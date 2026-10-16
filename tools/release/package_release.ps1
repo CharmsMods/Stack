@@ -2,6 +2,7 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$BuildDir = "",
     [string]$OutputDir = "",
+    [ValidateSet("Stack", "Burst")][string]$Product = "Stack",
     [switch]$PublicRelease,
     [switch]$LocalTestPackage,
     [switch]$SkipBuild,
@@ -14,6 +15,7 @@ param(
     -Root $Root `
     -BuildDir $BuildDir `
     -OutputDir $OutputDir `
+    -Product $Product `
     -PublicRelease:$PublicRelease `
     -LocalTestPackage:$LocalTestPackage `
     -SkipBuild:$SkipBuild `

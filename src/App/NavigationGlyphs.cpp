@@ -13,6 +13,12 @@ void DrawGlyph(ImDrawList* draw, Glyph glyph, ImVec2 minimum, float size, ImU32 
         draw->AddCircleFilled(p(x2, y2), stroke * .5f, color, 8);
     };
     switch (glyph) {
+    case Glyph::Capture:
+        draw->AddCircle(p(12,12),6.f*scale,color,24,stroke);
+        line(12,2,12,7);line(12,17,12,22);
+        line(2,12,7,12);line(17,12,22,12);
+        draw->AddCircleFilled(p(12,12),1.5f*scale,color,12);
+        break;
     case Glyph::Panel:
         draw->AddRect(p(3, 4), p(21, 20), color, 3 * scale, 0, stroke);
         line(9, 5, 9, 19);

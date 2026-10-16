@@ -52,7 +52,10 @@ public:
     bool SubmitHighPriority(ActivityMetadata activity, Task task);
     bool PostToMain(Task task);
     bool PostToMain(ActivityMetadata activity, Task task);
-    void PumpMainThreadTasks(std::size_t maxTasks = 0);
+    // A positive time limit stops between callbacks. One callback can exceed
+    // it, but at least one always runs so queued completions keep progressing.
+    // Zero retains the existing count-only or unlimited draining behavior.
+    void PumpMainThreadTasks(std::size_t maxTasks = 0, double maxMilliseconds = 0.0);
 
 private:
     TaskSystem() = default;

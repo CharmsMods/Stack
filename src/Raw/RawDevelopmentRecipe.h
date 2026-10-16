@@ -5,6 +5,7 @@
 #include "Raw/RawGradientMask.h"
 #include "Raw/RawColorCalibration.h"
 #include "Raw/Tone/SceneTone.h"
+#include "Raw/Curves/CurveTypes.h"
 #include "Raw/Detail/DetailContrast.h"
 #include "ThirdParty/json.hpp"
 
@@ -119,33 +120,6 @@ struct RawToneCurvePoint {
     float output = 0.0f;
 };
 
-// Curve handles are stored as normalized offsets from their anchor point so
-// moving an anchor carries its manually authored handle with it. Strength is
-// normalized to the UI's 0%-150% range: 0.0 is straight, 1.0 is the normal
-// smooth/custom handle, and 1.5 is an exact neighboring-tangent match.
-struct RawBezierHandleState {
-    float strength = 0.0f;
-    bool manual = false;
-    float offsetX = 0.0f;
-    float offsetY = 0.0f;
-};
-
-struct RawBezierCurvePoint {
-    float x = 0.0f;
-    float y = 0.0f;
-    RawBezierHandleState incoming;
-    RawBezierHandleState outgoing;
-};
-
-struct RawBezierSegment {
-    RawBezierCurvePoint left;
-    RawBezierCurvePoint right;
-    float leftHandleX = 0.0f;
-    float leftHandleY = 0.0f;
-    float rightHandleX = 0.0f;
-    float rightHandleY = 0.0f;
-};
-
 enum class RawPointCurveChannel : int {
     Composite = 0,
     Red = 1,
@@ -159,6 +133,7 @@ struct RawPointCurveControlPoint {
     int shape = 1;
     RawBezierHandleState incoming;
     RawBezierHandleState outgoing;
+    CurveTonalPointState tonal;
 };
 
 struct RawPointCurveComponent {
@@ -182,6 +157,7 @@ struct RawLocalRangePoint {
     float deltaEv = 0.0f;
     RawBezierHandleState incoming;
     RawBezierHandleState outgoing;
+    CurveTonalPointState tonal;
 };
 
 struct RawLocalRangeTargetSeed {
@@ -245,6 +221,8 @@ struct RawLocalRangeTargetZone {
 };
 
 struct RawLocalRangeRecipe {
+    CurveAmountState curveAmount;
+    float curveNormalization = 0.0f;
     bool enabled = false;
     float strength = 1.0f;
     float middleGrey = 0.18f;
@@ -493,6 +471,8 @@ float EvaluateRawPointCurveComponent(const RawPointCurveComponent& component, fl
 RawBezierSegment BuildRawBezierSegment(
     const std::vector<RawBezierCurvePoint>& points,
     std::size_t segmentIndex);
+std::vector<RawBezierSegment> BuildRawBezierSegments(
+    const std::vector<RawBezierCurvePoint>& points);
 float EvaluateRawBezierCurve(
     const std::vector<RawBezierCurvePoint>& points,
     float x);
@@ -555,10 +535,12 @@ std::array<float, 3> ApplyColorWarp(
     Raw::RawWorkingSpace workingSpace);
 // Fast path for interactive visualization after the caller has sanitized the
 // recipe once. This avoids copying pin strings per sample.
+struct RawColorWarpMaskSample;
 std::array<float, 3> ApplyPreparedColorWarp(
     const RawColorWarpRecipe& colorWarp,
     const std::array<float, 3>& sceneRgb,
-    Raw::RawWorkingSpace workingSpace);
+    Raw::RawWorkingSpace workingSpace,
+    const std::vector<RawColorWarpMaskSample>* masks = nullptr);
 nlohmann::json DefaultViewTransformJson();
 inline constexpr const char* kViewContrastModelPivotedLogV2 = "pivoted-log-v2";
 float EvaluateViewTransformDisplayLuma(

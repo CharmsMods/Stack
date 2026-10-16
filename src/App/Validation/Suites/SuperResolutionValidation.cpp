@@ -158,8 +158,44 @@ bool ValidateSuperResolution(int argc,char** argv) {
                     "Partly clipped SR capture contaminated a complete color measurement");
         }
         auto uncertain=Sr::Resolve(cpu.pixels[200],0);
+        // Existing capture sharpness changes fine detail without removing the
+        // broader noise evidence. Exercise the same weights on CPU and GPU.
+        auto preferred=TestTile(),equal=preferred,preferredGpu=preferred;
+        Require(gpu.Begin(preferredGpu,error),error);
+        for(unsigned i=0;i<8;++i) {
+            auto frame=TestFrame(float(i%4)*.5f,float(i/4)*.5f,i);
+            for(auto& m:frame.mapping)m.w=2e-5f;
+            Require(Sr::AccumulateCpu(equal,frame,{},error),error);
+            frame.detailPreference=i%2?.1f:1.f;
+            Require(Sr::AccumulateCpu(preferred,frame,{},error)&&gpu.Add(preferredGpu,frame,error),error);
+        }
+        Require(gpu.Read(preferredGpu,error),error);gpu.Release();
+        for(std::size_t p=0;p<preferred.pixels.size();++p)for(unsigned c=0;c<3;++c) {
+            const auto& a=preferred.pixels[p];const auto& b=equal.pixels[p];
+            Require(a.broad[c].value==b.broad[c].value&&a.broad[c].weight==b.broad[c].weight&&
+                a.broad[c].noise==b.broad[c].noise,"Detail preference changed broad reconstruction evidence");
+            Require(a.narrow[c].weight<b.narrow[c].weight,"Soft capture retained full fine-detail weight");
+            const auto cpuResult=Sr::Resolve(a,c),gpuResult=Sr::Resolve(preferredGpu.pixels[p],c);
+            Require(std::abs(cpuResult.value-gpuResult.value)<2e-5&&
+                std::abs(cpuResult.variance-gpuResult.variance)<1e-8&&
+                std::abs(cpuResult.uncertainty-gpuResult.uncertainty)<1e-8&&
+                std::abs(cpuResult.support-gpuResult.support)<1e-3,"Detail preference CPU/GPU evidence differs");
+        }
+        auto rejected=TestTile(),rejectedGpu=rejected;
+        auto mappedFrame=TestFrame(0,0,5);mappedFrame.mapping[2*mappedFrame.mapWidth+2].z=0;
+        Require(Sr::AccumulateCpu(rejected,mappedFrame,{},error),error);
+        Require(gpu.Begin(rejectedGpu,error)&&gpu.Add(rejectedGpu,mappedFrame,error)&&gpu.Read(rejectedGpu,error),error);
+        gpu.Release();
+        for(unsigned y=0;y<rejected.height;++y)for(unsigned x=0;x<rejected.width;++x) {
+            const auto index=y*rejected.width+x;
+            const auto a=Sr::Resolve(rejected.pixels[index],0),b=Sr::Resolve(rejectedGpu.pixels[index],0);
+            const float rx=rejected.originX+x*rejected.step,ry=rejected.originY+y*rejected.step;
+            Require(a.valid==b.valid,"CPU/GPU interpolated rejection differs");
+            if(rx>8&&rx<24&&ry>8&&ry<24)Require(!a.valid,"Map interpolation resurrected rejected motion");
+        }
         Require(uncertain.variance>0&&uncertain.uncertainty>0&&uncertain.support>1,"SR lost measurement, registration or support evidence");
         const double temporalError=TemporalEnlargementError(cpu);
+        std::cout<<"Super-resolution integration: shared detail preference, broad evidence retention, rejection interpolation and CPU/GPU uncertainty passed.\n";
         Require(errorBurst<temporalError*.9,"Original-sample SR did not improve over a resampled temporal mosaic");
         nlohmann::json report={{"singleReconstructionMse",errorSingle},{"burstReconstructionMse",errorBurst},{"temporalBicubicMosaicEnlargementMse",temporalError},{"stationaryNoiseRatio16Frames",noiseRatio},{"maximumCpuGpuError",maxGpuError}};
         SrContracts::Validate(root,report);

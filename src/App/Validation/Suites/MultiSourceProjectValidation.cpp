@@ -731,7 +731,7 @@ bool ValidateGraphBindingRoundTrip() {
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph restored;
     EditorNodeGraph::DeserializeGraphPayload(
-        serialized, restored, 0, {}, 0, 0, 0);
+        serialized, restored, 0);
     const auto found = std::find_if(
         restored.GetNodes().begin(), restored.GetNodes().end(),
         [](const EditorNodeGraph::Node& node) {
@@ -760,7 +760,7 @@ bool ValidateGraphBindingRoundTrip() {
     };
     EditorNodeGraph::Graph rejectedManaged;
     EditorNodeGraph::DeserializeGraphPayload(
-        obsoleteManaged, rejectedManaged, 0, {}, 0, 0, 0);
+        obsoleteManaged, rejectedManaged, 0);
     ok &= Check(rejectedManaged.GetNodes().empty(),
         "a managed source-set node with an obsolete empty identity was accepted");
     return ok;
@@ -947,7 +947,7 @@ bool ValidateMfdGraphContract() {
     const nlohmann::json serialized = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph restored;
-    EditorNodeGraph::DeserializeGraphPayload(serialized, restored, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serialized, restored, 0);
     const auto restoredMfd = std::find_if(
         restored.GetNodes().begin(), restored.GetNodes().end(),
         [](const EditorNodeGraph::Node& node) {
@@ -981,7 +981,7 @@ bool ValidateMfdGraphContract() {
     }
     EditorNodeGraph::Graph rejectedManaged;
     EditorNodeGraph::DeserializeGraphPayload(
-        obsoleteManaged, rejectedManaged, 0, {}, 0, 0, 0);
+        obsoleteManaged, rejectedManaged, 0);
     ok &= Check(rejectedManaged.GetNodes().empty(),
         "managed RAW nodes with obsolete empty identities were accepted");
     return ok;
@@ -1074,7 +1074,7 @@ bool ValidateHdrGraphContract() {
     const nlohmann::json serialized = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph restored;
-    EditorNodeGraph::DeserializeGraphPayload(serialized, restored, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serialized, restored, 0);
     const auto restoredHdr = std::find_if(
         restored.GetNodes().begin(), restored.GetNodes().end(),
         [](const EditorNodeGraph::Node& node) {

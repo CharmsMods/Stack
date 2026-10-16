@@ -1,5 +1,6 @@
 #pragma once
 #include "Persistence/BracketingProject.h"
+#include "Raw/Bracketing/Processor.h"
 #include "Raw/RawLoader.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include <algorithm>

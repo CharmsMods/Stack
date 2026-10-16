@@ -12,10 +12,6 @@ void AppShell::ConfigureDiagnosticWorkspaceSwitcher(std::filesystem::path output
 bool AppShell::TickDiagnosticWorkspaceSwitcher() {
     if(m_WorkspaceDiagnosticOutput.empty()) return false;
     if(!m_StartupRevealVisual.AllowsInput()) return true;
-    if(m_LegalManager && !m_LegalManager->IsAccepted()) {
-        std::cerr << "Workspace validation requires an accepted legal gate.\n";
-        m_IsRunning=false; return true;
-    }
     auto& s=m_WorkspaceSwitcher;
     const int frame=m_WorkspaceDiagnosticFrame++;
     const int step=frame/48, phase=frame%48;

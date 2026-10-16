@@ -1,12 +1,14 @@
 #pragma once
 
 #include "Editor/RawOperationMaskTarget.h"
+#include "Raw/RawAssetCapture.h"
 #include "imgui.h"
 
 namespace Stack::Navigation {
 
 struct RawMaskToolbarState {
     bool enabled = false;
+    bool maskButtonEnabled = false; // Preserve styling while the disabled bar exits.
     float revealAmount = 0.f;
     double visibleUntil = 0.0;
     float visibleHeight = 0.f;

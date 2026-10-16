@@ -1,0 +1,131 @@
+// src/App/AppShell.cpp:1409
+    UpdateNotifications();
+    m_LegalManager = std::make_unique<AppLegal::Manager>();
+    m_LegalManager->Initialize();
+    m_UpdateManager = std::make_unique<AppUpdate::UpdateManager>(
+        [this](UiNotificationSeverity severity, const std::string& message, const std::string& dedupeKey) {
+            PostUiNotification(m_AppNotifier, severity, message, dedupeKey);
+        },
+        [this]() {
+            RequestMainWindowClose("update-manager");
+
+// src/App/AppShell.cpp:1683
+    if (m_StartupUpdateCheckStarted ||
+        !m_LegalManager ||
+        !m_LegalManager->IsAccepted() ||
+        !m_UpdateManager ||
+        !m_UpdateManager->IsAutomaticStartupCheckEnabled()) {
+        return;
+    }
+    m_StartupUpdateCheckStarted = true;
+    m_UpdateManager->StartBackgroundCheck();
+
+// src/App/AppShell.cpp:2681
+
+    StartAutomaticUpdateCheckIfAllowed();
+    if (m_LegalManager && (!m_LegalManager->IsAccepted() || m_ShowLegalGateReview)) {
+        RenderLegalGate();
+        return;
+    }
+
+    SyncBackgroundImageTexture();
+    const bool seamlessSurfaces = m_Appearance && m_Appearance->GetSeamlessSurfaceStylingEnabled();
+
+// src/App/AppShell.cpp:3411
+        nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+
+    if (m_SettingsPopupState.requestShowLegalGate) {
+        m_SettingsPopupState.requestShowLegalGate = false;
+        popupOpen = false;
+        m_SettingsPopupOpenedAt = 0.0;
+        m_ShowLegalGateReview = true;
+    }
+
+
+// src/App/AppShell.h:175
+    void RenderLibraryWindow();
+    bool IsLibraryWindowOpenAndHovered() const;
+    void RenderLegalGate();
+    void RenderClosingFrame();
+    void StartAutomaticUpdateCheckIfAllowed();
+    void RenderEditorSavePrompts();
+    void RenderFileCommandPrompts();
+    void DispatchPendingFileMenuSaveAs();
+    void RequestFileMenuSave();
+
+// src/App/AppShell.h:340
+    bool m_SettingsPopupOpen = false;
+    double m_SettingsPopupOpenedAt = 0.0;
+    bool m_ShowLegalGateReview = false;
+    bool m_ShowOpenProjectPrompt = false;
+    bool m_ShowFileDispositionPrompt = false;
+    bool m_FileActionSavePending = false;
+    bool m_FileActionSaveFailed = false;
+    PendingFileAction m_PendingFileAction = PendingFileAction::None;
+    std::filesystem::path m_PendingFileProjectPath;
+
+// src/App/AppShell.h:413
+    std::unique_ptr<AppUpdate::UpdateManager> m_UpdateManager;
+    bool m_StartupUpdateCheckStarted = false;
+    std::string m_LegalActionError;
+    AppSettingsPopup::State m_SettingsPopupState;
+    EditorModule* m_Editor = nullptr;
+    LibraryModule m_Library;
+    CompositeModule m_Composite;
+    Stack::Queue::QueueModule m_Queue;
+    Stack::Queue::QueueRenderCoordinator m_QueueRenderer;
+
+// src/App/AppSettingsPopup.h:29
+    Category activeCategory = Category::Appearance;
+    bool showInstallConfirmPopup = false;
+    bool requestShowLegalGate = false;
+    bool hadOpenPopup = false;
+    std::string lastActionError;
+    Stack::Notifications::Notifier notifier;
+    std::unordered_map<std::string, Stack::Notifications::EventId> actionErrors;
+    StackAppearance::PaletteWorkshopState paletteWorkshop;
+    Stack::Notifications::OperationId installOperation = 0;
+
+// src/App/AppWorkspaceSwitcher.cpp:79
+        } else m_WorkspaceAltSuppressed=alt;
+    } else if(action==Stack::Workspace::HoldAction::Open) {
+        const bool blocked=m_CloseRequested || !m_StartupRevealVisual.AllowsInput() || m_ShowLegalGateReview ||
+            (m_LegalManager && !m_LegalManager->IsAccepted()) ||
+            ActiveProjectLoadPhase()!=LibraryToEditorProjectLoadPhase::None || m_RootTabBodyFadeActive ||
+            m_ShowEditorSavePrompt || m_ShowEditorNamePrompt || m_ShowRawWorkspaceSwitchPrompt ||
+            m_ShowUnnamedEditorClosePrompt || m_ShowOpenProjectPrompt || m_ShowFileDispositionPrompt ||
+            ImGui::GetTopMostPopupModal()!=nullptr;
+        if(blocked) m_WorkspaceAltSuppressed=true;
+
+// src/App/AppWorkspaceSwitcherValidation.cpp:15
+    if(m_WorkspaceDiagnosticOutput.empty()) return false;
+    if(!m_StartupRevealVisual.AllowsInput()) return true;
+    if(m_LegalManager && !m_LegalManager->IsAccepted()) {
+        std::cerr << "Workspace validation requires an accepted legal gate.\n";
+        m_IsRunning=false; return true;
+    }
+    auto& s=m_WorkspaceSwitcher;
+    const int frame=m_WorkspaceDiagnosticFrame++;
+    const int step=frame/48, phase=frame%48;
+
+// src/App/AppUiPerformanceCapture.cpp:99
+        s.failure="Diagnostic deadline exceeded";s.finished=true;m_IsRunning=false;return;
+    }
+    if(!m_LegalManager->IsAccepted()) {
+        s.failure="The application legal gate has not been accepted";s.finished=true;m_IsRunning=false;return;
+    }
+    if(!s.loadQueued) {
+        for(auto& workspace:m_ProjectWorkspaces)workspace->editor->SetDocumentPersistenceEnabled(false);
+        s.firstWorkspace=CreateProjectWorkspace();
+        if(!ActivateProjectWorkspace(s.firstWorkspace)){s.failure="Could not activate fixture workspace";s.finished=true;m_IsRunning=false;return;}
+
+// src/App/AppToolSwitcher.cpp:55
+        !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !m_Editor->IsBracketingPresentationActive() &&
+        !m_WorkspaceSwitcher.Visible() && m_StartupRevealVisual.AllowsInput() &&
+        !m_ShowLegalGateReview && (!m_LegalManager || m_LegalManager->IsAccepted()) &&
+        !m_MainWindowCloseSavePending && !m_FileActionSavePending && !m_ProjectLoadSavePending &&
+        !m_RawWorkspaceSwitchSavePending && m_ContinueMainWindowCloseSource.empty() &&
+        ActiveProjectLoadPhase() == LibraryToEditorProjectLoadPhase::None &&
+        !m_RootTabBodyFadeActive && !ImGui::GetTopMostPopupModal();
+    if (!down) sw.suppressed = false;
+    if (sw.discardMouse) {

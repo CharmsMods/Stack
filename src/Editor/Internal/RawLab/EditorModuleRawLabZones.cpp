@@ -1,3 +1,7 @@
+#include "Editor/Internal/RawLab/CurveCanvas.h"
+#include "Raw/Curves/CurveAuthoring.h"
+#include "Raw/Curves/TonalCurvePoints.h"
+#include "Editor/Internal/RawLab/CurveTonalSliders.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -35,22 +39,20 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
     auto& graph = m_RawWorkspaceLabUi.zonesCurveGraph;
     auto& history = m_RawWorkspaceLabUi.exposureHistory;
     const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),context.rawAdjustmentLayerId);
-    const auto exposureKey = layer ? layer->id + "/exposure" : std::string{};
-    const auto selection = m_Project->rawOperationSelection.find(exposureKey);
     const auto* exposureNode = layer ? Stack::Project::FindRawOperation(*layer,
-        Stack::RawRecipe::GraphOperationKind::Exposure, selection == m_Project->rawOperationSelection.end()
-            ? std::string{} : selection->second) : nullptr;
+        Stack::RawRecipe::GraphOperationKind::LocalEv, context.rawOperationUuid) : nullptr;
     const bool canAdjustExposure = exposureNode && exposureNode->rawOperation.enabled &&
-        !layer->graph.FindInputLink(exposureNode->id,"param:ev");
-    RawWorkspaceEditContext exposureContext = context;
-    if (exposureNode) {
-        exposureContext.rawOperationUuid = exposureNode->instanceUuid;
-        exposureContext.recipe = Stack::Project::ReadRawLayerOperation(*layer,exposureNode->instanceUuid);
-    }
-    float exposureEv = exposureContext.recipe.preToneExposureEv;
+        !context.IsParameterDriven("ev");
+    const auto exposureUuid = exposureNode ? exposureNode->instanceUuid : context.rawOperationUuid;
+    // The ordinary Local EV surface already owns this node's draft. Legacy
+    // entry points without a target can still read their separate instance.
+    float exposureEv = exposureNode && exposureUuid != context.rawOperationUuid
+        ? Stack::Project::ReadRawLayerOperation(*layer,exposureUuid).preToneExposureEv
+        : context.recipe.preToneExposureEv;
+    const float exposureBefore = exposureEv;
     const std::string exposureSource = m_Project->storePath.generic_string() +
         "|" + GetActiveRawWorkspacePreviewIdentity() + ":" + context.rawAdjustmentLayerId +
-        ":" + context.rawOperationUuid + ":" + exposureContext.rawOperationUuid;
+        ":" + context.rawOperationUuid + ":" + exposureUuid;
     if (history.SetSource(exposureSource, exposureEv)) {
         if (graph.draggingExposure) ImGui::ClearActiveID();
         graph = {};
@@ -61,7 +63,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
         Stack::RawRecipe::SanitizeLocalRangeRecipe(std::move(context.recipe.localRange));
     Stack::RawRecipe::RawLocalRangeRecipe& localRange = context.recipe.localRange;
 
-    if (ShowsRawLabSettings(section)) {
+    if (ShowsRawLabSettings(section) && context.rawAdjustmentLayerId.empty()) {
         ImGui::TextUnformatted(m_RawWorkspaceLabUi.selectedEvGradient >= 0
             ? "Local EV mask" : "Local EV");
         ContinueRawLabControlRow("Entire image");
@@ -72,18 +74,6 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             m_RawWorkspaceLabUi.selectedZonePoint = -1;
             m_RawWorkspaceLabUi.zonesTargetedView = false;
         }
-        ContinueRawLabControlRow("Linear");
-        const bool managedGradientUnsupported =
-            context.resolvedMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed;
-        ImGui::BeginDisabled(managedGradientUnsupported);
-        if (ImGui::SmallButton("Linear##EvGradientNew"))
-            m_RawWorkspaceLabUi.gradientDrawShape = 0;
-        ContinueRawLabControlRow("Radial");
-        if (ImGui::SmallButton("Radial##EvGradientNew"))
-            m_RawWorkspaceLabUi.gradientDrawShape = 1;
-        ImGui::EndDisabled();
-        if (managedGradientUnsupported)
-            ImGui::TextDisabled("Gradient masks need a recipe-backed RAW project.");
         if (ImGui::SmallButton(m_RawWorkspaceLabUi.gradientOverlayVisible
                 ? "Hide overlay##EvGradientOverlay" : "Show overlay##EvGradientOverlay"))
             m_RawWorkspaceLabUi.gradientOverlayVisible =
@@ -99,17 +89,19 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
         auto& localCurve = context.recipe.evGradients[
             static_cast<std::size_t>(m_RawWorkspaceLabUi.selectedEvGradient)].curve;
         if (ShowsRawLabGraph(section)) {
-            const RawLabGraphHistogram histogram = BuildRawLabZonesHistogram(
-                m_RawWorkspaceGraphScopeReadback, localCurve.minEv,
+            const auto& histogram = m_RawFloatingSurface.histogram.Zones(
+                m_RawWorkspaceGraphScopeReadback,
+                m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0, localCurve.minEv,
                 localCurve.maxEv, std::max(0.000001f, localCurve.middleGrey));
-            ImVec2 graphSize = CompactLabGraphSize(112.0f, 150.0f, 560.0f);
+            ImVec2 graphSize = ImGui::GetContentRegionAvail();
+            graphSize.y = std::max(12.f,std::min(graphSize.y,graphSize.x*.75f));
             graphSize.x = std::max(1.0f, graphSize.x - 16.0f);
             changed |= DrawFramelessLocalRangeBezier(
                 "##RawLabGradientEvGraph", localCurve,
                 m_RawWorkspaceLabUi.zonesCurveGraph,
                 m_RawWorkspaceLabUi.selectedZonePoint,
                 m_RawWorkspaceLocalRangeTargetZoneId, histogram,
-                false, graphSize, false, nullptr);
+                false, graphSize, false, nullptr, nullptr, true);
         }
         return changed;
     }
@@ -159,27 +151,47 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
     }
     if (!m_RawWorkspaceLabUi.zonesTargetedView) {
         if (ShowsRawLabGraph(section)) {
-            if (canAdjustExposure) {
-                ImGui::TextDisabled("Exposure %+.2f EV", exposureEv);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drag empty space in the graph vertically to edit %s.",exposureNode->title.c_str());
-            } else {
-                ImGui::TextDisabled(exposureNode ? "Exposure is bypassed or graph-driven" : "Add an Exposure operation for global exposure");
-            }
             const float minimumEv = context.recipe.localRange.minEv;
             const float maximumEv = context.recipe.localRange.maxEv;
             const float middleGrey = std::max(0.000001f, context.recipe.localRange.middleGrey);
-            const RawLabGraphHistogram histogram = BuildRawLabZonesHistogram(
+            const auto& histogram = m_RawFloatingSurface.histogram.Zones(
                 m_RawWorkspaceGraphScopeReadback,
+                m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0,
                 minimumEv,
                 maximumEv,
                 middleGrey);
 
             constexpr float graphHorizontalInset = 8.0f;
             const float surfaceStartX = ImGui::GetCursorPosX();
-            ImVec2 graphSize = CompactLabGraphSize(112.0f, 150.0f, 560.0f);
+            ImVec2 graphSize = ImGui::GetContentRegionAvail();
+            graphSize.y = std::max(12.f,std::min(graphSize.y,graphSize.x*.75f));
             graphSize.x = std::max(1.0f, graphSize.x - graphHorizontalInset * 2.0f);
             ImGui::SetCursorPosX(surfaceStartX + graphHorizontalInset);
             bool curveChanged = false;
+            if(context.nodeTarget && context.editorState) {
+                auto& state=context.State<CurveCanvasState>();
+                auto points=Stack::RawRecipe::RawLocalRangeBezierPoints(localRange);
+                const auto tonalDomain=ExposureTonalSliderDomain(minimumEv,maximumEv);
+                const bool normalizationDriven=context.IsParameterDriven("normalization");
+                float normalization=localRange.curveNormalization;
+                const auto normalizationFeedback=context.uniformParameters.find("normalization");
+                const bool normalizationAvailable=normalizationFeedback!=context.uniformParameters.end() &&
+                    normalizationFeedback->second.available && std::isfinite(normalizationFeedback->second.value);
+                if(normalizationDriven && normalizationAvailable)
+                    normalization=std::clamp(float(normalizationFeedback->second.value),0.f,1.f);
+                curveChanged=DrawCurveCanvas("LocalEV",points,localRange.curveAmount,state,false,
+                    histogram,graphSize,12,canAdjustExposure?&exposureEv:nullptr,{},false,
+                    &normalization,normalizationDriven,normalizationAvailable,
+                    &tonalDomain,m_RawWorkspaceGraphScopeReadbackRevision);
+                if(!normalizationDriven)localRange.curveNormalization=normalization;
+                if(curveChanged && !Stack::RawRecipe::SameCurvePoints(points,
+                    Stack::RawRecipe::RawLocalRangeBezierPoints(localRange))) {
+                    localRange.points.clear();
+                    for(const auto& p:points) localRange.points.push_back({minimumEv+p.x*(maximumEv-minimumEv),-4+8*p.y,p.incoming,p.outgoing,p.tonal});
+                    localRange.enabled=true;
+                }
+                graph.draggingExposure=state.exposureGesture;
+            } else {
             DrawFramelessLocalRangeBezier(
                     "##RawLabZonesOverallGraph",
                     context.recipe.localRange,
@@ -191,11 +203,13 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
                     graphSize,
                     false,
                     canAdjustExposure ? &exposureEv : nullptr,
-                    &curveChanged);
+                    &curveChanged,
+                    true);
+            }
             changed |= curveChanged;
-            if (exposureEv != exposureContext.recipe.preToneExposureEv) {
-                exposureContext.recipe.preToneExposureEv = exposureEv;
-                CommitRawWorkspaceEditContext(exposureContext,true,graph.draggingExposure);
+            if (exposureEv != exposureBefore) {
+                context.recipe.preToneExposureEv = exposureEv;
+                changed = true;
             }
             m_RawWorkspaceLabUi.globalExposureInteractionActive =
                 m_RawWorkspaceLabUi.zonesCurveGraph.draggingExposure;
@@ -235,7 +249,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
                 strengthWidth - strengthValueSize.x));
         ImGui::TextDisabled("%.2f", localRange.strength);
         ImGui::SetCursorPosX(strengthStartX + strengthHorizontalInset);
-        ImGui::BeginDisabled(IsRawParameterDriven("strength"));
+    ImGui::BeginDisabled(context.IsParameterDriven("strength"));
         if (DrawRawLabRingDial(
                 "##RawLabZonesStrength",
                 localRange.strength,

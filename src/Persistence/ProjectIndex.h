@@ -56,6 +56,8 @@ struct ProjectRecord {
     bool rawSourceLinked = true;
     bool rawSourceEmbedded = false;
     bool multiFrameProject = false;
+    bool hasSavedBracketingResult = false;
+    std::vector<std::string> savedBracketingSourceSetIds;
     std::uint64_t indexSignatureSize = 0;
     std::int64_t indexSignatureModifiedTimeTicks = 0;
     std::uint64_t editRevision = 0;

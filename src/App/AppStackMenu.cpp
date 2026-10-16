@@ -1,5 +1,6 @@
 #include "AppShell.h"
 #include "Utils/FileDialogs.h"
+#include "App/PlatformHelpers.h"
 #include <algorithm>
 
 void AppShell::RenderStackMenu() {
@@ -77,63 +78,56 @@ void AppShell::RenderStackMenu() {
         }
 
         menuSeparator();
-        if (fileMenuItem(
-                "Save Project",
-                "Ctrl+S",
-                m_FileSaveTexture,
-                context.canSave)) {
-            RequestFileMenuSave();
-        }
-        if (fileMenuItem(
-                "Save As...",
-                "Ctrl+Shift+S",
-                m_FileSaveTexture,
-                context.canSaveAs)) {
-            RequestFileMenuSaveAs();
-        }
+        if (ImGui::BeginMenu("Current Project", context.sessionKind != EditorModule::ProjectSessionKind::Empty)) {
+            ImGui::TextDisabled("%s", m_Editor->GetCurrentProjectName().c_str());
+            if (fileMenuItem(
+                    "Save Project",
+                    "Ctrl+S",
+                    m_FileSaveTexture,
+                    context.canSave)) {
+                RequestFileMenuSave();
+            }
+            if (fileMenuItem(
+                    "Save As...",
+                    "Ctrl+Shift+S",
+                    m_FileSaveTexture,
+                    context.canSaveAs)) {
+                RequestFileMenuSaveAs();
+            }
+            if (fileMenuItem("Create Version", nullptr, m_FileSaveTexture, context.canSaveAs))
+                m_Editor->RequestCurrentProjectVersion();
+            if (fileMenuItem("Rename...", nullptr, m_FileSaveTexture, context.canSave)) {
+                m_ProjectRenameWorkspace = m_ActiveProjectWorkspace;
+                m_ProjectRenameDocument = m_Editor->EnsureProjectDocumentId();
+                snprintf(m_ProjectRenameBuffer, sizeof(m_ProjectRenameBuffer), "%s", m_Editor->GetCurrentProjectName().c_str());
+                m_ShowProjectRenamePrompt = true;
+            }
+            if (fileMenuItem("Show in Explorer", nullptr, m_FileOpenProjectTexture, !context.projectPath.empty()))
+                PlatformHelpers::RevealPathInExplorer(context.projectPath);
 
-        if (fileMenuItem(
-                "Pack Project...",
-                nullptr,
-                m_FileSaveTexture,
-                context.canSaveAs)) {
-            const std::string defaultName =
-                (m_Editor->GetCurrentProjectName().empty()
-                    ? std::string("Untitled Project")
-                    : m_Editor->GetCurrentProjectName()) + ".stack";
-            const std::filesystem::path destination =
-                FileDialogs::SaveProjectFileDialog(
-                    "Pack Project for Sharing",
-                    defaultName.c_str());
-                if (!destination.empty()) {
-                    std::string error;
-                    if (!m_Editor->PackCurrentProject(destination, &error)) {
-                        m_Editor->ShowUiNotification(
-                            UiNotificationSeverity::Error,
-                            error.empty()
-                                ? "Project packing failed."
-                                : error,
-                            "file-menu-pack-project");
-                    } else {
-                        m_Editor->ShowUiNotification(
-                            UiNotificationSeverity::Success,
-                            "Packed project created. The working project remains active.",
-                            "file-menu-pack-project");
-                    }
-                }
-        }
+            if (fileMenuItem("Export Project (.stack)...", nullptr, m_FileSaveTexture, context.canSaveAs)) {
+                const auto workspaceId = m_ActiveProjectWorkspace;
+                const auto documentId = m_Editor->EnsureProjectDocumentId();
+                const auto name = m_Editor->GetCurrentProjectName() + ".stack";
+                const auto destination = FileDialogs::SaveProjectFileDialog("Export Complete Project", name.c_str());
+                auto* workspace = FindProjectWorkspace(workspaceId);
+                if (!destination.empty() && workspace && workspace->editor->GetProjectDocumentId() == documentId)
+                    workspace->editor->RequestProjectCopy(destination, true, false);
+            }
 
-        menuSeparator();
-        const char* closeLabel = context.sessionKind ==
-            EditorModule::ProjectSessionKind::RawPreview
-            ? "Close Preview"
-            : "Close Project";
-        if (fileMenuItem(
-                closeLabel,
-                "Ctrl+W",
-                m_FileExitProgramTexture,
-                context.canClose)) {
-            QueueFileAction(PendingFileAction::CloseCurrent);
+            menuSeparator();
+            const char* closeLabel = context.sessionKind ==
+                EditorModule::ProjectSessionKind::RawPreview
+                ? "Close Preview"
+                : "Close Project";
+            if (fileMenuItem(
+                    closeLabel,
+                    "Ctrl+W",
+                    m_FileExitProgramTexture,
+                    context.canClose)) {
+                QueueFileAction(PendingFileAction::CloseCurrent);
+            }
+            ImGui::EndMenu();
         }
         menuSeparator();
         if (fileMenuItem(
@@ -164,4 +158,21 @@ void AppShell::RenderStackMenu() {
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar(5);
+    if (m_ShowProjectRenamePrompt) {
+        ImGui::OpenPopup("Rename Project");
+        m_ShowProjectRenamePrompt = false;
+    }
+    if (ImGui::BeginPopupModal("Rename Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", m_ProjectRenameBuffer, sizeof(m_ProjectRenameBuffer));
+        if (ImGui::Button("Save name")) {
+            auto* workspace = FindProjectWorkspace(m_ProjectRenameWorkspace);
+            if (workspace && workspace->editor->GetProjectDocumentId() == m_ProjectRenameDocument &&
+                std::string(m_ProjectRenameBuffer).find_first_not_of(" \t\r\n") != std::string::npos)
+                workspace->editor->RequestSaveCurrentProject(m_ProjectRenameBuffer);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }

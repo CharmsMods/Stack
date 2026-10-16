@@ -26,10 +26,105 @@ namespace Stack::Validation { bool ValidateColorCalibration(int, char**); }
 namespace Stack::Validation { bool ValidateProjectGallery(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateConcurrentBracketing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidatePanorama(int,char**); }
+namespace Stack::Validation { bool ValidateBurstWorker(const std::filesystem::path&,const std::filesystem::path&,bool); }
+namespace Stack::Validation { bool ValidateBurstParity(const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateToneDetail(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
+namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
+namespace Stack::Validation { bool ValidateRawGraphCanvas(); }
+namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesystem::path&, bool); }
+
+namespace Stack::Validation { bool ValidateDemosaicing(const std::filesystem::path&,const std::filesystem::path&); }
+
+namespace Stack::Validation { bool ValidateSharedCurves(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateTonalSliderInteractions(const std::filesystem::path&); }
+
+namespace {
+void BurstDiagnosticsUnavailable(int& exitCode) {
+    std::cerr << "This engine-internal check is preserved in StackBurstDiagnostics.exe. "
+        "Configure a separate build tree with -DSTACK_BUILD_BURST_DIAGNOSTICS=ON, "
+        "then run the same arguments there. Shipping Stack.exe uses StackBurst.exe for processing.\n";
+    exitCode = 109;
+}
+}
 
 bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
+    if (argc > 1 && std::strcmp(argv[1], "--validate-settings-defaults") == 0) {
+        if ((argc != 3 && argc != 4) || (argc == 4 && std::strcmp(argv[3], "--reload") != 0)) {
+            std::cerr << "Usage: Stack.exe --validate-settings-defaults <new-output-folder> [--reload]\n";
+            exitCode = 112;
+            return true;
+        }
+        exitCode = Stack::Validation::ValidateSettingsDefaults(std::filesystem::u8path(argv[2]), argc == 4) ? 0 : 112;
+        return true;
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--validate-burst-parity") == 0) {
+        if (argc != 5 && argc != 6) {
+            std::cerr << "Usage: Stack.exe --validate-burst-parity <input-folder> <standalone.dng> <new-output-folder> [standalone-report.json]\n";
+            exitCode = 111;
+            return true;
+        }
+        exitCode = Stack::Validation::ValidateBurstParity(std::filesystem::u8path(argv[2]),
+            std::filesystem::u8path(argv[3]), std::filesystem::u8path(argv[4]),
+            argc == 6 ? std::filesystem::u8path(argv[5]) : std::filesystem::path{}) ? 0 : 111;
+        return true;
+    }
+    if (argc == 4 && (std::strcmp(argv[1], "--validate-burst-worker") == 0 ||
+        std::strcmp(argv[1], "--validate-burst-combining-cancellation") == 0)) {
+        exitCode = Stack::Validation::ValidateBurstWorker(
+            std::filesystem::u8path(argv[2]), std::filesystem::u8path(argv[3]),
+            std::strcmp(argv[1], "--validate-burst-combining-cancellation") == 0) ? 0 : 110;
+        return true;
+    }
+    if (argc >= 5 && std::strcmp(argv[1], "--validate-bracketing-node-surface") == 0) {
+        exitCode = Stack::Validation::ValidateBracketingNodeSurface(argc - 2, argv + 2) ? 0 : 97;
+        return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-bracketing-contribution-ui") == 0) {
+        exitCode = Stack::Validation::ValidateBracketingContributionUi(argv[2],argv[3]) ? 0 : 98;
+        return true;
+    }
+    if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "--validate-tonal-sliders") == 0) {
+        exitCode = Stack::Validation::ValidateTonalSliderInteractions(
+            argc == 3 ? std::filesystem::u8path(argv[2]) : std::filesystem::path{}) ? 0 : 94;
+        return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-raw-node-transitions") == 0) {
+        exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3], false, true) ? 0 : 93;
+        return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-raw-project-persistence") == 0) {
+        exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3], true) ? 0 : 93;
+        return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-raw-gallery-open") == 0) {
+        exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3]) ? 0 : 93;
+        return true;
+    }
+    if(argc==3 && std::strcmp(argv[1],"--validate-shared-curves")==0) {
+        exitCode=Stack::Validation::ValidateSharedCurves(std::filesystem::u8path(argv[2]))?0:92;return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-demosaicing") == 0) {
+        exitCode=Stack::Validation::ValidateDemosaicing(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]))?0:91;
+        return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-raw-asset-capture") == 0) {
+        exitCode = Stack::Validation::ValidateRawAssetCapture(std::filesystem::u8path(argv[2])) ? 0 : 89;
+        return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-raw-floating-tools") == 0) {
+        exitCode = Stack::Validation::ValidateRawGraphEditing(std::filesystem::u8path(argv[2])) ? 0 : 89;
+        return true;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-editing") == 0) {
+        exitCode = Stack::Validation::ValidateRawGraphEditing() ? 0 : 89;
+        return true;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-canvas") == 0) {
+        exitCode = Stack::Validation::ValidateRawGraphCanvas() ? 0 : 89;
+        return true;
+    }
     if (argc == 4 && std::strcmp(argv[1], "--validate-tone-detail") == 0) {
         exitCode = Stack::Validation::ValidateToneDetail(argv[2], argv[3]) ? 0 : 90;
         return true;
@@ -39,7 +134,11 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         return true;
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-panorama") == 0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode = Stack::Validation::ValidatePanorama(argc - 2, argv + 2) ? 0 : 88;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
         return true;
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-concurrent-bracketing") == 0) {
@@ -56,7 +155,7 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-project-workspaces") == 0) {
         if (argc > 3) {
-            std::cerr << "Usage: Stack.exe --validate-project-workspaces [existing-project.stack]\n";
+            std::cerr << "Usage: Stack.exe --validate-project-workspaces [existing-project.stack | --auto-only]\n";
             exitCode = 84;
         } else {
             exitCode = Stack::Validation::ValidateProjectWorkspaces(argc == 3 ? argv[2] : "") ? 0 : 84;
@@ -77,10 +176,18 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         return true;
     }
     if(argc>3&&std::strcmp(argv[1],"--validate-processing-presentation")==0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode=Stack::Validation::ValidateProcessingPresentation(argv[2],argv[3])?0:80;return true;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
     }
     if(argc>3 && std::strcmp(argv[1],"--benchmark-bracketing-presentation")==0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode=Stack::Validation::BenchmarkBracketingPresentation(argv[2],argv[3])?0:79;return true;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
     }
     if(argc>3&&std::strcmp(argv[1],"--validate-bracketing-sr1-workflow")==0) {
         exitCode=Stack::Validation::ValidateBracketingWorkflow(argc-2,argv+2,true,1)?0:78;return true;
@@ -89,10 +196,18 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode=Stack::Validation::ValidateBracketingWorkflow(argc-2,argv+2,true)?0:78;return true;
     }
     if(argc>2&&std::strcmp(argv[1],"--validate-super-resolution")==0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode=Stack::Validation::ValidateSuperResolution(argc-2,argv+2)?0:77;return true;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
     }
     if (argc > 3 && std::strcmp(argv[1], "--diagnose-bracketing-project") == 0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode = Stack::Validation::DiagnoseBracketingProject(argc-2,argv+2) ? 0 : 76;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
         return true;
     }
     if (argc > 3 && std::strcmp(argv[1], "--validate-bracketing-workflow") == 0) {
@@ -100,11 +215,26 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         return true;
     }
     if (argc > 2 && std::strcmp(argv[1], "--validate-bracketing-ui") == 0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode = Stack::Validation::ValidateBracketingUi(argv[2]) ? 0 : 74;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
         return true;
     }
+    if (argc > 2 && std::strcmp(argv[1], "--validate-bracketing-depth") == 0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
+        exitCode=Stack::Validation::ValidateBracketingDepth(argc-2,argv+2)?0:80;return true;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
+    }
     if (argc > 1 && std::strcmp(argv[1], "--validate-bracketing") == 0) {
+#if STACK_BUILD_BURST_DIAGNOSTICS
         exitCode = Stack::Validation::ValidateBracketing() ? 0 : 73;
+#else
+        BurstDiagnosticsUnavailable(exitCode); return true;
+#endif
         return true;
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-raw-zone-areas") == 0) {
@@ -114,11 +244,13 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     if (argc > 1 && std::strcmp(argv[1], "--validate-graph-rendering") == 0) {
         const bool projectOwnershipOnly = argc == 3 &&
             std::strcmp(argv[2], "--project-ownership") == 0;
-        if (argc != 2 && !projectOwnershipOnly) {
-            std::cerr << "Usage: Stack.exe --validate-graph-rendering [--project-ownership]\n";
+        const bool viewportPreviewOnly = argc == 3 &&
+            std::strcmp(argv[2], "--viewport-preview") == 0;
+        if (argc != 2 && !projectOwnershipOnly && !viewportPreviewOnly) {
+            std::cerr << "Usage: Stack.exe --validate-graph-rendering [--project-ownership|--viewport-preview]\n";
             exitCode = 71;
         } else {
-            exitCode = Stack::Validation::ValidateGraphRendering(projectOwnershipOnly) ? 0 : 71;
+            exitCode = Stack::Validation::ValidateGraphRendering(projectOwnershipOnly,viewportPreviewOnly) ? 0 : 71;
         }
         return true;
     }
@@ -417,8 +549,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
 
     if (argc > 1 && std::strcmp(argv[1], "--validate-node-math-phase6") == 0) {
         const bool transactionsOnly = argc == 3 && std::strcmp(argv[2], "--transactions-only") == 0;
-        if (argc != 2 && !transactionsOnly) { std::cerr << "Usage: Stack.exe --validate-node-math-phase6 [--transactions-only]\n"; exitCode = 27; return true; }
-        exitCode = Stack::Validation::ValidateNodeMathPhase6Integration(false, transactionsOnly) ? 0 : 27;
+        const bool framingOnly = argc == 3 && std::strcmp(argv[2], "--framing-only") == 0;
+        if (argc != 2 && !transactionsOnly && !framingOnly) { std::cerr << "Usage: Stack.exe --validate-node-math-phase6 [--transactions-only | --framing-only]\n"; exitCode = 27; return true; }
+        exitCode = Stack::Validation::ValidateNodeMathPhase6Integration(false, transactionsOnly, framingOnly) ? 0 : 27;
         return true;
     }
 

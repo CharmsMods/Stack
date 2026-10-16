@@ -4,38 +4,13 @@
 #include <cmath>
 
 namespace Stack::Editor::NodeGraphUIVisuals {
-namespace {
-std::optional<double> ResponseDefault(const EditorNodeGraph::FrequencyResponseSettings& response, const float* value) {
-    const EditorNodeGraph::FrequencyResponseSettings defaults;
-    if (value == &response.lowCutoff) return defaults.lowCutoff;
-    if (value == &response.highCutoff) return defaults.highCutoff;
-    if (value == &response.transitionWidth) return defaults.transitionWidth;
-    if (value == &response.butterworthOrder) return defaults.butterworthOrder;
-    const EditorNodeGraph::FrequencyNotch defaultNotch;
-    for (const auto& notch : response.notches) {
-        if (value == &notch.frequency) return defaultNotch.frequency;
-        if (value == &notch.directionDegrees) return defaultNotch.directionDegrees;
-        if (value == &notch.width) return defaultNotch.width;
-    }
-    return std::nullopt;
-}
-}
-
 std::optional<double> NodeNumericDefault(const EditorNodeGraph::Node& node, const float* value) {
     // Bind the actual field, not its display label or current saved value.
     static const EditorNodeGraph::Node defaults;
-    if (value == &node.applyFrequencyResponseSettings.strength) return defaults.applyFrequencyResponseSettings.strength;
     if (value == &node.dataMathSettings.maxValue) return defaults.dataMathSettings.maxValue;
     if (value == &node.dataMathSettings.minValue) return defaults.dataMathSettings.minValue;
     if (value == &node.dataMathSettings.outMax) return defaults.dataMathSettings.outMax;
     if (value == &node.dataMathSettings.outMin) return defaults.dataMathSettings.outMin;
-    if (value == &node.frequencyFilterSettings.strength) return defaults.frequencyFilterSettings.strength;
-    if (value == &node.frequencyMaskSettings.centerX) return defaults.frequencyMaskSettings.centerX;
-    if (value == &node.frequencyMaskSettings.centerY) return defaults.frequencyMaskSettings.centerY;
-    if (value == &node.frequencyMaskSettings.cutoff) return defaults.frequencyMaskSettings.cutoff;
-    if (value == &node.frequencyMaskSettings.feather) return defaults.frequencyMaskSettings.feather;
-    if (value == &node.frequencyMaskSettings.order) return defaults.frequencyMaskSettings.order;
-    if (value == &node.frequencyMaskSettings.width) return defaults.frequencyMaskSettings.width;
     if (value == &node.imageGeneratorSettings.angle) return defaults.imageGeneratorSettings.angle;
     if (value == &node.imageGeneratorSettings.fontSize) return defaults.imageGeneratorSettings.fontSize;
     if (value == &node.imageGeneratorSettings.offset) return defaults.imageGeneratorSettings.offset;
@@ -51,8 +26,6 @@ std::optional<double> NodeNumericDefault(const EditorNodeGraph::Node& node, cons
     if (value == &node.imageToMaskSettings.regionRadius) return defaults.imageToMaskSettings.regionRadius;
     if (value == &node.imageToMaskSettings.softness) return defaults.imageToMaskSettings.softness;
     if (value == &node.imageToMaskSettings.toneSimilarity) return defaults.imageToMaskSettings.toneSimilarity;
-    if (value == &node.magnitudePhaseSettings.exposure) return defaults.magnitudePhaseSettings.exposure;
-    if (value == &node.magnitudePhaseSettings.gamma) return defaults.magnitudePhaseSettings.gamma;
     if (value == &node.maskSettings.angle) return defaults.maskSettings.angle;
     if (value == &node.maskSettings.centerX) return defaults.maskSettings.centerX;
     if (value == &node.maskSettings.centerY) return defaults.maskSettings.centerY;
@@ -68,14 +41,8 @@ std::optional<double> NodeNumericDefault(const EditorNodeGraph::Node& node, cons
     if (value == &node.maskUtilitySettings.threshold) return defaults.maskUtilitySettings.threshold;
     if (value == &node.maskUtilitySettings.whitePoint) return defaults.maskUtilitySettings.whitePoint;
     if (value == &node.mixFactor) return defaults.mixFactor;
-    if (value == &node.spectrumAnalyzerSettings.innerRadius) return defaults.spectrumAnalyzerSettings.innerRadius;
-    if (value == &node.spectrumAnalyzerSettings.outerRadius) return defaults.spectrumAnalyzerSettings.outerRadius;
-    if (value == &node.spectrumMathSettings.amount) return defaults.spectrumMathSettings.amount;
-    if (value == &node.spectrumViewSettings.exposure) return defaults.spectrumViewSettings.exposure;
-    if (value == &node.spectrumViewSettings.gamma) return defaults.spectrumViewSettings.gamma;
     if (value == &node.technicalImageSettings.exposureValue) return defaults.technicalImageSettings.exposureValue;
-    if (auto result = ResponseDefault(node.frequencyResponseSettings, value)) return result;
-    return ResponseDefault(node.frequencyFilterSettings.localResponse, value);
+    return std::nullopt;
 }
 
 std::optional<double> LayerNumericDefault(const EditorNodeGraph::Node& node,

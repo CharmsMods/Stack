@@ -69,7 +69,7 @@ RawOperationClassification ClassifyPreDemosaicOperations(
     const RawMetadata& metadata);
 
 struct PreparationOptions {
-    std::string decoderVersion = "stack-libraw-dng-supplement-v2";
+    std::string decoderVersion = "stack-libraw-float-cfa-v3";
     std::string cameraProfileVersion = "none";
     std::uint32_t tileRawPixels = 512;
     double saturationDnMargin = 4.0;

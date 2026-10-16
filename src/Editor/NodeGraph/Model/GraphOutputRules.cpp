@@ -2,6 +2,7 @@
 
 #include "Editor/NodeGraph/NodeGraphModelTypes.h"
 #include "NodeMath/ChannelImageSemantics.h"
+#include "NodeMath/SourceImageSemantics.h"
 
 #include <algorithm>
 #include <array>
@@ -25,9 +26,11 @@ void SetExtent(ValueDescriptor& descriptor, int width, int height) {
     descriptor.spatial = SemanticField<SpatialDescriptor>::Known(spatial);
 }
 
-void SetChannel(GraphOutputDescription& output, const std::string& role = "value") {
+void SetChannel(GraphOutputDescription& output, const std::string& role = "value",
+    LogicalValueType type = LogicalValueType::Invalid) {
     const auto previous = output.descriptor;
-    output.descriptor = MakeUnknownDescriptor(LogicalValueType::Channel);
+    if (type==LogicalValueType::Invalid) type=IsSingleChannelValue(previous.logicalType) ? previous.logicalType : LogicalValueType::Channel;
+    output.descriptor = MakeUnknownDescriptor(type);
     output.descriptor.channels = SemanticField<ChannelDescriptor>::Known({ ChannelLayout::Gray, { role } });
     output.descriptor.spatial = previous.spatial;
     output.descriptor.sampling = previous.sampling;
@@ -120,7 +123,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         return reference;
     }
     GraphOutputDescription output;
-    output.descriptor = MakeUnknownDescriptor(IsSingleChannelValue(declaredType) ? LogicalValueType::Channel : declaredType);
+    output.descriptor = MakeUnknownDescriptor(declaredType);
     const auto input = [&](const std::string& id) -> const GraphOutputDescription* {
         const auto found = inputs.find(id);
         return found == inputs.end() ? nullptr : found->second;
@@ -141,16 +144,8 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     bool rendered = true;
     switch (node.kind) {
     case NodeKind::Image: {
-        output.descriptor = node.image.sourceColorMetadata.descriptor;
-        if (output.descriptor.logicalType != LogicalValueType::ColorImage) {
-            output.descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
-            if (node.image.originalChannels >= 1 && node.image.originalChannels <= 4)
-                SetComponents(output.descriptor, node.image.originalChannels == 2 || node.image.originalChannels == 4
-                ? MakeImageComponentSet({ ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue, ImageComponent::Alpha })
-                : MakeImageComponentSet({ ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue }));
-        }
-        SetExtent(output.descriptor, node.image.width, node.image.height);
-        output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::UInt8);
+        output.descriptor = DescribeStoredImageValue(node.image.sourceColorMetadata.descriptor,
+            node.image.channels, node.image.width, node.image.height);
         if (node.image.isLoading) AddDiagnostic(output, node, socketId, "Loading", DiagnosticSeverity::Information);
         rendered = false;
         break;
@@ -220,6 +215,25 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         break;
     }
     case NodeKind::DataMath: {
+        if (node.dataMathSettings.domain == ArithmeticDomain::Values) {
+            output.descriptor = MakeUnknownDescriptor(LogicalValueType::Scalar);
+            output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
+            output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless, {}});
+            if (node.dataMathMode == DataMathMode::ImageAverage)
+                AddDiagnostic(output, node, socketId, "Average Images requires the spatial domain");
+            for (int i = 0; i < kMaxDataMathInputCount; ++i) {
+                const auto* value = input(DataMathInputSocketId(i));
+                if (!value) continue;
+                MergeDiagnostics(output, *value);
+                if (value->descriptor.logicalType != LogicalValueType::Scalar)
+                    AddDiagnostic(output, node, socketId, "Values require uniform Scalar inputs");
+                else if (value->descriptor.units.state != KnowledgeState::Known ||
+                    value->descriptor.units.value.kind != UnitKind::Unitless)
+                    AddDiagnostic(output, node, socketId, "Value Math requires unitless inputs");
+            }
+            rendered = false;
+            break;
+        }
         std::vector<std::string> ports;
         for (int i = 0; i < kMaxDataMathInputCount; ++i) ports.push_back(DataMathInputSocketId(i));
         ports.push_back(kDataMathBaseInputSocketId);
@@ -257,9 +271,10 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         break;
     case NodeKind::ImageToMask:
         use(kImageToMaskInputSocketId);
-        SetChannel(output);
+        SetChannel(output,"value",LogicalValueType::Mask);
         output.descriptor.range = SemanticField<NumericRange>::Known({ 0, 1, false, false, NonFinitePolicy::Forbidden });
         break;
+    case NodeKind::MaskTexture:
     case NodeKind::MaskGenerator:
     case NodeKind::CustomMask:
         SetChannel(output);
@@ -270,9 +285,8 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         output.descriptor.range = SemanticField<NumericRange>::Known({ 0, 1, false, false, NonFinitePolicy::Forbidden });
         break;
     case NodeKind::ImageGenerator:
-    case NodeKind::SpectrumView: {
-        if (node.kind == NodeKind::SpectrumView) use(kSpectrumInputSocketId);
-        const auto spatial = node.kind == NodeKind::SpectrumView ? output.descriptor.spatial : context.canvasSpatial;
+     {
+        const auto spatial = context.canvasSpatial;
         output.descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
         SetComponents(output.descriptor, MakeImageComponentSet({ ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue, ImageComponent::Alpha }));
         output.descriptor.spatial = spatial;
@@ -296,8 +310,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 }
             SetComponents(output.descriptor, components);
             if (inputs.empty()) AddDiagnostic(output, node, socketId, "Connect an input");
-        } else use(node.kind == NodeKind::RawOperation && socketId == "measurementImageOut" && input("referenceIn")
-            ? "referenceIn" : kImageInputSocketId);
+        } else use(kImageInputSocketId);
         if (node.kind == NodeKind::RawOperation) output.descriptor.range = SemanticField<NumericRange>::Unknown();
         if (node.kind == NodeKind::Layer && node.layerType == LayerType::ViewTransform &&
             output.descriptor.logicalType == LogicalValueType::ColorImage) {
@@ -329,7 +342,10 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 output.diagnostics.push_back(std::move(diagnostic));
             }
         } else if (node.kind != NodeKind::Reformat) output.descriptor.range = SemanticField<NumericRange>::Unknown();
-        if (node.kind == NodeKind::Reformat) SetExtent(output.descriptor, node.reformatSettings.width, node.reformatSettings.height);
+        if (node.kind == NodeKind::Reformat) {
+            output.descriptor.spatial = SemanticField<SpatialDescriptor>::Known(
+                ReformatOutputSpatial(output.descriptor.spatial.value, node.reformatSettings));
+        }
         if (const auto* mask = input(kMaskInputSocketId)) MergeDiagnostics(output, *mask);
         break;
     case NodeKind::Output:
@@ -342,34 +358,11 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         if (const auto* value = input(kReductionFieldInputSocketId)) MergeDiagnostics(output, *value);
         else AddDiagnostic(output, node, socketId, "Connect a channel to measure");
         output.descriptor = MakeUnknownDescriptor(LogicalValueType::Scalar);
+        if (const auto* value = input(kReductionFieldInputSocketId))
+            output.descriptor.units = value->descriptor.units;
         output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
         rendered = false;
         break;
-    case NodeKind::FrequencyFilter:
-        use(kChannelInputSocketId);
-        output.descriptor.range = SemanticField<NumericRange>::Unknown();
-        break;
-    case NodeKind::FrequencyFft:
-    case NodeKind::FrequencyIfft:
-    case NodeKind::ApplyFrequencyResponse:
-    case NodeKind::CombineSpectra:
-    case NodeKind::SpectrumSeparate:
-    case NodeKind::SpectrumRecombine: {
-        const auto port = node.kind == NodeKind::FrequencyFft ? kChannelInputSocketId :
-            node.kind == NodeKind::CombineSpectra ? kSpectrumInputASocketId :
-            node.kind == NodeKind::SpectrumRecombine ? kSpectrumMagnitudeInputSocketId : kSpectrumInputSocketId;
-        use(port);
-        const auto carried = output.descriptor;
-        if (node.kind == NodeKind::CombineSpectra) output = MergeSignals(signals({ kSpectrumInputASocketId, kSpectrumInputBSocketId }), declaredType, false);
-        if (node.kind == NodeKind::SpectrumRecombine) output = MergeSignals(signals({ kSpectrumMagnitudeInputSocketId, kSpectrumPhaseInputSocketId }), declaredType, false);
-        output.descriptor = MakeUnknownDescriptor(declaredType);
-        output.descriptor.spatial = carried.spatial;
-        if (node.kind == NodeKind::FrequencyIfft) {
-            const auto role = output.componentRole;
-            SetChannel(output, role.empty() ? "value" : role);
-        }
-        break;
-    }
     case NodeKind::RawDetailAutoMask:
     case NodeKind::RawDetailFusion:
         use(kImageInputSocketId);
@@ -390,10 +383,6 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         if (values.empty()) AddDiagnostic(output, node, socketId, "Connect an image input");
         break;
     }
-    case NodeKind::RawNeuralDenoise:
-        use(kRawInputSocketId);
-        rendered = false;
-        break;
     case NodeKind::RawDevelopment:
     case NodeKind::RawDecode:
     case NodeKind::RawDevelop:
@@ -438,10 +427,9 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     if (rendered && IsImageLike(output.descriptor.logicalType)) {
         output.descriptor.precision = SemanticField<LogicalPrecision>::Known(
             node.kind == NodeKind::CustomMask ||
-            output.descriptor.logicalType == LogicalValueType::ComplexSpectrum ||
-            output.descriptor.logicalType == LogicalValueType::SpectrumMagnitude ||
-            output.descriptor.logicalType == LogicalValueType::SpectrumPhase
-                ? LogicalPrecision::Float32 : LogicalPrecision::Float16);
+            (node.kind==NodeKind::RawOperation && (node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
+                node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::Exposure))
+            ? LogicalPrecision::Float32 : LogicalPrecision::Float16);
     }
     if (output.descriptor.logicalType == LogicalValueType::Channel && output.descriptor.channels.state == KnowledgeState::NotApplicable) {
         output.descriptor.channels = SemanticField<ChannelDescriptor>::Unknown();

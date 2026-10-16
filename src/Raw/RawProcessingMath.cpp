@@ -582,25 +582,30 @@ std::array<float, 3> DemosaicHamiltonAdamsAt(
         mosaic.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
         return { 0.0f, 0.0f, 0.0f };
     }
-    const auto s = [&](int dx, int dy) { return SampleCfaMirrored(mosaic, width, height, x + dx, y + dy); };
-    const int color = PatternColor(pattern, x, y);
-    const float center = s(0, 0);
-    std::array<float, 3> result { center, center, center };
-    if (color == 0 || color == 2) {
-        const float horizontal = 0.5f * (s(-1, 0) + s(1, 0));
-        const float vertical = 0.5f * (s(0, -1) + s(0, 1));
-        const float horizontalGradient = std::abs(s(-1, 0) - s(1, 0)) +
-            std::abs(2.0f * center - s(-2, 0) - s(2, 0));
-        const float verticalGradient = std::abs(s(0, -1) - s(0, 1)) +
-            std::abs(2.0f * center - s(0, -2) - s(0, 2));
-        result[1] = horizontalGradient <= verticalGradient ? horizontal : vertical;
-        const float diagonal = 0.25f * (s(-1, -1) + s(1, -1) + s(-1, 1) + s(1, 1));
-        result[static_cast<std::size_t>(color == 0 ? 2 : 0)] = diagonal;
-        return result;
+    const auto green = [&](int px,int py) {
+        const auto s = [&](int dx,int dy) { return SampleCfaMirrored(mosaic,width,height,px+dx,py+dy); };
+        const float center=s(0,0);
+        if (PatternColor(pattern,px,py)==1) return center;
+        const float dh=2*center-s(-2,0)-s(2,0), dv=2*center-s(0,-2)-s(0,2);
+        const float h=0.5f*(s(-1,0)+s(1,0))+0.25f*dh;
+        const float v=0.5f*(s(0,-1)+s(0,1))+0.25f*dv;
+        const float gh=std::abs(s(-1,0)-s(1,0))+std::abs(dh);
+        const float gv=std::abs(s(0,-1)-s(0,1))+std::abs(dv);
+        return gh<gv ? h : gv<gh ? v : 0.5f*(h+v);
+    };
+    const int color=PatternColor(pattern,x,y);
+    const float g=green(x,y);
+    std::array<float,3> result{0,g,0};
+    for (int target : {0,2}) {
+        if (color==target) { result[target]=SampleCfaMirrored(mosaic,width,height,x,y); continue; }
+        float difference=0; int count=0;
+        for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+            if (PatternColor(pattern,x+dx,y+dy)!=target) continue;
+            difference+=SampleCfaMirrored(mosaic,width,height,x+dx,y+dy)-green(x+dx,y+dy);
+            ++count;
+        }
+        result[target]=g+difference/count;
     }
-    const bool horizontalRed = PatternColor(pattern, x - 1, y) == 0 || PatternColor(pattern, x + 1, y) == 0;
-    result[0] = horizontalRed ? 0.5f * (s(-1, 0) + s(1, 0)) : 0.5f * (s(0, -1) + s(0, 1));
-    result[2] = horizontalRed ? 0.5f * (s(0, -1) + s(0, 1)) : 0.5f * (s(-1, 0) + s(1, 0));
     return result;
 }
 

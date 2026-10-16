@@ -15,6 +15,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <unordered_map>
 
 namespace {
 
@@ -24,6 +25,11 @@ unsigned int g_HdrMergeIconTexture = 0;
 unsigned int g_CustomMaskIconTexture = 0;
 unsigned int g_LutIconTexture = 0;
 unsigned int g_DenoiseIconTexture = 0;
+
+// Editors draw through the shell's shared UI context. Embedded icons are
+// immutable and may outlive any one project, but not the last editor owner.
+std::unordered_map<const unsigned char*, unsigned int> g_EditorIconTextures;
+std::size_t g_EditorIconOwners = 0;
 
 bool HasBlockingModalPopupOpen() {
     ImGuiContext* context = ImGui::GetCurrentContext();
@@ -52,6 +58,8 @@ unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigned int s
     if (!data || size == 0) {
         return 0;
     }
+    const auto cached = g_EditorIconTextures.find(data);
+    if (cached != g_EditorIconTextures.end()) return cached->second;
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -63,6 +71,7 @@ unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigned int s
     }
     const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
     stbi_image_free(pixels);
+    if (texture) g_EditorIconTextures.emplace(data, texture);
     return texture;
 }
 
@@ -240,14 +249,13 @@ void EditorModule::LoadResourceTextures() {
         "Denoise"
     );
     m_TexturesLoaded = true;
+    ++g_EditorIconOwners;
 }
 
 void EditorModule::UnloadResourceTextures() {
+    if (!m_TexturesLoaded) return;
     const auto deleteTexture = [](unsigned int& texture) {
-        if (texture != 0) {
-            glDeleteTextures(1, &texture);
-            texture = 0;
-        }
+        texture = 0;
     };
 
     deleteTexture(m_NodeGraphIconTexture);
@@ -267,13 +275,16 @@ void EditorModule::UnloadResourceTextures() {
     deleteTexture(m_RawLabGalleryEyeClosedIconTexture);
     deleteTexture(m_RawLabGalleryEyeOpenIconTexture);
     deleteTexture(m_ChevronIconTexture);
+    m_TexturesLoaded = false;
+    if (--g_EditorIconOwners != 0) return;
+    for (const auto& entry : g_EditorIconTextures) glDeleteTextures(1, &entry.second);
+    g_EditorIconTextures.clear();
     deleteTexture(g_ToneCurveIconTexture);
     deleteTexture(g_ViewTransformIconTexture);
     deleteTexture(g_HdrMergeIconTexture);
     deleteTexture(g_CustomMaskIconTexture);
     deleteTexture(g_LutIconTexture);
     deleteTexture(g_DenoiseIconTexture);
-    m_TexturesLoaded = false;
 }
 
 void EditorModule::RenderFloatingToolbar() {
@@ -472,7 +483,7 @@ void EditorModule::RenderFloatingToolbar() {
                 tex = g_ToneCurveIconTexture;
             } else if (btn.typeId == "ViewTransform") {
                 tex = g_ViewTransformIconTexture;
-            } else if (btn.typeId == "ClassicalRgbDenoise" || btn.typeId == "LinearRgbNeuralDenoise") {
+            } else if (btn.typeId == "ClassicalRgbDenoise") {
                 tex = g_DenoiseIconTexture;
             } else {
                 tex = m_SettingsIconTexture;

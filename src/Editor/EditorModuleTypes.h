@@ -1,5 +1,6 @@
 #pragma once
 #include "Editor/Internal/RawLab/DetailContrastEditor.h"
+#include "Editor/Internal/RawLab/RawCalibrationEditor.h"
 #include "Editor/GraphScopeData.h"
 
 #include "Editor/LoadedProjectData.h"
@@ -7,6 +8,7 @@
 #include "Editor/RawWorkspaceAutoBaseState.h"
 #include "Editor/RawVariablePrecisionValueGraph.h"
 #include "Editor/RawZoneAreaHistory.h"
+#include "Project/NodeEditTarget.h"
 #include "Editor/RawExposureHistory.h"
 #include "Editor/RawZoneAreaPreview.h"
 #include "Editor/Internal/RawLab/RawDenoiseMapEditor.h"
@@ -312,7 +314,8 @@ enum class RawLabTool {
     Color = 9,
     Calibration = 10,
     Detail = 11,
-    Exposure = 12
+    Exposure = 12,
+    GraphNode = 13 // A selected graph instance without a legacy RAW tool category.
 };
 
 // Drawer groups keep the concrete tools and their persisted identities intact.
@@ -406,6 +409,7 @@ struct RawZoneAreaGraphState {
 
 struct RawZoneAreaUiState {
     Stack::Editor::RawZoneAreaHistory history;
+    std::optional<Stack::Project::NodeEditTarget> nodeTarget;
     std::string sourceKey;
     std::string selectedId;
     int mode = 0; // Adjust, Add, Erase.
@@ -480,6 +484,7 @@ struct RawWorkspaceLabUiState {
     float previewPanX = 0.0f;
     float previewPanY = 0.0f;
     bool previewPanning = false;
+    bool previewSpacePanning = false;
     double previewSurroundStarted = -1.0;
     float previewSurroundFrom = 0.f;
     bool previewSurroundTarget = false;
@@ -494,9 +499,7 @@ struct RawWorkspaceLabUiState {
     // authority and interaction drafts remain the sole live-edit authority.
     std::string lightSurfaceSourceKey;
     bool lightInteractionActive = false;
-    bool calibrationGestureActive = false;
-    RawRecipe::RawColorCalibrationRecipe calibrationGestureStart;
-    std::string calibrationGestureSource;
+    Editor::RawLabInternal::CalibrationEditorState calibrationEditor;
     bool globalExposureInteractionActive = false;
     Editor::RawExposureHistory exposureHistory;
     float lightExposureGlow = 0.0f;
@@ -846,16 +849,6 @@ struct GraphAutoFocusState {
     float lastCanvasWidth = 0.0f;
     float lastCanvasHeight = 0.0f;
     double animationStartTime = 0.0;
-};
-
-struct CustomMaskBrushAdjustDrag {
-    int nodeId = -1;
-    ImVec2 startMouse { 0.0f, 0.0f };
-    ImVec2 currentMouse { 0.0f, 0.0f };
-    float startSize = 48.0f;
-    float startSoftness = 0.45f;
-    float startOpacity = 1.0f;
-    bool adjusting = false;
 };
 
 enum class CompositeEdgeSnapMode {

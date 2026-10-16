@@ -152,16 +152,21 @@ std::uintmax_t PresetManager::BuildPresetSignature() const {
         return signature;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(m_PresetsPath, ec)) {
-        if (ec || !entry.is_regular_file()) {
+    for (std::filesystem::directory_iterator it(m_PresetsPath, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
+        std::error_code entryError;
+        if (!entry.is_regular_file(entryError) || entryError) {
             continue;
         }
         if (entry.path().extension() != ".stackpreset") {
             continue;
         }
-        mix(static_cast<std::uintmax_t>(entry.file_size(ec)));
-        const auto writeTime = std::filesystem::last_write_time(entry.path(), ec);
-        if (!ec) {
+        for (unsigned char ch : entry.path().filename().u8string()) mix(ch);
+        const auto size = entry.file_size(entryError);
+        if (!entryError) mix(static_cast<std::uintmax_t>(size));
+        const auto writeTime = entry.last_write_time(entryError);
+        if (!entryError) {
             mix(static_cast<std::uintmax_t>(writeTime.time_since_epoch().count()));
         }
     }
@@ -186,8 +191,11 @@ void PresetManager::RefreshPresets() {
     std::vector<std::shared_ptr<PresetEntry>> loaded;
     std::error_code ec;
     if (std::filesystem::exists(m_PresetsPath, ec)) {
-        for (const auto& fileEntry : std::filesystem::directory_iterator(m_PresetsPath, ec)) {
-            if (ec || !fileEntry.is_regular_file() || fileEntry.path().extension() != ".stackpreset") {
+        for (std::filesystem::directory_iterator it(m_PresetsPath, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            const auto& fileEntry = *it;
+            std::error_code entryError;
+            if (!fileEntry.is_regular_file(entryError) || entryError || fileEntry.path().extension() != ".stackpreset") {
                 continue;
             }
 
@@ -204,7 +212,7 @@ void PresetManager::RefreshPresets() {
             preset->displayName = document.metadata.displayName;
             preset->timestamp = document.metadata.timestamp;
             preset->savedWithVersion = document.metadata.savedWithVersion;
-            preset->fileName = fileEntry.path().filename().string();
+            preset->fileName = fileEntry.path().filename().u8string();
             preset->nodeCount = document.metadata.nodeCount;
             preset->inputCount = document.metadata.inputCount;
             preset->outputCount = document.metadata.outputCount;
@@ -246,9 +254,9 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
     entry->graphPayloadLoadRequested = true;
     entry->graphPayloadLoadError.clear();
 
-    const std::filesystem::path path = m_PresetsPath / entry->fileName;
+    const std::filesystem::path path = m_PresetsPath / std::filesystem::u8path(entry->fileName);
     const std::weak_ptr<PresetEntry> weakEntry = entry;
-    Async::TaskSystem::Get().Submit("Loading presets", [path, weakEntry]() {
+    const bool queued = Async::TaskSystem::Get().Submit("Loading presets", [path, weakEntry]() {
         StackBinaryFormat::json graphPayload = StackBinaryFormat::json::object();
         std::string error;
         bool success = false;
@@ -258,15 +266,17 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
         options.includeThumbnail = false;
         options.includeGraphPayload = true;
         options.includeBoundarySockets = true;
-        if (StackBinaryFormat::ReadNodePresetFile(path, document, options) && document.graphPayload.is_object()) {
-            graphPayload = std::move(document.graphPayload);
-            const bool payloadChanged = SanitizePresetGraphPayload(graphPayload);
-            if (payloadChanged) {
-                document.graphPayload = graphPayload;
-                StackBinaryFormat::WriteNodePresetFile(path, document);
+        try {
+            if (StackBinaryFormat::ReadNodePresetFile(path, document, options) && document.graphPayload.is_object()) {
+                graphPayload = std::move(document.graphPayload);
+                // Preloading must not rewrite a partial document or race an
+                // explicit rename/overwrite. Apply source scrubbing in memory.
+                SanitizePresetGraphPayload(graphPayload);
+                success = true;
+            } else {
+                error = "Stack could not read the preset graph.";
             }
-            success = true;
-        } else {
+        } catch (...) {
             error = "Stack could not read the preset graph.";
         }
 
@@ -285,6 +295,10 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
             }
         });
     });
+    if (!queued) {
+        entry->graphPayloadLoadRequested = false;
+        entry->graphPayloadLoadError = "Stack could not schedule the preset graph load.";
+    }
 }
 
 bool PresetManager::SaveUserPreset(
@@ -355,7 +369,7 @@ bool PresetManager::ReadUserPresetDocument(const PresetEntry& entry, StackBinary
         if (outError) *outError = "Preset file name is missing.";
         return false;
     }
-    const std::filesystem::path path = m_PresetsPath / entry.fileName;
+    const std::filesystem::path path = m_PresetsPath / std::filesystem::u8path(entry.fileName);
     if (!StackBinaryFormat::ReadNodePresetFile(path, document)) {
         if (outError) *outError = "Stack could not read the preset file.";
         return false;
@@ -368,7 +382,7 @@ bool PresetManager::WriteUserPresetDocument(const PresetEntry& entry, const Stac
         if (outError) *outError = "Built-in presets cannot be modified.";
         return false;
     }
-    const std::filesystem::path path = m_PresetsPath / entry.fileName;
+    const std::filesystem::path path = m_PresetsPath / std::filesystem::u8path(entry.fileName);
     if (!StackBinaryFormat::WriteNodePresetFile(path, document)) {
         if (outError) *outError = "Stack could not write the preset file.";
         return false;
@@ -378,7 +392,7 @@ bool PresetManager::WriteUserPresetDocument(const PresetEntry& entry, const Stac
     return true;
 }
 
-bool PresetManager::LoadPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload, std::string* outError) const {
+bool PresetManager::LoadPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload, std::string* outError) const try {
     if (TryGetPreloadedPresetPayload(entry, outGraphPayload)) {
         return true;
     }
@@ -394,6 +408,9 @@ bool PresetManager::LoadPresetPayload(const PresetEntry& entry, StackBinaryForma
     SanitizePresetGraphPayload(document.graphPayload);
     outGraphPayload = document.graphPayload;
     return true;
+} catch (const std::exception&) {
+    if (outError) *outError = "Stack could not read the preset graph.";
+    return false;
 }
 
 bool PresetManager::RenameUserPreset(const PresetEntry& entry, const std::string& displayName, std::string* outError) {
@@ -411,7 +428,7 @@ bool PresetManager::DeleteUserPreset(const PresetEntry& entry, std::string* outE
         return false;
     }
     std::error_code ec;
-    const std::filesystem::path path = m_PresetsPath / entry.fileName;
+    const std::filesystem::path path = m_PresetsPath / std::filesystem::u8path(entry.fileName);
     if (!std::filesystem::remove(path, ec) || ec) {
         if (outError) *outError = "Stack could not delete the preset file.";
         return false;

@@ -34,11 +34,19 @@ struct RawImageBackdropFrame {
     ImVec2 nativeExtent{};
     ImVec2 controlsMinimum{}, controlsMaximum{};
     std::vector<Patch> patches;
+    // Stable complete-photo inputs for derived surround resources. Visible
+    // detail patches may change during navigation without changing this source.
+    std::vector<Patch> surroundPatches;
+    const std::vector<Patch>& SurroundPatches() const {
+        return surroundPatches.empty() ? patches : surroundPatches;
+    }
 };
 
 class RawImageBackdrop {
 public:
-    bool Render(const RawImageBackdropFrame& frame, const ImDrawData& data, const ImVec4& clear);
+    // Compositor-owned pass. Destination and texture-unit ownership are explicit.
+    bool Render(const RawImageBackdropFrame& frame, const ImDrawData& data, const ImVec4& clear,
+        unsigned int destinationFramebuffer);
     void Shutdown();
 private:
     bool Ensure(int width, int height);
@@ -47,7 +55,10 @@ private:
     RawImageBackdropNoise noise;
     unsigned int texture = 0, framebuffer = 0, copyProgram = 0, presentProgram = 0, vao = 0;
     int width = 0, height = 0;
+    std::size_t copiedIdentity = 0;
+    bool copiedValid = false;
     bool failed = false;
+    int maximumTextureSize = 0;
 };
 
 // Temporarily leave the photo's narrow edge to the successful backdrop pass.

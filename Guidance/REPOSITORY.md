@@ -5,6 +5,7 @@ Keep the root for the CMake entry point, command launchers, Git configuration an
 | Folder | Contents |
 | --- | --- |
 | `src/` | Application code, shaders and third-party source dependencies |
+| `src/Assets/` | Created project asset records, immutable float data and value serialization. RAW capture math lives under `src/Raw/`; managed storage adapters live under `src/Persistence/`. |
 | `Assets/` | Source fonts, icons and splash images |
 | `cmake/` | Source lists, version information and focused build targets |
 | `tools/assets/` | Scripts that bake source assets into embedded headers |
@@ -15,7 +16,7 @@ Keep the root for the CMake entry point, command launchers, Git configuration an
 | `tools/tests/fixtures/` | Existing development image generators |
 | `tools/restormer/` | Optional model-service source and export tools |
 | `installer/` | Installer source and configuration |
-| `legal/` | Legal source documents, dependency licenses and release manifests required by the build |
+| `legal/` | Active third-party component metadata, notices and dependency licenses; `archive/stack-agreement/` holds the inactive custom agreement packet and former integration |
 | `website/` | Local website source and images, ignored by Git |
 | `Guidance/` | Current repository instructions |
 | `RESEARCH/` | Local topic-specific designs, findings and prior work records, ignored by Git |
@@ -28,6 +29,6 @@ The splash, tab-icon, RAW-sidebar-icon and composite-font headers are generated 
 
 The whole `RESEARCH/` and `website/` folders stay local. This includes downloaded papers, validation results and website drafts. The app's source icon is `Assets/Icons/Stack.png`; its bake script and source-image loading path do not require `website/`.
 
-Original RAW inputs in the local `bike test set/` and `denoise sets/` directories stay where they are. Those directories and project backup files are ignored. Follow the original-source safeguards in [Implementation/README.md](Implementation/README.md) before changing any image-data location.
+Original RAW inputs in the local `bike test set/`, `denoise sets/` and `depth sets/` directories stay where they are. Those directories and project backup files are ignored. Follow the original-source safeguards in [Implementation/README.md](Implementation/README.md) before changing any image-data location.
 
 Ignore generated files by their output directory or exact name. Avoid blanket rules for `.txt` or `.cmake`, which can hide required CMake and legal sources. Check a new rule against both its intended output and a source file that must remain visible to Git.

@@ -2,6 +2,7 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$BuildDir = "",
     [string]$BuildTreeDir = "",
+    [ValidateSet("Stack", "Burst")][string]$Product = "Stack",
     [int]$Parallel = 14,
     [switch]$Launch,
     [switch]$SkipClose
@@ -10,6 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\dev\stack_workflow.ps1")
+. (Join-Path $PSScriptRoot "..\release\product_payload.ps1")
+$productDefinition = Get-StackProduct -Product $Product
 
 $Root = (Resolve-Path $Root).Path
 $paths = Get-StackPaths -Root $Root
@@ -33,7 +36,7 @@ if (-not $cmake) {
 }
 
 Write-Host "Configuring private build tree in: $BuildTreeDir"
-Write-Host "Deploying runnable Stack to: $BuildDir"
+Write-Host "Deploying $($productDefinition.name) to: $BuildDir"
 $configureArgs = @(
     "-S", $Root,
     "-B", $BuildTreeDir,
@@ -41,6 +44,7 @@ $configureArgs = @(
     "-DSTACK_ENABLE_APPWINDOW_TITLEBAR=ON",
     "-DSTACK_ENABLE_RESTORMER_EXECUTION=OFF",
     "-DSTACK_BUILD_MODEL_SERVICE=OFF",
+    "-DSTACK_BUILD_BURST_DIAGNOSTICS=OFF",
     "-DSTACK_BUILD_AUXILIARY_TOOLS=OFF"
     "-DSTACK_MSVC_COMPILE_JOBS=$Parallel"
 )
@@ -55,8 +59,8 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "Building Stack (Release)..."
-$buildArgs = @("--build", $BuildTreeDir, "--config", "Release")
+Write-Host "Building $($productDefinition.name) (Release)..."
+$buildArgs = @("--build", $BuildTreeDir, "--config", "Release", "--target") + @($productDefinition.buildTargets)
 if ($Parallel -gt 0) {
     $buildArgs += @("--parallel", $Parallel.ToString())
 }
@@ -65,8 +69,8 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$exePath = Join-Path $BuildDir "Stack.exe"
-Copy-OptionalFfmpegProvider -Paths $paths -StageDir $BuildDir | Out-Null
+$exePath = Join-Path $BuildDir $productDefinition.executable
+if ($Product -eq "Stack") { Copy-OptionalFfmpegProvider -Paths $paths -StageDir $BuildDir | Out-Null }
 Write-Host ""
 Write-Host "Build complete."
 Write-Host "Use this executable: $exePath"
@@ -76,6 +80,6 @@ if ($Launch) {
         throw "Expected executable was not found after the build: $exePath"
     }
 
-    Write-Host "Launching Stack..."
+    Write-Host "Launching $($productDefinition.name)..."
     Start-Process -FilePath $exePath | Out-Null
 }

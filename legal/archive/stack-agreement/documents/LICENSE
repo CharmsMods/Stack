@@ -1,0 +1,150 @@
+Stack Source-Available Proprietary License
+Version 1.1
+Effective Date: August 6, 2026
+
+Copyright (c) 2024-2026 Darynn Ho. All rights reserved.
+
+IMPORTANT: STACK IS SOURCE-AVAILABLE PROPRIETARY SOFTWARE. IT IS NOT OPEN
+SOURCE. THIS LICENSE APPLIES TO THE STACK SOURCE CODE AND REPOSITORY MATERIALS,
+NOT TO USE OF AN OFFICIAL COMPILED RELEASE. OFFICIAL COMPILED RELEASES ARE
+GOVERNED BY THE STACK END USER LICENSE AGREEMENT DISTRIBUTED WITH THEM.
+
+1. Definitions
+
+"Licensor" means Darynn Ho.
+
+"Stack Source" means the original source code, build scripts, project files,
+documentation, user-interface designs, graphics, icons, website source, and
+other original materials in this repository that are owned by the Licensor.
+It does not include Third-Party Materials or an Official Binary Release.
+
+"Official Binary Release" means an installer, executable, portable archive,
+or other compiled package published by the Licensor through an official Stack
+or CharmsMods release channel.
+
+"Third-Party Materials" means code, libraries, tools, fonts, models, assets,
+or other material owned by someone other than the Licensor and identified by
+its own license or notice.
+
+2. Ownership and Reserved Rights
+
+The Stack Source is owned by the Licensor and protected by copyright and other
+applicable laws. Except for the limited inspection permission in Section 3,
+no right or license is granted. All rights not expressly granted are reserved.
+
+This License grants no patent, trademark, trade-name, branding, or logo rights.
+Stack, Charm, CharmsMods, associated logos, and related branding identify the
+Licensor's products or publishing brands. They may be referenced truthfully,
+but may not be used to imply ownership, sponsorship, endorsement, or affiliation.
+
+3. Limited Source Inspection Permission
+
+You may privately view, browse, search, and study the Stack Source for
+transparency, evaluation, security review, issue reporting, personal reference,
+or general understanding of the project.
+
+You may make only the temporary or platform-created copies reasonably necessary
+for that inspection, including ordinary browser caches, a private clone, or a
+GitHub fork created by GitHub's normal public-repository functionality. A clone,
+fork, download, or other copy does not grant ownership or any additional right.
+It may not be used for development, execution, distribution, or another purpose.
+
+GitHub's terms and technical features may independently permit GitHub to display
+and let users fork a public repository. Those platform permissions do not grant
+any broader right to the Stack Source outside the limited inspection permission
+stated here.
+
+4. Prohibited Uses
+
+Unless the Licensor gives you prior written permission, you may not:
+
+a. compile, build, run, execute, package, or deploy the Stack Source;
+
+b. modify, adapt, translate, port, remix, or create a derivative work from the
+   Stack Source;
+
+c. copy Stack Source into another project, product, service, library, website,
+   dataset, repository, or other work;
+
+d. publish, distribute, redistribute, mirror, host, upload, transmit, share,
+   sublicense, sell, rent, lease, monetize, or otherwise make Stack Source or a
+   substantial portion of it available to another person;
+
+e. remove, hide, change, or misrepresent a copyright, license, attribution, or
+   proprietary notice;
+
+f. claim authorship or ownership of Stack Source, rebrand it, or represent it
+   or a derivative as your own work;
+
+g. use Stack Source or repository materials to train, fine-tune, evaluate, or
+   develop a machine-learning model, code-generation system, or similar
+   automated system; or
+
+h. use Stack Source in violation of applicable law or another person's rights.
+
+5. Official Binary Releases
+
+This License does not govern ordinary end-user use of an Official Binary
+Release. The Stack End User License Agreement included with that release
+governs installation, use, and permitted sharing of the compiled application.
+
+Nothing in this License claims ownership of images, projects, or other original
+work that a user creates with an authorized Official Binary Release.
+
+6. Third-Party Materials
+
+Third-Party Materials are not licensed under this License. They remain governed
+by their own licenses and notices, which may grant rights different from this
+License. Nothing here limits a right granted directly by a third-party license.
+A third-party license does not grant rights to the Licensor's original Stack
+Source, branding, designs, or other proprietary materials.
+
+7. Issues, Feedback, and Contributions
+
+Bug reports and non-confidential feedback may be submitted through the official
+Stack GitHub Issues page. Unsolicited code, pull requests, patches, designs, or
+other creative contributions are not accepted. Do not submit material that you
+expect to remain confidential or that the Licensor has not requested in writing.
+
+8. Enforcement and Termination
+
+The limited permission in Section 3 ends automatically if you violate this
+License. You must then stop using the Stack Source and remove copies under your
+control, except for copies GitHub retains through its ordinary platform operation
+or copies that applicable law requires you to retain.
+
+9. Disclaimer of Warranties
+
+THE STACK SOURCE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OF
+ANY KIND. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR DISCLAIMS ALL
+EXPRESS, IMPLIED, AND STATUTORY WARRANTIES, INCLUDING MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, SECURITY,
+AVAILABILITY, AND ERROR-FREE OPERATION.
+
+10. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES,
+OR FOR LOSS OF PROFITS, REVENUE, DATA, GOODWILL, BUSINESS OPPORTUNITY, OR SYSTEM
+FUNCTIONALITY, ARISING FROM THE STACK SOURCE OR THIS LICENSE. THE LICENSOR'S
+TOTAL LIABILITY WILL NOT EXCEED THE AMOUNT YOU PAID DIRECTLY TO THE LICENSOR FOR
+THE RIGHTS GRANTED BY THIS LICENSE, IF ANY.
+
+11. Governing Law and Consumer Rights
+
+This License is governed by the laws of the State of Washington, United States,
+without regard to conflict-of-law rules, unless applicable law requires
+otherwise. Nothing in this License excludes a right or remedy that applicable
+law does not permit the parties to exclude.
+
+12. General Terms
+
+If a provision is unenforceable, it will be adjusted only as much as necessary,
+and the remaining provisions will continue in effect. Failure to enforce a
+provision is not a waiver. This License is the entire agreement for access to
+and inspection of the Stack Source unless the Licensor signs a separate written
+agreement that expressly replaces or supplements it.
+
+Permission requests may be made through the official Stack repository owner.
+No contact or permission is required for uses already allowed by the EULA for
+an Official Binary Release.

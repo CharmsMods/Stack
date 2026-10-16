@@ -17,7 +17,7 @@ namespace Stack::RawEvidence {
 inline constexpr int kRawTechnicalEvidenceSchemaVersion = 1;
 inline constexpr const char* kRawTechnicalEvidenceVersion = "raw-technical-evidence-v1";
 inline constexpr const char* kRawNormalizationVersion = "dng-linear-reference-v1";
-inline constexpr const char* kRawDecoderIdentityVersion = "stack-libraw-decoded-exif-v4";
+inline constexpr const char* kRawDecoderIdentityVersion = "stack-libraw-decoded-float-cfa-v5";
 
 enum class EvidenceProvenance {
     Measured,

@@ -1,4 +1,5 @@
 #include "Raw/RawViewportSettings.h"
+#include "Raw/RawGalleryInputPolicy.h"
 #include "RawWorkspace.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
 
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <system_error>
 #include <thread>
@@ -261,364 +263,6 @@ nlohmann::json SerializeThumbnailSignature(const ThumbnailSignature& signature) 
     return value;
 }
 
-float NormalizeRawValue(float value, const Raw::RawMetadata& metadata) {
-    const float black = metadata.blackLevel;
-    const float white = std::max(black + 1.0f, metadata.whiteLevel);
-    return std::clamp((value - black) / (white - black), 0.0f, 1.0f);
-}
-
-unsigned char ToSrgbByte(float linear) {
-    const float encoded = std::pow(std::clamp(linear, 0.0f, 1.0f), 1.0f / 2.2f);
-    return static_cast<unsigned char>(std::clamp(encoded * 255.0f + 0.5f, 0.0f, 255.0f));
-}
-
-int CfaColorAt(const Raw::RawMetadata& metadata, int x, int y) {
-    switch (metadata.cfaPattern) {
-        case Raw::CfaPattern::RGGB:
-            return (y & 1) == 0 ? ((x & 1) == 0 ? 0 : 1) : ((x & 1) == 0 ? 1 : 2);
-        case Raw::CfaPattern::BGGR:
-            return (y & 1) == 0 ? ((x & 1) == 0 ? 2 : 1) : ((x & 1) == 0 ? 1 : 0);
-        case Raw::CfaPattern::GBRG:
-            return (y & 1) == 0 ? ((x & 1) == 0 ? 1 : 2) : ((x & 1) == 0 ? 0 : 1);
-        case Raw::CfaPattern::GRBG:
-            return (y & 1) == 0 ? ((x & 1) == 0 ? 1 : 0) : ((x & 1) == 0 ? 2 : 1);
-        case Raw::CfaPattern::Unknown:
-        default:
-            return -1;
-    }
-}
-
-bool BuildFastMosaicThumbnailPixels(const Raw::RawImageData& raw, int maxDimension, std::vector<unsigned char>& outPixels, int& outW, int& outH) {
-    const Raw::RawMetadata& metadata = raw.metadata;
-    const int visibleW = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
-    const int visibleH = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
-    const int rawW = metadata.rawWidth;
-    const int rawH = metadata.rawHeight;
-    if (rawW <= 0 || rawH <= 0 || visibleW <= 0 || visibleH <= 0 || raw.rawBuffer.empty()) {
-        return false;
-    }
-
-    const float scale = static_cast<float>(maxDimension) / static_cast<float>(std::max(visibleW, visibleH));
-    outW = std::max(1, static_cast<int>(std::floor(static_cast<float>(visibleW) * std::min(1.0f, scale))));
-    outH = std::max(1, static_cast<int>(std::floor(static_cast<float>(visibleH) * std::min(1.0f, scale))));
-    outPixels.assign(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 4u, 255);
-
-    const int left = std::clamp(metadata.leftMargin, 0, std::max(0, rawW - 1));
-    const int top = std::clamp(metadata.topMargin, 0, std::max(0, rawH - 1));
-    const float wbR = metadata.cameraWhiteBalance[0] > 0.001f ? metadata.cameraWhiteBalance[0] : 1.0f;
-    const float wbG = metadata.cameraWhiteBalance[1] > 0.001f ? metadata.cameraWhiteBalance[1] : 1.0f;
-    const float wbB = metadata.cameraWhiteBalance[2] > 0.001f ? metadata.cameraWhiteBalance[2] : 1.0f;
-    const float wbScale = 1.0f / std::max(0.001f, wbG);
-
-    for (int y = 0; y < outH; ++y) {
-        for (int x = 0; x < outW; ++x) {
-            const int centerX = left + std::clamp(static_cast<int>((static_cast<float>(x) + 0.5f) * static_cast<float>(visibleW) / static_cast<float>(outW)), 0, visibleW - 1);
-            const int centerY = top + std::clamp(static_cast<int>((static_cast<float>(y) + 0.5f) * static_cast<float>(visibleH) / static_cast<float>(outH)), 0, visibleH - 1);
-            const int baseX = std::clamp(centerX & ~1, 0, std::max(0, rawW - 2));
-            const int baseY = std::clamp(centerY & ~1, 0, std::max(0, rawH - 2));
-
-            float channels[3] = { 0.0f, 0.0f, 0.0f };
-            int counts[3] = { 0, 0, 0 };
-            for (int oy = 0; oy < 2; ++oy) {
-                for (int ox = 0; ox < 2; ++ox) {
-                    const int sx = std::clamp(baseX + ox, 0, rawW - 1);
-                    const int sy = std::clamp(baseY + oy, 0, rawH - 1);
-                    const int color = CfaColorAt(metadata, sx, sy);
-                    const float value = NormalizeRawValue(
-                        static_cast<float>(raw.rawBuffer[static_cast<std::size_t>(sy) * rawW + sx]),
-                        metadata);
-                    if (color >= 0 && color < 3) {
-                        channels[color] += value;
-                        ++counts[color];
-                    } else {
-                        channels[0] += value;
-                        channels[1] += value;
-                        channels[2] += value;
-                        ++counts[0];
-                        ++counts[1];
-                        ++counts[2];
-                    }
-                }
-            }
-
-            float r = counts[0] > 0 ? channels[0] / static_cast<float>(counts[0]) : channels[1];
-            float g = counts[1] > 0 ? channels[1] / static_cast<float>(counts[1]) : (r + channels[2]) * 0.5f;
-            float b = counts[2] > 0 ? channels[2] / static_cast<float>(counts[2]) : g;
-            r = std::clamp(r * wbR * wbScale, 0.0f, 1.0f);
-            g = std::clamp(g, 0.0f, 1.0f);
-            b = std::clamp(b * wbB * wbScale, 0.0f, 1.0f);
-
-            const std::size_t dst = (static_cast<std::size_t>(y) * outW + static_cast<std::size_t>(x)) * 4u;
-            outPixels[dst + 0] = ToSrgbByte(r);
-            outPixels[dst + 1] = ToSrgbByte(g);
-            outPixels[dst + 2] = ToSrgbByte(b);
-            outPixels[dst + 3] = 255;
-        }
-    }
-    return true;
-}
-
-bool BuildFastLinearThumbnailPixels(const Raw::RawImageData& raw, int maxDimension, std::vector<unsigned char>& outPixels, int& outW, int& outH) {
-    const Raw::RawMetadata& metadata = raw.metadata;
-    const int srcW = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
-    const int srcH = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
-    const int channels = std::clamp(metadata.linearChannels > 0 ? metadata.linearChannels : 3, 3, 4);
-    if (srcW <= 0 || srcH <= 0) {
-        return false;
-    }
-
-    const bool useUInt16 = raw.linearUInt16Buffer.size() >= static_cast<std::size_t>(srcW) * srcH * channels;
-    const bool useFloat = raw.linearFloatBuffer.size() >= static_cast<std::size_t>(srcW) * srcH * channels;
-    if (!useUInt16 && !useFloat) {
-        return false;
-    }
-
-    const float scale = static_cast<float>(maxDimension) / static_cast<float>(std::max(srcW, srcH));
-    outW = std::max(1, static_cast<int>(std::floor(static_cast<float>(srcW) * std::min(1.0f, scale))));
-    outH = std::max(1, static_cast<int>(std::floor(static_cast<float>(srcH) * std::min(1.0f, scale))));
-    outPixels.assign(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 4u, 255);
-
-    for (int y = 0; y < outH; ++y) {
-        for (int x = 0; x < outW; ++x) {
-            const int sx = std::clamp(static_cast<int>((static_cast<float>(x) + 0.5f) * static_cast<float>(srcW) / static_cast<float>(outW)), 0, srcW - 1);
-            const int sy = std::clamp(static_cast<int>((static_cast<float>(y) + 0.5f) * static_cast<float>(srcH) / static_cast<float>(outH)), 0, srcH - 1);
-            const std::size_t src = (static_cast<std::size_t>(sy) * srcW + static_cast<std::size_t>(sx)) * static_cast<std::size_t>(channels);
-            float r = 0.0f;
-            float g = 0.0f;
-            float b = 0.0f;
-            if (useUInt16) {
-                r = static_cast<float>(raw.linearUInt16Buffer[src + 0]) / 65535.0f;
-                g = static_cast<float>(raw.linearUInt16Buffer[src + 1]) / 65535.0f;
-                b = static_cast<float>(raw.linearUInt16Buffer[src + 2]) / 65535.0f;
-            } else {
-                r = raw.linearFloatBuffer[src + 0];
-                g = raw.linearFloatBuffer[src + 1];
-                b = raw.linearFloatBuffer[src + 2];
-            }
-
-            const std::size_t dst = (static_cast<std::size_t>(y) * outW + static_cast<std::size_t>(x)) * 4u;
-            outPixels[dst + 0] = ToSrgbByte(r);
-            outPixels[dst + 1] = ToSrgbByte(g);
-            outPixels[dst + 2] = ToSrgbByte(b);
-            outPixels[dst + 3] = 255;
-        }
-    }
-    return true;
-}
-
-bool BuildHighQualityMosaicThumbnailPixels(
-    const Raw::RawImageData& raw,
-    int maxDimension,
-    std::vector<unsigned char>& outPixels,
-    int& outW,
-    int& outH) {
-    const Raw::RawMetadata& metadata = raw.metadata;
-    const int visibleW = metadata.visibleWidth > 0
-        ? metadata.visibleWidth
-        : metadata.rawWidth;
-    const int visibleH = metadata.visibleHeight > 0
-        ? metadata.visibleHeight
-        : metadata.rawHeight;
-    const int rawW = metadata.rawWidth;
-    const int rawH = metadata.rawHeight;
-    if (rawW <= 0 || rawH <= 0 || visibleW <= 0 || visibleH <= 0 ||
-        raw.rawBuffer.size() <
-            static_cast<std::size_t>(rawW) * static_cast<std::size_t>(rawH)) {
-        return false;
-    }
-
-    const float scale = static_cast<float>(maxDimension) /
-        static_cast<float>(std::max(visibleW, visibleH));
-    outW = std::max(1, static_cast<int>(std::floor(
-        static_cast<float>(visibleW) * std::min(1.0f, scale))));
-    outH = std::max(1, static_cast<int>(std::floor(
-        static_cast<float>(visibleH) * std::min(1.0f, scale))));
-    outPixels.assign(
-        static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 4u,
-        255);
-
-    const int left = std::clamp(metadata.leftMargin, 0, std::max(0, rawW - 1));
-    const int top = std::clamp(metadata.topMargin, 0, std::max(0, rawH - 1));
-    const int visibleRight = std::min(rawW, left + visibleW);
-    const int visibleBottom = std::min(rawH, top + visibleH);
-    const float wbR = metadata.cameraWhiteBalance[0] > 0.001f
-        ? metadata.cameraWhiteBalance[0]
-        : 1.0f;
-    const float wbG = metadata.cameraWhiteBalance[1] > 0.001f
-        ? metadata.cameraWhiteBalance[1]
-        : 1.0f;
-    const float wbB = metadata.cameraWhiteBalance[2] > 0.001f
-        ? metadata.cameraWhiteBalance[2]
-        : 1.0f;
-    const float wbScale = 1.0f / std::max(0.001f, wbG);
-
-    for (int y = 0; y < outH; ++y) {
-        int sourceY0 = top + static_cast<int>(
-            (static_cast<std::int64_t>(y) * visibleH) / outH);
-        int sourceY1 = top + static_cast<int>(
-            (static_cast<std::int64_t>(y + 1) * visibleH + outH - 1) / outH);
-        sourceY0 = std::clamp(sourceY0, top, std::max(top, visibleBottom - 1));
-        sourceY1 = std::clamp(sourceY1, sourceY0 + 1, visibleBottom);
-        if (sourceY1 - sourceY0 < 2 && visibleBottom - top >= 2) {
-            sourceY0 = std::clamp(sourceY0 - 1, top, visibleBottom - 2);
-            sourceY1 = sourceY0 + 2;
-        }
-        for (int x = 0; x < outW; ++x) {
-            int sourceX0 = left + static_cast<int>(
-                (static_cast<std::int64_t>(x) * visibleW) / outW);
-            int sourceX1 = left + static_cast<int>(
-                (static_cast<std::int64_t>(x + 1) * visibleW + outW - 1) / outW);
-            sourceX0 = std::clamp(sourceX0, left, std::max(left, visibleRight - 1));
-            sourceX1 = std::clamp(sourceX1, sourceX0 + 1, visibleRight);
-            if (sourceX1 - sourceX0 < 2 && visibleRight - left >= 2) {
-                sourceX0 = std::clamp(sourceX0 - 1, left, visibleRight - 2);
-                sourceX1 = sourceX0 + 2;
-            }
-
-            double channels[3] = { 0.0, 0.0, 0.0 };
-            int counts[3] = { 0, 0, 0 };
-            for (int sourceY = sourceY0; sourceY < sourceY1; ++sourceY) {
-                for (int sourceX = sourceX0; sourceX < sourceX1; ++sourceX) {
-                    const int color = CfaColorAt(metadata, sourceX, sourceY);
-                    const float value = NormalizeRawValue(
-                        static_cast<float>(raw.rawBuffer[
-                            static_cast<std::size_t>(sourceY) * rawW + sourceX]),
-                        metadata);
-                    if (color >= 0 && color < 3) {
-                        channels[color] += value;
-                        ++counts[color];
-                    } else {
-                        for (int channel = 0; channel < 3; ++channel) {
-                            channels[channel] += value;
-                            ++counts[channel];
-                        }
-                    }
-                }
-            }
-
-            const float fallback = counts[1] > 0
-                ? static_cast<float>(channels[1] / counts[1])
-                : 0.0f;
-            float r = counts[0] > 0
-                ? static_cast<float>(channels[0] / counts[0])
-                : fallback;
-            float g = counts[1] > 0
-                ? static_cast<float>(channels[1] / counts[1])
-                : fallback;
-            float b = counts[2] > 0
-                ? static_cast<float>(channels[2] / counts[2])
-                : fallback;
-            r = std::clamp(r * wbR * wbScale, 0.0f, 1.0f);
-            g = std::clamp(g, 0.0f, 1.0f);
-            b = std::clamp(b * wbB * wbScale, 0.0f, 1.0f);
-
-            const std::size_t destination =
-                (static_cast<std::size_t>(y) * outW + x) * 4u;
-            outPixels[destination + 0] = ToSrgbByte(r);
-            outPixels[destination + 1] = ToSrgbByte(g);
-            outPixels[destination + 2] = ToSrgbByte(b);
-            outPixels[destination + 3] = 255;
-        }
-    }
-    return true;
-}
-
-bool BuildHighQualityLinearThumbnailPixels(
-    const Raw::RawImageData& raw,
-    int maxDimension,
-    std::vector<unsigned char>& outPixels,
-    int& outW,
-    int& outH) {
-    const Raw::RawMetadata& metadata = raw.metadata;
-    const int sourceWidth = metadata.visibleWidth > 0
-        ? metadata.visibleWidth
-        : metadata.rawWidth;
-    const int sourceHeight = metadata.visibleHeight > 0
-        ? metadata.visibleHeight
-        : metadata.rawHeight;
-    const int channels = std::clamp(
-        metadata.linearChannels > 0 ? metadata.linearChannels : 3,
-        3,
-        4);
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
-        return false;
-    }
-    const bool useUInt16 = raw.linearUInt16Buffer.size() >=
-        static_cast<std::size_t>(sourceWidth) * sourceHeight * channels;
-    const bool useFloat = raw.linearFloatBuffer.size() >=
-        static_cast<std::size_t>(sourceWidth) * sourceHeight * channels;
-    if (!useUInt16 && !useFloat) {
-        return false;
-    }
-
-    const float scale = static_cast<float>(maxDimension) /
-        static_cast<float>(std::max(sourceWidth, sourceHeight));
-    outW = std::max(1, static_cast<int>(std::floor(
-        static_cast<float>(sourceWidth) * std::min(1.0f, scale))));
-    outH = std::max(1, static_cast<int>(std::floor(
-        static_cast<float>(sourceHeight) * std::min(1.0f, scale))));
-    outPixels.assign(
-        static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 4u,
-        255);
-
-    for (int y = 0; y < outH; ++y) {
-        const int sourceY0 = static_cast<int>(
-            (static_cast<std::int64_t>(y) * sourceHeight) / outH);
-        const int sourceY1 = std::max(
-            sourceY0 + 1,
-            static_cast<int>(
-                (static_cast<std::int64_t>(y + 1) * sourceHeight) / outH));
-        for (int x = 0; x < outW; ++x) {
-            const int sourceX0 = static_cast<int>(
-                (static_cast<std::int64_t>(x) * sourceWidth) / outW);
-            const int sourceX1 = std::max(
-                sourceX0 + 1,
-                static_cast<int>(
-                    (static_cast<std::int64_t>(x + 1) * sourceWidth) / outW));
-            double red = 0.0;
-            double green = 0.0;
-            double blue = 0.0;
-            int sampleCount = 0;
-            for (int sourceY = sourceY0;
-                 sourceY < std::min(sourceY1, sourceHeight);
-                 ++sourceY) {
-                for (int sourceX = sourceX0;
-                     sourceX < std::min(sourceX1, sourceWidth);
-                     ++sourceX) {
-                    const std::size_t source =
-                        (static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) *
-                        static_cast<std::size_t>(channels);
-                    if (useUInt16) {
-                        red += static_cast<double>(raw.linearUInt16Buffer[source + 0]) /
-                            65535.0;
-                        green += static_cast<double>(raw.linearUInt16Buffer[source + 1]) /
-                            65535.0;
-                        blue += static_cast<double>(raw.linearUInt16Buffer[source + 2]) /
-                            65535.0;
-                    } else {
-                        red += raw.linearFloatBuffer[source + 0];
-                        green += raw.linearFloatBuffer[source + 1];
-                        blue += raw.linearFloatBuffer[source + 2];
-                    }
-                    ++sampleCount;
-                }
-            }
-            const double inverseSamples = 1.0 /
-                static_cast<double>(std::max(1, sampleCount));
-            const std::size_t destination =
-                (static_cast<std::size_t>(y) * outW + x) * 4u;
-            outPixels[destination + 0] = ToSrgbByte(
-                static_cast<float>(red * inverseSamples));
-            outPixels[destination + 1] = ToSrgbByte(
-                static_cast<float>(green * inverseSamples));
-            outPixels[destination + 2] = ToSrgbByte(
-                static_cast<float>(blue * inverseSamples));
-            outPixels[destination + 3] = 255;
-        }
-    }
-    return true;
-}
-
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height) {
     std::vector<unsigned char> pngBytes;
     if (pixels.empty() || width <= 0 || height <= 0) {
@@ -651,12 +295,7 @@ std::vector<std::filesystem::path> DeduplicateRecentRoots(const std::vector<std:
 } // namespace
 
 bool DefaultRawPathPredicate(const std::filesystem::path& path) {
-    const std::string ext = ToLowerAscii(path.extension().u8string());
-    return ext == ".arw" ||
-        ext == ".srf" ||
-        ext == ".sr2" ||
-        ext == ".raw" ||
-        ext == ".dng";
+    return IsGalleryRawPath(path);
 }
 
 ScanResult ScanWorkspace(
@@ -860,7 +499,7 @@ ScanResult ScanWorkspace(
     }
 
     std::sort(result.sources.begin(), result.sources.end(), [](const SourceRecord& a, const SourceRecord& b) {
-        return ToLowerAscii(a.relativePathKey) < ToLowerAscii(b.relativePathKey);
+        return RawGalleryPathOrderKey(a.relativePathKey) < RawGalleryPathOrderKey(b.relativePathKey);
     });
 
     result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
@@ -1235,20 +874,8 @@ ThumbnailGenerationResult GenerateNeutralThumbnailImpl(
     std::vector<unsigned char> rgba;
     int width = 0;
     int height = 0;
-    bool built = false;
-    if (raw.metadata.pixelLayout == Raw::RawPixelLayout::LinearRgb) {
-        built = fastPreview
-            ? BuildFastLinearThumbnailPixels(
-                  raw, maxDimension, rgba, width, height)
-            : BuildHighQualityLinearThumbnailPixels(
-                  raw, maxDimension, rgba, width, height);
-    } else {
-        built = fastPreview
-            ? BuildFastMosaicThumbnailPixels(
-                  raw, maxDimension, rgba, width, height)
-            : BuildHighQualityMosaicThumbnailPixels(
-                  raw, maxDimension, rgba, width, height);
-    }
+    const bool built = BuildRawGalleryThumbnailPixels(
+        raw, maxDimension, rgba, width, height, fastPreview, isCancelled);
     if (isCancelled()) {
         markCancelled();
         return result;
@@ -1381,10 +1008,99 @@ void FilterGalleryProjectCards(GalleryPresentation& presentation, GalleryContent
         [](const auto& project) { return !project.bracketingProject; }), projects.end());
 }
 
+std::string BuildGallerySourceIdentityKey(std::vector<std::string> identities) {
+    identities.erase(std::remove(identities.begin(), identities.end(), std::string()), identities.end());
+    std::sort(identities.begin(), identities.end());
+    identities.erase(std::unique(identities.begin(), identities.end()), identities.end());
+    std::string key;
+    for (const auto& identity : identities)
+        key += std::to_string(identity.size()) + ':' + identity + ';';
+    return key;
+}
+
+std::vector<GalleryProjectStack> BuildGalleryProjectStacks(
+    const GalleryPresentation& presentation,
+    const std::vector<RawGallerySimilarityStack>& originalStacks) {
+    std::unordered_map<std::string, std::string> originalFamilies;
+    for (const auto& stack : originalStacks) {
+        if (stack.sourceKeys.empty()) continue;
+        // Stable within the current source grouping, independent of its cover.
+        const auto anchor = *std::min_element(stack.sourceKeys.begin(), stack.sourceKeys.end());
+        for (const auto& source : stack.sourceKeys) originalFamilies.emplace(source, anchor);
+    }
+    std::vector<GalleryProjectStack> stacks;
+    std::unordered_map<std::string, std::size_t> families;
+    for (std::size_t index = 0; index < presentation.projects.size(); ++index) {
+        const auto& project = presentation.projects[index];
+        std::vector<std::string> members;
+        if (project.bracketingProject) {
+            for (const auto& source : project.sourceKeys) {
+                const auto original = originalFamilies.find(source);
+                members.push_back(original == originalFamilies.end() ? "source:" + source : "stack:" + original->second);
+            }
+        } else if (!project.referenceSourceKey.empty()) {
+            members.push_back("source:" + project.referenceSourceKey);
+        }
+        std::string key = project.bracketingProject ? "burst:" : "image:";
+        if (!members.empty()) key += BuildGallerySourceIdentityKey(std::move(members));
+        else if (!project.sourceIdentityKey.empty()) key += "identity:" + project.sourceIdentityKey;
+        else key += "project:" + (project.projectId.empty() ? project.projectPath.generic_string() : project.projectId);
+        const auto [family, inserted] = families.emplace(key, stacks.size());
+        if (inserted) stacks.push_back({std::move(key), {}});
+        stacks[family->second].projectIndices.push_back(index);
+    }
+    return stacks;
+}
+
+std::vector<GalleryCompletedBurstSourceSet> BuildGalleryCompletedBurstSourceSets(
+    const WorkspaceState& state) {
+    struct SourceSetMembers {
+        GalleryCompletedBurstSourceSet completed;
+        std::uint64_t expectedCount = 0;
+        std::vector<std::string> contentIdentities;
+        bool contentKnown = true;
+    };
+    std::map<std::pair<std::string, std::string>, SourceSetMembers> sets;
+    for (const auto& source : state.sources) {
+        for (const auto& membership : source.sourceSetProjectMemberships) {
+            if (!membership.hasSavedBracketingResult || membership.projectId.empty() ||
+                membership.sourceSetId.empty() || !membership.sourceSetFrameCount) continue;
+            auto& set = sets[{membership.projectId, membership.sourceSetId}];
+            set.completed.projectId = membership.projectId;
+            set.completed.sourceSetId = membership.sourceSetId;
+            set.completed.sourceKeys.push_back(source.relativePathKey);
+            set.contentKnown &= !source.fingerprint.empty();
+            set.contentIdentities.push_back(source.fingerprint + ':' + std::to_string(source.fileSizeBytes));
+            set.expectedCount = std::max(set.expectedCount, membership.sourceSetFrameCount);
+        }
+    }
+    std::vector<GalleryCompletedBurstSourceSet> completed;
+    for (auto& [identity, set] : sets) {
+        auto& members = set.completed.sourceKeys;
+        std::sort(members.begin(), members.end());
+        members.erase(std::unique(members.begin(), members.end()), members.end());
+        // A missing original must not turn a larger saved burst into a
+        // smaller completed stack. Discovery will restore it when available.
+        if (members.size() == set.expectedCount && set.contentKnown) {
+            // Same identity components as automatic candidate matching:
+            // content fingerprint plus bytes, with duplicate aliases removed.
+            set.completed.sourceContentKey = BuildGallerySourceIdentityKey(std::move(set.contentIdentities));
+            completed.push_back(std::move(set.completed));
+        }
+    }
+    return completed;
+}
+
 GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
     GalleryPresentation presentation;
     presentation.totalSources = static_cast<int>(state.sources.size());
     presentation.selectedSourceKey = state.selectedSourceKey;
+    presentation.completedBurstSourceSets = BuildGalleryCompletedBurstSourceSets(state);
+
+    std::unordered_map<std::string, std::size_t> sourceIndices;
+    sourceIndices.reserve(state.sources.size());
+    for (std::size_t index = 0; index < state.sources.size(); ++index)
+        sourceIndices.emplace(state.sources[index].relativePathKey, index);
 
     presentation.projects.reserve(state.sourceSetProjects.size());
     for (std::size_t index = 0; index < state.sourceSetProjects.size(); ++index) {
@@ -1398,10 +1114,17 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
         view.projectPath = project.absolutePath;
         view.coverThumbnailCachePath = project.coverThumbnailCachePath;
         view.referenceSourceKey = project.referenceSourceKey;
+        if (view.referenceSourceKey.empty() && !project.sourceKeys.empty())
+            view.referenceSourceKey = project.sourceKeys.front();
+        const auto reference = sourceIndices.find(view.referenceSourceKey);
+        if (reference != sourceIndices.end()) view.referenceSourceIndex = reference->second;
         view.frameCount = project.totalFrameCount;
         view.status = project.status;
         view.multiFrameProject = project.multiFrameProject;
         view.bracketingProject = project.bracketingProject;
+        view.hasSavedBracketingResult = project.hasSavedBracketingResult;
+        view.sourceKeys = project.sourceKeys;
+        view.sourceIdentityKey = project.sourceIdentityKey;
         presentation.projects.push_back(std::move(view));
     }
 
@@ -1483,6 +1206,7 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
                 candidate, membership.projectId, membership.projectPath);
             if (!savedKey.empty()) savedProjectKeys.insert(savedKey);
             if (candidate == nullptr) continue;
+            view.hasSavedBracketingResult |= membership.hasSavedBracketingResult;
             // The Gallery tile represents the image first, so prefer its
             // single-image edit over a capture set that also contains it.
             // Within that class, prefer an already-generated edited cover.

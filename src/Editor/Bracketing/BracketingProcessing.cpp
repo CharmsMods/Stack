@@ -3,9 +3,11 @@
 #include "BracketingSession.h"
 #include "Project/BracketingJobRunner.h"
 #include "Project/BracketingPreparation.h"
+#include "BurstEngine/Client.h"
 #include "Editor/RawRenderService.h"
 #include "BracketingGallery.h"
 #include "Raw/Bracketing/SuperResolution/Reconstruction.h"
+#include "Raw/Bracketing/Depth/Depth.h"
 #include "Raw/Bracketing/Panorama/Panorama.h"
 #include "Persistence/BracketingProject.h"
 #include "App/AppPaths.h"
@@ -53,6 +55,7 @@ void EditorModule::CommitBracketingEdit() {
         IsBracketingActive()?m_Project->snapshot.get():nullptr,
         ImGui::IsAnyItemActive(),ImGui::GetTime());
     if(!outcome.changed)return;
+    ++ui.controlsRevision;
     ui.requestDetail=false;
     ui.textureIdentity.clear();
     if(outcome.invalidatedInteractiveRaw)MarkRenderDirty();
@@ -99,6 +102,13 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
     if(m_RawRenderClientId!=0)request.executeOpenGlTask=[](Raw::OpenGlTask task,std::string& taskError) {
         return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(std::move(task),taskError);
     };
+    BindBracketingSourceNodeEditor();
+    RequestRawSettingsPanel();
+    m_NodeOpenTransition.Reset();
+    m_RawImageViewTransition.Reset();
+    SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
+    RequestOpenRawLabTab();
+    m_BracketingImageMin=m_BracketingImageMax=ImVec2{};
     request.didRestoreResult=[job]{job->restoredFromProject=true;};
     request.shouldCancel=[job]{return job->canceled.load();};
     request.reportProgress=[job,notifier,activity](double p,const std::string& message){
@@ -106,7 +116,9 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
         {std::lock_guard<std::mutex> lock(job->mutex);job->message=message;}
         notifier.UpdateActivity(activity, message);
     };
-    if(m_RawWorkspaceRootTabActive) {
+    // All editor entry points have the same owned presentation. Its scene
+    // textures are allocated only while this project is actually visible.
+    {
     static std::atomic<std::uint64_t> nextPresentation{0};
     auto presentation=std::make_shared<Stack::Editor::ProcessingPresentation>();
     presentation->generation=++nextPresentation;presentation->projectId=snapshot.projectId;
@@ -173,7 +185,9 @@ void EditorModule::TickBracketing(bool foreground) {
         return;
     }
     if(m_Bracketing&&m_Bracketing->newProject) {
-        if(m_Bracketing->boundDocument==GetCurrentProjectFileName()){TickBracketingDraft();return;}
+        // A first save or Save As may change the path without replacing the
+        // document that owns these selected captures.
+        if(m_Bracketing->boundDocument==GetProjectDocumentId()){TickBracketingDraft();return;}
         m_Bracketing.reset();
     }
     if(!IsBracketingActive()) {
@@ -189,8 +203,18 @@ void EditorModule::TickBracketing(bool foreground) {
         m_Bracketing->projectId=snapshot.projectId;m_Bracketing->setId=set->sourceSetId;
     }
     auto& ui=*m_Bracketing;
-    const auto stored=set->settings["bracketing"].dump();
+    // The immutable identity is needed by jobs and result adoption, but JSON
+    // formatting is not drawing work. Supported project edits advance one of
+    // these document revisions; replacement creates a fresh session above.
+    if(ui.observedDocumentRevision!=snapshot.dirtyRevision||ui.observedInputRevision!=snapshot.hdrInputRevision) {
+        ui.observedStoredRecipe=set->settings["bracketing"].dump();
+        ui.observedDocumentRevision=snapshot.dirtyRevision;
+        ui.observedInputRevision=snapshot.hdrInputRevision;
+    }
+    const auto& stored=ui.observedStoredRecipe;
     if(ui.storedRecipe!=stored) {
+        ++ui.previewRevision;
+        if (ui.previewJob) ui.previewJob->canceled = true;
         if(!Raw::Bracketing::Deserialize(set->settings["bracketing"],ui.recipe,ui.status)) {ui.failed=true;return;}
         ui.storedRecipe=stored;ui.pending=true;ui.changedAt=ImGui::GetTime();
         ui.processRequired=set->settings.contains("bracketingDraft");
@@ -199,6 +223,7 @@ void EditorModule::TickBracketing(bool foreground) {
             ui.pending=false;ui.status="Saved changes pending. Press Process to update the result.";
         }
         ui.editedRecipe=Raw::Bracketing::Serialize(ui.recipe).dump();
+        ++ui.controlsRevision;
         if(!ui.result&&!ui.job&&Stack::Project::HasSavedBracketingResult(snapshot,*set)) {
             auto job=std::make_shared<Stack::Editor::BracketingJob>();
             job->projectId=snapshot.projectId;job->setId=set->sourceSetId;
@@ -292,6 +317,7 @@ void EditorModule::TickBracketing(bool foreground) {
         ui.activityLease.reset();
     }
     if(Stack::Project::RefreshBracketingInteractivePreview(ui)) {
+        ui.textureIdentity.clear();
         ClearRawWorkspaceGraphScopeReadbackCaches();
         NoteRawWorkspaceRecipePreviewEdit(false);
         MarkRenderRefreshDirty();
@@ -318,8 +344,7 @@ void EditorModule::TickBracketing(bool foreground) {
         const unsigned y=static_cast<unsigned>(ui.probeY*ui.result->raw->metadata.visibleHeight);
         const auto completed=ui.result;
         if(!ProjectTasks().SubmitHighPriority([job,request,x,y,completed] {
-            try {job->preview=completed->panorama?Raw::Bracketing::Panorama::NativeDetail(*completed,x,y,512):completed->reconstructionInspection?
-                Raw::Bracketing::SuperResolutionDetail(*completed,x,y,512,request.shouldCancel,request.memoryBudgetBytes):Raw::Bracketing::RenderNativeDetail(request,x,y,512);}
+            try {job->preview=Stack::BurstEngine::RenderResultDetail(request,*completed,x,y,512);}
             catch(const std::exception& e) {job->error=e.what();}
             job->done=true;
         })) {job->error="Could not schedule native detail.";job->done=true;}
@@ -344,7 +369,7 @@ void EditorModule::TickBracketing(bool foreground) {
         m_HdrAdoptedRawResult=std::move(adopted);ui.publishRequested=false;
         ClearRawWorkspaceGraphScopeReadbackCaches();
         NoteRawWorkspaceRecipePreviewEdit(false);
-        Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace,snapshot,GetCurrentProjectFileName());
+        Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace,snapshot,GetCurrentProjectFileName(),m_Project->store);
         InvalidateRawWorkspaceGalleryPresentation();
         for(auto& node:m_Project->graph.EditNodes()) if(node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr&&node.multiFrameHdr.sourceSetId==set->sourceSetId) {
             node.multiFrameHdr.resultState="ready";node.multiFrameHdr.presentationStatus="Bracket result ready.";

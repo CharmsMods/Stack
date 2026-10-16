@@ -5,7 +5,7 @@
 namespace Stack::RawRecipe {
 
 enum class GraphOperationKind {
-    Calibration, Exposure, LocalEv, LuminanceTone, RgbCurves, ColorWarp, DetailContrast, Count
+    Calibration, Exposure, LocalEv, ToneCurve, ColorWarp, DetailContrast, Count
 };
 
 // Each record owns only this operation's authored parameters. The recipe

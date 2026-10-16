@@ -1,7 +1,7 @@
 #include "Editor/EditorModule.h"
 
 bool EditorModule::UsesRawWorkspaceStageRender() const {
-    return m_RawWorkspaceRootTabActive && IsRawWorkspaceProjectActive() &&
+    return IsRawWorkspaceProjectActive() &&
         !m_RawWorkspaceExportRenderRequested && !m_Project->graph.IsOutputConnected();
 }
 

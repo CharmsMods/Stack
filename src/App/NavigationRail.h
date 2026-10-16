@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imgui.h"
+#include "Library/LibraryControls.h"
 #include <cstdint>
 
 namespace Stack::Navigation {
@@ -9,6 +10,7 @@ namespace Stack::Navigation {
 struct RailState {
     bool panelOpen = true;
     bool galleryView = true;
+    LibraryUi::ViewSwitchMotion libraryViewMotion;
     float panelAmount = 1.0f;
     float revealAmount = 0.0f;
     double visibleUntil = 0.0;
@@ -17,6 +19,12 @@ struct RailState {
     float visibleWidth = 0.0f;
     ImVec2 panelPosition{}, panelSize{}, bodyPosition{}, bodySize{};
     float visiblePanelWidth = 0.0f;
+    float galleryPanelWidth = 288.f;
+    float queuePanelWidth = 288.f;
+    float galleryResizeStartWidth = 288.f, galleryResizeStartX = 0.f;
+    float galleryResizeOriginalWidth = 288.f;
+    bool galleryResizeActive = false;
+    bool galleryResizeForQueue = false;
     int requestedDestination = -1;
     std::uint64_t lastEditingWorkspace = 0;
     std::uint64_t hoveredProject = 0;
@@ -28,7 +36,11 @@ struct RailState {
     bool menuOpen = false;
 };
 
-enum class Glyph { Panel, Stack, Raw, Graph, Library, Queue, Mask };
+enum class Glyph { Panel, Stack, Raw, Graph, Library, Queue, Mask, Capture };
 void DrawGlyph(ImDrawList* draw, Glyph glyph, ImVec2 minimum, float size, ImU32 color);
+void RegisterGalleryNavigatorSettings(RailState& state);
+void RenderGalleryNavigatorResize(RailState& state);
+void RenderQueueNavigatorResize(RailState& state);
+void FinishGalleryNavigatorResize(RailState& state);
 
 } // namespace Stack::Navigation

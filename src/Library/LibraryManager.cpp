@@ -1,4 +1,5 @@
 #include "LibraryManager.h"
+#include "Library/TagManager.h"
 
 #include "App/AppPaths.h"
 #include "Renderer/GLHelpers.h"
@@ -14,6 +15,8 @@ LibraryManager::LibraryManager() {
     std::filesystem::create_directories(m_LibraryPath, ec);
     ec.clear();
     std::filesystem::create_directories(m_AssetsPath, ec);
+    TagManager::Get().SetLibraryPath(m_LibraryPath);
+    TagManager::Get().Load();
     const AppPaths::DirectoryWriteProbe writeProbe =
         AppPaths::ProbeProjectsDirectoryWritable();
     m_ProjectRootWritable = writeProbe.writable;

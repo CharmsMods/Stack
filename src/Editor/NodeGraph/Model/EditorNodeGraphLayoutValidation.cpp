@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
 
@@ -40,12 +41,7 @@ bool IsUniformOrResourceSocketType(SocketType type) {
     }
 }
 
-bool IsSpecializedFrequencySocketType(SocketType type) {
-    return type == SocketType::Spectrum ||
-        type == SocketType::FrequencyResponse ||
-        type == SocketType::SpectrumMagnitude ||
-        type == SocketType::SpectrumPhase;
-}
+
 
 
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
@@ -92,6 +88,7 @@ bool IsSourceLikeNode(const Node& node) {
         node.kind == NodeKind::RawDevelopment ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Value ||
+        node.kind == NodeKind::MaskTexture ||
         node.kind == NodeKind::MaskGenerator ||
         node.kind == NodeKind::CustomMask;
 }
@@ -110,11 +107,11 @@ int LayoutKindPriority(const Node& node) {
         case NodeKind::RawProjectSourceSet:
         case NodeKind::ImageGenerator:
             return 0;
+        case NodeKind::MaskTexture:
         case NodeKind::MaskGenerator:
         case NodeKind::CustomMask:
         case NodeKind::Value:
             return 1;
-        case NodeKind::RawNeuralDenoise:
         case NodeKind::RawDecode:
         case NodeKind::RawDevelop:
             return 2;
@@ -270,7 +267,7 @@ void Graph::AutoLayout() {
     }
 
     for (const Node& node : m_Nodes) {
-        if (node.kind != NodeKind::MaskGenerator && node.kind != NodeKind::CustomMask) {
+        if (node.kind != NodeKind::MaskGenerator && node.kind != NodeKind::MaskTexture && node.kind != NodeKind::CustomMask) {
             continue;
         }
         auto outgoingIt = outgoing.find(node.id);
@@ -373,9 +370,10 @@ ValidationResult Graph::Validate() const {
         if (node.kind == NodeKind::Output) {
             ++outputCount;
         }
-        if (node.kind == NodeKind::Layer && node.layerIndex < 0) {
+        std::string layerParameterError;
+        if (node.kind == NodeKind::Layer && !Stack::GraphModel::ValidateLayerParameters(node,layerParameterError)) {
             result.valid = false;
-            result.messages.push_back("Layer node has no layer reference.");
+            result.messages.push_back(std::move(layerParameterError));
         }
         if (node.kind == NodeKind::Value) {
             for (const Stack::NodeMath::ContractIssue& issue :
@@ -535,7 +533,6 @@ bool Graph::IsRenderChainNode(const Node& node) const {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
         node.kind == NodeKind::RawDevelopment ||
-        node.kind == NodeKind::RawNeuralDenoise ||
         node.kind == NodeKind::RawDecode ||
         node.kind == NodeKind::RawDevelop ||
         node.kind == NodeKind::RawDetailAutoMask ||
@@ -557,19 +554,6 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::FieldMean ||
         node.kind == NodeKind::Reformat ||
         node.kind == NodeKind::Compound ||
-        node.kind == NodeKind::FrequencyFilter ||
-        node.kind == NodeKind::FrequencyResponse ||
-        node.kind == NodeKind::FrequencyFft ||
-        node.kind == NodeKind::FrequencyIfft ||
-        node.kind == NodeKind::SpectrumView ||
-        node.kind == NodeKind::ApplyFrequencyResponse ||
-        node.kind == NodeKind::CombineSpectra ||
-        node.kind == NodeKind::SpectrumSeparate ||
-        node.kind == NodeKind::SpectrumRecombine ||
-        node.kind == NodeKind::FrequencyMask ||
-        node.kind == NodeKind::SpectrumMath ||
-        node.kind == NodeKind::MagnitudePhase ||
-        node.kind == NodeKind::SpectrumAnalyzer ||
         node.kind == NodeKind::ImageToMask ||
         node.kind == NodeKind::CustomMask ||
         node.kind == NodeKind::ChannelSplit ||
@@ -614,8 +598,7 @@ bool Graph::IsRenderLink(const Link& link) const {
             toSocket)) {
         return true;
     }
-    if ((fromSocket.type == SocketType::Channel ||
-         IsSpecializedFrequencySocketType(fromSocket.type)) &&
+    if ((fromSocket.type == SocketType::Channel) &&
         fromSocket.type == toSocket.type) {
         return true;
     }

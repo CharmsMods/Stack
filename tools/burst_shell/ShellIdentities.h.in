@@ -1,0 +1,7 @@
+#pragma once
+
+// products.json owns installed identities, including isolated local-test builds.
+inline constexpr const wchar_t* StackBurstShellClassIds[] = {
+    L"@STACK_SHELL_CLSID@", L"@STACK_TEST_SHELL_CLSID@",
+    L"@BURST_SHELL_CLSID@", L"@BURST_TEST_SHELL_CLSID@"
+};

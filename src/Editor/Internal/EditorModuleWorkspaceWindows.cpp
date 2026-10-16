@@ -1,10 +1,12 @@
 #include "Editor/EditorModule.h"
+#include "Editor/AutoBracket/AutoBracketPresentation.h"
 
 #include <utility>
 
 void EditorModule::SetWorkspaceDetachedWindowsVisible(bool visible) {
     if (m_WorkspaceDetachedWindowsVisible == visible) return;
     m_WorkspaceDetachedWindowsVisible = visible;
+    if (m_AutoBracketPresentation) m_AutoBracketPresentation->SetForeground(visible);
     if (!visible) {
         m_RestoreWorkspaceDetachedPreview = m_DetachedPreviewActive;
         m_RestoreWorkspaceNativeGallery =

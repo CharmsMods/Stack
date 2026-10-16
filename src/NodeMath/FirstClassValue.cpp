@@ -87,10 +87,6 @@ bool ParseLogicalType(const std::string& text, LogicalValueType& type) {
         { "scalar-field", LogicalValueType::ScalarField },
         { "vector2-field", LogicalValueType::Vector2Field }, { "vector3-field", LogicalValueType::Vector3Field },
         { "vector4-field", LogicalValueType::Vector4Field }, { "color-image", LogicalValueType::ColorImage },
-        { "complex-spectrum", LogicalValueType::ComplexSpectrum },
-        { "frequency-response", LogicalValueType::FrequencyResponse },
-        { "spectrum-magnitude", LogicalValueType::SpectrumMagnitude },
-        { "spectrum-phase", LogicalValueType::SpectrumPhase },
         { "histogram", LogicalValueType::Histogram }, { "statistics", LogicalValueType::Statistics },
         { "metadata", LogicalValueType::Metadata }, { "specialized-handle", LogicalValueType::SpecializedHandle }
     };
@@ -176,10 +172,10 @@ bool PayloadMatches(const FirstClassValue& value) {
     case LogicalValueType::Vector3Field:
     case LogicalValueType::Vector4Field:
     case LogicalValueType::ColorImage:
-    case LogicalValueType::ComplexSpectrum:
-    case LogicalValueType::FrequencyResponse:
-    case LogicalValueType::SpectrumMagnitude:
-    case LogicalValueType::SpectrumPhase:
+    
+    
+    
+    
         return std::holds_alternative<ResourceValue>(value.payload);
     default: return false;
     }
@@ -196,8 +192,7 @@ bool IsFieldType(LogicalValueType type) {
     return type == LogicalValueType::Channel ||
         type == LogicalValueType::ScalarField || type == LogicalValueType::Vector2Field ||
         type == LogicalValueType::Vector3Field || type == LogicalValueType::Vector4Field ||
-        type == LogicalValueType::ColorImage || type == LogicalValueType::ComplexSpectrum ||
-        type == LogicalValueType::SpectrumMagnitude || type == LogicalValueType::SpectrumPhase;
+        type == LogicalValueType::ColorImage;
 }
 
 } // namespace
@@ -410,10 +405,10 @@ bool DeserializeFirstClassValue(const nlohmann::json& json, FirstClassValue& val
         case LogicalValueType::Vector3Field:
         case LogicalValueType::Vector4Field:
         case LogicalValueType::ColorImage:
-        case LogicalValueType::ComplexSpectrum:
-        case LogicalValueType::FrequencyResponse:
-        case LogicalValueType::SpectrumMagnitude:
-        case LogicalValueType::SpectrumPhase: { ResourceValue resource; resource.resourceType = payload.value("resourceType", std::string()); resource.identity = payload.value("identity", std::string()); resource.contentHash = payload.value("contentHash", std::string()); parsed.payload = std::move(resource); break; }
+        
+        
+        
+         { ResourceValue resource; resource.resourceType = payload.value("resourceType", std::string()); resource.identity = payload.value("identity", std::string()); resource.contentHash = payload.value("contentHash", std::string()); parsed.payload = std::move(resource); break; }
         default: return fail("known payload is unsupported for this logical type");
         }
     }

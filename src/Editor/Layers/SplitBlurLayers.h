@@ -21,6 +21,10 @@ protected:
     virtual const char* GetTypeId() const = 0;
 
     unsigned int m_ShaderProgram = 0;
+    unsigned int m_KernelTexture = 0;
+    float m_KernelAmount = -1.f;
+    int m_KernelRadius = 0;
+    float m_KernelSum = 1.f;
     float m_Amount = 2.0f;
 };
 

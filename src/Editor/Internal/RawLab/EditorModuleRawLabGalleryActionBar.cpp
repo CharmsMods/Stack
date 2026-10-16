@@ -1,45 +1,21 @@
 #include "Editor/EditorModule.h"
 #include "App/AppHeaderStyle.h"
+#include "App/WorkspacePresentation.h"
+#include "Library/LibraryControls.h"
 #include "RawLabUiSupport.h"
 
 #include <algorithm>
 #include <array>
-#include <initializer_list>
 #include <string>
 
 #include <imgui_internal.h>
 
 namespace {
-
 using Action = Stack::RawGalleryActions::Action;
 using SortMode = Stack::RawWorkspace::RawGalleryFilmstripSortMode;
-using Stack::Editor::RawLabInternal::BareTextButton;
 using Stack::Editor::RawLabInternal::LabTooltip;
-
-float GalleryButtonWidth(const char* label, bool menu = false) {
-    return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f +
-        (menu ? ImGui::GetFontSize() : 0.0f);
+namespace Ui = Stack::LibraryUi;
 }
-
-bool GalleryMenuButton(const char* label, const char* popup, bool enabled = true) {
-    const std::string buttonLabel = std::string(label) + "   ##" + popup;
-    const bool pressed = BareTextButton(buttonLabel.c_str(), false, enabled,
-        ImVec2(GalleryButtonWidth(label, true), 0.0f));
-    const ImVec2 maximum = ImGui::GetItemRectMax();
-    const ImVec2 minimum = ImGui::GetItemRectMin();
-    const float arrow = ImGui::GetFontSize() * 0.20f;
-    const ImVec2 center(maximum.x - ImGui::GetStyle().FramePadding.x - arrow,
-        (minimum.y + maximum.y) * 0.5f);
-    ImGui::GetWindowDrawList()->AddTriangleFilled(
-        ImVec2(center.x - arrow, center.y - arrow * 0.5f),
-        ImVec2(center.x + arrow, center.y - arrow * 0.5f),
-        ImVec2(center.x, center.y + arrow * 0.5f),
-        ImGui::GetColorU32(enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled));
-    if (pressed) ImGui::OpenPopup(popup);
-    return pressed;
-}
-
-} // namespace
 
 void EditorModule::SetRawGalleryGridView(bool grid) {
     if (m_RawWorkspaceLabUi.galleryWorkspaceGrid == grid) return;
@@ -60,65 +36,76 @@ void EditorModule::SetRawGalleryGridView(bool grid) {
 }
 
 bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
-    const auto context = CaptureRawGalleryActionContext();
-    const float unit = ImGui::GetFontSize() / 13.0f;
-    const float rowHeight = ImGui::GetFontSize() + 12.0f * unit;
-    const float statusHeight = ImGui::GetFontSize() + 8.0f * unit;
-    bool workspaceChanged = false;
+    const auto count = m_RawWorkspace.selectedSourceKeys.size() + m_RawWorkspaceLabSelectedProjectPaths.size();
+    // Queue eligibility needs only selection and the connected service. Resolve
+    // full action targets only on a click; do not rebuild indexes on every draw.
+    const bool canQueue = count > 0 && m_RawGalleryQueueRequestHandler && !Stack::Workspace::IsPreview();
+    const float unit = ImGui::GetFontSize() / 13.f;
     ImGui::PushID(nativeWindow ? "RawNativeGalleryActions" : "RawGalleryActions");
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,
-        Stack::Header::ResolvePanelColor(GetWorkspaceBaseColor()));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * unit, 6.0f * unit));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * unit, 4.0f * unit));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * unit, 5.0f * unit));
-    ImGui::BeginChild("CommandBar", ImVec2(0.0f, rowHeight + statusHeight + 16.0f * unit),
+    auto* storage = ImGui::GetStateStorage();
+    const ImGuiID amountId = ImGui::GetID("SelectionAmount");
+    float amount = storage->GetFloat(amountId, 0.f);
+    const float target = canQueue ? 1.f : 0.f;
+    if (Ui::ReducedMotion()) amount = target;
+    else Stack::Header::ApproachMotion(amount, target, .20f);
+    storage->SetFloat(amountId, amount);
+    if (amount == 0.f) { ImGui::PopID(); return false; }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f * unit, 6.f * unit));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.f * unit, 5.f * unit));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * amount);
+    ImGui::BeginChild("SelectionActions", ImVec2(0, (ImGui::GetFrameHeight() + 12.f * unit) * amount),
         ImGuiChildFlags_AlwaysUseWindowPadding,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (canQueue) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%zu selected", count);
+        const float queueWidth = ImGui::CalcTextSize("Queue").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - queueWidth));
+        if (Ui::TextButton("Queue")) ExecuteRawGalleryAction(Action::AddToQueue, CaptureRawGalleryActionContext());
+        LabTooltip("Add the selected images and projects to Queue");
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(3);
+    ImGui::PopID();
+    return false;
+}
 
-    const auto actionMenuItem = [&](Action action) {
-        const auto availability = Stack::RawGalleryActions::GetAvailability(context, action);
-        if (ImGui::MenuItem(Stack::RawGalleryActions::Label(action), nullptr, false,
-                availability.enabled)) {
-            ExecuteRawGalleryAction(action, context);
-        }
-        if (!availability.enabled)
-            LabTooltip(availability.reason.c_str(), ImGuiHoveredFlags_AllowWhenDisabled);
-    };
-    const auto actionButton = [&](const char* label, Action action) {
-        const auto availability = Stack::RawGalleryActions::GetAvailability(context, action);
-        if (BareTextButton(label, false, availability.enabled))
-            ExecuteRawGalleryAction(action, context);
-        LabTooltip(availability.enabled ? Stack::RawGalleryActions::Label(action)
-            : availability.reason.c_str(), ImGuiHoveredFlags_AllowWhenDisabled);
-    };
-    const auto folderMenuItems = [&] {
-        if (ImGui::MenuItem("Open RAW Folder...")) {
-            OpenRawWorkspaceFolderDialog();
-            workspaceChanged = true;
-        }
-        const bool canRescan = !context.workspaceRoot.empty() && !IsRawWorkspaceScanBusy();
-        if (ImGui::MenuItem("Rescan", nullptr, false, canRescan)) RescanRawWorkspace();
-        if (!canRescan) LabTooltip(context.workspaceRoot.empty()
-            ? "Open a RAW folder first." : "Wait for the current folder scan to finish.",
-            ImGuiHoveredFlags_AllowWhenDisabled);
-    };
-    const auto newMenuItems = [&] {
-        actionMenuItem(Action::CreateCaptureSet);
-        actionMenuItem(Action::NewSavedVersion);
-    };
-    const bool originalGallery = m_RawWorkspaceGalleryContentMode ==
-        Stack::RawWorkspace::GalleryContentMode::Gallery;
-    const bool canSort = !nativeWindow && originalGallery &&
-        !context.workspaceRoot.empty() && CanEditRawWorkspaceFilmstripOrganization();
-    const char* sortUnavailable = nativeWindow
-        ? "Sort original captures in the main Gallery."
-        : !originalGallery ? "Switch to Gallery to sort original captures."
-        : context.workspaceRoot.empty() ? "Open a RAW folder first."
-        : "Wait for the current folder scan to finish.";
-    const auto sortMenuItems = [&] {
-        const std::string workspaceKey = context.workspaceRoot.lexically_normal().generic_string();
+void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
+    const float unit = ImGui::GetFontSize() / 13.f;
+    ImGui::PushID(nativeWindow ? "NativeGallerySidebar" : "GallerySidebar");
+    const bool canSort = !nativeWindow && m_RawWorkspaceGalleryContentMode ==
+        Stack::RawWorkspace::GalleryContentMode::Gallery &&
+        !m_RawWorkspace.workspaceRoot.empty() && CanEditRawWorkspaceFilmstripOrganization();
+    const bool navigator = !nativeWindow && m_PermanentGalleryWorkspace;
+    using FooterAction = Stack::Editor::RawLabInternal::GalleryNavigatorFooterAction;
+    FooterAction requested = FooterAction::None;
+    if (navigator) {
+        const auto organization = m_RawWorkspaceManualGroupings.find(m_RawGalleryFolderTree.workspaceKey);
+        const auto sort = organization != m_RawWorkspaceManualGroupings.end()
+            ? organization->second.sortMode : SortMode::TimelineAll;
+        const char* label = sort == SortMode::TimelineAll ? "Capture time" :
+            sort == SortMode::TimelineByFolder ? "Capture time by folder" :
+            Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(sort);
+        requested = m_RawGalleryNavigator.RenderFooter(m_RawWorkspaceLabUi.galleryWorkspaceGrid,
+            m_RawWorkspaceLabUi.galleryPropertiesOpen, canSort, label);
+        if (requested == FooterAction::Grid) SetRawGalleryGridView(true);
+        if (requested == FooterAction::Filmstrip) SetRawGalleryGridView(false);
+    }
+    // Layout children have zero padding/spacing. Menus retain useful native
+    // gutters and row targets rather than inheriting the folder-body layout.
+    if (navigator) {
+        const float scale = ImGui::GetFontSize() / 14.f;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8 * scale, 6 * scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8 * scale, 12 * scale));
+    }
+    if (requested == FooterAction::Sort || (!navigator && Ui::IconButton("Sort", Ui::Icon::Sort, false, canSort))) ImGui::OpenPopup("Sort");
+    if (!navigator && !canSort) LabTooltip("Open a folder and switch to original images to sort them.",
+        ImGuiHoveredFlags_AllowWhenDisabled);
+    if (ImGui::BeginPopup("Sort")) {
+        const auto workspaceKey = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
         const auto organization = m_RawWorkspaceManualGroupings.find(workspaceKey);
-        const auto currentSort = organization != m_RawWorkspaceManualGroupings.end()
+        const auto current = organization != m_RawWorkspaceManualGroupings.end()
             ? organization->second.sortMode : SortMode::TimelineAll;
         constexpr std::array modes {
             SortMode::TimelineAll, SortMode::TimelineByFolder, SortMode::Manual,
@@ -128,182 +115,118 @@ bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
         };
         for (const auto mode : modes) {
             if (ImGui::MenuItem(Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(mode),
-                    nullptr, currentSort == mode, canSort))
-                SetRawWorkspaceFilmstripSortMode(mode);
+                    nullptr, current == mode, canSort)) SetRawWorkspaceFilmstripSortMode(mode);
         }
-    };
-    const auto detailsSelected = [&] {
-        return nativeWindow ? m_RawWorkspaceLabGalleryPanelsOpen
-            : m_RawWorkspaceLabUi.galleryPropertiesOpen;
-    };
-    const auto toggleDetails = [&] {
-        if (nativeWindow) {
-            m_RawWorkspaceLabGalleryPanelsOpen = !m_RawWorkspaceLabGalleryPanelsOpen;
-            if (!m_RawWorkspaceLabGalleryPanelsOpen) CancelRawWorkspaceLabGalleryImagePreview();
-        } else {
-            m_RawWorkspaceLabUi.galleryPropertiesOpen = !m_RawWorkspaceLabUi.galleryPropertiesOpen;
-        }
-    };
-    const auto viewMenuItems = [&] {
+        ImGui::EndPopup();
+    }
+    if (!navigator) {
+        ImGui::SameLine(0, 8.f * unit);
+        if (Ui::IconButton("View", Ui::Icon::View)) ImGui::OpenPopup("View");
+    }
+    if (ImGui::BeginPopup("View")) {
         if (nativeWindow) {
             for (const auto mode : {Stack::RawWorkspace::GalleryDisplayMode::Grid,
                     Stack::RawWorkspace::GalleryDisplayMode::List}) {
-                if (ImGui::MenuItem(mode == Stack::RawWorkspace::GalleryDisplayMode::Grid
-                        ? "Grid" : "List", nullptr, m_RawWorkspaceGalleryDisplayMode == mode)) {
+                if (ImGui::MenuItem(mode == Stack::RawWorkspace::GalleryDisplayMode::Grid ? "Grid" : "List",
+                        nullptr, m_RawWorkspaceGalleryDisplayMode == mode)) {
                     m_RawWorkspaceGalleryDisplayMode = mode;
                     SaveRawWorkspaceAppState();
                 }
             }
         } else {
-            if (ImGui::MenuItem("Grid", nullptr, m_RawWorkspaceLabUi.galleryWorkspaceGrid))
-                SetRawGalleryGridView(true);
-            if (ImGui::MenuItem("Filmstrip", nullptr, !m_RawWorkspaceLabUi.galleryWorkspaceGrid))
-                SetRawGalleryGridView(false);
+            if (ImGui::MenuItem("Grid", nullptr, m_RawWorkspaceLabUi.galleryWorkspaceGrid)) SetRawGalleryGridView(true);
+            if (ImGui::MenuItem("Filmstrip", nullptr, !m_RawWorkspaceLabUi.galleryWorkspaceGrid)) SetRawGalleryGridView(false);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Details", nullptr, detailsSelected())) toggleDetails();
-    };
-
-    const float availableWidth = ImGui::GetContentRegionAvail().x;
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const auto widths = [&](std::initializer_list<const char*> labels, int menus) {
-        float width = gap * static_cast<float>(labels.size() - 1u);
-        for (const char* label : labels) width += GalleryButtonWidth(label);
-        return width + menus * ImGui::GetFontSize();
-    };
-    const float dividerWidth = unit + gap;
-    const float fullWidth = widths({"New", "Open folder", "Open", "Copy edits", "Paste edits",
-        "Queue", "Sort", "View", "More", "Details"}, 4) + dividerWidth * 2.0f;
-    const float compactWidth = widths({"New", "Open", "Queue", "Sort", "View", "More", "Details"}, 4) +
-        dividerWidth * 2.0f;
-    const float smallWidth = widths({"Open", "View", "More", "Details"}, 2) + dividerWidth;
-    const bool full = availableWidth >= fullWidth;
-    const bool compact = !full && availableWidth >= compactWidth;
-    const bool small = !full && !compact && availableWidth >= smallWidth;
-    bool rowStarted = false;
-    const auto next = [&] {
-        if (rowStarted) ImGui::SameLine();
-        rowStarted = true;
-    };
-    const auto divider = [&] {
-        next();
-        ImGui::Dummy(ImVec2(unit, rowHeight - 2.0f * unit));
-        const ImVec2 minimum = ImGui::GetItemRectMin();
-        const ImVec2 maximum = ImGui::GetItemRectMax();
-        ImGui::GetWindowDrawList()->AddLine(
-            ImVec2(minimum.x, minimum.y + 4.0f * unit),
-            ImVec2(minimum.x, maximum.y - 4.0f * unit), ImGui::GetColorU32(ImGuiCol_Border));
-    };
-    if (full || compact) {
-        next(); GalleryMenuButton("New", "NewMenu");
-        if (ImGui::BeginPopup("NewMenu")) {
-            newMenuItems();
-            ImGui::EndPopup();
-        }
-    }
-    if (full) {
-        next();
-        if (BareTextButton("Open folder")) {
-            OpenRawWorkspaceFolderDialog();
-            workspaceChanged = true;
-        }
-        LabTooltip("Open a RAW folder");
-    }
-    if (full || compact) divider();
-    if (full || compact || small) {
-        next(); actionButton("Open", Action::Open);
-    }
-    if (full) {
-        next(); actionButton("Copy edits", Action::CopyEdits);
-        next(); actionButton("Paste edits", Action::PasteEdits);
-    }
-    if (full || compact) {
-        next(); actionButton("Queue", Action::AddToQueue);
-        divider();
-        next(); GalleryMenuButton("Sort", "SortMenu", canSort);
-        if (!canSort) LabTooltip(sortUnavailable, ImGuiHoveredFlags_AllowWhenDisabled);
-        if (ImGui::BeginPopup("SortMenu")) {
-            sortMenuItems();
-            ImGui::EndPopup();
-        }
-    }
-    if (small) divider();
-    if (full || compact || small) {
-        next(); GalleryMenuButton("View", "ViewMenu");
-        if (ImGui::BeginPopup("ViewMenu")) {
-            viewMenuItems();
-            ImGui::EndPopup();
-        }
-    }
-    next(); GalleryMenuButton(full || compact || small ? "More" : "Actions", "MoreMenu");
-    if (ImGui::BeginPopup("MoreMenu")) {
-        folderMenuItems();
-        ImGui::Separator();
-        if (!full && !compact && ImGui::BeginMenu("New")) {
-            newMenuItems();
-            ImGui::EndMenu();
-        }
-        if (!full && !compact && !small) actionMenuItem(Action::Open);
-        if (!full) {
-            actionMenuItem(Action::CopyEdits);
-            actionMenuItem(Action::PasteEdits);
-        }
-        if (!full && !compact) actionMenuItem(Action::AddToQueue);
-        actionMenuItem(Action::CopyPath);
-        actionMenuItem(Action::ShowInExplorer);
-        ImGui::Separator();
-        actionMenuItem(Action::TrashProjects);
-        actionMenuItem(Action::RevertProjects);
-        if (!full && !compact) {
-            ImGui::Separator();
-            if (ImGui::BeginMenu("Sort", canSort)) {
-                sortMenuItems();
-                ImGui::EndMenu();
-            }
-            if (!canSort) LabTooltip(sortUnavailable, ImGuiHoveredFlags_AllowWhenDisabled);
-        }
-        if (!full && !compact && !small && ImGui::BeginMenu("View")) {
-            viewMenuItems();
-            ImGui::EndMenu();
+        bool& properties = nativeWindow ? m_RawWorkspaceLabGalleryPanelsOpen : m_RawWorkspaceLabUi.galleryPropertiesOpen;
+        if (ImGui::MenuItem("Image properties", nullptr, properties)) {
+            properties = !properties;
+            if (nativeWindow && !properties) CancelRawWorkspaceLabGalleryImagePreview();
         }
         ImGui::EndPopup();
     }
-    if (full || compact || small) {
-        ImGui::SameLine();
-        const float detailsWidth = GalleryButtonWidth("Details");
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-            ImGui::GetWindowContentRegionMax().x - detailsWidth));
-        if (BareTextButton("Details", detailsSelected())) toggleDetails();
-        LabTooltip(nativeWindow ? "Show or hide image details and preview"
-            : "Show or hide image properties");
+    if (!navigator) ImGui::SameLine(0, 8.f * unit);
+    const bool properties = nativeWindow ? m_RawWorkspaceLabGalleryPanelsOpen : m_RawWorkspaceLabUi.galleryPropertiesOpen;
+    if (requested == FooterAction::Properties || (!navigator && Ui::IconButton("Image properties", Ui::Icon::Details, properties))) {
+        if (nativeWindow) {
+            m_RawWorkspaceLabGalleryPanelsOpen = !properties;
+            if (properties) CancelRawWorkspaceLabGalleryImagePreview();
+        } else m_RawWorkspaceLabUi.galleryPropertiesOpen = !properties;
     }
-
-    const std::string rootLabel = context.workspaceRoot.empty()
-        ? "No RAW folder open" : context.workspaceRoot.u8string();
-    const std::string selectionLabel = std::to_string(context.items.size()) + " selected";
-    const ImVec2 statusMinimum = ImGui::GetCursorScreenPos();
-    const float statusWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-    const float countWidth = ImGui::CalcTextSize(selectionLabel.c_str()).x;
-    const float rootWidth = std::max(0.0f, statusWidth - countWidth - 12.0f * unit);
-    ImGui::Dummy(ImVec2(statusWidth, statusHeight));
-    auto* draw = ImGui::GetWindowDrawList();
-    if (rootWidth > 0.0f) {
-        const float rootRight = statusMinimum.x + rootWidth;
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::RenderTextEllipsis(draw, statusMinimum,
-            ImVec2(rootRight, statusMinimum.y + statusHeight), rootRight,
-            rootLabel.c_str(), nullptr, nullptr);
-        ImGui::PopStyleColor();
+    if (!navigator) {
+        ImGui::SameLine(0, 8.f * unit);
+        const float moreX = ImGui::GetWindowContentRegionMax().x - 34.f * unit;
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), moreX));
     }
-    if (countWidth <= statusWidth) draw->AddText(
-        ImVec2(statusMinimum.x + statusWidth - countWidth, statusMinimum.y),
-        ImGui::GetColorU32(ImGuiCol_TextDisabled), selectionLabel.c_str());
-    LabTooltip(rootLabel.c_str());
-
-    ImGui::EndChild();
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor();
-    ImGui::Separator();
+    if (requested == FooterAction::More || (!navigator && Ui::IconButton("More", Ui::Icon::More))) ImGui::OpenPopup("More");
+    if (ImGui::BeginPopup("More")) {
+        RenderAutoBracketControls(true);
+        ImGui::Separator();
+        RenderRawWorkspaceGalleryFileMenu(false);
+        // Menus resolve their selection only while open. Execution retains the
+        // existing catalog, project-protection and owner checks.
+        const auto context = CaptureRawGalleryActionContext();
+        const auto item = [&](Action action) {
+            const auto availability = Stack::RawGalleryActions::GetAvailability(context, action);
+            if (!availability.enabled) return;
+            if (ImGui::MenuItem(Stack::RawGalleryActions::Label(action))) ExecuteRawGalleryAction(action, context);
+        };
+        if (!context.items.empty()) {
+            ImGui::Separator();
+            item(Action::CreateCaptureSet);
+            item(Action::NewSavedVersion);
+            item(Action::CopyPath);
+            item(Action::TrashProjects);
+            item(Action::RevertProjects);
+        }
+        ImGui::EndPopup();
+    }
+    if (navigator) ImGui::PopStyleVar(2);
     ImGui::PopID();
-    return workspaceChanged;
+}
+
+void EditorModule::RenderRawGalleryPropertyActions(const Stack::RawWorkspace::SourceRecord* source,
+    const std::filesystem::path& projectPath) {
+    const bool selected = !m_RawWorkspace.selectedSourceKeys.empty() || !m_RawWorkspaceLabSelectedProjectPaths.empty();
+    auto context = selected ? CaptureRawGalleryActionContext() : Stack::RawGalleryActions::Context{};
+    if (!selected) {
+        if (!source && projectPath.empty()) return;
+        context.workspaceRoot = m_RawWorkspace.workspaceRoot;
+        context.catalogGeneration = m_RawWorkspaceScanGeneration;
+        context.previewOnly = Stack::Workspace::IsPreview();
+        Stack::RawGalleryActions::Item item;
+        item.kind = projectPath.empty() ? Stack::RawGalleryActions::ItemKind::Source : Stack::RawGalleryActions::ItemKind::Project;
+        item.path = projectPath.empty() ? source->absolutePath : projectPath;
+        context.items.push_back(std::move(item));
+    }
+    if (context.items.empty()) return;
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (context.items.size() > 1) ImGui::TextDisabled("%zu selected", context.items.size());
+    else if (selected) {
+        const auto& target = context.items.front();
+        const auto displayedPath = projectPath.empty() && source ? source->absolutePath : projectPath;
+        if (target.path != displayedPath) {
+            ImGui::TextDisabled("Actions for selected image");
+            ImGui::TextWrapped("%s", target.path.filename().u8string().c_str());
+        }
+    }
+    const auto button = [&](const char* label, Action action, bool fullWidth = false) {
+        const auto availability = Stack::RawGalleryActions::GetAvailability(context, action);
+        if (Ui::TextButton(label, availability.enabled, fullWidth ? ImVec2(-1, 0) : ImVec2()))
+            ExecuteRawGalleryAction(action, context);
+        if (!availability.enabled) LabTooltip(availability.reason.c_str(), ImGuiHoveredFlags_AllowWhenDisabled);
+    };
+    if (selected) {
+        const bool showCopy = m_RawWorkspaceGalleryContentMode != Stack::RawWorkspace::GalleryContentMode::Gallery &&
+            context.focusedIndex < context.items.size() &&
+            context.items[context.focusedIndex].kind == Stack::RawGalleryActions::ItemKind::Project;
+        if (showCopy) {
+            button("Copy edits", Action::CopyEdits);
+            Stack::Editor::RawLabInternal::ContinueRawLabControlRow("Paste edits", 6.f);
+        }
+        button("Paste edits", Action::PasteEdits, !showCopy);
+    }
+    button("Open location", Action::ShowInExplorer, true);
 }

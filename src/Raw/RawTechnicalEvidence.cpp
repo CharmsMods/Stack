@@ -426,7 +426,7 @@ RawTechnicalEvidenceRecord BuildRawTechnicalEvidence(
         record.sourceIdentity.sha256 + "|" + record.decodeIdentity.sha256 + "|" + record.featureVersion);
     record.pixelLayout = Raw::RawPixelLayoutName(raw.metadata.pixelLayout);
     record.sampleFormat = raw.metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer
-        ? "UInt16"
+        ? (raw.normalizedMosaicBuffer ? "Float32" : "UInt16")
         : Raw::RawSampleFormatName(raw.metadata.linearSampleFormat);
     record.cfaPattern = Raw::CfaPatternName(raw.metadata.cfaPattern);
     record.geometry.orientation = raw.metadata.orientation;

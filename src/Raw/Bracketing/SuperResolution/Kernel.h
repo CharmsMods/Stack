@@ -15,6 +15,7 @@ struct PixelAccumulator {
     std::array<Moment,3> narrow{}, broad{};
     std::array<float,4> narrowUncertainty{},broadUncertainty{};
     std::array<float,4> crossNoise{},crossFrameWeight{},crossUncertainty{};
+    std::array<float,4> detailBroadWeight{};
 };
 struct Tile {
     unsigned width=0,height=0;
@@ -25,6 +26,7 @@ struct FrameRegion {
     int left=0,top=0,width=0,height=0;
     unsigned mapWidth=0,mapHeight=0;
     float mapOriginX=0,mapOriginY=0,mapStep=8;
+    float detailPreference=1;
     std::array<int,4> colors{}; // sensor parity to RGB channel
     // Original, unresampled samples: radiance, shot coefficient, read variance,
     // headroom. Negative headroom excludes clipped/invalid samples.

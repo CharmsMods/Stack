@@ -1,4 +1,5 @@
 #include "Raw/RawGpuPipeline.h"
+#include "Raw/Demosaic/GpuDemosaic.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLStateGuards.h"
 
@@ -109,6 +110,43 @@ void TestIncompleteRawInputs() {
     Check(glGetError() == GL_NO_ERROR, "Invalid CPU input reached an OpenGL upload.");
 }
 
+void TestDemosaicState() {
+    // Reuse the odd-sized upload fixture at the new compute boundary.
+    const std::array<float,6> samples{1,257,4095,83,1024,65535};
+    GLuint source=GLHelpers::CreateTextureFromData(samples.data(),3,2,GL_R32F,GL_RED,GL_FLOAT);
+    GLuint sentinel=GLHelpers::CreateTextureFromData(nullptr,1,1,GL_R32F,GL_RED,GL_FLOAT);
+    Check(source && sentinel,"Could not allocate demosaicing state fixture.");
+    GLuint storage=0;glGenBuffers(1,&storage);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER,storage);
+    const GLuint value=123;glBufferData(GL_SHADER_STORAGE_BUFFER,sizeof(value),&value,GL_STATIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,storage);
+    glBindImageTexture(0,sentinel,0,GL_FALSE,0,GL_READ_ONLY,GL_R32F);
+    for(int unit=0;unit<4;++unit) {glActiveTexture(GL_TEXTURE0+unit);glBindTexture(GL_TEXTURE_2D,sentinel);}
+    glActiveTexture(GL_TEXTURE2);
+    Raw::Demosaic::GpuDemosaic engine;
+    std::string error;
+    const GLuint result=engine.Reconstruct(source,3,2,Raw::CfaPattern::RGGB,Raw::DemosaicMethod::Lmmse,{},error);
+    Check(result!=0,error.c_str());
+    CheckState(GL_ACTIVE_TEXTURE,GL_TEXTURE2,"Demosaicing changed the active texture unit.");
+    for(int unit=0;unit<4;++unit) {
+        glActiveTexture(GL_TEXTURE0+unit);
+        CheckState(GL_TEXTURE_BINDING_2D,sentinel,"Demosaicing changed a caller's texture binding.");
+    }
+    GLint binding=0;glGetIntegeri_v(GL_IMAGE_BINDING_NAME,0,&binding);
+    Check(binding==static_cast<GLint>(sentinel),"Demosaicing changed the caller's image binding.");
+    constexpr GLenum storageBinding=0x90D3;
+    glGetIntegeri_v(storageBinding,0,&binding);
+    Check(binding==static_cast<GLint>(storage),"Demosaicing changed the indexed storage buffer.");
+    CheckState(storageBinding,storage,"Demosaicing changed the generic storage buffer.");
+    GLuint retained=0;glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,sizeof(retained),&retained);
+    Check(retained==value,"Demosaicing wrote to the caller's storage buffer.");
+    glBindImageTexture(0,0,0,GL_FALSE,0,GL_READ_ONLY,GL_R32F);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,0);glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);
+    glDeleteBuffers(1,&storage);glDeleteTextures(1,&result);glDeleteTextures(1,&source);glDeleteTextures(1,&sentinel);
+    glActiveTexture(GL_TEXTURE0);
+    Check(glGetError()==GL_NO_ERROR,"GPU demosaicing left an OpenGL error.");
+}
+
 } // namespace
 
 int main() {
@@ -125,7 +163,8 @@ int main() {
         Check(LoadGLFunctions(), "Could not load OpenGL functions.");
         TestTypedUploads();
         TestIncompleteRawInputs();
-        std::cout << "Typed texture uploads, GL state, allocation rejection and RAW input bounds passed.\n";
+        TestDemosaicState();
+        std::cout << "Typed texture uploads, GL state, allocation rejection, RAW input bounds and GPU demosaicing state passed.\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         result = 1;

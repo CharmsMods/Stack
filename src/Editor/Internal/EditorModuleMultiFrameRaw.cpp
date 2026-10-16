@@ -1,3 +1,5 @@
+#include "Persistence/ProjectSnapshotCapture.h"
+#include "Project/BracketingCopy.h"
 #include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
 
@@ -43,34 +45,7 @@ using Stack::Project::RawCaptureCompatibilitySummary;
 using Stack::Project::RawProjectSnapshot;
 using Stack::Project::SourceSetFrame;
 
-RawProjectSnapshot CopyProjectSnapshotWithoutPipeline(
-    const RawProjectSnapshot& source) {
-    RawProjectSnapshot copy;
-    copy.schemaVersion = source.schemaVersion;
-    copy.projectId = source.projectId;
-    copy.projectName = source.projectName;
-    copy.projectKindHint = source.projectKindHint;
-    copy.lifecycle = source.lifecycle;
-    copy.embeddedAssets = source.embeddedAssets;
-    copy.sourceSets = source.sourceSets;
-    copy.multiFrameGraph = source.multiFrameGraph;
-    copy.rawWorkspaceData = source.rawWorkspaceData;
-    copy.coverThumbnailBytes = source.coverThumbnailBytes;
-    copy.activeSourceSetId = source.activeSourceSetId;
-    copy.activeFrameId = source.activeFrameId;
-    copy.mfdInputRevision = source.mfdInputRevision;
-    copy.hdrInputRevision = source.hdrInputRevision;
-    copy.postRecipeRevision = source.postRecipeRevision;
-    copy.dirtyRevision = source.dirtyRevision;
-    copy.persistedStorageRevision = source.persistedStorageRevision;
-    copy.timestamp = source.timestamp;
-    copy.sourceWidth = source.sourceWidth;
-    copy.sourceHeight = source.sourceHeight;
-    copy.adoptedFrom = source.adoptedFrom;
-    copy.sourceAssetId = source.sourceAssetId;
-    copy.nodeBrowserThumbnails = source.nodeBrowserThumbnails;
-    return copy;
-}
+using Stack::Project::CopyProjectSnapshotWithoutPipeline;
 
 bool Finish(std::string* output, const std::string& message, bool result) {
     if (output) *output = message;
@@ -672,24 +647,104 @@ bool SyncMfdGraphTopology(
     return true;
 }
 
+bool NeedsBracketingSourceTopology(
+    EditorNodeGraph::Graph& graph,
+    const MultiFrameSourceSet& sourceSet) {
+    const auto* source = FindHdrNode(graph, sourceSet.sourceSetId,
+        sourceSet.graphBindingNodeId);
+    if (!source || !source->multiFrameHdr.bracketingSource ||
+        sourceSet.graphBindingNodeId != source->instanceUuid) return true;
+    return std::any_of(graph.GetNodes().begin(), graph.GetNodes().end(),
+        [&](const EditorNodeGraph::Node& node) {
+            return (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame &&
+                    node.rawProjectFrame.managed && !node.rawProjectFrame.quarantined &&
+                    node.rawProjectFrame.sourceSetId == sourceSet.sourceSetId) ||
+                (node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet &&
+                    node.rawProjectSourceSet.managed && !node.rawProjectSourceSet.quarantined &&
+                    node.rawProjectSourceSet.sourceSetId == sourceSet.sourceSetId);
+        });
+}
+
+bool SyncBracketingSourceTopology(
+    EditorNodeGraph::Graph& graph,
+    const RawProjectSnapshot& snapshot,
+    const MultiFrameSourceSet& sourceSet,
+    int sourceNodeId,
+    bool ensureOutput,
+    std::string& error) {
+    // Capture membership remains canonical in the project source set. Retire
+    // only its derived, managed provenance nodes; retain this source's UUID and
+    // every authored downstream node, connection and layout.
+    std::vector<int> obsoleteNodes;
+    std::unordered_set<int> obsoleteBindings;
+    for (const auto& node : graph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame &&
+            node.rawProjectFrame.managed && !node.rawProjectFrame.quarantined &&
+            node.rawProjectFrame.sourceSetId == sourceSet.sourceSetId) {
+            obsoleteNodes.push_back(node.id);
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet &&
+            node.rawProjectSourceSet.managed && !node.rawProjectSourceSet.quarantined &&
+            node.rawProjectSourceSet.sourceSetId == sourceSet.sourceSetId) {
+            obsoleteNodes.push_back(node.id);
+            obsoleteBindings.insert(node.id);
+        }
+    }
+    auto& links = graph.EditLinks();
+    links.erase(std::remove_if(links.begin(), links.end(), [&](const auto& link) {
+        return link.toNodeId == sourceNodeId;
+    }), links.end());
+    for (auto& link : links) {
+        if (obsoleteBindings.count(link.fromNodeId)) {
+            link.fromNodeId = sourceNodeId;
+            link.fromSocketId = EditorNodeGraph::kImageOutputSocketId;
+        }
+    }
+    for (int nodeId : obsoleteNodes) graph.RemoveNode(nodeId);
+    auto* source = graph.FindNode(sourceNodeId);
+    if (!source) {
+        error = "The Bracketing source disappeared while updating its graph.";
+        return false;
+    }
+    for (const auto& frame : sourceSet.frames)
+        source->multiFrameHdr.frameBindings.push_back(
+            BuildMfdFrameBinding(snapshot, sourceSet, frame));
+    if (ensureOutput) {
+        const auto* output = graph.EnsureOutputNode();
+        if (!output) {
+            error = "Could not create the Bracketing project Output node.";
+            return false;
+        }
+        if (!graph.FindInputLink(output->id, EditorNodeGraph::kImageInputSocketId) &&
+            !graph.TryConnectSockets(sourceNodeId, EditorNodeGraph::kImageOutputSocketId,
+                output->id, EditorNodeGraph::kImageInputSocketId, &error)) return false;
+    }
+    return true;
+}
+
 bool SyncHdrGraphTopology(
     EditorNodeGraph::Graph& graph,
     const RawProjectSnapshot& snapshot,
     MultiFrameSourceSet& sourceSet,
     bool ensureOutput,
     std::string& error) {
+    const bool bracketing = Stack::Project::IsBracketing(sourceSet);
     EditorNodeGraph::Node* hdr = FindHdrNode(
         graph, sourceSet.sourceSetId, sourceSet.graphBindingNodeId);
     if (!hdr) {
         EditorNodeGraph::MultiFrameHdrPayload payload;
         payload.sourceSetId = sourceSet.sourceSetId;
-        hdr = graph.AddMultiFrameHdrNode(std::move(payload), { 760.0f, 180.0f });
+        payload.bracketingSource = bracketing;
+        hdr = graph.AddMultiFrameHdrNode(std::move(payload),
+            { bracketing ? 80.0f : 760.0f, 180.0f });
         if (!hdr) {
             error = "Could not create the managed Multi-Frame HDR graph node.";
             return false;
         }
     }
-    hdr->title = "HDR - " + sourceSet.name;
+    if (bracketing && !hdr->multiFrameHdr.bracketingSource)
+        hdr->position = { 80.0f, 180.0f };
+    hdr->title = bracketing ? "Bracketing" : "HDR - " + sourceSet.name;
+    hdr->multiFrameHdr.bracketingSource = bracketing;
     hdr->multiFrameHdr.sourceSetId = sourceSet.sourceSetId;
     hdr->multiFrameHdr.managed = true;
     hdr->multiFrameHdr.quarantined = false;
@@ -713,6 +768,9 @@ bool SyncHdrGraphTopology(
     hdr->multiFrameHdr.frameBindings.clear();
     sourceSet.graphBindingNodeId = hdr->instanceUuid;
     const int hdrNodeId = hdr->id;
+
+    if (bracketing) return SyncBracketingSourceTopology(
+        graph, snapshot, sourceSet, hdrNodeId, ensureOutput, error);
 
     std::unordered_set<std::string> currentFrameIds;
     for (std::size_t index = 0; index < sourceSet.frames.size(); ++index) {
@@ -791,20 +849,7 @@ bool SyncHdrGraphTopology(
     return true;
 }
 
-void UpdateWorkspaceManifestFields(RawProjectSnapshot& snapshot) {
-    if (!snapshot.rawWorkspaceData.is_object()) {
-        snapshot.rawWorkspaceData = nlohmann::json::object();
-    }
-    snapshot.rawWorkspaceData["schema"] = "stack.rawWorkspace.project";
-    snapshot.rawWorkspaceData["schemaVersion"] =
-        Stack::Project::kRawWorkspaceProjectSchemaVersion;
-    snapshot.rawWorkspaceData.erase("rawWorkspaceSchemaVersion");
-    snapshot.rawWorkspaceData["rawProjectModel"] =
-        Stack::Project::kRawProjectModelSourceSets;
-    snapshot.rawWorkspaceData["projectId"] = snapshot.projectId;
-    snapshot.rawWorkspaceData["activeSourceSetId"] = snapshot.activeSourceSetId;
-    snapshot.rawWorkspaceData["activeFrameId"] = snapshot.activeFrameId;
-}
+using Stack::Project::UpdateWorkspaceManifestFields;
 
 } // namespace
 
@@ -1907,6 +1952,7 @@ bool EditorModule::SetMultiFrameInternalViewTransformEnabled(
             }
             if (graphViewSettings.is_object() && !graphViewSettings.empty()) {
                 m_Project->layers[viewNode->layerIndex]->Deserialize(graphViewSettings);
+                viewNode->layerParameters=m_Project->layers[viewNode->layerIndex]->Serialize();
             }
         }
         sourceSet->settings["viewTransformPlacement"] = "graph";
@@ -2703,17 +2749,16 @@ void EditorModule::StartManagedProjectSaveAsync(
         failImmediately("No managed project is active.");
         return;
     }
-    if(m_Bracketing&&!m_Bracketing->newProject&&m_Bracketing->processRequired) {
-        std::string error;
-        if(!CommitBracketingDraft(false,&error)){failImmediately(error);return;}
-        ProjectSaveResult result;
-        result.status=ProjectSaveStatus::Saved;
-        result.projectId=m_Project->documentId;
-        result.persistedEditRevision=GetProjectEditRevision();
-        result.storageRevision=m_Project->snapshot->persistedStorageRevision;
-        result.path=GetCurrentProjectFileName();
-        if(completion)completion(std::move(result));
-        return;
+    const auto owner = m_Project;
+    std::optional<Stack::Project::BracketingCopy> bracketDraft;
+    if (m_Bracketing && !m_Bracketing->newProject && m_Bracketing->processRequired &&
+        m_Bracketing->projectId == owner->snapshot->projectId) {
+        bracketDraft.emplace();
+        bracketDraft->sources = m_Bracketing->sources;
+        bracketDraft->recipe = m_Bracketing->recipe;
+        bracketDraft->setId = m_Bracketing->setId;
+        bracketDraft->projectName = owner->name;
+        bracketDraft->metadataPending = static_cast<bool>(m_Bracketing->metadataJob);
     }
 
     const std::string projectId = EnsureProjectDocumentId();
@@ -2769,12 +2814,13 @@ void EditorModule::StartManagedProjectSaveAsync(
             ? m_Project->adoptionSourcePath
             : sourceStore->StoragePath();
     std::filesystem::path destination;
+    std::filesystem::path adoptionWorkspace;
     if (adopting) {
+        if (rawProject) adoptionWorkspace = !m_RawWorkspace.workspaceRoot.empty()
+            ? m_RawWorkspace.workspaceRoot : adoptionSource.parent_path();
         const std::filesystem::path destinationRoot =
-            IsRawWorkspaceProjectActive() &&
-                    !m_RawWorkspace.workspaceRoot.empty()
-                ? Stack::RawWorkspace::BuildManagedLayout(
-                      m_RawWorkspace.workspaceRoot).projectsDirectory
+            rawProject
+                ? Stack::RawWorkspace::BuildManagedLayout(adoptionWorkspace).projectsDirectory
                 : AppPaths::GetProjectsDirectory();
         destination = Stack::Project::ProjectIndex::BuildUniqueProjectPath(
             destinationRoot,
@@ -2805,6 +2851,7 @@ void EditorModule::StartManagedProjectSaveAsync(
     work->snapshot = std::move(snapshot);
 
     auto saveWork = [
+        owner, bracketDraft = std::move(bracketDraft), adoptionWorkspace,
         sourceStore,
         bracketResult, bracketSetId,
         adopting,
@@ -2821,13 +2868,22 @@ void EditorModule::StartManagedProjectSaveAsync(
         const auto commitBegin = std::chrono::steady_clock::now();
         try {
         if (adopting) {
+            if (!adoptionWorkspace.empty() &&
+                !Stack::RawWorkspace::EnsureManagedFolders(adoptionWorkspace, &work->error))
+                throw std::runtime_error(work->error);
             Stack::Project::ProjectStoreOpenResult converted =
                 Stack::Project::ConvertProjectStore(
                     sourceStore,
                     work->snapshot,
                     destination,
                     Stack::Project::ProjectStorageKind::DirectoryBundle,
-                    [bracketResult, bracketSetId](const auto& store, const auto& transaction, auto& snapshot, auto& error) {
+                    [bracketResult, bracketSetId, &bracketDraft](const auto& store, const auto& transaction, auto& snapshot, auto& error) {
+                        if (bracketDraft && !Stack::Project::StageBracketingCopy(
+                            *bracketDraft, store, transaction, snapshot, error)) return false;
+                        if (!StackBinaryFormat::ExternalizeManagedProjectAssets(store, transaction, snapshot)) {
+                            error = "Could not collect the imported project's authored assets.";
+                            return false;
+                        }
                         return !bracketResult || Stack::Project::StageBracketingResult(
                             store, transaction, snapshot, bracketSetId, *bracketResult, {}, error);
                     });
@@ -2846,6 +2902,9 @@ void EditorModule::StartManagedProjectSaveAsync(
                     work->snapshot.persistedStorageRevision);
             if (!transaction) {
                 work->error = "Could not begin the project save transaction.";
+            } else if (bracketDraft && !Stack::Project::StageBracketingCopy(
+                           *bracketDraft, sourceStore, transaction, work->snapshot, work->error)) {
+                sourceStore->Abort(transaction);
             } else if (!StackBinaryFormat::ExternalizeManagedProjectAssets(
                            sourceStore,
                            transaction,
@@ -2895,8 +2954,8 @@ void EditorModule::StartManagedProjectSaveAsync(
         work->commitMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - commitBegin).count();
 
-        ProjectTasks().PostToMain([
-            this,
+        owner->tasks.PostToMain([
+            this, owner,
             projectId,
             capturedEditorRevision,
             saveToken,
@@ -2923,7 +2982,7 @@ void EditorModule::StartManagedProjectSaveAsync(
 
             try {
             const bool currentProject =
-                m_Project->documentId == projectId &&
+                m_Project == owner && m_Project->documentId == projectId &&
                 m_Project->store == sourceStore;
             if (!currentProject) {
                 result.status = ProjectSaveStatus::Canceled;
@@ -3176,6 +3235,34 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
     std::string* outError) {
     if (requiresRepairedCopy) *requiresRepairedCopy = false;
     if (!m_Project->snapshot) return true;
+    bool bracketTopologyChanged = false;
+    for (auto& sourceSet : m_Project->snapshot->sourceSets) {
+        if (!Stack::Project::IsBracketing(sourceSet) ||
+            !NeedsBracketingSourceTopology(m_Project->graph, sourceSet)) continue;
+        EditorNodeGraph::Graph graph = m_Project->graph;
+        MultiFrameSourceSet nextSet = sourceSet;
+        std::string error;
+        if (!SyncHdrGraphTopology(graph, *m_Project->snapshot, nextSet, true, error))
+            return Finish(outError, error, false);
+        sourceSet.graphBindingNodeId = nextSet.graphBindingNodeId;
+        m_Project->graph = std::move(graph);
+        bracketTopologyChanged = true;
+    }
+    if (bracketTopologyChanged) {
+        // This compatible presentation migration does not change processing
+        // revisions, capture assets, submitted recipes or accepted pixels.
+        m_Project->snapshot->pipelineData = PipelineForGraph(
+            m_Project->graph, m_Project->layers, m_Project->snapshot->pipelineData);
+        if (const auto* active = Stack::Project::FindSourceSet(
+                *m_Project->snapshot, m_Project->snapshot->activeSourceSetId);
+            active && Stack::Project::IsBracketing(*active))
+            m_Project->snapshot->pipelineData["rawLayerSourceNodeUuid"] =
+                active->graphBindingNodeId;
+        RefreshGraphLayerMetadata();
+        ApplyGraphLayerOrder();
+        MarkDirty();
+        MarkRenderRefreshDirty();
+    }
     if (!m_Project->snapshot->multiFrameGraph.nodes.empty()) {
         // The typed graph remains authoritative. The EditorGraph renderer
         // bridge is derived from it and may be rebuilt without rewriting the
@@ -3281,6 +3368,7 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
     float nextY = 120.0f;
     for (MultiFrameSourceSet& sourceSet : m_Project->snapshot->sourceSets) {
         knownSetIds.insert(sourceSet.sourceSetId);
+        if (Stack::Project::IsBracketing(sourceSet)) continue;
         auto found = nodesBySet.find(sourceSet.sourceSetId);
         if (found == nodesBySet.end() || found->second.empty()) {
             EditorNodeGraph::RawProjectSourceSetPayload payload;
@@ -3505,10 +3593,12 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
             FileDialogs::OpenMultipleFilesDialog(
                 "Choose RAW Capture Set",
                 "RAW Frames\0*.dng;*.cr2;*.cr3;*.nef;*.nrw;*.arw;*.srf;*.sr2;*.raf;*.rw2;*.orf;*.pef;*.3fr;*.fff;*.iiq;*.rwl;*.raw\0All Files\0*.*\0");
-        selectedPaths.clear();
-        for (const std::string& path : selected) selectedPaths.emplace_back(path);
-        refreshSelectedSummaries();
-        referenceFrameIndex = 0;
+        if (!selected.empty()) {
+            selectedPaths.clear();
+            for (const std::string& path : selected) selectedPaths.emplace_back(path);
+            refreshSelectedSummaries();
+            referenceFrameIndex = 0;
+        }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%llu frame(s)",
@@ -3526,11 +3616,13 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
             for (std::size_t index = 0; index < selectedPaths.size(); ++index) {
                 const bool selected =
                     static_cast<int>(index) == referenceFrameIndex;
+                ImGui::PushID(static_cast<int>(index));
                 if (ImGui::Selectable(
                         selectedPaths[index].filename().string().c_str(),
                         selected)) {
                     referenceFrameIndex = static_cast<int>(index);
                 }
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }

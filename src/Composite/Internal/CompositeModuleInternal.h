@@ -146,7 +146,7 @@ bool LoadCompositeDisplayRgbaImageFromFile(
     int& outHeight);
 bool LoadImageLayerDataFromFile(const std::string& path, LayerFileLoadData& outData);
 bool LoadEditorProjectLayerDataFromFile(const std::string& path, bool limitResolution, LayerFileLoadData& outData);
-void ApplyImportDataToNewLayer(const LayerFileLoadData& data, float canvasW, float canvasH, std::vector<CompositeLayer>& layers, std::string& selectedId);
+void ApplyImportDataToNewLayer(const LayerFileLoadData& data, const FloatRect& viewRect, std::vector<CompositeLayer>& layers, std::string& selectedId);
 void ApplyImportDataToExistingLayer(const LayerFileLoadData& data, CompositeLayer& layer);
 void QueueImportedExternalAssetMirror(const std::string& path, const LayerFileLoadData& data);
 bool BuildLayerSourcePngIfMissing(CompositeLayer& layer);

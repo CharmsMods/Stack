@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "App/UiPerformanceTrace.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
@@ -19,7 +20,6 @@ using EditorNodeGraphUIMetrics::LinkHitRadiusForZoom;
 using Stack::Editor::NodeGraphUIVisuals::ChannelLaneOffset;
 using Stack::Editor::NodeGraphUIVisuals::GraphStraightLinksEnabled;
 using Stack::Editor::NodeGraphUIVisuals::LinkAnimationKey;
-using Stack::Editor::NodeGraphUIVisuals::ResolveLinkVisualStyle;
 
 } // namespace
 
@@ -134,23 +134,33 @@ int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const Edi
 EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
     const int frame =
         ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
+    const bool labelsHidden = m_LinkLabelRevealAlpha <= 0.001f && m_LinkLabelHitRects.empty();
+    const bool straight = GraphStraightLinksEnabled(m_ActiveEditor);
+    const auto documentRevision = m_ActiveEditor ? m_ActiveEditor->GetProjectSession().editRevision : 0u;
     if (frame >= 0 &&
-        m_LinkHitTestFrame == frame &&
+        m_LinkHitTestFrame >= 0 &&
+        (m_LinkHitTestFrame == frame || (labelsHidden && m_LinkHitTestLabelsHidden)) &&
         m_LinkHitTestGraph == &graph &&
         m_LinkHitTestGraphRevision == graph.GetStructureRevision() &&
+        m_LinkHitTestProjectionRevision == m_NodeProjectionRevision &&
+        m_LinkHitTestDocumentRevision == documentRevision &&
+        m_LinkHitTestStraight == straight &&
         m_LinkHitTestScreenPos.x == screenPos.x &&
         m_LinkHitTestScreenPos.y == screenPos.y) {
         return m_LinkHitTestResult;
     }
 
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::LinkHitTest);
+
     const auto& links = graph.GetLinks();
     for (auto it = links.rbegin(); it != links.rend(); ++it) {
         const EditorNodeGraph::Link& link = *it;
-        const auto labelRect = m_LinkLabelHitRects.find(LinkAnimationKey(link));
-        if (labelRect != m_LinkLabelHitRects.end() &&
-            labelRect->second.Contains(ToImVec2(screenPos))) {
-            CacheLinkHitTest(graph, screenPos, link);
-            return link;
+        if (!m_LinkLabelHitRects.empty()) {
+            const auto labelRect = m_LinkLabelHitRects.find(LinkAnimationKey(link));
+            if (labelRect != m_LinkLabelHitRects.end() && labelRect->second.Contains(ToImVec2(screenPos))) {
+                CacheLinkHitTest(graph, screenPos, link);
+                return link;
+            }
         }
         const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
         const EditorNodeGraph::Node* to = FindCachedNode(graph, link.toNodeId);
@@ -160,7 +170,6 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
 
         EditorNodeGraph::Vec2 fromPos = OutputPinScreenPos(*from, link.fromSocketId);
         EditorNodeGraph::Vec2 toPos = InputPinScreenPos(*to, link.toSocketId);
-        const auto visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
 
         if (IsPointNearLink(screenPos, fromPos, toPos)) {
             CacheLinkHitTest(graph, screenPos, link);
@@ -179,6 +188,10 @@ void EditorNodeGraphUI::CacheLinkHitTest(
         ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
     m_LinkHitTestGraph = &graph;
     m_LinkHitTestGraphRevision = graph.GetStructureRevision();
+    m_LinkHitTestProjectionRevision = m_NodeProjectionRevision;
+    m_LinkHitTestDocumentRevision = m_ActiveEditor ? m_ActiveEditor->GetProjectSession().editRevision : 0u;
+    m_LinkHitTestStraight = GraphStraightLinksEnabled(m_ActiveEditor);
+    m_LinkHitTestLabelsHidden = m_LinkLabelRevealAlpha <= 0.001f && m_LinkLabelHitRects.empty();
     m_LinkHitTestScreenPos = screenPos;
     m_LinkHitTestResult = link;
 }

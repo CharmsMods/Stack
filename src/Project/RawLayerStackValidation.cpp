@@ -1,4 +1,5 @@
 #include "Project/RawLayerStack.h"
+#include "Graph/LayerOperationParameters.h"
 #include "Graph/GraphDocumentRules.h"
 
 #include <cmath>
@@ -10,6 +11,7 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
     const EditorNodeGraph::Graph* composition, int sourceNodeId) {
     using Role = GraphModel::NodeRole;
     error.clear();
+    if (!Assets::ValidateLibrary(state.assets, error)) return false;
     const auto fail = [&](std::string message) { error = std::move(message); return false; };
     if (!state.nextId || state.nextId == std::numeric_limits<std::uint64_t>::max())
         return fail("Invalid RAW layer identity counter.");
@@ -36,13 +38,22 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
     document.sources.push_back({technical,scene});
     document.sources.push_back({unedited,scene});
     std::unordered_set<std::string> identities;
-    GraphModel::Endpoint previous = technical;
+    const auto validRoute = [&](const std::optional<GraphModel::Endpoint>& route) {
+        if (!route || *route == technical) return true;
+        if (route->Empty() || route->graphId.empty()) return false;
+        const auto* owner = FindRawAdjustmentLayer(state, route->graphId);
+        const auto* end = owner ? FindRawRole(*owner, Role::LayerResult) : nullptr;
+        return end && route->nodeUuid == end->instanceUuid && route->portId == "imageOut";
+    };
+    if (state.explicitRouting && !validRoute(state.imageOutput))
+        return fail("The main image output must come from a layer End or the prepared source.");
     for (const auto* layer : RawLayersInOrder(state)) {
         if (layer->id.empty() || !identities.insert(layer->id).second)
             return fail("RAW layers must have distinct stable identities.");
         if (!std::isfinite(layer->opacity) || layer->opacity < 0 || layer->opacity > 1)
             return fail("Invalid layer opacity.");
-        if (!layer->processingSettings.is_array()) return fail("Invalid operation settings.");
+        if (layer->canvasOrigin && (!std::isfinite(layer->canvasOrigin->x) || !std::isfinite(layer->canvasOrigin->y)))
+            return fail("Invalid layer canvas position.");
         const auto* original = FindRawRole(*layer, Role::OriginalImage);
         const auto* current = FindRawRole(*layer, Role::CurrentImage);
         const auto* result = FindRawRole(*layer, Role::LayerResult);
@@ -68,8 +79,12 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
         document.graphs.push_back({layer->id, &layer->graph});
         const auto currentImage = RawLayerEndpoint(*layer, *current);
         const GraphModel::Endpoint blended{layer->id, "$layer-blend", "imageOut"};
-        document.dependencies.push_back({previous, currentImage});
-        document.valueBindings.push_back({previous,currentImage});
+        const auto input = RawLayerInputEndpoint(state, layer->id);
+        if (!validRoute(input)) return fail("A layer Start must receive a layer End or the prepared source.");
+        if (input) {
+            document.dependencies.push_back({*input, currentImage});
+            document.valueBindings.push_back({*input,currentImage});
+        }
         document.valueBindings.push_back({unedited,RawLayerEndpoint(*layer,*original)});
         document.valueBindings.push_back({RawLayerEndpoint(*layer,*result,"imageIn"),blended});
         document.valueBindings.push_back({blended,RawLayerEndpoint(*layer,*result)});
@@ -77,9 +92,8 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
         document.dependencies.push_back({currentImage, blended});
         document.dependencies.push_back({RawLayerEndpoint(*layer, *result, "imageIn"), blended});
         for (const auto& node : layer->graph.GetNodes()) {
-            if (node.kind == EditorNodeGraph::NodeKind::Layer &&
-                (node.layerIndex < 0 || static_cast<std::size_t>(node.layerIndex) >= layer->processingSettings.size()))
-                return fail("An effect node has no saved operation settings.");
+            if (node.kind == EditorNodeGraph::NodeKind::Layer && !GraphModel::ValidateLayerParameters(node,error))
+                return false;
             if (node.kind == EditorNodeGraph::NodeKind::RawOperation) {
                 try {
                     const auto settings = RawRecipe::ReadGraphOperation(node.rawOperation);
@@ -87,6 +101,12 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
                         return fail("Exposure is outside the supported EV range.");
                 } catch (const std::exception& exception) { return fail(exception.what()); }
             }
+            if (node.kind == EditorNodeGraph::NodeKind::MaskTexture &&
+                (node.rawCoverage.value("canvas",std::string{}) != "project" ||
+                 (node.maskKind != EditorNodeGraph::MaskGeneratorKind::LinearGradient &&
+                  node.maskKind != EditorNodeGraph::MaskGeneratorKind::RadialGradient &&
+                  node.maskKind != EditorNodeGraph::MaskGeneratorKind::Square)))
+                return fail("A live mask texture requires a project canvas and an editable shape.");
             if (node.role == Role::Reference) {
                 if (node.reference.Empty()) return fail("A graph reference has no stable target identity.");
                 const auto outputPort = node.kind == EditorNodeGraph::NodeKind::MaskGenerator ? "maskOut" : "imageOut";
@@ -94,25 +114,29 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
             }
             if (node.kind == EditorNodeGraph::NodeKind::Output)
                 document.dependencies.push_back({node.role == Role::LayerResult ? blended : RawLayerEndpoint(*layer, node, "imageIn"), RawLayerEndpoint(*layer, node)});
+            if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator && node.rawCoverage.value("canvas",std::string{}) == "project" &&
+                layer->graph.FindInputLink(node.id,"matchExtent"))
+                return fail("A project-canvas mask is an independent source and cannot receive an image input.");
         }
         for (const auto& output : layer->maskOutputs) {
             if (output.id.empty() || output.nodeUuid.empty() || !identities.insert(output.id).second) return fail("Published mask identities must be distinct.");
             const auto* node = FindRawPublishedNode(*layer, output);
-            if (node && (node->kind != EditorNodeGraph::NodeKind::Output || !node->outputSettings.maskOutput))
-                return fail("A mask publication must identify a Mask Output.");
+            if (node && !(node->kind == EditorNodeGraph::NodeKind::Output && node->outputSettings.maskOutput) &&
+                !((node->kind == EditorNodeGraph::NodeKind::MaskGenerator || node->kind == EditorNodeGraph::NodeKind::MaskTexture || node->kind == EditorNodeGraph::NodeKind::CustomMask) && node->role == Role::Ordinary &&
+                    node->rawCoverage.value("canvas",std::string{}) == "project"))
+                return fail("A mask must identify a mask output or an independent shape source.");
         }
         if (layer->layerMask) {
             const auto* owner = FindRawAdjustmentLayer(state, layer->layerMask->layerId);
             const auto* publication = FindRawMaskOutput(state, *layer->layerMask);
             const auto* node = owner && publication ? FindRawPublishedNode(*owner, *publication) : nullptr;
-            if (node) document.dependencies.push_back({RawLayerEndpoint(*owner, *node), blended});
-            // An unresolved attached mask is a valid draft with empty coverage.
+            if (node) document.dependencies.push_back({RawMaskEndpoint(*owner, *node), blended});
+            // An unresolved optional mask leaves the receiving operation unrestricted.
         }
-        previous = blended;
     }
-    if (source) {
-        document.dependencies.push_back({previous, {"project", source->instanceUuid, "imageOut"}});
-        document.valueBindings.push_back({previous, {"project", source->instanceUuid, "imageOut"}});
+    if (source) if (const auto output = RawMainOutputEndpoint(state)) {
+        document.dependencies.push_back({*output, {"project", source->instanceUuid, "imageOut"}});
+        document.valueBindings.push_back({*output, {"project", source->instanceUuid, "imageOut"}});
     }
     const auto analysis = GraphModel::AnalyzeDocument(document);
     if (!analysis.valid) return fail(analysis.errors.front());

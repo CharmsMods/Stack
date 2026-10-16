@@ -1,8 +1,8 @@
 #include "LibRawRuntime.h"
 
-#include "App/AppPaths.h"
-
+#include <filesystem>
 #include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -16,6 +16,24 @@
 
 namespace Raw {
 namespace {
+
+#if defined(_WIN32)
+std::filesystem::path ResolveLibRawRuntimePath() {
+    // Both application hosts carry the same runtime layout. Resolve from the
+    // running module, never from a working directory or an editor singleton.
+    std::vector<wchar_t> buffer(512);
+    while (buffer.size() <= 32768) {
+        const auto length = GetModuleFileNameW(nullptr, buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (!length) return {};
+        if (length < buffer.size())
+            return std::filesystem::path(std::wstring(buffer.data(), length)).parent_path() /
+                L"Stack" / L"App" / L"Runtime" / L"libraw.dll";
+        buffer.resize(buffer.size() * 2);
+    }
+    return {};
+}
+#endif
 
 LibRawRuntimeStatus BuildLibRawRuntimeStatus() {
     LibRawRuntimeStatus status;
@@ -31,7 +49,7 @@ LibRawRuntimeStatus BuildLibRawRuntimeStatus() {
 
 #if defined(_WIN32) && defined(_MSC_VER)
     const std::filesystem::path libraryPath =
-        AppPaths::GetRuntimeDirectory() / "libraw.dll";
+        ResolveLibRawRuntimePath();
     HMODULE module = LoadLibraryExW(
         libraryPath.c_str(),
         nullptr,
@@ -58,7 +76,7 @@ LibRawRuntimeStatus BuildLibRawRuntimeStatus() {
     return status;
 #elif defined(_WIN32)
     const std::filesystem::path libraryPath =
-        AppPaths::GetRuntimeDirectory() / "libraw.dll";
+        ResolveLibRawRuntimePath();
     HMODULE module = LoadLibraryExW(
         libraryPath.c_str(),
         nullptr,

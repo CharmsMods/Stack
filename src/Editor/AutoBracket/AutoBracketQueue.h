@@ -35,7 +35,8 @@ std::vector<Candidate> CollectCandidates(const std::vector<RawWorkspace::SourceR
     const std::vector<RawWorkspace::RawGallerySimilarityStack>&);
 bool LoadQueue(const std::filesystem::path& root,Queue&,std::string& error);
 bool SaveQueue(const Queue&,std::string& error);
-// Existing projects are authoritative; a match must never create a second project.
+// Only projects with a current, available durable result represent completed
+// candidates. Explicit user creation remains independent of this queue.
 void Reconcile(Queue&,const std::vector<Candidate>&,
     const std::map<std::string,std::pair<std::string,std::filesystem::path>>& represented);
 }

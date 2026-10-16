@@ -49,6 +49,17 @@ bool BuildCfaPlanePyramid(
     CfaPlanePyramid& result,
     std::string* error = nullptr);
 
+// Transfers the disposable base buffers into level zero. The base planes may
+// be consumed even when a later level cannot be built; the const overload
+// retains its existing non-consuming contract.
+bool BuildCfaPlanePyramid(
+    const CfaLayout& layout,
+    PixelExtent rawExtent,
+    std::array<CfaPyramidBasePlane, 4>&& basePlanes,
+    const RegistrationParameters& parameters,
+    CfaPlanePyramid& result,
+    std::string* error = nullptr);
+
 const CfaPyramidLevel* FindCfaPyramidLevel(
     const CfaPlanePyramid& pyramid,
     CfaSite site,

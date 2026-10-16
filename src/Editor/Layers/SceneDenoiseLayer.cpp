@@ -432,7 +432,7 @@ bool SceneDenoiseLayer::RenderControls(EditorModule* editor, float controlWidth)
         oldDifferenceAmount != m_DifferenceAmount ||
         oldSplitPosition != m_SplitPosition;
     if (changed && editor) {
-        editor->MarkSelectedLayerRenderDirty();
+        editor->MarkRenderRefreshDirty();
     }
     return changed;
 }

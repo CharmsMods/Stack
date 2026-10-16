@@ -1,6 +1,10 @@
 #include "Editor/EditorModule.h"
 #include "RawLabGalleryDetails.h"
 #include "RawLabUiSupport.h"
+#include "App/AppHeaderStyle.h"
+#include "App/WorkspaceInputScope.h"
+#include "Library/LibraryControls.h"
+#include "Editor/UI/WindowDrawOpacity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,11 +20,24 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
     m_RawWorkspaceGalleryPreviewHovered = false;
     const float unit = ImGui::GetFontSize() / 13.0f;
     const bool showProperties = m_RawWorkspaceLabUi.galleryPropertiesOpen;
-    const float detailsWidth = showProperties
-        ? std::min(258.0f * unit, std::max(1.0f, size.x * 0.34f)) : 0.0f;
+    const float target = showProperties ? 1.f : 0.f;
+    if (m_RawGalleryPropertiesAmount < 0.f)
+        m_RawGalleryPropertiesAmount = target;
+    if (m_RawGalleryPropertiesAmount != target) {
+        if (Stack::LibraryUi::ReducedMotion()) m_RawGalleryPropertiesAmount = target;
+        else Stack::Header::ApproachMotion(m_RawGalleryPropertiesAmount, target, .24f);
+    }
+    const float propertiesAmount = m_RawGalleryPropertiesAmount;
+    const float fullDetailsWidth = std::min(320.0f * ImGui::GetFontSize() / 16.f,
+        std::max(1.0f, size.x * 0.34f));
+    const float detailsWidth = fullDetailsWidth * propertiesAmount;
     const float imageWidth = std::max(1.0f, size.x - detailsWidth);
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+    // This is one docked workspace surface. Inner layout children must not
+    // inherit rounded, separately shaded window chrome from the app theme.
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, GetWorkspaceBaseColor());
     ImGui::BeginChild("RawGalleryWorkspace", size, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -33,11 +50,23 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
             m_RawWorkspaceGalleryLayoutAnimation.ContentAlpha());
         const bool layoutAnimating = m_RawWorkspaceGalleryLayoutAnimation.Active();
         if (layoutAnimating) ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-        RenderRawWorkspaceLabGalleryContent(false);
+        {
+            Stack::Workspace::InputScope transitionInput(layoutAnimating, false);
+            RenderRawWorkspaceLabGalleryContent(false);
+        }
         if (layoutAnimating) ImGui::PopItemFlag();
         ImGui::PopStyleVar();
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
+    }
+
+    // Grid thumbnails already own their cache requests. With properties fully
+    // closed there is no preview consumer to resolve, upload or format for.
+    if (grid && propertiesAmount == 0.f) {
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        return;
     }
 
     // Resolve after the grid handles input, since its actions may change selection.
@@ -47,13 +76,25 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         preview = {};
         preview.workspaceKey = workspaceKey;
     }
-    const auto* requestedSource = FindRawWorkspaceSourceByKey(m_RawWorkspaceLabFilmstripHoverSourceKey);
+    // Hover drives browsing even while another image is selected. Edit actions
+    // capture their selection separately and never use this preview identity.
+    const auto* requestedSource = m_RawWorkspaceLabFilmstripHoverSourceKey.empty() ? nullptr :
+        FindRawWorkspaceSourceByKey(m_RawWorkspaceLabFilmstripHoverSourceKey);
     std::filesystem::path requestedProject = m_RawWorkspaceLabFilmstripHoverProjectPath;
     if (!requestedSource) {
-        requestedSource = FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
+        requestedSource = m_RawWorkspace.selectedSourceKey.empty() ? nullptr :
+            FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
         requestedProject = m_RawWorkspaceLabFocusedProjectPath;
     }
-    if (!requestedSource) requestedSource = FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
+    if (!requestedSource && !requestedProject.empty()) {
+        const auto& projects = GetRawWorkspaceGalleryPresentation().projects;
+        const auto project = std::find_if(projects.begin(), projects.end(), [&](const auto& item) {
+            return item.projectPath == requestedProject;
+        });
+        if (project != projects.end()) requestedSource = FindRawWorkspaceSourceByKey(project->referenceSourceKey);
+    }
+    if (!requestedSource && requestedProject.empty() && !m_Project->rawSourceKey.empty())
+        requestedSource = FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
 
     struct Thumbnail {
         unsigned int texture = 0;
@@ -66,6 +107,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
                              const std::filesystem::path& projectPath) {
         Thumbnail result;
         if (!source) return result;
+        if (projectPath.empty()) {
+            result.texture = GetRawWorkspaceThumbnailTexture(*source, &result.width, &result.height, true);
+            result.metadata = GetRawWorkspaceThumbnailMetadata(source->relativePathKey);
+            return result;
+        }
         Stack::RawWorkspace::SourceRecord thumbnailSource = *source;
         if (!projectPath.empty()) {
             const auto& gallery = GetRawWorkspaceGalleryPresentation();
@@ -86,7 +132,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         return result;
     };
     const Thumbnail requested = resolve(requestedSource, requestedProject);
-    const auto* displayedSource = FindRawWorkspaceSourceByKey(preview.sourceKey);
+    const auto* displayedSource = preview.sourceKey.empty() ? nullptr : FindRawWorkspaceSourceByKey(preview.sourceKey);
     if (!displayedSource) {
         preview.sourceKey.clear();
         preview.previousSourceKey.clear();
@@ -121,16 +167,18 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         preview.lastChangedAt = now;
         displayedSource = requestedSource;
     }
-    preview.blend = std::min(1.0f, preview.blend +
-        std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f) / 0.12f);
-    if (preview.blend >= 1.0f) {
-        preview.previousSourceKey.clear();
-        preview.previousProjectPath.clear();
+    if (preview.blend < 1.0f) {
+        preview.blend = std::min(1.0f, preview.blend +
+            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f) / 0.12f);
+        if (preview.blend >= 1.0f) {
+            preview.previousSourceKey.clear();
+            preview.previousProjectPath.clear();
+        }
     }
     const Thumbnail current = displayedSource == requestedSource && preview.projectPath == requestedProject
         ? requested : displayed;
-    const Thumbnail previous = resolve(FindRawWorkspaceSourceByKey(preview.previousSourceKey),
-        preview.previousProjectPath);
+    const Thumbnail previous = preview.previousSourceKey.empty() ? Thumbnail{} :
+        resolve(FindRawWorkspaceSourceByKey(preview.previousSourceKey), preview.previousProjectPath);
     const auto drawPreview = [&](const ImVec2& available) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const ImVec2 extent(origin.x + available.x, origin.y + available.y);
@@ -190,23 +238,25 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         }
         ImGui::EndChild();
     }
-    if (showProperties) {
+    if (detailsWidth > .5f) {
         ImGui::SameLine(0.0f, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * unit, 14.0f * unit));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f * unit, 8.0f * unit));
-        ImGui::BeginChild("Properties", ImVec2(detailsWidth, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::TextWrapped("Image properties");
-        ImGui::Separator();
-        if (grid && current.ready()) {
-            drawPreview(ImVec2(ImGui::GetContentRegionAvail().x, 152.0f * unit));
-            ImGui::Separator();
-        }
-        if (!m_RawWorkspaceGalleryDetails)
-            m_RawWorkspaceGalleryDetails = std::make_shared<Stack::Editor::RawLabInternal::GalleryDetails>();
-        m_RawWorkspaceGalleryDetails->Render(displayedSource, current.metadata.get());
+        ImGui::BeginChild("PropertiesClip", ImVec2(detailsWidth, 0), ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        Stack::Workspace::InputScope propertiesInput(!showProperties, false);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("Properties", ImVec2(fullDetailsWidth, 0.0f), ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        if (grid && current.ready())
+            RenderRawGalleryProperties(displayedSource, current.metadata, preview.projectPath,
+                [&](const ImVec2& available) { drawPreview(available); });
+        else RenderRawGalleryProperties(displayedSource, current.metadata,
+            displayedSource ? preview.projectPath : requestedProject, {});
+        Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(), propertiesAmount);
         ImGui::EndChild();
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }

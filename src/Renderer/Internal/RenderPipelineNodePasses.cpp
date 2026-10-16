@@ -288,6 +288,10 @@ bool RenderPipeline::RenderReformat(
     glBindTexture(GL_TEXTURE_2D, texture);
     glUniform1i(glGetUniformLocation(m_ReformatProgram, "uImage"), 0);
     glUniform2i(glGetUniformLocation(m_ReformatProgram, "uInputSize"), inputWidth, inputHeight);
+    const auto framing = Stack::NodeMath::ResolveFramingMapping(settings, inputWidth, inputHeight);
+    glUniform2f(glGetUniformLocation(m_ReformatProgram, "uVisibleHalf"), float(framing.halfWidth), float(framing.halfHeight));
+    glUniform2f(glGetUniformLocation(m_ReformatProgram, "uSampleSpan"), float(framing.sampleWidth), float(framing.sampleHeight));
+    glUniform2f(glGetUniformLocation(m_ReformatProgram, "uSourceCenter"), float(framing.centerX), float(framing.centerY));
     glUniform1i(
         glGetUniformLocation(m_ReformatProgram, "uFilter"),
         settings.filter == Stack::NodeMath::ReconstructionFilter::Nearest ? 0 : 1);

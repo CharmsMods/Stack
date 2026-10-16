@@ -235,60 +235,7 @@ void TestDeepCompletedChainUsesBoundedCallStack() {
         "a deep valid chain should complete without exhausting the call stack");
 }
 
-void TestFrequencyChainRetainsItsReferenceSource() {
-    EditorNodeGraph::Graph graph;
-    const EditorNodeGraph::Node* source = graph.AddImageGeneratorNode(
-        EditorNodeGraph::ImageGeneratorKind::SolidColor,
-        { 0.0f, 0.0f });
-    RequireScale(source != nullptr, "frequency reference source allocation failed");
-    const int sourceNodeId = source->id;
-    const int splitNodeId = graph.AddChannelSplitNode({ 1.0f, 0.0f })->id;
-    const int fftNodeId = graph.AddFrequencyFftNode({ 2.0f, 0.0f })->id;
-    const int ifftNodeId = graph.AddFrequencyIfftNode({ 3.0f, 0.0f })->id;
-    const int outputNodeId = graph.AddOutputNode({ 4.0f, 0.0f }, true)->id;
 
-    std::string error;
-    RequireScale(
-        graph.TryConnectSockets(
-            sourceNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            splitNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error),
-        "frequency reference fixture should connect its image source");
-    RequireScale(
-        graph.TryConnectSockets(
-            splitNodeId,
-            "r",
-            fftNodeId,
-            EditorNodeGraph::kChannelInputSocketId,
-            &error),
-        "frequency reference fixture should connect Split to FFT");
-    RequireScale(
-        graph.TryConnectSockets(
-            fftNodeId,
-            EditorNodeGraph::kSpectrumOutputSocketId,
-            ifftNodeId,
-            EditorNodeGraph::kSpectrumInputSocketId,
-            &error),
-        "frequency reference fixture should connect FFT to inverse FFT");
-    RequireScale(
-        graph.TryConnectSockets(
-            ifftNodeId,
-            EditorNodeGraph::kChannelOutputSocketId,
-            outputNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error),
-        "frequency reference fixture should connect inverse FFT to output");
-    RequireScale(
-        graph.ResolveReferenceSourceNodeIdForOutput(outputNodeId) == sourceNodeId,
-        "frequency-domain chains should resolve the original image reference");
-    RequireScale(
-        graph.IsScalarSocketStream(
-            ifftNodeId,
-            EditorNodeGraph::kChannelOutputSocketId),
-        "inverse FFT output should retain its scalar channel identity");
-}
 
 void TestScalarBlendRetainsChannelIdentity() {
     EditorNodeGraph::Graph graph;
@@ -373,154 +320,9 @@ void TestDeepScalarAndChannelPropagationUsesBoundedCallStack() {
         "deep scene-path analysis should retain the upstream View Transform");
 }
 
-void TestFrequencyScenePathUsesTypedInputs() {
-    EditorNodeGraph::Graph graph;
-    EditorNodeGraph::RawSourcePayload rawPayload;
-    const int rawSourceNodeId =
-        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 0.0f })->id;
-    EditorNodeGraph::RawDecodePayload decodePayload;
-    const int decodeNodeId =
-        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 0.0f })->id;
-    const int viewTransformNodeId =
-        graph.AddLayerNode(
-            LayerType::ViewTransform,
-            0,
-            { 2.0f, 0.0f })->id;
-    const int splitNodeId =
-        graph.AddChannelSplitNode({ 3.0f, 0.0f })->id;
-    const int fftNodeId =
-        graph.AddFrequencyFftNode({ 4.0f, 0.0f })->id;
-    const int ifftNodeId =
-        graph.AddFrequencyIfftNode({ 5.0f, 0.0f })->id;
-    const int outputNodeId =
-        graph.AddOutputNode({ 6.0f, 0.0f }, true)->id;
 
-    graph.EditLinks() = {
-        {
-            rawSourceNodeId,
-            EditorNodeGraph::kRawOutputSocketId,
-            decodeNodeId,
-            EditorNodeGraph::kRawInputSocketId
-        },
-        {
-            decodeNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            viewTransformNodeId,
-            EditorNodeGraph::kImageInputSocketId
-        },
-        {
-            viewTransformNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            splitNodeId,
-            EditorNodeGraph::kImageInputSocketId
-        },
-        {
-            splitNodeId,
-            "r",
-            fftNodeId,
-            EditorNodeGraph::kChannelInputSocketId
-        },
-        {
-            fftNodeId,
-            EditorNodeGraph::kSpectrumOutputSocketId,
-            ifftNodeId,
-            EditorNodeGraph::kSpectrumInputSocketId
-        },
-        {
-            ifftNodeId,
-            EditorNodeGraph::kChannelOutputSocketId,
-            outputNodeId,
-            EditorNodeGraph::kImageInputSocketId
-        }
-    };
 
-    const EditorNodeGraph::ScenePathInfo scenePath =
-        EditorNodeGraph::AnalyzeScenePath(graph, outputNodeId);
-    RequireScale(
-        scenePath.sceneReferred && scenePath.hasViewTransform,
-        "frequency scene-path analysis should follow channel and spectrum inputs");
-}
 
-void TestMfsrRejectsMixedFamiliesThroughFrequencyChain() {
-    EditorNodeGraph::Graph graph;
-    const int rasterNodeId =
-        graph.AddImageGeneratorNode(
-            EditorNodeGraph::ImageGeneratorKind::SolidColor,
-            { 0.0f, -1.0f })->id;
-    const int mfsrNodeId =
-        graph.AddMfsrNode({}, { 6.0f, 0.0f })->id;
-
-    EditorNodeGraph::RawSourcePayload rawPayload;
-    const int rawSourceNodeId =
-        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 1.0f })->id;
-    EditorNodeGraph::RawDecodePayload decodePayload;
-    const int decodeNodeId =
-        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 1.0f })->id;
-    const int splitNodeId =
-        graph.AddChannelSplitNode({ 2.0f, 1.0f })->id;
-    const int fftNodeId =
-        graph.AddFrequencyFftNode({ 3.0f, 1.0f })->id;
-    const int ifftNodeId =
-        graph.AddFrequencyIfftNode({ 4.0f, 1.0f })->id;
-    const int combineNodeId =
-        graph.AddChannelCombineNode({ 5.0f, 1.0f })->id;
-
-    std::string error;
-    RequireScale(
-        graph.TryConnectSockets(
-            rasterNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            mfsrNodeId,
-            EditorNodeGraph::kMfsrReferenceInputSocketId,
-            &error),
-        "MFSR mixed-family fixture should connect its raster reference");
-    RequireScale(
-        graph.TryConnectSockets(
-            rawSourceNodeId,
-            EditorNodeGraph::kRawOutputSocketId,
-            decodeNodeId,
-            EditorNodeGraph::kRawInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            decodeNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            splitNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            splitNodeId,
-            "r",
-            fftNodeId,
-            EditorNodeGraph::kChannelInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            fftNodeId,
-            EditorNodeGraph::kSpectrumOutputSocketId,
-            ifftNodeId,
-            EditorNodeGraph::kSpectrumInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            ifftNodeId,
-            EditorNodeGraph::kChannelOutputSocketId,
-            combineNodeId,
-            "r",
-            &error),
-        "MFSR mixed-family fixture should build its RAW frequency chain");
-
-    error.clear();
-    RequireScale(
-        !graph.TryConnectSockets(
-            combineNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            mfsrNodeId,
-            EditorNodeGraph::MfsrInputSocketId(1),
-            &error),
-        "MFSR should reject RAW-derived frequency output beside a raster reference");
-    RequireScale(
-        error.find("cannot mix RAW-derived and raster-derived") !=
-            std::string::npos,
-        "MFSR mixed-family rejection should explain the conflicting origins");
-}
 
 void TestDeepRenderScheduleUsesTopologicalOrder() {
     constexpr int kDepth = 8192;
@@ -1184,18 +986,227 @@ void TestTileGraphBatchReusesExactTopology() {
         "tile crop should reject truncated source payloads");
 }
 
+void TestChannelReformatChainRetainsItsReferenceSource() {
+    EditorNodeGraph::Graph graph;
+    const EditorNodeGraph::Node* source = graph.AddImageGeneratorNode(
+        EditorNodeGraph::ImageGeneratorKind::SolidColor,
+        { 0.0f, 0.0f });
+    RequireScale(source != nullptr, "channel/reformat reference source allocation failed");
+    const int sourceNodeId = source->id;
+    const int splitNodeId = graph.AddChannelSplitNode({ 1.0f, 0.0f })->id;
+    const int firstReformatNodeId = graph.AddReformatNode({ 2.0f, 0.0f })->id;
+    const int secondReformatNodeId = graph.AddReformatNode({ 3.0f, 0.0f })->id;
+    const int outputNodeId = graph.AddOutputNode({ 4.0f, 0.0f }, true)->id;
+
+    std::string error;
+    RequireScale(
+        graph.TryConnectSockets(
+            sourceNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            splitNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error),
+        "channel/reformat reference fixture should connect its image source");
+    RequireScale(
+        graph.TryConnectSockets(
+            splitNodeId,
+            "r",
+            firstReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error),
+        "channel/reformat reference fixture should connect Split to Reformat");
+    RequireScale(
+        graph.TryConnectSockets(
+            firstReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            secondReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error),
+        "channel/reformat reference fixture should connect Reformat to second Reformat");
+    RequireScale(
+        graph.TryConnectSockets(
+            secondReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            outputNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error),
+        "channel/reformat reference fixture should connect second Reformat to output");
+    RequireScale(
+        graph.ResolveReferenceSourceNodeIdForOutput(outputNodeId) == sourceNodeId,
+        "channel/reformat chains should resolve the original image reference");
+    RequireScale(
+        graph.IsScalarSocketStream(
+            secondReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId),
+        "second Reformat output should retain its scalar channel identity");
+}
+
+void TestChannelReformatScenePathUsesTypedInputs() {
+    EditorNodeGraph::Graph graph;
+    EditorNodeGraph::RawSourcePayload rawPayload;
+    const int rawSourceNodeId =
+        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 0.0f })->id;
+    EditorNodeGraph::RawDecodePayload decodePayload;
+    const int decodeNodeId =
+        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 0.0f })->id;
+    const int viewTransformNodeId =
+        graph.AddLayerNode(
+            LayerType::ViewTransform,
+            0,
+            { 2.0f, 0.0f })->id;
+    const int splitNodeId =
+        graph.AddChannelSplitNode({ 3.0f, 0.0f })->id;
+    const int firstReformatNodeId =
+        graph.AddReformatNode({ 4.0f, 0.0f })->id;
+    const int secondReformatNodeId =
+        graph.AddReformatNode({ 5.0f, 0.0f })->id;
+    const int outputNodeId =
+        graph.AddOutputNode({ 6.0f, 0.0f }, true)->id;
+
+    graph.EditLinks() = {
+        {
+            rawSourceNodeId,
+            EditorNodeGraph::kRawOutputSocketId,
+            decodeNodeId,
+            EditorNodeGraph::kRawInputSocketId
+        },
+        {
+            decodeNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            viewTransformNodeId,
+            EditorNodeGraph::kImageInputSocketId
+        },
+        {
+            viewTransformNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            splitNodeId,
+            EditorNodeGraph::kImageInputSocketId
+        },
+        {
+            splitNodeId,
+            "r",
+            firstReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId
+        },
+        {
+            firstReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            secondReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId
+        },
+        {
+            secondReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            outputNodeId,
+            EditorNodeGraph::kImageInputSocketId
+        }
+    };
+
+    const EditorNodeGraph::ScenePathInfo scenePath =
+        EditorNodeGraph::AnalyzeScenePath(graph, outputNodeId);
+    RequireScale(
+        scenePath.sceneReferred && scenePath.hasViewTransform,
+        "channel/reformat scene-path analysis should follow channel and reformat inputs");
+}
+
+void TestMfsrRejectsMixedFamiliesThroughChannelReformatChain() {
+    EditorNodeGraph::Graph graph;
+    const int rasterNodeId =
+        graph.AddImageGeneratorNode(
+            EditorNodeGraph::ImageGeneratorKind::SolidColor,
+            { 0.0f, -1.0f })->id;
+    const int mfsrNodeId =
+        graph.AddMfsrNode({}, { 6.0f, 0.0f })->id;
+
+    EditorNodeGraph::RawSourcePayload rawPayload;
+    const int rawSourceNodeId =
+        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 1.0f })->id;
+    EditorNodeGraph::RawDecodePayload decodePayload;
+    const int decodeNodeId =
+        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 1.0f })->id;
+    const int splitNodeId =
+        graph.AddChannelSplitNode({ 2.0f, 1.0f })->id;
+    const int firstReformatNodeId =
+        graph.AddReformatNode({ 3.0f, 1.0f })->id;
+    const int secondReformatNodeId =
+        graph.AddReformatNode({ 4.0f, 1.0f })->id;
+    const int combineNodeId =
+        graph.AddChannelCombineNode({ 5.0f, 1.0f })->id;
+
+    std::string error;
+    RequireScale(
+        graph.TryConnectSockets(
+            rasterNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            mfsrNodeId,
+            EditorNodeGraph::kMfsrReferenceInputSocketId,
+            &error),
+        "MFSR mixed-family fixture should connect its raster reference");
+    RequireScale(
+        graph.TryConnectSockets(
+            rawSourceNodeId,
+            EditorNodeGraph::kRawOutputSocketId,
+            decodeNodeId,
+            EditorNodeGraph::kRawInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            decodeNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            splitNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            splitNodeId,
+            "r",
+            firstReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            firstReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            secondReformatNodeId,
+            EditorNodeGraph::kImageInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            secondReformatNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            combineNodeId,
+            "r",
+            &error),
+        "MFSR mixed-family fixture should build its RAW channel/reformat chain");
+
+    error.clear();
+    RequireScale(
+        !graph.TryConnectSockets(
+            combineNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            mfsrNodeId,
+            EditorNodeGraph::MfsrInputSocketId(1),
+            &error),
+        "MFSR should reject RAW-derived channel/reformat output beside a raster reference");
+    RequireScale(
+        error.find("cannot mix RAW-derived and raster-derived") !=
+            std::string::npos,
+        "MFSR mixed-family rejection should explain the conflicting origins");
+}
+
 } // namespace
 
+void RunRetainedRoutingTests() {
+    TestChannelReformatChainRetainsItsReferenceSource();
+    TestChannelReformatScenePathUsesTypedInputs();
+    TestMfsrRejectsMixedFamiliesThroughChannelReformatChain();
+}
+
 void RunGraphScaleTests() {
+    RunRetainedRoutingTests();
+
     TestDeepCycleCheckUsesBoundedCallStack();
     TestDeepRegionPlanningUsesBoundedCallStack();
     TestDeepCompletedChainUsesBoundedCallStack();
     TestSharedTreeCompletionAndCacheReuse();
-    TestFrequencyChainRetainsItsReferenceSource();
     TestScalarBlendRetainsChannelIdentity();
     TestDeepScalarAndChannelPropagationUsesBoundedCallStack();
-    TestFrequencyScenePathUsesTypedInputs();
-    TestMfsrRejectsMixedFamiliesThroughFrequencyChain();
     TestDeepRenderScheduleUsesTopologicalOrder();
     TestWideSharedRenderScheduleUsesEachDependencyOnce();
     TestManyIndependentRenderTreesStayOutputScoped();

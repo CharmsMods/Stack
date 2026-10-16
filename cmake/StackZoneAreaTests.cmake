@@ -11,6 +11,7 @@ add_executable(StackRawZoneAreaTests
     src/Editor/Internal/RawLab/RawLabAreaGraph.cpp
     src/Editor/Internal/RawLab/RawLabAreaMask.cpp
     src/Editor/Internal/RawLab/RawLabCurveEditor.cpp
+    src/Editor/GraphUI/GraphPlotStyle.cpp
     src/Raw/RawZoneAreaRecipe.cpp
     src/Raw/RawZoneAreaMask.cpp
     src/Raw/RawZoneAreaGuidance.cpp
@@ -18,6 +19,8 @@ add_executable(StackRawZoneAreaTests
     src/Raw/RawZoneAreaGain.cpp
     src/Raw/RawDevelopmentRecipe.cpp
     src/Raw/RawGraphOperation.cpp
+    src/NodeMath/ToneCurveParameters.cpp
+    src/NodeMath/ContractTypes.cpp
     src/Raw/Tone/SceneTone.cpp
     src/Raw/Detail/DetailContrast.cpp
     src/Raw/RawColorCalibration.cpp

@@ -1,7 +1,10 @@
 #include "AppShell.h"
+#include "UiPerformanceTrace.h"
+#include "UiPerformanceProbe.h"
 #include "AppHeaderStyle.h"
 #include "EdgeChrome.h"
 #include "WorkspaceInputScope.h"
+#include "WorkspacePresentation.h"
 #include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -37,15 +40,21 @@ void AppShell::ApplyRailNavigation() {
 }
 
 void AppShell::LayoutNavigationRail() {
+    const bool processing = m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace();
+    if (m_CurrentTabId == Graph) m_NavigationRail.panelOpen = m_Editor->WorkspacePanelOpen();
     auto& rail = m_NavigationRail;
-    if (m_Editor->ConsumeRawSettingsPanelRequest()) rail.panelOpen = true;
+    if (m_Editor->ConsumeRawSettingsPanelRequest()) {
+        rail.panelOpen = true;
+        if (m_CurrentTabId == Graph) m_Editor->SetWorkspacePanelOpen(true);
+    }
+    if (m_Editor->IsReturningToGraph()) rail.panelOpen = false;
     auto* viewport = ImGui::GetMainViewport();
     rail.scale = std::max(.75f, ImGui::GetFontSize() / 16.f);
     const bool toggleWasTop = TopBarOwnsPanelToggle();
     LayoutRawMaskToolbar();
     const float width = Stack::Navigation::BarExtent * rail.scale;
     const auto& io = ImGui::GetIO();
-    const bool focused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool focused = m_UiPerformanceCapture || glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
     const bool inHeight = io.MousePos.y >= viewport->Pos.y &&
         io.MousePos.y < viewport->Pos.y + viewport->Size.y;
     const bool atEdge = inHeight && io.MousePos.x >= viewport->Pos.x &&
@@ -61,36 +70,54 @@ void AppShell::LayoutNavigationRail() {
             std::strcmp(window->RootWindow->Name, "StackPanelToggle") == 0;
     };
     const bool railActive = (context->ActiveId && (belongsToRail(context->ActiveIdWindow) || belongsToToggle(context->ActiveIdWindow))) ||
-        (io.NavVisible && (belongsToRail(context->NavWindow) || belongsToToggle(context->NavWindow)));
+        (Stack::Navigation::NavigationInputActive() && (belongsToRail(context->NavWindow) || belongsToToggle(context->NavWindow)));
     const bool railPopup = rail.menuOpen || m_NotificationPresenter.PanelOpen();
     Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
         atEdge, overRail, railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
     rail.position = ImVec2(viewport->Pos.x - width + rail.visibleWidth, viewport->Pos.y);
     const float available = std::max(0.f, viewport->Size.x - rail.visibleWidth);
-    const float panelWidth = std::min(360.f * rail.scale, available * .38f);
-    const float target = rail.panelOpen ? 1.f : 0.f;
-    if (Stack::Notifications::SystemReducedMotion()) rail.panelAmount = target;
-    else Stack::Header::Approach(rail.panelAmount, target, 16.f);
+    const bool gallery = m_ActiveProjectWorkspace == m_GalleryWorkspaceId && IsRaw(m_CurrentTabId);
+    const bool queue = m_CurrentTabId == Queue;
+    if (rail.galleryResizeActive && ((rail.galleryResizeForQueue ? !queue : !gallery) ||
+            !rail.panelOpen || !io.MouseDown[0] || Stack::Workspace::IsPreview()))
+        Stack::Navigation::FinishGalleryNavigatorResize(rail);
+    const float panelWidth = std::min((gallery ? rail.galleryPanelWidth : queue ? rail.queuePanelWidth : 360.f) * rail.scale, available * .38f);
+    const float target = !processing && rail.panelOpen ? 1.f : 0.f;
+    if (processing || Stack::Notifications::SystemReducedMotion()) rail.panelAmount = target;
+    else Stack::Header::ApproachMotion(rail.panelAmount, target, .28f);
     rail.visiblePanelWidth = panelWidth * rail.panelAmount;
     // Each animated column reserves its visible width. Revealing the rail
     // shifts the panel and narrows the workspace without changing panel state.
     const float toolbarHeight = m_RawMaskToolbar.visibleHeight;
     rail.panelPosition = ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight);
     rail.panelSize = ImVec2(panelWidth, std::max(1.f, viewport->Size.y - toolbarHeight));
-    const float top = std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
+    const bool graphBody = m_CurrentTabId == Graph && !m_Editor->IsViewMode();
+    const float top = processing ? 0.f : graphBody ? toolbarHeight : std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
     rail.bodyPosition = ImVec2(rail.panelPosition.x + rail.visiblePanelWidth, viewport->Pos.y + top);
     rail.bodySize = ImVec2(std::max(1.f, available - rail.visiblePanelWidth), std::max(1.f, viewport->Size.y - top));
-    const ImVec2 toggleOrigin = TopBarOwnsPanelToggle() ? m_RawMaskToolbar.position : rail.position;
-    m_RawMaskToolbar.panelTogglePosition = ImVec2(toggleOrigin.x + Stack::Navigation::BarPadding * rail.scale,
-        toggleOrigin.y + Stack::Navigation::BarPadding * rail.scale);
+    m_Editor->SetGraphReturnBounds(
+        ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight),
+        ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
+    // Blend the two reveal paths at their shared corner. Switching the input
+    // owner must not teleport the button between horizontal and vertical paths.
+    const float left = rail.revealAmount, topReveal = m_RawMaskToolbar.revealAmount;
+    const float total = left + topReveal;
+    const float hidden = width * (1.f - std::max(left, topReveal));
+    const float leftWeight = total > 0.f ? left / total : 1.f;
+    m_RawMaskToolbar.panelTogglePosition = ImVec2(
+        viewport->Pos.x - hidden * leftWeight + Stack::Navigation::BarPadding * rail.scale,
+        viewport->Pos.y - hidden * (1.f - leftWeight) + Stack::Navigation::BarPadding * rail.scale);
 }
 
 void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NavigationBars);
+    Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Rail,
+        Stack::UiPerformance::Probe::Key(m_NavigationRail.revealAmount));
     auto& rail = m_NavigationRail;
     auto* viewport = ImGui::GetMainViewport();
     const float s = rail.scale, width = Stack::Navigation::BarExtent * s, targetSize = Stack::Navigation::ButtonExtent * s;
-    const auto palette = Stack::Header::ResolvePalette(m_Appearance ? m_Appearance->GetClearColor()
+    const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(rail.position);
     ImGui::SetNextWindowSize(ImVec2(width, viewport->Size.y));
@@ -133,8 +160,8 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     if (gallery) rail.galleryView = true;
     if (m_CurrentTabId == Library) rail.galleryView = false;
     const bool available = CanSwitchProjectWorkspace();
-    const std::array<std::pair<int, Glyph>, 4> destinations{{
-        {RawTab, Glyph::Raw}, {Graph, Glyph::Graph}, {Library, Glyph::Library}, {Queue, Glyph::Queue}}};
+    const std::array<std::pair<int, Glyph>, 2> destinations{{
+        {Library, Glyph::Library}, {Queue, Glyph::Queue}}};
     for (const auto& item : destinations) {
         const char* name = item.first == RawTab ? "RAW" : item.first == Graph ? "Graph" : item.first == Library ? "Library" : "Queue";
         const bool selected = item.first == Library ? m_CurrentTabId == Library || gallery
@@ -162,31 +189,30 @@ void AppShell::RenderLibraryViewSwitch() {
     auto& rail = m_NavigationRail;
     if (m_CurrentTabId != Library && !(m_ActiveProjectWorkspace == m_GalleryWorkspaceId && IsRaw(m_CurrentTabId))) return;
     const bool gallery = m_CurrentTabId != Library;
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.f * rail.scale);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f * rail.scale, 7.f * rail.scale));
-    ImGui::BeginDisabled(!CanSwitchProjectWorkspace());
-    for (int view = 0; view < 2; ++view) {
-        if (view) ImGui::SameLine(0, 4.f * rail.scale);
-        ImGui::PushStyleColor(ImGuiCol_Button, (view == 1) == gallery
-            ? ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered) : ImVec4(0, 0, 0, 0));
-        if (ImGui::Button(view ? "Gallery" : "Projects")) {
-            rail.galleryView = view != 0;
-            rail.requestedDestination = Library;
-        }
-        ImGui::PopStyleColor();
+    if (gallery) ImGui::PushFont(nullptr, 14.f * rail.scale);
+    const int view = Stack::LibraryUi::ViewSwitch(gallery, rail.libraryViewMotion,
+        CanSwitchProjectWorkspace(), gallery ? rail.scale : 0.f);
+    if (gallery) ImGui::PopFont();
+    if (view >= 0 && (view != 0) != gallery) {
+        rail.galleryView = view != 0;
+        rail.requestedDestination = Library;
     }
-    ImGui::EndDisabled();
-    ImGui::PopStyleVar(3);
-    ImGui::Dummy(ImVec2(0, 10.f * rail.scale));
+    ImGui::Dummy(ImVec2(0, (gallery ? 16.f : 10.f) * rail.scale));
 }
 
 void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
+    if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const auto& rail = m_NavigationRail;
-    m_Editor->SetGraphCatalogHost(renderTab == Graph ? rail.panelPosition : ImVec2(),
-        renderTab == Graph ? rail.panelSize : ImVec2(), rail.panelOpen, rail.visiblePanelWidth);
-    if (IsRaw(renderTab)) {
-        m_Editor->RenderRawWorkspaceSectionPanel(rail.panelPosition, rail.panelSize, rail.visiblePanelWidth);
+    Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Panel,
+        Stack::UiPerformance::Probe::Key(rail.visiblePanelWidth));
+    const bool graphMode = renderTab == Graph && !m_Editor->IsViewMode();
+    m_Editor->SetGraphCatalogHost(graphMode ? rail.panelPosition : ImVec2(),
+        graphMode ? rail.panelSize : ImVec2(), rail.panelOpen, rail.visiblePanelWidth);
+    if (IsRaw(renderTab) || (renderTab == Graph && m_Editor->IsViewMode())) {
+        m_Editor->RenderRawWorkspaceSectionPanel(rail.panelPosition, rail.panelSize, rail.visiblePanelWidth,
+            [this] { RenderLibraryViewSwitch(); });
+        if (m_ActiveProjectWorkspace == m_GalleryWorkspaceId && rail.panelAmount == 1.f &&
+            !Stack::Workspace::IsPreview()) Stack::Navigation::RenderGalleryNavigatorResize(m_NavigationRail);
         return;
     }
     if (renderTab == Graph || rail.visiblePanelWidth < 1.f) return;
@@ -204,12 +230,20 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
     ImGui::Begin("StackWorkspacePanel", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.f * rail.scale, 18.f * rail.scale));
-    ImGui::BeginChild("Contents", rail.panelSize, ImGuiChildFlags_AlwaysUseWindowPadding,
-        ImGuiWindowFlags_NoBackground);
-    if (renderTab == Library) m_Library.RenderSectionPanel();
-    else if (renderTab == Queue) m_Queue.RenderSectionPanel();
+    const bool queue = renderTab == Queue;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        queue ? ImVec2(12.f * rail.scale, 16.f * rail.scale) : ImVec2(16.f * rail.scale, 18.f * rail.scale));
+    if (queue) ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.f);
+    if (ImGui::BeginChild("Contents", queue ? ImVec2(0, 0) : rail.panelSize, ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoBackground | (queue ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0))) {
+        if (renderTab == Library) {
+            RenderLibraryViewSwitch();
+            m_Library.RenderSectionPanel();
+        }
+        else if (queue) m_Queue.RenderSectionPanel();
+    }
     ImGui::EndChild();
+    if (queue) ImGui::PopStyleVar();
     ImGui::PopStyleVar();
     // The full-screen workspace must stay behind this sibling window and its
     // children. Change display order without stealing keyboard focus or
@@ -219,4 +253,6 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
     ImGui::End();
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
+    if (queue && rail.panelAmount == 1.f && !Stack::Workspace::IsPreview())
+        Stack::Navigation::RenderQueueNavigatorResize(m_NavigationRail);
 }

@@ -1,6 +1,7 @@
 #include "Project/RawLayerStack.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/Timeline/TimelinePersistence.h"
 
 #include <stdexcept>
@@ -44,11 +45,22 @@ std::optional<RawMaskReference> ReadReference(const Json& value) {
     return RawMaskReference{value.at("layer").get<std::string>(), value.at("output").get<std::string>()};
 }
 
+Json EndpointJson(const std::optional<GraphModel::Endpoint>& endpoint) {
+    if (!endpoint) return nullptr;
+    return {{"graph",endpoint->graphId},{"node",endpoint->nodeUuid},{"port",endpoint->portId}};
+}
+std::optional<GraphModel::Endpoint> ReadEndpoint(const Json& value) {
+    if (value.is_null()) return std::nullopt;
+    return GraphModel::Endpoint{value.at("graph").get<std::string>(),
+        value.at("node").get<std::string>(),value.at("port").get<std::string>()};
+}
+
 } // namespace
 
-nlohmann::json SerializeRawLayerStack(const RawLayerStackState& state) {
-    const auto serializeLayer = [](const RawAdjustmentLayer& layer) {
-        auto graph = EditorNodeGraph::SerializeGraphPayload(layer.processingSettings, layer.graph);
+namespace {
+nlohmann::json SerializeLayerStack(const RawLayerStackState& state, bool includeAssets, bool includeMaskRaster) {
+    const auto serializeLayer = [includeMaskRaster](const RawAdjustmentLayer& layer) {
+        auto graph = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), layer.graph, includeMaskRaster);
         EncodeGraphBytes(graph);
         graph["nodeGraph"].erase("selectedNodeId");
         Timeline::TimelineDocumentState timeline;
@@ -57,22 +69,58 @@ nlohmann::json SerializeRawLayerStack(const RawLayerStackState& state) {
         Json outputs = Json::array();
         for (const auto& output : layer.maskOutputs)
             outputs.push_back({{"id", output.id}, {"name", output.name}, {"nodeUuid", output.nodeUuid}});
-        return Json{{"id", layer.id}, {"name", layer.name}, {"enabled", layer.enabled},
+        Json result{{"id", layer.id}, {"name", layer.name}, {"enabled", layer.enabled},
             {"opacity", layer.opacity}, {"layerMask", ReferenceJson(layer.layerMask)},
-            {"outputs", std::move(outputs)}, {"graph", std::move(graph)}, {"animation", Timeline::SerializeTimelineDocument(timeline)}};
+            {"outputs", std::move(outputs)}, {"graph", std::move(graph)}, {"animation", Timeline::SerializeTimelineDocument(timeline)},
+            {"imageInput",EndpointJson(layer.imageInput)}};
+        if (layer.canvasOrigin) result["canvasOrigin"] = {layer.canvasOrigin->x,layer.canvasOrigin->y};
+        return result;
     };
     Json layers = Json::array();
     for (const auto& layer : state.layers) layers.push_back(serializeLayer(layer));
-    return {{"version", 4}, {"nextId", state.nextId}, {"background", serializeLayer(state.background)}, {"layers", std::move(layers)}};
+    Json result = {{"version", kRawLayerStackSchemaVersion}, {"nextId", state.nextId}, {"background", serializeLayer(state.background)}, {"layers", std::move(layers)},
+        {"explicitRouting",state.explicitRouting},{"imageOutput",EndpointJson(state.imageOutput)}};
+    if (includeAssets) result["createdAssets"] = Assets::SerializeLibrary(state.assets);
+    return result;
+}
+} // namespace
+
+nlohmann::json SerializeRawLayerStack(const RawLayerStackState& state, bool includeAssets) {
+    return SerializeLayerStack(state, includeAssets, true);
+}
+
+bool SameRawLayerStackState(const RawLayerStackState& a, const RawLayerStackState& b) {
+    if (a.layers.size() != b.layers.size() || !Assets::SameLibrary(a.assets,b.assets)) return false;
+    const auto sameRasters = [](const RawAdjustmentLayer& left, const RawAdjustmentLayer& right) {
+        const auto& ln = left.graph.GetNodes(); const auto& rn = right.graph.GetNodes();
+        if (ln.size() != rn.size()) return false;
+        for (std::size_t i=0;i<ln.size();++i)
+            if (ln[i].kind == EditorNodeGraph::NodeKind::CustomMask &&
+                rn[i].kind == EditorNodeGraph::NodeKind::CustomMask &&
+                !(ln[i].customMask.rasterLayer == rn[i].customMask.rasterLayer)) return false;
+        return true;
+    };
+    if (!sameRasters(a.background,b.background)) return false;
+    for (std::size_t i=0;i<a.layers.size();++i) if (!sameRasters(a.layers[i],b.layers[i])) return false;
+    // Comparing unchanged masks must not turn a large binary raster into a JSON
+    // integer per byte. The exact pixel comparison above is usually pointer-only.
+    return SerializeLayerStack(a,false,false) == SerializeLayerStack(b,false,false);
 }
 
 bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& result, std::string& error) {
     error.clear();
     try {
-        if (value.at("version").get<int>() != 4) throw std::runtime_error("Unsupported RAW graph document version.");
+        const int version = value.at("version").get<int>();
+        if (version != kRawLayerStackSchemaVersion) throw std::runtime_error("Unsupported layer graph document version.");
         const auto readLayer = [](const Json& item) {
             RawAdjustmentLayer layer;
             layer.id = item.at("id").get<std::string>(); layer.name = item.at("name").get<std::string>();
+            if (item.contains("imageInput")) layer.imageInput = ReadEndpoint(item.at("imageInput"));
+            if (item.contains("canvasOrigin")) {
+                const auto& origin = item.at("canvasOrigin");
+                if (!origin.is_array() || origin.size() != 2) throw std::runtime_error("Invalid layer canvas origin.");
+                layer.canvasOrigin = EditorNodeGraph::Vec2{origin.at(0).get<float>(),origin.at(1).get<float>()};
+            }
             layer.enabled = item.at("enabled").get<bool>(); layer.opacity = item.at("opacity").get<float>();
             layer.layerMask = ReadReference(item.at("layerMask"));
             if (item.at("animation").at("schemaVersion") != 2) throw std::runtime_error("Unsupported layer animation version.");
@@ -80,10 +128,8 @@ bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& r
             auto graph = item.at("graph");
             DecodeGraphBytes(graph);
             if (!EditorNodeGraph::IsCurrentGraphPayload(graph)) throw std::runtime_error("Unsupported layer graph version.");
-            layer.processingSettings = EditorNodeGraph::ExtractLayerArray(graph);
-            if (!layer.processingSettings.is_array()) throw std::runtime_error("Invalid processing settings.");
             EditorNodeGraph::DeserializeGraphPayload(graph, layer.graph,
-                static_cast<int>(layer.processingSettings.size()), {}, 0, 0, 4);
+                static_cast<int>(EditorNodeGraph::ExtractLayerArray(graph).size()));
             const auto& saved = graph.at("nodeGraph");
             if (saved.at("nodes").size() != layer.graph.GetNodes().size() || saved.at("links").size() != layer.graph.GetLinks().size())
                 throw std::runtime_error("A layer graph could not be restored without dropping authored data.");
@@ -107,7 +153,10 @@ bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& r
             return layer;
         };
         RawLayerStackState candidate;
+        candidate.explicitRouting = value.value("explicitRouting",false);
+        if (candidate.explicitRouting && value.contains("imageOutput")) candidate.imageOutput = ReadEndpoint(value.at("imageOutput"));
         candidate.nextId = value.at("nextId").get<std::uint64_t>();
+        if (value.contains("createdAssets") && !Assets::DeserializeLibrary(value.at("createdAssets"), candidate.assets, error)) return false;
         candidate.background = readLayer(value.at("background"));
         if (!value.at("layers").is_array()) throw std::runtime_error("RAW layers must be an array.");
         for (const auto& item : value.at("layers")) candidate.layers.push_back(readLayer(item));
@@ -139,8 +188,8 @@ bool ReadRawLayersFromPipeline(const nlohmann::json& pipeline, RawLayerStackStat
             const auto settings = EditorNodeGraph::ExtractLayerArray(pipeline);
             if (!settings.is_array()) throw std::runtime_error("Invalid project operation settings.");
             EditorNodeGraph::Graph composition;
-            EditorNodeGraph::DeserializeGraphPayload(pipeline,composition,static_cast<int>(settings.size()),{},0,0,4);
-            const auto& saved = pipeline.at("nodeGraph");
+            EditorNodeGraph::DeserializeGraphPayload(pipeline,composition,static_cast<int>(settings.size()));
+            auto saved = pipeline.at("nodeGraph");
             if (saved.at("nodes").size() != composition.GetNodes().size() || saved.at("links").size() != composition.GetLinks().size())
                 throw std::runtime_error("The project graph could not be restored without dropping authored data.");
             for (const auto& link : saved.at("links"))

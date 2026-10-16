@@ -40,6 +40,9 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_ARRAY_BUFFER
 #define GL_ARRAY_BUFFER 0x8892
 #endif
+#ifndef GL_ARRAY_BUFFER_BINDING
+#define GL_ARRAY_BUFFER_BINDING 0x8894
+#endif
 #ifndef GL_STATIC_DRAW
 #define GL_STATIC_DRAW 0x88E4
 #endif
@@ -148,6 +151,21 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
 #endif
+#ifndef GL_RGB32F
+#define GL_RGB32F 0x8815
+#endif
+#ifndef GL_CLAMP_TO_BORDER
+#define GL_CLAMP_TO_BORDER 0x812D
+#endif
+#ifndef GL_FRAMEBUFFER_SRGB
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
+#endif
+#ifndef GL_RASTERIZER_DISCARD
+#define GL_RASTERIZER_DISCARD 0x8C89
+#endif
+#ifndef GL_VERTEX_ARRAY_BINDING
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#endif
 #ifndef GL_TEXTURE_2D_ARRAY
 #define GL_TEXTURE_2D_ARRAY 0x8C1A
 #endif
@@ -220,6 +238,9 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_TEXTURE_FETCH_BARRIER_BIT
 #define GL_TEXTURE_FETCH_BARRIER_BIT 0x00000008
 #endif
+#ifndef GL_TEXTURE_UPDATE_BARRIER_BIT
+#define GL_TEXTURE_UPDATE_BARRIER_BIT 0x00000100
+#endif
 #ifndef GL_SHADER_STORAGE_BARRIER_BIT
 #define GL_SHADER_STORAGE_BARRIER_BIT 0x00002000
 #endif
@@ -274,6 +295,7 @@ extern void(APIENTRY* glUniform1f_)(GLint location, GLfloat v0);
 extern void(APIENTRY* glUniform1fv_)(GLint location, GLsizei count, const GLfloat* value);
 extern void(APIENTRY* glUniform2f_)(GLint location, GLfloat v0, GLfloat v1);
 extern void(APIENTRY* glUniform2i_)(GLint location, GLint v0, GLint v1);
+extern void(APIENTRY* glUniform4i_)(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
 extern void(APIENTRY* glUniform3f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 extern void(APIENTRY* glUniform4f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
 extern void(APIENTRY* glUniform3fv_)(GLint location, GLsizei count, const GLfloat* value);
@@ -363,6 +385,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glUniform1fv glUniform1fv_
 #define glUniform2f glUniform2f_
 #define glUniform2i glUniform2i_
+#define glUniform4i glUniform4i_
 #define glUniform3f glUniform3f_
 #define glUniform4f glUniform4f_
 #define glUniform3fv glUniform3fv_

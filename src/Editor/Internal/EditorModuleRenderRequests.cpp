@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "App/UiPerformanceTrace.h"
 #include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
@@ -57,15 +58,13 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
         return true;
     }
 
-    for (const EditorNodeGraph::Node& node : GetNodeGraph().GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::Preview &&
-            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
-            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter &&
-            node.kind != EditorNodeGraph::NodeKind::Scope) {
-            continue;
-        }
-        if ((node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
-             node.kind == EditorNodeGraph::NodeKind::Scope) &&
+    const auto& graph = GetNodeGraph();
+    m_PreviewRequestCandidates.Refresh(graph, GetProjectDocumentId(), m_Project->editRevision, m_RenderRevision);
+    for (int nodeId : m_PreviewRequestCandidates.Nodes()) {
+        const auto* candidate = graph.FindNode(nodeId);
+        if (!candidate) continue;
+        const auto& node = *candidate;
+        if (node.kind == EditorNodeGraph::NodeKind::Scope &&
             !node.expanded) {
             continue;
         }
@@ -205,43 +204,44 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
 }
 
 std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewRequests() {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::PreviewRequests);
     std::vector<EditorRenderWorker::PreviewRequest> requests;
+    AppendRawAssetCaptureRequests(requests);
     AppendRawLayerThumbnailRequests(requests);
-    for (auto it = m_PreviewPixelCache.begin(); it != m_PreviewPixelCache.end();) {
-        if (GetNodeGraph().FindNode(it->first)) { ++it; continue; }
-        m_PreviewRequestedGenerations.erase(it->first);
-        m_PreviewCompletedGenerations.erase(it->first);
-        m_PreviewDisplayedRevisions.erase(it->first);
-        it = m_PreviewPixelCache.erase(it);
+    const auto& graph = GetNodeGraph();
+    if (m_PreviewRequestCandidates.Refresh(graph, GetProjectDocumentId(), m_Project->editRevision, m_RenderRevision))
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::PreviewCandidateRebuild);
+    if (m_PreviewCachePruneGeneration != m_PreviewRequestCandidates.Generation()) {
+        for (auto it = m_PreviewPixelCache.begin(); it != m_PreviewPixelCache.end();) {
+            if (graph.FindNode(it->first)) { ++it; continue; }
+            m_PreviewRequestedGenerations.erase(it->first);
+            m_PreviewCompletedGenerations.erase(it->first);
+            m_PreviewDisplayedRevisions.erase(it->first);
+            it = m_PreviewPixelCache.erase(it);
+        }
+        m_PreviewCachePruneGeneration = m_PreviewRequestCandidates.Generation();
     }
     SharedPixelBuffer pipelineSourcePixels;
     SharedPixelBuffer fallbackImagePixels;
     int fallbackImageWidth = 0;
     int fallbackImageHeight = 0;
     int fallbackImageChannels = 4;
-    for (const EditorNodeGraph::Node& node : GetNodeGraph().GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::Preview &&
-            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
-            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter &&
-            node.kind != EditorNodeGraph::NodeKind::Scope) {
-            continue;
-        }
-        if ((node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
-             node.kind == EditorNodeGraph::NodeKind::Scope) &&
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::PreviewCandidates, m_PreviewRequestCandidates.Nodes().size());
+    for (int nodeId : m_PreviewRequestCandidates.Nodes()) {
+        const auto* candidate = graph.FindNode(nodeId);
+        if (!candidate) continue;
+        const auto& node = *candidate;
+        if (node.kind == EditorNodeGraph::NodeKind::Scope &&
             !node.expanded) {
             continue;
         }
 
         const bool generatedAutoMaskPreview = node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask;
-        const bool frequencySpectrumPreview =
-            node.kind == EditorNodeGraph::NodeKind::FrequencyFilter;
         const EditorNodeGraph::Link* input = generatedAutoMaskPreview
             ? GetNodeGraph().FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
             : GetNodeGraph().FindAnyInputLink(
                 node.id,
-                frequencySpectrumPreview
-                    ? EditorNodeGraph::kChannelInputSocketId
-                    : (node.kind == EditorNodeGraph::NodeKind::Scope
+                (node.kind == EditorNodeGraph::NodeKind::Scope
                         ? EditorNodeGraph::kScopeInputSocketId
                         : EditorNodeGraph::kPreviewInputSocketId));
         if (!input) {
@@ -251,6 +251,15 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             m_PreviewDisplayedRevisions.erase(node.id);
             continue;
         }
+
+        // Completed previews need only their revision/link checks. Socket
+        // construction can allocate metadata and belongs to an actual request.
+        const std::uint64_t dirtyGeneration = GetPreviewNodeRevision(node.id);
+        if (dirtyGeneration == 0) continue;
+        const auto requested = m_PreviewRequestedGenerations.find(node.id);
+        const auto completed = m_PreviewCompletedGenerations.find(node.id);
+        if ((requested != m_PreviewRequestedGenerations.end() && requested->second >= dirtyGeneration) ||
+            (completed != m_PreviewCompletedGenerations.end() && completed->second >= dirtyGeneration)) continue;
 
         EditorNodeGraph::SocketDefinition sourceSocket;
         const int sourceNodeId = generatedAutoMaskPreview ? node.id : input->fromNodeId;
@@ -266,28 +275,13 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             continue;
         }
 
-        const std::uint64_t dirtyGeneration = GetPreviewNodeRevision(node.id);
-        if (dirtyGeneration == 0) {
-            continue;
-        }
-        const std::uint64_t requestedGeneration =
-            m_PreviewRequestedGenerations.count(node.id) ? m_PreviewRequestedGenerations[node.id] : 0;
-        const std::uint64_t completedGeneration =
-            m_PreviewCompletedGenerations.count(node.id) ? m_PreviewCompletedGenerations[node.id] : 0;
-        if (requestedGeneration >= dirtyGeneration || completedGeneration >= dirtyGeneration) {
-            continue;
-        }
-
         EditorRenderWorker::PreviewRequest request;
         request.previewNodeId = node.id;
         request.scopeAnalysis = node.kind == EditorNodeGraph::NodeKind::Scope;
         request.sourceNodeId = sourceNodeId;
         request.sourceSocketId = sourceSocketId;
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;
-        request.frequencySpectrumInput = frequencySpectrumPreview;
-        request.frequencyEdgePolicy = static_cast<RenderFrequencyEdgePolicy>(
-            node.frequencyFilterSettings.edgePolicy);
-        request.directSourceOutput = !frequencySpectrumPreview;
+        request.directSourceOutput = true;
         request.dirtyGeneration = dirtyGeneration;
 
         if (!IsEditingRawLayerMaskGraph() && TryResolveReferenceSourceBuffer(

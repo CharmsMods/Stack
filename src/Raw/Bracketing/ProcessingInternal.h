@@ -1,6 +1,7 @@
 #pragma once
 #include "Processor.h"
 #include "CaptureMotion.h"
+#include "Raw/ReconstructionDepth.h"
 #include "ProcessingTimer.h"
 #include "Raw/MultiFrameDenoise/Preparation.h"
 #include "Raw/MultiFrameDenoise/NoiseModel.h"
@@ -9,6 +10,7 @@
 #include "Raw/MultiFrameDenoise/Reliability.h"
 
 namespace Raw::Bracketing {
+class TemporalGpu;
 struct PreparedSource {
     std::string id;
     std::size_t group=0;
@@ -27,7 +29,11 @@ struct PreparedSource {
     std::shared_ptr<Mfd::LocalMotionGrid> localMotion;
     std::shared_ptr<const MotionRefinementField> refinedMotion;
     std::shared_ptr<Mfd::ReliabilityStore> reliability;
+    // Reliability is measured after calibration against this motion revision.
+    std::uint64_t motionRevision=0,reliabilityMotionRevision=0;
+    double reliabilityScale=0,reliabilityScaleVariance=-1;
     std::shared_ptr<AlignmentInspection> alignmentInspection;
+    std::shared_ptr<const DepthCorrespondenceSupport> depthSupport;
 };
 struct PreparedDataset {
     ~PreparedDataset() {
@@ -38,8 +44,11 @@ struct PreparedDataset {
     std::vector<PreparedSource> sources;
     std::size_t origin=0;
     std::string motionIdentity;
+    std::string depthIdentity;
+    std::shared_ptr<const ReconstructionDepth> depth;
     unsigned width=0,height=0;
     std::map<std::string,double> stageSeconds;
+    std::shared_ptr<TemporalGpu> combiningGpu;
 };
 struct Observation {
     double value=0,variance=0,headroom=0,support=0;
@@ -65,6 +74,9 @@ class PreparedTileSampler;
 Observation SampleAlignedCapture(const PreparedSource&,Mfd::CfaLayout&,PreparedTileSampler&,
     double,double,double,const Mfd::RawSignalGradient&,std::string&);
 bool Prepare(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
+// Decode/normalize sources without computing merger-specific motion. Shared
+// by reconstruction and independent GPU geometry inspection.
+bool PrepareSources(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool Align(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool AlignLocal(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool Calibrate(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
@@ -76,5 +88,9 @@ bool ReadTemporalGroups(const ProcessingRequest&,const PreparedDataset&,unsigned
 bool PrepareGroupTile(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,std::string&);
 Pixel Blend(const std::vector<Observation>&,const std::vector<double>&,const BracketingRecipe&,
     const std::array<double,64>* colorHeadroom=nullptr);
+// A null weight pointer with count zero requests automatic precision weights.
+// Callers with bounded scratch arrays can blend without allocating per pixel.
+Pixel BlendWithWeights(const std::vector<Observation>&,const double*,std::size_t,
+    const BracketingRecipe&,const std::array<double,64>* colorHeadroom=nullptr);
 double Luminance(const RawMetadata&,const std::array<double,4>&);
 } // namespace Raw::Bracketing

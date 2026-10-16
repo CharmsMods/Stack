@@ -320,8 +320,7 @@ bool ResolveProjectPreviewPixels(
 
         bool hasGraphRawRenderNode = false;
         for (const auto& node : previewEditor.GetNodeGraph().GetNodes()) {
-            if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-                node.kind == EditorNodeGraph::NodeKind::RawDecode ||
+            if (node.kind == EditorNodeGraph::NodeKind::RawDecode ||
                 node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
                 hasGraphRawRenderNode = true;
                 break;

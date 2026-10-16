@@ -120,6 +120,50 @@
         "OpenCV-SoftFloat-FDLIBM.txt",
         "OpenCV-FLANN-BSD.txt"
       ]
+    },
+    {
+      "id": "dcb-demosaic",
+      "name": "DCB demosaicing",
+      "version": "2010-07-11 float adaptation",
+      "homepage": "https://github.com/LibRaw/LibRaw/blob/0.22.1/src/demosaic/dcb_demosaic.cpp",
+      "license": "BSD-3-Clause",
+      "copyright": "Copyright (C) 2010 Jacek Gozdz; color refinement by Luis Sanz Rodriguez",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "DCB-BSD-3-Clause.txt"
+      ]
+    },
+    {
+      "id": "libraw-classic-demosaic",
+      "name": "LibRaw PPG, VNG and AHD demosaicing adaptations",
+      "version": "0.22.1 float CPU and GPU adaptations",
+      "homepage": "https://github.com/LibRaw/LibRaw/tree/0.22.1/src/demosaic",
+      "license": "CDDL-1.0 option",
+      "copyright": "Copyright 2019-2025 LibRaw LLC; dcraw copyright 1997-2018 Dave Coffin",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "LibRaw-Demosaic-CDDL-1.0.txt",
+        "LibRaw-Demosaic-NOTICE.txt",
+        "LibRawDemosaicSource/ClassicDemosaic.cpp",
+        "LibRawDemosaicSource/ClassicDemosaicTerms.h",
+        "LibRawDemosaicSource/GpuClassic.cpp",
+        "LibRawDemosaicSource/GpuClassicShaders.h"
+      ]
+    },
+    {
+      "id": "zhang-wu-demosaic",
+      "name": "Zhang-Wu LMMSE demosaicing",
+      "version": "2013-07-06 float adaptation",
+      "homepage": "https://dev.ipol.im/~getreuer/code/",
+      "license": "BSD-2-Clause",
+      "copyright": "Copyright (c) 2010-2011 Pascal Getreuer",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "ZhangWu-BSD-2-Clause.txt"
+      ]
     }
   ]
 }

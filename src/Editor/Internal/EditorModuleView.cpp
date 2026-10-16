@@ -103,6 +103,7 @@ void EditorModule::ToggleDetachedPreviewFullscreen() {
     m_DetachedPreviewPlacementInitialized = false;
     m_DetachedPreviewNativeShown = false;
     m_DetachedPreviewFirstPresented = false;
+    m_DetachedPreviewHadOpenPopup = false;
     m_DetachedPreviewLayoutDetached = false;
     m_DetachedPreviewPlatformWaitFrames = 0;
     m_DetachedPreviewFocusAttempts = 0;
@@ -129,6 +130,7 @@ void EditorModule::CloseDetachedPreviewFullscreen() {
     m_DetachedPreviewPlacementInitialized = false;
     m_DetachedPreviewNativeShown = false;
     m_DetachedPreviewFirstPresented = false;
+    m_DetachedPreviewHadOpenPopup = false;
     m_DetachedPreviewLayoutDetached = false;
     m_DetachedPreviewPlatformWaitFrames = 0;
     m_DetachedPreviewFocusAttempts = 0;
@@ -222,6 +224,9 @@ void EditorModule::RenderDetachedPreviewWindow() {
     m_DetachedPreviewWindowSize = ImGui::GetWindowSize();
     const bool closeOnEscape =
         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput &&
+        !m_DetachedPreviewHadOpenPopup &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 
     bool closeAfterEnd = !keepOpen || closeOnEscape;
@@ -234,6 +239,8 @@ void EditorModule::RenderDetachedPreviewWindow() {
             ImGui::ColorConvertFloat4ToU32(detachedSurfaceColor));
     }
     if (!windowVisible || !ownsDedicatedViewport || platformWindow == nullptr) {
+        m_DetachedPreviewHadOpenPopup = ImGui::IsPopupOpen(
+            nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
         ++m_DetachedPreviewPlatformWaitFrames;
         if (m_DetachedPreviewPlatformWaitFrames > kDetachedPreviewOpenGraceFrames) {
             PostNotification(
@@ -254,6 +261,8 @@ void EditorModule::RenderDetachedPreviewWindow() {
     m_DetachedPreviewPlacementInitialized = true;
 
     m_Viewport.Render(this, 1.0f, EditorViewport::HostMode::DetachedFullscreen);
+    m_DetachedPreviewHadOpenPopup = ImGui::IsPopupOpen(
+        nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     ImGui::End();
 
     ImGui::PopStyleVar(3);

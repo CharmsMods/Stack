@@ -37,17 +37,20 @@ public:
     }
     // Call on the main GL context when retiring or replacing a project.
     void ForgetProjectPreview(std::uint64_t workspace);
+    // Final shell pass on the main window's double-buffered GL context (or an
+    // explicit offscreen color target). Owns state and leaves that target bound,
+    // with program/VAO and used texture bindings cleared; does not save caller state.
     bool Render(ImDrawData* data, const Workspace::Switcher& switcher, const ImVec4& clear,
         const Tools::Switcher* tools = nullptr, int toolIndex = -1,
         std::uint64_t projectWorkspace = 0, bool retainProjectFrame = false,
-        const ProjectFrame* projectFrame = nullptr);
+        const ProjectFrame* projectFrame = nullptr, unsigned int targetFramebuffer = 0);
     void Shutdown();
 private:
     bool Ensure(int width, int height);
     bool EnsureToolBlur(int width, int height);
     void BlurTools(float amount, const ImVec4& bounds, const ImVec2& feather, float pixelScale);
     void CaptureLastProjectFrame();
-    void PresentProjectPreview(const ProjectFrame& frame, const ImDrawData& data, const ImVec4& clear);
+    bool PresentProjectPreview(const ProjectFrame& frame, const ImDrawData& data, const ImVec4& clear);
     unsigned int texture = 0, framebuffer = 0, lowTexture = 0, lowFramebuffer = 0;
     unsigned int program = 0, blendProgram = 0, previewProgram = 0, vao = 0;
     unsigned int toolProgram = 0, blurProgram = 0;
@@ -56,6 +59,9 @@ private:
     unsigned int historyTexture = 0, historyFramebuffer = 0;
     unsigned int presentedTexture = 0, presentedFramebuffer = 0;
     bool historyValid = false;
+    bool previewHistoryValid = false;
+    ProjectFrame lastPreviewFrame;
+    ImVec4 lastPreviewClear{};
     int previousMode = 0;
     std::uint64_t destination = 0;
     double fadeStarted = 0;

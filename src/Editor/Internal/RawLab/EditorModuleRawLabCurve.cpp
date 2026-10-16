@@ -1,3 +1,5 @@
+#include "Editor/Internal/RawLab/CurveCanvas.h"
+#include "Raw/Curves/CurveAuthoring.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -108,29 +110,6 @@ bool EditorModule::RenderRawWorkspaceLabToneSurface(RawWorkspaceEditContext& con
     if (ShowsRawLabSettings(section)) {
         if (!context.rawAdjustmentLayerId.empty()) {
             ImGui::TextUnformatted("Tone Curve");
-            if (section == RawLabControlSection::All) RenderRawLayerMaskAttachment("Tone Curve mask");
-            if (ImGui::SmallButton("Add local curve")) ImGui::OpenPopup("add-local-curve");
-            LabTooltip("Add a masked curve immediately after this operation instance.");
-            if (ImGui::BeginPopup("add-local-curve")) {
-                using Mask = EditorNodeGraph::MaskGeneratorKind;
-                for (const auto& choice : {std::pair<const char*,Mask>{"Linear gradient",Mask::LinearGradient},
-                        {"Radial gradient",Mask::RadialGradient},{"Square",Mask::Square}}) {
-                    if (!ImGui::MenuItem(choice.first)) continue;
-                    auto candidate = m_Project->rawLayers.State();
-                    const auto kind = *SelectedRawOperationKind();
-                    const auto uuid = Stack::Project::AddRawMaskedCurve(candidate,context.rawAdjustmentLayerId,
-                        context.rawOperationUuid,kind,choice.second,m_RawLayerStatus);
-                    if (!uuid.empty() && ApplyRawLayerStackEdit(std::move(candidate))) {
-                        const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),context.rawAdjustmentLayerId);
-                        m_Project->rawOperationSelection[layer->id + "/" + Stack::RawRecipe::GraphOperationId(kind)] = uuid;
-                        m_EditingRawLayerMask = Stack::Project::GetRawOperationMask(m_Project->rawLayers.State(),*layer,uuid);
-                        m_RawLayerMaskGenerator = -1;
-                    }
-                    ImGui::EndPopup();
-                    return false;
-                }
-                ImGui::EndPopup();
-            }
         } else {
         ImGui::TextUnformatted(m_RawWorkspaceLabUi.selectedToneGradient >= 0
             ? "Local Tone Curve mask" : "Global Tone Curve");
@@ -140,19 +119,10 @@ bool EditorModule::RenderRawWorkspaceLabToneSurface(RawWorkspaceEditContext& con
             m_RawWorkspaceLabUi.gradientDrawShape = -1;
             for (auto& graph : m_RawWorkspaceLabUi.toneCurveGraphs) graph = {};
             m_RawWorkspaceLabUi.selectedTonePoint = -1;
+            m_RawWorkspaceLabUi.sceneToneSelectedPoint = -1;
+            m_RawWorkspaceLabUi.sceneToneDraggingPoint = -1;
         }
         ImGui::SameLine();
-        const bool managedGradientUnsupported =
-            context.resolvedMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed;
-        ImGui::BeginDisabled(managedGradientUnsupported);
-        if (ImGui::SmallButton("Linear##ToneGradientNew"))
-            m_RawWorkspaceLabUi.gradientDrawShape = 0;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Radial##ToneGradientNew"))
-            m_RawWorkspaceLabUi.gradientDrawShape = 1;
-        ImGui::EndDisabled();
-        if (managedGradientUnsupported)
-            ImGui::TextDisabled("Gradient masks need a recipe-backed RAW project.");
         if (ImGui::SmallButton(m_RawWorkspaceLabUi.gradientOverlayVisible
                 ? "Hide overlay##ToneGradientOverlay" : "Show overlay##ToneGradientOverlay"))
             m_RawWorkspaceLabUi.gradientOverlayVisible =
@@ -172,8 +142,11 @@ bool EditorModule::RenderRawWorkspaceLabToneSurface(RawWorkspaceEditContext& con
     }
     EnsureFinishTone(*activeCurveJson);
     nlohmann::json& finishTone = *activeCurveJson;
-    if (ShowsRawLabSettings(section)) {
+    if (ShowsRawLabSettings(section) && context.rawAdjustmentLayerId.empty()) {
         for (int i=0;i<3;++i) {
+            if (!context.rawAdjustmentLayerId.empty() &&
+                ((m_RawWorkspaceLabUi.sceneToneView<2 && i==2) ||
+                 (m_RawWorkspaceLabUi.sceneToneView==2 && i<2))) continue;
             const char* labels[]={"Curve","Contrast","RGB curves"};
             if(i) ContinueRawLabControlRow(labels[i], ImGui::GetStyle().ItemSpacing.x);
             if(FramelessTextButton(labels[i],m_RawWorkspaceLabUi.sceneToneView==i)) {
@@ -188,11 +161,54 @@ bool EditorModule::RenderRawWorkspaceLabToneSurface(RawWorkspaceEditContext& con
     }
     if(m_RawWorkspaceLabUi.sceneToneView<2) {
         auto tone=Stack::RawRecipe::ReadSceneTone(finishTone.value("luminanceTone",nlohmann::json::object()));
-        const auto histogram=ShowsRawLabGraph(section) ? BuildRawLabFinishToneHistogram(m_RawWorkspaceGraphScopeReadback,
+        const auto histogram=ShowsRawLabGraph(section) ? m_RawFloatingSurface.histogram.FinishTone(m_RawWorkspaceGraphScopeReadback,
+            m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0,
             RawDevelopmentGraphScopeStage::FinishToneInput,context.recipe.technical.workingSpace,1,-16,16,.18f) : RawLabGraphHistogram{};
-        if(DrawSceneToneEditor(tone,m_RawWorkspaceLabUi.sceneToneView==1,
+        if(context.nodeTarget && context.editorState) {
+            auto& state=context.State<CurveCanvasState>();
+            if(!tone.direct && context.drivenParameters.empty()) {
+                auto enabledTone=tone;enabledTone.enabled=true;
+                if(!Stack::RawRecipe::IsSceneToneActive(enabledTone)) {
+                    const bool enabled=tone.enabled;
+                    tone=Stack::RawRecipe::SceneTone{};tone.enabled=enabled;
+                }
+            }
+            if(!tone.direct) {
+                // Keep saved slope curves exact until the user explicitly converts.
+                if(ShowsRawLabSettings(section)) {
+                    ImGui::TextWrapped("This saved edit uses the previous slope model. Converting makes an editable approximation; Undo restores the original.");
+                    ImGui::BeginDisabled(!context.drivenParameters.empty());
+                    if(ImGui::Button("Convert to editable points")) {
+                        tone.curve.clear();
+                        for(int i=0;i<=32;++i) {
+                            const float x=float(i)/32, ev=-16+32*x;
+                            tone.curve.push_back({x,std::clamp((Stack::RawRecipe::EvaluateSceneToneEv(tone,ev)+16)/32,0.f,1.f),{1},{1}});
+                        }
+                        tone.direct=true; changed=true;
+                    }
+                    ImGui::EndDisabled();
+                    if(!context.drivenParameters.empty())ImGui::TextWrapped("Disconnect the legacy parameter inputs in Graph before converting.");
+                }
+                if(!tone.direct) changed|=DrawSceneToneEditor(tone,false,
+                    m_RawWorkspaceLabUi.sceneToneSelectedPoint,m_RawWorkspaceLabUi.sceneToneDraggingPoint,
+                    m_RawWorkspaceLabUi.sceneToneViewMin,m_RawWorkspaceLabUi.sceneToneViewMax,histogram,
+                    [&context](const auto& id) { return context.IsParameterDriven(id); },section);
+            }
+            if(tone.direct) {
+                if(ShowsRawLabSettings(section)) {
+                    changed|=ImGui::Checkbox("Enabled",&tone.enabled);
+                    if(ImGui::Button("Reset curve")) {tone=Stack::RawRecipe::SceneTone{};state={};changed=true;}
+                    ImGui::TextWrapped("Double-click to add points. Drag points in either direction. Use the icons below the curve for selection and coordinated edits.");
+                }
+                if(ShowsRawLabGraph(section)) {
+                    ImVec2 size=ImGui::GetContentRegionAvail();size.y=std::min(size.y,250.f);
+                    changed|=DrawCurveCanvas("Tone",tone.curve,tone.curveAmount,state,true,histogram,size,64);
+                }
+            }
+            if(changed) finishTone["luminanceTone"]=Stack::RawRecipe::SerializeSceneTone(tone);
+        } else if(DrawSceneToneEditor(tone,m_RawWorkspaceLabUi.sceneToneView==1,
                 m_RawWorkspaceLabUi.sceneToneSelectedPoint,m_RawWorkspaceLabUi.sceneToneDraggingPoint,
-                m_RawWorkspaceLabUi.sceneToneViewMin,m_RawWorkspaceLabUi.sceneToneViewMax,histogram, [this](const auto& id) { return IsRawParameterDriven(id); }, section)) {
+                m_RawWorkspaceLabUi.sceneToneViewMin,m_RawWorkspaceLabUi.sceneToneViewMax,histogram, [&context](const auto& id) { return context.IsParameterDriven(id); }, section)) {
             finishTone["luminanceTone"]=Stack::RawRecipe::SerializeSceneTone(tone);changed=true;
         }
         return changed;
@@ -289,8 +305,9 @@ bool EditorModule::RenderRawWorkspaceLabToneSurface(RawWorkspaceEditContext& con
             RawLabPointCurveChannel(activeCurve));
     bool componentChanged = false;
     if (ShowsRawLabGraph(section)) {
-        const RawLabGraphHistogram histogram = BuildRawLabFinishToneHistogram(
+        const auto& histogram = m_RawFloatingSurface.histogram.FinishTone(
             m_RawWorkspaceGraphScopeReadback,
+            m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0,
             RawDevelopmentGraphScopeStage::FinishToneInput,
             context.recipe.technical.workingSpace,
             domain,

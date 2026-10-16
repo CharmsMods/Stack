@@ -6,6 +6,7 @@
 void EditorModule::RenderBracketingGroups() {
     if(!m_Bracketing)return;
     auto& ui=*m_Bracketing;
+    Stack::Editor::PrepareBracketingControls(ui);
     if(ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama) {
         bool changed=false;ui.hoverFrame.clear();
         for(auto& group:ui.recipe.groups) {
@@ -14,9 +15,9 @@ void EditorModule::RenderBracketingGroups() {
             for(auto& frame:group.frames) {
                 ImGui::PushID(frame.id.c_str());ImGui::BeginDisabled(!group.enabled);
                 changed|=ImGui::Checkbox("##Enabled",&frame.enabled);ImGui::SameLine();
-                const auto label=ui.frameLabels.count(frame.id)?ui.frameLabels.at(frame.id):frame.id;
-                if(ImGui::Selectable(label.c_str(),ui.selectedFrame==frame.id)){ui.selectedFrame=frame.id;ui.view=1;ui.gradedResult=false;}
-                if(ImGui::IsItemHovered())ui.hoverFrame=frame.id;
+                const auto foundLabel=ui.frameLabels.find(frame.id);
+                const auto& label=foundLabel!=ui.frameLabels.end()?foundLabel->second:frame.id;
+                ImGui::TextUnformatted(label.c_str());
                 if(ImGui::BeginPopupContextItem("Panorama capture")) {
                     if(ImGui::MenuItem("Use as reference",nullptr,frame.id==ui.recipe.originFrameId)&&frame.enabled){ui.recipe.originFrameId=frame.id;changed=true;}
                     ImGui::EndPopup();
@@ -36,21 +37,16 @@ void EditorModule::RenderBracketingGroups() {
     }
     bool changed=false;const bool preview=Stack::Workspace::IsPreview();
     std::string remove;
-    for(const auto& source:ui.sources)if(!source.inspected) {
-        ImGui::TextWrapped("%s / reading capture settings...",source.path.filename().string().c_str());
-    }
+    for(const auto& caption:ui.controls.readingCaptions)ImGui::TextWrapped("%s",caption.c_str());
     int moveGroup=-1,moveFrame=-1,moveTo=-1;
     ui.hoverFrame.clear();
 
     ImGui::BeginDisabled(preview);
-    ImGui::TextUnformatted("Exposure groups");
-    ImGui::TextWrapped("Hover a capture to compare. Click its circle to pin it.");
-
     for(std::size_t g=0;g<ui.recipe.groups.size();++g) {
         auto& group=ui.recipe.groups[g];ImGui::PushID(group.id.c_str());
         changed|=ImGui::Checkbox("##GroupEnabled",&group.enabled);ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text,Stack::Editor::BracketColor(ui.recipe,g));
-        if(ImGui::Selectable(group.name.c_str(),ui.selectedGroup==static_cast<int>(g))) {ui.selectedGroup=static_cast<int>(g);ui.textureIdentity.clear();}
+        ImGui::PushStyleColor(ImGuiCol_Text,ui.controls.colors[g]);
+        if(ImGui::Selectable(group.name.c_str(),ui.selectedGroup==static_cast<int>(g))) {ui.selectedGroup=static_cast<int>(g);ui.selectedPoint=-1;}
         ImGui::PopStyleColor();
         if(ImGui::BeginPopupContextItem("Group options")) {
             char name[256];std::snprintf(name,sizeof(name),"%s",group.name.c_str());
@@ -59,20 +55,19 @@ void EditorModule::RenderBracketingGroups() {
         }
         for(std::size_t i=0;i<group.frames.size();++i) {
             auto& frame=group.frames[i];ImGui::PushID(frame.id.c_str());
-            const auto source=std::find_if(ui.sources.begin(),ui.sources.end(),[&](const auto& s){return s.frameId==frame.id;});
-            if(source==ui.sources.end()&&frame.id==ui.recipe.originFrameId) {
+            const auto foundSource=ui.controls.sourceIndices.find(frame.id);
+            const auto* source=foundSource!=ui.controls.sourceIndices.end()&&foundSource->second<ui.sources.size()
+                ?&ui.sources[foundSource->second]:nullptr;
+            if(!source&&frame.id==ui.recipe.originFrameId) {
                 ImGui::TextDisabled("Exposure origin retained for calibration.");ImGui::PopID();continue;
             }
             changed|=ImGui::Checkbox("##FrameEnabled",&frame.enabled);ImGui::SameLine();
-            const auto label=ui.frameLabels.count(frame.id)?ui.frameLabels.at(frame.id):frame.id;
-            ui.frameLabels[frame.id]=label;
-            if(ImGui::RadioButton("##CompareCapture",!ui.gradedResult&&ui.selectedFrame==frame.id)) {ui.gradedResult=false;ui.selectedFrame=frame.id;ui.selectedGroup=static_cast<int>(g);ui.view=3;}
-            if(ImGui::IsItemHovered())ui.hoverFrame=frame.id;
-            ImGui::SameLine();
-            const bool open=ImGui::TreeNode("Capture","%s%s",label.c_str(),frame.id==ui.recipe.originFrameId?" [0 EV origin]":"");
-            if(ImGui::IsItemHovered())ui.hoverFrame=frame.id;
+            const auto foundLabel=ui.frameLabels.find(frame.id);
+            const auto& label=foundLabel!=ui.frameLabels.end()?foundLabel->second:frame.id;
+            const bool open=ImGui::TreeNode("Capture","%s",label.c_str());
             if(open) {
-                if(source!=ui.sources.end()) {
+                if(frame.id==ui.recipe.originFrameId)ImGui::TextDisabled("Exposure origin / 0 EV");
+                if(source) {
                     const auto& metadata=source->metadata;
                     ImGui::TextDisabled("%.6g s / ISO %.0f / f/%.1f",metadata.exposureTimeSeconds,metadata.isoSpeed,metadata.apertureFNumber);
                     if(!source->error.empty())ImGui::TextWrapped("%s",source->error.c_str());
@@ -102,7 +97,8 @@ void EditorModule::RenderBracketingGroups() {
                 ImGui::SetNextItemWidth(90);float ev=static_cast<float>(frame.relativeEv);
                 if(ImGui::InputFloat("EV",&ev,.1f,1,"%.2f")) {frame.relativeEv=std::clamp(static_cast<double>(ev),-32.0,32.0);frame.manualExposure=true;changed=true;}
                 ImGui::EndDisabled();
-                if(ImGui::BeginCombo("Move to",group.name.c_str())) {
+                ImGui::TextUnformatted("Move to group");ImGui::SetNextItemWidth(-1);
+                if(ImGui::BeginCombo("##MoveTo",group.name.c_str())) {
                     for(std::size_t target=0;target<ui.recipe.groups.size();++target) if(target!=g&&ImGui::Selectable(ui.recipe.groups[target].name.c_str())) {moveGroup=static_cast<int>(g);moveFrame=static_cast<int>(i);moveTo=static_cast<int>(target);}
                     if(group.frames.size()>1&&ImGui::Selectable("New group")) {moveGroup=static_cast<int>(g);moveFrame=static_cast<int>(i);moveTo=static_cast<int>(ui.recipe.groups.size());}
                     ImGui::EndCombo();

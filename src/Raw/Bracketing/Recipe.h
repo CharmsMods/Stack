@@ -5,7 +5,11 @@
 #include <vector>
 
 namespace Raw::Bracketing {
-inline constexpr int RecipeVersion = 6;
+inline constexpr int RecipeVersion = 7;
+struct DepthSettings {
+    bool enabled=false;
+    double focus=.5,focusRange=.08,blurRadius=0;
+};
 enum class ReconstructionMode { Standard, SuperResolution1x, SuperResolution2x, Panorama };
 enum class PanoramaProjection { Auto, Perspective, Spherical };
 struct PanoramaSettings {
@@ -52,6 +56,7 @@ struct BracketingRecipe {
     AlignmentMode alignmentMode = AlignmentMode::AutomaticLocal;
     ReconstructionMode reconstruction = ReconstructionMode::Standard;
     PanoramaSettings panorama;
+    DepthSettings depth;
 };
 int ResolveOrientation(const BracketingRecipe&, int original);
 int ResolveStoredOrientation(const nlohmann::json&, int original);
@@ -61,6 +66,8 @@ bool Validate(const BracketingRecipe&, std::string& error, bool allowInactiveDra
 nlohmann::json Serialize(const BracketingRecipe&);
 bool Deserialize(const nlohmann::json&, BracketingRecipe&, std::string& error, bool allowInactiveDraft = false);
 std::vector<double> Evaluate(const std::vector<Knot>&, double ev);
+// Reuse the caller's storage when evaluating a contribution curve per cell.
+void Evaluate(const std::vector<Knot>&, double ev, std::vector<double>& result);
 void Redistribute(std::vector<double>& shares, std::size_t selected, double value,
     const std::vector<double>& automatic = {});
 std::vector<Knot> EqualCurves(std::size_t groups, double minimum = -12, double maximum = 8);

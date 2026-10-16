@@ -1,7 +1,11 @@
 #include "Editor/EditorModule.h"
 #include "App/AppHeaderStyle.h"
+#include "App/UiPerformanceTrace.h"
 #include "App/WorkspacePresentation.h"
+#include "App/WorkspaceInputScope.h"
+#include "Editor/UI/WindowDrawOpacity.h"
 #include "RawLabUiSupport.h"
+#include "Library/LibraryControls.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -11,11 +15,13 @@
 using namespace Stack::Editor::RawLabInternal;
 
 void EditorModule::RenderRawWorkspaceSectionPanel(
-    const ImVec2& position, const ImVec2& size, float visibleWidth) {
+    const ImVec2& position, const ImVec2& size, float visibleWidth,
+    const std::function<void()>& libraryNavigation) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewPanel);
     m_RawSectionPanelFrame = ImGui::GetFrameCount();
     if (visibleWidth <= 0.5f || size.x <= 0.0f || size.y <= 0.0f) return;
     EnsureRawWorkspaceLoaded();
-    LoadResourceTextures();
+    if (!m_PermanentGalleryWorkspace) LoadResourceTextures();
     ImGui::SetNextWindowPos(position);
     ImGui::SetNextWindowSize(ImVec2(std::min(size.x, visibleWidth), size.y));
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
@@ -34,37 +40,57 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin(name, nullptr, flags)) {
-        const float unit = ImGui::GetFontSize() / 13.0f;
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * unit, 16.0f * unit));
-        ImGui::BeginChild("SectionContents", size, ImGuiChildFlags_AlwaysUseWindowPadding,
-            ImGuiWindowFlags_NoBackground | (m_PermanentGalleryWorkspace ? 0 :
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
-        ImGui::BeginDisabled(Stack::Workspace::IsPreview() || visibleWidth < size.x - 0.5f);
-        if (m_PermanentGalleryWorkspace) {
+        const float unit = ImGui::GetFontSize() / (m_PermanentGalleryWorkspace ? 16.f : 13.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2((m_PermanentGalleryWorkspace ? 12.f : 14.f) * unit, 16.0f * unit));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,
+            m_PermanentGalleryWorkspace ? 0.f : ImGui::GetStyle().ChildRounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, m_PermanentGalleryWorkspace ? ImVec2(0, 0) : ImGui::GetStyle().ItemSpacing);
+        const bool visible = ImGui::BeginChild("SectionContents", size, ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        const float expansion = std::clamp(visibleWidth / size.x, 0.f, 1.f);
+        const float contentAlpha = expansion * expansion * (3.f - 2.f * expansion);
+        // Suppress transition input without changing enabled/disabled styling.
+        // Real disabled controls retain their normal appearance throughout.
+        Stack::Workspace::InputScope transitionInput(visibleWidth < size.x - 0.5f, false);
+        ImGui::BeginDisabled(Stack::Workspace::IsPreview());
+        if (visible && m_PermanentGalleryWorkspace) {
+            if (libraryNavigation) libraryNavigation();
             RenderRawGalleryFolderPanel();
-        } else {
-            if (BareToolIslandButton("Layers", !m_RawWorkspaceLabUi.settingsTabActive))
-                m_RawWorkspaceLabUi.settingsTabActive = false;
-            ImGui::SameLine(0, 8.f * unit);
-            if (BareToolIslandButton("Settings", m_RawWorkspaceLabUi.settingsTabActive))
-                m_RawWorkspaceLabUi.settingsTabActive = true;
+        } else if (visible) {
+            const bool bracketSource=IsBracketingToolActive();
+            if (BareToolIslandButton(bracketSource ? "Source" : "Layers", !m_RawAssetCapture.assetsTab &&
+                (bracketSource || !m_RawWorkspaceLabUi.settingsTabActive))) {
+                m_RawWorkspaceLabUi.settingsTabActive = false; m_RawAssetCapture.assetsTab = false;
+            }
+            if (!bracketSource) {
+                ImGui::SameLine(0, 8.f * unit);
+                if (BareToolIslandButton("Settings", m_RawWorkspaceLabUi.settingsTabActive && !m_RawAssetCapture.assetsTab)) {
+                    m_RawWorkspaceLabUi.settingsTabActive = true; m_RawAssetCapture.assetsTab = false;
+                }
+            }
+            ImGui::SameLine(0,8.f*unit);
+            if (BareToolIslandButton("Assets",m_RawAssetCapture.assetsTab)) m_RawAssetCapture.assetsTab = true;
             ImGui::Spacing();
-            const bool settings = m_RawWorkspaceLabUi.settingsTabActive;
-            ImGui::PushID(settings ? "Settings" : "Layers");
+            const bool settings = !bracketSource && m_RawWorkspaceLabUi.settingsTabActive && !m_RawAssetCapture.assetsTab;
+            ImGui::PushID(m_RawAssetCapture.assetsTab ? "Assets" : bracketSource ? "Source" : settings ? "Settings" : "Layers");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
-            ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,
+            const bool bodyVisible=ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoBackground);
-            if (settings) {
+            if (bodyVisible && m_RawAssetCapture.assetsTab) {
+                RenderRawAssetsPanel();
+            } else if (bodyVisible && bracketSource) {
+                RenderBracketingSidePanelUI();
+            } else if (bodyVisible && settings) {
                 RenderRawWorkspaceToolSettings();
-            } else if (IsRawWorkspaceProjectActive() &&
+            } else if (bodyVisible && IsRawWorkspaceProjectActive() &&
                 m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
                 m_RawLayerPanel.Prune(ImGui::GetFrameCount());
                 // This is a permanent section host. The old floating/docked
                 // presentation flag does not move it out of the section panel.
                 RenderRawLayerPanelContents();
-            } else if (IsMultiFrameRawProjectActive()) {
+            } else if (bodyVisible && IsMultiFrameRawProjectActive()) {
                 ImGui::TextWrapped("Layers become available on a developed RAW image. Capture controls remain beside the viewport.");
-            } else {
+            } else if (bodyVisible) {
                 ImGui::TextWrapped("Open an image from Gallery to work with its layers and masks.");
             }
             ImGui::EndChild();
@@ -72,8 +98,11 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             ImGui::PopID();
         }
         ImGui::EndDisabled();
+        // Include custom plots and thumbnails without double-dimming widgets.
+        // The panel's separate translucent tint follows expansion above.
+        Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(),contentAlpha);
         ImGui::EndChild();
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(3);
     }
     // Keep the section above the full-screen workspace without taking focus.
     // This also puts its tint after the viewport's sharp image draw.
@@ -87,6 +116,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
 void EditorModule::RequestRawSettingsPanel() {
     if (Stack::Workspace::IsPreview()) return;
     m_RawWorkspaceLabUi.settingsTabActive = true;
+    m_RawAssetCapture.assetsTab = false;
     m_RawSettingsPanelRequested = true;
 }
 
@@ -110,74 +140,8 @@ bool EditorModule::ConsumeRawToolPickerRequest() {
     return requested;
 }
 
-void EditorModule::RenderRawGalleryFolderPanel() {
-    const std::string workspace = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
-    if (workspace != m_RawGalleryFolderWorkspaceKey) {
-        m_RawGalleryFolderWorkspaceKey = workspace;
-        m_RawGalleryFolderFilter.reset();
-        m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
-    }
-    ImGui::TextUnformatted("Folders");
-    ImGui::Spacing();
-    if (BareTextButton("Open folder")) {
-        OpenRawWorkspaceFolderDialog();
-        return;
-    }
-    if (m_RawWorkspace.workspaceRoot.empty()) {
-        ImGui::TextWrapped("Choose a folder to browse its RAW images.");
-        return;
-    }
-    ImGui::TextWrapped("%s", m_RawWorkspace.workspaceRoot.filename().string().c_str());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", workspace.c_str());
-    const auto selectFolder = [&](std::optional<std::string> folder) {
-        if (folder == m_RawGalleryFolderFilter) return;
-        m_RawGalleryFolderFilter = std::move(folder);
-        // The display caches own pointers into their presentations. Invalidate
-        // them together before either grid or filmstrip resolves its rows.
-        InvalidateRawWorkspaceGalleryPresentation();
-        m_RawWorkspaceLabGalleryScrollTargetY = 0.0f;
-        m_RawWorkspaceLabGalleryScrollCurrentY = 0.0f;
-        m_RawWorkspaceLabFilmstripScrollTargetX = 0.0f;
-        m_RawWorkspaceGalleryLayoutAnimation.Reset();
-    };
-    if (ImGui::Selectable("All folders", !m_RawGalleryFolderFilter)) selectFolder(std::nullopt);
-    struct Folder { std::map<std::string, Folder> children; std::string key; } root;
-    for (const auto& group : GetRawWorkspaceGalleryPresentation().groups) {
-        auto* folder = &root;
-        std::filesystem::path path;
-        for (const auto& part : std::filesystem::path(group.folderKey)) {
-            if (part.empty() || part == ".") continue;
-            path /= part;
-            folder = &folder->children[part.string()];
-            folder->key = path.generic_string();
-        }
-    }
-    const auto renderFolders = [&](const auto& self, const Folder& folder) -> void {
-        for (const auto& [label, child] : folder.children) {
-            ImGui::PushID(child.key.c_str());
-            auto flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-            if (child.children.empty()) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-            if (m_RawGalleryFolderFilter == child.key) flags |= ImGuiTreeNodeFlags_Selected;
-            const bool open = ImGui::TreeNodeEx("##Folder", flags, "%s", label.c_str());
-            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) selectFolder(child.key);
-            if (open && !child.children.empty()) { self(self, child); ImGui::TreePop(); }
-            ImGui::PopID();
-        }
-    };
-    renderFolders(renderFolders, root);
-    ImGui::Spacing();
-    ImGui::TextDisabled("Show");
-    // Retain the Gallery's existing category and automatic-bracket actions.
-    RenderRawWorkspaceLabGalleryHeader(false, true);
-}
-
 const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspacePanelGalleryPresentation() {
-    const std::string workspace = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
-    if (workspace != m_RawGalleryFolderWorkspaceKey) {
-        m_RawGalleryFolderWorkspaceKey = workspace;
-        m_RawGalleryFolderFilter.reset();
-        m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
-    }
+    SynchronizeRawGalleryFolderScope();
     const auto& source = GetRawWorkspaceCategoryPresentation();
     if (!m_PermanentGalleryWorkspace || !m_RawGalleryFolderFilter) return source;
     if (m_RawGalleryFilteredRevision == m_RawWorkspaceGalleryRevision &&

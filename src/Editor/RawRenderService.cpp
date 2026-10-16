@@ -44,6 +44,7 @@ void RawRenderService::ReleaseResultResources(
         texture.Reset();
     };
     releaseTexture(result.outputTexture);
+    releaseTexture(result.viewportOverview);
     releaseTexture(result.rawWorkspace.localRangeOverlayTexture);
     if (result.outputTiles.readyFence != nullptr) {
         glDeleteSync(result.outputTiles.readyFence);
@@ -184,6 +185,11 @@ bool RawRenderService::SubmitCommand(
     snapshot.previewMaxDimension = command.targetEdge;
     snapshot.telemetry = command.telemetry;
     snapshot.rawWorkspace = std::move(command.rawWorkspace);
+    snapshot.viewportPreview = command.viewportPreview;
+    snapshot.viewportViewId = command.viewportViewId;
+    snapshot.viewportExecutionIdentity = command.viewportExecutionIdentity;
+    snapshot.viewportContentIdentity = command.viewportContentIdentity;
+    snapshot.prepareViewportOverview = command.prepareViewportOverview;
     snapshot.viewportTiling = command.viewportTiling;
     snapshot.previews = std::move(command.previews);
     snapshot.rawSessionCommand = true;
@@ -210,6 +216,10 @@ void RawRenderService::QueueSyntheticSuperseded(
     result.telemetry.skipReason = reason != RawPreviewSkipReason::None ? reason : overload ? RawPreviewSkipReason::OverloadDeadline :
         workerStarted ? RawPreviewSkipReason::PriorityChange : RawPreviewSkipReason::InputCoalesced;
     result.previewMaxDimension = snapshot.previewMaxDimension;
+    result.viewportPreview = snapshot.viewportPreview;
+    result.viewportViewId = snapshot.viewportViewId;
+    result.viewportExecutionIdentity = snapshot.viewportExecutionIdentity;
+    result.viewportContentIdentity = snapshot.viewportContentIdentity;
     result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
     result.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
     result.rawWorkspace.recipeRevision =
@@ -279,8 +289,10 @@ void RawRenderService::Pump() {
             ready.telemetry.queuedAt = std::chrono::steady_clock::now();
             m_Pending[ready.ownerId] = std::move(ready);
         }
-        if (!m_Worker.HasPendingOrBusyForShutdown() ||
-            m_Worker.IsWaitingForRawDenoiseCompletion()) {
+        // A compute batch owns the GL context, not the next image slot.
+        // Admit pending foreground images now so the worker selects them at
+        // its next safe boundary rather than waiting for all burst batches.
+        if (!m_Worker.HasPendingSnapshotOrRender()) {
             m_ActiveOwner = 0;
             m_ActiveSnapshot = {};
             auto selected = m_Pending.end();
@@ -441,6 +453,13 @@ bool RawRenderService::IsBusyFor(ClientId clientId) const {
         m_Pending.find(clientId) != m_Pending.end() || m_Worker.HasPendingForOwner(clientId);
 }
 
+bool RawRenderService::HasSnapshotWorkFor(ClientId clientId) const {
+    if (clientId == 0) return false;
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Pending.find(clientId) != m_Pending.end() ||
+        m_Worker.HasSnapshotWorkFor(clientId);
+}
+
 bool RawRenderService::HasPendingOrBusyForShutdown(
     ClientId clientId) const {
     return IsBusyFor(clientId);
@@ -482,7 +501,8 @@ void RawRenderService::InvalidateSnapshotsBefore(
 
 bool RawRenderService::ExecuteOpenGlTaskBlocking(
     EditorRenderWorker::OpenGlTask task,
-    std::string& error) {
+    std::string& error,
+    Raw::OpenGlTaskPriority priority) {
     std::shared_lock<std::shared_mutex> lifetime(m_WorkerLifetimeMutex);
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
@@ -491,7 +511,7 @@ bool RawRenderService::ExecuteOpenGlTaskBlocking(
             return false;
         }
     }
-    return m_Worker.ExecuteOpenGlTaskBlocking(std::move(task), error);
+    return m_Worker.ExecuteOpenGlTaskBlocking(std::move(task), error, priority);
 }
 
 } // namespace Stack::EditorRendering

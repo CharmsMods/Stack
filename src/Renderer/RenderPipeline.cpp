@@ -1,6 +1,7 @@
 #include "RenderPipeline.h"
 #include "Renderer/GLStateGuards.h"
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
+#include "Editor/Layers/NoiseLayer.h"
 
 #include <new>
 #include <stdexcept>
@@ -96,6 +97,12 @@ void RenderPipeline::Execute(const std::vector<std::shared_ptr<LayerBase>>& laye
         glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
         glClear(GL_COLOR_BUFFER_BIT);
 
+        if(auto* noise=dynamic_cast<NoiseLayer*>(layer.get())){
+            Stack::Renderer::FilmGrain::Input input;
+            input.nativeWidth=m_BaseCanvasWidth;input.nativeHeight=m_BaseCanvasHeight;
+            input.shouldCancel=[this]{return m_ShouldCancelRender && m_ShouldCancelRender();};
+            noise->SetFilmGrainInput(input);
+        }
         layer->ExecuteWithSource(currentInput, m_SourceTexture, m_Width, m_Height, m_Quad);
 
         currentInput = targetTex;
@@ -286,6 +293,12 @@ void RenderPipeline::ExecuteMasked(const std::vector<RenderLayerStep>& steps, co
 
             glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
             glClear(GL_COLOR_BUFFER_BIT);
+            if(auto* noise=dynamic_cast<NoiseLayer*>(step.layer.get())){
+                Stack::Renderer::FilmGrain::Input input;
+                input.nativeWidth=m_BaseCanvasWidth;input.nativeHeight=m_BaseCanvasHeight;
+                input.shouldCancel=[this]{return m_ShouldCancelRender && m_ShouldCancelRender();};
+                noise->SetFilmGrainInput(input);
+            }
             step.layer->ExecuteWithSource(originalInput, m_SourceTexture, m_Width, m_Height, m_Quad);
 
             const unsigned int maskTexture = findMaskTexture(step.maskNodeId);

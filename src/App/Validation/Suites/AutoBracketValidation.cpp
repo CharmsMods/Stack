@@ -131,29 +131,28 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Check(editor->HasDeferredLoadedProjectApplyCoreFinished(),editor->GetDeferredLoadedProjectStatusText());
         auto& graph=editor->GetNodeGraph();Check(!graph.GetNodes().empty(),"Foreground graph was not loaded");
         graph.EditNodes().front().title="Unsaved foreground edit";editor->MarkDirty();
-        const auto filterId=graph.AddFrequencyFilterNode(EditorNodeGraph::FrequencyFilterMode::BandStop,{240,240})->id;
-        Check(editor->ExtractFrequencyResponseNode(filterId,&error),error);
-        Check(editor->CanUndoFrequencyGraphAction(),"Foreground undo history was not populated");
+        editor->BeginProjectGraphHistory();
+        editor->AddReformatNodeAt({240,240});
+        Check(editor->CanUndoProjectGraphEdit(),"Foreground undo history was not populated");
         graph.SelectNode(graph.GetNodes().front().id);
         const auto foreground=Project::SerializeRawProjectSnapshot(*editor->GetActiveRawProjectSnapshot());
         const auto foregroundGraph=EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(),graph);
-        const auto selection=graph.GetSelectedNodeIds();const bool undo=editor->CanUndoFrequencyGraphAction();
+        const auto selection=graph.GetSelectedNodeIds();const bool undo=editor->CanUndoProjectGraphEdit();
         const auto structureRevision=graph.GetStructureRevision();
         const auto checkForeground=[&] {
             Check(editor->IsDirty()&&Project::SerializeRawProjectSnapshot(*editor->GetActiveRawProjectSnapshot())==foreground&&
                 EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(),graph)==foregroundGraph&&
-                graph.GetSelectedNodeIds()==selection&&editor->CanUndoFrequencyGraphAction()==undo&&
+                graph.GetSelectedNodeIds()==selection&&editor->CanUndoProjectGraphEdit()==undo&&
                 graph.GetStructureRevision()==structureRevision,
                 "Background processing changed the foreground document, edits, selection or undo state");
         };
-        Check(queue.Enabled(),"Automatic processing is not enabled by default");
         Check(queue.SetRoot(root,0),"Could not select validation root");queue.UpdateCandidates(candidates,{});
         Check(queue.CanStartWork(0,true,false),"Automatic queue did not become eligible immediately");
         queue.RunNow();queue.Tick(59,false,false,executor);Check(!queue.HasWork(),"Run now bypassed readiness");
         queue.Tick(59,true,true,executor);Check(!queue.HasWork(),"Run now competed with foreground work");
         queue.Tick(59,true,false,executor);Check(queue.HasWork(),"Run now did not start");
         auto first=queue.Current();
-        Queue reserved;Check(LoadQueue(root,reserved,error)&&reserved.items.front().projectId==first->item.projectId,
+        AutoBracket::Queue reserved;Check(LoadQueue(root,reserved,error)&&reserved.items.front().projectId==first->item.projectId,
             "Project identity was not reserved before work");
         Presentation presentation;presentation.Begin(first,59);
         queue.SetPaused(true);bool continued=false;
@@ -174,9 +173,11 @@ bool ValidateAutoBracket(int argc,char** argv) {
         ImGui::NewFrame();DrawPresentation(presentation,queue);ImGui::EndFrame();presentation.Tick(120);
         Check(!presentation.animation.active,"Completion animation did not finish");
         Check(first->mailbox->Read()->progress.stage==Raw::Bracketing::ProcessingStage::Completed,"Completion preceded durable saving");
-        queue.Tick(200,true,false,executor);Check(!queue.HasWork(),"Pause started another bracket");
+        queue.Tick(200,false,false,executor);Check(!queue.HasWork(),"Idle resume bypassed discovery readiness");
         queue.Shutdown();Check(queue.SetRoot({},201),"Could not leave root");Check(queue.SetRoot(root,201),"Could not restore queue");
-        queue.UpdateCandidates(candidates,{});Check(queue.GetQueue().paused,"Pause did not survive reload");
+        queue.UpdateCandidates(candidates,{{first->item.candidate.identity,
+            {first->item.projectId,first->item.projectPath}}});
+        Check(queue.GetQueue().paused,"Pause did not survive reload");
         queue.SetPaused(false);queue.NoteActivity(201);queue.Tick(260,true,false,executor);
         Check(queue.HasWork(),"Resuming did not start the ready queue");
         const auto canceledId=queue.Current()->item.projectId;continued=false;
@@ -188,12 +189,23 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Check(queue.HasWork()&&queue.Current()->item.projectId==canceledId,"Cancellation created a duplicate project");
         queue.NoteActivity(264);auto second=finish(265);Check(second->outcome==State::Completed,second->status);checkForeground();
         queue.Tick(326,true,false,executor);Check(!queue.HasWork(),"Completed stacks were processed twice");
-        Check(editor->UndoFrequencyGraphAction()&&editor->CanRedoFrequencyGraphAction(),"Foreground undo history could not be used after takeover");
-        Check(editor->RedoFrequencyGraphAction(),"Foreground redo history could not be used after takeover");
+        Check(editor->UndoProjectGraphEdit()&&editor->CanRedoProjectGraphEdit(),"Foreground undo history could not be used after takeover");
+        Check(editor->RedoProjectGraphEdit(),"Foreground redo history could not be used after takeover");
 
         for(const auto& completed:{first,second}) {
             auto reopened=Project::OpenProjectStore(completed->item.projectPath);Check(bool(reopened),reopened.message);
             Check(!reopened.snapshot.coverThumbnailBytes.empty(),"Saved bracket has no cover");
+            const auto* savedSet=Project::FindSourceSet(reopened.snapshot,reopened.snapshot.activeSourceSetId);
+            Check(savedSet&&Project::HasSavedBracketingResult(reopened.store,reopened.snapshot,*savedSet),
+                "Current durable burst output was not recognized");
+            auto stale=reopened.snapshot;++stale.hdrInputRevision;
+            Check(!Project::HasSavedBracketingResult(stale,*Project::FindSourceSet(stale,stale.activeSourceSetId)),
+                "An older engine input revision counted as a completed burst");
+            stale=reopened.snapshot;
+            auto* malformed=Project::FindSourceSet(stale,stale.activeSourceSetId);
+            malformed->settings["bracketingResult"].erase("inputRevision");
+            Check(!Project::HasSavedBracketingResult(stale,*malformed),
+                "An incomplete saved-result descriptor counted as a completed burst");
             Raw::Bracketing::BracketingResult restored;
             Check(Project::RestoreBracketingResult(reopened.store,reopened.snapshot,reopened.snapshot.activeSourceSetId,restored,error),error);
             CheckResult(*completed->result,restored);Check(!restored.analysis,"Reopening unexpectedly rebuilt preparation");
@@ -218,12 +230,30 @@ bool ValidateAutoBracket(int argc,char** argv) {
             Check(Project::RestoreBracketingResult(copied.store,copied.snapshot,copied.snapshot.activeSourceSetId,restored,error),error);
             CheckResult(*first->result,restored);
         }
-        Queue independent;independent.root=first->item.projectPath.parent_path();
+        AutoBracket::Queue independent;independent.root=first->item.projectPath.parent_path();
         Reconcile(independent,candidates,{{candidates.front().identity,{first->item.projectId,first->item.projectPath}}});
         Check(independent.items.front().state==State::Completed,"An existing manual bracket was not recognized");
+        Reconcile(independent,candidates,{});
+        Check(independent.items.front().state==State::Attention,
+            "Persisted completion without a current durable result was retained");
+        {
+            auto retryQueue=independent;
+            retryQueue.root=root/"review-retry";
+            Check(SaveQueue(retryQueue,error),error);
+            AutoBracketCoordinator retry;
+            Check(retry.SetRoot(retryQueue.root,0),"Could not open the review retry queue");
+            retry.Retry(candidates.front().identity);
+            const auto& item=retry.GetQueue().items.front();
+            Check(item.state==State::Pending&&item.projectId.empty()&&item.projectPath.empty(),
+                "Review retry would overwrite the retained edited project");
+            retry.Shutdown();
+        }
+        Reconcile(independent,candidates,{{candidates.front().identity,{first->item.projectId,first->item.projectPath}}});
+        Check(independent.items.front().state==State::Completed,
+            "A current result did not repair the same project's previous attention state");
         independent.items.front().state=State::Attention;independent.items.front().error="Capture needs review";
         independent.items.back().state=State::Excluded;
-        Check(SaveQueue(independent,error),error);Queue loaded;Check(LoadQueue(independent.root,loaded,error),error);
+        Check(SaveQueue(independent,error),error);AutoBracket::Queue loaded;Check(LoadQueue(independent.root,loaded,error),error);
         Reconcile(loaded,candidates,{});
         Check(loaded.items.front().state==State::Attention&&loaded.items.back().state==State::Excluded,
             "Attention or explicit exclusion was lost");

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 
 namespace Stack::Renderer::RawPreviewProxy {
 
@@ -21,6 +22,8 @@ struct Summary {
 };
 
 bool HasPixels(const Raw::RawImageData& rawData);
+// Match RAW proxy sizing without decoding or rendering the image pixels.
+std::pair<int,int> FitPreviewExtent(int width, int height, int previewMaxDimension);
 bool BuildPreviewRawData(
     const Raw::RawImageData& source,
     int previewMaxDimension,

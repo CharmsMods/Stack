@@ -24,6 +24,9 @@ struct NodeSurfaceSpec {
     float preferredWidth = 334.0f;
     float maxWidth = 420.0f;
     bool usesCanvasTool = false;
+    // Opt-in width for expanded inline controls, in graph logical pixels.
+    // Zero retains the shared width class; collapsed nodes keep that class too.
+    float inlineWidth = 0.0f;
 };
 
 struct NodeSurfaceContext {

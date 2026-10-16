@@ -1,4 +1,5 @@
 #include "Project/GraphImagePayload.h"
+#include "NodeMath/SourceImageSemantics.h"
 #include "Utils/HashUtils.h"
 #include "Utils/PixelBufferUtils.h"
 
@@ -52,7 +53,8 @@ RenderGraphImagePayload BuildRenderImagePayload(const EditorNodeGraph::ImagePayl
     renderImage.width = payload.width;
     renderImage.height = payload.height;
     renderImage.channels = payload.channels;
-    renderImage.sourceDescriptor = payload.sourceColorMetadata.descriptor;
+    renderImage.sourceDescriptor = Stack::NodeMath::DescribeStoredImageValue(payload.sourceColorMetadata.descriptor,
+        payload.channels, payload.width, payload.height);
     return renderImage;
 }
 

@@ -1,6 +1,7 @@
 #include "Persistence/ProjectIndex.h"
 
 #include "App/AppPaths.h"
+#include "Persistence/BracketingResultStore.h"
 #include "Persistence/ProjectStore.h"
 #include "Persistence/StackBinaryFormat.h"
 
@@ -194,6 +195,10 @@ ProjectRecord RecordFromStore(
         : std::string();
     record.sourceSets = opened.snapshot.sourceSets;
     record.multiFrameProject = IsMultiFrameProjectDocument(opened.snapshot);
+    for (const auto& set : opened.snapshot.sourceSets)
+        if (HasSavedBracketingResult(opened.store, opened.snapshot, set))
+            record.savedBracketingSourceSetIds.push_back(set.sourceSetId);
+    record.hasSavedBracketingResult = !record.savedBracketingSourceSetIds.empty();
     AppendRawWorkspaceMetadata(opened.snapshot.rawWorkspaceData, record);
     AppendSnapshotSources(opened.snapshot, record.sources);
     if (record.hasRawWorkspaceData && !record.sources.empty()) {
@@ -323,11 +328,24 @@ std::vector<ProjectRecord> ProjectIndex::Rebuild(const std::vector<std::filesyst
                 signatureSize != 0 &&
                 previous->second.indexSignatureSize == signatureSize &&
                 previous->second.indexSignatureModifiedTimeTicks ==
-                    signatureModifiedTimeTicks) {
+                    signatureModifiedTimeTicks &&
+                // A bracket's managed output can disappear or be restored
+                // without changing its manifest. Recheck its small metadata
+                // and asset presence on a catalog scan, never while drawing.
+                std::none_of(previous->second.sourceSets.begin(),
+                    previous->second.sourceSets.end(), [](const MultiFrameSourceSet& set) {
+                        return set.settings.contains("bracketing");
+                    })) {
                 records.push_back(previous->second);
                 continue;
             }
             if (directory && !IsDirectoryProjectBundle(candidate)) {
+                // Closet itself now contains the shared Assets directory;
+                // Projects may contain first-save staging. Neither container
+                // is a half-written project, and both must remain traversable.
+                std::error_code markerError;
+                if (std::filesystem::is_regular_file(candidate / "workspace.json", markerError) ||
+                    std::filesystem::is_regular_file(candidate.parent_path() / "workspace.json", markerError)) continue;
                 std::error_code partialError;
                 const bool looksLikePartialBundle =
                     std::filesystem::exists(candidate / "assets", partialError) ||

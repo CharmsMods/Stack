@@ -6,6 +6,7 @@
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/Utf8Text.h"
 
 #include <algorithm>
 #include <cctype>
@@ -210,15 +211,19 @@ void DrawCardOverlayText(
     const ImU32 titleColor = IM_COL32(255, 255, 255, static_cast<int>(235.0f * alpha));
     const ImU32 bodyColor = IM_COL32(220, 228, 236, static_cast<int>(215.0f * alpha));
     auto fitWithEllipsis = [&](const std::string& source) {
-        if (ImGui::CalcTextSize(source.c_str()).x <= (maxTextX - titlePos.x)) {
+        const float availableWidth = maxTextX - titlePos.x;
+        if (ImGui::CalcTextSize(source.c_str()).x <= availableWidth) {
             return source;
         }
 
+        if (ImGui::CalcTextSize("...").x > availableWidth) {
+            return std::string();
+        }
         std::string candidate = source;
-        while (candidate.size() > 4) {
-            candidate.pop_back();
+        while (!candidate.empty()) {
+            Stack::Utf8Text::RemoveLastCodePoint(candidate);
             std::string withEllipsis = candidate + "...";
-            if (ImGui::CalcTextSize(withEllipsis.c_str()).x <= (maxTextX - titlePos.x)) {
+            if (ImGui::CalcTextSize(withEllipsis.c_str()).x <= availableWidth) {
                 return withEllipsis;
             }
         }

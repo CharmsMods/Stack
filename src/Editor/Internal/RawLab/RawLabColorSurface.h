@@ -8,6 +8,8 @@
 #include <functional>
 #include <string>
 
+namespace Stack::Editor { class ColorWarpFeedback; }
+
 namespace Stack::Editor::RawLabInternal {
 
 struct RawLabColorSurfaceArgs {
@@ -19,6 +21,7 @@ struct RawLabColorSurfaceArgs {
     const std::string& previewIdentity;
     std::function<void()> saveAppState;
     bool strengthDriven = false;
+    ColorWarpFeedback* feedback = nullptr;
 };
 
 bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args);

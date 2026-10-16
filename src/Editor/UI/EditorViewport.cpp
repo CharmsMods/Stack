@@ -1,5 +1,6 @@
 #include "Editor/UI/ViewportNavigation.h"
 #include "EditorViewport.h"
+#include "App/UiPerformanceProbe.h"
 #include "App/Resources/EmbeddedTabIcons.h"
 #include "Editor/EditorModule.h"
 #include "App/settings/AppearanceTheme.h"
@@ -22,6 +23,7 @@
 #include <stdexcept>
 #include <vector>
 #include <string>
+#include <utility>
 
 using namespace EditorViewportHelpers;
 
@@ -309,6 +311,8 @@ constexpr const char* kPixelInspectionFragmentShader = R"GLSL(
 #version 430 core
 uniform sampler2D uTexture;
 uniform ivec2 uFullSize;
+uniform ivec2 uStorageSize;
+uniform vec4 uRegionBounds;
 uniform ivec2 uTileOrigin;
 uniform ivec2 uTileHaloOrigin;
 uniform int uTiled;
@@ -331,6 +335,14 @@ void main() {
         texturePixel = ivec2(
             topLeftPixel.x - uTileOrigin.x + uTileHaloOrigin.x,
             bottomLeftY - uTileOrigin.y + uTileHaloOrigin.y);
+    } else {
+        const vec2 imageUv = (vec2(topLeftPixel) + vec2(0.5)) / vec2(uFullSize);
+        if (any(lessThan(imageUv, uRegionBounds.xy)) ||
+            any(greaterThanEqual(imageUv, uRegionBounds.zw))) discard;
+        const vec2 localUv = (imageUv - uRegionBounds.xy) / (uRegionBounds.zw - uRegionBounds.xy);
+        const ivec2 localPixel = clamp(ivec2(floor(localUv * vec2(uStorageSize))),
+            ivec2(0), uStorageSize - ivec2(1));
+        texturePixel = ivec2(localPixel.x, uStorageSize.y - 1 - localPixel.y);
     }
     fragColor = texelFetch(uTexture, texturePixel, 0);
     fragColor.a *= clamp(uRevealAlpha, 0.0, 1.0);
@@ -992,6 +1004,9 @@ void EditorViewport::DrawPixelInspectionCallback(
         glGetUniformLocation(draw->program, "uFullSize"),
         draw->fullWidth,
         draw->fullHeight);
+    glUniform2i(glGetUniformLocation(draw->program, "uStorageSize"), draw->storageWidth, draw->storageHeight);
+    glUniform4f(glGetUniformLocation(draw->program, "uRegionBounds"),
+        draw->regionBounds.x, draw->regionBounds.y, draw->regionBounds.z, draw->regionBounds.w);
     glUniform2i(
         glGetUniformLocation(draw->program, "uTileOrigin"),
         draw->tileX,
@@ -1052,6 +1067,7 @@ void EditorViewport::ResetSinglePreviewState() {
     m_PixelInspectionOriginX = 0;
     m_PixelInspectionOriginY = 0;
     m_PixelInspectionDrawCommands.clear();
+    m_PixelInspectionCommandFrame = -1;
 }
 
 void EditorViewport::Initialize() {
@@ -1153,7 +1169,7 @@ void EditorViewport::RenderCompositeMode(
 
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
         const bool hovered = !inputBlocked && ImGui::IsItemHovered();
-        const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
         if (hovered && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             editor->ToggleCompositeExportBoundsEditMode();
         }
@@ -2193,6 +2209,11 @@ void EditorViewport::RenderSingleImageMode(
     const bool rawWorkspaceContext =
         hasRawPresentationTexture &&
         editor->IsRawWorkspaceProjectActive();
+    Stack::Renderer::ViewportPreviewGeometry previewGeometry;
+    const bool hasPreviewGeometry = editor->TryGetViewportPreviewGeometry(previewGeometry) && previewGeometry.Valid();
+    unsigned int overviewTex = 0;
+    int overviewWidth = 0, overviewHeight = 0;
+    const bool hasOverview = editor->TryGetViewportPreviewOverview(overviewTex, overviewWidth, overviewHeight);
     const EditorRenderWorker::SharedTextureTileSet& viewportTiles = editor->GetViewportOutputTiles();
     int imgW = hasViewportTiles
         ? viewportTiles.fullWidth
@@ -2204,6 +2225,24 @@ void EditorViewport::RenderSingleImageMode(
         : (hasRawPresentationTexture
             ? rawPresentationHeight
             : pipeline.GetCanvasHeight());
+    const int outputStorageWidth = hasPreviewGeometry ? previewGeometry.storageWidth : imgW;
+    const int outputStorageHeight = hasPreviewGeometry ? previewGeometry.storageHeight : imgH;
+    if (hasPreviewGeometry && !hasViewportTiles) {
+        imgW = previewGeometry.logicalWidth;
+        imgH = previewGeometry.logicalHeight;
+    }
+    const Raw::ViewportRegion outputRegion = hasPreviewGeometry ? previewGeometry.resident :
+        Stack::Renderer::WholeImageRegion(imgW, imgH);
+    const bool regionalOutput = !hasViewportTiles && outputRegion.Partial();
+    const auto patchBounds = [&](ImVec2 minimum, ImVec2 maximum) {
+        if (!outputRegion.Valid()) return std::pair<ImVec2, ImVec2>{minimum, maximum};
+        const ImVec2 size(maximum.x - minimum.x, maximum.y - minimum.y);
+        return std::pair<ImVec2, ImVec2>{
+            ImVec2(minimum.x + size.x * outputRegion.x / outputRegion.fullWidth,
+                minimum.y + size.y * outputRegion.y / outputRegion.fullHeight),
+            ImVec2(minimum.x + size.x * (outputRegion.x + outputRegion.width) / outputRegion.fullWidth,
+                minimum.y + size.y * (outputRegion.y + outputRegion.height) / outputRegion.fullHeight)};
+    };
     const bool singleOutputMode = editor->GetViewportMode() == EditorModule::ViewportMode::SingleOutputPreview;
     EditorModule::DevelopSubjectViewportState developSubjectState;
     const bool hasDevelopSubjectOverlay =
@@ -2215,6 +2254,9 @@ void EditorViewport::RenderSingleImageMode(
         singleOutputMode &&
         canStaticCompare &&
         editor->CanConsumeEditorCommandKeys() &&
+        !ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeyShift &&
+        !ImGui::GetIO().KeySuper &&
         ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
         m_ShowStaticSingleCompare = !m_ShowStaticSingleCompare;
         editor->SetHoverFade(0.0f);
@@ -2263,6 +2305,23 @@ void EditorViewport::RenderSingleImageMode(
 
     const ImVec2 contentCursor = ImGui::GetCursorPos();
     ImDrawList* drawList = hostDrawList;
+    const auto drawOverviewGaps = [&](ImVec2 minimum, ImVec2 maximum, ImU32 tint) {
+        if (!regionalOutput || !hasOverview || !overviewTex || overviewWidth <= 0 || overviewHeight <= 0) return;
+        const auto patch = patchBounds(minimum, maximum);
+        const float width = maximum.x - minimum.x, height = maximum.y - minimum.y;
+        if (width <= 0 || height <= 0) return;
+        const auto uv = [&](ImVec2 point) {
+            return ImVec2((point.x - minimum.x) / width, 1.f - (point.y - minimum.y) / height);
+        };
+        const auto gap = [&](ImVec2 low, ImVec2 high) {
+            if (low.x >= high.x || low.y >= high.y) return;
+            drawList->AddImage((ImTextureID)(intptr_t)overviewTex, low, high, uv(low), uv(high), tint);
+        };
+        gap(minimum, ImVec2(maximum.x, patch.first.y));
+        gap(ImVec2(minimum.x, patch.second.y), maximum);
+        gap(ImVec2(minimum.x, patch.first.y), ImVec2(patch.first.x, patch.second.y));
+        gap(ImVec2(patch.second.x, patch.first.y), ImVec2(maximum.x, patch.second.y));
+    };
     float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
     float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
     const ImVec2 singleImageMin(contentScreen.x + offsetX, contentScreen.y + offsetY);
@@ -2377,14 +2436,20 @@ void EditorViewport::RenderSingleImageMode(
             if (hasViewportTiles && texture == outputTex) {
                 drawViewportTileSet(min, max, alpha / std::max(0.001f, viewportRevealAlpha));
             } else {
+                const bool editedOutput = texture == outputTex;
+                const ImU32 tint = IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f)));
+                if (editedOutput) drawOverviewGaps(min, max, tint);
+                const auto patch = editedOutput ? patchBounds(min, max) : std::pair<ImVec2, ImVec2>{min, max};
+                const float patchU = editedOutput ? 0.f : uInset;
+                const float patchV = editedOutput ? 0.f : vInset;
                 drawList->AddImageRounded(
                     (ImTextureID)(intptr_t)texture,
-                    min,
-                    max,
-                    ImVec2(uInset, 1.0f - vInset),
-                    ImVec2(1.0f - uInset, vInset),
-                    IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))),
-                    kImageRounding);
+                    patch.first,
+                    patch.second,
+                    ImVec2(patchU, 1.0f - patchV),
+                    ImVec2(1.0f - patchU, patchV),
+                    tint,
+                    editedOutput && regionalOutput ? 0.f : kImageRounding);
             }
         };
 
@@ -2424,6 +2489,11 @@ void EditorViewport::RenderSingleImageMode(
         m_StaticCompareOutputMax = LerpImVec2(m_StaticCompareOutputMax, outputTargetMax, rectT);
         m_StaticCompareSourceMin = LerpImVec2(m_StaticCompareSourceMin, sourceTargetMin, rectT);
         m_StaticCompareSourceMax = LerpImVec2(m_StaticCompareSourceMax, sourceTargetMax, rectT);
+
+        editor->UpdateGraphViewportCoverage(m_StaticCompareOutputMin, m_StaticCompareOutputMax,
+            contentScreen, ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y),
+            m_Panning || m_ZoomAnimating ||
+                (m_StaticSingleCompareBlend > .001f && m_StaticSingleCompareBlend < .999f));
 
         const float sourceAlpha = SmoothStep01(m_StaticSingleCompareBlend);
         drawAnimatedImage(sourceTex, m_StaticCompareSourceMin, m_StaticCompareSourceMax, sourceAlpha);
@@ -2581,8 +2651,11 @@ void EditorViewport::RenderSingleImageMode(
     constexpr float kImageRounding = 18.0f;
     ImGui::Dummy(ImVec2(dispW, dispH));
     const bool imageHovered = ImGui::IsItemHovered();
-    const ImVec2 imageMin = ImGui::GetItemRectMin();
-    const ImVec2 imageMax = ImGui::GetItemRectMax();
+    ImVec2 imageMin = ImGui::GetItemRectMin();
+    ImVec2 imageMax = ImGui::GetItemRectMax();
+    editor->UpdateGraphViewportCoverage(imageMin, imageMax, contentScreen,
+        ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y), m_Panning || m_ZoomAnimating);
+    if (editor->IsViewMode()) editor->PresentNodeOpenImage(imageMin, imageMax);
     const bool sourceAvailable = sourceTex != 0 && sourceTex != outputTex;
     const bool labelsFit = finalScale >= 42.0f;
     const EditorViewportPreview::StateInput previewInput {
@@ -2609,6 +2682,7 @@ void EditorViewport::RenderSingleImageMode(
     // extending edit-to-present latency.
     const bool pixelValuesRequested =
         !editor->IsRawWorkspaceUiInteractionActive() &&
+        (hasViewportTiles || !hasPreviewGeometry || previewGeometry.NativeSamples()) &&
         (previewPresentation ==
              EditorViewportPreview::Presentation::CleanProcessedCursorReadout ||
          previewPresentation ==
@@ -2644,7 +2718,7 @@ void EditorViewport::RenderSingleImageMode(
             hasViewportTiles ? viewportTiles : EditorRenderWorker::SharedTextureTileSet{},
             imgW,
             imgH,
-            editor->GetViewportOutputRenderGeneration());
+            editor->GetViewportOutputRenderGeneration()) ^ static_cast<std::uint64_t>(outputRegion.Fingerprint());
         int readbackOriginX = 0;
         int readbackOriginY = 0;
         int readbackWidth = 0;
@@ -2659,6 +2733,15 @@ void EditorViewport::RenderSingleImageMode(
             readbackOriginY = std::clamp(static_cast<int>(imageV * static_cast<float>(imgH)), 0, imgH - 1);
             readbackWidth = 1;
             readbackHeight = 1;
+        }
+        if (!hasViewportTiles && hasPreviewGeometry && previewGeometry.NativeSamples() &&
+            readbackWidth > 0 && readbackHeight > 0) {
+            const int right = std::min(readbackOriginX + readbackWidth, outputRegion.x + outputRegion.width);
+            const int bottom = std::min(readbackOriginY + readbackHeight, outputRegion.y + outputRegion.height);
+            readbackOriginX = std::max(readbackOriginX, outputRegion.x);
+            readbackOriginY = std::max(readbackOriginY, outputRegion.y);
+            readbackWidth = std::max(0, right - readbackOriginX);
+            readbackHeight = std::max(0, bottom - readbackOriginY);
         }
         std::uint64_t readbackSignature = textureSignature;
         const auto addSignature = [&readbackSignature](std::uint64_t value) {
@@ -2685,10 +2768,10 @@ void EditorViewport::RenderSingleImageMode(
             } else if (readbackWidth > 0 && readbackHeight > 0 && outputTex != 0) {
                 readbackReady = ReadPixelInspectionTextureRegion(
                     outputTex,
-                    imgW,
-                    imgH,
-                    readbackOriginX,
-                    readbackOriginY,
+                    outputStorageWidth,
+                    outputStorageHeight,
+                    readbackOriginX - (hasPreviewGeometry ? outputRegion.x : 0),
+                    readbackOriginY - (hasPreviewGeometry ? outputRegion.y : 0),
                     readbackWidth,
                     readbackHeight,
                     readbackPixels);
@@ -2913,8 +2996,10 @@ void EditorViewport::RenderSingleImageMode(
     editor->SetHoverFade(currentFactor);
 
     // 2) Draw processed output fully opaque, then fade the original over it.
-    const float uInset = imgW > 1 ? (0.5f / static_cast<float>(imgW)) : 0.0f;
-    const float vInset = imgH > 1 ? (0.5f / static_cast<float>(imgH)) : 0.0f;
+    // Standalone clamped images retain the complete sample lattice. A half
+    // texel inset compresses a native raster and blurs its one-to-one display.
+    const float uInset = 0.0f;
+    const float vInset = 0.0f;
     auto drawViewportTileSet = [&](ImVec2 min, ImVec2 max, float alpha) {
         if (!hasViewportTiles || alpha <= 0.001f || viewportTiles.fullWidth <= 0 || viewportTiles.fullHeight <= 0) {
             return;
@@ -2955,7 +3040,10 @@ void EditorViewport::RenderSingleImageMode(
         }
         drawList->PopClipRect();
     };
-    m_PixelInspectionDrawCommands.clear();
+    if (m_PixelInspectionCommandFrame != ImGui::GetFrameCount()) {
+        m_PixelInspectionDrawCommands.clear();
+        m_PixelInspectionCommandFrame = ImGui::GetFrameCount();
+    }
     const ImGuiViewport* windowViewport = ImGui::GetWindowViewport();
     auto queuePixelInspectionDraw = [&](unsigned int texture,
                                         const EditorRenderWorker::SharedTextureTile* tile,
@@ -2975,6 +3063,14 @@ void EditorViewport::RenderSingleImageMode(
         command.texture = texture;
         command.fullWidth = imgW;
         command.fullHeight = imgH;
+        command.storageWidth = outputStorageWidth;
+        command.storageHeight = outputStorageHeight;
+        if (outputRegion.Valid()) {
+            command.regionBounds = ImVec4(float(outputRegion.x) / outputRegion.fullWidth,
+                float(outputRegion.y) / outputRegion.fullHeight,
+                float(outputRegion.x + outputRegion.width) / outputRegion.fullWidth,
+                float(outputRegion.y + outputRegion.height) / outputRegion.fullHeight);
+        }
         command.imageMin = imageMin;
         command.imageMax = imageMax;
         command.displayPos = windowViewport ? windowViewport->Pos : ImVec2(0.0f, 0.0f);
@@ -2982,6 +3078,8 @@ void EditorViewport::RenderSingleImageMode(
         command.framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
         command.revealAlpha = viewportRevealAlpha;
         if (tile) {
+            command.storageWidth = tile->haloWidth;
+            command.storageHeight = tile->haloHeight;
             command.tileX = tile->x;
             command.tileY = tile->y;
             command.tileHaloX = tile->haloX;
@@ -3001,6 +3099,20 @@ void EditorViewport::RenderSingleImageMode(
         drawList->PopClipRect();
         return true;
     };
+    const int firstOpeningPhotoVertex = drawList->VtxBuffer.Size;
+    const bool openingPhotoClip = editor->IsNodeOpenTransitionActive();
+    if (openingPhotoClip) {
+        const auto* openingViewport = ImGui::GetMainViewport();
+        drawList->PushClipRect(openingViewport->WorkPos,
+            ImVec2(openingViewport->WorkPos.x+openingViewport->WorkSize.x,
+                openingViewport->WorkPos.y+openingViewport->WorkSize.y),false);
+    }
+    const bool openingSurround = editor->IsViewMode() && editor->HasNodeOpenSurround();
+    if (openingSurround) drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    const int firstOpeningPhotoCommand = drawList->CmdBuffer.Size - 1;
+    const auto outputPatch = patchBounds(imageMin, imageMax);
+    const ImU32 outputTint = IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha));
+    drawOverviewGaps(imageMin, imageMax, outputTint);
     bool drewPixelInspectionColors = false;
     if (pixelCleanModeRequested) {
         m_FrameTransition.Clear();
@@ -3028,24 +3140,35 @@ void EditorViewport::RenderSingleImageMode(
             drewPixelInspectionColors = queuePixelInspectionDraw(
                 outputTex,
                 nullptr,
-                imageMin,
-                imageMax);
+                outputPatch.first,
+                outputPatch.second);
         }
     }
     if (!drewPixelInspectionColors && hasViewportTiles) {
         drawViewportTileSet(imageMin, imageMax, viewportRevealAlpha);
-    } else if (!drewPixelInspectionColors && !m_FrameTransition.Draw(
-        drawList, outputTex, imageMin, imageMax, ImGui::GetTime(),
+    } else if (!drewPixelInspectionColors && (editor->IsNodeOpenTransitionActive() || !m_FrameTransition.Draw(
+        drawList, outputTex, outputPatch.first, outputPatch.second, ImGui::GetTime(),
         ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
-        IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding)) {
-        drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
-                                  ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding);
+        outputTint, regionalOutput ? 0.f : kImageRounding))) {
+        drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, outputPatch.first, outputPatch.second,
+                                  ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), outputTint,
+                                  regionalOutput ? 0.f : kImageRounding);
     }
 
+    if (openingSurround) {
+        editor->PublishNodeOpenBackdrop(imageMin, imageMax, contentScreen,
+            ImVec2(contentScreen.x+avail.x,contentScreen.y+avail.y),drawList,firstOpeningPhotoCommand);
+        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    }
+    editor->FinishNodeOpenPhoto(drawList, firstOpeningPhotoVertex);
+    if (openingPhotoClip) drawList->PopClipRect();
+    Stack::UiPerformance::Probe::ImageDrawn(editor->GetViewportOutputRenderGeneration(),
+        {imageMin.x,imageMin.y,imageMax.x-imageMin.x,imageMax.y-imageMin.y});
     if (currentFactor > 0.001f) {
         if (sourceTex != 0 && sourceTex != outputTex) {
             drawList->AddImageRounded((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
-                                      ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
+                                      ImVec2(imgW > 1 ? .5f / imgW : 0.f, imgH > 1 ? 1.f - .5f / imgH : 1.f),
+                                      ImVec2(imgW > 1 ? 1.f - .5f / imgW : 1.f, imgH > 1 ? .5f / imgH : 0.f),
                                       IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f * viewportRevealAlpha)), kImageRounding);
         }
     }

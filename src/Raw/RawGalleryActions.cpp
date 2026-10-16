@@ -26,6 +26,8 @@ Availability GetAvailability(const Context& context, Action action) {
         if (!context.queueAvailable) return disabled("Queue is unavailable in this view.");
         break;
     case Action::CopyEdits:
+        if (focused && focused->kind != ItemKind::Project)
+            return disabled("Original images have no edits to copy. Select a saved project or bracket.");
         if (!focused || !focused->canCopyEdits) return disabled("The focused item has no RAW edit to copy.");
         break;
     case Action::PasteEdits:

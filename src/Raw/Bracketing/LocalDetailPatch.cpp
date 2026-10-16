@@ -36,7 +36,7 @@ bool EvaluateLocalDetailPatch(const ProcessingRequest& request,const PreparedDat
     if(!ReadPreparedRegion(data.sources[data.origin].frame,sampler,left,top,rawSide,rawSide,origin,error))return false;
     std::vector<Mfd::RawSignalGradient> gradients(rawSide*rawSide,{std::numeric_limits<double>::quiet_NaN(),0});
     if(request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&
-        !BuildSceneGradients(request,data,origin,gradients,error))return false;
+        !BuildSceneGradients(request,data,origin,gradients,error,sampler))return false;
     std::array<std::vector<double>,4> pilots;
     for(unsigned c=0;c<4;++c) {
         pilots[c].resize(side*side);

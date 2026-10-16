@@ -1,0 +1,4 @@
+LIBRARY StackBurstShell
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

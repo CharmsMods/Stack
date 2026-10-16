@@ -24,6 +24,7 @@ bool EditorModule::IsRawBracketModeActive() const {
 }
 
 void EditorModule::RequestRawLabTool(RawLabTool tool) {
+    // Selection changes only when the requested tool transition commits.
     if (RawLabToolIndex(tool) >= 0) m_RequestedRawLabTool = tool;
 }
 
@@ -86,6 +87,7 @@ void EditorModule::ApplyRequestedRawLabTool(RawWorkspaceEditContext& context) {
             m_MfdAdoptedRawResult->inputRevision == m_Project->snapshot->mfdInputRevision));
     const auto activateTool = [&](RawLabTool tool) {
         if (m_RawWorkspaceLabUi.activeTool == tool) {
+            BindRequestedRawNodeEditor();
             return;
         }
         const RawLabTool previousTool = m_RawWorkspaceLabUi.activeTool;
@@ -98,7 +100,7 @@ void EditorModule::ApplyRequestedRawLabTool(RawWorkspaceEditContext& context) {
                 m_RawWorkspaceLabUi.lastColorTool = selected;
         };
         rememberGroupedTool(previousTool);
-        m_RawWorkspaceLabUi.calibrationGestureActive = false;
+        m_RawWorkspaceLabUi.calibrationEditor.dragging = -1;
         if (previousTool != RawLabTool::MultiFrame)
             m_RawLabLastEditTool = previousTool;
         m_RawWorkspaceLabUi.zonesCurveGraph.draggingExposure = false;
@@ -108,7 +110,8 @@ void EditorModule::ApplyRequestedRawLabTool(RawWorkspaceEditContext& context) {
                 ResolveRawWorkspaceInteractionDraft(false);
                 m_RawWorkspaceLabUi.zoneAreas.active = false;
             }
-            m_RawWorkspaceLabUi.zoneAreas.history.Observe(context.recipe.localRange.areas, false);
+            if (m_RawWorkspaceLabUi.zoneAreas.nodeTarget == context.nodeTarget)
+                m_RawWorkspaceLabUi.zoneAreas.history.Observe(context.recipe.localRange.areas, false);
             for (auto& entry : m_RawWorkspaceLabUi.zoneAreas.graphs) entry.second.interaction = {};
             ClearCurveSegmentSelection(
                 m_RawWorkspaceLabUi.zonesCurveGraph,
@@ -142,6 +145,7 @@ void EditorModule::ApplyRequestedRawLabTool(RawWorkspaceEditContext& context) {
             m_RawWorkspaceLabUi.colorWarpPhotoHoverValid = false;
         }
         m_RawWorkspaceLabUi.activeTool = tool;
+        BindRequestedRawNodeEditor();
         rememberGroupedTool(tool);
         if (tool != RawLabTool::MultiFrame)
             m_RawLabLastEditTool = tool;

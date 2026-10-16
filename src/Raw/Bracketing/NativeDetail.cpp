@@ -17,7 +17,8 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
     const auto groups=request.recipe.groups.size(),pixels=static_cast<std::size_t>(width)*height;
     const auto tilePixels=static_cast<std::uint64_t>(data.sources[data.origin].frame.tileRawPixels)*data.sources[data.origin].frame.tileRawPixels;
     if(pixels*(groups*5+4+data.sources.size()*5)*sizeof(float)+tilePixels*(groups*(sizeof(Observation)+16)+48)+
-       LocalDetailWorkingBytes(data.sources.size(),data.sources[data.origin].frame.tileRawPixels)>request.memoryBudgetBytes)
+       LocalDetailWorkingBytes(data.sources.size(),data.sources[data.origin].frame.tileRawPixels,
+           request.memoryBudgetBytes)>request.memoryBudgetBytes)
         throw std::runtime_error("Native detail exceeds the available memory budget.");
     std::vector<float> merged(pixels);std::vector<std::vector<float>> sources(groups,std::vector<float>(pixels));
     Preview out;out.width=width;out.height=height;out.sensorOriginX=left;out.sensorOriginY=top;
@@ -32,14 +33,15 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
         if(!ReadGroups(request,data,tx,ty,observations,tile,error)) throw std::runtime_error(error);
         ColorObservations colorInput;
         std::array<Pixel,4> color;
+        std::vector<double> shares;
         for(unsigned y=std::max<unsigned>(top,tile.originY);y<std::min<unsigned>(top+height,tile.originY+tile.extent.height);++y)
         for(unsigned x=std::max<unsigned>(left,tile.originX);x<std::min<unsigned>(left+width,tile.originX+tile.extent.width);++x) {
             const auto i=(y-top)*width+x-left;
             const auto p=(y-tile.originY)*tile.extent.width+x-tile.originX;
             const float ev=analysis.guideEv[(y/2)*(data.width/2)+x/2];out.guideEv[i]=ev;
-            auto shares=Evaluate(request.recipe.automatic?analysis.suggestion:request.recipe.knots,ev);
             // Rows revisit each cell, but both green sites use exactly the same decision.
             if((x&1u)==0) {
+                Evaluate(request.recipe.automatic?analysis.suggestion:request.recipe.knots,ev,shares);
                 const auto q=((y&~1u)-tile.originY)*tile.extent.width+x-tile.originX;
                 GatherColorCell(observations,q,tile.extent.width,colorInput);
                 color=BlendColor(colorInput,shares,request.recipe);

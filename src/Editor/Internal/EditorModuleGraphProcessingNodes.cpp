@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/GraphEditorCommands.h"
+#include "Graph/LayerOperationParameters.h"
 
 #include "Editor/Internal/EditorModuleDevelopDefaults.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
@@ -38,10 +39,7 @@ const EditorNodeGraph::Node* FindUpstreamRawSourceNode(
         if (upstream->kind == EditorNodeGraph::NodeKind::RawSource) {
             return upstream;
         }
-        if (upstream->kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-            return nullptr;
-        }
-        rawInput = graph.FindInputLink(upstream->id, EditorNodeGraph::kRawInputSocketId);
+        return nullptr;
     }
     return nullptr;
 }
@@ -199,15 +197,6 @@ bool EditorModule::AddRawDevelopmentNodeFromPayload(EditorNodeGraph::RawDevelopm
     return AddGraphNode(*this,[&](auto& graph) { return graph.AddRawDevelopmentNode(std::move(payload), graphPosition); }) > 0;
 }
 
-void EditorModule::AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::RawNeuralDenoisePayload payload;
-    AddRawNeuralDenoiseNodeFromPayload(std::move(payload), graphPosition);
-}
-
-bool EditorModule::AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    return AddGraphNode(*this,[&](auto& graph) { return graph.AddRawNeuralDenoiseNode(std::move(payload), graphPosition); }) > 0;
-}
-
 void EditorModule::AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     EditorNodeGraph::RawDevelopPayload payload;
     payload.scenePrepEnabled = true;
@@ -227,10 +216,6 @@ void EditorModule::AddRawDecodeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     if (const EditorNodeGraph::Node* selected = GetNodeGraph().FindNode(GetNodeGraph().GetSelectedNodeId())) {
         if (selected->kind == EditorNodeGraph::NodeKind::RawSource) {
             payload.settings = BuildRawDevelopSettingsFromMetadata(selected->rawSource.metadata);
-        } else if (selected->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-            if (const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(GetNodeGraph(), *selected)) {
-                payload.settings = BuildRawDevelopSettingsFromMetadata(rawSourceNode->rawSource.metadata);
-            }
         }
     }
     AddRawDecodeNodeFromPayload(std::move(payload), graphPosition);
@@ -385,14 +370,9 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
     const auto* source = GetNodeGraph().FindNode(rawSourceNodeId);
     if (!source || source->kind != EditorNodeGraph::NodeKind::RawSource) return false;
     const int completedBefore = GetCompletedChainCount();
-    auto settings = nlohmann::json::array();
-    for (const auto& layer : GetLayers()) settings.push_back(layer->Serialize());
-    const int toneIndex = static_cast<int>(settings.size());
-    const auto tone = LayerRegistry::CreateLayer(LayerType::ToneCurve);
+    const int viewIndex = static_cast<int>(GetLayers().size());
     const auto view = LayerRegistry::CreateLayer(LayerType::ViewTransform);
-    if (!tone || !view) return false;
-    settings.push_back(tone->Serialize());
-    settings.push_back(view->Serialize());
+    if (!view) return false;
     int outputId = 0;
     auto context = GetGraphEditorContext();
     auto proposal = Stack::GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& graph) {
@@ -405,8 +385,12 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
             return node->id;
         };
         const int decodeId = require(graph.AddRawDecodeNode(std::move(payload),{position.x+280.f,position.y}));
-        const int toneId = require(graph.AddLayerNode(LayerType::ToneCurve,toneIndex,{position.x+560.f,position.y}));
-        const int viewId = require(graph.AddLayerNode(LayerType::ViewTransform,toneIndex+1,{position.x+840.f,position.y}));
+        const int toneId = require(graph.AddRawOperationNode(Stack::RawRecipe::GraphOperationKind::ToneCurve,
+            {position.x+560.f,position.y}));
+        auto* viewNode = graph.AddLayerNode(LayerType::ViewTransform,viewIndex,{position.x+840.f,position.y});
+        const int viewId = require(viewNode);
+        viewNode->layerParameters = Stack::GraphModel::CaptureLayerParameters(*view);
+        viewNode->title = view->GetName();
         outputId = require(graph.AddOutputNode({position.x+1120.f,position.y}));
         ConnectCandidate(graph,rawSourceNodeId,EditorNodeGraph::kRawOutputSocketId,decodeId,EditorNodeGraph::kRawInputSocketId);
         ConnectCandidate(graph,decodeId,EditorNodeGraph::kImageOutputSocketId,toneId,EditorNodeGraph::kImageInputSocketId);
@@ -416,7 +400,7 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
         graph.SelectNode(outputId);
     });
     std::string error;
-    if (!context.applyDocumentEdit(std::move(proposal),std::move(settings),GetGraphAnimation(),error)) {
+    if (!context.applyEdit(std::move(proposal),error)) {
         PostNotification(UiNotificationSeverity::Error,error,"raw-tree-create");
         return false;
     }

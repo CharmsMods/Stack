@@ -2,6 +2,9 @@
 
 void EditorNodeGraphUI::ResetProjectInteractionState() {
     m_GraphContext = {};
+    m_MaskTextureInspectorUuid.clear();
+    m_MaskTextureInspectorOwner.clear();
+    m_OpenMaskTextureInspector=false;
     m_ConnectionCapabilityCache.clear();
     CloseTransientDrawers();
     StopMiddlePanCapture();

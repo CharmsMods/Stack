@@ -70,11 +70,6 @@ struct GraphStyleTokens {
     ImVec4 groupBorder;
 };
 
-struct GraphZoomDialStyle {
-    ImVec4 tick;
-    ImVec4 glow;
-};
-
 struct NodeLayoutMetrics {
     float width = 260.0f;
     float collapsedHeight = 52.0f;
@@ -171,7 +166,6 @@ std::string LinkAnimationKey(const EditorNodeGraph::Link& link);
 ImVec4 BrightenedSelectionFill(ImVec4 fill, const ImVec4& accent, const GraphStyleTokens& tokens);
 ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens);
 GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor);
-GraphZoomDialStyle BuildGraphZoomDialStyle(EditorModule* editor, const GraphStyleTokens& tokens);
 bool GraphDottedMaskLinksEnabled(EditorModule* editor);
 bool GraphStraightLinksEnabled(EditorModule* editor);
 bool IsSummaryOnlyNode(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node);

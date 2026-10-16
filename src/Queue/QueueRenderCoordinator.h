@@ -34,6 +34,8 @@ public:
         const std::filesystem::path& destination,
         const std::vector<Item>& items,
         std::string* errorMessage = nullptr);
+    // Finish the active image safely, returning scheduled images to Waiting.
+    void StopAfterCurrent();
     using InspectionCompletion = std::function<void(
         Stack::RawGalleryInspection::Result result)>;
     bool RequestInspection(
@@ -48,6 +50,7 @@ public:
     Notifications::OperationId ExportOperationId() const { return m_ExportActivity.operationId; }
     Notifications::OperationId InspectionOperationId() const { return m_InspectionActivity.operationId; }
     void Tick();
+    void RequestWorkerShutdownForAppClose();
     void Shutdown();
     bool IsBusy() const;
     bool IsInspectionBusy() const {
@@ -88,6 +91,7 @@ private:
     bool EnsureRenderEditor(std::string* errorMessage);
     void BeginNextItem();
     void BeginProjectLoad();
+    void BeginProjectSnapshot();
     void BeginSourceLoad();
     bool BeginFullQualityRender(
         std::string status,
@@ -111,6 +115,7 @@ private:
     RenderQueueModel* m_Model = nullptr;
     std::unique_ptr<EditorModule> m_RenderEditor;
     std::filesystem::path m_Destination;
+    std::filesystem::path m_CurrentOutputPath;
     std::deque<Item> m_Pending;
     Item m_Current;
     Phase m_Phase = Phase::Idle;
@@ -118,6 +123,8 @@ private:
     std::string m_StatusText;
     Async::MainThreadRequestScope m_ProjectLoadRequest;
     bool m_Initialized = false;
+    bool m_WorkerShutdownRequested = false;
+    bool m_StopAfterCurrent = false;
     bool m_MultiFrameProcessingStarted = false;
     float m_FullQualityProgressBase = 0.42f;
     InspectionPhase m_InspectionPhase = InspectionPhase::Idle;

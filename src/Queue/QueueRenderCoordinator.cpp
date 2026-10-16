@@ -3,9 +3,11 @@
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
 #include "Persistence/ProjectOpenCoordinator.h"
+#include "Raw/RawLoader.h"
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <system_error>
 #include <utility>
 
@@ -22,11 +24,20 @@ Async::ActivityMetadata ExecutionActivity(const Notifications::Notifier& notifie
     return metadata;
 }
 
+std::string SourceLoadPath(const std::filesystem::path& path) {
+    const std::string utf8 = path.u8string();
+    // RAW decoding accepts UTF-8. The current raster loader uses narrow ANSI
+    // filenames, so preserve its existing path conversion until it is updated.
+    return Raw::RawLoader::IsRawPath(utf8) ? utf8 : path.string();
+}
+
 std::string SanitizeStem(std::string value) {
     for (char& character : value) {
         const unsigned char byte = static_cast<unsigned char>(character);
-        if (!(std::isalnum(byte) || character == '-' || character == '_' ||
-              character == '.' || character == ' ')) {
+        if (byte < 32u || character == '<' || character == '>' ||
+            character == ':' || character == '"' || character == '/' ||
+            character == '\\' || character == '|' || character == '?' ||
+            character == '*') {
             character = '_';
         }
     }
@@ -34,7 +45,21 @@ std::string SanitizeStem(std::string value) {
            (value.back() == ' ' || value.back() == '.')) {
         value.pop_back();
     }
-    return value.empty() ? std::string("Stack Export") : value;
+    if (value.empty()) return "Stack Export";
+    std::string base = value.substr(0, value.find('.'));
+    std::transform(base.begin(), base.end(), base.begin(),
+        [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+    const bool devicePrefix = base.compare(0, 3, "COM") == 0 ||
+        base.compare(0, 3, "LPT") == 0;
+    const bool deviceNumber = (base.size() == 4u && base[3] >= '1' && base[3] <= '9') ||
+        (base.size() == 5u && static_cast<unsigned char>(base[3]) == 0xC2u &&
+            (static_cast<unsigned char>(base[4]) == 0xB9u ||
+             static_cast<unsigned char>(base[4]) == 0xB2u ||
+             static_cast<unsigned char>(base[4]) == 0xB3u));
+    const bool reserved = base == "CON" || base == "PRN" || base == "AUX" ||
+        base == "NUL" || (devicePrefix && deviceNumber);
+    if (reserved) value.insert(value.begin(), '_');
+    return value;
 }
 
 } // namespace
@@ -69,7 +94,7 @@ bool QueueRenderCoordinator::EnsureRenderEditor(std::string* errorMessage) {
     try {
         m_RenderEditor = std::make_unique<EditorModule>();
         m_RenderEditor->SetNotificationScope(m_Notifier);
-        m_RenderEditor->Initialize(m_SharedWindow, m_Appearance);
+        m_RenderEditor->Initialize(m_SharedWindow, m_Appearance, false);
         m_RenderEditor->SetDocumentPersistenceEnabled(false);
         m_Initialized = true;
         return true;
@@ -85,6 +110,10 @@ bool QueueRenderCoordinator::Start(
     const std::filesystem::path& destination,
     const std::vector<Item>& items,
     std::string* errorMessage) {
+    if (m_WorkerShutdownRequested) {
+        if (errorMessage) *errorMessage = "The Queue is shutting down.";
+        return false;
+    }
     if (destination.empty() || items.empty()) {
         if (errorMessage) *errorMessage =
             "Choose an export folder and at least one queued item.";
@@ -103,25 +132,53 @@ bool QueueRenderCoordinator::Start(
         return false;
     }
 
-    if (IsBusy()) {
-        for (const Item& item : items) m_Pending.push_back(item);
-        m_StatusText = "Added work to the active Queue export.";
-        m_ExportTotal += items.size();
-        m_Notifier.UpdateActivity(m_ExportActivity, "Exporting",
-            Notifications::Progress{static_cast<double>(m_ExportSucceeded + m_ExportFailed), static_cast<double>(m_ExportTotal), "images"});
-        return true;
-    }
-    CancelActiveInspection(true);
     const auto resolvedDestination = std::filesystem::absolute(destination, directoryError);
     if (directoryError) {
         if (errorMessage) *errorMessage =
             "The Queue export folder could not be resolved.";
         return false;
     }
-    m_Destination = resolvedDestination.lexically_normal();
-    m_Pending.assign(items.begin(), items.end());
+    const auto normalizedDestination = resolvedDestination.lexically_normal();
+    if (IsBusy()) {
+        if (m_StopAfterCurrent) {
+            if (errorMessage) *errorMessage =
+                "The Queue is stopping after the current image. Wait for it to finish before restarting.";
+            return false;
+        }
+        const bool sameDestination = std::filesystem::equivalent(
+            normalizedDestination, m_Destination, directoryError);
+        if (directoryError || !sameDestination) {
+            if (errorMessage) *errorMessage =
+                "The active Queue export uses another folder. Wait for it to finish before choosing a different export folder.";
+            return false;
+        }
+        auto claimed = m_Model->ClaimForExport(items);
+        const auto added = claimed.size();
+        if (added == 0) {
+            if (errorMessage) *errorMessage =
+                "The selected items are already scheduled or are no longer waiting for export.";
+            return false;
+        }
+        for (Item& item : claimed) m_Pending.push_back(std::move(item));
+        m_StatusText = "Added work to the active Queue export.";
+        m_ExportTotal += added;
+        m_Notifier.UpdateActivity(m_ExportActivity, "Exporting",
+            Notifications::Progress{static_cast<double>(m_ExportSucceeded + m_ExportFailed), static_cast<double>(m_ExportTotal), "images"});
+        return true;
+    }
+    auto claimed = m_Model->ClaimForExport(items);
+    if (claimed.empty()) {
+        if (errorMessage) *errorMessage =
+            "The selected items are no longer waiting for export.";
+        return false;
+    }
+    CancelActiveInspection(true);
+    m_Destination = normalizedDestination;
+    m_Pending.assign(std::make_move_iterator(claimed.begin()), std::make_move_iterator(claimed.end()));
     m_Current = {};
-    m_ExportTotal = items.size();
+    m_CurrentOutputPath.clear();
+    m_StopAfterCurrent = false;
+    m_ExportTotal = m_Pending.size();
     m_ExportSucceeded = 0;
     m_ExportFailed = 0;
     Notifications::NoticeSpec activity;
@@ -132,6 +189,18 @@ bool QueueRenderCoordinator::Start(
     m_ExportActivity = m_Notifier.BeginActivity(std::move(activity));
     SetPhase(Phase::PrepareItem, "Preparing Queue export...");
     return true;
+}
+
+void QueueRenderCoordinator::StopAfterCurrent() {
+    if (!IsBusy() || m_StopAfterCurrent) return;
+    std::vector<std::uint64_t> ids;
+    ids.reserve(m_Pending.size());
+    for (const Item& item : m_Pending) ids.push_back(item.id);
+    if (m_Model) m_Model->ReleaseQueued(ids);
+    m_Pending.clear();
+    m_StopAfterCurrent = true;
+    m_StatusText = "Stopping after the current image. Remaining jobs are waiting.";
+    m_Notifier.UpdateActivity(m_ExportActivity, "Stopping after current image");
 }
 
 bool QueueRenderCoordinator::RequestInspection(
@@ -146,6 +215,10 @@ bool QueueRenderCoordinator::RequestInspection(
         const auto& current = m_InspectionNotifier.GetOwner();
         if (applicationCancel || (target.id == current.id && target.generation == current.generation)) CancelActiveInspection(false);
         return true;
+    }
+    if (m_WorkerShutdownRequested) {
+        if (errorMessage) *errorMessage = "The Queue is shutting down.";
+        return false;
     }
     if (request.requestId == 0 ||
         (request.projectPath.empty() && request.sourcePath.empty())) {
@@ -251,7 +324,7 @@ void QueueRenderCoordinator::BeginInspection() {
     m_InspectionPhaseStartedAt = std::chrono::steady_clock::now();
     m_InspectionNotifier.UpdateActivity(m_InspectionActivity, "Loading original image");
     m_RenderEditor->RequestLoadSourceImage(
-        m_CurrentInspection.sourcePath.string());
+        SourceLoadPath(m_CurrentInspection.sourcePath));
 }
 
 void QueueRenderCoordinator::BeginInspectionProjectLoad() {
@@ -425,7 +498,13 @@ void QueueRenderCoordinator::TickInspection() {
 void QueueRenderCoordinator::BeginNextItem() {
     if (m_Pending.empty()) {
         m_Current = {};
-        if (m_ExportFailed == 0) {
+        m_CurrentOutputPath.clear();
+        if (m_StopAfterCurrent) {
+            SetPhase(Phase::Idle, "Queue stopped. Remaining jobs are waiting.");
+            m_Notifier.CancelActivity(m_ExportActivity,
+                "Queue stopped after the current image. Remaining jobs are waiting.");
+            m_StopAfterCurrent = false;
+        } else if (m_ExportFailed == 0) {
             SetPhase(Phase::Idle, "Queue export complete.");
             m_Notifier.CompleteActivity(m_ExportActivity,
                 "Exported " + std::to_string(m_ExportSucceeded) + (m_ExportSucceeded == 1 ? " image." : " images."));
@@ -445,6 +524,7 @@ void QueueRenderCoordinator::BeginNextItem() {
     }
     m_Current = std::move(m_Pending.front());
     m_Pending.pop_front();
+    m_CurrentOutputPath.clear();
     m_MultiFrameProcessingStarted = false;
     Notifications::NoticeSpec itemActivity;
     itemActivity.title = "Exporting image";
@@ -458,8 +538,31 @@ void QueueRenderCoordinator::BeginNextItem() {
         m_Model->UpdateState(
             m_Current.id, ItemState::Preparing, 0.05f, "Preparing");
     }
-    if (m_Current.kind == ItemKind::Project) BeginProjectLoad();
+    if (m_Current.kind == ItemKind::ProjectSnapshot) BeginProjectSnapshot();
+    else if (m_Current.kind == ItemKind::Project) BeginProjectLoad();
     else BeginSourceLoad();
+}
+
+void QueueRenderCoordinator::BeginProjectSnapshot() {
+    if (!m_Current.projectSnapshot) {
+        FailCurrent("The queued project capture is unavailable.");
+        return;
+    }
+    // Applying/processing owns mutable document state. The queued revision is
+    // immutable and remains reusable after failure without sharing that state.
+    auto candidate = std::make_shared<Stack::Project::LoadedProjectData>(
+        *m_Current.projectSnapshot);
+    if (candidate->rawProjectSnapshot)
+        candidate->rawProjectSnapshot = std::make_shared<Stack::Project::RawProjectSnapshot>(
+            *candidate->rawProjectSnapshot);
+    if (!m_RenderEditor->BeginDeferredLoadedProjectApply(std::move(candidate))) {
+        FailCurrent("The queued project capture could not be applied to the isolated render session.");
+        return;
+    }
+    SetPhase(Phase::ApplyProject, "Applying captured " + m_Current.displayName + "...");
+    if (m_Model)
+        m_Model->UpdateState(m_Current.id, ItemState::Preparing, 0.22f,
+            "Applying captured project");
 }
 
 void QueueRenderCoordinator::BeginProjectLoad() {
@@ -517,7 +620,7 @@ void QueueRenderCoordinator::BeginSourceLoad() {
         m_Model->UpdateState(
             m_Current.id, ItemState::Preparing, 0.12f, "Loading image");
     }
-    m_RenderEditor->RequestLoadSourceImage(m_Current.path.string());
+    m_RenderEditor->RequestLoadSourceImage(SourceLoadPath(m_Current.path));
 }
 
 bool QueueRenderCoordinator::BeginFullQualityRender(
@@ -559,27 +662,35 @@ bool QueueRenderCoordinator::BeginInspectionFullQualityRender() {
 std::filesystem::path QueueRenderCoordinator::BuildOutputPath(
     const Item& item) const {
     const std::string stem = SanitizeStem(item.displayName);
-    std::filesystem::path candidate = m_Destination / (stem + ".png");
+    std::filesystem::path candidate = m_Destination / std::filesystem::u8path(stem + ".png");
     std::error_code error;
-    if (!std::filesystem::exists(candidate, error)) return candidate;
+    bool exists = std::filesystem::exists(candidate, error);
+    if (error) return {};
+    if (!exists) return candidate;
     for (int version = 2; version < 10000; ++version) {
         candidate = m_Destination /
-            (stem + " " + std::to_string(version) + ".png");
+            std::filesystem::u8path(stem + " " + std::to_string(version) + ".png");
         error.clear();
-        if (!std::filesystem::exists(candidate, error)) return candidate;
+        exists = std::filesystem::exists(candidate, error);
+        if (error) return {};
+        if (!exists) return candidate;
     }
-    return m_Destination /
-        (stem + " " + std::to_string(item.id) + ".png");
+    return {};
 }
 
 void QueueRenderCoordinator::BeginOutputWrite() {
     const std::filesystem::path output = BuildOutputPath(m_Current);
+    if (output.empty()) {
+        FailCurrent("A new output filename could not be chosen in the export folder. Existing files were preserved.");
+        return;
+    }
     if (!m_RenderEditor->RequestQueueExportImage(output.u8string())) {
         FailCurrent(m_RenderEditor->GetExportStatusText().empty()
             ? "The full-quality Queue export could not be captured."
             : m_RenderEditor->GetExportStatusText());
         return;
     }
+    m_CurrentOutputPath = output;
     SetPhase(Phase::WriteOutput,
         "Writing " + output.filename().u8string() + "...");
     if (m_Model) {
@@ -590,6 +701,7 @@ void QueueRenderCoordinator::BeginOutputWrite() {
 
 void QueueRenderCoordinator::CompleteCurrent() {
     if (m_Model) {
+        m_Model->SetOutputPath(m_Current.id, m_CurrentOutputPath);
         m_Model->UpdateState(
             m_Current.id, ItemState::Complete, 1.0f, "Complete");
     }
@@ -619,8 +731,10 @@ void QueueRenderCoordinator::FailCurrent(std::string message) {
 }
 
 void QueueRenderCoordinator::Tick() {
-    if (!m_RenderEditor) return;
-    m_RenderEditor->PumpNonRenderingWork(2.0);
+    if (!m_RenderEditor || m_WorkerShutdownRequested) return;
+    if (m_Phase == Phase::Idle && !IsInspectionBusy() &&
+        m_RenderEditor->ProjectTasks().IsIdle() && !m_RenderEditor->IsEditorRenderBusy()) return;
+    m_RenderEditor->PumpNonRenderingWork(2.0, false);
     if (m_Phase == Phase::Idle) {
         TickInspection();
         return;
@@ -734,7 +848,16 @@ void QueueRenderCoordinator::Tick() {
     }
 }
 
+void QueueRenderCoordinator::RequestWorkerShutdownForAppClose() {
+    if (m_WorkerShutdownRequested) return;
+    m_WorkerShutdownRequested = true;
+    m_ProjectLoadRequest.Cancel();
+    CancelActiveInspection(false);
+    if (m_RenderEditor) m_RenderEditor->RequestWorkerShutdownForAppClose();
+}
+
 void QueueRenderCoordinator::Shutdown() {
+    RequestWorkerShutdownForAppClose();
     m_Notifier.CancelActivity(m_ItemActivity, "Queue export stopped.");
     m_Notifier.CancelActivity(m_ExportActivity, "Queue export stopped.");
     m_InspectionNotifier.CancelActivity(m_InspectionActivity, "Image preview stopped.");
@@ -743,7 +866,19 @@ void QueueRenderCoordinator::Shutdown() {
     m_InspectionActivity = {};
     m_ProjectLoadRequest.Cancel();
     m_InspectionLoadRequest.Cancel();
+    std::vector<std::uint64_t> queued;
+    queued.reserve(m_Pending.size());
+    for (const Item& item : m_Pending) queued.push_back(item.id);
+    if (m_Model) {
+        m_Model->ReleaseQueued(queued);
+        if (m_Current.id && m_Phase != Phase::Idle && m_Phase != Phase::PrepareItem)
+            m_Model->UpdateState(m_Current.id, ItemState::Failed, 0.0f,
+                "Queue export was interrupted.");
+    }
     m_Pending.clear();
+    m_Current = {};
+    m_CurrentOutputPath.clear();
+    m_StopAfterCurrent = false;
     m_PendingInspection.reset();
     m_InspectionCompletion = {};
     m_InspectionPhase = InspectionPhase::Idle;

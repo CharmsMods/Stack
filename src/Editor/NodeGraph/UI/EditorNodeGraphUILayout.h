@@ -159,6 +159,8 @@ inline bool TryDefaultWidthClassForKind(
         return true;
     };
     switch (kind) {
+        case NodeKind::MaskTexture:
+        case NodeKind::CustomMask:
         case NodeKind::Image:
         case NodeKind::Output:
         case NodeKind::RawProjectFrame:
@@ -166,7 +168,6 @@ inline bool TryDefaultWidthClassForKind(
         case NodeKind::RawSource:
             return assign(NodeWidthClass::RawSource);
         case NodeKind::RawDevelopment:
-        case NodeKind::RawNeuralDenoise:
         case NodeKind::RawDecode:
         case NodeKind::RawDevelop:
         case NodeKind::RawDetailAutoMask:
@@ -179,25 +180,24 @@ inline bool TryDefaultWidthClassForKind(
         case NodeKind::Lut:
         case NodeKind::ChannelSplit:
         case NodeKind::ChannelCombine:
-        case NodeKind::CustomMask:
             return assign(NodeWidthClass::Tile);
         case NodeKind::Layer:
         case NodeKind::MaskGenerator:
         case NodeKind::MaskCombine:
         case NodeKind::MaskUtility:
         case NodeKind::ImageToMask:
-        case NodeKind::FrequencyMask:
+        
             return assign(NodeWidthClass::Standard);
         case NodeKind::Composite:
         case NodeKind::Scope:
         case NodeKind::Mix:
         case NodeKind::ImageGenerator:
-        case NodeKind::CombineSpectra:
-        case NodeKind::SpectrumRecombine:
+        
+        
             return assign(NodeWidthClass::Wide);
         case NodeKind::Compound:
-        case NodeKind::FrequencyFilter:
-        case NodeKind::FrequencyResponse:
+        
+        
             return assign(NodeWidthClass::Complex);
         case NodeKind::Preview:
         case NodeKind::ConstantChannel:
@@ -205,17 +205,18 @@ inline bool TryDefaultWidthClassForKind(
         case NodeKind::Value:
         case NodeKind::RawOperation:
         case NodeKind::TechnicalImage:
-        case NodeKind::FrequencyFft:
-        case NodeKind::FrequencyIfft:
-        case NodeKind::SpectrumView:
-        case NodeKind::ApplyFrequencyResponse:
-        case NodeKind::SpectrumSeparate:
-        case NodeKind::SpectrumMath:
-        case NodeKind::MagnitudePhase:
-        case NodeKind::SpectrumAnalyzer:
+        
+        
+        
+        
+        
+        
+        
+        
         case NodeKind::FieldMean:
-        case NodeKind::Reformat:
             return assign(NodeWidthClass::Compact);
+        case NodeKind::Reformat:
+            return assign(NodeWidthClass::Wide);
         case NodeKind::Count:
             break;
     }
@@ -239,7 +240,7 @@ inline NodeWidthClass ResolveWidthClass(
     if (kind == EditorNodeGraph::NodeKind::RawSource) {
         return NodeWidthClass::RawSource;
     }
-    if (kind == EditorNodeGraph::NodeKind::Image ||
+    if (kind == EditorNodeGraph::NodeKind::MaskTexture || kind == EditorNodeGraph::NodeKind::CustomMask || kind == EditorNodeGraph::NodeKind::Image ||
         kind == EditorNodeGraph::NodeKind::Output) {
         return NodeWidthClass::Media;
     }

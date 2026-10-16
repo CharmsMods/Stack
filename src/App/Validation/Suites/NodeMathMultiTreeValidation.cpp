@@ -165,8 +165,6 @@ bool ValidateNodeMathMultiTreeWithCurrentContext() {
         Node(4, RenderGraphNodeKind::Output, "validation:multi-tree/exposure-output"),
         Node(5, RenderGraphNodeKind::ChannelSplit, "validation:multi-tree/split"),
         std::move(halfGreen),
-        Node(7, RenderGraphNodeKind::FrequencyFft, "validation:multi-tree/fft"),
-        Node(8, RenderGraphNodeKind::FrequencyIfft, "validation:multi-tree/ifft"),
         Node(9, RenderGraphNodeKind::Output, "validation:multi-tree/channel-output"),
         Node(21, RenderGraphNodeKind::ChannelCombine, "validation:multi-tree/combine"),
         Node(22, RenderGraphNodeKind::Output, "validation:multi-tree/channel-inspection-output"),
@@ -190,9 +188,7 @@ bool ValidateNodeMathMultiTreeWithCurrentContext() {
         Link(5, "r", 21, "r"),
         Link(5, "g", 6, EditorNodeGraph::kMixInputASocketId),
         Link(6, EditorNodeGraph::kImageOutputSocketId, 21, "g"),
-        Link(5, "b", 7, EditorNodeGraph::kChannelInputSocketId),
-        Link(7, EditorNodeGraph::kSpectrumOutputSocketId, 8, EditorNodeGraph::kSpectrumInputSocketId),
-        Link(8, EditorNodeGraph::kChannelOutputSocketId, 21, "b"),
+        Link(5, "b", 21, "b"),
         Link(5, "a", 21, "a"),
         Link(21, EditorNodeGraph::kImageOutputSocketId, 9, EditorNodeGraph::kImageInputSocketId),
         Link(5, "g", 22, EditorNodeGraph::kImageInputSocketId),
@@ -427,8 +423,8 @@ bool ValidateNodeMathMultiTreeWithCurrentContext() {
         ReadOutput(pipeline, kWidth, kHeight);
     ok &= Check(
         warmRecombined == recombined &&
-        warmChannelStats.maskCacheHits > 0 &&
-        warmChannelStats.frequencyCacheHits > 0,
+        warmChannelStats.maskCacheHits > 0
+,
         "the unchanged heterogeneous tree was not pixel-stable and cache-hot");
 
     graph.outputNodeId = 4;

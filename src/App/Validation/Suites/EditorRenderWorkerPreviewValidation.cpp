@@ -130,13 +130,13 @@ bool ValidateEditorRenderWorkerPreviewBatch(GLFWwindow* sharedWindow) {
     });
 
     snapshot.previews.push_back(DirectPreviewRequest(101));
-    EditorRenderWorker::PreviewRequest frequencyRequest;
-    frequencyRequest.previewNodeId = 102;
-    frequencyRequest.sourceNodeId = 2;
-    frequencyRequest.sourceSocketId = "r";
-    frequencyRequest.frequencySpectrumInput = true;
-    frequencyRequest.dirtyGeneration = 1;
-    snapshot.previews.push_back(std::move(frequencyRequest));
+    EditorRenderWorker::PreviewRequest channelRequest;
+    channelRequest.previewNodeId = 102;
+    channelRequest.sourceNodeId = 2;
+    channelRequest.sourceSocketId = "r";
+    channelRequest.directSourceOutput = true;
+    channelRequest.dirtyGeneration = 1;
+    snapshot.previews.push_back(std::move(channelRequest));
     snapshot.previews.push_back(DirectPreviewRequest(103));
 
     EditorRenderWorker worker;
@@ -167,7 +167,7 @@ bool ValidateEditorRenderWorkerPreviewBatch(GLFWwindow* sharedWindow) {
         result.previews[2].height == kHeight &&
         result.previews[0].pixels ==
             result.previews[2].pixels;
-    const bool frequencyOutputValid =
+    const bool channelOutputValid =
         complete &&
         result.previews[1].success &&
         result.previews[1].width == kWidth &&
@@ -175,7 +175,7 @@ bool ValidateEditorRenderWorkerPreviewBatch(GLFWwindow* sharedWindow) {
         !result.previews[1].pixels.empty();
     if (!complete ||
         !directOutputsMatch ||
-        !frequencyOutputValid) {
+        !channelOutputValid) {
         std::cerr
             << "Editor render-worker preview validation failed: "
                "direct/frequency/direct batch did not remain complete "

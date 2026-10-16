@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "stack_workflow.ps1")
-. (Join-Path $PSScriptRoot "..\release\legal_compliance.ps1")
+. (Join-Path $PSScriptRoot "..\release\product_payload.ps1")
 
 $Root = (Resolve-Path $Root).Path
 
@@ -31,28 +31,29 @@ function Write-StackMenuChoice {
 }
 
 function Show-StackMenuHeader {
-    param([object]$Paths)
+    param([object]$Paths, [string]$Product)
 
     $versionInfo = Get-StackVersionInfo -VersionFile $Paths.VersionFile
-    $legalManifest = Get-StackLegalManifest -Root $Paths.Root
 
     Clear-Host
     Write-Host "STACK TOOLS" -ForegroundColor Cyan
-    Write-Host "Version $($versionInfo.Version)  |  Legal: $($legalManifest.approvalState)"
+    Write-Host "Version $($versionInfo.Version)"
+    $definition = Get-StackProduct -Product $Product
+    Write-Host "Product: $($definition.name)" -ForegroundColor Cyan
+    Write-StackMenuChoice "P" "Change product (full Stack or Burst only)"
+    if ($Product -eq "Burst") {
+        Write-Host "Standalone Burst window; installer adds Explorer's Show more options command." -ForegroundColor DarkGray
+    }
     Write-Host "--------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Build and package"
-    Write-StackMenuChoice "1" "Build app"
+    Write-StackMenuChoice "1" "Build selected product (keep version)"
     Write-StackMenuChoice "2" "Build and launch"
     Write-StackMenuChoice "3" "Create installer + portable ZIP (unsigned)" -Highlight
     Write-StackMenuChoice "4" "Signed public release"
     Write-StackMenuChoice "5" "Local test installer (isolated profile)"
     Write-Host ""
-    Write-Host "Check and maintain"
-    Write-StackMenuChoice "6" "Validate current build"
-    Write-StackMenuChoice "10" "Archive old build folders"
-    Write-StackMenuChoice "11" "FFmpeg provider status"
-    Write-StackMenuChoice "12" "Version and full paths"
+    Write-StackMenuChoice "M" "More tools (checks, version, paths, maintenance)"
     Write-Host ""
     Write-Host "Open folders"
     Write-Host "   7  Build     8  Current release     9  Release archive"
@@ -62,12 +63,19 @@ function Show-StackMenuHeader {
 }
 
 function Invoke-StackValidation {
-    param([object]$Paths)
+    param([object]$Paths, [string]$Product)
 
-    $exePath = Join-Path $Paths.BuildDir "Stack.exe"
+    $definition = Get-StackProduct -Product $Product
+    $exePath = Join-Path $Paths.BuildDir $definition.executable
     if (-not (Test-Path -LiteralPath $exePath)) {
         Write-Host "No build was found yet."
-        Write-Host "Build the app first so there is a Stack.exe to validate."
+        Write-Host "Build $($definition.name) first."
+        return
+    }
+
+    if ($Product -eq "Burst") {
+        $check = Start-Process -FilePath $exePath -ArgumentList '--self-check' -WindowStyle Hidden -Wait -PassThru
+        if ($check.ExitCode -ne 0) { throw "Burst worker self-check failed with exit code $($check.ExitCode)." }
         return
     }
 
@@ -148,8 +156,8 @@ function Confirm-StackVersionForAction {
     Write-Host "Current: $($versionInfo.Version)"
     Write-Host "--------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Enter  Use next patch $suggestedVersion"
-    Write-Host "      K  Keep $($versionInfo.Version)"
+    Write-Host "  Enter  Keep $($versionInfo.Version)"
+    Write-Host "      N  Use next patch $suggestedVersion"
     Write-Host "      C  Cancel"
     Write-Host ""
     Write-Host "Or type a version as major.minor.patch, for example 1.3.0."
@@ -163,6 +171,11 @@ function Confirm-StackVersionForAction {
 
         $trimmedInput = $versionInput.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmedInput)) {
+            Write-Host "Keeping current version $($versionInfo.Version)."
+            return $true
+        }
+
+        if ($trimmedInput -match '^[nN]$') {
             Set-StackVersionInfo -VersionFile $Paths.VersionFile -Version $suggestedVersion
             Write-Host "Using suggested version $suggestedVersion."
             return $true
@@ -197,61 +210,67 @@ function Confirm-StackVersionForAction {
 Invoke-StackEnvironmentRepair -Root $Root
 $paths = Get-StackPaths -Root $Root
 Initialize-ReleaseFolders -Paths $paths
+$selectedProduct = "Stack"
 
 while ($true) {
-    Show-StackMenuHeader -Paths $paths
+    Show-StackMenuHeader -Paths $paths -Product $selectedProduct
     $rawChoice = Read-Host "Choose an option"
     if ($null -eq $rawChoice) {
         break
     }
 
     $choice = $rawChoice.Trim().ToUpperInvariant()
+    if ($choice -eq "M") {
+        Write-Host ""
+        Write-StackMenuChoice "6" "Validate selected build"
+        Write-StackMenuChoice "10" "Archive old build folders"
+        Write-StackMenuChoice "11" "FFmpeg provider status (full Stack)"
+        Write-StackMenuChoice "12" "Version and full paths"
+        Write-StackMenuChoice "V" "Change shared release version"
+        $moreChoice = Read-Host "Tool (Enter to go back)"
+        if ($null -eq $moreChoice) { break }
+        $choice = $moreChoice.Trim().ToUpperInvariant()
+        if ($choice -eq "") { continue }
+    }
     $shouldExitMenu = $false
 
     try {
         switch ($choice) {
+            "P" {
+                $selectedProduct = if ($selectedProduct -eq "Stack") { "Burst" } else { "Stack" }
+            }
+            "V" {
+                [void](Confirm-StackVersionForAction -Paths $paths -ActionLabel "shared release")
+                Pause-StackMenu
+            }
             "1" {
-                if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "build") {
-                    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $paths.BuildDir
-                }
+                & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct
                 Pause-StackMenu
             }
             "2" {
-                if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "build") {
-                    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $paths.BuildDir -Launch
-                }
+                & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct -Launch
                 Pause-StackMenu
             }
             "3" {
                 if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "release package") {
-                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir
+                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct
                 }
                 Pause-StackMenu
             }
             "4" {
-                $publicLegalReady = $true
-                try {
-                    Test-StackLegalPacket -Root $Root -RequireApproved | Out-Null
-                }
-                catch {
-                    $publicLegalReady = $false
-                    Write-Host "Public packaging is blocked before the version is changed:"
-                    Write-Host $_.Exception.Message
-                }
-                if ($publicLegalReady -and
-                    (Confirm-StackVersionForAction -Paths $paths -ActionLabel "public release package")) {
-                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -PublicRelease
+                if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "public release package") {
+                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct -PublicRelease
                 }
                 Pause-StackMenu
             }
             "5" {
                 if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "local test package") {
-                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -LocalTestPackage
+                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct -LocalTestPackage
                 }
                 Pause-StackMenu
             }
             "6" {
-                Invoke-StackValidation -Paths $paths
+                Invoke-StackValidation -Paths $paths -Product $selectedProduct
                 Pause-StackMenu
             }
             "7" {
@@ -284,9 +303,11 @@ while ($true) {
                 Write-Host "Suggested next patch:   $suggestedVersion"
                 Write-Host "Version file:           $($paths.VersionFile)"
                 Write-Host "Official build folder:  $($paths.BuildDir)"
-                Write-Host "Use this executable:    $(Join-Path $paths.BuildDir 'Stack.exe')"
-                Write-Host "Current release:        $($paths.CurrentReleaseDir)"
-                Write-Host "Local test output:      $($paths.LocalTestReleaseDir)"
+                $definition = Get-StackProduct -Product $selectedProduct
+                Write-Host "Selected product:       $($definition.name)"
+                Write-Host "Use this executable:    $(Join-Path $paths.BuildDir $definition.executable)"
+                Write-Host "Current release:        $(Join-Path $paths.CurrentReleaseDir $selectedProduct)"
+                Write-Host "Local test output:      $(Join-Path $paths.LocalTestReleaseDir $selectedProduct)"
                 Write-Host "Release archive:        $($paths.ReleaseArchiveDir)"
                 Write-Host "Extra build archive:    $($paths.ExtraBuildArchiveRoot)"
                 Write-Host "FFmpeg provider source: $($paths.FfmpegProviderSourceDir)"

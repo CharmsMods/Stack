@@ -38,8 +38,8 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
         ImGui::TextWrapped("The bracket preview appears after the captures have been prepared.");return;
     }
     const float controlsTop=ImGui::GetCursorScreenPos().y;
-    const char* views[]={"Result","Original","Mask","Matched","Group","Compare","Alignment"};
-    for(int v=0;v<7;++v) {
+    const char* views[]={"Result","Original","Mask","Matched","Group","Compare","Alignment","Depth"};
+    for(int v=0;v<8;++v) {
         if(v&&ImGui::GetItemRectMax().x+ImGui::CalcTextSize(views[v]).x+ImGui::GetFrameHeight()*2<ImGui::GetWindowPos().x+ImGui::GetWindowContentRegionMax().x)ImGui::SameLine();
         if(ImGui::RadioButton(views[v],ui.view==v))ui.view=v;
     }
@@ -72,10 +72,12 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
         ImGui::TextWrapped("%s / %s",view==1?"Captured brightness":"Exposure matched",label==ui.frameLabels.end()?"Select a capture":label->second.c_str());
         if(!original) {ImGui::TextWrapped("This capture is not prepared. Enable it to inspect its original.");return;}
     } else if(view==6) ImGui::TextWrapped("Alignment confidence / %s",ui.frameLabels.count(frame)?ui.frameLabels.at(frame).c_str():"select a capture");
-    else ImGui::TextDisabled(view==2?"Actual contributions after clipping and fallback":"Merged result or denoised group / common exposure");
+    else ImGui::TextDisabled(view==7?"Relative depth: light is near, dark is far, purple is unresolved":
+        view==2?"Actual contributions after clipping and fallback":"Merged result or denoised group / common exposure");
     ImGui::TextDisabled(ui.detailMode?(ui.result&&ui.result->reconstructionInspection?
         "Native reconstruction pixels / original enlarged to the same scene area":"Native sensor pixels / identical demosaic / no resizing at 1x"):
         native?"Full-quality inspection / zoom to examine detail":ui.inspectionJob?"Loading full-quality pixels...":
+        view==7?"Depth confidence preserves sharp pixels where geometry is uncertain":
         view==2||view==6?"Mask overview / native detail available at cursor":"Preview / full-quality pixels load automatically");
     if(native) {ImGui::SameLine();ImGui::TextDisabled("%u x %u",imageWidth,imageHeight);}
     if(!ui.inspectionError.empty()&&!ui.detailMode)ImGui::TextDisabled("%s",ui.inspectionError.c_str());
@@ -91,7 +93,13 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
             const bool originalPixel=needsOriginal&&(view!=5||static_cast<float>(x)/imageWidth>=ui.compareSplit);
             std::size_t originalIndex=0;
             if(originalPixel) originalIndex=(y*original->height/imageHeight)*original->width+x*original->width/imageWidth;
-            if(view==6) {
+            if(view==7) {
+                const auto depth=ui.result&&ui.result->raw?ui.result->raw->reconstructionDepth:nullptr;
+                const auto sample=depth?Raw::SampleReconstructionDepth(*depth,p.sensorOriginX+(i%p.width)*p.sensorStepX,
+                    p.sensorOriginY+(i/p.width)*p.sensorStepY):Raw::DepthSample{};
+                if(sample.confidence>=.3)color[0]=color[1]=color[2]=.1f+.9f*sample.inverseDepth;
+                else {color[0]=.3f;color[1]=.12f;color[2]=.3f;}
+            } else if(view==6) {
                 float confidence=0;std::uint16_t rejection=1;
                 if(alignmentInspection&&alignmentInspection->width&&alignmentInspection->height) {
                     const double rawX=p.sensorOriginX+(i%p.width)*p.sensorStepX;

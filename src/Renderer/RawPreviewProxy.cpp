@@ -240,6 +240,14 @@ bool BuildLinearPreviewRawData(
 
 namespace Stack::Renderer::RawPreviewProxy {
 
+std::pair<int,int> FitPreviewExtent(int width, int height, int previewMaxDimension) {
+    if (width <= 0 || height <= 0) return {0,0};
+    const int longest = std::max(width,height);
+    if (previewMaxDimension <= 0 || longest <= previewMaxDimension) return {width,height};
+    return {ScalePreviewDimension(width,longest,previewMaxDimension),
+        ScalePreviewDimension(height,longest,previewMaxDimension)};
+}
+
 bool HasPixels(const Raw::RawImageData& rawData) {
     return !rawData.rawBuffer.empty() ||
         !rawData.linearUInt16Buffer.empty() ||

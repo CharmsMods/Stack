@@ -1,0 +1,54 @@
+void RenderLegalSection(AppLegal::Manager* legalManager, State& state, const float contentWidth) {
+    RenderSectionIntro(
+        "ABOUT & LEGAL",
+        "Stack is published by Darynn Ho. Stack, Charm, and CharmsMods are product or publishing brands.");
+
+    ImGui::Text("Product: Stack Image Editor");
+    ImGui::Text("Version: %s", AppVersion::kVersionString);
+    ImGui::Text("Publisher and copyright owner: %s", AppVersion::kPublisher);
+    ImGui::TextWrapped("%s", AppVersion::kCopyright);
+
+    if (legalManager == nullptr) {
+        ImGui::TextDisabled("Legal documents are unavailable.");
+        return;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::TextWrapped("%s", legalManager->GetStatusMessage().c_str());
+    ImGui::TextWrapped("Acceptance record: %s", legalManager->GetAcceptanceLocationLabel().c_str());
+
+    struct LegalAction {
+        const char* label;
+        AppLegal::Document document;
+    };
+    const LegalAction actions[] = {
+        { "Open EULA", AppLegal::Document::Eula },
+        { "Open Privacy Notice", AppLegal::Document::Privacy },
+        { "Open Source License", AppLegal::Document::SourceLicense },
+        { "Open Third-Party Notices", AppLegal::Document::ThirdPartyNotices },
+        { "Open Third-Party Licenses", AppLegal::Document::ThirdPartyDirectory },
+        { "Open Legal Folder", AppLegal::Document::LegalDirectory }
+    };
+
+    RenderSubsectionLabel("DOCUMENTS");
+    const float buttonWidth = std::min(240.0f, std::max(1.0f, contentWidth));
+    if (ImGui::Button("View Initial Legal Agreement Surface", ImVec2(buttonWidth, 0.0f))) {
+        state.requestShowLegalGate = true;
+    }
+    for (const LegalAction& action : actions) {
+        if (ImGui::Button(action.label, ImVec2(buttonWidth, 0.0f))) {
+            state.lastActionError.clear();
+            if (!legalManager->OpenDocument(action.document, &state.lastActionError) && state.lastActionError.empty())
+                state.lastActionError = "Could not open the legal document.";
+            ReportActionResult(state, "open-legal-" + std::to_string(static_cast<int>(action.document)), state.lastActionError);
+        }
+    }
+
+    if (!state.lastActionError.empty()) {
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        ImGui::TextWrapped("%s", state.lastActionError.c_str());
+        ImGui::PopStyleColor();
+    }
+}
+

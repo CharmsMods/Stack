@@ -1,28 +1,21 @@
 #include "ProcessingInternal.h"
 #include "HdrColorFusion.h"
 #include "PresentationEvidence.h"
-#include "DetailFusion.h"
-#include "LocalDetail.h"
+#include "ProcessingTiles.h"
+#include "TemporalGpu.h"
 #include "SuperResolution/Reconstruction.h"
 #include "Panorama/Panorama.h"
+#include "Depth/Depth.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
-#include <mutex>
 #include <thread>
 #include <vector>
 
 namespace Raw::Bracketing {
 namespace {
-std::uint64_t GroupWorkerBytes(std::size_t groups,unsigned tilePixels,std::size_t captures) {
-    // Include the temporal detail halo, band accumulators, a source observation
-    // buffer, output/canonicalization copies, and the two live tile samplers.
-    const std::uint64_t side=static_cast<std::uint64_t>(tilePixels)+8;
-    return side*side*(groups*(4*sizeof(Observation)+sizeof(DetailFusionAccumulator))+160)+
-        std::max<std::uint64_t>(64ull*1024*1024,LocalDetailWorkingBytes(captures,tilePixels));
-}
 std::uint64_t Hash(const std::string& s) {
     std::uint64_t h=14695981039346656037ull;
     for(unsigned char c:s) {h^=c;h*=1099511628211ull;}return h;
@@ -37,89 +30,12 @@ void StoreColor(std::vector<float>& rgb,std::size_t offset,const std::array<doub
     }
 }
 
-template<class Task>
-bool ProcessTiles(const ProcessingRequest& request,const PreparedDataset& data,
-    double progressStart,double progressSpan,const char* progressLabel,ProcessingStage stage,
-    Task&& task,std::string& error) {
-    ReportPresentation(request,stage);
-    if(request.evidenceStream)request.evidenceStream->Begin(request,stage,data.width,data.height,data.sources[data.origin].metadata);
-    const auto& origin=data.sources[data.origin].frame;
-    const std::size_t total=static_cast<std::size_t>(origin.tileColumns)*origin.tileRows;
-    if(!total) {error="The prepared bracket contains no output tiles.";return false;}
-    const std::uint64_t perWorker=GroupWorkerBytes(request.recipe.groups.size(),origin.tileRawPixels,data.sources.size());
-    const std::uint64_t reserve=static_cast<std::uint64_t>(data.width)*data.height*36+64ull*1024*1024;
-    if(request.memoryBudgetBytes<=reserve||request.memoryBudgetBytes-reserve<perWorker) {
-        error="The output and group-processing buffers exceed the available memory budget.";return false;
-    }
-    const auto workers=std::min<std::size_t>({total,
-        ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount),
-        static_cast<std::size_t>((request.memoryBudgetBytes-reserve)/perWorker)});
-    std::atomic<std::size_t> next{0},completed{0};
-    std::atomic<bool> failed{false};
-    std::mutex errorMutex,progressMutex;
-    auto run=[&] {
-        while(!failed.load(std::memory_order_relaxed)) {
-            if(request.shouldCancel&&request.shouldCancel()) {failed=true;break;}
-            const auto index=next.fetch_add(1,std::memory_order_relaxed);
-            if(index>=total) break;
-            const auto tx=static_cast<unsigned>(index%origin.tileColumns);
-            const auto ty=static_cast<unsigned>(index/origin.tileColumns);
-            std::string tileError;
-            if(!task(tx,ty,tileError)) {
-                {
-                    std::lock_guard<std::mutex> lock(errorMutex);
-                    if(error.empty()) error=tileError.empty()?"Bracketing tile processing failed.":tileError;
-                }
-                failed=true;break;
-            }
-            const auto done=completed.fetch_add(1,std::memory_order_relaxed)+1;
-            ReportPresentation(request,stage,done,total);
-            if(request.reportProgress) {
-                std::lock_guard<std::mutex> lock(progressMutex);
-                request.reportProgress(progressStart+progressSpan*done/total,progressLabel);
-            }
-        }
-    };
-    std::vector<std::thread> threads;threads.reserve(workers>0?workers-1:0);
-    for(std::size_t i=1;i<workers;++i) threads.emplace_back(run);
-    run();
-    for(auto& thread:threads) thread.join();
-    if(request.evidenceStream)request.evidenceStream->Flush(request);
-    if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
-    return !failed.load(std::memory_order_relaxed);
-}
 }
 
-std::uint64_t EstimateBracketingPeakResidentBytes(unsigned width,unsigned height,
-    std::size_t sourceCount,std::size_t groupCount,std::uint32_t workerCount,bool localAlignment) {
-    const auto saturated=[](long double value) {
-        return value>=std::numeric_limits<std::uint64_t>::max()
-            ?std::numeric_limits<std::uint64_t>::max():static_cast<std::uint64_t>(value);
-    };
-    const long double pixels=static_cast<long double>(width)*height;
-    const long double output=pixels*(4*sizeof(float)+4*sizeof(std::uint8_t));
-    const long double preparedTiles=pixels*18;
-    const long double preview=std::min<long double>(pixels/4,640.0L*640)*
-        (4*groupCount*sizeof(Preview::Sample)+8*groupCount+32);
-    const long double pyramids=localAlignment?pixels*2*(2*sizeof(double)+sizeof(std::uint8_t))*1.34L:0;
-    const long double reliability=localAlignment?pixels*.25L*std::max<std::size_t>(1,sourceCount-1)*3:0;
-    const long double tileWorkers=static_cast<long double>(std::max<std::uint32_t>(1,workerCount))*
-        GroupWorkerBytes(groupCount,512,sourceCount);
-    return saturated(output+preparedTiles+pyramids+reliability+preview+tileWorkers+64.0L*1024*1024);
-}
 
-std::uint32_t ResolveBracketingWorkerCount(
-    std::uint64_t memoryBudgetBytes,std::uint32_t requestedLimit) {
-    const std::uint32_t hardware=std::max(1u,std::thread::hardware_concurrency());
-    constexpr std::uint64_t perWorkerPlanningBytes=384ull*1024*1024;
-    const std::uint64_t memoryWorkers=std::max<std::uint64_t>(1,
-        memoryBudgetBytes/perWorkerPlanningBytes);
-    const auto memoryLimit=static_cast<std::uint32_t>(std::min<std::uint64_t>(
-        hardware,memoryWorkers));
-    return requestedLimit?std::max(1u,std::min(requestedLimit,memoryLimit)):memoryLimit;
-}
 
-Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis) {
+Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
+    const Raw::OpenGlTaskExecutor& executor,std::string* failure) {
     Preview out=source;
     const auto n=recipe.groups.size(),pixels=static_cast<std::size_t>(out.width)*out.height;
     if(out.samples.size()!=pixels*4*n) return out;
@@ -129,8 +45,9 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
     std::vector<std::array<double,4>> sources(n);
     ColorObservations input;
     for(auto& site:input)site.resize(n);
+    std::vector<double> shares;
     for(std::size_t p=0;p<pixels;++p) {
-        const auto shares=Evaluate(recipe.automatic?analysis.suggestion:recipe.knots,out.guideEv[p]);
+        Evaluate(recipe.automatic?analysis.suggestion:recipe.knots,out.guideEv[p],shares);
         std::array<double,4> cell{};
         for(unsigned c=0;c<4;++c) {
             for(std::size_t g=0;g<n;++g) {
@@ -157,6 +74,14 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
             out.requested[p*n+g]=static_cast<float>(shares[g]);
         }
     }
+    if(recipe.depth.enabled&&recipe.depth.blurRadius>0&&analysis.depth) {
+        std::vector<float> blurred;std::string error;
+        if(!Depth::RenderDefocusGpu(out.resultRgb,out.width,out.height,*analysis.depth,recipe.depth,
+            out.sensorOriginX,out.sensorOriginY,out.sensorStepX,out.sensorStepY,blurred,executor,{},error)) {
+            if(failure)*failure=error;return {};
+        }
+        out.resultRgb=std::move(blurred);
+    }
     return out;
 }
 BracketingResult Process(const ProcessingRequest& submittedRequest) {
@@ -172,9 +97,14 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
     request.workerCount=ResolveBracketingWorkerCount(
         request.memoryBudgetBytes,request.workerCount);
     BracketingResult result;
-    const auto canceled=[&] {return request.shouldCancel&&request.shouldCancel();};
     const auto fail=[&](const std::string& message) {
-        result.message=message;result.status=canceled()?BracketingResult::Status::Canceled:BracketingResult::Status::Failed;return result;
+        result.message=message;result.status=BracketingResult::Status::Failed;
+        // A failing cancellation callback must not throw again while an
+        // exception from the processing workers is being reported.
+        try {
+            if(request.shouldCancel&&request.shouldCancel()) result.status=BracketingResult::Status::Canceled;
+        } catch(...) {}
+        return result;
     };
     try {
         std::string error;
@@ -189,7 +119,9 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         else {
             auto prepared=std::make_shared<PreparedDataset>();
             if(!Prepare(request,*prepared,analysis->diagnostics,error)) return fail(error);
+            prepared->combiningGpu=std::make_shared<TemporalGpu>(request);
             analysis->prepared=prepared;
+            analysis->depth=prepared->depth;
             analysis->stageSeconds=prepared->stageSeconds;
             for(const auto& s:prepared->sources) {
                 s.original->exposureScale=s.scale;
@@ -224,6 +156,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                     return PrepareGroupTile(request,data,tx,ty,tileError);
                 },error)) return fail(error);
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
+            if(data.combiningGpu)data.combiningGpu->Report(*analysis);
             const auto guideStart=std::chrono::steady_clock::now();
             if(std::count_if(data.sources.begin(),data.sources.end(),[](const auto& source){return source.enabled;})>1)
                 analysis->diagnostics.push_back("Temporal merge. Local detail uses agreement across at least three captures. Additional spatial denoising is controlled in RAW.");
@@ -318,10 +251,11 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             if(!ReadGroups(request,data,tx,ty,observations,tile,tileError)) return false;
             std::uint64_t tileFallback=0,tileUnrecoverable=0,tileInvalid=0;
             ColorObservations colorInput;
+            std::vector<double> shares;
             for(unsigned y=0;y<tile.extent.height;y+=2) for(unsigned x=0;x<tile.extent.width;x+=2) {
                 const auto cx=(tile.originX+x)/2,cy=(tile.originY+y)/2;
                 const double ev=analysis->guideEv[cy*cellWidth+cx];
-                const auto shares=Evaluate(request.recipe.automatic?analysis->suggestion:request.recipe.knots,ev);
+                Evaluate(request.recipe.automatic?analysis->suggestion:request.recipe.knots,ev,shares);
                 const bool keep=cx%stride==0&&cy%stride==0;
                 const auto previewIndex=(cy/stride)*preview.width+cx/stride;
                 if(keep) preview.guideEv[previewIndex]=static_cast<float>(ev);
@@ -382,7 +316,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.fallbackSamples=fallbackSamples.load(std::memory_order_relaxed);
         result.unrecoverableSamples=unrecoverableSamples.load(std::memory_order_relaxed);
         result.invalidSamples=invalidSamples.load(std::memory_order_relaxed);
-        result.identity=Stack::NodeMath::Sha256ContentIdentity(analysis->identity+Identity(request.recipe));
+        result.identity=Stack::NodeMath::Sha256ContentIdentity(analysis->identity+Identity(request.recipe)+data.motionIdentity+data.depthIdentity);
         auto raw=std::make_shared<RawImageData>();raw->metadata=origin.metadata;
         raw->metadata.sourcePath="bracketing://result";raw->metadata.sourceContentSha256=result.identity.substr(7);
         raw->metadata.sourceByteSize=pixels*sizeof(float);
@@ -400,7 +334,8 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         sidecars->localRejection=localRejection;sidecars->fallbackReason=fallbackReason;
         for(const auto& s:data.sources) if(s.enabled) sidecars->originalFrameIds.push_back(s.id);
         sidecars->evidenceIdentitySha256=raw->metadata.sourceContentSha256;raw->multiFrameMeasurementSidecars=sidecars;
-        result.raw=raw;result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis);
+        result.raw=raw;result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error);
+        if(!result.preview.width)return fail(error);
         // Reblend owns its copy. Release the construction cells before SR's
         // much larger output is allocated.
         preview={};
@@ -411,7 +346,12 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         auto reconstructionRequest=request;
         reconstructionRequest.reportProgress=submittedRequest.reportProgress;
         if(!ReconstructSuperResolution(reconstructionRequest,result,error)) return fail(error);
+        if(request.recipe.depth.enabled) {
+            ProcessingTimer timer(analysis->stageSeconds,"depth_output");
+            if(!Depth::Finish(reconstructionRequest,result,error)) return fail(error);
+        }
         return result;
     } catch(const std::exception& e) {return fail(std::string("Bracketing failed: ")+e.what());}
+    catch(...) {return fail("Bracketing failed with an unknown processing error.");}
 }
 } // namespace Raw::Bracketing

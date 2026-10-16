@@ -51,11 +51,9 @@ unsigned int RenderPipeline::RenderRawDevelopmentExposure(
         return 0;
     }
 
-    unsigned int outputTexture = m_RawZoneAreasFloatOutput
-        ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
-        : CreateGraphRenderTargetTexture();
-    const float exposureScale =
-        std::exp2(std::clamp(exposureEv, -24.0f, 24.0f));
+    if (!std::isfinite(exposureEv) || exposureEv < -32.f || exposureEv > 32.f) return 0;
+    unsigned int outputTexture = GLHelpers::CreateStorageTexture(m_Width,m_Height,GL_RGBA32F);
+    const float exposureScale=std::exp2(exposureEv);
     const bool rendered =
         outputTexture != 0 &&
         RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {

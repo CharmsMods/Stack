@@ -11,13 +11,12 @@ namespace Raw::Bracketing {
 // controls registration risk only; output samples are never filtered here.
 inline bool BuildSceneGradients(const ProcessingRequest& request,const PreparedDataset& data,
     const Mfd::PreparedRawTile& tile, std::vector<Mfd::RawSignalGradient>& gradients,
-    std::string& error) {
+    std::string& error,PreparedTileSampler& sampler) {
     const auto& source=data.sources[data.origin];
     const int width=static_cast<int>(tile.extent.width),height=static_cast<int>(tile.extent.height);
     const int stride=width+8;
     std::vector<double> signal(static_cast<std::size_t>(stride)*(height+8));
     std::vector<unsigned char> valid(signal.size());
-    PreparedTileSampler sampler(data.directory,16);
     for(int y=-4;y<height+4;++y) {
       if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
       for(int x=-4;x<width+4;++x) {
@@ -62,6 +61,13 @@ inline bool BuildSceneGradients(const ProcessingRequest& request,const PreparedD
       }
     }
     return true;
+}
+
+inline bool BuildSceneGradients(const ProcessingRequest& request,const PreparedDataset& data,
+    const Mfd::PreparedRawTile& tile,std::vector<Mfd::RawSignalGradient>& gradients,
+    std::string& error) {
+    PreparedTileSampler sampler(data.directory,16);
+    return BuildSceneGradients(request,data,tile,gradients,error,sampler);
 }
 
 } // namespace Raw::Bracketing

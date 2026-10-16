@@ -3,6 +3,7 @@
 #include "Editor/EditorModule.h"
 #include "Utils/ImGuiExtras.h"
 #include "Utils/RawGallerySelectionVisuals.h"
+#include "Utils/Utf8Text.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -47,9 +48,12 @@ std::string FitRawLibraryText(const std::string& text, float maxWidth) {
         return text;
     }
 
+    if (ImGui::CalcTextSize("...").x > maxWidth) {
+        return {};
+    }
     std::string result = text;
-    while (result.size() > 4) {
-        result.pop_back();
+    while (!result.empty()) {
+        Stack::Utf8Text::RemoveLastCodePoint(result);
         std::string candidate = result + "...";
         if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
             return candidate;

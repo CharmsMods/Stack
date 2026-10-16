@@ -52,9 +52,6 @@ bool IsApplicableImageType(LogicalValueType type) {
         type == LogicalValueType::ColorImage ||
         type == LogicalValueType::Mask ||
         type == LogicalValueType::DataImage ||
-        type == LogicalValueType::ComplexSpectrum ||
-        type == LogicalValueType::SpectrumMagnitude ||
-        type == LogicalValueType::SpectrumPhase ||
         type == LogicalValueType::Raw;
 }
 
@@ -445,10 +442,10 @@ bool IsNumericLike(LogicalValueType type) {
     case LogicalValueType::ColorImage:
     case LogicalValueType::Mask:
     case LogicalValueType::DataImage:
-    case LogicalValueType::ComplexSpectrum:
-    case LogicalValueType::FrequencyResponse:
-    case LogicalValueType::SpectrumMagnitude:
-    case LogicalValueType::SpectrumPhase:
+    
+    
+    
+    
     case LogicalValueType::Histogram:
     case LogicalValueType::Statistics:
     case LogicalValueType::ScalarField:

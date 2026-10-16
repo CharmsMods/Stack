@@ -1,5 +1,6 @@
 #include "Renderer/ViewportTextureCopy.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
 
 #include "App/settings/AppearanceTheme.h"
 #include "Async/TaskSystem.h"
@@ -44,7 +45,9 @@ void EditorModule::ConsumeRenderWorkerResults() {
     PumpViewportOutputTileTextureDeletes();
 
     auto releaseDeferredResultResources = [this](EditorRenderWorker::Result& result) {
+        FinishViewportPreviewRequest(result, false);
         QueueViewportOutputTextureRelease(result.outputTexture);
+        QueueViewportOutputTextureRelease(result.viewportOverview);
         QueueViewportOutputTileSetRelease(result.outputTiles);
         QueueViewportOutputTextureRelease(
             result.rawWorkspace.localRangeOverlayTexture);
@@ -100,9 +103,12 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
     }
 
-    while (m_RenderWorker.TryConsumeViewportTiming(result)) ObserveRawViewportTiming(result);
-    while (m_RawRenderClientId && Stack::EditorRendering::RawRenderService::Get().TryConsumeViewportTiming(m_RawRenderClientId,result))
-        ObserveRawViewportTiming(result);
+    while (m_RenderWorker.TryConsumeViewportTiming(result)) {
+        ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result);
+    }
+    while (m_RawRenderClientId && Stack::EditorRendering::RawRenderService::Get().TryConsumeViewportTiming(m_RawRenderClientId,result)) {
+        ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result);
+    }
     while (!resultsToProcess.empty()) {
         EditorRenderWorker::Result result = std::move(resultsToProcess.front());
         resultsToProcess.pop_front();
@@ -132,6 +138,13 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 }
             }
         }
+        if (result.viewportOverview.texture != 0) {
+            bool fenceFailed = false;
+            if (!PollSharedTextureFence(result.viewportOverview.readyFence, fenceFailed)) {
+                if (fenceFailed) QueueViewportOutputTextureRelease(result.viewportOverview);
+                else { deferResultUntilReady(std::move(result)); continue; }
+            }
+        }
         if (result.rawWorkspace.localRangeOverlayTexture.texture != 0) {
             bool fenceFailed = false;
             if (!PollSharedTextureFence(
@@ -151,7 +164,11 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 result.telemetry.snapshotReadyAt,
                 std::chrono::steady_clock::now());
         }
-        if (result.timingOnly) { ObserveRawViewportTiming(result); continue; }
+        // Fixed captures validate their own document and processing inputs.
+        // A newer viewport request must not discard a completed capture.
+        for (auto& preview : result.previews)
+            if (preview.assetCapture) AdoptRawAssetCapture(preview);
+        if (result.timingOnly) { ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result); continue; }
         if (result.rawRenderPurpose == RawRenderPurpose::ViewportOverview ||
             result.generation == m_RawViewportMaintenanceGeneration) {
             ObserveRawViewportTiming(result);
@@ -223,12 +240,12 @@ void EditorModule::ConsumeRenderWorkerResults() {
         const bool obsoleteViewport = rawPresentationResult && !result.graphRequest.enabled &&
             result.rawWorkspace.viewportGeneration != m_RawViewportRequest.generation && !nativeResultCoversView;
         if (obsoleteViewport) result.telemetry.skipReason = RawPreviewSkipReason::ObsoleteView;
-        const bool staleResult = result.graphRequest.enabled
+        const bool staleResult = !IsViewportPreviewResultCurrent(result) || (result.graphRequest.enabled
             ? !IsCurrentGraphResult(result) || result.telemetry.superseded
             : (rawResult
                 ? !currentRawGeneration || !currentRawRecipe || obsoleteViewport ||
                     (!m_RawWorkspaceRootTabActive && result.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)
-                : !IsCurrentGraphResult(result));
+                : !IsCurrentGraphResult(result)));
         const bool ownedRawNativeRefinementResult =
             Stack::EditorRenderScheduling::
                 RawRenderResultOwnsTrackedRequest(
@@ -255,6 +272,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 : -1.0;
         }
         if (staleResult) {
+            FinishViewportPreviewRequest(result, false);
             // Discarding the pixels still completes this worker request.
             // A stale last result must not leave RAW permanently busy.
             m_RenderPending = IsAnyRenderBackendBusy();
@@ -399,6 +417,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
         m_GraphPerformanceStats.lastMainRegionPlanHaloY = result.mainRegionPlanHaloY;
         m_GraphPerformanceStats.lastMainRegionPlanReason = result.mainRegionPlanReason;
         m_GraphPerformanceStats.lastMainGraphStats = result.mainGraphStats;
+        PublishUniformParameterFeedback(result.mainGraphStats);
         const std::string activePreviewIdentity =
             GetActiveRawWorkspacePreviewIdentity();
         const Stack::RawWorkspace::SourceRecord* activeRawWorkspaceSource =
@@ -461,9 +480,13 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 packet.workingSpace * 10 + packet.colorWarpVersion;
             m_RawWorkspaceLabUi.colorWarpCloud =
                 std::move(packet.samples);
+            m_RawWorkspaceLabUi.colorWarpCloudGpuFingerprint = 0;
         };
         bool rawPresentationAdopted = false;
+        bool acceptedMainFrame=false;
         auto markMainOutputAccepted = [&](RawWorkspacePreviewOutputKind outputKind) {
+            acceptedMainFrame=true;
+            AdoptViewportPreviewState(result);
             m_BracketingPresentedSourceHash = result.rawWorkspace.sourceHash;
             m_RawViewportPresentationContent = result.rawWorkspace.presentationFingerprint;
             m_RawViewportPresentedRegion = result.rawWorkspace.viewportRegion;
@@ -487,6 +510,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
             m_ViewportOutputExpectedNativeHeight =
                 result.rawWorkspace.expectedNativeOutputHeight;
             m_ViewportOutputNativeExtentVerified =
+                result.viewportPreview.enabled ? result.viewportPreviewGeometry.NativeSamples() :
                 !result.rawWorkspace.sourceKey.empty() &&
                 Stack::EditorRenderScheduling::
                     IsRawPresentationNativeExtent(
@@ -505,22 +529,36 @@ void EditorModule::ConsumeRenderWorkerResults() {
                           m_ViewportOutputExpectedNativeWidth,
                           m_ViewportOutputExpectedNativeHeight);
             m_ViewportOutputRenderGeneration = result.generation;
+            if (result.viewportPreview.enabled) {
+                m_ViewportOutputExpectedNativeWidth = result.viewportPreviewGeometry.logicalWidth;
+                m_ViewportOutputExpectedNativeHeight = result.viewportPreviewGeometry.logicalHeight;
+                m_ViewportOutputPreviewMaxDimension = result.viewportPreviewGeometry.NativeSamples() ? 0 : result.previewMaxDimension;
+            }
             rawPresentationAdopted =
                 !result.rawWorkspace.sourceKey.empty();
+            if (result.rawRenderPurpose==RawRenderPurpose::ExplicitInspection &&
+                HasCompleteNativeViewportOutput())
+                m_RawWorkspaceExplicitFullQualityRenderRequested=false;
             ObserveRawViewportFeedback(result);
             m_GraphPerformanceStats.rawAdaptiveFrameTimeMs =
                 m_RawWorkspaceAdaptiveFrameTimeMs;
             m_GraphPerformanceStats.rawAdaptivePreviewScale =
                 m_RawWorkspaceAdaptivePreviewScale;
+            if (!result.rawWorkspace.graphScopeOwnerKey.empty()) {
+                CacheRawWorkspaceGraphScopeReadback(result.rawWorkspace.graphScopeOwnerKey,
+                    result.rawWorkspace.graphScopeInputFingerprint,result.rawWorkspace.graphScopeReadback);
+                RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool();
+            }
             if (!result.rawWorkspace.sourceKey.empty()) {
                 m_RawWorkspaceStaleRenderStatusText.clear();
                 m_RawWorkspaceLocalRangeTargetPreview.interactionEditing =
                     false;
                 if (!result.rawWorkspace.analysisCaptured &&
+                    result.rawWorkspace.graphScopeOwnerKey.empty() &&
                     result.rawWorkspace.graphScopeReadback.valid &&
                     result.rawWorkspace.graphScopeReadback.stage !=
                         RawDevelopmentGraphScopeStage::None) {
-                    CacheRawWorkspaceGraphScopeReadback(result.rawWorkspace.sourceKey,
+                    CacheRawWorkspaceGraphScopeReadback(result.rawWorkspace.graphScopeOwnerKey.empty() ? result.rawWorkspace.sourceKey : result.rawWorkspace.graphScopeOwnerKey,
                         result.rawWorkspace.graphScopeInputFingerprint, result.rawWorkspace.graphScopeReadback);
                     RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool();
                 }
@@ -529,7 +567,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     m_RawWorkspaceFinalDisplayStats = result.rawWorkspace.finalDisplayStats;
                     m_RawWorkspaceStageStatsReadbacks = result.rawWorkspace.stageStatsReadbacks;
                     CacheRawWorkspaceGraphScopeReadback(
-                        result.rawWorkspace.sourceKey,
+                        result.rawWorkspace.graphScopeOwnerKey.empty() ? result.rawWorkspace.sourceKey : result.rawWorkspace.graphScopeOwnerKey,
                         result.rawWorkspace.graphScopeInputFingerprint,
                         result.rawWorkspace.graphScopeReadback);
                     adoptColorWarpCloudPacket();
@@ -777,7 +815,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     m_RawWorkspaceStageStatsReadbacks =
                         result.rawWorkspace.stageStatsReadbacks;
                     CacheRawWorkspaceGraphScopeReadback(
-                        result.rawWorkspace.sourceKey,
+                        result.rawWorkspace.graphScopeOwnerKey.empty() ? result.rawWorkspace.sourceKey : result.rawWorkspace.graphScopeOwnerKey,
                         result.rawWorkspace.graphScopeInputFingerprint,
                         result.rawWorkspace.graphScopeReadback);
                     adoptColorWarpCloudPacket();
@@ -855,8 +893,14 @@ void EditorModule::ConsumeRenderWorkerResults() {
             if (result.graphRequest.enabled) {
                 blendGraphFrame = frameTransition.Prepare(
                     {result.graphRequest, result.outputTexture.width, result.outputTexture.height,
-                     result.rawWorkspace.viewportEncodedSrgb, ImGui::GetTime()},
-                    result.telemetry.queueWaitMs + result.telemetry.workerTotalMs);
+                     result.rawWorkspace.viewportEncodedSrgb, ImGui::GetTime(),
+                     result.viewportPreviewGeometry.resident,
+                     result.viewportPreviewGeometry.logicalWidth, result.viewportPreviewGeometry.logicalHeight,
+                     result.viewportPreview.generation,
+                     result.rawWorkspace.viewportDiagnostic || result.rawRenderPurpose == RawRenderPurpose::ExplicitInspection},
+                    result.telemetry.queueWaitMs + result.telemetry.workerTotalMs,
+                    GetRawViewportFadeBelowFps(), GetSmoothRawViewportUpdates() && !m_NodeOpenTransition.Active() &&
+                        !ActiveViewportPreviewState().navigationActive);
             } else {
                 frameTransition.Reset();
             }
@@ -877,7 +921,10 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     result.error = "Render produced no viewport texture.";
                 }
             } else {
-                ClearViewportOutputTiles();
+                // Replace leases without discarding this view's current demand,
+                // content identity, timing curve, overview or prepared fade.
+                if (result.viewportPreview.enabled) ReleaseViewportPresentationResources();
+                else ClearViewportOutputTiles();
                 const int adoptedWidth = result.outputTexture.width;
                 const int adoptedHeight = result.outputTexture.height;
                 if (blendGraphFrame) {
@@ -895,7 +942,8 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 markMainOutputAccepted(RawWorkspacePreviewOutputKind::SingleTexture);
             }
         } else if (result.success && result.outputTiles.complete && !result.outputTiles.tiles.empty()) {
-            ClearViewportOutputTiles();
+            if (result.viewportPreview.enabled) ReleaseViewportPresentationResources();
+            else ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
             m_ViewportOutputTiles = std::move(result.outputTiles);
             result.outputTiles = {};
@@ -953,6 +1001,15 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     "hdr-merge-render-failed-" + std::to_string(nodeId));
             }
         }
+        FinishViewportPreviewRequest(result, result.success && result.error.empty());
+        if (result.success && result.error.empty() && result.viewportPreview.enabled &&
+            result.viewportPreviewGeometry.NativeSamples() && !result.telemetry.interactionActive &&
+            m_RawWorkspaceAnalysisRequested && !result.rawWorkspace.analysisCaptured) {
+            // The primary image took priority over pending RAW analysis. Give
+            // that independent auxiliary request a turn after native delivery.
+            MarkRenderRefreshDirty();
+        }
+        QueueViewportOutputTextureRelease(result.viewportOverview);
         // A worker can finish successfully while the UI cannot adopt/upload its
         // texture. That is a terminal first-frame failure too, not a reason to
         // keep the loaded document disabled waiting for another completion.
@@ -1011,7 +1068,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 ? ImGui::GetTime() + 0.50
                 : -1.0;
         }
-        ApplyToneCurveAutoRewriteFeedback(result.toneCurveAutoRewrites);
+        if (acceptedMainFrame) ApplyToneCurveAutoRewriteFeedback(result.toneCurveAutoRewrites);
         ApplyDevelopCandidateRenderFeedback(result.developCandidateRenders);
         if (submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()) {
             m_HdrMergeSubmittedNodesByGeneration.erase(submittedIt);
@@ -1043,6 +1100,9 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
 
         for (EditorRenderWorker::PreviewResult& previewResult : result.previews) {
+            if (previewResult.assetCapture) {
+                continue;
+            }
             if (!previewResult.rawLayerId.empty()) {
                 AdoptRawLayerThumbnail(previewResult);
                 continue;

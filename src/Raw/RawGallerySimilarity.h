@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@ struct RawGallerySimilarityStack {
     // owns a processed stack and its cover.
     std::string resultProjectId, resultProjectName;
     std::filesystem::path resultProjectPath, resultCoverPath;
+    bool hasSavedBracketingResult = false;
 };
 
 enum class RawGalleryFilmstripSortMode {
@@ -74,6 +76,19 @@ struct RawGalleryFilmstripSourceSortInfo {
     std::int64_t modifiedUnixSeconds = 0;
     std::int64_t captureTimestamp = 0;
 };
+
+// Contiguous ranges in the shared sorted order. Grid section headers must not
+// regroup a global sort or reverse the folder order chosen by the comparator.
+struct RawGalleryStackSection {
+    std::string folderKey;
+    std::size_t firstStack = 0;
+    std::size_t stackCount = 0;
+    bool separateFolder = false;
+};
+
+std::vector<RawGalleryStackSection> BuildRawGalleryStackSections(
+    const std::vector<RawGallerySimilarityStack>& stacks,
+    RawGalleryFilmstripSortMode mode);
 
 struct RawGalleryManualGrouping {
     int version = kRawGalleryManualGroupingVersion;
@@ -196,6 +211,10 @@ std::vector<RawGallerySimilarityStack> ApplyRawGalleryManualGrouping(
 
 std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
     const std::vector<RawGallerySimilarityInput>& inputs);
+
+std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
+    const std::vector<RawGallerySimilarityInput>& inputs,
+    const std::function<bool()>& shouldCancel);
 
 RawGallerySimilarityResult BuildRawGallerySimilarityResult(
     const RawGallerySimilarityRequest& request);

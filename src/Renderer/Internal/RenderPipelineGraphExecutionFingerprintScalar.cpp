@@ -43,15 +43,30 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
             scalarFingerprintCache[key] = fingerprint;
             return fingerprint;
         }
+        if (node.kind == RenderGraphNodeKind::DataMath &&
+            node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+            socketId == EditorNodeGraph::kImageOutputSocketId) {
+            std::size_t fingerprint = HashValue(node.definitionHash);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
+            const auto& settings = node.dataMathSettings;
+            for (const auto value : {settings.constantA, settings.constantB, settings.minValue,
+                    settings.maxValue, settings.outMin, settings.outMax}) HashCombine(fingerprint, HashValue(value));
+            const bool average = node.dataMathMode == RenderDataMathMode::Average;
+            const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
+            const int count = average ? EditorNodeGraph::kMaxDataMathInputCount : (unary ? 1 : 2);
+            for (int i = 0; i < count; ++i) {
+                const auto* input = findInputLink(nodeId, EditorNodeGraph::DataMathInputSocketId(i));
+                HashCombine(fingerprint, HashValue(i));
+                HashCombine(fingerprint, input ? fingerprintScalar(input->fromNodeId, input->fromSocketId) : 0);
+            }
+            scalarFingerprintCache[key] = fingerprint;
+            fingerprintingScalars.erase(key);
+            return fingerprint;
+        }
         const bool fieldMeanOutput =
             node.kind == RenderGraphNodeKind::FieldMean &&
             socketId == EditorNodeGraph::kValueOutputSocketId;
-        const bool analyzerOutput =
-            node.kind == RenderGraphNodeKind::SpectrumAnalyzer &&
-            (socketId == EditorNodeGraph::kBandPowerOutputSocketId ||
-             socketId == EditorNodeGraph::kPeakFrequencyOutputSocketId ||
-             socketId == EditorNodeGraph::kPeakDirectionOutputSocketId);
-        if (!fieldMeanOutput && !analyzerOutput) {
+        if (!fieldMeanOutput) {
             fingerprintingScalars.erase(key);
             return 0;
         }
@@ -70,25 +85,6 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
             HashCombine(fingerprint, input
                 ? fingerprintMask(input->fromNodeId, input->fromSocketId)
                 : 0);
-        } else {
-            const RenderGraphLink* input = findInputLink(
-                node.nodeId, EditorNodeGraph::kSpectrumInputSocketId);
-            HashCombine(fingerprint, input
-                ? fingerprintFrequency(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.innerRadius));
-            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.outerRadius));
-            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.excludeDc));
-            for (const char* parameterId : {
-                     EditorNodeGraph::kAnalyzerLowParameterId,
-                     EditorNodeGraph::kAnalyzerHighParameterId}) {
-                const RenderGraphLink* parameterInput = findInputLink(
-                    node.nodeId, EditorNodeGraph::ParameterInputSocketId(parameterId));
-                HashCombine(fingerprint, parameterInput
-                    ? fingerprintScalar(
-                        parameterInput->fromNodeId,
-                        parameterInput->fromSocketId)
-                    : 0);
-            }
         }
         fingerprintingScalars.erase(key);
         scalarFingerprintCache[key] = fingerprint;

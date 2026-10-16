@@ -2,6 +2,7 @@
 
 #include "RawGpuPreprocessTelemetry.h"
 #include "RawImageData.h"
+#include "RawColorTransform.h"
 
 #include <array>
 #include <cstddef>
@@ -12,18 +13,7 @@
 namespace Raw {
 
 class RawGpuPreprocessor;
-
-// Shared color-domain helpers used by processing stages that follow the RAW
-// GPU pipeline. Keeping these here prevents downstream noise models from
-// drifting away from the exact white-balance and camera transform used to
-// produce the scene-linear RGB texture.
-std::array<float, 3> ResolveRawWhiteBalance(
-    const RawMetadata& metadata,
-    const RawDevelopSettings& settings);
-std::array<float, 9> BuildRawCameraToWorkingTransform(
-    const RawMetadata& metadata,
-    const RawDevelopSettings& settings,
-    bool inputAlreadyWhiteBalanced);
+namespace Demosaic { class DemosaicTexture; }
 
 class RawGpuPipeline {
 public:
@@ -82,6 +72,9 @@ private:
         int highlightStrength = -1;
         int highlightThreshold = -1;
         int demosaicMethod = -1;
+        int prepareDemosaic = -1;
+        int externalDemosaic = -1;
+        int useExternalDemosaic = -1;
         int falseColorSuppression = -1;
         int defringeStrength = -1;
         int highlightEdgeCleanup = -1;
@@ -119,6 +112,7 @@ private:
     unsigned int m_Program = 0;
     unsigned int m_LinearProgram = 0;
     std::unique_ptr<RawGpuPreprocessor> m_Preprocessor;
+    std::unique_ptr<Demosaic::DemosaicTexture> m_Demosaic;
     RawGpuPreprocessTelemetry m_LastPreprocessTelemetry;
     RawProgramUniformLocations m_RawUniforms;
     LinearProgramUniformLocations m_LinearUniforms;

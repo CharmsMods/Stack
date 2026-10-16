@@ -5,6 +5,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawGraphParameters.h"
 #include "Utils/PixelBufferUtils.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,10 @@ namespace Stack::Renderer::GraphExecution {
 void GraphExecutionRuntime::BindImageEvaluation() {
     evalImage = [this](int nodeId, const std::string& socketId) -> unsigned int {
         if (pipeline.m_ShouldCancelRender && pipeline.m_ShouldCancelRender()) return 0;
+        if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end()) {
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId=nodeId;
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=unavailable->second;return 0;
+        }
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
         if (const auto cached = imageCache.find(key); cached != imageCache.end()) {
             if (const auto extent = localTextureExtents.find(key);
@@ -44,11 +49,21 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             return 0;
         }
 
-        const RenderGraphNode& node = *it->second;
+        const RenderGraphNode& authored = *it->second;
+        std::optional<RenderGraphNode> evaluated;
+        const bool operationActive = authored.kind == RenderGraphNodeKind::RawOperation ? authored.rawOperation.enabled :
+            authored.kind == RenderGraphNodeKind::Layer ? authored.layerJson.value("enabled",true) : true;
+        const bool hasUniformBindings = operationActive && socketId != "inputImageOut" &&
+            std::any_of(authored.uniformParameters.begin(),authored.uniformParameters.end(),
+            [&](const auto& parameter) { return findInputLink(nodeId,EditorNodeGraph::ParameterInputSocketId(parameter.id)) != nullptr; });
+        if (hasUniformBindings) {
+            evaluated=authored;
+            if (!ApplyUniformInputs(authored,*evaluated)) { visitingImages.erase(key); return 0; }
+        }
+        const RenderGraphNode& node = evaluated ? *evaluated : authored;
         if (node.kind == RenderGraphNodeKind::RawOperation &&
-            (socketId == "inputImageOut" || socketId == "measurementImageOut")) {
-            const auto* input = socketId == "measurementImageOut" ? findInputLink(nodeId, "referenceIn") : nullptr;
-            if (!input) input = findInputLink(nodeId, "imageIn");
+            socketId == "inputImageOut") {
+            const auto* input = findInputLink(nodeId, "imageIn");
             const auto value = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
             visitingImages.erase(key);
             imageCache[key] = value;
@@ -62,8 +77,6 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             node.kind == RenderGraphNodeKind::ImageToMask ||
             node.kind == RenderGraphNodeKind::ChannelSplit ||
             node.kind == RenderGraphNodeKind::ConstantChannel ||
-            node.kind == RenderGraphNodeKind::FrequencyMask ||
-            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId == EditorNodeGraph::kMaskOutputSocketId) ||
             (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
             (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             unsigned int maskTex = evalMask(nodeId, socketId);
@@ -96,28 +109,30 @@ void GraphExecutionRuntime::BindImageEvaluation() {
         if (!rawDevelopStageSocket &&
             !rawDevelopmentSideEffectsActive &&
             !passThroughOutput) {
-            if (const auto cached = pipeline.m_GraphImageCache.find(key);
-                cached != pipeline.m_GraphImageCache.end() &&
-                cached->second.fingerprint == fingerprint &&
-                cached->second.texture != 0) {
+            if (auto* cached = pipeline.FindGraphCacheEntry(pipeline.m_GraphImageCache,key,fingerprint)) {
                 ++pipeline.m_LastGraphExecutionStats.imageCacheHits;
-                pipeline.TouchGraphCacheEntry(cached->second);
-                pipeline.m_RawViewportAppliedRegion = cached->second.viewportRegion;
-                if (cached->second.width > 0 && cached->second.height > 0) {
-                    pipeline.m_Width = cached->second.width;
-                    pipeline.m_Height = cached->second.height;
+                pipeline.TouchGraphCacheEntry(*cached);
+                pipeline.m_RawViewportAppliedRegion = cached->viewportRegion;
+                if (cached->graphGeometry.Valid()) {
+                    viewportGeometry[key] = cached->graphGeometry;
+                    pipeline.m_CurrentGraphImageGeometry = cached->graphGeometry;
                 }
-                imageCache[key] = cached->second.texture;
+                if (cached->width > 0 && cached->height > 0) {
+                    pipeline.m_Width = cached->width;
+                    pipeline.m_Height = cached->height;
+                }
+                imageCache[key] = cached->texture;
                 localTextureExtents[key] = { pipeline.m_Width, pipeline.m_Height };
                 pipeline.m_LastGraphImageCacheHits.insert(key);
                 visitingImages.erase(key);
-                return cached->second.texture;
+                return cached->texture;
             }
         }
         ++pipeline.m_LastGraphExecutionStats.imageCacheMisses;
 
         unsigned int result = 0;
         bool resultOwned = false;
+        Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup cleanup(result, resultOwned);
         bool pointwiseFused = false;
         const bool hasDynamicExposureInput =
             node.kind == RenderGraphNodeKind::TechnicalImage &&
@@ -194,11 +209,6 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                 pipeline.RenderRawDevelopmentGraphNode(node, fingerprint);
             result = rawDevelopmentResult.texture;
             resultOwned = rawDevelopmentResult.owned;
-        } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
-            result = 0;
-            pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
-            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure =
-                "Legacy RAW Neural Denoise is retired and passes RAW data through unchanged.";
         } else if (node.kind == RenderGraphNodeKind::RawDecode) {
             const std::string rawBaseKey = std::to_string(node.nodeId) + ":__rawDecodeBase";
             const std::size_t rawBaseFingerprint = fingerprintImage(node.nodeId, "__rawDecodeBase");
@@ -301,21 +311,9 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             result = pipeline.GenerateImageTexture(node);
             resultOwned = result != 0;
         } else if (node.kind == RenderGraphNodeKind::RawOperation) {
-            auto evaluated = node;
-            bool ready = true;
-            for (const auto& parameter : Stack::RawRecipe::GraphParameters(node.rawOperation.kind)) {
-                const auto* input = findInputLink(nodeId, EditorNodeGraph::ParameterInputSocketId(parameter.id));
-                if (!input) continue;
-                double value = parameter.initial;
-                if (!evalScalar(input->fromNodeId, input->fromSocketId, value) || !std::isfinite(value)) { ready = false; break; }
-                evaluated.rawOperation.parameters[nlohmann::json::json_pointer(parameter.path)] =
-                    std::clamp(value, double(parameter.minimum), double(parameter.maximum));
-            }
-            if (ready) {
-                const auto operationResult = pipeline.RenderRawOperation(executionContext, evaluated, evalImage, evalMask);
-                result = operationResult.texture;
-                resultOwned = operationResult.owned;
-            }
+            const auto operationResult = pipeline.RenderRawOperation(executionContext, node, evalImage, evalMask);
+            result = operationResult.texture;
+            resultOwned = operationResult.owned;
         } else if (node.kind == RenderGraphNodeKind::Layer) {
             const RenderPipeline::GraphNodeRenderResult layerResult = pipeline.RenderLayerGraphNode(executionContext, node, evalImage, evalMask);
             result = layerResult.texture;
@@ -324,6 +322,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
             const unsigned int inputTexture = input
                 ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            const int imageWidth = pipeline.m_Width, imageHeight = pipeline.m_Height;
             double exposureValue = static_cast<double>(node.technicalExposureValue);
             const RenderGraphLink* exposureInput =
                 node.technicalImageOperation == Stack::NodeMath::TechnicalImageOperation::Exposure
@@ -332,6 +331,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             const bool exposureReady = exposureInput == nullptr ||
                 evalScalar(exposureInput->fromNodeId, exposureInput->fromSocketId, exposureValue);
             if (inputTexture && exposureReady) {
+                pipeline.m_Width = imageWidth; pipeline.m_Height = imageHeight;
                 result = createTarget();
                 renderPassToTexture(result, [&](unsigned int fbo) {
                     return pipeline.RenderTechnicalImage(
@@ -351,14 +351,21 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             const int inputHeight = pipeline.m_Height;
             if (inputTexture &&
                 Stack::NodeMath::ValidateReformatSettings(node.reformatSettings).empty()) {
-                pipeline.m_Width = node.reformatSettings.width;
-                pipeline.m_Height = node.reformatSettings.height;
+                auto canvas = Stack::NodeMath::ResolveFramingCanvas(node.reformatSettings, inputWidth, inputHeight);
+                // Original aspect follows authored input geometry, not a rounded preview raster.
+                if (canvas.canvasRatio == 1 && node.semanticDescriptor.spatial.state == Stack::NodeMath::KnowledgeState::Known) {
+                    canvas.width = int(node.semanticDescriptor.spatial.value.fullWindow.width);
+                    canvas.height = int(node.semanticDescriptor.spatial.value.fullWindow.height);
+                }
+                canvas.canvasRatio = 0;
+                pipeline.m_Width = canvas.width;
+                pipeline.m_Height = canvas.height;
                 result = createTarget();
                 bool reformatRendered = false;
                 const bool targetRendered = result != 0 && renderToTexture(result, [&](unsigned int fbo) {
                     reformatRendered = pipeline.RenderReformat(
                         inputTexture, inputWidth, inputHeight,
-                        node.reformatSettings, fbo);
+                        canvas, fbo);
                 });
                 if (!targetRendered || !reformatRendered) {
                     if (result != 0) glDeleteTextures(1, &result);
@@ -414,25 +421,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                 pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
-        } else if (node.kind == RenderGraphNodeKind::SpectrumView) {
-            const RenderGraphLink* spectrumLink = findInputLink(
-                node.nodeId, EditorNodeGraph::kSpectrumInputSocketId);
-            if (spectrumLink != nullptr) {
-                const RenderFrequencyResource spectrum = evalFrequency(
-                    spectrumLink->fromNodeId, spectrumLink->fromSocketId);
-                const RenderPipeline::GraphNodeRenderResult view =
-                    pipeline.RenderSpectrumVisualization(spectrum, node.spectrumViewSettings);
-                result = view.texture;
-                resultOwned = view.owned;
-                pipeline.m_Width = spectrum.sourceWidth;
-                pipeline.m_Height = spectrum.sourceHeight;
-            }
-            if (result == 0) {
-                pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
-                pipeline.m_LastGraphExecutionStats.lastSpecializedFailure =
-                    "Spectrum View could not materialize its typed Spectrum input.";
-            }
-        } else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
+        }  else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
             const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
             const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
             const RenderGraphLink* linkB = findInputLink(node.nodeId, "b");
@@ -543,6 +532,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             return 0;
         }
         if (result) {
+            RecordViewportGeometry(nodeId, socketId, resultOwned);
             unsigned int borrowedRawFallback = 0;
             if (!resultOwned && rawBorrowedResultNeedsOwnedCache) {
                 borrowedRawFallback = result;

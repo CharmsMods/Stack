@@ -930,6 +930,11 @@ std::vector<unsigned char> RenderPipeline::GetCompareSourcePixels(int& outW, int
         true);
 }
 
+std::vector<float> RenderPipeline::GetOutputFloatPixels(int& outW, int& outH, int maxDimension) {
+    return ReadTexturePixelsRgbaFloat(m_OutputTexture, m_Width, m_Height,
+        outW, outH, maxDimension, "GetOutputFloatPixels");
+}
+
 bool RenderPipeline::SampleOutputPixel(float u, float v, std::array<float, 4>& outRgba) const {
     outRgba = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (m_OutputTexture == 0 || m_Width <= 0 || m_Height <= 0) {
@@ -1365,6 +1370,17 @@ std::vector<unsigned char> RenderPipeline::GetPreviewPixels(int& outW, int& outH
         maxDimension,
         "GetPreviewPixels",
         false);
+}
+
+std::vector<unsigned char> RenderPipeline::GetMaskPreviewPixels(int& outW, int& outH, int maxDimension) {
+    auto pixels = GetPreviewPixels(outW, outH, maxDimension);
+    // GL_R32F raster masks read back as (coverage, 0, 0, 1), whereas shader
+    // masks may already repeat coverage in RGB. Both carry coverage in red.
+    for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        pixels[i + 1] = pixels[i + 2] = pixels[i];
+        pixels[i + 3] = 255;
+    }
+    return pixels;
 }
 
 std::vector<unsigned char> RenderPipeline::GetSourcePixels(int& outW, int& outH) {

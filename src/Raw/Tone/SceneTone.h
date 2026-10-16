@@ -1,14 +1,18 @@
 #pragma once
 #include "ThirdParty/json.hpp"
+#include "Raw/Curves/CurveTypes.h"
 #include <array>
 #include <vector>
 
 namespace Stack::RawRecipe {
 
-// Positive EV slopes are the authored curve. Integrating them retains a
-// brightness anchor; changing editor views never reconstructs these values.
+// The slope representation is retained only for existing saved edits. New
+// instances author ordinary input/output points in the EV -16..16 domain.
 struct SceneTonePoint { float ev = 0.0f; float contrast = 1.0f; };
 struct SceneTone {
+    bool direct = true;
+    std::vector<RawBezierCurvePoint> curve {{0,0,{1},{1}},{1,1,{1},{1}}};
+    CurveAmountState curveAmount;
     bool enabled = true;
     float anchorOffsetEv = 0.0f;
     float contrast = 1.0f;

@@ -1,9 +1,9 @@
 #include "WorkspaceCompositor.h"
+#include "App/UiPerformanceTrace.h"
 #include "App/WorkspaceSwitcher.h"
 #include "App/ToolSwitcher.h"
 #include "ToolDrawerShaders.h"
 #include "Renderer/GLHelpers.h"
-#include "Renderer/GLStateGuards.h"
 #include "imgui_impl_opengl3.h"
 #include <algorithm>
 #include <cmath>
@@ -89,27 +89,34 @@ bool HasArea(const ImVec4& bounds) { return bounds.z > bounds.x && bounds.w > bo
 void SetBounds(unsigned int program, const char* name, const ImVec4& bounds) {
     glUniform4f(glGetUniformLocation(program, name), bounds.x, bounds.y, bounds.z, bounds.w);
 }
-struct State {
-    GLState::FramebufferState fb{true};
-    GLint program, vao, active, textures[2], samplers[2];
-    GLboolean blend, scissor, depth, cull;
-    GLfloat clear[4];
-    State() {
-        glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
-        glGetIntegerv(GL_CURRENT_PROGRAM, &program); glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-        for (int i=0;i<2;++i) { glActiveTexture(GL_TEXTURE0+i); glGetIntegerv(GL_TEXTURE_BINDING_2D,&textures[i]); glGetIntegerv(GL_SAMPLER_BINDING,&samplers[i]); }
-        blend=glIsEnabled(GL_BLEND); scissor=glIsEnabled(GL_SCISSOR_TEST); depth=glIsEnabled(GL_DEPTH_TEST); cull=glIsEnabled(GL_CULL_FACE);
+// This is the shell's final main-window pass, not an arbitrary nested GL pass.
+// Its destination is explicit; querying unrelated shared GL objects here can
+// serialize the UI behind an expensive image render on another context.
+struct PresentationTarget {
+    int width, height;
+    unsigned int framebuffer;
+    void Restore() const {
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        const auto buffer = framebuffer ? GL_COLOR_ATTACHMENT0 : GL_BACK;
+        glReadBuffer(buffer); glDrawBuffer(buffer);
+        glViewport(0, 0, width, height);
     }
-    ~State() {
-        glClearColor(clear[0],clear[1],clear[2],clear[3]);
-        fb.Restore(true); glUseProgram(program); glBindVertexArray(vao);
-        for (int i=0;i<2;++i) { glActiveTexture(GL_TEXTURE0+i); glBindTexture(GL_TEXTURE_2D,textures[i]); glBindSampler(i,samplers[i]); }
-        glActiveTexture(active);
-        auto restore=[](GLenum cap, bool enabled) { if(enabled) glEnable(cap); else glDisable(cap); };
-        restore(GL_BLEND,blend); restore(GL_SCISSOR_TEST,scissor); restore(GL_DEPTH_TEST,depth); restore(GL_CULL_FACE,cull);
+    ~PresentationTarget() {
+        Restore();
+        glUseProgram(0); glBindVertexArray(0);
+        for (int i=0;i<2;++i) {
+            glActiveTexture(GL_TEXTURE0+i); glBindTexture(GL_TEXTURE_2D,0); glBindSampler(i,0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     }
 };
+void DrawInterface(ImDrawData* data) {
+    // No compositor shader is needed after this boundary. Unbind it so ImGui
+    // does not need to validate/restore a shared program after each UI pass.
+    glUseProgram(0);
+    ImGui_ImplOpenGL3_RenderDrawData(data);
+}
 void Append(ImDrawData& data, ImDrawList* list) {
     data.CmdLists.push_back(list); ++data.CmdListsCount;
     data.TotalVtxCount += list->VtxBuffer.Size; data.TotalIdxCount += list->IdxBuffer.Size;
@@ -140,6 +147,7 @@ bool WorkspaceCompositor::Ensure(int w, int h) {
     historyFramebuffer = historyTexture ? GLHelpers::CreateFBO(historyTexture) : 0;
     presentedFramebuffer = presentedTexture ? GLHelpers::CreateFBO(presentedTexture) : 0;
     historyValid = false;
+    previewHistoryValid = false;
     texture = GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
     lowTexture = GLHelpers::CreateTextureFromPixels(nullptr,std::max(1,w/2),std::max(1,h/2),4,false);
     framebuffer = texture ? GLHelpers::CreateFBO(texture) : 0;
@@ -198,12 +206,12 @@ void WorkspaceCompositor::ForgetProjectPreview(std::uint64_t workspace) {
     if (lastProjectFrame.workspace == workspace) lastProjectFrame = {};
 }
 
-void WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
+bool WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
     const ImDrawData& data, const ImVec4& clear) {
-    if (frame.previewAmount <= 0.f) return;
+    if (frame.previewAmount <= 0.f) return false;
     const auto* entry = previews.Use(frame.previewWorkspace, frame.previewRootView);
     const ImVec4 bounds = NormalizedBounds(frame.bodyMin, frame.bodyMax, data);
-    if (!entry || !HasArea(bounds)) return;
+    if (!entry || !HasArea(bounds)) return false;
     // Keep the remembered layout's proportions after a window resize or
     // panel-width change. Never stretch photographs to fill the new bounds.
     const float targetWidth = (bounds.z - bounds.x) * width;
@@ -225,11 +233,13 @@ void WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
     glUniform1f(glGetUniformLocation(previewProgram, "amount"), std::clamp(frame.previewAmount, 0.f, 1.f));
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    return true;
 }
 
 bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw, const ImVec4& clear,
     const Tools::Switcher* tools, int toolIndex, std::uint64_t projectWorkspace,
-    bool retainProjectFrame, const ProjectFrame* projectFrame) {
+    bool retainProjectFrame, const ProjectFrame* projectFrame, unsigned int targetFramebuffer) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Compositor);
     if (!data) return false;
     const int w=static_cast<int>(data->DisplaySize.x*data->FramebufferScale.x);
     const int h=static_cast<int>(data->DisplaySize.y*data->FramebufferScale.y);
@@ -243,7 +253,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     if (!visible || mode != previousMode) historyValid=false;
     previousMode = mode;
     if (!visible && (failed || (program && width==w && height==h))) return false;
-    State saved;
+    const PresentationTarget target{w,h,targetFramebuffer};
     const ImVec4 projectBounds = projectFrame ?
         NormalizedBounds(projectFrame->bodyMin, projectFrame->bodyMax, *data) : ImVec4();
     const bool captureAllowed = projectMode && !retainProjectFrame && projectFrame &&
@@ -275,14 +285,15 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         Append(foreground ? overlay : body,list);
     }
     if (projectMode && retainProjectFrame && historyValid && destination == projectWorkspace) {
+        previewHistoryValid = false;
         // Closing clears the editor before its tab can be retired next frame.
         // Hold the last image through that gap instead of presenting a blank.
-        saved.fb.Restore(true);
+        target.Restore();
         glBindFramebuffer(GL_READ_FRAMEBUFFER, presentedFramebuffer);
         glDisable(GL_SCISSOR_TEST);
         glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
-        saved.fb.Restore(true);
-        ImGui_ImplOpenGL3_RenderDrawData(&overlay);
+        target.Restore();
+        DrawInterface(&overlay);
         return true;
     }
     // Keep the last visible blend as the source when direction changes mid-fade.
@@ -292,12 +303,19 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         static_cast<std::uint64_t>(toolMode ? toolIndex : sw.preview);
     const float fadeSeconds = toolMode || projectMode ? .18f : sw.config.previewFadeSeconds;
     if (historyValid && destination != nextDestination && !reducedMotion) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER,presentedFramebuffer);
+        // Reconstruct the previous hover only when a switch needs it. The clean
+        // presented scene is still intact here; no per-hover-frame copy needed.
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER,historyFramebuffer);
-        glDisable(GL_SCISSOR_TEST);
-        glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        glViewport(0,0,w,h);
+        if (!previewHistoryValid || !PresentProjectPreview(lastPreviewFrame, *data, lastPreviewClear)) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER,presentedFramebuffer);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER,historyFramebuffer);
+            glDisable(GL_SCISSOR_TEST);
+            glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        }
         fadeStarted=now;
     }
+    previewHistoryValid = false;
     float weight=historyValid && !reducedMotion ? std::clamp(float(now-fadeStarted)/fadeSeconds,0.f,1.f) : 1.f;
     weight=weight*weight*(3.f-2.f*weight);
     if (!toolMode && !projectMode && !sw.held) weight=std::max(weight,1.f-sw.Amount());
@@ -309,10 +327,12 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     glBindFramebuffer(GL_FRAMEBUFFER, directProjectFrame ? presentedFramebuffer : framebuffer);
     glViewport(0,0,w,h); glDisable(GL_SCISSOR_TEST);
     glClearColor(clear.x,clear.y,clear.z,1); glClear(GL_COLOR_BUFFER_BIT);
-    const bool photoComposited = rawBackdropFrame && rawBackdrop.Render(*rawBackdropFrame, *data, clear);
+    const bool photoComposited = rawBackdropFrame && rawBackdrop.Render(*rawBackdropFrame, *data, clear,
+        directProjectFrame ? presentedFramebuffer : framebuffer);
     {
+        Stack::UiPerformance::Span bodyTiming(Stack::UiPerformance::Stage::CompositorBody);
         RawPhotoInteriorClip photoClip(photoComposited ? rawBackdropFrame : nullptr);
-        ImGui_ImplOpenGL3_RenderDrawData(&body);
+        DrawInterface(&body);
     }
     if (captureAllowed) {
         // Remember the unblended body, even during project crossfades.
@@ -340,7 +360,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         const ImVec2 feather(28.f * dpi / std::max(1.f, data->DisplaySize.x),
             28.f * dpi / std::max(1.f, data->DisplaySize.y));
         if (blurTools) BlurTools(amount, blurBounds, feather, std::max(.5f, dpi * data->FramebufferScale.x));
-        saved.fb.Restore(true);
+        target.Restore();
         glUseProgram(toolProgram);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, presentedTexture); glBindSampler(0,0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, toolBlurTextures[0]); glBindSampler(1,0);
@@ -350,19 +370,29 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         SetBounds(toolProgram, "bounds", blurBounds);
         glUniform2f(glGetUniformLocation(toolProgram, "feather"), feather.x, feather.y);
     } else if (projectMode) {
+        Stack::UiPerformance::Span presentTiming(Stack::UiPerformance::Stage::CompositorPresent);
         // No deformation or blur for ordinary project navigation.
-        saved.fb.Restore(true);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, presentedFramebuffer);
-        glDisable(GL_SCISSOR_TEST);
-        glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
-        saved.fb.Restore(true);
-        if (projectFrame) PresentProjectPreview(*projectFrame, *data, clear);
-        ImGui_ImplOpenGL3_RenderDrawData(&overlay);
+        target.Restore();
+        // The preview shader writes the entire destination, including the base
+        // scene outside its bounds. Blitting that scene first duplicates work.
+        const bool previewDrawn = projectFrame && PresentProjectPreview(*projectFrame, *data, clear);
+        if (!previewDrawn) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, presentedFramebuffer);
+            glDisable(GL_SCISSOR_TEST);
+            glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+            target.Restore();
+        }
+        previewHistoryValid = previewDrawn && weight >= 1.f;
+        if (previewHistoryValid) {
+            lastPreviewFrame = *projectFrame;
+            lastPreviewClear = clear;
+        }
+        DrawInterface(&overlay);
         return true;
     } else {
         glBindFramebuffer(GL_READ_FRAMEBUFFER,presentedFramebuffer); glBindFramebuffer(GL_DRAW_FRAMEBUFFER,lowFramebuffer);
         glBlitFramebuffer(0,0,w,h,0,0,std::max(1,w/2),std::max(1,h/2),GL_COLOR_BUFFER_BIT,GL_LINEAR);
-        saved.fb.Restore(true);
+        target.Restore();
         glUseProgram(program);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,presentedTexture);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,lowTexture);
@@ -373,7 +403,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     }
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES,0,3);
-    ImGui_ImplOpenGL3_RenderDrawData(&overlay);
+    DrawInterface(&overlay);
     return true;
 }
 void WorkspaceCompositor::Shutdown() {
@@ -393,6 +423,7 @@ void WorkspaceCompositor::Shutdown() {
     previewProgram = 0;
     historyFramebuffer=presentedFramebuffer=historyTexture=presentedTexture=blendProgram=0;
     historyValid=false;
+    previewHistoryValid=false;
     if(toolProgram) glDeleteProgram(toolProgram);
     if(blurProgram) glDeleteProgram(blurProgram);
     glDeleteFramebuffers(2, toolBlurFramebuffers);

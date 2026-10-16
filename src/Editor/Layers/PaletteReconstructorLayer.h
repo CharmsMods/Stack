@@ -26,6 +26,7 @@ private:
 
     unsigned int m_ShaderProgram = 0;
 
+    std::array<float,2> m_ExecutionSourceSize{};
     float m_Blend = 100.0f;
     float m_Smoothing = 0.0f;
     int m_SmoothingType = 0;

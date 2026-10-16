@@ -108,15 +108,16 @@ bool CompositeModule::ApplyLibraryProject(const StackBinaryFormat::ProjectDocume
         return false;
     }
 
-    ClearLayersGpu();
-    ClearStagePreviewGpu();
-    m_Layers.clear();
-    m_SelectedId.clear();
-
     const json& root = document.pipelineData;
     if (!root.is_object()) {
         return false;
     }
+
+    ClearLayersGpu();
+    ClearStagePreviewGpu();
+    m_Layers.clear();
+    m_SelectedId.clear();
+    ResetLayerInteraction();
 
     const json& view = root.value("view", json::object());
     m_ViewZoom = std::max(0.05f, view.value("zoom", 1.0f));
@@ -139,6 +140,7 @@ bool CompositeModule::ApplyLibraryProject(const StackBinaryFormat::ProjectDocume
     RememberSnapStepDefaults();
     m_SelectedId = root.value("selectionLayerId", std::string());
 
+    m_ExportSettings = CompositeExportSettings{};
     const json& exportJson = root.value("export", json::object());
     m_ExportSettings.boundsMode = ExportBoundsModeFromToken(exportJson.value("boundsMode", std::string("auto")));
     m_ExportSettings.backgroundMode = ExportBackgroundModeFromToken(exportJson.value("backgroundMode", std::string("transparent")));

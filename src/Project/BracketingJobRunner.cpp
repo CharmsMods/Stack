@@ -1,4 +1,5 @@
 #include "BracketingJobRunner.h"
+#include "BurstEngine/Client.h"
 #include "Persistence/BracketingResultStore.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include <algorithm>
@@ -21,8 +22,10 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
         request.recipe=job.recipe;request.analysis=job.analysis;request.preparationOnly=job.preparationOnly;
         const auto budget=Raw::Mfd::ResolveMfdProcessingMemoryBudget(0,Raw::Mfd::QueryPhysicalMemorySnapshot());
         if(!budget.valid)throw std::runtime_error(budget.message);
-        request.memoryBudgetBytes=budget.budgetBytes;request.automaticMemoryBudget=true;
-        request.workerCount=ResolveBracketingWorkerCount(request.memoryBudgetBytes);
+        // Background work limits concurrency, never the alignment quality plan.
+        request.memoryBudgetBytes=budget.budgetBytes;
+        request.automaticMemoryBudget=true;
+        request.workerCount=ResolveBracketingWorkerCount(request.memoryBudgetBytes,job.workerLimit);
         request.preferGpuRegistration=true;request.executeOpenGlTask=job.executeOpenGlTask;
         request.shouldCancel=job.shouldCancel;request.reportProgress=job.reportProgress;
         request.reportPresentation=job.reportPresentation;
@@ -36,11 +39,13 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
             }))continue;
             const auto* asset=Project::FindEmbeddedAsset(job.snapshot,frame.assetId);
             if(!asset)throw std::runtime_error("A bracket source asset is missing.");
+            const auto ownedPath = job.store->ResolveAssetFile(frame.assetId);
             request.sources.push_back({frame.frameId,asset->sha256,asset->byteLength,
-                sourcesDirectory/(asset->sha256+std::filesystem::path(asset->originalFilename).extension().string()),
+                ownedPath.empty() ? sourcesDirectory/(asset->sha256+std::filesystem::path(asset->originalFilename).extension().string()) : ownedPath,
                 asset->originalFilename});
         }
-        const bool reuse=request.analysis&&request.analysis->identity==AnalysisIdentity(request);
+        const bool reuse=Stack::BurstEngine::HasLiveSession(request.analysis)&&
+            request.analysis->identity==AnalysisIdentity(request);
         if(!reuse) {
             std::filesystem::create_directories(sourcesDirectory);
             std::size_t copied=0;
@@ -49,10 +54,14 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
                 ReportPresentation(request,ProcessingStage::Assets,copied++,request.sources.size(),source.frameId);
                 const auto frame=std::find_if(set->frames.begin(),set->frames.end(),[&](const auto& f){return f.frameId==source.frameId;});
                 std::string error;
-                if(!job.store->CopyAssetToFile(frame->assetId,source.path,&error))throw std::runtime_error(error);
+                if(job.store->ResolveAssetFile(frame->assetId).empty() &&
+                    !job.store->CopyAssetToFile(frame->assetId,source.path,&error))throw std::runtime_error(error);
             }
         }
-        result=Process(request);
+        result=Stack::BurstEngine::Process(request);
+        if(job.backgroundProcessing&&result.status==BracketingResult::Status::Failed&&
+            result.message.find("memory budget")!=std::string::npos)
+            result.message+=" Close other memory-heavy work and retry; automatic bursts use the same quality requirements as foreground processing.";
     }catch(const std::exception& error){result.status=BracketingResult::Status::Failed;result.message=error.what();}
     if(job.shouldCancel&&job.shouldCancel())result.status=BracketingResult::Status::Canceled;
     if(!sourcesDirectory.empty()){std::error_code ec;std::filesystem::remove_all(sourcesDirectory,ec);}

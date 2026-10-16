@@ -35,6 +35,11 @@ struct RawRenderCommand {
     int targetEdge = 0;
     EditorRenderWorker::RawRenderTelemetry telemetry;
     EditorRenderWorker::RawWorkspaceSnapshot rawWorkspace;
+    Stack::Renderer::ViewportPreviewRequest viewportPreview;
+    int viewportViewId = 0;
+    std::size_t viewportExecutionIdentity = 0;
+    std::size_t viewportContentIdentity = 0;
+    bool prepareViewportOverview = false;
     ViewportTilingSettings viewportTiling;
     std::vector<EditorRenderWorker::PreviewRequest> previews;
 };
@@ -74,6 +79,7 @@ public:
         EditorRenderWorker::Result& result);
     bool TryConsumeViewportTiming(ClientId clientId, EditorRenderWorker::Result& result);
     bool IsBusyFor(ClientId clientId) const;
+    bool HasSnapshotWorkFor(ClientId clientId) const;
     bool HasPendingOrBusyForShutdown(ClientId clientId) const;
     EditorRenderWorker::RenderProgress GetProgressFor(
         ClientId clientId) const;
@@ -82,7 +88,8 @@ public:
         std::uint64_t generation);
     bool ExecuteOpenGlTaskBlocking(
         EditorRenderWorker::OpenGlTask task,
-        std::string& error);
+        std::string& error,
+        Raw::OpenGlTaskPriority priority = Raw::OpenGlTaskPriority::Foreground);
 
 private:
     friend bool Stack::Validation::ValidateRawViewportInteraction(GLFWwindow* sharedWindow);

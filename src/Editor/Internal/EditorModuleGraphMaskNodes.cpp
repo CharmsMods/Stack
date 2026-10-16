@@ -30,7 +30,11 @@ void EditorModule::AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNo
 }
 
 void EditorModule::AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddMaskGeneratorNode(maskKind, graphPosition); });
+    const bool texture = IsEditingRawLayerMaskGraph() &&
+        (maskKind == EditorNodeGraph::MaskGeneratorKind::LinearGradient ||
+         maskKind == EditorNodeGraph::MaskGeneratorKind::RadialGradient || maskKind == EditorNodeGraph::MaskGeneratorKind::Square);
+    AddGraphNode(*this,[&](auto& graph) { return texture ? graph.AddMaskTextureNode(maskKind,graphPosition) :
+        graph.AddMaskGeneratorNode(maskKind, graphPosition); });
 }
 
 void EditorModule::AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combineMode, EditorNodeGraph::Vec2 graphPosition) {
@@ -39,18 +43,6 @@ void EditorModule::AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combine
 
 void EditorModule::AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition) {
     AddGraphNode(*this,[&](auto& graph) { return graph.AddMaskUtilityNode(utilityKind, graphPosition); });
-}
-
-void EditorModule::AddCustomMaskNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::CustomMaskPayload payload;
-    if (m_Pipeline.GetCanvasWidth() > 0 && m_Pipeline.GetCanvasHeight() > 0) {
-        payload.width = std::clamp(m_Pipeline.GetCanvasWidth(), 1, 4096);
-        payload.height = std::clamp(m_Pipeline.GetCanvasHeight(), 1, 4096);
-    }
-    const int nodeId = AddGraphNode(*this,[&](auto& graph) {
-        return graph.AddCustomMaskNode(std::move(payload),graphPosition);
-    });
-    if (nodeId > 0) SwitchToComplexNodeSubWindow(nodeId);
 }
 
 void EditorModule::AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition) {
@@ -86,8 +78,7 @@ bool EditorModule::CreateToneCurveSelectionMask(
         const bool ownerIsRawDevelop = owner->kind == EditorNodeGraph::NodeKind::RawDevelop;
         const bool curve = (owner->kind == EditorNodeGraph::NodeKind::Layer && owner->layerType == LayerType::ToneCurve) ||
             (owner->kind == EditorNodeGraph::NodeKind::RawOperation &&
-                (owner->rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LuminanceTone ||
-                 owner->rawOperation.kind == Stack::RawRecipe::GraphOperationKind::RgbCurves));
+                owner->rawOperation.kind == Stack::RawRecipe::GraphOperationKind::ToneCurve);
         const auto position = owner->position;
         int sourceId = 0;
         std::string sourcePort;

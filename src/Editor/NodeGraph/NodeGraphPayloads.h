@@ -9,9 +9,9 @@
 #include "NodeMath/GeometryMath.h"
 #include "NodeMath/CompoundDefinition.h"
 #include "NodeMath/TechnicalImageMath.h"
-#include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
+#include "Assets/MaskRaster.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -124,10 +124,6 @@ struct RawDecodePayload {
     Raw::RawDevelopSettings settings;
 };
 
-struct RawNeuralDenoisePayload {
-    NeuralDenoise::NeuralDenoiseSettings settings;
-};
-
 struct RawDetailFusionPayload {
     Raw::RawDetailFusionSettings settings;
 };
@@ -193,6 +189,9 @@ struct MultiFrameDenoisePayload {
 struct MultiFrameHdrPayload {
     std::string sourceSetId;
     std::vector<MfdFrameBinding> frameBindings;
+    // Bracketing owns its capture membership in the source-set recipe. The
+    // graph exposes its accepted result as one source, without per-frame pins.
+    bool bracketingSource = false;
     std::string radiometricAnchorFrameId;
     std::string presentationStatus = kHdrAwaitingProcessingStatus;
     std::string resultState = "unavailable";
@@ -245,6 +244,8 @@ struct CustomMaskObject {
 };
 
 inline constexpr int kMaximumCustomMaskDimension = 8192;
+// Storage extents are independent of the retired painting canvas limits.
+inline constexpr int kMaximumMaskRasterDimension = 65536;
 inline constexpr std::size_t kMaximumCustomMaskObjectCount = 4096;
 inline constexpr std::size_t kMaximumCustomMaskPointsPerObject = 65536;
 
@@ -256,7 +257,7 @@ struct CustomMaskPayload {
     int width = 1024;
     int height = 1024;
     bool aspectLocked = true;
-    std::vector<float> rasterLayer;
+    Stack::Assets::MaskRaster rasterLayer;
     std::vector<CustomMaskObject> objects;
     int nextObjectId = 1;
     bool invert = false;
@@ -309,14 +310,7 @@ struct ImageGeneratorSettings {
     float textBackdropPadding = 12.0f;
 };
 
-struct DataMathSettings {
-    float constantA = 0.0f;
-    float constantB = 1.0f;
-    float minValue = 0.0f;
-    float maxValue = 1.0f;
-    float outMin = 0.0f;
-    float outMax = 1.0f;
-};
+using DataMathSettings = Stack::NodeMath::ArithmeticSettings;
 
 struct ValuePayload {
     Stack::NodeMath::FirstClassValue value =
@@ -335,73 +329,15 @@ struct CompoundPayload {
     Stack::NodeMath::CompoundInstance instance;
 };
 
-struct FrequencyFftSettings {
-    FrequencyEdgePolicy edgePolicy = FrequencyEdgePolicy::Mirror;
-};
 
-struct SpectrumViewSettings {
-    SpectrumViewMode mode = SpectrumViewMode::Magnitude;
-    SpectrumViewLut lut = SpectrumViewLut::Turbo;
-    float exposure = 1.0f;
-    float gamma = 1.0f;
-    bool centerDc = true;
-};
 
-struct FrequencyNotch {
-    std::string id;
-    float frequency = 0.25f;
-    float directionDegrees = 0.0f;
-    float width = 0.025f;
-};
 
-struct FrequencyResponseSettings {
-    FrequencyFilterMode mode = FrequencyFilterMode::AllPass;
-    FrequencyTransitionProfile profile = FrequencyTransitionProfile::Smooth;
-    float lowCutoff = 0.08f;
-    float highCutoff = 0.25f;
-    float transitionWidth = 0.025f;
-    float butterworthOrder = 2.0f;
-    std::vector<FrequencyNotch> notches;
-};
 
-struct FrequencyFilterSettings {
-    FrequencyResponseSettings localResponse;
-    FrequencyEdgePolicy edgePolicy = FrequencyEdgePolicy::Mirror;
-    float strength = 1.0f;
-};
 
-struct ApplyFrequencyResponseSettings {
-    float strength = 1.0f;
-};
 
-struct CombineSpectraSettings {
-    SpectrumCombineMode mode = SpectrumCombineMode::Add;
-};
 
-struct FrequencyMaskSettings {
-    FrequencyMaskShape shape = FrequencyMaskShape::LowPass;
-    float cutoff = 0.25f;
-    float width = 0.12f;
-    float feather = 0.08f;
-    float order = 2.0f;
-    float centerX = 0.5f;
-    float centerY = 0.5f;
-    bool invert = false;
-};
 
-struct SpectrumMathSettings {
-    float amount = 1.0f;
-};
 
-struct MagnitudePhaseSettings {
-    float exposure = 1.0f;
-    float gamma = 1.0f;
-};
 
-struct SpectrumAnalyzerSettings {
-    float innerRadius = 0.0f;
-    float outerRadius = 0.5f;
-    bool excludeDc = true;
-};
 
 } // namespace EditorNodeGraph

@@ -1,6 +1,7 @@
 #include "Async/MainThreadRequestScope.h"
 #include "Async/TaskSystem.h"
 #include "Async/TaskGroup.h"
+#include "App/UiFrameBudget.h"
 
 #include <algorithm>
 #include <atomic>
@@ -9,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -209,6 +211,35 @@ void TestProjectTaskGroups() {
     Require(b.IsIdle(), "Discarded callbacks must not retain a retired project");
 }
 
+void TestMainThreadCompletionBudget() {
+    auto& tasks = Async::TaskSystem::Get();
+    tasks.Initialize();
+    int completed = 0;
+    std::vector<int> order;
+    for (int expected = 1; expected <= 3; ++expected) {
+        Require(tasks.PostToMain([&, expected] {
+            ++completed;
+            order.push_back(expected);
+        }), "Budgeted completion should be accepted");
+    }
+    // A positive budget smaller than clock resolution still runs one callback.
+    // This checks progress and deferred ownership without introducing a delay.
+    tasks.PumpMainThreadTasks(4, std::numeric_limits<double>::min());
+    Require(completed == 1, "A completion budget must make progress and leave the rest queued");
+    tasks.PumpMainThreadTasks(1, 1.0);
+    Require(completed == 2, "Task count must remain a limit when a time budget is supplied");
+    tasks.PumpMainThreadTasks();
+    Require(completed == 3, "Unbudgeted draining must keep its existing behavior");
+    Require(order == std::vector<int>{1, 2, 3}, "Budgeted completions changed queue order");
+    Require(Stack::App::MainThreadCompletionBudgetMs(400) == 0.25 &&
+        Stack::App::MainThreadCompletionBudgetMs(144) <
+            Stack::App::MainThreadCompletionBudgetMs(120) &&
+        Stack::App::MainThreadCompletionBudgetMs(60) == 1.0 &&
+        Stack::App::MainThreadCompletionBudgetMs(0) == 1.0,
+        "Completion budgets must follow the current display without a 60 Hz cap");
+    tasks.Shutdown();
+}
+
 } // namespace
 
 int main() {
@@ -218,6 +249,7 @@ int main() {
         TestShutdownWaitsForCaptureDestruction();
         TestStaleMainThreadCompletions();
         TestProjectTaskGroups();
+        TestMainThreadCompletionBudget();
         std::cout << "Async initialization, shutdown, and stale completion tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

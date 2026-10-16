@@ -1,34 +1,15 @@
 #include "Preparation.h"
+#include "../CaptureCorrespondence.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace Raw::Bracketing::Sr {
 Vec4 MapCapture(const PreparedSource& source,float x,float y,bool reference) {
-    if(reference)return {x,y,1,0};
-    auto mapped=source.alignment.Map({x,y});double confidence=1,refinementConfidence=1;
-    double positionalVariance=source.alignmentDiagnostic.model==CaptureAlignment::Model::Identity?0:.0025;
-    if(source.localMotion) {
-        Mfd::LocalMotionFieldSample m;Mfd::LocalMotionOptions options;
-        if(EvaluateCaptureMotion(source,{x,y},options,m,&refinementConfidence)) {
-            mapped=m.sourceRaw;confidence=std::max(.2,m.alignmentConfidence);
-            positionalVariance=std::max(0.,m.covarianceRaw.xxRawPixelsSquared+m.covarianceRaw.yyRawPixelsSquared);
-        } else confidence=0;
-        if(source.reliability&&source.reliability->cellExtent.width&&source.reliability->cellExtent.height) {
-            const auto& r=*source.reliability;
-            const auto cx=std::min<unsigned>(r.cellExtent.width-1,unsigned(std::max(0.f,x)*r.cellExtent.width/source.frame.activeExtent.width));
-            const auto cy=std::min<unsigned>(r.cellExtent.height-1,unsigned(std::max(0.f,y)*r.cellExtent.height/source.frame.activeExtent.height));
-            double reliability=0;std::uint16_t bits=0;
-            constexpr auto hard=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid)|
-                Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::SampleInvalid)|
-                Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::PatchRejected)|
-                Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::NonFiniteEvidence);
-            if(!Mfd::ReadReliabilityStoreCell(r,cx,cy,reliability,&bits,nullptr)||(bits&hard))confidence=0;
-            else confidence=std::max(.2,reliability);
-        }
-    } else if(source.alignmentDiagnostic.localApplied)confidence=0;
-    confidence=std::min(confidence,refinementConfidence);
-    return {float(mapped.x),float(mapped.y),float(confidence),float(positionalVariance)};
+    const auto match=EvaluateCaptureCorrespondence(source,{x,y},reference);
+    const double positionalVariance=std::max(0.,match.covarianceRaw.xxRawPixelsSquared+
+        match.covarianceRaw.yyRawPixelsSquared);
+    return {float(match.sourceRaw.x),float(match.sourceRaw.y),float(match.confidence),float(positionalVariance)};
 }
 bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& source,const Tile& tile,
     PreparedTileSampler& sampler,FrameRegion& out,const std::function<bool()>& cancel,std::string& error) {
@@ -36,6 +17,7 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
     const int guideWidth=data.width/2,guideHeight=data.height/2;
     const auto signal=[&](int x,int y){return .18*std::exp2(analysis.guideEv[std::size_t(std::clamp(y,0,guideHeight-1))*guideWidth+std::clamp(x,0,guideWidth-1)]);};
     out={};out.mapOriginX=std::floor(tile.originX/8)*8;out.mapOriginY=std::floor(tile.originY/8)*8;
+    out.detailPreference=float(std::clamp(source.detailPreference,.1,1.));
     out.mapWidth=unsigned(std::ceil((tile.originX+(tile.width-1)*tile.step-out.mapOriginX)/8))+1;
     out.mapHeight=unsigned(std::ceil((tile.originY+(tile.height-1)*tile.step-out.mapOriginY)/8))+1;
     out.mapWidth=std::max(2u,out.mapWidth);out.mapHeight=std::max(2u,out.mapHeight);
@@ -70,6 +52,7 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
             auto& s=out.samples[std::size_t(y)*out.width+x];s.w=-1;
             if(!std::isfinite(tap.normalizedSample)||!std::isfinite(tap.comparisonGain)||tap.comparisonGain<=0||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Defective)||
+               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired)||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Saturated)||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::ExplicitDecoderClip))continue;
             const auto site=layout.SiteAt(out.left+x,out.top+y);const auto i=static_cast<unsigned>(site);

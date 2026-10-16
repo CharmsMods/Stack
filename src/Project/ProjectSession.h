@@ -1,4 +1,8 @@
 #pragma once
+#include "Project/NodeEditTarget.h"
+#include "Project/WorkspaceState.h"
+#include "Project/ProjectGraphHistory.h"
+#include "NodeMath/UniformParameter.h"
 
 #include "Async/TaskGroup.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
@@ -63,6 +67,13 @@ public:
     RawLayerStackDocument rawLayers;
     // Per-project presentation state, excluded from authored processing and persistence.
     std::unordered_map<std::string, std::string> rawOperationSelection;
+    std::optional<NodeEditTarget> nodeEditor;
+    WorkspaceState workspace;
+    ProjectGraphHistory graphHistory;
+    bool restoringGraphHistory = false;
+    // Accepted derived values are presentation feedback, never authored state.
+    std::vector<NodeMath::UniformParameterFeedback> uniformFeedback;
+    std::unordered_map<std::string, std::string> layerNodeSelection;
     RawInteractionDraft rawInteractionDraft;
     RawWorkspace::RawProjectMode rawMode = RawWorkspace::RawProjectMode::UnifiedLayers;
     RawWorkspace::ManagedRawSection managedRaw;

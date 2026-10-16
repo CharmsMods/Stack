@@ -10,23 +10,28 @@
 
 namespace Raw::Bracketing::Sr {
 namespace {
-static_assert(sizeof(PixelAccumulator)==192);
+static_assert(sizeof(PixelAccumulator)==208);
 static_assert(sizeof(Vec4)==16);
 const char* shader=R"GLSL(
 #version 430 core
 layout(local_size_x=8,local_size_y=8) in;
 layout(std430,binding=0) readonly buffer Input { vec4 data[]; };
-struct Pixel { vec4 kernel; vec4 narrow[3]; vec4 broad[3]; vec4 narrowUncertainty; vec4 broadUncertainty; vec4 crossNoise; vec4 crossFrameWeight; vec4 crossUncertainty; };
+struct Pixel { vec4 kernel; vec4 narrow[3]; vec4 broad[3]; vec4 narrowUncertainty; vec4 broadUncertainty; vec4 crossNoise; vec4 crossFrameWeight; vec4 crossUncertainty; vec4 detailBroadWeight; };
 layout(std430,binding=1) buffer Output { Pixel pixels[]; };
 uniform ivec2 outputSize,mapSize;
 uniform vec3 target; // reference origin, sensor step
 uniform vec3 mapGeometry;
 uniform vec4 regionValue, colorValue;
+uniform float detailPreference;
 vec4 mapped(vec2 xy) {
     vec2 uv=clamp((xy-mapGeometry.xy)/mapGeometry.z,vec2(0),vec2(mapSize-1));
     ivec2 p=min(ivec2(uv),mapSize-2);vec2 f=uv-vec2(p);
     int i=p.y*mapSize.x+p.x;
-    return mix(mix(data[i],data[i+1],f.x),mix(data[i+mapSize.x],data[i+mapSize.x+1],f.x),f.y);
+    vec4 p00=data[i],p10=data[i+1],p01=data[i+mapSize.x],p11=data[i+mapSize.x+1];
+    vec4 result=mix(mix(p00,p10,f.x),mix(p01,p11,f.x),f.y);
+    if((f.x<1&&f.y<1&&p00.z<=0)||(f.x>0&&f.y<1&&p10.z<=0)||
+       (f.x<1&&f.y>0&&p01.z<=0)||(f.x>0&&f.y>0&&p11.z<=0))result.z=0;
+    return result;
 }
 void main() {
     ivec4 region=ivec4(regionValue),colors=ivec4(colorValue);
@@ -52,10 +57,11 @@ void main() {
         int c=colors[((q.y&1)<<1)|(q.x&1)];vec2 d=vec2(q)-m.xy;
         float v=max(1e-10,s.y*max(0.,p.kernel.w)+s.z);
         float base=m.z*headroom*1e-5/(v+max(0.,m.w));
-        float w=base*exp(-.5*(p.kernel.x*d.x*d.x+2*p.kernel.y*d.x*d.y+p.kernel.z*d.y*d.y));
+        float w=detailPreference*base*exp(-.5*(p.kernel.x*d.x*d.x+2*p.kernel.y*d.x*d.y+p.kernel.z*d.y*d.y));
         float bw=base*exp(-.5*dot(d,d));
         p.narrow[c].xyz+=vec3(w*s.x,w,w*w*v);weights[c]+=w;
         p.broad[c].xyz+=vec3(bw*s.x,bw,bw*bw*v);bwts[c]+=bw;
+        p.detailBroadWeight[c]+=bw*detailPreference;
         p.crossNoise[c]+=w*bw*v;
     }
     for(int c=0;c<3;++c) {
@@ -104,6 +110,7 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
     glUniform2i(glGetUniformLocation(program_,"mapSize"),f.mapWidth,f.mapHeight);
     glUniform3f(glGetUniformLocation(program_,"target"),t.originX,t.originY,t.step);
     glUniform3f(glGetUniformLocation(program_,"mapGeometry"),f.mapOriginX,f.mapOriginY,f.mapStep);
+    glUniform1f(glGetUniformLocation(program_,"detailPreference"),f.detailPreference);
     glUniform4f(glGetUniformLocation(program_,"regionValue"),float(f.left),float(f.top),float(f.width),float(f.height));
     glUniform4f(glGetUniformLocation(program_,"colorValue"),float(f.colors[0]),float(f.colors[1]),float(f.colors[2]),float(f.colors[3]));
     glDispatchCompute((t.width+7)/8,(t.height+7)/8,1);

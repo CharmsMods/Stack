@@ -1775,6 +1775,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             m_Height,
             "scene-linear-pre-color-warp-rgb",
             true);
+        if (m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::ColorWarpInput &&
+            m_RawDevelopmentGraphScopeReadback.valid) {
+            m_RawDevelopmentGraphScopeReadback.graphInputFingerprint = postFinishToneFingerprint;
+            m_RawDevelopmentGraphScopeReadback.sourceWidth = spatialSourceWidth;
+            m_RawDevelopmentGraphScopeReadback.sourceHeight = spatialSourceHeight;
+        }
     }
     ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostColorWarp, postFinishToneFingerprint, node.nodeId);
     m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostColorWarp);
@@ -1787,7 +1793,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         if (!adoptCachedStage(cachedPostColorWarp)) {
             ++m_LastGraphExecutionStats.rawStageCacheMisses;
             bool complete = !Stack::RawRecipe::IsColorWarpEnabled(recipe.colorWarp) ||
-                RenderRawDevelopmentColorWarpStage(result, recipe);
+                RenderRawDevelopmentColorWarpStage(result, recipe,
+                    postFinishToneFingerprint, spatialSourceWidth, spatialSourceHeight,
+                    m_RawViewportAppliedRegion);
             if (complete && Stack::RawRecipe::IsDetailContrastActive(recipe.detailContrast)) {
                 int sourceWidth = Raw::DisplayWidth(rawData->metadata);
                 int sourceHeight = Raw::DisplayHeight(rawData->metadata);

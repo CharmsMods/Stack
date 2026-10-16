@@ -71,6 +71,10 @@ std::string MakeBackgroundImageIdFromPath(const std::string& storedPath);
 
 AppearanceLibrary MakeLegacyAppearanceLibraryDefaults() {
     AppearanceLibrary library = MakeFirstRunAppearanceLibrary();
+    // Older records without a palette predate the Gray first-run profile.
+    library.savedCreamPalette = CreamPalette{};
+    library.activePresetId = kSolarizedPresetId;
+    library.graphLineOpacity = 1.0f;
     library.graphPanSensitivity = 0.55f;
     library.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
     library.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
@@ -1661,18 +1665,18 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
             if (DecodeCreamPalette(item, variant)) outLibrary.creamVariants.push_back(std::move(variant));
         }
     }
-    outLibrary.activePresetId = appearance.value(kActivePresetIdKey, std::string(kDefaultPresetToken));
+    outLibrary.activePresetId = appearance.value(kActivePresetIdKey, outLibrary.activePresetId);
     outLibrary.graphVisualMode = GraphVisualModeFromString(
         appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::Classic))));
     outLibrary.graphSpotlightHaloOutlines = appearance.value(kGraphSpotlightHaloOutlinesKey, false);
     outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, false);
     outLibrary.graphStraightLinks = appearance.value(kGraphStraightLinksKey, false);
-    outLibrary.graphLineOpacity = ClampUnit(appearance.value(kGraphLineOpacityKey, 1.0f));
-    outLibrary.graphPanSensitivity = ClampUnit(appearance.value(kGraphPanSensitivityKey, 0.55f));
+    outLibrary.graphLineOpacity = ClampUnit(appearance.value(kGraphLineOpacityKey, outLibrary.graphLineOpacity));
+    outLibrary.graphPanSensitivity = ClampUnit(appearance.value(kGraphPanSensitivityKey, outLibrary.graphPanSensitivity));
     outLibrary.graphNodeSliderDragSensitivity = ClampGraphNodeSliderDragSensitivity(
         appearance.value(
             kGraphNodeSliderDragSensitivityKey,
-            kGraphNodeSliderDragSensitivityDefault));
+            outLibrary.graphNodeSliderDragSensitivity));
     outLibrary.graphConnectionLabels = GraphConnectionLabelsFromString(
         appearance.value(kGraphConnectionLabelsKey, std::string("Adaptive")));
     outLibrary.graphConnectionTextLayout = GraphConnectionTextLayoutFromString(
@@ -1680,7 +1684,7 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     outLibrary.graphConnectionTextSize = ClampGraphConnectionTextSize(
         appearance.value(kGraphConnectionTextSizeKey, kGraphConnectionTextSizeDefault));
     outLibrary.graphConnectionTextSizing = GraphConnectionTextSizingFromString(
-        appearance.value(kGraphConnectionTextSizingKey, std::string("Zoom-Aware")));
+        appearance.value(kGraphConnectionTextSizingKey, std::string(GraphConnectionTextSizingToString(outLibrary.graphConnectionTextSizing))));
     outLibrary.graphConnectionTextOutline = appearance.value(kGraphConnectionTextOutlineKey, false);
     outLibrary.experimentalIslandEnabled = appearance.value(
         kExperimentalIslandEnabledKey,
@@ -1702,8 +1706,8 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     outLibrary.viewportTiling = RenderTiling::NormalizeSettings(viewportTiling);
     outLibrary.backgroundImageEnabled = appearance.value(kBackgroundImageEnabledKey, false);
     outLibrary.backgroundImagePath = appearance.value(kBackgroundImagePathKey, std::string());
-    outLibrary.backgroundImageStrength = ClampUnit(appearance.value(kBackgroundImageStrengthKey, 0.58f));
-    outLibrary.uiSurfaceTransparency = ClampUnit(appearance.value(kUiSurfaceTransparencyKey, 0.18f));
+    outLibrary.backgroundImageStrength = ClampUnit(appearance.value(kBackgroundImageStrengthKey, outLibrary.backgroundImageStrength));
+    outLibrary.uiSurfaceTransparency = ClampUnit(appearance.value(kUiSurfaceTransparencyKey, outLibrary.uiSurfaceTransparency));
     const json backgroundImages = appearance.value(kBackgroundImagesKey, json::array());
     if (backgroundImages.is_array()) {
         std::unordered_set<std::string> usedIds;
@@ -1817,7 +1821,9 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         factoryThemes.begin(),
         factoryThemes.end(),
         [](const ThemeDefinition& theme) { return theme.id == kSolarizedLightPresetId; });
-    if (factoryProfile.activePresetId != kSolarizedPresetId ||
+    if (factoryProfile.activePresetId != kPhotoshopGrayscalePresetId ||
+        factoryProfile.savedCreamPalette.id != kMonochromeGrayPaletteId ||
+        factoryProfile.savedCreamPalette.colorPolicy != PaletteColorPolicy::Monochrome ||
         solarizedDark == factoryThemes.end() ||
         solarizedLight == factoryThemes.end() ||
         solarizedDark->displayName != "Solarized Dark" ||
@@ -1827,9 +1833,9 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         factoryProfile.graphSpotlightHaloOutlines ||
         factoryProfile.graphDottedMaskLinks ||
         factoryProfile.graphStraightLinks ||
-        std::abs(factoryProfile.graphLineOpacity - 1.0f) > 0.0005f ||
-        std::abs(factoryProfile.graphPanSensitivity - 0.28f) > 0.0005f ||
-        std::abs(factoryProfile.graphNodeSliderDragSensitivity - 0.16f) > 0.0005f ||
+        std::abs(factoryProfile.graphLineOpacity - 0.20f) > 0.0005f ||
+        std::abs(factoryProfile.graphPanSensitivity - 0.40f) > 0.0005f ||
+        std::abs(factoryProfile.graphNodeSliderDragSensitivity - 0.10f) > 0.0005f ||
         factoryProfile.graphConnectionLabels != GraphConnectionLabelVisibility::Adaptive ||
         factoryProfile.graphConnectionTextLayout != GraphConnectionTextLayout::Floating ||
         std::abs(factoryProfile.graphConnectionTextSize - 11.0f) > 0.0005f ||
@@ -2047,7 +2053,7 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
     }
     AppearanceManager previewAppearance;
     previewAppearance.PreviewCreamPalette(FactoryCreamPalettes()[1]);
-    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetLibrary().savedCreamPalette.id!="harvest-cream") {
+    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetLibrary().savedCreamPalette.id!=kMonochromeGrayPaletteId) {
         if (errorMessage) *errorMessage="Palette preview modified saved settings.";
         return false;
     }
@@ -2129,6 +2135,13 @@ ThemeDefinition MakeFactoryPremiumDarkStudioTheme() {
 
 AppearanceLibrary MakeFirstRunAppearanceLibrary() {
     AppearanceLibrary library;
+    library.activePresetId = kPhotoshopGrayscalePresetId;
+    for (const auto& palette : FactoryCreamPalettes()) {
+        if (palette.id == kMonochromeGrayPaletteId) {
+            library.savedCreamPalette = palette;
+            break;
+        }
+    }
     library.viewportTiling = RenderTiling::NormalizeSettings(library.viewportTiling);
     library.backgroundImages.clear();
     library.customPresets.clear();
@@ -2197,9 +2210,12 @@ ThemeDefinition* FindPresetById(AppearanceLibrary& library, const std::string& p
 }
 
 bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary) {
+    return LoadAppearanceLibrary(GetSettingsPath(), outLibrary);
+}
+
+bool LoadAppearanceLibrary(const std::filesystem::path& settingsPath, AppearanceLibrary& outLibrary) {
     outLibrary = MakeFirstRunAppearanceLibrary();
 
-    const std::filesystem::path settingsPath = GetSettingsPath();
     std::error_code ec;
     if (!std::filesystem::exists(settingsPath, ec) || ec) {
         return false;
@@ -2221,16 +2237,21 @@ bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary) {
     }
 
     if (needsMigration) {
-        SaveAppearanceLibrary(outLibrary);
+        SaveAppearanceLibrary(settingsPath, outLibrary);
     }
 
     return true;
 }
 
 bool SaveAppearanceLibrary(const AppearanceLibrary& library, std::string* errorMessage) {
+    return SaveAppearanceLibrary(GetSettingsPath(), library, errorMessage);
+}
+
+bool SaveAppearanceLibrary(const std::filesystem::path& settingsPath,
+    const AppearanceLibrary& library, std::string* errorMessage) {
     if (errorMessage) errorMessage->clear();
     try {
-        return WriteAppearanceAtomically(GetSettingsPath(), AppearanceLibraryToJson(library), errorMessage);
+        return WriteAppearanceAtomically(settingsPath, AppearanceLibraryToJson(library), errorMessage);
     } catch (const std::exception& error) {
         if (errorMessage) *errorMessage = std::string("Could not prepare settings for saving. ") + error.what();
     } catch (...) {

@@ -1,7 +1,9 @@
 #pragma once
 #include "RawImageBackdropNoiseShaders.h"
 #include "RawImageBackdropColorFieldShaders.h"
+#include "RawImageBackdropDisplayShaders.h"
 #include <string>
+#include "RawImageBackdropUniforms.h"
 namespace Stack::Renderer::RawImageBackdropShaders {
 inline constexpr const char* Vertex = R"(#version 430 core
 out vec2 uv;
@@ -9,32 +11,39 @@ void main() {
     vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
     uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0, 1);
 })";
-inline constexpr const char* Copy = R"(#version 430 core
+inline const std::string Copy = std::string(R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D image, previous;
-uniform vec4 rect, textureRect, extendEdges;
-uniform vec2 previousOffset, previousScale;
-uniform float fadeAmount;
-uniform bool encodedSrgb, visibleColorOnly;
-vec3 decode(vec3 x) { vec3 a=abs(x); return sign(x)*mix(a/12.92,pow((a+.055)/1.055,vec3(2.4)),step(vec3(.04045),a)); }
-vec3 encode(vec3 x) { vec3 a=abs(x); return sign(x)*mix(12.92*a,1.055*pow(a,vec3(1.0/2.4))-.055,step(vec3(.0031308),a)); }
+)")
++ BackdropUniforms::Declare("sampler2D", "image", BackdropUniforms::Copy::Image)
++ BackdropUniforms::Declare("sampler2D", "previous", BackdropUniforms::Copy::Previous)
++ BackdropUniforms::Declare("vec4", "rect", BackdropUniforms::Copy::Rect)
++ BackdropUniforms::Declare("vec4", "textureRect", BackdropUniforms::Copy::TextureRect)
++ BackdropUniforms::Declare("vec4", "extendEdges", BackdropUniforms::Copy::ExtendEdges)
++ BackdropUniforms::Declare("vec2", "previousOffset", BackdropUniforms::Copy::PreviousOffset)
++ BackdropUniforms::Declare("vec2", "previousScale", BackdropUniforms::Copy::PreviousScale)
++ BackdropUniforms::Declare("float", "fadeAmount", BackdropUniforms::Copy::FadeAmount)
++ BackdropUniforms::Declare("bool", "encodedSrgb", BackdropUniforms::Copy::EncodedSrgb)
++ BackdropUniforms::Declare("bool", "visibleColorOnly", BackdropUniforms::Copy::VisibleColorOnly) + RawImageBackdropDisplayShaders::Functions + R"(
 void main() {
     vec2 local = (uv - rect.xy) / (rect.zw - rect.xy);
     if ((local.x < 0.0 && extendEdges.x < .5) || (local.y < 0.0 && extendEdges.y < .5) ||
         (local.x > 1.0 && extendEdges.z < .5) || (local.y > 1.0 && extendEdges.w < .5)) discard;
     vec2 p = mix(textureRect.xy, textureRect.zw, clamp(local, 0.0, 1.0));
-    color = texture(image, p);
+    color = visibleColorOnly ? backdropVisibleSample(image,p) : texture(image,p);
     if (fadeAmount < 1.0) {
-        vec4 a = texture(previous, previousOffset + p * previousScale);
+        vec2 previousPoint = previousOffset + p * previousScale;
+        vec4 a = visibleColorOnly ? backdropVisibleSample(previous,previousPoint) : texture(previous,previousPoint);
         float alpha = mix(a.a, color.a, fadeAmount);
-        vec3 ar = encodedSrgb ? decode(a.rgb) : a.rgb;
-        vec3 br = encodedSrgb ? decode(color.rgb) : color.rgb;
+        vec3 ar = encodedSrgb ? backdropDisplayDecode(a.rgb) : a.rgb;
+        vec3 br = encodedSrgb ? backdropDisplayDecode(color.rgb) : color.rgb;
         vec3 rgb = alpha > .000001 ? mix(ar*a.a, br*color.a, fadeAmount)/alpha : vec3(0);
-        color = vec4(encodedSrgb ? encode(rgb) : rgb, alpha);
+        color = vec4(encodedSrgb ? backdropDisplayEncode(rgb) : rgb, alpha);
     }
-    // The surround extends visible display colors. Hidden values beyond the
-    // window's display range must not carry blown-highlight energy into it.
-    if (visibleColorOnly) color.rgb = clamp(color.rgb, vec3(0), vec3(1));
+    // Match the ordinary photo's framebuffer clipping before the edge blend.
+    // Only the cached surround atlas changes to display-linear light; the
+    // sharp copy retains exactly the window RGB representation.
+    color.rgb = backdropDisplayRange(color.rgb);
+    if (visibleColorOnly) color.rgb = backdropDisplayDecode(color.rgb);
 })";
 inline constexpr const char* Blur = R"(#version 430 core
 in vec2 uv; out vec4 color;
@@ -71,16 +80,28 @@ void main() {
 })";
 inline const std::string Present = std::string(R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D image, blurred[7], blurColorField;
-uniform float blurSigma[7];
-uniform vec4 photo, controls, blurPhotoBounds;
-uniform vec2 screenSize;
-uniform vec3 background;
-uniform bool extendImage;
-uniform float extensionOpacity;
-uniform float edgeOverlap;
-uniform float controlsAmount;
-)") + RawImageBackdropColorFieldShaders::Coordinates + RawImageBackdropNoiseShaders::Synthesis + R"(
+)")
++ BackdropUniforms::Declare("sampler2D", "image", BackdropUniforms::Present::Image)
++ BackdropUniforms::Declare("sampler2D", "blurred[7]", BackdropUniforms::Present::Blurred)
++ BackdropUniforms::Declare("sampler2D", "blurColorField", BackdropUniforms::Present::ColorField)
++ BackdropUniforms::Declare("float", "blurSigma[7]", BackdropUniforms::Present::Sigma)
++ BackdropUniforms::Declare("vec4", "photo", BackdropUniforms::Present::Photo)
++ BackdropUniforms::Declare("vec4", "controls", BackdropUniforms::Present::Controls)
++ BackdropUniforms::Declare("vec4", "blurPhotoBounds", BackdropUniforms::Present::BlurPhotoBounds)
++ BackdropUniforms::Declare("vec2", "screenSize", BackdropUniforms::Present::ScreenSize)
++ BackdropUniforms::Declare("vec3", "background", BackdropUniforms::Present::Background)
++ BackdropUniforms::Declare("bool", "extendImage", BackdropUniforms::Present::ExtendImage)
++ BackdropUniforms::Declare("float", "extensionOpacity", BackdropUniforms::Present::ExtensionOpacity)
++ BackdropUniforms::Declare("float", "edgeOverlap", BackdropUniforms::Present::EdgeOverlap)
++ BackdropUniforms::Declare("float", "controlsAmount", BackdropUniforms::Present::ControlsAmount)
++ BackdropUniforms::Declare("sampler2DArray", "noiseVariance", BackdropUniforms::Present::NoiseVariance)
++ BackdropUniforms::Declare("sampler2DArray", "noiseCovariance", BackdropUniforms::Present::NoiseCovariance)
++ BackdropUniforms::Declare("sampler2DArray", "noiseGrain", BackdropUniforms::Present::NoiseGrain)
++ BackdropUniforms::Declare("sampler2DArray", "noiseBrightnessVariance", BackdropUniforms::Present::NoiseBrightnessVariance)
++ BackdropUniforms::Declare("sampler2DArray", "noiseBrightnessCovariance", BackdropUniforms::Present::NoiseBrightnessCovariance)
++ BackdropUniforms::Declare("vec2", "noisePhysicalSize", BackdropUniforms::Present::NoisePhysicalSize)
++ BackdropUniforms::Declare("vec2", "noiseNativeExtent", BackdropUniforms::Present::NoiseNativeExtent)
++ BackdropUniforms::Declare("bool", "noiseEnabled", BackdropUniforms::Present::NoiseEnabled) + RawImageBackdropDisplayShaders::Functions + RawImageBackdropColorFieldShaders::Coordinates + RawImageBackdropNoiseShaders::Synthesis + R"(
 vec3 sampleLevel(int level, vec2 p) {
     // Constant sampler indices also work on drivers requiring uniform indices.
     if (level == 0) return texture(blurred[0], p).rgb;
@@ -92,10 +113,12 @@ vec3 sampleLevel(int level, vec2 p) {
     return texture(blurred[6], p).rgb;
 }
 vec3 gaussian(vec2 p, float sigma, vec3 sharp) {
+    // Returns display-linear light. Only the optional sharp endpoint needs
+    // decoding; the cached levels already contain that representation.
     float previous = 0.0;
     for (int i = 0; i < 7; ++i) {
         if (sigma <= blurSigma[i]) {
-            vec3 a = i == 0 ? sharp : sampleLevel(i-1, p);
+            vec3 a = i == 0 ? backdropDisplayDecode(sharp) : sampleLevel(i-1, p);
             vec3 b = sampleLevel(i, p);
             float t = clamp((sigma*sigma-previous*previous) /
                 max(.0001, blurSigma[i]*blurSigma[i]-previous*previous), 0.0, 1.0);
@@ -162,6 +185,9 @@ void main() {
             vec2 fieldPoint = colorFieldCoordinate(imagePoint,photoSize/shortEdge);
             soft = mix(soft,texture(blurColorField,fieldPoint).rgb,fieldWeight);
         }
+        // Gaussian levels and the broad field contain display-linear light.
+        // Rejoin the window RGB photo and measure/add grain in that domain.
+        soft = backdropDisplayEncode(soft);
         // An edge entering the window on zoom-out gains its feather gradually
         // instead of suddenly softening a full strip at the window boundary.
         vec4 visibleMargins = vec4(photo.xy*screenSize, (vec2(1)-photo.zw)*screenSize);
@@ -175,7 +201,7 @@ void main() {
     }
     float coverage = controlBlurCoverage();
     if (coverage > 0.0) {
-        result = mix(result, gaussian(p, max(sigma,64.0), sharp), coverage);
+        result = mix(result, backdropDisplayEncode(gaussian(p, max(sigma,64.0), sharp)), coverage);
         blurredWeight = 1.0-(1.0-blurredWeight)*(1.0-coverage);
     }
     result += matchedNoise(blurredWeight, coverage>0.0 ? max(sigma,64.0) : sigma,result);

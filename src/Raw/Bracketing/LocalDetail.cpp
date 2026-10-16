@@ -11,7 +11,8 @@ bool CombineLocalDetail(const ProcessingRequest& request,const PreparedDataset& 
     const unsigned tile=data.sources[data.origin].frame.tileRawPixels,left=tx*tile,top=ty*tile;
     const unsigned width=std::min(tile,data.width-left),height=std::min(tile,data.height-top);
     static const LocalDetailTransform small(16),large(32);
-    PreparedTileSampler sampler(data.directory,8);
+    PreparedTileSampler sampler(data.directory,LocalDetailSamplerTiles(
+        data.sources.size(),tile,request.memoryBudgetBytes));
     std::array<double,256> windows{};double windowSum=0,windowSquared=0;
     for(unsigned p=0;p<256;++p){windows[p]=LocalDetailWindow(p%16,p/16);windowSum+=windows[p];windowSquared+=windows[p]*windows[p];}
     struct NoiseUpdate {double sensorSd=0,modelSd=0,baselineSensor=0,baselineModel=0;};

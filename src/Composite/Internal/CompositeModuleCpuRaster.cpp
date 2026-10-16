@@ -207,7 +207,8 @@ void CompositeModule::AddImageLayerFromFile(const std::string& path) {
         return;
     }
 
-    ApplyImportDataToNewLayer(data, m_CanvasW, m_CanvasH, m_Layers, m_SelectedId);
+    const FloatRect viewRect = ComputeViewWorldRect(m_CanvasW, m_CanvasH, m_ViewZoom, m_ViewPanX, m_ViewPanY);
+    ApplyImportDataToNewLayer(data, viewRect, m_Layers, m_SelectedId);
     QueueImportedExternalAssetMirror(path, data);
     MarkDocumentDirty();
 }
@@ -218,7 +219,8 @@ void CompositeModule::AddProjectLayerFromFile(const std::string& path) {
         return;
     }
 
-    ApplyImportDataToNewLayer(data, m_CanvasW, m_CanvasH, m_Layers, m_SelectedId);
+    const FloatRect viewRect = ComputeViewWorldRect(m_CanvasW, m_CanvasH, m_ViewZoom, m_ViewPanX, m_ViewPanY);
+    ApplyImportDataToNewLayer(data, viewRect, m_Layers, m_SelectedId);
     MarkDocumentDirty();
 }
 
@@ -239,9 +241,9 @@ bool CompositeModule::ReplaceSelectedLayerWithImageFile(const std::string& path)
     return true;
 }
 
-bool CompositeModule::ReplaceSelectedLayerWithProjectFile(const std::string& path) {
-    CompositeLayer* selected = GetSelectedLayer();
-    if (!selected) {
+bool CompositeModule::ReplaceLayerWithProjectFile(const std::string& layerId, const std::string& path) {
+    CompositeLayer* selected = FindLayerById(m_Layers, layerId);
+    if (!selected || selected->locked) {
         return false;
     }
 

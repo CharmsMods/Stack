@@ -2,6 +2,7 @@
 
 #include "Editor/EditorModule.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/Utf8Text.h"
 
 #include <algorithm>
 #include <cmath>
@@ -347,12 +348,32 @@ bool EditorNodeGraphUI::UpdateMiddlePanCapture(EditorModule* editor, bool graphH
         m_MiddlePanLastUpdateFrame = frame;
     }
 
-    ImGuiExtras::SubmitCursorCaptureRequest(ImGuiExtras::CursorCaptureRequest{
-        ImGuiExtras::CursorCaptureMode::LockedPan,
-        m_MiddlePanAnchorScreenPos,
-        m_MiddlePanRestoreScreenPos
-    });
+    ImGuiExtras::CursorCaptureRequest captureRequest;
+    captureRequest.mode = ImGuiExtras::CursorCaptureMode::LockedPan;
+    captureRequest.anchorScreenPos = m_MiddlePanAnchorScreenPos;
+    captureRequest.restoreScreenPos = m_MiddlePanRestoreScreenPos;
+    ImGuiExtras::SubmitCursorCaptureRequest(captureRequest);
     return true;
+}
+
+void EditorNodeGraphUI::UpdateActiveNodeDrag(EditorModule* editor, EditorNodeGraph::Graph& graph) {
+    if (m_DragNodeId <= 0 || m_EditingGroupId > 0 || m_DragGroupId > 0 || m_ResizingGroupId > 0 ||
+        m_DragOutputNodeId > 0 || m_DragInputNodeId > 0 || m_MiddlePanCaptureActive ||
+        !ImGui::IsMouseDragging(ImGuiMouseButton_Left)) return;
+    const ImVec2 delta = ImGui::GetIO().MouseDelta;
+    if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || m_Zoom <= 0.0001f ||
+        (delta.x == 0.0f && delta.y == 0.0f)) return;
+    bool changed = false;
+    for (int nodeId : graph.GetSelectedNodeIds()) {
+        if (auto* node = graph.FindNode(nodeId)) {
+            const auto position = ClampGraphPosition({node->position.x + delta.x / m_Zoom,
+                node->position.y + delta.y / m_Zoom});
+            changed |= position.x != node->position.x || position.y != node->position.y;
+            node->position = position;
+        }
+    }
+    // One history/document update for the whole selection, before projection.
+    if (changed) editor->MarkGraphEdited(-1, false);
 }
 
 void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph) {
@@ -537,7 +558,9 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && hitHeader) {
             m_EditingGroupId = hitGroupId;
             if (const auto* g = editor->GetNodeGraph().FindGroup(hitGroupId)) {
-                strncpy_s(m_GroupRenameBuffer, g->title.c_str(), sizeof(m_GroupRenameBuffer) - 1);
+                std::string title = g->title;
+                Stack::Utf8Text::TruncateToByteLimit(title, sizeof(m_GroupRenameBuffer) - 1u);
+                strncpy_s(m_GroupRenameBuffer, title.c_str(), sizeof(m_GroupRenameBuffer) - 1);
             }
             m_DragGroupId = -1;
             m_ResizingGroupId = -1;
@@ -696,22 +719,18 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     }
 
     if (m_DragNodeId > 0) {
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            if (std::isfinite(delta.x) && std::isfinite(delta.y) && m_Zoom > 0.0001f) {
-                for (int nodeId : editor->GetNodeGraph().GetSelectedNodeIds()) {
-                    if (EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(nodeId)) {
-                        node->position.x += delta.x / m_Zoom;
-                        node->position.y += delta.y / m_Zoom;
-                        node->position = ClampGraphPosition(node->position);
-                        editor->MarkGraphEdited(-1, false);
-                    }
-                }
-            }
-        }
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             m_DragNodeId = -1;
         }
+        return;
+    }
+
+    // Project nodes open their image editor from the whole node body, including
+    // empty space. Keep sockets and popups on their own interaction paths.
+    if ((ownerIsNode || m_MouseOwner == GraphMouseOwner::NodeContent) &&
+        hoveredNodeId > 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+        editor->OpenRawProjectNodeEditor(hoveredNodeId)) {
+        editor->BeginNodeOpenTransition(std::move(m_NodeOpenAppearance));
         return;
     }
 
@@ -733,10 +752,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         }
     }
 
-    if (ownerIsContent) {
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_BoxSelecting = false;
-        }
+    if (m_MouseOwner == GraphMouseOwner::Popup) {
+        m_BoxSelecting = false;
+        return;
+    }
+
+    if (ownerIsContent && !m_BoxSelecting) {
         return;
     }
 
@@ -761,6 +782,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
         if (node) {
+            if (!node->rawLayerOwnerId.empty()) {
+                editor->GetGraphEditorContext().inspectParameters(hoveredNodeId);
+                return;
+            }
             if (node->kind == EditorNodeGraph::NodeKind::Output) {
                 return;
             }
@@ -811,8 +836,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         const ImVec2 a = ToImVec2(GraphToScreen(m_BoxSelectStart));
         const ImVec2 b = ToImVec2(GraphToScreen(m_BoxSelectCurrent));
-        drawList->AddRectFilled(a, b, IM_COL32(120, 170, 255, 35));
-        drawList->AddRect(a, b, IM_COL32(170, 210, 255, 180));
+        const ImVec2 selectionMin(std::min(a.x, b.x), std::min(a.y, b.y));
+        const ImVec2 selectionMax(std::max(a.x, b.x), std::max(a.y, b.y));
+        drawList->AddRectFilled(selectionMin, selectionMax, IM_COL32(120, 170, 255, 35));
+        drawList->AddRect(selectionMin, selectionMax, IM_COL32(170, 210, 255, 180));
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             EditorNodeGraph::Graph& mutableGraph = editor->GetNodeGraph();
             if (!additiveSelect) {
@@ -851,7 +878,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         } else if (additiveSelect) {
             editor->GetNodeGraph().SelectNode(hoveredNodeId, true);
         }
-        m_DragNodeId = hoveredNodeId;
+        m_DragNodeId = editor->GetNodeGraph().IsNodeSelected(hoveredNodeId) ? hoveredNodeId : -1;
     }
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         m_DragNodeId = -1;
@@ -917,15 +944,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         if (ImGui::GetIO().KeyCtrl &&
             !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_Z, false) &&
-            editor->CanUndoFrequencyGraphAction()) {
-            editor->UndoFrequencyGraphAction();
+            editor->CanUndoProjectGraphEdit()) {
+            editor->UndoProjectGraphEdit();
             return;
         }
         if (ImGui::GetIO().KeyCtrl &&
             ((ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) ||
              ImGui::IsKeyPressed(ImGuiKey_Y, false)) &&
-            editor->CanRedoFrequencyGraphAction()) {
-            editor->RedoFrequencyGraphAction();
+            editor->CanRedoProjectGraphEdit()) {
+            editor->RedoProjectGraphEdit();
             return;
         }
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {

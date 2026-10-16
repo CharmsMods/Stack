@@ -44,6 +44,12 @@ bool EditorRenderWorker::HasPendingForOwner(std::uint64_t ownerId) const {
         [ownerId](const DrainingDenoiseState& value) { return value.ownerId == ownerId; });
 }
 
+bool EditorRenderWorker::HasSnapshotWorkFor(std::uint64_t ownerId) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return (m_Rendering && m_RenderingOwner == ownerId) ||
+        (m_HasPending && m_Pending.ownerId == ownerId);
+}
+
 void EditorRenderWorker::CancelOwnerSnapshots(
     std::uint64_t ownerId, std::optional<RawRenderPurpose> purpose) {
     {

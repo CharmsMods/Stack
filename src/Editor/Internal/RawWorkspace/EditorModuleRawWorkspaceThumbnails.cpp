@@ -1,6 +1,8 @@
 #include "Editor/EditorModule.h"
 
 #include "Async/TaskSystem.h"
+#include "App/UiFrameBudget.h"
+#include "Utils/DisplayRefreshRate.h"
 #include "Raw/RawLoader.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
@@ -10,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -224,7 +227,6 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             sourceKey,
             sourcePath,
             metadataIdentity,
-            metadata = entry.metadata,
             metadataChecked = entry.metadataChecked,
             thumbnailPath,
             thumbnailStatus
@@ -273,27 +275,16 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             return;
         }
 
-        if (!metadataChecked && !decodedPixels.empty()) {
-            try {
-                auto candidate = std::make_shared<Raw::RawMetadata>();
-                if (!sourcePath.empty() && Raw::RawLoader::LoadMetadata(sourcePath.u8string(), *candidate))
-                    metadata = std::move(candidate);
-            } catch (...) {
-                // An unavailable camera header must not hide a valid thumbnail.
-            }
-            metadataChecked = true;
-        }
-        if (resetRequested()) return;
-
-            ProjectTasks().PostToMain([
+        const bool needsMetadata = !metadataChecked && !decodedPixels.empty();
+        // Queue usable pixels before opening the original RAW for camera
+        // details. A slow or unavailable source must not hold up its cache.
+        const bool pixelsPosted = ProjectTasks().PostToMain([
                 this,
                 requestGeneration,
                 sourceKey,
                 thumbnailPath,
                 thumbnailStatus,
                 metadataIdentity,
-                metadata = std::move(metadata),
-                metadataChecked,
                 width,
                 height,
                 decodedPixels = std::move(decodedPixels)
@@ -323,9 +314,6 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                     return;
                 }
 
-                // Publish both before making the texture available to any view.
-                target.metadata = std::move(metadata);
-                target.metadataChecked = metadataChecked;
                 target.decodedPixels = std::move(decodedPixels);
                 // A generated file is not repaired until the decoder can read it.
                 m_RawWorkspaceThumbnailDecodeRepairAttempts.erase(sourceKey);
@@ -351,6 +339,30 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                     target.decodedHeight = 0;
                 }
             });
+
+        if (!pixelsPosted || !needsMetadata || resetRequested()) return;
+        std::shared_ptr<const Raw::RawMetadata> metadata;
+        try {
+            auto candidate = std::make_shared<Raw::RawMetadata>();
+            if (!sourcePath.empty() && Raw::RawLoader::LoadMetadata(sourcePath.u8string(), *candidate))
+                metadata = std::move(candidate);
+        } catch (...) {
+            // Camera details are optional; the cached pixels are already queued.
+        }
+        if (resetRequested()) return;
+        ProjectTasks().PostToMain([
+            this, requestGeneration, resetGeneration, sourceKey, metadataIdentity,
+            metadata = std::move(metadata)
+        ]() mutable {
+            if (resetGeneration != m_RawWorkspaceThumbnailTextureResetGeneration.load(
+                    std::memory_order_relaxed)) return;
+            const auto found = m_RawWorkspaceThumbnailTextures.find(sourceKey);
+            if (found == m_RawWorkspaceThumbnailTextures.end() ||
+                found->second.requestGeneration != requestGeneration ||
+                found->second.metadataIdentity != metadataIdentity) return;
+            found->second.metadata = std::move(metadata);
+            found->second.metadataChecked = true;
+        });
         });
     } catch (...) {
         submitted = false;
@@ -460,7 +472,7 @@ void EditorModule::HandleRawWorkspaceThumbnailDecodeFailure(
         sourceIt->thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Failed;
         sourceIt->thumbnail.errorMessage =
             "RAW thumbnail could not be decoded after repair.";
-        InvalidateRawWorkspaceGalleryPresentation();
+        InvalidateRawWorkspaceGalleryPresentation(false);
         PersistRawWorkspaceCatalog();
         return;
     }
@@ -469,7 +481,7 @@ void EditorModule::HandleRawWorkspaceThumbnailDecodeFailure(
     sourceIt->thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Stale;
     sourceIt->thumbnail.errorMessage =
         "RAW thumbnail failed to decode; regenerating.";
-    InvalidateRawWorkspaceGalleryPresentation();
+    InvalidateRawWorkspaceGalleryPresentation(false);
     PersistRawWorkspaceCatalog();
     QueueRawWorkspaceThumbnailRepair(sourceKey);
 }
@@ -523,6 +535,11 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
 
     const std::size_t uploadLimit = filmstripLayoutMoving
         ? 1u : kRawWorkspaceThumbnailTextureUploadsPerFrame;
+    const auto uploadStarted = std::chrono::steady_clock::now();
+    const auto* viewport = ImGui::GetCurrentContext() ? ImGui::GetMainViewport() : nullptr;
+    const int refresh = viewport ? DisplayRefreshRate::ForWindow(
+        static_cast<GLFWwindow*>(viewport->PlatformHandle)) : 60;
+    const double uploadBudgetMs = Stack::App::MainThreadCompletionBudgetMs(refresh);
     while (m_RawWorkspaceThumbnailTextureUploadsThisFrame < uploadLimit &&
         !m_RawWorkspaceThumbnailTextureUploadQueue.empty()) {
         auto queueItem = m_RawWorkspaceThumbnailTextureUploadQueue.begin();
@@ -586,6 +603,7 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
             QueueRawWorkspaceThumbnailTextureDelete(pendingEntry.texture);
         }
         pendingEntry.texture = texture;
+        m_RawWorkspaceThumbnailTextureTrimNeeded = true;
         pendingEntry.width = pendingEntry.decodedWidth;
         pendingEntry.height = pendingEntry.decodedHeight;
         pendingEntry.decodedWidth = 0;
@@ -594,6 +612,12 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
         pendingEntry.priority = false;
         ++m_RawWorkspaceThumbnailTextureUploadsThisFrame;
         m_RawWorkspaceThumbnailTextureUploadBytesThisFrame += uploadBytes;
+        if (std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadStarted).count() >= uploadBudgetMs) {
+            // A second pump in the same frame must not renew this allowance.
+            m_RawWorkspaceThumbnailTextureUploadsThisFrame = kRawWorkspaceThumbnailTextureUploadsPerFrame;
+            break;
+        }
     }
     TrimRawWorkspaceThumbnailTextureCache();
 }
@@ -643,6 +667,9 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureDeletes(bool drainAll) {
 }
 
 void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
+    // Only an upload can increase residency. Once within budget, ordinary
+    // drawing/hovering must not rescan the entire thumbnail map every frame.
+    if (!m_RawWorkspaceThumbnailTextureTrimNeeded) return;
     // Gallery keeps a browsing history across both layouts. The byte limit
     // matters more than count for portrait and unusually large thumbnails.
     const std::size_t maxCount = m_PermanentGalleryWorkspace
@@ -668,6 +695,7 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
         residentBytes += bytes;
     }
     if (residentCount <= maxCount && residentBytes <= maxBytes) {
+        m_RawWorkspaceThumbnailTextureTrimNeeded = false;
         return;
     }
 
@@ -707,6 +735,7 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
             : 0;
         --residentCount;
     }
+    m_RawWorkspaceThumbnailTextureTrimNeeded = residentCount > maxCount || residentBytes > maxBytes;
 }
 
 void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {
@@ -714,6 +743,7 @@ void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {
     m_RawWorkspaceThumbnailTextureResetGeneration.fetch_add(1, std::memory_order_relaxed);
     ++m_RawWorkspaceThumbnailTextureRequestGeneration;
     m_RawWorkspaceThumbnailTextureUseSerial = 0;
+    m_RawWorkspaceThumbnailTextureTrimNeeded = false;
     m_RawWorkspaceThumbnailTextureRequestFrame = -1;
     m_RawWorkspaceThumbnailTextureRequestsThisFrame = 0;
     m_RawWorkspaceThumbnailTextureUploadQueue.clear();

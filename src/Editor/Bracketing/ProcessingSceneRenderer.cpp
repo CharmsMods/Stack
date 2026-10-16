@@ -24,6 +24,7 @@ void ProcessingSceneRenderer::Release() {
     if(vbo_)glDeleteBuffers(1,&vbo_);if(vao_)glDeleteVertexArrays(1,&vao_);if(program_)glDeleteProgram(program_);
     output_=fbo_=previousOutput_=previousFbo_=msTexture_=msFbo_=vbo_=vao_=program_=0;width_=height_=0;lastDraw_=-1;lastEvidence_=nullptr;
     dissolveDuration_=0;
+    consumedPublication_=-1;
 }
 std::size_t ProcessingSceneRenderer::TextureBytes() const {
     std::size_t bytes=std::size_t(width_)*height_*4*(1+(previousOutput_?1:0)+(msTexture_?samples_:0));
@@ -38,19 +39,25 @@ unsigned ProcessingSceneRenderer::Draw(const ProcessingSnapshot& snapshot,const 
     const bool busy=snapshot.progress.stage==ProcessingStage::LocalAlignment||snapshot.progress.stage==ProcessingStage::Reconstruction;
     const float scale=std::min({1.f,1920.f/size.x,1080.f/size.y});
     const int width=std::max(1,int(size.x*scale)),height=std::max(1,int(size.y*scale));
-    std::string layoutKey=std::to_string(int(snapshot.progress.stage))+"/"+snapshot.progress.captureId;
-    if(snapshot.evidence) {
-        layoutKey+=snapshot.evidence->hasAffine?"/affine":"/fixed";
-        for(const auto& raster:snapshot.evidence->rasters)layoutKey+="/"+raster.label;
+    bool layoutChanged=false;
+    if(consumedPublication_!=snapshot.publishedAt||consumedSequence_!=snapshot.progress.sequence||
+       stage_!=snapshot.progress.stage||lastEvidence_!=snapshot.evidence||snapshot.publishedAt<=0) {
+        std::string layoutKey=std::to_string(int(snapshot.progress.stage))+"/"+snapshot.progress.captureId;
+        if(snapshot.evidence) {
+            layoutKey+=snapshot.evidence->hasAffine?"/affine":"/fixed";
+            for(const auto& raster:snapshot.evidence->rasters)layoutKey+="/"+raster.label;
+        }
+        const bool sameImages=images_.size()==snapshot.images.size()&&std::all_of(snapshot.images.begin(),snapshot.images.end(),[&](const auto& entry) {
+            auto found=images_.find(entry.first);return found!=images_.end()&&found->second.source==entry.second;
+        });
+        layoutChanged=layoutKey_!=layoutKey||!sameImages;
+        if(layoutChanged){layoutKey_=std::move(layoutKey);layoutChangedAt_=time-(reduced?.85:0);}
+        consumedPublication_=snapshot.publishedAt;
+        consumedSequence_=snapshot.progress.sequence;
     }
-    const bool sameImages=images_.size()==snapshot.images.size()&&std::all_of(snapshot.images.begin(),snapshot.images.end(),[&](const auto& entry) {
-        auto found=images_.find(entry.first);return found!=images_.end()&&found->second.source==entry.second;
-    });
-    const bool layoutChanged=layoutKey_!=layoutKey||!sameImages;
-    if(layoutChanged){layoutKey_=std::move(layoutKey);layoutChangedAt_=time-(reduced?.85:0);}
     // After a transition settles, only measured changes require a new scene.
     // Native labels and counters are still drawn every UI frame.
-    if(output_&&width==width_&&height==height_&&!layoutChanged&&sameImages&&lastEvidence_==snapshot.evidence&&
+    if(output_&&width==width_&&height==height_&&!layoutChanged&&lastEvidence_==snapshot.evidence&&
         (reduced||(time-layoutChangedAt_>1.6&&time-dissolveStart_>=dissolveDuration_)))return output_;
     if(output_&&width==width_&&height==height_&&!layoutChanged&&time-lastDraw_<(busy?1./30.:1./60.))return output_;
     const float dt=lastDraw_<0?.016f:float(std::clamp(time-lastDraw_,0.,.1));lastDraw_=time;drawTime_=time;
@@ -70,6 +77,10 @@ unsigned ProcessingSceneRenderer::Draw(const ProcessingSnapshot& snapshot,const 
     if(!program_) {
         program_=GLHelpers::CreateShaderProgram(ProcessingGl::VertexShader,ProcessingGl::FragmentShader);
         if(!program_){failed_=true;return 0;}
+        imageUniform_=glGetUniformLocation(program_,"Image");fullscreenUniform_=glGetUniformLocation(program_,"Fullscreen");
+        kindUniform_=glGetUniformLocation(program_,"Kind");tintUniform_=glGetUniformLocation(program_,"Tint");
+        cropUniform_=glGetUniformLocation(program_,"Crop");warpXUniform_=glGetUniformLocation(program_,"WarpX");
+        warpYUniform_=glGetUniformLocation(program_,"WarpY");
         glGenVertexArrays(1,&vao_);glGenBuffers(1,&vbo_);
     }
     if(width!=width_||height!=height_||!output_) {
@@ -122,13 +133,12 @@ unsigned ProcessingSceneRenderer::Draw(const ProcessingSnapshot& snapshot,const 
         }
     }
     glBindFramebuffer(GL_FRAMEBUFFER,msFbo_?msFbo_:fbo_);glViewport(0,0,width,height);
-    glClearColor(.012f,.014f,.018f,1);glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(program_);glBindVertexArray(vao_);glBindBuffer(GL_ARRAY_BUFFER,vbo_);
     glEnableVertexAttribArray(0);glEnableVertexAttribArray(1);
     glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),nullptr);
     glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)(4*sizeof(float)));
-    const auto uniform=[&](const char* name){return glGetUniformLocation(program_,name);};
-    glUniform1i(uniform("Image"),0);glUniform1i(uniform("Fullscreen"),0);annotations_.clear();std::set<std::string> alive;
+    glUniform1i(imageUniform_,0);glUniform1i(fullscreenUniform_,0);annotations_.clear();std::set<std::string> alive;
     const auto paint=[&](const std::string& id,ProcessingPlane target,unsigned texture,const std::string& label,
         ImVec4 tint,int kind,int evidenceIndex,bool main,ImVec4 crop=ImVec4(0,0,1,1)) {
         alive.insert(id);auto found=poses_.find(id);
@@ -152,14 +162,14 @@ unsigned ProcessingSceneRenderer::Draw(const ProcessingSnapshot& snapshot,const 
             const int k=order[v];float u=k==1||k==2?1.015f:-.015f,vy=k>=2?1.015f:-.015f;
             auto point=ProjectScenePoint(p,u,vy);vertices[v]={point.x*2-1,1-point.y*2,0,1,u,vy};
         }
-        glBindTexture(GL_TEXTURE_2D,texture);glUniform1i(uniform("Kind"),texture?kind:-1);
-        glUniform4f(uniform("Tint"),tint.x,tint.y,tint.z,tint.w*state.opacity);
-        glUniform4f(uniform("Crop"),crop.x,crop.y,crop.z,crop.w);
-        glUniform3f(uniform("WarpX"),1,0,0);glUniform3f(uniform("WarpY"),0,1,0);
+        glBindTexture(GL_TEXTURE_2D,texture);glUniform1i(kindUniform_,texture?kind:-1);
+        glUniform4f(tintUniform_,tint.x,tint.y,tint.z,tint.w*state.opacity);
+        glUniform4f(cropUniform_,crop.x,crop.y,crop.z,crop.w);
+        glUniform3f(warpXUniform_,1,0,0);glUniform3f(warpYUniform_,0,1,0);
         if(main&&evidence&&evidence->hasAffine) {
             const float blend=reduced?1:float(std::clamp((time-evidenceStart_)/.8,0.,1.));const auto& a=evidence->affine;
-            glUniform3f(uniform("WarpX"),1+(a[0]-1)*blend,a[1]*blend,a[2]*blend);
-            glUniform3f(uniform("WarpY"),a[3]*blend,1+(a[4]-1)*blend,a[5]*blend);
+            glUniform3f(warpXUniform_,1+(a[0]-1)*blend,a[1]*blend,a[2]*blend);
+            glUniform3f(warpYUniform_,a[3]*blend,1+(a[4]-1)*blend,a[5]*blend);
         }
         glBufferData(GL_ARRAY_BUFFER,sizeof(vertices),vertices,0x88E0);glDrawArrays(GL_TRIANGLES,0,6);
         Annotation annotation;annotation.label=label;annotation.evidence=evidenceIndex;annotation.main=main;
@@ -225,7 +235,7 @@ unsigned ProcessingSceneRenderer::Draw(const ProcessingSnapshot& snapshot,const 
         const Vertex quad[]={{-1,1,0,1,0,0},{1,1,0,1,1,0},{1,-1,0,1,1,1},
                              {-1,1,0,1,0,0},{1,-1,0,1,1,1},{-1,-1,0,1,0,1}};
         glBindFramebuffer(GL_FRAMEBUFFER,fbo_);glBindTexture(GL_TEXTURE_2D,previousOutput_);
-        glUniform1i(uniform("Fullscreen"),1);glUniform4f(uniform("Tint"),1,1,1,1-t);
+        glUniform1i(fullscreenUniform_,1);glUniform4f(tintUniform_,1,1,1,1-t);
         glBufferData(GL_ARRAY_BUFFER,sizeof(quad),quad,0x88E0);glDrawArrays(GL_TRIANGLES,0,6);
     }
     return output_;

@@ -2,6 +2,7 @@
 
 #include "Persistence/ProjectIndex.h"
 #include "Persistence/ProjectStore.h"
+#include "Persistence/LoadedProjectData.h"
 
 #include <algorithm>
 #include <cctype>
@@ -21,7 +22,7 @@ std::filesystem::path NormalizePath(const std::filesystem::path& path) {
 }
 
 std::string PathKey(const std::filesystem::path& path) {
-    std::string value = NormalizePath(path).generic_string();
+    std::string value = NormalizePath(path).generic_u8string();
 #if defined(_WIN32)
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char character) {
@@ -45,13 +46,15 @@ Item MakeProjectItem(const std::filesystem::path& path) {
     Item item;
     item.kind = ItemKind::Project;
     item.path = NormalizePath(path);
-    item.displayName = item.path.stem().string();
+    item.displayName = item.path.stem().u8string();
     Stack::Project::ProjectRecord record;
     if (Stack::Project::ProjectIndex::Get().FindByPath(item.path, record)) {
         item.displayName = record.displayName.empty()
             ? item.displayName : record.displayName;
         item.projectId = record.projectId;
-        item.thumbnailBytes = std::move(record.coverThumbnailBytes);
+        if (!record.coverThumbnailBytes.empty())
+            item.thumbnailBytes = std::make_shared<const std::vector<unsigned char>>(
+                std::move(record.coverThumbnailBytes));
     }
     return item;
 }
@@ -60,8 +63,11 @@ Item MakeSourceItem(const Stack::RawGalleryQueue::SourceRequest& source) {
     Item item;
     item.kind = ItemKind::SourceImage;
     item.path = NormalizePath(source.sourcePath);
-    item.displayName = item.path.stem().string();
-    item.thumbnailBytes = ReadThumbnailBytes(source.thumbnailPath);
+    item.displayName = item.path.stem().u8string();
+    auto thumbnail = ReadThumbnailBytes(source.thumbnailPath);
+    if (!thumbnail.empty())
+        item.thumbnailBytes = std::make_shared<const std::vector<unsigned char>>(
+            std::move(thumbnail));
     return item;
 }
 
@@ -112,6 +118,31 @@ Stack::RawGalleryQueue::Result RenderQueueModel::AddGalleryRequest(
     return result;
 }
 
+Stack::RawGalleryQueue::Result RenderQueueModel::AddProjectSnapshot(
+    const ProjectRequest& request) {
+    Stack::RawGalleryQueue::Result result;
+    if (!request.snapshot) {
+        result.skipped = 1;
+        result.errors.push_back("The project could not be captured for Queue.");
+        return result;
+    }
+    Item item;
+    item.kind = ItemKind::ProjectSnapshot;
+    item.projectSnapshot = request.snapshot;
+    item.path = std::filesystem::path(request.snapshot->projectFileName);
+    item.projectId = request.snapshot->projectId;
+    item.displayName = request.displayName.empty()
+        ? request.snapshot->projectName : request.displayName;
+    if (item.displayName.empty()) item.displayName = "Untitled Project";
+    if (!request.thumbnailBytes.empty())
+        item.thumbnailBytes = std::make_shared<const std::vector<unsigned char>>(
+            request.thumbnailBytes);
+    // Each click captures an intentional authored revision/output, including
+    // unsaved projects. Path deduplication would discard that distinction.
+    result.added = AddItem(std::move(item), false) == AddStatus::Added ? 1u : 0u;
+    return result;
+}
+
 std::size_t RenderQueueModel::AddProjects(
     const std::vector<std::filesystem::path>& projectPaths) {
     std::size_t added = 0;
@@ -142,24 +173,42 @@ std::size_t RenderQueueModel::AddSourceRequests(
     return added;
 }
 
-RenderQueueModel::AddStatus RenderQueueModel::AddItem(Item item) {
-    const std::string key = PathKey(item.path);
-    if (key.empty()) return AddStatus::Skipped;
+RenderQueueModel::AddStatus RenderQueueModel::AddItem(Item item, bool deduplicate) {
+    const std::string key = deduplicate
+        ? std::to_string(static_cast<int>(item.kind)) + ":" + PathKey(item.path)
+        : std::string();
+    if (deduplicate && item.path.empty()) return AddStatus::Skipped;
     std::lock_guard<std::mutex> lock(m_Mutex);
-    const auto existing = std::find_if(
-        m_Items.begin(), m_Items.end(), [&](const Item& candidate) {
-            return candidate.kind == item.kind &&
-                PathKey(candidate.path) == key;
-        });
-    if (existing != m_Items.end()) {
-        existing->selected = true;
-        return AddStatus::AlreadyPresent;
+    const auto existingId = deduplicate ? m_PathItems.find(key) : m_PathItems.end();
+    if (existingId != m_PathItems.end()) {
+        const auto existing = std::find_if(m_Items.begin(), m_Items.end(),
+            [&](const Item& candidate) { return candidate.id == existingId->second; });
+        if (existing != m_Items.end() && existing->state == ItemState::Complete) {
+            // A deliberate new Gallery request may export the source/latest
+            // saved edit again. Retain the old outcome and deduplicate against
+            // the newly staged job from here onward.
+            m_ItemKeys.erase(existing->id);
+            m_PathItems.erase(existingId);
+        } else {
+            if (existing != m_Items.end() && !existing->selected) {
+                existing->selected = true;
+                ++m_Revision;
+                ++m_PresentationRevision;
+            }
+            return AddStatus::AlreadyPresent;
+        }
     }
     item.id = m_NextId++;
     item.selected = true;
     item.state = ItemState::Waiting;
     item.progress = 0.0f;
+    if (deduplicate) {
+        m_PathItems.emplace(key, item.id);
+        m_ItemKeys.emplace(item.id, key);
+    }
     m_Items.push_back(std::move(item));
+    ++m_Revision;
+    ++m_PresentationRevision;
     return AddStatus::Added;
 }
 
@@ -168,34 +217,131 @@ std::vector<Item> RenderQueueModel::Snapshot() const {
     return m_Items;
 }
 
+bool RenderQueueModel::SnapshotIfChanged(
+    std::vector<Item>& items, std::uint64_t& revision,
+    std::uint64_t* presentationRevision) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (presentationRevision) *presentationRevision = m_PresentationRevision;
+    if (revision == m_Revision) return false;
+    items = m_Items;
+    revision = m_Revision;
+    return true;
+}
+
+std::vector<Item> RenderQueueModel::ClaimForExport(const std::vector<Item>& requested) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<Item> claimed;
+    claimed.reserve(requested.size());
+    for (const Item& request : requested) {
+        const auto item = std::find_if(m_Items.begin(), m_Items.end(),
+            [&](const Item& candidate) { return candidate.id == request.id; });
+        if (item == m_Items.end() ||
+            (item->state != ItemState::Waiting && item->state != ItemState::Failed)) continue;
+        item->state = ItemState::Queued;
+        item->progress = 0.0f;
+        item->status = "Queued for export";
+        item->outputPath.clear();
+        claimed.push_back(*item);
+    }
+    if (!claimed.empty()) {
+        ++m_Revision;
+        ++m_PresentationRevision;
+    }
+    return claimed;
+}
+
+void RenderQueueModel::ReleaseQueued(const std::vector<std::uint64_t>& ids) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    bool changed = false;
+    for (Item& item : m_Items) {
+        if (item.state != ItemState::Queued ||
+            std::find(ids.begin(), ids.end(), item.id) == ids.end()) continue;
+        item.state = ItemState::Waiting;
+        item.progress = 0.0f;
+        item.status.clear();
+        changed = true;
+    }
+    if (changed) {
+        ++m_Revision;
+        ++m_PresentationRevision;
+    }
+}
+
 void RenderQueueModel::SetSelected(std::uint64_t id, bool selected) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     const auto item = std::find_if(m_Items.begin(), m_Items.end(),
         [&](const Item& candidate) { return candidate.id == id; });
-    if (item != m_Items.end()) item->selected = selected;
+    if (item != m_Items.end() && item->selected != selected &&
+        (item->state == ItemState::Waiting || item->state == ItemState::Failed)) {
+        item->selected = selected;
+        ++m_Revision;
+        ++m_PresentationRevision;
+    }
 }
 
 void RenderQueueModel::SetAllSelected(bool selected) {
     std::lock_guard<std::mutex> lock(m_Mutex);
-    for (Item& item : m_Items) item.selected = selected;
+    bool changed = false;
+    for (Item& item : m_Items) {
+        if (item.state != ItemState::Waiting && item.state != ItemState::Failed) continue;
+        if (item.selected == selected) continue;
+        item.selected = selected;
+        changed = true;
+    }
+    if (changed) {
+        ++m_Revision;
+        ++m_PresentationRevision;
+    }
 }
 
 void RenderQueueModel::Remove(std::uint64_t id) {
     std::lock_guard<std::mutex> lock(m_Mutex);
-    m_Items.erase(
-        std::remove_if(m_Items.begin(), m_Items.end(),
-            [&](const Item& item) { return item.id == id; }),
-        m_Items.end());
+    const auto item = std::find_if(m_Items.begin(), m_Items.end(),
+        [&](const Item& candidate) { return candidate.id == id; });
+    if (item == m_Items.end() ||
+        (item->state != ItemState::Waiting && item->state != ItemState::Failed &&
+         item->state != ItemState::Complete)) return;
+    const auto key = m_ItemKeys.find(id);
+    if (key != m_ItemKeys.end()) {
+        m_PathItems.erase(key->second);
+        m_ItemKeys.erase(key);
+    }
+    m_Items.erase(item);
+    ++m_Revision;
+    ++m_PresentationRevision;
 }
 
 void RenderQueueModel::ClearCompleted() {
     std::lock_guard<std::mutex> lock(m_Mutex);
+    const auto previousCount = m_Items.size();
+    for (const Item& item : m_Items) {
+        if (item.state != ItemState::Complete) continue;
+        const auto key = m_ItemKeys.find(item.id);
+        if (key != m_ItemKeys.end()) {
+            m_PathItems.erase(key->second);
+            m_ItemKeys.erase(key);
+        }
+    }
     m_Items.erase(
         std::remove_if(m_Items.begin(), m_Items.end(),
             [](const Item& item) {
                 return item.state == ItemState::Complete;
             }),
         m_Items.end());
+    if (m_Items.size() != previousCount) {
+        ++m_Revision;
+        ++m_PresentationRevision;
+    }
+}
+
+void RenderQueueModel::SetOutputPath(std::uint64_t id, const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    const auto item = std::find_if(m_Items.begin(), m_Items.end(),
+        [&](const Item& candidate) { return candidate.id == id; });
+    if (item == m_Items.end() || item->outputPath == path) return;
+    item->outputPath = path;
+    ++m_Revision;
+    ++m_PresentationRevision;
 }
 
 void RenderQueueModel::UpdateState(
@@ -207,9 +353,14 @@ void RenderQueueModel::UpdateState(
     const auto item = std::find_if(m_Items.begin(), m_Items.end(),
         [&](const Item& candidate) { return candidate.id == id; });
     if (item == m_Items.end()) return;
+    progress = std::clamp(progress, 0.0f, 1.0f);
+    if (item->state == state && item->progress == progress && item->status == status) return;
+    const bool stateChanged = item->state != state;
     item->state = state;
-    item->progress = std::clamp(progress, 0.0f, 1.0f);
+    item->progress = progress;
     item->status = std::move(status);
+    ++m_Revision;
+    if (stateChanged) ++m_PresentationRevision;
 }
 
 bool RenderQueueModel::HasSelectedWaitingItems() const {

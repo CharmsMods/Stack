@@ -198,18 +198,6 @@ Locality ClassifyNode(
             result.reason = "RAW detail processing remains an opaque RAW-development stage.";
             return result;
         }
-        case RenderGraphNodeKind::RawNeuralDenoise: {
-            const auto kind = Stack::NodeMath::SpecializedStageKind::NeuralOrExternal;
-            const auto specialized = Stack::NodeMath::PlanSpecializedStage(kind);
-            result.recognized = false;
-            result.capability = specialized.capability;
-            result.specializedKind = kind;
-            result.regionRequirement = specialized.regionRequirement;
-            result.scalePolicy = specialized.scalePolicy;
-            result.cancellation = specialized.cancellation;
-            result.reason = specialized.reason;
-            return result;
-        }
         case RenderGraphNodeKind::HdrMerge:
         case RenderGraphNodeKind::Mfsr: {
             const auto kind = Stack::NodeMath::SpecializedStageKind::MultiFrameMerge;
@@ -234,54 +222,14 @@ Locality ClassifyNode(
                 ? "The adopted multi-frame Bayer result is developed through the ordinary full-frame RAW pipeline."
                 : "The multi-frame RAW result is not available yet.";
             return result;
-        case RenderGraphNodeKind::FrequencyFft: {
-            const auto kind = Stack::NodeMath::SpecializedStageKind::FrequencyTransform;
-            const auto specialized = Stack::NodeMath::PlanSpecializedStage(kind);
-            result.recognized = false;
-            result.capability = specialized.capability;
-            result.specializedKind = kind;
-            result.regionRequirement = specialized.regionRequirement;
-            result.scalePolicy = specialized.scalePolicy;
-            result.cancellation = specialized.cancellation;
-            result.reason = specialized.reason;
-            return result;
-        }
-        case RenderGraphNodeKind::FrequencyIfft: {
-            const auto kind = Stack::NodeMath::SpecializedStageKind::FrequencyInverseTransform;
-            const auto specialized = Stack::NodeMath::PlanSpecializedStage(kind);
-            result.recognized = false;
-            result.capability = specialized.capability;
-            result.specializedKind = kind;
-            result.regionRequirement = specialized.regionRequirement;
-            result.scalePolicy = specialized.scalePolicy;
-            result.cancellation = specialized.cancellation;
-            result.reason = specialized.reason;
-            return result;
-        }
-        case RenderGraphNodeKind::SpectrumView:
-        case RenderGraphNodeKind::FrequencyFilter:
-        case RenderGraphNodeKind::FrequencyResponse:
-        case RenderGraphNodeKind::ApplyFrequencyResponse:
-        case RenderGraphNodeKind::CombineSpectra:
-        case RenderGraphNodeKind::SpectrumSeparate:
-        case RenderGraphNodeKind::SpectrumRecombine:
-        case RenderGraphNodeKind::FrequencyMask:
-        case RenderGraphNodeKind::SpectrumMath:
-        case RenderGraphNodeKind::MagnitudePhase:
-        case RenderGraphNodeKind::SpectrumAnalyzer: {
-            const auto kind = Stack::NodeMath::SpecializedStageKind::FrequencyOperation;
-            const auto specialized = Stack::NodeMath::PlanSpecializedStage(kind);
-            result.recognized = false;
-            result.capability = specialized.capability;
-            result.specializedKind = kind;
-            result.regionRequirement = specialized.regionRequirement;
-            result.scalePolicy = specialized.scalePolicy;
-            result.cancellation = specialized.cancellation;
-            result.reason = specialized.reason;
-            return result;
-        }
         case RenderGraphNodeKind::Layer: {
             const std::string type = node.layerJson.value("type", std::string());
+            if (type=="Halftoning") {
+                result.recognized=false;
+                result.regionRequirement=Stack::NodeMath::RegionRequirement::FullFrame;
+                result.reason="Halftone screens are anchored to the complete logical input grid.";
+                return result;
+            }
             if (IsBasicTileSafeLayerType(type)) return result;
             if (!IsNeighborhoodLayerType(type)) {
                 result.recognized = false;
@@ -519,7 +467,13 @@ RenderGraphRegionPlan PlanGraphRegions(
                             firstInput = inputSpatial->second;
                             hasFiniteInput = true;
                         } else if (node.kind != RenderGraphNodeKind::Reformat &&
-                                   !(inputSpatial->second == firstInput)) {
+                                   (inputSpatial->second.kind != firstInput.kind ||
+                                    !(inputSpatial->second.fullWindow == firstInput.fullWindow) ||
+                                    !(inputSpatial->second.dataWindow == firstInput.dataWindow) ||
+                                    inputSpatial->second.rasterOrigin != firstInput.rasterOrigin ||
+                                    inputSpatial->second.pixelAspect != firstInput.pixelAspect)) {
+                            // Source provenance/transform can differ after nondestructive
+                            // framing. Image combination requires matching raster canvases.
                             extentFailure = true;
                             extentFailureReason =
                                 "node " + std::to_string(nodeId) +

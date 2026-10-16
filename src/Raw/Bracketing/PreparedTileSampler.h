@@ -45,7 +45,8 @@ public:
         Mfd::CfaSite site,
         const Mfd::SameCfaScalarParameters& parameters,
         Mfd::SameCfaSampleResult& result,
-        CaptureFallback& fallback);
+        CaptureFallback& fallback,
+        std::string* error = nullptr);
 
 private:
     struct Entry {

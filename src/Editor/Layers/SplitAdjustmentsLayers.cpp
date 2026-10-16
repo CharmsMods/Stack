@@ -56,7 +56,6 @@ void main() {
         color.rgb = mix(color.rgb, sharpened, mask);
     }
 
-    color.rgb = clamp(color.rgb, 0.0, 1.0);
     FragColor = color;
 }
 )";

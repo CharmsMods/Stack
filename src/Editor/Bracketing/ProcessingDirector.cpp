@@ -13,28 +13,44 @@ std::string EvidenceKey(const Raw::Bracketing::ProcessingProgress& progress,cons
     return key;
 }
 }
-ProcessingSnapshot ProcessingDirector::Select(const ProcessingSnapshot& current,double now,bool reduced) {
+const ProcessingSnapshot& ProcessingDirector::PrepareSelection(const ProcessingSnapshot& current,const ProcessingMilestone* milestone) {
+    const auto& progress=milestone?milestone->progress:current.progress;
+    const auto& evidence=milestone?milestone->evidence:current.evidence;
+    if(!hasSelected_||selectedSequence_!=current.progress.sequence||selectedPublication_!=current.publishedAt||
+       selected_.progress.sequence!=progress.sequence||selected_.progress.stage!=progress.stage||
+       selected_.progress.occurrence!=progress.occurrence||selected_.evidence!=evidence) {
+        selected_=current;
+        selected_.progress=progress;selected_.evidence=evidence;
+        selectedSequence_=current.progress.sequence;selectedPublication_=current.publishedAt;
+        hasSelected_=true;
+    }
+    return selected_;
+}
+const ProcessingSnapshot& ProcessingDirector::Select(const ProcessingSnapshot& current,double now,bool reduced) {
     if(readyAt_<0) {
-        auto evidenceKey=EvidenceKey(current.progress,current.evidence);
+        if(!hasEvidenceKey_||keyOccurrence_!=current.progress.occurrence||keyCapture_!=current.progress.captureId||keyEvidence_!=current.evidence) {
+            inputEvidenceKey_=EvidenceKey(current.progress,current.evidence);
+            keyOccurrence_=current.progress.occurrence;keyCapture_=current.progress.captureId;keyEvidence_=current.evidence;
+            hasEvidenceKey_=true;
+        }
+        const auto& evidenceKey=inputEvidenceKey_;
         const double dwell=reduced?.1:2.2;
         if(!hasDisplayed_||liveEvidence_==evidenceKey||now-entered_>=dwell) {
             if(!hasDisplayed_||liveEvidence_!=evidenceKey) {
                 if(hasDisplayed_&&displayed_.evidence)seen_.insert(std::hash<std::string>{}(liveEvidence_));
-                liveOccurrence_=current.progress.occurrence;liveEvidence_=std::move(evidenceKey);entered_=now;
+                liveOccurrence_=current.progress.occurrence;liveEvidence_=evidenceKey;entered_=now;
             }
             displayed_={current.progress,current.evidence};hasDisplayed_=true;
         }
         if(displayed_.evidence&&now-entered_>=dwell)seen_.insert(std::hash<std::string>{}(liveEvidence_));
-        auto out=current;out.progress=displayed_.progress;out.evidence=displayed_.evidence;
-        return out;
+        return PrepareSelection(current,&displayed_);
     }
-    auto out=current;
     const double duration=deadline_-readyAt_-.5;
     if(!ending_.empty()&&duration>0&&now<deadline_-.5) {
         const auto index=std::min(ending_.size()-1,std::size_t(std::max(0.,now-readyAt_)/duration*ending_.size()));
-        out.progress=ending_[index].progress;out.evidence=ending_[index].evidence;
+        return PrepareSelection(current,&ending_[index]);
     }
-    return out;
+    return PrepareSelection(current,nullptr);
 }
 void ProcessingDirector::Ready(const ProcessingSnapshot& current,double now,bool reduced) {
     if(readyAt_>=0)return;

@@ -1,4 +1,5 @@
 #include "Project/RawLayerStack.h"
+#include "Raw/RawGraphParameters.h"
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_set>
@@ -66,7 +67,15 @@ bool WriteRawLayerOperation(RawAdjustmentLayer& layer, const std::string& uuid,
     if (operation->rawOperation.parameters.value("graphCoverage", false))
         for (const auto& socket : layer.graph.GetSockets(*operation))
             previousPorts.insert(socket.id);
+    auto authored=operation->rawOperation;
     RawRecipe::WriteGraphOperation(layer.graph.FindNode(operationId)->rawOperation, recipe);
+    // A driven control cannot overwrite the manual value retained for a later
+    // disconnection. Custom editors may display a derived effective recipe.
+    for (const auto& parameter:RawRecipe::GraphParameters(authored))
+        if (layer.graph.FindInputLink(operationId,EditorNodeGraph::ParameterInputSocketId(parameter.id))) {
+            const nlohmann::json::json_pointer path(parameter.path);
+            if (authored.parameters.contains(path)) layer.graph.FindNode(operationId)->rawOperation.parameters[path]=authored.parameters.at(path);
+        }
     if (operation->rawOperation.kind != RawRecipe::GraphOperationKind::LocalEv) return true;
     const auto serialized = RawRecipe::SerializeRecipe(recipe);
     const auto bind = [&](const std::string& port, EditorNodeGraph::MaskGeneratorKind kind,
@@ -84,7 +93,7 @@ bool WriteRawLayerOperation(RawAdjustmentLayer& layer, const std::string& uuid,
             generator = layer.graph.AddMaskGeneratorNode(kind, {0, 300});
             generator->title = name;
             const int generatorId = generator->id;
-            if (!layer.graph.TryConnectSockets(operationId, kind == EditorNodeGraph::MaskGeneratorKind::PaintedArea ? "measurementImageOut" : "inputImageOut", generatorId,
+            if (!layer.graph.TryConnectSockets(operationId, "inputImageOut", generatorId,
                     EditorNodeGraph::kMatchExtentInputSocketId, &error) ||
                 !layer.graph.TryConnectSockets(generatorId, "maskOut", operationId, port, &error)) return false;
             generator = layer.graph.FindNode(generatorId);

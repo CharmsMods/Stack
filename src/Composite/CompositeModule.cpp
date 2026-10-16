@@ -443,6 +443,17 @@ void CompositeModule::MarkStageDirty() {
     m_StagePreviewDirty = true;
 }
 
+void CompositeModule::ResetLayerInteraction() {
+    m_ActiveHandle = HandleType::None;
+    m_ActiveExportHandle = ExportHandleType::None;
+    m_MiddleMousePanActive = false;
+    m_RightMousePressedOnCanvas = false;
+    m_ShowLibraryPicker = false;
+    m_LibraryPickerTargetLayerId.clear();
+    m_OpenRenamePopup = false;
+    m_RenameLayerId.clear();
+}
+
 CompositeSnapModePreset CompositeModule::GetSnapModePreset() const {
     if (!m_SnapEnabled) {
         return CompositeSnapModePreset::Off;
@@ -706,6 +717,7 @@ void CompositeModule::NewProject() {
     ClearStagePreviewGpu();
     m_Layers.clear();
     m_SelectedId.clear();
+    ResetLayerInteraction();
     m_ShowLayersWindow = true;
     m_ShowSelectedWindow = true;
     m_ShowViewWindow = true;
@@ -2082,7 +2094,8 @@ void CompositeModule::RenderStage() {
     }
 
     selectedLayer = GetSelectedLayer();
-    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedLayer && !selectedLayer->locked) {
+    if (hovered && !ImGui::GetIO().WantTextInput &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedLayer && !selectedLayer->locked) {
         RemoveSelectedLayers();
     }
 

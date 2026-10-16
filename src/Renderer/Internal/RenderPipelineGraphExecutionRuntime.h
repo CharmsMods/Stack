@@ -3,6 +3,7 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
+#include "Renderer/RenderTiling.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,7 @@ public:
         bool rawDevelopmentSideEffectsRequested);
 
     void Execute();
+    ~GraphExecutionRuntime();
 
 private:
     const RenderGraphLink* findInputLink(
@@ -69,51 +71,30 @@ private:
         return false;
     }
 
-    static void CanonicalizeFrequencyResponseSettings(
-        RenderFrequencyResponseSettings& response) {
-        const auto finiteOr = [](float value, float fallback) {
-            return std::isfinite(value) ? value : fallback;
-        };
-        response.lowCutoff = std::clamp(
-            finiteOr(response.lowCutoff, 0.08f), 0.0f, 0.5f);
-        response.highCutoff = std::clamp(
-            finiteOr(response.highCutoff, 0.25f), 0.0f, 0.5f);
-        if (response.lowCutoff > response.highCutoff) {
-            std::swap(response.lowCutoff, response.highCutoff);
-        }
-        response.transitionWidth = std::clamp(
-            finiteOr(response.transitionWidth, 0.025f),
-            0.000001f,
-            0.5f);
-        response.butterworthOrder = std::clamp(
-            finiteOr(response.butterworthOrder, 2.0f),
-            1.0f,
-            12.0f);
-        if (response.notches.size() > 16u) {
-            response.notches.resize(16u);
-        }
-        for (RenderFrequencyNotch& notch : response.notches) {
-            notch.frequency = std::clamp(
-                finiteOr(notch.frequency, 0.25f), 0.0f, 0.5f);
-            notch.directionDegrees = std::clamp(
-                finiteOr(notch.directionDegrees, 0.0f),
-                -180.0f,
-                180.0f);
-            notch.width = std::clamp(
-                finiteOr(notch.width, 0.025f),
-                0.001f,
-                0.25f);
-        }
-    }
+
 
     void BindMaskFingerprint();
     void BindScalarFingerprint();
     void BindImageFingerprint();
-    void BindFrequencyFingerprints();
-    void BindFrequencyEvaluation();
+
+
     void BindMaskEvaluation();
-    void BindSpectrumAndScalarEvaluation();
+    void BindScalarEvaluation();
     void BindImageEvaluation();
+    bool ApplyUniformInputs(const RenderGraphNode& authored, RenderGraphNode& evaluated);
+    std::pair<int,int> ProjectMaskCanvasExtent(const RenderGraphNode& node) const;
+    void BindViewportEvaluation();
+    unsigned int EvaluateViewportOutput(int nodeId, const std::string& socket,
+        const std::function<unsigned int(int, const std::string&)>& evaluate);
+    unsigned int ViewportInput(unsigned int texture, const std::string& sourceKey,
+        const RenderGraphViewportEndpoint& source, const RenderGraphViewportEndpoint& consumer);
+    void RecordViewportGeometry(int nodeId, const std::string& socket, bool renderedPass = false);
+    void HashViewportDemand(std::size_t& fingerprint, int nodeId, const std::string& socket) const;
+    RenderGraphViewportPlan viewportPlan;
+    RenderGraphViewportEndpoint viewportConsumer;
+    std::unordered_map<std::string, Stack::Renderer::ViewportPreviewGeometry> viewportGeometry;
+    std::vector<unsigned int> viewportTemporaryTextures;
+    std::unordered_map<std::string, unsigned int> viewportInputCache;
 
     RenderPipeline& pipeline;
     const RenderGraphSnapshot& graph;
@@ -136,26 +117,12 @@ private:
     std::unordered_map<std::string, std::size_t> scalarFingerprintCache;
     std::unordered_set<std::string> visitingScalars;
     std::unordered_set<std::string> fingerprintingScalars;
-    std::unordered_map<std::string, RenderFrequencyResource> frequencyCache;
-    std::unordered_map<int, RenderFrequencyResponseSettings> responseCache;
-    std::unordered_map<std::string, std::size_t> frequencyFingerprintCache;
-    std::unordered_map<int, std::size_t> responseFingerprintCache;
-    std::unordered_set<std::string> visitingFrequency;
-    std::unordered_set<std::string> fingerprintingFrequency;
-    std::set<int> visitingResponses;
-    std::set<int> fingerprintingResponses;
-    std::unordered_map<int, RenderSpectrumAnalysis> spectrumAnalysisCache;
     std::function<unsigned int(int, const std::string&)> evalMask;
     std::function<unsigned int(int, const std::string&)> evalImage;
     std::function<bool(int, const std::string&, double&)> evalScalar;
     std::function<std::size_t(int, const std::string&)> fingerprintMask;
     std::function<std::size_t(int, const std::string&)> fingerprintImage;
     std::function<std::size_t(int, const std::string&)> fingerprintScalar;
-    std::function<std::size_t(int, const std::string&)> fingerprintFrequency;
-    std::function<std::size_t(int)> fingerprintResponse;
-    std::function<RenderFrequencyResource(int, const std::string&)> evalFrequency;
-    std::function<bool(int, RenderFrequencyResponseSettings&)> evalResponse;
-    std::function<bool(int, RenderSpectrumAnalysis&)> evalSpectrumAnalysis;
     std::function<std::string(int, const std::string&)> resolveChannelRole;
     std::unordered_set<int> pointwiseFusionDisabledNodes;
 };

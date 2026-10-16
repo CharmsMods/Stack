@@ -16,6 +16,11 @@ void AppShell::CancelProjectPillPreview() {
 
 void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
     auto& rail = m_NavigationRail;
+    // A pill activates on release, on the next shell tick. Keep its preview
+    // throughout the press so that activation can crossfade from what was seen.
+    if (hovered && hovered == rail.previewProject && CanSwitchProjectWorkspace() &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left) && !m_SettingsPopupOpen && !rail.menuOpen &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) return;
     const bool blocked = !CanSwitchProjectWorkspace() || m_SettingsPopupOpen || rail.menuOpen ||
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) ||
         ImGui::IsAnyMouseDown() || ImGui::IsAnyItemActive() ||
@@ -39,6 +44,10 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
         if (rail.previewAmount <= .001f) {
             rail.previewProject = hovered;
             rail.previewRootView = workspace->rootTab;
+            if (!workspace->editor->IsAutoBracketWorkspace() &&
+                (rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Queue) ||
+                 rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Library)))
+                rail.previewRootView = static_cast<int>(Stack::Workspace::Id::Graph);
         }
     }
     const bool showing = ready && rail.previewProject == hovered;
@@ -54,7 +63,7 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
 
 void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     const auto& rail = m_NavigationRail;
-    const auto palette = Stack::Header::ResolvePalette(m_Appearance ? m_Appearance->GetClearColor()
+    const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetCursorScreenPos(position);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -64,12 +73,14 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         ImGuiWindowFlags_NoBackground);
     const bool enabled = CanSwitchProjectWorkspace();
     std::uint64_t hovered = 0;
+    bool activationQueued = false;
     ImGui::BeginDisabled(!enabled);
     for (const auto& workspace : m_ProjectWorkspaces) {
         if (workspace->id == m_GalleryWorkspaceId) continue;
         const auto id = workspace->id;
         ImGui::PushID(static_cast<int>(id));
         const bool selected = id == m_ActiveProjectWorkspace;
+        const bool automatic = workspace->editor->IsAutoBracketWorkspace();
         std::string name = workspace->editor->GetCurrentProjectName();
         if (name.empty()) name = "Untitled project";
         const bool dirty = workspace->editor->NeedsWorkspaceSaveBeforeTransition();
@@ -80,20 +91,22 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         // Preview follows pointer hover only. Navigation focus can persist
         // after opening a document, which would otherwise keep its input blocked.
         if (over) hovered = id;
-        if (clicked) { CancelProjectPillPreview(); QueueWorkspaceTabAction(WorkspaceTabAction::Select, id); hovered = 0; }
+        if (clicked) {
+            QueueWorkspaceTabAction(WorkspaceTabAction::Select, id);
+            activationQueued = true;
+        }
         if (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
             CancelProjectPillPreview(); QueueWorkspaceTabAction(WorkspaceTabAction::Close, id); hovered = 0;
         }
         const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
         const ImVec2 pillMin(min.x + 4.f * rail.scale, min.y + 5.f * rail.scale);
         const ImVec2 pillMax(max.x - 4.f * rail.scale, max.y - 5.f * rail.scale);
-        ImVec4 fill = Stack::Header::Blend(palette.caption, palette.text, selected ? .56f : over ? .28f : .16f);
         auto* draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(pillMin, pillMax, ImGui::GetColorU32(fill), 8.f * rail.scale);
-        if (dirty || focused) draw->AddRect(pillMin, pillMax,
-            ImGui::GetColorU32(focused ? palette.focus : palette.mutedText), 8.f * rail.scale, 0, 1.f);
-        if (over || focused) ImGui::SetTooltip("%s%s\nClick to activate. Middle-click to close.",
-            name.c_str(), dirty ? " (unsaved changes)" : "");
+        Stack::Header::DrawProjectPill(draw,pillMin,pillMax,rail.scale,palette,
+            {selected,over,focused,dirty,automatic});
+        if (over || focused) ImGui::SetTooltip("%s%s%s\nClick to activate. Middle-click to close.",
+            name.c_str(), dirty ? " (unsaved changes)" : "",
+            automatic ? "\nAutomatic bursts - background priority" : "");
         if (ImGui::BeginPopupContextItem("ProjectActions")) {
             ImGui::TextUnformatted(name.c_str());
             if (dirty) ImGui::TextDisabled("Unsaved changes");
@@ -109,7 +122,7 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::EndChild();
     ImGui::PopStyleVar(3);
-    UpdateProjectPillPreview(hovered);
+    if (!activationQueued) UpdateProjectPillPreview(hovered);
 }
 
 void AppShell::RenderProjectPreviewFallback() {
@@ -120,7 +133,7 @@ void AppShell::RenderProjectPreviewFallback() {
     if (!workspace) return;
     auto* viewport = ImGui::GetMainViewport();
     auto* draw = ImGui::GetForegroundDrawList(viewport);
-    ImVec4 fill = m_Appearance ? m_Appearance->GetClearColor() : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    ImVec4 fill = m_Editor ? m_Editor->GetWorkspaceBaseColor() : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
     fill.w = rail.previewAmount;
     draw->AddRectFilled(rail.panelPosition,
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y), ImGui::GetColorU32(fill));

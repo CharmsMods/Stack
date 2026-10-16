@@ -1155,7 +1155,11 @@ PreparationResult PrepareRawFrame(
 
                     const double span = prepared.calibration.usableSpanByCfaSite[siteIndex];
                     const double saturationMargin = std::max(
-                        options.saturationDnMargin / span,
+                        // Floating DNG has no integer DN quantization margin.
+                        // Four DN against WhiteLevel=1 would mark every pixel
+                        // saturated. Preserve the noise-based margin below.
+                        raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::FloatDngPreGain
+                            ? 0.0 : options.saturationDnMargin / span,
                         options.saturationNoiseSigmaMargin *
                             options.saturationStdDevAtWhite[siteIndex]);
                     std::uint8_t flags = 0u;

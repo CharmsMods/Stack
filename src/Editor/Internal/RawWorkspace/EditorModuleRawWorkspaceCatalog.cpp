@@ -16,11 +16,13 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +32,8 @@ namespace {
 
 constexpr double kRawWorkspacePersistDebounceSeconds = 0.35;
 constexpr std::size_t kRawWorkspaceThumbnailApplyBatchSize = 8;
+constexpr std::size_t kRawWorkspaceCatalogApplyBatchSize = 32;
+constexpr auto kRawWorkspaceCatalogPublishInterval = std::chrono::milliseconds(50);
 constexpr float kRawWorkspaceControlsDefaultWidth = 420.0f;
 constexpr float kRawWorkspaceControlsMinWidth = 340.0f;
 constexpr float kRawWorkspaceControlsMaxWidth = 1040.0f;
@@ -129,8 +133,7 @@ int FindUpstreamRawDecode(const EditorNodeGraph::Graph& graph, int nodeId) {
             return node->id;
         }
 
-        if (node->kind == EditorNodeGraph::NodeKind::RawSource ||
-            node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
+        if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
             const int downstreamRawDecode =
                 FindDirectDownstreamRawDecode(graph, node->id);
             return downstreamRawDecode > 0 ? downstreamRawDecode : -1;
@@ -207,7 +210,8 @@ EditorModule::BuildRawWorkspaceAppStateSnapshot() const {
     appState.rawLabGalleryThumbnailScale =
         m_RawWorkspaceLabUi.galleryThumbnailScale;
     appState.rawLabActiveTool =
-        static_cast<int>(m_RawWorkspaceLabUi.activeTool);
+        static_cast<int>(m_RawWorkspaceLabUi.activeTool == RawLabTool::GraphNode
+            ? RawLabTool::Zones : m_RawWorkspaceLabUi.activeTool);
     appState.rawLabActivePointCurve =
         std::clamp(m_RawWorkspaceLabUi.activePointCurve, 0, 3);
     appState.rawLabColorWarpLiveCloud =
@@ -243,7 +247,7 @@ void EditorModule::OpenRawWorkspaceFolderDialog() {
     EnsureRawWorkspaceLoaded();
     const std::string path = FileDialogs::OpenFolderDialog("Open RAW Folder");
     if (!path.empty()) {
-        RequestOpenRawWorkspace(path);
+        RequestOpenRawWorkspace(std::filesystem::u8path(path));
     }
 }
 
@@ -274,7 +278,8 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
     const std::string& sourceKey,
     bool toggle,
     bool extendRange,
-    bool openForEditing) {
+    bool openForEditing,
+    const std::vector<std::string>* visibleSourceOrder) {
     if(!openForEditing && IsBracketingToolActive() && !m_RawWorkspaceLabUi.galleryWorkspaceOpen) {
         SelectBracketingSources({sourceKey},toggle,extendRange);
         return;
@@ -287,24 +292,35 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
         });
     if (target == m_RawWorkspace.sources.end()) return;
 
+    bool selectedRange = false;
     if (extendRange && !m_RawWorkspace.selectedSourceKey.empty()) {
-        const auto anchor = std::find_if(
-            m_RawWorkspace.sources.begin(), m_RawWorkspace.sources.end(),
-            [&](const Stack::RawWorkspace::SourceRecord& source) {
-                return source.relativePathKey == m_RawWorkspace.selectedSourceKey;
-            });
-        if (anchor != m_RawWorkspace.sources.end()) {
-            const std::size_t first = static_cast<std::size_t>(std::distance(
-                m_RawWorkspace.sources.begin(), std::min(anchor, target)));
-            const std::size_t last = static_cast<std::size_t>(std::distance(
-                m_RawWorkspace.sources.begin(), std::max(anchor, target)));
-            m_RawWorkspace.selectedSourceKeys.clear();
-            for (std::size_t index = first; index <= last; ++index) {
-                m_RawWorkspace.selectedSourceKeys.push_back(
-                    m_RawWorkspace.sources[index].relativePathKey);
+        std::vector<std::string> catalogOrder;
+        if (!visibleSourceOrder) {
+            catalogOrder.reserve(m_RawWorkspace.sources.size());
+            for (const auto& source : m_RawWorkspace.sources) {
+                catalogOrder.push_back(source.relativePathKey);
             }
+            visibleSourceOrder = &catalogOrder;
         }
-    } else if (toggle) {
+        const auto anchor = std::find(visibleSourceOrder->begin(),
+            visibleSourceOrder->end(), m_RawWorkspace.selectedSourceKey);
+        const auto clicked = std::find(visibleSourceOrder->begin(),
+            visibleSourceOrder->end(), sourceKey);
+        if (anchor != visibleSourceOrder->end() && clicked != visibleSourceOrder->end()) {
+            if (!toggle) m_RawWorkspace.selectedSourceKeys.clear();
+            std::unordered_set<std::string> selectedKeys(
+                m_RawWorkspace.selectedSourceKeys.begin(),
+                m_RawWorkspace.selectedSourceKeys.end());
+            const auto last = std::max(anchor, clicked);
+            for (auto current = std::min(anchor, clicked); current <= last; ++current) {
+                if (selectedKeys.insert(*current).second) {
+                    m_RawWorkspace.selectedSourceKeys.push_back(*current);
+                }
+            }
+            selectedRange = true;
+        }
+    }
+    if (!selectedRange && toggle) {
         const auto selected = std::find(
             m_RawWorkspace.selectedSourceKeys.begin(),
             m_RawWorkspace.selectedSourceKeys.end(),
@@ -315,11 +331,11 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
             m_RawWorkspace.selectedSourceKeys.erase(selected);
         }
         m_RawWorkspace.selectedSourceKey = sourceKey;
-    } else {
+    } else if (!selectedRange) {
         m_RawWorkspace.selectedSourceKeys.assign(1u, sourceKey);
         m_RawWorkspace.selectedSourceKey = sourceKey;
     }
-    InvalidateRawWorkspaceGalleryPresentation();
+    InvalidateRawWorkspaceGalleryPresentation(false);
     PersistRawWorkspaceCatalog();
     SaveRawWorkspaceAppState();
     if (openForEditing) {
@@ -408,12 +424,19 @@ bool EditorModule::IsRawWorkspaceThumbnailBusy() const {
 }
 
 bool EditorModule::CanEditRawWorkspaceFilmstripOrganization() const {
-    const RawWorkspaceScanSnapshot snapshot = GetRawWorkspaceScanSnapshot();
-    return snapshot.completedSuccessfully && !Async::IsBusy(snapshot.state);
+    std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+    return m_RawWorkspaceScanSnapshot.completedSuccessfully && !Async::IsBusy(m_RawWorkspaceScanSnapshot.state);
 }
 
-void EditorModule::InvalidateRawWorkspaceGalleryPresentation() {
+void EditorModule::InvalidateRawWorkspaceGalleryPresentation(bool navigatorContentsChanged) {
     ++m_RawWorkspaceGalleryRevision;
+    if (navigatorContentsChanged) ++m_RawWorkspaceNavigatorRevision;
+}
+
+bool EditorModule::ConsumeRawWorkspaceCatalogChanged() {
+    const bool changed = m_RawWorkspaceCatalogChanged;
+    m_RawWorkspaceCatalogChanged = false;
+    return changed;
 }
 
 const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspaceGalleryPresentation() {
@@ -553,7 +576,9 @@ void EditorModule::LoadRawWorkspaceAppState() {
             : 1.0f,
         0.65f,
         1.75f);
-    m_RawWorkspaceLabUi.activeTool = appState.rawLabActiveTool == static_cast<int>(RawLabTool::Exposure)
+    // Graph-node selection belongs to its project; it is not a global startup tool.
+    m_RawWorkspaceLabUi.activeTool = appState.rawLabActiveTool == static_cast<int>(RawLabTool::GraphNode)
+        ? RawLabTool::Zones : appState.rawLabActiveTool == static_cast<int>(RawLabTool::Exposure)
         ? RawLabTool::Exposure : appState.rawLabActiveTool == static_cast<int>(RawLabTool::Detail)
         ? RawLabTool::Detail : appState.rawLabActiveTool == static_cast<int>(RawLabTool::Calibration)
         ? RawLabTool::Calibration : appState.rawLabActiveTool ==
@@ -812,6 +837,20 @@ void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& workspac
     // it, or the completed scan looks like an empty filmstrip.
     m_RawWorkspaceGalleryContentMode =
         Stack::RawWorkspace::GalleryContentMode::Gallery;
+    if(m_PermanentGalleryWorkspace) {
+        // Opening a source folder leaves any project/capture picker scope.
+        // Reusing its project ID or subfolder filter can hide every new image.
+        m_RawWorkspaceLabUi.galleryNavigationMode=RawGalleryNavigationMode::ProjectRoot;
+        m_RawWorkspaceLabUi.galleryProjectId.clear();
+        m_RawGalleryFolderWorkspaceRoot=m_RawWorkspace.workspaceRoot;
+        m_RawGalleryFolderFilter.reset();
+        m_RawWorkspaceLabCollapsedGalleryGroups.clear();
+        m_RawWorkspaceLabGalleryScrollTargetY=m_RawWorkspaceLabGalleryScrollCurrentY=0.f;
+        m_RawWorkspaceLabFilmstripScrollTargetX=0.f;
+        m_RawWorkspaceLabFilmstripScrollLastAppliedX=-1.f;
+        m_RawWorkspaceGalleryLayoutAnimation.Reset();
+        m_RawWorkspaceGalleryDrawerNeedsInitialExpansion=true;
+    }
     m_RawWorkspace.sources.clear();
     m_RawWorkspace.selectedSourceKey.clear();
     m_RawWorkspace.selectedSourceKeys.clear();
@@ -1006,7 +1045,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         RawWorkspaceProgressivePreviewSession>();
                     std::vector<Stack::RawWorkspace::SourceRecord>
                         progressiveBatch;
-                    progressiveBatch.reserve(16);
+                    progressiveBatch.reserve(kRawWorkspaceCatalogApplyBatchSize);
                     auto flushProgressiveBatch = [
                         this,
                         generation,
@@ -1017,7 +1056,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         std::vector<Stack::RawWorkspace::SourceRecord> batch =
                             std::move(progressiveBatch);
                         progressiveBatch.clear();
-                        progressiveBatch.reserve(16);
+                        progressiveBatch.reserve(kRawWorkspaceCatalogApplyBatchSize);
                         std::vector<Stack::RawWorkspace::SourceRecord>
                             quickSources;
                         quickSources.reserve(batch.size());
@@ -1043,20 +1082,23 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                     m_RawWorkspaceScanSnapshot.
                                         sourcesPublished = true;
                                 }
+                                // Index this main-thread snapshot once, rather
+                                // than searching the entire catalog per source.
+                                std::unordered_map<std::string, std::size_t> sourceIndices;
+                                sourceIndices.reserve(m_RawWorkspace.sources.size() + batch.size());
+                                for (std::size_t index = 0; index < m_RawWorkspace.sources.size(); ++index) {
+                                    sourceIndices.emplace(m_RawWorkspace.sources[index].relativePathKey, index);
+                                }
                                 for (auto& source : batch) {
-                                    auto existing = std::find_if(
-                                        m_RawWorkspace.sources.begin(),
-                                        m_RawWorkspace.sources.end(),
-                                        [&](const auto& candidate) {
-                                            return candidate.relativePathKey ==
-                                                source.relativePathKey;
-                                        });
-                                    if (existing ==
-                                        m_RawWorkspace.sources.end()) {
+                                    const auto found = sourceIndices.find(source.relativePathKey);
+                                    if (found == sourceIndices.end()) {
+                                        sourceIndices.emplace(source.relativePathKey, m_RawWorkspace.sources.size());
                                         m_RawWorkspace.sources.push_back(
                                             std::move(source));
-                                    } else if (existing->fingerprint ==
-                                               source.fingerprint) {
+                                        continue;
+                                    }
+                                    auto* existing = &m_RawWorkspace.sources[found->second];
+                                    if (existing->fingerprint == source.fingerprint) {
                                         const auto project = existing->project;
                                         const auto memberships = existing->
                                             sourceSetProjectMemberships;
@@ -1073,113 +1115,79 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                             return false;
                         }
 
-                        if (quickSources.empty()) return true;
-                        {
-                            std::lock_guard<std::mutex> lock(
-                                previewSession->mutex);
-                            ++previewSession->activeBatches;
-                        }
-                        const bool submittedPreview =
-                            ProjectTasks().Submit(
+                        bool previewsSubmitted = true;
+                        // Keep one job per uncached source so batching catalog
+                        // publication does not serialize the quick RAW decodes.
+                        for (auto& quickSource : quickSources) {
+                            {
+                                std::lock_guard<std::mutex> lock(previewSession->mutex);
+                                ++previewSession->activeBatches;
+                            }
+                            const bool submittedPreview = ProjectTasks().Submit(
                                 "Building previews",
-                                [
-                                    this,
-                                    generation,
-                                    layout,
-                                    quickSources = std::move(quickSources),
-                                    previewSession
-                                ]() mutable {
+                                [this, generation, layout, source = std::move(quickSource),
+                                 previewSession]() mutable {
                                     try {
-                                    std::vector<RawWorkspaceThumbnailUpdate>
-                                        updates;
-                                    updates.reserve(quickSources.size());
-                                    const auto canceled = [this, generation]() {
-                                        std::lock_guard<std::mutex> lock(
-                                            m_RawWorkspaceScanMutex);
-                                        return generation !=
-                                            m_RawWorkspaceScanGeneration;
-                                    };
-                                    for (const auto& source : quickSources) {
-                                        if (canceled()) break;
-                                        auto result = Stack::RawWorkspace::
-                                            GenerateFastNeutralThumbnail(
-                                                layout,
-                                                source,
-                                                Stack::RawWorkspace::
-                                                    kFastNeutralThumbnailMaxDimension,
+                                        const auto canceled = [this, generation]() {
+                                            std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+                                            return generation != m_RawWorkspaceScanGeneration;
+                                        };
+                                        if (!canceled()) {
+                                            auto result = Stack::RawWorkspace::GenerateFastNeutralThumbnail(
+                                                layout, source,
+                                                Stack::RawWorkspace::kFastNeutralThumbnailMaxDimension,
                                                 canceled);
-                                        if (result.success) {
-                                            updates.push_back({
-                                                0,
-                                                source.relativePathKey,
-                                                std::move(result.thumbnail),
-                                                true });
+                                            if (result.success) {
+                                                ProjectTasks().PostToMain([
+                                                    this, generation, sourceKey = source.relativePathKey,
+                                                    thumbnail = std::move(result.thumbnail)
+                                                ]() mutable {
+                                                    {
+                                                        std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+                                                        if (generation != m_RawWorkspaceScanGeneration) return;
+                                                    }
+                                                    const auto found = std::find_if(
+                                                        m_RawWorkspace.sources.begin(),
+                                                        m_RawWorkspace.sources.end(),
+                                                        [&](const auto& candidate) {
+                                                            return candidate.relativePathKey == sourceKey;
+                                                        });
+                                                    if (found == m_RawWorkspace.sources.end()) return;
+                                                    found->transientThumbnail = std::move(thumbnail);
+                                                    InvalidateRawWorkspaceGalleryPresentation(false);
+                                                    RequestRawWorkspaceSimilarityRebuild();
+                                                });
+                                            }
                                         }
-                                    }
-                                    if (!updates.empty()) {
-                                        ProjectTasks().PostToMain([
-                                            this,
-                                            generation,
-                                            updates = std::move(updates)
-                                        ]() mutable {
-                                            {
-                                                std::lock_guard<std::mutex> lock(
-                                                    m_RawWorkspaceScanMutex);
-                                                if (generation !=
-                                                    m_RawWorkspaceScanGeneration) {
-                                                    return;
-                                                }
-                                            }
-                                            bool changed = false;
-                                            for (auto& update : updates) {
-                                                auto found = std::find_if(
-                                                    m_RawWorkspace.sources.begin(),
-                                                    m_RawWorkspace.sources.end(),
-                                                    [&](const auto& source) {
-                                                        return source.
-                                                            relativePathKey ==
-                                                            update.sourceKey;
-                                                    });
-                                                if (found !=
-                                                    m_RawWorkspace.sources.end()) {
-                                                    found->transientThumbnail =
-                                                        std::move(
-                                                            update.thumbnail);
-                                                    changed = true;
-                                                }
-                                            }
-                                            if (changed) {
-                                                InvalidateRawWorkspaceGalleryPresentation();
-                                                RequestRawWorkspaceSimilarityRebuild();
-                                            }
-                                        });
-                                    }
                                     } catch (...) {
-                                        // The durable pass will retry this
-                                        // source after scan intake closes.
+                                        // The durable pass retries after scan intake closes.
                                     }
                                     {
-                                        std::lock_guard<std::mutex> lock(
-                                            previewSession->mutex);
+                                        std::lock_guard<std::mutex> lock(previewSession->mutex);
                                         --previewSession->activeBatches;
                                     }
                                     previewSession->completed.notify_all();
                                 });
-                        if (!submittedPreview) {
-                            {
-                                std::lock_guard<std::mutex> lock(
-                                    previewSession->mutex);
-                                --previewSession->activeBatches;
+                            if (!submittedPreview) {
+                                {
+                                    std::lock_guard<std::mutex> lock(previewSession->mutex);
+                                    --previewSession->activeBatches;
+                                }
+                                previewSession->completed.notify_all();
                             }
-                            previewSession->completed.notify_all();
+                            previewsSubmitted = submittedPreview && previewsSubmitted;
                         }
-                        return submittedPreview;
+                        return previewsSubmitted;
                     };
 
+                    bool firstSourcePublication = true;
+                    auto lastSourcePublication = std::chrono::steady_clock::now();
                     auto sourceReady = [
                         &updateProgress,
                         &progressiveBatch,
-                        &flushProgressiveBatch
+                        &flushProgressiveBatch,
+                        &firstSourcePublication,
+                        &lastSourcePublication
                     ](
                         const Stack::RawWorkspace::ManagedLayout& layout,
                         Stack::RawWorkspace::SourceRecord& source,
@@ -1194,10 +1202,19 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         ++progress.cachedPreviewsChecked;
                         updateProgress(progress);
                         progressiveBatch.push_back(source);
-                        // A one-source batch is below both publication bounds
-                        // and avoids holding a confirmed source behind the
-                        // hash of the next large file.
-                        flushProgressiveBatch(layout);
+                        const auto now = std::chrono::steady_clock::now();
+                        // Show the first source immediately. Later scanner
+                        // yields combine ready records by count or elapsed time;
+                        // scan completion flushes the final partial batch.
+                        if (firstSourcePublication ||
+                            progressiveBatch.size() >= kRawWorkspaceCatalogApplyBatchSize ||
+                            now - lastSourcePublication >= kRawWorkspaceCatalogPublishInterval) {
+                            if (!flushProgressiveBatch(layout)) {
+                                throw std::runtime_error("Could not publish progressive RAW previews.");
+                            }
+                            firstSourcePublication = false;
+                            lastSourcePublication = now;
+                        }
                     };
 
                     auto reuseSourceIdentity = [
@@ -1266,17 +1283,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                     "Discovering saved projects...";
                             }
                         }
-                        if (!Stack::RawWorkspace::DiscoverProjects(
-                                result.layout,
-                                result.sources,
-                                isScanCancelled)) {
-                            if (!isScanCancelled()) {
-                                markScanFailed(
-                                    "Could not discover saved projects.");
-                            }
-                            return;
-                        }
-                        if (!Stack::RawWorkspace::DiscoverSourceSetProjects(
+                        if (!Stack::RawWorkspace::DiscoverWorkspaceProjects(
                                 result.layout,
                                 result.sources,
                                 result.sourceSetProjects,
@@ -1335,52 +1342,36 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                 result.layout.workspaceRoot;
                             std::unordered_map<
                                 std::string,
-                                Stack::RawWorkspace::ThumbnailInfo>
-                                publishedThumbnails;
-                            std::unordered_map<
-                                std::string,
-                                Stack::RawWorkspace::ThumbnailInfo>
-                                publishedTransientThumbnails;
-                            publishedThumbnails.reserve(
-                                m_RawWorkspace.sources.size());
-                            publishedTransientThumbnails.reserve(
+                                const Stack::RawWorkspace::SourceRecord*>
+                                publishedSources;
+                            publishedSources.reserve(
                                 m_RawWorkspace.sources.size());
                             for (const Stack::RawWorkspace::SourceRecord& source :
                                  m_RawWorkspace.sources) {
-                                publishedThumbnails.emplace(
-                                    source.relativePathKey,
-                                    source.thumbnail);
-                                publishedTransientThumbnails.emplace(
-                                    source.relativePathKey,
-                                    source.transientThumbnail);
+                                publishedSources.emplace(source.relativePathKey, &source);
                             }
                             for (Stack::RawWorkspace::SourceRecord& source :
                                  result.sources) {
-                                const auto thumbnail =
-                                    publishedThumbnails.find(
-                                        source.relativePathKey);
-                                if (thumbnail != publishedThumbnails.end()) {
+                                const auto published = publishedSources.find(source.relativePathKey);
+                                if (published != publishedSources.end()) {
                                     const Stack::RawWorkspace::SourceRecord* previous =
-                                        FindRawWorkspaceSourceByKey(
-                                            source.relativePathKey);
+                                        m_PinnedRawWorkspaceSource.has_value() &&
+                                                m_PinnedRawWorkspaceSource->relativePathKey == source.relativePathKey
+                                            ? &*m_PinnedRawWorkspaceSource : published->second;
                                     const bool sameSource = previous != nullptr &&
                                         !previous->fingerprint.empty() &&
                                         previous->fingerprint == source.fingerprint;
                                     if (sameSource &&
                                         std::max(
-                                            thumbnail->second.width,
-                                            thumbnail->second.height) ==
+                                            published->second->thumbnail.width,
+                                            published->second->thumbnail.height) ==
                                             Stack::RawWorkspace::
                                                 kNeutralThumbnailMaxDimension) {
-                                        source.thumbnail = thumbnail->second;
+                                        source.thumbnail = published->second->thumbnail;
                                     }
-                                    const auto transientThumbnail =
-                                        publishedTransientThumbnails.find(
-                                            source.relativePathKey);
-                                    if (sameSource && transientThumbnail !=
-                                        publishedTransientThumbnails.end()) {
+                                    if (sameSource) {
                                         source.transientThumbnail =
-                                            transientThumbnail->second;
+                                            published->second->transientThumbnail;
                                     }
                                     if (sameSource && previous != nullptr &&
                                         previous->project.status !=
@@ -1391,13 +1382,10 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                                 NoProject) {
                                         source.project = previous->project;
                                     }
-                                    if (sameSource && previous != nullptr &&
-                                        !previous->sourceSetProjectMemberships.
-                                            empty()) {
-                                        source.sourceSetProjectMemberships =
-                                            previous->
-                                                sourceSetProjectMemberships;
-                                    }
+                                    // Project discovery owns these derived
+                                    // relationships and verified output flags.
+                                    // Warm memberships cannot override it. A
+                                    // later save publishes another refresh.
                                 }
                             }
                             m_RawWorkspace.sources = std::move(result.sources);
@@ -1616,7 +1604,7 @@ void EditorModule::FailRawWorkspaceThumbnailGeneration(
             m_RawWorkspaceThumbnailSnapshot.statusText,
             message);
     }
-    InvalidateRawWorkspaceGalleryPresentation();
+    InvalidateRawWorkspaceGalleryPresentation(false);
     try {
         PersistRawWorkspaceCatalog();
     } catch (...) {
@@ -1632,7 +1620,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
         m_RawWorkspaceThumbnailSnapshot.statusText = m_RawWorkspaceThumbnailSnapshot.progress.statusText;
         m_RawWorkspaceThumbnailScheduler.Clear();
         m_RawWorkspaceThumbnailWorkerActive = false;
-        InvalidateRawWorkspaceGalleryPresentation();
+        InvalidateRawWorkspaceGalleryPresentation(false);
         return;
     }
 
@@ -1671,7 +1659,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
         }
     }
     if (!pending.empty()) {
-        InvalidateRawWorkspaceGalleryPresentation();
+        InvalidateRawWorkspaceGalleryPresentation(false);
     }
 
     Stack::RawWorkspace::ThumbnailProgress initialProgress =
@@ -1823,7 +1811,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
                     }
                 }
                 if (anyThumbnailUpdated) {
-                    InvalidateRawWorkspaceGalleryPresentation();
+                    InvalidateRawWorkspaceGalleryPresentation(false);
                     RequestRawWorkspaceSimilarityRebuild();
                 }
                 if (anyPersistentThumbnailUpdated) {
@@ -2064,7 +2052,7 @@ void EditorModule::SelectRawWorkspaceSource(const std::string& sourceKey) {
         sourceKey != m_Project->rawSourceKey &&
         !explicitReplacement) {
         if (Stack::RawWorkspace::SelectSourceByKey(m_RawWorkspace, sourceKey)) {
-            InvalidateRawWorkspaceGalleryPresentation();
+            InvalidateRawWorkspaceGalleryPresentation(false);
             PersistRawWorkspaceCatalog();
             SaveRawWorkspaceAppState();
         }
@@ -2118,7 +2106,7 @@ void EditorModule::SelectRawWorkspaceSource(const std::string& sourceKey) {
         return;
     }
     if (selectionChanged) {
-        InvalidateRawWorkspaceGalleryPresentation();
+        InvalidateRawWorkspaceGalleryPresentation(false);
     }
     QueueSelectedRawWorkspaceSourcePreviewStaging();
     m_RawWorkspaceExplicitReplacementSourceKey.clear();

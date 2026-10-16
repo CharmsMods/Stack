@@ -342,9 +342,62 @@ static void RunClosetWorkspaceStorage() {
 
 void TestPersistenceBinaryFormat();
 
+static void TestSharedClosetAssetsAndPortablePayloads() {
+    namespace Project = Stack::Project;
+    namespace RW = Stack::RawWorkspace;
+    const auto sandbox = std::filesystem::temp_directory_path() / ("stack-shared-assets-" + Project::GenerateStableUuid());
+    auto root = sandbox / "Photos";
+    Write(root / "source.dng", "immutable source fixture");
+    std::string error;
+    Check(RW::EnsureManagedFolders(root, &error), "Initialize shared asset workspace");
+    const auto layout = RW::BuildManagedLayout(root);
+    Project::RawProjectSnapshot bootstrap;
+    bootstrap.projectId = Project::GenerateStableUuid();
+    bootstrap.projectName = "First";
+    auto first = Project::CreateProjectStore(layout.projectsDirectory / "First", Project::ProjectStorageKind::DirectoryBundle, bootstrap);
+    Check(static_cast<bool>(first), "Create shared asset project");
+    const auto transaction = first.store->BeginTransaction(first.snapshot.persistedStorageRevision);
+    Project::EmbeddedAssetRecord source;
+    Check(first.store->StageAssetFile(transaction, root / "source.dng", Project::MultiFrameInputFamily::Raw, nlohmann::json::object(), source, &error), "Stage shared source");
+    first.snapshot.embeddedAssets.push_back(source);
+    const std::vector<std::uint8_t> bytes{0, 1, 2, 254, 255};
+    first.snapshot.pipelineData["nested"]["mask"] = nlohmann::json::binary(bytes);
+    first.snapshot.pipelineData["nested"]["layer"]["pixels"] = {{"$rawLayerBytes", bytes}};
+    Check(StackBinaryFormat::ExternalizeManagedProjectAssets(first.store, transaction, first.snapshot), "Collect nested payloads");
+    const auto commit = first.store->Commit(transaction, first.snapshot);
+    Check(static_cast<bool>(commit), "Commit shared project");
+    first.snapshot.persistedStorageRevision = commit.committedStorageRevision;
+    const auto sharedSource = first.store->ResolveAssetFile(source.assetId);
+    Check(sharedSource.parent_path() == layout.dataDirectory / "Assets", "Source must live in Closet Assets");
+    auto secondSnapshot = first.snapshot;
+    secondSnapshot.projectId = Project::GenerateStableUuid();
+    secondSnapshot.projectName = "Second";
+    auto second = Project::ConvertProjectStore(first.store, secondSnapshot, layout.projectsDirectory / "Second", Project::ProjectStorageKind::DirectoryBundle);
+    Check(static_cast<bool>(second), "Create shared version");
+    Check(second.store->ResolveAssetFile(source.assetId) == sharedSource, "Versions must share exactly one managed source");
+    Check(!std::filesystem::exists(second.store->StoragePath() / source.projectAssetPath), "Version must not duplicate source bytes");
+    const auto portable = sandbox / "Complete.stack";
+    Check(static_cast<bool>(Project::ConvertProjectStore(first.store, first.snapshot, portable, Project::ProjectStorageKind::PortableFile)), "Export complete portable project");
+    first.store.reset(); second.store.reset();
+    const auto movedRoot = sandbox / "Moved Photos";
+    std::filesystem::rename(root, movedRoot);
+    std::filesystem::rename(movedRoot / "source.dng", movedRoot / "renamed.dng");
+    auto relocated = Project::OpenProjectStore(movedRoot / "Closet" / "Projects" / "First");
+    Check(static_cast<bool>(relocated) && relocated.store->ResolveAssetFile(source.assetId).parent_path() == movedRoot / "Closet" / "Assets", "Reopen must resolve shared assets from the new root");
+    StackBinaryFormat::ProjectDocument restored;
+    Check(StackBinaryFormat::ReadProjectFile(portable, restored), "Read self-contained export after relocating its source workspace");
+    Check(restored.pipelineData["nested"]["mask"] == nlohmann::json::binary(bytes),
+        "Portable export must preserve nested binary masks");
+    Check(restored.pipelineData["nested"]["layer"]["pixels"].is_binary(), "Portable export must restore wrapped layer payloads");
+    Check(static_cast<bool>(restored.projectStore->OpenAssetStream(source.assetId)), "Portable export owns its source bytes");
+    restored = {}; relocated.store.reset();
+    std::filesystem::remove_all(sandbox);
+}
+
 void TestClosetWorkspaceStorage() {
     try {
         TestPersistenceBinaryFormat();
+        TestSharedClosetAssetsAndPortablePayloads();
         RunClosetWorkspaceStorage();
     } catch (const std::exception& error) {
         std::cerr << "Closet storage validation failed: " << error.what() << std::endl;

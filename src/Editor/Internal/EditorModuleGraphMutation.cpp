@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Editor/RawLayerTools.h"
 #include "Editor/Internal/GraphEditorCommands.h"
 
 #include "Editor/Layers/ToneLayers.h"
@@ -167,6 +168,7 @@ void EditorModule::AddLayer(LayerType type) {
 }
 
 void EditorModule::AddLayerNodeAt(LayerType type, EditorNodeGraph::Vec2 graphPosition) {
+    if (type==LayerType::ToneCurve) { AddRawOperationNodeAt(Stack::RawRecipe::GraphOperationKind::ToneCurve,graphPosition); return; }
     auto layer = LayerRegistry::CreateLayer(type);
     if (!layer) return;
     const int layerIndex = static_cast<int>(GetLayers().size());
@@ -184,6 +186,8 @@ void EditorModule::AddLayerNodeAt(LayerType type, EditorNodeGraph::Vec2 graphPos
         auto* node = graph.AddLayerNode(type,layerIndex,graphPosition);
         if (!node) throw std::runtime_error("The operation could not be created.");
         nodeId = node->id;
+        node->layerParameters=layer->Serialize();
+        node->layerParameters["visible"]=layer->IsVisible();
         node->title = layer->GetName();
         graph.SelectNode(nodeId);
     });
@@ -202,33 +206,42 @@ void EditorModule::RemoveLayer(int index) {
 }
 
 void EditorModule::MoveLayer(int from, int to) {
-    if (from == to) return;
-    if (from < 0 || from >= static_cast<int>(GetLayers().size())) return;
-    if (to < 0 || to >= static_cast<int>(GetLayers().size())) return;
-
-    // TODO: Promote this to an undoable editor command when command history lands.
-    if (from < to) {
-        std::rotate(GetLayers().begin() + from, GetLayers().begin() + from + 1, GetLayers().begin() + to + 1);
-    } else {
-        std::rotate(GetLayers().begin() + to, GetLayers().begin() + from, GetLayers().begin() + from + 1);
+    if (from==to || from<0 || to<0 || from>=static_cast<int>(GetLayers().size()) ||
+        to>=static_cast<int>(GetLayers().size())) return;
+    auto context=GetGraphEditorContext();
+    auto proposal=Stack::GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& graph) {
+        std::vector<EditorNodeGraph::Node> ordered;
+        for (auto& node:graph.EditNodes()) if (node.kind==EditorNodeGraph::NodeKind::Layer) {
+            if (node.layerIndex==from) node.layerIndex=to;
+            else if (from<to && node.layerIndex>from && node.layerIndex<=to) --node.layerIndex;
+            else if (from>to && node.layerIndex>=to && node.layerIndex<from) ++node.layerIndex;
+            ordered.push_back(node);
+        }
+        std::stable_sort(ordered.begin(),ordered.end(),[](const auto& a,const auto& b){return a.layerIndex<b.layerIndex;});
+        auto next=ordered.begin();
+        for (auto& node:graph.EditNodes()) if (node.kind==EditorNodeGraph::NodeKind::Layer)
+            node=std::move(*next++);
+    });
+    std::string error;
+    if (!context.applyEdit(std::move(proposal),error)) {
+        PostNotification(UiNotificationSeverity::Error,error,"graph-effect-order"); return;
     }
-
-    if (m_SelectedLayerIndex == from) {
-        m_SelectedLayerIndex = to;
-    } else if (from < m_SelectedLayerIndex && to >= m_SelectedLayerIndex) {
-        m_SelectedLayerIndex--;
-    } else if (from > m_SelectedLayerIndex && to <= m_SelectedLayerIndex) {
-        m_SelectedLayerIndex++;
-    }
-
-    RefreshGraphLayerMetadata();
-    MarkGraphEdited();
+    const auto* selected=GetNodeGraph().FindNode(GetNodeGraph().GetSelectedNodeId());
+    m_SelectedLayerIndex=selected && selected->kind==EditorNodeGraph::NodeKind::Layer ? selected->layerIndex : -1;
 }
-
 void EditorModule::SetLayerVisible(int index, bool visible) {
     if (index < 0 || index >= static_cast<int>(GetLayers().size())) return;
-    GetLayers()[index]->SetVisible(visible);
-    MarkGraphEdited();
+    const auto* node=GetNodeGraph().FindNodeByLayerIndex(index);
+    if (!node) return;
+    const auto uuid=node->instanceUuid;
+    auto context=GetGraphEditorContext();
+    auto proposal=Stack::GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& graph) {
+        for (auto& candidate:graph.EditNodes()) if (candidate.instanceUuid==uuid)
+            candidate.layerParameters["visible"]=visible;
+    });
+    std::string error;
+    if (!context.applyEdit(std::move(proposal),error))
+        PostNotification(UiNotificationSeverity::Error,error,"graph-effect-visibility");
 }
 
 void EditorModule::SelectLayer(int index) {
@@ -242,6 +255,15 @@ void EditorModule::SelectLayer(int index) {
 void EditorModule::SelectGraphNode(int nodeId) {
     GetNodeGraph().SelectNode(nodeId);
     const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
+    if (node && IsEditingRawLayerMaskGraph() && !node->rawLayerOwnerId.empty()) {
+        m_RawLayerMaskWorkspace->layerId=node->rawLayerOwnerId;
+        m_SelectedRawAdjustmentLayer=node->rawLayerOwnerId==Stack::Project::kRawBackgroundId?std::string{}:node->rawLayerOwnerId;
+        if(m_Project->nodeEditor && m_Project->nodeEditor->layerId!=node->rawLayerOwnerId) m_Project->nodeEditor.reset();
+        const auto* owner=Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),node->rawLayerOwnerId);
+        const auto tools=owner ? Stack::Editor::RawLayerToolNodes(owner->graph) : std::vector<const EditorNodeGraph::Node*>{};
+        if (std::any_of(tools.begin(),tools.end(),[&](const auto* tool){return tool->instanceUuid==node->instanceUuid;}))
+            SelectRawNodeEditor(node->rawLayerOwnerId,node->instanceUuid);
+    }
     if (node && node->kind == EditorNodeGraph::NodeKind::Layer) {
         SelectLayer(node->layerIndex);
     } else {
@@ -249,22 +271,6 @@ void EditorModule::SelectGraphNode(int nodeId) {
     }
     if (node && node->kind == EditorNodeGraph::NodeKind::Output) {
         m_CompositeSelectedOutputNodeId = nodeId;
-    }
-    if (node && node->kind == EditorNodeGraph::NodeKind::RawOperation && IsEditingRawLayerMaskGraph()) {
-        const auto kind = node->rawOperation.kind;
-        m_Project->rawOperationSelection[m_RawLayerMaskWorkspace->layerId + "/" + Stack::RawRecipe::GraphOperationId(kind)] = node->instanceUuid;
-        using Kind = Stack::RawRecipe::GraphOperationKind;
-        switch (kind) {
-            case Kind::Calibration: m_RawWorkspaceLabUi.activeTool = RawLabTool::Calibration; break;
-            case Kind::Exposure: m_RawWorkspaceLabUi.activeTool = RawLabTool::Exposure; break;
-            case Kind::LocalEv: m_RawWorkspaceLabUi.activeTool = RawLabTool::Zones; break;
-            case Kind::LuminanceTone: m_RawWorkspaceLabUi.activeTool = RawLabTool::Tone; m_RawWorkspaceLabUi.sceneToneView = 0; break;
-            case Kind::RgbCurves: m_RawWorkspaceLabUi.activeTool = RawLabTool::Tone; m_RawWorkspaceLabUi.sceneToneView = 2; break;
-            case Kind::ColorWarp: m_RawWorkspaceLabUi.activeTool = RawLabTool::Color; break;
-            case Kind::DetailContrast: m_RawWorkspaceLabUi.activeTool = RawLabTool::Detail; break;
-            default: break;
-        }
-        ClearRawWorkspaceGraphScopeReadbackCaches();
     }
 
 }
@@ -307,7 +313,6 @@ bool EditorModule::NodeHasDedicatedComplexEditor(int nodeId) const {
     switch (node->kind) {
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -340,8 +345,7 @@ NodeSurfaceSpec EditorModule::GetNodeSurfaceSpec(int nodeId) const {
         spec.maxWidth = 520.0f;
         return spec;
     }
-    if (node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-        node->kind == EditorNodeGraph::NodeKind::RawDecode ||
+    if (node->kind == EditorNodeGraph::NodeKind::RawDecode ||
         node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
         node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
         node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
@@ -586,7 +590,7 @@ bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
     const auto originalNode = *original;
     auto settings = nlohmann::json::array();
     for (const auto& layer : GetLayers()) settings.push_back(layer->Serialize());
-    const auto originalSettings = settings[originalNode.layerIndex];
+    const auto originalSettings = originalNode.layerParameters;
     const auto originalAnimation = GetGraphAnimation();
     auto animation = originalAnimation;
     animation.tracks.erase(std::remove_if(animation.tracks.begin(),animation.tracks.end(),[&](const auto& track) {
@@ -617,6 +621,7 @@ bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
             const auto cloneId = node->id;
             const auto cloneUuid = node->instanceUuid;
             node->typeId = originalNode.typeId;
+            node->layerParameters=originalSettings;
             node->exposedParameterIds = originalNode.exposedParameterIds;
             settings.push_back(originalSettings);
             connect(splitId,channels[i],cloneId,"imageIn");
@@ -1084,34 +1089,6 @@ bool EditorModule::SelectedLayerInputContainsViewTransform() const {
             .hasViewTransform;
 }
 
-bool EditorModule::RenderLayerControlsWithDirtyTracking(
-    EditorNodeGraph::Node& node,
-    const std::function<void(LayerBase&)>& renderControls) {
-    if (node.kind != EditorNodeGraph::NodeKind::Layer ||
-        node.layerIndex < 0 ||
-        node.layerIndex >= static_cast<int>(GetLayers().size()) ||
-        !GetLayers()[node.layerIndex]) {
-        return false;
-    }
-
-    LayerBase& layer = *GetLayers()[node.layerIndex];
-    const nlohmann::json before = layer.Serialize();
-    const bool beforeEnabled = layer.IsEnabled();
-    const bool beforeVisible = layer.IsVisible();
-    renderControls(layer);
-    const nlohmann::json after = layer.Serialize();
-    if (before != after ||
-        beforeEnabled != layer.IsEnabled() ||
-        beforeVisible != layer.IsVisible()) {
-        if (before != after && !IsEditingRawLayerMaskGraph()) {
-            UpdateTimelineExistingKeyframesForLayerEdit(node, before, after);
-        }
-        MarkGraphEdited(node.id);
-        return true;
-    }
-    return false;
-}
-
 void EditorModule::MarkSelectedLayerRenderDirty() {
     if (m_SelectedLayerIndex >= 0) {
         if (const EditorNodeGraph::Node* node = GetNodeGraph().FindNodeByLayerIndex(m_SelectedLayerIndex)) {
@@ -1447,777 +1424,43 @@ bool EditorModule::CreateCompoundFromSelection(const std::string& label, std::st
     return true;
 }
 
-void EditorModule::AddFrequencyFilterNodeAt(EditorNodeGraph::FrequencyFilterMode mode, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddFrequencyFilterNode(mode, graphPosition); });
-}
 
-void EditorModule::AddFrequencyResponseNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddFrequencyResponseNode(graphPosition); });
-}
 
-void EditorModule::AddFrequencyFftNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddFrequencyFftNode(graphPosition); });
-}
 
-void EditorModule::AddFrequencyIfftNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddFrequencyIfftNode(graphPosition); });
-}
 
-void EditorModule::AddSpectrumViewNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddSpectrumViewNode(graphPosition); });
-}
 
-void EditorModule::AddApplyFrequencyResponseNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddApplyFrequencyResponseNode(graphPosition); });
-}
 
-void EditorModule::AddCombineSpectraNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddCombineSpectraNode(graphPosition); });
-}
 
-void EditorModule::AddSpectrumSeparateNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddSpectrumSeparateNode(graphPosition); });
-}
 
-void EditorModule::AddSpectrumRecombineNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddSpectrumRecombineNode(graphPosition); });
-}
 
-bool EditorModule::SetFrequencyParameterExposed(
-    int nodeId,
-    const std::string& parameterId,
-    bool exposed) {
-    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
-    if (node == nullptr) return false;
-    const EditorNodeGraphDefinitions::LiveNodeDefinition* definition =
-        EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node);
-    if (definition == nullptr) return false;
-    const auto parameter = std::find_if(
-        definition->parameters.begin(),
-        definition->parameters.end(),
-        [&](const EditorNodeGraphDefinitions::LiveParameterDefinition& candidate) {
-            return candidate.id == parameterId && candidate.graphInputCapable;
-        });
-    if (parameter == definition->parameters.end()) {
-        bool dynamicNotchParameter = false;
-        if (node->kind == EditorNodeGraph::NodeKind::FrequencyResponse) {
-            for (const EditorNodeGraph::FrequencyNotch& notch :
-                 node->frequencyResponseSettings.notches) {
-                for (const char* field : { "frequency", "direction", "width" }) {
-                    if (parameterId ==
-                        EditorNodeGraph::FrequencyNotchParameterId(
-                            notch.id, field)) {
-                        dynamicNotchParameter = true;
-                        break;
-                    }
-                }
-                if (dynamicNotchParameter) break;
-            }
-        }
-        if (!dynamicNotchParameter) return false;
-    }
-    std::string error;
-    const bool applied=ApplyGraphCommand(*this,[&](auto& graph) {
-        if (!graph.SetParameterExposed(nodeId,parameterId,exposed))
-            throw std::runtime_error("The parameter connection could not be changed.");
-    },&error);
-    if(!applied) PostNotification(UiNotificationSeverity::Error,error,"graph-parameter-exposed");
-    return applied;
-}
 
-bool EditorModule::ApplyFrequencyGraphHistoryPatch(
-    FrequencyGraphHistoryPatch& patch,
-    bool applyAfter) {
-    auto context = GetGraphEditorContext();
-    auto candidate = GetNodeGraph();
-    const std::uint64_t expectedRevision =
-        applyAfter
-            ? patch.expectedBeforeRevision
-            : patch.expectedAfterRevision;
-    if (candidate.GetStructureRevision() !=
-        expectedRevision) {
-        return false;
-    }
-    const std::vector<FrequencyGraphHistoryNode>& removeNodes =
-        applyAfter ? patch.beforeNodes : patch.afterNodes;
-    const std::vector<FrequencyGraphHistoryNode>& targetNodes =
-        applyAfter ? patch.afterNodes : patch.beforeNodes;
-    const std::vector<FrequencyGraphHistoryLink>& targetLinks =
-        applyAfter ? patch.afterLinks : patch.beforeLinks;
-    const std::vector<int>& targetSelection =
-        applyAfter ? patch.afterSelection : patch.beforeSelection;
-    const std::optional<EditorNodeGraph::Link>& targetSelectedLink =
-        applyAfter
-            ? patch.afterSelectedLink
-            : patch.beforeSelectedLink;
-    const int targetNextNodeId =
-        applyAfter
-            ? patch.afterNextNodeId
-            : patch.beforeNextNodeId;
 
-    for (const FrequencyGraphHistoryNode& item : removeNodes) {
-        if (!candidate.FindNode(item.node.id)) {
-            return false;
-        }
-    }
-    for (const FrequencyGraphHistoryNode& item : targetNodes) {
-        if (candidate.FindNode(item.node.id)) {
-            return false;
-        }
-    }
 
-    // Finish every potentially allocating copy/reserve before removing the
-    // currently authored side of the patch.
-    std::vector<FrequencyGraphHistoryNode> preparedNodes =
-        targetNodes;
-    std::vector<FrequencyGraphHistoryLink> preparedLinks =
-        targetLinks;
-    std::vector<int> preparedSelection = targetSelection;
-    if (preparedNodes.size() >
-        candidate.GetNodes().max_size() -
-            candidate.GetNodes().size()) {
-        return false;
-    }
-    if (preparedLinks.size() >
-        candidate.GetLinks().max_size() -
-            candidate.GetLinks().size()) {
-        return false;
-    }
-    candidate.EditNodes().reserve(
-        candidate.GetNodes().size() +
-        preparedNodes.size());
-    candidate.EditLinks().reserve(
-        candidate.GetLinks().size() +
-        preparedLinks.size());
 
-    for (const FrequencyGraphHistoryNode& item : removeNodes) {
-        if (!candidate.RemoveNode(item.node.id)) {
-            return false;
-        }
-    }
-    for (FrequencyGraphHistoryNode& item : preparedNodes) {
-        std::vector<EditorNodeGraph::Node>& nodes =
-            candidate.EditNodes();
-        const std::size_t insertionIndex =
-            std::min(item.index, nodes.size());
-        nodes.insert(
-            nodes.begin() +
-                static_cast<std::ptrdiff_t>(insertionIndex),
-            std::move(item.node));
-    }
-    for (FrequencyGraphHistoryLink& item : preparedLinks) {
-        std::vector<EditorNodeGraph::Link>& links =
-            candidate.EditLinks();
-        const std::size_t insertionIndex =
-            std::min(item.index, links.size());
-        links.insert(
-            links.begin() +
-                static_cast<std::ptrdiff_t>(insertionIndex),
-            std::move(item.link));
-    }
-    candidate.SetNextNodeId(targetNextNodeId);
-    candidate.ClearSelection();
-    for (const int nodeId : preparedSelection) {
-        candidate.SelectNode(nodeId, true);
-    }
-    if (targetSelectedLink) {
-        candidate.SelectLink(
-            targetSelectedLink->fromNodeId,
-            targetSelectedLink->fromSocketId,
-            targetSelectedLink->toNodeId,
-            targetSelectedLink->toSocketId);
-    }
-    auto proposal = Stack::GraphModel::ProposeEdit(*context.graph, context.revision,
-        [&](auto& graph) { graph = std::move(candidate); });
-    std::string reason;
-    if (!context.applyEdit(std::move(proposal), reason)) return false;
-    if (applyAfter) {
-        patch.expectedAfterRevision =
-            GetNodeGraph().GetStructureRevision();
-    } else {
-        patch.expectedBeforeRevision =
-            GetNodeGraph().GetStructureRevision();
-    }
-    return true;
-}
 
-bool EditorModule::ExtractFrequencyResponseNode(
-    int filterNodeId,
-    std::string* error) {
-    auto context = GetGraphEditorContext();
-    auto candidate = GetNodeGraph();
-    const EditorNodeGraph::Node* filter = candidate.FindNode(filterNodeId);
-    if (filter == nullptr ||
-        filter->kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
-        if (error) *error = "Extract Response Node requires a Frequency Filter.";
-        return false;
-    }
-    if (candidate.FindAnyInputLink(
-            filterNodeId, EditorNodeGraph::kFrequencyResponseInputSocketId) != nullptr) {
-        if (error) *error = "This Frequency Filter already has a connected Response.";
-        return false;
-    }
 
-    FrequencyGraphHistoryPatch patch;
-    patch.beforeNextNodeId = candidate.GetNextNodeId();
-    patch.expectedBeforeRevision =
-        candidate.GetStructureRevision();
-    patch.beforeSelection =
-        candidate.GetSelectedNodeIds();
-    if (const EditorNodeGraph::Link* selected =
-            candidate.GetSelectedLink()) {
-        patch.beforeSelectedLink = *selected;
-    }
-    const EditorNodeGraph::FrequencyResponseSettings responseSettings =
-        filter->frequencyFilterSettings.localResponse;
-    const EditorNodeGraph::Vec2 position {
-        filter->position.x - 260.0f,
-        filter->position.y + 28.0f
-    };
-    int responseNodeId = -1;
-    const auto rollbackExtraction = [&]() {
-        if (responseNodeId > 0) {
-            candidate.RemoveNode(responseNodeId);
-        }
-        candidate.SetNextNodeId(
-            patch.beforeNextNodeId);
-        candidate.ClearSelection();
-        for (const int selectedNodeId :
-             patch.beforeSelection) {
-            candidate.SelectNode(
-                selectedNodeId,
-                true);
-        }
-        if (patch.beforeSelectedLink) {
-            const EditorNodeGraph::Link& selected =
-                *patch.beforeSelectedLink;
-            candidate.SelectLink(
-                selected.fromNodeId,
-                selected.fromSocketId,
-                selected.toNodeId,
-                selected.toSocketId);
-        }
-    };
 
-    try {
-        EditorNodeGraph::Node* response =
-            candidate.AddFrequencyResponseNode(
-                position);
-        if (!response) {
-            rollbackExtraction();
-            SetGraphMutationErrorNoThrow(
-                error,
-                "Could not create the Frequency Response node.");
-            return false;
-        }
-        responseNodeId = response->id;
-        response->frequencyResponseSettings =
-            responseSettings;
-        std::string connectionError;
-        if (!candidate.TryConnectSockets(
-                responseNodeId,
-                EditorNodeGraph::kFrequencyResponseOutputSocketId,
-                filterNodeId,
-                EditorNodeGraph::kFrequencyResponseInputSocketId,
-                &connectionError)) {
-            rollbackExtraction();
-            if (error) *error = std::move(connectionError);
-            return false;
-        }
-        candidate.SelectNode(responseNodeId);
 
-        const auto responseIt = std::find_if(
-            candidate.GetNodes().begin(),
-            candidate.GetNodes().end(),
-            [responseNodeId](
-                const EditorNodeGraph::Node& node) {
-                return node.id == responseNodeId;
-            });
-        const EditorNodeGraph::Link* responseLink =
-            candidate.FindAnyInputLink(
-                filterNodeId,
-                EditorNodeGraph::kFrequencyResponseInputSocketId);
-        if (responseIt == candidate.GetNodes().end() ||
-            !responseLink ||
-            responseLink->fromNodeId != responseNodeId) {
-            rollbackExtraction();
-            SetGraphMutationErrorNoThrow(
-                error,
-                "Could not record the extracted response topology.");
-            return false;
-        }
-        patch.afterNodes.push_back({
-            static_cast<std::size_t>(
-                std::distance(
-                    candidate.GetNodes().begin(),
-                    responseIt)),
-            *responseIt
-        });
-        const auto responseLinkIt = std::find_if(
-            candidate.GetLinks().begin(),
-            candidate.GetLinks().end(),
-            [responseLink](
-                const EditorNodeGraph::Link& link) {
-                return &link == responseLink;
-            });
-        patch.afterLinks.push_back({
-            static_cast<std::size_t>(
-                std::distance(
-                    candidate.GetLinks().begin(),
-                    responseLinkIt)),
-            *responseLink
-        });
-        patch.afterNextNodeId =
-            candidate.GetNextNodeId();
-        patch.expectedAfterRevision =
-            candidate.GetStructureRevision();
-        patch.afterSelection =
-            candidate.GetSelectedNodeIds();
-        if (const EditorNodeGraph::Link* selected =
-                candidate.GetSelectedLink()) {
-            patch.afterSelectedLink = *selected;
-        }
 
-    } catch (const std::bad_alloc&) {
-        rollbackExtraction();
-        SetGraphMutationErrorNoThrow(
-            error,
-            "Could not record frequency graph history because memory is exhausted.");
-        return false;
-    } catch (const std::length_error&) {
-        rollbackExtraction();
-        SetGraphMutationErrorNoThrow(
-            error,
-            "Could not record frequency graph history because its size limit was reached.");
-        return false;
-    } catch (...) {
-        rollbackExtraction();
-        throw;
-    }
-    auto proposal = Stack::GraphModel::ProposeEdit(*context.graph, context.revision,
-        [&](auto& graph) { graph = std::move(candidate); });
-    std::string reason;
-    if (!context.applyEdit(std::move(proposal), reason)) {
-        if (error) *error = std::move(reason);
-        return false;
-    }
-    patch.expectedAfterRevision = GetNodeGraph().GetStructureRevision();
-    if (!IsEditingRawLayerMaskGraph()) m_FrequencyGraphUndo = std::move(patch);
-    else m_FrequencyGraphUndo.reset();
-    m_FrequencyGraphRedo.reset();
-    return true;
-}
 
-bool EditorModule::ExpandFrequencyFilterNode(
-    int filterNodeId,
-    std::string* error) {
-    auto context = GetGraphEditorContext();
-    auto candidate = GetNodeGraph();
-    const EditorNodeGraph::Node* filter = candidate.FindNode(filterNodeId);
-    if (filter == nullptr ||
-        filter->kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
-        if (error) *error = "Expand requires a Frequency Filter node.";
-        return false;
-    }
 
-    FrequencyGraphHistoryPatch patch;
-    patch.beforeNextNodeId =
-        candidate.GetNextNodeId();
-    patch.expectedBeforeRevision =
-        candidate.GetStructureRevision();
-    patch.beforeSelection =
-        candidate.GetSelectedNodeIds();
-    if (const EditorNodeGraph::Link* selected =
-            candidate.GetSelectedLink()) {
-        patch.beforeSelectedLink = *selected;
-    }
-    const auto filterIt = std::find_if(
-        candidate.GetNodes().begin(),
-        candidate.GetNodes().end(),
-        [filterNodeId](
-            const EditorNodeGraph::Node& node) {
-            return node.id == filterNodeId;
-        });
-    if (filterIt == candidate.GetNodes().end()) {
-        if (error) *error = "Could not locate the original Frequency Filter.";
-        return false;
-    }
-    patch.beforeNodes.push_back({
-        static_cast<std::size_t>(
-            std::distance(
-                candidate.GetNodes().begin(),
-                filterIt)),
-        *filterIt
-    });
-    const EditorNodeGraph::FrequencyFilterSettings filterSettings =
-        filter->frequencyFilterSettings;
-    const std::vector<std::string> exposedParameters =
-        filter->exposedParameterIds;
-    const EditorNodeGraph::Vec2 origin = filter->position;
-    std::vector<EditorNodeGraph::Link> incoming;
-    std::vector<EditorNodeGraph::Link> outgoing;
-    for (std::size_t linkIndex = 0;
-         linkIndex < candidate.GetLinks().size();
-         ++linkIndex) {
-        const EditorNodeGraph::Link& link =
-            candidate.GetLinks()[linkIndex];
-        if (link.toNodeId == filterNodeId) incoming.push_back(link);
-        if (link.fromNodeId == filterNodeId) outgoing.push_back(link);
-        if (link.toNodeId == filterNodeId ||
-            link.fromNodeId == filterNodeId) {
-            patch.beforeLinks.push_back({
-                linkIndex,
-                link
-            });
-        }
-    }
-    FrequencyGraphHistoryNode rollbackFilter =
-        patch.beforeNodes.front();
-    std::vector<FrequencyGraphHistoryLink> rollbackLinks =
-        patch.beforeLinks;
-    std::vector<int> createdNodeIds;
-    createdNodeIds.reserve(4u);
-    bool rolledBack = false;
-    const auto rollbackAdvancedChain = [&]() {
-        if (rolledBack) {
-            return;
-        }
-        rolledBack = true;
-        for (const int createdNodeId : createdNodeIds) {
-            candidate.RemoveNode(createdNodeId);
-        }
-        if (!candidate.FindNode(filterNodeId)) {
-            std::vector<EditorNodeGraph::Node>& nodes =
-                candidate.EditNodes();
-            const std::size_t insertionIndex =
-                std::min(
-                    rollbackFilter.index,
-                    nodes.size());
-            nodes.insert(
-                nodes.begin() +
-                    static_cast<std::ptrdiff_t>(
-                        insertionIndex),
-                std::move(rollbackFilter.node));
-        }
-        for (FrequencyGraphHistoryLink& item :
-             rollbackLinks) {
-            std::vector<EditorNodeGraph::Link>& links =
-                candidate.EditLinks();
-            const std::size_t insertionIndex =
-                std::min(item.index, links.size());
-            links.insert(
-                links.begin() +
-                    static_cast<std::ptrdiff_t>(
-                        insertionIndex),
-                std::move(item.link));
-        }
-        candidate.SetNextNodeId(
-            patch.beforeNextNodeId);
-        candidate.ClearSelection();
-        for (const int selectedNodeId :
-             patch.beforeSelection) {
-            candidate.SelectNode(
-                selectedNodeId,
-                true);
-        }
-        if (patch.beforeSelectedLink) {
-            const EditorNodeGraph::Link& selected =
-                *patch.beforeSelectedLink;
-            candidate.SelectLink(
-                selected.fromNodeId,
-                selected.fromSocketId,
-                selected.toNodeId,
-                selected.toSocketId);
-        }
-    };
 
-    try {
-        constexpr std::size_t kAdvancedNodeCount = 4u;
-        if (incoming.size() >
-                std::numeric_limits<std::size_t>::max() - 3u ||
-            outgoing.size() >
-                std::numeric_limits<std::size_t>::max() -
-                    3u - incoming.size()) {
-            throw std::length_error(
-                "advanced frequency link count overflow");
-        }
-        const std::size_t maximumAddedLinks =
-            3u + incoming.size() + outgoing.size();
-        if (kAdvancedNodeCount >
-                candidate.GetNodes().max_size() -
-                    candidate.GetNodes().size() ||
-            maximumAddedLinks >
-                candidate.GetLinks().max_size() -
-                    candidate.GetLinks().size()) {
-            throw std::length_error(
-                "advanced frequency graph capacity exhausted");
-        }
-        candidate.EditNodes().reserve(
-            candidate.GetNodes().size() +
-            kAdvancedNodeCount);
-        candidate.EditLinks().reserve(
-            candidate.GetLinks().size() +
-            maximumAddedLinks);
-        if (!candidate.RemoveNode(filterNodeId)) {
-            if (error) *error = "Could not remove the original Frequency Filter.";
-            return false;
-        }
 
-        EditorNodeGraph::Node* created =
-            candidate.AddFrequencyFftNode(
-                { origin.x - 330.0f, origin.y });
-        const int transformId = created ? created->id : -1;
-        if (transformId > 0) createdNodeIds.push_back(transformId);
-        created = candidate.AddFrequencyResponseNode(
-            { origin.x - 110.0f, origin.y + 190.0f });
-        const int responseId = created ? created->id : -1;
-        if (responseId > 0) createdNodeIds.push_back(responseId);
-        created = candidate.AddApplyFrequencyResponseNode(
-            { origin.x - 90.0f, origin.y });
-        const int applyId = created ? created->id : -1;
-        if (applyId > 0) createdNodeIds.push_back(applyId);
-        created = candidate.AddFrequencyIfftNode(
-            { origin.x + 150.0f, origin.y });
-        const int inverseId = created ? created->id : -1;
-        if (inverseId > 0) createdNodeIds.push_back(inverseId);
-        if (transformId <= 0 || responseId <= 0 ||
-            applyId <= 0 || inverseId <= 0) {
-            rollbackAdvancedChain();
-            if (error) *error = "Could not create the advanced frequency chain.";
-            return false;
-        }
-        candidate.FindNode(transformId)->
-            frequencyFftSettings.edgePolicy =
-                filterSettings.edgePolicy;
-        candidate.FindNode(responseId)->
-            frequencyResponseSettings =
-                filterSettings.localResponse;
-        candidate.FindNode(applyId)->
-            applyFrequencyResponseSettings.strength =
-                filterSettings.strength;
-        if (std::find(
-                exposedParameters.begin(),
-                exposedParameters.end(),
-                EditorNodeGraph::kStrengthParameterId) !=
-            exposedParameters.end()) {
-            candidate.SetParameterExposed(
-                applyId,
-                EditorNodeGraph::kStrengthParameterId,
-                true);
-        }
 
-        const auto connect =
-            [&](int fromNodeId,
-                const std::string& fromSocket,
-                int toNodeId,
-                const std::string& toSocket) {
-                std::string message;
-                if (candidate.TryConnectSockets(
-                        fromNodeId,
-                        fromSocket,
-                        toNodeId,
-                        toSocket,
-                        &message)) {
-                    return true;
-                }
-                if (error) *error = std::move(message);
-                return false;
-            };
 
-        bool ok = connect(
-            transformId,
-            EditorNodeGraph::kSpectrumOutputSocketId,
-            applyId,
-            EditorNodeGraph::kSpectrumInputSocketId);
-        ok = ok && connect(
-            applyId,
-            EditorNodeGraph::kSpectrumOutputSocketId,
-            inverseId,
-            EditorNodeGraph::kSpectrumInputSocketId);
 
-        const EditorNodeGraph::Link* externalResponse = nullptr;
-        for (const EditorNodeGraph::Link& link : incoming) {
-            if (link.toSocketId ==
-                EditorNodeGraph::kChannelInputSocketId) {
-                ok = ok && connect(
-                    link.fromNodeId,
-                    link.fromSocketId,
-                    transformId,
-                    EditorNodeGraph::kChannelInputSocketId);
-            } else if (link.toSocketId ==
-                       EditorNodeGraph::kFrequencyResponseInputSocketId) {
-                externalResponse = &link;
-            } else if (link.toSocketId ==
-                       EditorNodeGraph::ParameterInputSocketId(
-                           EditorNodeGraph::kStrengthParameterId)) {
-                candidate.SetParameterExposed(
-                    applyId,
-                    EditorNodeGraph::kStrengthParameterId,
-                    true);
-                ok = ok && connect(
-                    link.fromNodeId,
-                    link.fromSocketId,
-                    applyId,
-                    EditorNodeGraph::ParameterInputSocketId(
-                        EditorNodeGraph::kStrengthParameterId));
-            }
-        }
-        if (externalResponse) {
-            ok = ok && connect(
-                externalResponse->fromNodeId,
-                externalResponse->fromSocketId,
-                applyId,
-                EditorNodeGraph::kFrequencyResponseInputSocketId);
-            candidate.RemoveNode(responseId);
-        } else {
-            ok = ok && connect(
-                responseId,
-                EditorNodeGraph::kFrequencyResponseOutputSocketId,
-                applyId,
-                EditorNodeGraph::kFrequencyResponseInputSocketId);
-        }
-        for (const EditorNodeGraph::Link& link : outgoing) {
-            if (link.fromSocketId ==
-                EditorNodeGraph::kChannelOutputSocketId) {
-                ok = ok && connect(
-                    inverseId,
-                    EditorNodeGraph::kChannelOutputSocketId,
-                    link.toNodeId,
-                    link.toSocketId);
-            }
-        }
-        if (!ok) {
-            rollbackAdvancedChain();
-            return false;
-        }
 
-        candidate.SelectNode(applyId);
-        std::unordered_set<int> addedNodeIds(
-            createdNodeIds.begin(),
-            createdNodeIds.end());
-        for (std::size_t nodeIndex = 0;
-             nodeIndex < candidate.GetNodes().size();
-             ++nodeIndex) {
-            const EditorNodeGraph::Node& node =
-                candidate.GetNodes()[nodeIndex];
-            if (addedNodeIds.count(node.id) != 0u) {
-                patch.afterNodes.push_back({
-                    nodeIndex,
-                    node
-                });
-            }
-        }
-        for (std::size_t linkIndex = 0;
-             linkIndex < candidate.GetLinks().size();
-             ++linkIndex) {
-            const EditorNodeGraph::Link& link =
-                candidate.GetLinks()[linkIndex];
-            if (addedNodeIds.count(link.fromNodeId) != 0u ||
-                addedNodeIds.count(link.toNodeId) != 0u) {
-                patch.afterLinks.push_back({
-                    linkIndex,
-                    link
-                });
-            }
-        }
-        patch.afterNextNodeId =
-            candidate.GetNextNodeId();
-        patch.expectedAfterRevision =
-            candidate.GetStructureRevision();
-        patch.afterSelection =
-            candidate.GetSelectedNodeIds();
-        if (const EditorNodeGraph::Link* selected =
-                candidate.GetSelectedLink()) {
-            patch.afterSelectedLink = *selected;
-        }
 
-    } catch (const std::bad_alloc&) {
-        rollbackAdvancedChain();
-        SetGraphMutationErrorNoThrow(
-            error,
-            "Could not record frequency graph history because memory is exhausted.");
-        return false;
-    } catch (const std::length_error&) {
-        rollbackAdvancedChain();
-        SetGraphMutationErrorNoThrow(
-            error,
-            "Could not record frequency graph history because its size limit was reached.");
-        return false;
-    } catch (...) {
-        rollbackAdvancedChain();
-        throw;
-    }
-    auto proposal = Stack::GraphModel::ProposeEdit(*context.graph, context.revision,
-        [&](auto& graph) { graph = std::move(candidate); });
-    std::string reason;
-    if (!context.applyEdit(std::move(proposal), reason)) {
-        if (error) *error = std::move(reason);
-        return false;
-    }
-    patch.expectedAfterRevision = GetNodeGraph().GetStructureRevision();
-    if (!IsEditingRawLayerMaskGraph()) m_FrequencyGraphUndo = std::move(patch);
-    else m_FrequencyGraphUndo.reset();
-    m_FrequencyGraphRedo.reset();
-    return true;
-}
 
-bool EditorModule::UndoFrequencyGraphAction() {
-    if (IsEditingRawLayerMaskGraph()) return UndoRawLayerEdit();
-    if (!m_FrequencyGraphUndo.has_value()) return false;
-    if (GetNodeGraph().GetStructureRevision() !=
-        m_FrequencyGraphUndo->expectedAfterRevision) {
-        m_FrequencyGraphUndo.reset();
-        m_FrequencyGraphRedo.reset();
-        return false;
-    }
-    if (!ApplyFrequencyGraphHistoryPatch(
-            *m_FrequencyGraphUndo,
-            false)) {
-        return false;
-    }
-    m_FrequencyGraphRedo =
-        std::move(*m_FrequencyGraphUndo);
-    m_FrequencyGraphUndo.reset();
 
-    return true;
-}
 
-bool EditorModule::RedoFrequencyGraphAction() {
-    if (IsEditingRawLayerMaskGraph()) return RedoRawLayerEdit();
-    if (!m_FrequencyGraphRedo.has_value()) return false;
-    if (GetNodeGraph().GetStructureRevision() !=
-        m_FrequencyGraphRedo->expectedBeforeRevision) {
-        m_FrequencyGraphUndo.reset();
-        m_FrequencyGraphRedo.reset();
-        return false;
-    }
-    if (!ApplyFrequencyGraphHistoryPatch(
-            *m_FrequencyGraphRedo,
-            true)) {
-        return false;
-    }
-    m_FrequencyGraphUndo =
-        std::move(*m_FrequencyGraphRedo);
-    m_FrequencyGraphRedo.reset();
 
-    return true;
-}
 
-void EditorModule::AddFrequencyMaskNodeAt(EditorNodeGraph::FrequencyMaskShape shape, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddFrequencyMaskNode(shape, graphPosition); });
-}
 
-void EditorModule::AddSpectrumMathNodeAt(EditorNodeGraph::SpectrumMathMode mode, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddSpectrumMathNode(mode, graphPosition); });
-}
 
-void EditorModule::AddMagnitudePhaseNodeAt(EditorNodeGraph::MagnitudePhaseMode mode, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddMagnitudePhaseNode(mode, graphPosition); });
-}
 
-void EditorModule::AddSpectrumAnalyzerNodeAt(EditorNodeGraph::SpectrumAnalyzerMode mode, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddSpectrumAnalyzerNode(mode, graphPosition); });
-}
+
+
 
 void EditorModule::AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     AddGraphNode(*this,[&](auto& graph) { return graph.AddPreviewNode(graphPosition); });
@@ -2270,7 +1513,9 @@ void EditorModule::RefreshGraphLayerMetadata() {
         const std::string typeId = layerJson.value("type", std::string());
         const LayerDescriptor* descriptor = LayerRegistry::FindDescriptorByTypeId(typeId);
         if (descriptor) {
+            const bool changedType=node->typeId!=descriptor->typeId;
             GetNodeGraph().SetLayerNodeType(node->id, descriptor->type);
+            if (changedType) node->layerParameters=layerJson;
         } else {
             node->typeId = typeId;
             node->title = GetLayers()[i]->GetDefaultName();
@@ -2278,3 +1523,35 @@ void EditorModule::RefreshGraphLayerMetadata() {
     }
 }
 
+
+bool EditorModule::SetNodeParameterExposed(int nodeId, const std::string& parameterId, bool exposed) {
+    const auto* node = GetNodeGraph().FindNode(nodeId);
+    if (!node) return false;
+    const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node);
+    if (!definition) return false;
+    const auto parameter = std::find_if(definition->parameters.begin(), definition->parameters.end(),
+        [&](const auto& candidate) { return candidate.id == parameterId && candidate.graphInputCapable; });
+    if (parameter == definition->parameters.end()) return false;
+    std::string error;
+    const bool applied = ApplyGraphCommand(*this, [&](auto& graph) {
+        if (!graph.SetParameterExposed(nodeId, parameterId, exposed))
+            throw std::runtime_error("The parameter connection could not be changed.");
+    }, &error);
+    if (!applied) PostNotification(UiNotificationSeverity::Error, error, "graph-parameter-exposed");
+    return applied;
+}
+
+
+bool EditorModule::SetDataMathDomain(int nodeId, Stack::NodeMath::ArithmeticDomain domain) {
+    std::string error;
+    const bool applied = ApplyGraphCommand(*this, [&](auto& graph) {
+        auto* node = graph.FindNode(nodeId);
+        if (!node || node->kind != EditorNodeGraph::NodeKind::DataMath)
+            throw std::runtime_error("The math node is unavailable.");
+        if (domain == Stack::NodeMath::ArithmeticDomain::Values && node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage)
+            throw std::runtime_error("Average Images requires spatial image inputs.");
+        node->dataMathSettings.domain = domain;
+    }, &error);
+    if (!applied) PostNotification(UiNotificationSeverity::Error, error, "graph-math-domain");
+    return applied;
+}

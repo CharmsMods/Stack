@@ -235,6 +235,7 @@ void NotificationStore::InvalidateOperation(const Owner& owner, OperationId oper
             RetireCallbacksLocked(record.content);
             record.centerRequested = false;
             record.actionPending = false;
+            record.dismissed = true;
             if (!record.Terminal()) {
                 record.state = RecordState::Cancelled;
                 if (record.outcome == Outcome::None) record.outcome = Outcome::Cancelled;
@@ -297,6 +298,9 @@ void NotificationStore::EndActivity(const Owner& owner, ActivityHandle activity,
         outcome == Outcome::Partial ? Severity::Warning :
         outcome == Outcome::Failure ? Severity::Error : Severity::Info;
     found->content.outcome = outcome;
+    if (outcome == Outcome::Success && found->content.progress && found->content.progress->Measured()) {
+        found->content.progress->completed = found->content.progress->total;
+    }
     if (!message.empty()) found->content.message = std::move(message);
     found->content.details = std::move(details);
     if (found->ownerValid) found->dismissed = false;

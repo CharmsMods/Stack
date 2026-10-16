@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Developer migration cleanup for the full Stack deployment, including existing
+# user data. Package validation lives in product_payload.ps1 and needs no user data.
+
 . (Join-Path $PSScriptRoot "..\dev\stack_workflow.ps1")
 
 $Root = (Resolve-Path -LiteralPath $Root).Path
@@ -21,13 +24,11 @@ Close-RunningStackProcess
 
 $requiredFiles = @(
     "Stack.exe",
+    "StackBurst.exe",
     "Stack\App\Runtime\libraw.dll",
     "Stack\App\Runtime\Microsoft.WindowsAppRuntime.Bootstrap.dll",
-    "Stack\App\Legal\LICENSE",
-    "Stack\App\Legal\EULA.txt",
-    "Stack\App\Legal\PRIVACY.md",
-    "Stack\App\Legal\INFO_BEFORE_INSTALL.txt",
     "Stack\App\Legal\THIRD_PARTY_NOTICES.md",
+    "Stack\App\Legal\Adobe-DNG-Notice.txt",
     "Stack\App\Legal\ThirdParty\DearImGui-MIT.txt",
     "Stack\App\Legal\ThirdParty\GLFW-zlib-libpng.txt",
     "Stack\App\Legal\ThirdParty\NlohmannJSON-MIT.txt",
@@ -107,8 +108,8 @@ if (Test-Path -LiteralPath $legacyLicenses -PathType Container) {
 }
 
 $remaining = @(Get-ChildItem -LiteralPath $BuildDir -Force | Select-Object -ExpandProperty Name | Sort-Object)
-if (($remaining -join '|') -ne 'Stack|Stack.exe') {
+if (($remaining -join '|') -ne 'Stack|Stack.exe|StackBurst.exe') {
     throw "Deployment root still contains unexpected entries: $($remaining -join ', ')"
 }
 
-Write-Host "Runtime layout finalized. Deployment root contains only Stack.exe and Stack."
+Write-Host "Runtime layout finalized. Deployment root contains Stack.exe, StackBurst.exe and Stack."

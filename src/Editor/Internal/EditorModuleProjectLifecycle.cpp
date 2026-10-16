@@ -8,6 +8,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Persistence/ProjectIndex.h"
+#include "Persistence/ManagedAssetPaths.h"
 #include "Raw/RawLoader.h"
 #include "Raw/RawTechnicalEvidence.h"
 
@@ -130,9 +131,10 @@ EditorModule::GetProjectFileCommandContext() const {
         Stack::Project::ProjectLifecyclePhase::Importing;
     const bool mfdProcessingBusy =
         IsMultiFrameRawProjectActive() && IsMfdExperimentalProcessingBusy();
+    const bool bracketProcessingBusy = IsBracketingPresentationActive();
     context.busy = projectLoadBusy || projectSaveBusy || importBusy ||
         lifecycleLoadBusy || lifecycleSaveBusy || lifecycleImportBusy ||
-        mfdProcessingBusy;
+        mfdProcessingBusy || bracketProcessingBusy;
     if (projectLoadBusy) {
         context.busyReason = "A project is currently opening.";
     } else if (projectSaveBusy) {
@@ -147,6 +149,8 @@ EditorModule::GetProjectFileCommandContext() const {
         context.busyReason = "Source frames are currently being imported.";
     } else if (mfdProcessingBusy) {
         context.busyReason = "Multi-frame processing is currently running.";
+    } else if (bracketProcessingBusy) {
+        context.busyReason = "This bracket is processing. Return to its project pill to view progress.";
     } else if (context.conflict) {
         context.busyReason =
             "The open project has a storage conflict. Save a copy to continue safely.";
@@ -162,9 +166,10 @@ EditorModule::GetProjectFileCommandContext() const {
     // Ctrl+S joins the single-writer queue and completes only after its
     // requested revision is durable. Loading/importing still cannot be saved.
     context.canSave = (hasSession || HasUnsavedBracketingDraft()) &&
+        !m_ProjectCopyPending &&
         m_DocumentPersistenceEnabled &&
         !projectLoadBusy && !importBusy && !lifecycleLoadBusy &&
-        !lifecycleImportBusy && !mfdProcessingBusy &&
+        !lifecycleImportBusy && !mfdProcessingBusy && !bracketProcessingBusy &&
         !context.conflict && !context.readOnlyRecovery;
     context.canSaveAs = hasSession && !context.busy;
     context.canClose = hasSession && !context.busy;
@@ -1432,7 +1437,7 @@ bool EditorModule::MaterializeSelectedRawPreviewProject(
     }
 
     managedRecipe.source.sourcePath =
-        (projectRoot / asset.projectAssetPath).lexically_normal().string();
+        Stack::Project::ManagedAssetFilePath(projectRoot, asset).lexically_normal().string();
     managedRecipe.source.relativePathKey = source.relativePathKey;
     managedRecipe.source.fingerprint = asset.originalFileFingerprint;
     managedRecipe.source.fileSizeBytes = asset.byteLength;
@@ -1544,6 +1549,11 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
         return false;
     }
     bool needsDefaultGraph = !alreadyActive;
+    if (alreadyActive && !m_Project->store && !m_Project->snapshot) {
+        // All editor paths use the same deferred first-save owner. Do not
+        // create a store (or change document identity) during a gesture.
+        return true;
+    }
 
     if (m_Project->rawSourceKey != selectedSource->relativePathKey) {
         if (!FlushActiveRawWorkspaceProjectIfDirty()) {
@@ -1804,6 +1814,9 @@ bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
 void EditorModule::RefreshUnifiedProjectViewsAfterSave(
     bool projectMembershipChanged,
     bool persistCatalog) {
+    // Publish only after the save commit, including saves completed while
+    // another tab is visible. The shell coalesces matching-root refreshes.
+    m_RawWorkspaceCatalogChanged = true;
     RefreshBracketingProjectCard();
     if (!m_RawWorkspaceAppStateLoaded) {
         if (projectMembershipChanged) {
@@ -1821,8 +1834,8 @@ void EditorModule::RefreshUnifiedProjectViewsAfterSave(
         source->project.absolutePath = m_Project->storePath;
         source->project.relativePath =
             m_Project->storePath.filename();
-        source->project.autosaved = true;
-        source->project.dirty = false;
+        source->project.autosaved = !IsDirty();
+        source->project.dirty = IsDirty();
         InvalidateRawWorkspaceGalleryPresentation();
         if (persistCatalog) {
             PersistRawWorkspaceCatalog();
@@ -1841,6 +1854,7 @@ void EditorModule::RefreshUnifiedProjectViewsAfterSave(
 void EditorModule::RequestCreateProjectVersion(
     const std::filesystem::path& sourceProject) {
     if (sourceProject.empty()) return;
+    if (m_ProjectVersionHandler && m_ProjectVersionHandler(sourceProject)) return;
     std::filesystem::path destinationRoot = AppPaths::GetProjectsDirectory();
     if (!m_RawWorkspace.workspaceRoot.empty()) {
         const std::filesystem::path workspaceProjects =
@@ -1916,7 +1930,7 @@ bool EditorModule::EnqueueCurrentProjectSave(
     Stack::Project::ProjectSaveReason reason,
     const std::string& fallbackName,
     std::function<void(bool)> onComplete) {
-    if (!m_DocumentPersistenceEnabled) {
+    if (!m_DocumentPersistenceEnabled || m_ProjectCopyPending) {
         if (onComplete) onComplete(false);
         return false;
     }
@@ -1988,6 +2002,10 @@ bool EditorModule::EnqueueCurrentProjectSave(
 
         const bool adopting = !m_Project->adoptionSourcePath.empty();
         if (IsRawWorkspaceProjectActive()) {
+            if (!m_Project->snapshot && !m_Project->store && !requireNewStore) {
+                StartInitialRawProjectSaveAsync(capturedRevision, std::move(completion));
+                return;
+            }
             Stack::Project::ProjectSaveResult result;
             result.status = Stack::Project::ProjectSaveStatus::Failed;
             result.projectId = projectId;
@@ -2165,27 +2183,8 @@ bool EditorModule::RequestSaveProjectAs(
         return false;
     }
 
-    if (IsUnifiedProjectStoreActive()) {
-        std::string error;
-        const bool success = SaveActiveMultiFrameRawProjectAs(
-            requestedDestination,
-            Stack::Project::ProjectStorageKind::DirectoryBundle,
-            &error);
-        if (!success) {
-            PostNotification(
-                UiNotificationSeverity::Error,
-                error.empty() ? "Failed to save the project copy." : error,
-                "project-file-save-as");
-        } else {
-            PostNotification(
-                UiNotificationSeverity::Success,
-                "Project saved to the new location.",
-                "project-file-save-as");
-        }
-        if (onComplete) {
-            onComplete(success);
-        }
-        return success;
+    if (IsUnifiedProjectStoreActive() || IsRawWorkspaceProjectActive()) {
+        return RequestProjectCopy(requestedDestination, false, true, std::move(onComplete));
     }
 
     if (HasPendingGraphImageImports()) {

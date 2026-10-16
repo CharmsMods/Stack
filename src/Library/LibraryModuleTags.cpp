@@ -188,6 +188,7 @@ void LibraryModule::RenderTagFilters(bool wallpaperSurfaces,
     }
 
     if (!m_FilterNoTag) {
+        ImGui::PushID("KnownTags");
         for (const auto& tag : allTags) {
             bool active = m_ActiveTagFilters.count(tag) > 0;
             if (ImGui::Checkbox(tag.c_str(), &active)) {
@@ -198,6 +199,7 @@ void LibraryModule::RenderTagFilters(bool wallpaperSurfaces,
                 }
             }
         }
+        ImGui::PopID();
     }
 
     if (!m_ActiveTagFilters.empty() || m_FilterNoTag) {

@@ -101,7 +101,6 @@ const std::vector<LayerDescriptor>& TestLayerDescriptors() {
         { LayerType::Saturation, "Saturation", "Saturation", "Saturation", "Color", "Adjust saturation.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
         { LayerType::Warmth, "Warmth", "Warmth", "Warmth", "Color", "Adjust warmth.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
         { LayerType::Sharpen, "Sharpen", "Sharpen", "Sharpen", "Color", "Adjust sharpening.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::ChannelUsefulWithWarning },
-        { LayerType::ToneCurve, "ToneCurve", "Tone Curve", "Tone Curve", "Color / Tone", "Manual scene-referred finish curve.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
         { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Display/output transform.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
     };
     return descriptors;
@@ -1425,7 +1424,7 @@ void TestChannelRoleConnectsDirectlyToMaskInputs() {
         }),
         graph);
     Graph restored;
-    DeserializeGraphPayload(saved, restored, 1, {}, 0, 0, 0);
+    DeserializeGraphPayload(saved, restored, 1);
     const Link* restoredMaskLink = restored.FindInputLink(
         contrastId,
         kMaskInputSocketId);
@@ -1723,7 +1722,7 @@ void TestOutputV2Persistence() {
         saved["nodeGraph"].value("version", 0) == 9,
         "Output v2 persistence uses the current graph schema");
     Graph loaded;
-    DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(saved, loaded, 0);
     const Node* loadedOutput = loaded.FindNode(outputId);
     Require(
         loadedOutput &&
@@ -1781,7 +1780,7 @@ void TestPartialImageComponentPresenceSurvivesGraphRoundTrip() {
     const nlohmann::json saved =
         SerializeGraphPayload(nlohmann::json::array(), graph);
     Graph loaded;
-    DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(saved, loaded, 0);
 
     Require(
         loaded.HasLink(splitId, "r", combineId, "r") &&
@@ -2031,21 +2030,8 @@ void TestNonRawNumericLayerAnimatableRegistryCoverage() {
             { "layer.corruptionScale", "resScale", AnimatableValueType::Float }
         });
     };
-    requireCorruption(LayerType::JpegBlocks);
     requireCorruption(LayerType::Pixelation);
-    requireCorruption(LayerType::ColorBleed);
 
-    auto requireCompression = [&](LayerType layerType) {
-        requireParameters(layerType, {
-            { "layer.compressionQuality", "quality", AnimatableValueType::Float },
-            { "layer.compressionBlockSize", "blockSize", AnimatableValueType::Float },
-            { "layer.compressionBlend", "blend", AnimatableValueType::Float },
-            { "layer.compressionIterations", "iterations", AnimatableValueType::Integer }
-        });
-    };
-    requireCompression(LayerType::DctCompression);
-    requireCompression(LayerType::ChromaSubsampleCompression);
-    requireCompression(LayerType::WaveletCompression);
 
     requireParameters(LayerType::NonLocalMeansDenoise, {
         { "layer.denoiseSearchRadius", "searchRadius", AnimatableValueType::Integer },
@@ -2062,20 +2048,6 @@ void TestNonRawNumericLayerAnimatableRegistryCoverage() {
         { "layer.denoiseBlendStrength", "strength", AnimatableValueType::Float }
     });
 
-    requireParameters(LayerType::EdgeOverlay, {
-        { "layer.edgeBlend", "blend", AnimatableValueType::Float },
-        { "layer.edgeStrength", "strength", AnimatableValueType::Float },
-        { "layer.edgeTolerance", "tolerance", AnimatableValueType::Float }
-    });
-    requireParameters(LayerType::EdgeSaturationMask, {
-        { "layer.edgeBlend", "blend", AnimatableValueType::Float },
-        { "layer.edgeStrength", "strength", AnimatableValueType::Float },
-        { "layer.edgeTolerance", "tolerance", AnimatableValueType::Float },
-        { "layer.edgeForegroundSaturation", "foregroundSaturation", AnimatableValueType::Float },
-        { "layer.edgeBackgroundSaturation", "backgroundSaturation", AnimatableValueType::Float },
-        { "layer.edgeBloomSpread", "bloomSpread", AnimatableValueType::Float },
-        { "layer.edgeBloomSmoothness", "bloomSmoothness", AnimatableValueType::Float }
-    });
 
     requireParameters(LayerType::Crop, {
         { "layer.cropLeft", "cropLeft", AnimatableValueType::Float },
@@ -2087,34 +2059,8 @@ void TestNonRawNumericLayerAnimatableRegistryCoverage() {
         { "layer.rotation", "rotation", AnimatableValueType::Float }
     });
 
-    auto requireDistortion = [&](LayerType layerType) {
-        requireParameters(layerType, {
-            { "layer.distortionIntensity", "intensity", AnimatableValueType::Float },
-            { "layer.distortionPhase", "phase", AnimatableValueType::Float },
-            { "layer.distortionScale", "scale", AnimatableValueType::Float }
-        });
-    };
-    requireDistortion(LayerType::HeatwaveDistortion);
-    requireDistortion(LayerType::RippleDistortion);
 
     Graph graph;
-    const int dctId = NodeId(graph.AddLayerNode(LayerType::DctCompression, 0, { 0.0f, 0.0f }));
-    const Node* dctNode = graph.FindNode(dctId);
-    Require(dctNode != nullptr, "compression readback test node should exist");
-    SerializedLayerFixture dctLayer({
-        { "type", "DctCompression" },
-        { "quality", 42.0f },
-        { "blockSize", 12.0f },
-        { "blend", 64.0f },
-        { "iterations", 7 }
-    });
-    const std::vector<AnimatableParameterDefinition> dctParameters =
-        Stack::Timeline::CollectAnimatableParametersForNode(*dctNode, &dctLayer);
-    Require(dctParameters.size() == 4, "compression readback should expose all numeric parameters");
-    Require(dctParameters[0].hasCurrentValue && std::abs(dctParameters[0].currentValue - 42.0f) < 0.0001f,
-        "compression quality should read serialized float current value");
-    Require(dctParameters[3].hasCurrentValue && std::abs(dctParameters[3].currentValue - 7.0f) < 0.0001f,
-        "compression iterations should read serialized integer current value");
 }
 
 void TestEffectsGenerateStylizeLayerAnimatableRegistryCoverage() {
@@ -2172,27 +2118,7 @@ void TestEffectsGenerateStylizeLayerAnimatableRegistryCoverage() {
         { "layer.noiseOpacity", "opacity", AnimatableValueType::Float }
     });
 
-    auto requireSplitDither = [&](LayerType layerType) {
-        requireParameters(layerType, {
-            { "layer.ditherBitDepth", "bitDepth", AnimatableValueType::Integer },
-            { "layer.ditherPaletteSize", "paletteSize", AnimatableValueType::Integer },
-            { "layer.ditherStrength", "strength", AnimatableValueType::Float },
-            { "layer.ditherScale", "scale", AnimatableValueType::Float },
-            { "layer.ditherGammaCorrect", "gammaCorrect", AnimatableValueType::Boolean },
-            { "layer.ditherUsePaletteBank", "usePaletteBank", AnimatableValueType::Boolean }
-        });
-    };
-    requireSplitDither(LayerType::OrderedDither8x8);
-    requireSplitDither(LayerType::ErrorDiffusionDither);
-    requireSplitDither(LayerType::WhiteNoiseDither);
-    requireSplitDither(LayerType::OrderedDither4x4);
-    requireSplitDither(LayerType::OrderedDither2x2);
-    requireSplitDither(LayerType::InterleavedGradientDither);
 
-    requireParameters(LayerType::HDR, {
-        { "layer.hdrTolerance", "tolerance", AnimatableValueType::Float },
-        { "layer.hdrAmount", "amount", AnimatableValueType::Float }
-    });
     requireParameters(LayerType::ColorGrade, {
         { "layer.colorGradeStrength", "strength", AnimatableValueType::Float }
     });
@@ -2248,27 +2174,6 @@ void TestEffectsGenerateStylizeLayerAnimatableRegistryCoverage() {
         { "layer.cellShadingEdgeThickness", "edgeThickness", AnimatableValueType::Float },
         { "layer.cellShadingColorPreserve", "colorPreserve", AnimatableValueType::Float },
         { "layer.cellShadingShowEdges", "showEdges", AnimatableValueType::Boolean }
-    });
-    requireParameters(LayerType::ImageBreaks, {
-        { "layer.imageBreaksColumns", "columns", AnimatableValueType::Float },
-        { "layer.imageBreaksRows", "rows", AnimatableValueType::Float },
-        { "layer.imageBreaksShiftX", "shiftX", AnimatableValueType::Float },
-        { "layer.imageBreaksShiftY", "shiftY", AnimatableValueType::Float },
-        { "layer.imageBreaksShiftBlur", "shiftBlur", AnimatableValueType::Float },
-        { "layer.imageBreaksSeed", "seed", AnimatableValueType::Float },
-        { "layer.imageBreaksSquareDensity", "squareDensity", AnimatableValueType::Float },
-        { "layer.imageBreaksGridSize", "gridSize", AnimatableValueType::Float },
-        { "layer.imageBreaksSquareDistance", "squareDistance", AnimatableValueType::Float },
-        { "layer.imageBreaksSquareBlur", "squareBlur", AnimatableValueType::Float }
-    });
-    requireParameters(LayerType::AnalogVideo, {
-        { "layer.analogWobble", "wobble", AnimatableValueType::Float },
-        { "layer.analogBleed", "bleed", AnimatableValueType::Float },
-        { "layer.analogCurve", "curve", AnimatableValueType::Float },
-        { "layer.analogNoise", "noise", AnimatableValueType::Float }
-    });
-    requireParameters(LayerType::Expander, {
-        { "layer.expanderPadding", "padding", AnimatableValueType::Float }
     });
     requireParameters(LayerType::PaletteReconstructor, {
         { "layer.paletteBlend", "blend", AnimatableValueType::Float },
@@ -2625,48 +2530,16 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
     Stack::Timeline::TimelineAnimationState numericAnimation;
     Stack::Timeline::SetOrReplaceKeyframe(
         numericAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 505, "layer.compressionIterations" },
-        5,
-        99.2f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        numericAnimation,
         Stack::Timeline::AnimatableParameterTarget{ 606, "layer.denoiseSearchRadius" },
         5,
         6.6f);
     Stack::Timeline::SetOrReplaceKeyframe(
         numericAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 707, "layer.edgeStrength" },
-        5,
-        750.0f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        numericAnimation,
         Stack::Timeline::AnimatableParameterTarget{ 808, "layer.cropLeft" },
         5,
         55.0f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        numericAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 909, "layer.distortionPhase" },
-        5,
-        120.0f);
     const Stack::Timeline::FrameEvaluationContext numericContext =
         Stack::Timeline::BuildFrameEvaluationContext(numericAnimation, 5);
-
-    nlohmann::json compressionLayerJson = {
-        { "type", "DctCompression" },
-        { "quality", 50.0f },
-        { "blockSize", 8.0f },
-        { "blend", 100.0f },
-        { "iterations", 1 }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            numericContext,
-            505,
-            LayerType::DctCompression,
-            compressionLayerJson),
-        "frame evaluation should apply compression integer overrides");
-    Require(compressionLayerJson["iterations"].is_number_integer() &&
-            compressionLayerJson.value("iterations", 0) == 20,
-        "compression iterations should be rounded and clamped before JSON write");
 
     nlohmann::json denoiseLayerJson = {
         { "type", "NonLocalMeansDenoise" },
@@ -2685,21 +2558,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
             denoiseLayerJson.value("searchRadius", 0) == 7,
         "denoise search radius should round to the nearest integer before JSON write");
 
-    nlohmann::json edgeLayerJson = {
-        { "type", "EdgeOverlay" },
-        { "blend", 100.0f },
-        { "strength", 500.0f },
-        { "tolerance", 10.0f }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            numericContext,
-            707,
-            LayerType::EdgeOverlay,
-            edgeLayerJson),
-        "frame evaluation should apply edge-effect float overrides");
-    Require(std::abs(edgeLayerJson.value("strength", 0.0f) - 750.0f) < 0.0001f,
-        "edge strength override should write the serialized strength key");
-
     nlohmann::json cropLayerJson = {
         { "type", "Crop" },
         { "cropLeft", 0.0f },
@@ -2716,21 +2574,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
     Require(std::abs(cropLayerJson.value("cropLeft", 0.0f) - 50.0f) < 0.0001f,
         "crop overrides should clamp to the registered slider range before JSON write");
 
-    nlohmann::json distortionLayerJson = {
-        { "type", "RippleDistortion" },
-        { "intensity", 30.0f },
-        { "phase", 50.0f },
-        { "scale", 20.0f }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            numericContext,
-            909,
-            LayerType::RippleDistortion,
-            distortionLayerJson),
-        "frame evaluation should apply heat/ripple distortion float overrides");
-    Require(std::abs(distortionLayerJson.value("phase", 0.0f) - 120.0f) < 0.0001f,
-        "distortion phase override should write the serialized phase key");
-
     Stack::Timeline::TimelineAnimationState effectsAnimation;
     Stack::Timeline::SetOrReplaceKeyframe(
         effectsAnimation,
@@ -2739,19 +2582,9 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
         100.0f);
     Stack::Timeline::SetOrReplaceKeyframe(
         effectsAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 1002, "layer.ditherBitDepth" },
-        5,
-        0.2f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        effectsAnimation,
         Stack::Timeline::AnimatableParameterTarget{ 1003, "layer.chromaticCenterY" },
         5,
         0.82f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        effectsAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 1004, "layer.imageBreaksGridSize" },
-        5,
-        88.0f);
     Stack::Timeline::SetOrReplaceKeyframe(
         effectsAnimation,
         Stack::Timeline::AnimatableParameterTarget{ 1005, "layer.airyBloomThreshold" },
@@ -2778,23 +2611,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
             bilateralLayerJson.value("radius", 0) == 30,
         "bilateral radius should be rounded and clamped before JSON write");
 
-    nlohmann::json splitDitherLayerJson = {
-        { "type", "OrderedDither8x8" },
-        { "bitDepth", 4 },
-        { "paletteSize", 8 },
-        { "strength", 100.0f },
-        { "scale", 1.0f }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            effectsContext,
-            1002,
-            LayerType::OrderedDither8x8,
-            splitDitherLayerJson),
-        "frame evaluation should apply split dither integer overrides");
-    Require(splitDitherLayerJson["bitDepth"].is_number_integer() &&
-            splitDitherLayerJson.value("bitDepth", 0) == 1,
-        "dither bit depth should be rounded and clamped before JSON write");
-
     nlohmann::json chromaticLayerJson = {
         { "type", "ChromaticAberration" },
         { "amount", 0.0f },
@@ -2814,28 +2630,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
             std::abs(chromaticLayerJson["center"][0].get<float>() - 0.25f) < 0.0001f &&
             std::abs(chromaticLayerJson["center"][1].get<float>() - 0.82f) < 0.0001f,
         "chromatic center Y override should update only the serialized array element");
-
-    nlohmann::json imageBreaksLayerJson = {
-        { "type", "ImageBreaks" },
-        { "columns", 10.0f },
-        { "rows", 10.0f },
-        { "shiftX", 0.2f },
-        { "shiftY", 0.0f },
-        { "shiftBlur", 0.0f },
-        { "seed", 0.0f },
-        { "squareDensity", 0.0f },
-        { "gridSize", 20.0f },
-        { "squareDistance", 0.1f },
-        { "squareBlur", 0.0f }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            effectsContext,
-            1004,
-            LayerType::ImageBreaks,
-            imageBreaksLayerJson),
-        "frame evaluation should apply image breaks numeric overrides");
-    Require(std::abs(imageBreaksLayerJson.value("gridSize", 0.0f) - 88.0f) < 0.0001f,
-        "image breaks grid size override should write the serialized grid size key");
 
     nlohmann::json airyBloomLayerJson = {
         { "type", "AiryBloom" },
@@ -2865,11 +2659,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
         Stack::Timeline::AnimatableParameterTarget{ 1102, "layer.flipHorizontal" },
         5,
         0.8f);
-    Stack::Timeline::SetOrReplaceKeyframe(
-        typedAnimation,
-        Stack::Timeline::AnimatableParameterTarget{ 1103, "layer.ditherGammaCorrect" },
-        5,
-        0.1f);
     Stack::Timeline::SetOrReplaceKeyframe(
         typedAnimation,
         Stack::Timeline::AnimatableParameterTarget{ 1104, "layer.cellShadingQuantMode" },
@@ -2919,21 +2708,6 @@ void TestFrameEvaluationAppliesLayerJsonOverridesWithoutMutatingLiveJson() {
     Require(flipLayerJson["flipH"].is_boolean() &&
             flipLayerJson.value("flipH", false),
         "flip boolean overrides should write boolean JSON");
-
-    nlohmann::json ditherBoolLayerJson = {
-        { "type", "OrderedDither8x8" },
-        { "gammaCorrect", true },
-        { "usePaletteBank", true }
-    };
-    Require(Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(
-            typedContext,
-            1103,
-            LayerType::OrderedDither8x8,
-            ditherBoolLayerJson),
-        "frame evaluation should apply dither boolean overrides");
-    Require(ditherBoolLayerJson["gammaCorrect"].is_boolean() &&
-            !ditherBoolLayerJson.value("gammaCorrect", true),
-        "dither boolean overrides should threshold and write boolean JSON");
 
     nlohmann::json cellShadingLayerJson = {
         { "type", "CellShading" },
@@ -3453,7 +3227,7 @@ void TestCustomMaskConnections() {
     CustomMaskPayload payload;
     payload.width = 4;
     payload.height = 4;
-    payload.rasterLayer.assign(16, 0.5f);
+    payload.rasterLayer = std::vector<float>(16, 0.5f);
 
     const int maskId = NodeId(graph.AddCustomMaskNode(payload, { 0.0f, 0.0f }));
     const int previewId = NodeId(graph.AddPreviewNode({ 220.0f, 0.0f }));
@@ -3486,7 +3260,7 @@ void TestCustomMaskThroughMaskCombineExclude() {
     CustomMaskPayload payload;
     payload.width = 2;
     payload.height = 2;
-    payload.rasterLayer.assign(4, 1.0f);
+    payload.rasterLayer = std::vector<float>(4, 1.0f);
 
     const int customA = NodeId(graph.AddCustomMaskNode(payload, { 0.0f, 0.0f }));
     const int customB = NodeId(graph.AddCustomMaskNode(payload, { 0.0f, 120.0f }));
@@ -3528,7 +3302,7 @@ void TestCustomMaskSparseRasterPersistence() {
     CustomMaskPayload painted;
     painted.width = 2;
     painted.height = 2;
-    painted.rasterLayer = { 0.0f, 0.25f, 0.5f, 1.0f };
+    painted.rasterLayer = std::vector<float>{ 0.0f, 0.25f, 0.5f, 1.0f };
     const CustomMaskPayload restoredPainted =
         DeserializeCustomMaskPayload(SerializeCustomMaskPayload(painted));
     Require(
@@ -4717,11 +4491,7 @@ void TestRawWorkspaceProjectLifecycleModel() {
     EditorNodeGraph::DeserializeGraphPayload(
         loadedDocument.pipelineData,
         loadedGraph,
-        2,
-        {},
-        0,
-        0,
-        0);
+        2);
     Require(loadedGraph.IsOutputConnected(),
         "RAW project lifecycle should store a usable canonical graph in pipelineData");
     Require(!loadedDocument.rawWorkspaceData.contains("downstreamGraph"),
@@ -5215,7 +4985,7 @@ void TestRawWorkspaceProjectReloadPreservesOwnershipModes() {
         RawWorkspace::DeserializeManagedRawSection(
             loadedManagedDocument.rawWorkspaceData.value("managedRawSection", nlohmann::json::object()));
     Graph loadedManagedGraph;
-    DeserializeGraphPayload(loadedManagedDocument.pipelineData, loadedManagedGraph, 2, {}, 0, 0, 0);
+    DeserializeGraphPayload(loadedManagedDocument.pipelineData, loadedManagedGraph, 2);
     const RawWorkspace::ManagedRawValidationResult managedValidation =
         RawWorkspace::ValidateManagedRawSection(loadedManagedGraph, loadedManagedSection, loadedManagedRecipe);
     if (!managedValidation.valid) {
@@ -5259,7 +5029,7 @@ void TestRawWorkspaceProjectReloadPreservesOwnershipModes() {
         RawWorkspace::DeserializeManagedRawSection(
             loadedCustomDocument.rawWorkspaceData.value("managedRawSection", nlohmann::json::object()));
     Graph loadedCustomGraph;
-    DeserializeGraphPayload(loadedCustomDocument.pipelineData, loadedCustomGraph, 2, {}, 0, 0, 0);
+    DeserializeGraphPayload(loadedCustomDocument.pipelineData, loadedCustomGraph, 2);
     Require(!RawWorkspace::ValidateManagedRawSection(
                 loadedCustomGraph,
                 loadedPreviousManagedSection,
@@ -5336,360 +5106,7 @@ void TestImageThroughDataMathToOutput() {
         "image Data Math output should connect to output image input");
 }
 
-void TestFrequencyNodeShellSocketsAndConnections() {
-    using namespace EditorNodeGraph;
 
-    Graph graph;
-    const int imageId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
-    const int splitId = NodeId(graph.AddChannelSplitNode({ 180.0f, 0.0f }));
-    const int filterId = NodeId(graph.AddFrequencyFilterNode(
-        FrequencyFilterMode::LowPass, { 380.0f, 0.0f }));
-    const int responseId = NodeId(graph.AddFrequencyResponseNode({ 380.0f, 220.0f }));
-    const int fftId = NodeId(graph.AddFrequencyFftNode({ 600.0f, 0.0f }));
-    const int applyId = NodeId(graph.AddApplyFrequencyResponseNode({ 820.0f, 0.0f }));
-    const int combineId = NodeId(graph.AddCombineSpectraNode({ 1040.0f, 0.0f }));
-    const int separateId = NodeId(graph.AddSpectrumSeparateNode({ 1260.0f, 0.0f }));
-    const int recombineId = NodeId(graph.AddSpectrumRecombineNode({ 1480.0f, 0.0f }));
-    const int viewId = NodeId(graph.AddSpectrumViewNode({ 1480.0f, 220.0f }));
-    const int ifftId = NodeId(graph.AddFrequencyIfftNode({ 1700.0f, 0.0f }));
-    const int analyzerId = NodeId(graph.AddSpectrumAnalyzerNode(
-        SpectrumAnalyzerMode::RadialEnergy, { 1260.0f, 420.0f }));
-    const int outputId = NodeId(graph.AddOutputNode({ 1920.0f, 0.0f }, true));
-
-    const Node* fftNode = graph.FindNode(fftId);
-    Require(fftNode && fftNode->kind == NodeKind::FrequencyFft &&
-            fftNode->title == "Fourier Transform",
-        "Fourier Transform should use the approachable revised title");
-    const Node* ifftNode = graph.FindNode(ifftId);
-    Require(ifftNode && ifftNode->kind == NodeKind::FrequencyIfft &&
-            ifftNode->title == "Inverse Fourier Transform",
-        "Inverse Fourier Transform should use the revised title");
-
-    SocketDefinition channelInput;
-    SocketDefinition responseInput;
-    SocketDefinition channelOutput;
-    SocketDefinition spectrumOutput;
-    SocketDefinition responseOutput;
-    SocketDefinition magnitudeOutput;
-    SocketDefinition phaseOutput;
-    SocketDefinition radialPowerOutput;
-    SocketDefinition bandPowerOutput;
-    Require(graph.FindSocket(filterId, kChannelInputSocketId, &channelInput) &&
-            channelInput.type == SocketType::Channel &&
-            graph.FindSocket(filterId, kFrequencyResponseInputSocketId, &responseInput) &&
-            responseInput.type == SocketType::FrequencyResponse &&
-            graph.FindSocket(filterId, kChannelOutputSocketId, &channelOutput) &&
-            channelOutput.type == SocketType::Channel,
-        "Frequency Filter should expose Channel, optional Response, and Channel sockets");
-    Require(graph.FindSocket(fftId, kChannelInputSocketId, &channelInput) &&
-            channelInput.type == SocketType::Channel &&
-            graph.FindSocket(fftId, kSpectrumOutputSocketId, &spectrumOutput) &&
-            spectrumOutput.type == SocketType::Spectrum,
-        "Fourier Transform should expose exact Channel-to-Spectrum sockets");
-    Require(graph.FindSocket(
-                responseId, kFrequencyResponseOutputSocketId, &responseOutput) &&
-            responseOutput.type == SocketType::FrequencyResponse,
-        "Frequency Response should expose a distinct Response socket");
-    Require(graph.FindSocket(
-                separateId, kSpectrumMagnitudeOutputSocketId, &magnitudeOutput) &&
-            magnitudeOutput.type == SocketType::SpectrumMagnitude &&
-            graph.FindSocket(
-                separateId, kSpectrumPhaseOutputSocketId, &phaseOutput) &&
-            phaseOutput.type == SocketType::SpectrumPhase,
-        "Separate Spectrum should expose raw Magnitude and Phase types");
-    Require(graph.FindSocket(
-                analyzerId, kRadialPowerOutputSocketId, &radialPowerOutput) &&
-            radialPowerOutput.type == SocketType::Analysis &&
-            graph.FindSocket(
-                analyzerId, kBandPowerOutputSocketId, &bandPowerOutput) &&
-            bandPowerOutput.type == SocketType::Scalar,
-        "Spectrum Analyzer should expose Data plus independent scalar measurements");
-
-    std::string error;
-    Require(!graph.TryConnectSockets(
-            imageId, kImageOutputSocketId,
-            fftId, kChannelInputSocketId, &error) &&
-            error.find("Channel") != std::string::npos,
-        "ordinary Image output must be rejected by an exact Channel input");
-    Require(graph.TryConnectSockets(
-            imageId, kImageOutputSocketId,
-            splitId, kImageInputSocketId),
-        "image should connect to Channel Split");
-    Require(graph.TryConnectSockets(
-            splitId, "r", filterId, kChannelInputSocketId),
-        "Channel should connect to the approachable Frequency Filter");
-    Require(graph.TryConnectSockets(
-            responseId, kFrequencyResponseOutputSocketId,
-            filterId, kFrequencyResponseInputSocketId),
-        "Response should connect only to the Frequency Filter Response input");
-    Require(graph.TryConnectSockets(
-            filterId, kChannelOutputSocketId,
-            fftId, kChannelInputSocketId),
-        "filtered Channel should connect to Fourier Transform");
-    Require(graph.TryConnectSockets(
-            fftId, kSpectrumOutputSocketId,
-            applyId, kSpectrumInputSocketId),
-        "Spectrum should connect to Apply Frequency Response");
-    Require(graph.TryConnectSockets(
-            responseId, kFrequencyResponseOutputSocketId,
-            applyId, kFrequencyResponseInputSocketId),
-        "Response should connect to Apply Frequency Response");
-    Require(graph.TryConnectSockets(
-            fftId, kSpectrumOutputSocketId,
-            combineId, kSpectrumInputASocketId) &&
-            graph.TryConnectSockets(
-                applyId, kSpectrumOutputSocketId,
-                combineId, kSpectrumInputBSocketId),
-        "Combine Spectra should accept two exact Spectrum inputs");
-    Require(graph.TryConnectSockets(
-            combineId, kSpectrumOutputSocketId,
-            separateId, kSpectrumInputSocketId),
-        "combined Spectrum should connect to Separate Spectrum");
-    Require(graph.TryConnectSockets(
-            separateId, kSpectrumMagnitudeOutputSocketId,
-            recombineId, kSpectrumMagnitudeInputSocketId) &&
-            graph.TryConnectSockets(
-                separateId, kSpectrumPhaseOutputSocketId,
-                recombineId, kSpectrumPhaseInputSocketId),
-        "raw Magnitude and Phase should reconnect only to matching typed inputs");
-    Require(!graph.TryConnectSockets(
-            separateId, kSpectrumMagnitudeOutputSocketId,
-            recombineId, kSpectrumPhaseInputSocketId),
-        "Magnitude must not accidentally connect to Phase");
-    Require(graph.TryConnectSockets(
-            recombineId, kSpectrumOutputSocketId,
-            viewId, kSpectrumInputSocketId),
-        "recombined Spectrum should connect to Spectrum View");
-    Require(graph.TryConnectSockets(viewId, kImageOutputSocketId, outputId, kImageInputSocketId),
-        "Spectrum View output should connect to graph output");
-    Require(
-        graph.IsOutputConnected(),
-        "the advanced typed frequency chain should qualify as a completed "
-        "viewport output chain");
-    Require(graph.TryConnectSockets(
-            recombineId, kSpectrumOutputSocketId,
-            ifftId, kSpectrumInputSocketId),
-        "Spectrum should connect to Inverse Fourier Transform");
-    Require(graph.TryConnectSockets(
-            recombineId, kSpectrumOutputSocketId,
-            analyzerId, kSpectrumInputSocketId),
-        "Spectrum Analyzer should accept exact Spectrum only");
-    const int analyzedExposureId = NodeId(
-        graph.AddTechnicalImageNode(
-            Stack::NodeMath::TechnicalImageOperation::Exposure,
-            { 1700.0f, 420.0f }));
-    Require(
-        !graph.TryConnectSockets(
-            analyzerId,
-            kRadialPowerOutputSocketId,
-            analyzedExposureId,
-            kExposureValueInputSocketId),
-        "Spectrum Analyzer radial Data must not masquerade as a scalar Value");
-    Require(
-        graph.TryConnectSockets(
-            viewId,
-            kImageOutputSocketId,
-            analyzedExposureId,
-            kImageInputSocketId) &&
-        graph.TryConnectSockets(
-            analyzerId,
-            kBandPowerOutputSocketId,
-            analyzedExposureId,
-            kExposureValueInputSocketId) &&
-        graph.TryConnectSockets(
-            analyzedExposureId,
-            kImageOutputSocketId,
-            outputId,
-            kImageInputSocketId),
-        "Spectrum Analyzer scalar measurements should drive implemented "
-        "runtime Value inputs");
-    const std::vector<CompletedChainInfo> analyzedChains =
-        graph.GetCompletedChains();
-    Require(
-        analyzedChains.size() == 1 &&
-        std::find(
-            analyzedChains.front().nodeIds.begin(),
-            analyzedChains.front().nodeIds.end(),
-            analyzerId) != analyzedChains.front().nodeIds.end() &&
-        std::find(
-            analyzedChains.front().nodeIds.begin(),
-            analyzedChains.front().nodeIds.end(),
-            analyzedExposureId) != analyzedChains.front().nodeIds.end(),
-        "completed-chain lowering should retain the analyzer reduction branch "
-        "that controls Exposure");
-
-    Graph basicGraph;
-    const int basicImageId = NodeId(
-        basicGraph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
-    const int basicSplitId = NodeId(
-        basicGraph.AddChannelSplitNode({ 180.0f, 0.0f }));
-    const int basicFilterId = NodeId(
-        basicGraph.AddFrequencyFilterNode(
-            FrequencyFilterMode::LowPass,
-            { 380.0f, 0.0f }));
-    const int basicCombineId = NodeId(
-        basicGraph.AddChannelCombineNode({ 580.0f, 0.0f }));
-    const int basicOutputId = NodeId(
-        basicGraph.AddOutputNode({ 780.0f, 0.0f }, true));
-    Require(
-        basicGraph.TryConnectSockets(
-            basicImageId,
-            kImageOutputSocketId,
-            basicSplitId,
-            kImageInputSocketId) &&
-        basicGraph.TryConnectSockets(
-            basicSplitId,
-            "r",
-            basicFilterId,
-            kChannelInputSocketId) &&
-        basicGraph.TryConnectSockets(
-            basicFilterId,
-            kChannelOutputSocketId,
-            basicCombineId,
-            "r") &&
-        basicGraph.TryConnectSockets(
-            basicSplitId,
-            "g",
-            basicCombineId,
-            "g") &&
-        basicGraph.TryConnectSockets(
-            basicSplitId,
-            "b",
-            basicCombineId,
-            "b") &&
-        basicGraph.TryConnectSockets(
-            basicSplitId,
-            "a",
-            basicCombineId,
-            "a") &&
-        basicGraph.TryConnectSockets(
-            basicCombineId,
-            kImageOutputSocketId,
-            basicOutputId,
-            kImageInputSocketId),
-        "the basic low-pass regression graph should connect exactly");
-    const std::vector<CompletedChainInfo> basicChains =
-        basicGraph.GetCompletedChains();
-    Require(
-        basicGraph.IsOutputConnected() &&
-        basicChains.size() == 1 &&
-        basicChains.front().outputNodeId == basicOutputId &&
-        std::find(
-            basicChains.front().nodeIds.begin(),
-            basicChains.front().nodeIds.end(),
-            basicFilterId) != basicChains.front().nodeIds.end(),
-        "Image -> Split -> Frequency Filter -> Combine -> Output should "
-        "remain a completed viewport chain");
-
-    Require(graph.SetParameterExposed(
-            filterId, kStrengthParameterId, true) &&
-            graph.FindSocket(
-                filterId,
-                ParameterInputSocketId(kStrengthParameterId),
-                &bandPowerOutput) &&
-            bandPowerOutput.type == SocketType::Scalar,
-        "exposed Strength should gain a stable parameter-derived Value socket");
-
-    Node* responseNode = graph.FindNode(responseId);
-    responseNode->frequencyResponseSettings.mode =
-        FrequencyFilterMode::NotchReject;
-    responseNode->frequencyResponseSettings.profile =
-        FrequencyTransitionProfile::Butterworth;
-    responseNode->frequencyResponseSettings.notches = {
-        { "notch-a", 0.1875f, 31.0f, 0.018f },
-        { "notch-b", 0.3125f, -67.0f, 0.027f }
-    };
-    Require(graph.SetParameterExposed(
-            responseId,
-            FrequencyNotchParameterId("notch-b", "direction"),
-            true) &&
-            graph.FindSocket(
-                responseId,
-                ParameterInputSocketId(
-                    FrequencyNotchParameterId(
-                        "notch-b", "direction")),
-                &bandPowerOutput) &&
-            bandPowerOutput.type == SocketType::Scalar,
-        "notch parameters should support stable graph exposure");
-    const nlohmann::json serialized =
-        SerializeGraphPayload(nlohmann::json::array(), graph);
-    Require(serialized["nodeGraph"].value("version", 0) == 9,
-        "Output v2 uses the current channel-first graph schema");
-    Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
-    const Node* loadedResponse = loaded.FindNode(responseId);
-    Require(loadedResponse != nullptr &&
-            loadedResponse->frequencyResponseSettings.notches.size() == 2 &&
-            loadedResponse->frequencyResponseSettings.notches[1].id == "notch-b" &&
-            std::find(
-                loadedResponse->exposedParameterIds.begin(),
-                loadedResponse->exposedParameterIds.end(),
-                FrequencyNotchParameterId(
-                    "notch-b", "direction")) !=
-                loadedResponse->exposedParameterIds.end(),
-        "response notches and exposed parameter IDs should persist exactly");
-
-    nlohmann::json outOfDomainDocument = serialized;
-    for (nlohmann::json& item :
-         outOfDomainDocument["nodeGraph"]["nodes"]) {
-        if (item.value("id", -1) == responseId) {
-            item["frequencyResponseSettings"]["butterworthOrder"] = 99.0f;
-            item["frequencyResponseSettings"]["notches"][0]["width"] = 8.0f;
-        } else if (item.value("id", -1) == analyzerId) {
-            item["spectrumAnalyzerSettings"]["innerRadius"] = 9.0f;
-            item["spectrumAnalyzerSettings"]["outerRadius"] = 10.0f;
-        }
-    }
-    Graph bounded;
-    DeserializeGraphPayload(
-        outOfDomainDocument, bounded, 0, {}, 0, 0, 0);
-    const Node* boundedResponse = bounded.FindNode(responseId);
-    const Node* boundedAnalyzer = bounded.FindNode(analyzerId);
-    Require(
-        boundedResponse != nullptr &&
-        boundedResponse->frequencyResponseSettings.butterworthOrder == 12.0f &&
-        boundedResponse->frequencyResponseSettings.notches.size() == 2 &&
-        boundedResponse->frequencyResponseSettings.notches[0].width == 0.25f &&
-        boundedAnalyzer != nullptr &&
-        std::abs(
-            boundedAnalyzer->spectrumAnalyzerSettings.innerRadius -
-            0.70710678f) < 1.0e-7f &&
-        std::abs(
-            boundedAnalyzer->spectrumAnalyzerSettings.outerRadius -
-            0.70710678f) < 1.0e-7f,
-        "frequency response and analyzer persistence should canonicalize "
-        "out-of-domain values to the same limits as live execution");
-
-    const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> catalog =
-        EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
-    const int mainFrequencyCount = static_cast<int>(std::count_if(
-        catalog.begin(), catalog.end(), [](const auto& entry) {
-            return entry.category == "Frequency";
-        }));
-    const int advancedFrequencyCount = static_cast<int>(std::count_if(
-        catalog.begin(), catalog.end(), [](const auto& entry) {
-            return entry.category == "Advanced Frequency";
-        }));
-    Require(mainFrequencyCount == 6 && advancedFrequencyCount == 9,
-        "browser should expose six friendly presets and nine advanced frequency nodes");
-    Require(std::none_of(
-            catalog.begin(), catalog.end(), [](const auto& entry) {
-                return entry.kind == NodeKind::FrequencyMask ||
-                    entry.kind == NodeKind::SpectrumMath ||
-                    entry.kind == NodeKind::MagnitudePhase;
-            }),
-        "legacy frequency shells should not remain in the node browser");
-
-    Graph oldGraph;
-    oldGraph.AddFrequencyFftNode({ 0.0f, 0.0f });
-    nlohmann::json oldDocument =
-        SerializeGraphPayload(nlohmann::json::array(), oldGraph);
-    oldDocument["nodeGraph"]["version"] = 6;
-    Graph rejectedGraph;
-    DeserializeGraphPayload(oldDocument, rejectedGraph, 0, {}, 0, 0, 0);
-    Require(rejectedGraph.GetNodes().empty(),
-        "non-current graph schemas should be rejected without conversion");
-}
 
 void TestAverageNodeInputRules() {
     using namespace EditorNodeGraph;
@@ -5933,23 +5350,6 @@ void TestSemanticNodeMutationsInvalidateExecutionState() {
         "an unresolved authored mask must fail closed instead of "
         "disappearing into an unmasked render snapshot");
 
-    Graph legacyFrequencyGraph;
-    const int legacyMaskId = NodeId(
-        legacyFrequencyGraph.AddFrequencyMaskNode(
-            FrequencyMaskShape::LowPass, { 0.0f, 0.0f }));
-    const int legacyOutputId = NodeId(
-        legacyFrequencyGraph.AddOutputNode({ 260.0f, 0.0f }, true));
-    Require(
-        !legacyFrequencyGraph.TryConnectSockets(
-            legacyMaskId,
-            kMaskOutputSocketId,
-            legacyOutputId,
-            kImageInputSocketId),
-        "Output v2 should reject a legacy frequency Mask instead of "
-        "misrepresenting it as a Channel");
-    Require(
-        !legacyFrequencyGraph.IsOutputConnected(),
-        "a rejected legacy frequency Mask must never advertise a completed output");
 }
 
 void TestImageAndScalarThroughDataMathStaysImage() {
@@ -6720,7 +6120,7 @@ void TestMfsrNodeShellSerializesRoundTrip() {
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
 
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 0);
     const Node* loadedMfsr = nullptr;
     for (const Node& node : loaded.GetNodes()) {
         if (node.kind == NodeKind::Mfsr) {
@@ -6741,36 +6141,14 @@ void TestMfsrNodeShellSerializesRoundTrip() {
 
 void TestRetiredNeuralDenoiseIsRejected() {
     using namespace EditorNodeGraph;
-
-    const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> catalog =
-        EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
-    Require(std::none_of(catalog.begin(), catalog.end(), [](const auto& entry) {
-        return entry.kind == NodeKind::RawNeuralDenoise;
-    }), "retired RAW neural denoise should not be offered for new graphs");
-    const EditorNodeGraphDefinitions::LiveNodeDefinition* retiredDefinition =
-        EditorNodeGraphDefinitions::FindLiveNodeDefinition(
-            NodeKind::RawNeuralDenoise, 0);
-    Require(retiredDefinition == nullptr,
-        "retired RAW neural denoise should not retain a compatibility definition");
-
-    Graph graph;
-    RawNeuralDenoisePayload payload;
-    payload.settings.enabled = true;
-    payload.settings.selectedModelId = "legacy-test-model";
-    payload.settings.strength = 0.42f;
-    payload.settings.runtimePreference = NeuralDenoise::RuntimePreference::Cuda;
-    payload.settings.runRequestRevision = 7;
-    payload.settings.tilePlan.tileSize = 768;
-    payload.settings.tilePlan.overlap = 96;
-    graph.AddRawNeuralDenoiseNode(std::move(payload), { 120.0f, 80.0f });
-
-    const nlohmann::json serialized =
-        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Graph graph;graph.AddOutputNode({0,0},true);
+    auto serialized=SerializeGraphPayload(nlohmann::json::array(),graph);
+    serialized["nodeGraph"]["nodes"][0]["kind"]="RawNeuralDenoise";
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
-
-    Require(!IsCurrentGraphPayload(serialized) && loaded.GetNodes().empty(),
-        "graphs containing retired RAW neural denoise nodes should be rejected");
+    Require(!IsCurrentGraphPayload(serialized),"A removed operation identity must fail the current reader.");
+    bool rejected=false;
+    try {DeserializeGraphPayload(serialized,loaded,0);} catch (const std::exception&) {rejected=true;}
+    Require(rejected && loaded.GetNodes().empty(),"Removed identities must never create a placeholder graph.");
 }
 
 void TestTechnicalImageAndSourceMetadataSerializeRoundTrip() {
@@ -6798,7 +6176,7 @@ void TestTechnicalImageAndSourceMetadataSerializeRoundTrip() {
 
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 0);
 
     const Node* loadedImage = loaded.FindNode(imageId);
     const Node* loadedTechnical = loaded.FindNode(technicalId);
@@ -6831,7 +6209,7 @@ void TestCompositeNodeSerializesRoundTrip() {
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
 
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 0);
 
     const Node* compositeNode = loaded.FindNode(compositeId);
     Require(compositeNode != nullptr, "Composite node should survive graph serialization");
@@ -6919,7 +6297,7 @@ void TestHdrMergeDeghostModeMediumRoundTrip() {
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
 
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 0);
 
     const Node* hdrMergeNode = loaded.FindNode(hdrMergeId);
     Require(hdrMergeNode != nullptr, "HDR merge node should survive graph serialization");
@@ -14699,7 +14077,7 @@ void TestCompactRawDevelopmentNodeGraphContract() {
 
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 1, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 1);
     const Node* loadedRawDevelopment = loaded.FindNode(rawDevelopmentId);
     Require(loadedRawDevelopment != nullptr,
         "RAW Development node should survive graph serialization");
@@ -14752,7 +14130,7 @@ void TestRawDevelopNodeSerializesCurrentFields() {
     const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
 
     Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(serialized, loaded, 0);
     const Node* rawDevelopNode = loaded.FindNode(rawDevelopId);
     Require(rawDevelopNode != nullptr, "RawDevelop node should survive current graph serialization");
     Require(rawDevelopNode->kind == NodeKind::RawDevelop,
@@ -15508,7 +14886,7 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
     Require(serialized["nodeGraph"].value("version", 0) == 9,
         "graphs should use the channel-first Output inspection schema version");
     EditorNodeGraph::Graph loaded;
-    EditorNodeGraph::DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serialized, loaded, 0);
     const EditorNodeGraph::Node* loadedScalar = loaded.FindNode(scalarId);
     const EditorNodeGraph::Node* loadedUnknown = loaded.FindNode(unknownId);
     const EditorNodeGraph::Node* loadedMissing = loaded.FindNode(missingId);
@@ -15525,7 +14903,7 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
         if (item.value("id", 0) == scalarId) item["value"]["payload"] = "not-a-number";
     }
     EditorNodeGraph::Graph invalidValueGraph;
-    EditorNodeGraph::DeserializeGraphPayload(invalidValueDocument, invalidValueGraph, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(invalidValueDocument, invalidValueGraph, 0);
     const EditorNodeGraph::Node* invalidValue = invalidValueGraph.FindNode(scalarId);
     Require(invalidValue &&
             invalidValue->value.value.logicalType == Stack::NodeMath::LogicalValueType::Scalar &&
@@ -15537,7 +14915,7 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
         if (item.value("id", 0) == scalarId) item["definition"]["contentHash"] = std::string(64, '0');
     }
     EditorNodeGraph::Graph mismatchedDefinitionGraph;
-    EditorNodeGraph::DeserializeGraphPayload(mismatchedDefinitionDocument, mismatchedDefinitionGraph, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(mismatchedDefinitionDocument, mismatchedDefinitionGraph, 0);
     const EditorNodeGraph::Node* mismatchedDefinition = mismatchedDefinitionGraph.FindNode(scalarId);
     Require(mismatchedDefinition && !mismatchedDefinition->definitionResolved &&
             !mismatchedDefinition->definitionResolutionError.empty(),
@@ -15669,7 +15047,7 @@ void TestConstantChannelFoundation() {
     const nlohmann::json saved =
         SerializeGraphPayload(nlohmann::json::array(), graph);
     Graph restored;
-    DeserializeGraphPayload(saved, restored, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(saved, restored, 0);
     const Node* restoredConstant =
         restored.FindNode(constantId);
     const Node* restoredCombine =
@@ -15700,10 +15078,6 @@ void TestConstantChannelFoundation() {
     DeserializeGraphPayload(
         malformed,
         repaired,
-        0,
-        {},
-        0,
-        0,
         0);
     const Node* repairedConstant =
         repaired.FindNode(constantId);
@@ -15816,7 +15190,7 @@ void TestPhase6BFieldMeanGraphContract() {
     const nlohmann::json saved = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph loaded;
-    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0);
     const EditorNodeGraph::Node* loadedMean = loaded.FindNode(meanId);
     Require(loadedMean && loadedMean->kind == EditorNodeGraph::NodeKind::FieldMean,
         "Field Mean node kind should round-trip");
@@ -15909,7 +15283,7 @@ void TestPhase6GeometryAndSpecializedGraphContract() {
     const nlohmann::json saved = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph loaded;
-    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0);
     const EditorNodeGraph::Node* loadedReformat = loaded.FindNode(reformatId);
     Require(loadedReformat && loadedReformat->kind == EditorNodeGraph::NodeKind::Reformat &&
             loadedReformat->definitionResolved &&
@@ -16047,7 +15421,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
             nlohmann::json::array(), authoredChain);
         EditorNodeGraph::Graph authoredReloaded;
         EditorNodeGraph::DeserializeGraphPayload(
-            authoredSaved, authoredReloaded, 0, {}, 0, 0, 0);
+            authoredSaved, authoredReloaded, 0);
         Require(authoredReloaded.IsOutputConnected() &&
                 authoredReloaded.ResolveReferenceSourceNodeIdForOutput(authoredOutputId) == authoredSourceId,
             "the authored shipped-compound chain should remain executable after save/load");
@@ -16099,7 +15473,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
         CompoundDefinition connectedInputBinding = templates[0];
         EditorNodeGraph::Graph canonical;
         EditorNodeGraph::DeserializeGraphPayload(
-            connectedInputBinding.canonicalGraph, canonical, 0, {}, 0, 0, 0);
+            connectedInputBinding.canonicalGraph, canonical, 0);
         Require(!canonical.GetLinks().empty(),
             "compound contract fixture should contain an internal connection");
         const EditorNodeGraph::Link& internalLink = canonical.GetLinks().front();
@@ -16138,10 +15512,6 @@ void TestPhase5ExecutableCompoundLifecycle() {
         EditorNodeGraph::DeserializeGraphPayload(
             duplicateCanonicalUuid.canonicalGraph,
             duplicateUuidCanonical,
-            0,
-            {},
-            0,
-            0,
             0);
         Require(duplicateUuidCanonical.GetNodes().size() >= 2,
             "compound contract fixture should contain multiple internal nodes");
@@ -16257,7 +15627,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
     Require(saved["nodeGraph"]["compoundDefinitions"].size() == 1,
         "project save should embed the exact compound definition");
     EditorNodeGraph::Graph loaded;
-    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(saved, loaded, 0);
     const EditorNodeGraph::Node* loadedCompound = loaded.FindNode(compoundId);
     Require(loadedCompound && loadedCompound->definitionResolved &&
             loadedCompound->compound.instance.interfaceSnapshot.size() == 2 &&
@@ -16323,7 +15693,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
     const nlohmann::json nestedSaved = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph nestedLoaded;
-    EditorNodeGraph::DeserializeGraphPayload(nestedSaved, nestedLoaded, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(nestedSaved, nestedLoaded, 0);
     Require(nestedLoaded.FindNode(nestedId) && nestedLoaded.FindNode(nestedId)->definitionResolved,
         "nested compound should survive project save/load with its closure");
     Require(nestedLoaded.IsOutputConnected(),
@@ -16438,7 +15808,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
     nlohmann::json missingDocument = nestedSaved;
     missingDocument["nodeGraph"]["compoundDefinitions"] = nlohmann::json::array();
     EditorNodeGraph::Graph missingGraph;
-    EditorNodeGraph::DeserializeGraphPayload(missingDocument, missingGraph, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(missingDocument, missingGraph, 0);
     const EditorNodeGraph::Node* missingNode = missingGraph.FindNode(nestedId);
     Require(missingNode && !missingNode->definitionResolved &&
             missingNode->compound.instance.interfaceSnapshot.size() ==
@@ -16461,7 +15831,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
     }
     EditorNodeGraph::Graph invalidInstanceGraph;
     EditorNodeGraph::DeserializeGraphPayload(
-        invalidInstanceDocument, invalidInstanceGraph, 0, {}, 0, 0, 0);
+        invalidInstanceDocument, invalidInstanceGraph, 0);
     const EditorNodeGraph::Node* invalidInstance = invalidInstanceGraph.FindNode(compoundId);
     Require(invalidInstance && !invalidInstance->definitionResolved &&
             invalidInstance->compound.instance.resolution == CompoundResolutionStatus::InvalidDefinition,
@@ -16804,7 +16174,7 @@ void TestRenderQueueModelSelectionAndDeduplication() {
             return item.path.filename() == "third.dng";
         });
     Require(thumbnailItem != items.end() &&
-            !thumbnailItem->thumbnailBytes.empty(),
+            thumbnailItem->thumbnailBytes && !thumbnailItem->thumbnailBytes->empty(),
         "an unedited queued source should retain its Gallery thumbnail bytes");
     std::error_code cleanupError;
     std::filesystem::remove_all(thumbnailRoot, cleanupError);
@@ -17009,8 +16379,20 @@ void TestManagedImageSerializationReusesImmutableAsset() {
 namespace LayerRegistry {
 
 std::shared_ptr<LayerBase> CreateLayer(LayerType type) {
-    (void)type;
-    return nullptr;
+    // This target supplies parameter-only adapters; numerical rendering remains
+    // in the app checks, which link the production factories and kernels.
+    const auto* descriptor=GetDescriptor(type);
+    if (!descriptor) return nullptr;
+    nlohmann::json parameters={{"type",descriptor->typeId},{"enabled",true}};
+    for (const auto& parameter:Stack::Timeline::DescribeAnimatableParametersForLayer(type)) {
+        if (parameter.valueType==Stack::Timeline::AnimatableValueType::Boolean)
+            parameters[parameter.storageKey]=parameter.defaultValue!=0;
+        else if (parameter.valueType==Stack::Timeline::AnimatableValueType::Integer ||
+                 parameter.valueType==Stack::Timeline::AnimatableValueType::Enum)
+            parameters[parameter.storageKey]=static_cast<int>(parameter.defaultValue);
+        else parameters[parameter.storageKey]=parameter.defaultValue;
+    }
+    return std::make_shared<SerializedLayerFixture>(std::move(parameters));
 }
 
 std::shared_ptr<LayerBase> CreateLayerFromTypeId(const std::string& typeId) {
@@ -17096,6 +16478,7 @@ bool ValidateRegistry(std::vector<std::string>* errors) {
 } // namespace LayerRegistry
 
 void RunGraphScaleTests();
+void RunRetainedRoutingTests();
 void RunNodeLayoutTests();
 
 void TestGraphRenderPolicyAndNavigation();
@@ -17105,6 +16488,33 @@ void RunGraphOutputSemanticsTests();
 void TestProjectGalleryDiscovery();
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--project-persistence") {
+        TestClosetWorkspaceStorage();
+        TestProjectStoreOwnership();
+        TestProjectSaveCoordinatorRevisionQueue();
+        std::cout << "Focused project persistence checks passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--definition-inventory-only") {
+        std::vector<std::string> errors;
+        if (!EditorNodeGraphDefinitions::ValidateUnifiedNodeDefinitionRegistry(&errors)) {
+            for (const auto& error : errors) std::cerr << error << '\n';
+            return 1;
+        }
+        std::cout << "Operation constructor/variant inventory and exact definitions passed: "
+            << EditorNodeGraphDefinitions::GetUnifiedNodeDefinitionRegistry().size() << " definitions.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--retained-routing-only") {
+        RunRetainedRoutingTests();
+        std::cout << "Retained reference, scene-path and source-family routing checks passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--node-layout-only") {
+        RunNodeLayoutTests();
+        std::cout << "Node layout checks passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--raw-layers-only") {
         try {
             TestRawLayerStackContracts();
@@ -17254,7 +16664,6 @@ int main(int argc, char** argv) {
     TestManagedRawSectionBlocksUnsupportedRecipeAndDecodeFields();
     TestScalarThroughDataMathToPreviewAndScalarTargets();
     TestImageThroughDataMathToOutput();
-    TestFrequencyNodeShellSocketsAndConnections();
     TestSemanticNodeMutationsInvalidateExecutionState();
     TestAverageNodeInputRules();
     TestImageAndScalarThroughDataMathStaysImage();

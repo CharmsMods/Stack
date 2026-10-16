@@ -77,13 +77,6 @@ void DrawSocketPin(ImDrawList* draw, const ImVec2& pin, float radius,
             rect(5.5f, 2.5f, 12.5f, 15.5f, 3.5f);
             line(9, 6, 9, 12);
             break;
-        case Type::Spectrum:
-        case Type::FrequencyResponse:
-        case Type::SpectrumMagnitude:
-        case Type::SpectrumPhase:
-            polygon({{5, 2.5f}, {13, 2.5f}, {16, 9}, {13, 15.5f}, {5, 15.5f}, {2, 9}});
-            line(4, 9, 6, 9); line(6, 9, 7, 6); line(7, 6, 9, 12); line(9, 12, 11, 9); line(11, 9, 14, 9);
-            break;
         case Type::Vector2:
         case Type::Vector3:
         case Type::Vector4:

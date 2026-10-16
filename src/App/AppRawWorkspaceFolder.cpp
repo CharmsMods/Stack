@@ -20,6 +20,11 @@ void AppShell::SynchronizeRawWorkspaceFolder() {
 }
 
 void AppShell::UpdateWorkspacePreferencesOwner() {
+    if (m_UiPerformanceCapture) {
+        for (auto& workspace : m_ProjectWorkspaces)
+            workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+        return;
+    }
     EditorModule* writer = m_Editor && !m_Editor->IsAutoBracketWorkspace() ? m_Editor : nullptr;
     if (!writer) for (auto& workspace : m_ProjectWorkspaces)
         if (!workspace->editor->IsAutoBracketWorkspace()) { writer = workspace->editor.get(); break; }

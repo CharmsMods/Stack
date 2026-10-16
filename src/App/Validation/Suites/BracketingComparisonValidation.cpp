@@ -1,4 +1,5 @@
 #include "Raw/Bracketing/Processor.h"
+#include "BurstEngine/Client.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "Persistence/RawProjectModel.h"
 #include "ThirdParty/stb_image_write.h"
@@ -27,10 +28,10 @@ bool ValidateBracketingComparison(const Project::RawProjectSnapshot& snapshot,
     if(!memory.valid)throw std::runtime_error(memory.message);
     request.memoryBudgetBytes=memory.budgetBytes;
     request.workerCount=ResolveBracketingWorkerCount(request.memoryBudgetBytes);
-    auto result=Process(request);
+    auto result=Stack::BurstEngine::Process(request);
     if(result.status!=BracketingResult::Status::Completed)throw std::runtime_error(result.message);
     request.analysis=result.analysis;
-    auto detail=RenderNativeDetail(request,result.raw->metadata.visibleWidth/2,result.raw->metadata.visibleHeight/2,512);
+    auto detail=Stack::BurstEngine::RenderResultDetail(request,result,result.raw->metadata.visibleWidth/2,result.raw->metadata.visibleHeight/2,512);
     if(detail.originals.size()!=request.sources.size())throw std::runtime_error("Native comparison lost originals");
     nlohmann::json report;report["diagnostics"]=result.analysis->diagnostics;
     report["estimatedPeakResidentBytes"]=result.analysis->estimatedPeakResidentBytes;

@@ -1,0 +1,89 @@
+void AppShell::RenderLegalGate() {
+    if (m_ShowLegalGateReview && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        m_ShowLegalGateReview = false;
+        return;
+    }
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30.0f, 24.0f));
+    ImGui::Begin("Stack EULA##LegalGate", nullptr, flags);
+    ImGui::PopStyleVar(3);
+
+    const float contentWidth = std::min(900.0f, std::max(300.0f, ImGui::GetContentRegionAvail().x));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (ImGui::GetContentRegionAvail().x - contentWidth) * 0.5f));
+    ImGui::BeginChild("##LegalGateContent", ImVec2(contentWidth, 0.0f), false);
+    ImGui::TextUnformatted("STACK END USER LICENSE AGREEMENT");
+    ImGui::Text("Version %s", AppLegalVersion::kEulaVersion);
+    ImGui::TextDisabled("Published by Darynn Ho - Stack by CharmsMods");
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+
+    const float buttonAreaHeight = 105.0f;
+    ImGui::BeginChild(
+        "##LegalGateText",
+        ImVec2(0.0f, std::max(140.0f, ImGui::GetContentRegionAvail().y - buttonAreaHeight)),
+        true,
+        ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    ImGui::PushTextWrapPos(0.0f);
+    if (m_LegalManager && !m_LegalManager->GetEulaText().empty()) {
+        ImGui::TextUnformatted(m_LegalManager->GetEulaText().c_str());
+    } else {
+        ImGui::TextWrapped("The Stack EULA file is missing or could not be read. Stack cannot continue from this package.");
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    if (!m_LegalActionError.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.48f, 0.48f, 1.0f));
+        ImGui::TextWrapped("%s", m_LegalActionError.c_str());
+        ImGui::PopStyleColor();
+    } else if (m_LegalManager) {
+        ImGui::TextWrapped("%s", m_LegalManager->GetStatusMessage().c_str());
+    }
+
+    if (ImGui::Button("View EULA File", ImVec2(128.0f, 0.0f)) && m_LegalManager) {
+        m_LegalActionError.clear();
+        m_LegalManager->OpenDocument(AppLegal::Document::Eula, &m_LegalActionError);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("View Privacy Notice", ImVec2(150.0f, 0.0f)) && m_LegalManager) {
+        m_LegalActionError.clear();
+        m_LegalManager->OpenDocument(AppLegal::Document::Privacy, &m_LegalActionError);
+    }
+    ImGui::SameLine();
+    if (m_ShowLegalGateReview || (m_LegalManager && m_LegalManager->IsAccepted())) {
+        if (ImGui::Button("Close Review", ImVec2(140.0f, 0.0f))) {
+            m_ShowLegalGateReview = false;
+        }
+    } else {
+        ImGui::BeginDisabled(!m_LegalManager || !m_LegalManager->IsEulaFileValid());
+        if (ImGui::Button("Accept and Continue", ImVec2(160.0f, 0.0f))) {
+            m_LegalActionError.clear();
+            if (m_LegalManager->Accept(&m_LegalActionError)) {
+                StartAutomaticUpdateCheckIfAllowed();
+            }
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Exit Stack", ImVec2(110.0f, 0.0f))) {
+        BeginMainWindowClose("eula-declined");
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+

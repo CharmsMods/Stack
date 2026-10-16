@@ -40,7 +40,6 @@ public:
     Node* AddImageNode(ImagePayload payload, Vec2 position);
     Node* AddRawSourceNode(RawSourcePayload payload, Vec2 position);
     Node* AddRawDevelopmentNode(RawDevelopmentPayload payload, Vec2 position);
-    Node* AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position);
     Node* AddRawDecodeNode(RawDecodePayload payload, Vec2 position);
     Node* AddRawDevelopNode(RawDevelopPayload payload, Vec2 position);
     Node* AddRawDetailAutoMaskNode(RawDetailAutoMaskPayload payload, Vec2 position);
@@ -52,10 +51,12 @@ public:
     Node* AddMultiFrameHdrNode(MultiFrameHdrPayload payload, Vec2 position);
     Node* AddRawProjectSourceSetNode(RawProjectSourceSetPayload payload, Vec2 position);
     Node* AddLutNode(LutPayload payload, Vec2 position);
+    Node* AddDefaultOperationNode(const Node& sourceType, Vec2 position);
     Node* AddRawOperationNode(Stack::RawRecipe::GraphOperationKind kind, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);
+    Node* AddMaskTextureNode(MaskGeneratorKind shape, Vec2 position);
     Node* AddMaskCombineNode(MaskCombineMode combineMode, Vec2 position);
     Node* AddMaskUtilityNode(MaskUtilityKind utilityKind, Vec2 position);
     Node* AddCustomMaskNode(CustomMaskPayload payload, Vec2 position);
@@ -68,19 +69,19 @@ public:
     Node* AddReformatNode(Vec2 position);
     Node* AddTechnicalImageNode(Stack::NodeMath::TechnicalImageOperation operation, Vec2 position);
     Node* AddCompoundNode(const Stack::NodeMath::DefinitionReference& definition, Vec2 position);
-    Node* AddFrequencyFilterNode(FrequencyFilterMode mode, Vec2 position);
-    Node* AddFrequencyResponseNode(Vec2 position);
-    Node* AddFrequencyFftNode(Vec2 position);
-    Node* AddFrequencyIfftNode(Vec2 position);
-    Node* AddSpectrumViewNode(Vec2 position);
-    Node* AddApplyFrequencyResponseNode(Vec2 position);
-    Node* AddCombineSpectraNode(Vec2 position);
-    Node* AddSpectrumSeparateNode(Vec2 position);
-    Node* AddSpectrumRecombineNode(Vec2 position);
-    Node* AddFrequencyMaskNode(FrequencyMaskShape shape, Vec2 position);
-    Node* AddSpectrumMathNode(SpectrumMathMode mode, Vec2 position);
-    Node* AddMagnitudePhaseNode(MagnitudePhaseMode mode, Vec2 position);
-    Node* AddSpectrumAnalyzerNode(SpectrumAnalyzerMode mode, Vec2 position);
+
+
+
+
+
+
+
+
+
+
+
+
+
     Node* AddPreviewNode(Vec2 position);
     Node* AddChannelSplitNode(Vec2 position);
     Node* AddChannelCombineNode(Vec2 position);

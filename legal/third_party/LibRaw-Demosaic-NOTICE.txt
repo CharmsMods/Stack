@@ -1,0 +1,33 @@
+Stack PPG, VNG/VNG4 and AHD demosaicing adaptations
+
+Original source: LibRaw 0.22.1, commit b860248a89d9082b8e0a1e202e516f46af9adb29
+https://github.com/LibRaw/LibRaw/tree/0.22.1/src/demosaic
+Files: misc_demosaic.cpp and ahd_demosaic.cpp
+
+Copyright 2019-2025 LibRaw LLC (info@libraw.org).
+LibRaw uses code from dcraw.c, copyright 1997-2018 Dave Coffin.
+LibRaw does not use RESTRICTED code from dcraw.c.
+PPG is by Alain Desbiolles. AHD is based on work by Keigo Hirakawa,
+Thomas Parks and Paul Lee.
+
+These adaptations use the Common Development and Distribution License,
+Version 1.0, option expressly offered by LibRaw. The accompanying
+LibRaw-Demosaic-CDDL-1.0.txt contains the complete license.
+
+Stack modifications, October 2026: floating-point CPU references and OpenGL
+compute passes; explicit input ownership and cancellation; mirrored Bayer
+boundaries; preservation of negative, above-white and recorded channel values;
+camera-calibrated floating-point Lab analysis; separate VNG green phases.
+
+The covered source files are supplied with this application under
+LibRawDemosaicSource/, next to this notice. They are also available in the
+Stack source distribution under src/Raw/Demosaic/:
+    ClassicDemosaic.cpp
+    ClassicDemosaicTerms.h
+    GpuClassic.cpp
+    GpuClassicShaders.h
+
+The CDDL grants apply to those covered files. Stack's separate proprietary
+terms do not replace or limit rights granted under the CDDL for these files.
+Any additional terms or warranties for the larger Stack application are
+offered by Stack's publisher alone, not LibRaw or its contributors.

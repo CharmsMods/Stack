@@ -476,10 +476,13 @@ const CfaPyramidLevel* FindCfaPyramidLevel(
     return &levels[level];
 }
 
-bool BuildCfaPlanePyramid(
+namespace {
+
+template<typename BasePlanes>
+bool BuildCfaPlanePyramidImpl(
     const CfaLayout& layout,
     PixelExtent rawExtent,
-    const std::array<CfaPyramidBasePlane, 4>& basePlanes,
+    BasePlanes& basePlanes,
     const RegistrationParameters& parameters,
     CfaPlanePyramid& result,
     std::string* error) {
@@ -504,7 +507,7 @@ bool BuildCfaPlanePyramid(
     result.rawExtent = rawExtent;
     result.levelCount = parameters.pyramidLevels;
     for (CfaSite site : kSites) {
-        const CfaPyramidBasePlane& base = basePlanes[SiteIndex(site)];
+        auto& base = basePlanes[SiteIndex(site)];
         const PixelExtent expected = layout.PlaneExtent(site, rawExtent);
         std::size_t count = 0u;
         if (base.site != site || base.extent.width != expected.width ||
@@ -517,11 +520,13 @@ bool BuildCfaPlanePyramid(
         CfaPyramidLevel level;
         level.site = site;
         level.extent = base.extent;
-        level.signal = base.signal;
-        level.variance = base.variance;
-        level.validMask = base.validMask.empty()
-            ? std::vector<std::uint8_t>(count, 1u)
-            : base.validMask;
+        // Moving a const base retains the copying overload's behavior; a
+        // disposable mutable base transfers its storage without another
+        // full-resolution signal/variance/mask allocation.
+        level.signal = std::move(base.signal);
+        level.variance = std::move(base.variance);
+        if (base.validMask.empty()) level.validMask.assign(count, 1u);
+        else level.validMask = std::move(base.validMask);
         for (std::size_t index = 0u; index < count; ++index) {
             if (!Finite(level.signal[index]) || !Finite(level.variance[index]) ||
                 level.variance[index] < 0.0) {
@@ -595,6 +600,30 @@ bool BuildCfaPlanePyramid(
         }
     }
     return true;
+}
+
+} // namespace
+
+bool BuildCfaPlanePyramid(
+    const CfaLayout& layout,
+    PixelExtent rawExtent,
+    const std::array<CfaPyramidBasePlane, 4>& basePlanes,
+    const RegistrationParameters& parameters,
+    CfaPlanePyramid& result,
+    std::string* error) {
+    return BuildCfaPlanePyramidImpl(
+        layout, rawExtent, basePlanes, parameters, result, error);
+}
+
+bool BuildCfaPlanePyramid(
+    const CfaLayout& layout,
+    PixelExtent rawExtent,
+    std::array<CfaPyramidBasePlane, 4>&& basePlanes,
+    const RegistrationParameters& parameters,
+    CfaPlanePyramid& result,
+    std::string* error) {
+    return BuildCfaPlanePyramidImpl(
+        layout, rawExtent, basePlanes, parameters, result, error);
 }
 
 namespace {

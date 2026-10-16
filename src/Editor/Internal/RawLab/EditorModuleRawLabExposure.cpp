@@ -1,3 +1,4 @@
+#include "Editor/Internal/RawDemosaicControls.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -31,32 +32,6 @@ using RawCurveGraphUiState = Stack::EditorModuleTypes::RawCurveGraphUiState;
 
 namespace {
 
-constexpr float kRawLabPi = 3.14159265358979323846f;
-constexpr double kRawLabDemosaicIdleSettleSeconds = 0.165;
-constexpr double kRawLabDemosaicDirectionDebounceSeconds = 0.055;
-constexpr float kRawLabDemosaicPursuitSeconds = 0.075f;
-
-struct RawLabDemosaicChoice {
-    const char* label = "";
-    bool implemented = false;
-    Raw::DemosaicMethod backendMethod = Raw::DemosaicMethod::Bilinear;
-};
-
-constexpr std::array<RawLabDemosaicChoice, 12> kRawLabDemosaicChoices {{
-    { "Nearest Neighbor", true, Raw::DemosaicMethod::NearestNeighbor },
-    { "Bilinear", true, Raw::DemosaicMethod::Bilinear },
-    { "Malvar-He-Cutler 5x5", true, Raw::DemosaicMethod::MalvarHeCutler },
-    { "Hamilton-Adams", true, Raw::DemosaicMethod::HamiltonAdams },
-    { "PPG", false, Raw::DemosaicMethod::Bilinear },
-    { "VNG4", false, Raw::DemosaicMethod::Bilinear },
-    { "AHD", false, Raw::DemosaicMethod::Bilinear },
-    { "DCB", false, Raw::DemosaicMethod::Bilinear },
-    { "LMMSE", false, Raw::DemosaicMethod::Bilinear },
-    { "IGV", false, Raw::DemosaicMethod::Bilinear },
-    { "RCD", false, Raw::DemosaicMethod::Bilinear },
-    { "AMaZE", false, Raw::DemosaicMethod::Bilinear }
-}};
-
 ImVec4 RawLabColorWithAlpha(ImVec4 color, float alpha) {
     color.w *= std::clamp(alpha, 0.0f, 1.0f);
     return color;
@@ -68,28 +43,6 @@ float RawLabEaseToward(float current, float target, float responseSeconds) {
         -deltaTime / std::max(0.001f, responseSeconds));
     const float next = current + (target - current) * response;
     return std::abs(next - target) <= 0.0001f ? target : next;
-}
-
-float RawLabWrapAngle(float angle) {
-    return std::remainder(angle, 2.0f * kRawLabPi);
-}
-
-int RawLabWrapIndex(int index, int count) {
-    if (count <= 0) {
-        return 0;
-    }
-    const int remainder = index % count;
-    return remainder < 0 ? remainder + count : remainder;
-}
-
-int RawLabDemosaicVisualIndex(Raw::DemosaicMethod method) {
-    switch (method) {
-        case Raw::DemosaicMethod::NearestNeighbor: return 0;
-        case Raw::DemosaicMethod::MalvarHeCutler: return 2;
-        case Raw::DemosaicMethod::HamiltonAdams: return 3;
-        case Raw::DemosaicMethod::Bilinear:
-        default: return 1;
-    }
 }
 
 void DrawRawLabGlowingText(
@@ -381,7 +334,7 @@ bool EditorModule::RenderRawWorkspaceLabLightSurface(RawWorkspaceEditContext& co
     const float availableWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float availableHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y);
     constexpr float sectionGap = 10.0f;
-    const float wheelHeight = std::clamp(availableHeight * 0.40f, 128.0f, 244.0f);
+    const float wheelHeight = ImGui::GetFrameHeightWithSpacing() * 2.0f;
     const float whiteBalanceHeight = std::max(1.0f, availableHeight - wheelHeight - sectionGap);
     const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive);
 
@@ -389,278 +342,16 @@ bool EditorModule::RenderRawWorkspaceLabLightSurface(RawWorkspaceEditContext& co
         m_HdrAdoptedRawResult->rawData->reconstructedCameraRgb;
     const bool canDemosaic=context.canEdit&&!reconstructed;
     if(reconstructed)ImGui::TextDisabled("Color reconstruction supplied by Bracketing");
-    constexpr int demosaicChoiceCount =
-        static_cast<int>(kRawLabDemosaicChoices.size());
-    constexpr float demosaicStep =
-        (2.0f * kRawLabPi) / static_cast<float>(demosaicChoiceCount);
-    if (!state.lightDemosaicInitialized) {
-        state.lightDemosaicSelectedItem = RawLabDemosaicVisualIndex(
-            context.recipe.technical.demosaicMethod);
-        state.lightDemosaicRotation =
-            -static_cast<float>(state.lightDemosaicSelectedItem) * demosaicStep;
-        state.lightDemosaicTargetRotation = state.lightDemosaicRotation;
-        state.lightDemosaicLastInputTime = -1.0;
-        state.lightDemosaicLastAcceptedScrollTime = -1.0;
-        state.lightDemosaicLastAcceptedScrollDirection = 0;
-        state.lightDemosaicIgnoredOppositeDirection = 0;
-        state.lightDemosaicDragging = false;
-        state.lightDemosaicPressedItem = -1;
-        state.lightDemosaicInitialized = true;
-    }
-
-    ImGui::InvisibleButton(
-        "##RawLabLightDemosaicWheel",
-        ImVec2(availableWidth, wheelHeight),
-        ImGuiButtonFlags_MouseButtonLeft);
-    const ImRect wheelRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    const bool wheelHovered = ImGui::IsItemHovered(
-        ImGuiHoveredFlags_AllowWhenDisabled);
-    const bool wheelActive = canDemosaic && ImGui::IsItemActive();
-    if (wheelHovered && canDemosaic) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-    const double now = ImGui::GetTime();
-    const ImGuiIO& io = ImGui::GetIO();
-    const float wheelRadius = std::clamp(
-        std::min(wheelRect.GetHeight() * 0.92f, availableWidth * 0.78f),
-        96.0f,
-        260.0f);
-    const ImVec2 wheelCenter(
-        wheelRect.Min.x - 2.0f,
-        wheelRect.GetCenter().y + 6.0f);
-    const int displayedSelection = RawLabWrapIndex(
-        static_cast<int>(std::lround(
-            -state.lightDemosaicRotation / demosaicStep)),
-        demosaicChoiceCount);
-    std::array<ImRect, demosaicChoiceCount> demosaicHitRects;
-    std::array<bool, demosaicChoiceCount> demosaicHitVisible {};
-    ImFont* wheelFont = ImGui::GetFont();
-    for (int index = 0; index < demosaicChoiceCount; ++index) {
-        const float angle = RawLabWrapAngle(
-            static_cast<float>(index) * demosaicStep +
-            state.lightDemosaicRotation);
-        const float facing = std::cos(angle);
-        if (facing <= 0.015f) {
-            continue;
-        }
-        const float fontSize = index == displayedSelection
-            ? std::clamp(availableWidth * 0.057f, 17.0f, 22.0f)
-            : std::clamp(availableWidth * 0.045f, 13.0f, 17.0f);
-        const ImVec2 textSize = wheelFont->CalcTextSizeA(
-            fontSize,
-            std::numeric_limits<float>::max(),
-            0.0f,
-            kRawLabDemosaicChoices[static_cast<std::size_t>(index)].label);
-        const float inwardRadius = wheelRadius * 0.52f;
-        const ImVec2 inwardStart(
-            wheelCenter.x + std::cos(angle) * inwardRadius,
-            wheelCenter.y + std::sin(angle) * inwardRadius);
-        ImRect hitBounds = RawLabRadialTextBounds(
-            inwardStart,
-            textSize,
-            angle);
-        hitBounds.Expand(ImVec2(7.0f, 5.0f));
-        demosaicHitRects[static_cast<std::size_t>(index)] = hitBounds;
-        demosaicHitVisible[static_cast<std::size_t>(index)] = true;
-    }
-
-    if (canDemosaic && ImGui::IsItemActivated()) {
-        state.lightDemosaicPressPosition = io.MousePos;
-        state.lightDemosaicPreviousPointerAngle = std::atan2(
-            io.MousePos.y - wheelCenter.y,
-            io.MousePos.x - wheelCenter.x);
-        state.lightDemosaicDragging = false;
-        state.lightDemosaicPressedItem = -1;
-        for (int index = 0; index < demosaicChoiceCount; ++index) {
-            if (demosaicHitVisible[static_cast<std::size_t>(index)] &&
-                demosaicHitRects[static_cast<std::size_t>(index)].Contains(
-                    io.MousePos)) {
-                state.lightDemosaicPressedItem = index;
-                break;
-            }
-        }
-    }
-    if (wheelActive && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        const float dragX = io.MousePos.x - state.lightDemosaicPressPosition.x;
-        const float dragY = io.MousePos.y - state.lightDemosaicPressPosition.y;
-        if (!state.lightDemosaicDragging &&
-            dragX * dragX + dragY * dragY >= 16.0f) {
-            state.lightDemosaicDragging = true;
-            state.lightDemosaicPressedItem = -1;
-        }
-        if (state.lightDemosaicDragging) {
-            const float pointerAngle = std::atan2(
-                io.MousePos.y - wheelCenter.y,
-                io.MousePos.x - wheelCenter.x);
-            const float pointerDelta = std::clamp(
-                RawLabWrapAngle(
-                    pointerAngle - state.lightDemosaicPreviousPointerAngle),
-                -0.42f,
-                0.42f);
-            state.lightDemosaicTargetRotation += pointerDelta;
-            state.lightDemosaicPreviousPointerAngle = pointerAngle;
-            state.lightDemosaicLastInputTime = now;
-            state.lightInteractionActive = true;
-            ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-        }
-    }
-    if (canDemosaic && wheelHovered &&
-        std::abs(io.MouseWheel) > 0.0001f) {
-        const float wheelImpulse = std::clamp(io.MouseWheel, -4.0f, 4.0f);
-        const int direction = wheelImpulse > 0.0f ? 1 : -1;
-        const bool firstOppositeInsideDebounce =
-            state.lightDemosaicLastAcceptedScrollDirection != 0 &&
-            direction != state.lightDemosaicLastAcceptedScrollDirection &&
-            now - state.lightDemosaicLastAcceptedScrollTime <=
-                kRawLabDemosaicDirectionDebounceSeconds &&
-            state.lightDemosaicIgnoredOppositeDirection != direction;
-        if (firstOppositeInsideDebounce) {
-            state.lightDemosaicIgnoredOppositeDirection = direction;
-        } else {
-            // The 1.18 multiplier is the requested modest gain increase over
-            // the wheel's conservative 0.66-item base response.
-            constexpr float scrollGain = demosaicStep * 0.66f * 1.18f;
-            state.lightDemosaicTargetRotation += wheelImpulse * scrollGain;
-            state.lightDemosaicLastInputTime = now;
-            state.lightDemosaicLastAcceptedScrollTime = now;
-            state.lightDemosaicLastAcceptedScrollDirection = direction;
-            state.lightDemosaicIgnoredOppositeDirection = 0;
-            state.lightInteractionActive = true;
-        }
-    }
-    if (canDemosaic && ImGui::IsItemDeactivated()) {
-        if (!state.lightDemosaicDragging &&
-            state.lightDemosaicPressedItem >= 0) {
-            const float pressedAngle = RawLabWrapAngle(
-                static_cast<float>(state.lightDemosaicPressedItem) * demosaicStep +
-                state.lightDemosaicRotation);
-            state.lightDemosaicTargetRotation =
-                state.lightDemosaicRotation - pressedAngle;
-            state.lightDemosaicLastInputTime = now;
-            state.lightInteractionActive = true;
-        }
-        state.lightDemosaicDragging = false;
-        state.lightDemosaicPressedItem = -1;
-    }
-
-    if (!state.lightDemosaicDragging &&
-        state.lightDemosaicLastInputTime >= 0.0 &&
-        now - state.lightDemosaicLastInputTime >=
-            kRawLabDemosaicIdleSettleSeconds) {
-        const float nearestAlignedTarget = std::round(
-            state.lightDemosaicTargetRotation / demosaicStep) * demosaicStep;
-        const float alignmentDistance = std::abs(
-            state.lightDemosaicTargetRotation - nearestAlignedTarget);
-        if (alignmentDistance <= demosaicStep * 0.42f) {
-            state.lightDemosaicTargetRotation = nearestAlignedTarget;
-        }
-    }
-    state.lightDemosaicRotation = RawLabEaseToward(
-        state.lightDemosaicRotation,
-        state.lightDemosaicTargetRotation,
-        kRawLabDemosaicPursuitSeconds);
-    const bool wheelAnimating = std::abs(
-        state.lightDemosaicRotation -
-        state.lightDemosaicTargetRotation) > 0.0002f;
-    state.lightInteractionActive |= wheelActive || wheelAnimating;
-    const int nearestDemosaic = RawLabWrapIndex(
-        static_cast<int>(std::lround(
-            -state.lightDemosaicRotation / demosaicStep)),
-        demosaicChoiceCount);
-    if (nearestDemosaic != state.lightDemosaicSelectedItem) {
-        state.lightDemosaicSelectedItem = nearestDemosaic;
-        const RawLabDemosaicChoice& selectedChoice =
-            kRawLabDemosaicChoices[static_cast<std::size_t>(nearestDemosaic)];
-        if (canDemosaic && selectedChoice.implemented &&
-            context.recipe.technical.demosaicMethod !=
-                selectedChoice.backendMethod) {
-            context.recipe.technical.demosaicMethod =
-                selectedChoice.backendMethod;
-            changed = true;
-        }
-    }
-    if (std::abs(state.lightDemosaicRotation) > 200.0f * kRawLabPi &&
-        !wheelAnimating && !state.lightDemosaicDragging) {
-        const float turns = std::round(
-            state.lightDemosaicRotation / (2.0f * kRawLabPi));
-        const float reduction = turns * 2.0f * kRawLabPi;
-        state.lightDemosaicRotation -= reduction;
-        state.lightDemosaicTargetRotation -= reduction;
-    }
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->PushClipRect(wheelRect.Min, wheelRect.Max, true);
-    const ImVec4 disabled = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-    drawList->AddCircle(
-        wheelCenter,
-        wheelRadius,
-        ImGui::GetColorU32(RawLabColorWithAlpha(disabled, 0.20f)),
-        96,
-        1.0f);
-    drawList->AddCircle(
-        wheelCenter,
-        wheelRadius * 0.88f,
-        ImGui::GetColorU32(RawLabColorWithAlpha(disabled, 0.075f)),
-        96,
-        1.0f);
-    const ImVec2 selectionPoint(
-        wheelCenter.x + wheelRadius,
-        wheelCenter.y);
-    drawList->AddCircleFilled(
-        selectionPoint,
-        3.25f,
-        ImGui::GetColorU32(RawLabColorWithAlpha(accent, 0.92f)));
-    drawList->AddLine(
-        ImVec2(selectionPoint.x - 13.0f, selectionPoint.y),
-        ImVec2(selectionPoint.x + 8.0f, selectionPoint.y),
-        ImGui::GetColorU32(RawLabColorWithAlpha(accent, 0.40f)),
-        1.0f);
-    for (int index = 0; index < demosaicChoiceCount; ++index) {
-        const float angle = RawLabWrapAngle(
-            static_cast<float>(index) * demosaicStep +
-            state.lightDemosaicRotation);
-        const float facing = std::cos(angle);
-        if (facing <= 0.015f) {
-            continue;
-        }
-        const bool selected = index == nearestDemosaic;
-        const RawLabDemosaicChoice& choice =
-            kRawLabDemosaicChoices[static_cast<std::size_t>(index)];
-        const float fontSize = selected
-            ? std::clamp(availableWidth * 0.057f, 17.0f, 22.0f)
-            : std::clamp(availableWidth * 0.045f, 13.0f, 17.0f);
-        const ImVec2 textSize = wheelFont->CalcTextSizeA(
-            fontSize,
-            std::numeric_limits<float>::max(),
-            0.0f,
-            choice.label);
-        const float inwardRadius = wheelRadius * 0.52f;
-        const ImVec2 inwardStart(
-            wheelCenter.x + std::cos(angle) * inwardRadius,
-            wheelCenter.y + std::sin(angle) * inwardRadius);
-        const float facingAlpha = std::pow(
-            std::clamp(facing, 0.0f, 1.0f),
-            0.70f);
-        const ImVec4 labelColor = choice.implemented
-            ? (selected
-                ? accent
-                : ImGui::GetStyleColorVec4(ImGuiCol_Text))
-            : disabled;
-        const float labelAlpha = facingAlpha * (choice.implemented
-            ? (selected ? 1.0f : 0.54f)
-            : (selected ? 0.58f : 0.34f));
-        DrawRawLabRadialText(
-            drawList,
-            wheelFont,
-            fontSize,
-            inwardStart,
-            textSize,
-            angle,
-            ImGui::GetColorU32(RawLabColorWithAlpha(
-                labelColor,
-                labelAlpha)),
-            choice.label);
-    }
-    drawList->PopClipRect();
-    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+    ImGui::TextUnformatted("Demosaicing");
+    ImGui::BeginDisabled(!canDemosaic);
+    changed |= Stack::Editor::DrawDemosaicCombo("##RawDemosaic",context.recipe.technical.demosaicMethod,-1.f,
+        true,&m_RawFloatingSurface.imageNavigationMenuOpen);
+    state.lightInteractionActive |= ImGui::IsItemActive();
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0.0f,sectionGap));
+    ImDrawList* drawList=ImGui::GetWindowDrawList();
+    ImFont* wheelFont=ImGui::GetFont();
+    const ImVec4 disabled=ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 
     const ImVec2 whiteCardMinimum = ImGui::GetCursorScreenPos();
     const ImRect whiteCard(

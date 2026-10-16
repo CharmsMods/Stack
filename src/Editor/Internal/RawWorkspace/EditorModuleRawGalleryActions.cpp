@@ -35,7 +35,7 @@ const Stack::RawWorkspace::SourceRecord* FindGallerySource(
 }
 }
 
-Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext() {
+Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(bool editControlsOnly) {
     Stack::RawGalleryActions::Context context;
     context.workspaceRoot = m_RawWorkspace.workspaceRoot;
     context.catalogGeneration = m_RawWorkspaceScanGeneration;
@@ -43,12 +43,12 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext()
     context.queueAvailable = static_cast<bool>(m_RawGalleryQueueRequestHandler);
     RefreshRawEditAttributeClipboardFromSystem();
     context.hasEditClipboard = m_RawEditAttributeClipboard.has_value();
-    context.foregroundBusy = GetProjectFileCommandContext().busy || IsBracketingPresentationActive();
+    context.foregroundBusy = !editControlsOnly &&
+        (GetProjectFileCommandContext().busy || IsBracketingPresentationActive());
     context.previewOnly = Stack::Workspace::IsPreview();
-    const auto* activeSource = FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
     std::unordered_map<std::string, const Stack::RawWorkspace::SourceRecord*> sourcesByKey;
     std::unordered_map<std::string, const Stack::RawWorkspace::SourceRecord*> sourcesByFingerprint;
-    if (m_RawWorkspace.selectedSourceKeys.size() > 1u || !m_RawWorkspaceLabSelectedProjectPaths.empty()) {
+    if (!editControlsOnly && (m_RawWorkspace.selectedSourceKeys.size() > 1u || !m_RawWorkspaceLabSelectedProjectPaths.empty())) {
         sourcesByKey.reserve(m_RawWorkspace.sources.size());
         if (!m_RawWorkspaceLabSelectedProjectPaths.empty())
             sourcesByFingerprint.reserve(m_RawWorkspace.sources.size());
@@ -60,6 +60,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext()
     }
     std::unordered_set<std::wstring> captureKeys;
     const auto addCapture = [&](const std::filesystem::path& path) {
+        if (editControlsOnly) return;
         if (path.empty() || !Raw::RawLoader::IsRawPath(path.u8string())) return;
         auto key = path.lexically_normal().generic_wstring();
 #if defined(_WIN32)
@@ -68,7 +69,30 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext()
 #endif
         if (captureKeys.insert(std::move(key)).second) context.bracketSources.push_back(path);
     };
-    for (const auto& key : m_RawWorkspace.selectedSourceKeys) {
+    auto sourceBegin = m_RawWorkspace.selectedSourceKeys.begin();
+    auto sourceEnd = m_RawWorkspace.selectedSourceKeys.end();
+    auto projectBegin = m_RawWorkspaceLabSelectedProjectPaths.begin();
+    auto projectEnd = m_RawWorkspaceLabSelectedProjectPaths.end();
+    if (editControlsOnly) {
+        // These identities come from the same catalog as the selection. Avoid
+        // filesystem canonicalization and full selection materialization while
+        // drawing controls; execution still captures and validates every item.
+        const auto focusedProject = std::find(projectBegin, projectEnd, m_RawWorkspaceLabFocusedProjectPath);
+        if (focusedProject != projectEnd) {
+            projectBegin = focusedProject;
+            projectEnd = projectBegin + 1;
+            sourceBegin = sourceEnd;
+        } else if (sourceBegin != sourceEnd) {
+            const auto focusedSource = std::find(sourceBegin, sourceEnd, m_RawWorkspace.selectedSourceKey);
+            if (focusedSource != sourceEnd) sourceBegin = focusedSource;
+            sourceEnd = sourceBegin + 1;
+            projectBegin = projectEnd;
+        } else if (projectBegin != projectEnd) {
+            projectEnd = projectBegin + 1;
+        }
+    }
+    for (auto selected = sourceBegin; selected != sourceEnd; ++selected) {
+        const auto& key = *selected;
         const auto found = sourcesByKey.find(key);
         const auto* source = sourcesByKey.empty() ? FindGallerySource(m_RawWorkspace.sources, key)
             : found == sourcesByKey.end() ? nullptr : found->second;
@@ -76,12 +100,8 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext()
         Stack::RawGalleryActions::Item item;
         item.path = source->absolutePath;
         item.sourceKey = key;
-        item.canCopyEdits = (!IsMultiFrameRawProjectActive() && IsRawWorkspaceProjectActive() &&
-                m_Project->rawSourceKey == key && activeSource &&
-                Stack::Project::SameProjectPath(activeSource->absolutePath, source->absolutePath)) ||
-            ((source->project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
-              source->project.status == Stack::RawWorkspace::ProjectStatus::Embedded) &&
-             !source->project.absolutePath.empty());
+        // An original remains an unedited input even when a saved project
+        // references it. Copying edits belongs to the saved project card.
         if (source->thumbnail.status == Stack::RawWorkspace::ThumbnailStatus::Ready ||
             source->thumbnail.status == Stack::RawWorkspace::ThumbnailStatus::Valid)
             item.thumbnailPath = source->thumbnail.absolutePath;
@@ -89,29 +109,32 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext()
         context.items.push_back(std::move(item));
         addCapture(source->absolutePath);
     }
-    for (const auto& path : m_RawWorkspaceLabSelectedProjectPaths) {
+    for (auto selected = projectBegin; selected != projectEnd; ++selected) {
+        const auto& path = *selected;
         if (path.empty()) continue;
         Stack::RawGalleryActions::Item item;
         item.kind = Kind::Project;
         item.path = path;
-        item.protectedProject = Stack::Project::SameProjectPath(path, m_Project->storePath) ||
-            (m_ProjectRemovalGuard && m_ProjectRemovalGuard(path));
+        item.protectedProject = !editControlsOnly && (Stack::Project::SameProjectPath(path, m_Project->storePath) ||
+            (m_ProjectRemovalGuard && m_ProjectRemovalGuard(path)));
         Stack::Project::ProjectRecord record;
         if (Stack::Project::ProjectIndex::Get().FindByPath(path, record)) {
             item.canCopyEdits = record.hasRawWorkspaceRecipe || record.multiFrameProject;
             item.canVersion = record.format == Stack::Project::IndexedProjectFormat::CurrentBundle &&
                 record.storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle &&
                 !record.readOnlyRecovery && !record.needsAttention;
-            for (const auto& indexedSource : record.sources) {
-                std::filesystem::path original = indexedSource.originalPath;
-                if (!indexedSource.fingerprint.empty()) {
-                    const auto source = sourcesByFingerprint.find(indexedSource.fingerprint);
-                    if (source != sourcesByFingerprint.end()) original = source->second->absolutePath;
+            if (!editControlsOnly) {
+                for (const auto& indexedSource : record.sources) {
+                    std::filesystem::path original = indexedSource.originalPath;
+                    if (!indexedSource.fingerprint.empty()) {
+                        const auto source = sourcesByFingerprint.find(indexedSource.fingerprint);
+                        if (source != sourcesByFingerprint.end()) original = source->second->absolutePath;
+                    }
+                    addCapture(original);
                 }
-                addCapture(original);
             }
         }
-        if (Stack::Project::SameProjectPath(path, m_RawWorkspaceLabFocusedProjectPath))
+        if (editControlsOnly || Stack::Project::SameProjectPath(path, m_RawWorkspaceLabFocusedProjectPath))
             context.focusedIndex = context.items.size();
         context.items.push_back(std::move(item));
     }
@@ -198,11 +221,7 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
     case Action::CopyEdits: {
         const auto& item = context.items[context.focusedIndex];
         std::string error;
-        const auto* source = item.kind == Kind::Source ?
-            FindGallerySource(m_RawWorkspace.sources, item.sourceKey, item.path) : nullptr;
-        const bool copied = item.kind == Kind::Project ? CopyRawEditAttributesFromProjectPath(item.path, {}, &error) :
-            source && Stack::Project::SameProjectPath(source->absolutePath, item.path) &&
-                CopyRawEditAttributesFromGallerySource(*source, &error);
+        const bool copied = CopyRawEditAttributesFromProjectPath(item.path, {}, &error);
         if (!copied) PostNotification(UiNotificationSeverity::Error,
             error.empty() ? "The focused item has no copyable RAW edit." : error, "raw-edit-attributes-copy-failed");
         return copied;
@@ -295,6 +314,8 @@ void EditorModule::RenderRawGalleryContextActions(const std::filesystem::path& f
         Action::CopyEdits, Action::PasteEdits, Action::NewSavedVersion, Action::ShowInExplorer,
         Action::CopyPath, Action::TrashProjects, Action::RevertProjects};
     for (const auto action : actions) {
+        if (action == Action::CopyEdits && (context.focusedIndex >= context.items.size() ||
+                context.items[context.focusedIndex].kind != Kind::Project)) continue;
         if (action == Action::CopyEdits || action == Action::ShowInExplorer || action == Action::TrashProjects)
             ImGui::Separator();
         if ((action == Action::TrashProjects || action == Action::RevertProjects || action == Action::NewSavedVersion) &&

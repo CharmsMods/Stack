@@ -1,10 +1,10 @@
 #pragma once
-#include "Persistence/RawProjectModel.h"
+#include "Raw/RawCaptureCompatibility.h"
 
 namespace Raw::Bracketing::Panorama {
-inline bool IsPanorama(const Stack::Project::MultiFrameSourceSet& set) {
-    const auto it=set.settings.find("bracketing");
-    return it!=set.settings.end()&&it->is_object()&&it->value("reconstruction",std::string())=="panorama";
+inline bool IsPanorama(const nlohmann::json& settings) {
+    const auto it=settings.find("bracketing");
+    return it!=settings.end()&&it->is_object()&&it->value("reconstruction",std::string())=="panorama";
 }
 inline bool Compatible(const Stack::Project::RawCaptureCompatibilitySummary& a,
     const Stack::Project::RawCaptureCompatibilitySummary& b,std::string* reason) {

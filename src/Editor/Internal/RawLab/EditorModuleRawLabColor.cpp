@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabColorSurface.h"
+#include "Editor/NodeEditors/ColorWarpFeedback.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
 #include "Async/TaskSystem.h"
@@ -47,10 +48,11 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         ? cachedScope
         : m_RawWorkspaceGraphScopeReadback;
     const std::size_t cloudInputFingerprint =
-        m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
+        scope.graphInputFingerprint ? scope.graphInputFingerprint :
+        (m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
                 previewIdentity
             ? m_RawWorkspaceColorWarpInputGraphScopeCache.inputFingerprint
-            : 0u;
+            : 0u);
     RawLabColorSurfaceArgs args {
         m_RawWorkspaceLabUi,
         context.recipe.colorWarp,
@@ -60,7 +62,16 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         previewIdentity,
         [this]() { SaveRawWorkspaceAppState(); }
     };
-    args.strengthDriven = IsRawParameterDriven("strength");
+    args.strengthDriven = context.IsParameterDriven("strength");
+    if (context.nodeTarget && context.editorState) {
+        args.feedback = &context.State<Stack::Editor::ColorWarpFeedback>();
+        args.feedback->Update(scope, previewIdentity + context.nodeTarget->Key(),
+            cloudInputFingerprint, context.recipe.colorWarp,
+            context.recipe.technical.workingSpace,
+            [this](std::function<void()> job) {
+                return ProjectTasks().SubmitHighPriority("Analyzing colors", std::move(job));
+            });
+    }
     bool changed = ShowsRawLabGraph(section) && Stack::Editor::RawLabInternal::RenderRawLabColorSurface(args);
     if (ShowsRawLabSettings(section)) changed |= Stack::Editor::RawLabInternal::RenderRawLabColorSettings(args);
     return changed;
@@ -72,7 +83,7 @@ bool EditorModule::RenderRawWorkspaceLabColorSecondaryControls(
     context.recipe.colorWarp = Stack::RawRecipe::SanitizeColorWarpRecipe(
         std::move(context.recipe.colorWarp));
     auto& colorWarp = context.recipe.colorWarp;
-    ImGui::BeginDisabled(IsRawParameterDriven("strength"));
+    ImGui::BeginDisabled(context.IsParameterDriven("strength"));
     float overallStrength = colorWarp.strength;
     if (BareSliderFloat(
             "Overall Strength",

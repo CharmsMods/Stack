@@ -1,11 +1,14 @@
 #include "AppShell.h"
+#include "App/WorkspaceSwitcher.h"
 
 #include "Library/LibraryManager.h"
 #include "Persistence/ProjectStore.h"
+#include "ThirdParty/stb_image.h"
 
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -38,6 +41,83 @@ bool AppShell::WasDiagnosticQueueExportSuccessful() const {
     return m_DiagnosticQueueSuccessful;
 }
 
+void AppShell::ConfigureDiagnosticQueueCurrent(
+    std::filesystem::path projectPath,
+    std::filesystem::path destination) {
+    std::string extension = projectPath.extension().u8string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    std::error_code error;
+    m_DiagnosticQueueSourceImage = extension != ".stack" &&
+        extension != ".stackbundle" && !std::filesystem::is_directory(projectPath, error);
+    ConfigureDiagnosticProjectOpen(std::move(projectPath));
+    m_DiagnosticQueueDestination = std::move(destination);
+    m_DiagnosticQueueCurrent = true;
+}
+
+void AppShell::StartDiagnosticQueueCurrent() {
+    const auto fail = [&](const std::string& error) {
+        std::cerr << "[QueueCurrentDiagnostic] Failed: " << error << '\n';
+        m_DiagnosticProjectOpenActive = false;
+        m_IsRunning = false;
+    };
+    m_Editor->SetDocumentPersistenceEnabled(false);
+    if (m_Editor->IsRawWorkspaceProjectActive()) {
+        fail("Use a saved raster Graph project with an Image connected directly to an Output.");
+        return;
+    }
+    if (!m_Editor->SetWorkspaceMode(Stack::Project::WorkspaceMode::Graph)) {
+        fail("The loaded project could not enter Graph.");
+        return;
+    }
+    auto& graph = m_Editor->GetNodeGraph();
+    int imageId = 0, outputId = 0;
+    for (const int candidate : graph.GetConnectedOutputNodeIds()) {
+        const auto* input = graph.FindInputLink(candidate, EditorNodeGraph::kImageInputSocketId);
+        const auto* image = input ? graph.FindNode(input->fromNodeId) : nullptr;
+        if (image && image->kind == EditorNodeGraph::NodeKind::Image &&
+            image->image.width != image->image.height) {
+            imageId = image->id;
+            outputId = candidate;
+            break;
+        }
+    }
+    if (imageId == 0 || !m_Editor->RotateImageNode(imageId, 1)) {
+        fail("The fixture needs a non-square, decoded Image connected directly to an Output.");
+        return;
+    }
+    const auto* capturedImage = graph.FindNode(imageId);
+    m_DiagnosticQueueExpectedWidth = capturedImage->image.width;
+    m_DiagnosticQueueExpectedHeight = capturedImage->image.height;
+    const auto capturedRevision = m_Editor->GetProjectEditRevision();
+    if (!m_Editor->AddProjectOutputToQueue(outputId)) {
+        fail("The current edited Output was rejected by Queue.");
+        return;
+    }
+    if (!m_Editor->RotateImageNode(imageId, 1)) {
+        fail("The foreground image could not receive its later edit.");
+        return;
+    }
+    const auto* laterImage = graph.FindNode(imageId);
+    std::cout << "[QueueCurrentDiagnostic] Captured revision " << capturedRevision
+              << " at " << m_DiagnosticQueueExpectedWidth << 'x' << m_DiagnosticQueueExpectedHeight
+              << "; later foreground revision " << m_Editor->GetProjectEditRevision()
+              << " at " << laterImage->image.width << 'x' << laterImage->image.height << ".\n";
+    if (!m_Editor->CloseCurrentProject(true)) {
+        fail("The originating project could not be closed after capture.");
+        return;
+    }
+    m_DiagnosticProjectOpenActive = false;
+    m_CurrentTabId = static_cast<int>(Stack::Workspace::Id::Queue);
+    m_RequestedTab = -1;
+    std::string error;
+    m_DiagnosticQueueActive = m_QueueRenderer.Start(m_DiagnosticQueueDestination,
+        m_Queue.Model().Snapshot(), &error);
+    m_DiagnosticQueueStartedAt = glfwGetTime();
+    if (!m_DiagnosticQueueActive) fail(error);
+    else std::cout << "[QueueCurrentDiagnostic] Originating project closed; rendering captured edits.\n";
+}
+
 void AppShell::ConfigureDiagnosticGalleryInspection(
     std::filesystem::path firstSource,
     std::filesystem::path latestSource) {
@@ -65,6 +145,48 @@ void AppShell::TickDiagnosticProjectOpen() {
             (diagnosticNow - m_DiagnosticProjectOpenLastTickAt) * 1000.0);
     }
     m_DiagnosticProjectOpenLastTickAt = diagnosticNow;
+
+    if (m_DiagnosticQueueCurrent && m_DiagnosticQueueSourceImage) {
+        const auto failSource = [&](const std::string& error) {
+            std::cerr << "[QueueCurrentDiagnostic] Failed: " << error << '\n';
+            m_DiagnosticProjectOpenActive = false;
+            m_IsRunning = false;
+        };
+        if (m_Editor->GetSourceLoadTaskState() == Async::TaskState::Failed) {
+            failSource(m_Editor->GetSourceLoadStatusText());
+            return;
+        }
+        if (diagnosticNow - m_DiagnosticProjectOpenStartedAt > 120.0) {
+            failSource("Timed out preparing the real raster source for current-edit capture.");
+            return;
+        }
+        if (m_Editor->IsSourceLoadBusy()) return;
+        auto& graph = m_Editor->GetNodeGraph();
+        const bool importing = std::any_of(graph.GetNodes().begin(), graph.GetNodes().end(),
+            [](const auto& node) { return node.kind == EditorNodeGraph::NodeKind::Image &&
+                (node.image.isLoading || node.image.isEmbedding); });
+        if (importing) return;
+        if (graph.GetActiveImageNodeId() <= 0) {
+            // Normal source loading supplies this pair. Retain the supported
+            // fixture path if a source loader leaves only its pipeline image.
+            if (!m_Editor->AddImageNodeFromFile(m_DiagnosticProjectOpenPath.u8string(), {20, 30})) {
+                failSource("The real raster could not be added to the diagnostic Graph.");
+                return;
+            }
+            const int imageId = graph.GetSelectedNodeId();
+            m_Editor->AddOutputNodeAt({320, 30});
+            const int outputId = graph.GetSelectedNodeId();
+            std::string error;
+            if (!m_Editor->ConnectGraphSockets(imageId, EditorNodeGraph::kImageOutputSocketId,
+                    outputId, EditorNodeGraph::kImageInputSocketId, &error)) {
+                failSource(error);
+                return;
+            }
+        }
+        m_Editor->SetCurrentProjectName(m_DiagnosticProjectOpenPath.stem().u8string());
+        StartDiagnosticQueueCurrent();
+        return;
+    }
 
     const Async::TaskState loadState =
         m_Editor->GetProjectLoadTaskState();
@@ -106,6 +228,10 @@ void AppShell::TickDiagnosticProjectOpen() {
                 m_DiagnosticProjectOpenActive = false;
                 m_IsRunning = false;
             }
+            return;
+        }
+        if (m_DiagnosticQueueCurrent) {
+            StartDiagnosticQueueCurrent();
             return;
         }
         if (m_Editor->IsRawWorkspaceProjectActive() &&
@@ -224,6 +350,21 @@ void AppShell::TickDiagnosticQueueExport() {
             m_DiagnosticQueueLastItemStatus = item.status;
         }
         if (item.state == Stack::Queue::ItemState::Complete) {
+            if (m_DiagnosticQueueCurrent) {
+                int width = 0, height = 0, channels = 0;
+                const auto outputPath = item.outputPath.u8string();
+                if (!stbi_info(outputPath.c_str(), &width, &height, &channels) ||
+                    width != m_DiagnosticQueueExpectedWidth || height != m_DiagnosticQueueExpectedHeight) {
+                    std::cerr << "[QueueCurrentDiagnostic] Captured size mismatch: expected "
+                              << m_DiagnosticQueueExpectedWidth << 'x' << m_DiagnosticQueueExpectedHeight
+                              << ", exported " << width << 'x' << height << '\n';
+                    m_DiagnosticQueueActive = false;
+                    m_IsRunning = false;
+                    return;
+                }
+                std::cout << "[QueueCurrentDiagnostic] Verified captured orientation after later edit and project close: "
+                          << width << 'x' << height << ".\n";
+            }
             std::cout << "[QueueExportDiagnostic] Export completed: "
                       << item.displayName << '\n';
             m_DiagnosticQueueSuccessful = true;

@@ -1133,10 +1133,6 @@ bool ValidateRawWorkspaceDurableFlushUsesManagedAssets() {
     EditorNodeGraph::DeserializeGraphPayload(
         graphSaveDocument.pipelineData,
         reloadedRawGraph,
-        0,
-        {},
-        0,
-        0,
         0);
     const EditorNodeGraph::Node* reloadedAuthoredGraphNode =
         reloadedRawGraph.FindNode(authoredGraphNodeId);
@@ -1365,10 +1361,6 @@ bool ValidateAsyncProjectSaveKeepsNewerEditsDirty() {
     EditorNodeGraph::DeserializeGraphPayload(
         reloadedDocument.pipelineData,
         reloadedGraph,
-        0,
-        {},
-        0,
-        0,
         0);
     const EditorNodeGraph::Node* reloadedOutput =
         reloadedGraph.FindNode(outputNodeId);

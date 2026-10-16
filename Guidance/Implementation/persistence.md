@@ -6,6 +6,8 @@ Read when changing saving, loading, import, export, disk caches, discovery or de
 
 Original camera RAW files remain read-only. Import may create project-owned copies and derived assets through the established storage path. A source path or provenance record does not grant permission to overwrite or remove that source. Export must not resolve to an original camera file either.
 
+Gallery working projects live under `<photo folder>/Closet/Projects`. Their immutable managed assets share the owning Closet's content-addressed `Assets` directory; individual project folders are not independently portable. Resolve committed assets through `ProjectStore::ResolveAssetFile` or its stream interface, rather than constructing a path from `projectAssetPath`. A complete portable `.stack` collects its own dependencies. Copying a whole workspace requires its Closet as well as its originals. Browsing alone does not ingest sources, and shared assets are not automatically reclaimed.
+
 For destructive operations, establish what the application owns and resolve the actual target. Use the existing path and store helpers where suitable. On Windows, aliases, case differences and path normalization matter. Check affected open projects and pending users before removal; recheck at execution if a queued action can outlive the original decision. Do not infer ownership just from an extension or a folder's display name.
 
 ## Save a deliberate model

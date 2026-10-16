@@ -4,6 +4,7 @@
 #include "Persistence/StackBinaryFormat.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawGallerySimilarity.h"
+#include "Raw/RawGalleryThumbnailPixels.h"
 
 #include <chrono>
 #include <cstddef>
@@ -23,8 +24,6 @@ constexpr const char* kProjectsFolderName = "Stack RAW Projects";
 constexpr const char* kCatalogFolderName = "Stack RAW Catalog";
 constexpr const char* kCatalogFileName = "catalog.json";
 constexpr const char* kRatingsFileName = "ratings.json";
-constexpr int kFastNeutralThumbnailMaxDimension = 320;
-constexpr int kNeutralThumbnailMaxDimension = 512;
 constexpr int kSourceIdentityAlgorithmVersion = 1;
 
 enum class ThumbnailStatus {
@@ -138,6 +137,8 @@ struct SourceSetProjectMembership {
     std::string sourceSetName;
     bool projectIsMultiFrame = false;
     std::filesystem::path projectCoverThumbnailCachePath;
+    bool hasSavedBracketingResult = false;
+    std::uint64_t sourceSetFrameCount = 0;
 };
 
 struct SourceSetProjectCatalogEntry {
@@ -153,6 +154,10 @@ struct SourceSetProjectCatalogEntry {
     bool conflict = false;
     bool multiFrameProject = false;
     bool bracketingProject = false;
+    bool hasSavedBracketingResult = false;
+    // Derived catalog relationships, never authored project state.
+    std::vector<std::string> sourceKeys;
+    std::string sourceIdentityKey;
     std::uint64_t sourceSetCount = 0;
     std::uint64_t totalFrameCount = 0;
     std::uint64_t rawSetCount = 0;
@@ -306,6 +311,7 @@ struct GallerySourceView {
     std::filesystem::path projectPath;
     std::filesystem::path projectCoverThumbnailCachePath;
     std::uint64_t savedProjectCount = 0;
+    bool hasSavedBracketingResult = false;
 };
 
 struct GalleryFolderGroup {
@@ -316,6 +322,7 @@ struct GalleryFolderGroup {
 
 struct GalleryProjectView {
     std::size_t projectIndex = 0;
+    std::size_t referenceSourceIndex = static_cast<std::size_t>(-1);
     std::string projectId;
     std::string projectName;
     std::filesystem::path projectPath;
@@ -325,11 +332,27 @@ struct GalleryProjectView {
     ProjectStatus status = ProjectStatus::Unknown;
     bool multiFrameProject = false;
     bool bracketingProject = false;
+    bool hasSavedBracketingResult = false;
+    std::vector<std::string> sourceKeys;
+    std::string sourceIdentityKey;
+};
+
+struct GalleryProjectStack {
+    std::string familyKey;
+    std::vector<std::size_t> projectIndices;
+};
+
+struct GalleryCompletedBurstSourceSet {
+    std::string projectId;
+    std::string sourceSetId;
+    std::vector<std::string> sourceKeys;
+    std::string sourceContentKey;
 };
 
 struct GalleryPresentation {
     std::vector<GalleryFolderGroup> groups;
     std::vector<GalleryProjectView> projects;
+    std::vector<GalleryCompletedBurstSourceSet> completedBurstSourceSets;
     int totalSources = 0;
     int readyThumbnailCount = 0;
     int queuedThumbnailCount = 0;
@@ -435,6 +458,12 @@ bool RemoveTransientThumbnailCache(
     const ManagedLayout& layout,
     std::string* outError = nullptr);
 GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state);
+std::string BuildGallerySourceIdentityKey(std::vector<std::string> identities);
+std::vector<GalleryCompletedBurstSourceSet> BuildGalleryCompletedBurstSourceSets(
+    const WorkspaceState& state);
+std::vector<GalleryProjectStack> BuildGalleryProjectStacks(
+    const GalleryPresentation& presentation,
+    const std::vector<RawGallerySimilarityStack>& originalStacks);
 void FilterGalleryProjectCards(GalleryPresentation& presentation, GalleryContentMode mode);
 RawPanelState BuildRawPanelState(const SourceRecord* source);
 GalleryPlacementMode ResolveExclusiveGalleryPlacement(
@@ -459,6 +488,12 @@ bool DiscoverProjects(
     std::vector<SourceRecord>& sources,
     CancellationPredicate shouldCancel = {});
 bool DiscoverSourceSetProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    std::vector<SourceSetProjectCatalogEntry>& projects,
+    CancellationPredicate shouldCancel = {});
+// Discover both source associations and Gallery project cards with one scan.
+bool DiscoverWorkspaceProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,

@@ -96,14 +96,6 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             addNode(std::move(node));
             if (input.node > 0) link(std::move(input), id, "imageIn");
         };
-        const int emptyMask = stableAllocate("raw/empty-mask");
-        RenderGraphNode zero;
-        zero.nodeId = emptyMask; zero.kind = RenderGraphNodeKind::MaskGenerator;
-        zero.maskKind = RenderMaskGeneratorKind::Solid; zero.maskSettings.value = 0.f;
-        zero.semanticDescriptor = MakeUnknownDescriptor(LogicalValueType::ScalarField);
-        addNode(std::move(zero));
-        link({base}, emptyMask, EditorNodeGraph::kMatchExtentInputSocketId);
-
         struct LayerCapture {
             const RawAdjustmentLayer* layer;
             RenderGraphSnapshot snapshot;
@@ -117,6 +109,8 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
         const auto endpointKey = [](const GraphModel::Endpoint& endpoint) {
             return endpoint.graphId + "/" + endpoint.nodeUuid + "/" + endpoint.portId;
         };
+        endpoints[endpointKey(RawPreparedSourceEndpoint())] = {base};
+        endpoints[endpointKey({kRawPreparedSourceGraph,"original","imageOut"})] = {original};
         if (composition) for (const auto& node : composition->GetNodes()) {
             if (node.kind == EditorNodeGraph::NodeKind::Output &&
                 node.outputSettings.publishedType != LogicalValueType::Invalid &&
@@ -145,8 +139,9 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
         for (const auto* layer : RawLayersInOrder(state)) {
             GraphSnapshotInputs input{layer->graph, noLayers, layer->animation, noDirtyNodes,
                 recipe, noRaw, noLiveTargets};
-            input.layerSettings = &layer->processingSettings;
             input.graphId = layer->id;
+            input.documentId = source.authoredDocumentId;
+            input.authoredRevision = source.authoredRevision;
             input.frame = {frame, duration, framesPerSecond};
             EditorNodeGraph::GraphOutputContext sources;
             for (const auto& node : layer->graph.GetNodes())
@@ -156,6 +151,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                     sources.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(node.id, "imageOut")] = scene;
             input.outputContextOverrides = &sources;
             LayerCapture capture{layer, BuildGraphSnapshot(input).snapshot, {}, previous, stableAllocate(layer->id + "/result")};
+            for (auto& node:capture.snapshot.nodes) node.uniformSourceIdentity=source.uniformSourceIdentity;
             for (const auto& node : capture.snapshot.nodes) {
                 const auto* authored = layer->graph.FindNode(node.nodeId);
                 capture.ids.emplace(node.nodeId, stableAllocate(layer->id + "/" +
@@ -181,21 +177,54 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             previous = capture.result;
             captures.push_back(std::move(capture));
         }
+        // Main image routing follows authored cap connections. Disabled layers
+        // are routed around here; references to their own outputs remain absent.
+        const auto routedInput = [&](std::optional<GraphModel::Endpoint> endpoint) {
+            std::unordered_set<std::string> visited;
+            while (endpoint) {
+                if (!visited.insert(endpointKey(*endpoint)).second) return Socket{};
+                const auto* owner = FindRawAdjustmentLayer(state,endpoint->graphId);
+                if (owner && (!owner->enabled || owner->opacity == 0.f)) {
+                    endpoint = RawLayerInputEndpoint(state,owner->id);
+                    continue;
+                }
+                const auto found = endpoints.find(endpointKey(*endpoint));
+                return found == endpoints.end() ? Socket{} : found->second;
+            }
+            return Socket{};
+        };
+        for (auto& capture : captures) {
+            capture.incoming = routedInput(RawLayerInputEndpoint(state,capture.layer->id)).node;
+            candidate.rawLayerStageNodeIds[capture.layer->id + "/input"] = capture.incoming;
+        }
+        const auto mainOutput = routedInput(RawMainOutputEndpoint(state));
+        const auto inactive = [&](const RawAdjustmentLayer& layer) {
+            return !layer.enabled || layer.opacity == 0.f ||
+                (state.explicitRouting && !layer.imageInput);
+        };
+        for (const auto& capture : captures) if (inactive(*capture.layer)) {
+            for (auto it = endpoints.begin(); it != endpoints.end();) {
+                if (it->first.rfind(capture.layer->id + "/",0) == 0) it = endpoints.erase(it);
+                else ++it;
+            }
+        }
         std::unordered_map<std::string, Socket> masks;
         for (const auto& capture : captures) {
             const auto& layer = *capture.layer;
             const auto complete = layer.graph.GetConnectedOutputNodeIds();
             for (const auto& output : layer.maskOutputs) {
-                Socket value{emptyMask, "maskOut"};
+                Socket value{};
                 const auto* node = FindRawPublishedNode(layer, output);
                 const auto input = std::find_if(capture.snapshot.links.begin(),capture.snapshot.links.end(),
                     [&](const auto& link) { return node && link.toNodeId == node->id && link.toSocketId == "imageIn"; });
-                if (node && node->outputEnabled && input != capture.snapshot.links.end() && capture.ids.count(input->fromNodeId) &&
+                if (!inactive(layer) && node && node->outputEnabled && input != capture.snapshot.links.end() && capture.ids.count(input->fromNodeId) &&
                     std::find(complete.begin(), complete.end(), node->id) != complete.end())
                     value = {capture.ids.at(input->fromNodeId), input->fromSocketId};
+                if (!inactive(layer) && node && (node->kind == EditorNodeGraph::NodeKind::MaskGenerator || node->kind == EditorNodeGraph::NodeKind::MaskTexture || node->kind == EditorNodeGraph::NodeKind::CustomMask) && capture.ids.count(node->id))
+                    value = {capture.ids.at(node->id),"maskOut"};
                 masks[MaskKey({layer.id, output.id})] = value;
                 candidate.rawLayerMaskOutputs[MaskKey({layer.id, output.id})] = {value.node, value.socket};
-                if (node) endpoints[endpointKey(RawLayerEndpoint(layer, *node))] = value;
+                if (node && value.node > 0) endpoints[endpointKey(RawMaskEndpoint(layer, *node))] = value;
             }
         }
         for (auto& capture : captures) {
@@ -210,17 +239,23 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 const auto* authored = layer.graph.FindNode(node.nodeId);
                 const int localId = node.nodeId;
                 node.nodeId = capture.ids.at(node.nodeId);
-                if (node.role == GraphModel::NodeRole::OriginalImage) pass(node.nodeId, {original});
+                if (inactive(layer)) {
+                    candidate.unavailableOutputs[node.nodeId] = layer.name + ": layer is off or disconnected.";
+                    pass(node.nodeId, {});
+                }
+                else if (node.role == GraphModel::NodeRole::OriginalImage) pass(node.nodeId, {original});
                 else if (node.role == GraphModel::NodeRole::CurrentImage) pass(node.nodeId, {capture.incoming});
                 else if (node.role == GraphModel::NodeRole::Reference) {
                     const auto found = endpoints.find(endpointKey(node.reference));
                     const bool mask = node.kind == RenderGraphNodeKind::MaskGenerator;
                     if (!mask && found == endpoints.end())
                         candidate.unavailableOutputs[node.nodeId] = layer.name + " / " + (authored ? authored->title : "Compound reference") + ": the referenced producer is unavailable.";
-                    pass(node.nodeId, found != endpoints.end() ? found->second :
-                        mask ? Socket{emptyMask, "maskOut"} : Socket{});
+                    pass(node.nodeId, found != endpoints.end() ? found->second : Socket{});
                 } else {
-                    if (node.kind == RenderGraphNodeKind::MaskGenerator &&
+                    const bool projectCanvas = (node.kind == RenderGraphNodeKind::MaskGenerator || node.kind == RenderGraphNodeKind::CustomMask) &&
+                        node.rawCoverage.value("canvas",std::string{}) == "project";
+                    if (projectCanvas) node.maskCanvasSourceNodeId = base;
+                    if (node.kind == RenderGraphNodeKind::MaskGenerator && !projectCanvas &&
                         std::none_of(capture.snapshot.links.begin(),capture.snapshot.links.end(),[&](const auto& connection) {
                             return connection.toNodeId == localId && connection.toSocketId == EditorNodeGraph::kMatchExtentInputSocketId;
                         }))
@@ -233,13 +268,16 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                     addNode(std::move(node));
                 }
             }
-            for (auto connection : capture.snapshot.links) {
+            if (!inactive(layer)) for (auto connection : capture.snapshot.links) {
                 connection.fromNodeId = capture.ids.at(connection.fromNodeId);
                 connection.toNodeId = capture.ids.at(connection.toNodeId);
                 candidate.links.push_back(std::move(connection));
             }
             const auto* result = FindRawRole(layer, GraphModel::NodeRole::LayerResult);
-            if (!layer.enabled || layer.opacity == 0.f) pass(capture.result, {capture.incoming});
+            if (inactive(layer)) {
+                pass(capture.result, {});
+                candidate.unavailableOutputs[capture.result] = layer.name + ": layer is off or disconnected.";
+            }
             else if (!layer.layerMask && layer.opacity == 1.f) pass(capture.result, {capture.ids.at(result->id)});
             else {
                 RenderGraphNode blend;
@@ -250,7 +288,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 link({capture.ids.at(result->id)}, capture.result, "imageB");
                 if (layer.layerMask) {
                     const auto mask = masks.find(MaskKey(*layer.layerMask));
-                    link(mask == masks.end() ? Socket{emptyMask, "maskOut"} : mask->second, capture.result, "factor");
+                    if (mask != masks.end() && mask->second.node > 0) link(mask->second, capture.result, "factor");
                 }
             }
         }
@@ -264,7 +302,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 [&](const auto& node) { return node.nodeId == authored.nodeId; }), candidate.nodes.end());
             if (!mask && resolved == endpoints.end())
                 candidate.unavailableOutputs[authored.nodeId] = "The referenced producer is unavailable.";
-            pass(authored.nodeId, resolved != endpoints.end() ? resolved->second : mask ? Socket{emptyMask,"maskOut"} : Socket{});
+            pass(authored.nodeId, resolved != endpoints.end() ? resolved->second : Socket{});
         }
         // Typed publications are value aliases, not image conversions. Resolve
         // them before the existing scalar/frequency consumers are scheduled.
@@ -279,7 +317,8 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 connection.fromNodeId = source.node; connection.fromSocketId = source.socket;
             }
         }
-        pass(backgroundNodeId, {previous});
+        pass(backgroundNodeId, mainOutput);
+        if (!mainOutput.node) candidate.unavailableOutputs[backgroundNodeId] = "Connect a layer End to the image output.";
         // The finished RAW stack remains scene-linear for outer composition.
         // The presentation transform runs once at the requested final output.
         {
@@ -344,8 +383,8 @@ bool IsRawLayerOutputAvailable(const RenderGraphSnapshot& graph, std::string& er
         const auto node = nodes.find(endpoint.node);
         if (node == nodes.end()) { error = "The requested image producer is missing."; return false; }
         for (const auto* link : inputs[endpoint.node]) {
-            // Missing mask coverage is defined as empty. It does not fabricate
-            // a photo image, and it must not make an unused mask draft fatal.
+            // Optional missing coverage leaves its consumer unrestricted.
+            // A missing required math input still makes that branch unavailable.
             if (link->toSocketId == "maskIn" || link->toSocketId == "factor" ||
                 link->toSocketId.rfind("gradient:", 0) == 0 || link->toSocketId.rfind("area:", 0) == 0) continue;
             if (GraphModel::OutputDependsOnInput(node->second->outputDependencies, endpoint.socket, link->toSocketId))

@@ -93,6 +93,9 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
     for (const RawGalleryFilmstripSourceSortInfo& source : sources) {
         if (source.sourceKey.empty()) continue;
         byKey.emplace(source.sourceKey, source);
+        auto& prepared = byKey.at(source.sourceKey);
+        prepared.fileName = LowerAscii(prepared.fileName);
+        prepared.folderKey = LowerAscii(prepared.folderKey);
         catalogKeys.push_back(source.sourceKey);
     }
 
@@ -130,6 +133,8 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
             const auto* leftSource = sourceForStack(left);
             const auto* rightSource = sourceForStack(right);
             if (leftSource == nullptr || rightSource == nullptr) {
+                if ((leftSource == nullptr) != (rightSource == nullptr))
+                    return leftSource != nullptr;
                 return left.anchorCatalogIndex < right.anchorCatalogIndex;
             }
 
@@ -142,11 +147,13 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
                 case RawGalleryFilmstripSortMode::FileNameAscending:
                 case RawGalleryFilmstripSortMode::FileNameDescending:
                     comparison = CompareValues(
-                        LowerAscii(leftSource->fileName),
-                        LowerAscii(rightSource->fileName));
+                        leftSource->fileName, rightSource->fileName);
                     break;
                 case RawGalleryFilmstripSortMode::ModifiedNewestFirst:
                 case RawGalleryFilmstripSortMode::ModifiedOldestFirst:
+                    if ((leftSource->modifiedTimeTicks == 0) !=
+                        (rightSource->modifiedTimeTicks == 0))
+                        return leftSource->modifiedTimeTicks != 0;
                     comparison = CompareValues(
                         leftSource->modifiedTimeTicks,
                         rightSource->modifiedTimeTicks);
@@ -157,8 +164,7 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
                     break;
                 case RawGalleryFilmstripSortMode::TimelineByFolder:
                     comparison = CompareValues(
-                        LowerAscii(leftSource->folderKey),
-                        LowerAscii(rightSource->folderKey));
+                        leftSource->folderKey, rightSource->folderKey);
                     if (comparison == 0) {
                         comparison = CompareKnownTimes(
                             TimelineTime(*leftSource), TimelineTime(*rightSource));
@@ -167,12 +173,10 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
                 case RawGalleryFilmstripSortMode::FolderThenNameAscending:
                 case RawGalleryFilmstripSortMode::FolderThenNameDescending:
                     comparison = CompareValues(
-                        LowerAscii(leftSource->folderKey),
-                        LowerAscii(rightSource->folderKey));
+                        leftSource->folderKey, rightSource->folderKey);
                     if (comparison == 0) {
                         comparison = CompareValues(
-                            LowerAscii(leftSource->fileName),
-                            LowerAscii(rightSource->fileName));
+                            leftSource->fileName, rightSource->fileName);
                     }
                     break;
             }
@@ -190,6 +194,23 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
             return leftSource->catalogIndex < rightSource->catalogIndex;
         });
     return stacks;
+}
+
+std::vector<RawGalleryStackSection> BuildRawGalleryStackSections(
+    const std::vector<RawGallerySimilarityStack>& stacks,
+    RawGalleryFilmstripSortMode mode) {
+    if (stacks.empty()) return {};
+    const bool byFolder = mode == RawGalleryFilmstripSortMode::TimelineByFolder ||
+        mode == RawGalleryFilmstripSortMode::FolderThenNameAscending ||
+        mode == RawGalleryFilmstripSortMode::FolderThenNameDescending;
+    if (!byFolder) return {{ {}, 0u, stacks.size() }};
+    std::vector<RawGalleryStackSection> sections;
+    for (std::size_t index = 0; index < stacks.size(); ++index) {
+        if (sections.empty() || sections.back().folderKey != stacks[index].folderKey)
+            sections.push_back({stacks[index].folderKey, index, 0u, true});
+        ++sections.back().stackCount;
+    }
+    return sections;
 }
 
 std::vector<std::string> ReorderRawGalleryManualSourceOrder(

@@ -4,6 +4,7 @@
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/Timeline/TimelinePersistence.h"
+#include "Graph/LayerOperationParameters.h"
 
 #include <algorithm>
 #include <memory>
@@ -13,9 +14,10 @@
 namespace {
 
 EditorNodeGraph::Node MakeTreeOnlyNode(EditorNodeGraph::Node node) {
+    if (node.kind==EditorNodeGraph::NodeKind::Layer)
+        node.layerParameters=Stack::GraphModel::DefaultLayerParameters(node.layerType);
     node.image = {};
     node.rawSource = {};
-    node.rawNeuralDenoise = {};
     node.rawDevelop = {};
     node.rawDetailAutoMask = {};
     node.rawDetailFusion = {};
@@ -117,10 +119,8 @@ ExportResult BuildExport(
     }
 
     const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    const auto& layers = editor->GetLayers();
     std::unordered_set<int> includedNodeIds(nodeIds.begin(), nodeIds.end());
 
-    std::unordered_map<int, int> oldLayerIndexToNew;
     nlohmann::json layerArray = nlohmann::json::array();
     EditorNodeGraph::Graph exportGraph;
     exportGraph.Clear();
@@ -136,25 +136,8 @@ ExportResult BuildExport(
 
         EditorNodeGraph::Node nodeCopy = includeState ? *sourceNode : MakeTreeOnlyNode(*sourceNode);
         if (nodeCopy.kind == EditorNodeGraph::NodeKind::Layer) {
-            int remappedLayerIndex = -1;
-            const auto it = oldLayerIndexToNew.find(sourceNode->layerIndex);
-            if (it != oldLayerIndexToNew.end()) {
-                remappedLayerIndex = it->second;
-            } else if (sourceNode->layerIndex >= 0 && sourceNode->layerIndex < static_cast<int>(layers.size())) {
-                remappedLayerIndex = static_cast<int>(layerArray.size());
-                oldLayerIndexToNew[sourceNode->layerIndex] = remappedLayerIndex;
-                std::shared_ptr<LayerBase> layerToSerialize = layers[sourceNode->layerIndex];
-                if (!includeState) {
-                    const std::string typeId = layerToSerialize->Serialize().value("type", std::string());
-                    std::shared_ptr<LayerBase> defaultLayer = LayerRegistry::CreateLayerFromTypeId(typeId);
-                    if (defaultLayer) {
-                        defaultLayer->InitializeGL();
-                        layerToSerialize = defaultLayer;
-                    }
-                }
-                layerArray.push_back(layerToSerialize ? layerToSerialize->Serialize() : nlohmann::json::object());
-            }
-            nodeCopy.layerIndex = remappedLayerIndex;
+            nodeCopy.layerIndex = static_cast<int>(layerArray.size());
+            layerArray.push_back(nodeCopy.layerParameters);
         }
 
         exportGraph.EditNodes().push_back(std::move(nodeCopy));

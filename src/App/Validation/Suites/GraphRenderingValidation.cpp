@@ -12,6 +12,7 @@
 #include <chrono>
 #include <future>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 
@@ -407,9 +408,68 @@ void ValidateGraphThroughRawService(GLFWwindow* window) {
     std::cout << "RAW-backed Graph service kept native resolution and forward progress.\n";
 }
 
+void ValidateGraphFramePresentation() {
+    std::unique_ptr<ImGuiContext, void(*)(ImGuiContext*)> context(ImGui::CreateContext(), ImGui::DestroyContext);
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(160, 120);
+    io.DeltaTime = 1.f / 60.f;
+    unsigned char* fontPixels = nullptr;
+    int fontWidth = 0, fontHeight = 0;
+    io.Fonts->GetTexDataAsRGBA32(&fontPixels, &fontWidth, &fontHeight);
+    const auto nextDrawFrame = [] {
+        ImGui::NewFrame();
+        ImGui::Begin("Graph frame transition validation");
+    };
+    const auto finishDrawFrame = [] { ImGui::End(); ImGui::Render(); };
+    nextDrawFrame();
+    GraphFrameTransition transition;
+    Stack::GraphRendering::FramePresentation frame {{true,4,0,false,1,123,1},2,2,false,1.0};
+    Require(!transition.Prepare(frame,200), "First frame should not blend");
+    frame.completedAt = 1.2;
+    Require(transition.Prepare(frame,200), "Slow completion should blend");
+    const auto oldTexture = GLHelpers::CreateEmptyTexture(2,2);
+    transition.RetainOwned(oldTexture,2,2);
+    transition.Validate(frame.identity,1.25);
+    Require(glIsTexture(oldTexture), "Transition released its previous frame too early");
+    transition.Validate(frame.identity,1.4);
+    Require(glIsTexture(oldTexture), "A hidden completion consumed its fade before the first draw");
+    const auto currentTexture = GLHelpers::CreateEmptyTexture(2,2);
+    Require(transition.Draw(ImGui::GetWindowDrawList(),currentTexture,{0,0},{80,80},1.5,
+        {0,1},{1,0},IM_COL32_WHITE,0), "First visible draw did not start the pending fade");
+    transition.Validate(frame.identity,1.55);
+    Require(transition.Active(), "Visible transition ended before its duration");
+    transition.Validate(frame.identity,1.65);
+    Require(!transition.Active() && glIsTexture(oldTexture), "Queued fade draw lost its previous-frame lease");
+    finishDrawFrame();nextDrawFrame();
+    transition.Validate(frame.identity,1.7);
+    Require(!glIsTexture(oldTexture), "Finished transition retained its previous frame after draw submission");
+    frame.completedAt = 1.8;
+    Require(transition.Prepare(frame,200), "Subsequent completion should blend");
+    const auto interruptedTexture = GLHelpers::CreateEmptyTexture(2,2);
+    transition.RetainOwned(interruptedTexture,2,2);
+    Require(transition.Draw(ImGui::GetWindowDrawList(),currentTexture,{0,0},{80,80},1.85,
+        {0,1},{1,0},IM_COL32_WHITE,0), "Subsequent visible transition did not start");
+    frame.completedAt = 1.9;
+    Require(transition.Prepare(frame,100), "Newest completion was delayed by an old blend");
+    Require(glIsTexture(interruptedTexture), "Retargeted blend discarded its still-visible base");
+    const auto switchedTexture = GLHelpers::CreateEmptyTexture(2,2);
+    transition.RetainOwned(switchedTexture,2,2);
+    Require(!glIsTexture(switchedTexture), "Retargeted blend retained an unnecessary target texture");
+    frame.identity.outputNodeId++;
+    transition.Validate(frame.identity,1.91);
+    Require(!transition.Active(), "Output switch retained a transition from another output");
+    finishDrawFrame();nextDrawFrame();
+    transition.Validate(frame.identity,1.92);
+    Require(!glIsTexture(interruptedTexture), "Output switch retained its previous queued draw after submission");
+    finishDrawFrame();
+    glDeleteTextures(1,&currentTexture);
+    transition.Shutdown();
+}
+
 } // namespace
 
-bool ValidateGraphRendering(bool projectOwnershipOnly) {
+bool ValidateGraphRendering(bool projectOwnershipOnly, bool viewportPreviewOnly) {
     std::cout << std::unitbuf;
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -422,7 +482,12 @@ bool ValidateGraphRendering(bool projectOwnershipOnly) {
         glfwMakeContextCurrent(window);
         try {
             Require(LoadGLFunctions(), "OpenGL loading failed");
-            if (projectOwnershipOnly) {
+            if (viewportPreviewOnly) {
+                Require(ValidateRawViewportTransitions(), "Frame blending shader validation failed");
+                ValidateGraphFramePresentation();
+                Require(ValidateGraphViewportRendering(), "Viewport graph validation failed");
+                Require(ValidateGraphViewportWorker(window), "Viewport worker delivery validation failed");
+            } else if (projectOwnershipOnly) {
                 ValidateOwnerDelivery(window);
                 RenderPipeline pipeline;
                 pipeline.Initialize();
@@ -432,32 +497,7 @@ bool ValidateGraphRendering(bool projectOwnershipOnly) {
             } else {
             Require(ValidateRawViewportTransitions(), "Frame blending shader validation failed");
             Require(ValidateRawViewportPresentation(), "Raw viewport presentation validation failed");
-            {
-                GraphFrameTransition transition;
-                Stack::GraphRendering::FramePresentation frame {{true,4,0,false,1,123,1},2,2,false,1.0};
-                Require(!transition.Prepare(frame,200), "First frame should not blend");
-                frame.completedAt = 1.2;
-                Require(transition.Prepare(frame,200), "Slow completion should blend");
-                const auto oldTexture = GLHelpers::CreateEmptyTexture(2,2);
-                transition.RetainOwned(oldTexture,2,2);
-                transition.Validate(frame.identity,1.25);
-                Require(glIsTexture(oldTexture), "Transition released its previous frame too early");
-                transition.Validate(frame.identity,1.4);
-                Require(!glIsTexture(oldTexture), "Finished transition retained its previous frame");
-                frame.completedAt = 1.5;
-                Require(transition.Prepare(frame,200), "Subsequent completion should blend");
-                const auto interruptedTexture = GLHelpers::CreateEmptyTexture(2,2);
-                transition.RetainOwned(interruptedTexture,2,2);
-                frame.completedAt = 1.55;
-                Require(transition.Prepare(frame,100), "Newest completion was delayed by an old blend");
-                Require(!glIsTexture(interruptedTexture), "Interrupted blend retained an obsolete frame");
-                const auto switchedTexture = GLHelpers::CreateEmptyTexture(2,2);
-                transition.RetainOwned(switchedTexture,2,2);
-                frame.identity.outputNodeId++;
-                transition.Validate(frame.identity,1.56);
-                Require(!glIsTexture(switchedTexture), "Output switch retained a transition from another output");
-                transition.Shutdown();
-            }
+            ValidateGraphFramePresentation();
             ValidateNativeCache(1024, 512);
             ValidateNativeCache(7680, 4320);
             ValidateWorker(window);

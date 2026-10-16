@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabImageMapping.h"
+#include "Editor/Internal/RawLab/RawLayerMaskPlacement.h"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,7 @@
 
 void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& context,
     const ImVec2& minimum, const ImVec2& maximum) {
+    if (IsRawImageNavigationActive()) return;
     using namespace Stack::Project;
     using Kind = EditorNodeGraph::MaskGeneratorKind;
     if (!context.canEdit || !m_EditingRawLayerMask) return;
@@ -30,11 +32,13 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         if (!visited.insert(id).second) continue;
         const auto* node = owner->graph.FindNode(id);
         if (!node) continue;
-        if (node->kind == EditorNodeGraph::NodeKind::MaskGenerator &&
+        if ((node->kind == EditorNodeGraph::NodeKind::MaskGenerator || node->kind == EditorNodeGraph::NodeKind::MaskTexture) &&
             (node->maskKind == Kind::RadialGradient || node->maskKind == Kind::LinearGradient || node->maskKind == Kind::Square))
             generators.push_back(id);
         for (const auto& link : owner->graph.GetLinks())
-            if (link.toNodeId == id) pending.push_back(link.fromNodeId);
+            // The sizing image can contain earlier masked edits; those shapes
+            // do not belong to this coverage branch.
+            if (link.toNodeId == id && link.toSocketId != "matchExtent") pending.push_back(link.fromNodeId);
     }
     if (generators.empty()) return;
     if (std::find(generators.begin(), generators.end(), m_RawLayerMaskGenerator) == generators.end())
@@ -49,8 +53,11 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         for (int id : generators) {
             const auto* choice = owner->graph.FindNode(id);
             ImGui::PushID(id);
-            if (ImGui::Selectable(choice->title.c_str(), id == m_RawLayerMaskGenerator))
+            if (ImGui::Selectable(choice->title.c_str(), id == m_RawLayerMaskGenerator)) {
+                m_Project->rawLayers.EndGesture();
+                m_RawLayerMaskDrag = -1;
                 m_RawLayerMaskGenerator = id;
+            }
             ImGui::PopID();
         }
         ImGui::EndCombo();
@@ -67,11 +74,9 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
     ImGui::PopID();
     ImGui::SetCursorScreenPos(previousCursor);
 
-    const auto settings = generator->maskSettings;
+    auto settings = generator->maskSettings;
     const auto kind = generator->maskKind;
     constexpr float pi = 3.14159265358979323846f;
-    const float angle = settings.angle * pi / 180.0f;
-    const float cs = std::cos(angle), sn = std::sin(angle);
     if (m_GraphOutputDescriptionRenderRevision != m_RenderRevision) BuildGraphSnapshot();
     const auto descriptor = m_GraphOutputDescriptions.find("raw/"+owner->id+"/"+
         EditorNodeGraph::GraphOutputIdentity(generator->id,"maskOut"));
@@ -95,27 +100,118 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         return ImVec2(local.x,1-local.y);
     };
     const auto distance = [](ImVec2 a, ImVec2 b) { return std::hypot(a.x - b.x, a.y - b.y); };
+    using namespace Stack::Editor::RawLabInternal;
     std::array<ImVec2, 5> handles;
     int count = 5;
-    const float scale = std::max(settings.scale, .001f);
-    float centerU = settings.centerX, centerV = settings.centerY;
-    if (kind == Kind::LinearGradient) {
-        centerU = .5f - cs * settings.offset / scale;
-        centerV = .5f - sn * settings.offset / scale;
-        handles[0] = screen(centerU, centerV);
-        handles[1] = screen(centerU - cs * .5f / scale, centerV - sn * .5f / scale);
-        handles[2] = screen(centerU + cs * .5f / scale, centerV + sn * .5f / scale);
-        count = 3;
-    } else {
-        handles[0] = screen(centerU, centerV);
-        handles[1] = screen(centerU + cs * settings.radius, centerV + sn * settings.radius);
-        handles[2] = screen(centerU - sn * settings.radiusY, centerV + cs * settings.radiusY);
-        handles[3] = screen(centerU + cs * (settings.radius + .08f), centerV + sn * (settings.radius + .08f));
-        handles[4] = screen(centerU + cs * (settings.radius + settings.feather), centerV + sn * (settings.radius + settings.feather));
+    float scale = 1, centerU = .5f, centerV = .5f, cs = 1, sn = 0;
+    const auto updateHandles = [&] {
+        const float angle = settings.angle * pi / 180.0f;
+        cs = std::cos(angle); sn = std::sin(angle);
+        scale = std::max(settings.scale, .001f);
+        centerU = settings.centerX; centerV = settings.centerY;
+        if (kind == Kind::LinearGradient) {
+            centerU = .5f - cs * settings.offset / scale;
+            centerV = .5f - sn * settings.offset / scale;
+            handles[0] = screen(centerU, centerV);
+            handles[1] = screen(centerU - cs * .5f / scale, centerV - sn * .5f / scale);
+            handles[2] = screen(centerU + cs * .5f / scale, centerV + sn * .5f / scale);
+            count = 3;
+        } else {
+            handles[0] = screen(centerU, centerV);
+            handles[1] = screen(centerU + cs * settings.radius, centerV + sn * settings.radius);
+            handles[2] = screen(centerU - sn * settings.radiusY, centerV + cs * settings.radiusY);
+            handles[3] = screen(centerU + cs * (settings.radius + .08f), centerV + sn * (settings.radius + .08f));
+            handles[4] = screen(centerU + cs * (settings.radius + settings.feather), centerV + sn * (settings.radius + settings.feather));
+        }
+    };
+    updateHandles();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        if (m_Project->rawLayers.CancelGesture()) { MarkDirty(); MarkRenderRefreshDirty(); }
+        m_RawLayerMaskDrag = -1;
+        return;
     }
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool hovered = ImGui::IsWindowHovered();
+    const bool inImage = ImRect(minimum,maximum).Contains(mouse) && hovered;
+    if (m_RawLayerMaskDrag == MaskAwaitingPlacement && inImage)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    if (hovered && !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        int nearest = -1;
+        float best = 12;
+        if (m_RawLayerMaskDrag == MaskAwaitingPlacement) {
+            if (inImage) nearest = MaskPlacementDrag;
+        } else for (int i = 0; i < count; ++i) {
+            const float d = distance(handles[i], mouse);
+            if (d < best) { nearest = i; best = d; }
+        }
+        if (nearest >= 0) {
+            m_RawLayerMaskDrag = nearest;
+            m_RawLayerMaskDragStart = mouse;
+            m_RawLayerMaskDragOriginal = settings;
+            m_Project->rawLayers.BeginGesture();
+        }
+    }
+    if (m_RawLayerMaskDrag >= 0 &&
+        (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left)) &&
+        (m_RawLayerMaskDrag == MaskPlacementDrag || distance(mouse, m_RawLayerMaskDragStart) > 0)) {
+        auto candidate = m_Project->rawLayers.State();
+        auto& changed = FindRawAdjustmentLayer(candidate, reference.layerId)->graph.FindNode(m_RawLayerMaskGenerator)->maskSettings;
+        changed = m_RawLayerMaskDragOriginal;
+        const auto& original = m_RawLayerMaskDragOriginal;
+        const float a = original.angle*pi/180;
+        const float c = std::cos(a), s = std::sin(a);
+        const auto point = generatorPoint(mouse), start = generatorPoint(m_RawLayerMaskDragStart);
+        const float dx = point.x-start.x, dy = point.y-start.y;
+        if (m_RawLayerMaskDrag == MaskPlacementDrag) PlaceLayerMask(changed,kind,start,point);
+        else if (kind == Kind::LinearGradient) {
+            if (m_RawLayerMaskDrag == 0) changed.offset -= (dx*c+dy*s)*original.scale;
+            else {
+                const float sign = m_RawLayerMaskDrag == 1 ? -1.0f : 1.0f;
+                const float cx = .5f-c*original.offset/original.scale;
+                const float cy = .5f-s*original.offset/original.scale;
+                const float ux = (point.x-cx)*sign;
+                const float uy = (point.y-cy)*sign;
+                changed.angle = std::atan2(uy,ux)*180/pi;
+                changed.scale = std::clamp(.5f/std::max(.001f,std::hypot(ux,uy)),.1f,100.0f);
+                changed.offset = -((cx-.5f)*std::cos(changed.angle*pi/180)+
+                    (cy-.5f)*std::sin(changed.angle*pi/180))*changed.scale;
+            }
+        } else if (m_RawLayerMaskDrag == 0) {
+            changed.centerX = std::clamp(original.centerX+dx,-2.0f,3.0f);
+            changed.centerY = std::clamp(original.centerY+dy,-2.0f,3.0f);
+        } else if (m_RawLayerMaskDrag == 1) changed.radius = std::clamp(original.radius+dx*c+dy*s,.001f,4.0f);
+        else if (m_RawLayerMaskDrag == 2) changed.radiusY = std::clamp(original.radiusY-dx*s+dy*c,.001f,4.0f);
+        else if (m_RawLayerMaskDrag == 3) changed.angle = std::atan2(
+            point.y-original.centerY,
+            point.x-original.centerX)*180/pi;
+        else changed.feather = std::clamp(original.feather+dx*c+dy*s,.0001f,2.0f);
+        if (changed.centerX != settings.centerX || changed.centerY != settings.centerY ||
+            changed.radius != settings.radius || changed.radiusY != settings.radiusY ||
+            changed.angle != settings.angle || changed.feather != settings.feather ||
+            changed.offset != settings.offset || changed.scale != settings.scale) {
+            const auto updated = changed;
+            if (ApplyRawLayerStackEdit(std::move(candidate))) {
+                settings = updated;
+                updateHandles();
+            }
+        }
+    }
+    // Input suppression or focus loss can consume the release event. End the
+    // gesture when the button is no longer held so another control cannot
+    // inherit the shape drag or its undo group.
+    if (m_RawLayerMaskDrag >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        m_RawLayerMaskDrag = -1;
+        m_Project->rawLayers.EndGesture();
+    }
+
+    // Paint after applying the gesture so the outline follows this frame's
+    // pointer position even while its GPU image result is still pending.
     auto* draw = ImGui::GetWindowDrawList();
     draw->PushClipRect(minimum, maximum, true);
     const auto color = IM_COL32(255, 230, 145, 230);
+    if (m_RawLayerMaskDrag == MaskAwaitingPlacement)
+        draw->AddText({minimum.x+12,minimum.y+42},color,"Drag on the image to place this mask.");
     if (kind == Kind::LinearGradient) {
         draw->AddLine(handles[1], handles[2], color, 2);
         for (int i = 1; i <= 2; ++i) {
@@ -145,67 +241,4 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         draw->AddCircle(handles[i], 5, color, 0, 1.5f);
     }
     draw->PopClipRect();
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        if (m_Project->rawLayers.CancelGesture()) { MarkDirty(); MarkRenderRefreshDirty(); }
-        m_RawLayerMaskDrag = -1;
-        return;
-    }
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        int nearest = -1;
-        float best = 12;
-        for (int i = 0; i < count; ++i) {
-            const float d = distance(handles[i], mouse);
-            if (d < best) { nearest = i; best = d; }
-        }
-        if (nearest >= 0) {
-            m_RawLayerMaskDrag = nearest;
-            m_RawLayerMaskDragStart = mouse;
-            m_RawLayerMaskDragOriginal = settings;
-            m_Project->rawLayers.BeginGesture();
-        }
-    }
-    if (m_RawLayerMaskDrag >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-        distance(mouse, m_RawLayerMaskDragStart) > 0) {
-        auto candidate = m_Project->rawLayers.State();
-        auto& changed = FindRawAdjustmentLayer(candidate, reference.layerId)->graph.FindNode(m_RawLayerMaskGenerator)->maskSettings;
-        changed = m_RawLayerMaskDragOriginal;
-        const auto& original = m_RawLayerMaskDragOriginal;
-        const float a = original.angle*pi/180;
-        const float c = std::cos(a), s = std::sin(a);
-        const auto point = generatorPoint(mouse), start = generatorPoint(m_RawLayerMaskDragStart);
-        const float dx = point.x-start.x, dy = point.y-start.y;
-        if (kind == Kind::LinearGradient) {
-            if (m_RawLayerMaskDrag == 0) changed.offset -= (dx*c+dy*s)*original.scale;
-            else {
-                const float sign = m_RawLayerMaskDrag == 1 ? -1.0f : 1.0f;
-                const float cx = .5f-c*original.offset/original.scale;
-                const float cy = .5f-s*original.offset/original.scale;
-                const float ux = (point.x-cx)*sign;
-                const float uy = (point.y-cy)*sign;
-                changed.angle = std::atan2(uy,ux)*180/pi;
-                changed.scale = std::clamp(.5f/std::max(.001f,std::hypot(ux,uy)),.1f,100.0f);
-                changed.offset = -((cx-.5f)*std::cos(changed.angle*pi/180)+
-                    (cy-.5f)*std::sin(changed.angle*pi/180))*changed.scale;
-            }
-        } else if (m_RawLayerMaskDrag == 0) {
-            changed.centerX = std::clamp(original.centerX+dx,-2.0f,3.0f);
-            changed.centerY = std::clamp(original.centerY+dy,-2.0f,3.0f);
-        } else if (m_RawLayerMaskDrag == 1) changed.radius = std::clamp(original.radius+dx*c+dy*s,.001f,4.0f);
-        else if (m_RawLayerMaskDrag == 2) changed.radiusY = std::clamp(original.radiusY-dx*s+dy*c,.001f,4.0f);
-        else if (m_RawLayerMaskDrag == 3) changed.angle = std::atan2(
-            point.y-original.centerY,
-            point.x-original.centerX)*180/pi;
-        else changed.feather = std::clamp(original.feather+dx*c+dy*s,.0001f,2.0f);
-        if (changed.centerX != settings.centerX || changed.centerY != settings.centerY ||
-            changed.radius != settings.radius || changed.radiusY != settings.radiusY ||
-            changed.angle != settings.angle || changed.feather != settings.feather ||
-            changed.offset != settings.offset || changed.scale != settings.scale)
-            ApplyRawLayerStackEdit(std::move(candidate));
-    }
-    if (m_RawLayerMaskDrag >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        m_RawLayerMaskDrag = -1;
-        m_Project->rawLayers.EndGesture();
-    }
 }

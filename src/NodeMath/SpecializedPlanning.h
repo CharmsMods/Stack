@@ -14,9 +14,6 @@ enum class SpecializedStageKind {
     RawDevelopment,
     NeuralOrExternal,
     MultiFrameMerge,
-    FrequencyTransform,
-    FrequencyInverseTransform,
-    FrequencyOperation,
     ScopeAnalysis,
     PreviewReadback,
     ExportReadback

@@ -26,10 +26,7 @@ const RenderGraphNode* RenderPipeline::FindUpstreamRawSourceNode(
         if (rawIt->second->kind == RenderGraphNodeKind::RawSource) {
             return rawIt->second;
         }
-        if (rawIt->second->kind != RenderGraphNodeKind::RawNeuralDenoise) {
-            break;
-        }
-        rawInput = executionContext.FindInputLink(rawIt->second->nodeId, "rawIn");
+        break;
     }
     return nullptr;
 }

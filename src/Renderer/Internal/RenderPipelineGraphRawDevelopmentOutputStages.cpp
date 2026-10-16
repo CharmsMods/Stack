@@ -2,6 +2,7 @@
 
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawColorWarpMask.h"
+#include "Raw/RawColorWarpSelection.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/CoverageSampling.h"
 #include "Renderer/GLStateGuards.h"
@@ -243,51 +244,16 @@ void HashColorWarpMaskValue(std::size_t& seed, const T& value) {
 }
 
 std::size_t BuildColorWarpMaskKey(
-    const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     const Stack::RawRecipe::RawColorWarpRecipe& colorWarp,
+    std::size_t inputKey,
     int qualityLongEdge,
     int width,
     int height) {
-    const auto stages = Stack::Renderer::RawDevelopmentCache::BuildStageFingerprints(
-        recipe,
-        qualityLongEdge);
-    std::size_t seed = stages.postFinishTone;
+    std::size_t seed = inputKey;
     HashColorWarpMaskValue(seed, qualityLongEdge);
     HashColorWarpMaskValue(seed, width);
     HashColorWarpMaskValue(seed, height);
-    for (const auto& pin : colorWarp.pins) {
-        if (!pin.enabled) continue;
-        HashColorWarpMaskValue(seed, pin.id);
-        HashColorWarpMaskValue(seed, pin.sourceA);
-        HashColorWarpMaskValue(seed, pin.sourceB);
-        HashColorWarpMaskValue(seed, pin.radius);
-        HashColorWarpMaskValue(seed, pin.softness);
-        HashColorWarpMaskValue(seed, pin.qualifierDirectionality);
-        HashColorWarpMaskValue(seed, pin.qualifierOrientationRadians);
-        HashColorWarpMaskValue(seed, pin.qualifierAperture);
-        HashColorWarpMaskValue(seed, pin.regionId);
-        for (const float sample : pin.evCurve.samples) {
-            HashColorWarpMaskValue(seed, sample);
-        }
-    }
-    for (const auto& region : colorWarp.regions) {
-        HashColorWarpMaskValue(seed, region.id);
-        HashColorWarpMaskValue(seed, static_cast<int>(region.spatialMode));
-        HashColorWarpMaskValue(seed, region.reachPixels);
-        HashColorWarpMaskValue(seed, region.spatialSupport);
-        HashColorWarpMaskValue(seed, region.edgeStop);
-        HashColorWarpMaskValue(seed, region.featherPixels);
-        HashColorWarpMaskValue(seed, static_cast<int>(region.featherDirection));
-        for (const auto& circle : region.circles) {
-            HashColorWarpMaskValue(seed, circle.id);
-            HashColorWarpMaskValue(seed, circle.centerU);
-            HashColorWarpMaskValue(seed, circle.centerV);
-            HashColorWarpMaskValue(seed, circle.radiusU);
-            HashColorWarpMaskValue(seed, circle.radiusV);
-            HashColorWarpMaskValue(seed, static_cast<int>(circle.interpretation));
-            HashColorWarpMaskValue(seed, static_cast<int>(circle.polarity));
-        }
-    }
+    HashColorWarpMaskValue(seed, Stack::RawRecipe::ColorWarpSelectionFingerprint(colorWarp));
     return seed == 0u ? 1u : seed;
 }
 
@@ -295,7 +261,9 @@ std::size_t BuildColorWarpMaskKey(
 
 bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     GraphNodeRenderResult& result,
-    const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
+    const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+    std::size_t inputFingerprint, int sourceWidth, int sourceHeight,
+    const Raw::ViewportRegion& inputRegion) {
     const Stack::RawRecipe::RawColorWarpRecipe colorWarp =
         Stack::RawRecipe::SanitizeColorWarpRecipe(recipe.colorWarp);
     if (!Stack::RawRecipe::IsColorWarpEnabled(colorWarp)) {
@@ -446,9 +414,16 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                 std::max(1, std::max(m_Width, m_Height)));
         const int proxyWidth = std::max(1, static_cast<int>(std::lround(m_Width * proxyScale)));
         const int proxyHeight = std::max(1, static_cast<int>(std::lround(m_Height * proxyScale)));
+        std::size_t inputKey = inputFingerprint;
+        HashColorWarpMaskValue(inputKey, static_cast<int>(recipe.technical.workingSpace));
+        HashColorWarpMaskValue(inputKey, sourceWidth);
+        HashColorWarpMaskValue(inputKey, sourceHeight);
+        HashColorWarpMaskValue(inputKey, m_Width);
+        HashColorWarpMaskValue(inputKey, m_Height);
+        HashColorWarpMaskValue(inputKey, inputRegion.Fingerprint());
         const std::size_t maskKey = BuildColorWarpMaskKey(
-            recipe,
             colorWarp,
+            inputKey,
             qualityLongEdge,
             m_Width,
             m_Height);
@@ -463,6 +438,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                     return pin != nullptr && pin->id == cachedId;
                 });
         const bool compatibleCachedMask =
+            inputFingerprint != 0u && cache.inputKey == inputKey &&
             cachedLayersMatch &&
             cache.gateTexture != 0 && cache.supportTexture != 0 &&
             cache.boundaryTexture != 0 && cache.guideTexture != 0;
@@ -517,8 +493,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             Stack::RawRecipe::RawColorWarpMaskGuide guide;
             guide.width = proxyWidth;
             guide.height = proxyHeight;
-            guide.sourceWidth = m_Width;
-            guide.sourceHeight = m_Height;
+            guide.sourceWidth = sourceWidth > 0 ? sourceWidth : m_Width;
+            guide.sourceHeight = sourceHeight > 0 ? sourceHeight : m_Height;
             guide.pixels.resize(static_cast<std::size_t>(proxyWidth) * proxyHeight);
             std::vector<float> packedGuide(guide.pixels.size() * 4u, 0.0f);
             if (proxyReady) {
@@ -637,6 +613,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                 deleteTexture(cache.boundaryTexture);
                 deleteTexture(cache.guideTexture);
                 cache.key = maskKey;
+                cache.inputKey = inputKey;
                 cache.width = proxyWidth;
                 cache.height = proxyHeight;
                 cache.layers = pinCount;
@@ -662,7 +639,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         if (!useSpatialMasks && m_RawDevelopmentInteractivePreview &&
             compatibleCachedMask) {
             // Keep the last coherent spatial selection on screen while a
-            // source/EV/region edit rebuilds its lower-tier interaction mask.
+            // qualifier/EV/region edit rebuilds its interaction mask. Input,
+            // working space and sample geometry must still match.
             // Publishing an un-gated direct qualifier here makes every remote
             // color match flash during the drag and then disappear on release.
             useSpatialMasks = true;

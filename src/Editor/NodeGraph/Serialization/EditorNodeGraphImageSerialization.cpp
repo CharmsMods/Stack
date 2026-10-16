@@ -36,14 +36,27 @@ std::vector<unsigned char> EncodeImagePayloadPngForStorage(
     }
     std::vector<unsigned char> topLeftPixels;
     try {
-        topLeftPixels = bottomLeftPixels;
+        if (channels < 3) {
+            // These are packed GL_RED/GL_RG numerical values. PNG's two-channel
+            // gray/alpha interpretation would move G into alpha on reopen.
+            std::size_t storageSize = 0;
+            if (!Stack::PixelBuffer::TryComputePixelByteCount(width, height, 4, storageSize)) return {};
+            topLeftPixels.resize(storageSize);
+            for (std::size_t i = 0, source = 0; i < storageSize; i += 4, source += channels) {
+                topLeftPixels[i] = bottomLeftPixels[source];
+                topLeftPixels[i + 1] = channels == 2 ? bottomLeftPixels[source + 1] : 0;
+                topLeftPixels[i + 2] = 0;
+                topLeftPixels[i + 3] = 255;
+            }
+        } else topLeftPixels = bottomLeftPixels;
     } catch (const std::bad_alloc&) {
         return {};
     } catch (const std::length_error&) {
         return {};
     }
-    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
-    return EncodePng(topLeftPixels, width, height, channels);
+    const int storageChannels = channels < 3 ? 4 : channels;
+    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, storageChannels);
+    return EncodePng(topLeftPixels, width, height, storageChannels);
 }
 
 void BuildImagePayloadPreview(

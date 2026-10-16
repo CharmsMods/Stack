@@ -10,7 +10,6 @@
 #include "NodeMath/PointwiseIR.h"
 #include "NodeMath/SpecializedPlanning.h"
 #include "Renderer/FullscreenQuad.h"
-#include "Renderer/Frequency/GpuFft.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Raw/RawAutoBase.h"
@@ -114,8 +113,8 @@ enum class RawDevelopmentGraphScopeStage {
 
 struct RawDevelopmentGraphScopeReadback {
     bool valid = false;
-    // Actual upstream content for a graph operation, independent of the old
-    // recipe-stage positions. Zero denotes a standalone recipe readback.
+    // Actual incoming content, including standalone Color Warp recipe stages.
+    // Zero means the producer did not provide a content identity.
     std::size_t graphInputFingerprint = 0;
     float inputExposureEv = 0.0f;
     RawDevelopmentGraphScopeStage stage = RawDevelopmentGraphScopeStage::None;
@@ -165,12 +164,16 @@ struct SpecializedBoundaryExecutionStats {
 
 struct GraphExecutionStats {
     bool allocationFailed = false;
+    int viewportRegionalStages = 0;
+    std::uint64_t viewportRegionalPixels = 0;
+    std::uint64_t viewportInputSamplePixels = 0;
+    std::uint64_t viewportCompleteDependencyPixels = 0;
+    std::uint64_t viewportWorkingBytes = 0;
+    std::size_t viewportPlanFingerprint = 0;
     int imageCacheHits = 0;
     int imageCacheMisses = 0;
     int maskCacheHits = 0;
     int maskCacheMisses = 0;
-    int frequencyCacheHits = 0;
-    int frequencyCacheMisses = 0;
     int rawStageCacheHits = 0;
     int rawStageCacheMisses = 0;
     int rawRgbDenoisePasses = 0;
@@ -224,6 +227,7 @@ struct GraphExecutionStats {
     std::string lastReductionFailure;
     int lastReductionFailureNodeId = -1;
     std::vector<ReductionExecutionStats> reductions;
+    std::vector<Stack::NodeMath::UniformParameterFeedback> uniformParameters;
     std::vector<SpecializedBoundaryExecutionStats> specializedBoundaries;
     std::string lastSpecializedFailure;
     int lastSpecializedFailureNodeId = -1;
@@ -368,6 +372,13 @@ public:
         m_RawViewportRequest = request;
     }
     const Raw::ViewportRegion& GetRawViewportRegion() const { return m_RawViewportAppliedRegion; }
+    void SetGraphViewportRequest(const Stack::Renderer::ViewportPreviewRequest& request) {
+        m_GraphViewportRequest = request;
+        m_GraphViewportGeometry = {};
+    }
+    const Stack::Renderer::ViewportPreviewGeometry& GetGraphViewportGeometry() const {
+        return m_GraphViewportGeometry;
+    }
     Raw::ViewportRequest m_RawViewportRequest;
     Raw::ViewportRegion m_RawViewportAppliedRegion;
 
@@ -384,6 +395,9 @@ public:
 
     // Read final output pixels (usually for thumbnails)
     std::vector<unsigned char> GetOutputPixels(int& outW, int& outH);
+    // Full-resolution scene/output values, bottom-up RGBA float32. No View,
+    // encoding or resampling is introduced by this readback.
+    std::vector<float> GetOutputFloatPixels(int& outW, int& outH, int maxDimension = 0);
     // Authoritative export readback. This is intended for the persistent RAW
     // worker: row bands are pipelined through a three-slot PBO ring so the UI
     // never owns a full-frame glReadPixels stall or a full-raster GPU staging
@@ -411,6 +425,8 @@ public:
     std::vector<unsigned char> GetScopesPixels(int& outW, int& outH);
     // Read aspect-preserving preview pixels for graph preview nodes.
     std::vector<unsigned char> GetPreviewPixels(int& outW, int& outH, int maxDimension = 512);
+    // Present scalar coverage as opaque grayscale without changing its texture.
+    std::vector<unsigned char> GetMaskPreviewPixels(int& outW, int& outH, int maxDimension = 512);
     std::vector<unsigned char> GetRawDevelopmentLocalRangeOverlayPixels(int& outW, int& outH);
     unsigned int TakeRawDevelopmentLocalRangeOverlayTexture(int& outW, int& outH);
     RenderTextureStats GetRawDevelopmentViewTransformInputStats() const { return m_RawDevelopmentViewTransformInputStats; }
@@ -504,18 +520,7 @@ public:
     SharedPixelBuffer ShareSourcePixels(int& outW, int& outH, int& outChannels);
     int GetSourceChannels() const { return m_SourceChannels; }
     const GraphExecutionStats& GetLastGraphExecutionStats() const { return m_LastGraphExecutionStats; }
-    bool GetCachedSpectrumAnalysis(
-        int nodeId,
-        RenderSpectrumAnalysis& outAnalysis) const {
-        const auto found = m_GraphFrequencyAnalysisCache.find(
-            std::to_string(nodeId) + ":radialPowerOut");
-        if (found == m_GraphFrequencyAnalysisCache.end() ||
-            !found->second.valid) {
-            return false;
-        }
-        outAnalysis = found->second;
-        return true;
-    }
+
     const std::string& GetLastRawRgbDenoiseError() const {
         return m_RawRgbDenoiseState->error;
     }
@@ -530,6 +535,7 @@ private:
     struct CachedGraphTexture {
         // Coverage belongs to the cached pixels, not the last configured job.
         Raw::ViewportRegion viewportRegion;
+        Stack::Renderer::ViewportPreviewGeometry graphGeometry;
         unsigned int texture = 0;
         std::size_t fingerprint = 0;
         int width = 0;
@@ -548,13 +554,6 @@ private:
         std::uint64_t lastUseSerial = 0;
     };
 
-    struct CachedGraphFrequency {
-        RenderFrequencyResource resource;
-        std::size_t fingerprint = 0;
-        bool owned = false;
-        std::uint64_t bytes = 0;
-        std::uint64_t lastUseSerial = 0;
-    };
 
     struct CachedPointwiseProgram {
         unsigned int program = 0;
@@ -651,6 +650,13 @@ private:
     int m_BaseCanvasHeight;
     int m_SourceChannels;
     int m_PreviewMaxDimension = 0;
+    Stack::Renderer::ViewportPreviewRequest m_GraphViewportRequest;
+    Stack::Renderer::ViewportPreviewGeometry m_GraphViewportGeometry;
+    Stack::Renderer::ViewportPreviewGeometry m_CurrentGraphImageGeometry;
+    unsigned int m_GraphViewportSampleProgram = 0;
+    unsigned int SampleGraphViewportTexture(unsigned int texture,
+        const Stack::Renderer::ViewportPreviewGeometry& source,
+        const Stack::Renderer::ViewportPreviewGeometry& target);
     bool m_RawDevelopmentAnalysisEnabled = true;
     bool m_RawDevelopmentInteractivePreview = false;
     int m_RawDevelopmentColorWarpMaskQualityLongEdge = 1024;
@@ -689,11 +695,6 @@ private:
     unsigned int m_DataMathProgram;
     unsigned int m_TechnicalImageProgram;
     unsigned int m_ReformatProgram;
-    unsigned int m_SpectrumViewProgram;
-    unsigned int m_FrequencyMaskProgram;
-    unsigned int m_SpectrumMathProgram;
-    unsigned int m_MagnitudePhaseProgram;
-    unsigned int m_FrequencyIfftProjectProgram;
     unsigned int m_ChannelSplitProgram;
     unsigned int m_ChannelCombineProgram;
     unsigned int m_LutProgram;
@@ -720,6 +721,7 @@ private:
     unsigned int m_RawDevelopmentCropProgram;
     struct RawDevelopmentColorWarpMaskCacheEntry {
         std::size_t key = 0;
+        std::size_t inputKey = 0;
         int width = 0;
         int height = 0;
         int layers = 0;
@@ -855,12 +857,17 @@ private:
     std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
     std::unordered_map<std::string, CachedGraphScalar> m_GraphScalarCache;
-    std::unordered_map<std::string, CachedGraphFrequency> m_GraphFrequencyCache;
-    std::unordered_map<std::string, RenderSpectrumAnalysis> m_GraphFrequencyAnalysisCache;
     std::unordered_map<std::string, CachedGraphTexture> m_LutTextureCache;
     std::unordered_map<std::string, std::vector<CachedGraphTexture>> m_RawDevelopStageImageCache;
     std::unordered_map<std::string, CachedRawDevelopmentRecipeLayer>
         m_RawDevelopmentRecipeLayerCache;
+    std::unordered_map<int, CachedRawDevelopmentRecipeLayer> m_GraphLayerInstances;
+    struct NodeOperationRuntime {
+        CachedRawDevelopmentRecipeLayer instance;
+        std::uint64_t lastUse=0, authoredRevision=0;
+        std::size_t inputFingerprint=0, sourceIdentity=0;
+    };
+    std::unordered_map<std::string,NodeOperationRuntime> m_NodeOperationInstances;
     std::unordered_set<std::string> m_LastGraphImageCacheHits;
     std::unordered_map<std::string, CachedPointwiseProgram> m_PointwiseProgramCache;
     std::vector<GraphTransientTarget> m_GraphTransientTargets;
@@ -883,7 +890,6 @@ private:
     std::unordered_map<int, std::string> m_RawDataCachePaths;
     std::unordered_map<int, Raw::RawImageData> m_RawPreviewDataCache;
     std::unordered_map<int, std::string> m_RawPreviewDataCacheKeys;
-    Stack::Renderer::Frequency::GpuFft m_GpuFft;
 
     void CleanupFBOs();
     void DeleteGraphCacheEntry(CachedGraphTexture& entry);
@@ -892,15 +898,12 @@ private:
     unsigned int CloneTextureForGraphCache(unsigned int sourceTexture, int width, int height);
     bool StoreGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key, unsigned int texture, std::size_t fingerprint, bool owned);
     void TouchGraphCacheEntry(CachedGraphTexture& entry);
-    void DeleteFrequencyCacheEntry(CachedGraphFrequency& entry);
-    void DestroyFrequencyCache();
-    bool StoreFrequencyCacheEntry(
-        const std::string& key,
-        const RenderFrequencyResource& resource,
-        std::size_t fingerprint,
-        bool owned);
-    void PruneInactiveFrequencyCache(
-        const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext);
+    CachedGraphTexture* FindGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache,
+        const std::string& key, std::size_t fingerprint);
+
+
+
+
     std::uint64_t GraphPersistentCacheBytes() const;
     void TrimGraphPersistentCachesToBudget();
     void PruneInactiveGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache, const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext);
@@ -1022,7 +1025,9 @@ private:
         std::size_t fingerprint);
     bool RenderRawDevelopmentColorWarpStage(
         GraphNodeRenderResult& result,
-        const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+        std::size_t inputFingerprint, int sourceWidth, int sourceHeight,
+        const Raw::ViewportRegion& inputRegion);
     void ApplyRawViewportRegion(GraphNodeRenderResult& result,
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe, Raw::ViewportStage stage,
         std::size_t upstreamFingerprint, int nodeId);
@@ -1058,45 +1063,16 @@ private:
         const std::string& socketId,
         const std::function<unsigned int(int, const std::string&)>& evalImage,
         const std::function<unsigned int(int, const std::string&)>& evalMask);
-    GraphNodeRenderResult RenderFrequencyGraphNode(
-        const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
-        const RenderGraphNode& node,
-        const std::string& socketId,
-        const std::function<unsigned int(int, const std::string&)>& evalImage,
-        const std::function<unsigned int(int, const std::string&)>& evalMask);
-    RenderFrequencyResource RenderFourierTransform(
-        unsigned int channelTexture,
-        int sourceWidth,
-        int sourceHeight,
-        RenderFrequencyEdgePolicy edgePolicy,
-        std::string sourceRole);
-    GraphNodeRenderResult RenderInverseFourierTransform(
-        const RenderFrequencyResource& spectrum);
-    unsigned int RenderFrequencyResponseTexture(
-        const RenderFrequencyResponseSettings& settings,
-        int paddedWidth,
-        int paddedHeight);
-    RenderFrequencyResource RenderApplyFrequencyResponse(
-        const RenderFrequencyResource& spectrum,
-        const RenderFrequencyResponseSettings& response,
-        float strength);
-    RenderFrequencyResource RenderCombineSpectra(
-        const RenderFrequencyResource& a,
-        const RenderFrequencyResource& b,
-        RenderSpectrumCombineMode mode);
-    RenderFrequencyResource RenderSpectrumComponent(
-        const RenderFrequencyResource& spectrum,
-        RenderFrequencyResourceKind componentKind);
-    RenderFrequencyResource RenderRecombineSpectrum(
-        const RenderFrequencyResource& magnitude,
-        const RenderFrequencyResource& phase);
-    GraphNodeRenderResult RenderSpectrumVisualization(
-        const RenderFrequencyResource& spectrum,
-        const RenderSpectrumViewSettings& settings);
-    RenderSpectrumAnalysis AnalyzeSpectrum(
-        const RenderFrequencyResource& spectrum,
-        const RenderSpectrumAnalyzerSettings& settings,
-        std::size_t fingerprint);
+
+
+
+
+
+
+
+
+
+
     void ExecuteGraphImpl(
         const RenderGraphSnapshot& graph,
         const Stack::Renderer::GraphExecution::GraphTopologyIndex& topology);
@@ -1114,7 +1090,7 @@ private:
     void EnsureDataMathProgram();
     void EnsureTechnicalImageProgram();
     void EnsureReformatProgram();
-    void EnsureFrequencyPrograms();
+
     void EnsureLutProgram();
     void EnsureHdrMergeProgram();
     void EnsureRawDetailFusionPrograms();

@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/FramingControls.h"
 #include "Utils/GraphCursor.h"
 #include "App/settings/NodeControlStyle.h"
 #include "Utils/GraphNumericControls.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <imgui.h>
 #include <limits>
@@ -37,194 +39,9 @@ ImVec2 FitPreviewRect(const ImVec2& bounds, const ImVec2& sourceSize) {
         std::max(1.0f, sourceSize.y * scale));
 }
 
-float EvaluateFrequencyResponsePreview(
-    const EditorNodeGraph::FrequencyResponseSettings& settings,
-    float fx,
-    float fy) {
-    const float radius = std::sqrt(fx * fx + fy * fy);
-    const auto lowPass = [&](float cutoff) {
-        cutoff = std::clamp(cutoff, 0.000001f, 0.70710678f);
-        const float transition = std::max(settings.transitionWidth, 0.000001f);
-        switch (settings.profile) {
-            case EditorNodeGraph::FrequencyTransitionProfile::Gaussian: {
-                const float sigma = cutoff / std::sqrt(2.0f * std::log(2.0f));
-                return std::exp(-0.5f * radius * radius /
-                    std::max(sigma * sigma, 0.0000001f));
-            }
-            case EditorNodeGraph::FrequencyTransitionProfile::Butterworth:
-                return 1.0f / (1.0f + std::pow(
-                    radius / cutoff,
-                    2.0f * std::clamp(settings.butterworthOrder, 1.0f, 12.0f)));
-            case EditorNodeGraph::FrequencyTransitionProfile::Hard:
-                return radius <= cutoff ? 1.0f : 0.0f;
-            case EditorNodeGraph::FrequencyTransitionProfile::Smooth:
-            default: {
-                const float lo = cutoff - transition * 0.5f;
-                const float hi = cutoff + transition * 0.5f;
-                const float t = std::clamp((radius - lo) / std::max(hi - lo, 0.000001f), 0.0f, 1.0f);
-                const float smooth = t * t * (3.0f - 2.0f * t);
-                return 1.0f - smooth;
-            }
-        }
-    };
 
-    float value = 1.0f;
-    switch (settings.mode) {
-        case EditorNodeGraph::FrequencyFilterMode::LowPass:
-            value = lowPass(settings.lowCutoff);
-            break;
-        case EditorNodeGraph::FrequencyFilterMode::HighPass:
-            value = 1.0f - lowPass(settings.lowCutoff);
-            break;
-        case EditorNodeGraph::FrequencyFilterMode::BandPass:
-            value = (1.0f - lowPass(settings.lowCutoff)) * lowPass(settings.highCutoff);
-            break;
-        case EditorNodeGraph::FrequencyFilterMode::BandStop:
-            value = 1.0f - (1.0f - lowPass(settings.lowCutoff)) * lowPass(settings.highCutoff);
-            break;
-        case EditorNodeGraph::FrequencyFilterMode::NotchReject:
-            for (const EditorNodeGraph::FrequencyNotch& notch : settings.notches) {
-                const float radians = notch.directionDegrees * 3.14159265358979323846f / 180.0f;
-                const float nx = notch.frequency * std::cos(radians);
-                const float ny = notch.frequency * std::sin(radians);
-                const float d1 = std::hypot(fx - nx, fy - ny);
-                const float d2 = std::hypot(fx + nx, fy + ny);
-                const float distance = std::min(d1, d2);
-                const float width = std::max(notch.width, 0.000001f);
-                const float t = std::clamp(
-                    (distance - width) /
-                    std::max(settings.transitionWidth, 0.000001f),
-                    0.0f, 1.0f);
-                value *= t * t * (3.0f - 2.0f * t);
-            }
-            break;
-        case EditorNodeGraph::FrequencyFilterMode::AllPass:
-        default:
-            break;
-    }
-    return std::clamp(value, 0.0f, 1.0f);
-}
 
-bool DrawFrequencyResponsePreview(
-    EditorNodeGraph::FrequencyResponseSettings& settings,
-    float availableWidth,
-    bool interactive,
-    unsigned int spectrumTexture = 0) {
-    const float size = std::clamp(availableWidth, 72.0f, 180.0f);
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##FrequencyResponsePreview", ImVec2(size, size));
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    if (spectrumTexture != 0) {
-        drawList->AddImage(
-            static_cast<ImTextureID>(spectrumTexture),
-            origin,
-            ImVec2(origin.x + size, origin.y + size));
-    }
-    constexpr int cells = 32;
-    const float cellSize = size / static_cast<float>(cells);
-    for (int y = 0; y < cells; ++y) {
-        for (int x = 0; x < cells; ++x) {
-            const float fx = ((static_cast<float>(x) + 0.5f) / cells - 0.5f);
-            const float fy = ((static_cast<float>(y) + 0.5f) / cells - 0.5f);
-            const float response = EvaluateFrequencyResponsePreview(settings, fx, fy);
-            const ImU32 color = spectrumTexture == 0
-                ? IM_COL32(
-                    static_cast<int>(18.0f + response * 225.0f),
-                    static_cast<int>(24.0f + response * 150.0f),
-                    static_cast<int>(40.0f + response * 75.0f),
-                    255)
-                : IM_COL32(
-                    static_cast<int>(38.0f + response * 50.0f),
-                    static_cast<int>(20.0f + response * 125.0f),
-                    static_cast<int>(38.0f + response * 155.0f),
-                    static_cast<int>(40.0f +
-                        (1.0f - response) * 180.0f));
-            drawList->AddRectFilled(
-                ImVec2(origin.x + x * cellSize, origin.y + y * cellSize),
-                ImVec2(origin.x + (x + 1) * cellSize + 1.0f,
-                       origin.y + (y + 1) * cellSize + 1.0f),
-                color);
-        }
-    }
-    drawList->AddRect(
-        origin, ImVec2(origin.x + size, origin.y + size),
-        IM_COL32(205, 215, 228, 170), 4.0f);
-    const ImVec2 center(origin.x + size * 0.5f, origin.y + size * 0.5f);
-    const auto drawRing = [&](float frequency, ImU32 color) {
-        drawList->AddCircle(
-            center,
-            std::clamp(frequency / 0.5f, 0.0f, 1.41421356f) * size * 0.5f,
-            color, 64, 1.5f);
-    };
-    if (settings.mode == EditorNodeGraph::FrequencyFilterMode::LowPass ||
-        settings.mode == EditorNodeGraph::FrequencyFilterMode::HighPass) {
-        drawRing(settings.lowCutoff, IM_COL32(255, 221, 112, 245));
-    } else if (settings.mode == EditorNodeGraph::FrequencyFilterMode::BandPass ||
-               settings.mode == EditorNodeGraph::FrequencyFilterMode::BandStop) {
-        drawRing(settings.lowCutoff, IM_COL32(255, 221, 112, 245));
-        drawRing(settings.highCutoff, IM_COL32(113, 224, 255, 245));
-    }
-    for (const EditorNodeGraph::FrequencyNotch& notch : settings.notches) {
-        const float angle = notch.directionDegrees * 3.14159265358979323846f / 180.0f;
-        const ImVec2 offset(
-            std::cos(angle) * notch.frequency / 0.5f * size * 0.5f,
-            std::sin(angle) * notch.frequency / 0.5f * size * 0.5f);
-        drawList->AddCircleFilled(
-            ImVec2(center.x + offset.x, center.y + offset.y),
-            4.0f, IM_COL32(255, 128, 110, 255));
-        drawList->AddCircleFilled(
-            ImVec2(center.x - offset.x, center.y - offset.y),
-            4.0f, IM_COL32(255, 128, 110, 255));
-    }
 
-    if (!interactive || !ImGui::IsItemActive() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))
-        return false;
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const float dx = mouse.x - center.x;
-    const float dy = mouse.y - center.y;
-    const float frequency = std::clamp(
-        std::hypot(dx, dy) / (size * 0.5f) * 0.5f,
-        0.0f, 0.70710678f);
-    if (settings.mode == EditorNodeGraph::FrequencyFilterMode::NotchReject &&
-        !settings.notches.empty()) {
-        std::size_t nearestIndex = 0;
-        float nearestDistance = std::numeric_limits<float>::max();
-        for (std::size_t index = 0; index < settings.notches.size(); ++index) {
-            const EditorNodeGraph::FrequencyNotch& candidate =
-                settings.notches[index];
-            const float angle =
-                candidate.directionDegrees *
-                3.14159265358979323846f / 180.0f;
-            const float hx =
-                std::cos(angle) * candidate.frequency / 0.5f *
-                size * 0.5f;
-            const float hy =
-                std::sin(angle) * candidate.frequency / 0.5f *
-                size * 0.5f;
-            const float distance = std::min(
-                std::hypot(dx - hx, dy - hy),
-                std::hypot(dx + hx, dy + hy));
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearestIndex = index;
-            }
-        }
-        EditorNodeGraph::FrequencyNotch& notch =
-            settings.notches[nearestIndex];
-        notch.frequency = frequency;
-        notch.directionDegrees = std::atan2(dy, dx) * 180.0f / 3.14159265358979323846f;
-    } else if (settings.mode == EditorNodeGraph::FrequencyFilterMode::BandPass ||
-               settings.mode == EditorNodeGraph::FrequencyFilterMode::BandStop) {
-        if (std::abs(frequency - settings.lowCutoff) <
-            std::abs(frequency - settings.highCutoff))
-            settings.lowCutoff = std::min(frequency, settings.highCutoff);
-        else
-            settings.highCutoff = std::max(frequency, settings.lowCutoff);
-    } else {
-        settings.lowCutoff = frequency;
-    }
-    return true;
-}
 
 float SmoothStep01(float value) {
     const float t = std::clamp(value, 0.0f, 1.0f);
@@ -408,6 +225,9 @@ void EditorNodeGraphUI::DrawAdvancedSocketRevealRows(
     int hiddenInputs = 0;
     int hiddenOutputs = 0;
     for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, false)) {
+        if (node.kind == EditorNodeGraph::NodeKind::RawOperation && socket.id == "inputImageOut" && !IsSocketConnected(graph,socket)) continue;
+        if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator && node.rawCoverage.value("canvas",std::string{}) == "project" &&
+            socket.direction == EditorNodeGraph::SocketDirection::Input) continue;
         if (socket.visibilityTier != EditorNodeGraph::SocketVisibilityTier::Advanced ||
             IsSocketConnected(graph, socket)) {
             continue;
@@ -581,15 +401,23 @@ void EditorNodeGraphUI::ExtendNodeOverlayBounds(
     overlay.max.y = std::max(overlay.max.y, rect.max.y);
 }
 
-void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& node) {
+void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& node,
+    std::function<void()>& pendingGraphAction) {
     EditorNodeGraph::Graph& graph = GetActiveGraph(editor);
     NodeLayoutMetrics metrics = MetricsForNode(node);
     ApplyModernCompactMetrics(node, metrics);
     ApplyLayerSurfaceMetrics(this, editor, node, metrics);
     ApplyCanonicalNodeMetrics(this, editor, node, metrics);
-    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
+    GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const NodePresentationProfile presentation = BuildNodePresentationProfile(this, editor, node, graphStyle);
-    const NodeFamilyStyle familyStyle = StyleForFamily(FamilyForNode(node), graphStyle);
+    NodeFamilyStyle familyStyle = StyleForFamily(FamilyForNode(node), graphStyle);
+    if (!node.rawLayerOwnerId.empty() &&
+        (node.role == Stack::GraphModel::NodeRole::CurrentImage || node.role == Stack::GraphModel::NodeRole::LayerResult)) {
+        familyStyle.accent = ImVec4(.86f,.23f,.22f,1.f);
+        familyStyle.border = familyStyle.accent;
+        familyStyle.fill = BlendColor(familyStyle.fill,familyStyle.accent,.13f);
+        graphStyle.nodeAppearance.surface = familyStyle.fill;
+    }
     if (!FindNodeLayoutCache(node.id)) {
         RefreshNodeLayoutCache(graph, node);
     }
@@ -682,6 +510,11 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             imageSourceSize = ImVec2(
                 static_cast<float>(std::max(1, node.image.width)),
                 static_cast<float>(std::max(1, node.image.height)));
+        } else if ((node.kind == EditorNodeGraph::NodeKind::MaskTexture ||
+                    node.kind == EditorNodeGraph::NodeKind::CustomMask) && editor) {
+            int width = 0, height = 0;
+            texture = editor->GetRawMaskTexturePreview(node.id,width,height);
+            imageSourceSize = ImVec2(static_cast<float>(std::max(1,width)),static_cast<float>(std::max(1,height)));
         } else if (node.kind == EditorNodeGraph::NodeKind::Output && editor) {
             int presentationWidth = 0;
             int presentationHeight = 0;
@@ -840,10 +673,16 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             ? Stack::NodeMath::OutputChannelViewModeLabel(
                 node.outputSettings.channelViewMode)
             : "Image";
+        const bool bracketSource=node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node.multiFrameHdr.bracketingSource;
+        char captureLabel[48]{};
+        if (bracketSource) std::snprintf(captureLabel,sizeof(captureLabel),"%zu capture%s",
+            node.multiFrameHdr.frameBindings.size(),node.multiFrameHdr.frameBindings.size()==1 ? "" : "s");
+        const char* secondaryLabel=bracketSource ? captureLabel :
+            node.kind==EditorNodeGraph::NodeKind::Output ? outputModeLabel : nullptr;
         const float modeFontSize = fontSize * 0.72f;
         ImVec2 scaledModeTextSize {};
-        if (node.kind == EditorNodeGraph::NodeKind::Output) {
-            const ImVec2 modeTextSize = ImGui::CalcTextSize(outputModeLabel);
+        if (secondaryLabel) {
+            const ImVec2 modeTextSize = ImGui::CalcTextSize(secondaryLabel);
             const float modeScale = modeFontSize / std::max(1.0f, ImGui::GetFontSize());
             scaledModeTextSize = ImVec2(modeTextSize.x * modeScale, modeTextSize.y * modeScale);
         }
@@ -853,7 +692,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             : static_cast<float>(squareDisplayLines.size()) * fontSize +
                 static_cast<float>(squareDisplayLines.size() - 1) *
                     titleLineGap;
-        const float labelBlockHeight = (node.kind == EditorNodeGraph::NodeKind::Output)
+        const float labelBlockHeight = secondaryLabel
             ? titleBlockHeight + scaledModeTextSize.y + 3.0f * uiScale
             : titleBlockHeight;
         float textY =
@@ -874,7 +713,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             textY += fontSize + titleLineGap;
         }
 
-        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+        if (secondaryLabel) {
             const ImVec2 modePos(
                 min.x + (max.x - min.x - scaledModeTextSize.x) * 0.5f,
                 textY + 3.0f * uiScale);
@@ -883,7 +722,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 modeFontSize,
                 modePos,
                 graphStyle.enabled ? ColorWithAlpha(familyStyle.mutedText, 0.92f) : ApplyStyleAlpha(IM_COL32(180, 195, 205, 220)),
-                outputModeLabel);
+                secondaryLabel);
         }
 
         for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
@@ -956,6 +795,13 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 if (!node.rawSource.sourcePath.empty()) {
                     ImGui::TextDisabled("%s", node.rawSource.sourcePath.c_str());
                 }
+            } else if (node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node.multiFrameHdr.bracketingSource) {
+                ImGui::TextDisabled("%zu capture%s",node.multiFrameHdr.frameBindings.size(),
+                    node.multiFrameHdr.frameBindings.size()==1 ? "" : "s");
+                if (!node.multiFrameHdr.presentationStatus.empty())
+                    ImGui::TextWrapped("%s",node.multiFrameHdr.presentationStatus.c_str());
+                if (node.multiFrameHdr.quarantined)
+                    ImGui::TextColored(ImVec4(.95f,.55f,.42f,1.f),"Binding quarantined. Use Save Repaired Copy.");
             } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelopment) {
                 const std::string displayName = Stack::RawRecipe::RecipeDisplayName(node.rawDevelopment.recipe);
                 if (!displayName.empty()) {
@@ -1183,6 +1029,10 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + controlWidth);
     ImGui::BeginGroup();
     const ImVec2 contentUsedMin = ImGui::GetCursorScreenPos();
+    // EndGroup includes LastItemData in its bounds. With no inline controls,
+    // that would otherwise be the previous node or the full canvas Dummy.
+    ImGui::Dummy(ImVec2(0, 0));
+    ImGui::SetCursorScreenPos(contentUsedMin);
     if (!node.definitionResolved) {
         ImGui::TextColored(
             ImVec4(0.95f, 0.55f, 0.42f, 1.0f),
@@ -1241,12 +1091,12 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         selected,
         captureIfActive,
         renderSlider,
-        drawInlineSeparator
+        drawInlineSeparator,
+        pendingGraphAction
     };
     (void)(
         RenderSourceNodeContent(contentContext) ||
         RenderMaskDataNodeContent(contentContext) ||
-        RenderFrequencyNodeContent(contentContext) ||
         RenderUtilityNodeContent(contentContext));
     const ImVec2 contentCursorMax = ImGui::GetCursorScreenPos();
     ImGui::EndGroup();
@@ -1355,7 +1205,6 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -1364,6 +1213,7 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::RawProjectFrame:
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::MultiFrameHdr:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
@@ -1409,6 +1259,8 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
             } else {
                 editor->RenderLayerControlsWithDirtyTracking(node, [&](LayerBase& layer) {
                     renderLayerControls(layer);
+                },[&](std::function<void()> command) {
+                    context.pendingGraphAction=std::move(command);
                 });
             }
         } else {
@@ -1455,8 +1307,6 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
         editor->RenderRawSourceControls(node, controlWidth, false);
-    } else if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-        editor->RenderRawNeuralDenoiseControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::RawDecode) {
         editor->RenderRawDecodeControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
@@ -1567,6 +1417,16 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
                 ImVec4(0.95f, 0.55f, 0.42f, 1.0f),
                 "Binding quarantined. Use Save Repaired Copy.");
         }
+    } else if (node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr) {
+        ImGui::TextDisabled(node.multiFrameHdr.bracketingSource
+            ? "Bracket source" : "Managed HDR bracket");
+        ImGui::TextWrapped("%s", node.multiFrameHdr.presentationStatus.c_str());
+        ImGui::TextDisabled("%llu capture(s)", static_cast<unsigned long long>(
+            node.multiFrameHdr.frameBindings.size()));
+        if (node.multiFrameHdr.quarantined) {
+            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f),
+                "Binding quarantined. Use Save Repaired Copy.");
+        }
     } else if (node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet) {
         ImGui::TextDisabled("Managed source-set binding");
         ImGui::TextWrapped("%s", node.rawProjectSourceSet.presentationStatus.c_str());
@@ -1667,7 +1527,9 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         }
         ImGui::EndDisabled();
         if (ImGui::Button(node.outputEnabled ? "Deactivate Output" : "Activate Output", ImVec2(controlWidth, 0.0f))) {
-            editor->ToggleOutputNodeEnabled(node.id);
+            context.pendingGraphAction = [editor, nodeId = node.id] {
+                editor->ToggleOutputNodeEnabled(nodeId);
+            };
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::Composite) {
         ImGui::TextDisabled("%d completed chains", editor->GetCompletedChainCount());
@@ -1806,6 +1668,7 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
     auto& drawInlineSeparator = context.drawInlineSeparator;
 
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::DataMath:
@@ -1814,7 +1677,7 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
             return false;
     }
 
-    if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator) {
+    if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator || node.kind == EditorNodeGraph::NodeKind::MaskTexture) {
         bool changed = false;
         if (node.maskKind == EditorNodeGraph::MaskGeneratorKind::Solid) {
             changed |= renderSlider("Value", "##SolidValue", &node.maskSettings.value, 0.0f, 1.0f);
@@ -1891,6 +1754,25 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::DataMath) {
         bool changed = false;
+        int domain = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values ? 1 : 0;
+        const char* domains[] = {"Images / Channels", "Values"};
+        if (ImGuiExtras::NodeCombo("Domain", "##MathDomain", &domain, domains, 2, controlWidth)) {
+            context.pendingGraphAction = [editor, nodeId = node.id, domain] {
+                editor->SetDataMathDomain(nodeId, domain == 1 ? Stack::NodeMath::ArithmeticDomain::Values : Stack::NodeMath::ArithmeticDomain::Spatial);
+            };
+        }
+        if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) {
+            ImGui::TextDisabled("Uniform values can drive parameters.");
+            if (!graph.FindInputLink(node.id, EditorNodeGraph::kMixInputASocketId))
+                changed |= renderSlider("Value A", "##MathA", &node.dataMathSettings.constantA,
+                    std::min(-16.f, node.dataMathSettings.constantA), std::max(16.f, node.dataMathSettings.constantA));
+            if (!graph.FindInputLink(node.id, EditorNodeGraph::kMixInputBSocketId) &&
+                node.dataMathMode != EditorNodeGraph::DataMathMode::Clamp && node.dataMathMode != EditorNodeGraph::DataMathMode::Remap &&
+                node.dataMathMode != EditorNodeGraph::DataMathMode::Average)
+                changed |= renderSlider("Value B", "##MathB", &node.dataMathSettings.constantB,
+                    std::min(-16.f, node.dataMathSettings.constantB), std::max(16.f, node.dataMathSettings.constantB));
+        }
+
         int mode = static_cast<int>(node.dataMathMode);
         const char* modes[] = { "Clamp", "Add", "Subtract", "Multiply", "Divide", "Average", "Minimum", "Maximum", "Difference", "Remap", "Average Images" };
         if (ImGuiExtras::NodeCombo("Mode", "##DataMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
@@ -1899,10 +1781,13 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
                 static_cast<EditorNodeGraph::DataMathMode>(
                     std::clamp(mode, 0, 10)));
         }
-        ImGui::TextDisabled("%s", node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage
+        ImGui::TextDisabled("%s", node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values
+            ? "Produces one uniform value."
+            : node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage
             ? "Averages 2+ full image inputs only."
             : "Works on scalar fields or images.");
-        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Average) {
+        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Average &&
+            node.dataMathSettings.domain != Stack::NodeMath::ArithmeticDomain::Values) {
             ImGui::TextDisabled("Outputs one scalar field from any number of scalar inputs.");
         } else if (node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage) {
             ImGui::TextDisabled("Press G to split into per-channel averages.");
@@ -1923,524 +1808,7 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
     return true;
 }
 
-bool EditorNodeGraphUI::RenderFrequencyNodeContent(
-    NodeContentRenderContext& context) {
-    EditorModule* editor = context.editor;
-    EditorNodeGraph::Graph& graph = context.graph;
-    EditorNodeGraph::Node& node = context.node;
-    const NodeLayoutMetrics& metrics = context.metrics;
-    const NodeSurfaceSpec& nodeSurfaceSpec = context.nodeSurfaceSpec;
-    const GraphStyleTokens& graphStyle = context.graphStyle;
-    ImDrawList* drawList = context.drawList;
-    const ImVec2 previewSize = context.previewSize;
-    const float controlWidth = context.controlWidth;
-    const float safeContentWidth = context.safeContentWidth;
-    const float logicalControlWidth = context.logicalControlWidth;
-    const float logicalSafeContentWidth = context.logicalSafeContentWidth;
-    const float uiScale = context.uiScale;
-    const float contentScale = context.contentScale;
-    const float itemGap = context.itemGap;
-    const float sectionGap = context.sectionGap;
-    const bool richExpandedSurface = context.richExpandedSurface;
-    const bool selected = context.selected;
-    auto& captureIfActive = context.captureIfActive;
-    auto& renderSlider = context.renderSlider;
-    auto& drawInlineSeparator = context.drawInlineSeparator;
 
-    switch (node.kind) {
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-        case EditorNodeGraph::NodeKind::SpectrumView:
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            break;
-        default:
-            return false;
-    }
-
-    if (node.kind == EditorNodeGraph::NodeKind::FrequencyFilter) {
-        bool changed = false;
-        EditorNodeGraph::FrequencyResponseSettings& response =
-            node.frequencyFilterSettings.localResponse;
-        const bool externalResponse = editor->GetNodeGraph().FindAnyInputLink(
-            node.id, EditorNodeGraph::kFrequencyResponseInputSocketId) != nullptr;
-        EditorNodeGraph::FrequencyResponseSettings previewResponse = response;
-        if (externalResponse) {
-            const EditorNodeGraph::Link* responseLink =
-                editor->GetNodeGraph().FindAnyInputLink(
-                    node.id,
-                    EditorNodeGraph::kFrequencyResponseInputSocketId);
-            const EditorNodeGraph::Node* responseNode = responseLink == nullptr
-                ? nullptr
-                : editor->GetNodeGraph().FindNode(
-                    responseLink->fromNodeId);
-            if (responseNode != nullptr &&
-                responseNode->kind ==
-                    EditorNodeGraph::NodeKind::FrequencyResponse) {
-                previewResponse =
-                    responseNode->frequencyResponseSettings;
-            }
-        }
-        const unsigned int spectrumTexture =
-            GetGraphPreviewTexture(editor, node);
-        ImGui::BeginDisabled(externalResponse);
-        int mode = static_cast<int>(response.mode);
-        const char* modes[] = {
-            "All Pass", "Low Pass", "High Pass",
-            "Band Pass", "Band Stop", "Notch Reject"
-        };
-        if (ImGuiExtras::NodeCombo(
-                "Mode", "##FrequencyFilterMode", &mode,
-                modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            response.mode = static_cast<EditorNodeGraph::FrequencyFilterMode>(
-                std::clamp(mode, 0, 5));
-            changed = true;
-        }
-        int profile = static_cast<int>(response.profile);
-        const char* profiles[] = {
-            "Smooth", "Gaussian", "Butterworth", "Hard"
-        };
-        if (ImGuiExtras::NodeCombo(
-                "Profile", "##FrequencyFilterProfile", &profile,
-                profiles, IM_ARRAYSIZE(profiles), controlWidth)) {
-            response.profile =
-                static_cast<EditorNodeGraph::FrequencyTransitionProfile>(
-                    std::clamp(profile, 0, 3));
-            changed = true;
-        }
-        if (externalResponse) {
-            DrawFrequencyResponsePreview(
-                previewResponse, controlWidth, false, spectrumTexture);
-        } else {
-            changed |= DrawFrequencyResponsePreview(
-                response, controlWidth, true, spectrumTexture);
-        }
-        if (response.mode == EditorNodeGraph::FrequencyFilterMode::LowPass ||
-            response.mode == EditorNodeGraph::FrequencyFilterMode::HighPass ||
-            response.mode == EditorNodeGraph::FrequencyFilterMode::BandPass ||
-            response.mode == EditorNodeGraph::FrequencyFilterMode::BandStop) {
-            changed |= renderSlider(
-                "Low", "##FrequencyFilterLow", &response.lowCutoff, 0.0f, 0.5f);
-            if (response.mode == EditorNodeGraph::FrequencyFilterMode::BandPass ||
-                response.mode == EditorNodeGraph::FrequencyFilterMode::BandStop) {
-                changed |= renderSlider(
-                    "High", "##FrequencyFilterHigh", &response.highCutoff, 0.0f, 0.5f);
-            }
-            ImGui::TextDisabled(
-                "%.4f cyc/px  |  %.1f px detail",
-                response.lowCutoff,
-                response.lowCutoff > 0.000001f ? 1.0f / response.lowCutoff : 0.0f);
-            if (response.mode ==
-                    EditorNodeGraph::FrequencyFilterMode::BandPass ||
-                response.mode ==
-                    EditorNodeGraph::FrequencyFilterMode::BandStop) {
-                ImGui::TextDisabled(
-                    "%.4f cyc/px  |  %.1f px detail",
-                    response.highCutoff,
-                    response.highCutoff > 0.000001f
-                        ? 1.0f / response.highCutoff
-                        : 0.0f);
-            }
-        }
-        if (response.profile ==
-            EditorNodeGraph::FrequencyTransitionProfile::Smooth) {
-            changed |= renderSlider(
-                "Transition", "##FrequencyFilterTransition",
-                &response.transitionWidth, 0.001f, 0.25f);
-        } else if (response.profile ==
-                   EditorNodeGraph::FrequencyTransitionProfile::Butterworth) {
-            changed |= renderSlider(
-                "Order", "##FrequencyFilterOrder",
-                &response.butterworthOrder, 1.0f, 12.0f);
-        }
-        if (response.mode == EditorNodeGraph::FrequencyFilterMode::NotchReject) {
-            if (response.notches.empty()) {
-                response.notches.push_back({ "notch-1", 0.25f, 0.0f, 0.025f });
-                changed = true;
-            }
-            for (std::size_t i = 0; i < response.notches.size(); ++i) {
-                ImGui::PushID(static_cast<int>(i));
-                EditorNodeGraph::FrequencyNotch& notch = response.notches[i];
-                const auto renderNotchParameter = [&](const char* field,
-                                                      const char* label,
-                                                      const char* id,
-                                                      float& value,
-                                                      float minimum,
-                                                      float maximum) {
-                    const bool connected = editor->GetNodeGraph().FindAnyInputLink(
-                        node.id,
-                        EditorNodeGraph::ParameterInputSocketId(
-                            EditorNodeGraph::FrequencyNotchParameterId(
-                                notch.id, field))) != nullptr;
-                    ImGui::BeginDisabled(connected);
-                    const bool parameterChanged =
-                        renderSlider(label, id, &value, minimum, maximum);
-                    ImGui::EndDisabled();
-                    return parameterChanged;
-                };
-                changed |= renderNotchParameter(
-                    "frequency", "Frequency", "##NotchFrequency",
-                    notch.frequency, 0.0f, 0.5f);
-                changed |= renderNotchParameter(
-                    "direction", "Direction", "##NotchDirection",
-                    notch.directionDegrees, -180.0f, 180.0f);
-                changed |= renderNotchParameter(
-                    "width", "Width", "##NotchWidth",
-                    notch.width, 0.001f, 0.25f);
-                ImGui::PopID();
-            }
-            if (response.notches.size() < 16 &&
-                ImGui::Button("Add mirrored notch pair")) {
-                response.notches.push_back({
-                    Stack::NodeMath::GenerateCanonicalUuid(),
-                    0.25f, 0.0f, 0.025f
-                });
-                changed = true;
-            }
-            if (response.notches.size() > 1) {
-                ImGui::SameLine();
-                if (ImGui::Button("Remove last")) {
-                    response.notches.pop_back();
-                    changed = true;
-                }
-            }
-        }
-        ImGui::EndDisabled();
-        if (externalResponse)
-            ImGui::TextDisabled("Connected Response is authoritative; local settings are preserved.");
-        int edgePolicy = static_cast<int>(node.frequencyFilterSettings.edgePolicy);
-        const char* edgePolicies[] = { "Mirror", "Wrap", "Zero Pad" };
-        if (ImGuiExtras::NodeCombo(
-                "Edges", "##FrequencyFilterEdges", &edgePolicy,
-                edgePolicies, IM_ARRAYSIZE(edgePolicies), controlWidth)) {
-            node.frequencyFilterSettings.edgePolicy =
-                static_cast<EditorNodeGraph::FrequencyEdgePolicy>(
-                    std::clamp(edgePolicy, 0, 2));
-            changed = true;
-        }
-        const bool strengthConnected = editor->GetNodeGraph().FindAnyInputLink(
-            node.id,
-            EditorNodeGraph::ParameterInputSocketId(
-                EditorNodeGraph::kStrengthParameterId)) != nullptr;
-        ImGui::BeginDisabled(strengthConnected);
-        changed |= renderSlider(
-            "Strength", "##FrequencyFilterStrength",
-            &node.frequencyFilterSettings.strength, 0.0f, 1.0f);
-        ImGui::EndDisabled();
-        if (strengthConnected) ImGui::TextDisabled("Strength supplied by connected Value.");
-        if (response.mode == EditorNodeGraph::FrequencyFilterMode::AllPass &&
-            !externalResponse)
-            ImGui::TextDisabled("Exact bypass: no FFT work.");
-        if (changed) editor->MarkGraphEdited(node.id);
-    } else if (node.kind == EditorNodeGraph::NodeKind::FrequencyResponse) {
-        bool changed = false;
-        EditorNodeGraph::FrequencyResponseSettings& response =
-            node.frequencyResponseSettings;
-        int mode = static_cast<int>(response.mode);
-        const char* modes[] = {
-            "All Pass", "Low Pass", "High Pass",
-            "Band Pass", "Band Stop", "Notch Reject"
-        };
-        if (ImGuiExtras::NodeCombo(
-                "Mode", "##FrequencyResponseMode", &mode,
-                modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            response.mode = static_cast<EditorNodeGraph::FrequencyFilterMode>(
-                std::clamp(mode, 0, 5));
-            changed = true;
-        }
-        int profile = static_cast<int>(response.profile);
-        const char* profiles[] = { "Smooth", "Gaussian", "Butterworth", "Hard" };
-        if (ImGuiExtras::NodeCombo(
-                "Profile", "##FrequencyResponseProfile", &profile,
-                profiles, IM_ARRAYSIZE(profiles), controlWidth)) {
-            response.profile =
-                static_cast<EditorNodeGraph::FrequencyTransitionProfile>(
-                    std::clamp(profile, 0, 3));
-            changed = true;
-        }
-        changed |= DrawFrequencyResponsePreview(response, controlWidth, true);
-        const auto renderParameter = [&](const char* label,
-                                         const char* id,
-                                         const char* parameterId,
-                                         float& value,
-                                         float minimum,
-                                         float maximum) {
-            const bool connected = editor->GetNodeGraph().FindAnyInputLink(
-                node.id, EditorNodeGraph::ParameterInputSocketId(parameterId)) != nullptr;
-            ImGui::BeginDisabled(connected);
-            const bool parameterChanged =
-                renderSlider(label, id, &value, minimum, maximum);
-            ImGui::EndDisabled();
-            return parameterChanged;
-        };
-        if (response.mode != EditorNodeGraph::FrequencyFilterMode::AllPass &&
-            response.mode != EditorNodeGraph::FrequencyFilterMode::NotchReject) {
-            changed |= renderParameter(
-                "Low", "##FrequencyResponseLow",
-                EditorNodeGraph::kLowCutoffParameterId,
-                response.lowCutoff, 0.0f, 0.5f);
-            if (response.mode == EditorNodeGraph::FrequencyFilterMode::BandPass ||
-                response.mode == EditorNodeGraph::FrequencyFilterMode::BandStop) {
-                changed |= renderParameter(
-                    "High", "##FrequencyResponseHigh",
-                    EditorNodeGraph::kHighCutoffParameterId,
-                    response.highCutoff, 0.0f, 0.5f);
-            }
-            ImGui::TextDisabled(
-                "%.4f cyc/px  |  %.1f px detail",
-                response.lowCutoff,
-                response.lowCutoff > 0.000001f ? 1.0f / response.lowCutoff : 0.0f);
-            if (response.mode ==
-                    EditorNodeGraph::FrequencyFilterMode::BandPass ||
-                response.mode ==
-                    EditorNodeGraph::FrequencyFilterMode::BandStop) {
-                ImGui::TextDisabled(
-                    "%.4f cyc/px  |  %.1f px detail",
-                    response.highCutoff,
-                    response.highCutoff > 0.000001f
-                        ? 1.0f / response.highCutoff
-                        : 0.0f);
-            }
-        }
-        if (response.profile == EditorNodeGraph::FrequencyTransitionProfile::Smooth) {
-            changed |= renderParameter(
-                "Transition", "##FrequencyResponseTransition",
-                EditorNodeGraph::kTransitionWidthParameterId,
-                response.transitionWidth, 0.001f, 0.25f);
-        } else if (response.profile == EditorNodeGraph::FrequencyTransitionProfile::Butterworth) {
-            changed |= renderParameter(
-                "Order", "##FrequencyResponseOrder",
-                EditorNodeGraph::kButterworthOrderParameterId,
-                response.butterworthOrder, 1.0f, 12.0f);
-        }
-        if (response.mode == EditorNodeGraph::FrequencyFilterMode::NotchReject) {
-            for (std::size_t i = 0; i < response.notches.size(); ++i) {
-                ImGui::PushID(static_cast<int>(i));
-                EditorNodeGraph::FrequencyNotch& notch = response.notches[i];
-                const auto renderNotchParameter = [&](const char* field,
-                                                      const char* label,
-                                                      const char* id,
-                                                      float& value,
-                                                      float minimum,
-                                                      float maximum) {
-                    const bool connected = editor->GetNodeGraph().FindAnyInputLink(
-                        node.id,
-                        EditorNodeGraph::ParameterInputSocketId(
-                            EditorNodeGraph::FrequencyNotchParameterId(
-                                notch.id, field))) != nullptr;
-                    ImGui::BeginDisabled(connected);
-                    const bool parameterChanged =
-                        renderSlider(label, id, &value, minimum, maximum);
-                    ImGui::EndDisabled();
-                    return parameterChanged;
-                };
-                changed |= renderNotchParameter(
-                    "frequency", "Frequency", "##NotchFrequency",
-                    notch.frequency, 0.0f, 0.5f);
-                changed |= renderNotchParameter(
-                    "direction", "Direction", "##NotchDirection",
-                    notch.directionDegrees, -180.0f, 180.0f);
-                changed |= renderNotchParameter(
-                    "width", "Width", "##NotchWidth",
-                    notch.width, 0.001f, 0.25f);
-                ImGui::PopID();
-            }
-            if (response.notches.size() < 16 && ImGui::Button("Add mirrored notch pair")) {
-                response.notches.push_back({
-                    Stack::NodeMath::GenerateCanonicalUuid(),
-                    0.25f, 0.0f, 0.025f
-                });
-                changed = true;
-            }
-            if (!response.notches.empty()) {
-                ImGui::SameLine();
-                if (ImGui::Button("Remove last")) {
-                    const std::string removedNotchId =
-                        response.notches.back().id;
-                    for (const char* field :
-                         { "frequency", "direction", "width" }) {
-                        editor->SetFrequencyParameterExposed(
-                            node.id,
-                            EditorNodeGraph::FrequencyNotchParameterId(
-                                removedNotchId, field),
-                            false);
-                    }
-                    response.notches.pop_back();
-                    changed = true;
-                }
-            }
-        }
-        ImGui::TextDisabled("Resolution-independent response.");
-        if (changed) editor->MarkGraphEdited(node.id);
-    } else if (node.kind == EditorNodeGraph::NodeKind::ApplyFrequencyResponse) {
-        bool changed = false;
-        const bool strengthConnected = editor->GetNodeGraph().FindAnyInputLink(
-            node.id,
-            EditorNodeGraph::ParameterInputSocketId(
-                EditorNodeGraph::kStrengthParameterId)) != nullptr;
-        ImGui::BeginDisabled(strengthConnected);
-        changed |= renderSlider(
-            "Strength", "##ApplyFrequencyStrength",
-            &node.applyFrequencyResponseSettings.strength, 0.0f, 1.0f);
-        ImGui::EndDisabled();
-        ImGui::TextDisabled("F × lerp(1, response, strength)");
-        if (changed) editor->MarkGraphEdited(node.id);
-    } else if (node.kind == EditorNodeGraph::NodeKind::CombineSpectra) {
-        bool changed = false;
-        int mode = static_cast<int>(node.combineSpectraSettings.mode);
-        const char* modes[] = { "Add", "Subtract" };
-        if (ImGuiExtras::NodeCombo(
-                "Operation", "##CombineSpectraMode", &mode,
-                modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            node.combineSpectraSettings.mode =
-                static_cast<EditorNodeGraph::SpectrumCombineMode>(
-                    std::clamp(mode, 0, 1));
-            changed = true;
-        }
-        ImGui::TextDisabled("Inputs must have matching transform metadata.");
-        if (changed) editor->MarkGraphEdited(node.id);
-    } else if (node.kind == EditorNodeGraph::NodeKind::SpectrumSeparate) {
-        ImGui::TextDisabled("Raw amplitude and phase radians.");
-    } else if (node.kind == EditorNodeGraph::NodeKind::SpectrumRecombine) {
-        ImGui::TextDisabled("Exact reversible reconstruction.");
-    } else if (node.kind == EditorNodeGraph::NodeKind::FrequencyFft ||
-               node.kind == EditorNodeGraph::NodeKind::FrequencyIfft) {
-        bool changed = false;
-        EditorNodeGraph::FrequencyFftSettings& settings =
-            node.kind == EditorNodeGraph::NodeKind::FrequencyFft
-                ? node.frequencyFftSettings
-                : node.frequencyIfftSettings;
-        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFft) {
-            int edgePolicy = static_cast<int>(settings.edgePolicy);
-            const char* edgePolicies[] = { "Mirror", "Wrap", "Zero Pad" };
-            if (ImGuiExtras::NodeCombo(
-                    "Edges", "##FrequencyEdges", &edgePolicy,
-                    edgePolicies, IM_ARRAYSIZE(edgePolicies), controlWidth)) {
-                settings.edgePolicy = static_cast<EditorNodeGraph::FrequencyEdgePolicy>(
-                    std::clamp(edgePolicy, 0, 2));
-                changed = true;
-            }
-            ImGui::TextDisabled("Centered RG32F transform.");
-        } else {
-            ImGui::TextDisabled("Restores source role and crops padding.");
-        }
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::SpectrumView) {
-        bool changed = false;
-        int viewMode = static_cast<int>(node.spectrumViewSettings.mode);
-        const char* viewModes[] = { "Magnitude", "Phase", "Real", "Imaginary" };
-        if (ImGuiExtras::NodeCombo(
-                "View", "##SpectrumViewMode", &viewMode,
-                viewModes, IM_ARRAYSIZE(viewModes), controlWidth)) {
-            node.spectrumViewSettings.mode =
-                static_cast<EditorNodeGraph::SpectrumViewMode>(
-                    std::clamp(viewMode, 0, 3));
-            changed = true;
-        }
-        int lut = static_cast<int>(node.spectrumViewSettings.lut);
-        const char* luts[] = { "Turbo", "Viridis", "Inferno", "Grayscale" };
-        if (ImGuiExtras::NodeCombo("LUT", "##SpectrumViewLut", &lut, luts, IM_ARRAYSIZE(luts), controlWidth)) {
-            node.spectrumViewSettings.lut = static_cast<EditorNodeGraph::SpectrumViewLut>(std::clamp(lut, 0, 3));
-            changed = true;
-        }
-        changed |= renderSlider("Exposure", "##SpectrumViewExposure", &node.spectrumViewSettings.exposure, 0.01f, 8.0f);
-        changed |= renderSlider("Gamma", "##SpectrumViewGamma", &node.spectrumViewSettings.gamma, 0.2f, 3.0f);
-        changed |= ImGuiExtras::NodeCheckbox("Center DC", "##SpectrumViewCenterDc", &node.spectrumViewSettings.centerDc, controlWidth);
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::FrequencyMask) {
-        bool changed = false;
-        int shape = static_cast<int>(node.frequencyMaskShape);
-        const char* shapes[] = { "Low Pass", "High Pass", "Band Pass", "Band Stop", "Notch", "Gaussian", "Butterworth" };
-        if (ImGuiExtras::NodeCombo("Shape", "##FrequencyMaskShape", &shape, shapes, IM_ARRAYSIZE(shapes), controlWidth)) {
-            node.frequencyMaskShape = static_cast<EditorNodeGraph::FrequencyMaskShape>(std::clamp(shape, 0, 6));
-            node.frequencyMaskSettings.shape = node.frequencyMaskShape;
-            EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            changed = true;
-        }
-        node.frequencyMaskSettings.shape = node.frequencyMaskShape;
-        changed |= renderSlider("Cutoff", "##FrequencyMaskCutoff", &node.frequencyMaskSettings.cutoff, 0.0f, 1.0f);
-        changed |= renderSlider("Width", "##FrequencyMaskWidth", &node.frequencyMaskSettings.width, 0.0f, 1.0f);
-        changed |= renderSlider("Feather", "##FrequencyMaskFeather", &node.frequencyMaskSettings.feather, 0.0f, 0.5f);
-        if (node.frequencyMaskShape == EditorNodeGraph::FrequencyMaskShape::Butterworth) {
-            changed |= renderSlider("Order", "##FrequencyMaskOrder", &node.frequencyMaskSettings.order, 1.0f, 12.0f);
-        }
-        if (node.frequencyMaskShape == EditorNodeGraph::FrequencyMaskShape::Notch) {
-            changed |= renderSlider("Center X", "##FrequencyMaskCenterX", &node.frequencyMaskSettings.centerX, 0.0f, 1.0f);
-            changed |= renderSlider("Center Y", "##FrequencyMaskCenterY", &node.frequencyMaskSettings.centerY, 0.0f, 1.0f);
-        }
-        changed |= ImGuiExtras::NodeCheckbox("Invert", "##FrequencyMaskInvert", &node.frequencyMaskSettings.invert, controlWidth);
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::SpectrumMath) {
-        bool changed = false;
-        int mode = static_cast<int>(node.spectrumMathMode);
-        const char* modes[] = { "Multiply", "Add", "Subtract", "Difference" };
-        if (ImGuiExtras::NodeCombo("Mode", "##SpectrumMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            node.spectrumMathMode = static_cast<EditorNodeGraph::SpectrumMathMode>(std::clamp(mode, 0, 3));
-            EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            changed = true;
-        }
-        changed |= renderSlider("Amount", "##SpectrumMathAmount", &node.spectrumMathSettings.amount, 0.0f, 4.0f);
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::MagnitudePhase) {
-        bool changed = false;
-        int mode = static_cast<int>(node.magnitudePhaseMode);
-        const char* modes[] = { "Magnitude", "Phase", "Recombine" };
-        if (ImGuiExtras::NodeCombo("Mode", "##MagnitudePhaseMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            node.magnitudePhaseMode = static_cast<EditorNodeGraph::MagnitudePhaseMode>(std::clamp(mode, 0, 2));
-            EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            changed = true;
-        }
-        changed |= renderSlider("Exposure", "##MagnitudePhaseExposure", &node.magnitudePhaseSettings.exposure, 0.01f, 8.0f);
-        changed |= renderSlider("Gamma", "##MagnitudePhaseGamma", &node.magnitudePhaseSettings.gamma, 0.2f, 3.0f);
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::SpectrumAnalyzer) {
-        bool changed = false;
-        const bool innerConnected = editor->GetNodeGraph().FindAnyInputLink(
-            node.id,
-            EditorNodeGraph::ParameterInputSocketId(
-                EditorNodeGraph::kAnalyzerLowParameterId)) != nullptr;
-        const bool outerConnected = editor->GetNodeGraph().FindAnyInputLink(
-            node.id,
-            EditorNodeGraph::ParameterInputSocketId(
-                EditorNodeGraph::kAnalyzerHighParameterId)) != nullptr;
-        ImGui::BeginDisabled(innerConnected);
-        changed |= renderSlider("Band Low", "##SpectrumAnalyzerInner", &node.spectrumAnalyzerSettings.innerRadius, 0.0f, 0.70710678f);
-        ImGui::EndDisabled();
-        ImGui::BeginDisabled(outerConnected);
-        changed |= renderSlider("Band High", "##SpectrumAnalyzerOuter", &node.spectrumAnalyzerSettings.outerRadius, 0.0f, 0.70710678f);
-        ImGui::EndDisabled();
-        if (node.spectrumAnalyzerSettings.outerRadius < node.spectrumAnalyzerSettings.innerRadius) {
-            std::swap(node.spectrumAnalyzerSettings.innerRadius, node.spectrumAnalyzerSettings.outerRadius);
-            changed = true;
-        }
-        changed |= ImGuiExtras::NodeCheckbox(
-            "Exclude DC", "##SpectrumAnalyzerExcludeDc",
-            &node.spectrumAnalyzerSettings.excludeDc, controlWidth);
-        ImGui::TextDisabled("256 radial bins; power uses |F|².");
-        if (changed) {
-            editor->MarkGraphEdited(node.id);
-        }
-    }
-    return true;
-}
 
 bool EditorNodeGraphUI::RenderUtilityNodeContent(
     NodeContentRenderContext& context) {
@@ -2667,34 +2035,7 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
         ImGui::TextDisabled("Arithmetic mean of every field pixel");
         ImGui::TextDisabled("Full-frame reduction · strict finite values");
     } else if (node.kind == EditorNodeGraph::NodeKind::Reformat) {
-        bool changed = false;
-        ImGui::SetNextItemWidth(controlWidth);
-        {
-            ImGuiExtras::GraphNumericValueStyle numericValueStyle;
-            changed |= ImGui::InputInt("##ReformatWidth", &node.reformatSettings.width, 1, 128);
-        }
-        ImGui::SameLine(); ImGui::TextUnformatted("Width");
-        ImGui::SetNextItemWidth(controlWidth);
-        {
-            ImGuiExtras::GraphNumericValueStyle numericValueStyle;
-            changed |= ImGui::InputInt("##ReformatHeight", &node.reformatSettings.height, 1, 128);
-        }
-        ImGui::SameLine(); ImGui::TextUnformatted("Height");
-        node.reformatSettings.width = std::clamp(
-            node.reformatSettings.width, 1, Stack::NodeMath::kMaximumReformatDimension);
-        node.reformatSettings.height = std::clamp(
-            node.reformatSettings.height, 1, Stack::NodeMath::kMaximumReformatDimension);
-        const char* filters[] = { "Nearest", "Linear" };
-        int filter = node.reformatSettings.filter == Stack::NodeMath::ReconstructionFilter::Nearest ? 0 : 1;
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Filter##ReformatFilter", &filter, filters, 2)) {
-            node.reformatSettings.filter = filter == 0
-                ? Stack::NodeMath::ReconstructionFilter::Nearest
-                : Stack::NodeMath::ReconstructionFilter::Linear;
-            changed = true;
-        }
-        ImGui::TextDisabled("Pixel centers - Clamp border");
-        ImGui::TextDisabled("No color or alpha conversion");
+        const bool changed = Stack::NodeEditors::DrawFramingControls(node.reformatSettings, controlWidth);
         if (changed) editor->MarkGraphEdited(node.id);
     } else if (node.kind == EditorNodeGraph::NodeKind::TechnicalImage) {
         bool changed = false;

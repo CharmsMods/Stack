@@ -6,6 +6,7 @@
 #include "../Editor/EditorModule.h"
 #include "../Utils/FileDialogs.h"
 #include "../Utils/ImGuiExtras.h"
+#include "Utils/Utf8Text.h"
 #include "App/Resources/EmbeddedTabIcons.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
@@ -146,8 +147,9 @@ std::string TruncateToWidth(const std::string& value, const float maxWidth) {
     }
     std::string candidate = value;
     const std::string suffix = "...";
-    while (candidate.size() > 1) {
-        candidate.pop_back();
+    if (ImGui::CalcTextSize(suffix.c_str()).x > maxWidth) return {};
+    while (!candidate.empty()) {
+        Stack::Utf8Text::RemoveLastCodePoint(candidate);
         std::string testStr = candidate + suffix;
         if (ImGui::CalcTextSize(testStr.c_str()).x <= maxWidth) {
             return testStr;
@@ -172,12 +174,15 @@ bool RenderCategoryButton(
     const ImVec2 actualSize(
         size.x < 0.0f ? std::max(1.0f, ImGui::GetContentRegionAvail().x) : size.x,
         size.y);
-    const bool pressed = ImGui::InvisibleButton(label, actualSize);
+    const bool pressed = ImGui::InvisibleButton(label, actualSize, ImGuiButtonFlags_EnableNav);
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     if (selected || hovered)
         drawList->AddRectFilled(start, ImVec2(start.x + actualSize.x, start.y + actualSize.y),
             ImGui::GetColorU32(selected ? ImGuiCol_TabSelected : ImGuiCol_TabHovered), 4.0f);
+    if (ImGui::IsItemFocused())
+        drawList->AddRect(start, ImVec2(start.x + actualSize.x, start.y + actualSize.y),
+            ImGui::GetColorU32(ImGuiCol_NavCursor), 4.0f);
     const ImU32 textColor = ImGui::GetColorU32(
         selected
             ? ImGuiCol_TabSelectedOverline
@@ -222,7 +227,7 @@ void RenderExperimentalSection(
 void RenderRawSection(EditorModule* editor, const float contentWidth) {
     RenderSectionIntro(
         "RAW",
-        "Choose RAW editing and preview preferences.");
+        "Choose RAW editing preferences. Image preview preferences apply to RAW and Graph.");
     if (editor == nullptr) {
         ImGui::TextDisabled("RAW settings are unavailable.");
         return;
@@ -242,7 +247,7 @@ void RenderRawSection(EditorModule* editor, const float contentWidth) {
     const double nativeFps = editor->GetRawViewportNativeFps();
     if (nativeFps > 0.0) ImGui::Text("Whole image rebuild: approximately %.1f FPS", nativeFps);
     const double visibleFps = editor->GetRawViewportVisibleNativeFps();
-    if (visibleFps > 0.0) ImGui::Text("Native visible area, cached input: approximately %.1f FPS", visibleFps);
+    if (visibleFps > 0.0) ImGui::Text("Native visible area: approximately %.1f FPS", visibleFps);
     if (editor->GetRawViewportRequestedFps()>editor->GetRawViewportMaximumFps())
         ImGui::TextDisabled("Requested %d FPS; using %d FPS on this display",editor->GetRawViewportRequestedFps(),editor->GetRawViewportTargetFps());
     auto preferences=editor->GetRawViewportPreferences();
@@ -259,18 +264,18 @@ void RenderRawSection(EditorModule* editor, const float contentWidth) {
     ImGui::EndDisabled();
     ImGui::TextWrapped("100%% matches physical display detail at the current zoom, up to native source detail. Preserving detail can lower the achieved update rate.");
     ImGui::TextWrapped("%s",editor->GetRawViewportDecisionStatus().c_str());
-    if (ImGui::Checkbox("Learn missing timings while idle",&preferences.backgroundLearning))
+    if (ImGui::Checkbox("Learn extra RAW timings while idle",&preferences.backgroundLearning))
         editor->SetRawViewportPreferences(preferences);
     if (ImGui::Button("Reset learned timings for this hardware")) editor->ResetRawViewportLearnedTimings();
     bool smoothUpdates = editor->GetSmoothRawViewportUpdates();
-    if (ImGui::Checkbox("Fade slower RAW preview updates", &smoothUpdates))
+    if (ImGui::Checkbox("Fade slower preview updates", &smoothUpdates))
         editor->SetSmoothRawViewportUpdates(smoothUpdates);
     ImGui::BeginDisabled(!smoothUpdates);
     int fadeBelowFps = editor->GetRawViewportFadeBelowFps();
     ImGui::SetNextItemWidth(std::min(contentWidth, kSettingsControlWidth));
     if (ImGui::SliderInt("Fade below update rate", &fadeBelowFps,
         Raw::kMinimumViewportFadeBelowFps,
-        editor->GetRawViewportMaximumFps(), "%d FPS",
+        std::max({Raw::kDefaultViewportFadeBelowFps, editor->GetRawViewportMaximumFps(), fadeBelowFps}), "%d FPS",
         ImGuiSliderFlags_AlwaysClamp)) {
         editor->SetRawViewportFadeBelowFps(fadeBelowFps);
     }
@@ -279,7 +284,7 @@ void RenderRawSection(EditorModule* editor, const float contentWidth) {
     ImGui::EndDisabled();
     const std::string calibrationStatus = editor->GetRawViewportCalibrationStatus();
     ImGui::TextWrapped("%s", calibrationStatus.c_str());
-    ImGui::TextWrapped("During adjustments, resolution adapts toward this target. Lower FPS allows more detail; higher FPS favors responsiveness. After input settles, the visible area returns to native detail where memory permits.");
+    ImGui::TextWrapped("During adjustments, resolution adapts toward this target. RAW/Graph image requests are paced to avoid preparing work faster than it can be displayed. Lower FPS allows more detail; higher FPS favors responsiveness. After edits settle, the visible area returns to native detail where memory permits, including while zooming or panning. Moving a floating tool does not lower image quality.");
 }
 
 void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, State& state, const float contentWidth) {
@@ -333,11 +338,13 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
         constexpr float rowHeight = 27.0f;
         const float listWidth = std::min(contentWidth, 520.0f);
         const float listX = startX + std::max(0.0f, (contentWidth - listWidth) * 0.5f);
-        const float itemWidth = (listWidth - columnGap) * 0.5f;
+        const std::size_t columns = listWidth >= 360.0f ? 2u : 1u;
+        const float itemWidth = std::max(1.0f,
+            (listWidth - columnGap * static_cast<float>(columns - 1u)) / static_cast<float>(columns));
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         for (std::size_t index = 0; index < images.size(); ++index) {
             const StackAppearance::BackgroundImageEntry& image = images[index];
-            if ((index % 2) == 1) {
+            if ((index % columns) != 0) {
                 ImGui::SameLine(0.0f, columnGap);
             } else {
                 ImGui::SetCursorPosX(listX);
@@ -346,7 +353,8 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
             const bool selected = image.path == managedPath;
             ImGui::PushID(image.id.c_str());
             const ImVec2 itemMin = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("##BackgroundChoice", ImVec2(itemWidth, rowHeight));
+            const bool pressed = ImGui::InvisibleButton(
+                "##BackgroundChoice", ImVec2(itemWidth, rowHeight), ImGuiButtonFlags_EnableNav);
             const bool hovered = ImGui::IsItemHovered();
             const std::string label = image.displayName.empty()
                 ? std::filesystem::path(image.path).filename().string()
@@ -359,7 +367,7 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
                         ? ImGuiCol_CheckMark
                         : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled)),
                 visibleLabel.c_str());
-            if (ImGui::IsItemClicked() && appearance->SelectBackgroundImageById(image.id)) {
+            if (pressed && appearance->SelectBackgroundImageById(image.id)) {
                 state.lastActionError.clear();
             }
             if (hovered) {
@@ -755,7 +763,7 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     const bool stackTopActions = contentWidth < topActionRowWidth;
 
     ImGui::BeginDisabled(!updateManager->CanCheckForUpdates());
-    if (ImGui::Button("Check for Updates", ImVec2(150.0f, 0.0f))) {
+    if (ImGui::Button("Check for Updates", ImVec2(std::min(150.0f, std::max(1.0f, contentWidth)), 0.0f))) {
         state.lastActionError.clear();
         updateManager->StartManualCheck();
     }
@@ -764,7 +772,7 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     if (!stackTopActions) {
         ImGui::SameLine(0.0f, 10.0f);
     }
-    if (ImGui::Button("Open GitHub Releases", ImVec2(174.0f, 0.0f))) {
+    if (ImGui::Button("Open GitHub Releases", ImVec2(std::min(174.0f, std::max(1.0f, contentWidth)), 0.0f))) {
         state.lastActionError.clear();
         if (!updateManager->OpenReleasesPage(&state.lastActionError) && state.lastActionError.empty())
             state.lastActionError = "Could not open the releases page.";
@@ -774,7 +782,7 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     if (!stackTopActions) {
         ImGui::SameLine(0.0f, 10.0f);
     }
-    if (ImGui::Button("Open Website Download Page", ImVec2(204.0f, 0.0f))) {
+    if (ImGui::Button("Open Website Download Page", ImVec2(std::min(204.0f, std::max(1.0f, contentWidth)), 0.0f))) {
         state.lastActionError.clear();
         if (!updateManager->OpenWebsiteDownloadPage(&state.lastActionError) && state.lastActionError.empty())
             state.lastActionError = "Could not open the download page.";
@@ -850,17 +858,13 @@ void RenderLegalSection(AppLegal::Manager* legalManager, State& state, const flo
     }
 
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    ImGui::TextWrapped("%s", legalManager->GetStatusMessage().c_str());
-    ImGui::TextWrapped("Acceptance record: %s", legalManager->GetAcceptanceLocationLabel().c_str());
+    ImGui::TextWrapped("Stack includes third-party software. Its notices and license terms are included below.");
 
     struct LegalAction {
         const char* label;
         AppLegal::Document document;
     };
     const LegalAction actions[] = {
-        { "Open EULA", AppLegal::Document::Eula },
-        { "Open Privacy Notice", AppLegal::Document::Privacy },
-        { "Open Source License", AppLegal::Document::SourceLicense },
         { "Open Third-Party Notices", AppLegal::Document::ThirdPartyNotices },
         { "Open Third-Party Licenses", AppLegal::Document::ThirdPartyDirectory },
         { "Open Legal Folder", AppLegal::Document::LegalDirectory }
@@ -868,9 +872,6 @@ void RenderLegalSection(AppLegal::Manager* legalManager, State& state, const flo
 
     RenderSubsectionLabel("DOCUMENTS");
     const float buttonWidth = std::min(240.0f, std::max(1.0f, contentWidth));
-    if (ImGui::Button("View Initial Legal Agreement Surface", ImVec2(buttonWidth, 0.0f))) {
-        state.requestShowLegalGate = true;
-    }
     for (const LegalAction& action : actions) {
         if (ImGui::Button(action.label, ImVec2(buttonWidth, 0.0f))) {
             state.lastActionError.clear();
@@ -952,8 +953,9 @@ void RenderContents(
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(appearance);
     const float footerHeight = 32.0f;
-    const float railWidth = 176.0f;
-    const float contentHeight = std::max(120.0f, avail.y - footerHeight);
+    const float railGap = std::min(24.0f, std::max(0.0f, avail.x * 0.05f));
+    const float railWidth = std::min(176.0f, std::max(1.0f, (avail.x - railGap) * 0.35f));
+    const float contentHeight = std::max(1.0f, avail.y - footerHeight);
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, kSettingsItemGap));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 5.0f));
@@ -1013,7 +1015,7 @@ void RenderContents(
     }
     ImGui::PopStyleVar(2);
 
-    ImGui::SameLine(0.0f, 24.0f);
+    ImGui::SameLine(0.0f, railGap);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("SettingsPopupDetail", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar);

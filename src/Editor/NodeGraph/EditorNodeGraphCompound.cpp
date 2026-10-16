@@ -222,6 +222,8 @@ Node CloneImageNodeForCompoundExpansion(const Node& source) {
     clone.position = source.position;
     clone.expanded = source.expanded;
     clone.outputEnabled = source.outputEnabled;
+    clone.rawLayerOwnerId = source.rawLayerOwnerId;
+    clone.exposedParameterIds = source.exposedParameterIds;
     clone.definitionId = source.definitionId;
     clone.definitionVersion = source.definitionVersion;
     clone.definitionHash = source.definitionHash;
@@ -258,7 +260,7 @@ bool ValidateCanonicalCompoundBindings(
         return true;
     }
     Graph canonical;
-    DeserializeGraphPayload(definition.canonicalGraph, canonical, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(definition.canonicalGraph, canonical, 0);
     if (canonical.GetNodes().empty()) {
         if (error) *error = "Compound canonical graph contains no executable nodes.";
         return false;
@@ -561,7 +563,7 @@ bool Graph::UnpackCompoundNode(
     }
 
     Graph internal;
-    DeserializeGraphPayload(definition->canonicalGraph, internal, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(definition->canonicalGraph, internal, 0);
     for (const Stack::NodeMath::CompoundDefinition& dependency : internal.GetCompoundDefinitions()) {
         bool present = false;
         for (const Stack::NodeMath::CompoundDefinition& existing : m_CompoundDefinitions) {
@@ -930,7 +932,7 @@ bool Graph::ResolveCompoundOutputInputDependencies(
     }
 
     Graph canonical;
-    DeserializeGraphPayload(definition->canonicalGraph, canonical, 0, {}, 0, 0, 0);
+    DeserializeGraphPayload(definition->canonicalGraph, canonical, 0);
     std::unordered_map<int, const Node*> canonicalNodes;
     std::unordered_map<int, std::vector<SocketDefinition>> canonicalSockets;
     std::unordered_map<

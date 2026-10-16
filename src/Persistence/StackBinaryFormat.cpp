@@ -1,4 +1,7 @@
 #include "StackBinaryFormat.h"
+#include "Persistence/ProjectPayloadAssets.h"
+#include "Persistence/ProjectSourceAssets.h"
+#include "Persistence/CreatedAssetStore.h"
 
 #include "Raw/RawTechnicalEvidence.h"
 #include "ThirdParty/stb_image.h"
@@ -857,6 +860,18 @@ bool AssetFromJson(const json& value, AssetDocument& asset) {
 }
 
 std::vector<std::uint8_t> BinaryJsonBytes(const json& value) {
+    if (value.is_object() && value.size() == 1 && value.contains("$rawLayerBytes")) {
+        const auto& bytes = value.at("$rawLayerBytes");
+        if (!bytes.is_array()) throw std::runtime_error("Invalid nested image bytes.");
+        std::vector<std::uint8_t> decoded;
+        decoded.reserve(bytes.size());
+        for (const auto& byte : bytes) {
+            if (!byte.is_number_integer() || byte.get<std::int64_t>() < 0 || byte.get<std::uint64_t>() > 255)
+                throw std::runtime_error("Invalid nested image byte.");
+            decoded.push_back(byte.get<std::uint8_t>());
+        }
+        return decoded;
+    }
     if (!value.is_binary()) {
         return {};
     }
@@ -915,27 +930,24 @@ bool StageManagedBytes(
     return true;
 }
 
+void GatherGraphImageNodes(json& value, std::vector<json*>& nodes) {
+    if (value.is_binary() || (value.is_object() && value.contains("$rawLayerBytes"))) return;
+    if (value.is_object()) {
+        const auto kind = value.find("kind");
+        if (kind != value.end() && kind->is_string() && *kind == "Image") nodes.push_back(&value);
+    }
+    if (value.is_structured()) for (auto& child : value) GatherGraphImageNodes(child, nodes);
+}
+
 bool ExternalizeGraphImageAssets(
     const Stack::Project::ProjectStoreHandle& store,
     const Stack::Project::ProjectStoreTransaction& transaction,
     Stack::Project::RawProjectSnapshot& snapshot) {
-    if (!snapshot.pipelineData.is_object()) {
-        return true;
-    }
-    auto graph = snapshot.pipelineData.find("nodeGraph");
-    if (graph == snapshot.pipelineData.end() || !graph->is_object()) {
-        return true;
-    }
-    auto nodes = graph->find("nodes");
-    if (nodes == graph->end() || !nodes->is_array()) {
-        return true;
-    }
-
+    std::vector<json*> nodes;
+    GatherGraphImageNodes(snapshot.pipelineData, nodes);
     std::unordered_set<std::string> referencedGraphAssets;
-    for (json& node : *nodes) {
-        if (!node.is_object() || node.value("kind", std::string()) != "Image") {
-            continue;
-        }
+    for (auto* item : nodes) {
+        auto& node = *item;
         const std::string existingId =
             node.value("managedAssetId", std::string());
         if (!existingId.empty()) {
@@ -1034,27 +1046,17 @@ bool ReadManagedAssetBytes(
             return false;
         }
     }
-    return true;
+    const auto identity = Stack::RawEvidence::ComputeSourceIdentity(bytes);
+    return identity.valid && identity.sha256 == asset.sha256 && identity.byteSize == asset.byteLength;
 }
 
 bool RehydrateGraphImageAssets(
     const Stack::Project::ProjectStoreOpenResult& opened,
     json& pipelineData) {
-    if (!pipelineData.is_object()) {
-        return true;
-    }
-    auto graph = pipelineData.find("nodeGraph");
-    if (graph == pipelineData.end() || !graph->is_object()) {
-        return true;
-    }
-    auto nodes = graph->find("nodes");
-    if (nodes == graph->end() || !nodes->is_array()) {
-        return true;
-    }
-    for (json& node : *nodes) {
-        if (!node.is_object() || node.value("kind", std::string()) != "Image") {
-            continue;
-        }
+    std::vector<json*> nodes;
+    GatherGraphImageNodes(pipelineData, nodes);
+    for (auto* item : nodes) {
+        auto& node = *item;
         const std::string assetId =
             node.value("managedAssetId", std::string());
         if (assetId.empty()) {
@@ -1088,9 +1090,7 @@ void RewriteManagedRawSourcePaths(
     if (!asset || asset->projectAssetPath.empty()) {
         return;
     }
-    const std::string managedPath = (
-        opened.store->StoragePath() /
-        std::filesystem::u8path(asset->projectAssetPath)).lexically_normal().u8string();
+    const std::string managedPath = opened.store->ResolveAssetFile(asset->assetId).u8string();
     if (rawWorkspaceData.contains("rawRecipe") &&
         rawWorkspaceData["rawRecipe"].is_object()) {
         rawWorkspaceData["rawRecipe"]["sourceRef"]["sourcePath"] =
@@ -1110,8 +1110,12 @@ void RewriteManagedRawSourcePaths(
         const std::string kind = node.value("kind", std::string());
         if (kind == "RawDevelopment" && node.contains("rawRecipe") &&
             node["rawRecipe"].is_object()) {
-            node["rawRecipe"]["sourceRef"]["sourcePath"] = managedPath;
+            auto& ref = node["rawRecipe"]["sourceRef"];
+            if (ref.is_object() && (ref.value("managedAssetId", std::string()) == assetId ||
+                ref.value("fingerprint", std::string()) == asset->sha256))
+                ref["sourcePath"] = managedPath;
         } else if (kind == "RawSource") {
+            if (node.value("sourcePath", std::string()) != asset->originalSourcePath) continue;
             node["sourcePath"] = managedPath;
             if (node.contains("rawMetadata") && node["rawMetadata"].is_object()) {
                 node["rawMetadata"]["sourcePath"] = managedPath;
@@ -1126,7 +1130,26 @@ bool ExternalizeManagedProjectAssets(
     const Stack::Project::ProjectStoreHandle& store,
     const Stack::Project::ProjectStoreTransaction& transaction,
     Stack::Project::RawProjectSnapshot& snapshot) {
-    return ExternalizeGraphImageAssets(store, transaction, snapshot);
+    if (!Stack::Project::CollectRawSourceAssets(snapshot.pipelineData, store, transaction, snapshot) ||
+        !Stack::Project::CollectRawSourceAssets(snapshot.rawWorkspaceData, store, transaction, snapshot)) return false;
+    if (!ExternalizeGraphImageAssets(store, transaction, snapshot)) return false;
+    std::vector<std::string> referenced;
+    if (!Stack::Project::ExternalizeCreatedAssets(snapshot.pipelineData,
+        [&](const std::string& id,const std::string& name,const std::vector<unsigned char>& bytes,std::string& managedId) {
+            return StageManagedBytes(store,transaction,snapshot,bytes,name,
+                "assets/captures/"+id+".asset",{},id+".asset","created-asset",managedId);
+        },referenced)) return false;
+    snapshot.embeddedAssets.erase(std::remove_if(snapshot.embeddedAssets.begin(),snapshot.embeddedAssets.end(),
+        [&](const auto& asset) {return asset.managedRole=="created-asset" &&
+            std::find(referenced.begin(),referenced.end(),asset.assetId)==referenced.end() &&
+            std::find(snapshot.lifecycle.initialAssetIds.begin(),snapshot.lifecycle.initialAssetIds.end(),asset.assetId)==snapshot.lifecycle.initialAssetIds.end();}),snapshot.embeddedAssets.end());
+    return Stack::Project::ExternalizePayloadBytes(snapshot.pipelineData,
+        [&](const auto& bytes, std::string& id) {
+            const auto identity = Stack::RawEvidence::ComputeSourceIdentity(bytes);
+            if (!identity.valid) return false;
+            return StageManagedBytes(store, transaction, snapshot, bytes, "Graph payload",
+                "assets/payloads/" + identity.sha256 + ".bin", {}, {}, "graph-payload", id);
+        });
 }
 
 static bool WriteProjectFileCaptured(
@@ -1428,9 +1451,20 @@ bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& documen
         }
         if (options.includePipelineData) {
             document.pipelineData = opened.snapshot.pipelineData;
+            if (!Stack::Project::RestoreRawSourceAssets(document.pipelineData, opened.store, opened.snapshot)) return false;
+            if (!Stack::Project::RehydratePayloadBytes(document.pipelineData,
+                [&](const std::string& id, auto& bytes) {
+                    const auto* asset = Stack::Project::FindEmbeddedAsset(opened.snapshot, id);
+                    return asset && ReadManagedAssetBytes(opened.store, *asset, bytes);
+                })) return false;
             if (!RehydrateGraphImageAssets(opened, document.pipelineData)) {
                 return false;
             }
+            if (!Stack::Project::RehydrateCreatedAssets(document.pipelineData,
+                [&](const std::string& id,std::vector<unsigned char>& bytes) {
+                    const auto* asset=Stack::Project::FindEmbeddedAsset(opened.snapshot,id);
+                    return asset && asset->managedRole=="created-asset" && ReadManagedAssetBytes(opened.store,*asset,bytes);
+                })) return false;
         }
         if (options.includeSourceImage) {
             const std::string& sourceAssetId = opened.snapshot.sourceAssetId;

@@ -1,40 +1,71 @@
 #include "RawImageBackdropNoise.h"
+#include "RawImageBackdropUniforms.h"
 #include "RawImageBackdrop.h"
-#include "RawImageBackdropShaders.h"
 #include "RawImageBackdropNoiseShaders.h"
 #include "Renderer/GLHelpers.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 
 namespace Stack::Renderer {
 namespace {
-constexpr int BrightnessBins = 32;
-bool CreatePair(int width, int height, bool repeat, unsigned int& first,
-                unsigned int& second, unsigned int& framebuffer) {
-    // Profiles contain variances, whose range can exceed that of amplitudes.
-    const auto format = repeat ? GL_RGBA16F : GL_RGBA32F;
-    first = GLHelpers::CreateTextureFromData(nullptr, width, height, format, GL_RGBA, GL_FLOAT, GL_LINEAR);
-    second = GLHelpers::CreateTextureFromData(nullptr, width, height, format, GL_RGBA, GL_FLOAT, GL_LINEAR);
-    if (!first || !second) return false;
-    for (const auto image : {first, second}) {
-        glBindTexture(GL_TEXTURE_2D, image);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+constexpr int Bands = 3, BrightnessBins = 32, GrainSize = 512;
+
+// Save only the image units changed here; the backdrop guards texture units.
+struct ImageBindings {
+    struct Binding { GLint name, level, layered, layer, access, format; };
+    std::array<Binding, 2> saved{};
+    ImageBindings() {
+        for (GLuint i = 0; i < saved.size(); ++i) {
+            auto& b = saved[i];
+            glGetIntegeri_v(GL_IMAGE_BINDING_NAME, i, &b.name);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LEVEL, i, &b.level);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LAYERED, i, &b.layered);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LAYER, i, &b.layer);
+            glGetIntegeri_v(GL_IMAGE_BINDING_ACCESS, i, &b.access);
+            glGetIntegeri_v(GL_IMAGE_BINDING_FORMAT, i, &b.format);
+        }
     }
-    glGenFramebuffers(1, &framebuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, first, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, second, 0);
-    const GLenum outputs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, outputs);
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    ~ImageBindings() {
+        for (GLuint i = 0; i < saved.size(); ++i) {
+            const auto& b = saved[i];
+            glBindImageTexture(i, b.name, b.level, b.layered ? GL_TRUE : GL_FALSE,
+                b.layer, b.access, b.format);
+        }
+    }
+};
+unsigned int CreateArray(int width, int height, bool mipmaps, bool repeat, GLenum format) {
+    unsigned int texture = 0;
+    glGenTextures(1, &texture);
+    if (!texture) return 0;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+    const int levels = mipmaps ? 1 + int(std::floor(std::log2(std::max(width, height)))) : 1;
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, format, width, height, Bands);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, mipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    // Immutable storage limits sampling to the allocated mip levels.
+    if (glGetError() != GL_NO_ERROR) { glDeleteTextures(1, &texture); return 0; }
+    return texture;
 }
-void DeletePair(unsigned int& first, unsigned int& second, unsigned int& framebuffer) {
-    if (framebuffer) glDeleteFramebuffers(1, &framebuffer);
-    if (first) glDeleteTextures(1, &first);
-    if (second) glDeleteTextures(1, &second);
-    first = second = framebuffer = 0;
+void Delete(unsigned int& texture) {
+    if (texture) glDeleteTextures(1, &texture);
+    texture = 0;
+}
+void BindInputs(unsigned int variance, unsigned int covariance) {
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D_ARRAY, variance);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, covariance);
+}
+void BindOutputs(unsigned int variance, unsigned int covariance) {
+    glBindImageTexture(0, variance, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+    glBindImageTexture(1, covariance, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+}
+void Dispatch(int width, int height, int bands = Bands) {
+    glDispatchCompute((width + 7) / 8, (height + 7) / 8, bands);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT |
+        GL_TEXTURE_UPDATE_BARRIER_BIT);
 }
 std::size_t Identity(const RawImageBackdropFrame& frame) {
     std::size_t hash = frame.presentationFingerprint;
@@ -42,9 +73,8 @@ std::size_t Identity(const RawImageBackdropFrame& frame) {
         hash ^= std::hash<decltype(value)>{}(value) + std::size_t(0x9e3779b9) + (hash << 6) + (hash >> 2);
     };
     const auto point = [&](ImVec2 p) { append(p.x); append(p.y); };
-    point(frame.nativeExtent);
-    append(frame.patches.size());
-    for (const auto& patch : frame.patches) {
+    point(frame.nativeExtent); append(frame.SurroundPatches().size());
+    for (const auto& patch : frame.SurroundPatches()) {
         append(patch.texture); append(patch.previousTexture); append(patch.fadeAmount); append(patch.encodedSrgb);
         append(patch.imageBounds.x); append(patch.imageBounds.y);
         append(patch.imageBounds.z); append(patch.imageBounds.w);
@@ -54,148 +84,116 @@ std::size_t Identity(const RawImageBackdropFrame& frame) {
     return hash;
 }
 }
-
 void RawImageBackdropNoise::ReleaseProfiles() {
-    DeletePair(fineProfile, coarseProfile, profileFramebuffer);
-    DeletePair(filteredFineProfile, filteredCoarseProfile, filteredFramebuffer);
-    DeletePair(fineBrightness, coarseBrightness, brightnessFramebuffer);
-    width = height = 0;
-    profileIdentity = 0;
-    profileValid = false;
+    Delete(profileVariance); Delete(profileCovariance);
+    Delete(filteredVariance); Delete(filteredCovariance);
+    Delete(brightnessVariance); Delete(brightnessCovariance);
+    width = height = 0; profileIdentity = 0; profileValid = false;
 }
-
 bool RawImageBackdropNoise::Ensure(int w, int h) {
     if (failed) return false;
+    glActiveTexture(GL_TEXTURE0);
     if (!analysisProgram) {
-        analysisProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropNoiseShaders::Analysis);
-        seedProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropNoiseShaders::Seed);
-        filterProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropNoiseShaders::Filter);
-        brightnessProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropNoiseShaders::BrightnessProfile);
+        analysisProgram = GLHelpers::CreateComputeProgram(RawImageBackdropNoiseShaders::Analysis.c_str());
+        seedProgram = GLHelpers::CreateComputeProgram(RawImageBackdropNoiseShaders::Seed);
+        filterProgram = GLHelpers::CreateComputeProgram(RawImageBackdropNoiseShaders::Filter);
+        brightnessProgram = GLHelpers::CreateComputeProgram(RawImageBackdropNoiseShaders::BrightnessProfile);
         if (!analysisProgram || !seedProgram || !filterProgram || !brightnessProgram ||
-            !CreatePair(512, 512, true, fineGrain, coarseGrain, grainFramebuffer)) {
+            !(grain = CreateArray(GrainSize, GrainSize, true, true, GL_RGBA16F))) {
             Shutdown(); failed = true; return false;
         }
-        glViewport(0, 0, 512, 512);
         glUseProgram(seedProgram);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        // Average the same deterministic field when grain becomes subpixel.
-        // These atlases are generated once; the photo blur remains Gaussian.
-        for (const auto image : {fineGrain, coarseGrain}) {
-            glBindTexture(GL_TEXTURE_2D, image);
-            glGenerateMipmap(GL_TEXTURE_2D);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        }
-        if (glGetError() != GL_NO_ERROR) {
-            Shutdown(); failed = true; return false;
-        }
+        glBindImageTexture(0, grain, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        Dispatch(GrainSize, GrainSize);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, grain);
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+        if (glGetError() != GL_NO_ERROR) { Shutdown(); failed = true; return false; }
     }
-    if (profileFramebuffer && width == w && height == h) return true;
+    if (profileVariance && width == w && height == h) return true;
     ReleaseProfiles();
-    if (!CreatePair(w, h, false, fineProfile, coarseProfile, profileFramebuffer) ||
-        !CreatePair(w, h, false, filteredFineProfile, filteredCoarseProfile, filteredFramebuffer) ||
-        !CreatePair(BrightnessBins, 1, false, fineBrightness, coarseBrightness, brightnessFramebuffer)) {
-        Shutdown(); failed = true; return false;
-    }
+    profileVariance = CreateArray(w, h, false, false, GL_RGBA32F);
+    profileCovariance = CreateArray(w, h, false, false, GL_RGBA32F);
+    filteredVariance = CreateArray(w, h, true, false, GL_RGBA32F);
+    filteredCovariance = CreateArray(w, h, true, false, GL_RGBA32F);
+    brightnessVariance = CreateArray(BrightnessBins, 1, false, false, GL_RGBA32F);
+    brightnessCovariance = CreateArray(BrightnessBins, 1, false, false, GL_RGBA32F);
+    if (!profileVariance || !profileCovariance || !filteredVariance || !filteredCovariance ||
+        !brightnessVariance || !brightnessCovariance) { Shutdown(); failed = true; return false; }
     width = w; height = h;
     return true;
 }
-
 bool RawImageBackdropNoise::Prepare(const RawImageBackdropFrame& frame) {
-    if (!std::isfinite(frame.nativeExtent.x) || !std::isfinite(frame.nativeExtent.y) ||
+    if (frame.patches.empty() || !std::isfinite(frame.nativeExtent.x) || !std::isfinite(frame.nativeExtent.y) ||
         frame.nativeExtent.x <= 0.f || frame.nativeExtent.y <= 0.f) return false;
-    // Fixed photo-space measurements avoid changing sample phase or strength
-    // while navigating. Limit the entire map to 64 samples on its longer axis.
+    const auto identity = Identity(frame);
+    // The cached path needs no allocation, dispatch or image-binding queries.
+    if (frame.presentationFingerprint && profileValid && profileIdentity == identity) return true;
     const float scale = std::min(1.f, 64.f / std::max(frame.nativeExtent.x, frame.nativeExtent.y));
     const int w = std::clamp(int(std::ceil(frame.nativeExtent.x * scale)), 1, 64);
     const int h = std::clamp(int(std::ceil(frame.nativeExtent.y * scale)), 1, 64);
+    ImageBindings savedImages;
     if (!Ensure(w, h)) return false;
-    const auto identity = Identity(frame);
-    // A zero identity owner deliberately disables reuse for anonymous callers.
-    if (frame.presentationFingerprint && profileValid && profileIdentity == identity) return true;
-    glBindFramebuffer(GL_FRAMEBUFFER, profileFramebuffer);
-    glViewport(0, 0, width, height);
-    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+    profileValid = false;
     glUseProgram(analysisProgram);
     glUniform1i(glGetUniformLocation(analysisProgram, "image"), 0);
     glUniform1i(glGetUniformLocation(analysisProgram, "previous"), 1);
     glUniform2f(glGetUniformLocation(analysisProgram, "nativeExtent"), frame.nativeExtent.x, frame.nativeExtent.y);
-    for (const auto& patch : frame.patches) {
+    BindOutputs(profileVariance, profileCovariance);
+    glUniform1i(glGetUniformLocation(analysisProgram, "clearOnly"), 1);
+    Dispatch(width, height, 1);
+    glUniform1i(glGetUniformLocation(analysisProgram, "clearOnly"), 0);
+    for (const auto& patch : frame.SurroundPatches()) {
         if (!patch.texture || patch.imageBounds.z <= patch.imageBounds.x || patch.imageBounds.w <= patch.imageBounds.y) continue;
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, patch.previousTexture ? patch.previousTexture : patch.texture);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, patch.texture);
-        glUniform4f(glGetUniformLocation(analysisProgram, "rect"),
-            patch.imageBounds.x, patch.imageBounds.y, patch.imageBounds.z, patch.imageBounds.w);
-        glUniform4f(glGetUniformLocation(analysisProgram, "textureRect"),
-            patch.uvMinimum.x, patch.uvMaximum.y, patch.uvMaximum.x, patch.uvMinimum.y);
+        glUniform4f(glGetUniformLocation(analysisProgram, "rect"), patch.imageBounds.x, patch.imageBounds.y,
+            patch.imageBounds.z, patch.imageBounds.w);
+        glUniform4f(glGetUniformLocation(analysisProgram, "textureRect"), patch.uvMinimum.x, patch.uvMaximum.y,
+            patch.uvMaximum.x, patch.uvMinimum.y);
         glUniform2f(glGetUniformLocation(analysisProgram, "previousOffset"), patch.previousOffset.x, patch.previousOffset.y);
         glUniform2f(glGetUniformLocation(analysisProgram, "previousScale"), patch.previousScale.x, patch.previousScale.y);
         glUniform1f(glGetUniformLocation(analysisProgram, "fadeAmount"), patch.previousTexture ? patch.fadeAmount : 1.f);
         glUniform1i(glGetUniformLocation(analysisProgram, "encodedSrgb"), patch.encodedSrgb ? 1 : 0);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        Dispatch(width, height, 1);
     }
-    // Reject isolated structure estimates before spatial smoothing. All three
-    // passes operate on the small cached map, never on the full-screen grain.
     glUseProgram(filterProgram);
-    glUniform1i(glGetUniformLocation(filterProgram, "fineInput"), 0);
-    glUniform1i(glGetUniformLocation(filterProgram, "coarseInput"), 1);
-    const auto filter = [&](unsigned int target, unsigned int fine, unsigned int coarse,
-                            bool median, float x, float y) {
-        glBindFramebuffer(GL_FRAMEBUFFER, target);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, fine);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, coarse);
+    glUniform1i(glGetUniformLocation(filterProgram, "varianceInput"), 0);
+    glUniform1i(glGetUniformLocation(filterProgram, "covarianceInput"), 1);
+    const auto filter = [&](unsigned int targetVariance, unsigned int targetCovariance,
+        unsigned int sourceVariance, unsigned int sourceCovariance, bool median, int x, int y) {
+        BindOutputs(targetVariance, targetCovariance); BindInputs(sourceVariance, sourceCovariance);
         glUniform1i(glGetUniformLocation(filterProgram, "rejectOutliers"), median ? 1 : 0);
-        glUniform2f(glGetUniformLocation(filterProgram, "direction"), x, y);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glUniform2i(glGetUniformLocation(filterProgram, "direction"), x, y);
+        Dispatch(width, height);
     };
-    filter(filteredFramebuffer, fineProfile, coarseProfile, true, 0, 0);
-    filter(profileFramebuffer, filteredFineProfile, filteredCoarseProfile, false, 1.f / width, 0);
-    filter(filteredFramebuffer, fineProfile, coarseProfile, false, 0, 1.f / height);
-    // Learn display-noise variance versus measured display brightness. This
-    // small GPU-only curve follows edited pixels and needs no source readback.
-    glBindFramebuffer(GL_FRAMEBUFFER, brightnessFramebuffer);
-    glViewport(0, 0, BrightnessBins, 1);
+    filter(filteredVariance, filteredCovariance, profileVariance, profileCovariance, true, 0, 0);
+    filter(profileVariance, profileCovariance, filteredVariance, filteredCovariance, false, 1, 0);
+    filter(filteredVariance, filteredCovariance, profileVariance, profileCovariance, false, 0, 1);
     glUseProgram(brightnessProgram);
-    glUniform1i(glGetUniformLocation(brightnessProgram, "fineInput"), 0);
-    glUniform1i(glGetUniformLocation(brightnessProgram, "coarseInput"), 1);
-    glUniform1i(glGetUniformLocation(brightnessProgram, "bins"), BrightnessBins);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, filteredFineProfile);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, filteredCoarseProfile);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    // Broadening the variance neighborhood outside the photo prevents one
-    // edge measurement from becoming an infinitely long horizontal/vertical band.
-    for (const auto image : {filteredFineProfile, filteredCoarseProfile}) {
-        glBindTexture(GL_TEXTURE_2D, image);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glUniform1i(glGetUniformLocation(brightnessProgram, "varianceInput"), 0);
+    glUniform1i(glGetUniformLocation(brightnessProgram, "covarianceInput"), 1);
+    BindOutputs(brightnessVariance, brightnessCovariance); BindInputs(filteredVariance, filteredCovariance);
+    Dispatch(BrightnessBins, 1);
+    for (const auto texture : {filteredVariance, filteredCovariance}) {
+        glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     }
-    if (glGetError() != GL_NO_ERROR) {
-        Shutdown(); failed = true; return false;
-    }
-    profileIdentity = identity;
-    profileValid = true;
+    if (glGetError() != GL_NO_ERROR) { Shutdown(); failed = true; return false; }
+    profileIdentity = identity; profileValid = true;
     return true;
 }
-
-void RawImageBackdropNoise::Bind(unsigned int program, int firstUnit, int brightnessUnit) const {
-    const unsigned int images[] = {filteredFineProfile, filteredCoarseProfile, fineGrain, coarseGrain};
-    const char* names[] = {"noiseFineProfile", "noiseCoarseProfile", "noiseFineGrain", "noiseCoarseGrain"};
-    for (int i = 0; i < 4; ++i) {
-        glUniform1i(glGetUniformLocation(program, names[i]), firstUnit+i);
-        glActiveTexture(GL_TEXTURE0+firstUnit+i);
-        glBindTexture(GL_TEXTURE_2D, images[i]);
+void RawImageBackdropNoise::Bind(unsigned int /*presentProgram*/, int firstUnit, int brightnessUnit) const {
+    const std::array<unsigned int, 5> images{filteredVariance, filteredCovariance, grain,
+        brightnessVariance, brightnessCovariance};
+    const int units[] = {firstUnit, firstUnit + 1, firstUnit + 2, brightnessUnit, brightnessUnit + 1};
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        glUniform1i(BackdropUniforms::Present::NoiseVariance+int(i), units[i]);
+        glActiveTexture(GL_TEXTURE0 + units[i]); glBindTexture(GL_TEXTURE_2D_ARRAY, images[i]);
     }
-    glUniform1i(glGetUniformLocation(program, "noiseFineBrightness"), brightnessUnit);
-    glActiveTexture(GL_TEXTURE0+brightnessUnit);
-    glBindTexture(GL_TEXTURE_2D, fineBrightness);
-    glUniform1i(glGetUniformLocation(program, "noiseCoarseBrightness"), brightnessUnit+1);
-    glActiveTexture(GL_TEXTURE0+brightnessUnit+1);
-    glBindTexture(GL_TEXTURE_2D, coarseBrightness);
 }
-
 void RawImageBackdropNoise::Shutdown() {
-    ReleaseProfiles();
-    DeletePair(fineGrain, coarseGrain, grainFramebuffer);
+    ReleaseProfiles(); Delete(grain);
     if (analysisProgram) glDeleteProgram(analysisProgram);
     if (seedProgram) glDeleteProgram(seedProgram);
     if (filterProgram) glDeleteProgram(filterProgram);

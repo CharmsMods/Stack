@@ -1,40 +1,146 @@
 #include "Editor/EditorModule.h"
+#include "Graph/LayerOperationParameters.h"
+#include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
+#include "Editor/NodeEditors/NodeInputPresentationCache.h"
 #include "Project/RawLayerStack.h"
+#include "Project/RawNodeEditing.h"
+#include "Project/GraphImageContracts.h"
 #include "Raw/RawGraphParameters.h"
 
 using namespace Stack::Project;
 using namespace Stack::RawRecipe;
 
 std::optional<GraphOperationKind> EditorModule::SelectedRawOperationKind() const {
-    switch (m_RawWorkspaceLabUi.activeTool) {
-        case RawLabTool::Calibration: return GraphOperationKind::Calibration;
-        case RawLabTool::Exposure: return GraphOperationKind::Exposure;
-        case RawLabTool::Zones: return GraphOperationKind::LocalEv;
-        case RawLabTool::Tone: return m_RawWorkspaceLabUi.sceneToneView < 2
-            ? GraphOperationKind::LuminanceTone : GraphOperationKind::RgbCurves;
-        case RawLabTool::Color: return GraphOperationKind::ColorWarp;
-        case RawLabTool::Detail: return GraphOperationKind::DetailContrast;
-        default: return std::nullopt;
-    }
+    const auto* node = SelectedRawOperation();
+    return node ? std::optional<GraphOperationKind>(node->rawOperation.kind) : std::nullopt;
 }
 
 const EditorNodeGraph::Node* EditorModule::SelectedRawOperation() const {
-    const auto kind = SelectedRawOperationKind();
-    const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), m_SelectedRawAdjustmentLayer);
-    if (!kind || !layer) return nullptr;
-    const auto selected = m_Project->rawOperationSelection.find(layer->id + "/" + GraphOperationId(*kind));
-    return FindRawOperation(*layer, *kind, selected == m_Project->rawOperationSelection.end()
-        ? std::string{} : selected->second);
+    const auto* node = SelectedEditingNode();
+    return node && node->kind == EditorNodeGraph::NodeKind::RawOperation ? node : nullptr;
 }
 
-bool EditorModule::IsRawParameterDriven(const std::string& parameter) const {
-    const auto* operation = SelectedRawOperation();
-    const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), m_SelectedRawAdjustmentLayer);
-    return operation && layer && layer->graph.FindInputLink(operation->id, "param:" + parameter);
+void EditorModule::BindNodeInputContext(RawWorkspaceEditContext& context) const {
+    context.inputDescriptor={};
+    if (!context.nodeTarget || context.nodeTarget->documentId!=GetProjectDocumentId()) return;
+    auto& cache=m_NodeEditorState.Get<Stack::Editor::NodeInputPresentationCache>(*context.nodeTarget);
+    const Stack::Editor::NodeInputPresentationCache::DescriptorKey key{
+        m_Project->editRevision,m_Project->rawLayers.Revision(),GetNodeGraph().GetStructureRevision(),
+        m_RenderRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame,m_TimelineUi.liveEditPreviewFrame};
+    const bool transientDraft=(m_RawLayerMaskWorkspace && m_RawLayerMaskWorkspace->dirty) ||
+        !m_TimelineUi.liveEditPreviewTargets.empty();
+    if (cache.descriptorValid && !transientDraft && cache.descriptorKey==key) {
+        context.inputDescriptor=cache.descriptor;
+    } else {
+        const auto snapshot=BuildGraphSnapshot();
+        const auto compiled=std::find_if(snapshot.nodes.begin(),snapshot.nodes.end(),[&](const auto& node) {
+            return node.authoredNodeUuid==context.nodeTarget->nodeUuid && node.authoredGraphId==context.nodeTarget->layerId;
+        });
+        if (compiled!=snapshot.nodes.end()) {
+            const auto input=std::find_if(snapshot.links.begin(),snapshot.links.end(),[&](const auto& link) {
+                return link.toNodeId==compiled->nodeId && link.toSocketId=="imageIn";
+            });
+            if (input!=snapshot.links.end()) context.inputDescriptor=input->semanticDescriptor;
+        }
+        cache.descriptorKey=key;cache.descriptor=context.inputDescriptor;
+        cache.descriptorValid=!transientDraft;
+    }
+    if (const auto space=RawOperationInputWorkingSpace(context.inputDescriptor)) context.recipe.technical.workingSpace=*space;
 }
 
 void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) const {
+    if (const auto* selected=SelectedEditingNode()) context.presentationNodeId=selected->id;
+    const auto describeCurveInput=[&] {
+        const auto* selected=SelectedEditingNode();
+        if (!selected || !context.nodeTarget) return;
+        BindNodeInputContext(context);
+        if (selected->kind!=EditorNodeGraph::NodeKind::RawOperation ||
+            selected->rawOperation.kind!=GraphOperationKind::ToneCurve) return;
+        if (m_RawWorkspaceGraphScopeReadback.valid &&
+            m_RawWorkspaceGraphScopeReadback.stage==RawDevelopmentGraphScopeStage::FinishToneInput &&
+            m_RawWorkspaceGraphScopeReadbackRevision==m_RawWorkspaceFinishToneInputGraphScopeCache.contentRevision &&
+            m_RawWorkspaceFinishToneInputGraphScopeCache.sourceKey==context.nodeTarget->Key() &&
+            m_RawWorkspaceFinishToneInputGraphScopeCache.inputFingerprint==Stack::Editor::NodeInputAnalysisIdentity(
+                *context.nodeTarget,m_Project->editRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame)) {
+            const auto& parameters=selected->rawOperation.parameters;
+            const auto mode=parameters.value("curveMode",std::string("components"));
+            auto& cache=m_NodeEditorState.Get<Stack::Editor::NodeInputPresentationCache>(*context.nodeTarget);
+            const bool components=mode=="components";
+            const int domain=components?parameters.value("domain",0):1;
+            const float minimum=components?parameters.value("logMinEv",-10.f):-16.f;
+            const float maximum=components?parameters.value("logMaxEv",6.f):16.f;
+            const float grey=parameters.value("middleGrey",.18f);
+            const Stack::Editor::NodeInputPresentationCache::HistogramKey key{
+                m_RawWorkspaceGraphScopeReadbackRevision,components,domain,minimum,maximum,grey};
+            if (!cache.histogramValid || cache.histogramKey!=key ||
+                !(cache.histogramDescriptor==context.inputDescriptor)) {
+                cache.histogram=Stack::Editor::RawLabInternal::BuildNodeInputToneHistogram(
+                    m_RawWorkspaceGraphScopeReadback,Stack::NodeMath::DescribeImageOperationInput(context.inputDescriptor),
+                    components,domain,minimum,maximum,grey);
+                cache.histogramKey=key;cache.histogramDescriptor=context.inputDescriptor;
+                cache.histogramValid=m_RawWorkspaceGraphScopeReadbackRevision!=0;
+                ++cache.histogramRevision;
+            }
+            context.inputHistogram=cache.histogram;
+            context.inputHistogramRevision=cache.histogramRevision;
+        }
+    };
+    if (m_Project->nodeEditor && m_Project->nodeEditor->layerId == kProjectGraphId) {
+        const auto* node = SelectedEditingNode();
+        if (!node) { context.canEdit=false; context.error="The selected node is no longer available."; return; }
+        context.nodeTarget = m_Project->nodeEditor;
+        context.nodeRevision = m_Project->editRevision;
+        context.rawAdjustmentLayerId = kProjectGraphId;
+        context.rawOperationUuid = node->instanceUuid;
+        if (node->kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node->multiFrameHdr.bracketingSource) {
+            // This source edits its canonical source-set recipe through the
+            // Bracketing coordinator. It has no graph-parameter draft or input
+            // analysis to copy/prepare while the ordinary View is submitted.
+            return;
+        }
+        if (node->kind != EditorNodeGraph::NodeKind::RawOperation) context.nodeDraft = *node;
+        if (node->kind == EditorNodeGraph::NodeKind::Layer)
+            context.nodeSettings = node->layerParameters;
+        if (node->kind == EditorNodeGraph::NodeKind::RawOperation)
+            context.recipe = m_RawOperationRecipeCache.Read(node->rawOperation,
+                node->instanceUuid, GetProjectDocumentId(), m_Project->editRevision);
+        for (const auto& link : m_Project->graph.GetLinks()) if (link.toNodeId == node->id) {
+            if (link.toSocketId.rfind("param:",0)==0) context.drivenParameters.insert(link.toSocketId.substr(6));
+            if (const auto* producer=m_Project->graph.FindNode(link.fromNodeId))
+                context.inputs.emplace(link.toSocketId,Stack::GraphModel::Endpoint{kProjectGraphId,producer->instanceUuid,link.fromSocketId});
+        }
+        BindUniformParameterContext(context,*node);
+        describeCurveInput();
+        return;
+    }
+    if (const auto* node = SelectedEditingNode()) {
+        const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), m_SelectedRawAdjustmentLayer);
+        context.nodeTarget = NodeEditTarget{GetProjectDocumentId(),layer->id,node->instanceUuid};
+        context.nodeRevision = m_Project->rawLayers.Revision();
+        context.rawAdjustmentLayerId = layer->id;
+        context.rawOperationUuid = node->instanceUuid;
+        context.persistedRecipe = nullptr;
+        for (const auto& link:layer->graph.GetLinks()) if(link.toNodeId==node->id) {
+            if(link.toSocketId.rfind("param:",0)==0)
+                context.drivenParameters.insert(link.toSocketId.substr(6));
+            const auto input=RawNodeInput(m_Project->rawLayers.State(),*context.nodeTarget,GetProjectDocumentId(),link.toSocketId);
+            if(input) context.inputs.emplace(link.toSocketId,*input);
+        }
+        const auto& editor = Stack::Editor::FindNodeEditor(*node);
+        const bool editsNodeDraft = editor.primary || editor.settings || editor.reset || editor.overlay;
+        if(node->kind!=EditorNodeGraph::NodeKind::RawOperation && editsNodeDraft) {
+            context.nodeDraft=*node;
+            if(node->kind==EditorNodeGraph::NodeKind::Layer)
+                context.nodeSettings=node->layerParameters;
+        }
+    } else if (m_Project->nodeEditor) {
+        context.canEdit = false;
+        context.error = "The selected node is no longer available.";
+        return;
+    }
     if (!SelectedRawOperationKind()) {
+        if (const auto* node=SelectedEditingNode()) BindUniformParameterContext(context,*node);
+        describeCurveInput();
         if (!m_SelectedRawAdjustmentLayer.empty() && m_SelectedRawAdjustmentLayer != kRawBackgroundId &&
             (m_RawWorkspaceLabUi.activeTool == RawLabTool::Light || m_RawWorkspaceLabUi.activeTool == RawLabTool::Denoise ||
              m_RawWorkspaceLabUi.activeTool == RawLabTool::RgbDenoise)) {
@@ -54,12 +160,15 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
         return;
     }
     context.rawOperationUuid = operation->instanceUuid;
-    auto editing = ReadRawLayerOperation(*layer, operation->instanceUuid);
+    auto editing = m_RawOperationRecipeCache.Read(*layer, operation->instanceUuid,
+        GetProjectDocumentId(), m_Project->rawLayers.Revision());
     editing.source = context.recipe.source;
     editing.technical.workingSpace = context.recipe.technical.workingSpace;
     editing.technical.processingVersion = context.recipe.technical.processingVersion;
     editing.cropRotation = context.recipe.cropRotation;
     context.recipe = std::move(editing);
+    BindUniformParameterContext(context,*operation);
+    describeCurveInput();
 }
 
 void EditorModule::RenderRawOperationInstancePicker(RawWorkspaceEditContext& context) {
@@ -84,7 +193,7 @@ void EditorModule::RenderRawOperationInstancePicker(RawWorkspaceEditContext& con
                 ImGui::PushID(choice.uuid.c_str());
                 const auto label = choice.title + " " + std::to_string(++index);
                 if (ImGui::Selectable(label.c_str(), choice.uuid == context.rawOperationUuid)) {
-                    m_Project->rawOperationSelection[key] = choice.uuid;
+                    SelectRawNodeEditor(layer->id, choice.uuid);
                     BeginRawWorkspaceEditContext(context.source, context);
                     ClearRawWorkspaceGraphScopeReadbackCaches();
                     m_RawWorkspaceAnalysisPending = true;
@@ -100,7 +209,7 @@ void EditorModule::RenderRawOperationInstancePicker(RawWorkspaceEditContext& con
     }
     current = SelectedRawOperation();
     if (current) {
-        for (const auto& parameter : GraphParameters(current->rawOperation.kind)) {
+        for (const auto& parameter : GraphParameters(current->rawOperation)) {
             const auto* link = layer->graph.FindInputLink(current->id, "param:" + parameter.id);
             if (!link) continue;
             const auto* source = layer->graph.FindNode(link->fromNodeId);
@@ -122,7 +231,7 @@ void EditorModule::RenderRawOperationInstancePicker(RawWorkspaceEditContext& con
         if (old) valid = destination->graph.TryConnectSockets(old->fromNodeId, old->fromSocketId, addedId, "imageIn", &m_RawLayerStatus);
         if (valid) valid = destination->graph.TryConnectSockets(addedId, "imageOut", resultId, "imageIn", &m_RawLayerStatus);
         if (valid && ApplyRawLayerStackEdit(std::move(candidate))) {
-            m_Project->rawOperationSelection[key] = uuid;
+            SelectRawNodeEditor(layer->id, uuid);
             BeginRawWorkspaceEditContext(context.source, context);
         }
     }
@@ -182,11 +291,7 @@ RawDevelopmentRecipe EditorModule::ReadRawControlRecipe() const {
             case GraphOperationKind::Calibration: result.colorCalibration = part.colorCalibration; break;
             case GraphOperationKind::Exposure: result.preToneExposureEv = part.preToneExposureEv; break;
             case GraphOperationKind::LocalEv: result.localRange = part.localRange; result.evGradients = part.evGradients; break;
-            case GraphOperationKind::LuminanceTone: result.finishTone.layerJson["luminanceTone"] = part.finishTone.layerJson.at("luminanceTone"); break;
-            case GraphOperationKind::RgbCurves: {
-                const auto luminance = result.finishTone.layerJson.at("luminanceTone");
-                result.finishTone = part.finishTone; result.finishTone.layerJson["luminanceTone"] = luminance; break;
-            }
+            case GraphOperationKind::ToneCurve: result.finishTone=part.finishTone; break;
             case GraphOperationKind::ColorWarp: result.colorWarp = part.colorWarp; break;
             case GraphOperationKind::DetailContrast: result.detailContrast = part.detailContrast; break;
             default: break;
@@ -204,16 +309,28 @@ bool EditorModule::PrepareRawControlRecipeEdit(const RawDevelopmentRecipe& recip
         const auto kind = static_cast<GraphOperationKind>(i);
         auto before = MakeGraphOperation(kind), after = before;
         WriteGraphOperation(before, previous); WriteGraphOperation(after, recipe);
+        // A whole-recipe exposure edit belongs to Exposure. Local EV's vertical
+        // gesture owns a separate offset on that particular curve instance.
+        if (kind == GraphOperationKind::LocalEv) { before.parameters.erase("ev"); after.parameters.erase("ev"); }
         if (before.parameters == after.parameters) continue;
         auto& layer = candidate.background;
         const auto selection = m_Project->rawOperationSelection.find(layer.id + "/" + GraphOperationId(kind));
         const auto* node = FindRawOperation(layer, kind,
             selection == m_Project->rawOperationSelection.end() ? std::string{} : selection->second);
         if (!node) {
-            error = std::string("Add a ") + GraphOperationLabel(kind) + " operation before applying this adjustment.";
-            return false;
+            const auto* end = FindRawRole(layer,Stack::GraphModel::NodeRole::LayerResult);
+            const int endId=end->id;
+            const auto* input=layer.graph.FindInputLink(endId,"imageIn");
+            if (!input) { error="Connect the Background chain before applying this adjustment."; return false; }
+            const auto from=*input;
+            node=layer.graph.AddRawOperationNode(kind,{end->position.x,180.f});
+            const int id=node->id;
+            if (!layer.graph.TryConnectSockets(from.fromNodeId,from.fromSocketId,id,"imageIn",&error) ||
+                !layer.graph.TryConnectSockets(id,"imageOut",endId,"imageIn",&error)) return false;
         }
-        if (!WriteRawLayerOperation(layer, node->instanceUuid, recipe, error)) return false;
+        auto edited=recipe;
+        if (kind == GraphOperationKind::LocalEv) edited.preToneExposureEv=ReadGraphOperation(node->rawOperation).preToneExposureEv;
+        if (!WriteRawLayerOperation(layer, node->instanceUuid, edited, error)) return false;
         changed = true;
     }
     return ValidateRawLayerStack(candidate, error, &m_Project->graph, ResolveRawWorkspaceStageOutputNodeId());

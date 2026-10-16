@@ -1,10 +1,18 @@
 #include "Editor/AutoBracket/AutoBracketEditingScope.h"
+#include "Graph/LayerOperationParameters.h"
 #include "Editor/Bracketing/BracketingSession.h"
 #include "App/WorkspacePresentation.h"
+#include "App/UiPerformanceTrace.h"
+#include "App/UiPerformanceProbe.h"
 #include "App/WorkspaceInputScope.h"
+#include "Library/LibraryControls.h"
 #include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
+#include "Editor/Timeline/TimelineParameterEdits.h"
+#include "Project/RawNodeEditing.h"
+#include "Graph/GraphDocumentRules.h"
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
+#include "Editor/Internal/RawLab/RawFloatingInputTrace.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/Internal/RawLab/RawLabToolPresentation.h"
 #include "Editor/Internal/RawLab/RawLabModeSwitcher.h"
@@ -14,6 +22,7 @@
 #include "Persistence/RawProjectEditPipeline.h"
 #include "Project/RawLayerSourceTransactions.h"
 #include "Persistence/ProjectIndex.h"
+#include "Persistence/ProjectStore.h"
 #include "Raw/RawGalleryFileActions.h"
 #include "Raw/MultiFrameHdr/Contracts.h"
 #include "Renderer/GLHelpers.h"
@@ -72,8 +81,24 @@ int NormalizeRawLabRotationDegrees(int rotationDegrees) {
 bool EditorModule::BeginRawWorkspaceEditContext(
     const Stack::RawWorkspace::SourceRecord* selectedSource,
     RawWorkspaceEditContext& context) const {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewContext);
     context = RawWorkspaceEditContext{};
     context.source = selectedSource;
+    context.editabilityTrace.sourcePresent = selectedSource != nullptr;
+    context.editabilityTrace.projectActive = IsRawWorkspaceProjectActive();
+    context.editabilityTrace.sourceMatches = selectedSource && m_Project->rawSourceKey == selectedSource->relativePathKey;
+    context.editabilityTrace.lifecycle = static_cast<int>(m_Project->lifecycle.Phase());
+    context.editabilityTrace.loadState = static_cast<int>(m_RawWorkspaceProjectLoadTaskState);
+    if (m_Project->nodeEditor && m_Project->nodeEditor->layerId == Stack::Project::kProjectGraphId &&
+        !IsBracketingToolActive()) {
+        const auto phase=m_Project->lifecycle.Phase();
+        context.canEdit=phase!=Stack::Project::ProjectLifecyclePhase::Loading &&
+            phase!=Stack::Project::ProjectLifecyclePhase::Conflict &&
+            phase!=Stack::Project::ProjectLifecyclePhase::Importing &&
+            phase!=Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery && !IsWorkspaceTransitionPending();
+        BindRawOperationContext(context);
+        return SelectedEditingNode()!=nullptr;
+    }
     if (IsMultiFrameRawProjectActive() && m_Project->snapshot) {
         Stack::Project::RawProjectEditRecipeBinding binding;
         if (!Stack::Project::ResolveRawProjectEditRecipe(
@@ -84,6 +109,7 @@ bool EditorModule::BeginRawWorkspaceEditContext(
             return false;
         }
         context.recipe = std::move(binding.recipe);
+        context.editabilityTrace.recipeResolved = true;
         // A merged source can change while its authored RAW recipe stays the
         // same. Key stage caches and retained detail to the actual pixels.
         context.recipe.source.sourcePath = GetActiveRawWorkspacePreviewIdentity();
@@ -118,6 +144,7 @@ bool EditorModule::BeginRawWorkspaceEditContext(
     }
 
     context.panelState = Stack::RawWorkspace::BuildRawPanelState(selectedSource);
+    context.editabilityTrace.catalogEditable = context.panelState.recipeControlsEditable;
     const bool selectedProjectActive =
         IsRawWorkspaceProjectActive() &&
         m_Project->rawSourceKey == selectedSource->relativePathKey;
@@ -131,6 +158,9 @@ bool EditorModule::BeginRawWorkspaceEditContext(
     const bool selectedProjectLoadFailed =
         m_RawWorkspaceProjectLoadTaskState == Async::TaskState::Failed &&
         m_RawWorkspaceProjectLoadSourceKey == selectedSource->relativePathKey;
+    context.editabilityTrace.previewQueued = selectedPreviewStageQueued;
+    context.editabilityTrace.loading = selectedProjectLoading;
+    context.editabilityTrace.loadFailed = selectedProjectLoadFailed;
     const bool selectedStoredProject =
         selectedSource->project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
         selectedSource->project.status == Stack::RawWorkspace::ProjectStatus::Embedded;
@@ -142,24 +172,57 @@ bool EditorModule::BeginRawWorkspaceEditContext(
             ? m_RawWorkspaceProjectLoadStatusText
             : "Double-click this image in Gallery to open its RAW project.";
     } else {
-        resolved = ResolveRawWorkspaceRecipeForSource(
-            *selectedSource,
-            context.recipe,
-            &context.resolvedMode,
-            &context.error);
+        if (selectedProjectActive && SelectedRawOperation()) {
+            // Binding an operation retains only source identity, working
+            // space, processing version and crop from this recipe. Reading
+            // every Background operation here would immediately discard it.
+            context.recipe = m_Project->rawRecipe;
+            context.resolvedMode = m_Project->rawMode;
+            resolved = true;
+        } else {
+            resolved = ResolveRawWorkspaceRecipeForSource(
+                *selectedSource,
+                context.recipe,
+                &context.resolvedMode,
+                &context.error);
+        }
         if (selectedPreviewStageQueued && context.error.empty()) {
             context.error = m_RawWorkspaceProjectLoadStatusText.empty()
                 ? "Preparing RAW preview..."
                 : m_RawWorkspaceProjectLoadStatusText;
         }
     }
-    // A failed replacement may restore the same source's previous live
-    // project. The failed attempt must not disable that restored document.
+    // Gallery discovery describes a saved association, which can be pending,
+    // stale, or a different project using this same source. The matching open
+    // document owns editing permission once its recipe has been resolved.
+    // A failed replacement likewise must not disable a restored live document.
+    using Phase = Stack::Project::ProjectLifecyclePhase;
+    const auto phase = m_Project->lifecycle.Phase();
+    const bool recovery = phase == Phase::ReadOnlyRecovery ||
+        (m_Project->store && m_Project->store->IsReadOnlyRecovery());
+    const bool projectBusy = phase == Phase::Loading || phase == Phase::Importing ||
+        Async::IsBusy(m_Project->files->load.state);
+    const bool liveModeEditable =
+        context.resolvedMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers ||
+        context.resolvedMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed;
     context.canEdit =
-        context.panelState.recipeControlsEditable &&
         resolved &&
         selectedProjectActive &&
-        !selectedProjectLoading;
+        liveModeEditable &&
+        !selectedProjectLoading && !projectBusy && !recovery && phase != Phase::Conflict;
+    context.editabilityTrace.recipeResolved = resolved;
+    if (!context.canEdit && context.error.empty()) {
+        if (phase == Phase::Conflict)
+            context.error = "Resolve the project storage conflict before editing.";
+        else if (recovery)
+            context.error = "Save a repaired copy before editing this recovered project.";
+        else if (selectedProjectLoading || projectBusy)
+            context.error = "The RAW project is still opening.";
+        else if (selectedProjectActive && !liveModeEditable)
+            context.error = "RAW controls are unavailable for this project's editing mode.";
+        else if (!context.panelState.recipeControlsEditable)
+            context.error = context.panelState.readOnlyMessage;
+    }
     context.persistedRecipe = selectedProjectActive
         ? &m_Project->rawRecipe
         : &context.recipe;
@@ -178,6 +241,47 @@ void EditorModule::CommitRawWorkspaceEditContext(
     if (Stack::Workspace::IsPreview() || !context.canEdit) {
         return;
     }
+    // Bracketing controls commit the canonical source-set recipe themselves.
+    // Its first-node surface has no RAW operation or project-graph parameter
+    // draft for this generic host to write or cancel.
+    if (IsBracketingToolActive()) return;
+    if (context.nodeTarget && context.nodeTarget->layerId == Stack::Project::kProjectGraphId) {
+        if (context.nodeTarget->documentId != GetProjectDocumentId() ||
+            context.nodeRevision != m_Project->editRevision || IsEditingRawLayerMaskGraph()) {
+            context.error="The project or node changed while this edit was prepared."; return;
+        }
+        if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {
+            RestoreProjectGraphHistory(false,true); ImGui::ClearActiveID(); return;
+        }
+        if (changed) {
+            auto editor = GetGraphEditorContext();
+            Stack::Project::RawAdjustmentLayer candidate;
+            candidate.graph=m_Project->graph;
+            EditorNodeGraph::Node* node=nullptr;
+            for (auto& item:candidate.graph.GetNodes())
+                if (item.instanceUuid==context.nodeTarget->nodeUuid) { node=&item; break; }
+            if (!node) return;
+            const auto before=node->kind==EditorNodeGraph::NodeKind::RawOperation ? node->rawOperation.parameters : node->layerParameters;
+            std::string error;
+            const bool prepared = context.nodeDraft
+                ? Stack::Project::WriteRawNodeDraft(candidate,*node,*context.nodeDraft,context.nodeSettings,error)
+                : Stack::Project::WriteRawLayerOperation(candidate,node->instanceUuid,context.recipe,error);
+            if (prepared) {
+                const auto after=node->kind==EditorNodeGraph::NodeKind::RawOperation ? node->rawOperation.parameters : node->layerParameters;
+                auto timelineEdit=m_TimelineUi.open ? Stack::Timeline::PrepareParameterEditAnimation(m_Project->timeline,*node,editor.graphId,
+                    m_TimelineUi.currentFrame,before,after) : Stack::Timeline::ParameterEditAnimation{m_Project->timeline,{}};
+                auto proposal = Stack::GraphModel::ProposeEdit(*editor.graph,editor.revision,
+                    [&](auto& graph) { graph=candidate.graph; });
+                if (editor.applyDocumentEdit(std::move(proposal),Stack::GraphModel::LayerParameterRecords(candidate.graph),std::move(timelineEdit.animation),error)) {
+                    context.nodeRevision=m_Project->editRevision;
+                    for (const auto& target:timelineEdit.livePreviewTargets) AddTimelineLiveEditPreviewTarget(target);
+                }
+            }
+            if (!error.empty()) context.error=std::move(error);
+        }
+        if (!interactionActive) m_Project->graphHistory.EndGesture();
+        return;
+    }
     if (!context.rawAdjustmentLayerId.empty()) {
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             if (m_Project->rawLayers.CancelGesture()) {
@@ -185,24 +289,35 @@ void EditorModule::CommitRawWorkspaceEditContext(
                 NoteRawWorkspaceRecipePreviewEdit(false);
             }
             auto& areas = m_RawWorkspaceLabUi.zoneAreas;
-            areas.history.Cancel();areas.active=false;
+            if (areas.nodeTarget == context.nodeTarget) areas.history.Cancel();
+            areas.active=false;
             for(auto& graph:areas.graphs) graph.second.interaction={};
             m_RawWorkspaceLabUi.sceneToneDraggingPoint=-1;
             ImGui::ClearActiveID();
             return;
         }
         auto& areaUi = m_RawWorkspaceLabUi.zoneAreas;
-        if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity() && (changed || !interactionActive))
+        if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity() &&
+            areaUi.nodeTarget == context.nodeTarget && (changed || !interactionActive))
             areaUi.history.Observe(context.recipe.localRange.areas, interactionActive);
         if (changed) {
             if (interactionActive) m_Project->rawLayers.BeginGesture();
-            auto candidate = m_Project->rawLayers.State();
-            if (auto* layer = Stack::Project::FindRawAdjustmentLayer(candidate, context.rawAdjustmentLayerId)) {
-                std::string error;
-                if (Stack::Project::WriteRawLayerOperation(*layer, context.rawOperationUuid, context.recipe, error))
-                    ApplyRawLayerStackEdit(std::move(candidate));
-                else m_RawLayerStatus = error;
-            }
+            Stack::Project::RawLayerStackState candidate;
+            std::string error;
+            if (context.nodeTarget && Stack::Project::PrepareRawNodeEdit(m_Project->rawLayers,GetProjectDocumentId(),
+                *context.nodeTarget,context.nodeRevision,candidate,[&](auto& layer,auto& node,auto& reason) {
+                    const auto before=node.kind==EditorNodeGraph::NodeKind::RawOperation ? node.rawOperation.parameters : node.layerParameters;
+                    const bool prepared=context.nodeDraft ? Stack::Project::WriteRawNodeDraft(layer,node,*context.nodeDraft,context.nodeSettings,reason)
+                        : Stack::Project::WriteRawLayerOperation(layer,context.rawOperationUuid,context.recipe,reason);
+                    if (prepared) {
+                        const auto after=node.kind==EditorNodeGraph::NodeKind::RawOperation ? node.rawOperation.parameters : node.layerParameters;
+                        if (m_TimelineUi.open) layer.animation=Stack::Timeline::PrepareParameterEditAnimation(layer.animation,node,layer.id,
+                            m_TimelineUi.currentFrame,before,after).animation;
+                    }
+                    return prepared;
+                },error)) {
+                if (ApplyRawLayerStackEdit(std::move(candidate))) context.nodeRevision=m_Project->rawLayers.Revision();
+            } else m_RawLayerStatus=error;
         }
         if (!interactionActive) {
             m_Project->rawLayers.EndGesture();
@@ -214,7 +329,7 @@ void EditorModule::CommitRawWorkspaceEditContext(
         return;
     }
     auto& areaUi = m_RawWorkspaceLabUi.zoneAreas;
-    if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity()) {
+    if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity() && areaUi.nodeTarget == context.nodeTarget) {
         const bool cancelling = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         if (cancelling) {
             auto restored = areaUi.history.Cancel();
@@ -528,67 +643,21 @@ void EditorModule::UpdateRawWorkspaceNotificationDecisions() {
 }
 
 bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& context) {
+    UpdateRawWorkspaceNotificationDecisions();
+    const auto editorRevision = context.nodeTarget && context.nodeTarget->layerId == Stack::Project::kProjectGraphId
+        ? m_Project->editRevision : m_Project->rawLayers.Revision();
+    if (context.nodeTarget && context.nodeRevision != editorRevision)
+        BeginRawWorkspaceEditContext(context.source,context);
+    context.editorState=&m_NodeEditorState;
+    ImGui::BeginDisabled(!context.canEdit);
+    const bool fallback = RenderRawGraphOperationControls();
+    ImGui::EndDisabled();
+    if (fallback) return false;
     // This flag describes only the current UI frame. Reset it even when a
     // different tool surface is active so a later interaction cannot inherit
     // stale Exposure state after a tool switch.
     m_RawWorkspaceLabUi.globalExposureInteractionActive = false;
-    // Keep the move handle and tool chooser outside the scrolling body.
     const ImVec2 controlsMinimum = ImGui::GetCursorScreenPos();
-    RenderRawFloatingSurfaceHandle(LabToolName(m_RawWorkspaceLabUi.activeTool));
-    if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize("Choose").x + 12.f)
-        ImGui::SameLine();
-    if (BareTextButton("Choose", false, !Stack::Workspace::IsPreview()))
-        m_RawToolPickerRequested = true;
-    LabTooltip("Choose an editing tool. Hold Alt anywhere in RAW.");
-    const float headerHeight = ImGui::GetCursorScreenPos().y - ImGui::GetWindowPos().y;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 8.f));
-    // Separate scroll state per tool. Switching from a long tool must not
-    // open a short tool at the old tool's scroll offset.
-    ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
-    ImGui::BeginChild("RawLabActiveToolSurface", ImVec2(0.f, 0.f),
-        ImGuiChildFlags_AlwaysUseWindowPadding,
-        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_HorizontalScrollbar);
-    if (!context.rawAdjustmentLayerId.empty()) {
-        const auto* layer = Stack::Project::FindRawAdjustmentLayer(
-            m_Project->rawLayers.State(), context.rawAdjustmentLayerId);
-        if (layer) ImGui::TextDisabled("%s", layer->name.c_str());
-    } else if (context.source || context.multiFrameResult) {
-        ImGui::TextDisabled("Base image");
-    }
-    // Bracket/Edit is local to the selected capture, not application chrome.
-    RenderRawWorkspaceLabCommandStrip();
-    ImGui::Spacing();
-    const RawLabTool drawerTool =
-        Stack::EditorModuleTypes::RawLabDrawerTool(m_RawWorkspaceLabUi.activeTool);
-    if (drawerTool == RawLabTool::Zones || drawerTool == RawLabTool::Color) {
-        const bool curves = drawerTool == RawLabTool::Zones;
-        const RawLabTool first = curves ? RawLabTool::Zones : RawLabTool::Color;
-        const RawLabTool second = curves ? RawLabTool::Tone : RawLabTool::Calibration;
-        ImGui::PushID(curves ? "RawLabCurvesModes" : "RawLabColorModes");
-        if (curves) {
-            if (BareTextButton("Exposure", m_RawWorkspaceLabUi.activeTool == RawLabTool::Exposure)) RequestRawLabTool(RawLabTool::Exposure);
-            ImGui::SameLine();
-        }
-        if (BareTextButton(curves ? "Local exposure" : "Color Warp",
-                m_RawWorkspaceLabUi.activeTool == first)) {
-            RequestRawLabTool(first);
-        }
-        ImGui::SameLine();
-        if (BareTextButton(curves ? "Tone" : "Calibration",
-                m_RawWorkspaceLabUi.activeTool == second)) {
-            RequestRawLabTool(second);
-        }
-        if (curves) {
-            ImGui::SameLine();
-            if (BareTextButton("Detail", m_RawWorkspaceLabUi.activeTool == RawLabTool::Detail)) RequestRawLabTool(RawLabTool::Detail);
-        }
-        ImGui::PopID();
-        ImGui::Spacing();
-    }
-    if (BareTextButton("Settings", m_RawWorkspaceLabUi.settingsTabActive,
-            !Stack::Workspace::IsPreview())) RequestRawSettingsPanel();
-    LabTooltip("Open this tool's settings in the side panel.");
-    ImGui::Spacing();
     bool settingsOpenedThisFrame = false;
 
     if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Denoise ||
@@ -607,13 +676,16 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
     }
     bool changed = false;
     if (m_RawWorkspaceLabUi.activeTool == RawLabTool::MultiFrame) {
-        RenderBracketingUI();
-        if (m_RawLabMultiFrameAdvancedOpenedThisFrame) {
-            settingsOpenedThisFrame = true;
-            RequestRawSettingsPanel();
-            m_RawLabMultiFrameAdvancedOpenedThisFrame = false;
+        if (IsBracketingToolActive()) RenderBracketingContributionUI();
+        else {
+            RenderMultiFrameRawLabTool();
+            if (m_RawLabMultiFrameAdvancedOpenedThisFrame) {
+                settingsOpenedThisFrame = true;
+                RequestRawSettingsPanel();
+                m_RawLabMultiFrameAdvancedOpenedThisFrame = false;
+            }
         }
-    } else if (context.source == nullptr && !context.multiFrameResult) {
+    } else if (context.source == nullptr && !context.multiFrameResult && !context.nodeTarget) {
         ImGui::TextDisabled("%s", context.error.empty()
             ? "Choose an image from Gallery to edit."
             : context.error.c_str());
@@ -621,7 +693,9 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
         Stack::UiActivity::BeginDisabledForWork(
         !context.canEdit && IsRawWorkspaceProjectLoadBusy(),
         !context.canEdit && !IsRawWorkspaceProjectLoadBusy());
-        switch (m_RawWorkspaceLabUi.activeTool) {
+        const auto* nodeEditor = SelectedNodeEditor();
+        if (nodeEditor && nodeEditor->primary) changed |= nodeEditor->primary(*this,context);
+        else switch (m_RawWorkspaceLabUi.activeTool) {
             case RawLabTool::Transform:
                 if (ImGui::Button("Rotate left")) {
                     context.recipe.cropRotation.rotationDegrees = NormalizeRawLabRotationDegrees(context.recipe.cropRotation.rotationDegrees - 90);
@@ -644,28 +718,11 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
             case RawLabTool::Light:
                 changed |= RenderRawWorkspaceLabLightSurface(context);
                 break;
-            case RawLabTool::Exposure:
-                ImGui::BeginDisabled(IsRawParameterDriven("ev"));
-                changed |= ImGui::SliderFloat("Exposure", &context.recipe.preToneExposureEv, -10.f, 10.f, "%.2f EV");
-                ImGui::EndDisabled();
-                break;
-            case RawLabTool::Zones:
-                changed |= RenderRawWorkspaceLabZonesSurface(context, RawLabControlSection::Graph);
-                break;
-            case RawLabTool::Detail:
-                changed |= DrawDetailContrastEditor(context.recipe.detailContrast, m_RawWorkspaceLabUi.detailContrastEditor, [this](const auto& id) { return IsRawParameterDriven(id); }, RawLabControlSection::Graph);
-                break;
-            case RawLabTool::Tone:
-                changed |= RenderRawWorkspaceLabToneSurface(context, RawLabControlSection::Graph);
-                break;
-            case RawLabTool::Color:
-                changed |= RenderRawWorkspaceLabColorSurface(context, RawLabControlSection::Graph);
-                break;
-            case RawLabTool::Calibration:
-                changed |= RenderRawWorkspaceLabCalibrationSurface(context);
-                break;
             case RawLabTool::View:
                 changed |= RenderRawWorkspaceLabViewSurface(context);
+                break;
+            case RawLabTool::GraphNode:
+                ImGui::TextWrapped("Add and connect an operation in Graph, then open it here.");
                 break;
             default:
                 ImGui::TextDisabled("This tool is reserved for a later RAW Lab pass.");
@@ -680,8 +737,8 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
     // Contact detection and the Alt selector follow the visible controls.
     // This does not request a rectangular image blur behind the tool window.
     const auto* controlsWindow = ImGui::GetCurrentWindow();
-    m_RawFloatingSurface.contentHeights[static_cast<int>(m_RawWorkspaceLabUi.activeTool)] =
-        std::max(80.f, headerHeight +
+    m_RawFloatingSurface.contentHeights[RawNodeEditorStateKey()] =
+        std::max(80.f,
             controlsWindow->DC.CursorMaxPos.y - controlsWindow->DC.CursorStartPos.y + 16.f);
     ImRect visibleControls(controlsMinimum, ImVec2(controlsWindow->WorkRect.Max.x,
         std::max(controlsMinimum.y, controlsWindow->DC.CursorMaxPos.y)));
@@ -689,10 +746,6 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
     m_RawActiveControlMinimum = visibleControls.Min;
     m_RawActiveControlMaximum = visibleControls.Max;
     m_RawActiveControlFrame = ImGui::GetFrameCount();
-    ImGui::EndChild();
-    ImGui::PopID();
-    ImGui::PopStyleVar();
-
     const auto curveInteractionActive = [](const RawCurveGraphUiState& state) {
         return state.draggingExposure || state.draggingPoint >= 0 || state.draggingSegment >= 0;
     };
@@ -711,7 +764,10 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
         m_RawWorkspaceLabUi.colorWarpInteractionActive ||
         (m_RawWorkspaceLabUi.activeTool == RawLabTool::Light &&
          m_RawWorkspaceLabUi.lightInteractionActive);
+    const auto revisionBefore = m_Project->rawLayers.Revision();
     CommitRawWorkspaceEditContext(context, changed, interactionActive);
+    Stack::Editor::RawLabInternal::TraceFloatingControlEdit(m_RawFloatingSurface.trace,
+        this, changed, interactionActive, context.canEdit, revisionBefore, m_Project->rawLayers.Revision());
     m_RawWorkspaceLabUi.colorWarpInteractionActive = false;
     return settingsOpenedThisFrame;
 }
@@ -739,6 +795,11 @@ bool EditorModule::RenderRawWorkspaceLabSecondaryControls(RawWorkspaceEditContex
 }
 
 void EditorModule::RenderRawWorkspaceLabUI() {
+    Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Workspace,2);
+    if (Stack::UiPerformance::Probe::Active())
+        Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Project,
+            Stack::UiPerformance::Probe::Key(GetProjectDocumentId()) ^ reinterpret_cast<std::uintptr_t>(this));
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewWorkspace);
     m_RawActiveControlFrame = -2;
     m_RawFloatingSurface.frame = -2;
     LoadResourceTextures();
@@ -760,9 +821,12 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         m_RawWorkspaceLabFilmstripHoverFrame = -1;
         m_RawWorkspaceLabFilmstripHoverOpacity = 0.0f;
     }
-    PumpNonRenderingWork(2.5);
-    PumpRawWorkspaceThumbnailTextureUploads();
-    PollRawWorkspaceLabGradingScope();
+    {
+        Stack::UiPerformance::Span services(Stack::UiPerformance::Stage::ViewServices);
+        PumpNonRenderingWork(2.5);
+        PumpRawWorkspaceThumbnailTextureUploads();
+        PollRawWorkspaceLabGradingScope();
+    }
     if (!m_RawWorkspaceLabDrawerAnimationInitialized) {
         // Ordinary filmstrips animate their first open. The Gallery overrides
         // the drawer height on its first layout so it starts expanded.
@@ -813,14 +877,13 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         }
         ImGui::BeginChild("RawGalleryBody", ImVec2(0.0f, 0.0f), false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
-            m_RawWorkspaceGalleryLayoutAnimation.Reset();
         const std::string layoutKey = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string() +
             ":" + std::to_string(static_cast<int>(m_RawWorkspaceGalleryContentMode)) +
             ":" + std::to_string(static_cast<int>(m_RawWorkspaceLabUi.galleryNavigationMode)) +
             ":" + m_RawWorkspaceLabUi.galleryProjectId;
         m_RawWorkspaceGalleryLayoutAnimation.BeginFrame(layoutKey,
-            m_RawWorkspaceLabUi.galleryWorkspaceGrid, ImGui::GetFrameCount(), ImGui::GetTime());
+            m_RawWorkspaceLabUi.galleryWorkspaceGrid, ImGui::GetFrameCount(), ImGui::GetTime(),
+            m_RawWorkspaceFilmstripOrganizationRevision, Stack::LibraryUi::ReducedMotion());
     } else {
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
@@ -958,7 +1021,10 @@ void EditorModule::RenderRawWorkspaceLabUI() {
     }
     RawWorkspaceEditContext context;
     BeginRawWorkspaceEditContext(selectedSource, context);
-    ApplyRequestedRawLabTool(context);
+    if (m_RequestedRawLabTool) {
+        ApplyRequestedRawLabTool(context);
+        BeginRawWorkspaceEditContext(selectedSource, context);
+    }
 
     UpdateRawWorkspaceNotificationDecisions();
     ImGui::SetCursorPosX(0.0f);
@@ -1255,7 +1321,12 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                     ImVec2(editingWidth, previewDisplayHeight), showEditingSurface);
             // Canvas tools also poll mouse/key input directly. A tool gesture
             // must not simultaneously pan, zoom, paint or select on the image.
-            Stack::Workspace::InputScope toolInput(RawFloatingSurfaceOwnsPointer(), false);
+            const bool toolOwnsPointer = RawFloatingSurfaceOwnsPointer();
+            TraceRawImageNavigation(this, static_cast<int>(m_RawWorkspaceLabUi.activeTool),
+                "raw-image-input", toolOwnsPointer, false, false,
+                m_RawWorkspaceLabUi.previewZoom, m_RawWorkspaceLabUi.previewZoomTarget,
+                m_RawWorkspaceLabUi.previewZoomTarget);
+            Stack::Workspace::InputScope toolInput(toolOwnsPointer, false);
             renderPreviewColumn();
         }
         autoBracketInput.reset();
@@ -1286,10 +1357,13 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                     m_RawWorkspaceGalleryLayoutAnimation.ContentAlpha());
                 const bool layoutAnimating = m_RawWorkspaceGalleryLayoutAnimation.Active();
                 if (layoutAnimating) ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-                RenderRawWorkspaceLabGalleryContent(
-                    true,
-                    expandedDrawer,
-                    expandedDrawer ? drawerExpansionProgress : 0.0f);
+                {
+                    Stack::Workspace::InputScope transitionInput(layoutAnimating, false);
+                    RenderRawWorkspaceLabGalleryContent(
+                        true,
+                        expandedDrawer,
+                        expandedDrawer ? drawerExpansionProgress : 0.0f);
+                }
                 if (layoutAnimating) ImGui::PopItemFlag();
                 ImGui::PopStyleVar();
                 const float scrollX = ImGui::GetScrollX();

@@ -39,46 +39,46 @@ std::string ReconstructionFilterToString(Stack::NodeMath::ReconstructionFilter f
 Stack::NodeMath::ReconstructionFilter ReconstructionFilterFromString(const std::string& value);
 nlohmann::json SerializeReformatSettings(const ReformatSettings& settings);
 ReformatSettings DeserializeReformatSettings(const nlohmann::json& value);
-std::string SpectrumViewLutToString(SpectrumViewLut lut);
-SpectrumViewLut SpectrumViewLutFromString(const std::string& value);
-std::string SpectrumViewModeToString(SpectrumViewMode mode);
-SpectrumViewMode SpectrumViewModeFromString(const std::string& value);
-std::string FrequencyFilterModeToString(FrequencyFilterMode mode);
-FrequencyFilterMode FrequencyFilterModeFromString(const std::string& value);
-std::string FrequencyTransitionProfileToString(FrequencyTransitionProfile profile);
-FrequencyTransitionProfile FrequencyTransitionProfileFromString(const std::string& value);
-std::string FrequencyEdgePolicyToString(FrequencyEdgePolicy policy);
-FrequencyEdgePolicy FrequencyEdgePolicyFromString(const std::string& value);
-std::string SpectrumCombineModeToString(SpectrumCombineMode mode);
-SpectrumCombineMode SpectrumCombineModeFromString(const std::string& value);
-nlohmann::json SerializeFrequencyResponseSettings(const FrequencyResponseSettings& settings);
-FrequencyResponseSettings DeserializeFrequencyResponseSettings(const nlohmann::json& value);
-nlohmann::json SerializeFrequencyFilterSettings(const FrequencyFilterSettings& settings);
-FrequencyFilterSettings DeserializeFrequencyFilterSettings(const nlohmann::json& value);
-nlohmann::json SerializeApplyFrequencyResponseSettings(const ApplyFrequencyResponseSettings& settings);
-ApplyFrequencyResponseSettings DeserializeApplyFrequencyResponseSettings(const nlohmann::json& value);
-nlohmann::json SerializeCombineSpectraSettings(const CombineSpectraSettings& settings);
-CombineSpectraSettings DeserializeCombineSpectraSettings(const nlohmann::json& value);
-std::string FrequencyMaskShapeToString(FrequencyMaskShape shape);
-FrequencyMaskShape FrequencyMaskShapeFromString(const std::string& value);
-std::string SpectrumMathModeToString(SpectrumMathMode mode);
-SpectrumMathMode SpectrumMathModeFromString(const std::string& value);
-std::string MagnitudePhaseModeToString(MagnitudePhaseMode mode);
-MagnitudePhaseMode MagnitudePhaseModeFromString(const std::string& value);
-std::string SpectrumAnalyzerModeToString(SpectrumAnalyzerMode mode);
-SpectrumAnalyzerMode SpectrumAnalyzerModeFromString(const std::string& value);
-nlohmann::json SerializeFrequencyFftSettings(const FrequencyFftSettings& settings);
-FrequencyFftSettings DeserializeFrequencyFftSettings(const nlohmann::json& value);
-nlohmann::json SerializeSpectrumViewSettings(const SpectrumViewSettings& settings);
-SpectrumViewSettings DeserializeSpectrumViewSettings(const nlohmann::json& value);
-nlohmann::json SerializeFrequencyMaskSettings(const FrequencyMaskSettings& settings);
-FrequencyMaskSettings DeserializeFrequencyMaskSettings(const nlohmann::json& value);
-nlohmann::json SerializeSpectrumMathSettings(const SpectrumMathSettings& settings);
-SpectrumMathSettings DeserializeSpectrumMathSettings(const nlohmann::json& value);
-nlohmann::json SerializeMagnitudePhaseSettings(const MagnitudePhaseSettings& settings);
-MagnitudePhaseSettings DeserializeMagnitudePhaseSettings(const nlohmann::json& value);
-nlohmann::json SerializeSpectrumAnalyzerSettings(const SpectrumAnalyzerSettings& settings);
-SpectrumAnalyzerSettings DeserializeSpectrumAnalyzerSettings(const nlohmann::json& value);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 std::string ImageToMaskKindToString(ImageToMaskKind kind);
 ImageToMaskKind ImageToMaskKindFromString(const std::string& value);
 

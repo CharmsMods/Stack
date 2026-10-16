@@ -1,4 +1,8 @@
 #include "Utils/GraphCursor.h"
+#include "App/WorkspacePresentation.h"
+#include "App/WorkspaceInputScope.h"
+#include "App/UiPerformanceTrace.h"
+#include "App/UiPerformanceProbe.h"
 #include "Utils/GraphNumericControls.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
@@ -151,6 +155,7 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
     if (!editor) {
         return -1;
     }
+    const int firstNewNodeId = editor->GetNodeGraph().GetNextNodeId();
     switch (entry.kind) {
         case EditorNodeGraph::NodeKind::Output:
             editor->AddOutputNodeAt(graphPos);
@@ -164,11 +169,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Preview:
             editor->AddPreviewNodeAt(graphPos);
             break;
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::MaskGenerator:
             editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::CustomMask:
-            editor->AddCustomMaskNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::MaskCombine:
             editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
@@ -209,46 +212,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Compound:
             editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
             break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            editor->AddFrequencyFilterNodeAt(
-                static_cast<EditorNodeGraph::FrequencyFilterMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            editor->AddFrequencyResponseNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-            editor->AddFrequencyFftNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-            editor->AddFrequencyIfftNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumView:
-            editor->AddSpectrumViewNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-            editor->AddApplyFrequencyResponseNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            editor->AddCombineSpectraNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-            editor->AddSpectrumSeparateNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            editor->AddSpectrumRecombineNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            editor->AddSpectrumMathNodeAt(static_cast<EditorNodeGraph::SpectrumMathMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            editor->AddMagnitudePhaseNodeAt(static_cast<EditorNodeGraph::MagnitudePhaseMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            editor->AddSpectrumAnalyzerNodeAt(static_cast<EditorNodeGraph::SpectrumAnalyzerMode>(entry.value), graphPos);
-            break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
             break;
@@ -282,9 +245,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Lut:
             editor->AddLutNodeAt(graphPos);
             break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            editor->AddRawNeuralDenoiseNodeAt(graphPos);
-            break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawProjectFrame:
@@ -293,7 +253,8 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Composite:
             break;
     }
-    return editor->GetNodeGraph().GetSelectedNodeId();
+    const int selectedNodeId = editor->GetNodeGraph().GetSelectedNodeId();
+    return selectedNodeId >= firstNewNodeId ? selectedNodeId : -1;
 }
 
 } // namespace
@@ -301,11 +262,16 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
 void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_ActiveEditor = editor;
     auto context = editor->GetGraphEditorContext();
+    if (context.documentId != m_GraphContext.documentId || context.graphId != m_GraphContext.graphId) {
+        m_NodeLayoutCache.clear();
+        m_NodeOrderCacheGraph = nullptr;
+    }
     if (context.documentId != m_GraphContext.documentId || context.graphId != m_GraphContext.graphId ||
         context.documentRevision != m_GraphContext.documentRevision || context.revision != m_GraphContext.revision)
         m_ConnectionCapabilityCache.clear();
     m_GraphContext = context;
     EditorNodeGraph::Graph& graph = *context.graph;
+    if (editor->IsRawProjectCanvas()) for (auto& node : graph.GetNodes()) node.expanded = true;
     const std::uint64_t structureRevision = graph.GetStructureRevision();
     bool syncVisualCaches = false;
     if (m_LastGraphStructureRevision == 0) {
@@ -338,12 +304,87 @@ Stack::EditorGraphCapture::GraphViewportSnapshot EditorNodeGraphUI::GetGraphCapt
     return snapshot;
 }
 
+Stack::Editor::NodeOpenTransition::Appearance EditorNodeGraphUI::CaptureNodeAppearance(
+    EditorModule* editor, int nodeId, ImVec2 canvasMinimum, ImVec2 canvasMaximum) {
+    Stack::Editor::NodeOpenTransition::Appearance appearance;
+    if (canvasMaximum.x <= canvasMinimum.x || canvasMaximum.y <= canvasMinimum.y) return appearance;
+    m_ActiveEditor = editor;
+    m_GraphContext = editor->GetGraphEditorContext();
+    auto& graph = *m_GraphContext.graph;
+    auto* node = graph.FindNode(nodeId);
+    if (!node) return appearance;
+
+    // Resolve once against the destination canvas. The next visible Graph frame
+    // uses this same camera and the same canonical node layout.
+    editor->CancelGraphAutoFocusTracking();
+    m_SmoothZoomActive = false;
+    m_ZoomTarget = m_Zoom;
+    m_CanvasOrigin = m_CanvasMin = ToGraphVec2(canvasMinimum);
+    m_CanvasMax = ToGraphVec2(canvasMaximum);
+    for (auto& item : graph.GetNodes()) {
+        if (editor->IsRawProjectCanvas()) item.expanded = true;
+        RefreshLogicalNodeLayoutCache(graph, item, m_NodeLayoutCache[item.id]);
+    }
+    ClampPanToContent(graph);
+    ProjectNodeLayoutCache(*node, m_NodeLayoutCache[nodeId]);
+    auto bounds = m_NodeLayoutCache[nodeId].frameRect;
+    // A tool selected from View may not have been visible in the old graph.
+    if (bounds.max.x < canvasMinimum.x || bounds.min.x > canvasMaximum.x ||
+        bounds.max.y < canvasMinimum.y || bounds.min.y > canvasMaximum.y) {
+        m_Pan.x += (canvasMinimum.x+canvasMaximum.x-bounds.min.x-bounds.max.x)*.5f;
+        m_Pan.y += (canvasMinimum.y+canvasMaximum.y-bounds.min.y-bounds.max.y)*.5f;
+        ClampPanToContent(graph);
+        ProjectNodeLayoutCache(*node, m_NodeLayoutCache[nodeId]);
+        bounds = m_NodeLayoutCache[nodeId].frameRect;
+    }
+    graph.SelectNode(nodeId);
+
+    // Render only this node into CPU geometry, without submitting a window or
+    // processing an image. Suppress input without disabled-style dimming.
+    auto* window = ImGui::GetCurrentWindow();
+    ImDrawList scratch(ImGui::GetDrawListSharedData());
+    scratch._ResetForNewFrame();
+    scratch.PushTextureID(ImGui::GetIO().Fonts->TexRef);
+    scratch.PushClipRectFullScreen();
+    {
+        struct RestoreWindow {
+            ImGuiWindow* window;
+            ImDrawList* drawList;
+            ImGuiWindowTempData layout;
+            ImGuiLastItemData lastItem;
+            ImRect clip;
+            bool& capture;
+            bool previousCapture;
+            ~RestoreWindow() {
+                window->DrawList = drawList; window->DC = layout;
+                window->ClipRect = clip;
+                ImGui::GetCurrentContext()->LastItemData = lastItem;
+                capture = previousCapture;
+            }
+        } restore{window, window->DrawList, window->DC, ImGui::GetCurrentContext()->LastItemData, window->ClipRect,
+            m_RenderCaptureOnly, m_RenderCaptureOnly};
+        window->DrawList = &scratch;
+        // Widget culling uses the window clip independently of the draw list.
+        // The destination node can be outside View's image/control child.
+        window->ClipRect = ImRect(canvasMinimum, canvasMaximum);
+        m_RenderCaptureOnly = true;
+        Stack::Workspace::InputScope input(true, false);
+        std::function<void()> ignoredAction;
+        RenderNode(editor, *node, ignoredAction);
+    }
+    appearance.Capture(scratch, 0, bounds.min, bounds.max);
+    appearance.nodeUuid = node->instanceUuid;
+    return appearance;
+}
+
 void EditorNodeGraphUI::RenderGraphCanvas(
     EditorModule* editor,
     EditorNodeGraph::Graph& graph,
     const ImVec2& canvasMin,
     const ImVec2& canvasMax,
     const GraphRenderOptions& options) {
+    Stack::UiPerformance::Span canvasTiming(Stack::UiPerformance::Stage::GraphCanvas);
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::Nodes, graph.GetNodes().size());
     bool draggingMask = false;
     bool draggingImage = false;
     if (options.interactive && m_DragOutputNodeId > 0) {
@@ -470,7 +511,13 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             !ImGui::IsAnyItemActive() && !ImGui::IsAnyMouseDown();
         if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed &&
             !tabIo.KeyCtrl && !tabIo.KeyAlt && !tabIo.KeyShift && !tabIo.KeySuper) {
-            if (IsCatalogDocked()) {
+            if (HasCatalogHost() && (catalogShortcutAvailable ||
+                (m_NodeBrowserSearchFocused && !ImGui::IsAnyMouseDown()))) {
+                const bool open = !editor->WorkspacePanelOpen();
+                CloseNodeBrowser();
+                editor->SetWorkspacePanelOpen(open);
+                m_NodeBrowserFocusSearch = open && !m_CatalogAssetsTab;
+            } else if (IsCatalogDocked()) {
                 if ((editor->CanConsumeEditorCommandKeys() || m_NodeBrowserSearchFocused || catalogShortcutAvailable) &&
                     !ImGui::IsAnyMouseDown() &&
                     (graphHovered || m_NodeBrowserSearchFocused || catalogShortcutAvailable || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)))
@@ -514,6 +561,16 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         }
     }
 
+    // Plain wheel input belongs to the camera. Start it before projection so
+    // this frame draws the new zoom. Ctrl-wheel is routed by node controls
+    // below; only an unconsumed modifier wheel may fall back to camera zoom.
+    const bool wheelZoomHandled = options.interactive && graphHovered &&
+        !ImGui::GetIO().KeyCtrl && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        !ImGuiExtras::IsSliderWheelConsumed() && ImGui::GetIO().MouseWheel != 0.0f;
+    if (wheelZoomHandled) {
+        editor->CancelGraphAutoFocusTracking();
+        ZoomAtMouse(ImGui::GetIO().MouseWheel);
+    }
     if (options.interactive && m_SmoothZoomActive) {
         const float nextZoom = m_Zoom + ((m_ZoomTarget - m_Zoom) * std::clamp(ImGui::GetIO().DeltaTime * 18.0f, 0.0f, 1.0f));
         m_Zoom = (std::abs(m_ZoomTarget - nextZoom) < 0.0005f) ? m_ZoomTarget : nextZoom;
@@ -527,18 +584,15 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     drawList->PushClipRect(canvasMin, canvasMax, true);
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
-    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
-    const bool wallpaperSurfaces =
-        options.background == Stack::EditorGraphCapture::Background::CurrentAppearance &&
-        appearance && appearance->GetSeamlessSurfaceStylingEnabled();
+    const bool wallpaperSurfaces = false;
     const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
-    const ImVec4 canvasBg = graphStyle.enabled ? graphStyle.canvas : workspaceBg;
+    ImVec4 canvasBg = graphStyle.enabled ? graphStyle.canvas : workspaceBg;
+    canvasBg.w=1.f;
     const ImVec2 fadeMin = canvasMin;
     const ImVec2 fadeMax = canvasMax;
     const float wallpaperEdgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool drawCanvasBackground =
-        options.background == Stack::EditorGraphCapture::Background::SolidTheme ||
-        (options.background == Stack::EditorGraphCapture::Background::CurrentAppearance && !wallpaperSurfaces);
+        options.background != Stack::EditorGraphCapture::Background::Transparent;
     if (drawCanvasBackground) {
         drawList->AddRectFilled(canvasMin, canvasMax, ColorToU32(canvasBg));
     }
@@ -577,19 +631,28 @@ void EditorNodeGraphUI::RenderGraphCanvas(
                 wallpaperEdgeFadeDistance);
         }
     }
-    ClampPanToContent(graph);
-
-    for (EditorNodeGraph::Node& node : graph.GetNodes()) {
-        node.position = ClampGraphPosition(node.position);
+    if (options.interactive) UpdateActiveNodeDrag(editor, graph);
+    {
+        Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::LogicalLayout);
+        for (auto& node : graph.GetNodes()) {
+            const auto position = ClampGraphPosition(node.position);
+            if (position.x != node.position.x || position.y != node.position.y) node.position = position;
+            RefreshLogicalNodeLayoutCache(graph, node, m_NodeLayoutCache[node.id]);
+        }
     }
-
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        RefreshNodeLayoutCache(graph, node);
+    ClampPanToContent(graph);
+    {
+        Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Projection);
+        for (const auto& node : graph.GetNodes()) ProjectNodeLayoutCache(node, m_NodeLayoutCache[node.id]);
     }
     const float graphElementCullMargin = std::clamp(
         std::min(canvasSize.x, canvasSize.y) * 0.35f,
         180.0f,
         520.0f);
+    if (Stack::UiPerformance::Probe::Active())
+        Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Camera,
+            Stack::UiPerformance::Probe::Key(m_Pan.x,m_Pan.y,m_Zoom),
+            {canvasMin.x,canvasMin.y,canvasSize.x,canvasSize.y});
     const auto rectOverlapsCanvas = [&](const CachedRect& rect) {
         if (!rect.IsValid()) {
             return true;
@@ -613,6 +676,9 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     const std::vector<int>& nodeRenderOrder = GetNodeRenderOrder(graph);
     m_VisibleNodeFrameRects.clear();
     m_VisibleNodeFrameRects.reserve(nodeRenderOrder.size());
+    std::function<void()> pendingGraphAction;
+    const int openingNode = options.interactive && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
+        ? FindNodeAt(graph, ToGraphVec2(ImGui::GetMousePos())) : -1;
     for (int nodeId : nodeRenderOrder) {
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         const bool forceRenderForInteraction =
@@ -629,7 +695,20 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             m_VisibleNodeFrameRects.push_back(layout->frameRect);
         }
         if (EditorNodeGraph::Node* node = FindCachedNode(graph, nodeId)) {
-            RenderNode(editor, *node);
+            if (nodeId == Stack::UiPerformance::Probe::WatchedNode() && layout)
+                Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Node,
+                    Stack::UiPerformance::Probe::Key(node->position.x,node->position.y),
+                    {layout->headerRect.min.x,layout->headerRect.min.y,
+                     layout->headerRect.max.x-layout->headerRect.min.x,layout->headerRect.max.y-layout->headerRect.min.y});
+            Stack::UiPerformance::Add(Stack::UiPerformance::Counter::VisibleNodes);
+            const bool captureOpen = layout && openingNode == nodeId;
+            const auto openingBounds = captureOpen ? layout->frameRect : CachedRect{};
+            const int firstVertex = drawList->VtxBuffer.Size;
+            RenderNode(editor, *node, pendingGraphAction);
+            if (captureOpen) {
+                m_NodeOpenAppearance.Capture(*drawList, firstVertex, openingBounds.min, openingBounds.max);
+                m_NodeOpenAppearance.nodeUuid = node->instanceUuid;
+            }
         }
     }
     graphSplitter.SetCurrentChannel(drawList, 0);
@@ -639,9 +718,11 @@ void EditorNodeGraphUI::RenderGraphCanvas(
 
     if (options.interactive) {
         RenderInteraction(editor, graph);
+        RenderMaskTextureInspector(editor);
     }
 
     if (options.interactive &&
+        !wheelZoomHandled &&
         graphHovered &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !ImGuiExtras::IsSliderWheelConsumed() &&
@@ -664,16 +745,19 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         }
     }
 
-    if (options.showZoomDial && !wallpaperSurfaces) {
-        RenderGraphZoomDial(editor, drawList, canvasMin, canvasMax, canvasSize);
-    }
-
     if (options.syncEditorViewTransform) {
         editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
     }
 
     EndDetailCardFrame();
     drawList->PopClipRect();
+
+    // Graph commands replace node storage, so finish all canvas reads first.
+    if (pendingGraphAction) {
+        pendingGraphAction();
+    }
+    if (!Stack::Workspace::IsPreview() && !ImGui::IsAnyMouseDown() && !ImGui::IsAnyItemActive())
+        editor->GetProjectSession().graphHistory.EndGesture();
 }
 
 void EditorNodeGraphUI::FitGraphPreviewToCanvas(
@@ -822,7 +906,6 @@ void EditorNodeGraphUI::RenderGraphCapture(
     options.showValidation = false;
     options.showContextMenu = false;
     options.showNodeBrowser = false;
-    options.showZoomDial = false;
     options.showGrid = settings.showGrid;
     options.background = settings.background;
     RenderGraphCanvas(editor, graph, canvasMin, canvasMax, options);
@@ -874,7 +957,6 @@ void EditorNodeGraphUI::RenderStaticGraphPreview(
     options.showValidation = false;
     options.showContextMenu = false;
     options.showNodeBrowser = false;
-    options.showZoomDial = false;
 
     // Preview rendering clamps positions for safety. Preserve only the small
     // position array instead of deep-copying every graph payload (including
@@ -890,89 +972,4 @@ void EditorNodeGraphUI::RenderStaticGraphPreview(
     m_RenderPreviewOnly = previousPreviewOnly;
     m_RenderCaptureOnly = previousCaptureOnly;
     m_ActiveEditor = previousEditor;
-}
-
-void EditorNodeGraphUI::RenderGraphZoomDial(
-    EditorModule* editor,
-    ImDrawList* drawList,
-    const ImVec2& canvasMin,
-    const ImVec2& canvasMax,
-    const ImVec2& canvasSize) const {
-    if (!editor || !drawList) {
-        return;
-    }
-
-    if (canvasSize.x < 240.0f || canvasSize.y < 180.0f) {
-        return;
-    }
-
-    const float radius = std::clamp(std::min(canvasSize.x, canvasSize.y) * 0.12f, 96.0f, 144.0f);
-    const float outwardOffset = radius * 0.02f;
-    const ImVec2 center(canvasMax.x + outwardOffset, canvasMin.y - outwardOffset);
-    const GraphZoomDialStyle dialStyle = BuildGraphZoomDialStyle(editor, BuildGraphStyleTokens(editor));
-
-    constexpr float kMinZoom = 0.16f;
-    constexpr float kMaxZoom = 4.5f;
-    constexpr float kMaxRotationDegrees = 150.0f;
-    constexpr int kTickCount = 64;
-    constexpr float kTau = 6.28318530718f;
-    const float safeZoom = std::clamp(m_Zoom, kMinZoom, kMaxZoom);
-    float rotationT = 0.0f;
-    if (safeZoom >= 1.0f) {
-        rotationT = std::clamp(std::log(safeZoom) / std::log(kMaxZoom), 0.0f, 1.0f);
-    } else {
-        rotationT = -std::clamp(std::log(1.0f / safeZoom) / std::log(1.0f / kMinZoom), 0.0f, 1.0f);
-    }
-    const float rotation = rotationT * (kMaxRotationDegrees * IM_PI / 180.0f);
-    const float baseAngle = IM_PI * 0.25f;
-
-    const ImU32 tickColor = ColorToU32(dialStyle.tick);
-    const ImU32 glowColor = ColorToU32(dialStyle.glow);
-    for (int tickIndex = 0; tickIndex < kTickCount; ++tickIndex) {
-        const float angle = baseAngle + rotation + (static_cast<float>(tickIndex) / static_cast<float>(kTickCount)) * kTau;
-        const bool major = (tickIndex % 8) == 0;
-        const float innerRadius = radius - (major ? radius * 0.16f : radius * 0.10f);
-        const ImVec2 direction(std::cos(angle), std::sin(angle));
-        const ImVec2 inner(center.x + direction.x * innerRadius, center.y + direction.y * innerRadius);
-        const ImVec2 outer(center.x + direction.x * radius, center.y + direction.y * radius);
-        drawList->AddLine(inner, outer, glowColor, major ? 4.8f : 3.2f);
-        drawList->AddLine(inner, outer, tickColor, major ? 2.0f : 1.3f);
-    }
-
-    const float accentAngles[] = {
-        IM_PI * 0.92f,
-        IM_PI * 0.98f,
-        IM_PI * 1.04f,
-        IM_PI * 1.42f,
-        IM_PI * 1.48f,
-        IM_PI * 1.54f
-    };
-    const float accentLengths[] = {
-        radius * 0.09f,
-        radius * 0.12f,
-        radius * 0.07f,
-        radius * 0.07f,
-        radius * 0.11f,
-        radius * 0.08f
-    };
-    const float accentRadii[] = {
-        radius * 0.38f,
-        radius * 0.32f,
-        radius * 0.26f,
-        radius * 0.40f,
-        radius * 0.33f,
-        radius * 0.26f
-    };
-
-    for (int accentIndex = 0; accentIndex < IM_ARRAYSIZE(accentAngles); ++accentIndex) {
-        const float angle = baseAngle + rotation + accentAngles[accentIndex];
-        const ImVec2 direction(std::cos(angle), std::sin(angle));
-        const ImVec2 tangent(-direction.y, direction.x);
-        const ImVec2 basePoint(center.x + direction.x * accentRadii[accentIndex], center.y + direction.y * accentRadii[accentIndex]);
-        const float halfLength = accentLengths[accentIndex] * 0.5f;
-        const ImVec2 lineStart(basePoint.x - tangent.x * halfLength, basePoint.y - tangent.y * halfLength);
-        const ImVec2 lineEnd(basePoint.x + tangent.x * halfLength, basePoint.y + tangent.y * halfLength);
-        drawList->AddLine(lineStart, lineEnd, glowColor, 3.2f);
-        drawList->AddLine(lineStart, lineEnd, tickColor, 1.4f);
-    }
 }

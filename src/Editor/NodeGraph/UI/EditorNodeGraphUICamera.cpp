@@ -58,12 +58,11 @@ EditorNodeGraphUI::NodeGraphBounds(
     const auto cached = m_NodeLayoutCache.find(node.id);
     const std::uint64_t logicalRevision =
         LogicalNodeLayoutRevision(graph, node);
-    const NodeLogicalLayout logical =
-        cached != m_NodeLayoutCache.end() &&
+    if (cached != m_NodeLayoutCache.end() &&
             cached->second.hasLogicalLayout &&
-            cached->second.logicalRevision == logicalRevision
-        ? cached->second.logicalLayout
-        : BuildLogicalNodeLayout(graph, node);
+            cached->second.logicalRevision == logicalRevision)
+        return AbsoluteGraphBounds(cached->second.logicalLayout, node.position);
+    const auto logical = BuildLogicalNodeLayout(graph, node);
     return AbsoluteGraphBounds(logical, node.position);
 }
 
@@ -82,18 +81,20 @@ void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
 }
 
 void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
-    if (graph.GetNodes().empty() || m_MiddlePanCaptureActive) {
-        return;
-    }
-
+    // The origin acts as virtual content for an empty graph, keeping blank-canvas
+    // panning finite while still allowing a useful area for adding the first node.
     float minX = 0.0f;
     float minY = 0.0f;
     float maxX = 0.0f;
     float maxY = 0.0f;
     bool first = true;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        const Stack::Editor::NodeGraphUILayout::LogicalRect bounds =
-            NodeGraphBounds(graph, node);
+        // RenderGraphCanvas prepared logical layouts before clamping. Borrow
+        // those bounds instead of rehashing/copying every socket and title.
+        const auto* cache = FindNodeLayoutCache(node.id);
+        const auto bounds = cache && cache->hasLogicalLayout
+            ? Stack::Editor::NodeGraphUILayout::AbsoluteGraphBounds(cache->logicalLayout, node.position)
+            : NodeGraphBounds(graph, node);
         if (first) {
             minX = bounds.min.x;
             minY = bounds.min.y;

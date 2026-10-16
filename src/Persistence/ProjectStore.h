@@ -62,6 +62,9 @@ public:
     // Read the committed generation from storage without loading image assets.
     virtual bool ReadStorageRevision(std::uint64_t& revision, std::string& error) const = 0;
     virtual bool IsReadOnlyRecovery() const = 0;
+    // An owned immutable file for directory stores; portable stores return an
+    // empty path and must be read through OpenAssetStream/CopyAssetToFile.
+    virtual std::filesystem::path ResolveAssetFile(const std::string& assetId) const = 0;
 
     virtual ProjectStoreTransaction BeginTransaction(
         std::uint64_t expectedStorageRevision) = 0;

@@ -277,6 +277,7 @@ private:
     bool m_ExtendedSceneRange = false;
     bool m_LumaIsRec2020 = false;
     bool m_TruthfulV2SignedMath = false;
+    std::array<float,3> m_ExecutionComponents{1,1,1};
     ToneCurveSamplingBasis m_SamplingBasis = ToneCurveSamplingBasis::CurveInput;
     ToneCurveTargetingMode m_TargetingMode = ToneCurveTargetingMode::RegionTarget;
     bool m_ProbeValid = false;

@@ -19,7 +19,7 @@ void RequireLayout(bool condition, const char* message) {
 }
 
 static_assert(
-    static_cast<std::size_t>(EditorNodeGraph::NodeKind::Count) == 50,
+    static_cast<std::size_t>(EditorNodeGraph::NodeKind::Count) == 37,
     "Update node layout coverage when adding a NodeKind");
 
 bool NearlyEqual(float lhs, float rhs, float epsilon = 0.0005f) {
@@ -59,6 +59,9 @@ void TestEveryNodeKindHasCanonicalWidth() {
         DefaultWidthClassForKind(EditorNodeGraph::NodeKind::RawProjectFrame) ==
             NodeWidthClass::Media,
         "RAW Project Frame must use the canonical media layout");
+    RequireLayout(
+        DefaultWidthClassForKind(EditorNodeGraph::NodeKind::MaskTexture) == NodeWidthClass::Media,
+        "A live mask texture must use the image-style media layout");
     RequireLayout(
         DefaultWidthClassForKind(EditorNodeGraph::NodeKind::MultiFrameDenoise) ==
             NodeWidthClass::Tile,

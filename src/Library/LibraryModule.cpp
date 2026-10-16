@@ -9,6 +9,7 @@
 #include "Editor/EditorModule.h"
 
 #include "Utils/ImGuiExtras.h"
+#include "Utils/Utf8Text.h"
 #include "Renderer/GLLoader.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -141,7 +142,9 @@ void LibraryModule::SyncRenameBuffer() {
         return;
     }
 
-    std::snprintf(m_RenameBuffer, sizeof(m_RenameBuffer), "%s", m_PreviewProject->projectName.c_str());
+    std::string projectName = m_PreviewProject->projectName;
+    Stack::Utf8Text::TruncateToByteLimit(projectName, sizeof(m_RenameBuffer) - 1u);
+    std::snprintf(m_RenameBuffer, sizeof(m_RenameBuffer), "%s", projectName.c_str());
     m_RenameTargetFileName = m_PreviewProject->fileName;
 }
 

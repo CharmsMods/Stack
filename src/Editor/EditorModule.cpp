@@ -1,4 +1,6 @@
 #include "App/WorkspacePresentation.h"
+#include "App/UiPerformanceProbe.h"
+#include <iostream>
 #include "EditorModule.h"
 #include "Editor/AutoBracket/AutoBracketCoordinator.h"
 #include "Editor/AutoBracket/AutoBracketPresentation.h"
@@ -18,6 +20,7 @@
 #include "Utils/ImGuiExtras.h"
 #include "Utils/PixelBufferUtils.h"
 #include "Utils/PngEncodingUtils.h"
+#include "Utils/Utf8Text.h"
 #include "ThirdParty/stb_image.h"
 #include "App/settings/AppearanceTheme.h"
 #include <algorithm>
@@ -303,9 +306,6 @@ ScenePathState AnalyzeScenePathFromNode(
             state.sceneReferred = true;
             mergeInput(EditorNodeGraph::kImageInputSocketId);
             break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            mergeInput(EditorNodeGraph::kRawInputSocketId);
-            break;
         case EditorNodeGraph::NodeKind::Layer:
             if (node->layerType == LayerType::ViewTransform) {
                 state.hasViewTransform = true;
@@ -425,18 +425,6 @@ std::optional<GraphReconnectPlan> BuildReconnectSourcePlan(
                 EditorNodeGraph::kMaskOutputSocketId
             };
         }
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise: {
-            const EditorNodeGraph::Link* input = graph.FindInputLink(node.id, EditorNodeGraph::kRawInputSocketId);
-            if (!input) {
-                return std::nullopt;
-            }
-            return GraphReconnectPlan{
-                input->fromNodeId,
-                input->fromSocketId,
-                0,
-                EditorNodeGraph::kRawOutputSocketId
-            };
-        }
         case EditorNodeGraph::NodeKind::Mix: {
             const EditorNodeGraph::Link* inputA = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputASocketId);
             const EditorNodeGraph::Link* inputB = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputBSocketId);
@@ -538,9 +526,7 @@ bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
         kind == EditorNodeGraph::NodeKind::CustomMask ||
         kind == EditorNodeGraph::NodeKind::ImageToMask ||
         kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-        kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-        kind == EditorNodeGraph::NodeKind::FrequencyMask ||
-        kind == EditorNodeGraph::NodeKind::MagnitudePhase;
+        kind == EditorNodeGraph::NodeKind::RawDetailFusion ;
 }
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
@@ -554,11 +540,6 @@ bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
         kind == EditorNodeGraph::NodeKind::Layer ||
         kind == EditorNodeGraph::NodeKind::Mix ||
         kind == EditorNodeGraph::NodeKind::DataMath ||
-        kind == EditorNodeGraph::NodeKind::FrequencyFft ||
-        kind == EditorNodeGraph::NodeKind::FrequencyIfft ||
-        kind == EditorNodeGraph::NodeKind::SpectrumView ||
-        kind == EditorNodeGraph::NodeKind::SpectrumMath ||
-        kind == EditorNodeGraph::NodeKind::MagnitudePhase ||
         kind == EditorNodeGraph::NodeKind::Output;
 }
 
@@ -744,6 +725,8 @@ void EditorModule::Shutdown() {
         return;
     }
     m_ShutdownComplete = true;
+    m_NodeOpenTransition.Reset();
+    if (m_RawAssetCapture.cancellation) m_RawAssetCapture.cancellation->store(true);
     CancelMfdExperimentalProcessing({}, true);
     CloseDetachedPreviewFullscreen();
     FlushRawWorkspacePersistenceForShutdown();
@@ -754,15 +737,18 @@ void EditorModule::Shutdown() {
         m_RawRenderClientId = 0;
     }
     m_NodeBrowserRenderWorker.Shutdown();
+    m_NodeEditorState.Clear();
     m_RenderWorkerAvailable = false;
     m_NodeBrowserRenderWorkerAvailable = false;
     for (EditorRenderWorker::Result& result : m_DeferredRenderResults) {
         QueueViewportOutputTextureRelease(result.outputTexture);
+        QueueViewportOutputTextureRelease(result.viewportOverview);
         QueueViewportOutputTileSetRelease(result.outputTiles);
         QueueViewportOutputTextureRelease(
             result.rawWorkspace.localRangeOverlayTexture);
     }
     m_DeferredRenderResults.clear();
+    ClearViewportPreviewState();
     ClearViewportOutputTiles();
     PumpViewportOutputTextureDeletes(true);
     PumpViewportOutputTileTextureDeletes(true);
@@ -771,6 +757,9 @@ void EditorModule::Shutdown() {
     m_RawLayerPanel.Clear();
     ClearRawWorkspaceLabGradingScope();
     m_RawWorkspaceLabUi.colorWarpWheelRenderer.Shutdown();
+    m_RawAssetCapture.feedbackRenderer.Shutdown();
+    m_RawAssetPreviews.Clear();
+    m_RawAssetCapture.feedback.reset();
     if (m_RawWorkspaceLabUi.zoneAreas.overlayTexture) {
         glDeleteTextures(1, &m_RawWorkspaceLabUi.zoneAreas.overlayTexture);
         m_RawWorkspaceLabUi.zoneAreas.overlayTexture = 0;
@@ -979,8 +968,8 @@ bool EditorModule::RequestFullQualityRender(std::string* errorMessage) {
         m_RawWorkspaceFullResolutionPreviewDeferredBudgetBytes = 0;
         m_RawWorkspaceFullResolutionPreviewRequestGeneration = 0;
         m_RawWorkspaceFullResolutionPreviewRetryCount = 0;
-        m_RawWorkspaceExplicitFullQualityRenderRequested = true;
     }
+    m_RawWorkspaceExplicitFullQualityRenderRequested = true;
 
     // This is presentation invalidation only. It must not create an edit or
     // autosave revision, but it does fence out any display-sized render that
@@ -1042,6 +1031,14 @@ std::string EditorModule::GetFullQualityRenderDiagnostic() const {
         << ", submittedRevision=" << m_LastSubmittedRenderRevision
         << ", renderGeneration=" << m_RenderGeneration
         << ", completedGeneration=" << m_LastCompletedRenderGeneration;
+    if (UsesGraphViewportPreview()) {
+        const auto& view = ActiveViewportPreviewState();
+        diagnostic << ", nativeRefinementPending=" << view.refinement
+            << ", nativeRefinementGeneration=" << view.refinementGeneration
+            << ", nativeRefinementFailures=" << view.refinementFailures
+            << ", nativeRefinementBudgetBlocked=" << view.refinementBlocked
+            << ", nativeRefinementError=" << view.refinementError;
+    }
     if (IsRawWorkspaceProjectActive()) {
         diagnostic
             << ", activeRawIdentity="
@@ -1086,20 +1083,28 @@ std::string EditorModule::GetFullQualityRenderDiagnostic() const {
 bool EditorModule::SubmitRenderSnapshot(
     EditorRenderWorker::Snapshot snapshot) {
     if (IsEditingRawLayerMaskGraph()) {
-        const auto owner = snapshot.graph.rawLayerMaskNodeIds.find(m_RawLayerMaskWorkspace->layerId);
         for (auto& preview : snapshot.previews) {
             if (!preview.rawLayerId.empty()) continue;
-            if (owner == snapshot.graph.rawLayerMaskNodeIds.end()) return false;
-            const auto source = owner->second.find(preview.sourceNodeId);
-            if (source == owner->second.end()) return false;
-            preview.sourceNodeId = source->second;
+            const int source = ResolveRawCanvasRenderNode(snapshot.graph,preview.sourceNodeId);
+            preview.sourceNodeId = source;
         }
+        snapshot.previews.erase(std::remove_if(snapshot.previews.begin(),snapshot.previews.end(),
+            // Layer thumbnails resolve their output from layer/mask IDs in
+            // the worker, not a canvas node. Dropping them here leaves the
+            // visible panel requesting the same unfinished thumbnails forever.
+            [](const auto& preview) { return preview.rawLayerId.empty() && preview.sourceNodeId <= 0; }),snapshot.previews.end());
+    }
+    const bool tracePreparation = Stack::UiPerformance::Probe::Active();
+    const auto preparationStarted = tracePreparation ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    ConfigureViewportPreview(snapshot);
+    if (tracePreparation) {
+        const double elapsed = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-preparationStarted).count();
+        if (elapsed > 5.0) std::clog << "Viewport planning ms=" << elapsed << '\n';
     }
     const bool rawSnapshot = !snapshot.rawWorkspace.sourceKey.empty();
-    if (!rawSnapshot || (!m_RawWorkspaceRootTabActive &&
+    if (snapshot.viewportPreview.enabled || !rawSnapshot || (!m_RawWorkspaceRootTabActive &&
         snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)) {
         snapshot.graphRequest = CurrentGraphRenderTag();
-        snapshot.previewMaxDimension = 0;
     }
     const std::uint64_t generation = snapshot.generation;
     const RawRenderPurpose purpose = snapshot.rawRenderPurpose;
@@ -1360,8 +1365,20 @@ void EditorModule::BeginLibraryLoadReveal() {
 
 
 void EditorModule::RenderUI() {
+    if (!m_PermanentGalleryWorkspace && IsViewMode()) {
+        RenderViewWorkspace();
+        return;
+    }
     Stack::AutoBracket::EditingScope autoBracketInput(*this,ImGui::GetCursorScreenPos(),ImGui::GetContentRegionAvail());
     PumpNonRenderingWork(2.5);
+    m_TimelineUi.open = false;
+    if (m_TimelineUi.playing) StopTimelinePlayback(false);
+    if (!Stack::Workspace::IsPreview() && !IsEditingRawLayerMaskGraph() &&
+        (IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive())) {
+        // The shell also draws Graph while it fades out into RAW. Preparing
+        // this view must not enqueue navigation back to the outgoing tab.
+        OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer, false);
+    }
     if (!Stack::Workspace::IsPreview() && m_DetachedPreviewTogglePending) {
         m_DetachedPreviewTogglePending = false;
         ToggleDetachedPreviewFullscreen();
@@ -1371,6 +1388,11 @@ void EditorModule::RenderUI() {
         m_PendingAddImageNodePrompt = false;
         m_PendingAddImageNodeGraphPosition = {};
         PromptAddImageNodeAt(graphPosition);
+    }
+    if (!m_PermanentGalleryWorkspace && m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
+        m_TargetSubWindow == EditorSubWindow::NodeGraph) {
+        RenderGraphWorkspace();
+        return;
     }
 
     // Safety fallback: if ExportSettings is active or targeted but we have less than 2 completed chains, fallback to NodeGraph
@@ -1585,11 +1607,7 @@ void EditorModule::RenderUI() {
         } else if (m_TargetSubWindow == EditorSubWindow::Presets) {
             targetWidth = 560.0f;
         } else if (m_TargetSubWindow == EditorSubWindow::ComplexNode) {
-            const EditorNodeGraph::Node* targetComplexNode =
-                m_TargetComplexNodeId > 0 ? GetNodeGraph().FindNode(m_TargetComplexNodeId) : nullptr;
-            targetWidth = targetComplexNode && targetComplexNode->kind == EditorNodeGraph::NodeKind::CustomMask
-                ? (workspaceSize.x - splitGap) * 0.5f
-                : 470.0f;
+            targetWidth = 470.0f;
         }
 
         if (!(m_TargetSubWindow == EditorSubWindow::NodeGraph && m_NodeGraphFullscreen)) {
@@ -1624,12 +1642,10 @@ void EditorModule::RenderUI() {
         }
     }
 
-    if (CanConsumeEditorCommandKeys() &&
-        ImGui::GetIO().KeyCtrl &&
-        ImGui::GetIO().KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        m_TimelineUi.open = !m_TimelineUi.open;
-    }
+    // Timeline presentation and playback are retired from the editing workspace.
+    // Persisted animation data remains readable for existing project recovery.
+    m_TimelineUi.open = false;
+    if (m_TimelineUi.playing) StopTimelinePlayback(false);
 
     if (CanConsumeEditorCommandKeys() &&
         ImGui::GetIO().KeyCtrl &&
@@ -1644,7 +1660,7 @@ void EditorModule::RenderUI() {
         RequestSaveCurrentProject(m_Project->name.empty() ? "Untitled Project" : m_Project->name);
     }
 
-    const float timelineHeight = UpdateTimelinePanelHeight(workspaceSize.y);
+    const float timelineHeight = 0.0f;
     const float paneHeight = std::max(0.0f, workspaceSize.y - timelineHeight);
     const ImVec2 mousePos = ImGui::GetIO().MousePos;
     const bool timelineHovered =
@@ -1680,43 +1696,7 @@ void EditorModule::RenderUI() {
         m_SpacebarHeld = false;
     }
 
-    if (timelineShortcutInputAllowed && m_TimelineUi.open && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
-        StepTimelineFrame(-1);
-    }
-
-    if (timelineShortcutInputAllowed && m_TimelineUi.open && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
-        StepTimelineFrame(1);
-    }
-
-    if (!rawWorkspaceConsumesSpace &&
-        timelineShortcutInputAllowed &&
-        !ImGui::GetIO().KeyCtrl &&
-        !ImGui::GetIO().KeyShift &&
-        !ImGui::GetIO().KeyAlt &&
-        ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
-        if (m_TimelineUi.playing) {
-            StopTimelinePlayback(false);
-            m_SpacebarHeld = false;
-        } else if (timelineHovered) {
-            ToggleTimelinePlayback();
-            m_SpacebarHeld = false;
-        } else {
-            m_SpacebarPressTime = ImGui::GetTime();
-            m_SpacebarHeld = true;
-        }
-    }
-
-    if (!rawWorkspaceConsumesSpace && m_SpacebarHeld) {
-        if (!ImGui::IsKeyDown(ImGuiKey_Space)) {
-            const float holdTime = static_cast<float>(ImGui::GetTime() - m_SpacebarPressTime);
-            if (holdTime >= 0.4f) {
-                HandleSpacebarLongPress(workspaceSize.x, paneHeight, minLeftWidth, maxLeftWidth, splitGap);
-            } else {
-                HandleSpacebarPress(workspaceSize.x, paneHeight, minLeftWidth, maxLeftWidth, splitGap);
-            }
-            m_SpacebarHeld = false;
-        }
-    }
+    m_SpacebarHeld = false;
 
     const float effectiveSplitGap = detachedPreviewActive
         ? 0.0f
@@ -1946,8 +1926,8 @@ void EditorModule::RenderUI() {
                         ImGui::PopStyleColor();
                     } else {
                         // Keyboard Z-order Reordering via Up/Down Arrow keys
-                        const bool drawerFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-                        const bool drawerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+                        const bool drawerFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+                        const bool drawerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
                         int selectedId = GetCompositeSelectedOutputNodeId();
                         if ((drawerFocused || drawerHovered) && selectedId > 0 && !ImGui::GetIO().WantTextInput) {
                             int selectedIdx = -1;
@@ -1959,13 +1939,13 @@ void EditorModule::RenderUI() {
                             }
                             if (selectedIdx != -1) {
                                 if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
-                                    if (selectedIdx < static_cast<int>(zOrder.size()) - 1) {
-                                        MoveCompositeOutputToIndex(selectedId, selectedIdx + 1);
+                                    if (selectedIdx > 0) {
+                                        MoveCompositeOutputToIndex(selectedId, selectedIdx - 1);
                                         MarkDirty();
                                     }
                                 } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
-                                    if (selectedIdx > 0) {
-                                        MoveCompositeOutputToIndex(selectedId, selectedIdx - 1);
+                                    if (selectedIdx < static_cast<int>(zOrder.size()) - 1) {
+                                        MoveCompositeOutputToIndex(selectedId, selectedIdx + 1);
                                         MarkDirty();
                                     }
                                 }
@@ -1977,8 +1957,8 @@ void EditorModule::RenderUI() {
                         ImGui::PopStyleColor();
                         ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
-                        // Iterate in REVERSE order (top is front, bottom is back)
-                        for (int i = (int)zOrder.size() - 1; i >= 0; --i) {
+                        // The frontmost output is index zero, matching the viewport.
+                        for (int i = 0; i < static_cast<int>(zOrder.size()); ++i) {
                             int outputNodeId = zOrder[i];
                             const CompositeSceneItem* item = FindCompositeSceneItem(outputNodeId);
                             std::string label = item && !item->label.empty() ? item->label : ("Output " + std::to_string(outputNodeId));
@@ -1986,7 +1966,8 @@ void EditorModule::RenderUI() {
                             // Truncate if too long
                             std::string displayLabel = label;
                             if (displayLabel.size() > 18) {
-                                displayLabel = displayLabel.substr(0, 15) + "...";
+                                Stack::Utf8Text::TruncateToByteLimit(displayLabel, 15u);
+                                displayLabel += "...";
                             }
 
                             char itemID[128];
@@ -2129,8 +2110,7 @@ void EditorModule::RenderUI() {
             !IsToneCurveTargeting() &&
             !HasFocusedToneCurveViewportInteraction() &&
             !hasDevelopSubjectViewportInteraction &&
-            !CanToggleActiveAutoGainMaskPreview() &&
-            !HasActiveCustomMaskOverlay();
+            !CanToggleActiveAutoGainMaskPreview();
         const bool viewportPaneHoveredForSplit =
             canDragSplitFromViewportPane &&
             !m_LibraryWindowHovered &&

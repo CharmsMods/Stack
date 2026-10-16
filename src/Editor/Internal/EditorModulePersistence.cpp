@@ -1,4 +1,7 @@
 #include "App/WorkspacePresentation.h"
+#include "App/UiFrameBudget.h"
+#include "Utils/DisplayRefreshRate.h"
+#include "Graph/LayerOperationParameters.h"
 #include "Editor/EditorModule.h"
 
 #include "Async/TaskSystem.h"
@@ -36,6 +39,34 @@
 namespace {
 
 namespace StackFormat = StackBinaryFormat;
+
+bool ValidateWorkspacePayload(const nlohmann::json& payload, std::string& error,
+    EditorNodeGraph::Graph* validatedGraph = nullptr,
+    Stack::Project::RawLayerStackState* validatedLayers = nullptr, int installedLayerCount = -1) {
+    Stack::Project::WorkspaceMode mode;
+    if (!payload.contains("nodeGraph") || !EditorNodeGraph::IsCurrentGraphPayload(payload)) {
+        error = "Unsupported project version: this project uses a different graph model generation.";
+        return false;
+    }
+    const auto setting = payload.find("workspaceMode");
+    if (setting != payload.end() && (!setting->is_string() ||
+        !Stack::Project::ParseWorkspaceMode(setting->get<std::string>(),mode))) {
+        error = "The project has an invalid workspace mode."; return false;
+    }
+    try {
+        EditorNodeGraph::Graph candidate;
+        EditorNodeGraph::DeserializeGraphPayload(payload,candidate,
+            installedLayerCount >= 0 ? installedLayerCount :
+                static_cast<int>(EditorNodeGraph::ExtractLayerArray(payload).size()));
+        Stack::Project::RawLayerStackState layers;
+        if (!Stack::Project::ReadRawLayersFromPipeline(payload,layers,error,false)) return false;
+        if (validatedGraph) *validatedGraph = std::move(candidate);
+        if (validatedLayers) *validatedLayers = std::move(layers);
+    } catch (const std::exception& exception) {
+        error = std::string("Cannot read current graph: ") + exception.what(); return false;
+    }
+    return true;
+}
 
 struct DecodedImageData {
     std::vector<unsigned char> pixels;
@@ -305,6 +336,7 @@ nlohmann::json EditorModule::SerializePipeline() {
     payload["editorComposite"] = SerializeCompositePersistence();
     payload["editorTimeline"] = SerializeTimelinePersistence();
     payload["rawLayerStack"] = Stack::Project::SerializeRawLayerStack(m_Project->rawLayers.State());
+    payload["workspaceMode"] = Stack::Project::WorkspaceModeName(GetWorkspaceMode());
     return payload;
 }
 
@@ -360,16 +392,24 @@ bool EditorModule::DeserializeSinglePipelineLayer(const nlohmann::json& layerDat
     }
 
     newLayer->InitializeGL();
-    newLayer->Deserialize(layerData);
+    Stack::GraphModel::PrepareLayerParameterDraft(*newLayer,layerData);
     m_Project->layers.push_back(newLayer);
     return true;
 }
 
 bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized, bool restoreSourceFromGraphState) {
+    std::string workspaceError;
+    EditorNodeGraph::Graph validatedGraph;
     Stack::Project::RawLayerStackState rawLayers;
+    if (!ValidateWorkspacePayload(serialized,workspaceError, &validatedGraph, &rawLayers,
+            static_cast<int>(m_Project->layers.size()))) {
+        PostNotification(UiNotificationSeverity::Error,workspaceError,"unsupported-project-version");
+        return false;
+    }
+    Stack::Project::WorkspaceMode restoredMode = Stack::Project::WorkspaceMode::View;
+    Stack::Project::ParseWorkspaceMode(serialized.value("workspaceMode",std::string("view")),restoredMode);
     std::string rawLayerError;
-    if (!Stack::Project::ReadRawLayersFromPipeline(serialized, rawLayers, rawLayerError) ||
-        !m_Project->rawLayers.Load(Stack::Project::SerializeRawLayerStack(rawLayers), rawLayerError)) {
+    if (!m_Project->rawLayers.Load(Stack::Project::SerializeRawLayerStack(rawLayers), rawLayerError)) {
         std::cerr << rawLayerError << '\n';
         return false;
     }
@@ -383,14 +423,9 @@ bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized
         sourceHeight = m_Pipeline.GetCanvasHeight();
     }
 
-    EditorNodeGraph::DeserializeGraphPayload(
-        serialized,
-        m_Project->graph,
-        static_cast<int>(m_Project->layers.size()),
-        sourcePixels,
-        sourceWidth,
-        sourceHeight,
-        m_Pipeline.GetSourceChannels());
+    // Validation already built this exact candidate, including decoded image
+    // payloads. Install it instead of decoding/allocating the graph twice.
+    m_Project->graph = std::move(validatedGraph);
     RefreshDeserializedRawRuntimeErrors(m_Project->graph);
 
     DeserializeCompositePersistence(serialized);
@@ -426,10 +461,14 @@ bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized
         m_Pipeline.ClearOutput();
     }
     MarkRenderRefreshDirty();
+    WorkspaceLoaded(restoredMode);
+    m_Project->graphHistory.Reset(CaptureProjectGraphState());
     return true;
 }
 
 void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
+    std::string workspaceError;
+    if (!ValidateWorkspacePayload(serialized,workspaceError)) throw std::runtime_error(workspaceError);
     Stack::Project::RawLayerStackState rawLayers;
     std::string rawLayerError;
     if (!Stack::Project::ReadRawLayersFromPipeline(serialized, rawLayers, rawLayerError))
@@ -441,7 +480,13 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
     for (const auto& layerData : layers) {
         DeserializeSinglePipelineLayer(layerData);
     }
-    FinalizeDeserializedPipeline(serialized, true);
+    if (FinalizeDeserializedPipeline(serialized, true) && std::any_of(m_Project->graph.GetNodes().begin(),
+        m_Project->graph.GetNodes().end(),[](const auto& node) {
+            return node.kind == EditorNodeGraph::NodeKind::RawDevelopment ||
+                node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet ||
+                node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise ||
+                node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr;
+        })) SelectRawAdjustmentLayer({});
 }
 
 void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch, bool loadCompositePreview) {
@@ -512,6 +557,10 @@ void EditorModule::LoadSourceFromImagePayload(
 }
 
 bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
+    std::string workspaceError;
+    if (!ValidateWorkspacePayload(projectData.pipelineData,workspaceError)) {
+        PostNotification(UiNotificationSeverity::Error,workspaceError,"unsupported-project-version"); return false;
+    }
     Stack::Project::RawLayerStackState rawLayers;
     std::string rawLayerError;
     if (!Stack::Project::ReadRawLayersFromPipeline(projectData.pipelineData, rawLayers, rawLayerError, projectData.projectKind == StackBinaryFormat::kRawProjectKind)) {
@@ -589,6 +638,9 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
            !projectData.rawProjectSnapshot->projectId.empty()
             ? projectData.rawProjectSnapshot->projectId
             : Stack::Project::GenerateStableUuid());
+    // Bind the initial tool only after installing the document identity.
+    // Otherwise the selection immediately becomes stale and RAW has no picker.
+    SelectRawAdjustmentLayer({});
     m_Project->adoptionSourcePath = projectData.adoptedFrom;
     // Adoption itself is a durable transition even when the compatibility
     // document has not been edited. Keep the session visually clean while
@@ -614,16 +666,22 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
 bool EditorModule::FinishWorkspaceInteraction() {
     if (!CommitRawLayerMaskGraph()) return false;
     m_Project->rawLayers.EndGesture();
-    return !m_Project->rawInteractionDraft.active || ResolveRawWorkspaceInteractionDraft(false);
+    m_Project->graphHistory.EndGesture();
+    if (m_Project->rawInteractionDraft.active && !ResolveRawWorkspaceInteractionDraft(false)) return false;
+    ClearRawCurveDragState();
+    return true;
 }
 
 bool EditorModule::EnterRawWorkspaceRootTab() {
     if (Stack::Workspace::IsPreview()) return false;
+    if (!CommitRawLayerMaskGraph()) return false;
+    // Outgoing Graph frames can prepare their canvas after RAW was requested.
+    // Commit the actual view change here, when the shell finishes fading out.
+    m_GraphEditorUsesRawLayer = false;
     if (m_RawWorkspaceRootTabActive) {
         return true;
     }
 
-    if (!CommitRawLayerMaskGraph()) return false;
     m_Project->rawLayers.EndGesture();
     CancelCanvasTool();
     ClearTrackedToneCurveProbe();
@@ -666,7 +724,9 @@ bool EditorModule::EnterRawWorkspaceRootTab() {
 
 bool EditorModule::LeaveRawWorkspaceRootTab(bool enteringEditorTab) {
     if (Stack::Workspace::IsPreview()) return false;
-    (void)enteringEditorTab;
+    m_RawImageInput={};
+    m_RawWorkspaceLabUi.previewSpacePanning=false;
+    m_RawWorkspaceLabUi.previewPanning=false;
 
     if (m_Project->rawInteractionDraft.active &&
         !ResolveRawWorkspaceInteractionDraft(false)) {
@@ -690,8 +750,14 @@ bool EditorModule::LeaveRawWorkspaceRootTab(bool enteringEditorTab) {
     m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
     m_RawWorkspaceLabFilmstripDragState = {};
     m_RawWorkspaceRootTabActive = false;
+    m_Viewport.FrameTransition().Reset();
     MarkRenderRefreshDirty();
     m_RawWorkspaceLockedByEditorProject = false;
+    if (enteringEditorTab && (IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive())) {
+        // The shell is already entering Graph; setup must not request it again.
+        OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer, false);
+        SwitchToSubWindow(EditorSubWindow::NodeGraph);
+    }
     return true;
 }
 
@@ -801,6 +867,9 @@ bool EditorModule::BeginDeferredLoadedProjectApply(
 
     const nlohmann::json layerArray =
         EditorNodeGraph::ExtractLayerArray(projectData->pipelineData);
+    std::string workspaceError;
+    if (!ValidateWorkspacePayload(projectData->pipelineData,workspaceError))
+        return rejectCandidate(workspaceError);
     if (!layerArray.is_array()) {
         return rejectCandidate("Failed to read the project's editor state.");
     }
@@ -989,7 +1058,13 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
     };
 
     bool processedWorkThisFrame = false;
-    const double clampedBudgetMs = std::max(0.0, projectApplyBudgetMs);
+    const auto* viewport = ImGui::GetCurrentContext() ? ImGui::GetMainViewport() : nullptr;
+    const int refresh = viewport ? DisplayRefreshRate::ForWindow(
+        static_cast<GLFWwindow*>(viewport->PlatformHandle)) : 60;
+    // Loading shares the UI thread with input and animation. A fixed 2.5 ms
+    // allowance already consumes a complete frame at 400 Hz.
+    const double clampedBudgetMs = std::min(std::max(0.0, projectApplyBudgetMs),
+        Stack::App::MainThreadCompletionBudgetMs(refresh));
 
     while (m_DeferredLoadedProjectApply.active && !m_DeferredLoadedProjectApply.failed) {
         const auto step = m_DeferredLoadedProjectApply.step;
@@ -1120,6 +1195,8 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
                    !project.rawProjectSnapshot->projectId.empty()
                     ? project.rawProjectSnapshot->projectId
                     : Stack::Project::GenerateStableUuid());
+            // The deferred load uses the same final identity as its RAW tools.
+            SelectRawAdjustmentLayer({});
             m_Project->adoptionSourcePath = project.adoptedFrom;
             m_Project->editRevision = m_Project->adoptionSourcePath.empty()
                 ? 0u
@@ -1555,6 +1632,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 }
                 SetCurrentProjectName("");
                 SetCurrentProjectFileName("");
+                WorkspaceLoaded();
                 MarkNodeBrowserThumbnailSourceChanged();
                 MarkDirty();
 

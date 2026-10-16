@@ -6,6 +6,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Presets/PresetManager.h"
+#include "Utils/Utf8Text.h"
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +48,10 @@ bool BuildPreviewGraphFromPayload(
         outError = "Preset graph payload is missing.";
         return false;
     }
+    if (!EditorNodeGraph::IsCurrentGraphPayload(graphPayload)) {
+        outError = "This preset uses an unsupported graph model generation.";
+        return false;
+    }
 
     const StackBinaryFormat::json layerArray = EditorNodeGraph::ExtractLayerArray(graphPayload);
     if (layerArray.is_array()) {
@@ -62,14 +67,11 @@ bool BuildPreviewGraphFromPayload(
         }
     }
 
-    EditorNodeGraph::DeserializeGraphPayload(
-        graphPayload,
-        outGraph,
-        static_cast<int>(outLayers.size()),
-        {},
-        0,
-        0,
-        0);
+    try {
+        EditorNodeGraph::DeserializeGraphPayload(graphPayload,outGraph,static_cast<int>(outLayers.size()));
+    } catch (const std::exception& exception) {
+        outError = exception.what(); return false;
+    }
     if (outGraph.GetNodes().empty() && outGraph.GetGroups().empty()) {
         outError = "Preset preview graph is empty.";
         return false;
@@ -300,7 +302,9 @@ void RenderUserPresetSection(
 
         if (ImGui::BeginPopupModal("Rename Preset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             if (ImGui::IsWindowAppearing()) {
-                strncpy_s(renameBuffer, preset->displayName.c_str(), sizeof(renameBuffer) - 1);
+                std::string displayName = preset->displayName;
+                Stack::Utf8Text::TruncateToByteLimit(displayName, sizeof(renameBuffer) - 1u);
+                strncpy_s(renameBuffer, displayName.c_str(), sizeof(renameBuffer) - 1);
                 renameBuffer[sizeof(renameBuffer) - 1] = '\0';
             }
             ImGui::InputText("Name", renameBuffer, sizeof(renameBuffer));

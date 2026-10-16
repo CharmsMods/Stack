@@ -2,7 +2,6 @@
 #include "Raw/RawLoader.h"
 #include "Raw/RawProcessingMath.h"
 #include "Raw/MultiFrameDenoise/NoiseModel.h"
-#include "Persistence/RawProjectModel.h"
 #include <opencv2/imgproc.hpp>
 #include <fstream>
 #include <set>
@@ -106,10 +105,10 @@ std::shared_ptr<Prepared> Prepare(const ProcessingRequest& request) {
         Progress(request,ProcessingStage::Preparing,.02+.20*data->captures.size()/enabled.size(),unsigned(data->captures.size()),unsigned(enabled.size()),source.frameId);
         if(!hashes.insert(source.sha256).second)throw std::runtime_error("Duplicate panorama captures cannot provide independent measurements.");
         RawImageData raw;RawMetadata metadata;
-        if(!request.decode&&RawLoader::LoadMetadata(source.path.string(),metadata)&&
+        if(!request.decode&&RawLoader::LoadMetadata(source.path.u8string(),metadata)&&
            std::uint64_t(std::max(0,metadata.rawWidth))*std::max(0,metadata.rawHeight)>request.memoryBudgetBytes/96)
             throw std::runtime_error("Preparing this panorama capture exceeds available memory.");
-        const bool loaded=request.decode?request.decode(source.path,raw,request.shouldCancel):RawLoader::LoadFile(source.path.string(),raw,request.shouldCancel);
+        const bool loaded=request.decode?request.decode(source.path,raw,request.shouldCancel):RawLoader::LoadFile(source.path.u8string(),raw,request.shouldCancel);
         if(!loaded)throw std::runtime_error("Could not decode "+source.displayName+": "+raw.metadata.error);
         if(raw.metadata.sourceContentSha256!=source.sha256||raw.metadata.sourceByteSize!=source.bytes)
             throw std::runtime_error("Panorama source content changed: "+source.displayName);

@@ -225,7 +225,8 @@ void TestUnicodeProjectPaths(const std::filesystem::path& sandbox) {
         { "sourcePath", originalImage.u8string() },
         { "pngBytes", Format::json::binary(Bytes { 1u, 2u, 3u }) }
     }}) }} }};
-    Check(Format::WriteProjectFile(path, document), "Save a project in a Unicode folder");
+    const auto written = Format::WriteProjectFileWithResult(path, document);
+    if (!written) throw std::runtime_error("Save a project in a Unicode folder: " + written.commit.message);
     const auto root = path.parent_path() / path.stem();
     Format::ProjectDocument loaded;
     Check(Format::ReadProjectFile(root, loaded), "Open a project from a Unicode folder");

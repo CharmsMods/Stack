@@ -19,13 +19,19 @@ void GalleryLayoutAnimation::Reset() {
 }
 
 void GalleryLayoutAnimation::BeginFrame(
-    const std::string& workspace, bool grid, int frame, double time) {
+    const std::string& workspace, bool grid, int frame, double time,
+    std::uint64_t orderRevision, bool reducedMotion) {
     if (workspace != m_Workspace || m_Frame != frame - 1) {
         Reset();
         m_Workspace = workspace;
         m_Grid = grid;
+        m_OrderRevision = orderRevision;
     }
-    if (grid != m_Grid) {
+    if (reducedMotion) {
+        m_Active = false;
+        m_Progress = 1.0f;
+        m_From.clear();
+    } else if (grid != m_Grid || orderRevision != m_OrderRevision) {
         // A reversal starts from the geometry currently on screen.
         m_From = m_Active ? Sample() : m_Layout;
         m_StartedAt = time;
@@ -35,7 +41,7 @@ void GalleryLayoutAnimation::BeginFrame(
                 entry.second.clip.GetWidth() > 0 && entry.second.clip.GetHeight() > 0;
         });
         m_Layout.clear();
-        m_Grid = grid;
+        if (!m_Active) m_From.clear();
     } else if (m_Active) {
         const float elapsed = std::clamp(static_cast<float>((time - m_StartedAt) / .32), 0.0f, 1.0f);
         m_Progress = elapsed * elapsed * (3.0f - 2.0f * elapsed);
@@ -44,6 +50,8 @@ void GalleryLayoutAnimation::BeginFrame(
             m_From.clear();
         }
     }
+    m_Grid = grid;
+    m_OrderRevision = orderRevision;
     m_Frame = frame;
     m_NextOrder = 0;
 }
@@ -70,9 +78,11 @@ void GalleryLayoutAnimation::ObserveSlot(
 }
 
 void GalleryLayoutAnimation::PrepareSwitch(const std::string& preferredKey) {
+    const Layout displayed = m_Active ? Sample() : Layout{};
+    const auto& layout = m_Active ? displayed : m_Layout;
     const Pose* anchor = nullptr;
     float nearest = std::numeric_limits<float>::max();
-    for (const auto& [key, pose] : m_Layout) {
+    for (const auto& [key, pose] : layout) {
         if (!pose.rendered || !pose.image.Overlaps(pose.clip) ||
             pose.clip.GetWidth() <= 0 || pose.clip.GetHeight() <= 0) continue;
         const ImVec2 center = pose.image.GetCenter();

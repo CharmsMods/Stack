@@ -5,7 +5,9 @@
 #include <algorithm>
 
 void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorker::PreviewRequest>& requests) {
-    if (!m_RawWorkspaceRootTabActive || !IsRawWorkspaceProjectActive()) return;
+    const bool projectGraph = IsEditingRawLayerMaskGraph() && m_RawLayerMaskWorkspace->projectCanvas;
+    if ((!m_RawWorkspaceRootTabActive && !projectGraph) || !IsRawWorkspaceProjectActive()) return;
+    m_RawLayerPanel.Prune(ImGui::GetFrameCount());
     const auto revision = std::max<std::uint64_t>(1, m_RenderRevision);
     int count = 0;
     for (const auto& entry : m_RawLayerPanel.thumbnails) {
@@ -21,6 +23,29 @@ void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorke
         requests.push_back(std::move(request));
         if (++count == 2) break; // Keep auxiliary batches interruptible by edits.
     }
+}
+
+unsigned int EditorModule::GetRawMaskTexturePreview(int nodeId, int& width, int& height) {
+    width = height = 0;
+    if (!IsEditingRawLayerMaskGraph()) return 0;
+    const auto* node = GetNodeGraph().FindNode(nodeId);
+    if (!node || (node->kind != EditorNodeGraph::NodeKind::MaskTexture &&
+        node->kind != EditorNodeGraph::NodeKind::CustomMask)) return 0;
+    const auto& owner = node->rawLayerOwnerId.empty() ? m_RawLayerMaskWorkspace->layerId : node->rawLayerOwnerId;
+    const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
+    if (!layer) return 0;
+    for (const auto& mask : layer->maskOutputs) {
+        if (mask.nodeUuid != node->instanceUuid) continue;
+        auto& preview = m_RawLayerPanel.thumbnails[Stack::Editor::RawLayerPanelState::Key(owner,mask.id)];
+        preview.layerId = owner;
+        preview.maskId = mask.id;
+        preview.visibleFrame = ImGui::GetFrameCount();
+        width = preview.width;
+        height = preview.height;
+        // Retain the last completed image while the next revision is rendering.
+        return preview.texture;
+    }
+    return 0;
 }
 
 void EditorModule::AdoptRawLayerThumbnail(const EditorRenderWorker::PreviewResult& result) {
@@ -77,7 +102,7 @@ bool EditorModule::RenderRawLayerThumbnail(const std::string& layerId, const std
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::TextUnformatted(maskId.empty() ? "Photo after this layer. Click to edit its RAW controls." :
-            "Mask coverage. Click to edit its shape. Double-click to open Graph.");
+            "Mask coverage. Click to open Graph and edit its texture or shape.");
         if (!thumbnail.error.empty()) ImGui::TextUnformatted(thumbnail.error.c_str());
         else if (!current) ImGui::TextDisabled("Updating thumbnail...");
         if (thumbnail.texture) {

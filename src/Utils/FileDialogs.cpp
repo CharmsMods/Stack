@@ -4,6 +4,7 @@
 #include "Utils/ScopedComApartment.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -189,6 +190,34 @@ HRESULT ShowFileDialog(IFileDialog* dialog, const char* kind, const char* title)
     const HRESULT hr = dialog ? dialog->Show(ownerSelection.effectiveOwner) : E_POINTER;
     TraceFileDialog("end", kind, title, ownerSelection, SUCCEEDED(hr) ? TRUE : FALSE, 0, hr);
     return hr;
+}
+
+void SetFileDialogFilters(IFileDialog& dialog, const char* filter) {
+    if (!filter) return;
+    const auto toWide = [](const char* text) {
+        const int length = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+        if (length <= 0) return std::wstring();
+        std::wstring converted(static_cast<std::size_t>(length), L'\0');
+        if (!MultiByteToWideChar(CP_UTF8, 0, text, -1, converted.data(), length))
+            return std::wstring();
+        converted.resize(static_cast<std::size_t>(length - 1));
+        return converted;
+    };
+    std::vector<std::pair<std::wstring, std::wstring>> entries;
+    for (const char* label = filter; *label;) {
+        const char* pattern = label + std::strlen(label) + 1;
+        if (!*pattern) break;
+        entries.emplace_back(toWide(label), toWide(pattern));
+        label = pattern + std::strlen(pattern) + 1;
+    }
+    std::vector<COMDLG_FILTERSPEC> specifications;
+    specifications.reserve(entries.size());
+    for (const auto& entry : entries) {
+        if (!entry.first.empty() && !entry.second.empty())
+            specifications.push_back({entry.first.c_str(), entry.second.c_str()});
+    }
+    if (!specifications.empty())
+        dialog.SetFileTypes(static_cast<UINT>(specifications.size()), specifications.data());
 }
 
 } // namespace
@@ -742,6 +771,7 @@ std::vector<std::string> OpenMultipleFilesDialog(const char* title, const char* 
         if (SUCCEEDED(pfd->GetOptions(&dwOptions))) {
             pfd->SetOptions(dwOptions | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM);
         }
+        SetFileDialogFilters(*pfd, filter);
         
         int len = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
         if (len > 0) {

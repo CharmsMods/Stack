@@ -19,7 +19,6 @@ Use the code as the primary source for implementation behavior. Keep lasting rep
 during building, use parallel builds like 14, and closing running stack instances is always ok.
 Never use "Computer use" to test things.
 The git diff will probably always be dirty since i go a long time between commits, so dont worry about that as concern.
-For your responses and the way you write documentation, always use `Guidance/Un-slop.md`. You must always read this file at the beginning of a conversation. This file should, however, not affect the quality or integrity of code.
 
 Reference material is in `Guidance/`. The files in `Guidance/AGENT RULES/` are a general native-software preset; consult only the relevant topic file when it helps the task. For recurring RAW startup or render-cache failures, consult `Guidance/AGENT RULES/08-debugging-watchlist.txt`.
 

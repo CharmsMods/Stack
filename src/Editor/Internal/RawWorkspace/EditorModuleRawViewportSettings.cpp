@@ -22,6 +22,7 @@ void EditorModule::SyncRawViewportPreferences() {
     m_RawViewportPreferencesRevision = revision;
     m_RawViewportEffectiveFps = fps;
     CancelRawViewportCalibration();
+    m_Viewport.FrameTransition().Clear();
     if (!preferences.smoothUpdates) ClearRawViewportTransition();
     m_RawWorkspacePreviewHealthyStreak = m_RawWorkspacePreviewSlowSamples = m_RawWorkspacePreviewScaleCooldown = 0;
     const int edge = GetCalibratedRawViewportEdge();
@@ -46,7 +47,7 @@ void EditorModule::SetSmoothRawViewportUpdates(bool enabled) {
     SetRawViewportPreferences(preferences);
 }
 int EditorModule::GetRawViewportFadeBelowFps() const {
-    return Raw::ResolveViewportTargetFps(GetRawViewportPreferences().fadeBelowFps,GetRawViewportMaximumFps());
+    return Raw::ClampViewportFadeBelowFps(GetRawViewportPreferences().fadeBelowFps);
 }
 void EditorModule::SetRawViewportFadeBelowFps(int fps) {
     auto preferences = GetRawViewportPreferences();

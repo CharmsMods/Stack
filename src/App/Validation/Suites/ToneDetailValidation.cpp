@@ -92,8 +92,8 @@ void CheckReal(const std::filesystem::path& path,const std::filesystem::path& fo
         originalBefore.pixels==originalAfter.pixels,"Original changed with authored white balance or denoise");
     std::cout<<"Original source is unchanged by authored white balance and denoise\n";
     Project::RawLayerStackState layers;const auto id=Project::AddRawAdjustmentLayer(layers,"Tone and detail");
-    auto& layer=layers.layers[0];SceneTone tone;tone.contrast=1.25f;tone.outerProtection=.65f;
-    FindRawOperation(layer, GraphOperationKind::LuminanceTone)->rawOperation.parameters = SerializeSceneTone(tone);
+    auto& layer=layers.layers[0];SceneTone tone; tone.direct=false;tone.contrast=1.25f;tone.outerProtection=.65f;
+    FindRawOperation(layer, GraphOperationKind::ToneCurve)->rawOperation.parameters = SerializeSceneTone(tone);
     auto detail = ReadGraphOperation(FindRawOperation(layer, GraphOperationKind::DetailContrast)->rawOperation);
     detail.detailContrast.scaleGains[4]=1.2f; detail.detailContrast.scaleGains[6]=1.25f;
     WriteGraphOperation(FindRawOperation(layer, GraphOperationKind::DetailContrast)->rawOperation, detail);

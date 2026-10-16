@@ -579,6 +579,68 @@ bool TestFilmstripOrganization() {
         "drag motion uses deterministic cubic settling");
 }
 
+bool TestAllGallerySortModes() {
+    using namespace Stack::RawWorkspace;
+    const std::vector<RawGalleryFilmstripSourceSortInfo> sources {
+        {"a", "zulu.ARW", "B", 20, 0, 200, 400},
+        {"b", "Beta.ARW", "A", 40, 1, 400, 100},
+        {"c", "alpha.ARW", "B", 10, 2, 100, 300},
+        {"d", "beta.arw", "A", 40, 3, 400, 100},
+        {"e", "Echo.ARW", "", 0, 4, 0, 0}
+    };
+    std::vector<RawGallerySimilarityStack> stacks;
+    for (const auto& source : sources)
+        stacks.push_back({source.folderKey, source.catalogIndex, {source.sourceKey}});
+    struct Expected { RawGalleryFilmstripSortMode mode; const char* keys; };
+    const Expected cases[] {
+        {RawGalleryFilmstripSortMode::TimelineAll, "bdcae"},
+        {RawGalleryFilmstripSortMode::TimelineByFolder, "ebdca"},
+        {RawGalleryFilmstripSortMode::Manual, "cabde"},
+        {RawGalleryFilmstripSortMode::FileNameAscending, "cbdea"},
+        {RawGalleryFilmstripSortMode::FileNameDescending, "aebdc"},
+        {RawGalleryFilmstripSortMode::ModifiedNewestFirst, "bdace"},
+        {RawGalleryFilmstripSortMode::ModifiedOldestFirst, "cabde"},
+        {RawGalleryFilmstripSortMode::FolderThenNameAscending, "ebdca"},
+        {RawGalleryFilmstripSortMode::FolderThenNameDescending, "acbde"}
+    };
+    for (const auto& expected : cases) {
+        RawGalleryManualGrouping organization;
+        organization.sortMode = expected.mode;
+        organization.manualSourceOrder = {"c", "a", "b", "d", "e"};
+        const auto ordered = SortRawGalleryFilmstripStacks(stacks, sources, organization);
+        std::string filmstripKeys, gridKeys;
+        for (const auto& stack : ordered) filmstripKeys += stack.sourceKeys.front();
+        const auto sections = BuildRawGalleryStackSections(ordered, expected.mode);
+        for (const auto& section : sections) {
+            for (std::size_t index = section.firstStack;
+                 index < section.firstStack + section.stackCount; ++index) {
+                gridKeys += ordered[index].sourceKeys.front();
+                if (section.separateFolder && !Check(
+                    section.folderKey == ordered[index].folderKey, "section preserves folder identity")) return false;
+            }
+        }
+        if (!Check(filmstripKeys == expected.keys && gridKeys == filmstripKeys,
+                RawGalleryFilmstripSortModeLabel(expected.mode))) return false;
+        const bool grouped = expected.mode == RawGalleryFilmstripSortMode::TimelineByFolder ||
+            expected.mode == RawGalleryFilmstripSortMode::FolderThenNameAscending ||
+            expected.mode == RawGalleryFilmstripSortMode::FolderThenNameDescending;
+        if (!Check(sections.size() == (grouped ? 3u : 1u), "global sorts stay global in grid")) return false;
+        RawGalleryManualGrouping restored;
+        if (!Check(DeserializeRawGalleryManualGrouping(SerializeRawGalleryManualGrouping(organization), restored) &&
+                restored.sortMode == expected.mode && restored.manualSourceOrder == organization.manualSourceOrder,
+                "all sort modes persist")) return false;
+    }
+    auto negativeTimes = sources;
+    negativeTimes[0].modifiedTimeTicks = -20;
+    negativeTimes[1].modifiedTimeTicks = -10;
+    RawGalleryManualGrouping organization;
+    organization.sortMode = RawGalleryFilmstripSortMode::ModifiedOldestFirst;
+    const auto ordered = SortRawGalleryFilmstripStacks(stacks, negativeTimes, organization);
+    if (!Check(ordered.front().sourceKeys.front() == "a" && ordered.back().sourceKeys.front() == "e",
+        "negative Windows file-clock timestamps sort normally and unknown times stay last")) return false;
+    return Check(BuildRawGalleryStackSections({}, organization.sortMode).empty(), "empty sorting has no sections");
+}
+
 bool TestFilmstripDrawerState() {
     using Stack::RawWorkspace::RawGalleryFilmstripDrawerInput;
     using Stack::RawWorkspace::RawGalleryFilmstripDrawerState;
@@ -701,6 +763,7 @@ int main() {
         !TestPersistenceAndDeterminism() ||
         !TestManualGrouping() ||
         !TestFilmstripOrganization() ||
+        !TestAllGallerySortModes() ||
         !TestPresentationHelpers() ||
         !TestFilmstripDrawerState() ||
         !TestGalleryRestorationPolicy()) {

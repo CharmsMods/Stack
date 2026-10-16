@@ -1,4 +1,6 @@
 #include "Utils/DisplayRefreshRate.h"
+#include "App/UiPerformanceProbe.h"
+#include <iostream>
 #include "Renderer/GpuMemoryBudget.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Bracketing/BracketingSession.h"
@@ -89,9 +91,14 @@ void EditorModule::NoteRawWorkspaceRecipePreviewEdit(bool interactionActive) {
         ShouldRequestRawRefinementOnRelease(m_RawWorkspaceAdaptiveGestureActive,
             interactionActive, HasRawWorkspaceLivePreviewForSource(
                 m_RawWorkspacePreviewSourceKey));
+    // Source preparation is inspected at pixel detail. Changes in this view
+    // request native refinement directly rather than flashing a proxy first.
+    // Both render planners still apply their existing GPU memory limits.
+    const bool sourcePreparation = m_RawWorkspaceRootTabActive &&
+        m_RawWorkspaceLabUi.activeTool == RawLabTool::Light && !SelectedEditingNode();
     m_RawWorkspaceExplicitFullQualityRenderRequested = false;
     m_RawWorkspaceFullResolutionPreviewPending = true;
-    m_RawWorkspaceFullResolutionPreviewRequested = releasedGesture;
+    m_RawWorkspaceFullResolutionPreviewRequested = releasedGesture || sourcePreparation;
     m_RawWorkspaceFullResolutionPreviewDeferredByBudget = false;
     m_RawWorkspaceFullResolutionPreviewDeferredBudgetBytes = 0;
     m_RawWorkspaceFullResolutionPreviewRequestGeneration = 0;
@@ -120,7 +127,7 @@ void EditorModule::NoteRawWorkspaceRecipePreviewEdit(bool interactionActive) {
     }
     if (ImGui::GetCurrentContext()) {
         const double now = ImGui::GetTime();
-        m_RawWorkspaceFastPreviewUntilTime = (interactionActive || releasedGesture)
+        m_RawWorkspaceFastPreviewUntilTime = (interactionActive || releasedGesture || sourcePreparation)
             ? -1.0
             : now + kRawWorkspaceNativeRefinementQuietSeconds;
         m_RawWorkspaceAnalysisQuietUntilTime =
@@ -259,6 +266,15 @@ std::string EditorModule::GetActiveRawWorkspacePresentationDiagnosticForValidati
         << ", submittedRevision=" << m_LastSubmittedRenderRevision;
     diagnostic << ", fade=" << m_RawViewportFadeDecision << ", fadeSeconds=" << m_RawViewportFadeDuration
         << ", cadenceMs=" << m_RawViewportCadenceMs << ", chosenEdge=" << m_RawWorkspaceInteractivePreviewMaxDimension;
+    const auto& state=ActiveViewportPreviewState();
+    diagnostic << ", logical=" << state.geometry.logicalWidth << 'x' << state.geometry.logicalHeight
+        << ", demand=" << state.request.visible.fullWidth << 'x' << state.request.visible.fullHeight
+        << ':' << state.request.visible.x << ',' << state.request.visible.y
+        << '+' << state.request.visible.width << 'x' << state.request.visible.height
+        << ", physical=" << state.physicalWidth << 'x' << state.physicalHeight
+        << ", selectedEdge=" << state.selection.edge << ", interactiveEdge=" << state.interactiveEdge
+        << ", refinement=" << state.refinement << ", blocked=" << state.refinementBlocked
+        << ", refineError=" << state.refinementError;
     if (!m_RawWorkspaceStaleRenderStatusText.empty()) {
         diagnostic << ", renderError=" << m_RawWorkspaceStaleRenderStatusText;
     }
@@ -327,6 +343,10 @@ void EditorModule::RefreshRawWorkspaceGpuMemoryBudget() {
     const Raw::RawGpuMemoryBudgetDecision memoryDecision =
         Raw::ResolveRawGpuMemoryBudget(
             Stack::Renderer::QueryGpuMemoryBudget());
+    if (Stack::UiPerformance::Probe::Active()) {
+        const double elapsed = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-now).count();
+        if (elapsed > 5.0) std::clog << "Viewport memory query ms=" << elapsed << '\n';
+    }
     m_RawWorkspaceVramWorkingBudgetBytes =
         memoryDecision.workingBudgetBytes;
     m_RawWorkspaceVramAvailableBytes =
@@ -465,7 +485,7 @@ void EditorModule::UpdateRawWorkspaceSettledPreviewRender(double now) {
         return;
     }
     const bool interactiveGestureHeld =
-        IsRawWorkspaceUiInteractionActive();
+        IsRawWorkspaceImageEditActive();
     if (interactiveGestureHeld) {
         m_RawWorkspaceAnalysisQuietUntilTime =
             now + kRawWorkspaceAnalysisQuietSeconds;
@@ -511,6 +531,13 @@ void EditorModule::UpdateRawWorkspaceSettledPreviewRender(double now) {
         }
         m_RawWorkspaceFastPreviewUntilTime = -1.0;
     }
+    // A settled regional frame and its overview remain useful during a camera
+    // gesture. Request missing detail on release instead of submitting another
+    // native crop repeatedly while dragging. Actual image edits still settle.
+    if ((IsRawImageNavigationActive() || m_RawWorkspaceLabUi.previewZoomAnimating) &&
+        !m_RawViewportLastPresentation.interactive && !m_RawViewportLastPresentation.diagnostic &&
+        !m_RenderDirty && !m_RenderPending &&
+        HasRawWorkspaceCurrentPresentationForSource(currentIdentity)) return;
     if (Stack::EditorRenderScheduling::ShouldStartRawNativeRefinement(
             m_RawWorkspaceFullResolutionPreviewPending &&
                 !m_RawWorkspaceFullResolutionPreviewDeferredByBudget,
@@ -595,6 +622,7 @@ bool EditorModule::HasRawWorkspaceCurrentPresentationForSource(const std::string
 
 bool EditorModule::HasRawWorkspaceFullResolutionPreviewForSource(const std::string& sourceKey) const {
     if (!HasRawWorkspaceCurrentPresentationForSource(sourceKey)) return false;
+    if (ActiveViewportPreviewState().acceptedInteractive) return false;
     if (m_RawWorkspacePreviewOutputKind == RawWorkspacePreviewOutputKind::Tiled ||
         !m_RawViewportRequest.visible.Valid()) {
         return m_ViewportOutputNativeExtentVerified && m_ViewportOutputPreviewMaxDimension == 0;

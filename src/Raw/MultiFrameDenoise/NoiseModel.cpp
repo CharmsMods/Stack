@@ -539,16 +539,18 @@ bool PropagateKnownGainVariance(
 }
 
 bool PropagateInterpolationVariance(
-    const std::vector<InterpolationVarianceTerm>& terms,
+    const InterpolationVarianceTerm* terms,
+    std::size_t termCount,
     double& variance,
     double& effectiveDnStepSquared,
     std::string* error) {
-    if (terms.empty()) {
+    if (!terms || termCount == 0u) {
         return SetError(error, "MFD interpolation variance requires at least one source term.");
     }
     variance = 0.0;
     effectiveDnStepSquared = 0.0;
-    for (const InterpolationVarianceTerm& term : terms) {
+    for (std::size_t index = 0; index < termCount; ++index) {
+        const InterpolationVarianceTerm& term = terms[index];
         if (!Finite(term.coefficient) || !Finite(term.sampleVariance) ||
             term.sampleVariance < 0.0 || !Finite(term.comparisonGain) ||
             term.comparisonGain <= 0.0 || !Finite(term.usableCodeSpanDn) ||
@@ -565,6 +567,15 @@ bool PropagateInterpolationVariance(
         return SetError(error, "MFD interpolation variance overflowed or has no quantization support.");
     }
     return true;
+}
+
+bool PropagateInterpolationVariance(
+    const std::vector<InterpolationVarianceTerm>& terms,
+    double& variance,
+    double& effectiveDnStepSquared,
+    std::string* error) {
+    return PropagateInterpolationVariance(
+        terms.data(), terms.size(), variance, effectiveDnStepSquared, error);
 }
 
 bool RegistrationUncertaintyVariance(

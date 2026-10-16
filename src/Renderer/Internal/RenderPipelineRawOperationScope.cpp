@@ -1,6 +1,7 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Utils/HashUtils.h"
 #include <stdexcept>
 
 void RenderPipeline::CaptureRawLayerLocalScope(
@@ -15,12 +16,24 @@ void RenderPipeline::CaptureRawLayerLocalScope(
     auto recipe = ReadGraphOperation(node.rawOperation);
     recipe.technical.workingSpace = node.rawWorkingSpace;
     const int width = m_Width, height = m_Height;
-    const auto native = ResolveGraphNativeExtent(context, node.nodeId, "measurementImageOut");
+    const auto native = ResolveGraphNativeExtent(context, node.nodeId, "inputImageOut");
     const int nativeWidth = native.first, nativeHeight = native.second;
     const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(context.graph.rawLayerScopeNodeId, context.graph.rawLayerScopeSocketId);
     const auto fp = context.imageFingerprintCache.find(key);
     const std::size_t fingerprint = fp == context.imageFingerprintCache.end() ? 0 : fp->second;
-    CaptureRawDevelopmentLocalRangeGraphScopeReadback(texture, recipe.localRange, width, height,
+    // Local EV applies its own exposure offset before evaluating the curve.
+    // Measure that same input, while preserving the original image below for
+    // the area reference statistics used by RenderRawOperation.
+    Stack::Renderer::ScopedGLTexture exposed;
+    if (recipe.preToneExposureEv != 0.f) {
+        exposed.Reset(RenderRawDevelopmentExposure(texture, recipe.preToneExposureEv));
+        if (!exposed) throw std::runtime_error("Local EV input measurement is unavailable.");
+    }
+    const auto curveInput = exposed ? exposed.Get() : texture;
+    auto curveInputFingerprint = fingerprint;
+    if (curveInputFingerprint != 0 && recipe.preToneExposureEv != 0.f)
+        StackHash::HashCombine(curveInputFingerprint, StackHash::HashValue(recipe.preToneExposureEv));
+    CaptureRawDevelopmentLocalRangeGraphScopeReadback(curveInput, recipe.localRange, width, height,
         node.rawWorkingSpace, nativeWidth, nativeHeight);
     m_RawDevelopmentGraphScopeReadback.graphInputFingerprint = fingerprint;
     if (!recipe.localRange.areas.empty()) {
@@ -68,9 +81,9 @@ void RenderPipeline::CaptureRawLayerLocalScope(
         m_RawDevelopmentGraphScopeReadback.zoneReferenceExposureEv = 0;
     }
     if (!m_RawDevelopmentLocalRangeOverlayRequestMode.empty() && m_RawDevelopmentLocalRangeOverlayRequestMode != "none") {
-        Stack::Renderer::ScopedGLTexture overlay(RenderRawDevelopmentLocalRangeOverlay(texture, recipe.localRange,
+        Stack::Renderer::ScopedGLTexture overlay(RenderRawDevelopmentLocalRangeOverlay(curveInput, recipe.localRange,
             node.rawWorkingSpace, recipe.technical.processingVersion, m_RawDevelopmentLocalRangeOverlayRequestMode,
-            fingerprint, nativeWidth, nativeHeight));
+            curveInputFingerprint, nativeWidth, nativeHeight));
         ClearRawDevelopmentLocalRangeOverlay();
         if (overlay) {
             m_RawDevelopmentLocalRangeOverlayTexture = overlay.Release();

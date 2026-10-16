@@ -13,11 +13,12 @@ void EditorModule::RenderRawLayerPanelContents() {
     const auto phase = m_Project->lifecycle.Phase();
     ImGui::BeginDisabled(Stack::Workspace::IsPreview() ||
         phase == ProjectLifecyclePhase::Conflict || phase == ProjectLifecyclePhase::ReadOnlyRecovery);
-    if (ImGui::SmallButton("+ Adjustment")) {
+    if (ImGui::SmallButton("New layer")) {
         auto candidate = m_Project->rawLayers.State();
         const auto id = AddRawAdjustmentLayer(candidate);
         if (ApplyRawLayerStackEdit(std::move(candidate))) SelectRawAdjustmentLayer(id);
     }
+    LabTooltip("Create an empty layer. Add its adjustments from the Graph node library.");
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_Project->rawLayers.CanUndo());
     if (ImGui::SmallButton("Undo")) UndoRawLayerEdit();
@@ -57,7 +58,8 @@ void EditorModule::RenderRawLayerPanelContents() {
     const float rowHeight = std::max(46.0f, ImGui::GetFontSize() * 2 + 12);
     const float thumbnailSize = rowHeight - 8;
     const float available = ImGui::GetContentRegionAvail().y;
-    const float listHeight = std::max(rowHeight, available - 62);
+    const float footerHeight = ImGui::GetFrameHeightWithSpacing();
+    const float listHeight = std::max(rowHeight, available - footerHeight);
     std::string deleteId;
     const auto beginRename = [&](const Row& row) {
         m_RawLayerPanel.renameId = row.id;
@@ -107,12 +109,7 @@ void EditorModule::RenderRawLayerPanelContents() {
             ImGui::SetCursorScreenPos(ImVec2(textX, start.y+4));
             if (RenderRawLayerThumbnail(row.mask->layerId, row.mask->outputId,
                     ImVec2(thumbnailSize,thumbnailSize), maskActive)) {
-                SelectRawAdjustmentLayer(selectionId);
-                if (m_SelectedRawAdjustmentLayer == selectionId) {
-                    m_EditingRawLayerMask = row.mask;
-                    m_RawLayerMaskGenerator = -1;
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) OpenRawLayerMaskGraph(row.mask->layerId);
-                }
+                OpenRawLayerMaskGraph(row.mask->layerId);
             }
             textX += thumbnailSize + 6;
         }
@@ -186,12 +183,6 @@ void EditorModule::RenderRawLayerPanelContents() {
     if (!ImGui::IsPopupOpen("Rename layer")) m_RawLayerPanel.renameId.clear();
     selected = FindRawAdjustmentLayer(m_Project->rawLayers.State(),m_SelectedRawAdjustmentLayer);
     if (selected) {
-        if (ImGui::SmallButton(selected->layerMask ? "Layer mask..." : "+ Layer mask")) ImGui::OpenPopup("layer-mask");
-        if (ImGui::BeginPopup("layer-mask")) {
-            RenderRawLayerMaskAttachment("Whole layer",true);
-            ImGui::EndPopup();
-        }
-        ImGui::SameLine();
         if (ImGui::SmallButton("Graph")) OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer);
         LabTooltip("Edit this layer's operations, masks and branches in Graph.");
         ImGui::SameLine();
@@ -207,6 +198,15 @@ void EditorModule::RenderRawLayerPanelContents() {
     } else ImGui::TextDisabled("Background owns the base RAW development.");
     if (!deleteId.empty()) {
         auto candidate = m_Project->rawLayers.State();
+        if (candidate.explicitRouting) {
+            const auto* removed = FindRawAdjustmentLayer(candidate,deleteId);
+            const auto outgoing = RawLayerEndpoint(*removed,*FindRawRole(*removed,Stack::GraphModel::NodeRole::LayerResult));
+            const auto incoming = removed->imageInput;
+            for (auto& layer : candidate.layers)
+                if (layer.imageInput && *layer.imageInput == outgoing) layer.imageInput = incoming;
+            if (candidate.background.imageInput && *candidate.background.imageInput == outgoing) candidate.background.imageInput = incoming;
+            if (candidate.imageOutput && *candidate.imageOutput == outgoing) candidate.imageOutput = incoming;
+        }
         candidate.layers.erase(std::remove_if(candidate.layers.begin(),candidate.layers.end(),
             [&](const auto& layer){return layer.id==deleteId;}),candidate.layers.end());
         if (ApplyRawLayerStackEdit(std::move(candidate))) {

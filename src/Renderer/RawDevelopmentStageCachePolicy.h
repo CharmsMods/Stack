@@ -337,7 +337,7 @@ struct StageFingerprints {
 inline StageFingerprints BuildStageFingerprints(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     int previewMaxDimension) {
-    constexpr int kTypedFingerprintContractVersion = 8;
+    constexpr int kTypedFingerprintContractVersion = 10;
     std::size_t fingerprint =
         static_cast<std::size_t>(1469598103934665603ull);
     HashTypedValue(fingerprint, kTypedFingerprintContractVersion);

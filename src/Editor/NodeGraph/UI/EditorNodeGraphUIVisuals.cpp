@@ -7,6 +7,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/UI/NodeNumericDefaults.h"
+#include "Utils/Utf8Text.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +28,6 @@ ImGuiExtras::GraphSliderRangePolicy GraphSliderRangePolicyForNodeKind(EditorNode
         case EditorNodeGraph::NodeKind::RawProjectFrame:
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -42,10 +42,10 @@ ImGuiExtras::GraphSliderRangePolicy GraphSliderRangePolicyForNodeKind(EditorNode
 
 NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::Output:
@@ -65,7 +65,7 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::DataMath:
-        case EditorNodeGraph::NodeKind::FrequencyMask:
+        
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return NodeFamily::Mask;
         case EditorNodeGraph::NodeKind::Scope:
@@ -80,18 +80,18 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::ChannelSplit:
         case EditorNodeGraph::NodeKind::ChannelCombine:
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-        case EditorNodeGraph::NodeKind::SpectrumView:
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
             return NodeFamily::Merge;
     }
     return NodeFamily::Gray;
@@ -191,16 +191,6 @@ GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor) {
     return t;
 }
 
-GraphZoomDialStyle BuildGraphZoomDialStyle(EditorModule* editor, const GraphStyleTokens& tokens) {
-    GraphZoomDialStyle style {};
-    const ImVec4 baseColor = tokens.text;
-    const float tickAlpha = tokens.light ? 0.82f : 0.90f;
-    const float glowAlpha = tokens.light ? 0.12f : 0.18f;
-    style.tick = WithAlpha(baseColor, tickAlpha);
-    style.glow = WithAlpha(baseColor, glowAlpha);
-    return style;
-}
-
 bool GraphDottedMaskLinksEnabled(EditorModule* editor) {
     const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
     return appearance ? appearance->GetGraphDottedMaskLinks() : true;
@@ -212,10 +202,16 @@ bool GraphStraightLinksEnabled(EditorModule* editor) {
 }
 
 bool IsSummaryOnlyNode(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node) {
+    if (node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node.multiFrameHdr.bracketingSource) return true;
+    if (!node.rawLayerOwnerId.empty() &&
+        (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
+         node.role == Stack::GraphModel::NodeRole::LayerResult)) return true;
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+        // These operations expose their controls on the image editing surface.
+        // An expanded canvas node still has no inline control body to measure.
+        case EditorNodeGraph::NodeKind::RawOperation:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -243,7 +239,22 @@ NodePresentationProfile BuildNodePresentationProfile(
     (void)tokens;
 
     profile.showKindLabel = false;
+    if (node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node.multiFrameHdr.bracketingSource) {
+        profile.kind=NodePresentationKind::SummaryOnly;
+        profile.inlineControls=false;
+        profile.hoverDetails=true;
+        return profile;
+    }
+    if (!node.rawLayerOwnerId.empty() &&
+        (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
+         node.role == Stack::GraphModel::NodeRole::LayerResult)) {
+        profile.kind = NodePresentationKind::SummaryOnly;
+        profile.inlineControls = false;
+        return profile;
+    }
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::MaskTexture:
+        case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::Output:
             profile.kind = NodePresentationKind::FramelessMedia;
@@ -254,11 +265,11 @@ NodePresentationProfile BuildNodePresentationProfile(
             break;
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
+        case EditorNodeGraph::NodeKind::RawOperation:
             profile.kind = NodePresentationKind::SummaryOnly;
             profile.inlineControls = false;
             profile.hoverDetails = true;
             break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -269,7 +280,6 @@ NodePresentationProfile BuildNodePresentationProfile(
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Lut:
-        case EditorNodeGraph::NodeKind::CustomMask:
             profile.kind = NodePresentationKind::SummaryOnly;
             profile.inlineControls = false;
             break;
@@ -400,6 +410,8 @@ void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetr
     metrics.sliderHeight = 20.0f;
 
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::MaskTexture:
+        case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::Output:
             metrics.width = 176.0f;
@@ -448,15 +460,6 @@ void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetr
             metrics.scopeHeight = 168.0f;
             metrics.minExpandedHeight = 226.0f;
             break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            metrics.width = 302.0f;
-            metrics.contentLaneWidth = 228.0f;
-            metrics.previewWidth = 180.0f;
-            metrics.previewHeight = 180.0f;
-            metrics.minExpandedHeight = 360.0f;
-            metrics.collapsedHeight = 48.0f;
-            break;
         case EditorNodeGraph::NodeKind::Composite:
             metrics.width = 270.0f;
             metrics.contentLaneWidth = 220.0f;
@@ -492,6 +495,8 @@ Stack::Editor::NodeGraphUILayout::NodeWidthClass ResolveNodeWidthClass(
     const EditorNodeGraphUI* ui,
     const EditorModule* editor,
     const EditorNodeGraph::Node& node) {
+    if (node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr && node.multiFrameHdr.bracketingSource)
+        return Stack::Editor::NodeGraphUILayout::NodeWidthClass::RawSource;
     const GraphStyleTokens geometryOnlyTokens {};
     const NodePresentationProfile presentation =
         BuildNodePresentationProfile(ui, editor, node, geometryOnlyTokens);
@@ -517,6 +522,12 @@ void ApplyCanonicalNodeMetrics(
     metrics.width = WidthForClass(widthClass);
     if (widthClass == NodeWidthClass::Compact || widthClass == NodeWidthClass::Standard)
         metrics.width = CompactControlNodeWidth(node).value_or(metrics.width);
+    if (node.kind == EditorNodeGraph::NodeKind::Layer && node.expanded && ui && editor) {
+        const NodeSurfaceSpec surface = ui->ResolveLayerSurfaceSpec(editor, node.layerIndex);
+        if (std::isfinite(surface.inlineWidth) && surface.inlineWidth > 0.0f)
+            metrics.width = std::clamp(surface.inlineWidth, metrics.width,
+                std::max(metrics.width, surface.maxWidth));
+    }
     if (node.kind == EditorNodeGraph::NodeKind::MaskUtility &&
         node.maskUtilityKind == EditorNodeGraph::MaskUtilityKind::Invert) metrics.minExpandedHeight = 72.0f;
     metrics.collapsedHeight = kCollapsedNodeHeight;
@@ -571,9 +582,7 @@ std::string CompactAdvancedLayerLabel(const EditorNodeGraph::Node& node) {
     if (space != std::string::npos && space > 0) {
         label = label.substr(0, space);
     }
-    if (label.size() > 8) {
-        label = label.substr(0, 8);
-    }
+    Stack::Utf8Text::TruncateToByteLimit(label, 8u);
     return label.empty() ? std::string("Advanced") : label;
 }
 
@@ -679,10 +688,6 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
             base = BlendColor(imageBase, channelBase, 0.5f);
             break;
         case EditorNodeGraph::SocketType::Channel: base = channelBase; break;
-        case EditorNodeGraph::SocketType::Spectrum:
-        case EditorNodeGraph::SocketType::SpectrumMagnitude:
-        case EditorNodeGraph::SocketType::SpectrumPhase: base = spectrumBase; break;
-        case EditorNodeGraph::SocketType::FrequencyResponse: base = responseBase; break;
         case EditorNodeGraph::SocketType::Mask:
         case EditorNodeGraph::SocketType::ScalarField: base = maskBase; break;
         case EditorNodeGraph::SocketType::Analysis: base = analysisBase; break;
@@ -829,10 +834,6 @@ ImVec4 SocketColorVec(
         case EditorNodeGraph::SocketType::ImageOrChannel:
             return tokens.socketImage;
         case EditorNodeGraph::SocketType::Channel: return tokens.socketImage;
-        case EditorNodeGraph::SocketType::Spectrum:
-        case EditorNodeGraph::SocketType::SpectrumMagnitude:
-        case EditorNodeGraph::SocketType::SpectrumPhase: return tokens.socketAnalysis;
-        case EditorNodeGraph::SocketType::FrequencyResponse: return tokens.socketValue;
         case EditorNodeGraph::SocketType::Mask:
         case EditorNodeGraph::SocketType::ScalarField: return tokens.socketMask;
         case EditorNodeGraph::SocketType::Analysis: return tokens.socketAnalysis;
@@ -1081,6 +1082,7 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
             return std::max(metrics.minExpandedHeight, measuredLayerHeight > 0.0f ? measuredLayerHeight : metrics.minExpandedHeight);
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::Image:
             return headerBlock + sectionGap + metrics.previewHeight + gap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::Output:
@@ -1134,51 +1136,8 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
         case EditorNodeGraph::NodeKind::FieldMean:
             return headerBlock + sectionGap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::Reformat:
-            return headerBlock + sectionGap + row + gap + row + gap + row + gap + row + gap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-            return headerBlock + sectionGap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::FrequencyFilter: {
-            const float notchRows =
-                node.frequencyFilterSettings.localResponse.mode ==
-                        EditorNodeGraph::FrequencyFilterMode::NotchReject
-                    ? static_cast<float>(
-                        std::max<std::size_t>(
-                            1, node.frequencyFilterSettings.localResponse.notches.size())) * 3.0f
-                    : 0.0f;
-            return headerBlock + sectionGap + row + gap + 180.0f +
-                sectionGap + (6.0f + notchRows) * row +
-                (5.0f + notchRows) * gap + bottomPadding;
-        }
-        case EditorNodeGraph::NodeKind::FrequencyResponse: {
-            const float notchRows =
-                node.frequencyResponseSettings.mode ==
-                        EditorNodeGraph::FrequencyFilterMode::NotchReject
-                    ? static_cast<float>(
-                        node.frequencyResponseSettings.notches.size()) * 3.0f + 1.0f
-                    : 0.0f;
-            return headerBlock + sectionGap + row + gap + row + gap + 180.0f +
-                sectionGap + (5.0f + notchRows) * row +
-                (5.0f + notchRows) * gap + bottomPadding;
-        }
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            return headerBlock + sectionGap + row + gap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            return headerBlock + sectionGap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            return headerBlock + sectionGap + row + gap + row + gap +
-                checkboxRow + gap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::SpectrumView:
-            return headerBlock + sectionGap + row + gap + row + gap +
-                sliderRow + gap + row + gap + sliderRow + gap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + bottomPadding;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
+            return headerBlock + sectionGap + row * (node.reformatSettings.canvasRatio == 7 ? 8.0f : 7.0f) +
+                sliderRow * 5.0f + gap * 12.0f + bottomPadding;
         case EditorNodeGraph::NodeKind::ImageToMask:
             if (node.imageToMaskKind == EditorNodeGraph::ImageToMaskKind::SampledRange) {
                 const int extraSamples = std::max(0, std::clamp(node.imageToMaskSettings.sampleCount, 1, 5) - 1);
@@ -1267,10 +1226,10 @@ std::string EllipsizeLabel(const std::string& value, float maxWidth) {
 
 const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
     switch (kind) {
+        case EditorNodeGraph::NodeKind::MaskTexture: return "Mask texture";
         case EditorNodeGraph::NodeKind::Image: return "Slice";
         case EditorNodeGraph::NodeKind::RawSource: return "RAW";
         case EditorNodeGraph::NodeKind::RawDevelopment: return "RAW Development";
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "RAW Denoise";
         case EditorNodeGraph::NodeKind::RawDecode: return "RAW Decode";
         case EditorNodeGraph::NodeKind::RawDevelop: return "Develop";
         case EditorNodeGraph::NodeKind::RawDetailAutoMask: return "RAW Detail Auto Mask";
@@ -1286,7 +1245,7 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Composite: return "Composite";
         case EditorNodeGraph::NodeKind::Scope: return "Scope";
         case EditorNodeGraph::NodeKind::MaskGenerator: return "Mask";
-        case EditorNodeGraph::NodeKind::CustomMask: return "Custom Mask";
+        case EditorNodeGraph::NodeKind::CustomMask: return "Mask texture";
         case EditorNodeGraph::NodeKind::MaskCombine: return "Mask Combine";
         case EditorNodeGraph::NodeKind::Mix: return "Image Blend";
         case EditorNodeGraph::NodeKind::Preview: return "Preview";
@@ -1299,19 +1258,6 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Reformat: return "Geometry";
         case EditorNodeGraph::NodeKind::TechnicalImage: return "Technical Image";
         case EditorNodeGraph::NodeKind::Compound: return "Compound";
-        case EditorNodeGraph::NodeKind::FrequencyFilter: return "Frequency Filter";
-        case EditorNodeGraph::NodeKind::FrequencyResponse: return "Frequency Response";
-        case EditorNodeGraph::NodeKind::FrequencyFft: return "Fourier Transform";
-        case EditorNodeGraph::NodeKind::FrequencyIfft: return "Inverse Fourier Transform";
-        case EditorNodeGraph::NodeKind::SpectrumView: return "Spectrum View";
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse: return "Apply Response";
-        case EditorNodeGraph::NodeKind::CombineSpectra: return "Combine Spectra";
-        case EditorNodeGraph::NodeKind::SpectrumSeparate: return "Separate Spectrum";
-        case EditorNodeGraph::NodeKind::SpectrumRecombine: return "Recombine Spectrum";
-        case EditorNodeGraph::NodeKind::FrequencyMask: return "Frequency Mask";
-        case EditorNodeGraph::NodeKind::SpectrumMath: return "Spectrum Math";
-        case EditorNodeGraph::NodeKind::MagnitudePhase: return "Magnitude / Phase";
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer: return "Spectrum Analyzer";
         case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
         case EditorNodeGraph::NodeKind::ChannelCombine: return "Image Combine";
         case EditorNodeGraph::NodeKind::ConstantChannel: return "Constant Channel";
@@ -1456,6 +1402,9 @@ std::string PrimaryNodeTitle(const EditorNodeGraph::Node& node) {
 }
 
 std::string CompactNodeTitle(const EditorNodeGraph::Node& node) {
+    if (!node.rawLayerOwnerId.empty() &&
+        (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
+         node.role == Stack::GraphModel::NodeRole::LayerResult)) return node.title;
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
             return CompactAdvancedLayerLabel(node);
@@ -1463,8 +1412,6 @@ std::string CompactNodeTitle(const EditorNodeGraph::Node& node) {
             return "RAW";
         case EditorNodeGraph::NodeKind::RawDevelopment:
             return "RAW Dev";
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            return "RAW Denoise";
         case EditorNodeGraph::NodeKind::RawDecode:
             return "RAW Decode";
         case EditorNodeGraph::NodeKind::RawDevelop:
@@ -1486,7 +1433,7 @@ std::string CompactNodeTitle(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Lut:
             return "LUT";
         case EditorNodeGraph::NodeKind::CustomMask:
-            return "Mask Edit";
+            return "Mask texture";
         case EditorNodeGraph::NodeKind::Output:
             return node.outputEnabled ? "Output" : "Deactivated";
         case EditorNodeGraph::NodeKind::ChannelSplit:

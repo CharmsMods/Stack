@@ -2,6 +2,8 @@
 
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/Definitions/OperationInventory.h"
+#include "Graph/LayerOperationParameters.h"
 
 namespace EditorNodeGraphDefinitions {
 namespace {
@@ -130,6 +132,20 @@ Stack::NodeMath::FirstClassValue DefaultValue(Stack::NodeMath::LogicalValueType 
     value.storage = type == LogicalValueType::Curve1D
         ? ValueStorageClass::StructuredResource
         : ValueStorageClass::Uniform;
+    switch (type) {
+        case LogicalValueType::Channel: case LogicalValueType::ScalarField:
+        case LogicalValueType::Vector2Field: case LogicalValueType::Vector3Field:
+        case LogicalValueType::Vector4Field: case LogicalValueType::ColorImage:
+        case LogicalValueType::Mask: case LogicalValueType::DataImage:
+            value.storage = ValueStorageClass::PerPixelField; break;
+        case LogicalValueType::Lut: case LogicalValueType::Histogram:
+        case LogicalValueType::Statistics: case LogicalValueType::Metadata:
+            value.storage = ValueStorageClass::StructuredResource; break;
+        case LogicalValueType::SpecializedHandle: case LogicalValueType::Raw:
+        case LogicalValueType::Analysis:
+            value.storage = ValueStorageClass::SpecializedHandle; break;
+        default: break;
+    }
     value.availability = ValueAvailability::Known;
     switch (type) {
         case LogicalValueType::Boolean: value.payload = false; break;
@@ -164,202 +180,15 @@ const char* TechnicalImageTitle(Stack::NodeMath::TechnicalImageOperation operati
     return "Technical Image";
 }
 
-const char* FrequencyMaskTitle(EditorNodeGraph::FrequencyMaskShape shape) {
-    switch (shape) {
-        case EditorNodeGraph::FrequencyMaskShape::LowPass: return "Low Pass";
-        case EditorNodeGraph::FrequencyMaskShape::HighPass: return "High Pass";
-        case EditorNodeGraph::FrequencyMaskShape::BandPass: return "Band Pass";
-        case EditorNodeGraph::FrequencyMaskShape::BandStop: return "Band Stop";
-        case EditorNodeGraph::FrequencyMaskShape::Notch: return "Notch";
-        case EditorNodeGraph::FrequencyMaskShape::Gaussian: return "Gaussian";
-        case EditorNodeGraph::FrequencyMaskShape::Butterworth: return "Butterworth";
-    }
-    return "Frequency Mask";
-}
 
-const char* SpectrumMathTitle(EditorNodeGraph::SpectrumMathMode mode) {
-    switch (mode) {
-        case EditorNodeGraph::SpectrumMathMode::Multiply: return "Filter Spectrum";
-        case EditorNodeGraph::SpectrumMathMode::Add: return "Add Spectra";
-        case EditorNodeGraph::SpectrumMathMode::Subtract: return "Subtract Spectra";
-        case EditorNodeGraph::SpectrumMathMode::Difference: return "Spectrum Difference";
-    }
-    return "Spectrum Math";
-}
 
-const char* MagnitudePhaseTitle(EditorNodeGraph::MagnitudePhaseMode mode) {
-    switch (mode) {
-        case EditorNodeGraph::MagnitudePhaseMode::Magnitude: return "Magnitude";
-        case EditorNodeGraph::MagnitudePhaseMode::Phase: return "Phase";
-        case EditorNodeGraph::MagnitudePhaseMode::Recombine: return "Recombine Magnitude/Phase";
-    }
-    return "Magnitude / Phase";
-}
 
-std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
-    switch (kind) {
-        case EditorNodeGraph::NodeKind::Output: return "output";
-        case EditorNodeGraph::NodeKind::Preview: return "preview";
-        case EditorNodeGraph::NodeKind::Scope:
-            switch (static_cast<EditorNodeGraph::ScopeKind>(value)) {
-                case EditorNodeGraph::ScopeKind::Histogram: return "scope:histogram";
-                case EditorNodeGraph::ScopeKind::Vectorscope: return "scope:vectorscope";
-                case EditorNodeGraph::ScopeKind::RGBParade: return "scope:rgbparade";
-            }
-            return "scope";
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "raw-neural-denoise";
-        case EditorNodeGraph::NodeKind::RawDevelopment: return "raw-development";
-        case EditorNodeGraph::NodeKind::RawDecode: return "raw-decode";
-        case EditorNodeGraph::NodeKind::RawDevelop: return "develop";
-        case EditorNodeGraph::NodeKind::RawDetailAutoMask: return "raw-detail-automask";
-        case EditorNodeGraph::NodeKind::RawDetailFusion: return "raw-detail-fusion";
-        case EditorNodeGraph::NodeKind::HdrMerge: return "hdr-merge";
-        case EditorNodeGraph::NodeKind::Mfsr: return "mfsr";
-        case EditorNodeGraph::NodeKind::RawProjectFrame: return "raw-project-frame";
-        case EditorNodeGraph::NodeKind::MultiFrameDenoise: return "multi-frame-denoise";
-        case EditorNodeGraph::NodeKind::MultiFrameHdr: return "multi-frame-hdr";
-        case EditorNodeGraph::NodeKind::RawProjectSourceSet: return "raw-project-source-set";
-        case EditorNodeGraph::NodeKind::Lut: return "lut";
-        case EditorNodeGraph::NodeKind::CustomMask: return "custom-mask";
-        case EditorNodeGraph::NodeKind::Mix: return "blend-images";
-        case EditorNodeGraph::NodeKind::ChannelSplit: return "channel-split";
-        case EditorNodeGraph::NodeKind::ChannelCombine: return "channel-combine";
-        case EditorNodeGraph::NodeKind::ConstantChannel: return "constant-channel";
-        case EditorNodeGraph::NodeKind::Composite: return "composite";
-        case EditorNodeGraph::NodeKind::Layer: {
-            const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(static_cast<LayerType>(value));
-            return descriptor && descriptor->typeId ? std::string("layer:") + descriptor->typeId : "layer";
-        }
-        case EditorNodeGraph::NodeKind::MaskGenerator:
-            switch (static_cast<EditorNodeGraph::MaskGeneratorKind>(value)) {
-                case EditorNodeGraph::MaskGeneratorKind::Solid: return "mask:solid";
-                case EditorNodeGraph::MaskGeneratorKind::LinearGradient: return "mask:linear-gradient";
-                case EditorNodeGraph::MaskGeneratorKind::RadialGradient: return "mask:radial-gradient";
-                case EditorNodeGraph::MaskGeneratorKind::Noise: return "mask:noise";
-                case EditorNodeGraph::MaskGeneratorKind::Square: return "mask:square";
-                case EditorNodeGraph::MaskGeneratorKind::RawGradient: return "mask:photo-gradient";
-                case EditorNodeGraph::MaskGeneratorKind::PaintedArea: return "mask:painted-area";
-            }
-            return "mask";
-        case EditorNodeGraph::NodeKind::MaskCombine:
-            switch (static_cast<EditorNodeGraph::MaskCombineMode>(value)) {
-                case EditorNodeGraph::MaskCombineMode::Add: return "mask-combine:add";
-                case EditorNodeGraph::MaskCombineMode::Subtract: return "mask-combine:subtract";
-                case EditorNodeGraph::MaskCombineMode::Intersect: return "mask-combine:intersect";
-                case EditorNodeGraph::MaskCombineMode::Exclude: return "mask-combine:exclude";
-            }
-            return "mask-combine";
-        case EditorNodeGraph::NodeKind::MaskUtility:
-            switch (static_cast<EditorNodeGraph::MaskUtilityKind>(value)) {
-                case EditorNodeGraph::MaskUtilityKind::Invert: return "mask-utility:invert";
-                case EditorNodeGraph::MaskUtilityKind::Levels: return "mask-utility:levels";
-                case EditorNodeGraph::MaskUtilityKind::Threshold: return "mask-utility:threshold";
-            }
-            return "mask-utility";
-        case EditorNodeGraph::NodeKind::ImageToMask:
-            switch (static_cast<EditorNodeGraph::ImageToMaskKind>(value)) {
-                case EditorNodeGraph::ImageToMaskKind::Luminance: return "image-to-mask:luminance";
-                case EditorNodeGraph::ImageToMaskKind::SampledRange: return "image-to-mask:sampled-range";
-            }
-            return "image-to-mask";
-        case EditorNodeGraph::NodeKind::ImageGenerator:
-            switch (static_cast<EditorNodeGraph::ImageGeneratorKind>(value)) {
-                case EditorNodeGraph::ImageGeneratorKind::SolidColor: return "image-generator:solid-color";
-                case EditorNodeGraph::ImageGeneratorKind::ColorGradient: return "image-generator:color-gradient";
-                case EditorNodeGraph::ImageGeneratorKind::Square: return "image-generator:square";
-                case EditorNodeGraph::ImageGeneratorKind::Circle: return "image-generator:circle";
-                case EditorNodeGraph::ImageGeneratorKind::Text: return "image-generator:text";
-            }
-            return "image-generator";
-        case EditorNodeGraph::NodeKind::DataMath:
-            switch (static_cast<EditorNodeGraph::DataMathMode>(value)) {
-                case EditorNodeGraph::DataMathMode::Clamp: return "data-math:clamp";
-                case EditorNodeGraph::DataMathMode::Add: return "data-math:add";
-                case EditorNodeGraph::DataMathMode::Subtract: return "data-math:subtract";
-                case EditorNodeGraph::DataMathMode::Multiply: return "data-math:multiply";
-                case EditorNodeGraph::DataMathMode::Divide: return "data-math:divide";
-                case EditorNodeGraph::DataMathMode::Average: return "data-math:average";
-                case EditorNodeGraph::DataMathMode::Min: return "data-math:min";
-                case EditorNodeGraph::DataMathMode::Max: return "data-math:max";
-                case EditorNodeGraph::DataMathMode::Difference: return "data-math:difference";
-                case EditorNodeGraph::DataMathMode::Remap: return "data-math:remap";
-                case EditorNodeGraph::DataMathMode::ImageAverage: return "data-math:image-average";
-            }
-            return "data-math";
-        case EditorNodeGraph::NodeKind::Value:
-            return std::string("value:") +
-                Stack::NodeMath::SerializeFirstClassValue(DefaultValue(
-                    static_cast<Stack::NodeMath::LogicalValueType>(value))).value("logicalType", "invalid");
-        case EditorNodeGraph::NodeKind::FieldMean: return "analysis:field-mean";
-        case EditorNodeGraph::NodeKind::Reformat: return "geometry:reformat";
-        case EditorNodeGraph::NodeKind::RawOperation:
-            return std::string("raw-operation:") + Stack::RawRecipe::GraphOperationId(static_cast<Stack::RawRecipe::GraphOperationKind>(value));
-        case EditorNodeGraph::NodeKind::TechnicalImage:
-            return std::string("technical-image:") +
-                Stack::NodeMath::TechnicalOperationIdentity(
-                    static_cast<Stack::NodeMath::TechnicalImageOperation>(value));
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            return "frequency:filter:" + std::to_string(value);
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            return "frequency:response";
-        case EditorNodeGraph::NodeKind::FrequencyFft: return "frequency:fft";
-        case EditorNodeGraph::NodeKind::FrequencyIfft: return "frequency:ifft";
-        case EditorNodeGraph::NodeKind::SpectrumView: return "frequency:spectrum-view";
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse: return "frequency:apply-response";
-        case EditorNodeGraph::NodeKind::CombineSpectra: return "frequency:combine-spectra";
-        case EditorNodeGraph::NodeKind::SpectrumSeparate: return "frequency:separate-spectrum";
-        case EditorNodeGraph::NodeKind::SpectrumRecombine: return "frequency:recombine-spectrum";
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            switch (static_cast<EditorNodeGraph::FrequencyMaskShape>(value)) {
-                case EditorNodeGraph::FrequencyMaskShape::LowPass: return "frequency-mask:low-pass";
-                case EditorNodeGraph::FrequencyMaskShape::HighPass: return "frequency-mask:high-pass";
-                case EditorNodeGraph::FrequencyMaskShape::BandPass: return "frequency-mask:band-pass";
-                case EditorNodeGraph::FrequencyMaskShape::BandStop: return "frequency-mask:band-stop";
-                case EditorNodeGraph::FrequencyMaskShape::Notch: return "frequency-mask:notch";
-                case EditorNodeGraph::FrequencyMaskShape::Gaussian: return "frequency-mask:gaussian";
-                case EditorNodeGraph::FrequencyMaskShape::Butterworth: return "frequency-mask:butterworth";
-            }
-            return "frequency-mask";
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            switch (static_cast<EditorNodeGraph::SpectrumMathMode>(value)) {
-                case EditorNodeGraph::SpectrumMathMode::Multiply: return "spectrum-math:multiply";
-                case EditorNodeGraph::SpectrumMathMode::Add: return "spectrum-math:add";
-                case EditorNodeGraph::SpectrumMathMode::Subtract: return "spectrum-math:subtract";
-                case EditorNodeGraph::SpectrumMathMode::Difference: return "spectrum-math:difference";
-            }
-            return "spectrum-math";
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            switch (static_cast<EditorNodeGraph::MagnitudePhaseMode>(value)) {
-                case EditorNodeGraph::MagnitudePhaseMode::Magnitude: return "magnitude-phase:magnitude";
-                case EditorNodeGraph::MagnitudePhaseMode::Phase: return "magnitude-phase:phase";
-                case EditorNodeGraph::MagnitudePhaseMode::Recombine: return "magnitude-phase:recombine";
-            }
-            return "magnitude-phase";
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer: return "spectrum-analyzer";
-        case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::RawSource:
-            break;
-    }
-    return "catalog-entry";
-}
 
-NodeCatalogEntry MakeCatalogEntry(
-    EditorNodeGraph::NodeKind kind,
-    int value,
-    std::string label,
-    std::string category,
-    NodeCatalogPreviewStrategy strategy = NodeCatalogPreviewStrategy::Auto,
-    std::uint32_t previewRecipeVersion = 1) {
-    NodeCatalogEntry entry;
-    entry.kind = kind;
-    entry.value = value;
-    entry.label = std::move(label);
-    entry.category = std::move(category);
-    entry.previewKey = BuildPreviewKey(kind, value);
-    entry.previewRecipeVersion = previewRecipeVersion;
-    entry.previewStrategy = strategy;
-    return entry;
-}
+
+
+
+
+
 
 } // namespace
 
@@ -376,9 +205,6 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             break;
         case EditorNodeGraph::NodeKind::RawDevelopment:
             node.title = "RAW Development";
-            break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            node.title = "RAW/CFA Neural Denoise";
             break;
         case EditorNodeGraph::NodeKind::RawDecode:
             node.title = "RAW Decode";
@@ -409,7 +235,8 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.expanded = true;
             break;
         case EditorNodeGraph::NodeKind::MultiFrameHdr:
-            node.title = "Multi-Frame HDR";
+            node.title = node.multiFrameHdr.bracketingSource
+                ? "Bracketing" : "Multi-Frame HDR";
             node.expanded = true;
             break;
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
@@ -426,6 +253,8 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Layer: {
             const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
             node.typeId = descriptor ? descriptor->typeId : "";
+            if (node.layerParameters.empty())
+                node.layerParameters=Stack::GraphModel::DefaultLayerParameters(node.layerType);
             node.title = descriptor ? descriptor->displayName : "Layer";
             break;
         }
@@ -442,6 +271,11 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Preview:
             node.title = "Preview";
             node.expanded = true;
+            break;
+        case EditorNodeGraph::NodeKind::MaskTexture:
+            node.title = node.maskKind == EditorNodeGraph::MaskGeneratorKind::LinearGradient ? "Linear mask texture" :
+                node.maskKind == EditorNodeGraph::MaskGeneratorKind::RadialGradient ? "Radial mask texture" : "Square mask texture";
+            node.rawCoverage = {{"canvas","project"}};
             break;
         case EditorNodeGraph::NodeKind::MaskGenerator:
             node.title = MaskTitle(node.maskKind);
@@ -484,7 +318,7 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.title = "Field Mean";
             break;
         case EditorNodeGraph::NodeKind::Reformat:
-            node.title = "Reformat";
+            node.title = "Framing";
             node.expanded = true;
             break;
         case EditorNodeGraph::NodeKind::TechnicalImage:
@@ -493,47 +327,7 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Compound:
             if (node.title.empty()) node.title = "Compound";
             break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            node.title = "Frequency Filter";
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            node.title = "Frequency Response";
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-            node.title = "Fourier Transform";
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-            node.title = "Inverse Fourier Transform";
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumView:
-            node.title = "Spectrum View";
-            break;
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-            node.title = "Apply Frequency Response";
-            break;
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            node.title = "Combine Spectra";
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-            node.title = "Separate Spectrum";
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            node.title = "Recombine Spectrum";
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            node.title = FrequencyMaskTitle(node.frequencyMaskShape);
-            node.frequencyMaskSettings.shape = node.frequencyMaskShape;
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            node.title = SpectrumMathTitle(node.spectrumMathMode);
-            break;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            node.title = MagnitudePhaseTitle(node.magnitudePhaseMode);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            node.title = "Spectrum Analyzer";
-            break;
-    }
+        }
     if (node.kind != EditorNodeGraph::NodeKind::Compound) {
         ApplyLiveDefinitionIdentity(node);
     }
@@ -562,10 +356,6 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             break;
         case EditorNodeGraph::NodeKind::RawDevelopment:
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
-            add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
             break;
         case EditorNodeGraph::NodeKind::RawDecode:
             add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
@@ -626,21 +416,24 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Developed result", false, true);
             break;
         case EditorNodeGraph::NodeKind::MultiFrameHdr:
-            for (const EditorNodeGraph::MfdFrameBinding& binding :
-                 node.multiFrameHdr.frameBindings) {
-                const std::string socketId = binding.socketId.empty()
-                    ? EditorNodeGraph::MfdFrameInputSocketId(binding.frameId)
-                    : binding.socketId;
-                std::string label = binding.label;
-                if (binding.reference) label = "Geometric reference - " + label;
-                if (binding.frameId == node.multiFrameHdr.radiometricAnchorFrameId)
-                    label = "Radiometric anchor - " + label;
-                add(socketId.c_str(), EditorNodeGraph::SocketDirection::Input,
-                    EditorNodeGraph::SocketType::Raw,
-                    label.empty() ? "RAW Frame" : label.c_str(), false, true);
+            if (!node.multiFrameHdr.bracketingSource) {
+                for (const EditorNodeGraph::MfdFrameBinding& binding :
+                     node.multiFrameHdr.frameBindings) {
+                    const std::string socketId = binding.socketId.empty()
+                        ? EditorNodeGraph::MfdFrameInputSocketId(binding.frameId)
+                        : binding.socketId;
+                    std::string label = binding.label;
+                    if (binding.reference) label = "Geometric reference - " + label;
+                    if (binding.frameId == node.multiFrameHdr.radiometricAnchorFrameId)
+                        label = "Radiometric anchor - " + label;
+                    add(socketId.c_str(), EditorNodeGraph::SocketDirection::Input,
+                        EditorNodeGraph::SocketType::Raw,
+                        label.empty() ? "RAW Frame" : label.c_str(), false, true);
+                }
             }
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output,
-                EditorNodeGraph::SocketType::Image, "Scene-linear HDR", false, true);
+                EditorNodeGraph::SocketType::Image,
+                node.multiFrameHdr.bracketingSource ? "Image" : "Scene-linear HDR", false, true);
             break;
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Result unavailable", false, true);
@@ -651,12 +444,12 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::RawOperation:
-            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input,
+                (node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve || node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::Exposure) ? EditorNodeGraph::SocketType::ImageOrChannel : EditorNodeGraph::SocketType::Image,
+                "Image", false, true);
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", true, true);
             add("inputImageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Operation input", false, true);
             if (node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LocalEv) {
-                add("referenceIn", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Measurement reference", true, true);
-                add("measurementImageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Measurement image", false, true);
                 for (const auto& gradient : node.rawOperation.parameters.value("evGradients", nlohmann::json::array()))
                     add(("gradient:" + gradient.at("mask").value("id", std::string{})).c_str(), EditorNodeGraph::SocketDirection::Input,
                         EditorNodeGraph::SocketType::Mask, "Gradient coverage", true, true);
@@ -681,6 +474,9 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             break;
         case EditorNodeGraph::NodeKind::Preview:
             add(EditorNodeGraph::kPreviewInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Image / Mask", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::MaskTexture:
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Texture", false, true);
             break;
         case EditorNodeGraph::NodeKind::MaskGenerator:
             add(EditorNodeGraph::kMatchExtentInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Reference image", true, true);
@@ -743,69 +539,6 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             }
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            add(EditorNodeGraph::kChannelInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Channel, "Channel", false, true);
-            add(EditorNodeGraph::kFrequencyResponseInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::FrequencyResponse, "Response", true, true);
-            add(EditorNodeGraph::kChannelOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Channel, "Filtered", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            add(EditorNodeGraph::kFrequencyResponseOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::FrequencyResponse, "Response", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-            add(EditorNodeGraph::kChannelInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Channel, "Channel", false, true);
-            add(EditorNodeGraph::kSpectrumOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-            add(EditorNodeGraph::kSpectrumInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            add(EditorNodeGraph::kChannelOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Channel, "Channel", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumView:
-            add(EditorNodeGraph::kSpectrumInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "View", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-            add(EditorNodeGraph::kSpectrumInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            add(EditorNodeGraph::kFrequencyResponseInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::FrequencyResponse, "Response", false, true);
-            add(EditorNodeGraph::kSpectrumOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            add(EditorNodeGraph::kSpectrumInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum A", false, true);
-            add(EditorNodeGraph::kSpectrumInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum B", false, true);
-            add(EditorNodeGraph::kSpectrumOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-            add(EditorNodeGraph::kSpectrumInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            add(EditorNodeGraph::kSpectrumMagnitudeOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::SpectrumMagnitude, "Magnitude", false, true);
-            add(EditorNodeGraph::kSpectrumPhaseOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::SpectrumPhase, "Phase", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            add(EditorNodeGraph::kSpectrumMagnitudeInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::SpectrumMagnitude, "Magnitude", false, true);
-            add(EditorNodeGraph::kSpectrumPhaseInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::SpectrumPhase, "Phase", false, true);
-            add(EditorNodeGraph::kSpectrumOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Filter", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            add(EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Spectrum A", false, true);
-            add(EditorNodeGraph::kMixInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Spectrum B", true, true);
-            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Filter", true, true);
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Spectrum", true, true);
-            add("magnitude", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Magnitude", true, false);
-            add("phase", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Phase", true, false);
-            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Component", false, true);
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Spectrum", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            add(EditorNodeGraph::kSpectrumInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true);
-            add(EditorNodeGraph::kRadialPowerOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Analysis, "Radial Power", false, true);
-            add(EditorNodeGraph::kBandPowerOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Scalar, "Band Power", false, true);
-            add(EditorNodeGraph::kPeakFrequencyOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Scalar, "Peak Frequency", false, true);
-            add(EditorNodeGraph::kPeakDirectionOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Scalar, "Peak Direction", false, true);
-            break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
             add("r", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Channel, "R", false, true);
@@ -838,26 +571,13 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::ChannelSplit:
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
+        
+        
+        
         case EditorNodeGraph::NodeKind::RawOperation:
         case EditorNodeGraph::NodeKind::TechnicalImage:
         case EditorNodeGraph::NodeKind::Reformat:
-            return node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
-                   node.kind == EditorNodeGraph::NodeKind::FrequencyFft
-                ? EditorNodeGraph::kChannelInputSocketId
-                : EditorNodeGraph::kImageInputSocketId;
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-        case EditorNodeGraph::NodeKind::SpectrumView:
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            return EditorNodeGraph::kSpectrumInputSocketId;
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            return EditorNodeGraph::kSpectrumInputASocketId;
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            return EditorNodeGraph::kSpectrumMagnitudeInputSocketId;
+            return EditorNodeGraph::kImageInputSocketId;
         case EditorNodeGraph::NodeKind::Value:
             break;
         case EditorNodeGraph::NodeKind::FieldMean:
@@ -874,7 +594,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
                         node.multiFrameDenoise.frameBindings.front().frameId)
                     : node.multiFrameDenoise.frameBindings.front().socketId);
         case EditorNodeGraph::NodeKind::MultiFrameHdr:
-            return node.multiFrameHdr.frameBindings.empty()
+            return node.multiFrameHdr.bracketingSource || node.multiFrameHdr.frameBindings.empty()
                 ? std::string()
                 : (node.multiFrameHdr.frameBindings.front().socketId.empty()
                     ? EditorNodeGraph::MfdFrameInputSocketId(
@@ -882,7 +602,6 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
                     : node.multiFrameHdr.frameBindings.front().socketId);
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             return EditorNodeGraph::kRawInputSocketId;
         case EditorNodeGraph::NodeKind::ChannelCombine:
             return "r";
@@ -892,7 +611,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             break;
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::DataMath:
-        case EditorNodeGraph::NodeKind::SpectrumMath:
+        
             return EditorNodeGraph::kMixInputASocketId;
         case EditorNodeGraph::NodeKind::Scope:
             return EditorNodeGraph::kScopeInputSocketId;
@@ -904,14 +623,15 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             return EditorNodeGraph::kMaskCombineInputASocketId;
         case EditorNodeGraph::NodeKind::ImageToMask:
             return EditorNodeGraph::kImageInputSocketId;
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::RawDevelopment:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-        case EditorNodeGraph::NodeKind::FrequencyMask:
+        
+        
         case EditorNodeGraph::NodeKind::RawProjectFrame:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
             break;
@@ -937,263 +657,49 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::ChannelCombine:
         case EditorNodeGraph::NodeKind::DataMath:
-        case EditorNodeGraph::NodeKind::SpectrumView:
-        case EditorNodeGraph::NodeKind::SpectrumMath:
+        
+        
         case EditorNodeGraph::NodeKind::RawOperation:
         case EditorNodeGraph::NodeKind::TechnicalImage:
         case EditorNodeGraph::NodeKind::Reformat:
             return EditorNodeGraph::kImageOutputSocketId;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
+        
+        
         case EditorNodeGraph::NodeKind::ConstantChannel:
             return EditorNodeGraph::kChannelOutputSocketId;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            return EditorNodeGraph::kSpectrumOutputSocketId;
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            return EditorNodeGraph::kFrequencyResponseOutputSocketId;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-            return EditorNodeGraph::kSpectrumMagnitudeOutputSocketId;
         case EditorNodeGraph::NodeKind::Value:
             return EditorNodeGraph::kValueOutputSocketId;
         case EditorNodeGraph::NodeKind::FieldMean:
             return EditorNodeGraph::kValueOutputSocketId;
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawProjectFrame:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             return EditorNodeGraph::kRawOutputSocketId;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             return "r";
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
+        
+        
             return EditorNodeGraph::kMaskOutputSocketId;
         case EditorNodeGraph::NodeKind::Composite:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Scope:
         case EditorNodeGraph::NodeKind::Preview:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+        
             break;
     }
     return {};
 }
 
-std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
-    std::vector<NodeCatalogEntry> entries;
-    for (int i = 0; i < static_cast<int>(Stack::RawRecipe::GraphOperationKind::Count); ++i)
-        entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::RawOperation, i,
-            Stack::RawRecipe::GraphOperationLabel(static_cast<Stack::RawRecipe::GraphOperationKind>(i)), "RAW / Photo"));
 
-    entries.push_back(MakeCatalogEntry(
-        EditorNodeGraph::NodeKind::Output,
-        0,
-        "Output",
-        "Input / Output",
-        NodeCatalogPreviewStrategy::FallbackOnly));
-    for (const LayerDescriptor& descriptor : LayerRegistry::GetAllDescriptors()) {
-        if (!LayerRegistry::ShouldShowInNodeBrowser(descriptor)) {
-            continue;
-        }
-        std::string label = descriptor.displayName ? descriptor.displayName : "Layer";
-        if (descriptor.lifecycleStatus == LayerLifecycleStatus::Experimental) {
-            label += " (Experimental)";
-        } else if (descriptor.lifecycleStatus == LayerLifecycleStatus::NeedsFix) {
-            label += " (Needs Fix)";
-        }
-        entries.push_back(MakeCatalogEntry(
-            EditorNodeGraph::NodeKind::Layer,
-            static_cast<int>(descriptor.type),
-            std::move(label),
-            descriptor.categoryName ? descriptor.categoryName : "Layers"));
-    }
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::Histogram), "Histogram", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::Vectorscope), "Vectorscope", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade), "RGB Parade", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(
-        EditorNodeGraph::NodeKind::RawDevelopment,
-        0,
-        "RAW Development",
-        "Input / Output",
-        NodeCatalogPreviewStrategy::NoPreview,
-        1));
-    entries.push_back(MakeCatalogEntry(
-        EditorNodeGraph::NodeKind::RawDecode,
-        0,
-        "RAW Decode",
-        "Input / Output",
-        NodeCatalogPreviewStrategy::NoPreview,
-        2));
-    entries.push_back(MakeCatalogEntry(
-        EditorNodeGraph::NodeKind::RawDevelop,
-        0,
-        "Develop (Advanced Auto)",
-        "Advanced RAW",
-        NodeCatalogPreviewStrategy::NoPreview,
-        2));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::HdrMerge, 0, "HDR Merge", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Mfsr, 0, "MFSR", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::CustomMask, 0, "Custom Mask", "Masks", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Solid), "Solid Mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RadialGradient), "Radial Gradient Mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Noise), "Noise Mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Square), "Square Mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RawGradient), "Photo gradient mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::PaintedArea), "Painted area mask", "Masks"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Add), "Add Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Subtract), "Subtract Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Intersect), "Intersect Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Exclude), "Difference Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Invert), "Invert Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Levels), "Remap Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Threshold), "Threshold Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance), "Luminance Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::SampledRange), "Sampled Range Mask", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Clamp), "Clamp", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Add), "Add", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Subtract), "Subtract", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Multiply), "Multiply", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Divide), "Divide", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Average), "Average", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Min), "Minimum", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Max), "Maximum", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Difference), "Difference", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Remap), "Remap", "Mask / Math"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::ImageAverage), "Average Images", "Image Operations"));
-    using LogicalValue = Stack::NodeMath::LogicalValueType;
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Boolean), "Boolean Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Integer), "Integer Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Scalar), "Scalar Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Vector2), "Vector 2 Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Vector3), "Vector 3 Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Vector4), "Vector 4 Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Matrix3), "Matrix 3x3 Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Matrix4), "Matrix 4x4 Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Coordinate2), "Coordinate Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Curve1D), "Curve Value", "Values", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FieldMean, 0, "Field Mean", "Analysis / Measure", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Reformat, 0, "Reformat", "Geometry / Transform", NodeCatalogPreviewStrategy::FallbackOnly));
-    using TechnicalOperation = Stack::NodeMath::TechnicalImageOperation;
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::AssignSrgb), "Assign sRGB", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::AssignLinearSrgb), "Assign Linear sRGB", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::AssignLinearDisplayP3), "Assign Linear Display-P3", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::SrgbDecode), "sRGB Decode", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::SrgbEncode), "sRGB Encode", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::LinearSrgbToDisplayP3), "Linear sRGB to Display-P3", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::LinearDisplayP3ToSrgb), "Linear Display-P3 to sRGB", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::Exposure), "Exposure (EV)", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::Premultiply), "Premultiply", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::TechnicalImage, static_cast<int>(TechnicalOperation::Unpremultiply), "Unpremultiply", "Image Technical"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::AllPass), "Frequency Filter", "Frequency"));
-    entries.back().searchAliases = "FFT IFFT Fourier";
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::LowPass), "Low Pass", "Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::HighPass), "High Pass", "Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::BandPass), "Isolate Band", "Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::BandStop), "Suppress Band", "Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFilter, static_cast<int>(EditorNodeGraph::FrequencyFilterMode::NotchReject), "Remove Periodic Pattern", "Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyResponse, 0, "Frequency Response", "Advanced Frequency"));
-    entries.back().searchAliases = "Gaussian Butterworth response heatmap";
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyFft, 0, "Fourier Transform", "Advanced Frequency"));
-    entries.back().searchAliases = "FFT";
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::FrequencyIfft, 0, "Inverse Fourier Transform", "Advanced Frequency"));
-    entries.back().searchAliases = "IFFT inverse FFT";
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::SpectrumView, 0, "Spectrum View", "Advanced Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ApplyFrequencyResponse, 0, "Apply Frequency Response", "Advanced Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::CombineSpectra, 0, "Combine Spectra", "Advanced Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::SpectrumSeparate, 0, "Separate Spectrum", "Advanced Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::SpectrumRecombine, 0, "Recombine Spectrum", "Advanced Frequency"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::SpectrumAnalyzer, 0, "Spectrum Analyzer", "Advanced Frequency", NodeCatalogPreviewStrategy::FallbackOnly));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::SolidColor), "Solid Color Image", "Texture / Generate"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::ColorGradient), "Color Gradient Image", "Texture / Generate"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Square), "Square", "Texture / Generate"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Circle), "Circle", "Texture / Generate"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text), "Text", "Texture / Generate"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Mix, 0, "Blend Images", "Image Operations"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Lut, 0, "LUT", "Image Operations"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ChannelSplit, 0, "Channel Split", "Channels"));
-    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ChannelCombine, 0, "Image Combine", "Channels"));
-    entries.back().searchAliases = "Channel Combine RGBA";
-    entries.push_back(MakeCatalogEntry(
-        EditorNodeGraph::NodeKind::ConstantChannel,
-        0,
-        "Constant Channel",
-        "Channels",
-        NodeCatalogPreviewStrategy::FallbackOnly));
-    return entries;
-}
 
 EditorNodeGraph::Node BuildPrototypeNode(const NodeCatalogEntry& entry) {
-    EditorNodeGraph::Node node;
-    node.kind = entry.kind;
-    switch (entry.kind) {
-        case EditorNodeGraph::NodeKind::Layer:
-            node.layerType = static_cast<LayerType>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::Scope:
-            node.scopeKind = static_cast<EditorNodeGraph::ScopeKind>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::MaskGenerator:
-            node.maskKind = static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::MaskCombine:
-            node.maskCombineMode = static_cast<EditorNodeGraph::MaskCombineMode>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::MaskUtility:
-            node.maskUtilityKind = static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::ImageToMask:
-            node.imageToMaskKind = static_cast<EditorNodeGraph::ImageToMaskKind>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::ImageGenerator:
-            node.imageGeneratorKind = static_cast<EditorNodeGraph::ImageGeneratorKind>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::DataMath:
-            node.dataMathMode = static_cast<EditorNodeGraph::DataMathMode>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::Value:
-            node.value.value = DefaultValue(static_cast<Stack::NodeMath::LogicalValueType>(entry.value));
-            break;
-        case EditorNodeGraph::NodeKind::RawOperation:
-            node.rawOperation = Stack::RawRecipe::MakeGraphOperation(static_cast<Stack::RawRecipe::GraphOperationKind>(entry.value));
-            break;
-        case EditorNodeGraph::NodeKind::TechnicalImage:
-            node.technicalImageSettings.operation =
-                static_cast<Stack::NodeMath::TechnicalImageOperation>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            node.frequencyFilterSettings.localResponse.mode =
-                static_cast<EditorNodeGraph::FrequencyFilterMode>(entry.value);
-            if (node.frequencyFilterSettings.localResponse.mode ==
-                EditorNodeGraph::FrequencyFilterMode::NotchReject) {
-                node.frequencyFilterSettings.localResponse.notches.push_back({
-                    Stack::NodeMath::GenerateCanonicalUuid(), 0.25f, 0.0f, 0.025f
-                });
-            }
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            node.frequencyMaskShape = static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value);
-            node.frequencyMaskSettings.shape = node.frequencyMaskShape;
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            node.spectrumMathMode = static_cast<EditorNodeGraph::SpectrumMathMode>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            node.magnitudePhaseMode = static_cast<EditorNodeGraph::MagnitudePhaseMode>(entry.value);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            node.spectrumAnalyzerMode = static_cast<EditorNodeGraph::SpectrumAnalyzerMode>(entry.value);
-            break;
-        default:
-            break;
-    }
+    auto node = BuildOperationPrototype(entry.kind, entry.value);
     ApplyNodeMetadata(node);
     return node;
 }

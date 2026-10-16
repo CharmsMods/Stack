@@ -1,3 +1,4 @@
+#include "Editor/Internal/RawDemosaicControls.h"
 #include "Editor/AutoBracket/AutoBracketEditingScope.h"
 #include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
@@ -16,6 +17,7 @@
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include "Utils/PixelBufferUtils.h"
+#include "Utils/Utf8Text.h"
 
 #include <imgui_internal.h>
 
@@ -439,7 +441,8 @@ std::string ShortRawWorkspaceSuggestionRationale(const std::string& rationale) {
         ++end;
     }
 
-    std::string result = rationale.substr(0, end);
+    std::string result = rationale;
+    Stack::Utf8Text::TruncateToByteLimit(result, end);
     while (!result.empty() && std::isspace(static_cast<unsigned char>(result.back()))) {
         result.pop_back();
     }
@@ -764,8 +767,11 @@ std::string EllipsizeTextToWidth(const std::string& text, float maxWidth) {
 
     std::string result = text;
     const char* suffix = "...";
-    while (result.size() > 4) {
-        result.pop_back();
+    if (ImGui::CalcTextSize(suffix).x > maxWidth) {
+        return {};
+    }
+    while (!result.empty()) {
+        Stack::Utf8Text::RemoveLastCodePoint(result);
         std::string candidate = result + suffix;
         if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
             return candidate;
@@ -1620,19 +1626,7 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         ImGui::TextDisabled(
             "Working space: %s",
             Raw::RawWorkingSpaceName(editedRecipe.technical.workingSpace));
-        const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5", "Nearest Neighbor", "Hamilton-Adams" };
-        int demosaicMethod = static_cast<int>(editedRecipe.technical.demosaicMethod);
-        if (ImGuiExtras::NodeCombo(
-                "Demosaic",
-                "##RawWorkspaceDemosaic",
-                &demosaicMethod,
-                demosaicLabels,
-                IM_ARRAYSIZE(demosaicLabels),
-                controlWidth)) {
-            editedRecipe.technical.demosaicMethod = static_cast<Raw::DemosaicMethod>(
-                std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
-            changed = true;
-        }
+        changed |= Stack::Editor::DrawDemosaicCombo("Demosaic",editedRecipe.technical.demosaicMethod,controlWidth);
         bool applyBaselineExposure = editedRecipe.technical.applyBaselineExposure;
         if (ImGuiExtras::NodeCheckbox(
                 "Apply DNG Baseline Exposure",

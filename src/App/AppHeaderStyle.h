@@ -25,9 +25,16 @@ inline constexpr float SectionTintOpacity = .64f;
 float ResolveSectionTintOpacity(float expandedAmount);
 ImVec4 ResolvePanelColor(ImVec4 workspace, float opacity = 1.0f);
 ImVec4 Blend(ImVec4 from, ImVec4 to, float amount);
-void Approach(float& value, float target, float speed = 20.0f);
+void Approach(float& value, float target, float speed = 20.0f, float settleTolerance = .01f);
+// Cubic ease-out with a finite endpoint; reversals start at the current position.
+void ApproachMotion(float& value, float target, float duration);
 ImRect AlignToPixels(const ImRect& rect);
 void DrawActiveTab(ImDrawList* draw, const ImRect& rect, ImU32 color);
 void DrawControlFeedback(const ImRect& rect, const Palette& palette,
     float selected, bool hovered, bool held, bool focused);
+struct ProjectPillState {
+    bool selected=false, hovered=false, focused=false, dirty=false, automatic=false;
+};
+void DrawProjectPill(ImDrawList*, ImVec2 minimum, ImVec2 maximum,
+    float scale, const Palette&, ProjectPillState);
 }

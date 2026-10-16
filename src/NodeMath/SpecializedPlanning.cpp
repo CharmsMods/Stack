@@ -11,9 +11,6 @@ const char* SpecializedStageKindName(SpecializedStageKind kind) {
         case SpecializedStageKind::RawDevelopment: return "RAW development";
         case SpecializedStageKind::NeuralOrExternal: return "CPU/external process";
         case SpecializedStageKind::MultiFrameMerge: return "multi-frame merge";
-        case SpecializedStageKind::FrequencyTransform: return "frequency transform";
-        case SpecializedStageKind::FrequencyInverseTransform: return "inverse frequency transform";
-        case SpecializedStageKind::FrequencyOperation: return "frequency operation";
         case SpecializedStageKind::ScopeAnalysis: return "scope analysis";
         case SpecializedStageKind::PreviewReadback: return "preview readback";
         case SpecializedStageKind::ExportReadback: return "export readback";
@@ -55,30 +52,6 @@ SpecializedStagePlan PlanSpecializedStage(SpecializedStageKind kind) {
             plan.scalePolicy = RenderScalePolicy::FullQualityOnly;
             plan.cancellation = CancellationPolicy::BetweenStages;
             plan.reason = "Multi-frame alignment and reconstruction require the complete declared frames.";
-            break;
-        case SpecializedStageKind::FrequencyTransform:
-            plan.capability = CapabilityClass::MultipassIterative;
-            plan.inputType = LogicalValueType::Channel;
-            plan.outputType = LogicalValueType::ComplexSpectrum;
-            plan.scalePolicy = RenderScalePolicy::ExactRequested;
-            plan.cancellation = CancellationPolicy::BetweenStages;
-            plan.reason = "FFT/IFFT are global multipass transforms and cannot consume independent image tiles.";
-            break;
-        case SpecializedStageKind::FrequencyInverseTransform:
-            plan.capability = CapabilityClass::MultipassIterative;
-            plan.inputType = LogicalValueType::ComplexSpectrum;
-            plan.outputType = LogicalValueType::Channel;
-            plan.scalePolicy = RenderScalePolicy::ExactRequested;
-            plan.cancellation = CancellationPolicy::BetweenStages;
-            plan.reason = "Inverse FFT is a global multipass transform and cannot consume independent tiles.";
-            break;
-        case SpecializedStageKind::FrequencyOperation:
-            plan.capability = CapabilityClass::MultipassIterative;
-            plan.inputType = LogicalValueType::ComplexSpectrum;
-            plan.outputType = LogicalValueType::ComplexSpectrum;
-            plan.scalePolicy = RenderScalePolicy::ExactRequested;
-            plan.cancellation = CancellationPolicy::BetweenStages;
-            plan.reason = "Frequency-domain work retains the complete spectrum extent.";
             break;
         case SpecializedStageKind::ScopeAnalysis:
             plan.capability = CapabilityClass::Reduction;

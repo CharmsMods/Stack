@@ -1,6 +1,8 @@
 #include "BracketingHdrColorValidation.h"
+#include "BracketingValidationGl.h"
 #include "Raw/Bracketing/ProcessingInternal.h"
 #include "Raw/Bracketing/SceneGradient.h"
+#include "Raw/Bracketing/Depth/Depth.h"
 #include "BracketingBorderValidation.h"
 #include "BracketingBurstValidation.h"
 #include "BracketingNoiseValidation.h"
@@ -226,6 +228,14 @@ bool ValidateBracketing() {
             "Clipped HDR highlights caused a false stationary alignment");
         Check(std::abs(movedResult.analysis->calibratedEv.at("f1")+std::log2(3.125))<.05,
             "Moved HDR captures did not retain measured exposure calibration");
+        auto localHdrRequest=movedHdr;localHdrRequest.recipe.alignmentMode=AlignmentMode::AutomaticLocal;
+        localHdrRequest.workerCount=2;
+        const auto localHdr=Process(localHdrRequest);
+        Check(localHdr.status==BracketingResult::Status::Completed,localHdr.message);
+        for(const auto& source:localHdr.analysis->prepared->sources)if(source.localMotion)
+            Check(HasCurrentCaptureReliability(source),"HDR calibration left stale reconstruction reliability");
+        Check(localHdr.analysis->prepared->sources[1].reliability!=nullptr,
+            "Local HDR fixture did not exercise calibrated reliability");
         auto globalPlaneDisagreementRequest=Request(
             {AlignedCapture('0',0,0),CfaDisagreementCapture('1')},
             directory/"global-alignment-plane-disagreement",true);
@@ -349,6 +359,29 @@ bool ValidateBracketing() {
         auto duplicate=Request({a,a},directory/"duplicate",true);Check(Process(duplicate).status==BracketingResult::Status::Failed,"Duplicate data claimed independent evidence");
         auto hdrRequest=Request({Capture('c',1),Capture('d',.25,0,800),Capture('e',.5)},directory/"hdr");
         auto hdr=Process(hdrRequest);Check(hdr.status==BracketingResult::Status::Completed,hdr.message);
+        auto defocused=hdr;
+        defocused.raw=std::make_shared<Raw::RawImageData>(*hdr.raw);
+        defocused.raw->metadata.hasDngNoiseProfile=true;
+        defocused.raw->metadata.dngNoiseProfile={{.001,.00001}};
+        auto depthAnalysis=std::make_shared<BracketingAnalysis>(*hdr.analysis);
+        auto outputDepth=std::make_shared<Raw::ReconstructionDepth>();
+        outputDepth->width=outputDepth->height=2;outputDepth->acceptedPairs=2;
+        outputDepth->sensorWidth=hdr.raw->metadata.visibleWidth;outputDepth->sensorHeight=hdr.raw->metadata.visibleHeight;
+        outputDepth->inverseDepth={0,0,1,1};outputDepth->confidence={1,1,1,1};outputDepth->measuredFraction=1;
+        depthAnalysis->depth=outputDepth;defocused.analysis=depthAnalysis;
+        auto defocusRequest=hdrRequest;defocusRequest.recipe.depth.enabled=true;
+        defocusRequest.recipe.depth.focus=1;defocusRequest.recipe.depth.blurRadius=8;
+        {
+            BracketingValidationGl gl;
+            defocusRequest.executeOpenGlTask=gl.Executor();
+            Check(Depth::Finish(defocusRequest,defocused,error),error);
+            defocusRequest.executeOpenGlTask={};
+        }
+        Check(defocused.raw->reconstructedCameraRgb&&!defocused.raw->normalizedMosaicBuffer&&
+            !defocused.raw->multiFrameMeasurementSidecars&&defocused.raw->reconstructionDepth==outputDepth,
+            "Defocus did not publish the camera RGB contract with depth evidence");
+        Check(!defocused.raw->metadata.hasDngNoiseProfile&&defocused.raw->metadata.dngNoiseProfile.empty(),
+            "Defocus retained an unfiltered sensor noise profile");
         Check(std::abs((*hdr.raw->normalizedMosaicBuffer)[110]-1.5)<.002,"HDR highlight recovery or mixed ISO scale failed");
         Check(hdr.raw->normalizedMosaicInputContract==Raw::NormalizedMosaicInputContract::BracketingPreGain,"Mosaic contract lost");
         {
@@ -524,6 +557,34 @@ bool ValidateBracketing() {
         for(std::size_t i=0;i<loadedResult.preview.samples.size();++i)
             Check(loadedResult.preview.samples[i].fallbackClipped==storedResult.preview.samples[i].fallbackClipped,
                 "Saving and reopening lost fallback capture clipping");
+        auto depth=std::make_shared<Raw::ReconstructionDepth>();
+        depth->width=depth->height=2;
+        depth->sensorWidth=storedResult.raw->metadata.visibleWidth;
+        depth->sensorHeight=storedResult.raw->metadata.visibleHeight;
+        depth->acceptedPairs=2;depth->measuredFraction=.75f;
+        depth->inverseDepth={0,.3f,.6f,1};depth->confidence={1,.8f,0,.9f};
+        depth->message="Saved relative depth fixture";
+        storedResult.raw=std::make_shared<Raw::RawImageData>(*storedResult.raw);
+        storedResult.raw->reconstructionDepth=depth;storedResult.identity+="-depth";
+        storedRecipe.depth.enabled=true;storedRecipe.alignmentMode=AlignmentMode::AutomaticLocal;
+        savedSnapshot.sourceSets.front().settings["bracketing"]=Serialize(storedRecipe);
+        Check(SaveBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,storedResult,{},error),error);
+        loadedResult={};
+        Check(RestoreBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,loadedResult,error),error);
+        const auto restoredDepth=loadedResult.raw->reconstructionDepth;
+        Check(restoredDepth&&restoredDepth->Available()&&restoredDepth->inverseDepth==depth->inverseDepth&&
+            restoredDepth->confidence==depth->confidence&&restoredDepth->sensorWidth==depth->sensorWidth&&
+            restoredDepth->sensorHeight==depth->sensorHeight&&restoredDepth->message==depth->message,
+            "Saving and reopening lost relative depth or confidence");
+        storedResult.raw=defocused.raw;storedResult.identity+="-defocus";
+        storedRecipe.depth=defocusRequest.recipe.depth;
+        savedSnapshot.sourceSets.front().settings["bracketing"]=Serialize(storedRecipe);
+        Check(SaveBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,storedResult,{},error),error);
+        loadedResult={};
+        Check(RestoreBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,loadedResult,error),error);
+        Check(loadedResult.raw->reconstructedCameraRgb&&loadedResult.raw->linearFloatBuffer==defocused.raw->linearFloatBuffer&&
+            loadedResult.raw->reconstructionDepth&&loadedResult.raw->reconstructionDepth->Available(),
+            "Saving and reopening lost depth-of-field pixels");
         std::error_code ec;std::filesystem::remove_all(directory,ec);
         std::cout<<"Bracketing curves, RAW alignment, noise averaging, clipping, mixed ISO, preview parity, persistence, identity, cancellation and memory checks passed.\n";return true;
     }catch(const std::exception& e) {std::cerr<<"Bracketing validation failed: "<<e.what()<<"\nFixtures: "<<directory<<'\n';return false;}

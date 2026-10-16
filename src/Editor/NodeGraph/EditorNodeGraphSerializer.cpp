@@ -1,8 +1,11 @@
+#include "NodeMath/ToneCurveParameters.h"
 #include "Editor/LayerRegistry.h"
 #include "EditorNodeGraphSerializer.h"
+#include "Graph/LayerOperationParameters.h"
 
 #include "EditorNodeGraphDefinitions.h"
 #include "UnifiedNodeDefinitionRegistry.h"
+#include "NodeMath/SourceImageSemantics.h"
 #include "Raw/RawRecipeCompatibility.h"
 #include "Serialization/EditorNodeGraphCustomMaskSerialization.h"
 #include "Serialization/EditorNodeGraphDevelopSerialization.h"
@@ -10,9 +13,13 @@
 #include "Serialization/EditorNodeGraphLutSerialization.h"
 #include "Serialization/EditorNodeGraphRawSerialization.h"
 #include "Serialization/EditorNodeGraphUtilitySerialization.h"
+#include "Serialization/EditorNodeGraphCurrentReader.h"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
+#include <limits>
+#include <stdexcept>
 
 namespace EditorNodeGraph {
 namespace {
@@ -22,7 +29,6 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Image: return "Image";
         case NodeKind::RawSource: return "RawSource";
         case NodeKind::RawDevelopment: return "RawDevelopment";
-        case NodeKind::RawNeuralDenoise: return "RawNeuralDenoise";
         case NodeKind::RawDecode: return "RawDecode";
         case NodeKind::RawDevelop: return "RawDevelop";
         case NodeKind::RawDetailAutoMask: return "RawDetailAutoMask";
@@ -38,6 +44,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
         case NodeKind::Scope: return "Scope";
+        case NodeKind::MaskTexture: return "MaskTexture";
         case NodeKind::MaskGenerator: return "MaskGenerator";
         case NodeKind::MaskCombine: return "MaskCombine";
         case NodeKind::Mix: return "Mix";
@@ -56,20 +63,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::RawOperation: return "RawOperation";
         case NodeKind::TechnicalImage: return "TechnicalImage";
         case NodeKind::Compound: return "Compound";
-        case NodeKind::FrequencyFilter: return "FrequencyFilter";
-        case NodeKind::FrequencyResponse: return "FrequencyResponse";
-        case NodeKind::FrequencyFft: return "FrequencyFft";
-        case NodeKind::FrequencyIfft: return "FrequencyIfft";
-        case NodeKind::SpectrumView: return "SpectrumView";
-        case NodeKind::ApplyFrequencyResponse: return "ApplyFrequencyResponse";
-        case NodeKind::CombineSpectra: return "CombineSpectra";
-        case NodeKind::SpectrumSeparate: return "SpectrumSeparate";
-        case NodeKind::SpectrumRecombine: return "SpectrumRecombine";
-        case NodeKind::FrequencyMask: return "FrequencyMask";
-        case NodeKind::SpectrumMath: return "SpectrumMath";
-        case NodeKind::MagnitudePhase: return "MagnitudePhase";
-        case NodeKind::SpectrumAnalyzer: return "SpectrumAnalyzer";
-    }
+        }
     return "Layer";
 }
 
@@ -184,11 +178,18 @@ std::vector<unsigned char> BuildImagePayloadStoragePngBytes(const ImagePayload& 
 } // namespace
 
 nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData) {
-    if (pipelineData.is_object()) {
-        const nlohmann::json layers = pipelineData.value("layers", nlohmann::json::array());
-        return layers.is_array() ? layers : nlohmann::json::array();
+    auto records=nlohmann::json::array();
+    if (!pipelineData.is_object() || !pipelineData.contains("nodeGraph")) return records;
+    const auto& nodes=pipelineData.at("nodeGraph").at("nodes");
+    const auto count=std::count_if(nodes.begin(),nodes.end(),[](const auto& node){return node.value("kind",std::string{})=="Layer";});
+    for (std::ptrdiff_t i=0;i<count;++i) records.push_back(nullptr);
+    for (const auto& node:nodes) if (node.value("kind",std::string{})=="Layer") {
+        const int index=node.at("layerIndex").template get<int>();
+        if (index<0 || index>=count || !records[index].is_null())
+            throw std::runtime_error("Invalid effect adapter index.");
+        records[index]=node.at("parameters");
     }
-    return nlohmann::json::array();
+    return records;
 }
 
 bool IsCurrentGraphPayload(const nlohmann::json& pipelineData) {
@@ -196,7 +197,7 @@ bool IsCurrentGraphPayload(const nlohmann::json& pipelineData) {
     if (pipelineData.empty()) return true;
     const auto layers = pipelineData.find("layers");
     const auto graph = pipelineData.find("nodeGraph");
-    const bool currentEnvelope = layers != pipelineData.end() && layers->is_array() &&
+    const bool currentEnvelope = layers != pipelineData.end() && layers->is_array() && layers->empty() &&
         graph != pipelineData.end() && graph->is_object() &&
         graph->value("version", 0) == kEditorNodeGraphSchemaVersion;
     if (!currentEnvelope) return false;
@@ -205,7 +206,6 @@ bool IsCurrentGraphPayload(const nlohmann::json& pipelineData) {
     for (const nlohmann::json& node : nodes) {
         if (!node.is_object()) return false;
         const std::string kind = node.value("kind", std::string());
-        if (kind == "RawNeuralDenoise") return false;
 
         if (kind == "RawDevelopment") {
             const auto recipe = node.find("rawRecipe");
@@ -278,9 +278,9 @@ bool IsCurrentGraphPayload(const nlohmann::json& pipelineData) {
     return true;
 }
 
-nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Graph& graph) {
+nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Graph& graph, bool includeMaskRaster) {
     nlohmann::json root = nlohmann::json::object();
-    root["layers"] = layerArray.is_array() ? layerArray : nlohmann::json::array();
+    root["layers"] = nlohmann::json::array();
 
     nlohmann::json graphJson = nlohmann::json::object();
     graphJson["version"] = kEditorNodeGraphSchemaVersion;
@@ -302,6 +302,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["kind"] = NodeKindToString(node.kind);
         item["layerIndex"] = node.layerIndex;
         item["typeId"] = node.typeId;
+        if (node.kind==NodeKind::Layer) item["parameters"]=node.layerParameters;
         item["title"] = node.title;
         item["x"] = node.position.x;
         item["y"] = node.position.y;
@@ -321,26 +322,14 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["mixFactor"] = node.mixFactor;
         item["dataMathMode"] = DataMathModeToString(node.dataMathMode);
         item["dataMathSettings"] = SerializeDataMathSettings(node.dataMathSettings);
-        if (node.kind == NodeKind::RawOperation) item["rawOperation"] = Stack::RawRecipe::SerializeGraphOperation(node.rawOperation);
+        if (node.kind == NodeKind::RawOperation) {
+            auto persisted=node.rawOperation;
+            if (persisted.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve)
+                Stack::NodeMath::ClearPendingToneCurveAnalysis(persisted.parameters);
+            item["rawOperation"] = Stack::RawRecipe::SerializeGraphOperation(persisted);
+        }
         item["technicalImageSettings"] = SerializeTechnicalImageSettings(node.technicalImageSettings);
         item["reformatSettings"] = SerializeReformatSettings(node.reformatSettings);
-        item["frequencyFilterSettings"] = SerializeFrequencyFilterSettings(node.frequencyFilterSettings);
-        item["frequencyResponseSettings"] = SerializeFrequencyResponseSettings(node.frequencyResponseSettings);
-        item["frequencyFftSettings"] = SerializeFrequencyFftSettings(node.frequencyFftSettings);
-        item["frequencyIfftSettings"] = SerializeFrequencyFftSettings(node.frequencyIfftSettings);
-        item["spectrumViewSettings"] = SerializeSpectrumViewSettings(node.spectrumViewSettings);
-        item["applyFrequencyResponseSettings"] =
-            SerializeApplyFrequencyResponseSettings(node.applyFrequencyResponseSettings);
-        item["combineSpectraSettings"] =
-            SerializeCombineSpectraSettings(node.combineSpectraSettings);
-        item["frequencyMaskShape"] = FrequencyMaskShapeToString(node.frequencyMaskShape);
-        item["frequencyMaskSettings"] = SerializeFrequencyMaskSettings(node.frequencyMaskSettings);
-        item["spectrumMathMode"] = SpectrumMathModeToString(node.spectrumMathMode);
-        item["spectrumMathSettings"] = SerializeSpectrumMathSettings(node.spectrumMathSettings);
-        item["magnitudePhaseMode"] = MagnitudePhaseModeToString(node.magnitudePhaseMode);
-        item["magnitudePhaseSettings"] = SerializeMagnitudePhaseSettings(node.magnitudePhaseSettings);
-        item["spectrumAnalyzerMode"] = SpectrumAnalyzerModeToString(node.spectrumAnalyzerMode);
-        item["spectrumAnalyzerSettings"] = SerializeSpectrumAnalyzerSettings(node.spectrumAnalyzerSettings);
         item["exposedParameterIds"] = node.exposedParameterIds;
         item["outputEnabled"] = node.outputEnabled;
         if (node.kind == NodeKind::Output) {
@@ -377,8 +366,10 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
                 item["pngBytes"] = nlohmann::json::binary(
                     BuildImagePayloadStoragePngBytes(node.image));
             }
-            item["sourceColorMetadata"] =
-                Stack::NodeMath::SerializeSourceColorMetadata(node.image.sourceColorMetadata);
+            auto metadata = node.image.sourceColorMetadata;
+            metadata.descriptor = Stack::NodeMath::DescribeStoredImageValue(metadata.descriptor,
+                node.image.channels, node.image.width, node.image.height);
+            item["sourceColorMetadata"] = Stack::NodeMath::SerializeSourceColorMetadata(metadata);
         } else if (node.kind == NodeKind::Value) {
             item["value"] = Stack::NodeMath::SerializeFirstClassValue(node.value.value);
         } else if (node.kind == NodeKind::Compound) {
@@ -462,6 +453,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["sourceSetId"] = node.multiFrameHdr.sourceSetId;
             item["hdrStatus"] = node.multiFrameHdr.presentationStatus;
             item["hdrResultState"] = node.multiFrameHdr.resultState;
+            item["hdrBracketingSource"] = node.multiFrameHdr.bracketingSource;
             item["hdrInternalViewTransformEnabled"] =
                 node.multiFrameHdr.internalViewTransformEnabled;
             item["hdrRadiometricAnchorFrameId"] =
@@ -486,7 +478,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         } else if (node.kind == NodeKind::Lut) {
             item["lut"] = SerializeLutPayload(node.lut);
         } else if (node.kind == NodeKind::CustomMask) {
-            item["customMask"] = SerializeCustomMaskPayload(node.customMask);
+            item["customMask"] = SerializeCustomMaskPayload(node.customMask, includeMaskRaster);
         }
 
         nodesJson.push_back(std::move(item));
@@ -560,44 +552,39 @@ void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData) {
     graphJson.erase("selectedNodeId");
 }
 
-void DeserializeGraphPayload(
+void Serialization::ReadCurrentGraphPayload(
     const nlohmann::json& pipelineData,
     Graph& graph,
-    int layerCount,
-    const std::vector<unsigned char>& fallbackSourcePixels,
-    int fallbackSourceWidth,
-    int fallbackSourceHeight,
-    int fallbackSourceChannels) {
+    int layerCount) {
 
     graph.Clear();
-    (void)layerCount;
-    (void)fallbackSourcePixels;
-    (void)fallbackSourceWidth;
-    (void)fallbackSourceHeight;
-    (void)fallbackSourceChannels;
 
     if (!IsCurrentGraphPayload(pipelineData) ||
         !pipelineData.contains("nodeGraph")) {
-        return;
+        throw std::runtime_error("Unsupported graph model generation.");
     }
 
-    const nlohmann::json graphJson = pipelineData.value("nodeGraph", nlohmann::json::object());
+    nlohmann::json graphJson = pipelineData.value("nodeGraph", nlohmann::json::object());
     graph.SetAllowNoOutput(graphJson.value("allowNoOutput", false));
     const nlohmann::json compoundDefinitionsJson =
         graphJson.value("compoundDefinitions", nlohmann::json::array());
     if (compoundDefinitionsJson.is_array()) {
         for (const nlohmann::json& item : compoundDefinitionsJson) {
             Stack::NodeMath::CompoundDefinition definition;
-            if (Stack::NodeMath::DeserializeCompoundDefinition(item, definition, nullptr)) {
-                graph.GetCompoundDefinitions().push_back(std::move(definition));
-            }
+            std::string error;
+            if (!Stack::NodeMath::DeserializeCompoundDefinition(item, definition, &error))
+                throw std::runtime_error(error.empty() ? "Invalid compound definition." : error);
+            graph.GetCompoundDefinitions().push_back(std::move(definition));
         }
     }
     const nlohmann::json nodesJson = graphJson.value("nodes", nlohmann::json::array());
     const nlohmann::json linksJson = graphJson.value("links", nlohmann::json::array());
+    if (!nodesJson.is_array() || !linksJson.is_array()) throw std::runtime_error("Graph nodes and links must be arrays.");
+    std::unordered_set<int> ids;
+    std::unordered_set<std::string> uuids;
     int maxNodeId = 0;
     for (const nlohmann::json& item : nodesJson) {
-        if (!item.is_object()) continue;
+        if (!item.is_object()) throw std::runtime_error("Invalid graph node record.");
 
         Node node;
         bool compoundInstanceValid = true;
@@ -615,8 +602,10 @@ void DeserializeGraphPayload(
             node.reference = {reference.at("graph").get<std::string>(), reference.at("node").get<std::string>(), reference.at("port").get<std::string>()};
         }
         if (!Stack::NodeMath::IsValidCanonicalUuid(node.instanceUuid)) {
-            node.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
+            throw std::runtime_error("Saved node has no valid stable UUID.");
         }
+        if (node.id <= 0 || node.id == std::numeric_limits<int>::max() || !ids.insert(node.id).second ||
+            !uuids.insert(node.instanceUuid).second) throw std::runtime_error("Duplicate or invalid saved node identity.");
         node.layerIndex = item.value("layerIndex", -1);
         node.typeId = item.value("typeId", std::string());
         node.title = item.value("title", std::string());
@@ -630,9 +619,6 @@ void DeserializeGraphPayload(
         const std::string savedDefinitionHash = savedDefinition.value("contentHash", std::string());
 
         const std::string kind = item.value("kind", std::string("Layer"));
-        if (kind == "ExportBoundsSettings") {
-            continue;
-        }
 
         if (kind == "Image") {
             node.kind = NodeKind::Image;
@@ -770,6 +756,8 @@ void DeserializeGraphPayload(
                 "hdrStatus", std::string(kHdrAwaitingProcessingStatus));
             node.multiFrameHdr.resultState = item.value(
                 "hdrResultState", std::string("unavailable"));
+            node.multiFrameHdr.bracketingSource = item.value(
+                "hdrBracketingSource", false);
             node.multiFrameHdr.internalViewTransformEnabled = item.value(
                 "hdrInternalViewTransformEnabled", true);
             node.multiFrameHdr.radiometricAnchorFrameId = item.value(
@@ -791,7 +779,8 @@ void DeserializeGraphPayload(
                     node.multiFrameHdr.frameBindings.push_back(std::move(binding));
                 }
             }
-            if (node.title.empty()) node.title = "Multi-Frame HDR";
+            if (node.title.empty()) node.title = node.multiFrameHdr.bracketingSource
+                ? "Bracketing" : "Multi-Frame HDR";
         } else if (kind == "RawProjectSourceSet") {
             node.kind = NodeKind::RawProjectSourceSet;
             node.rawProjectSourceSet.sourceSetId =
@@ -821,8 +810,8 @@ void DeserializeGraphPayload(
             if (node.title.empty()) {
                 node.title = ScopeKindToString(node.scopeKind);
             }
-        } else if (kind == "MaskGenerator") {
-            node.kind = NodeKind::MaskGenerator;
+        } else if (kind == "MaskGenerator" || kind == "MaskTexture") {
+            node.kind = kind == "MaskTexture" ? NodeKind::MaskTexture : NodeKind::MaskGenerator;
             node.maskKind = MaskGeneratorKindFromString(item.value("maskKind", std::string("Solid")));
             node.rawCoverage = item.value("rawCoverage", nlohmann::json::object());
             node.maskSettings = DeserializeMaskSettings(item.value("maskSettings", nlohmann::json::object()));
@@ -849,6 +838,10 @@ void DeserializeGraphPayload(
         } else if (kind == "CustomMask") {
             node.kind = NodeKind::CustomMask;
             node.customMask = DeserializeCustomMaskPayload(item.value("customMask", nlohmann::json::object()));
+            // Captured raster textures use the same project-canvas association
+            // as live shapes. It is saved on every node, not inside the legacy
+            // CustomMask pixel payload, and must survive reopening the project.
+            node.rawCoverage = item.value("rawCoverage", nlohmann::json::object());
             if (node.title.empty()) node.title = "Custom Mask";
         } else if (kind == "Mix") {
             node.kind = NodeKind::Mix;
@@ -880,18 +873,7 @@ void DeserializeGraphPayload(
             const nlohmann::json savedValue = item.value("value", nlohmann::json::object());
             std::string valueError;
             if (!Stack::NodeMath::DeserializeFirstClassValue(savedValue, node.value.value, &valueError)) {
-                nlohmann::json missingValue = savedValue.is_object()
-                    ? savedValue : nlohmann::json::object();
-                missingValue["schemaVersion"] = Stack::NodeMath::kFirstClassValueSchemaVersion;
-                missingValue["availability"] = "missing";
-                missingValue["message"] = valueError.empty() ? "Saved value is invalid." : valueError;
-                missingValue.erase("payload");
-                if (!Stack::NodeMath::DeserializeFirstClassValue(missingValue, node.value.value, nullptr)) {
-                    node.value.value = Stack::NodeMath::MakeMissingValue(
-                        Stack::NodeMath::LogicalValueType::Invalid,
-                        Stack::NodeMath::ValueStorageClass::Uniform,
-                        valueError.empty() ? "Saved value is invalid." : valueError);
-                }
+                throw std::runtime_error(valueError.empty() ? "Invalid saved Value." : valueError);
             }
             EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
         } else if (kind == "FieldMean") {
@@ -917,104 +899,10 @@ void DeserializeGraphPayload(
                     item.value("compoundInstance", nlohmann::json::object()),
                     node.compound.instance,
                     &compoundError)) {
-                compoundInstanceValid = false;
-                node.compound.instance.instanceUuid = node.instanceUuid;
-                const std::optional<Stack::NodeMath::SemanticVersion> savedVersion =
-                    Stack::NodeMath::ParseSemanticVersion(savedDefinitionVersion);
-                node.compound.instance.definition.id = savedDefinitionId;
-                node.compound.instance.definition.version = savedVersion.value_or(
-                    Stack::NodeMath::SemanticVersion{});
-                node.compound.instance.definition.contentHash = savedDefinitionHash;
-                node.compound.instance.resolution = Stack::NodeMath::CompoundResolutionStatus::InvalidDefinition;
-                node.compound.instance.resolutionError = compoundError.empty()
-                    ? "Saved compound instance is invalid." : compoundError;
+                throw std::runtime_error(compoundError.empty() ? "Invalid saved compound instance." : compoundError);
             }
             node.compound.instance.instanceUuid = node.instanceUuid;
             if (node.title.empty()) node.title = "Compound";
-        } else if (kind == "FrequencyFilter") {
-            node.kind = NodeKind::FrequencyFilter;
-            node.frequencyFilterSettings = DeserializeFrequencyFilterSettings(
-                item.value("frequencyFilterSettings", nlohmann::json::object()));
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "FrequencyResponse") {
-            node.kind = NodeKind::FrequencyResponse;
-            node.frequencyResponseSettings = DeserializeFrequencyResponseSettings(
-                item.value("frequencyResponseSettings", nlohmann::json::object()));
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "FrequencyFft") {
-            node.kind = NodeKind::FrequencyFft;
-            node.frequencyFftSettings =
-                DeserializeFrequencyFftSettings(item.value("frequencyFftSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "FrequencyIfft") {
-            node.kind = NodeKind::FrequencyIfft;
-            node.frequencyIfftSettings =
-                DeserializeFrequencyFftSettings(item.value("frequencyIfftSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "SpectrumView") {
-            node.kind = NodeKind::SpectrumView;
-            node.spectrumViewSettings =
-                DeserializeSpectrumViewSettings(item.value("spectrumViewSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "ApplyFrequencyResponse") {
-            node.kind = NodeKind::ApplyFrequencyResponse;
-            node.applyFrequencyResponseSettings = DeserializeApplyFrequencyResponseSettings(
-                item.value("applyFrequencyResponseSettings", nlohmann::json::object()));
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "CombineSpectra") {
-            node.kind = NodeKind::CombineSpectra;
-            node.combineSpectraSettings = DeserializeCombineSpectraSettings(
-                item.value("combineSpectraSettings", nlohmann::json::object()));
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "SpectrumSeparate") {
-            node.kind = NodeKind::SpectrumSeparate;
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "SpectrumRecombine") {
-            node.kind = NodeKind::SpectrumRecombine;
-            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        } else if (kind == "FrequencyMask") {
-            node.kind = NodeKind::FrequencyMask;
-            node.frequencyMaskSettings =
-                DeserializeFrequencyMaskSettings(item.value("frequencyMaskSettings", nlohmann::json::object()));
-            node.frequencyMaskShape = FrequencyMaskShapeFromString(
-                item.value("frequencyMaskShape", FrequencyMaskShapeToString(node.frequencyMaskSettings.shape)));
-            node.frequencyMaskSettings.shape = node.frequencyMaskShape;
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "SpectrumMath") {
-            node.kind = NodeKind::SpectrumMath;
-            node.spectrumMathMode =
-                SpectrumMathModeFromString(item.value("spectrumMathMode", std::string("Multiply")));
-            node.spectrumMathSettings =
-                DeserializeSpectrumMathSettings(item.value("spectrumMathSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "MagnitudePhase") {
-            node.kind = NodeKind::MagnitudePhase;
-            node.magnitudePhaseMode =
-                MagnitudePhaseModeFromString(item.value("magnitudePhaseMode", std::string("Magnitude")));
-            node.magnitudePhaseSettings =
-                DeserializeMagnitudePhaseSettings(item.value("magnitudePhaseSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
-        } else if (kind == "SpectrumAnalyzer") {
-            node.kind = NodeKind::SpectrumAnalyzer;
-            node.spectrumAnalyzerMode =
-                SpectrumAnalyzerModeFromString(item.value("spectrumAnalyzerMode", std::string("RadialEnergy")));
-            node.spectrumAnalyzerSettings =
-                DeserializeSpectrumAnalyzerSettings(item.value("spectrumAnalyzerSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-            }
         } else if (kind == "Preview") {
             node.kind = NodeKind::Preview;
             if (node.title.empty()) {
@@ -1085,15 +973,19 @@ void DeserializeGraphPayload(
             if (node.title.empty()) {
                 node.title = "Constant Channel";
             }
-        } else {
+        } else if (kind == "Layer") {
             node.kind = NodeKind::Layer;
             const LayerDescriptor* descriptor = LayerRegistry::FindDescriptorByTypeId(node.typeId);
-            if (descriptor) {
+            if (descriptor && descriptor->typeId == node.typeId) {
                 node.layerType = descriptor->type;
+                node.layerParameters=item.at("parameters");
+                std::string parameterError;
+                if (!Stack::GraphModel::ValidateLayerParameters(node,parameterError))
+                    throw std::runtime_error(parameterError);
                 if (node.title.empty()) node.title = descriptor->displayName;
-            } else if (node.title.empty()) {
-                node.title = "Layer";
-            }
+            } else throw std::runtime_error("Saved effect has no current canonical definition.");
+        } else {
+            throw std::runtime_error("Unknown saved graph node kind: " + kind);
         }
 
         node.exposedParameterIds =
@@ -1115,12 +1007,13 @@ void DeserializeGraphPayload(
                 node.title = definition->label;
             }
         } else {
-            EditorNodeGraphDefinitions::ResolveSavedLiveDefinition(
+            std::string error;
+            if (!EditorNodeGraphDefinitions::ResolveSavedLiveDefinition(
                 node,
                 savedDefinitionId,
                 savedDefinitionVersion,
                 savedDefinitionHash,
-                nullptr);
+                &error)) throw std::runtime_error(error);
         }
 
         maxNodeId = std::max(maxNodeId, node.id);
@@ -1151,43 +1044,28 @@ void DeserializeGraphPayload(
     graph.SetActiveImageNodeId(graphJson.value("activeImageNodeId", -1));
 
     for (const nlohmann::json& item : linksJson) {
-        if (!item.is_object()) continue;
-        const int from = item.value("fromNodeId", 0);
-        const int to = item.value("toNodeId", 0);
-        if (from <= 0 || to <= 0) {
-            continue;
-        }
-
-        const Node* fromNode = graph.FindNode(from);
-        const Node* toNode = graph.FindNode(to);
-        if (!fromNode || !toNode) {
-            continue;
-        }
-
-        const std::string fromSocket = item.value("fromSocket", std::string());
-        const std::string toSocket = item.value("toSocket", std::string());
-        if (!fromSocket.empty() && !toSocket.empty() && !graph.HasLink(from, fromSocket, to, toSocket)) {
-            if (graph.TryConnectSockets(from, fromSocket, to, toSocket)) {
-                for (Link& link : graph.EditLinks()) {
-                    if (link.fromNodeId == from && link.fromSocketId == fromSocket &&
-                        link.toNodeId == to && link.toSocketId == toSocket) {
-                        link.ownership = item.value("ownership", std::string()) ==
-                                "managed-source-binding"
-                            ? Link::Ownership::ManagedSourceBinding
-                            : Link::Ownership::User;
-                        link.bindingId = item.value("bindingId", std::string());
-                        break;
-                    }
-                }
-            }
-        }
+        if (!item.is_object()) throw std::runtime_error("Invalid saved connection record.");
+        Link link;
+        link.fromNodeId = item.at("fromNodeId").get<int>();
+        link.toNodeId = item.at("toNodeId").get<int>();
+        link.fromSocketId = item.at("fromSocket").get<std::string>();
+        link.toSocketId = item.at("toSocket").get<std::string>();
+        const auto ownership = item.value("ownership", std::string("user"));
+        if (ownership != "user" && ownership != "managed-source-binding")
+            throw std::runtime_error("Unknown connection ownership.");
+        link.ownership = ownership == "managed-source-binding" ? Link::Ownership::ManagedSourceBinding : Link::Ownership::User;
+        link.bindingId = item.value("bindingId", std::string());
+        // Restore every authored edge, then validate structure as a whole.
+        // Execution availability is separate from structural link validity.
+        graph.EditLinks().push_back(std::move(link));
     }
 
     const nlohmann::json groupsJson = graphJson.value("groups", nlohmann::json::array());
+    if (!groupsJson.is_array()) throw std::runtime_error("Saved groups must be an array.");
     int maxGroupId = 0;
     if (groupsJson.is_array()) {
         for (const nlohmann::json& item : groupsJson) {
-            if (!item.is_object()) continue;
+            if (!item.is_object()) throw std::runtime_error("Invalid saved group record.");
             NodeGroup group;
             group.id = item.value("id", 0);
             group.title = item.value("title", "New Group");
@@ -1199,10 +1077,12 @@ void DeserializeGraphPayload(
             graph.GetGroups().push_back(std::move(group));
         }
     }
+    if (maxGroupId == std::numeric_limits<int>::max()) throw std::runtime_error("Invalid saved group identity.");
     graph.SetNextGroupId(std::max(maxGroupId + 1, graphJson.value("nextGroupId", maxGroupId + 1)));
 
-    if (!graph.AllowsNoOutput()) graph.EnsureOutputNode();
-    graph.SyncLayerNodes(layerCount);
+    const auto validation = graph.Validate();
+    if (!validation.valid) throw std::runtime_error(validation.messages.empty()
+        ? "Invalid current graph document." : validation.messages.front());
 }
 
 } // namespace EditorNodeGraph

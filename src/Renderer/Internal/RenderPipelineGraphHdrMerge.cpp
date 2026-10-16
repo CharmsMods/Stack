@@ -62,9 +62,6 @@ int RenderPipeline::FindReferenceSourceNode(const GraphExecutionContext& executi
             case RenderGraphNodeKind::RawDevelop:
                 useCurrentNode();
                 break;
-            case RenderGraphNodeKind::RawNeuralDenoise:
-                addInput(EditorNodeGraph::kRawInputSocketId);
-                break;
             case RenderGraphNodeKind::Layer:
             case RenderGraphNodeKind::TechnicalImage:
             case RenderGraphNodeKind::Reformat:
@@ -127,35 +124,6 @@ int RenderPipeline::FindReferenceSourceNode(const GraphExecutionContext& executi
             case RenderGraphNodeKind::MaskCombine:
                 addInput(EditorNodeGraph::kMaskCombineInputASocketId);
                 addInput(EditorNodeGraph::kMaskCombineInputBSocketId);
-                break;
-            case RenderGraphNodeKind::FrequencyFilter:
-            case RenderGraphNodeKind::FrequencyFft:
-                addInput(EditorNodeGraph::kChannelInputSocketId);
-                break;
-            case RenderGraphNodeKind::FrequencyIfft:
-            case RenderGraphNodeKind::SpectrumView:
-            case RenderGraphNodeKind::SpectrumSeparate:
-            case RenderGraphNodeKind::SpectrumAnalyzer:
-                addInput(EditorNodeGraph::kSpectrumInputSocketId);
-                break;
-            case RenderGraphNodeKind::ApplyFrequencyResponse:
-                addInput(EditorNodeGraph::kSpectrumInputSocketId);
-                break;
-            case RenderGraphNodeKind::CombineSpectra:
-                addInput(EditorNodeGraph::kSpectrumInputASocketId);
-                break;
-            case RenderGraphNodeKind::SpectrumRecombine:
-                addInput(EditorNodeGraph::kSpectrumMagnitudeInputSocketId);
-                break;
-            case RenderGraphNodeKind::SpectrumMath:
-                addInput(EditorNodeGraph::kMixInputASocketId);
-                break;
-            case RenderGraphNodeKind::MagnitudePhase:
-                addInput(
-                    node.magnitudePhaseMode ==
-                            RenderMagnitudePhaseMode::Recombine
-                        ? EditorNodeGraph::kSpectrumMagnitudeInputSocketId
-                        : EditorNodeGraph::kImageInputSocketId);
                 break;
             default:
                 break;
@@ -289,10 +257,7 @@ RenderPipeline::HdrMergeInputContext RenderPipeline::ResolveHdrMergeInputContext
                 context.metadata = rawIt->second->rawSource.metadata;
                 break;
             }
-            if (rawIt->second->kind != RenderGraphNodeKind::RawNeuralDenoise) {
-                break;
-            }
-            rawInput = executionContext.FindInputLink(rawIt->second->nodeId, "rawIn");
+            break;
         }
     }
 

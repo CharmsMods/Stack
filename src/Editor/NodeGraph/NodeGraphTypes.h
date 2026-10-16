@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NodeMath/ContractTypes.h"
+#include "NodeMath/Arithmetic.h"
 #include "NodeMath/OutputInspection.h"
 
 #include <string>
@@ -29,36 +30,10 @@ inline constexpr const char* kExposureValueInputSocketId = "evIn";
 inline constexpr const char* kChannelInputSocketId = "channelIn";
 inline constexpr const char* kChannelOutputSocketId = "channelOut";
 inline constexpr const char* kMatchExtentInputSocketId = "matchExtent";
-inline constexpr const char* kSpectrumInputSocketId = "spectrumIn";
-inline constexpr const char* kSpectrumOutputSocketId = "spectrumOut";
-inline constexpr const char* kSpectrumInputASocketId = "spectrumA";
-inline constexpr const char* kSpectrumInputBSocketId = "spectrumB";
-inline constexpr const char* kFrequencyResponseInputSocketId = "responseIn";
-inline constexpr const char* kFrequencyResponseOutputSocketId = "responseOut";
-inline constexpr const char* kSpectrumMagnitudeInputSocketId = "magnitudeIn";
-inline constexpr const char* kSpectrumMagnitudeOutputSocketId = "magnitudeOut";
-inline constexpr const char* kSpectrumPhaseInputSocketId = "phaseIn";
-inline constexpr const char* kSpectrumPhaseOutputSocketId = "phaseOut";
-inline constexpr const char* kRadialPowerOutputSocketId = "radialPowerOut";
-inline constexpr const char* kBandPowerOutputSocketId = "bandPowerOut";
-inline constexpr const char* kPeakFrequencyOutputSocketId = "peakFrequencyOut";
-inline constexpr const char* kPeakDirectionOutputSocketId = "peakDirectionOut";
-inline constexpr const char* kStrengthParameterId = "strength";
-inline constexpr const char* kLowCutoffParameterId = "lowCutoff";
-inline constexpr const char* kHighCutoffParameterId = "highCutoff";
-inline constexpr const char* kTransitionWidthParameterId = "transitionWidth";
-inline constexpr const char* kButterworthOrderParameterId = "butterworthOrder";
-inline constexpr const char* kAnalyzerLowParameterId = "bandLow";
-inline constexpr const char* kAnalyzerHighParameterId = "bandHigh";
-
 inline std::string ParameterInputSocketId(const std::string& parameterId) {
     return "param:" + parameterId;
 }
-inline std::string FrequencyNotchParameterId(
-    const std::string& notchId,
-    const std::string& field) {
-    return "notch." + notchId + "." + field;
-}
+
 inline constexpr const char* kReductionFieldInputSocketId = "fieldIn";
 inline constexpr const char* kReformatInputSocketId = "imageIn";
 inline constexpr const char* kMaskUtilityInputSocketId = "maskIn";
@@ -185,7 +160,6 @@ enum class NodeKind {
     Image,
     RawSource,
     RawDevelopment,
-    RawNeuralDenoise,
     RawDecode,
     RawDevelop,
     RawDetailAutoMask,
@@ -212,19 +186,6 @@ enum class NodeKind {
     Value,
     TechnicalImage,
     Compound,
-    FrequencyFilter,
-    FrequencyResponse,
-    FrequencyFft,
-    FrequencyIfft,
-    SpectrumView,
-    ApplyFrequencyResponse,
-    CombineSpectra,
-    SpectrumSeparate,
-    SpectrumRecombine,
-    FrequencyMask,
-    SpectrumMath,
-    MagnitudePhase,
-    SpectrumAnalyzer,
     FieldMean,
     Reformat,
     RawProjectFrame,
@@ -232,6 +193,7 @@ enum class NodeKind {
     MultiFrameHdr,
     RawProjectSourceSet,
     RawOperation,
+    MaskTexture,
     Count
 };
 
@@ -316,97 +278,22 @@ enum class MixBlendMode {
     PremultipliedSourceOver
 };
 
-enum class DataMathMode {
-    Clamp,
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Average,
-    Min,
-    Max,
-    Difference,
-    Remap,
-    ImageAverage
-};
+using DataMathMode = Stack::NodeMath::ArithmeticMode;
 
-enum class SpectrumViewLut {
-    Turbo,
-    Viridis,
-    Inferno,
-    Grayscale
-};
 
-enum class FrequencyMaskShape {
-    LowPass,
-    HighPass,
-    BandPass,
-    BandStop,
-    Notch,
-    Gaussian,
-    Butterworth
-};
 
-enum class SpectrumMathMode {
-    Multiply,
-    Add,
-    Subtract,
-    Difference
-};
 
-enum class MagnitudePhaseMode {
-    Magnitude,
-    Phase,
-    Recombine
-};
 
-enum class SpectrumAnalyzerMode {
-    RadialEnergy,
-    DominantFrequency
-};
 
-enum class FrequencyFilterMode {
-    AllPass,
-    LowPass,
-    HighPass,
-    BandPass,
-    BandStop,
-    NotchReject
-};
 
-enum class FrequencyTransitionProfile {
-    Smooth,
-    Gaussian,
-    Butterworth,
-    Hard
-};
 
-enum class FrequencyEdgePolicy {
-    Mirror,
-    Wrap,
-    ZeroPad
-};
 
-enum class SpectrumCombineMode {
-    Add,
-    Subtract
-};
 
-enum class SpectrumViewMode {
-    Magnitude,
-    Phase,
-    Real,
-    Imaginary
-};
 
 enum class SocketType {
     Image,
     ImageOrChannel,
     Channel,
-    Spectrum,
-    FrequencyResponse,
-    SpectrumMagnitude,
-    SpectrumPhase,
     Mask,
     ScalarField,
     Boolean,

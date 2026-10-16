@@ -2,15 +2,19 @@
 #include "App/Validation/Suites/HeaderActionRegistryValidation.h"
 #include "App/Validation/Suites/ProjectBracketingOwnershipValidation.h"
 #include "App/Validation/Suites/ProjectFileOperationsValidation.h"
+#include "App/Validation/Suites/ProjectCurveFeedbackValidation.h"
 #include "App/Validation/Suites/ProjectGraphSnapshotValidation.h"
 #include "App/Validation/Suites/BracketingPresentationValidation.h"
 #include "App/ProjectWorkspace.h"
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
+#include "Graph/GraphDocumentRules.h"
 #include "Editor/AutoBracket/AutoBracketCoordinator.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Persistence/ProjectOpenCoordinator.h"
 #include "Renderer/GLLoader.h"
+#include "Project/GraphImagePayload.h"
 
 #include <filesystem>
 #include <chrono>
@@ -21,7 +25,7 @@
 
 namespace Stack::Validation {
 namespace {
-void RequireWorkspace(bool condition, const char* message) {
+void RequireWorkspace(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
 
@@ -83,36 +87,220 @@ nlohmann::json WorkspaceGraph(const EditorModule& editor) {
 void ValidateWorkspaceHistoryReplacement(EditorModule& editor, const EditorModule& other) {
     const auto otherGraph = WorkspaceGraph(other);
     const bool otherDirty = other.IsDirty();
-    const bool otherUndo = other.CanUndoFrequencyGraphAction();
-    const bool otherRedo = other.CanRedoFrequencyGraphAction();
+    const bool otherUndo = other.CanUndoProjectGraphEdit();
+    const bool otherRedo = other.CanRedoProjectGraphEdit();
     const auto addHistory = [&] {
-        const auto* filter = editor.GetNodeGraph().AddFrequencyFilterNode(
-            EditorNodeGraph::FrequencyFilterMode::BandStop, {240, 240});
-        RequireWorkspace(filter != nullptr, "Could not create the history check's filter.");
-        std::string error;
-        RequireWorkspace(editor.ExtractFrequencyResponseNode(filter->id, &error),
-            "Could not create frequency history through the editor action.");
-        RequireWorkspace(editor.CanUndoFrequencyGraphAction(),
-            "The frequency action did not record undo history.");
+        editor.AddOutputNodeAt({400,240});
+        editor.AddReformatNodeAt({240,240});
+        RequireWorkspace(editor.CanUndoProjectGraphEdit(),
+            "The graph action did not record undo history.");
     };
 
     addHistory();
     RequireWorkspace(editor.CloseCurrentProject(true) &&
-        !editor.CanUndoFrequencyGraphAction() && !editor.CanRedoFrequencyGraphAction(),
-        "Closing a project retained its frequency history.");
+        !editor.CanUndoProjectGraphEdit() && !editor.CanRedoProjectGraphEdit(),
+        "Closing a project retained its graph history.");
 
     addHistory();
-    RequireWorkspace(editor.UndoFrequencyGraphAction() && editor.CanRedoFrequencyGraphAction(),
-        "The frequency action did not record redo history.");
+    RequireWorkspace(editor.UndoProjectGraphEdit() && editor.CanRedoProjectGraphEdit(),
+        "The graph action did not record redo history.");
     const auto replacement = editor.SerializePipeline();
     editor.DeserializePipeline(replacement);
-    RequireWorkspace(!editor.CanUndoFrequencyGraphAction() && !editor.CanRedoFrequencyGraphAction(),
-        "Replacing the pipeline retained the prior document's frequency history.");
+    RequireWorkspace(!editor.CanUndoProjectGraphEdit() && !editor.CanRedoProjectGraphEdit(),
+        "Replacing the pipeline retained the prior document's graph history.");
     RequireWorkspace(editor.CloseCurrentProject(true), "Could not close the history check's project.");
     RequireWorkspace(WorkspaceGraph(other) == otherGraph && other.IsDirty() == otherDirty &&
-        other.CanUndoFrequencyGraphAction() == otherUndo && other.CanRedoFrequencyGraphAction() == otherRedo,
+        other.CanUndoProjectGraphEdit() == otherUndo && other.CanRedoProjectGraphEdit() == otherRedo,
         "Replacing one project's history changed another workspace.");
     std::cout << "PASS close and pipeline replacement clear only the owning project's undo/redo\n";
+}
+
+void ValidateUniformAdjustment(EditorModule& editor) {
+    if (editor.GetProjectSessionKind()!=EditorModule::ProjectSessionKind::Empty)
+        RequireWorkspace(editor.CloseCurrentProject(true),"Could not prepare the uniform parameter check.");
+    auto& pipeline=editor.GetPipeline();
+    const auto input=std::filesystem::current_path()/"Assets"/"Splash"/"splash_banner.png";
+    RequireWorkspace(pipeline.LoadSourceImage(input.string()),"Could not read the existing splash image for the focused parameter check.");
+    EditorNodeGraph::ImagePayload image;
+    image.width=pipeline.GetCanvasWidth(); image.height=pipeline.GetCanvasHeight(); image.channels=4;
+    image.pixels=pipeline.GetSourcePixelsRaw();
+    auto& graph=editor.GetNodeGraph();
+    const int source=graph.AddImageNode(std::move(image),{})->id;
+    std::cout<<"Uniform check: create Brightness\n";
+    editor.AddLayerNodeAt(LayerType::Brightness,{200,0});
+    const int adjustment=graph.GetSelectedNodeId();
+    RequireWorkspace(graph.FindNode(adjustment) && graph.FindNode(adjustment)->kind==EditorNodeGraph::NodeKind::Layer &&
+        graph.FindNode(adjustment)->layerIndex>=0 && graph.FindNode(adjustment)->layerIndex<editor.GetLayers().size(),
+        "The root project action failed to create its effect adapter.");
+    const auto uuid=graph.FindNode(adjustment)->instanceUuid;
+    auto& layer=editor.GetLayers()[graph.FindNode(adjustment)->layerIndex];
+    auto settings=layer->Serialize(); settings["brightness"]=-.8;
+    layer->Deserialize(settings);
+    graph.FindNode(adjustment)->layerParameters["brightness"]=.125;
+    editor.MarkGraphEdited(adjustment);
+    RequireWorkspace(graph.FindNode(adjustment)->layerParameters.at("brightness")==.125,
+        "A graph notification copied a stale adapter over the node-authored value.");
+    std::cout<<"Uniform check: connect output\n";
+    editor.AddOutputNodeAt({400,0});
+    const int output=graph.GetSelectedNodeId();
+    std::string error;
+    RequireWorkspace(editor.ConnectGraphSockets(source,"imageOut",adjustment,"imageIn",&error) &&
+        editor.ConnectGraphSockets(adjustment,"imageOut",output,"imageIn",&error),error);
+    editor.GetLayers()[graph.FindNode(adjustment)->layerIndex]->Deserialize(settings);
+    const auto authoredSnapshot=editor.BuildGraphSnapshot();
+    const auto authoredEffect=std::find_if(authoredSnapshot.nodes.begin(),authoredSnapshot.nodes.end(),
+        [&](const auto& node){return node.nodeId==adjustment;});
+    RequireWorkspace(authoredEffect!=authoredSnapshot.nodes.end() && authoredEffect->layerJson.at("brightness")==.125,
+        "Rendering read an effect adapter instead of its authored graph payload.");
+    const auto sample=[&] {
+        pipeline.ExecuteGraph(editor.BuildGraphSnapshot());
+        RequireWorkspace(pipeline.GetOutputTexture()!=0 && pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
+            "The core adjustment did not execute.");
+        std::vector<float> pixels(static_cast<std::size_t>(pipeline.GetCanvasWidth())*pipeline.GetCanvasHeight()*4);
+        glBindTexture(GL_TEXTURE_2D,pipeline.GetOutputTexture());
+        glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,pixels.data());
+        return pixels.front();
+    };
+    std::cout<<"Uniform check: render manual\n";
+    const float manual=sample();
+    editor.AddValueNodeAt(NodeMath::MakeUniformScalar(.25),{200,200});
+    const int producer=graph.GetSelectedNodeId();
+    const auto port=EditorNodeGraph::ParameterInputSocketId("layer.brightness");
+    RequireWorkspace(editor.SetNodeParameterExposed(adjustment,"layer.brightness",true) &&
+        editor.ConnectGraphSockets(producer,"valueOut",adjustment,port,&error),error);
+    RequireWorkspace(editor.OpenRawProjectNodeEditor(adjustment) && editor.IsViewMode(),
+        "The driven core node did not open in View.");
+    const Project::NodeEditTarget target{editor.GetProjectDocumentId(),Project::kProjectGraphId,uuid};
+    auto state=editor.GetUniformParameterState(target,"layer.brightness");
+    RequireWorkspace(state.available && state.value==.25 && std::abs(sample()-manual-.125f)<.0002f,
+        "The worker or View did not use the connected uniform value.");
+    const auto setValue=[&](double value) {
+        auto context=editor.GetGraphEditorContext();
+        auto edit=GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& candidate) {
+            candidate.FindNode(producer)->value.value=NodeMath::MakeUniformScalar(value);
+        });
+        RequireWorkspace(context.applyEdit(std::move(edit),error),error);
+    };
+    setValue(.5);
+    state=editor.GetUniformParameterState(target,"layer.brightness");
+    RequireWorkspace(state.available && state.value==.5 && std::abs(sample()-manual-.375f)<.0002f,
+        "Changing the producer reused stale parameters or clipped finite image data.");
+    RequireWorkspace(editor.GetLayers()[graph.FindNode(adjustment)->layerIndex]->Serialize()["brightness"]==.125,
+        "The connected value overwrote the authored manual parameter.");
+    setValue(2);
+    state=editor.GetUniformParameterState(target,"layer.brightness");
+    pipeline.ExecuteGraph(editor.BuildGraphSnapshot());
+    RequireWorkspace(!state.available && !state.reason.empty() &&
+        !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
+        "An out-of-range uniform value was accepted or shown as editable in View.");
+    RequireWorkspace(editor.RemoveGraphLink(producer,"valueOut",adjustment,port) && std::abs(sample()-manual)<.0002f,
+        "Disconnecting did not restore the authored manual parameter.");
+    RequireWorkspace(editor.UndoProjectGraphEdit() &&
+        std::abs(editor.GetLayers()[graph.FindNode(adjustment)->layerIndex]->Serialize()["brightness"].get<double>()-.125)<.00001 &&
+        editor.RedoProjectGraphEdit() && std::abs(sample()-manual)<.0002f,
+        "Image-backed history changed source storage or the authored manual parameter.");
+    setValue(.25);
+    editor.AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Multiply,{250,200});
+    const int arithmetic=graph.GetSelectedNodeId();
+    RequireWorkspace(editor.SetDataMathDomain(arithmetic,NodeMath::ArithmeticDomain::Values),
+        "The shared math operation did not accept its Values domain.");
+    const auto setArithmetic=[&](EditorNodeGraph::DataMathMode mode,float operand) {
+        auto context=editor.GetGraphEditorContext();
+        auto edit=GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& candidate) {
+            candidate.SetDataMathMode(arithmetic,mode);
+            candidate.FindNode(arithmetic)->dataMathSettings.constantB=operand;
+        });
+        RequireWorkspace(context.applyEdit(std::move(edit),error),error);
+    };
+    setArithmetic(EditorNodeGraph::DataMathMode::Multiply,2);
+    RequireWorkspace(editor.ConnectGraphSockets(producer,"valueOut",arithmetic,"imageA",&error) &&
+        editor.ConnectGraphSockets(arithmetic,"imageOut",adjustment,port,&error),error);
+    RequireWorkspace(std::abs(sample()-manual-.375f)<.0002f,
+        "The uniform arithmetic chain did not drive the real adjustment.");
+    setValue(-.25);
+    setArithmetic(EditorNodeGraph::DataMathMode::Divide,-.5);
+    RequireWorkspace(std::abs(sample()-manual-.375f)<.0002f,
+        "Uniform division lost the sign of its divisor.");
+    setArithmetic(EditorNodeGraph::DataMathMode::Divide,0);
+    pipeline.ExecuteGraph(editor.BuildGraphSnapshot());
+    RequireWorkspace(!pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
+        "Uniform division by zero silently produced a parameter value.");
+    RequireWorkspace(editor.RemoveGraphLink(arithmetic,"imageOut",adjustment,port) &&
+        std::abs(sample()-manual)<.0002f,"Arithmetic disconnect did not restore the authored parameter.");
+    setArithmetic(EditorNodeGraph::DataMathMode::Multiply,1);
+    RequireWorkspace(editor.RemoveGraphLink(producer,"valueOut",arithmetic,"imageA"),
+        "Could not prepare the measured arithmetic input.");
+    editor.AddChannelSplitNodeAt({100,300});
+    const int split=graph.GetSelectedNodeId();
+    editor.AddFieldMeanNodeAt({250,300});
+    const int mean=graph.GetSelectedNodeId();
+    RequireWorkspace(editor.ConnectGraphSockets(source,"imageOut",split,"imageIn",&error) &&
+        editor.ConnectGraphSockets(split,"r",mean,"fieldIn",&error) &&
+        editor.ConnectGraphSockets(mean,"valueOut",arithmetic,"imageA",&error) &&
+        editor.ConnectGraphSockets(arithmetic,"imageOut",adjustment,port,&error),error);
+    sample();
+    const auto& feedback=pipeline.GetLastGraphExecutionStats().uniformParameters;
+    RequireWorkspace(std::any_of(feedback.begin(),feedback.end(),[&](const auto& value) {
+        return value.available && value.documentId==target.documentId && value.graphId==target.layerId &&
+            value.nodeUuid==target.nodeUuid && value.parameterId=="layer.brightness";
+    }),"A derived uniform producer lost its authored owner identity.");
+    sample();
+    RequireWorkspace(!pipeline.GetLastGraphExecutionStats().uniformParameters.empty(),
+        "Cached output reuse dropped the effective uniform feedback.");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    do {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1000,700});
+        ImGui::Begin("Uniform View validation",nullptr,ImGuiWindowFlags_NoSavedSettings);
+        editor.RenderUI(); ImGui::End(); ImGui::EndFrame();
+        Async::TaskSystem::Get().PumpMainThreadTasks(4);
+        state=editor.GetUniformParameterState(target,"layer.brightness");
+        if (state.available) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    } while (std::chrono::steady_clock::now()<deadline);
+    if (!state.available) {
+        const auto& stats=editor.GetGraphPerformanceStats();
+        std::cerr<<"Uniform View feedback: submitted="<<stats.lastSubmittedGeneration
+            <<", output="<<editor.GetViewportOutputRenderGeneration()<<", main="<<stats.lastSubmissionIncludedMainOutput
+            <<", expected revision="<<editor.GetProjectSession().editRevision<<", reason="<<state.reason
+            <<", render failure="<<stats.lastMainGraphStats.lastSpecializedFailure<<'\n';
+        for (const auto& value:stats.lastMainGraphStats.uniformParameters)
+            std::cerr<<"  feedback "<<value.documentId<<'/'<<value.graphId<<'/'<<value.nodeUuid
+                <<" revision="<<value.revision<<" available="<<value.available<<" reason="<<value.reason<<'\n';
+    }
+    RequireWorkspace(state.available && state.revision==editor.GetProjectSession().editRevision,
+        "View did not accept the current derived parameter feedback from its worker.");
+    // Use the real imported image's R/G samples to check packed numerical
+    // storage. PNG gray/alpha packing must not replace G with repeated R.
+    const auto& sourceImage=graph.FindNode(source)->image;
+    EditorNodeGraph::ImagePayload partial;
+    partial.width=sourceImage.width; partial.height=sourceImage.height;
+    partial.channels=2; partial.originalChannels=2;
+    partial.pixels.reserve(sourceImage.pixels.size()/2);
+    for (std::size_t i=0;i<sourceImage.pixels.size();i+=4) {
+        partial.pixels.push_back(sourceImage.pixels[i]);
+        partial.pixels.push_back(sourceImage.pixels[i+1]);
+    }
+    EditorNodeGraph::Graph numerical;
+    const int numericalSource=numerical.AddImageNode(std::move(partial),{})->id;
+    const auto packed=EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(),numerical);
+    EditorNodeGraph::Graph reopened;
+    EditorNodeGraph::DeserializeGraphPayload(packed,reopened,0);
+    const auto* restored=reopened.FindNode(numericalSource);
+    RequireWorkspace(restored && restored->image.pixels.size()==sourceImage.pixels.size(),
+        "Current numerical-source storage did not reopen.");
+    const auto descriptor=Project::BuildRenderImagePayload(restored->image).sourceDescriptor;
+    RequireWorkspace(descriptor.presentImageComponents.state==NodeMath::KnowledgeState::Known &&
+        NodeMath::HasImageComponent(descriptor.presentImageComponents.value,NodeMath::ImageComponent::Green) &&
+        !NodeMath::HasImageComponent(descriptor.presentImageComponents.value,NodeMath::ImageComponent::Blue),
+        "Numerical RG source storage invented a blue component on reopen.");
+    for (std::size_t i=0;i<sourceImage.pixels.size();i+=4)
+        RequireWorkspace(restored->image.pixels[i]==sourceImage.pixels[i] &&
+            restored->image.pixels[i+1]==sourceImage.pixels[i+1],
+            "Numerical-source PNG storage moved or changed an authored component.");
+    RequireWorkspace(editor.CloseCurrentProject(true) && !editor.GetUniformParameterState(target,"layer.brightness").available,
+        "A replaced project accepted an earlier node's uniform feedback.");
+    std::cout<<"PASS core uniform execution, signed arithmetic chains, zero/range rejection, authored disconnection, derived feedback, cache reuse and replacement\n";
 }
 
 void RenderRawWorkspaceValidationFrame(EditorModule& editor) {
@@ -174,7 +362,7 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
     using namespace AutoBracket;
     // Queue metadata is sufficient to check dispatch eligibility and persisted
     // progress. This check never submits an image-processing job.
-    Queue saved;
+    AutoBracket::Queue saved;
     saved.root = scratch / "auto-bracket-queue";
     saved.items.push_back({{"saved-bracket", "Saved bracket", {}}, State::Completed, "saved-project"});
     saved.items.push_back({{"pending-bracket", "Pending bracket", {}}, State::Pending, "pending-project"});
@@ -182,9 +370,11 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
     std::string error;
     RequireWorkspace(SaveQueue(saved, error), "Could not write the queue metadata check.");
     const std::vector<Candidate> candidates{saved.items[0].candidate, saved.items[1].candidate};
+    const std::map<std::string,std::pair<std::string,std::filesystem::path>> represented{
+        {saved.items[0].candidate.identity,{saved.items[0].projectId,saved.root/"saved-project"}}};
     AutoBracketCoordinator scheduler;
     RequireWorkspace(scheduler.SetRoot(saved.root, 0), "Could not load the queue metadata check.");
-    scheduler.UpdateCandidates(candidates, {});
+    scheduler.UpdateCandidates(candidates, represented);
     RequireWorkspace(scheduler.CanStartWork(0, true, false) &&
         scheduler.CanStartWork(60, true, false) &&
         !scheduler.CanStartWork(60, false, false) && !scheduler.CanStartWork(60, true, true),
@@ -205,7 +395,7 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
     scheduler.Shutdown();
     AutoBracketCoordinator reopened;
     RequireWorkspace(reopened.SetRoot(saved.root, 61), "Could not reopen the bracket queue.");
-    reopened.UpdateCandidates(candidates, {});
+    reopened.UpdateCandidates(candidates, represented);
     RequireWorkspace(!reopened.GetQueue().paused && reopened.GetQueue().items[0].state == State::Completed &&
         reopened.GetQueue().items[1].projectId == "pending-project" &&
         reopened.CanStartWork(61, true, false),
@@ -218,7 +408,7 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
         "Further editing did not restart the idle wait.");
     AutoBracketCoordinator idleReopened;
     RequireWorkspace(idleReopened.SetRoot(saved.root, 160), "Could not reload the idle pause.");
-    idleReopened.UpdateCandidates(candidates, {});
+    idleReopened.UpdateCandidates(candidates, represented);
     RequireWorkspace(idleReopened.GetQueue().resumeWhenIdle &&
         !idleReopened.CanStartWork(219, true, false) && idleReopened.CanStartWork(220, true, false),
         "Closing and reopening the queue lost its idle pause.");
@@ -227,9 +417,15 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
         idleReopened.CanStartWork(160, true, false), "Run now did not override the idle wait.");
     idleReopened.Shutdown();
     reopened.SetPaused(true);
+    // Older releases saved stops without an idle-resume flag.
+    auto legacyPause=reopened.GetQueue();legacyPause.resumeWhenIdle=false;
+    RequireWorkspace(SaveQueue(legacyPause,error),error);
     AutoBracketCoordinator paused;
-    RequireWorkspace(paused.SetRoot(saved.root, 62) && paused.GetQueue().paused &&
-        !paused.CanStartWork(1000, true, false), "An explicit pause was lost on reload.");
+    RequireWorkspace(paused.SetRoot(saved.root,62),"Could not reload the legacy pause.");
+    paused.UpdateCandidates(candidates,represented);
+    RequireWorkspace(paused.GetQueue().paused &&
+        paused.GetQueue().resumeWhenIdle && !paused.CanStartWork(121,true,false) &&
+        paused.CanStartWork(122,true,false), "A reloaded pause did not resume after inactivity.");
     paused.Shutdown();
     reopened.SetPaused(false);
     reopened.Exclude("pending-bracket");
@@ -263,12 +459,13 @@ void ValidateAutoBracketWorkspaceLifecycle(EditorModule& donor, GLFWwindow* wind
         WorkspaceGraph(donor) == graph, "Closing automatic processing changed the donor or restarted work.");
     worker->Shutdown();
     donor.ShutdownAutoBracketing();
-    std::cout << "PASS automatic workspace transfer, immediate scheduling, idle resume, and durable pause\n"
+    std::cout << "PASS automatic workspace transfer, immediate scheduling, idle resume, and temporary pause reload\n"
         << "SKIP active bracket cancellation and pixel output: no image-processing job in this focused check\n";
 }
 }
 
 bool ValidateProjectWorkspaces(const std::string& projectPath) {
+    std::cout<<std::unitbuf;std::cerr<<std::unitbuf;
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -289,6 +486,17 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
     auto second = std::make_unique<ProjectWorkspace>(2);
     bool success = false;
     try {
+        if(projectPath=="--auto-only") {
+            first->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+            first->editor->Initialize(window,nullptr,false);
+            ValidateAutoBracketWorkspaceLifecycle(*first->editor,window,WorkspaceSaveScratchDirectory());
+            success=true;
+        } else {
+        std::vector<std::string> inventoryErrors;
+        const bool validInventory=EditorNodeGraphDefinitions::ValidateUnifiedNodeDefinitionRegistry(&inventoryErrors);
+        RequireWorkspace(validInventory,inventoryErrors.empty() ? "Invalid operation inventory." : inventoryErrors.front());
+        std::cout << "PASS production constructor/variant inventory: "
+            << EditorNodeGraphDefinitions::GetUnifiedNodeDefinitionRegistry().size() << " exact definitions\n";
         ValidateProjectSessionOwnership();
         ValidateProjectGraphSnapshotBuilder();
         ValidateProjectBracketingOwnership();
@@ -362,6 +570,8 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
         std::cout << "PASS names, graph edits, dirty flags, and discard remain in their own workspace\n";
 
         ValidateWorkspaceHistoryReplacement(a, b);
+        ValidateUniformAdjustment(a);
+        ValidateProjectCurveFeedback(a);
 
         const auto scratch = WorkspaceSaveScratchDirectory();
         a.SetDocumentPersistenceEnabled(true);
@@ -384,6 +594,21 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
         // omits it intentionally repairs that graph, so include it in this
         // save test instead of comparing before/after repair states.
         a.AddOutputNodeAt({360, 40});
+        using Stack::Project::WorkspaceMode;
+        RequireWorkspace(a.SetWorkspaceMode(WorkspaceMode::View),"Could not enter ordinary View.");
+        a.SetWorkspacePanelOpen(true);
+        const EditorNodeGraph::Node* editable = nullptr;
+        for (const auto& node : a.GetNodeGraph().GetNodes())
+            if (node.kind == EditorNodeGraph::NodeKind::Reformat) { editable=&node; break; }
+        RequireWorkspace(editable && a.OpenRawProjectNodeEditor(editable->id) && a.IsViewMode() &&
+            !a.GetRawLayerToolLabels().empty(),"An ordinary node did not open its instance editor in View.");
+        const auto beforeRejected = a.SerializePipeline();
+        auto obsolete = beforeRejected;
+        obsolete["nodeGraph"]["version"] = EditorNodeGraph::kEditorNodeGraphSchemaVersion-1;
+        bool rejected = false;
+        try { a.DeserializePipeline(obsolete); } catch (const std::exception&) { rejected=true; }
+        RequireWorkspace(rejected && a.SerializePipeline()==beforeRejected,
+            "Rejecting an old project changed the active authored document.");
         RequireWorkspace(a.IsDirty() && a.NeedsWorkspaceSaveBeforeTransition() &&
             !std::filesystem::exists(savedPath), "The first save was not an unsaved document.");
         SaveWorkspaceAndWait(a);
@@ -403,6 +628,8 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
         RequireWorkspace(static_cast<bool>(reopened), "The saved verification project could not be opened.");
         RequireWorkspace(a.ApplyLoadedProject(*reopened.candidate),
             "The saved verification project could not be applied to the workspace.");
+        RequireWorkspace(a.IsViewMode() && !a.WorkspacePanelOpen(),
+            "Reopening did not restore View with its side panel closed.");
         const auto reopenedGraph = WorkspaceGraph(a);
         if (reopenedGraph != editedGraph)
             std::cerr << "Saved workspace graph difference: "
@@ -500,6 +727,7 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
         }
         ValidateOverlappingProjectFileOperations(a, b, scratch);
         success = true;
+        }
     } catch (const std::exception& error) {
         std::cerr << "Project workspace validation failed: " << error.what() << '\n';
     }

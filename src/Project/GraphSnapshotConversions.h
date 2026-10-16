@@ -18,6 +18,6 @@ RenderImageGeneratorKind ToRenderImageGeneratorKind(EditorNodeGraph::ImageGenera
 RenderMaskUtilitySettings ToRenderMaskUtilitySettings(const EditorNodeGraph::MaskUtilitySettings& settings);
 RenderImageToMaskSettings ToRenderImageToMaskSettings(const EditorNodeGraph::ImageToMaskSettings& settings);
 RenderImageGeneratorSettings ToRenderImageGeneratorSettings(const EditorNodeGraph::ImageGeneratorSettings& settings);
-RenderFrequencyResponseSettings ToRenderFrequencyResponseSettings(const EditorNodeGraph::FrequencyResponseSettings& settings);
+
 
 } // namespace Stack::Project::GraphSnapshotInternal

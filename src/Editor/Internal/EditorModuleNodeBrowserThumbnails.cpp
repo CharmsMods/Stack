@@ -379,10 +379,6 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
             renderNode.rawSource.sourcePath = node.rawSource.sourcePath;
             renderNode.rawSource.metadata = node.rawSource.metadata;
             break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            renderNode.kind = RenderGraphNodeKind::RawNeuralDenoise;
-            renderNode.rawNeuralDenoise.settings = node.rawNeuralDenoise.settings;
-            break;
         case EditorNodeGraph::NodeKind::RawDecode:
             renderNode.kind = RenderGraphNodeKind::RawDecode;
             renderNode.rawDecode.settings = node.rawDecode.settings;
@@ -549,12 +545,17 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
 
 } // namespace
 
-bool EditorModule::GetNodeBrowserThumbnailView(const std::string& previewKey, NodeBrowserThumbnailView& outView) const {
+bool EditorModule::GetNodeBrowserThumbnailView(const std::string& previewKey, NodeBrowserThumbnailView& outView) {
     outView = {};
     const auto it = m_NodeBrowserThumbnailEntries.find(previewKey);
     if (it == m_NodeBrowserThumbnailEntries.end()) {
         return false;
     }
+    // A cold card must not decode PNGs in the drawing call. The existing
+    // project-owned worker publishes pixels with generation/revision checks.
+    if (!it->second.pngBytes.empty() && it->second.decodedPixels.empty() &&
+        m_NodeBrowserThumbnailWarmPendingEntries == 0)
+        WarmNodeBrowserThumbnailPixelsAsync();
     outView.pngBytes = it->second.pngBytes.empty() ? nullptr : &it->second.pngBytes;
     outView.decodedPixels = it->second.decodedPixels.empty() ? nullptr : &it->second.decodedPixels;
     outView.width = it->second.width;
@@ -715,12 +716,13 @@ EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed
     const EditorNodeGraph::Node* activeNode = m_Project->graph.FindNode(m_Project->graph.GetActiveImageNodeId());
 
     if (activeNode && activeNode->kind == EditorNodeGraph::NodeKind::Image) {
-        std::vector<unsigned char> pixels = activeNode->image.pixels;
+        std::vector<unsigned char> decodedPixels;
+        const auto& pixels = activeNode->image.pixels.empty() ? decodedPixels : activeNode->image.pixels;
         int width = activeNode->image.width;
         int height = activeNode->image.height;
         int channels = std::max(1, activeNode->image.channels);
         if (pixels.empty() && !activeNode->image.pngBytes.empty()) {
-            LibraryManager::DecodeImageBytes(activeNode->image.pngBytes, pixels, width, height, channels);
+            LibraryManager::DecodeImageBytes(activeNode->image.pngBytes, decodedPixels, width, height, channels);
         }
         if (!pixels.empty() && width > 0 && height > 0) {
             int resizedW = width;
@@ -1398,30 +1400,6 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
                 const int nodeId = addNode(BuildRenderNodeFromPrototype(prototype));
                 addLink(rawSourceNodeId, EditorNodeGraph::kRawOutputSocketId, nodeId, EditorNodeGraph::kRawInputSocketId);
                 addRequest(entry, nodeId, EditorNodeGraph::kImageOutputSocketId, false);
-                renderable = true;
-                break;
-            }
-            case EditorNodeGraph::NodeKind::RawNeuralDenoise: {
-                if (seed.kind != NodeBrowserPreviewSeed::Kind::Raw) {
-                    break;
-                }
-                const int rawSourceNodeId = ensureSharedRawSource();
-                const int denoiseNodeId = addNode(BuildRenderNodeFromPrototype(prototype));
-                EditorNodeGraph::Node decodePrototype = EditorNodeGraphDefinitions::BuildPrototypeNode(
-                    EditorNodeGraphDefinitions::NodeCatalogEntry {
-                        EditorNodeGraph::NodeKind::RawDecode,
-                        0,
-                        "RAW Decode",
-                        "Input / Output",
-                        "raw-decode",
-                        1,
-                        EditorNodeGraphDefinitions::NodeCatalogPreviewStrategy::Auto
-                    });
-                decodePrototype.rawDecode.settings = BuildRawPreviewDevelopSettings(seed.rawSource.metadata);
-                const int decodeNodeId = addNode(BuildRenderNodeFromPrototype(decodePrototype));
-                addLink(rawSourceNodeId, EditorNodeGraph::kRawOutputSocketId, denoiseNodeId, EditorNodeGraph::kRawInputSocketId);
-                addLink(denoiseNodeId, EditorNodeGraph::kRawOutputSocketId, decodeNodeId, EditorNodeGraph::kRawInputSocketId);
-                addRequest(entry, decodeNodeId, EditorNodeGraph::kImageOutputSocketId, false);
                 renderable = true;
                 break;
             }

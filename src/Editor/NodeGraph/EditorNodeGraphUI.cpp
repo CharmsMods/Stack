@@ -1,4 +1,6 @@
 #include "EditorNodeGraphUI.h"
+#include "Editor/EditorModule.h"
+#include "App/UiPerformanceTrace.h"
 
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
@@ -51,9 +53,72 @@ void EditorNodeGraphUI::BuildNodeLayoutCache(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node,
     NodeLayoutCache& cache) const {
+    RefreshLogicalNodeLayoutCache(graph, node, cache);
+    ProjectNodeLayoutCache(node, cache);
+}
+
+std::uint64_t EditorNodeGraphUI::LogicalNodeInputRevision(
+    const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) const {
+    // Authored socket/schema changes use the graph/document/render revisions.
+    // Expansion, revealed sockets and connection-preview intent are presentation
+    // inputs and can change without authoring a document edit.
+    std::uint64_t revision = graph.GetStructureRevision();
+    const auto mix = [&](std::uint64_t value) { MixRevision(revision, value); };
+    mix(reinterpret_cast<std::uintptr_t>(&graph));
+    mix(reinterpret_cast<std::uintptr_t>(&node));
+    mix(reinterpret_cast<std::uintptr_t>(m_ActiveEditor));
+    mix(m_GraphContext.revision);
+    mix(m_GraphContext.documentRevision);
+    if (m_ActiveEditor) {
+        mix(m_ActiveEditor->GetProjectSession().editRevision);
+        mix(m_ActiveEditor->GetRenderRevision());
+    }
+    mix(static_cast<std::uint64_t>(node.kind));
+    mix(static_cast<std::uint64_t>(node.layerType));
+    mix(static_cast<std::uint64_t>(node.layerIndex));
+    mix(static_cast<std::uint64_t>(node.role));
+    mix(std::hash<std::string>{}(node.rawLayerOwnerId));
+    mix(static_cast<std::uint64_t>(node.rawOperation.kind));
+    mix(static_cast<std::uint64_t>(node.maskKind));
+    mix(static_cast<std::uint64_t>(node.maskUtilityKind));
+    mix(static_cast<std::uint64_t>(node.imageToMaskKind));
+    mix(static_cast<std::uint64_t>(node.imageToMaskSettings.sampleCount));
+    mix(static_cast<std::uint64_t>(node.imageGeneratorKind));
+    mix(static_cast<std::uint64_t>(node.scopeKind));
+    mix(static_cast<std::uint64_t>(node.dataMathMode));
+    mix(static_cast<std::uint64_t>(node.technicalImageSettings.operation));
+    mix(node.expanded); mix(node.outputEnabled);
+    mix(std::hash<std::string>{}(node.title));
+    mix(std::hash<std::string>{}(node.typeId));
+    mix(static_cast<std::uint64_t>(graph.GetSocketPreviewIntent(node.id)));
+    mix(m_RevealedAdvancedInputNodes.count(node.id));
+    mix(m_RevealedAdvancedOutputNodes.count(node.id));
+    mix(reinterpret_cast<std::uintptr_t>(ImGui::GetFont()));
+    mix(std::hash<float>{}(ImGui::GetStyle().FontSizeBase));
+    if (node.kind == EditorNodeGraph::NodeKind::Layer) {
+        const auto spec = ResolveLayerSurfaceSpec(m_ActiveEditor, node.layerIndex);
+        mix(static_cast<std::uint64_t>(spec.presentation));
+        mix(static_cast<std::uint64_t>(spec.density));
+        mix(std::hash<float>{}(spec.preferredWidth));
+        mix(std::hash<float>{}(spec.maxWidth));
+        mix(ResolveLayerUsesRichNodeSurface(m_ActiveEditor, node.layerIndex));
+    }
+    return revision;
+}
+
+void EditorNodeGraphUI::RefreshLogicalNodeLayoutCache(
+    const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    NodeLayoutCache& cache) const {
     using namespace Stack::Editor::NodeGraphUILayout;
-    const std::uint64_t logicalContentRevision =
-        LogicalNodeContentRevision(graph, node);
+    const std::uint64_t inputRevision = LogicalNodeInputRevision(graph, node);
+    const bool canReuseInputs = !m_RenderPreviewOnly && !m_RenderCaptureOnly &&
+        m_GraphContext.graph == &graph && cache.hasLogicalInputs &&
+        cache.logicalInputRevision == inputRevision;
+    const std::uint64_t logicalContentRevision = canReuseInputs
+        ? cache.logicalContentRevision : LogicalNodeContentRevision(graph, node);
+    cache.logicalInputRevision = inputRevision;
+    cache.hasLogicalInputs = !m_RenderPreviewOnly && !m_RenderCaptureOnly && m_GraphContext.graph == &graph;
+    if (canReuseInputs) Stack::UiPerformance::Add(Stack::UiPerformance::Counter::LogicalReuse);
     std::uint64_t logicalRevision = logicalContentRevision;
     const auto measuredIt =
         m_NodeMeasuredBaseHeights.find(node.id);
@@ -70,10 +135,28 @@ void EditorNodeGraphUI::BuildNodeLayoutCache(
             logicalContentRevision;
         cache.logicalRevision = logicalRevision;
         cache.hasLogicalLayout = true;
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::LogicalRebuild);
     }
+}
+
+void EditorNodeGraphUI::ProjectNodeLayoutCache(
+    const EditorNodeGraph::Node& node, NodeLayoutCache& cache) const {
+    using namespace Stack::Editor::NodeGraphUILayout;
+    const auto position = ClampGraphPosition(node.position);
+    cache.contentUsedRect = {};
+    if (cache.hasProjection && cache.projectedLogicalRevision == cache.logicalRevision &&
+        cache.projectedPosition.x == position.x && cache.projectedPosition.y == position.y &&
+        cache.projectedOrigin.x == m_CanvasOrigin.x && cache.projectedOrigin.y == m_CanvasOrigin.y &&
+        cache.projectedPan.x == m_Pan.x && cache.projectedPan.y == m_Pan.y && cache.projectedZoom == m_Zoom) {
+        cache.overlayRect = cache.baseOverlayRect;
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::ProjectionReuse);
+        return;
+    }
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::ProjectionRebuild);
+    ++m_NodeProjectionRevision;
     const NodeProjectedLayout projected = ProjectNodeLayout(
         cache.logicalLayout,
-        ClampGraphPosition(node.position),
+        position,
         m_CanvasOrigin,
         m_Pan,
         m_Zoom);
@@ -91,6 +174,7 @@ void EditorNodeGraphUI::BuildNodeLayoutCache(
     cache.persistentVisualRect =
         toCachedRect(projected.bounds.persistentVisual);
     cache.overlayRect = toCachedRect(projected.bounds.overlay);
+    cache.baseOverlayRect = cache.overlayRect;
     cache.interactionRect = toCachedRect(projected.bounds.interaction);
     const float projectedSocketHitRadius =
         (kSocketRadius + kSocketLogicalHitPadding) * m_Zoom;
@@ -115,6 +199,12 @@ void EditorNodeGraphUI::BuildNodeLayoutCache(
             ImVec2(screenSocket.center.x, screenSocket.center.y)
         });
     }
+    cache.projectedLogicalRevision = cache.logicalRevision;
+    cache.projectedPosition = position;
+    cache.projectedOrigin = m_CanvasOrigin;
+    cache.projectedPan = m_Pan;
+    cache.projectedZoom = m_Zoom;
+    cache.hasProjection = true;
 }
 
 std::uint64_t EditorNodeGraphUI::LogicalNodeContentRevision(
@@ -283,6 +373,13 @@ std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSocke
     const EditorNodeGraph::Node& node) const {
     std::vector<EditorNodeGraph::SocketDefinition> presented;
     for (EditorNodeGraph::SocketDefinition socket : graph.GetSockets(node, false)) {
+        // Retain existing authored tap wires, without advertising a second
+        // image output on every adjustment or an input on a canvas-owned shape.
+        if (node.kind == EditorNodeGraph::NodeKind::RawOperation && socket.id == "inputImageOut" && !IsSocketConnected(graph,socket))
+            continue;
+        if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator && node.rawCoverage.value("canvas",std::string{}) == "project" &&
+            socket.direction == EditorNodeGraph::SocketDirection::Input)
+            continue;
         const bool revealed = socket.direction == EditorNodeGraph::SocketDirection::Input
             ? m_RevealedAdvancedInputNodes.count(node.id) != 0
             : m_RevealedAdvancedOutputNodes.count(node.id) != 0;
@@ -348,15 +445,34 @@ EditorNodeGraph::Node* EditorNodeGraphUI::FindCachedNode(EditorNodeGraph::Graph&
 }
 
 void EditorNodeGraphUI::RefreshNodeOrderCache(const EditorNodeGraph::Graph& graph) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NodeOrder);
     const int frame = ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
     const std::vector<EditorNodeGraph::Node>& nodes = graph.GetNodes();
     if (m_NodeOrderCacheFrame == frame &&
         m_NodeOrderCacheGraph == &graph &&
+        m_NodeOrderCacheNodes == nodes.data() &&
         m_NodeOrderCacheGraphRevision == graph.GetStructureRevision() &&
         m_NodeOrderCacheNodeCount == nodes.size() &&
         m_NodeOrderCacheFrontCounter == m_NodeFrontOrderCounter) {
         return;
     }
+
+    std::uint64_t presentation = 1469598103934665603ull;
+    for (const auto& node : nodes) {
+        MixRevision(presentation, static_cast<std::uint64_t>(node.id));
+        MixRevision(presentation, node.kind == EditorNodeGraph::NodeKind::Layer &&
+            node.expanded && ResolveLayerUsesRichNodeSurface(m_ActiveEditor, node.layerIndex));
+    }
+    if (m_NodeOrderCacheGraph == &graph && m_NodeOrderCacheNodes == nodes.data() &&
+        m_NodeOrderCacheGraphRevision == graph.GetStructureRevision() &&
+        m_NodeOrderCacheNodeCount == nodes.size() &&
+        m_NodeOrderCacheFrontCounter == m_NodeFrontOrderCounter &&
+        m_NodeOrderCachePresentation == presentation) {
+        m_NodeOrderCacheFrame = frame;
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::OrderReuse);
+        return;
+    }
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::OrderRebuild);
 
     std::vector<OrderedNodeEntry> order;
     order.reserve(nodes.size());
@@ -402,9 +518,11 @@ void EditorNodeGraphUI::RefreshNodeOrderCache(const EditorNodeGraph::Graph& grap
 
     m_NodeOrderCacheFrame = frame;
     m_NodeOrderCacheGraph = &graph;
+    m_NodeOrderCacheNodes = nodes.data();
     m_NodeOrderCacheGraphRevision = graph.GetStructureRevision();
     m_NodeOrderCacheNodeCount = nodes.size();
     m_NodeOrderCacheFrontCounter = m_NodeFrontOrderCounter;
+    m_NodeOrderCachePresentation = presentation;
 }
 
 const std::vector<int>& EditorNodeGraphUI::GetNodeRenderOrder(const EditorNodeGraph::Graph& graph) {

@@ -137,18 +137,24 @@ int RunStackApplication(int argc, char** argv) {
             std::strcmp(argv[1], "--diagnose-queue-export") == 0;
         const bool queueSourceExportDiagnostic = argc == 4 &&
             std::strcmp(argv[1], "--diagnose-queue-source") == 0;
+        const bool queueCurrentExportDiagnostic = argc == 4 &&
+            std::strcmp(argv[1], "--diagnose-queue-current") == 0;
+        const bool queueDiagnostic = queueExportDiagnostic || queueSourceExportDiagnostic || queueCurrentExportDiagnostic;
+        if (queueDiagnostic) std::cout.setf(std::ios::unitbuf);
         const bool galleryInspectionDiagnostic = argc == 4 &&
             std::strcmp(argv[1],
                 "--diagnose-gallery-inspection") == 0;
 #if defined(_WIN32)
         if (projectOpenDiagnostic || queueExportDiagnostic ||
-            queueSourceExportDiagnostic || galleryInspectionDiagnostic) {
+            queueSourceExportDiagnostic || queueCurrentExportDiagnostic || galleryInspectionDiagnostic) {
             std::set_terminate(DiagnosticTerminateHandler);
         }
 #endif
 
         const bool workspaceDiagnostic = argc == 3 && std::strcmp(argv[1], "--diagnose-workspace-switcher") == 0;
+        const bool uiPerformanceCapture = (argc == 4 || argc == 5) && std::strcmp(argv[1],"--diagnose-ui-performance")==0;
         AppShell app;
+        if (uiPerformanceCapture) app.ConfigureUiPerformanceCapture(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),argc==5?argv[4]:"");
         if (workspaceDiagnostic) app.ConfigureDiagnosticWorkspaceSwitcher(argv[2]);
         if (projectOpenDiagnostic) {
             app.ConfigureDiagnosticProjectOpen(
@@ -160,6 +166,10 @@ int RunStackApplication(int argc, char** argv) {
         if (queueExportDiagnostic || queueSourceExportDiagnostic) {
             app.ConfigureDiagnosticQueueExport(
                 argv[2], argv[3], queueSourceExportDiagnostic);
+        }
+        if (queueCurrentExportDiagnostic) {
+            app.ConfigureDiagnosticQueueCurrent(
+                std::filesystem::u8path(argv[2]), std::filesystem::u8path(argv[3]));
         }
         if (galleryInspectionDiagnostic) {
             app.ConfigureDiagnosticGalleryInspection(argv[2], argv[3]);
@@ -173,15 +183,18 @@ int RunStackApplication(int argc, char** argv) {
         }
 
         app.Run();
+        if (queueDiagnostic) std::cout << "[QueueExportDiagnostic] Event loop finished.\n";
         const bool diagnosticSucceeded =
+            (!uiPerformanceCapture || app.WasUiPerformanceCaptureSuccessful()) &&
             (!workspaceDiagnostic || app.WasDiagnosticWorkspaceSwitcherSuccessful()) &&
             (!projectOpenDiagnostic ||
              app.WasDiagnosticProjectOpenSuccessful()) &&
-            (!(queueExportDiagnostic || queueSourceExportDiagnostic) ||
+            (!(queueExportDiagnostic || queueSourceExportDiagnostic || queueCurrentExportDiagnostic) ||
              app.WasDiagnosticQueueExportSuccessful()) &&
             (!galleryInspectionDiagnostic ||
              app.WasDiagnosticGalleryInspectionSuccessful());
         app.Shutdown();
+        if (queueDiagnostic) std::cout << "[QueueExportDiagnostic] Application shutdown finished.\n";
 
         return diagnosticSucceeded ? 0 : 67;
     } catch (const std::exception& error) {

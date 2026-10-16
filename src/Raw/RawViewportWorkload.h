@@ -9,7 +9,7 @@
 namespace Raw {
 using ViewportStage = Stack::Renderer::RawDevelopmentCache::Stage;
 constexpr std::size_t kViewportStageCount = 8;
-inline constexpr std::uint64_t kViewportTimingVersion = 5;
+inline constexpr std::uint64_t kViewportTimingVersion = 7;
 using ViewportStageCosts = std::array<double, kViewportStageCount>;
 
 namespace ViewportModules {

@@ -25,7 +25,7 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
         return result;
     }
     std::array<double,64> headroom{};
-    std::vector<double> weights(groups);
+    std::array<double,64> weights{};
     bool completeSupport=false;
     const bool automatic=requested.empty()||recipe.automatic;
     for(std::size_t g=0;g<groups;++g) {
@@ -51,7 +51,8 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
         // invent clipping or discard these recoverable measurements merely
         // because no single exposure contains a complete usable color cell.
         for(unsigned s=0;s<sites;++s)
-            result[s]=Blend(samples[s],automatic?std::vector<double>{}:requested,recipe);
+            result[s]=BlendWithWeights(samples[s],automatic?nullptr:requested.data(),
+                automatic?0:requested.size(),recipe);
         // If a color has no accepted measurement, independent fallback can
         // pair clipped-reference red/blue with a dark, displaced green from
         // another exposure. Prefer one complete, unclipped exposure instead.
@@ -108,7 +109,7 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
         }
     }
     for(unsigned s=0;s<sites;++s) {
-        result[s]=Blend(samples[s],weights,recipe,&headroom);
+        result[s]=BlendWithWeights(samples[s],weights.data(),groups,recipe,&headroom);
         if(fallback) {
             result[s].fallback=true;
             if(result[s].fallbackReason==MeasurementFallbackReason::None)

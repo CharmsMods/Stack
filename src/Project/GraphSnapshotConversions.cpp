@@ -186,25 +186,6 @@ RenderImageGeneratorSettings ToRenderImageGeneratorSettings(const EditorNodeGrap
     return result;
 }
 
-RenderFrequencyResponseSettings ToRenderFrequencyResponseSettings(
-    const EditorNodeGraph::FrequencyResponseSettings& settings) {
-    RenderFrequencyResponseSettings result;
-    result.mode = static_cast<RenderFrequencyFilterMode>(settings.mode);
-    result.profile = static_cast<RenderFrequencyTransitionProfile>(settings.profile);
-    result.lowCutoff = settings.lowCutoff;
-    result.highCutoff = settings.highCutoff;
-    result.transitionWidth = settings.transitionWidth;
-    result.butterworthOrder = settings.butterworthOrder;
-    result.notches.reserve(settings.notches.size());
-    for (const EditorNodeGraph::FrequencyNotch& notch : settings.notches) {
-        result.notches.push_back({
-            notch.id,
-            notch.frequency,
-            notch.directionDegrees,
-            notch.width
-        });
-    }
-    return result;
-}
+
 
 } // namespace Stack::Project::GraphSnapshotInternal

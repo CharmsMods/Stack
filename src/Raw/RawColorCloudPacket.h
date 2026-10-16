@@ -12,6 +12,9 @@ struct RawColorCloudSample {
     float a = 0.0f;
     float b = 0.0f;
     float sceneEv = 0.0f;
+    // Pixel centers in the unwarped input image; readbacks use top-left rows.
+    float u = 0.0f;
+    float v = 0.0f;
 };
 
 struct RawColorCloudPacket {

@@ -1,6 +1,9 @@
 #pragma once
 #include "Raw/Bracketing/BurstGuide.h"
 #include "Raw/Bracketing/BurstAlignment.h"
+#include "Raw/Bracketing/CaptureCorrespondence.h"
+#include "Raw/Bracketing/CaptureReliability.h"
+#include "Raw/Bracketing/SuperResolution/Preparation.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -61,8 +64,72 @@ inline void ValidateBracketingBurstAlignment() {
     check(std::abs(correctionConfidence-.8)<1e-6,"Refinement confidence was not exposed to the sample reader");
     check(EvaluateCaptureMotion(source,{32,32},{},corrected,&correctionConfidence)&&correctionConfidence==1,
         "An unsupported refinement changed the original confidence policy");
+    ReliabilityMap reliability;reliability.valid=true;reliability.rawExtent={128,128};
+    reliability.cellExtent={64,64};reliability.cells.resize(64*64);
+    for(auto& cell:reliability.cells)cell.reliability=1;
+    const auto install=[&](std::uint16_t bits,double confidence) {
+        for(auto& cell:reliability.cells){cell.rejectionBits=bits;cell.reliability=confidence;}
+        source.reliability=std::make_shared<ReliabilityStore>();std::string error;
+        check(BuildReliabilityStore(reliability,ReliabilityStorageFormat::Uint16Unorm,32,*source.reliability,&error),error);
+        StampCaptureReliability(source);
+    };
+    const auto consistent=[&]() {
+        const auto match=EvaluateCaptureCorrespondence(source,{64,64});
+        const auto sr=Sr::MapCapture(source,64,64,false);
+        check(std::abs(sr.x-match.sourceRaw.x)<1e-5&&std::abs(sr.y-match.sourceRaw.y)<1e-5&&
+            std::abs(sr.z-match.confidence)<1e-6&&std::abs(sr.w-(match.covarianceRaw.xxRawPixelsSquared+
+            match.covarianceRaw.yyRawPixelsSquared))<1e-6,"Standard/SR correspondence or uncertainty differs");
+        return match.confidence;
+    };
+    install(0,1);check(std::abs(consistent()-.8)<1e-6,"Stored reliability erased correction confidence");
+    auto depthSupport=std::make_shared<Raw::DepthCorrespondenceSupport>();
+    depthSupport->width=depthSupport->height=2;depthSupport->rejected={0,0,0,1};
+    source.depthSupport=depthSupport;
+    check(consistent()==0,"Standard/SR ignored geometric disagreement");
+    depthSupport->rejected[3]=0;
+    check(consistent()>0,"Unknown depth removed accepted capture evidence");
+    source.depthSupport.reset();
+    for(auto bit:{ReliabilityRejectBit::AlignmentInvalid,ReliabilityRejectBit::SampleInvalid,
+        ReliabilityRejectBit::PatchRejected,ReliabilityRejectBit::NonFiniteEvidence}) {
+        install(ReliabilityRejectMask(bit),1);check(consistent()==0,"Hard rejection acquired reconstruction support");
+    }
+    install(ReliabilityRejectMask(ReliabilityRejectBit::InsufficientPatchSupport),.01);
+    check(std::abs(consistent()-.2)<1e-6,"Uncertain texture lost conservative support");
+    install(0,1);source.scale*=2;check(consistent()==0,"Stale exposure reliability was accepted");
+    source.scale/=2;source.scaleVariance+=.01;check(consistent()==0,"Stale exposure variance was accepted");
+    source.scaleVariance-=.01;++source.motionRevision;check(consistent()==0,"Stale motion reliability was accepted");
+    StampCaptureReliability(source);check(consistent()>0,"Current evidence was not restored");
     for(auto& cell:grid.nodes){cell.state=MotionNodeState::Rejected;cell.confidence=0;}
     check(!EvaluateCaptureMotion(source,{64,64},{},corrected),"Refinement resurrected rejected base motion");
+    check(consistent()==0,"Stored reliability resurrected rejected base motion in reconstruction");
+    check(Sr::MapCapture(source,64,64,true).z==1,"Fixed reference depended on alternate evidence");
+
+    // Exercise the production refresh with the existing shifted CFA pyramids.
+    for(auto& cell:grid.nodes){cell.state=MotionNodeState::Structured;cell.confidence=1;}
+    source.refinedMotion.reset();source.frame.activeCfaPattern=Raw::CfaPattern::RGGB;
+    PreparedSource fixed;fixed.frame=source.frame;
+    PreparedDataset shape;shape.width=shape.height=128;
+    auto refreshParameters=CaptureAlignmentParameters(shape);
+    ProcessingRequest refreshRequest;refreshRequest.workerCount=2;refreshRequest.memoryBudgetBytes=64*1024*1024;
+    alternate=pyramid(.35,-.2,false);std::string error;
+    check(RefreshCaptureReliability(refreshRequest,fixed,source,refreshParameters,reference,alternate,{},error),error);
+    const double before=EvaluateCaptureCorrespondence(source,{48,56}).confidence;
+    auto correction=std::make_shared<MotionRefinementField>(*field);
+    for(auto& cell:correction->cells){cell.delta={.7,-.4};cell.confidence=1;cell.covariance={.0025,0,.0025};}
+    source.refinedMotion=correction;++source.motionRevision;
+    check(!HasCurrentCaptureReliability(source),"Refinement retained the old evidence stamp");
+    check(RefreshCaptureReliability(refreshRequest,fixed,source,refreshParameters,reference,alternate,{},error),error);
+    check(HasCurrentCaptureReliability(source),"Refreshed reliability was not stamped");
+    const auto refreshed=EvaluateCaptureCorrespondence(source,{48,56});
+    check(refreshed.confidence>before+.2&&refreshed.confidence>.8,
+        "Reliability was not measured against the corrected sampling coordinates");
+    check(source.alignmentInspection&&source.alignmentDiagnostic.acceptedCoverage>0,
+        "Refinement did not refresh its inspection evidence");
+    const auto previous=source.reliability;
+    refreshRequest.shouldCancel=[] {return true;};++source.motionRevision;
+    check(!RefreshCaptureReliability(refreshRequest,fixed,source,refreshParameters,reference,alternate,{},error)&&
+        source.reliability==previous&&!HasCurrentCaptureReliability(source),"Canceled refresh published partial reliability");
     std::cout<<"Burst alignment: independent subsets, flat fallback, subpixel improvement, color conflict and cancellation passed.\n";
+    std::cout<<"Bracketing integration: shared rejection, revision checks and refined reliability passed.\n";
 }
 }

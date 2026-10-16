@@ -2,18 +2,24 @@
 #include "Renderer/GLLoader.h"
 
 void EditorModule::ResetProjectInteractionState() {
+    m_PreviewRequestCandidates = {};
+    m_PreviewCachePruneGeneration = 0;
     // Node IDs and source identities can be reused by a replacement document.
     // Neither histories nor unfinished gestures may follow them into it.
-    m_FrequencyGraphUndo.reset();
-    m_FrequencyGraphRedo.reset();
-    m_CustomMaskUndoStacks.clear();
-    m_CustomMaskRedoStacks.clear();
-    m_CustomMaskPaintingNodes.clear();
-    m_CustomMaskBrushAdjustDrag = {};
+    m_Project->graphHistory = {};
+    m_Project->uniformFeedback.clear();
+    m_Project->workspace = {};
     m_ProjectInteractionUi = {};
     m_Project->rawInteractionDraft = {};
+    m_Project->nodeEditor.reset();
+    m_Project->layerNodeSelection.clear();
+    m_Project->rawOperationSelection.clear();
     m_SelectedRawAdjustmentLayer.clear();
     m_RawLayerPanel.Clear();
+    m_RawAssetPreviews.Clear();
+    m_RawLayerToolPicker = {};
+    m_RawOperationRecipeCache = {};
+    m_RawOperationInputCache = {};
     m_RawLayerStatus.clear();
     m_RawLayerMaskWorkspace.reset();
     m_GraphEditorUsesRawLayer = false;
@@ -48,9 +54,8 @@ void EditorModule::ResetProjectInteractionState() {
     ui.lightSurfaceSourceKey.clear();
     ui.lightInteractionActive = false;
     ui.globalExposureInteractionActive = false;
-    ui.calibrationGestureActive = false;
-    ui.calibrationGestureStart = {};
-    ui.calibrationGestureSource.clear();
+    ui.calibrationEditor = {};
+    m_RawFloatingSurface.input = {};
     ui.colorWarpInteractionActive = false;
     ui.colorWarpDraggingSource = false;
     ui.colorWarpQualifierDragHandle = 0;

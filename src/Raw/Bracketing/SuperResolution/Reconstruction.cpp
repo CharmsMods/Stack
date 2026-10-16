@@ -4,7 +4,7 @@
 #include "Preparation.h"
 #include "Memory.h"
 #include "Raw/RawProcessingMath.h"
-#include "Persistence/RawProjectModel.h"
+#include "NodeMath/Uuid.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
 #include <cmath>
@@ -12,9 +12,6 @@
 #include <limits>
 
 namespace Raw::Bracketing {
-BracketingResult::ReconstructionInspection::~ReconstructionInspection() {
-    if(!directory.empty()){std::error_code e;std::filesystem::remove_all(directory,e);}
-}
 namespace {
 struct GpuSession {
     const ProcessingRequest& request;
@@ -180,7 +177,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     auto rejection=std::make_shared<std::vector<std::uint8_t>>(pixels);
     auto fallback=std::make_shared<std::vector<std::uint8_t>>(pixels);
     auto inspection=std::make_shared<BracketingResult::ReconstructionInspection>();
-    inspection->directory=data.directory/("sr-"+Stack::Project::GenerateStableUuid());
+    inspection->directory=data.directory/("sr-"+Stack::NodeMath::GenerateCanonicalUuid());
     inspection->scale=scale;inspection->tilePixels=tileSide;inspection->sensorWidth=data.width;inspection->sensorHeight=data.height;inspection->groups=unsigned(groups);
     inspection->recipe=request.recipe;
     std::filesystem::create_directories(inspection->directory);

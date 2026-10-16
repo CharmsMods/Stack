@@ -12,7 +12,8 @@ void TagManager::SetLibraryPath(const std::filesystem::path& libraryPath) {
 
 void TagManager::Load() {
     m_Tags.clear();
-    if (m_TagFilePath.empty() || !std::filesystem::exists(m_TagFilePath)) return;
+    std::error_code error;
+    if (m_TagFilePath.empty() || !std::filesystem::exists(m_TagFilePath, error)) return;
 
     try {
         std::ifstream file(m_TagFilePath);

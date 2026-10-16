@@ -44,13 +44,14 @@ void AppShell::TickToolSwitcher() {
     const bool mouseRequest = m_Editor->ConsumeRawToolPickerRequest();
     ImVec2 minimum, maximum;
     const bool hasBounds = m_Editor->GetRawActiveControlBounds(minimum, maximum);
+    sw.count = static_cast<int>(m_Editor->GetRawLayerToolLabels().size());
     const bool available = focused && !chord && !m_CloseRequested && !m_NotificationPresenter.BlocksInput() &&
-        (m_CurrentTabId == 5 || m_CurrentTabId == 3) && hasBounds &&
-        !m_Editor->IsWorkspaceTransitionPending() && !m_Editor->IsRawWorkspaceLockedByEditorProject() &&
+        ((m_CurrentTabId == 1 && m_Editor->IsViewMode()) || m_CurrentTabId == 5 || m_CurrentTabId == 3) && hasBounds && sw.HasChoices() &&
+        !m_Editor->IsWorkspaceTransitionPending() && !m_Editor->IsNodeOpenTransitionActive() &&
+        !m_Editor->IsRawWorkspaceLockedByEditorProject() &&
         !m_Editor->IsAutoBracketWorkspace() && !m_Editor->IsRawBracketModeActive() &&
         !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !m_Editor->IsBracketingPresentationActive() &&
         !m_WorkspaceSwitcher.Visible() && m_StartupRevealVisual.AllowsInput() &&
-        !m_ShowLegalGateReview && (!m_LegalManager || m_LegalManager->IsAccepted()) &&
         !m_MainWindowCloseSavePending && !m_FileActionSavePending && !m_ProjectLoadSavePending &&
         !m_RawWorkspaceSwitchSavePending && m_ContinueMainWindowCloseSource.empty() &&
         ActiveProjectLoadPhase() == LibraryToEditorProjectLoadPhase::None &&
@@ -70,7 +71,7 @@ void AppShell::TickToolSwitcher() {
     };
     const auto close = [&](bool commit) {
         const int selection = sw.hovered;
-        if (commit && selection >= 0) m_Editor->RequestRawLabToolIndex(selection);
+        if (commit && selection >= 0) m_Editor->RequestRawLayerToolIndex(selection);
         releaseCursor();
         sw.Close();
         sw.suppressed = down;
@@ -132,8 +133,8 @@ void AppShell::DrawToolSwitcher() {
     if (m_Editor->GetRawActiveControlBounds(minimum, maximum)) {
         sw.controlsMin = minimum; sw.controlsMax = maximum;
     }
-    constexpr const char* labels[] = {"Transform", "Denoise", "Color", "Global\nExposure", "Curves", "View\nTransform"};
-    static_assert(std::size(labels) == Stack::EditorModuleTypes::kRawLabDrawerTools.size());
+    const auto& labels = m_Editor->GetRawLayerToolLabels();
+    if (labels.size() < 2) return;
     auto* viewport = ImGui::GetMainViewport();
     const auto layout = sw.Geometry(m_NavigationRail.scale);
     const auto palette = Stack::Header::ResolvePalette(m_Appearance ? m_Appearance->GetClearColor()
@@ -152,10 +153,10 @@ void AppShell::DrawToolSwitcher() {
     const auto tint = [&](ImVec4 color, float opacity) { color.w *= alpha * opacity; return ImGui::GetColorU32(color); };
     draw->AddCircleFilled(layout.center, radius, tint(palette.caption, .93f), 96);
     constexpr float pi = 3.14159265359f;
-    const int active = m_Editor->GetRawLabToolIndex();
-    for (int i = 0; i < Stack::Tools::Switcher::Count; ++i) {
-        const float angle = -pi * .5f + 2.f * pi * i / Stack::Tools::Switcher::Count;
-        const float half = pi / Stack::Tools::Switcher::Count - .025f;
+    const int active = m_Editor->GetRawLayerToolIndex();
+    for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+        const float angle = -pi * .5f + 2.f * pi * i / labels.size();
+        const float half = pi / labels.size() - .025f;
         if (i == sw.hovered || i == active) {
             draw->PathArcTo(layout.center, radius - 4.f, angle - half, angle + half, 18);
             for (int j = 18; j >= 0; --j) {
@@ -166,11 +167,11 @@ void AppShell::DrawToolSwitcher() {
             draw->PathFillConcave(tint(palette.selected, i == sw.hovered ? 1.f : .45f));
         }
         const float fontSize = std::min(ImGui::GetFontSize(), radius * .105f);
-        const auto text = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0, labels[i]);
+        const auto text = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0, labels[i].c_str());
         const ImVec2 position(layout.center.x + std::cos(angle) * radius * .68f - text.x * .5f,
             layout.center.y + std::sin(angle) * radius * .68f - text.y * .5f);
         draw->AddText(ImGui::GetFont(), fontSize, position,
-            tint(palette.text, i == sw.hovered || i == active ? 1.f : .72f), labels[i]);
+            tint(palette.text, i == sw.hovered || i == active ? 1.f : .72f), labels[i].c_str());
     }
     const char* center = sw.hovered >= 0 ? (sw.held ? "Release" : "Choose") : "Cancel";
     const auto text = ImGui::CalcTextSize(center);

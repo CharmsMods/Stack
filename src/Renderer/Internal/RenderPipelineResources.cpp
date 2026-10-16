@@ -40,8 +40,6 @@ RenderPipeline::RenderPipeline()
       m_MaskProgram(0), m_MaskCombineProgram(0), m_MaskBlendProgram(0), m_MixProgram(0),
       m_MaskUtilityProgram(0), m_ImageToMaskProgram(0), m_ImageGeneratorProgram(0),
       m_DataMathProgram(0), m_TechnicalImageProgram(0), m_ReformatProgram(0),
-      m_SpectrumViewProgram(0), m_FrequencyMaskProgram(0), m_SpectrumMathProgram(0),
-      m_MagnitudePhaseProgram(0), m_FrequencyIfftProjectProgram(0),
       m_ChannelSplitProgram(0), m_ChannelCombineProgram(0), m_LutProgram(0),
       m_HdrMergeProgram(0),
       m_RawDetailFusionAnalysisProgram(0), m_RawDetailFusionMetricsProgram(0), m_RawDetailFusionSmoothProgram(0), m_RawDetailFusionApplyProgram(0),
@@ -80,6 +78,8 @@ void RenderPipeline::Shutdown() {
     // Recipe-layer instances own GL programs (and Tone Curve owns its LUT).
     // Release them while the renderer's GL context is still current.
     m_RawDevelopmentRecipeLayerCache.clear();
+    m_GraphLayerInstances.clear();
+    m_NodeOperationInstances.clear();
     ClearRawDevelopmentLocalRangeOverlay();
     ClearRawDevelopmentLocalRangeSelectionBits();
     ClearRawDevelopmentLocalRangeTargetPreviewSelection();
@@ -120,11 +120,7 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_DataMathProgram);
     deleteProgram(m_TechnicalImageProgram);
     deleteProgram(m_ReformatProgram);
-    deleteProgram(m_SpectrumViewProgram);
-    deleteProgram(m_FrequencyMaskProgram);
-    deleteProgram(m_SpectrumMathProgram);
-    deleteProgram(m_MagnitudePhaseProgram);
-    deleteProgram(m_FrequencyIfftProjectProgram);
+    deleteProgram(m_GraphViewportSampleProgram);
     deleteProgram(m_ChannelSplitProgram);
     deleteProgram(m_ChannelCombineProgram);
     deleteProgram(m_LutProgram);
@@ -161,7 +157,6 @@ void RenderPipeline::Shutdown() {
     deleteColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.guideTexture);
     m_RawDevelopmentColorWarpMaskCache = {};
 
-    m_GpuFft.Shutdown();
     m_Quad.Shutdown();
     m_Width = 0;
     m_Height = 0;
@@ -190,7 +185,6 @@ void RenderPipeline::CleanupFBOs() {
 void RenderPipeline::InvalidateGraphCaches(bool preserveRawDevelopStages) {
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
-    DestroyFrequencyCache();
     m_GraphScalarCache.clear();
     DestroyGraphCache(m_LutTextureCache);
     if (!preserveRawDevelopStages) {

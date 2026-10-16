@@ -4,7 +4,7 @@
 
 namespace Raw {
 constexpr int kMinimumInteractiveViewportEdge = 128;
-constexpr int kDefaultViewportFadeBelowFps = 30;
+constexpr int kDefaultViewportFadeBelowFps = 400;
 constexpr int kMinimumViewportFadeBelowFps = 5;
 constexpr int kMaximumViewportFadeBelowFps = std::numeric_limits<int>::max();
 inline int ClampViewportFadeBelowFps(int fps) {

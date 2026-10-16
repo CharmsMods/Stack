@@ -2,13 +2,14 @@
 #include "Editor/EditorModule.h"
 #include "App/AppPaths.h"
 #include "Raw/Bracketing/Recipe.h"
+#include "Persistence/BracketingResultStore.h"
 #include <algorithm>
 #include <fstream>
 #include <unordered_set>
 
 namespace Stack::Editor {
 void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,const Project::RawProjectSnapshot& snapshot,
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path, const Project::ProjectStoreHandle& store) {
     const auto* set=Project::FindSourceSet(snapshot,snapshot.activeSourceSetId);
     if(!set||!set->settings.contains("bracketing"))return;
     Raw::Bracketing::BracketingRecipe recipe;std::string error;
@@ -17,8 +18,12 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
     if(entry==workspace.sourceSetProjects.end()){workspace.sourceSetProjects.emplace_back();entry=std::prev(workspace.sourceSetProjects.end());}
     entry->projectId=snapshot.projectId;entry->projectName=snapshot.projectName;entry->absolutePath=path;
     entry->bracketingProject=true;
+    entry->hasSavedBracketingResult = false;
+    entry->sourceKeys.clear();
+    entry->referenceSourceKey.clear();
     entry->multiFrameProject=true;entry->status=RawWorkspace::ProjectStatus::Existing;
-    entry->totalFrameCount=0;entry->sourceSetCount=entry->rawSetCount=1;
+    entry->totalFrameCount=entry->rawSetCount=entry->rasterSetCount=0;
+    entry->sourceSetCount=snapshot.sourceSets.size();
     if(!snapshot.coverThumbnailBytes.empty()&&entry->coverThumbnailBytes!=snapshot.coverThumbnailBytes) {
         entry->coverThumbnailBytes=snapshot.coverThumbnailBytes;
         const auto directory=AppPaths::GetCacheDirectory()/"BracketingCovers";
@@ -29,32 +34,55 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
         std::ofstream output(target,std::ios::binary);output.write(reinterpret_cast<const char*>(snapshot.coverThumbnailBytes.data()),snapshot.coverThumbnailBytes.size());
         if(output)entry->coverThumbnailCachePath=target;
     }
-    std::unordered_set<std::string> selectedFrames;
-    for (const auto& group : recipe.groups) for (const auto& frame : group.frames) {
-        if (set->settings.contains("bracketingSelection")) {
-            const auto& selected = set->settings["bracketingSelection"];
-            if (std::find(selected.begin(), selected.end(), frame.id) == selected.end()) continue;
+    struct PreparedSet {
+        const Project::MultiFrameSourceSet* set = nullptr;
+        bool completed = false;
+        std::uint64_t selectedFrameCount = 0;
+        std::vector<std::pair<const Project::SourceSetFrame*, const Project::EmbeddedAssetRecord*>> frames;
+    };
+    std::vector<PreparedSet> prepared;
+    std::vector<std::string> identities;
+    for (const auto& sourceSet : snapshot.sourceSets) {
+        PreparedSet input;
+        input.set = &sourceSet;
+        input.completed = store && Project::HasSavedBracketingResult(store, snapshot, sourceSet);
+        entry->hasSavedBracketingResult |= input.completed;
+        if (sourceSet.inputFamily == Project::MultiFrameInputFamily::Raw) ++entry->rawSetCount;
+        else ++entry->rasterSetCount;
+        for (const auto& frame : sourceSet.frames) {
+            const auto selection = sourceSet.settings.find("bracketingSelection");
+            if (selection != sourceSet.settings.end() &&
+                (!selection->is_array() || std::find(selection->begin(), selection->end(), frame.frameId) == selection->end())) continue;
+            ++entry->totalFrameCount;
+            ++input.selectedFrameCount;
+            const auto* asset = Project::FindEmbeddedAsset(snapshot, frame.assetId);
+            if (!asset) continue;
+            identities.push_back(asset->sha256);
+            input.frames.emplace_back(&frame, asset);
         }
-        selectedFrames.insert(frame.id);
+        prepared.push_back(std::move(input));
     }
-    entry->totalFrameCount = selectedFrames.size();
+    entry->sourceIdentityKey = RawWorkspace::BuildGallerySourceIdentityKey(std::move(identities));
     for(auto& source:workspace.sources) {
         auto& memberships=source.sourceSetProjectMemberships;
         memberships.erase(std::remove_if(memberships.begin(),memberships.end(),[&](const auto& m){return m.projectId==snapshot.projectId;}),memberships.end());
-        bool member=false;
-        for(const auto& group:recipe.groups)for(const auto& frame:group.frames) {
-            if(set->settings.contains("bracketingSelection")) {
-                const auto& selected=set->settings["bracketingSelection"];
-                if(std::find(selected.begin(),selected.end(),frame.id)==selected.end())continue;
+        bool member = false;
+        for (const auto& input : prepared) {
+            const auto match = std::find_if(input.frames.begin(), input.frames.end(), [&](const auto& candidate) {
+                const auto* asset = candidate.second;
+                return (!source.fingerprint.empty() && source.fingerprint == asset->sha256) ||
+                    source.absolutePath.lexically_normal() == std::filesystem::path(asset->originalSourcePath).lexically_normal();
+            });
+            if (match == input.frames.end()) continue;
+            memberships.push_back({snapshot.projectId, snapshot.projectName, path,
+                input.set->sourceSetId, input.set->name, true, entry->coverThumbnailCachePath, input.completed,
+                input.selectedFrameCount});
+            member = true;
+            if (entry->referenceSourceKey.empty() || match->first->frameId == input.set->referenceFrameId) {
+                entry->referenceSourceKey = source.relativePathKey;
             }
-            const auto f=std::find_if(set->frames.begin(),set->frames.end(),[&](const auto& f){return f.frameId==frame.id;});
-            const auto* asset=f==set->frames.end()?nullptr:Project::FindEmbeddedAsset(snapshot,f->assetId);
-            if(asset&&((!source.fingerprint.empty()&&source.fingerprint==asset->sha256)||source.absolutePath==std::filesystem::path(asset->originalSourcePath)))member=true;
         }
-        if(member) {
-            memberships.push_back({snapshot.projectId,snapshot.projectName,path,set->sourceSetId,set->name,true,entry->coverThumbnailCachePath});
-            if(entry->referenceSourceKey.empty())entry->referenceSourceKey=source.relativePathKey;
-        }
+        if (member) entry->sourceKeys.push_back(source.relativePathKey);
     }
 }
 void AddBracketingResultStacks(std::vector<RawWorkspace::RawGallerySimilarityStack>& stacks,
@@ -90,6 +118,6 @@ void EditorModule::RefreshBracketingProjectCard() {
     const auto browsed = m_RawWorkspace.workspaceRoot.lexically_normal();
     const bool directlyBrowsed = path == browsed || path.parent_path() == browsed;
     if (!directlyBrowsed && (relative.empty() || relative.is_absolute() || *relative.begin() == "..")) return;
-    Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace, *m_Project->snapshot, path);
+    Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace, *m_Project->snapshot, path, m_Project->store);
     InvalidateRawWorkspaceGalleryPresentation();
 }

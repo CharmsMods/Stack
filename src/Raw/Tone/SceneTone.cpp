@@ -1,4 +1,6 @@
 #include "Raw/Tone/SceneTone.h"
+#include "Raw/RawDevelopmentRecipe.h"
+#include "Raw/Curves/CurveAuthoring.h"
 #include <algorithm>
 #include <cmath>
 
@@ -67,7 +69,13 @@ SceneTone SanitizeSceneTone(SceneTone t) {
 }
 SceneTone ReadSceneTone(const nlohmann::json& j) {
     SceneTone t;
-    if(!j.is_object()) return t;
+    if(!j.is_object() || j.empty()) return t;
+    t.direct=j.value("representation",std::string{})=="points-v1";
+    if(t.direct) {
+        t.curve=ReadCurvePoints(j.value("curve",nlohmann::json::array()));
+        if(t.curve.size()<2) t.curve={{0,0,{1},{1}},{1,1,{1},{1}}};
+        t.curveAmount=ReadCurveAmount(j.value("curveAmount",nlohmann::json::object()));
+    }
     if(j.contains("enabled")&&j["enabled"].is_boolean()) t.enabled=j["enabled"].get<bool>();
     t.anchorOffsetEv=Number(j,"anchorOffsetEv",0); t.contrast=Number(j,"contrast",1);
     t.pivotEv=Number(j,"pivotEv",0); t.coreHalfWidthEv=Number(j,"coreHalfWidthEv",1);
@@ -87,9 +95,18 @@ nlohmann::json SerializeSceneTone(const SceneTone& input) {
         {"pivotEv",t.pivotEv},{"coreHalfWidthEv",t.coreHalfWidthEv},{"transitionEv",t.transitionEv},{"outerProtection",t.outerProtection}};
     j["points"]=nlohmann::json::array();
     for(const auto& p:t.points) j["points"].push_back({{"ev",p.ev},{"contrast",p.contrast}});
+    if(t.direct) {j["representation"]="points-v1";j["curve"]=CurvePointsJson(t.curve);j["curveAmount"]=CurveAmountJson(t.curveAmount);}
     return j;
 }
 bool IsSceneToneActive(const SceneTone& t) {
+    if(t.direct) {
+        if(!t.enabled) return false;
+        for(const auto& p:t.curve) {
+            if(std::abs(p.y-p.x)>1e-7f) return true;
+            for(const auto* h:{&p.incoming,&p.outgoing})if(h->manual && std::abs(h->offsetY-h->offsetX)>1e-7f)return true;
+        }
+        return false;
+    }
     return t.enabled && (std::abs(t.anchorOffsetEv)>1e-7f || std::abs(t.contrast-1)>1e-7f ||
         std::any_of(t.points.begin(),t.points.end(),[](auto p){return std::abs(p.contrast-1)>1e-7f;}));
 }
@@ -110,10 +127,23 @@ float EffectiveSceneToneContrast(const SceneTone& t) {
 }
 float EvaluateSceneToneContrast(const SceneTone& t,float e) {
     if(!t.enabled) return 1;
+    if(t.direct) return (EvaluateSceneToneEv(t,e+.005f)-EvaluateSceneToneEv(t,e-.005f))/.01f;
     return float(BaseSlope(t,e)+(EffectiveSceneToneContrast(t)-1)*Shape(t,e));
 }
 float EvaluateSceneToneEv(const SceneTone& t,float e) {
     if(!t.enabled) return e;
+    if(t.direct && t.curve.size()>=2) {
+        const float x=(e+16)/32;
+        const float y=EvaluateRawBezierCurve(t.curve,std::clamp(x,0.f,1.f));
+        // Extend the end tangent, without clamping HDR luminance to the editor box.
+        float tail=0;
+        if(x<0 || x>1) {
+            const float edge=x<0?0.f:1.f,near=x<0?.001f:.999f;
+            const float slope=(y-EvaluateRawBezierCurve(t.curve,near))/(edge-near);
+            tail=(x-edge)*slope;
+        }
+        return -16+32*(y+tail);
+    }
     return float(t.anchorOffsetEv+BaseIntegral(t,e)-BaseIntegral(t,0)+
         (EffectiveSceneToneContrast(t)-1)*ShapeIntegral(t,e));
 }
@@ -130,7 +160,8 @@ std::array<float,3> ApplySceneTone(const SceneTone& t,std::array<float,3> rgb,co
 }
 float SetSceneToneOutput(SceneTone& t,std::size_t index,float target) {
     t=SanitizeSceneTone(std::move(t));
-    if(index>=t.points.size()||!std::isfinite(target)) return 0;
+    if(index>=(t.direct?t.curve.size():t.points.size())||!std::isfinite(target)) return 0;
+    if(t.direct && index<t.curve.size()) {t.curve[index].y=std::clamp((target+16)/32,0.f,1.f);return -16+32*t.curve[index].y;}
     const float e=t.points[index].ev;
     if(std::abs(e)<0.025f) {
         t.anchorOffsetEv=Finite(t.anchorOffsetEv+target-EvaluateSceneToneEv(t,e),0,-12,12);

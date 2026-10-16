@@ -88,7 +88,30 @@ void CheckMathAndStorage() {
     invalid.primaries[1]={-200,200};
     invalid=SanitizeColorCalibration(invalid);
     Require(invalid.primaries[0].hue==0&&invalid.primaries[0].saturation==0&&
-        invalid.primaries[1].hue==-100&&invalid.primaries[1].saturation==100,"Invalid slider values were not sanitized");
+        invalid.primaries[1].hue==-200&&invalid.primaries[1].saturation==200&&invalid.version==2,
+        "Nonfinite controls must reset without clipping unrestricted finite values");
+    const auto expandedDocument=SerializeColorCalibration(invalid);
+    Require(SerializeColorCalibration(DeserializeColorCalibration(expandedDocument))==expandedDocument,
+        "Unrestricted calibration did not round-trip");
+    Require(IsCanonicalRawRecipeDocument(document),"Existing bounded calibration lost canonical save compatibility");
+    for (int i=0;i<3;++i) {
+        const std::array<double,2> position {-.7+i*.8,1.3-i*.9};
+        RawColorCalibrationRecipe free;
+        free.primaries[i]=ColorCalibrationControlForPosition(i,position,{});
+        const auto actual=ColorCalibrationPrimaries(free)[i];
+        Require(std::hypot(actual[0]-position[0],actual[1]-position[1])<1e-6,"Free primary mapping changed position");
+        const auto transform=BuildColorCalibrationTransform(free,Raw::RawWorkingSpace::LinearRec2020D65);
+        for(double value:Apply(transform.matrix,{.18,.18,.18}))
+            Require(std::abs(value-.18)<1e-5,"Unrestricted transform changed neutral");
+    }
+    RawColorCalibrationRecipe collapsed;
+    for(int i=0;i<3;++i) collapsed.primaries[i]=ColorCalibrationControlForPosition(i,kCalibrationWhite,{});
+    Require(ColorCalibrationPrimaries(DeserializeColorCalibration(SerializeColorCalibration(collapsed)))[0]==kCalibrationWhite,
+        "A primary at neutral did not survive save/reopen");
+    bool singular=false;
+    try { BuildColorCalibrationTransform(collapsed,Raw::RawWorkingSpace::LinearRec2020D65); }
+    catch(const std::runtime_error&) { singular=true; }
+    Require(singular,"A singular arrangement must report no transform, not fabricate an output");
     Require(!IsColorCalibrationActive(BuildNeutralComparisonRecipe(recipe).colorCalibration),"Neutral comparison kept calibration");
     recipe.rgbDenoise.enabled=false;
     std::string reason;
@@ -166,6 +189,9 @@ void CheckGpuAndGuides() {
         CompareMatrix(baseline,test.Render(recipe),BuildColorCalibrationTransform(recipe.colorCalibration,space),4);
         recipe.preToneExposureEv=0;recipe.colorCalibration.enabled=false;
         Require(test.Render(recipe)==baseline,"Bypass changed original pixels");
+        recipe.colorCalibration={};
+        recipe.colorCalibration.primaries[0]={350,180};
+        CompareMatrix(baseline,test.Render(recipe),BuildColorCalibrationTransform(recipe.colorCalibration,space));
         recipe.colorCalibration={};Require(test.Render(recipe)==baseline,"Zero settings changed original pixels");
     }
     auto raw=MakeViewportValidationRaw(128,96);

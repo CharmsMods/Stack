@@ -6,10 +6,11 @@
 
 void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     RenderPipeline& pipeline, Result& result) {
-    if (!snapshot.graphRequest.enabled) return;
+    if (!snapshot.graphRequest.enabled && !result.viewportPreview.enabled) return;
     using namespace Stack::GraphRendering;
-    int width = snapshot.width, height = snapshot.height;
-    bool rawStages = false;
+    int width = std::max(snapshot.width, snapshot.rawWorkspace.fullFrameWidth);
+    int height = std::max(snapshot.height, snapshot.rawWorkspace.fullFrameHeight);
+    bool rawStages = snapshot.rawWorkspace.hasRecipe;
     for (const auto& node : snapshot.graph.nodes) {
         width = std::max(width, node.image.width);
         height = std::max(height, node.image.height);
@@ -27,6 +28,7 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
         }
         rawStages |= node.kind == RenderGraphNodeKind::RawSource ||
             node.kind == RenderGraphNodeKind::RawDevelopment ||
+            node.kind == RenderGraphNodeKind::RawProjectSourceSet ||
             node.kind == RenderGraphNodeKind::RawDevelop ||
             node.kind == RenderGraphNodeKind::RawDecode;
     }
@@ -50,7 +52,42 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     // pass ends. Reserve that conservative peak plus ping/pong and publication,
     // rather than applying RAW's fixed seven-surface estimate to a branched graph.
     const auto surfaces = schedule.valid ? schedule.outputs.size() : snapshot.graph.nodes.size();
-    const auto working = ImageBytes(width, height, AddBytes(surfaces, 3));
+    const auto targetBytes = [&](int w, int h, std::uint64_t count) {
+        const auto bytes = ImageBytes(w, h, count);
+        // RAW graphs use float32 targets and have internal reconstruction
+        // scratch beyond their authored output endpoints.
+        return rawStages ? AddBytes(bytes, bytes) : bytes;
+    };
+    const auto completeWorking = targetBytes(width, height, AddBytes(surfaces, rawStages ? 7 : 3));
+    std::uint64_t working = completeWorking;
+    if (result.viewportPreview.enabled) {
+        const auto mainPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
+            snapshot.width, snapshot.height, snapshot.previewMaxDimension, result.viewportPreview);
+        if (mainPlan.valid) {
+            working = mainPlan.workingBytes;
+            std::uint64_t publishedMain = 0;
+            const auto output = mainPlan.stages.find(mainPlan.output);
+            if (output != mainPlan.stages.end()) {
+                const auto& stage = output->second;
+                const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand,
+                    stage.renderWidth, stage.renderHeight);
+                publishedMain = targetBytes(resident.width, resident.height, 1);
+            }
+            // Complete auxiliary evaluations run after publication and may
+            // keep the main immutable texture alive while using full inputs.
+            if (!snapshot.previews.empty() || !snapshot.developCandidateRenders.empty())
+                working = std::max(working, AddBytes(completeWorking, publishedMain));
+            if (snapshot.prepareViewportOverview) {
+                auto overview = result.viewportPreview;
+                overview.visible = {};
+                overview.empty = false;
+                const auto overviewPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
+                    snapshot.width, snapshot.height, 512, overview);
+                const auto overviewWorking = overviewPlan.valid ? overviewPlan.workingBytes : completeWorking;
+                working = std::max(working, AddBytes(overviewWorking, publishedMain));
+            }
+        }
+    }
     const auto memory = Stack::Renderer::QueryGpuMemoryBudget();
     const auto budget = Raw::ResolveRawGpuMemoryBudget(memory);
     const auto resident = pipeline.GetGraphResidentCacheBytes();
@@ -58,6 +95,6 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     // other pipelines. Only this pipeline's evictable caches are added back.
     const auto allowance = CacheAllowance(memory.queryAvailable,
         budget.workingBudgetBytes, resident, working);
-    pipeline.SetGraphCacheBudget(allowance, 0, rawStages);
+    pipeline.SetGraphCacheBudget(allowance, snapshot.rawWorkspace.minimumRawStageCacheBytes, rawStages);
     result.telemetry.fullFrameEstimatedWorkingSetBytes = working;
 }

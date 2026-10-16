@@ -1,15 +1,99 @@
 #include "PhotometricReliability.h"
+#include "ParallelProcessing.h"
 #include <array>
-#include <atomic>
-#include <thread>
 
 namespace Raw::Bracketing {
 namespace {
 struct Evidence { std::array<float,4> z{};std::uint8_t valid=0; };
+
+struct PatchMoments {
+    std::array<double,4> sum{},squared{};
+    std::array<unsigned,4> support{};
+
+    void Add(const Evidence& evidence) {
+        for(unsigned s=0;s<4;++s)if(evidence.valid&(1u<<s)) {
+            const double z=evidence.z[s];
+            sum[s]+=z;squared[s]+=z*z;++support[s];
+        }
+    }
+};
+
+struct CompensatedSum {
+    double sum=0,correction=0;
+
+    void Add(double value) {
+        const double next=sum+value;
+        correction+=std::abs(sum)>=std::abs(value)?(sum-next)+value:(value-next)+sum;
+        sum=next;
+    }
+
+    double Value()const {return sum+correction;}
+};
+
+struct PatchWindow {
+    std::array<CompensatedSum,4> sum{},squared{};
+    std::array<unsigned,4> support{};
+
+    void Accumulate(const PatchMoments& column,bool remove=false) {
+        const double sign=remove?-1.:1.;
+        for(unsigned s=0;s<4;++s) {
+            sum[s].Add(sign*column.sum[s]);squared[s].Add(sign*column.squared[s]);
+            if(remove)support[s]-=column.support[s];
+            else support[s]+=column.support[s];
+            if(!support[s]) {sum[s]={};squared[s]={};}
+        }
+    }
+};
+
+// Each entering column is read once for both patch sizes. Seven columns and
+// two windows are sufficient regardless of image width or worker count.
+// Compensated updates keep a large rejected residual from contaminating the
+// small residuals that remain after its column leaves the window.
+template<typename Visitor>
+void VisitPatchStatisticsRow(const std::vector<Evidence>& evidence,unsigned width,
+    unsigned height,unsigned y,const Visitor& visit) {
+    struct Column {PatchMoments small,large;};
+    std::array<Column,7> columns;
+    PatchWindow small,large;
+    const auto load=[&](unsigned x) {
+        Column column;
+        const auto first=y>3?y-3:0u;
+        const auto last=std::min(height-1,y+3);
+        for(unsigned yy=first;yy<=last;++yy) {
+            const auto& sample=evidence[static_cast<std::size_t>(yy)*width+x];
+            column.large.Add(sample);
+            if(yy+1>=y&&yy<=y+1)column.small.Add(sample);
+        }
+        return column;
+    };
+    for(unsigned x=0;x<std::min(width,4u);++x) {
+        columns[x]=load(x);large.Accumulate(columns[x].large);
+        if(x<=1)small.Accumulate(columns[x].small);
+    }
+    for(unsigned x=0;x<width;++x) {
+        double mismatch=0;unsigned maximumSupport=0;
+        for(const auto* patch:{&small,&large})for(unsigned s=0;s<4;++s) {
+            mismatch=std::max(mismatch,NoiseCorrectedMismatch(
+                patch->sum[s].Value(),patch->squared[s].Value(),patch->support[s]));
+            maximumSupport=std::max(maximumSupport,patch->support[s]);
+        }
+        visit(x,mismatch,maximumSupport);
+        if(x+1==width)break;
+        // Advance the small window before replacing the oldest large-window
+        // slot. Its entering column is already resident in the seven slots.
+        if(x>=1)small.Accumulate(columns[(x-1)%7].small,true);
+        if(x+2<width)small.Accumulate(columns[(x+2)%7].small);
+        if(x>=3)large.Accumulate(columns[(x-3)%7].large,true);
+        if(x+4<width) {
+            auto& incoming=columns[(x+4)%7];incoming=load(x+4);
+            large.Accumulate(incoming.large);
+        }
+    }
+}
 }
 
 bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
-    Mfd::ReliabilityMap& result,std::string& error) {
+    Mfd::ReliabilityMap& result,std::string& error,const CaptureMotionEvaluator& evaluateMotion) {
     result={};
     const auto stride=request.cellStrideBayerCells;
     if(!stride||!request.motionGrid||!request.motionGrid->valid||!request.residualEvaluator||
@@ -21,15 +105,13 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     result.rawExtent=request.rawExtent;result.cellExtent={width,height};
     result.noiseQuality=request.noiseQuality;result.noiseConfidence=1;
     result.cells.resize(count);std::vector<Evidence> evidence(count);
-    const auto canceled=[&](){return request.shouldCancel&&request.shouldCancel();};
+    const auto motionAt=[&](Mfd::RawCoordinate point,Mfd::LocalMotionFieldSample& sample) {
+        return evaluateMotion?evaluateMotion(point,sample):
+            Mfd::EvaluateLocalMotionField(*request.motionGrid,point,request.motionOptions,sample,nullptr);
+    };
     const auto rows=[&](const auto& evaluate) {
-        std::atomic<unsigned> next{0};
-        const auto run=[&](){while(!canceled()) {const auto y=next.fetch_add(1);if(y>=height) break;evaluate(y);}};
-        std::vector<std::thread> workers;
-        const auto workersToUse=std::clamp(request.workerCount,1u,std::max(1u,height));
-        for(unsigned i=1;i<workersToUse;++i) workers.emplace_back(run);
-        run();for(auto& worker:workers) worker.join();
-        return !canceled();
+        return ProcessParallelIndices(height,request.workerCount,request.shouldCancel,
+            [&](std::size_t y) {evaluate(static_cast<unsigned>(y));return true;});
     };
     if(!rows([&](unsigned y) {
         for(unsigned x=0;x<width;++x) {
@@ -38,8 +120,7 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
             const auto cx=std::min<std::uint64_t>(rawCellWidth-1,static_cast<std::uint64_t>(x)*stride+stride/2);
             const auto cy=std::min<std::uint64_t>(rawCellHeight-1,static_cast<std::uint64_t>(y)*stride+stride/2);
             Mfd::LocalMotionFieldSample center;
-            if(!Mfd::EvaluateLocalMotionField(*request.motionGrid,{2.*cx+.5,2.*cy+.5},
-                request.motionOptions,center,nullptr)) {
+            if(!motionAt({2.*cx+.5,2.*cy+.5},center)) {
                 cell.rejectionBits=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid);continue;
             }
             cell.alignmentConfidence=std::clamp(center.alignmentConfidence,0.,1.);
@@ -47,7 +128,7 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
                 const auto site=static_cast<Mfd::CfaSite>(s);const auto offset=request.layout.OffsetFor(site);
                 const Mfd::RawCoordinate raw={2.*cx+offset.x,2.*cy+offset.y};
                 Mfd::LocalMotionFieldSample motion;Mfd::ReliabilityResidualSample sample;
-                if(!Mfd::EvaluateLocalMotionField(*request.motionGrid,raw,request.motionOptions,motion,nullptr)||
+                if(!motionAt(raw,motion)||
                    !request.residualEvaluator(raw,site,motion,sample)||!sample.valid||!sample.hardValid) continue;
                 const double variance=sample.referenceGateVariance+sample.alternateGateVariance+
                     request.parameters.fusion.numericalVarianceFloor;
@@ -64,25 +145,11 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     // red/blue boundary merely because the two green sites agree. Two patch
     // sizes distinguish incoherent sample noise from a coherent displaced edge.
     if(!rows([&](unsigned y) {
-        for(unsigned x=0;x<width;++x) {
+        const auto first=result.cells.begin()+static_cast<std::size_t>(y)*width;
+        if(std::all_of(first,first+width,[](const auto& cell) {return cell.rejectionBits!=0;}))return;
+        VisitPatchStatisticsRow(evidence,width,height,y,[&](unsigned x,double mismatch,unsigned maximumSupport) {
             auto& cell=result.cells[static_cast<std::size_t>(y)*width+x];
-            if(cell.rejectionBits) continue;
-            double mismatch=0;unsigned maximumSupport=0;
-            for(const int radius:{1,3}) {
-                std::array<double,4> sum{},squared{};std::array<unsigned,4> support{};
-                for(int dy=-radius;dy<=radius;++dy) for(int dx=-radius;dx<=radius;++dx) {
-                    const auto xx=static_cast<int>(x)+dx,yy=static_cast<int>(y)+dy;
-                    if(xx<0||yy<0||xx>=static_cast<int>(width)||yy>=static_cast<int>(height)) continue;
-                    const auto& e=evidence[static_cast<std::size_t>(yy)*width+xx];
-                    for(unsigned s=0;s<4;++s) if(e.valid&(1u<<s)) {
-                        sum[s]+=e.z[s];squared[s]+=double(e.z[s])*e.z[s];++support[s];
-                    }
-                }
-                for(unsigned s=0;s<4;++s) {
-                    mismatch=std::max(mismatch,NoiseCorrectedMismatch(sum[s],squared[s],support[s]));
-                    maximumSupport=std::max(maximumSupport,support[s]);
-                }
-            }
+            if(cell.rejectionBits)return;
             cell.validResidualCount=maximumSupport;cell.patchScale=mismatch;
             cell.patchGate=Mfd::FlatTopQuinticGate(mismatch,3.,7.);
             if(maximumSupport<4) {
@@ -95,7 +162,7 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
                 cell.rejectionBits|=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::PatchRejected);
             }
             cell.rawConfidence=cell.erodedConfidence=cell.reliability=cell.alignmentConfidence*cell.patchGate;
-        }
+        });
     })) {error="Canceled";return false;}
     for(const auto& cell:result.cells) if(!cell.rejectionBits&&cell.reliability>.05) ++result.usableCellCount;
     result.minimumUsableCellCount=Mfd::MinimumUsableReliabilityCells(count,request.parameters.reliability);

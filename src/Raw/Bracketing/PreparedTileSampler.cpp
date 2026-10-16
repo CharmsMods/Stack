@@ -91,21 +91,36 @@ bool PreparedTileSampler::ReadSample(
     std::string* error) {
     if (rawX >= frame.activeExtent.width ||
         rawY >= frame.activeExtent.height) return false;
+    if (frame.tileRawPixels == 0) {
+        if (error) *error = "The prepared RAW frame has an invalid tile size.";
+        return false;
+    }
     const auto tileX = static_cast<std::uint32_t>(
         rawX / frame.tileRawPixels);
     const auto tileY = static_cast<std::uint32_t>(
         rawY / frame.tileRawPixels);
     const Mfd::PreparedRawTile* tile = nullptr;
     if (GetTile(frame.cacheKey, tileX, tileY, tile, error) !=
-        Mfd::TileCacheReadStatus::Hit || !tile ||
+        Mfd::TileCacheReadStatus::Hit) {
+        if (error && error->empty())
+            *error = "A prepared RAW tile required for bracketing is unavailable.";
+        return false;
+    }
+    if (!tile ||
         rawX < tile->originX || rawY < tile->originY ||
         rawX >= tile->originX + tile->extent.width ||
-        rawY >= tile->originY + tile->extent.height) return false;
+        rawY >= tile->originY + tile->extent.height) {
+        if (error) *error = "A prepared RAW tile does not cover its requested sample.";
+        return false;
+    }
     const auto index = static_cast<std::size_t>(rawY - tile->originY) *
         tile->extent.width + rawX - tile->originX;
     if (index >= tile->normalizedMosaic.size() ||
         index >= tile->comparisonGain.size() ||
-        index >= tile->sampleFlags.size()) return false;
+        index >= tile->sampleFlags.size()) {
+        if (error) *error = "A prepared RAW tile has incomplete sample data.";
+        return false;
+    }
     sample.normalizedSample = tile->normalizedMosaic[index];
     sample.comparisonGain = tile->comparisonGain[index];
     sample.sampleFlags = tile->sampleFlags[index];
@@ -119,7 +134,8 @@ bool PreparedTileSampler::SampleSameCfa(
     Mfd::CfaSite site,
     const Mfd::SameCfaScalarParameters& parameters,
     Mfd::SameCfaSampleResult& result,
-    CaptureFallback& fallback) {
+    CaptureFallback& fallback,
+    std::string* error) {
     result = {};
     fallback = {};
     result.site = site;
@@ -148,8 +164,13 @@ bool PreparedTileSampler::SampleSameCfa(
         const auto rawY = static_cast<std::uint64_t>(raw.y);
         if (layout.SiteAt(
                 static_cast<std::int64_t>(rawX),
-                static_cast<std::int64_t>(rawY)) != site ||
-            !ReadSample(frame, rawX, rawY, taps[index])) return false;
+                static_cast<std::int64_t>(rawY)) != site) return false;
+        if (!ReadSample(frame, rawX, rawY, taps[index], error)) {
+            result.failure = Mfd::SameCfaSampleFailure::TileUnavailable;
+            result.message = error && !error->empty() ? *error :
+                "A prepared RAW footprint tile is unavailable.";
+            return false;
+        }
     }
 
     const auto siteIndex = static_cast<std::size_t>(site);

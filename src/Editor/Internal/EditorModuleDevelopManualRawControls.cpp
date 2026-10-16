@@ -1,3 +1,4 @@
+#include "Editor/Internal/RawDemosaicControls.h"
 #include "Editor/Internal/EditorModuleDevelopManualRawControls.h"
 
 #include "Editor/Internal/EditorModuleRawControlShared.h"
@@ -158,15 +159,7 @@ bool RenderDevelopManualRawAdvancedControls(
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     ImGui::BeginDisabled(!demosaicEnabled);
-    const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5", "Nearest Neighbor", "Hamilton-Adams" };
-    int demosaicMethod = static_cast<int>(settings.demosaicMethod);
-    ImGui::SetNextItemWidth(controlWidth);
-    if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
-        settings.demosaicMethod = static_cast<Raw::DemosaicMethod>(
-            std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
-        changed = true;
-    }
-    ImGui::TextDisabled("MHC, Nearest Neighbor, and Hamilton-Adams are Stack-side CFA reconstructions.");
+    changed |= Stack::Editor::DrawDemosaicCombo("Method",settings.demosaicMethod,controlWidth);
     ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));

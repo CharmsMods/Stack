@@ -4,6 +4,7 @@
 #include <imgui_internal.h>
 
 #include <functional>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -17,7 +18,8 @@ public:
         unsigned int handle = 0;
         int width = 0, height = 0;
     };
-    void BeginFrame(const std::string& workspace, bool grid, int frame, double time);
+    void BeginFrame(const std::string& workspace, bool grid, int frame, double time,
+        std::uint64_t orderRevision, bool reducedMotion);
     void EndFrame();
     bool Observe(const std::string& key, const ImRect& image, const ImRect& clip,
         float opacity = 1.0f);
@@ -57,6 +59,7 @@ private:
     double m_StartedAt = 0.0;
     float m_Progress = 1.0f;
     bool m_Grid = false;
+    std::uint64_t m_OrderRevision = 0;
     bool m_Active = false;
     std::size_t m_NextOrder = 0;
     std::string m_AnchorKey;

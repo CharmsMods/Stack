@@ -1,4 +1,5 @@
 #include "CaptureSharpness.h"
+#include "CaptureCorrespondence.h"
 #include "PreparedTileSampler.h"
 #include "BurstNoise.h"
 #include <array>
@@ -9,13 +10,10 @@ namespace Raw::Bracketing {
 namespace {
 struct Spectrum {double fine=0,coarse=0,noise=0;unsigned count=0;};
 bool Patch(PreparedTileSampler& sampler,const PreparedSource& source,
-    const Mfd::CfaLayout& layout,Mfd::RawCoordinate reference,Spectrum& spectrum,std::string& error) {
-    auto mapped=source.alignment.Map(reference);
-    if(source.localMotion) {
-        Mfd::LocalMotionFieldSample motion;Mfd::LocalMotionOptions options;
-        if(!EvaluateCaptureMotion(source,reference,options,motion)||motion.alignmentConfidence<.4) return false;
-        mapped=motion.sourceRaw;
-    } else if(source.alignmentDiagnostic.localApplied&&source.alignmentDiagnostic.backend!="fixed-reference") return false;
+    const Mfd::CfaLayout& layout,Mfd::RawCoordinate reference,bool fixedReference,Spectrum& spectrum,std::string& error) {
+    const auto match=EvaluateCaptureCorrespondence(source,reference,fixedReference);
+    if(match.confidence<.4)return false;
+    const auto mapped=match.sourceRaw;
     for(unsigned s=0;s<4;++s) {
         const auto site=static_cast<Mfd::CfaSite>(s);const auto plane=layout.RawToPlane(mapped,site);
         if(!std::isfinite(plane.x)||!std::isfinite(plane.y)) return false;
@@ -60,7 +58,7 @@ bool MeasureCaptureSharpness(const ProcessingRequest& request,PreparedDataset& d
     for(unsigned y=12;y+12<data.height;y+=stride) for(unsigned x=12;x+12<data.width;x+=stride) {
         if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
         Spectrum evidence;
-        if(Patch(sampler,origin,layout,{double(x),double(y)},evidence,error))
+        if(Patch(sampler,origin,layout,{double(x),double(y)},true,evidence,error))
             anchors.push_back({{double(x),double(y)},evidence.fine/evidence.count});
         if(!error.empty()) return false;
     }
@@ -73,7 +71,7 @@ bool MeasureCaptureSharpness(const ProcessingRequest& request,PreparedDataset& d
         for(const auto& anchor:anchors) {
             if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
             Spectrum evidence;
-            if(Patch(sampler,source,layout,anchor.coordinate,evidence,error)) {
+            if(Patch(sampler,source,layout,anchor.coordinate,false,evidence,error)) {
                 // Exposure calibration already puts these energies on one
                 // radiometric scale. Dividing by coarse energy here would
                 // hide blur in scenes dominated by one spatial frequency.

@@ -32,34 +32,51 @@ void AppShell::TickAutoBracketWorkspaces() {
     };
     for (const auto& workspace : m_ProjectWorkspaces) protectWorkspace(workspace);
     for (const auto& workspace : m_RetiredProjectWorkspaces) protectWorkspace(workspace);
-    // Editing, saving, loading or processing another project does not own
-    // this worker. Only application shutdown blocks independent queues.
+    // User-started first processing, imports and saves get the next admission
+    // slot. An already running automatic bracket retains its own owner and
+    // continues at background CPU/IO priority, with foreground GPU batches
+    // selected before its next batch. Ordinary edits do not stop that work.
+    const auto foregroundWork = [](const auto& workspace) {
+        const auto& editor = *workspace->editor;
+        return !editor.IsAutoBracketWorkspace() &&
+            (editor.IsUserStartedProcessingBusy() || editor.IsGraphDropImportBusy() ||
+             editor.IsSourceLoadBusy() || editor.IsRawWorkspaceProjectLoadBusy() || editor.IsExportBusy() ||
+             editor.IsProjectFileSaveBusy() || editor.IsRawWorkspaceProjectSaveBusy());
+    };
     const bool blocked = m_CloseRequested || !m_ContinueMainWindowCloseSource.empty() ||
         m_MainWindowCloseSavePending || !m_StartupRevealVisual.AllowsInput();
+    const bool foregroundBusy = std::any_of(m_ProjectWorkspaces.begin(),m_ProjectWorkspaces.end(),foregroundWork) ||
+        std::any_of(m_RetiredProjectWorkspaces.begin(),m_RetiredProjectWorkspaces.end(),foregroundWork);
     auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
     if (!gallery) return;
     const auto& galleryRoot = gallery->editor->GetRawWorkspaceState().workspaceRoot;
     bool workerExists = false;
     const auto publishCatalogChanges = [this](EditorModule& worker) {
-        if (!worker.ConsumeAutoBracketCatalogChanged()) return;
+        if (!worker.ConsumeRawWorkspaceCatalogChanged()) return;
         const auto& root = worker.GetRawWorkspaceState().workspaceRoot;
         for (auto& workspace : m_ProjectWorkspaces)
-            if (!workspace->editor->IsAutoBracketWorkspace() &&
+            if (workspace->editor.get() != &worker && !workspace->editor->IsAutoBracketWorkspace() &&
                 workspace->editor->GetRawWorkspaceState().workspaceRoot == root)
                 workspace->rawCatalogRefreshPending = true;
     };
     for (auto& workspace : m_ProjectWorkspaces) {
-        if (!workspace->editor->IsAutoBracketWorkspace()) continue;
-        workerExists |= Stack::Project::SameProjectPath(
-            workspace->editor->GetRawWorkspaceState().workspaceRoot, galleryRoot);
+        if (!workspace->editor->IsAutoBracketWorkspace()) {
+            publishCatalogChanges(*workspace->editor);
+            continue;
+        }
+        const auto& workerRoot=workspace->editor->GetRawWorkspaceState().workspaceRoot;
+        workerExists |= workerRoot==galleryRoot || Stack::Project::SameProjectPath(workerRoot,galleryRoot);
         workspace->editor->SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-        workspace->editor->TickAutoBracketing(blocked);
+        workspace->editor->TickAutoBracketing(blocked || foregroundBusy);
         publishCatalogChanges(*workspace->editor);
     }
     for (auto& workspace : m_RetiredProjectWorkspaces) {
-        if (!workspace->editor->IsAutoBracketWorkspace()) continue;
-        workerExists |= Stack::Project::SameProjectPath(
-            workspace->editor->GetRawWorkspaceState().workspaceRoot, galleryRoot);
+        if (!workspace->editor->IsAutoBracketWorkspace()) {
+            publishCatalogChanges(*workspace->editor);
+            continue;
+        }
+        const auto& workerRoot=workspace->editor->GetRawWorkspaceState().workspaceRoot;
+        workerExists |= workerRoot==galleryRoot || Stack::Project::SameProjectPath(workerRoot,galleryRoot);
         // Cancellation must publish its queue state before a replacement
         // scheduler reads that folder's saved progress.
         workspace->editor->TickAutoBracketing(true);
@@ -75,8 +92,8 @@ void AppShell::TickAutoBracketWorkspaces() {
     if (workerExists) return;
     auto& scheduler = *gallery->editor;
     scheduler.SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-    scheduler.TickAutoBracketing(blocked);
-    if (blocked || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
+    scheduler.TickAutoBracketing(blocked || foregroundBusy);
+    if (blocked || foregroundBusy || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
 
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
     workspace->editor->Initialize(m_Window, m_Appearance.get(), false);
@@ -84,6 +101,7 @@ void AppShell::TickAutoBracketWorkspaces() {
     workspace->editor->SetRawWorkspaceFolder(galleryRoot);
     if (scheduler.TransferAutoBracketingTo(*workspace->editor)) {
         // Starting automatic work does not change the user's selection.
+        workspace->editor->SetWorkspaceDetachedWindowsVisible(false);
         m_ProjectWorkspaces.push_back(std::move(workspace));
     } else {
         workspace->editor->RequestWorkerShutdownForAppClose();

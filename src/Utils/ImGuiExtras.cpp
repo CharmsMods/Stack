@@ -1,6 +1,8 @@
 #include "GraphCursor.h"
 #include "ImGuiExtras.h"
 #include "Utils/GraphNumericControls.h"
+#include "Utils/FloatingSlider.h"
+#include "Utils/Utf8Text.h"
 #include <imgui_internal.h>
 #include <array>
 #include <algorithm>
@@ -203,9 +205,10 @@ std::string EllipsizeTextForWidth(const char* text, float maxWidth) {
         return original;
     }
     static constexpr const char* kEllipsis = "...";
+    if (ImGui::CalcTextSize(kEllipsis).x > maxWidth) return {};
     std::string trimmed = original;
     while (!trimmed.empty()) {
-        trimmed.pop_back();
+        Stack::Utf8Text::RemoveLastCodePoint(trimmed);
         const std::string candidate = trimmed + kEllipsis;
         if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
             return candidate;
@@ -1032,6 +1035,12 @@ void RichColorSwatchRow(
 }
 
 bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, float v_max, const char* format, float controlWidth) {
+    if (HasFloatingSliderScope()) {
+        g_NextNumericDefault.reset();
+        const bool changed = FloatingSliderFloat(label,id,v,v_min,v_max,format,controlWidth);
+        CaptureNodeControlItem();
+        return changed;
+    }
     if (IsGraphNodeControlScopeActive() && g_GraphNodeControlScopeConfig.useScrubHandles) {
         auto defaultValue = g_NextNumericDefault;
         g_NextNumericDefault.reset();
@@ -1075,6 +1084,12 @@ bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, f
 }
 
 bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_max, const char* format, float controlWidth) {
+    if (HasFloatingSliderScope()) {
+        g_NextNumericDefault.reset();
+        const bool changed = FloatingSliderInt(label,id,v,v_min,v_max,format,controlWidth);
+        CaptureNodeControlItem();
+        return changed;
+    }
     if (IsGraphNodeControlScopeActive() && g_GraphNodeControlScopeConfig.useScrubHandles) {
         auto defaultValue = g_NextNumericDefault;
         g_NextNumericDefault.reset();
@@ -1217,6 +1232,16 @@ bool NodeInputInt(const char* label, const char* id, int* v, int step, int step_
     return changed;
 }
 
+bool InputTextMultiline(const char* label, std::string& value, const ImVec2& size,
+    ImGuiInputTextFlags flags) {
+    if (value.capacity() < value.size() + 1) {
+        value.reserve(value.size() + 32);
+    }
+    InputTextCallbackUserData userData { &value };
+    return ImGui::InputTextMultiline(label, value.data(), value.capacity() + 1, size,
+        flags | ImGuiInputTextFlags_CallbackResize, ResizeStdStringInputCallback, &userData);
+}
+
 bool NodeTextMultiline(const char* label, const char* id, std::string& value, float controlWidth, int lineCount) {
     ImGui::PushID(id);
 
@@ -1230,19 +1255,7 @@ bool NodeTextMultiline(const char* label, const char* id, std::string& value, fl
         ImGui::GetTextLineHeightWithSpacing() * static_cast<float>(lines) +
         ImGui::GetStyle().FramePadding.y * 2.0f;
     ImGui::SetNextItemWidth(width);
-    if (value.capacity() < value.size() + 1) {
-        value.reserve(value.size() + 32);
-    }
-
-    InputTextCallbackUserData userData { &value };
-    const bool changed = ImGui::InputTextMultiline(
-        "##TextValue",
-        value.data(),
-        value.capacity() + 1,
-        ImVec2(width, height),
-        ImGuiInputTextFlags_CallbackResize,
-        ResizeStdStringInputCallback,
-        &userData);
+    const bool changed = InputTextMultiline("##TextValue", value, ImVec2(width, height));
     CaptureNodeControlItem();
 
     ImGui::PopID();

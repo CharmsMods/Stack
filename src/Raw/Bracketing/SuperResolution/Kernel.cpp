@@ -9,7 +9,8 @@ namespace Raw::Bracketing::Sr {
 bool Validate(const Tile& t,const FrameRegion& f,std::string& error) {
     if(!t.width||!t.height||t.pixels.size()!=std::size_t(t.width)*t.height||
        !(t.step>0)||f.width<=0||f.height<=0||f.samples.size()!=std::size_t(f.width)*f.height||
-       f.mapWidth<2||f.mapHeight<2||f.mapping.size()!=std::size_t(f.mapWidth)*f.mapHeight||!(f.mapStep>0)) {
+       f.mapWidth<2||f.mapHeight<2||f.mapping.size()!=std::size_t(f.mapWidth)*f.mapHeight||!(f.mapStep>0)||
+       !std::isfinite(f.detailPreference)||f.detailPreference<.1f||f.detailPreference>1) {
         error="Invalid super-resolution tile or capture region.";return false;
     }
     return true;
@@ -21,13 +22,18 @@ Vec4 Map(const FrameRegion& f,float x,float y) {
     const unsigned ix=std::min(unsigned(u),f.mapWidth-2),iy=std::min(unsigned(v),f.mapHeight-2);
     const float a=u-ix,b=v-iy;
     const auto lerp=[](Vec4 p,Vec4 q,float w){return Vec4{p.x+(q.x-p.x)*w,p.y+(q.y-p.y)*w,p.z+(q.z-p.z)*w,p.w+(q.w-p.w)*w};};
-    return lerp(lerp(f.mapping[iy*f.mapWidth+ix],f.mapping[iy*f.mapWidth+ix+1],a),
-        lerp(f.mapping[(iy+1)*f.mapWidth+ix],f.mapping[(iy+1)*f.mapWidth+ix+1],a),b);
+    const auto p00=f.mapping[iy*f.mapWidth+ix],p10=f.mapping[iy*f.mapWidth+ix+1];
+    const auto p01=f.mapping[(iy+1)*f.mapWidth+ix],p11=f.mapping[(iy+1)*f.mapWidth+ix+1];
+    auto result=lerp(lerp(p00,p10,a),lerp(p01,p11,a),b);
+    // Interpolation cannot turn a contributing hard rejection into support.
+    if((a<1&&b<1&&p00.z<=0)||(a>0&&b<1&&p10.z<=0)||
+       (a<1&&b>0&&p01.z<=0)||(a>0&&b>0&&p11.z<=0))result.z=0;
+    return result;
 }
 }
 void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y,PixelAccumulator& p) {
     const auto m=Map(f,tile.originX+x*tile.step,tile.originY+y*tile.step);
-    if(!std::isfinite(m.x)||!std::isfinite(m.y)||m.z<=0)return;
+    if(!std::isfinite(m.x)||!std::isfinite(m.y)||!std::isfinite(m.z)||!std::isfinite(m.w)||m.z<=0)return;
     const int cx=int(std::floor(m.x+.5f)),cy=int(std::floor(m.y+.5f));
     // Reject a capture's incomplete color footprint as a whole. Dropping only
     // clipped green taps while retaining red/blue sky taps reconstructs a
@@ -49,11 +55,12 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
         // Spatial mass stays independent of noisy sample values. The fixed
         // variance scale keeps sums in a comfortable float32 range.
         const float base=m.z*headroom*1e-5f/(variance+std::max(0.f,m.w));
-        const float w=base*std::exp(-.5f*(p.kernel.x*dx*dx+2*p.kernel.y*dx*dy+p.kernel.z*dy*dy));
+        const float w=f.detailPreference*base*std::exp(-.5f*(p.kernel.x*dx*dx+2*p.kernel.y*dx*dy+p.kernel.z*dy*dy));
         const float bw=base*std::exp(-.5f*(dx*dx+dy*dy));
         auto& n=p.narrow[c];auto& b=p.broad[c];
         n.value+=w*s.x;n.weight+=w;n.noise+=w*w*variance;weights[c]+=w;
         b.value+=bw*s.x;b.weight+=bw;b.noise+=bw*bw*variance;broadWeights[c]+=bw;
+        p.detailBroadWeight[c]+=bw*f.detailPreference;
         p.crossNoise[c]+=w*bw*variance;
     }
     for(unsigned c=0;c<3;++c) {
@@ -94,8 +101,10 @@ ChannelResult Resolve(const PixelAccumulator& p,unsigned channel) {
     const float area=1/std::sqrt(std::max(1e-12f,p.kernel.x*p.kernel.z-p.kernel.y*p.kernel.y));
     float confidence=1;
     for(unsigned c=0;c<3;++c) {
-        const auto& nc=p.narrow[c];const auto& bc=p.broad[c];
-        const float coverage=nc.weight/std::max(1e-12f,bc.weight*area);
+        const auto& nc=p.narrow[c];
+        // Compare areas using the same capture preference on both kernels.
+        // Broad reconstruction itself still receives every usable capture.
+        const float coverage=nc.weight/std::max(1e-12f,p.detailBroadWeight[c]*area);
         const float support=nc.weight*nc.weight/std::max(1e-30f,nc.frameWeightSquared);
         confidence=std::min({confidence,std::clamp((coverage-.2f)/.8f,0.f,1.f),std::clamp((support-1.f)/2.f,0.f,1.f)});
     }

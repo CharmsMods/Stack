@@ -20,74 +20,7 @@
 
 namespace Stack::Renderer::GraphExecution {
 
-void GraphExecutionRuntime::BindSpectrumAndScalarEvaluation() {
-    evalSpectrumAnalysis = [this](int nodeId, RenderSpectrumAnalysis& analysis) -> bool {
-        if (const auto local = spectrumAnalysisCache.find(nodeId);
-            local != spectrumAnalysisCache.end()) {
-            analysis = local->second;
-            return analysis.valid;
-        }
-        const auto nodeIt = nodes.find(nodeId);
-        if (nodeIt == nodes.end() || nodeIt->second == nullptr ||
-            nodeIt->second->kind != RenderGraphNodeKind::SpectrumAnalyzer) return false;
-        const RenderGraphNode& node = *nodeIt->second;
-        const RenderGraphLink* spectrumLink = findInputLink(
-            nodeId, EditorNodeGraph::kSpectrumInputSocketId);
-        if (spectrumLink == nullptr) return false;
-
-        RenderSpectrumAnalyzerSettings settings = node.spectrumAnalyzerSettings;
-        const auto applyBandInput = [&](const char* parameterId, float& destination) {
-            const RenderGraphLink* input = findInputLink(
-                nodeId, EditorNodeGraph::ParameterInputSocketId(parameterId));
-            if (input == nullptr) return true;
-            double value = destination;
-            if (!evalScalar(input->fromNodeId, input->fromSocketId, value)) return false;
-            destination = static_cast<float>(value);
-            return true;
-        };
-        if (!applyBandInput(EditorNodeGraph::kAnalyzerLowParameterId, settings.innerRadius) ||
-            !applyBandInput(EditorNodeGraph::kAnalyzerHighParameterId, settings.outerRadius)) {
-            return false;
-        }
-        if (!std::isfinite(settings.innerRadius)) settings.innerRadius = 0.0f;
-        if (!std::isfinite(settings.outerRadius)) settings.outerRadius = 0.5f;
-        settings.innerRadius = std::clamp(settings.innerRadius, 0.0f, 0.70710678f);
-        settings.outerRadius = std::clamp(settings.outerRadius, 0.0f, 0.70710678f);
-        if (settings.innerRadius > settings.outerRadius)
-            std::swap(settings.innerRadius, settings.outerRadius);
-
-        std::size_t fingerprint = HashValue(node.definitionId);
-        HashCombine(fingerprint, HashValue(node.definitionVersion));
-        HashCombine(fingerprint, HashValue(node.definitionHash));
-        HashCombine(fingerprint, fingerprintFrequency(
-            spectrumLink->fromNodeId, spectrumLink->fromSocketId));
-        HashCombine(fingerprint, HashValue(settings.innerRadius));
-        HashCombine(fingerprint, HashValue(settings.outerRadius));
-        HashCombine(fingerprint, HashValue(settings.excludeDc));
-        const std::string persistentKey =
-            MakeNodeSocketKey(nodeId, EditorNodeGraph::kRadialPowerOutputSocketId);
-        if (const auto persistent = pipeline.m_GraphFrequencyAnalysisCache.find(persistentKey);
-            persistent != pipeline.m_GraphFrequencyAnalysisCache.end() &&
-            persistent->second.fingerprint == fingerprint) {
-            analysis = persistent->second;
-            spectrumAnalysisCache[nodeId] = analysis;
-            return analysis.valid;
-        }
-
-        const RenderFrequencyResource spectrum = evalFrequency(
-            spectrumLink->fromNodeId, spectrumLink->fromSocketId);
-        analysis = pipeline.AnalyzeSpectrum(spectrum, settings, fingerprint);
-        spectrumAnalysisCache[nodeId] = analysis;
-        if (analysis.valid) {
-            pipeline.m_GraphFrequencyAnalysisCache[persistentKey] = analysis;
-        } else {
-            pipeline.m_GraphFrequencyAnalysisCache.erase(persistentKey);
-            pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId = nodeId;
-            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure = analysis.error;
-        }
-        return analysis.valid;
-    };
-
+void GraphExecutionRuntime::BindScalarEvaluation() {
     evalScalar = [&](int nodeId, const std::string& socketId, double& value) -> bool {
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
         if (const auto local = scalarCache.find(key); local != scalarCache.end()) {
@@ -98,7 +31,7 @@ void GraphExecutionRuntime::BindSpectrumAndScalarEvaluation() {
         if (!visitingScalars.insert(key).second) {
             pipeline.m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
             pipeline.m_LastGraphExecutionStats.lastReductionFailure =
-                "Reduction dependency contains a cycle.";
+                "Uniform value dependency contains a cycle.";
             return false;
         }
         const auto finishFailure = [&](std::string message) {
@@ -110,6 +43,8 @@ void GraphExecutionRuntime::BindSpectrumAndScalarEvaluation() {
         const auto nodeIt = nodes.find(nodeId);
         if (nodeIt == nodes.end() || nodeIt->second == nullptr)
             return finishFailure("The connected uniform value has no executable source.");
+        if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end())
+            return finishFailure(unavailable->second);
         const RenderGraphNode& node = *nodeIt->second;
         if (node.kind == RenderGraphNodeKind::Value && socketId == EditorNodeGraph::kValueOutputSocketId) {
             if (!std::isfinite(node.scalarValue)) return finishFailure("The connected value is not finite.");
@@ -118,29 +53,25 @@ void GraphExecutionRuntime::BindSpectrumAndScalarEvaluation() {
             visitingScalars.erase(key);
             return true;
         }
-        if (node.kind == RenderGraphNodeKind::SpectrumAnalyzer) {
-            if (socketId != EditorNodeGraph::kBandPowerOutputSocketId &&
-                socketId != EditorNodeGraph::kPeakFrequencyOutputSocketId &&
-                socketId != EditorNodeGraph::kPeakDirectionOutputSocketId) {
-                return finishFailure("Spectrum Analyzer's radial curve is Data, not a scalar Value.");
+        
+        if (node.kind == RenderGraphNodeKind::DataMath &&
+            node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+            socketId == EditorNodeGraph::kImageOutputSocketId) {
+            std::vector<double> inputs;
+            const bool average = node.dataMathMode == RenderDataMathMode::Average;
+            const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
+            const int count = average ? EditorNodeGraph::kMaxDataMathInputCount : (unary ? 1 : 2);
+            for (int i = 0; i < count; ++i) {
+                const auto* link = findInputLink(nodeId, EditorNodeGraph::DataMathInputSocketId(i));
+                double operand = i == 0 ? node.dataMathSettings.constantA : node.dataMathSettings.constantB;
+                if (link && !evalScalar(link->fromNodeId, link->fromSocketId, operand))
+                    return finishFailure(pipeline.m_LastGraphExecutionStats.lastReductionFailure);
+                if (!average || link) inputs.push_back(operand);
             }
-            RenderSpectrumAnalysis analysis;
-            if (!evalSpectrumAnalysis(nodeId, analysis)) {
-                return finishFailure(analysis.error.empty()
-                    ? "Spectrum Analyzer could not evaluate its spectrum." : analysis.error);
-            }
-            if (socketId == EditorNodeGraph::kBandPowerOutputSocketId)
-                value = analysis.bandPower;
-            else if (socketId == EditorNodeGraph::kPeakFrequencyOutputSocketId)
-                value = analysis.peakFrequency;
-            else
-                value = analysis.peakDirectionDegrees;
+            std::string error;
+            if (!Stack::NodeMath::EvaluateUniformArithmetic(node.dataMathMode, node.dataMathSettings, inputs, value, error))
+                return finishFailure(std::move(error));
             scalarCache[key] = value;
-            RenderPipeline::CachedGraphScalar cached;
-            cached.fingerprint = fingerprintScalar(nodeId, socketId);
-            cached.value = value;
-            cached.lastUseSerial = ++pipeline.m_GraphResourceUseSerial;
-            pipeline.m_GraphScalarCache[key] = cached;
             visitingScalars.erase(key);
             return true;
         }

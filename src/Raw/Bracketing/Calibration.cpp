@@ -5,36 +5,16 @@
 #include "BurstAlignment.h"
 #include "LocalDetail.h"
 #include "HdrColorFusion.h"
+#include "Depth/Depth.h"
 #include "Raw/RawLoader.h"
 #include "Panorama/Panorama.h"
-#include "Persistence/RawProjectModel.h"
+#include "Raw/RawCaptureCompatibility.h"
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
 
 namespace Raw::Bracketing {
-std::string AnalysisIdentity(const ProcessingRequest& request) {
-    if(request.recipe.reconstruction==ReconstructionMode::Panorama)return Panorama::PreparationIdentity(request);
-    auto recipe=request.recipe;recipe.knots=EqualCurves(recipe.groups.size());recipe.automatic=true;
-    // Output resolution does not alter source preparation, motion or the guide.
-    recipe.reconstruction=ReconstructionMode::Standard;
-    for(auto& group:recipe.groups) {group.name.clear();group.colorSlot=-1;}
-    auto j=Serialize(recipe);
-    // Sampling and clipping decisions feed reliability, the guide and cached
-    // group tiles. Keep their revisions together when these decisions change.
-    j["alignmentProfile"]="automatic-local-v19-highlight-geometry";
-    j["detailProfile"]=kLocalDetailRevision;
-    j["hdrProfile"]=kHdrColorFusionRevision;
-    for(const auto& s:request.sources) j["sources"].push_back({s.frameId,s.sha256,s.bytes});
-    // Native inspection uses the immutable prepared captures and does not
-    // need to re-extract project assets merely to name the same sources.
-    if(request.sources.empty()&&request.analysis) {
-        const auto stored=nlohmann::json::parse(request.analysis->identity,nullptr,false);
-        if(stored.is_object()&&stored.contains("sources"))j["sources"]=stored["sources"];
-    }
-    return j.dump();
-}
-bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
+bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     data.directory=request.cacheDirectory;
     data.removeCacheOnRelease=request.removeCacheOnRelease;
@@ -56,11 +36,11 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         if(request.reportProgress) request.reportProgress(.02,"Preparing capture "+std::to_string(data.sources.size()+1));
         // Check metadata before the decoder allocates its full sensor buffers.
         RawMetadata metadata;
-        if(!request.decode && RawLoader::LoadMetadata(source->path.string(),metadata)) {
+        if(!request.decode && RawLoader::LoadMetadata(source->path.u8string(),metadata)) {
             const auto pixels=static_cast<std::uint64_t>(std::max(0,metadata.rawWidth))*std::max(0,metadata.rawHeight);
             if(pixels>request.memoryBudgetBytes/48) {error="The RAW decoder and output exceed the available bracketing memory budget.";return false;}
         }
-        const bool loaded=request.decode?request.decode(source->path,raw,request.shouldCancel):RawLoader::LoadFile(source->path.string(),raw,request.shouldCancel);
+        const bool loaded=request.decode?request.decode(source->path,raw,request.shouldCancel):RawLoader::LoadFile(source->path.u8string(),raw,request.shouldCancel);
         if(!loaded) {error=raw.metadata.error.empty()?"Could not decode a bracket capture.":raw.metadata.error;return false;}
         if(raw.metadata.sourceContentSha256!=source->sha256 || raw.metadata.sourceByteSize!=source->bytes) {
             error="A bracket capture no longer matches its saved content identity.";return false;
@@ -146,6 +126,12 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         data.sources.push_back(std::move(s));
     }
     data.stageSeconds["decode_prepare"]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-preparationStart).count();
+    return true;
+}
+bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
+    std::vector<std::string>& diagnostics,std::string& error) {
+    if(!PrepareSources(request,data,diagnostics,error))return false;
+    if(!PreflightBurstRefinement(request,data,diagnostics,error))return false;
     {
         ProcessingTimer timer(data.stageSeconds,"global_alignment");
         if(!Align(request,data,diagnostics,error)) return false;
@@ -190,10 +176,18 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
                 };
                 ++localRequest.presentationPass;
                 if(!AlignLocal(localRequest,data,diagnostics,error)) return false;
+            } else {
+                // Keep the exact calibration paired with the retained map.
+                // Sub-threshold solver drift must not leave its stamp stale.
+                for(std::size_t i=0;i<data.sources.size();++i) {
+                    data.sources[i].scale=previousScales[i];
+                    data.sources[i].scaleVariance=previousVariance[i];
+                }
             }
         }
     }
     if(!RefineBurstAlignment(request,data,diagnostics,error))return false;
+    if(!Depth::Estimate(request,data,diagnostics,error))return false;
     return MeasureCaptureSharpness(request,data,diagnostics,error);
 }
 } // namespace Raw::Bracketing

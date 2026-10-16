@@ -13,6 +13,7 @@ inline double NoiseCorrectedMismatch(double sum,double sumSquared,unsigned count
     const double coherent=std::abs(mean)*std::sqrt(count/2.);
     return std::max(structure,coherent);
 }
+using CaptureMotionEvaluator=std::function<bool(Mfd::RawCoordinate,Mfd::LocalMotionFieldSample&)>;
 bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
-    Mfd::ReliabilityMap& result,std::string& error);
+    Mfd::ReliabilityMap& result,std::string& error,const CaptureMotionEvaluator& evaluateMotion={});
 }

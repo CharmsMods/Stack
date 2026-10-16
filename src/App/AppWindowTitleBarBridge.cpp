@@ -1,8 +1,10 @@
 #include "AppWindowTitleBarBridge.h"
 
 #include "AppPaths.h"
+#include "App/UiPerformanceTrace.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -64,6 +66,8 @@ namespace {
 Metrics g_Metrics;
 bool g_TraceLoggedRuntimeDisabled = false;
 bool g_TraceLoggedThemeUpdate = false;
+std::array<std::uint32_t, 4> g_AppliedThemeColors {};
+bool g_HasAppliedThemeColors = false;
 
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
 winrt::Microsoft::UI::Windowing::AppWindow g_AppWindow { nullptr };
@@ -143,6 +147,7 @@ void Trace(const char*, GLFWwindow* = nullptr, const char* = nullptr) {}
 #endif
 
 void SetFallback(const std::string& reason, GLFWwindow* window = nullptr) {
+    g_HasAppliedThemeColors = false;
     g_Metrics.initialized = true;
     g_Metrics.customizationSupported = false;
     g_Metrics.active = false;
@@ -362,6 +367,7 @@ bool RuntimeFlagEnabled() {
 
 void Initialize(GLFWwindow* window) {
     g_Metrics = Metrics{};
+    g_HasAppliedThemeColors = false;
     g_Metrics.requested = RuntimeFlagEnabled();
     g_Metrics.compiled =
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
@@ -514,6 +520,7 @@ void Shutdown() {
 #endif
     g_Metrics = Metrics{};
     g_TraceLoggedThemeUpdate = false;
+    g_HasAppliedThemeColors = false;
 }
 
 void UpdateTheme(
@@ -522,6 +529,7 @@ void UpdateTheme(
     const ImVec4& hoverBackground,
     const ImVec4& pressedBackground,
     float captionButtonOpacity) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NativeChrome);
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
     if (!g_Metrics.active || !g_AppWindow) {
         return;
@@ -537,11 +545,28 @@ void UpdateTheme(
         inactiveForeground.w *= 0.72f * opacity;
         hover.w *= opacity;
         pressed.w *= opacity;
-        auto titleBar = g_AppWindow.TitleBar();
-        titleBar.ButtonForegroundColor(BoxColor(ToWindowsColor(activeForeground)));
-        titleBar.ButtonInactiveForegroundColor(BoxColor(ToWindowsColor(inactiveForeground)));
-        titleBar.ButtonHoverBackgroundColor(BoxColor(ToWindowsColor(hover)));
-        titleBar.ButtonPressedBackgroundColor(BoxColor(ToWindowsColor(pressed)));
+        const std::array<winrt::Windows::UI::Color, 4> colors {
+            ToWindowsColor(activeForeground), ToWindowsColor(inactiveForeground),
+            ToWindowsColor(hover), ToWindowsColor(pressed)
+        };
+        std::array<std::uint32_t, 4> keys {};
+        for (std::size_t index = 0; index < colors.size(); ++index) {
+            const auto& color = colors[index];
+            keys[index] = (std::uint32_t(color.A) << 24) | (std::uint32_t(color.R) << 16) |
+                (std::uint32_t(color.G) << 8) | std::uint32_t(color.B);
+        }
+        // Compare the actual native byte colors. Settled frames do not need
+        // another four property writes and four boxed color allocations.
+        if (!g_HasAppliedThemeColors || keys != g_AppliedThemeColors) {
+            auto titleBar = g_AppWindow.TitleBar();
+            titleBar.ButtonForegroundColor(BoxColor(colors[0]));
+            titleBar.ButtonInactiveForegroundColor(BoxColor(colors[1]));
+            titleBar.ButtonHoverBackgroundColor(BoxColor(colors[2]));
+            titleBar.ButtonPressedBackgroundColor(BoxColor(colors[3]));
+            g_AppliedThemeColors = keys;
+            g_HasAppliedThemeColors = true;
+        }
+        // Native geometry can change independently of the theme on resize/DPI.
         RefreshMetrics();
         if (!g_TraceLoggedThemeUpdate) {
             g_TraceLoggedThemeUpdate = true;
@@ -562,6 +587,7 @@ void UpdateTheme(
 }
 
 void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& screenRects) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NativeChrome);
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
     if (!g_Metrics.active || !window) {
         ClearPassthroughRegionsReal();

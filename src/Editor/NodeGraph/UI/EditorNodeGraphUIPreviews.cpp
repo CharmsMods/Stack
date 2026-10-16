@@ -1,6 +1,8 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Async/TaskSystem.h"
+#include <atomic>
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
@@ -92,11 +94,21 @@ bool DecodeImagePreviewPixelsFromPng(
 
 } // namespace
 
+// Worker-owned input/result only: no UI, graph or editor pointer crosses the
+// thread boundary. Removing a cache entry makes a late result unreachable.
+struct EditorNodeGraphUI::ImagePreviewDecode {
+    size_t fingerprint = 0;
+    std::atomic<bool> ready{false};
+    std::vector<unsigned char> pixels;
+    int width = 0, height = 0, channels = 4;
+};
+
 EditorNodeGraphUI::~EditorNodeGraphUI() {
     Shutdown();
 }
 
 void EditorNodeGraphUI::Shutdown() {
+    m_NodeOpenAppearance = {};
     m_PresetPreviewCurrentRenderer.reset();
     m_PresetPreviewPreviousRenderer.reset();
     m_SocketIconTexture.Reset();
@@ -104,6 +116,10 @@ void EditorNodeGraphUI::Shutdown() {
 }
 
 void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
+    m_NodeLayoutCache.clear();
+    m_NodeOrderCacheGraph = nullptr;
+    m_NodeOrderCacheNodes = nullptr;
+    m_LinkHitTestFrame = -1;
     m_LinkLabelRevealAlpha = 0.0f;
     for (auto& item : m_ImagePreviewTextures) {
         unsigned int texture = item.second;
@@ -125,6 +141,7 @@ void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
     }
 
     m_ImagePreviewTextures.clear();
+    m_ImagePreviewDecodes.clear();
     m_ImagePreviewFingerprints.clear();
     m_ImagePreviewSizes.clear();
     m_GraphPreviewTextures.clear();
@@ -175,6 +192,7 @@ void EditorNodeGraphUI::SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& g
     pruneTextureMap(m_ImagePreviewTextures);
     pruneTextureMap(m_GraphPreviewTextures);
     pruneKeyedMap(m_ImagePreviewFingerprints);
+    pruneKeyedMap(m_ImagePreviewDecodes);
     pruneKeyedMap(m_ImagePreviewSizes);
     pruneKeyedMap(m_GraphPreviewRevisions);
     pruneKeyedMap(m_GraphPreviewSizes);
@@ -200,6 +218,43 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         return it->second;
     }
 
+    std::vector<unsigned char> decodedPixels;
+    int decodedWidth = 0, decodedHeight = 0, decodedChannels = 4;
+    if (node.image.previewPixels.empty() && node.image.pixels.empty()) {
+        const unsigned int previous = it != m_ImagePreviewTextures.end() ? it->second : 0;
+        auto& pending = m_ImagePreviewDecodes[node.id];
+        if (!pending || pending->fingerprint != fingerprint) {
+            // Admit at most one cold image per frame, including failed PNGs.
+            if (m_ImagePreviewDecodeFrame == ImGui::GetFrameCount()) return previous;
+            m_ImagePreviewDecodeFrame = ImGui::GetFrameCount();
+            pending = std::make_shared<ImagePreviewDecode>();
+            pending->fingerprint = fingerprint;
+            const auto result = pending;
+            if (!Async::TaskSystem::Get().Submit("Preparing image node preview",
+                [target = std::weak_ptr<ImagePreviewDecode>(result), bytes = node.image.pngBytes] {
+                    const auto result = target.lock();
+                    if (!result) return;
+                    try {
+                        std::vector<unsigned char> pixels;
+                        int width = 0, height = 0, channels = 4;
+                        if (DecodeImagePreviewPixelsFromPng(bytes, pixels, width, height, channels)) {
+                            EditorNodeGraph::BuildImagePayloadPreview(pixels, width, height, channels,
+                                result->pixels, result->width, result->height, result->channels);
+                            if (result->pixels.empty() && width <= 768 && height <= 768) {
+                                result->pixels = std::move(pixels);
+                                result->width = width; result->height = height; result->channels = channels;
+                            }
+                        }
+                    } catch (...) { result->pixels.clear(); }
+                    result->ready.store(true, std::memory_order_release);
+                })) result->ready.store(true, std::memory_order_release);
+            return previous;
+        }
+        if (!pending->ready.load(std::memory_order_acquire) || pending->pixels.empty()) return previous;
+        decodedPixels = std::move(pending->pixels);
+        decodedWidth = pending->width; decodedHeight = pending->height; decodedChannels = pending->channels;
+    } else m_ImagePreviewDecodes.erase(node.id);
+
     if (it != m_ImagePreviewTextures.end() && it->second != 0) {
         unsigned int oldTexture = it->second;
         glDeleteTextures(1, &oldTexture);
@@ -212,7 +267,6 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
     int uploadWidth = node.image.width;
     int uploadHeight = node.image.height;
     int uploadChannels = std::max(1, node.image.channels);
-    std::vector<unsigned char> decodedPixels;
     std::vector<unsigned char> generatedPreviewPixels;
     const std::vector<unsigned char>* previewSourcePixels = nullptr;
     if (!node.image.previewPixels.empty() &&
@@ -225,7 +279,8 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
     } else if (!node.image.pixels.empty()) {
         uploadPixels = node.image.pixels.data();
         previewSourcePixels = &node.image.pixels;
-    } else if (DecodeImagePreviewPixelsFromPng(node.image.pngBytes, decodedPixels, uploadWidth, uploadHeight, uploadChannels)) {
+    } else if (!decodedPixels.empty()) {
+        uploadWidth = decodedWidth; uploadHeight = decodedHeight; uploadChannels = decodedChannels;
         uploadPixels = decodedPixels.data();
         previewSourcePixels = &decodedPixels;
     } else {
@@ -306,8 +361,7 @@ unsigned int EditorNodeGraphUI::UploadPreviewTexture(int nodeId, const std::vect
 unsigned int EditorNodeGraphUI::GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node) {
     if (!editor ||
         (node.kind != EditorNodeGraph::NodeKind::Preview &&
-         node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
-         node.kind != EditorNodeGraph::NodeKind::FrequencyFilter)) {
+         node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask)) {
         return 0;
     }
 
@@ -423,18 +477,13 @@ unsigned int EditorNodeGraphUI::GetNodeBrowserThumbnailTexture(
     }
 
     const std::vector<unsigned char>* pixels = view.decodedPixels;
-    std::vector<unsigned char> decodedPixels;
     int decodedWidth = view.width;
     int decodedHeight = view.height;
     int decodedChannels = view.channels;
     if (!pixels || pixels->empty() || decodedWidth <= 0 || decodedHeight <= 0) {
-        if (editor->GetPendingNodeBrowserThumbnailWarmCount() > 0) {
-            return existingTexture;
-        }
-        if (!DecodeImagePreviewPixelsFromPng(*view.pngBytes, decodedPixels, decodedWidth, decodedHeight, decodedChannels)) {
-            return existingTexture;
-        }
-        pixels = &decodedPixels;
+        // GetNodeBrowserThumbnailView schedules the project-owned decoder.
+        // Keep the last card (or its placeholder) while those pixels arrive.
+        return existingTexture;
     }
 
     const unsigned int texture = GLHelpers::CreateTextureFromPixels(

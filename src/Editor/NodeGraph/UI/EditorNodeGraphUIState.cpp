@@ -50,7 +50,6 @@ bool EditorNodeGraphUI::ResolveNodeHasDedicatedComplexEditor(
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:

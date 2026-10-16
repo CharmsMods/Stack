@@ -1,4 +1,5 @@
 #include "ContinuousLinkStroke.h"
+#include "App/UiPerformanceTrace.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
@@ -281,18 +282,21 @@ void DrawLinkStrokeWithEdgeFade(
     const ImVec2& fadeMax,
     float fadeDistance,
     float gapStartT = -1.0f,
-    float gapEndT = -1.0f) {
+    float gapEndT = -1.0f,
+    const std::vector<CurveSample>* preparedSamples = nullptr) {
     if (!drawList || thickness <= 0.0f) {
         return;
     }
+    const ImVec2 middle((p0.x+p3.x)*0.5f,(p0.y+p3.y)*0.5f);
+    const auto generatedSamples=preparedSamples ? std::vector<CurveSample>{}
+        : SampleLinkCurve(p0,straight ? middle : p1,straight ? middle : p2,p3);
+    const auto& samples=preparedSamples ? *preparedSamples : generatedSamples;
     if (!dotted) {
-        Stack::Editor::NodeGraphUIVisuals::DrawContinuousLinkStroke(drawList,p0,p1,p2,p3,color,thickness,
-            straight,fadeMin,fadeMax,fadeDistance,gapStartT,gapEndT);
+        DrawContinuousLinkStroke(drawList,samples,color,thickness,
+            fadeMin,fadeMax,fadeDistance,gapStartT,gapEndT);
         return;
     }
     const bool hasGap=gapStartT>=0 && gapEndT>gapStartT;
-    const ImVec2 middle((p0.x+p3.x)*0.5f,(p0.y+p3.y)*0.5f);
-    const auto samples=SampleLinkCurve(p0,straight ? middle : p1,straight ? middle : p2,p3);
     const float radius=std::max(0.25f,thickness*0.5f), spacing=std::max(1.4f,radius*2.6f);
     float distanceToNextDot=0;
     for (size_t i=1;i<samples.size();++i) {
@@ -317,6 +321,8 @@ void DrawLinkStrokeWithEdgeFade(
 } // namespace
 
 void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Links);
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::Links, graph.GetLinks().size());
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(m_ActiveEditor);
     const StackAppearance::AppearanceManager* appearance = m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
@@ -348,7 +354,9 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     activeLinkKeys.reserve(graph.GetLinks().size());
     std::vector<CachedRect> occupiedLabelRects;
     m_LinkLabelHitRects.clear();
-    m_LinkHitTestFrame = -1;
+    // Moving labels need fresh hit geometry. With labels hidden, immutable
+    // endpoint geometry and an unchanged pointer can reuse the previous hit.
+    if (labelsVisible) m_LinkHitTestFrame = -1;
     EditorNodeGraph::Link hoveredLink = (!m_MiddlePanCaptureActive && IsGraphCanvasHovered())
         ? FindLinkAt(graph, ToGraphVec2(ImGui::GetMousePos()))
         : EditorNodeGraph::Link{};
@@ -371,11 +379,6 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             hoveredLink.fromSocketId == link.fromSocketId &&
             hoveredLink.toNodeId == link.toNodeId &&
             hoveredLink.toSocketId == link.toSocketId;
-        LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
-        if (!GraphDottedMaskLinksEnabled(m_ActiveEditor)) {
-            visualStyle.dotted = false;
-        }
-        const std::string& channel = visualStyle.channel;
         const float cullHandle = ResolveLinkHandle(p1, p2, straightLinks);
         const ImVec2 linkMin(
             std::min({ p1.x, p2.x, p1.x + cullHandle, p2.x - cullHandle }),
@@ -386,12 +389,19 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         if (!RectOverlapsExpandedCanvas(linkMin, linkMax, fadeMin, fadeMax, linkCullMargin) && !selected && !hovered) {
             continue;
         }
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::VisibleLinks);
+        LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
+        if (!GraphDottedMaskLinksEnabled(m_ActiveEditor)) visualStyle.dotted = false;
+        const std::string& channel = visualStyle.channel;
         const std::string animationKey = LinkAnimationKey(link);
         const float labelHandle = ResolveLinkHandle(p1, p2, straightLinks);
         const ImVec2 labelC1(p1.x + labelHandle, p1.y);
         const ImVec2 labelC2(p2.x - labelHandle, p2.y);
-        const float screenLength = ApproximateLinkLength(
-            p1, labelC1, labelC2, p2, straightLinks);
+        const float screenLength = labelsVisible ? ApproximateLinkLength(
+            p1, labelC1, labelC2, p2, straightLinks) : 0.0f;
+        const ImVec2 middle((p1.x+p2.x)*0.5f,(p1.y+p2.y)*0.5f);
+        const auto strokeSamples = SampleLinkCurve(p1, straightLinks ? middle : labelC1,
+            straightLinks ? middle : labelC2, p2);
         const StackAppearance::GraphConnectionTextLayout textLayout = appearance
             ? appearance->GetGraphConnectionTextLayout()
             : StackAppearance::GraphConnectionTextLayout::Floating;
@@ -661,7 +671,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                 fadeMax,
                 edgeFadeDistance,
                 gapStartT,
-                gapEndT);
+                gapEndT, &strokeSamples);
             if (emphasis > 0.01f) {
                 DrawLinkStrokeWithEdgeFade(
                     drawList,
@@ -677,7 +687,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                     fadeMax,
                     edgeFadeDistance,
                     gapStartT,
-                    gapEndT);
+                    gapEndT, &strokeSamples);
             }
             DrawLinkStrokeWithEdgeFade(
                 drawList,
@@ -693,7 +703,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                 fadeMax,
                 edgeFadeDistance,
                 gapStartT,
-                gapEndT);
+                gapEndT, &strokeSamples);
             if (selected) {
                 DrawLinkStrokeWithEdgeFade(
                     drawList,
@@ -709,7 +719,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                     fadeMax,
                     edgeFadeDistance,
                     gapStartT,
-                    gapEndT);
+                    gapEndT, &strokeSamples);
             }
             drawConnectionLabels(ColorToU32(linkColor));
             drawDelayedWireDetail();
@@ -731,7 +741,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             fadeMax,
             edgeFadeDistance,
             gapStartT,
-            gapEndT);
+            gapEndT, &strokeSamples);
         drawConnectionLabels(LinkColorClassic(visualStyle, selected));
         drawDelayedWireDetail();
     }
@@ -760,11 +770,11 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
     const ImVec2 fadeMax(m_CanvasMax.x, m_CanvasMax.y);
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool hoveredInputConnectable = hoveredInput.IsValid() &&
-        graph.CanConnectSockets(m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId);
+        CanConnectInContext(graph, m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId);
     const float dragPulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
-    LinkVisualStyle visualStyle = hoveredInputConnectable
-        ? ResolvePendingLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId)
-        : ResolvePendingLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId, EditorNodeGraph::SocketDirection::Output);
+    LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId,
+        hoveredInputConnectable ? hoveredInput.nodeId : 0,
+        hoveredInputConnectable ? hoveredInput.socketId : std::string{}, editor);
     if (!GraphDottedMaskLinksEnabled(editor)) {
         visualStyle.dotted = false;
     }
@@ -833,11 +843,11 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
     const ImVec2 fadeMax(m_CanvasMax.x, m_CanvasMax.y);
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool hoveredOutputConnectable = hoveredOutput.IsValid() &&
-        graph.CanConnectSockets(hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId);
+        CanConnectInContext(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId);
     const float dragPulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
     LinkVisualStyle visualStyle = hoveredOutputConnectable
-        ? ResolvePendingLinkVisualStyle(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId)
-        : ResolvePendingLinkVisualStyle(graph, m_DragInputNodeId, m_DragInputSocketId, EditorNodeGraph::SocketDirection::Input);
+        ? ResolveLinkVisualStyle(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, editor)
+        : LinkVisualStyle{};
     if (!GraphDottedMaskLinksEnabled(editor)) {
         visualStyle.dotted = false;
     }
@@ -1002,13 +1012,15 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
             }
 
             if (ImGui::InputText("##rename", m_GroupRenameBuffer, sizeof(m_GroupRenameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                group.title = m_GroupRenameBuffer;
-                editor->MarkGraphEdited(-1, false);
+                if (group.title != m_GroupRenameBuffer) {
+                    group.title = m_GroupRenameBuffer;
+                    editor->MarkGraphEdited(-1, false);
+                }
                 m_EditingGroupId = -1;
             }
 
             if (ImGui::IsItemDeactivated()) {
-                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                if (ImGui::IsItemDeactivatedAfterEdit() && group.title != m_GroupRenameBuffer) {
                     group.title = m_GroupRenameBuffer;
                     editor->MarkGraphEdited(-1, false);
                 }

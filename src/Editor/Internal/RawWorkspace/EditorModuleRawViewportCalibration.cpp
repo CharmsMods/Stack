@@ -57,6 +57,7 @@ void EditorModule::UpdateRawViewportEditTiming(const Stack::RawRecipe::RawDevelo
 }
 bool EditorModule::IsRawViewportCalibrationBusy() const { return m_RawViewportCalibration.Busy(); }
 std::string EditorModule::GetRawViewportCalibrationStatus() const {
+    if (UsesGraphViewportPreview()) return "Preview timings update from completed adjustments.";
     const auto& state = m_RawViewportCalibration;
     if (!IsRawWorkspaceProjectActive()) return "Open a RAW project to measure viewport timing";
     if (state.Busy()) return std::string(state.verification ? "Verifying viewport timing " : "Preparing RAW editing ") +
@@ -67,6 +68,7 @@ std::string EditorModule::GetRawViewportCalibrationStatus() const {
     return GetRawViewportPreferences().backgroundLearning ? saved : "Background probes paused. " + saved;
 }
 double EditorModule::GetRawViewportNativeFps() const {
+    if (UsesGraphViewportPreview()) return 0.0;
     if ((m_RawViewportCalibration.source != GetActiveRawWorkspacePreviewIdentity() || m_RawViewportCalibration.sourceHash != RawViewportSourceHash())) return 0;
     bool known = false;
     const double ms = m_RawViewportTimingBank.Cost(BuildRawViewportDecisionInput().keys,
@@ -81,6 +83,12 @@ int EditorModule::GetCalibratedRawViewportEdge() const {
 }
 
 double EditorModule::GetRawViewportVisibleNativeFps() const {
+    if (UsesGraphViewportPreview()) {
+        const auto& state = ActiveViewportPreviewState();
+        const auto estimate = state.timings.Estimate(state.executionIdentity,
+            std::max(state.geometry.logicalWidth,state.geometry.logicalHeight));
+        return estimate.costKnown && estimate.predictedMs > 0 ? 1000.0 / estimate.predictedMs : 0.0;
+    }
     if ((m_RawViewportCalibration.source != GetActiveRawWorkspacePreviewIdentity() || m_RawViewportCalibration.sourceHash != RawViewportSourceHash())) return 0;
     const auto& region = m_RawViewportRequest.visible;
     const double area = BuildRawViewportDecisionInput().regionalAllowed && region.Partial() ? double(region.width) * region.height /

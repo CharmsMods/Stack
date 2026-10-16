@@ -3,6 +3,16 @@ add_executable(StackGpuUploadTests
     src/Renderer/GLLoader.cpp
     src/Renderer/GLHelpers.cpp
     src/Raw/RawGpuPipeline.cpp
+    src/Raw/RawColorTransform.cpp
+    src/Raw/Demosaic/DemosaicTexture.cpp
+    src/Raw/Demosaic/GpuDemosaic.cpp
+    src/Raw/Demosaic/GpuDcb.cpp
+    src/Raw/Demosaic/GpuClassic.cpp
+    src/Raw/Demosaic/ClassicDemosaic.cpp
+    src/Raw/Demosaic/FloatDemosaic.cpp
+    src/Raw/Demosaic/DirectionalDemosaic.cpp
+    src/Raw/Demosaic/LmmseDemosaic.cpp
+    src/Raw/Demosaic/DcbDemosaic.cpp
     src/Raw/RawGpuPreprocessor.cpp
     src/Raw/RawProcessingMath.cpp
     src/Raw/RawImageData.cpp)

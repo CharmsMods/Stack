@@ -4,6 +4,8 @@
 #include "Editor/RawRenderGraphOverlay.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLStateGuards.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
+#include "Renderer/RenderTiling.h"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -21,7 +23,9 @@ void Require(bool condition, const std::string& message) {
 
 using Kind = RawRecipe::GraphOperationKind;
 RawRecipe::RawDevelopmentRecipe Photo(const RawAdjustmentLayer& layer, Kind kind) {
-    return RawRecipe::ReadGraphOperation(FindRawOperation(layer, kind)->rawOperation);
+    const auto* operation=FindRawOperation(layer,kind);
+    Require(operation!=nullptr,std::string("The validation fixture needs ")+RawRecipe::GraphOperationLabel(kind));
+    return RawRecipe::ReadGraphOperation(operation->rawOperation);
 }
 template<class Edit> void EditPhoto(RawAdjustmentLayer& layer, Kind kind, Edit edit) {
     auto recipe = Photo(layer, kind); edit(recipe);
@@ -87,6 +91,51 @@ std::vector<float> Render(RenderPipeline& pipeline, const RenderGraphSnapshot& g
     return pixels;
 }
 
+void CheckRetainedStylize() {
+    RenderPipeline pipeline;pipeline.Initialize();
+    auto source=BackgroundGraph();
+    const auto base=Render(pipeline,source);
+    for (const auto type:{LayerType::CellShading,LayerType::PaletteReconstructor,LayerType::Halftoning}) {
+        RawLayerStackState state;
+        auto& graph=state.background.graph;
+        const int resultId=FindRawRole(state.background,GraphModel::NodeRole::LayerResult)->id;
+        const auto incoming=*graph.FindInputLink(resultId,"imageIn");
+        graph.RemoveLink(incoming.fromNodeId,incoming.fromSocketId,resultId,"imageIn");
+        const int effectId=graph.AddLayerNode(type,0,{300,0})->id;
+        if (type==LayerType::Halftoning) {
+            graph.FindNode(effectId)->layerParameters["colorMode"]=3;
+            graph.FindNode(effectId)->layerParameters["sharpness"]=1.f;
+        }
+        std::string error;
+        Require(graph.TryConnectSockets(incoming.fromNodeId,incoming.fromSocketId,effectId,"imageIn",&error),error);
+        Require(graph.TryConnectSockets(effectId,"imageOut",resultId,"imageIn",&error),error);
+        auto lowered=source;Require(LowerRawLayerStack(lowered,state,1,40,error),error);
+        pipeline.SetPreviewMaxDimension(64);const auto view=Render(pipeline,lowered);
+        pipeline.SetPreviewMaxDimension(0);const auto full=Render(pipeline,lowered);
+        Require(view==full,"Retained stylize View and full-quality output differ at the same native extent.");
+        for (std::size_t pixel=0;pixel<full.size();pixel+=4)
+            Require(full[pixel+3]==base[pixel+3],"Retained stylize processing changed alpha.");
+        if (type==LayerType::Halftoning) {
+            RenderGraphSnapshot policy;
+            RenderGraphNode image;image.nodeId=1;image.kind=RenderGraphNodeKind::Image;image.image.width=4;image.image.height=2;image.image.channels=3;
+            RenderGraphNode screen;screen.nodeId=2;screen.kind=RenderGraphNodeKind::Layer;screen.layerJson=graph.FindNode(effectId)->layerParameters;
+            RenderGraphNode output;output.nodeId=3;output.kind=RenderGraphNodeKind::Output;
+            policy.nodes={image,screen,output};policy.links={{1,"imageOut",2,"imageIn"},{2,"imageOut",3,"imageIn"}};
+            policy.outputNodeId=3;policy.outputSocketId="imageOut";
+            const auto plan=RenderTiling::PlanGraphRegions(policy,4,2);
+            Require(!plan.tileable && plan.reason.find("Halftone")!=std::string::npos,
+                "Halftone accepted tiled inputs with a restarted UV grid.");
+        }
+    }
+    std::cout << "Retained stylize finite pixels, black CMYK, alpha, native View/full quality and full-grid policy passed.\n";
+}
+
+void ExpectUnavailableCoverage(RenderPipeline& pipeline,const RenderGraphSnapshot& graph) {
+    pipeline.Resize(4,2);pipeline.ExecuteGraph(graph);
+    Require(pipeline.GetOutputTexture()==0 && !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
+        "Unavailable connected coverage produced an unrestricted image.");
+}
+
 void CompareGain(const std::vector<float>& base, const std::vector<float>& actual, float gain) {
     for (std::size_t i = 0; i < base.size(); ++i) {
         const float expected = i % 4 == 3 ? base[i] : base[i] * gain;
@@ -96,6 +145,25 @@ void CompareGain(const std::vector<float>& base, const std::vector<float>& actua
     }
 }
 
+// Existing regression cases deliberately exercise a full legacy operation chain.
+// New documents are tested separately with their smaller defaults.
+void SeedOperationFixture(RawAdjustmentLayer& layer) {
+    using Kind = Stack::RawRecipe::GraphOperationKind;
+    using Role = Stack::GraphModel::NodeRole;
+    int previous = FindRawRole(layer,Role::CurrentImage)->id;
+    const int output = FindRawRole(layer,Role::LayerResult)->id;
+    layer.graph.EditLinks().clear();
+    int position = 1;
+    for (auto kind : {Kind::Calibration,Kind::Exposure,Kind::LocalEv,Kind::ToneCurve,
+        Kind::ColorWarp,Kind::DetailContrast}) {
+        auto* node = FindRawOperation(layer,kind);
+        if (!node) node = layer.graph.AddRawOperationNode(kind,{260.f*position,0});
+        const int id=node->id;
+        layer.graph.EditLinks().push_back({previous,"imageOut",id,"imageIn"});
+        previous=id; ++position;
+    }
+    layer.graph.EditLinks().push_back({previous,"imageOut",output,"imageIn"});
+}
 RawMaskReference SolidMask(RawLayerStackState& state, const std::string& owner, float coverage) {
     auto reference = AddRawGeneratedMask(state, owner, EditorNodeGraph::MaskGeneratorKind::Solid, "Coverage");
     auto* layer = FindRawAdjustmentLayer(state, owner);
@@ -119,10 +187,119 @@ void CheckPixelsAndView() {
             *std::max_element(base.begin(), base.end()) > 3.0f, "Upstream input lost signed/HDR values.");
         RawLayerStackState state;
         const auto first = AddRawAdjustmentLayer(state);
+        SeedOperationFixture(state.background);
+        for (auto& layer:state.layers) SeedOperationFixture(layer);
         std::cout << "Checking neutral layer in " << RawRecipe::WorkingSpaceStableString(space) << '\n';
         auto lowered = graph;
         Require(LowerRawLayerStack(lowered, state, 1, 1, error), error);
         CompareGain(base, Render(pipeline, lowered), 1.0f);
+        {
+            auto localOffset=state;
+            EditPhoto(localOffset.background,Kind::LocalEv,[](auto& r) { r.preToneExposureEv=1.f; });
+            auto localGraph=graph;
+            Require(LowerRawLayerStack(localGraph,localOffset,1,30,error),error);
+            CompareGain(base,Render(pipeline,localGraph),2.f);
+            const auto original = FindRawOperation(localOffset.background,Kind::LocalEv)->instanceUuid;
+            const auto linear = AddRawLocalAdjustment(localOffset,kRawBackgroundId,original,
+                EditorNodeGraph::MaskGeneratorKind::LinearGradient,error);
+            Require(!linear.operationUuid.empty(),error);
+            const auto radial = AddRawLocalAdjustment(localOffset,kRawBackgroundId,linear.operationUuid,
+                EditorNodeGraph::MaskGeneratorKind::RadialGradient,error);
+            Require(!radial.operationUuid.empty(),error);
+            auto neutralGraph = graph;
+            Require(LowerRawLayerStack(neutralGraph,localOffset,1,33,error),error);
+            CompareGain(base,Render(pipeline,neutralGraph),2.f);
+            auto localEdit = ReadRawLayerOperation(localOffset.background,radial.operationUuid);
+            localEdit.preToneExposureEv = 1.f;
+            Require(WriteRawLayerOperation(localOffset.background,radial.operationUuid,localEdit,error),error);
+            auto maskedGraph = graph;
+            Require(LowerRawLayerStack(maskedGraph,localOffset,1,35,error),error);
+            const int radialSource = FindRawMaskOutput(localOffset,radial.mask)->nodeId;
+            const int renderedSource = maskedGraph.rawLayerMaskNodeIds.at(kRawBackgroundId).at(radialSource);
+            const auto maskNode = std::find_if(maskedGraph.nodes.begin(),maskedGraph.nodes.end(),[&](const auto& node) {
+                return node.nodeId == renderedSource;
+            });
+            Require(maskNode != maskedGraph.nodes.end() && maskNode->maskCanvasSourceNodeId > 0 &&
+                maskNode->semanticDescriptor.spatial.state == NodeMath::KnowledgeState::Known,
+                "The independent shape lost its project canvas coordinates.");
+            Require(std::none_of(maskedGraph.links.begin(),maskedGraph.links.end(),[&](const auto& link) {
+                return link.toNodeId == renderedSource;
+            }),"A rendered shape acquired a hidden image input.");
+            auto maskPreview = maskedGraph;
+            Require(ConfigureRawLayerThumbnail(maskPreview,kRawBackgroundId,radial.mask.outputId,error),error);
+            const auto coveragePixels = Render(pipeline,maskPreview);
+            int thumbnailWidth = 0, thumbnailHeight = 0;
+            const auto thumbnail = pipeline.GetPreviewPixels(thumbnailWidth,thumbnailHeight,128);
+            Require(!thumbnail.empty() && thumbnailWidth > 0 && thumbnailHeight > 0,"The mask texture thumbnail is empty.");
+            for (std::size_t i=0;i<thumbnail.size();i+=4)
+                Require(thumbnail[i] == thumbnail[i+1] && thumbnail[i] == thumbnail[i+2] && thumbnail[i+3] == 255,
+                    "The mask texture thumbnail is not opaque grayscale.");
+            const auto maskedPixels = Render(pipeline,maskedGraph);
+            for (std::size_t i=0;i<base.size();++i) {
+                const float amount = std::clamp(coveragePixels[(i/4)*4],0.f,1.f);
+                const float expected = i%4 == 3 ? base[i] : base[i]*2.f*(1.f+amount);
+                Require(std::abs(maskedPixels[i]-expected) < .005f*std::max(1.f,std::abs(expected)),
+                    "Independent shape coverage did not mask the new adjustment.");
+            }
+            auto movedShape = localOffset;
+            movedShape.background.graph.FindNode(radialSource)->maskSettings.centerX = .1f;
+            auto movedGraph = graph;
+            Require(LowerRawLayerStack(movedGraph,movedShape,1,36,error),error);
+            Require(ConfigureRawLayerThumbnail(movedGraph,kRawBackgroundId,radial.mask.outputId,error),error);
+            Require(Render(pipeline,movedGraph) != coveragePixels,"Moving shape handles did not invalidate coverage.");
+            Require(pipeline.GetPreviewPixels(thumbnailWidth,thumbnailHeight,128) != thumbnail,
+                "Moving shape handles did not refresh the mask texture thumbnail.");
+            Require(SetRawOperationMask(localOffset,kRawBackgroundId,radial.operationUuid,std::nullopt,error),error);
+            auto unmaskedGraph = graph;
+            Require(LowerRawLayerStack(unmaskedGraph,localOffset,1,34,error),error);
+            CompareGain(base,Render(pipeline,unmaskedGraph),4.f);
+            std::cout << "Independent shape source, coordinates, handles, mask preview and direct coverage passed.\n";
+            auto shared=state;
+            const auto coverage=SolidMask(shared,first,.25f);
+            const auto receiver=AddRawAdjustmentLayer(shared,"Shared mask consumer");
+            SeedOperationFixture(shared.layers.back());
+            EditPhoto(shared.layers.front(),Kind::Exposure,[](auto& r) { r.preToneExposureEv=1.f; });
+            EditPhoto(shared.layers.back(),Kind::Exposure,[](auto& r) { r.preToneExposureEv=2.f; });
+            Attach(shared,receiver,Kind::Exposure,coverage);
+            auto liveGraph=graph;
+            Require(LowerRawLayerStack(liveGraph,shared,1,31,error),error);
+            CompareGain(base,Render(pipeline,liveGraph),3.5f);
+            shared.layers.front().enabled=false;
+            auto bypassGraph=graph;
+            Require(LowerRawLayerStack(bypassGraph,shared,1,32,error),error);
+            ExpectUnavailableCoverage(pipeline,bypassGraph);
+            const auto producerId=bypassGraph.rawLayerMaskNodeIds.at(first).at(
+                FindRawOperation(shared.layers.front(),Kind::Exposure)->id);
+            Require(bypassGraph.unavailableOutputs.count(producerId),"A disabled layer still publishes its internal output.");
+            std::cout << "Local EV offset and layer bypass with stopped shared masks passed.\n";
+        }
+        {
+            auto scalar=state;
+            const auto mask=SolidMask(scalar,kRawBackgroundId,.5f);
+            auto& authored=scalar.background.graph;
+            const auto generator=authored.FindInputLink(FindRawMaskOutput(scalar,mask)->nodeId,"imageIn")->fromNodeId;
+            const int curveId=authored.AddRawOperationNode(Kind::ToneCurve,{0,700})->id;
+            auto curveRecipe=RawRecipe::ReadGraphOperation(authored.FindNode(curveId)->rawOperation);
+            RawRecipe::RawPointCurveComponent valueCurve;valueCurve.points={{0,0},{.5f,.75f},{1,1}};
+            RawRecipe::StorePointCurveComponentInFinishToneJson(curveRecipe.finishTone.layerJson,RawRecipe::RawPointCurveChannel::Composite,valueCurve);
+            // A previously authored red curve cannot affect a scalar rewire.
+            RawRecipe::RawPointCurveComponent redCurve;redCurve.points={{0,0},{.5f,.1f},{1,1}};
+            RawRecipe::StorePointCurveComponentInFinishToneJson(curveRecipe.finishTone.layerJson,RawRecipe::RawPointCurveChannel::Red,redCurve);
+            RawRecipe::WriteGraphOperation(authored.FindNode(curveId)->rawOperation,curveRecipe);
+            const int exposureId=authored.AddRawOperationNode(Kind::Exposure,{260,700})->id;
+            authored.FindNode(exposureId)->rawOperation.parameters["ev"]=2.f;
+            const int meanId=authored.AddFieldMeanNode({520,700})->id;
+            Require(authored.TryConnectSockets(generator,"maskOut",curveId,"imageIn",&error),error);
+            Require(authored.TryConnectSockets(curveId,"imageOut",exposureId,"imageIn",&error),error);
+            Require(authored.TryConnectSockets(exposureId,"imageOut",meanId,"fieldIn",&error),error);
+            Require(authored.TryConnectSockets(meanId,"valueOut",FindRawOperation(scalar.background,Kind::Exposure)->id,"param:ev",&error),error);
+            const auto description=EditorNodeGraph::DescribeGraphOutput(authored,exposureId,"imageOut");
+            Require(description.descriptor.logicalType==NodeMath::LogicalValueType::Mask,
+                "Component math fabricated RGB or changed the authored mask role.");
+            auto scalarGraph=graph;Require(LowerRawLayerStack(scalarGraph,scalar,1,33,error),error);
+            CompareGain(base,Render(pipeline,scalarGraph),8.f);
+            std::cout << "Mask Value curve, absent red curve, unbounded Exposure and Field Mean passed.\n";
+        }
         auto typed = state;
         const auto scalarId = typed.layers.front().graph.AddValueNode(NodeMath::MakeUniformScalar(1.0),{0,600})->id;
         Require(PublishRawLayerResult(typed,RawLayerEndpoint(typed.layers.front(),
@@ -231,7 +408,7 @@ void CheckPixelsAndView() {
             const auto tool = SolidMask(masked, first, coverage);
             const auto whole = SolidMask(masked, first, .5f);
             auto* layer = FindRawAdjustmentLayer(masked, first);
-            FindRawOperation(*layer, Kind::LuminanceTone)->rawOperation.enabled = false;
+            FindRawOperation(*layer, Kind::ToneCurve)->rawOperation.enabled = false;
             EditPhoto(*layer, Kind::Exposure, [](auto& r) { r.preToneExposureEv = 2.f; });
             Attach(masked, first, Kind::Exposure, tool);
             layer->layerMask = whole;
@@ -243,7 +420,7 @@ void CheckPixelsAndView() {
             layer->graph.RemoveNode(output);
             lowered = graph;
             Require(LowerRawLayerStack(lowered, masked, 1, 3, error), error);
-            CompareGain(base, Render(pipeline, lowered), 1.0f);
+            ExpectUnavailableCoverage(pipeline,lowered);
         }
         auto curved = state;
         const auto toneMask = SolidMask(curved, first, .5f);
@@ -251,23 +428,20 @@ void CheckPixelsAndView() {
         auto* toneLayer = FindRawAdjustmentLayer(curved, first);
         RawRecipe::RawPointCurveComponent curve;
         curve.points = {{0,0}, {.5f,.57f}, {1,1}};
-        EditPhoto(*toneLayer, Kind::RgbCurves, [&](auto& r) { RawRecipe::StorePointCurveComponentInFinishToneJson(r.finishTone.layerJson,
+        EditPhoto(*toneLayer, Kind::ToneCurve, [&](auto& r) { RawRecipe::StorePointCurveComponentInFinishToneJson(r.finishTone.layerJson,
             RawRecipe::RawPointCurveChannel::Composite, curve); });
         // A curve inside a mask graph changes coverage, independently of the
         // photo curve owned by RAW. Then break its input while keeping Output.
         auto graphEditedMask = state;
         const auto shaped = SolidMask(graphEditedMask, first, .25f);
         auto& maskOwner = graphEditedMask.layers.front();
-        auto maskCurve = Photo(*toneLayer, Kind::RgbCurves).finishTone.layerJson;
-        maskCurve["type"] = "ToneCurve";
-        maskCurve["truthfulV2SignedMath"] = true;
-        maskCurve["inputWorkingSpace"] = RawRecipe::WorkingSpaceStableString(space);
-        maskOwner.processingSettings.push_back(maskCurve);
+        auto maskCurve = Photo(*toneLayer, Kind::ToneCurve).finishTone.layerJson;
         auto& maskGraph = maskOwner.graph;
         const int shapedOutput = FindRawMaskOutput(graphEditedMask, shaped)->nodeId;
         const int generator = maskGraph.FindInputLink(shapedOutput, "imageIn")->fromNodeId;
         maskGraph.RemoveLink(generator, "maskOut", shapedOutput, "imageIn");
-        const int maskCurveNode = maskGraph.AddLayerNode(LayerType::ToneCurve, 0, {160,0})->id;
+        const int maskCurveNode = maskGraph.AddRawOperationNode(Kind::ToneCurve, {160,0})->id;
+        maskGraph.FindNode(maskCurveNode)->rawOperation.parameters=maskCurve;
         Require(maskGraph.TryConnectSockets(generator, "maskOut", maskCurveNode, "imageIn", &error), error);
         Require(maskGraph.TryConnectSockets(maskCurveNode, "imageOut", shapedOutput, "imageIn", &error), error);
         EditPhoto(maskOwner, Kind::Exposure, [](auto& r) { r.preToneExposureEv = 1.f; });
@@ -279,16 +453,16 @@ void CheckPixelsAndView() {
         maskGraph.RemoveNode(generator);
         lowered = graph;
         Require(LowerRawLayerStack(lowered, graphEditedMask, 1, 21, error), error);
-        CompareGain(base, Render(pipeline, lowered), 1.0f);
-        std::cout << "Mask graph curve and incomplete branch passed.\n";
-        Attach(curved, first, Kind::RgbCurves, toneMask);
+        ExpectUnavailableCoverage(pipeline,lowered);
+        std::cout << "Mask graph curve and unavailable incomplete branch passed.\n";
+        Attach(curved, first, Kind::ToneCurve, toneMask);
         toneLayer->layerMask = entireMask;
         lowered = graph;
         Require(LowerRawLayerStack(lowered, curved, 1, 5, error), error);
         const auto tonePixels = Render(pipeline, lowered);
         std::cout << "Checking masked Tone Curve against the RAW curve evaluator\n";
         for (std::size_t i = 0; i < base.size(); i += 4) {
-            const auto mapped = RawRecipe::EvaluateFinishTonePointCurveRgb(Photo(*toneLayer, Kind::RgbCurves).finishTone.layerJson,
+            const auto mapped = RawRecipe::EvaluateFinishTonePointCurveRgb(Photo(*toneLayer, Kind::ToneCurve).finishTone.layerJson,
                 {base[i],base[i+1],base[i+2]}, space);
             for (int channel=0; channel<3; ++channel) {
                 const float expected = base[i+channel] + .25f*(mapped[channel]-base[i+channel]);
@@ -298,6 +472,7 @@ void CheckPixelsAndView() {
             Require(tonePixels[i+3] == base[i+3], "Tone layer changed alpha.");
         }
         const auto second = AddRawAdjustmentLayer(curved, "Exposure after curve");
+        SeedOperationFixture(curved.layers.back());
         EditPhoto(*FindRawAdjustmentLayer(curved, second), Kind::Exposure, [](auto& r) { r.preToneExposureEv = 1.f; });
         lowered = graph;
         Require(LowerRawLayerStack(lowered, curved, 1, 6, error), error);
@@ -306,12 +481,20 @@ void CheckPixelsAndView() {
         Require(MoveRawAdjustmentLayer(curved, second, 0, error), error);
         lowered = graph;
         Require(LowerRawLayerStack(lowered, curved, 1, 7, error), error);
-        lowered.rawLayerScopeNodeId = CompiledOperation(lowered, state, first, Kind::Exposure);
+        const int selectedCurve=CompiledOperation(lowered,curved,first,Kind::ToneCurve);
+        const auto scopeInput=std::find_if(lowered.links.begin(),lowered.links.end(),[&](const auto& link) {
+            return link.toNodeId==selectedCurve && link.toSocketId=="imageIn";
+        });
+        Require(scopeInput!=lowered.links.end(),"The selected curve has no actual input endpoint.");
+        lowered.rawLayerScopeNodeId=scopeInput->fromNodeId;
+        lowered.rawLayerScopeSocketId=scopeInput->fromSocketId;
+        lowered.rawLayerScopeOperationId=selectedCurve;
+        lowered.rawLayerScopeDescriptor=scopeInput->semanticDescriptor;
         pipeline.SetRawDevelopmentGraphScopeReadbackRequest(RawDevelopmentGraphScopeStage::FinishToneInput, 8);
         const auto exposureThenTone = Render(pipeline, lowered);
         const auto& scope = pipeline.GetRawDevelopmentGraphScopeReadback();
         Require(scope.valid && scope.width == 4 && scope.height == 2 &&
-            scope.measurementDomain == "scene-linear-raw-layer-tool-input", "Selected layer scope is missing.");
+            scope.measurementDomain == "authored-node-input-values" && scope.sceneLinearBeforeViewTransform, "Selected layer scope is missing.");
         for (int y=0; y<2; ++y) for (int x=0; x<4; ++x) for (int c=0; c<3; ++c) {
             const float expected = base[((1-y)*4+x)*4+c]*2;
             Require(std::abs(scope.pixels[(y*4+x)*3+c]-expected) < .004f*std::max(.25f,std::abs(expected)),
@@ -350,6 +533,7 @@ void CheckPixelsAndView() {
         Require(LowerRawLayerStack(expectedFirst, thumbnailState, 1, 30, error), error);
         const auto expectedFirstPixels = Render(pipeline, expectedFirst);
         const auto secondThumbnailLayer = AddRawAdjustmentLayer(thumbnailState);
+        SeedOperationFixture(thumbnailState.layers.back());
         EditPhoto(thumbnailState.layers.back(), Kind::Exposure, [](auto& r) { r.preToneExposureEv = -2.f; });
         auto thumbnailGraph = graph;
         thumbnailGraph.nodes[0].rawDevelopment.recipe = mappedRecipe;
@@ -394,8 +578,9 @@ void CheckCreativeGpu() {
             if(base[i]>0 && std::max({base[i],base[i+1],base[i+2]})<1e-4f)nearBlackIndex=i;
         Require(nearBlackIndex<base.size(),"RAW intermediates lost near-black values");
         RawLayerStackState state;const auto id=AddRawAdjustmentLayer(state);
-        SceneTone tone;tone.contrast=1.35f;tone.outerProtection=.65f;
-        EditPhoto(state.layers[0], Kind::LuminanceTone, [&](auto& r) { r.finishTone.layerJson["luminanceTone"] = SerializeSceneTone(tone); });
+        SeedOperationFixture(state.background); SeedOperationFixture(state.layers.front());
+        SceneTone tone;tone.direct=false;tone.contrast=1.35f;tone.outerProtection=.65f;
+        EditPhoto(state.layers[0], Kind::ToneCurve, [&](auto& r) { r.finishTone.layerJson["curveMode"]="contrast";r.finishTone.layerJson["luminanceTone"] = SerializeSceneTone(tone); });
         auto lowered=graph;Require(LowerRawLayerStack(lowered,state,1,30,error),error);
         const auto mapped=Render(pipeline,lowered);
         const std::array<float,3> weights=space==Raw::RawWorkingSpace::LinearRec2020D65?
@@ -405,22 +590,25 @@ void CheckCreativeGpu() {
             for(int c=0;c<3;++c) Require(std::abs(mapped[i+c]-expected[c])<.003f*std::max(.01f,std::abs(expected[c])),"GPU tone differs from the authoritative EV curve");
             Require(mapped[i+3]==base[i+3],"Tone changed alpha");
             if(i==nearBlackIndex) Require(std::abs(mapped[i]-expected[0])<std::abs(expected[0])*.003f,
-                "Near-black tone differs from the authoritative EV curve");
+                "Near-black tone differs from the authoritative EV curve: actual="+std::to_string(mapped[i])+" expected="+std::to_string(expected[0])+" ratio="+std::to_string(mapped[i]/expected[0]));
         }
-        const auto coverage=SolidMask(state,id,.5f);Attach(state, id, Kind::LuminanceTone, coverage);
+        const auto coverage=SolidMask(state,id,.5f);Attach(state, id, Kind::ToneCurve, coverage);
         lowered=graph;Require(LowerRawLayerStack(lowered,state,1,31,error),error);
         const auto masked=Render(pipeline,lowered);
         for(std::size_t i=0;i<base.size();++i) Require(std::abs(masked[i]-(base[i]+mapped[i])*.5f)<.002f,"Tone mask is not result blending");
-        auto background=graph;background.nodes[0].rawDevelopment.recipe.finishTone=Photo(state.layers[0], Kind::LuminanceTone).finishTone;
+        RawLayerStackState backgroundState;SeedOperationFixture(backgroundState.background);
+        EditPhoto(backgroundState.background,Kind::ToneCurve,[&](auto& recipe) {recipe.finishTone=Photo(state.layers[0],Kind::ToneCurve).finishTone;});
+        auto background=graph;Require(LowerRawLayerStack(background,backgroundState,1,34,error),error);
         const auto backgroundTone=Render(pipeline,background);
         for(std::size_t i=0;i<mapped.size();++i)Require(std::abs(backgroundTone[i]-mapped[i])<.003f*std::max(.25f,std::abs(mapped[i])),"Background and layer tone disagree at " + std::to_string(i) + ": " + std::to_string(backgroundTone[i]) + " vs " + std::to_string(mapped[i]));
-        SceneTone deepTone;deepTone.anchorOffsetEv=-12;
-        background.nodes[0].rawDevelopment.recipe.finishTone.layerJson["luminanceTone"]=SerializeSceneTone(deepTone);
+        SceneTone deepTone;deepTone.direct=false;deepTone.anchorOffsetEv=-12;
+        EditPhoto(backgroundState.background,Kind::ToneCurve,[&](auto& recipe) {recipe.finishTone.layerJson["luminanceTone"]=SerializeSceneTone(deepTone);});
+        background=graph;Require(LowerRawLayerStack(background,backgroundState,1,35,error),error);
         const auto deepOutput=Render(pipeline,background);
         const float expectedBlack=base[nearBlackIndex]*std::exp2(-12.f);
         Require(deepOutput[nearBlackIndex]>0 && std::abs(deepOutput[nearBlackIndex]-expectedBlack)<expectedBlack*.003f,
             "Identity RGB curves lifted or lost the luminance result near black");
-        EditPhoto(state.layers[0], Kind::LuminanceTone, [](auto& r) { r.finishTone.layerJson = DefaultFinishToneJson(); });
+        EditPhoto(state.layers[0], Kind::ToneCurve, [](auto& r) { r.finishTone.layerJson = DefaultFinishToneJson(); });
         auto local=DefaultLocalRangeRecipe();local.enabled=true;
         local.highlightProtection=0;local.detailProtection=0;
         for(auto& point:local.points)point.deltaEv=.5f;
@@ -461,7 +649,7 @@ void CheckCreativeGpu() {
             const int operation=CompiledOperation(snapshot,state,id,Kind::LocalEv);
             snapshot.rawLayerScopeNodeId=operation;
             snapshot.rawLayerScopeOperationId=operation;
-            snapshot.rawLayerScopeSocketId="measurementImageOut";
+            snapshot.rawLayerScopeSocketId="inputImageOut";
             pipeline.SetRawDevelopmentGraphScopeReadbackRequest(RawDevelopmentGraphScopeStage::LocalRangeInput,8);
             Render(pipeline,snapshot);
             const auto& scope=pipeline.GetRawDevelopmentGraphScopeReadback();
@@ -518,7 +706,9 @@ void CheckCreativeGpu() {
 void CheckStore(const std::filesystem::path& folder) {
     RawLayerStackState layers;
     const auto first = AddRawAdjustmentLayer(layers, "Exposure layer");
+    SeedOperationFixture(layers.background); SeedOperationFixture(layers.layers.front());
     AddRawAdjustmentLayer(layers, "Tone layer");
+    SeedOperationFixture(layers.layers.back());
     const auto mask = SolidMask(layers, first, .3f);
     Attach(layers, first, Kind::Exposure, mask);
     EditPhoto(layers.layers[0], Kind::LocalEv, [](auto& r) { r.localRange.enabled=true; r.localRange.points[2].deltaEv=.6f; });
@@ -526,12 +716,12 @@ void CheckStore(const std::filesystem::path& folder) {
     EditPhoto(layers.layers[0], Kind::DetailContrast, [](auto& r) { r.detailContrast.scaleGains[4]=1.3f; r.detailContrast.evScaleResidual[64]=-.3f; });
     Attach(layers, first, Kind::DetailContrast, mask);
     RawRecipe::SceneTone sceneTone;sceneTone.contrast=1.4f;sceneTone.outerProtection=.7f;
-    EditPhoto(layers.layers[1], Kind::LuminanceTone, [&](auto& r) { r.finishTone.layerJson["luminanceTone"]=RawRecipe::SerializeSceneTone(sceneTone); });
+    EditPhoto(layers.layers[1], Kind::ToneCurve, [&](auto& r) { r.finishTone.layerJson["curveMode"]="luminance";r.finishTone.layerJson["luminanceTone"]=RawRecipe::SerializeSceneTone(sceneTone); });
     layers.layers[1].layerMask = mask;
-    const auto square = AddRawGeneratedMask(layers, first, EditorNodeGraph::MaskGeneratorKind::Square, "Custom square");
+    const auto square = AddRawShapeMask(layers, first, EditorNodeGraph::MaskGeneratorKind::Square, "Custom square");
     const auto* squareOutput = FindRawMaskOutput(layers, square);
     auto& maskGraph = layers.layers[0].graph;
-    const int squareNode = maskGraph.FindInputLink(squareOutput->nodeId, "imageIn")->fromNodeId;
+    const int squareNode = squareOutput->nodeId;
     maskGraph.FindNode(squareNode)->maskSettings.radiusY = .2f;
     EditorNodeGraph::ImagePayload imported;
     imported.label = "Embedded mask image";
@@ -572,6 +762,7 @@ void CheckStore(const std::filesystem::path& folder) {
 } // namespace
 
 bool ValidateRawLayers(const std::filesystem::path& folder) {
+    std::cout << std::unitbuf;
     if (!glfwInit()) return false;
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -586,6 +777,7 @@ bool ValidateRawLayers(const std::filesystem::path& folder) {
         Require(LoadGLFunctions(), "Cannot initialize OpenGL.");
         CheckPixelsAndView();
         CheckCreativeGpu();
+        CheckRetainedStylize();
         CheckStore(folder);
         ok = true;
     } catch (const std::exception& error) {

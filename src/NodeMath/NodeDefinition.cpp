@@ -708,16 +708,6 @@ std::vector<NodeDefinition> BuildRepresentativeDefinitions() {
         SpatialBehavior::Preserve, MetadataBehavior::Preserve, "direct graph result");
     definitions.push_back(std::move(output));
 
-    NodeDefinition frequency = Base(
-        "stack:frequency/fft", "Forward FFT", "frequency.fft",
-        "Transform declared image channels to complex frequency-domain samples.",
-        CapabilityClass::MultipassIterative, Inspectability::GraphDefinedOptimizedEquivalent,
-        DescriptorPropagationKind::FrequencyTransform);
-    frequency.ports = { Input("image", LogicalValueType::DataImage), Output("spectrum", LogicalValueType::ComplexSpectrum) };
-    frequency.policies = Policies(RangeBehavior::Derived, AlphaBehavior::NotApplicable,
-        SpatialBehavior::ExplicitOutput, MetadataBehavior::Derive, "declared channel selection then forward FFT");
-    definitions.push_back(std::move(frequency));
-
     NodeDefinition multi = Base(
         "stack:image/merge-many", "Merge Many Images", "image.merge-many",
         "Combine repeated typed images using a declared authored order and alignment policy.",

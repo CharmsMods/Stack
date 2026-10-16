@@ -11,7 +11,7 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
     const std::string workspaceKey =
         m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
     if (m_RawWorkspaceFilmstripStacksCacheWorkspaceKey == workspaceKey &&
-        m_RawWorkspaceFilmstripStacksCacheGalleryRevision == m_RawWorkspaceGalleryRevision &&
+        m_RawWorkspaceFilmstripStacksCacheContentRevision == m_RawWorkspaceNavigatorRevision &&
         m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration ==
             m_RawWorkspaceSimilarityPublishedGeneration &&
         m_RawWorkspaceFilmstripStacksCacheOrganizationRevision ==
@@ -45,8 +45,8 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
         organization);
     // The source gallery and automatic queue share the original grouping.
     // Saved results are presented in the Bracket category.
-    std::vector<Stack::RawWorkspace::RawGalleryFilmstripSourceSortInfo>
-        sortSources;
+    auto& sortSources = m_RawWorkspaceFilmstripSortSources;
+    sortSources.clear();
     sortSources.reserve(m_RawWorkspace.sources.size());
     for (std::size_t index = 0; index < m_RawWorkspace.sources.size(); ++index) {
         const auto& source = m_RawWorkspace.sources[index];
@@ -69,7 +69,7 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
             stack.sourceKeys.size());
     }
     m_RawWorkspaceFilmstripStacksCacheWorkspaceKey = workspaceKey;
-    m_RawWorkspaceFilmstripStacksCacheGalleryRevision = m_RawWorkspaceGalleryRevision;
+    m_RawWorkspaceFilmstripStacksCacheContentRevision = m_RawWorkspaceNavigatorRevision;
     m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration =
         m_RawWorkspaceSimilarityPublishedGeneration;
     m_RawWorkspaceFilmstripStacksCacheOrganizationRevision =
@@ -195,8 +195,6 @@ void EditorModule::SetRawWorkspaceFilmstripSortMode(
     organization.version = Stack::RawWorkspace::
         kRawGalleryManualGroupingVersion;
     m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
-    m_RawWorkspaceLabFilmstripScrollTargetX = 0.0f;
-    m_RawWorkspaceLabFilmstripScrollLastAppliedX = -1.0f;
     SaveRawWorkspaceGalleryGroupingState();
     SaveRawWorkspaceAppState();
 }
@@ -258,6 +256,7 @@ bool EditorModule::DetachRawWorkspaceFilmstripStackMember(
 void EditorModule::ResetRawWorkspaceSimilarityStacks() {
     m_RawWorkspaceSimilarityGeneration.fetch_add(1, std::memory_order_relaxed);
     m_RawWorkspaceSimilarityPublishedGeneration = 0;
+    ++m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceSimilarityWorkspaceKey.clear();
     m_RawWorkspaceSimilarityStacks.clear();
     m_RawWorkspaceSimilarityRebuildPending = false;
@@ -281,6 +280,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
 
     if (workspaceKey.empty() || m_RawWorkspace.sources.empty()) {
         m_RawWorkspaceSimilarityPublishedGeneration = generation;
+        ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
         m_RawWorkspaceSimilarityStacks.clear();
         return;
@@ -317,14 +317,20 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                 this,
                 request = std::move(request)
             ]() mutable {
-                Stack::RawWorkspace::RawGallerySimilarityResult result =
-                    Stack::RawWorkspace::BuildRawGallerySimilarityResult(
+                Stack::RawWorkspace::RawGallerySimilarityResult result;
+                bool completed = false;
+                try {
+                    result = Stack::RawWorkspace::BuildRawGallerySimilarityResult(
                         request);
+                    completed = true;
+                } catch (...) {
+                }
                 ProjectTasks().PostToMain([
                     this,
+                    completed,
                     result = std::move(result)
                 ]() mutable {
-                    const bool current = Stack::RawWorkspace::
+                    const bool current = completed && Stack::RawWorkspace::
                         IsRawGallerySimilarityResultCurrent(
                             result,
                             m_RawWorkspaceSimilarityGeneration.load(
@@ -335,6 +341,9 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                     if (current) {
                         m_RawWorkspaceSimilarityPublishedGeneration =
                             result.generation;
+                        // Automatic grouping changes the same displayed order
+                        // as manual organization, without persisting a manual edit.
+                        ++m_RawWorkspaceFilmstripOrganizationRevision;
                         m_RawWorkspaceSimilarityWorkspaceKey =
                             result.workspaceKey;
                         m_RawWorkspaceSimilarityStacks =
@@ -358,6 +367,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
             std::memory_order_relaxed)) {
         m_RawWorkspaceSimilarityWorkerActive = false;
         m_RawWorkspaceSimilarityPublishedGeneration = generation;
+        ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
         m_RawWorkspaceSimilarityStacks.clear();
     } else if (!submitted) {

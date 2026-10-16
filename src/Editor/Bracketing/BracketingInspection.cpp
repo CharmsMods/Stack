@@ -1,4 +1,5 @@
 #include "BracketingSession.h"
+#include "BurstEngine/Client.h"
 #include "Raw/Bracketing/InspectionImage.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "Async/TaskSystem.h"
@@ -10,7 +11,7 @@ namespace Stack::Editor {
 std::shared_ptr<const Raw::Bracketing::CapturePreview> UpdateBracketingInspection(
     BracketingSession& ui,int view,const std::string& frame) {
     using namespace Raw::Bracketing;
-    if(ui.detailMode||!ui.result||(!ui.result->analysis&&!ui.result->panorama)||ui.HasInteractivePreview()||view==2||view==6)return {};
+    if(ui.detailMode||!ui.result||(!ui.result->analysis&&!ui.result->panorama)||ui.HasInteractivePreview()||view==2||view==6||view==7)return {};
     // Saved draft inputs still inspect the published result, whose preparation
     // and group order belong to its own recipe.
     if(ui.processRequired)return {};
@@ -42,8 +43,8 @@ std::shared_ptr<const Raw::Bracketing::CapturePreview> UpdateBracketingInspectio
         if(view==5)request.memoryBudgetBytes/=2;
         if(!Async::TaskSystem::Get().SubmitHighPriority([job,request,result,kind,frame,group,maximum,view,ev,split,showClipping] {
             try {
-                const auto image=RenderInspectionImage(request,*result,kind,frame,group,unsigned(std::max(1,maximum)));
-                const auto comparison=view==5&&!job->canceled?RenderInspectionImage(request,*result,InspectionImageKind::Result,{},0,unsigned(std::max(1,maximum))):nullptr;
+                const auto image=Stack::BurstEngine::RenderInspectionImage(request,*result,kind,frame,group,unsigned(std::max(1,maximum)));
+                const auto comparison=view==5&&!job->canceled?Stack::BurstEngine::RenderInspectionImage(request,*result,InspectionImageKind::Result,{},0,unsigned(std::max(1,maximum))):nullptr;
                 if(image&&!job->canceled) {
                     const auto width=image->width,height=image->height;
                     job->rgba.resize(std::size_t(width)*height*4);

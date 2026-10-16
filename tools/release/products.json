@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "components": {
+    "application": {
+      "files": ["Stack.exe"],
+      "directories": ["Stack/App"],
+      "signedFiles": ["Stack.exe"]
+    },
+    "burst": {
+      "files": ["StackBurst.exe"],
+      "directories": [],
+      "sourceFiles": [
+        {"source": "installer/BURST-README.txt", "destination": "Stack/App/BURST-README.txt"},
+        {"source": "legal/Adobe-DNG-Notice.txt", "destination": "Stack/App/Legal/Adobe-DNG-Notice.txt"}
+      ],
+      "signedFiles": ["StackBurst.exe"]
+    },
+    "burstShell": {
+      "files": ["Stack/App/Runtime/StackBurstShell.dll"],
+      "directories": [],
+      "signedFiles": ["Stack/App/Runtime/StackBurstShell.dll"]
+    },
+    "rawRuntime": {
+      "files": ["Stack/App/Runtime/libraw.dll"],
+      "directories": [],
+      "signedFiles": ["Stack/App/Runtime/libraw.dll"]
+    },
+    "legal": {
+      "files": [],
+      "directories": ["Stack/App/Legal"],
+      "signedFiles": []
+    }
+  },
+  "products": {
+    "Stack": {
+      "name": "Stack",
+      "artifactName": "Stack",
+      "installerName": "StackSetup",
+      "executable": "Stack.exe",
+      "components": ["application", "burst", "burstShell", "rawRuntime", "legal"],
+      "buildTargets": ["Stack", "StackBurst", "StackBurstShell"],
+      "rootEntries": ["Stack", "Stack.exe", "StackBurst.exe"],
+      "versionedExecutables": ["Stack.exe", "StackBurst.exe", "Stack/App/Runtime/StackBurstShell.dll"],
+      "shellClsid": "{03F6660E-3BB2-47C8-8DEA-797C570EEA92}",
+      "localTestShellClsid": "{247849BE-6532-465A-B191-0E62F5D1E6F0}",
+      "thirdPartyIds": []
+    },
+    "Burst": {
+      "name": "Stack Burst",
+      "artifactName": "StackBurst",
+      "installerName": "StackBurstSetup",
+      "executable": "StackBurst.exe",
+      "components": ["burst", "burstShell", "rawRuntime", "legal"],
+      "buildTargets": ["StackBurst", "StackBurstShell"],
+      "rootEntries": ["Stack", "StackBurst.exe"],
+      "versionedExecutables": ["StackBurst.exe", "Stack/App/Runtime/StackBurstShell.dll"],
+      "shellClsid": "{74273991-A142-4823-ABFB-66398A23FE0D}",
+      "localTestShellClsid": "{44082701-6DC0-4B17-9E5E-83EE78BA7E2B}",
+      "thirdPartyIds": ["glfw", "nlohmann-json", "libraw", "opencv"]
+    }
+  }
+}

@@ -28,7 +28,7 @@ std::size_t SourceIdentity(const RawImageBackdropFrame& frame,
     };
     const auto point = [&](ImVec2 p) { append(p.x); append(p.y); };
     point(frame.nativeExtent);
-    for (const auto& patch : frame.patches) {
+    for (const auto& patch : frame.SurroundPatches()) {
         if (wholePhoto && &patch != wholePhoto) continue;
         append(patch.texture); append(patch.previousTexture); append(patch.fadeAmount); append(patch.encodedSrgb);
         append(patch.imageBounds.x); append(patch.imageBounds.y);
@@ -63,7 +63,7 @@ void RawImageBackdropBlur::ReleaseImages() {
 bool RawImageBackdropBlur::Ensure(int w, int h) {
     if (failed) return false;
     if (!copyProgram) {
-        copyProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropShaders::Copy);
+        copyProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropShaders::Copy.c_str());
         blurProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex, RawImageBackdropShaders::Blur);
         colorFieldProgram = GLHelpers::CreateShaderProgram(RawImageBackdropShaders::Vertex,
             RawImageBackdropColorFieldShaders::Generate.c_str());
@@ -100,7 +100,7 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     // A native crop must not change the surround's color when navigation asks
     // for different detail. Prefer the accepted, complete developed photo.
     const RawImageBackdropFrame::Patch* wholePhoto = nullptr;
-    for (const auto& patch : frame.patches) {
+    for (const auto& patch : frame.SurroundPatches()) {
         if (IsWholePhoto(patch)) { wholePhoto = &patch; break; }
     }
     const auto nextIdentity = SourceIdentity(frame, wholePhoto);
@@ -140,8 +140,10 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     glUseProgram(copyProgram);
     glUniform1i(glGetUniformLocation(copyProgram, "image"), 0);
     glUniform1i(glGetUniformLocation(copyProgram, "previous"), 1);
+    // Copy clips visible display texels before sampling, applies the accepted
+    // frame fade, then decodes window RGB for every following convolution.
     glUniform1i(glGetUniformLocation(copyProgram, "visibleColorOnly"), 1);
-    for (const auto& patch : frame.patches) {
+    for (const auto& patch : frame.SurroundPatches()) {
         if (wholePhoto && &patch != wholePhoto) continue;
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, patch.previousTexture ? patch.previousTexture : patch.texture);
@@ -204,19 +206,18 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     return true;
 }
 
-void RawImageBackdropBlur::Bind(unsigned int program, int firstUnit, ImVec2 photoSize) const {
+void RawImageBackdropBlur::Bind(unsigned int /*presentProgram*/, int firstUnit, ImVec2 photoSize) const {
     std::array<float, Levels> sigmas{};
     for (int i = 0; i < Levels; ++i) {
-        const std::string name = "blurred[" + std::to_string(i) + "]";
-        glUniform1i(glGetUniformLocation(program, name.c_str()), firstUnit+i);
+        glUniform1i(BackdropUniforms::Present::Blurred+i, firstUnit+i);
         glActiveTexture(GL_TEXTURE0+firstUnit+i);
         glBindTexture(GL_TEXTURE_2D, levels[i].texture);
         sigmas[i] = normalizedSigmas[i]*photoSize.x/(photoBounds.z-photoBounds.x);
     }
-    glUniform1fv(glGetUniformLocation(program, "blurSigma[0]"), Levels, sigmas.data());
-    glUniform4f(glGetUniformLocation(program, "blurPhotoBounds"), photoBounds.x,
+    glUniform1fv(BackdropUniforms::Present::Sigma, Levels, sigmas.data());
+    glUniform4f(BackdropUniforms::Present::BlurPhotoBounds, photoBounds.x,
         photoBounds.y, photoBounds.z, photoBounds.w);
-    glUniform1i(glGetUniformLocation(program, "blurColorField"), 12);
+    glUniform1i(BackdropUniforms::Present::ColorField, 12);
     glActiveTexture(GL_TEXTURE0+12);
     glBindTexture(GL_TEXTURE_2D, colorField);
 }

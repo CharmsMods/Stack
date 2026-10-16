@@ -13,6 +13,9 @@ namespace EditorNodeGraph {
 struct Node {
     int id = 0;
     std::string instanceUuid;
+    // Editing projection only. Authored parameters remain owned by the layer
+    // document; this identifies their instance on the project-wide canvas.
+    std::string rawLayerOwnerId;
     Stack::GraphModel::NodeRole role = Stack::GraphModel::NodeRole::Ordinary;
     Stack::GraphModel::Endpoint reference;
     Stack::NodeMath::LogicalValueType referenceType = Stack::NodeMath::LogicalValueType::Invalid;
@@ -21,6 +24,7 @@ struct Node {
     nlohmann::json rawCoverage = nlohmann::json::object();
     int layerIndex = -1;
     LayerType layerType = LayerType::Brightness;
+    nlohmann::json layerParameters = nlohmann::json::object();
     std::string typeId;
     std::string title;
     Vec2 position;
@@ -43,21 +47,6 @@ struct Node {
     TechnicalImageSettings technicalImageSettings;
     ReformatSettings reformatSettings;
     CompoundPayload compound;
-    FrequencyFilterSettings frequencyFilterSettings;
-    FrequencyResponseSettings frequencyResponseSettings;
-    FrequencyFftSettings frequencyFftSettings;
-    FrequencyFftSettings frequencyIfftSettings;
-    SpectrumViewSettings spectrumViewSettings;
-    ApplyFrequencyResponseSettings applyFrequencyResponseSettings;
-    CombineSpectraSettings combineSpectraSettings;
-    FrequencyMaskShape frequencyMaskShape = FrequencyMaskShape::LowPass;
-    FrequencyMaskSettings frequencyMaskSettings;
-    SpectrumMathMode spectrumMathMode = SpectrumMathMode::Multiply;
-    SpectrumMathSettings spectrumMathSettings;
-    MagnitudePhaseMode magnitudePhaseMode = MagnitudePhaseMode::Magnitude;
-    MagnitudePhaseSettings magnitudePhaseSettings;
-    SpectrumAnalyzerMode spectrumAnalyzerMode = SpectrumAnalyzerMode::RadialEnergy;
-    SpectrumAnalyzerSettings spectrumAnalyzerSettings;
     std::vector<std::string> exposedParameterIds;
     bool outputEnabled = true;
     OutputSettings outputSettings;
@@ -71,7 +60,6 @@ struct Node {
     ImagePayload image;
     RawSourcePayload rawSource;
     RawDevelopmentPayload rawDevelopment;
-    RawNeuralDenoisePayload rawNeuralDenoise;
     RawDecodePayload rawDecode;
     RawDevelopPayload rawDevelop;
     RawDetailAutoMaskPayload rawDetailAutoMask;

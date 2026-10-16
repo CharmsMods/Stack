@@ -752,6 +752,12 @@ std::vector<RawGallerySimilarityStack> ApplyRawGalleryManualGrouping(
 
 std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
     const std::vector<RawGallerySimilarityInput>& inputs) {
+    return BuildRawGallerySimilarityStacks(inputs, {});
+}
+
+std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
+    const std::vector<RawGallerySimilarityInput>& inputs,
+    const std::function<bool()>& shouldCancel) {
     std::vector<RawGallerySimilarityInput> ordered = inputs;
     std::stable_sort(
         ordered.begin(),
@@ -769,6 +775,7 @@ std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
     std::vector<const RawGallerySimilarityInput*> anchors;
 
     for (const RawGallerySimilarityInput& input : ordered) {
+        if (shouldCancel && shouldCancel()) return {};
         FolderState& folder = folders[input.folderKey];
         const CaptureSequenceIdentity inputCapture =
             ParseCaptureSequenceIdentity(input.sourceKey);
@@ -802,6 +809,7 @@ std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
                 }
             }
             for (const std::size_t candidateIndex : candidates) {
+                if (shouldCancel && shouldCancel()) return {};
                 if (candidateIndex >= anchors.size() ||
                     anchors[candidateIndex] == nullptr) {
                     continue;

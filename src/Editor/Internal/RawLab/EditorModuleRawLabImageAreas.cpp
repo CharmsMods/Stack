@@ -10,7 +10,7 @@ void EditorModule::RenderRawWorkspaceLabImageAreas(const Stack::RawWorkspace::So
     RawWorkspaceEditContext context;
     if (!BeginRawWorkspaceEditContext(source, context) || !context.canEdit) return;
     const std::string identity = GetActiveRawWorkspacePreviewIdentity();
-    if (ui.sourceKey != identity) return;
+    if (ui.sourceKey != identity || ui.nodeTarget != context.nodeTarget) return;
     Async::ActivityMetadata activity;
     activity.ownerId = GetNotifier().GetOwner().id;
     activity.ownerGeneration = GetNotifier().GetOwner().generation;
@@ -30,12 +30,11 @@ void EditorModule::RenderRawWorkspaceLabImageAreas(const Stack::RawWorkspace::So
             return Mapping::FromSpatial(found->second.descriptor.spatial.value,
                 m_LastGraphOutputSemanticDescriptor.spatial.value,context.recipe.cropRotation);
         };
-        const auto* input=layer->graph.FindInputLink(operation->id,"referenceIn");
-        if (!input) input=layer->graph.FindInputLink(operation->id,"imageIn");
+        const auto* input=layer->graph.FindInputLink(operation->id,"imageIn");
         const auto measured=input ? mappingFor(input->fromNodeId,input->fromSocketId) : std::nullopt;
         if (!measured) {
             ImGui::GetWindowDrawList()->AddText({minimum.x+12,minimum.y+12},IM_COL32(230,230,230,255),
-                "The Local EV measurement image coordinates are unavailable.");
+                "The Local EV input image coordinates are unavailable.");
             return;
         }
         std::unordered_map<std::string,Mapping> areaMappings;

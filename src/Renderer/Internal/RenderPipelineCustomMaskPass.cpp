@@ -1,3 +1,4 @@
+#include "Assets/MaskResampling.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLStateGuards.h"
 #include "Utils/PixelBufferUtils.h"
@@ -360,45 +361,14 @@ std::vector<float> FlattenCustomMaskPayload(const RenderCustomMaskPayload& paylo
             width, height, 1, pixelCount)) {
         return {};
     }
-    std::vector<float> values(pixelCount, 0.0f);
+    std::vector<float> values;
     const int sourceW = std::max(1, payload.width);
     const int sourceH = std::max(1, payload.height);
     const bool hasRaster = payload.rasterLayer.size() >= static_cast<std::size_t>(sourceW) * static_cast<std::size_t>(sourceH);
 
-    if (hasRaster) {
-        for (int y = 0; y < height; ++y) {
-            const float v = height > 1
-                ? static_cast<float>(y) /
-                    static_cast<float>(height - 1)
-                : 0.0f;
-            const float maskV = 1.0f - v;
-            const int srcY = std::clamp(
-                static_cast<int>(
-                    std::round(
-                        maskV *
-                        static_cast<float>(sourceH - 1))),
-                0,
-                sourceH - 1);
-            for (int x = 0; x < width; ++x) {
-                const float u = width > 1
-                    ? static_cast<float>(x) /
-                        static_cast<float>(width - 1)
-                    : 0.0f;
-                const int srcX = std::clamp(
-                    static_cast<int>(
-                        std::round(
-                            u *
-                            static_cast<float>(sourceW - 1))),
-                    0,
-                    sourceW - 1);
-                values[static_cast<std::size_t>(y) * width + x] =
-                    Clamp01(
-                        payload.rasterLayer[
-                            static_cast<std::size_t>(srcY) * sourceW +
-                            srcX]);
-            }
-        }
-    }
+    if (hasRaster) values = Stack::Assets::ResampleMaskCoverage(
+        payload.rasterLayer.data(),sourceW,sourceH,width,height,true);
+    else values.assign(pixelCount,0.f);
 
     for (const RenderCustomMaskObject& object : payload.objects) {
         if (!CustomMaskObjectHasUsableGeometry(object)) {

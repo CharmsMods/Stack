@@ -23,6 +23,7 @@ public:
     const GraphFrameTransition& FrameTransition() const { return m_FrameTransition; }
     void Render(EditorModule* editor, float revealAlpha = 1.0f, HostMode hostMode = HostMode::DockedPane);
     void ResetSinglePreviewState();
+    bool IsPanning() const { return m_Panning; }
 
 private:
     GraphFrameTransition m_FrameTransition;
@@ -71,6 +72,9 @@ private:
         unsigned int texture = 0;
         int fullWidth = 0;
         int fullHeight = 0;
+        int storageWidth = 0;
+        int storageHeight = 0;
+        ImVec4 regionBounds = ImVec4(0.0f, 0.0f, 1.0f, 1.0f);
         int tileX = 0;
         int tileY = 0;
         int tileHaloX = 0;
@@ -173,4 +177,5 @@ private:
     unsigned int m_PixelInspectionProgram = 0;
     unsigned int m_PixelInspectionVertexArray = 0;
     std::deque<PixelInspectionDrawCommand> m_PixelInspectionDrawCommands;
+    int m_PixelInspectionCommandFrame = -1;
 };

@@ -126,7 +126,6 @@ enum class DescriptorPropagationKind {
     Reduction,
     DirectOutput,
     RawDevelopment,
-    FrequencyTransform,
     UnknownExternal
 };
 

@@ -592,7 +592,7 @@ bool ValidateDevelopGraphStateSerialization() {
     const nlohmann::json rawDecodeSerialized =
         EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), rawDecodeGraph);
     EditorNodeGraph::Graph rawDecodeRestoredGraph;
-    EditorNodeGraph::DeserializeGraphPayload(rawDecodeSerialized, rawDecodeRestoredGraph, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(rawDecodeSerialized, rawDecodeRestoredGraph, 0);
     const EditorNodeGraph::Node* restoredRawDecodeNode = rawDecodeRestoredGraph.FindNode(rawDecodeNodeId);
     const bool rawDecodeRoundTripPreserved =
         restoredRawDecodeNode &&
@@ -694,7 +694,7 @@ bool ValidateDevelopAutoIntentSerialization() {
     }
 
     EditorNodeGraph::Graph restoredGraph;
-    EditorNodeGraph::DeserializeGraphPayload(serialized, restoredGraph, 0, {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serialized, restoredGraph, 0);
     const EditorNodeGraph::Node* restoredNode = restoredGraph.FindNode(developNodeId);
     const bool roundTripPreserved =
         restoredNode &&

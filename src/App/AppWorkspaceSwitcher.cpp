@@ -76,8 +76,7 @@ void AppShell::TickWorkspaceSwitcher() {
             m_WorkspaceDiscardMouse=true;
         } else m_WorkspaceAltSuppressed=alt;
     } else if(action==Stack::Workspace::HoldAction::Open) {
-        const bool blocked=m_CloseRequested || !m_StartupRevealVisual.AllowsInput() || m_ShowLegalGateReview ||
-            (m_LegalManager && !m_LegalManager->IsAccepted()) ||
+        const bool blocked=m_CloseRequested || !m_StartupRevealVisual.AllowsInput() ||
             ActiveProjectLoadPhase()!=LibraryToEditorProjectLoadPhase::None || m_RootTabBodyFadeActive ||
             m_ShowEditorSavePrompt || m_ShowEditorNamePrompt || m_ShowRawWorkspaceSwitchPrompt ||
             m_ShowUnnamedEditorClosePrompt || m_ShowOpenProjectPrompt || m_ShowFileDispositionPrompt ||

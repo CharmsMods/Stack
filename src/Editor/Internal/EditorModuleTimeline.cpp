@@ -645,12 +645,16 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
         for (const Stack::Timeline::AnimatableParameterDefinition& definition : selectedParameters) {
             const bool selected = Stack::Timeline::SameTarget(definition.target, m_TimelineUi.selectedParameterTarget);
             const std::string label = BuildParameterComboLabel(definition);
+            ImGui::PushID(definition.target.nodeId);
+            ImGui::PushID(definition.target.parameterId.c_str());
             if (ImGui::Selectable(label.c_str(), selected)) {
                 m_TimelineUi.selectedParameterTarget = definition.target;
             }
             if (selected) {
                 ImGui::SetItemDefaultFocus();
             }
+            ImGui::PopID();
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -684,6 +688,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
         ImGui::SetNextItemWidth(120.0f);
         if (ImGui::InputInt("Duration frames##TimelineSettingsDuration", &m_TimelineUi.durationFrames, 1, 30)) {
             m_TimelineUi.durationFrames = std::clamp(m_TimelineUi.durationFrames, 1, 100000);
+            MarkDirty();
             StopTimelinePlayback(false);
             m_TimelineUi.currentFrame =
                 Stack::Timeline::ClampTimelineFrame(m_TimelineUi.currentFrame, m_TimelineUi.durationFrames);
@@ -693,6 +698,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
         if (ImGui::InputInt("FPS##TimelineSettingsFps", &m_TimelineUi.framesPerSecond, 1, 5)) {
             m_TimelineUi.playbackFrameAccumulator = 0.0;
             m_TimelineUi.framesPerSecond = std::clamp(m_TimelineUi.framesPerSecond, 1, 240);
+            MarkDirty();
         }
 
         ImGui::Checkbox("Loop playback##TimelineSettingsLoop", &m_TimelineUi.loopPlayback);

@@ -5,6 +5,7 @@
 #include "PlatformHelpers.h"
 #include "UpdateDownloadStorage.h"
 #include "UpdateJson.h"
+#include "Utils/Utf8Text.h"
 #include "Async/TaskSystem.h"
 #include "ThirdParty/json.hpp"
 
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <cstdio>
@@ -79,6 +81,11 @@ struct DownloadTaskResult {
     std::string selectedDigest;
 };
 
+bool IsUpdateOperationActive(UpdateState state) {
+    return state == UpdateState::Checking || state == UpdateState::Downloading ||
+        state == UpdateState::Verifying || state == UpdateState::Installing;
+}
+
 std::uint64_t GetUnixTimeNow() {
     return static_cast<std::uint64_t>(std::time(nullptr));
 }
@@ -121,9 +128,14 @@ std::filesystem::path GetPersistentStatePath() {
 }
 
 bool ParseSemanticVersion(const std::string& text, SemanticVersion& outVersion) {
+    outVersion = {};
     std::string value = Trim(text);
     if (!value.empty() && (value.front() == 'v' || value.front() == 'V')) {
         value.erase(value.begin());
+    }
+
+    if (std::count(value.begin(), value.end(), '.') != 2) {
+        return false;
     }
 
     std::stringstream stream(value);
@@ -140,15 +152,23 @@ bool ParseSemanticVersion(const std::string& text, SemanticVersion& outVersion) 
         return false;
     }
 
-    try {
-        outVersion.major = std::stoi(majorText);
-        outVersion.minor = std::stoi(minorText);
-        outVersion.patch = std::stoi(patchText);
-        outVersion.valid = true;
-        return true;
-    } catch (...) {
+    const auto parseComponent = [](const std::string& component, int& result) {
+        if (component.empty() || !std::all_of(component.begin(), component.end(),
+                [](unsigned char ch) { return ch >= '0' && ch <= '9'; })) {
+            return false;
+        }
+        const auto parsed = std::from_chars(component.data(), component.data() + component.size(), result);
+        return parsed.ec == std::errc() && parsed.ptr == component.data() + component.size();
+    };
+    SemanticVersion parsedVersion;
+    if (!parseComponent(majorText, parsedVersion.major) ||
+        !parseComponent(minorText, parsedVersion.minor) ||
+        !parseComponent(patchText, parsedVersion.patch)) {
         return false;
     }
+    parsedVersion.valid = true;
+    outVersion = parsedVersion;
+    return true;
 }
 
 int CompareSemanticVersion(const SemanticVersion& lhs, const SemanticVersion& rhs) {
@@ -171,7 +191,7 @@ std::string BuildReleaseSummary(const std::string& releaseBody) {
         line = Trim(line);
         if (!line.empty()) {
             if (line.size() > 240) {
-                line.resize(240);
+                Stack::Utf8Text::TruncateToByteLimit(line, 240);
                 line += "...";
             }
             return line;
@@ -180,41 +200,12 @@ std::string BuildReleaseSummary(const std::string& releaseBody) {
     return {};
 }
 
-bool NameContains(const std::string& haystack, const std::string& needle) {
-    return ToLowerAscii(haystack).find(ToLowerAscii(needle)) != std::string::npos;
-}
-
 int ScoreInstallerAsset(const ReleaseAsset& asset, const std::string& versionText) {
-    const std::string lowered = ToLowerAscii(asset.name);
-    if (!NameContains(lowered, ".exe") || lowered.find(".exe") == std::string::npos) {
-        return -1000;
-    }
-    if (lowered.find("local-test") != std::string::npos ||
-        lowered.find("unsigned") != std::string::npos ||
-        lowered.find("legal-draft") != std::string::npos) {
-        return -1000;
-    }
-
-    int score = 0;
-    if (lowered.find("stacksetup") != std::string::npos) {
-        score += 80;
-    }
-    if (lowered.find("stack") != std::string::npos) {
-        score += 20;
-    }
-    if (lowered.find("win") != std::string::npos || lowered.find("windows") != std::string::npos) {
-        score += 20;
-    }
-    if (lowered.find("x64") != std::string::npos || lowered.find("64") != std::string::npos) {
-        score += 12;
-    }
-    if (lowered.find(ToLowerAscii(versionText)) != std::string::npos) {
-        score += 18;
-    }
-    if (lowered.find("portable") != std::string::npos || lowered.find("source") != std::string::npos) {
-        score -= 60;
-    }
-    return score;
+    std::string version = ToLowerAscii(versionText);
+    if (!version.empty() && version.front() == 'v') version.erase(version.begin());
+    // Full Stack and Burst releases can share a release page. Only the exact
+    // full-product Windows x64 asset may update this application.
+    return ToLowerAscii(asset.name) == "stacksetup-v" + version + "-win-x64.exe" ? 100 : -1000;
 }
 
 bool TryExtractHashForAsset(const std::string& shaText, const std::string& assetName, std::string& outHash) {
@@ -582,7 +573,8 @@ ReleaseInfo FetchLatestRelease() {
             }
 
             const std::string lowered = ToLowerAscii(asset.name);
-            if (lowered == "sha256sums.txt" || lowered == "sha256sum.txt" || lowered.find("sha256") != std::string::npos) {
+            if (lowered == "stack-sha256sums.txt" ||
+                (hashAsset.name.empty() && (lowered == "sha256sums.txt" || lowered == "sha256sum.txt"))) {
                 hashAsset = asset;
             }
             installerCandidates.push_back(asset);
@@ -725,22 +717,19 @@ const Snapshot& UpdateManager::GetSnapshot() const {
 
 bool UpdateManager::CanCheckForUpdates() const {
     return !m_Snapshot.isLocalTestBuild &&
-           m_Snapshot.state != UpdateState::Checking &&
-           m_Snapshot.state != UpdateState::Downloading &&
-           m_Snapshot.state != UpdateState::Verifying &&
-           m_Snapshot.state != UpdateState::Installing;
+           !IsUpdateOperationActive(m_Snapshot.state);
 }
 
 bool UpdateManager::CanDownloadUpdate() const {
-    return m_Snapshot.updateAvailable &&
+    return !m_Snapshot.isLocalTestBuild && !IsUpdateOperationActive(m_Snapshot.state) &&
+           m_Snapshot.updateAvailable &&
            !m_SelectedAssetUrl.empty() &&
-           m_Snapshot.state != UpdateState::Downloading &&
-           m_Snapshot.state != UpdateState::Installing &&
            m_Snapshot.state != UpdateState::ReadyToInstall;
 }
 
 bool UpdateManager::CanInstallUpdate() const {
-    return m_Snapshot.downloadReady && !m_Snapshot.downloadedFilePath.empty();
+    return !m_Snapshot.isLocalTestBuild && !IsUpdateOperationActive(m_Snapshot.state) &&
+           m_Snapshot.downloadReady && !m_Snapshot.downloadedFilePath.empty();
 }
 
 bool UpdateManager::IsAutomaticStartupCheckEnabled() const {

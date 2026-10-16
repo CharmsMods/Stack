@@ -2,6 +2,7 @@
 #include "Raw/DngMetadataSupplement.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include "Raw/RawOrientation.h"
+#include "Raw/FloatMosaicImport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -212,6 +213,17 @@ void ExtractDngLevels(LibRaw& processor, RawMetadata& metadata) {
 
 void ExtractDngColorMetadata(const libraw_data_t& image, RawMetadata& metadata) {
     if (!metadata.isDng) {
+        // Preserve LibRaw's camera XYZ calibration for a later DNG export.
+        // rgb_cam alone has already been normalized for white balance and
+        // cannot substitute for DNG's XYZ-to-native-camera ColorMatrix.
+        bool available=false;
+        for(int r=0;r<3;++r)for(int c=0;c<3;++c) {
+            const float value=image.color.cam_xyz[r][c];
+            metadata.dngColorMatrix1[r*3+c]=value;
+            available=available||std::abs(value)>0.000001f;
+        }
+        metadata.hasDngColorMatrix1=available;
+        metadata.dngIlluminant1=21; // LibRaw camera calibration is D65.
         return;
     }
     for (int set = 0; set < 2; ++set) {
@@ -276,6 +288,7 @@ void ExtractMetadata(
     metadata.isoSpeed = std::max(0.0f, capture.iso_speed);
     metadata.apertureFNumber = std::max(0.0f, capture.aperture);
     metadata.focalLengthMm = std::max(0.0f, capture.focal_len);
+    metadata.focalLength35mm = float(processor.imgdata.lens.FocalLengthIn35mmFormat);
     metadata.lensModel = image.lens.Lens ? image.lens.Lens : "";
     metadata.captureTimestamp = capture.timestamp > 0
         ? static_cast<std::int64_t>(capture.timestamp)
@@ -549,6 +562,10 @@ bool DecodeWithLibRaw(
         return false;
     }
 
+    // Keep floating-point Bayer DNG in its original precision. LibRaw's
+    // default converts it to unsigned 16-bit, losing signed/HDR measurements.
+    if(processor.imgdata.idata.filters)
+        processor.imgdata.rawparams.options &= ~LIBRAW_RAWOPTIONS_CONVERTFLOAT_TO_INT;
     status = processor.unpack();
     if (status == LIBRAW_CANCELLED_BY_CALLBACK || cancellation.cancelled || IsCancelled(shouldCancel)) {
         MarkCancelled(outData);
@@ -696,6 +713,11 @@ bool DecodeWithLibRaw(
         return true;
     }
 
+    if(processor.imgdata.rawdata.float_image) {
+        const int stride=processor.imgdata.sizes.raw_pitch>0?processor.imgdata.sizes.raw_pitch/int(sizeof(float)):rawWidth;
+        const bool imported=ImportFloatDngMosaic(processor.imgdata.rawdata.float_image,stride,outData,shouldCancel);
+        processor.recycle();return imported;
+    }
     if (!processor.imgdata.rawdata.raw_image || rawWidth <= 0 || rawHeight <= 0 || pixelCount == 0) {
         outData.metadata.error = "LibRaw did not expose a mosaiced raw_image buffer after unpack().";
         processor.recycle();

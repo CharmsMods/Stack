@@ -2,6 +2,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
+#include "Graph/LayerOperationParameters.h"
 
 #include <string>
 #include <vector>
@@ -51,6 +52,8 @@ bool Graph::SetDataMathMode(int nodeId, DataMathMode mode) {
     if (!node || node->kind != NodeKind::DataMath) {
         return false;
     }
+    if (node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+        mode == DataMathMode::ImageAverage) return false;
 
     const DataMathMode previousMode = node->dataMathMode;
     const NodeMetadataState before = CaptureMetadataState(*node);
@@ -127,24 +130,15 @@ bool Graph::SetImageToMaskKind(int nodeId, ImageToMaskKind kind) {
 
 bool Graph::SetLayerNodeType(int nodeId, LayerType type) {
     Node* node = FindNode(nodeId);
-    if (!node || node->kind != NodeKind::Layer) {
+    if (!node || node->kind != NodeKind::Layer || !LayerRegistry::GetDescriptor(type)) {
         return false;
     }
 
     const LayerType previousType = node->layerType;
     const NodeMetadataState before = CaptureMetadataState(*node);
+    if (previousType!=type) node->layerParameters=Stack::GraphModel::DefaultLayerParameters(type);
     node->layerType = type;
-    if (node->definitionResolved) {
-        EditorNodeGraphDefinitions::ApplyNodeMetadata(*node);
-    } else if (const LayerDescriptor* descriptor =
-                   LayerRegistry::GetDescriptor(type)) {
-        // Metadata synchronization must not silently "repair" an exact saved
-        // definition mismatch. Preserve its unresolved identity until the user
-        // explicitly chooses a replacement.
-        node->typeId = descriptor->typeId ? descriptor->typeId : "";
-        node->title =
-            descriptor->displayName ? descriptor->displayName : "Layer";
-    }
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(*node);
     const bool changed =
         previousType != type ||
         MetadataChanged(before, *node);

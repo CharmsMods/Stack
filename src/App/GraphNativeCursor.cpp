@@ -46,8 +46,18 @@ void Restore(GLFWwindow* window) {
 void Apply(GLFWwindow* window,const ImGuiExtras::GraphCursorSnapshot& state,bool captured) {
     if (!window) return;
     if (!state.visible) {
+        if (captured) {
+            if (!ownsCursor) {
+                previousNoCursorChange=(ImGui::GetIO().ConfigFlags&ImGuiConfigFlags_NoMouseCursorChange)!=0;
+                ownsCursor=true;
+            }
+            // Keep ImGui's GLFW backend from restoring a visible cursor while
+            // an owner has the native pointer captured but no graph cursor to draw.
+            ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;
+            return;
+        }
         Restore(window);
-        if (!captured) glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_NORMAL);
+        glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_NORMAL);
         return;
     }
     if (!ownsCursor) {

@@ -13,7 +13,7 @@ struct PresetEntry {
     std::string displayName;
     std::string timestamp;
     std::string savedWithVersion;
-    std::string fileName;
+    std::string fileName; // UTF-8 filename within the presets directory.
     bool builtIn = false;
     std::uint32_t nodeCount = 0;
     std::uint32_t inputCount = 0;

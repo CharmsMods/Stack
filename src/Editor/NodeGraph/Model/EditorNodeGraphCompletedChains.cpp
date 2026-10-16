@@ -157,15 +157,15 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                 case NodeKind::RawDevelopment:
                 case NodeKind::RawSource:
                 case NodeKind::ImageGenerator:
-                case NodeKind::MaskGenerator:
+                case NodeKind::MaskTexture:
+            case NodeKind::MaskGenerator:
                 case NodeKind::CustomMask:
-                case NodeKind::FrequencyMask:
+                
                     plan.valid = true;
                     plan.source = true;
                     break;
                 case NodeKind::RawDecode:
                 case NodeKind::RawDevelop:
-                case NodeKind::RawNeuralDenoise:
                     plan.valid = requireInput(kRawInputSocketId);
                     break;
                 case NodeKind::Layer:
@@ -177,9 +177,7 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                     plan.valid = requireInput(kImageInputSocketId);
                     break;
                 case NodeKind::RawOperation:
-                    if (key.socketId == "measurementImageOut" && findInput(key.nodeId, "referenceIn"))
-                        plan.valid = requireInput("referenceIn");
-                    else plan.valid = requireInput(kImageInputSocketId);
+                    plan.valid = requireInput(kImageInputSocketId);
                     break;
                 case NodeKind::Compound: {
                     std::vector<std::string> dependencies;
@@ -307,55 +305,6 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                         : inputCount >= 1;
                     break;
                 }
-                case NodeKind::FrequencyFilter:
-                    plan.valid = requireInput(kChannelInputSocketId);
-                    if (plan.valid) {
-                        optionalInput(kFrequencyResponseInputSocketId);
-                    }
-                    break;
-                case NodeKind::FrequencyResponse:
-                    plan.valid = true;
-                    break;
-                case NodeKind::FrequencyFft:
-                    plan.valid = requireInput(kChannelInputSocketId);
-                    break;
-                case NodeKind::FrequencyIfft:
-                case NodeKind::SpectrumView:
-                case NodeKind::SpectrumSeparate:
-                case NodeKind::SpectrumAnalyzer:
-                    plan.valid = requireInput(kSpectrumInputSocketId);
-                    break;
-                case NodeKind::ApplyFrequencyResponse:
-                    plan.valid =
-                        requireInput(kSpectrumInputSocketId) &&
-                        requireInput(kFrequencyResponseInputSocketId);
-                    break;
-                case NodeKind::CombineSpectra:
-                    plan.valid =
-                        requireInput(kSpectrumInputASocketId) &&
-                        requireInput(kSpectrumInputBSocketId);
-                    break;
-                case NodeKind::SpectrumRecombine:
-                    plan.valid =
-                        requireInput(kSpectrumMagnitudeInputSocketId) &&
-                        requireInput(kSpectrumPhaseInputSocketId);
-                    break;
-                case NodeKind::SpectrumMath:
-                    plan.valid = requireInput(kMixInputASocketId);
-                    if (plan.valid) {
-                        optionalInput(kMixInputBSocketId);
-                        optionalInput(kMaskInputSocketId);
-                    }
-                    break;
-                case NodeKind::MagnitudePhase:
-                    if (node->magnitudePhaseMode == MagnitudePhaseMode::Recombine) {
-                        plan.valid =
-                            requireInput("magnitude") &&
-                            requireInput("phase");
-                    } else {
-                        plan.valid = requireInput(kImageInputSocketId);
-                    }
-                    break;
                 case NodeKind::ChannelCombine:
                     optionalInput("r");
                     optionalInput("g");

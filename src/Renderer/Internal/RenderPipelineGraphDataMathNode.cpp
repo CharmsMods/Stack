@@ -136,9 +136,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                 int outputHeight = referenceHeight;
                 if (const RenderGraphLink* maskLink = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId)) {
                     const unsigned int maskTexture = evalMask(maskLink->fromNodeId, maskLink->fromSocketId);
-                    if (maskTexture == 0) {
-                        discardOwnedAverage();
-                    } else {
+                    if (maskTexture != 0) {
                         unsigned int baseTexture = 0;
                         bool baseTransient = false;
                         bool baseReady = true;

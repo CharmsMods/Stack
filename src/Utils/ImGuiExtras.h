@@ -94,6 +94,9 @@ namespace ImGuiExtras {
         float totalWidth,
         float spacing = 0.0f);
 
+    bool InputTextMultiline(const char* label, std::string& value, const ImVec2& size,
+        ImGuiInputTextFlags flags = 0);
+
     // Node UI Helpers
     bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, float v_max, const char* format = "%.2f", float controlWidth = 0.0f);
     bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_max, const char* format = "%d", float controlWidth = 0.0f);

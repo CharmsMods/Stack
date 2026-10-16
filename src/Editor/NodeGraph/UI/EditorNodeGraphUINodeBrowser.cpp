@@ -1,11 +1,15 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "App/AppHeaderStyle.h"
+#include "App/UiPerformanceTrace.h"
+#include "App/UiPerformanceProbe.h"
 #include "App/settings/AppearanceTheme.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Graph/GraphDocumentRules.h"
+#include "Editor/Internal/RawLab/RawLabUiSupport.h"
+#include "Utils/Utf8Text.h"
 
 #include <algorithm>
 #include <cctype>
@@ -40,6 +44,15 @@ std::string EntryKey(const NodeBrowserEntry& entry) {
     return std::to_string(static_cast<int>(entry.kind)) + ":" + std::to_string(entry.value) + ":" + entry.label;
 }
 
+const std::vector<std::string>& CachedEntryKeys() {
+    static const auto keys = [] {
+        std::vector<std::string> result;
+        for (const auto& entry : CachedNodeBrowserEntries()) result.push_back(EntryKey(entry));
+        return result;
+    }();
+    return keys;
+}
+
 std::string EllipsizeText(const std::string& text, float maxWidth) {
     if (text.empty() || maxWidth <= 4.0f) {
         return {};
@@ -50,9 +63,12 @@ std::string EllipsizeText(const std::string& text, float maxWidth) {
 
     const char* ellipsis = "...";
     const float ellipsisWidth = ImGui::CalcTextSize(ellipsis).x;
+    if (ellipsisWidth > maxWidth) {
+        return {};
+    }
     std::string clipped = text;
     while (!clipped.empty()) {
-        clipped.pop_back();
+        Stack::Utf8Text::RemoveLastCodePoint(clipped);
         const std::string candidate = clipped + ellipsis;
         if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth - ellipsisWidth * 0.1f) {
             return candidate;
@@ -119,6 +135,7 @@ void DrawClippedTextLine(
 
 bool RenderBrowserCard(
     const NodeBrowserEntry& entry,
+    const std::string& entryKey,
     unsigned int texture,
     const ImVec2& textureSize,
     const char* statusText,
@@ -137,7 +154,7 @@ bool RenderBrowserCard(
         return false;
     }
 
-    ImGui::PushID(EntryKey(entry).c_str());
+    ImGui::PushID(entryKey.c_str());
     constexpr float kCardWidth = 138.0f;
     constexpr float kCardHeight = 154.0f;
     constexpr float kImageHeight = 104.0f;
@@ -232,6 +249,7 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
     if (!editor) {
         return -1;
     }
+    const int firstNewNodeId = editor->GetNodeGraph().GetNextNodeId();
     switch (entry.kind) {
         case EditorNodeGraph::NodeKind::Output:
             editor->AddOutputNodeAt(graphPos);
@@ -245,11 +263,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Preview:
             editor->AddPreviewNodeAt(graphPos);
             break;
+        case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::MaskGenerator:
             editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::CustomMask:
-            editor->AddCustomMaskNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::MaskCombine:
             editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
@@ -290,46 +306,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Compound:
             editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
             break;
-        case EditorNodeGraph::NodeKind::FrequencyFilter:
-            editor->AddFrequencyFilterNodeAt(
-                static_cast<EditorNodeGraph::FrequencyFilterMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyResponse:
-            editor->AddFrequencyResponseNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-            editor->AddFrequencyFftNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-            editor->AddFrequencyIfftNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumView:
-            editor->AddSpectrumViewNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
-            editor->AddApplyFrequencyResponseNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::CombineSpectra:
-            editor->AddCombineSpectraNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumSeparate:
-            editor->AddSpectrumSeparateNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumRecombine:
-            editor->AddSpectrumRecombineNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-            editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-            editor->AddSpectrumMathNodeAt(static_cast<EditorNodeGraph::SpectrumMathMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-            editor->AddMagnitudePhaseNodeAt(static_cast<EditorNodeGraph::MagnitudePhaseMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            editor->AddSpectrumAnalyzerNodeAt(static_cast<EditorNodeGraph::SpectrumAnalyzerMode>(entry.value), graphPos);
-            break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
             break;
@@ -363,9 +339,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Lut:
             editor->AddLutNodeAt(graphPos);
             break;
-        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-            editor->AddRawNeuralDenoiseNodeAt(graphPos);
-            break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawProjectFrame:
@@ -375,7 +348,7 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
     }
     const std::vector<int>& selected = editor->GetNodeGraph().GetSelectedNodeIds();
-    return selected.empty() ? -1 : selected.back();
+    return selected.empty() || selected.back() < firstNewNodeId ? -1 : selected.back();
 }
 
 } // namespace
@@ -387,7 +360,7 @@ void EditorNodeGraphUI::SetCatalogHost(const ImVec2& position, const ImVec2& siz
     if (!enabled && HasCatalogHost()) CloseNodeBrowser();
     if (wasDocked && enabled && !expanded) {
         // Explicit collapse closes both the docked view and any insertion
-        // operation. Tab may reopen it temporarily after the panel closes.
+        // operation. Tab and the rail toggle share this panel state.
         CloseNodeBrowser();
         m_NodeBrowserFocusSearch = false;
         m_NodeBrowserSearchFocused = false;
@@ -403,6 +376,7 @@ void EditorNodeGraphUI::SetCatalogHost(const ImVec2& position, const ImVec2& siz
 }
 
 void EditorNodeGraphUI::OpenNodeBrowser(NodeBrowserMode mode, const EditorNodeGraph::Vec2& graphPos) {
+    m_CatalogAssetsTab=false;
     m_NodeBrowserMode = mode;
     m_NodeBrowserGraphPos = graphPos;
     m_NodeBrowserScreenPos = GraphToScreen(graphPos);
@@ -474,6 +448,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     float targetPanelWidth,
     float paneHeight,
     const ImVec2& workspacePos) {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Catalog);
     if (!editor) {
         return;
     }
@@ -513,8 +488,9 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
 
     const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     const std::vector<NodeBrowserEntry>& entries = CachedNodeBrowserEntries();
+    const auto& entryKeys = CachedEntryKeys();
     const std::string search = m_NodeBrowserSearchBuffer;
-    std::vector<const NodeBrowserEntry*> filtered;
+    bool filterChanged = false;
     if (isOpen) {
         const std::uint64_t graphRevision = graph.GetStructureRevision();
         const bool filterCacheDirty =
@@ -527,6 +503,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             m_NodeBrowserFilterCacheDragToNodeId != m_NodeBrowserDragToNodeId ||
             m_NodeBrowserFilterCacheDragToSocketId != m_NodeBrowserDragToSocketId;
         if (filterCacheDirty) {
+            filterChanged = true;
             m_NodeBrowserFilteredEntryIndices.clear();
             m_NodeBrowserFilteredEntryIndices.reserve(entries.size());
 
@@ -549,7 +526,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                     continue;
                 }
 
-                if (!availableKeys.count(EntryKey(entry))) continue;
+                if (!availableKeys.count(entryKeys[index])) continue;
 
                 m_NodeBrowserFilteredEntryIndices.push_back(index);
             }
@@ -564,42 +541,40 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             m_NodeBrowserFilterCacheDragToSocketId = m_NodeBrowserDragToSocketId;
         }
 
-        filtered.reserve(m_NodeBrowserFilteredEntryIndices.size());
-        for (std::size_t index : m_NodeBrowserFilteredEntryIndices) {
-            if (index < entries.size()) {
-                filtered.push_back(&entries[index]);
+    }
+    static const std::vector<std::size_t> emptyEntries;
+    const auto& filtered = isOpen ? m_NodeBrowserFilteredEntryIndices : emptyEntries;
+    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::CatalogMatches, filtered.size());
+    if (filterChanged || m_NodeBrowserVisibleCacheOpen != isOpen) {
+        m_NodeBrowserVisibleKeys.clear();
+        m_NodeBrowserVisibleKeys.reserve(filtered.size());
+        for (std::size_t index : filtered) {
+            m_NodeBrowserVisibleKeys.insert(entryKeys[index]);
+            m_NodeBrowserEntryAlpha.try_emplace(entryKeys[index], 0.0f);
+        }
+        m_NodeBrowserVisibleCacheOpen = isOpen;
+        m_NodeBrowserEntryAnimationsSettled = false;
+    }
+    if (!m_NodeBrowserEntryAnimationsSettled) {
+        bool settled = true;
+        for (auto it = m_NodeBrowserEntryAlpha.begin(); it != m_NodeBrowserEntryAlpha.end();) {
+            const bool visible = m_NodeBrowserVisibleKeys.count(it->first) != 0;
+            it->second = AnimateToward(it->second, visible ? 1.0f : 0.0f, visible ? 18.0f : 14.0f, dt);
+            if (!visible && it->second <= 0.01f) {
+                m_NodeBrowserCardHoverAnim.erase(it->first);
+                it = m_NodeBrowserEntryAlpha.erase(it);
+            } else {
+                if (visible && it->second >= 0.999f) it->second = 1.0f;
+                else settled = false;
+                ++it;
             }
         }
+        m_NodeBrowserEntryAnimationsSettled = settled;
     }
-
-    std::unordered_set<std::string> visibleKeys;
-    visibleKeys.reserve(filtered.size());
-    for (const NodeBrowserEntry* entry : filtered) {
-        if (!entry) {
-            continue;
-        }
-        const std::string key = EntryKey(*entry);
-        visibleKeys.insert(key);
-        float& entryAlpha = m_NodeBrowserEntryAlpha[key];
-        entryAlpha = AnimateToward(entryAlpha, 1.0f, 18.0f, dt);
-    }
-
-    for (auto it = m_NodeBrowserEntryAlpha.begin(); it != m_NodeBrowserEntryAlpha.end();) {
-        if (visibleKeys.find(it->first) == visibleKeys.end()) {
-            it->second = AnimateToward(it->second, 0.0f, 14.0f, dt);
-        }
-        if (it->second <= 0.01f) {
-            it = m_NodeBrowserEntryAlpha.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = m_NodeBrowserCardHoverAnim.begin(); it != m_NodeBrowserCardHoverAnim.end();) {
-        if (m_NodeBrowserEntryAlpha.find(it->first) == m_NodeBrowserEntryAlpha.end()) {
-            it = m_NodeBrowserCardHoverAnim.erase(it);
-        } else {
-            ++it;
-        }
+    if (!isOpen && alpha <= 0.01f) {
+        m_NodeBrowserEntryAlpha.clear();
+        m_NodeBrowserCardHoverAnim.clear();
+        return;
     }
 
     if (isOpen && !m_NodeBrowserThumbnailCatalogEnsured) {
@@ -725,9 +700,26 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::SetCursorPos(ImVec2(horizontalPadding, topPadding + revealOffsetY));
         if (hosted) {
             ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
-            ImGui::TextUnformatted("Node library");
+            using Stack::Editor::RawLabInternal::BareToolIslandButton;
+            if (BareToolIslandButton("Node Library",!m_CatalogAssetsTab)) m_CatalogAssetsTab=false;
+            if (editor->IsRawProjectCanvas()) {
+                ImGui::SameLine(0,8.f);
+                if (BareToolIslandButton("Assets",m_CatalogAssetsTab)) { CloseNodeBrowser(); m_CatalogAssetsTab=true; }
+            }
             ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        }
+
+        if (hosted && m_CatalogAssetsTab && editor->IsRawProjectCanvas()) {
+            ImGui::PushItemWidth(contentWidth);
+            ImGui::BeginChild("ProjectAssets",{contentWidth,std::max(1.f,overlayHeight-ImGui::GetCursorPosY()-bottomPadding)},false,
+                ImGuiWindowFlags_NoBackground);
+            editor->RenderRawAssetsPanel();
+            ImGui::EndChild();
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+            ImGui::End();
+            return;
         }
 
         if (interactiveOverlay && m_NodeBrowserFocusSearch) {
@@ -770,6 +762,11 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PushItemWidth(contentWidth);
         ImGuiInputTextFlags searchFlags = isOpen ? ImGuiInputTextFlags_None : ImGuiInputTextFlags_ReadOnly;
         ImGui::InputTextWithHint("##NodesPanelSearch", prompt, m_NodeBrowserSearchBuffer, sizeof(m_NodeBrowserSearchBuffer), searchFlags);
+        if (Stack::UiPerformance::Probe::Active()) {
+            const auto low=ImGui::GetItemRectMin(),high=ImGui::GetItemRectMax();
+            Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Search,
+                Stack::UiPerformance::Probe::Key(m_NodeBrowserFilterCacheSearch),{low.x,low.y,high.x-low.x,high.y-low.y});
+        }
         m_NodeBrowserSearchFocused = ImGui::IsItemActive();
         ImGui::PopItemWidth();
         ImGui::PopStyleVar(3);
@@ -819,12 +816,13 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                             continue;
                         }
 
-                        const NodeBrowserEntry* entry = filtered[index];
+                        const NodeBrowserEntry* entry = &entries[filtered[index]];
                         if (!entry) {
                             continue;
                         }
 
-                        const std::string key = EntryKey(*entry);
+                        const std::string& key = entryKeys[filtered[index]];
+                        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::CatalogCards);
                         const auto alphaIt = m_NodeBrowserEntryAlpha.find(key);
                         const float entryAlpha = alphaIt != m_NodeBrowserEntryAlpha.end() ? alphaIt->second : 0.0f;
                         ImVec2 textureSize(0.0f, 0.0f);
@@ -849,6 +847,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                         float& hoverAnim = m_NodeBrowserCardHoverAnim[key];
                         const bool pressed = RenderBrowserCard(
                             *entry,
+                            key,
                             texture,
                             textureSize,
                             detailText,
@@ -889,6 +888,11 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         }
 
         m_NodeBrowserScrollY = ImGui::GetScrollY();
+        if (Stack::UiPerformance::Probe::Active())
+            Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Catalog,
+                Stack::UiPerformance::Probe::Key(m_NodeBrowserFilterCacheSearch) ^
+                Stack::UiPerformance::Probe::Key(m_NodeBrowserScrollY),
+                {resultsMin.x,resultsMin.y,resultsMax.x-resultsMin.x,resultsMax.y-resultsMin.y});
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(5);
@@ -918,7 +922,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         const bool catalogFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         if (interactiveOverlay && catalogFocused && !activatedEntry && submitPressed) {
             if (!filtered.empty()) {
-                activatedEntry = filtered.front();
+                activatedEntry = &entries[filtered.front()];
             } else {
                 // Single-line inputs release their active focus on Enter. With
                 // nothing to activate, keep the user in the search workflow.
@@ -955,9 +959,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 } else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput) {
                     EditorNodeGraphUI::ConnectBestOutputToInput(editor, newNodeId, m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId);
                 }
+                CloseNodeBrowser();
             }
-
-            CloseNodeBrowser();
         }
 
         if (interactiveOverlay && (catalogFocused || operationOpen) && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {

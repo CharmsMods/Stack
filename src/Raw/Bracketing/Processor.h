@@ -2,6 +2,7 @@
 #include "Recipe.h"
 #include "Progress.h"
 #include "Raw/RawImageData.h"
+#include "Raw/ReconstructionDepth.h"
 #include "Raw/OpenGlTask.h"
 #include <filesystem>
 #include <functional>
@@ -56,7 +57,12 @@ enum class MeasurementFallbackReason : std::uint8_t {
     NoFiniteMeasurement = 4
 };
 struct PreparedDataset;
+// Host-owned lease for prepared work retained outside this address space.
+// It is observational, is never serialized, and never participates in identity.
+struct ProcessingSessionLease { virtual ~ProcessingSessionLease() = default; };
 struct BracketingAnalysis {
+    std::shared_ptr<ProcessingSessionLease> sessionLease;
+    std::shared_ptr<const ReconstructionDepth> depth;
     std::shared_ptr<const Panorama::Prepared> panorama;
     unsigned version=1;
     std::string identity;
@@ -134,6 +140,8 @@ struct ProcessingRequest {
     bool preparationOnly=false;
     std::uint32_t workerCount=1;
     bool preferGpuRegistration=true;
+    // Backend selection never changes the reconstruction recipe or alignment.
+    bool preferGpuCombining=true;
     Raw::OpenGlTaskExecutor executeOpenGlTask;
     // Only enable for a private, caller-created generation directory.
     bool removeCacheOnRelease=false;
@@ -157,7 +165,8 @@ inline void ReportPresentation(const ProcessingRequest& request,ProcessingStage 
 BracketingResult Process(const ProcessingRequest&);
 // A bounded interactive preview reuses the exact full-resolution evaluator's
 // cached source cells; it never decodes or changes the neutral guide.
-Preview ReblendPreview(const Preview&, const BracketingRecipe&, const BracketingAnalysis&);
+Preview ReblendPreview(const Preview&, const BracketingRecipe&, const BracketingAnalysis&,
+    const Raw::OpenGlTaskExecutor& executor={},std::string* error=nullptr);
 Preview RenderNativeDetail(const ProcessingRequest&, unsigned centerX, unsigned centerY, unsigned size = 192);
 std::string AnalysisIdentity(const ProcessingRequest&);
 std::uint64_t EstimateBracketingPeakResidentBytes(

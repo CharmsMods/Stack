@@ -26,7 +26,7 @@ enum class Category {
 struct State {
     Category activeCategory = Category::Appearance;
     bool showInstallConfirmPopup = false;
-    bool requestShowLegalGate = false;
+    bool hadOpenPopup = false;
     std::string lastActionError;
     Stack::Notifications::Notifier notifier;
     std::unordered_map<std::string, Stack::Notifications::EventId> actionErrors;

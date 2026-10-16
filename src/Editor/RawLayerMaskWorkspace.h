@@ -2,6 +2,7 @@
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/Timeline/TimelineAnimation.h"
+#include "Project/RawProjectGraph.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,5 +20,6 @@ struct RawLayerMaskWorkspace {
     bool dirty = false;
     bool affectsPixels = false;
     int previewOutputNodeId = 0;
+    std::optional<Stack::Project::RawProjectGraph> projectCanvas;
 };
 }

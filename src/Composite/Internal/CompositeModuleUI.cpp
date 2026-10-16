@@ -121,8 +121,14 @@ void CompositeModule::RenderLayerPane() {
 
             if (ImGui::BeginPopupContextItem("CompositeLayerRowContext")) {
                 m_SelectedId = layer->id;
-                RenderLayerContextMenu(layer);
+                const bool layersChanged = RenderLayerContextMenu(layer);
                 ImGui::EndPopup();
+                if (layersChanged) {
+                    // Duplication and deletion invalidate the row pointers.
+                    ImGui::PopID();
+                    ImGui::EndTable();
+                    return;
+                }
             }
 
             ImGui::TableSetColumnIndex(1);
@@ -356,9 +362,8 @@ void CompositeModule::RenderSelectedInspector(CompositeLayer* selectedLayer) {
             for (int channel = 0; channel < 4; ++channel) {
                 selectedLayer->fillColor[channel] = Clamp01(fillColor[channel]);
             }
-            if (RegenerateGeneratedLayerTexture(*selectedLayer)) {
-                appearanceChanged = true;
-            }
+            RegenerateGeneratedLayerTexture(*selectedLayer);
+            appearanceChanged = true;
         }
     }
     if (appearanceChanged) {
@@ -370,19 +375,15 @@ void CompositeModule::RenderSelectedInspector(CompositeLayer* selectedLayer) {
         ImGui::Spacing();
         ImGui::TextUnformatted("Text");
         ImGui::BeginDisabled(layerLocked);
-        char textBuffer[4096];
-        std::snprintf(textBuffer, sizeof(textBuffer), "%s", selectedLayer->textContent.c_str());
         bool textChanged = false;
-        if (ImGui::InputTextMultiline("Content", textBuffer, sizeof(textBuffer), ImVec2(-1.0f, 120.0f))) {
-            selectedLayer->textContent = textBuffer;
+        if (ImGuiExtras::InputTextMultiline("Content", selectedLayer->textContent, ImVec2(-1.0f, 120.0f))) {
             textChanged = true;
         }
         textChanged |= ImGui::DragFloat("Font Size", &selectedLayer->textFontSize, 1.0f, 1.0f, 0.0f, "%.0f px");
         if (textChanged) {
             selectedLayer->textFontSize = std::max(1.0f, selectedLayer->textFontSize);
-            if (RegenerateGeneratedLayerTexture(*selectedLayer)) {
-                MarkDocumentDirty();
-            }
+            RegenerateGeneratedLayerTexture(*selectedLayer);
+            MarkDocumentDirty();
         }
         ImGui::EndDisabled();
     }
@@ -553,9 +554,9 @@ void CompositeModule::RenderExportInspector() {
     }
 }
 
-void CompositeModule::RenderLayerContextMenu(CompositeLayer* targetLayer) {
+bool CompositeModule::RenderLayerContextMenu(CompositeLayer* targetLayer) {
     if (targetLayer == nullptr) {
-        return;
+        return false;
     }
 
     m_SelectedId = targetLayer->id;
@@ -566,6 +567,7 @@ void CompositeModule::RenderLayerContextMenu(CompositeLayer* targetLayer) {
     }
     if (ImGui::MenuItem("Duplicate")) {
         DuplicateSelectedLayer();
+        return true;
     }
     const bool visible = targetLayer->visible;
     if (ImGui::MenuItem("Visible", nullptr, visible)) {
@@ -578,10 +580,12 @@ void CompositeModule::RenderLayerContextMenu(CompositeLayer* targetLayer) {
         MarkDocumentDirty();
     }
     ImGui::BeginDisabled(targetLayer->locked);
-    if (ImGui::MenuItem("Delete")) {
-        RemoveSelectedLayers();
-    }
+    const bool deleteLayer = ImGui::MenuItem("Delete");
     ImGui::EndDisabled();
+    if (deleteLayer) {
+        RemoveSelectedLayers();
+        return true;
+    }
 
     ImGui::Separator();
     if (IsEditorBridgeLayer(*targetLayer)) {
@@ -609,6 +613,7 @@ void CompositeModule::RenderLayerContextMenu(CompositeLayer* targetLayer) {
             }
         }
     }
+    return false;
 }
 
 void CompositeModule::RenderCanvasContextMenu() {
@@ -669,6 +674,11 @@ void CompositeModule::RenderRenamePopup() {
     }
 
     if (ImGui::BeginPopupModal("RenameCompositeLayer", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!FindLayerById(m_Layers, m_RenameLayerId)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            return;
+        }
         ImGui::InputText("Layer name", m_RenameBuffer, sizeof(m_RenameBuffer));
         if (ImGui::Button("Apply", ImVec2(120, 0))) {
             CompositeLayer* layer = FindLayerById(m_Layers, m_RenameLayerId);
@@ -758,7 +768,7 @@ void CompositeModule::RenderLibraryPicker() {
                     if (ImGui::Button(actionLabel)) {
                         const std::filesystem::path fullPath = LibraryManager::Get().GetLibraryPath() / project->fileName;
                         if (m_LibraryPickerMode == LibraryPickerMode::ReplaceSelectedWithProject) {
-                            ReplaceSelectedLayerWithProjectFile(fullPath.string());
+                            ReplaceLayerWithProjectFile(m_LibraryPickerTargetLayerId, fullPath.string());
                         } else {
                             AddProjectLayerFromFile(fullPath.string());
                         }
@@ -770,13 +780,11 @@ void CompositeModule::RenderLibraryPicker() {
                     ImGui::Separator();
                     ImGui::PopID();
                 }
-
-                ImGui::EndChild();
             }
+            ImGui::EndChild();
         }
-
-        ImGui::End();
     }
+    ImGui::End();
 }
 
 void CompositeModule::RenderUI() {

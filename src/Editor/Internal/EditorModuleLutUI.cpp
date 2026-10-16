@@ -82,7 +82,7 @@ void PreserveLutViewSettings(const ColorLut::LutPayload& source, ColorLut::LutPa
 } // namespace
 
 bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure) {
-    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }
@@ -102,7 +102,7 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
         }
         import.payload.importError = import.message.empty() ? "Failed to import LUT." : import.message;
         node->lut = std::move(import.payload);
-        MarkRenderDirty(nodeId);
+        MarkGraphEdited(nodeId);
         if (notifyOnFailure) {
             PostNotification(
                 UiNotificationSeverity::Error,
@@ -113,7 +113,7 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
     }
 
     node->lut = std::move(import.payload);
-    MarkRenderDirty(nodeId);
+    MarkGraphEdited(nodeId);
     if (notifyOnFailure) {
         PostNotification(UiNotificationSeverity::Success,
             "Imported " + node->lut.label + ".", "lut-import-complete");
@@ -122,7 +122,7 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
 }
 
 bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure) {
-    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
+    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut || node->lut.sourcePath.empty()) {
         if (notifyOnFailure) {
             PostNotification(
@@ -136,7 +136,7 @@ bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure)
 }
 
 bool EditorModule::ClearLutNodeData(int nodeId) {
-    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }
@@ -149,7 +149,7 @@ bool EditorModule::ClearLutNodeData(int nodeId) {
     cleared.importFormat = ColorLut::LutImportFormat::Unknown;
     ColorLut::ClearCanonicalLutData(cleared);
     node->lut = std::move(cleared);
-    MarkRenderDirty(nodeId);
+    MarkGraphEdited(nodeId);
     return true;
 }
 
@@ -265,6 +265,6 @@ void EditorModule::RenderLutControls(EditorNodeGraph::Node& node, float controlW
     }
 
     if (changed) {
-        MarkRenderDirty(node.id);
+        MarkGraphEdited(node.id);
     }
 }

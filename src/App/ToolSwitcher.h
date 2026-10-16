@@ -6,7 +6,7 @@
 namespace Stack::Tools {
 struct Layout { ImVec2 center; float radius = 120.f, inner = 38.f; };
 struct Switcher {
-    static constexpr int Count = 6;
+    int count = 0;
     bool held = false, mouseOpen = false, wasDown = false, suppressed = false;
     bool discardMouse = false, cursorCaptured = false;
     float progress = 0.f, fadeRemaining = 0.f;
@@ -16,7 +16,8 @@ struct Switcher {
     bool Open() const { return held || mouseOpen; }
     bool Visible() const { return Open() || progress > 0.f; }
     float Amount() const { return progress * progress * (3.f - 2.f * progress); }
-    void Begin(bool keyboard) { held = keyboard; mouseOpen = !keyboard; pointer = {}; hovered = -1; }
+    bool HasChoices() const { return count > 1; }
+    void Begin(bool keyboard) { if (!HasChoices()) return; held = keyboard; mouseOpen = !keyboard; pointer = {}; hovered = -1; }
     void Close() { held = mouseOpen = false; hovered = -1; discardMouse = true; }
     void Tick(float seconds, bool reducedMotion = false) {
         progress = reducedMotion ? (Open() ? 1.f : 0.f)
@@ -30,11 +31,12 @@ struct Switcher {
             (controlsMin.y + controlsMax.y) * .5f), radius, radius * .31f};
     }
     int Hit(ImVec2 delta, const Layout& layout) const {
+        if (!HasChoices()) return -1;
         constexpr float pi = 3.14159265359f;
         if (std::hypot(delta.x, delta.y) < layout.inner) return -1;
-        float angle = std::atan2(delta.y, delta.x) + pi * .5f + pi / Count;
+        float angle = std::atan2(delta.y, delta.x) + pi * .5f + pi / count;
         if (angle < 0) angle += 2.f * pi;
-        return static_cast<int>(angle / (2.f * pi / Count)) % Count;
+        return static_cast<int>(angle / (2.f * pi / count)) % count;
     }
 };
 }

@@ -1,9 +1,16 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace Stack::Validation {
+bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scratchPath, bool persistenceChecks = false,
+    bool nodeTransitionChecks = false);
+bool ValidateBracketingDepth(int argc,char** argv);
+bool ValidateBracketingNodeSurface(int argc, char** argv);
+bool ValidateBracketingContributionUi(const std::filesystem::path& savedProjectJson,
+    const std::filesystem::path& outputImage);
 
 bool ValidateRawZoneAreaPipeline();
 bool ValidateRawGradingScopes();
@@ -13,7 +20,7 @@ bool ValidateRawDecodeCancellation(const std::string& path);
 bool ValidateToneCurveAutoIntegration();
 bool ValidateNodeMathPhase4Integration();
 bool ValidateNodeMathPhase5Integration();
-bool ValidateNodeMathPhase6Integration(bool calibrationOnly = false, bool transactionsOnly = false);
+bool ValidateNodeMathPhase6Integration(bool calibrationOnly = false, bool transactionsOnly = false, bool framingOnly = false);
 bool ValidateEditorGraphTransactions();
 bool ValidateProjectWorkspaces(const std::string& projectPath);
 bool ValidateMultiSourceProjectFoundation();

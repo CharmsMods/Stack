@@ -204,6 +204,10 @@ struct BracketingRawToolValidationAccess {
         e.m_Bracketing->recipe.automatic=false;
         e.m_Bracketing->recipe.knots.front().ev-=.1;
         ImGui::NewFrame();e.CommitBracketingEdit();e.TickBracketing();ImGui::EndFrame();
+        const auto previewDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        while(e.m_Bracketing->previewJob&&std::chrono::steady_clock::now()<previewDeadline) {
+            e.TickBracketing();std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         Check(!e.HasPendingBracketingDraft()&&e.m_Bracketing->interactiveRaw,"Curve edit did not create a bounded preview");
         Check(e.m_Bracketing->result->analysis==analysis,"Curve edit replaced prepared analysis");
         Check(e.m_HdrAdoptedRawResult->rawData==published,"Interactive preview was adopted as the full result");

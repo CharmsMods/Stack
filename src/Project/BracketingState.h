@@ -57,6 +57,15 @@ struct BracketingState {
     // Preserve successfully solved geometry if only the requested canvas size failed.
     std::shared_ptr<const Raw::Bracketing::BracketingAnalysis> panoramaAnalysis;
     Raw::Bracketing::Preview preview, detail;
+    struct PreviewJob {
+        std::atomic<bool> done{false}, canceled{false};
+        std::uint64_t revision = 0;
+        std::shared_ptr<const Raw::Bracketing::BracketingResult> source;
+        Raw::Bracketing::Preview preview;
+        std::string error;
+    };
+    std::shared_ptr<PreviewJob> previewJob;
+    std::uint64_t previewRevision = 0;
     struct DetailJob {
         std::atomic<bool> done{false}, canceled{false};
         Raw::Bracketing::Preview preview;
@@ -101,6 +110,8 @@ bool CanAdoptBracketingJob(const BracketingState& state, const BracketingJob& jo
 bool AdoptBracketingJob(BracketingState& state, BracketingJob& job);
 bool ShouldStartPendingBracketing(const BracketingState& state, double now,
     bool interactionActive);
+// Coalesces worker requests and adopts only the current source/revision. Never
+// waits for an engine process or performs IPC on the UI thread.
 bool RefreshBracketingInteractivePreview(BracketingState& state);
 std::shared_ptr<const Raw::RawImageData> MakeBracketingInteractiveRaw(const BracketingState& state);
 

@@ -11,6 +11,18 @@ inline constexpr float BarExtent = 52.f;
 inline constexpr float ButtonExtent = 38.f;
 inline constexpr float BarPadding = 7.f;
 
+// A remembered navigation focus is not ongoing interaction. Renew the reveal
+// while navigating, then let the ordinary grace period expire after release.
+inline bool NavigationInputActive() {
+    return ImGui::GetIO().NavVisible &&
+        (ImGui::IsKeyDown(ImGuiKey_Tab) || ImGui::IsKeyDown(ImGuiKey_LeftArrow) ||
+         ImGui::IsKeyDown(ImGuiKey_RightArrow) || ImGui::IsKeyDown(ImGuiKey_UpArrow) ||
+         ImGui::IsKeyDown(ImGuiKey_DownArrow) || ImGui::IsKeyDown(ImGuiKey_Enter) ||
+         ImGui::IsKeyDown(ImGuiKey_Space) || ImGui::IsKeyDown(ImGuiKey_GamepadDpadLeft) ||
+         ImGui::IsKeyDown(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyDown(ImGuiKey_GamepadDpadUp) ||
+         ImGui::IsKeyDown(ImGuiKey_GamepadDpadDown) || ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown));
+}
+
 inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
     bool atEdge, bool hovered, bool interacting, bool popupOpen, bool reducedMotion) {
     const double now = ImGui::GetTime();
@@ -20,7 +32,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
     const float target = focused && now < visibleUntil ? 1.f : 0.f;
     if (!focused) visibleUntil = 0.0;
     if (reducedMotion) amount = target;
-    else Stack::Header::Approach(amount, target, 18.f);
+    else Stack::Header::ApproachMotion(amount, target, .24f);
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,

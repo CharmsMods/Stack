@@ -6,21 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(STACK_LEGAL_STATUS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/legal/RELEASE_LEGAL_STATUS.json")
-file(READ "${STACK_LEGAL_STATUS_FILE}" STACK_LEGAL_STATUS_JSON)
-string(JSON STACK_EULA_VERSION GET "${STACK_LEGAL_STATUS_JSON}" documents eula version)
-string(JSON STACK_PRIVACY_VERSION GET "${STACK_LEGAL_STATUS_JSON}" documents privacy version)
-file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/legal/EULA.txt" STACK_EULA_SHA256)
-
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/src/App/AppVersion.h"
-    @ONLY
-)
-
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppLegalVersion.h.in"
-    "${CMAKE_BINARY_DIR}/generated/src/App/AppLegalVersion.h"
     @ONLY
 )
 
@@ -34,7 +22,13 @@ endif()
 
 # CMake owns a private binary tree. Only the runnable app target and its shipped
 # payload are written to STACK_DEPLOY_DIR.
+option(STACK_BUILD_BURST_DIAGNOSTICS "Build the private in-process burst diagnostics application instead of shipping Stack" OFF)
 set(STACK_DEPLOY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build" CACHE PATH "Runnable Stack deployment directory")
+if (STACK_BUILD_BURST_DIAGNOSTICS)
+    # Never replace the shipping executable or place internal algorithms in a
+    # packageable deployment tree. Configure this option in a separate build tree.
+    set(STACK_DEPLOY_DIR "${CMAKE_BINARY_DIR}/diagnostics")
+endif()
 get_filename_component(STACK_DEPLOY_DIR "${STACK_DEPLOY_DIR}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(STACK_PRIVATE_RUNTIME_DIR "${CMAKE_BINARY_DIR}/artifacts")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${STACK_PRIVATE_RUNTIME_DIR}")
@@ -128,18 +122,21 @@ endif()
 # ImGui Core & Backends Compilation target since ImGui natively lacks CMakelists
 # ==============================================================================
 FetchContent_GetProperties(imgui)
+include(cmake/StackGlfwMonitorCache.cmake)
 add_library(imgui_core STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${STACK_GLFW_BACKEND_SOURCE}
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui_core PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
+target_include_directories(imgui_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_definitions(imgui_core PUBLIC STACK_CACHE_GLFW_MONITORS=$<BOOL:${STACK_CACHE_GLFW_MONITORS}>)
 target_link_libraries(imgui_core PUBLIC glfw)
 
 # ==============================================================================
@@ -169,6 +166,7 @@ add_custom_target(BakeFonts
 )
 
 include(cmake/StackSources.cmake)
+include(cmake/StackUiPerformanceBaseline.cmake)
 
 if (WIN32)
     add_executable(${PROJECT_NAME} WIN32 ${STACK_APP_SOURCE_FILES})
@@ -176,6 +174,14 @@ else()
     add_executable(${PROJECT_NAME} ${STACK_APP_SOURCE_FILES})
 endif()
 add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeFonts)
+if (STACK_BUILD_BURST_DIAGNOSTICS)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME StackBurstDiagnostics)
+endif()
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    STACK_BUILD_BURST_DIAGNOSTICS=$<BOOL:${STACK_BUILD_BURST_DIAGNOSTICS}>)
+if(MSVC AND STACK_UI_PERF_LINK_MAP)
+    target_link_options(${PROJECT_NAME} PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/StackUiPerformance.map")
+endif()
 include(cmake/StackPanorama.cmake)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${STACK_DEPLOY_DIR}"
@@ -369,14 +375,6 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
         target_link_libraries(${PROJECT_NAME} PRIVATE
             runtimeobject
         )
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL}"
-                "${STACK_DEPLOY_DIR}/Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll"
-            VERBATIM
-        )
     else()
         message(WARNING "STACK_ENABLE_APPWINDOW_TITLEBAR=ON, but Microsoft.WindowsAppSDK was not found. Stack will build with the native titlebar fallback.")
         target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_HAS_WINDOWS_APP_SDK=0)
@@ -394,7 +392,7 @@ if (WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE shell32)
 endif()
 
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+add_custom_target(StackRuntimePayload
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
     COMMAND ${CMAKE_COMMAND} -E rm -f
@@ -405,25 +403,26 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         "${STACK_DEPLOY_DIR}/Stack/App/Tools"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Legal"
+    # Remove the old bundled agreement packet on incremental builds. The
+    # repository source license remains outside the application payload.
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/EULA.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/PRIVACY.md"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/INFO_BEFORE_INSTALL.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/LICENSE"
     COMMAND ${CMAKE_COMMAND} -E remove_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/legal/EULA.txt"
-        "${STACK_DEPLOY_DIR}/Stack/App/Legal/EULA.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/Adobe-DNG-Notice.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/Adobe-DNG-Notice.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/legal/PRIVACY.md"
-        "${STACK_DEPLOY_DIR}/Stack/App/Legal/PRIVACY.md"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/legal/INFO_BEFORE_INSTALL.txt"
-        "${STACK_DEPLOY_DIR}/Stack/App/Legal/INFO_BEFORE_INSTALL.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/installer/BURST-README.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/BURST-README.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/THIRD_PARTY_NOTICES.md"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-        "${STACK_DEPLOY_DIR}/Stack/App/Legal/LICENSE"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${imgui_SOURCE_DIR}/LICENSE.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/DearImGui-MIT.txt"
@@ -437,12 +436,24 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/stb-MIT-or-Public-Domain.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/stb-MIT-or-Public-Domain.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/DCB-BSD-3-Clause.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/ZhangWu-BSD-2-Clause.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-CDDL-1.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-NOTICE.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-Apache-2.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-COPYRIGHT.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-zlib.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-SoftFloat-FDLIBM.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-FLANN-BSD.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibRawDemosaicSource"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Demosaic/ClassicDemosaic.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Demosaic/ClassicDemosaicTerms.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Demosaic/GpuClassic.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Demosaic/GpuClassicShaders.h"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibRawDemosaicSource"
     VERBATIM
 )
 
@@ -453,7 +464,8 @@ if (STACK_ENABLE_LIBRAW)
         target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:libraw.dll")
         target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
     endif()
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    add_dependencies(StackRuntimePayload stack_libraw)
+    add_custom_command(TARGET StackRuntimePayload POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -469,9 +481,21 @@ if (STACK_ENABLE_LIBRAW)
     )
 endif()
 
+# The shared payload target owns every file it clears or refreshes. In
+# particular, an engine-only incremental build must not erase the desktop's
+# optional runtime notice while leaving its DLL in this deployment tree.
+if (STACK_HAS_WINDOWS_APP_SDK)
+    add_custom_command(TARGET StackRuntimePayload POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL}"
+            "${STACK_DEPLOY_DIR}/Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll"
+        VERBATIM
+    )
+endif()
+
 if (STACK_HAS_WINDOWS_APP_SDK AND
     EXISTS "${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}/license.txt")
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    add_custom_command(TARGET StackRuntimePayload POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}/license.txt"
             "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/Microsoft-WindowsAppSDK-License.txt"
@@ -480,7 +504,7 @@ if (STACK_HAS_WINDOWS_APP_SDK AND
 endif()
 
 if (NOT STACK_HAS_WINDOWS_APP_SDK)
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    add_custom_command(TARGET StackRuntimePayload POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -f
             "${STACK_DEPLOY_DIR}/Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll"
         VERBATIM
@@ -495,6 +519,11 @@ elseif (APPLE)
 elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
+
+add_dependencies(${PROJECT_NAME} StackRuntimePayload)
+include(cmake/StackBurst.cmake)
+include(cmake/StackBurstShell.cmake)
+add_dependencies(${PROJECT_NAME} StackBurst)
 
 option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" OFF)
 
@@ -606,6 +635,14 @@ if (BUILD_TESTING)
     set_tests_properties(StackRaw.GallerySimilarity PROPERTIES
         LABELS "raw;gallery;similarity;cpu")
 
+    add_executable(StackRawGalleryLayoutAnimationTests
+        tools/tests/raw_gallery_layout_animation_tests.cpp
+        src/Editor/Internal/RawLab/RawLabGalleryLayoutAnimation.cpp)
+    target_include_directories(StackRawGalleryLayoutAnimationTests PRIVATE src)
+    target_link_libraries(StackRawGalleryLayoutAnimationTests PRIVATE imgui_core)
+    add_test(NAME StackRaw.GalleryLayoutAnimation COMMAND StackRawGalleryLayoutAnimationTests)
+    set_tests_properties(StackRaw.GalleryLayoutAnimation PROPERTIES LABELS "raw;gallery;ui;cpu")
+
     add_executable(StackStartupRevealTests
         tools/tests/startup_reveal_tests.cpp
         src/App/StartupReveal.cpp)
@@ -621,7 +658,7 @@ if (BUILD_TESTING)
         src/Async/TaskSystem.cpp
         src/Notifications/NotificationStore.cpp src/Notifications/Notifier.cpp
         src/Notifications/NotificationIndicator.cpp src/Notifications/NotificationPresentation.cpp
-        src/Notifications/AnimatedIndicatorLabel.cpp src/ThirdParty/imstb_truetype_impl.cpp)
+        src/Utils/MorphingLabel.cpp src/ThirdParty/imstb_truetype_impl.cpp)
     target_include_directories(StackUiActivityTests PRIVATE src)
     target_link_libraries(StackUiActivityTests PRIVATE imgui_core)
     add_test(NAME StackUi.Activity COMMAND StackUiActivityTests)
@@ -815,11 +852,13 @@ if (BUILD_TESTING)
     set_tests_properties(StackRaw.SharedBurstGpu PROPERTIES
         LABELS "raw;mfd;shared-burst;processor;parity;fallback;cancellation;gpu")
 
-    add_test(NAME StackRaw.SuperResolution
-        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-super-resolution
-            "${CMAKE_CURRENT_BINARY_DIR}/validation/super-resolution")
-    set_tests_properties(StackRaw.SuperResolution PROPERTIES
-        LABELS "raw;bracketing;super-resolution;parity;fallback;gpu")
+    if (STACK_BUILD_BURST_DIAGNOSTICS)
+        add_test(NAME StackRaw.SuperResolution
+            COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-super-resolution
+                "${CMAKE_CURRENT_BINARY_DIR}/validation/super-resolution")
+        set_tests_properties(StackRaw.SuperResolution PROPERTIES
+            LABELS "raw;bracketing;super-resolution;parity;fallback;gpu")
+    endif()
 
     add_test(NAME StackRaw.MultiFrameContracts
         COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-multiframe-contracts)
@@ -1030,6 +1069,10 @@ if (STACK_BUILD_GRAPH_TESTS)
     )
 
     if (BUILD_TESTING)
+        add_executable(StackViewportPreviewTests tools/tests/viewport_preview_tests.cpp)
+        target_include_directories(StackViewportPreviewTests PRIVATE src)
+        add_test(NAME StackRenderer.ViewportPreview COMMAND StackViewportPreviewTests)
+        set_tests_properties(StackRenderer.ViewportPreview PROPERTIES LABELS "renderer;viewport;cpu")
         add_test(NAME StackEditor.GraphBehavior
             COMMAND StackGraphBehaviorTests)
         set_tests_properties(StackEditor.GraphBehavior PROPERTIES

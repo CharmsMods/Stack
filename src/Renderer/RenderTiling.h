@@ -4,9 +4,11 @@
 #include "NodeMath/RegionPlanning.h"
 #include "NodeMath/SpecializedPlanning.h"
 #include "Renderer/MaskRenderTypes.h"
+#include "Renderer/ViewportPreviewTypes.h"
 
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -66,6 +68,43 @@ struct RenderGraphRegionPlan {
     std::string reason;
 };
 
+struct RenderGraphViewportEndpoint {
+    int nodeId = -1;
+    std::string socketId;
+    bool operator<(const RenderGraphViewportEndpoint& b) const {
+        return nodeId < b.nodeId || (nodeId == b.nodeId && socketId < b.socketId);
+    }
+};
+
+// A complete dependency and a regional consumer can coexist in one plan.
+// Demand belongs to an output endpoint. Each consumed port keeps its own map.
+struct RenderGraphViewportInput {
+    std::string port;
+    RenderGraphViewportEndpoint source;
+    Stack::Renderer::ImageRegion demand;
+};
+struct RenderGraphViewportStage {
+    Stack::NodeMath::SpatialDescriptor spatial;
+    Stack::Renderer::ImageRegion demand;
+    int renderWidth = 0, renderHeight = 0;
+    bool regionalExecutable = false;
+    std::vector<RenderGraphViewportInput> inputs;
+    std::string completeReason;
+};
+struct RenderGraphViewportPlan {
+    bool valid = false;
+    bool enabled = false;
+    RenderGraphViewportEndpoint output;
+    std::map<RenderGraphViewportEndpoint, RenderGraphViewportStage> stages;
+    std::uint64_t regionalPixels = 0;
+    std::uint64_t completePixels = 0;
+    std::uint64_t fullInputPixels = 0;
+    std::uint64_t workingBytes = 0;
+    int logicalWidth = 0, logicalHeight = 0;
+    std::size_t fingerprint = 0;
+    std::string reason;
+};
+
 enum class TileIterationStatus {
     Completed,
     Canceled,
@@ -97,6 +136,18 @@ RenderGraphRegionPlan PlanGraphRegions(
     int fullWidth,
     int fullHeight,
     Stack::NodeMath::RenderScale renderScale = {});
+RenderGraphViewportPlan PlanGraphViewport(
+    const RenderGraphSnapshot& graph,
+    int fullWidth,
+    int fullHeight,
+    int previewMaxDimension,
+    const Stack::Renderer::ViewportPreviewRequest& request,
+    const std::vector<RenderGraphViewportEndpoint>& completeConsumers = {});
+inline RenderGraphViewportPlan PlanGraphViewportRegions(
+    const RenderGraphSnapshot& graph, int fullWidth, int fullHeight,
+    const Stack::Renderer::ViewportPreviewRequest& request, int previewMaxDimension) {
+    return PlanGraphViewport(graph, fullWidth, fullHeight, previewMaxDimension, request);
+}
 bool IsGraphTileSafe(const RenderGraphSnapshot& graph, int fullWidth, int fullHeight, std::string* reason = nullptr);
 TileIterationResult IterateTiles(
     const std::vector<RenderTileRect>& tiles,

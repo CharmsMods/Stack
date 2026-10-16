@@ -1,5 +1,6 @@
 #pragma once
 #include "Editor/GraphScopeData.h"
+#include "Raw/RawAssetCapture.h"
 #include "Editor/GraphRenderPolicy.h"
 
 #include "ThirdParty/json.hpp"
@@ -12,6 +13,7 @@
 #include "Raw/RawImageAnalysis.h"
 #include "Raw/RawPreciseNativeRuntime.h"
 #include "Editor/RawRenderPurpose.h"
+#include "Raw/OpenGlTask.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Renderer/RenderPipeline.h"
@@ -199,6 +201,12 @@ public:
     };
 
     struct PreviewRequest {
+        std::optional<Stack::RawAssetCapture::Selection> assetCapture;
+        bool assetCaptureInput = false;
+        std::shared_ptr<std::atomic<bool>> assetCaptureCancellation;
+        int assetOperationId = 0;
+        std::string assetLayerId;
+        Raw::RawWorkingSpace assetWorkingSpace = Raw::RawWorkingSpace::LinearRec2020D65;
         std::string rawLayerId;
         std::string rawMaskId;
         int previewNodeId = -1;
@@ -207,9 +215,6 @@ public:
         bool maskInput = false;
         bool directSourceOutput = false;
         bool scopeAnalysis = false;
-        bool frequencySpectrumInput = false;
-        RenderFrequencyEdgePolicy frequencyEdgePolicy =
-            RenderFrequencyEdgePolicy::Mirror;
         SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
@@ -218,6 +223,11 @@ public:
     };
 
     struct PreviewResult {
+        std::optional<Stack::Assets::Record> capturedAsset;
+        bool assetCapture = false;
+        bool assetCaptureSuperseded = false;
+        bool assetCaptureInput = false;
+        std::shared_ptr<const Stack::RawAssetCapture::PreviewField> assetFeedback;
         std::string rawLayerId;
         std::string rawMaskId;
         int previewNodeId = -1;
@@ -461,6 +471,7 @@ public:
             RawDevelopmentGraphScopeStage::None;
         int graphScopeMaxDimension = 192;
         std::size_t graphScopeInputFingerprint = 0;
+        std::string graphScopeOwnerKey;
         RawDevelopmentGradingScopeSource gradingScopeSource =
             RawDevelopmentGradingScopeSource::None;
         std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
@@ -515,6 +526,7 @@ public:
         RenderTextureStats finalDisplayStats;
         std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
         RawDevelopmentGraphScopeReadback graphScopeReadback;
+        std::string graphScopeOwnerKey;
         Raw::RawColorCloudPacket colorWarpCloudPacket;
         std::shared_ptr<const RawGradingScopeVisualization> gradingScopeVisualization;
         std::size_t graphScopeInputFingerprint = 0;
@@ -548,6 +560,11 @@ public:
         bool outputConnected = false;
         int previewMaxDimension = 0;
         RawWorkspaceSnapshot rawWorkspace;
+        Stack::Renderer::ViewportPreviewRequest viewportPreview;
+        int viewportViewId = 0;
+        std::size_t viewportExecutionIdentity = 0;
+        std::size_t viewportContentIdentity = 0;
+        bool prepareViewportOverview = false;
         SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
@@ -579,6 +596,13 @@ public:
         RawRenderTelemetry telemetry;
         int previewMaxDimension = 0;
         RawWorkspaceResult rawWorkspace;
+        Stack::Renderer::ViewportPreviewRequest viewportPreview;
+        Stack::Renderer::ViewportPreviewGeometry viewportPreviewGeometry;
+        int viewportViewId = 0;
+        std::size_t viewportExecutionIdentity = 0;
+        std::size_t viewportContentIdentity = 0;
+        SharedTextureResult viewportOverview;
+        bool viewportCold = false;
         Raw::ViewportStageCosts stageCosts {};
         Raw::ViewportStageCosts cpuStageCosts {}, gpuStageCosts {};
         std::array<bool,Raw::kViewportStageCount> measuredStages {};
@@ -634,7 +658,8 @@ public:
     // Executes a short, self-contained compute task on the worker's hidden
     // shared OpenGL context. The caller may be any non-render thread. Shutdown
     // and worker failure always release a blocked caller with an error.
-    bool ExecuteOpenGlTaskBlocking(OpenGlTask task, std::string& error);
+    bool ExecuteOpenGlTaskBlocking(OpenGlTask task, std::string& error,
+        Raw::OpenGlTaskPriority priority = Raw::OpenGlTaskPriority::Foreground);
     void RequestStopForShutdown();
     void Shutdown();
     void InvalidateSnapshotsBefore(std::uint64_t generation);
@@ -644,6 +669,9 @@ public:
     void InvalidateOwnerSnapshotsBefore(std::uint64_t ownerId, std::uint64_t generation);
     void ReleaseOwner(std::uint64_t ownerId);
     bool HasPendingForOwner(std::uint64_t ownerId) const;
+    // Excludes parked model continuations: edits can still render while an
+    // external denoiser is computing an input for a later completion.
+    bool HasSnapshotWorkFor(std::uint64_t ownerId) const;
     bool TryConsumeReadyDenoiseSnapshot(Snapshot& snapshot);
     bool Submit(Snapshot snapshot);
     bool TryConsumeCompleted(Result& result);
@@ -653,6 +681,9 @@ public:
     void UpdateGraphContext(const Stack::GraphRendering::RequestTag& context);
     bool IsWaitingForRawDenoiseCompletion() const;
     bool HasPendingOrBusyForShutdown() const;
+    // Compute batches do not hold the next snapshot admission slot. The
+    // shared service can queue foreground image work while a batch drains.
+    bool HasPendingSnapshotOrRender() const;
     RenderProgress GetProgress() const;
     static DevelopCandidateRenderMetrics AnalyzeDevelopCandidatePixelsForValidation(
         const std::vector<unsigned char>& pixels,
@@ -702,17 +733,32 @@ private:
 
     struct OpenGlTaskState {
         OpenGlTask task;
+        Raw::OpenGlTaskPriority priority = Raw::OpenGlTaskPriority::Foreground;
+        std::uint64_t serial = 0;
         std::mutex mutex;
         std::condition_variable cv;
         bool completed = false;
         bool success = false;
         std::string error;
     };
+    struct OpenGlTaskOrder {
+        bool operator()(const std::shared_ptr<OpenGlTaskState>& left,
+            const std::shared_ptr<OpenGlTaskState>& right) const {
+            return left->priority != right->priority
+                ? left->priority > right->priority : left->serial > right->serial;
+        }
+    };
+    using OpenGlTaskQueue = std::priority_queue<std::shared_ptr<OpenGlTaskState>,
+        std::vector<std::shared_ptr<OpenGlTaskState>>, OpenGlTaskOrder>;
 
     void PrepareGraphResourceBudget(const Snapshot& snapshot, RenderPipeline& pipeline, Result& result);
     void ThreadMain();
     void CaptureViewportTiming(const Snapshot& snapshot, Result& result);
+    void CompleteViewportTiming(const Result& result);
+    void FinishViewportTiming(const Result& result);
+    void PrepareViewportOverview(const Snapshot& snapshot, Result& result);
     void PollViewportTimings();
+    bool WaitForSubmittedGpuWork();
     struct PendingViewportTiming {
         Raw::ViewportGpuTiming::Batch batch;
         Result evidence;
@@ -751,7 +797,8 @@ private:
     bool m_HasPending = false;
     Stack::GraphRendering::RequestTag m_LatestGraphRequest;
     Snapshot m_Pending;
-    std::queue<std::shared_ptr<OpenGlTaskState>> m_OpenGlTasks;
+    OpenGlTaskQueue m_OpenGlTasks;
+    std::uint64_t m_NextOpenGlTaskSerial = 1;
     std::shared_ptr<OpenGlTaskState> m_ActiveOpenGlTask;
     std::deque<Result> m_Completed;
     std::queue<Result> m_CompletedTimings;

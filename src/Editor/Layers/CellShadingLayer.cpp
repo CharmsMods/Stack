@@ -1,144 +1,10 @@
 #include "CellShadingLayer.h"
+#include "Renderer/Operations/StylizeShaders.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
 #include "Utils/ImGuiExtras.h"
 
-static const char* s_CellShadingVert = R"(
-#version 130
-in vec2 aPos;
-in vec2 aTexCoord;
-out vec2 vUV;
-void main() {
-    vUV = aTexCoord;
-    gl_Position = vec4(aPos, 0.0, 1.0);
-}
-)";
 
-static const char* s_CellShadingFrag = R"(
-#version 130
-in vec2 vUV;
-out vec4 FragColor;
-
-uniform sampler2D uInputTex;
-uniform vec2 uRes;
-uniform int uLevels;
-uniform float uBias;
-uniform float uGamma;
-uniform int uQuantMode;
-uniform int uBandMap;
-uniform int uEdgeMethod;
-uniform float uEdgeStr;
-uniform float uEdgeThick;
-uniform float uColorPreserve;
-uniform int uEdgeEnable;
-
-vec3 rgb2hsv(vec3 c) {
-    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-    float d = q.x - min(q.w, q.y);
-    float e = 1.0e-10;
-    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-}
-
-vec3 hsv2rgb(vec3 c) {
-    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
-
-float getLuma(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-
-float quantize(float value) {
-    value = clamp(value + uBias, 0.0, 1.0);
-    value = pow(value, max(0.001, uGamma));
-
-    float levels = float(max(2, uLevels));
-    float quantized = floor(value * levels) / max(1.0, levels - 1.0);
-
-    if (uBandMap == 1) {
-        quantized = smoothstep(0.0, 1.0, quantized);
-    } else if (uBandMap == 2) {
-        quantized = floor(value * levels) / levels;
-    }
-
-    return quantized;
-}
-
-float sobel(vec2 uv) {
-    vec2 px = vec2(uEdgeThick) / uRes;
-    float l00 = getLuma(texture(uInputTex, uv + vec2(-px.x, -px.y)).rgb);
-    float l10 = getLuma(texture(uInputTex, uv + vec2(0.0, -px.y)).rgb);
-    float l20 = getLuma(texture(uInputTex, uv + vec2(px.x, -px.y)).rgb);
-    float l01 = getLuma(texture(uInputTex, uv + vec2(-px.x, 0.0)).rgb);
-    float l21 = getLuma(texture(uInputTex, uv + vec2(px.x, 0.0)).rgb);
-    float l02 = getLuma(texture(uInputTex, uv + vec2(-px.x, px.y)).rgb);
-    float l12 = getLuma(texture(uInputTex, uv + vec2(0.0, px.y)).rgb);
-    float l22 = getLuma(texture(uInputTex, uv + vec2(px.x, px.y)).rgb);
-
-    float gx = l00 + 2.0 * l01 + l02 - (l20 + 2.0 * l21 + l22);
-    float gy = l00 + 2.0 * l10 + l20 - (l02 + 2.0 * l12 + l22);
-    return sqrt(gx * gx + gy * gy);
-}
-
-float robertsCross(vec2 uv) {
-    vec2 px = vec2(uEdgeThick) / uRes;
-    float l00 = getLuma(texture(uInputTex, uv).rgb);
-    float l10 = getLuma(texture(uInputTex, uv + vec2(px.x, 0.0)).rgb);
-    float l01 = getLuma(texture(uInputTex, uv + vec2(0.0, px.y)).rgb);
-    float l11 = getLuma(texture(uInputTex, uv + px).rgb);
-    float gx = l00 - l11;
-    float gy = l10 - l01;
-    return sqrt(gx * gx + gy * gy);
-}
-
-float laplacian(vec2 uv) {
-    vec2 px = vec2(uEdgeThick) / uRes;
-    float left = getLuma(texture(uInputTex, uv + vec2(-px.x, 0.0)).rgb);
-    float right = getLuma(texture(uInputTex, uv + vec2(px.x, 0.0)).rgb);
-    float up = getLuma(texture(uInputTex, uv + vec2(0.0, -px.y)).rgb);
-    float down = getLuma(texture(uInputTex, uv + vec2(0.0, px.y)).rgb);
-    float center = getLuma(texture(uInputTex, uv).rgb);
-    return abs(left + right + up + down - 4.0 * center) * 2.0;
-}
-
-void main() {
-    vec4 base = texture(uInputTex, vUV);
-    vec3 color = base.rgb;
-    vec3 result = color;
-
-    if (uQuantMode == 0) {
-        float q = quantize(getLuma(color));
-        vec3 monochrome = vec3(q);
-        vec3 hsv = rgb2hsv(color);
-        hsv.z = q;
-        vec3 preserved = hsv2rgb(hsv);
-        result = mix(monochrome, preserved, clamp(uColorPreserve, 0.0, 1.0));
-    } else if (uQuantMode == 1) {
-        result.r = quantize(color.r);
-        result.g = quantize(color.g);
-        result.b = quantize(color.b);
-    } else {
-        vec3 hsv = rgb2hsv(color);
-        hsv.z = quantize(hsv.z);
-        result = hsv2rgb(hsv);
-    }
-
-    if (uEdgeEnable == 1) {
-        float edge = 0.0;
-        if (uEdgeMethod == 0) edge = sobel(vUV);
-        else if (uEdgeMethod == 1) edge = robertsCross(vUV);
-        else edge = laplacian(vUV);
-
-        edge = smoothstep(0.1, 1.0, edge * 2.0);
-        result = mix(result, vec3(0.0), edge * clamp(uEdgeStr, 0.0, 2.0));
-    }
-
-    FragColor = vec4(clamp(result, 0.0, 1.0), base.a);
-}
-)";
 
 CellShadingLayer::CellShadingLayer() {}
 
@@ -147,7 +13,7 @@ CellShadingLayer::~CellShadingLayer() {
 }
 
 void CellShadingLayer::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(s_CellShadingVert, s_CellShadingFrag);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(Stack::Renderer::Operations::StylizeVertex(), Stack::Renderer::Operations::CellShadingFragment());
 }
 
 void CellShadingLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
@@ -156,6 +22,12 @@ void CellShadingLayer::Execute(unsigned int inputTexture, int width, int height,
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
     glUniform2f(glGetUniformLocation(m_ShaderProgram, "uRes"), static_cast<float>(width), static_cast<float>(height));
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uScalar"),m_ExecutionScalar ? 1 : 0);
+    glUniform3fv(glGetUniformLocation(m_ShaderProgram,"uLumaWeights"),1,m_ExecutionLuma.data());
+    glUniform3fv(glGetUniformLocation(m_ShaderProgram,"uComponents"),1,m_ExecutionComponents.data());
+    glUniform2f(glGetUniformLocation(m_ShaderProgram,"uSourceSize"),
+        float(m_ExecutionSourceSize[0]>0 ? m_ExecutionSourceSize[0] : width),
+        float(m_ExecutionSourceSize[1]>0 ? m_ExecutionSourceSize[1] : height));
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uLevels"), m_Levels);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uBias"), m_Bias);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uGamma"), m_Gamma);
@@ -206,6 +78,10 @@ json CellShadingLayer::Serialize() const {
 }
 
 void CellShadingLayer::Deserialize(const json& j) {
+    m_ExecutionScalar=j.value("executionScalar",false);
+    m_ExecutionLuma=j.value("executionLumaWeights",std::array<float,3>{.2126f,.7152f,.0722f});
+    m_ExecutionComponents=j.value("executionComponents",std::array<float,3>{1,1,1});
+    m_ExecutionSourceSize=j.value("executionSourceSize",std::array<int,2>{0,0});
     if (j.contains("levels")) m_Levels = j["levels"];
     if (j.contains("bias")) m_Bias = j["bias"];
     if (j.contains("gamma")) m_Gamma = j["gamma"];

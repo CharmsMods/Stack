@@ -26,7 +26,9 @@ Preview SuperResolutionDetail(const BracketingResult& result,unsigned x,unsigned
     out.resultRgb.resize(count*3);out.sourceRgb.resize(count*groups*3);
     out.guideEv.resize(count);out.contributions.resize(count*groups);out.requested.resize(count*groups);out.diagnostics.resize(count);
     out.originals=native.originals;
-    const auto& raw=*result.raw;const auto& evidence=*raw.multiFrameMeasurementSidecars;
+    const auto& raw=*result.raw;
+    const RawImageData::MultiFrameMeasurementSidecars empty;
+    const auto& evidence=raw.multiFrameMeasurementSidecars?*raw.multiFrameMeasurementSidecars:empty;
     std::map<std::pair<unsigned,unsigned>,std::vector<float>> masks;
     for(unsigned yy=0;yy<out.height;++yy) {
       if(cancel&&cancel())return {};
@@ -55,6 +57,7 @@ Preview SuperResolutionDetail(const BracketingResult& result,unsigned x,unsigned
         const auto maskIndex=(std::size_t(gy%cache.tilePixels)*tw+gx%cache.tilePixels)*groups;
         std::copy_n(found->second.begin()+maskIndex,groups,out.contributions.begin()+p*groups);
         for(std::size_t g=0;g<groups;++g)out.requested[p*groups+g]=native.requested[q*groups+g];
+        if(evidence.fallbackReason&&evidence.validity&&evidence.clipping&&evidence.localRejection)
         out.diagnostics[p]=((*evidence.fallbackReason)[index]?Preview::Fallback:0)|
             (!(*evidence.validity)[index]&&!(*evidence.clipping)[index]?Preview::Invalid:0)|((*evidence.clipping)[index]?Preview::Unrecoverable:0)|
             ((*evidence.localRejection)[index]?Preview::AlignmentRejected:0)|

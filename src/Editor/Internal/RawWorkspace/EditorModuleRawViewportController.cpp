@@ -30,6 +30,8 @@ Raw::ViewportDecisionInput EditorModule::BuildRawViewportDecisionInput() const {
     return input;
 }
 int EditorModule::ResolveRawViewportInteractiveEdge() {
+    if (!UsesGraphViewportPreview() && m_RawViewportTimingViewGeneration != m_RawViewportRequest.generation)
+        UpdateRawViewportEditTiming(RawViewportRecipe());
     const int selected=GetCalibratedRawViewportEdge();
     if (selected<=0) return m_RawWorkspaceInteractivePreviewMaxDimension;
     auto input=BuildRawViewportDecisionInput();
@@ -46,7 +48,20 @@ int EditorModule::ResolveRawViewportInteractiveEdge() {
     return m_RawWorkspaceInteractivePreviewMaxDimension;
 }
 std::string EditorModule::GetRawViewportDecisionStatus() const {
-    if (!IsRawWorkspaceProjectActive()) return "Applies to the RAW viewport. Graph rendering is unchanged.";
+    if (UsesGraphViewportPreview()) {
+        const auto& state = ActiveViewportPreviewState();
+        std::ostringstream text;
+        text << "Interactive sampling: " << state.interactiveEdge << " px longest side";
+        if (state.selection.predictedMs > 0) text << std::fixed << std::setprecision(1) <<
+            "; predicted " << state.selection.predictedMs << " ms";
+        if (state.selection.provisional) text << ". Learning this workload";
+        if (state.refinementBlocked) text << ". Native detail is limited by the memory or texture budget";
+        if (!state.refinementError.empty() && !state.refinementBlocked) {
+            text << ". Native detail " << (state.refinementFailures >= 3 ? "failed after retries: " : "will retry: ")
+                << state.refinementError;
+        }
+        return text.str();
+    }
     auto input=BuildRawViewportDecisionInput();
     input.evaluationEdge=m_RawWorkspaceInteractivePreviewMaxDimension;
     m_RawViewportDecision=m_RawViewportController.Choose(input,m_RawViewportTimingBank,RawViewportRecipe());
@@ -66,6 +81,7 @@ std::string EditorModule::GetRawViewportDecisionStatus() const {
     return text.str();
 }
 void EditorModule::ResetRawViewportLearnedTimings() {
+    for (auto& state : m_ViewportPreviewStates) state.timings.Reset();
     CancelRawViewportCalibration();
     m_RawViewportTimingHistory.ResetHardware();
     m_RawViewportTimingHistory.MergeLoaded(m_RawViewportTimingBank);

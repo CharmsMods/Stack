@@ -1,6 +1,10 @@
+#include "Raw/Demosaic/DemosaicCatalog.h"
 #include "HdrDisplayMapping.h"
+#include "ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
+#include "Raw/Curves/CurveAuthoring.h"
 #include "Raw/RawZoneArea.h"
+#include "Raw/RawColorWarpSelection.h"
 
 #include <algorithm>
 #include <array>
@@ -237,6 +241,7 @@ nlohmann::json LocalRangeJson(const RawLocalRangeRecipe& input) {
             { "incomingHandle", SerializeBezierHandle(point.incoming) },
             { "outgoingHandle", SerializeBezierHandle(point.outgoing) }
         });
+        if (IsTonalCurvePoint(point)) points.back()["tonal"] = CurveTonalPointJson(point.tonal);
     }
     nlohmann::json targetZones = nlohmann::json::array();
     for (const RawLocalRangeTargetZone& zone : localRange.targetZones) {
@@ -268,6 +273,8 @@ nlohmann::json LocalRangeJson(const RawLocalRangeRecipe& input) {
     return {
         { "enabled", localRange.enabled },
         { "strength", localRange.strength },
+        { "curveAmount", CurveAmountJson(localRange.curveAmount) },
+        { "curveNormalization", localRange.curveNormalization },
         { "middleGrey", localRange.middleGrey },
         { "minEv", localRange.minEv },
         { "maxEv", localRange.maxEv },
@@ -588,26 +595,11 @@ const char* ProcessingVersionStableString(Raw::RawProcessingVersion version) {
 }
 
 const char* DemosaicMethodStableString(Raw::DemosaicMethod method) {
-    switch (method) {
-        case Raw::DemosaicMethod::Bilinear: return "bilinear";
-        case Raw::DemosaicMethod::MalvarHeCutler: return "malvar-he-cutler-5x5";
-        case Raw::DemosaicMethod::NearestNeighbor: return "nearest-neighbor";
-        case Raw::DemosaicMethod::HamiltonAdams: return "hamilton-adams";
-    }
-    return "bilinear";
+    return Raw::Demosaic::Describe(method).key;
 }
 
 Raw::DemosaicMethod DemosaicMethodFromStableString(const std::string& value) {
-    if (value == "malvar-he-cutler-5x5") {
-        return Raw::DemosaicMethod::MalvarHeCutler;
-    }
-    if (value == "nearest-neighbor") {
-        return Raw::DemosaicMethod::NearestNeighbor;
-    }
-    if (value == "hamilton-adams") {
-        return Raw::DemosaicMethod::HamiltonAdams;
-    }
-    return Raw::DemosaicMethod::Bilinear;
+    return Raw::Demosaic::FromKey(value);
 }
 
 const char* WorkingSpaceStableString(Raw::RawWorkingSpace workingSpace) {
@@ -786,6 +778,8 @@ std::vector<RawPointCurveControlPoint> SanitizePointCurvePoints(
             point.outgoing = BezierHandleFromJson(
                 item.value("outgoingHandle", nlohmann::json::object()),
                 missingStrength);
+            if (const auto tonal = item.find("tonal"); tonal != item.end())
+                point.tonal = ReadCurveTonalPoint(*tonal);
             points.push_back(point);
         }
     }
@@ -826,6 +820,7 @@ nlohmann::json SerializePointCurvePoints(
             { "incomingHandle", SerializeBezierHandle(point.incoming) },
             { "outgoingHandle", SerializeBezierHandle(point.outgoing) }
         });
+        if (IsTonalCurvePoint(point)) result.back()["tonal"] = CurveTonalPointJson(point.tonal);
     }
     return result;
 }
@@ -850,6 +845,7 @@ nlohmann::json SerializePointCurveComponent(const RawPointCurveComponent& compon
     const auto hasOnlyDefaultHandles = [](
         const std::vector<RawPointCurveControlPoint>& points) {
         for (const RawPointCurveControlPoint& point : points) {
+            if (IsTonalCurvePoint(point)) return false;
             for (const RawBezierHandleState* handle :
                  { &point.incoming, &point.outgoing }) {
                 if (handle->manual ||
@@ -1089,22 +1085,24 @@ std::array<float, 2> ClampCurveHandleFromAnchor(
 
 } // namespace
 
-RawBezierSegment BuildRawBezierSegment(
-    const std::vector<RawBezierCurvePoint>& inputPoints,
-    std::size_t segmentIndex) {
+namespace {
+std::vector<RawBezierCurvePoint> PreparedBezierPoints(const std::vector<RawBezierCurvePoint>& inputPoints) {
+    auto points=inputPoints;
+    for(auto& point:points){
+        point.x=std::clamp(point.x,0.f,1.f);point.y=std::clamp(point.y,0.f,1.f);
+        point.incoming=SanitizeBezierHandle(point.incoming);point.outgoing=SanitizeBezierHandle(point.outgoing);
+    }
+    return points;
+}
+RawBezierSegment PreparedBezierSegment(
+    const std::vector<RawBezierCurvePoint>& points,
+    std::size_t segmentIndex,const std::vector<float>& tangents) {
     RawBezierSegment result;
-    if (inputPoints.size() < 2u) {
+    if (points.size() < 2u) {
         return result;
     }
-    const std::size_t count = std::min(inputPoints.size(), kMaxRawPointCurvePoints);
+    const std::size_t count = points.size();
     segmentIndex = std::min(segmentIndex, count - 2u);
-    std::vector<RawBezierCurvePoint> points(inputPoints.begin(), inputPoints.begin() + count);
-    for (RawBezierCurvePoint& point : points) {
-        point.x = std::clamp(point.x, 0.0f, 1.0f);
-        point.y = std::clamp(point.y, 0.0f, 1.0f);
-        point.incoming = SanitizeBezierHandle(point.incoming);
-        point.outgoing = SanitizeBezierHandle(point.outgoing);
-    }
     result.left = points[segmentIndex];
     result.right = points[segmentIndex + 1u];
     const float width = std::max(0.0001f, result.right.x - result.left.x);
@@ -1112,7 +1110,6 @@ RawBezierSegment BuildRawBezierSegment(
     const float straightLeftY = result.left.y + (result.right.y - result.left.y) / 3.0f;
     const float straightRightX = result.right.x - width / 3.0f;
     const float straightRightY = result.right.y - (result.right.y - result.left.y) / 3.0f;
-    const std::vector<float> tangents = MonotoneCurveTangents(points);
 
     const RawBezierHandleState& leftState = result.left.outgoing;
     float baseLeftX = leftState.manual
@@ -1218,6 +1215,21 @@ RawBezierSegment BuildRawBezierSegment(
     }
     return result;
 }
+} // namespace
+
+RawBezierSegment BuildRawBezierSegment(const std::vector<RawBezierCurvePoint>& input,std::size_t index) {
+    const auto points=PreparedBezierPoints(input);
+    return PreparedBezierSegment(points,index,MonotoneCurveTangents(points));
+}
+std::vector<RawBezierSegment> BuildRawBezierSegments(const std::vector<RawBezierCurvePoint>& input) {
+    const auto points=PreparedBezierPoints(input);
+    const auto tangents=MonotoneCurveTangents(points);
+    std::vector<RawBezierSegment> result;
+    if(points.size()<2)return result;
+    result.reserve(points.size()-1);
+    for(size_t i=0;i+1<points.size();++i)result.push_back(PreparedBezierSegment(points,i,tangents));
+    return result;
+}
 
 float EvaluateRawBezierCurve(
     const std::vector<RawBezierCurvePoint>& points,
@@ -1251,7 +1263,10 @@ float EvaluateRawBezierCurve(
         if (curveX < x) low = middle;
         else high = middle;
     }
-    const float t = (low + high) * 0.5f;
+    const float span=segment.right.x-segment.left.x;
+    const bool linearX=std::abs(segment.leftHandleX-(segment.left.x+span/3))<1e-6f &&
+        std::abs(segment.rightHandleX-(segment.right.x-span/3))<1e-6f;
+    const float t = linearX?(x-segment.left.x)/span:(low + high) * 0.5f;
     return std::clamp(
         BezierCoordinate(
             segment.left.y,
@@ -1268,7 +1283,7 @@ std::vector<RawBezierCurvePoint> RawPointCurveBezierPoints(
     std::vector<RawBezierCurvePoint> result;
     result.reserve(component.points.size());
     for (const RawPointCurveControlPoint& point : component.points) {
-        result.push_back({ point.x, point.y, point.incoming, point.outgoing });
+        result.push_back({ point.x, point.y, point.incoming, point.outgoing, point.tonal });
     }
     return result;
 }
@@ -1284,7 +1299,8 @@ std::vector<RawBezierCurvePoint> RawLocalRangeBezierPoints(
             (point.ev - localRange.minEv) / evSpan,
             (point.deltaEv + 4.0f) / 8.0f,
             point.incoming,
-            point.outgoing
+            point.outgoing,
+            point.tonal
         });
     }
     return result;
@@ -1937,7 +1953,8 @@ std::array<float, 3> ApplyColorWarp(
 std::array<float, 3> ApplyPreparedColorWarp(
     const RawColorWarpRecipe& colorWarp,
     const std::array<float, 3>& sceneRgb,
-    Raw::RawWorkingSpace workingSpace) {
+    Raw::RawWorkingSpace workingSpace,
+    const std::vector<RawColorWarpMaskSample>* masks) {
     if (!HasPreparedColorWarpEffect(colorWarp)) {
         return sceneRgb;
     }
@@ -1949,21 +1966,12 @@ std::array<float, 3> ApplyPreparedColorWarp(
     float weightedB = 0.0f;
     float weightedLightnessEv = 0.0f;
     float totalWeight = 0.0f;
-    for (const RawColorWarpPin& pin : colorWarp.pins) {
-        if (!pin.enabled || pin.strength <= 0.0001f) {
-            continue;
-        }
-        const float radialWeight = EvaluateColorWarpPinShapeWeight(
-            pin,
-            coordinate.a,
-            coordinate.b);
-        if (radialWeight <= 0.000001f) {
-            continue;
-        }
-        const float lightnessWeight = EvaluateColorWarpPinLightnessWeight(
-            pin,
-            coordinate.sceneEv);
-        const float weight = radialWeight * lightnessWeight * pin.strength;
+    for (std::size_t index = 0; index < colorWarp.pins.size(); ++index) {
+        const auto& pin = colorWarp.pins[index];
+        const auto mask = masks && index < masks->size()
+            ? (*masks)[index] : RawColorWarpMaskSample{};
+        const float weight = EvaluateColorWarpPinWeight(pin, coordinate, mask,
+            masks ? ColorWarpPinSpatialSupport(colorWarp, pin) : 0.0f);
         if (weight <= 0.000001f) {
             continue;
         }
@@ -1993,24 +2001,25 @@ std::array<float, 3> ApplyPreparedColorWarp(
 }
 
 nlohmann::json DefaultViewTransformJson() {
+    const auto& p = Raw::ViewTransform::Defaults;
     return {
         { "type", "ViewTransform" },
         { "displayCurve", "standard" },
         { "enabled", true },
-        { "exposure", 0.0f },
-        { "blackEv", -8.0f },
-        { "whiteEv", 4.0f },
-        { "middleGrey", 0.18f },
-        { "shoulder", 0.45f },
-        { "toe", 0.18f },
-        { "contrast", 1.0f },
-        { "contrastPivotEv", 0.0f },
+        { "exposure", p.exposure },
+        { "blackEv", p.blackEv },
+        { "whiteEv", p.whiteEv },
+        { "middleGrey", p.middleGrey },
+        { "shoulder", p.shoulder },
+        { "toe", p.toe },
+        { "contrast", p.contrast },
+        { "contrastPivotEv", p.contrastPivotEv },
         { "contrastModel", kViewContrastModelPivotedLogV2 },
-        { "saturation", 1.0f },
-        { "preserveHue", true },
-        { "debugFalseColor", false },
+        { "saturation", p.saturation },
+        { "preserveHue", p.preserveHue },
+        { "debugFalseColor", p.debugFalseColor },
         { "inputWorkingSpace", "linear-rec2020-d65" },
-        { "encodeSrgbOutput", true }
+        { "encodeSrgbOutput", p.encodeSrgbOutput }
     };
 }
 
@@ -2024,30 +2033,10 @@ float EvaluateViewTransformDisplayLuma(
     float toe,
     float contrast,
     float contrastPivotEv) {
-    // Keep this scalar reference in lockstep with filmicCurve() in
-    // ToneLayerRendering.cpp. RAW Lab uses it only to visualize the existing
-    // display transform; it does not define or replace the render path.
-    const float black = middleGrey * std::exp2(blackEv);
-    const float white = middleGrey * std::exp2(whiteEv);
-    float x = std::max(0.0f, input * std::exp2(exposure) - black);
-    float normalized = x / std::max(0.000001f, white - black);
-    const float safeContrast = std::max(0.05f, contrast);
-    const float pivotInput = middleGrey * std::exp2(contrastPivotEv);
-    const float pivotNormalized = std::max(
-        0.000001f,
-        (pivotInput - black) / std::max(0.000001f, white - black));
-    normalized = pivotNormalized * std::pow(
-        std::max(0.0f, normalized) / pivotNormalized,
-        safeContrast);
-    const float clampedToe = std::clamp(toe, 0.0f, 1.0f);
-    const float toeMapped =
-        (normalized + clampedToe * normalized / (normalized + 0.18f)) /
-        (1.0f + clampedToe);
-    normalized = normalized * (1.0f - clampedToe) + toeMapped * clampedToe;
-    const float safeShoulder = std::max(0.001f, shoulder);
-    const float mapped = normalized / (normalized + safeShoulder);
-    const float whiteMapped = 1.0f / (1.0f + safeShoulder);
-    return std::clamp(mapped / std::max(0.0001f, whiteMapped), 0.0f, 1.0f);
+    Raw::ViewTransform::Parameters p;
+    p.exposure=exposure;p.blackEv=blackEv;p.whiteEv=whiteEv;p.middleGrey=middleGrey;
+    p.shoulder=shoulder;p.toe=toe;p.contrast=contrast;p.contrastPivotEv=contrastPivotEv;
+    return Raw::ViewTransform::PreparedTransform(p).Luma(input);
 }
 
 std::vector<RawLocalRangePoint> DefaultLocalRangePoints(float minEv, float maxEv) {
@@ -2059,9 +2048,9 @@ std::vector<RawLocalRangePoint> DefaultLocalRangePoints(float minEv, float maxEv
 
     const float middleEv = std::clamp(0.0f, minEv, maxEv);
     return {
-        RawLocalRangePoint{ minEv, 0.0f },
-        RawLocalRangePoint{ middleEv, 0.0f },
-        RawLocalRangePoint{ maxEv, 0.0f }
+        RawLocalRangePoint{ minEv, 0.0f, {1}, {1} },
+        RawLocalRangePoint{ middleEv, 0.0f, {1}, {1} },
+        RawLocalRangePoint{ maxEv, 0.0f, {1}, {1} }
     };
 }
 
@@ -2075,6 +2064,7 @@ RawLocalRangeRecipe SanitizeLocalRangeRecipe(RawLocalRangeRecipe localRange) {
     SanitizeZoneAreas(localRange.areas);
     RawLocalRangeRecipe defaults = DefaultLocalRangeRecipe();
     localRange.strength = ClampFinite(localRange.strength, defaults.strength, 0.0f, 1.0f);
+    localRange.curveNormalization = ClampFinite(localRange.curveNormalization, 0.0f, 0.0f, 1.0f);
     localRange.middleGrey = ClampFinite(localRange.middleGrey, defaults.middleGrey, 0.01f, 1.0f);
     localRange.minEv = ClampFinite(localRange.minEv, defaults.minEv, -16.0f, 0.0f);
     localRange.maxEv = ClampFinite(localRange.maxEv, defaults.maxEv, 0.0f, 16.0f);
@@ -2173,7 +2163,8 @@ RawLocalRangeRecipe SanitizeLocalRangeRecipe(RawLocalRangeRecipe localRange) {
             std::clamp(point.ev, localRange.minEv, localRange.maxEv),
             std::clamp(point.deltaEv, -4.0f, 4.0f),
             SanitizeBezierHandle(point.incoming),
-            SanitizeBezierHandle(point.outgoing)
+            SanitizeBezierHandle(point.outgoing),
+            point.tonal
         });
     }
     if (points.empty()) {
@@ -3064,6 +3055,8 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     const nlohmann::json localRange = value.value("localRange", nlohmann::json::object());
     if (localRange.is_object()) {
         recipe.localRange.enabled = localRange.value("enabled", recipe.localRange.enabled);
+        recipe.localRange.curveAmount=ReadCurveAmount(localRange.value("curveAmount",nlohmann::json::object()));
+        recipe.localRange.curveNormalization = JsonFloat(localRange, "curveNormalization", 0.0f);
         recipe.localRange.strength = JsonFloat(localRange, "strength", recipe.localRange.strength);
         recipe.localRange.middleGrey = JsonFloat(localRange, "middleGrey", recipe.localRange.middleGrey);
         recipe.localRange.minEv = JsonFloat(localRange, "minEv", recipe.localRange.minEv);
@@ -3156,6 +3149,8 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
                 point.outgoing = BezierHandleFromJson(
                     item.value("outgoingHandle", nlohmann::json::object()),
                     0.0f);
+                if (const auto tonal = item.find("tonal"); tonal != item.end())
+                    point.tonal = ReadCurveTonalPoint(*tonal);
                 recipe.localRange.points.push_back(point);
             }
         }

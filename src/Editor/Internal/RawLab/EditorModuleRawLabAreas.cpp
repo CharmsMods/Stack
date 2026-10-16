@@ -11,10 +11,11 @@ using namespace Stack::Editor::RawLabInternal;
 bool EditorModule::RenderRawWorkspaceLabAreas(RawWorkspaceEditContext& context, RawLabControlSection section) {
     auto& ui = m_RawWorkspaceLabUi.zoneAreas;
     const std::string identity = GetActiveRawWorkspacePreviewIdentity();
-    if (ui.sourceKey != identity) {
+    if (ui.sourceKey != identity || ui.nodeTarget != context.nodeTarget) {
         if (ui.overlayTexture) glDeleteTextures(1, &ui.overlayTexture);
         ui = {};
         ui.sourceKey = identity;
+        ui.nodeTarget = context.nodeTarget;
     }
     auto& areas = context.recipe.localRange.areas;
     for (auto it=ui.masks.begin(); it!=ui.masks.end();) {
@@ -24,15 +25,11 @@ bool EditorModule::RenderRawWorkspaceLabAreas(RawWorkspaceEditContext& context, 
     ui.history.Initialize(areas);
     bool changed = false;
     if (ShowsRawLabSettings(section)) {
-        const bool commandKeys = CanConsumeEditorCommandKeys() && !ImGui::GetIO().WantTextInput &&
-            !ImGui::IsAnyItemActive() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::GetIO().KeyCtrl;
-        const bool undoKey = commandKeys && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false);
-        const bool redoKey = commandKeys && ((ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) || ImGui::IsKeyPressed(ImGuiKey_Y, false));
-        if ((BareTextButton("Undo", false, ui.history.CanUndo()) || undoKey) && ui.history.CanUndo()) {
+        if (BareTextButton("Undo", false, ui.history.CanUndo()) && ui.history.CanUndo()) {
             areas = ui.history.Undo(); changed = true;
         }
         ImGui::SameLine();
-        if ((BareTextButton("Redo", false, ui.history.CanRedo()) || redoKey) && ui.history.CanRedo()) {
+        if (BareTextButton("Redo", false, ui.history.CanRedo()) && ui.history.CanRedo()) {
             areas = ui.history.Redo(); changed = true;
         }
         if (BareTextButton("+ Add Area", false, areas.size() < Stack::RawRecipe::kMaxZoneAreas)) {

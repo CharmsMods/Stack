@@ -1,4 +1,5 @@
 #include "Renderer/RenderPipeline.h"
+#include "Raw/Curves/LocalEvCurveNormalization.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
 #include "Renderer/GLStateGuards.h"
@@ -659,6 +660,9 @@ void RenderPipeline::EnsureReformatProgram() {
         uniform sampler2D uImage;
         uniform ivec2 uInputSize;
         uniform int uFilter;
+        uniform vec2 uVisibleHalf;
+        uniform vec2 uSampleSpan;
+        uniform vec2 uSourceCenter;
 
         ivec2 clampCoord(ivec2 value) {
             return clamp(value, ivec2(0), uInputSize - ivec2(1));
@@ -668,7 +672,11 @@ void RenderPipeline::EnsureReformatProgram() {
             return vec4(sampleValue.rgb * sampleValue.a, sampleValue.a);
         }
         void main() {
-            vec2 source = vTexCoord * vec2(uInputSize) - vec2(0.5);
+            if (any(greaterThan(abs(vTexCoord - vec2(0.5)), uVisibleHalf))) {
+                FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                return;
+            }
+            vec2 source = (uSourceCenter + (vTexCoord - vec2(0.5)) * uSampleSpan) * vec2(uInputSize) - vec2(0.5);
             if (uFilter == 0) {
                 FragColor = texelFetch(uImage, clampCoord(ivec2(floor(source + vec2(0.5)))), 0);
                 return;
@@ -1993,6 +2001,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
+        uniform float uCurveGlobalOffsetEv;
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform float uSmoothness;
@@ -2033,7 +2042,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
                 t * t * t * p3;
         }
 
-        float evaluateLocalRangeDelta(float sceneEv) {
+        float evaluateLocalRangeResidual(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
             }
@@ -2066,6 +2075,13 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
                 previous = current;
             }
             return previous.y;
+        }
+
+        float evaluateLocalRangeDelta(float sceneEv) {
+            if (uLocalRangePointCount < 2 || uStrength <= 0.0001) return 0.0;
+            // Combine before strength, masks, and highlight protection so the
+            // split never changes the input guide or the total correction.
+            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv;
         }
 
         float lumaOf(vec3 rgb) {
@@ -2340,6 +2356,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
+        uniform float uCurveGlobalOffsetEv;
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform int uOverlayMode;
@@ -2382,7 +2399,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
                 t * t * t * p3;
         }
 
-        float evaluateLocalRangeDelta(float sceneEv) {
+        float evaluateLocalRangeResidual(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
             }
@@ -2415,6 +2432,13 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
                 previous = current;
             }
             return previous.y;
+        }
+
+        float evaluateLocalRangeDelta(float sceneEv) {
+            if (uLocalRangePointCount < 2 || uStrength <= 0.0001) return 0.0;
+            // Combine before strength, masks, and highlight protection so the
+            // split never changes the input guide or the total correction.
+            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv;
         }
 
         float lumaOf(vec3 rgb) {
@@ -3722,6 +3746,8 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             m_RawDevelopmentLocalRangeProgram,
             sanitized,
             workingSpace);
+        const float curveOffsetEv = Stack::RawRecipe::LocalEvGlobalOffsetEv(sanitized);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uCurveGlobalOffsetEv"), curveOffsetEv);
         const int count = std::min<int>(static_cast<int>(sanitized.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uLocalRangePointCount"), count);
         for (int i = 0; i < count; ++i) {
@@ -3731,7 +3757,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             glUniform2f(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
                 point.ev,
-                point.deltaEv);
+                point.deltaEv - curveOffsetEv);
         }
         const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
             Stack::RawRecipe::RawLocalRangeBezierPoints(sanitized);
@@ -3746,9 +3772,9 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             glUniform4f(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
                 sanitized.minEv + segment.leftHandleX * evSpan,
-                -4.0f + segment.leftHandleY * 8.0f,
+                -4.0f + segment.leftHandleY * 8.0f - curveOffsetEv,
                 sanitized.minEv + segment.rightHandleX * evSpan,
-                -4.0f + segment.rightHandleY * 8.0f);
+                -4.0f + segment.rightHandleY * 8.0f - curveOffsetEv);
         }
 
         m_Quad.Draw();
@@ -3990,6 +4016,8 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
             m_RawDevelopmentLocalRangeOverlayProgram,
             overlayRange,
             workingSpace);
+        const float curveOffsetEv = Stack::RawRecipe::LocalEvGlobalOffsetEv(overlayRange);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uCurveGlobalOffsetEv"), curveOffsetEv);
         const int count = std::min<int>(static_cast<int>(overlayRange.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uLocalRangePointCount"), count);
         for (int i = 0; i < count; ++i) {
@@ -3999,7 +4027,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
             glUniform2f(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, uniformName),
                 point.ev,
-                point.deltaEv);
+                point.deltaEv - curveOffsetEv);
         }
         const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
             Stack::RawRecipe::RawLocalRangeBezierPoints(overlayRange);
@@ -4016,9 +4044,9 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
                     m_RawDevelopmentLocalRangeOverlayProgram,
                     uniformName),
                 overlayRange.minEv + segment.leftHandleX * evSpan,
-                -4.0f + segment.leftHandleY * 8.0f,
+                -4.0f + segment.leftHandleY * 8.0f - curveOffsetEv,
                 overlayRange.minEv + segment.rightHandleX * evSpan,
-                -4.0f + segment.rightHandleY * 8.0f);
+                -4.0f + segment.rightHandleY * 8.0f - curveOffsetEv);
         }
 
         m_Quad.Draw();

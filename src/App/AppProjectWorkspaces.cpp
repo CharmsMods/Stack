@@ -50,7 +50,18 @@ std::uint64_t AppShell::CreateProjectWorkspace() {
 }
 
 void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
+    if (m_DiagnosticQueueCurrent) editor.SetDocumentPersistenceEnabled(false);
     auto* owner = &editor;
+    editor.SetProjectVersionHandler([this](const std::filesystem::path& path) {
+        for (const auto& workspace : m_ProjectWorkspaces) {
+            if (Stack::Project::SameProjectPath(path,
+                    Stack::Project::ResolveProjectStoreRoot(workspace->editor->GetCurrentProjectFileName()))) {
+                workspace->editor->RequestCurrentProjectVersion();
+                return true;
+            }
+        }
+        return false;
+    });
     editor.SetProjectRemovalGuard([this](const std::filesystem::path& path) {
         const auto usesPath = [&](const auto& workspace) {
             return Stack::Project::SameProjectPath(path,
@@ -69,6 +80,10 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
     editor.SetRawGalleryQueueRequestHandler(
         [this](const Stack::RawGalleryQueue::Request& request) {
             return m_Queue.Model().AddGalleryRequest(request);
+        });
+    editor.SetProjectQueueRequestHandler(
+        [this](const Stack::Queue::ProjectRequest& request) {
+            return m_Queue.Model().AddProjectSnapshot(request);
         });
     editor.SetRawGalleryOpenSelectionHandler(
         [this, owner](EditorModule::RawGalleryOpenSelection selection,
@@ -154,7 +169,14 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     if (m_ToolSwitcher.Open() || m_ToolSwitcher.cursorCaptured) CancelToolSwitcher();
     CancelProjectPillPreview();
     for (auto& workspace : m_ProjectWorkspaces) {
-        if (workspace->id == m_ActiveProjectWorkspace) workspace->rootTab = m_CurrentTabId;
+        if (workspace->id == m_ActiveProjectWorkspace) {
+            // App destinations must not become a project's editing return point.
+            const bool appSurface = m_CurrentTabId == static_cast<int>(Stack::Workspace::Id::Queue) ||
+                m_CurrentTabId == static_cast<int>(Stack::Workspace::Id::Library);
+            workspace->rootTab = appSurface && workspace->id != m_GalleryWorkspaceId &&
+                !workspace->editor->IsAutoBracketWorkspace()
+                ? static_cast<int>(Stack::Workspace::Id::Graph) : m_CurrentTabId;
+        }
     }
     m_Editor->EndWorkspacePreview();
     m_Editor->SetWorkspaceDetachedWindowsVisible(false);
@@ -170,6 +192,8 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     m_Editor = (*next)->editor.get();
     m_ActiveProjectWorkspace = id;
     m_CurrentTabId = (*next)->rootTab;
+    if (id != m_GalleryWorkspaceId && !m_Editor->IsViewMode())
+        m_Editor->SetWorkspaceMode(Stack::Project::WorkspaceMode::Graph);
     if (id == m_GalleryWorkspaceId) {
         (*next)->rawCatalogRefreshPending = true;
         m_CurrentTabId = static_cast<int>(Stack::Workspace::Id::Raw);
@@ -284,8 +308,15 @@ void AppShell::TickProjectWorkspaces() {
             }
         } else if (action == WorkspaceTabAction::Create) {
             ActivateProjectWorkspace(CreateProjectWorkspace());
-        } else if (ActivateProjectWorkspace(id) && action == WorkspaceTabAction::Close) {
-            QueueFileAction(PendingFileAction::CloseWorkspace);
+        } else if (ActivateProjectWorkspace(id)) {
+            if (action == WorkspaceTabAction::Close) {
+                QueueFileAction(PendingFileAction::CloseWorkspace);
+            } else if (action == WorkspaceTabAction::Select && id != m_GalleryWorkspaceId &&
+                !m_Editor->IsAutoBracketWorkspace() && m_Editor->FinishWorkspaceInteraction()) {
+                // Selecting even the already-active pill means returning to its
+                // editor. Its project-owned View/Graph mode remains untouched.
+                RequestTabSwitch(static_cast<int>(Stack::Workspace::Id::Graph));
+            }
         }
     }
     if (m_PendingWorkspaceRetirement) FinishProjectWorkspaceRetirement();

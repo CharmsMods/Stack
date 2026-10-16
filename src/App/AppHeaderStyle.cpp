@@ -40,10 +40,18 @@ Palette ResolvePalette(ImVec4 workspace, bool windowFocused) {
     return palette;
 }
 
-void Approach(float& value, float target, float speed) {
+void Approach(float& value, float target, float speed, float settleTolerance) {
     const float response = 1.0f - std::exp(-std::clamp(ImGui::GetIO().DeltaTime, 0.0f, .05f) * speed);
     value += (target - value) * response;
-    if (std::abs(value - target) < .01f) value = target;
+    if (std::abs(value - target) < settleTolerance) value = target;
+}
+
+void ApproachMotion(float& value, float target, float duration) {
+    if (value == target) return;
+    const float distance = std::abs(target - value);
+    const float remaining = std::max(0.f, std::cbrt(distance) -
+        std::max(0.f, ImGui::GetIO().DeltaTime) / std::max(.001f, duration));
+    value = target + (value < target ? -1.f : 1.f) * remaining * remaining * remaining;
 }
 
 ImRect AlignToPixels(const ImRect& rect) {
@@ -94,5 +102,24 @@ void DrawControlFeedback(const ImRect& rect, const Palette& palette,
     if (focused && ImGui::GetCurrentContext()->NavCursorVisible)
         draw->AddRect(ImVec2(rect.Min.x + 1, rect.Min.y + 1),
             ImVec2(rect.Max.x - 1, rect.Max.y - 1), ImGui::GetColorU32(palette.focus), 7.0f, 0, 1.5f);
+}
+
+void DrawProjectPill(ImDrawList* draw, ImVec2 minimum, ImVec2 maximum,
+    float scale, const Palette& palette, ProjectPillState state) {
+    const float amount = state.automatic
+        ? (state.selected ? .31f : state.hovered ? .18f : .08f)
+        : (state.selected ? .56f : state.hovered ? .28f : .16f);
+    const ImVec4 fill = Blend(palette.caption, palette.text, amount);
+    draw->AddRectFilled(minimum, maximum, ImGui::GetColorU32(fill), 8.f*scale);
+    if (state.automatic) {
+        ImVec4 stripe = palette.text; stripe.w *= .32f;
+        const float inset = 5.f*scale, step = 6.f*scale;
+        for (float x=minimum.x+inset; x+step<=maximum.x-inset; x+=step)
+            draw->AddLine({x,maximum.y-2.f*scale}, {x+step,minimum.y+2.f*scale},
+                ImGui::GetColorU32(stripe), scale);
+    }
+    if (state.dirty || state.focused)
+        draw->AddRect(minimum, maximum, ImGui::GetColorU32(state.focused ? palette.focus : palette.mutedText),
+            8.f*scale, 0, scale);
 }
 }

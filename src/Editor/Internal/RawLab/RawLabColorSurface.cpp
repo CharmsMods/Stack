@@ -2,6 +2,7 @@
 #include "Editor/Internal/RawLab/RawLabColorSurface.h"
 
 #include "Editor/Internal/RawLab/RawLabColorCloudRenderer.h"
+#include "Editor/NodeEditors/ColorWarpFeedback.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/ImGuiExtras.h"
@@ -269,6 +270,8 @@ void RefreshRawLabColorCloud(
             point.a = coordinate.a;
             point.b = coordinate.b;
             point.sceneEv = coordinate.sceneEv;
+            point.u = (static_cast<float>(index % scope.width) + 0.5f) / scope.width;
+            point.v = (static_cast<float>(index / scope.width) + 0.5f) / scope.height;
             return std::isfinite(point.sceneEv);
         };
         const auto packetBinForPoint = [&](const auto& point) {
@@ -1824,6 +1827,17 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         discScreenRadius / 230.0f,
         0.55f,
         1.80f);
+    auto feedback = args.feedback ? args.feedback->Current() : nullptr;
+    if (feedback && feedback->selectionFingerprint != RawRecipe::ColorWarpSelectionFingerprint(colorWarp))
+        feedback.reset();
+    const bool spatialSelection = std::any_of(colorWarp.pins.begin(), colorWarp.pins.end(),
+        [&](const auto& pin) {
+            if (!pin.enabled) return false;
+            const auto region = std::find_if(colorWarp.regions.begin(), colorWarp.regions.end(),
+                [&](const auto& candidate) { return candidate.id == pin.regionId; });
+            return region != colorWarp.regions.end() &&
+                region->spatialMode != RawRecipe::RawColorWarpSpatialMode::AllMatches;
+        });
     std::size_t cloudGpuFingerprint = static_cast<std::size_t>(0x8f3d5b79u);
     HashRawLabColorCloudValue(
         cloudGpuFingerprint,
@@ -1835,6 +1849,8 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         cloudGpuFingerprint,
         static_cast<std::size_t>(args.ui.colorWarpCloudWorkingSpace + 1));
     HashRawLabColorCloudValue(cloudGpuFingerprint, colorCloud.size());
+    HashRawLabColorCloudValue(cloudGpuFingerprint, args.feedback ? args.feedback->Key() : 0u);
+    HashRawLabColorCloudValue(cloudGpuFingerprint, feedback ? 1u : 0u);
     HashRawLabColorCloudValue(
         cloudGpuFingerprint,
         args.ui.colorWarpLiveCloud ? 1u : 0u);
@@ -1849,7 +1865,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             cloudGpuFingerprint,
             std::hash<float>{}(value));
     };
-    if (args.ui.colorWarpLiveCloud) {
+    if (args.ui.colorWarpLiveCloud || showSelectedCatch) {
         HashRawLabColorCloudValue(
             cloudGpuFingerprint,
             colorWarp.enabled ? 1u : 0u);
@@ -1860,8 +1876,11 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             HashRawLabColorCloudValue(cloudGpuFingerprint, pin.protectColor ? 1u : 0u);
             hashColorWarpFloat(pin.sourceA);
             hashColorWarpFloat(pin.sourceB);
-            hashColorWarpFloat(pin.targetA);
-            hashColorWarpFloat(pin.targetB);
+            if (args.ui.colorWarpLiveCloud) {
+                hashColorWarpFloat(pin.targetA);
+                hashColorWarpFloat(pin.targetB);
+                hashColorWarpFloat(pin.lightnessDeltaEv);
+            }
             hashColorWarpFloat(pin.radius);
             hashColorWarpFloat(pin.softness);
             hashColorWarpFloat(pin.qualifierDirectionality);
@@ -1873,20 +1892,6 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             for (const float sample : pin.evCurve.samples) {
                 hashColorWarpFloat(sample);
             }
-            hashColorWarpFloat(pin.lightnessDeltaEv);
-        }
-    } else if (showSelectedCatch) {
-        const RawColorWarpPin& selected = colorWarp.pins[static_cast<std::size_t>(
-            inspectedColorWarpPin)];
-        hashColorWarpFloat(selected.sourceA);
-        hashColorWarpFloat(selected.sourceB);
-        hashColorWarpFloat(selected.radius);
-        hashColorWarpFloat(selected.softness);
-        hashColorWarpFloat(selected.qualifierDirectionality);
-        hashColorWarpFloat(selected.qualifierOrientationRadians);
-        hashColorWarpFloat(selected.qualifierAperture);
-        for (const float sample : selected.evCurve.samples) {
-            hashColorWarpFloat(sample);
         }
     }
 
@@ -1897,17 +1902,35 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             cloudGpuFingerprint) {
         std::vector<RawLabColorCloudGpuVertex> gpuVertices;
         gpuVertices.reserve(colorCloud.size());
+        std::vector<RawRecipe::RawColorWarpMaskSample> masks;
         for (const auto& point : colorCloud) {
             std::array<float, 3> rgb = point.rgb;
             RawColorWarpCoordinate coordinate;
             coordinate.a = point.a;
             coordinate.b = point.b;
             coordinate.sceneEv = point.sceneEv;
-            if (args.ui.colorWarpLiveCloud) {
+            const auto inputCoordinate = coordinate;
+            if (feedback) feedback->SampleMasks(colorWarp, inputCoordinate, point.u, point.v, masks);
+            float selectedCatch = 0.0f;
+            if (showSelectedCatch && colorWarp.enabled && (!spatialSelection || feedback)) {
+                float totalWeight = 0.0f, selectedWeight = 0.0f;
+                for (std::size_t index = 0; index < colorWarp.pins.size(); ++index) {
+                    const auto& pin = colorWarp.pins[index];
+                    const float weight = RawRecipe::EvaluateColorWarpPinWeight(pin, inputCoordinate,
+                        feedback ? masks[index] : RawRecipe::RawColorWarpMaskSample{},
+                        RawRecipe::ColorWarpPinSpatialSupport(colorWarp, pin));
+                    totalWeight += weight;
+                    if (index == static_cast<std::size_t>(inspectedColorWarpPin)) selectedWeight = weight;
+                }
+                selectedCatch = RawRecipe::ColorWarpEffectiveSelectionWeight(colorWarp,
+                    selectedWeight, totalWeight);
+            }
+            if (args.ui.colorWarpLiveCloud && (!spatialSelection || feedback)) {
                 rgb = Stack::RawRecipe::ApplyPreparedColorWarp(
                     colorWarp,
                     point.rgb,
-                    args.workingSpace);
+                    args.workingSpace,
+                    feedback ? &masks : nullptr);
                 coordinate =
                     Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
                         rgb,
@@ -1920,24 +1943,6 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
                 !std::isfinite(rgb[1]) ||
                 !std::isfinite(rgb[2])) {
                 continue;
-            }
-
-            float selectedCatch = 0.0f;
-            if (showSelectedCatch) {
-                const RawColorWarpPin& selected =
-                    colorWarp.pins[static_cast<std::size_t>(
-                        inspectedColorWarpPin)];
-                const float shapeWeight =
-                    Stack::RawRecipe::EvaluateColorWarpPinShapeWeight(
-                        selected,
-                        coordinate.a,
-                        coordinate.b);
-                const float lightnessWeight =
-                    Stack::RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                        selected,
-                        coordinate.sceneEv);
-                selectedCatch = shapeWeight > 0.0f && lightnessWeight > 0.0f
-                    ? 1.0f : 0.0f;
             }
 
             const auto projected = ProjectColorDisc(coordinate.a, coordinate.b);
@@ -2024,6 +2029,12 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             ImVec2(canvasMin.x + 10.0f, canvasMax.y - 24.0f),
             ImGui::GetColorU32(ImGuiCol_TextDisabled),
             "Using the last settled color map when available.");
+    } else if (spatialSelection && !feedback &&
+        (showSelectedCatch || args.ui.colorWarpLiveCloud)) {
+        drawList->AddText(
+            ImVec2(canvasMin.x + 10.0f, canvasMax.y - 24.0f),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled),
+            "Spatial selection is refining.");
     }
 
     if (args.ui.colorWarpPhotoHoverValid) {

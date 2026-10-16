@@ -1,4 +1,5 @@
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
+#include "Editor/GraphUI/GraphPlotStyle.h"
 
 #include <imgui_internal.h>
 
@@ -102,6 +103,44 @@ RawLabGraphHistogram BuildRawLabFinishToneHistogram(
                 std::max(0.000001f, value) / safeMiddleGrey);
             return (ev - minimumEv) / evSpan;
         });
+}
+
+RawLabGraphHistogram BuildNodeInputToneHistogram(
+    const RawDevelopmentGraphScopeReadback& scope,
+    const NodeMath::ImageOperationInput& input, bool componentMode,
+    int domain, float minimumEv, float maximumEv, float middleGrey) {
+    RawLabGraphHistogram histogram;
+    if (!scope.valid || scope.stage!=RawDevelopmentGraphScopeStage::FinishToneInput ||
+        scope.width<=0 || scope.height<=0 || scope.pixels.size()<
+            static_cast<std::size_t>(scope.width)*scope.height*3u) return histogram;
+    const float span=std::max(.1f,maximumEv-minimumEv);
+    const auto add=[&](auto& bins,float value) {
+        if (!std::isfinite(value)) return;
+        const float coordinate=domain==0 ? value :
+            (std::log2(std::max(.000001f,value)/std::max(.000001f,middleGrey))-minimumEv)/span;
+        const auto bin=std::min<std::size_t>(kRawLabHistogramBinCount-1,
+            static_cast<std::size_t>(std::clamp(coordinate,0.f,1.f)*kRawLabHistogramBinCount));
+        bins[bin]+=1;
+    };
+    std::array<bool,3> present{};
+    for (int i=0;i<3;++i) present[i]=NodeMath::HasImageComponent(input.components,
+        static_cast<NodeMath::ImageComponent>(1u<<i));
+    for (std::size_t base=0;base<static_cast<std::size_t>(scope.width)*scope.height*3u;base+=3) {
+        if (input.scalar) {add(histogram.luma,scope.pixels[base]);continue;}
+        std::array<std::array<float,kRawLabHistogramBinCount>*,3> bins{
+            &histogram.red,&histogram.green,&histogram.blue};
+        for (int i=0;i<3;++i) if (present[i]) {
+            add(*bins[i],scope.pixels[base+i]);
+            // Value remaps each actual component independently, so its input
+            // distribution is their union, not an invented RGB luminance.
+            if (componentMode) add(histogram.luma,scope.pixels[base+i]);
+        }
+        if (!componentMode && input.colorRelationships)
+            add(histogram.luma,input.lumaWeights[0]*scope.pixels[base]+
+                input.lumaWeights[1]*scope.pixels[base+1]+input.lumaWeights[2]*scope.pixels[base+2]);
+    }
+    histogram.valid=true;
+    return histogram;
 }
 
 namespace {
@@ -275,7 +314,8 @@ bool DrawRawLabRingDial(
     float width,
     const char* tooltip,
     float doubleClickValue) {
-    constexpr float dialHeight = 26.0f;
+    const auto style=GraphUI::ResolveGraphPlotStyle();
+    const float dialHeight = style.controlHeight;
     ImGui::InvisibleButton(
         id,
         ImVec2(std::max(1.0f, width), dialHeight),
@@ -304,32 +344,8 @@ bool DrawRawLabRingDial(
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     }
 
-    const ImVec4 faded = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    constexpr float pillSpacing = 7.0f;
-    // Translate the entire repeated ring pattern instead of using a slider
-    // thumb. The dial is a direct visual echo of the horizontal drag.
-    const float ringTravel = (std::clamp(value, 0.0f, 1.0f) - 1.0f) * 31.5f;
-    const int pillExtent = static_cast<int>(std::ceil(
-        bounds.GetWidth() / (pillSpacing * 2.0f))) + 6;
-    drawList->PushClipRect(bounds.Min, bounds.Max, true);
-    for (int index = -pillExtent; index <= pillExtent; ++index) {
-        const float centerX = bounds.GetCenter().x +
-            static_cast<float>(index) * pillSpacing + ringTravel;
-        const float edgeDistance = std::abs(centerX - bounds.GetCenter().x) /
-            std::max(1.0f, bounds.GetWidth() * 0.5f);
-        const float centerWeight = std::clamp(1.0f - edgeDistance, 0.0f, 1.0f);
-        const float alpha = 0.10f + 0.60f * centerWeight * centerWeight;
-        const float height = 6.0f + 8.0f * centerWeight;
-        ImVec4 pill = faded;
-        pill.w = alpha;
-        drawList->AddRectFilled(
-            ImVec2(centerX - 0.8f, bounds.GetCenter().y - height * 0.5f),
-            ImVec2(centerX + 0.8f, bounds.GetCenter().y + height * 0.5f),
-            ImGui::GetColorU32(pill),
-            0.8f);
-    }
-    drawList->PopClipRect();
+    GraphUI::DrawGraphDial(*drawList,bounds.Min,bounds.Max,value,true,style);
     if (tooltip != nullptr && tooltip[0] != '\0' && ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", tooltip);
     }
@@ -459,16 +475,13 @@ bool DrawRawLabHistogramBackdrop(
     const RawLabGraphHistogram& histogram,
     bool rgb,
     int emphasizedChannel = -1) {
+    const auto style=GraphUI::ResolveGraphPlotStyle();
     if (!histogram.valid) {
         const char* pending = "Scope pending";
         const ImVec2 labelSize = ImGui::CalcTextSize(pending);
         drawList->AddText(
             ImVec2(rect.Max.x - labelSize.x, rect.Min.y + 2.0f),
-            ImGui::GetColorU32(ImVec4(
-                ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled).x,
-                ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled).y,
-                ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled).z,
-                0.55f)),
+            style.label,
             pending);
         return false;
     }
@@ -491,27 +504,24 @@ bool DrawRawLabHistogramBackdrop(
         includeMaximum(lumaDensity);
     }
     const float normalization = maximum;
+    const auto tint=[](ImVec4 color,float alpha) {color.w*=alpha;return color;};
     if (rgb) {
         const float redScale = emphasizedChannel < 0 || emphasizedChannel == 0 ? 1.0f : 0.34f;
         const float greenScale = emphasizedChannel < 0 || emphasizedChannel == 1 ? 1.0f : 0.34f;
         const float blueScale = emphasizedChannel < 0 || emphasizedChannel == 2 ? 1.0f : 0.34f;
         DrawRawLabHistogramChannel(
             drawList, rect, redDensity, normalization,
-            ImVec4(0.92f, 0.18f, 0.16f, 0.10f * redScale),
-            ImVec4(0.96f, 0.28f, 0.24f, 0.34f * redScale));
+            tint(style.histogramFill[1],redScale),tint(style.histogramLine[1],redScale));
         DrawRawLabHistogramChannel(
             drawList, rect, greenDensity, normalization,
-            ImVec4(0.18f, 0.82f, 0.36f, 0.09f * greenScale),
-            ImVec4(0.26f, 0.90f, 0.44f, 0.32f * greenScale));
+            tint(style.histogramFill[2],greenScale),tint(style.histogramLine[2],greenScale));
         DrawRawLabHistogramChannel(
             drawList, rect, blueDensity, normalization,
-            ImVec4(0.18f, 0.46f, 0.98f, 0.10f * blueScale),
-            ImVec4(0.28f, 0.58f, 1.00f, 0.34f * blueScale));
+            tint(style.histogramFill[3],blueScale),tint(style.histogramLine[3],blueScale));
     } else {
         DrawRawLabHistogramChannel(
             drawList, rect, lumaDensity, normalization,
-            ImVec4(0.72f, 0.78f, 0.80f, 0.14f),
-            ImVec4(0.82f, 0.88f, 0.90f, 0.34f));
+            style.histogramFill[0],style.histogramLine[0]);
     }
     return true;
 }
@@ -534,9 +544,7 @@ void DrawRawLabLocalRangeAxes(
     const ImRect& plotRect,
     float minimumEv,
     float maximumEv) {
-    const ImVec4 disabled = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-    const ImU32 labelColor = ImGui::GetColorU32(
-        ImVec4(disabled.x, disabled.y, disabled.z, 0.72f));
+    const ImU32 labelColor = GraphUI::ResolveGraphPlotStyle().label;
     auto addRightAligned = [&](const char* label, float right, float y) {
         const ImVec2 size = ImGui::CalcTextSize(label);
         drawList->AddText(ImVec2(right - size.x, y), labelColor, label);
@@ -683,11 +691,13 @@ bool DrawBezierCurveInteraction(
     int maximumPoints,
     const std::function<Stack::RawRecipe::RawBezierSegment(const std::vector<Stack::RawRecipe::RawBezierCurvePoint>&, std::size_t)>& segmentBuilder,
     bool preserveEndpointX,
-    float* exposureEv) {
-    constexpr float pointHitRadius = 24.0f;
-    constexpr float handleHitRadius = 11.0f;
-    constexpr float segmentHitRadius = 11.0f;
-    constexpr float minimumPointSpacingPixels = 4.0f;
+    float* exposureEv,float interactionScale) {
+    const float scale=std::max(.01f,interactionScale);
+    const bool unlimited=maximumPoints<=0;
+    const float pointHitRadius = 24.0f*scale;
+    const float handleHitRadius = 11.0f*scale;
+    const float segmentHitRadius = 11.0f*scale;
+    const float minimumPointSpacingPixels = 4.0f*scale;
     constexpr int segmentSamples = 64;
     bool changed = false;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -710,9 +720,12 @@ bool DrawBezierCurveInteraction(
         if (!segmentBuilder) return GraphToScreen(bounds, x, y);
         return ImVec2(bounds.Min.x + x * bounds.GetWidth(), bounds.Max.y - y * bounds.GetHeight());
     };
+    auto preparedSegments=unlimited && !segmentBuilder ? Stack::RawRecipe::BuildRawBezierSegments(points)
+        : std::vector<Stack::RawRecipe::RawBezierSegment>{};
     auto screenSegment = [&](int index) {
         const Stack::RawRecipe::RawBezierSegment segment =
             (segmentBuilder ? segmentBuilder(points, static_cast<std::size_t>(index)) :
+                !preparedSegments.empty() ? preparedSegments[static_cast<std::size_t>(index)] :
                 Stack::RawRecipe::BuildRawBezierSegment(points, static_cast<std::size_t>(index)));
         return std::array<ImVec2, 4>{
             toScreen(rect, segment.left.x, segment.left.y),
@@ -793,17 +806,17 @@ bool DrawBezierCurveInteraction(
             selectedScreen[2],
             selectedScreen[3],
             0.5f);
-        constexpr float chooserWidth = 102.0f;
-        constexpr float chooserHeight = 25.0f;
+        const float chooserWidth = std::min(102.0f*scale,std::max(scale,rect.GetWidth()-4.f*scale));
+        const float chooserHeight = 25.0f*scale;
         const float chooserX = std::clamp(
             center.x - chooserWidth * 0.5f,
-            rect.Min.x + 2.0f,
-            rect.Max.x - chooserWidth - 2.0f);
-        const float preferredY = center.y - chooserHeight - 10.0f;
+            rect.Min.x + 2.0f*scale,
+            rect.Max.x - chooserWidth - 2.0f*scale);
+        const float preferredY = center.y - chooserHeight - 10.0f*scale;
         const float chooserY = std::clamp(
             preferredY,
-            rect.Min.y + 2.0f,
-            rect.Max.y - chooserHeight - 2.0f);
+            rect.Min.y + 2.0f*scale,
+            rect.Max.y - chooserHeight - 2.0f*scale);
         chooserRect = ImRect(
             ImVec2(chooserX, chooserY),
             ImVec2(chooserX + chooserWidth, chooserY + chooserHeight));
@@ -828,7 +841,9 @@ bool DrawBezierCurveInteraction(
             (mouse.y - activeHandleScreen.y) * (mouse.y - activeHandleScreen.y) <=
         handleHitRadius * handleHitRadius;
 
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // Point controls live in a separate Settings panel. Only this graph's
+    // own clicks may change its selection.
+    if (itemHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         if (!inside && hoveredPoint < 0 && !chooserContainsMouse) {
             ClearCurveSegmentSelection(state, selectedPoint);
             state.draggingPoint = -1;
@@ -913,9 +928,9 @@ bool DrawBezierCurveInteraction(
             selectedPoint = -1;
             changed = true;
         } else if (pointUnderMouse < 0 &&
-                   points.size() < static_cast<std::size_t>(maximumPoints)) {
+                   (unlimited || points.size() < static_cast<std::size_t>(maximumPoints))) {
             const ImVec2 graphPoint = ScreenToGraph(rect, mouse);
-            const float minimumSpacing = std::max(
+            const float minimumSpacing = unlimited ? 0.f : std::max(
                 0.002f,
                 minimumPointSpacingPixels / std::max(1.0f, rect.GetWidth()));
             const auto insertion = std::lower_bound(
@@ -928,8 +943,10 @@ bool DrawBezierCurveInteraction(
             const int insertionIndex = static_cast<int>(
                 std::distance(points.begin(), insertion));
             if ((segmentBuilder || (insertionIndex > 0 && insertionIndex < static_cast<int>(points.size()))) &&
-                (insertionIndex == 0 || graphPoint.x >= points[static_cast<std::size_t>(insertionIndex - 1)].x + minimumSpacing) &&
-                (insertionIndex == static_cast<int>(points.size()) || graphPoint.x <= points[static_cast<std::size_t>(insertionIndex)].x - minimumSpacing)) {
+                (insertionIndex == 0 || (unlimited ? graphPoint.x > points[static_cast<std::size_t>(insertionIndex - 1)].x :
+                    graphPoint.x >= points[static_cast<std::size_t>(insertionIndex - 1)].x + minimumSpacing)) &&
+                (insertionIndex == static_cast<int>(points.size()) || (unlimited ? graphPoint.x < points[static_cast<std::size_t>(insertionIndex)].x :
+                    graphPoint.x <= points[static_cast<std::size_t>(insertionIndex)].x - minimumSpacing))) {
                 Stack::RawRecipe::RawBezierCurvePoint added;
                 added.x = graphPoint.x;
                 added.y = graphPoint.y;
@@ -959,16 +976,19 @@ bool DrawBezierCurveInteraction(
                     std::max(1.0f, rect.GetHeight()));
         const bool endpoint = pointIndex == 0 ||
             pointIndex + 1 == static_cast<int>(points.size());
-        const float minimumSpacing = std::max(
+        const float minimumSpacing = unlimited ? 0.f : std::max(
             0.002f,
             minimumPointSpacingPixels / std::max(1.0f, rect.GetWidth()));
         const float minimumX = pointIndex == 0
             ? 0.0f
-            : points[static_cast<std::size_t>(pointIndex - 1)].x + minimumSpacing;
+            : unlimited ? std::nextafter(points[static_cast<std::size_t>(pointIndex - 1)].x,1.f)
+                : points[static_cast<std::size_t>(pointIndex - 1)].x + minimumSpacing;
         const float maximumX = pointIndex + 1 == static_cast<int>(points.size())
             ? 1.0f
-            : points[static_cast<std::size_t>(pointIndex + 1)].x - minimumSpacing;
-        requested.x = std::clamp(requested.x, minimumX, maximumX);
+            : unlimited ? std::nextafter(points[static_cast<std::size_t>(pointIndex + 1)].x,0.f)
+                : points[static_cast<std::size_t>(pointIndex + 1)].x - minimumSpacing;
+        requested.x = minimumX<=maximumX ? std::clamp(requested.x, minimumX, maximumX)
+            : points[static_cast<std::size_t>(pointIndex)].x;
         requested.y = std::clamp(requested.y, 0.0f, 1.0f);
         if (endpoint && preserveEndpointX) {
             // Boundary anchors own the domain ends. Their output can be
@@ -976,7 +996,7 @@ bool DrawBezierCurveInteraction(
             requested.x = state.dragPointStart.x;
         }
         auto& point = points[static_cast<std::size_t>(pointIndex)];
-        if (std::abs(point.x - requested.x) > 0.0001f ||
+        if ((unlimited ? point.x!=requested.x : std::abs(point.x - requested.x) > 0.0001f) ||
             std::abs(point.y - requested.y) > 0.0001f) {
             point.x = requested.x;
             point.y = requested.y;
@@ -1061,21 +1081,22 @@ bool DrawBezierCurveInteraction(
         }
     }
 
-    const ImU32 hoverColor = ImGui::GetColorU32(
-        ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab));
-    const ImU32 selectedColor = ImGui::GetColorU32(
-        ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive));
+    if(!preparedSegments.empty() && changed)preparedSegments=Stack::RawRecipe::BuildRawBezierSegments(points);
+    auto plotStyle=GraphUI::ResolveGraphPlotStyle(scale);
+    plotStyle.point=pointColor;
+    const ImU32 hoverColor = plotStyle.hovered;
+    const ImU32 selectedColor = plotStyle.selected;
     for (int segmentIndex = 0; segmentIndex + 1 < static_cast<int>(points.size()); ++segmentIndex) {
         const auto screen = screenSegment(segmentIndex);
         const bool selected = state.selectedSegment == segmentIndex;
         const bool hovered = hoveredSegment == segmentIndex;
-        drawList->AddBezierCubic(
+        GraphUI::DrawGraphBezier(*drawList,
             screen[0],
             screen[1],
             screen[2],
             screen[3],
             selected ? selectedColor : (hovered ? hoverColor : normalCurveColor),
-            selected ? 2.8f : (hovered ? 2.35f : 1.65f));
+            plotStyle,hovered,selected);
     }
 
     if (state.selectedSegment >= 0 && state.selectedSide >= 0) {
@@ -1098,9 +1119,9 @@ bool DrawBezierCurveInteraction(
                 state.selectedSide,
                 ImGui::GetColorU32(ImGuiCol_TextDisabled, 0.45f));
         }
-        drawList->AddLine(anchor, handle, selectedColor, 1.25f);
-        drawList->AddCircleFilled(handle, handleHovered ? 5.5f : 4.5f, selectedColor, 20);
-        drawList->AddCircle(anchor, 7.0f, selectedColor, 24, 2.0f);
+        drawList->AddLine(anchor, handle, selectedColor, 1.25f*scale);
+        drawList->AddCircleFilled(handle, (handleHovered ? 5.5f : 4.5f)*scale, selectedColor, 20);
+        drawList->AddCircle(anchor, 7.0f*scale, selectedColor, 24, 2.0f*scale);
     }
 
     for (int index = 0; index < static_cast<int>(points.size()); ++index) {
@@ -1113,11 +1134,9 @@ bool DrawBezierCurveInteraction(
             index == (state.selectedSide == 0
                 ? state.selectedSegment
                 : state.selectedSegment + 1);
-        drawList->AddCircleFilled(
-            point,
-            selectedPoint == index || activeAnchor ? 5.2f : 3.8f,
-            activeAnchor ? selectedColor : pointColor,
-            20);
+        auto anchorStyle=plotStyle;
+        if(!activeAnchor)anchorStyle.selected=pointColor;
+        GraphUI::DrawGraphPoint(*drawList,point,anchorStyle,selectedPoint==index || activeAnchor,true);
     }
 
     if (state.chooserOpen && state.selectedSegment >= 0) {
@@ -1172,47 +1191,22 @@ bool DrawFramelessToneCurveBezier(
     ImRect rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     rect.Expand(-24.0f);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    if (activeCurve > 0) {
-        const ImVec4 channelTints[] = {
-            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
-            ImVec4(0.96f, 0.18f, 0.14f, 0.050f),
-            ImVec4(0.18f, 0.88f, 0.32f, 0.045f),
-            ImVec4(0.16f, 0.42f, 1.00f, 0.055f)
-        };
-        const ImVec4 complementTints[] = {
-            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
-            ImVec4(0.10f, 0.88f, 0.90f, 0.042f),
-            ImVec4(0.92f, 0.16f, 0.82f, 0.038f),
-            ImVec4(0.96f, 0.82f, 0.12f, 0.045f)
-        };
-        drawList->AddTriangleFilled(
-            rect.Min,
-            ImVec2(rect.Max.x, rect.Min.y),
-            ImVec2(rect.Min.x, rect.Max.y),
-            ImGui::GetColorU32(channelTints[activeCurve]));
-        drawList->AddTriangleFilled(
-            ImVec2(rect.Max.x, rect.Min.y),
-            rect.Max,
-            ImVec2(rect.Min.x, rect.Max.y),
-            ImGui::GetColorU32(complementTints[activeCurve]));
-    }
+    const auto plotStyle=GraphUI::ResolveGraphPlotStyle();
+    GraphUI::DrawGraphBackdrop(*drawList,rect.Min,rect.Max,plotStyle);
+    GraphUI::DrawGraphChannelWash(*drawList,rect.Min,rect.Max,activeCurve-1,plotStyle);
     DrawRawLabHistogramBackdrop(
         drawList,
         rect,
         histogram,
         rgbHistogram || activeCurve > 0,
         activeCurve > 0 ? activeCurve - 1 : -1);
-    drawList->AddLine(
+    GraphUI::DrawGraphReference(*drawList,
         ImVec2(rect.Min.x, rect.Max.y),
         ImVec2(rect.Max.x, rect.Min.y),
-        ImGui::GetColorU32(ImVec4(0.78f, 0.82f, 0.84f, 0.22f)),
-        1.0f);
+        plotStyle);
 
-    const ImVec4 curveColors[] = {
-        ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive),
-        ImVec4(1.00f, 0.34f, 0.30f, 1.0f),
-        ImVec4(0.34f, 0.94f, 0.48f, 1.0f),
-        ImVec4(0.38f, 0.62f, 1.00f, 1.0f)
+    const ImU32 curveColors[] = {
+        plotStyle.curve,plotStyle.channel[0],plotStyle.channel[1],plotStyle.channel[2]
     };
     const float viewMinimum = std::clamp(viewRange.minimum, 0.0f, 1.0f);
     const float viewMaximum = std::clamp(
@@ -1240,7 +1234,7 @@ bool DrawFramelessToneCurveBezier(
               points,
               interaction,
               selectedPoint,
-              ImGui::GetColorU32(curveColors[activeCurve]),
+              curveColors[activeCurve],
               ImGui::GetColorU32(ImGuiCol_Text),
               kRawLabCurveMaxPoints,
               [](const std::vector<Stack::RawRecipe::RawBezierCurvePoint>& displayed,
@@ -1253,7 +1247,7 @@ bool DrawFramelessToneCurveBezier(
               points,
               interaction,
               selectedPoint,
-              ImGui::GetColorU32(curveColors[activeCurve]),
+              curveColors[activeCurve],
               ImGui::GetColorU32(ImGuiCol_Text),
               kRawLabCurveMaxPoints,
               {},
@@ -1292,6 +1286,30 @@ bool DrawFramelessToneCurveBezier(
     return changed;
 }
 
+bool DrawFramelessResponseBezier(const char* id,
+    std::vector<RawRecipe::RawBezierCurvePoint>& points,RawCurveGraphUiState& interaction,
+    int& selectedPoint,const RawLabGraphHistogram& histogram,ImVec2 size,float scale,
+    ImVec2& plotMinimum,ImVec2& plotMaximum,float probe) {
+    ImGui::InvisibleButton(id,size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
+    const ImRect item(ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
+    const auto style=GraphUI::ResolveGraphPlotStyle(scale);
+    const float inset=std::min(style.inset,std::min(size.x,size.y)*.2f);
+    const ImRect rect(ImVec2(item.Min.x+inset,item.Min.y+inset),ImVec2(item.Max.x-inset,item.Max.y-inset));
+    plotMinimum=rect.Min;plotMaximum=rect.Max;
+    auto* draw=ImGui::GetWindowDrawList();
+    GraphUI::DrawGraphBackdrop(*draw,rect.Min,rect.Max,style);
+    if(histogram.valid)DrawRawLabHistogramBackdrop(draw,rect,histogram,false);
+    const float neutral=GraphToScreen(rect,0.f,1.f/3.f).y;
+    GraphUI::DrawGraphReference(*draw,{rect.Min.x,neutral},{rect.Max.x,neutral},style);
+    draw->PushClipRect(rect.Min,rect.Max,true);
+    const float x=rect.Min.x+std::clamp(probe,0.f,1.f)*rect.GetWidth();
+    GraphUI::DrawGraphProbe(*draw,rect.Min,rect.Max,x,style);
+    const bool changed=DrawBezierCurveInteraction(rect,points,interaction,selectedPoint,
+        style.curve,style.point,0,{},true,nullptr,scale);
+    draw->PopClipRect();
+    return changed;
+}
+
 bool DrawFramelessLocalRangeBezier(
     const char* id,
     Stack::RawRecipe::RawLocalRangeRecipe& localRange,
@@ -1303,29 +1321,32 @@ bool DrawFramelessLocalRangeBezier(
     const ImVec2& size,
     bool drawTargetZones,
     float* exposureEv,
-    bool* curveChanged) {
+    bool* curveChanged,
+    bool minimal) {
     localRange = Stack::RawRecipe::SanitizeLocalRangeRecipe(std::move(localRange));
     ImGui::InvisibleButton(
         id,
         size,
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     const ImRect itemRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    const ImRect rect = RawLabLocalRangePlotRect(itemRect);
+    const ImRect rect = minimal ? ImRect(
+        ImVec2(itemRect.Min.x+4.f,itemRect.Min.y+4.f),
+        ImVec2(itemRect.Max.x-4.f,itemRect.Max.y-4.f)) : RawLabLocalRangePlotRect(itemRect);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    DrawRawLabHistogramBackdrop(drawList, rect, histogram, rgbHistogram);
-    DrawRawLabLocalRangeAxes(
+    const auto style=GraphUI::ResolveGraphPlotStyle();
+    GraphUI::DrawGraphBackdrop(*drawList,rect.Min,rect.Max,style);
+    if (!minimal || histogram.valid) DrawRawLabHistogramBackdrop(drawList, rect, histogram, rgbHistogram);
+    if (!minimal) DrawRawLabLocalRangeAxes(
         drawList,
         itemRect,
         rect,
         localRange.minEv,
         localRange.maxEv);
-    const ImU32 baseColor = ImGui::GetColorU32(
-        ImVec4(0.72f, 0.76f, 0.78f, 0.52f));
     const float zeroY = GraphToScreen(rect, 0.0f, 0.5f).y;
-    drawList->AddLine(
+    GraphUI::DrawGraphReference(*drawList,
         ImVec2(rect.Min.x, zeroY),
         ImVec2(rect.Max.x, zeroY),
-        baseColor);
+        style);
 
     const float evSpan = std::max(0.1f, localRange.maxEv - localRange.minEv);
     if (drawTargetZones) {
@@ -1383,8 +1404,8 @@ bool DrawFramelessLocalRangeBezier(
         points,
         interaction,
         selectedPoint,
-        ImGui::GetColorU32(ImGuiCol_SliderGrabActive),
-        ImGui::GetColorU32(ImGuiCol_Text),
+        style.curve,
+        style.point,
         kRawLabCurveMaxPoints,
         {},
         true,

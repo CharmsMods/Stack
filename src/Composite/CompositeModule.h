@@ -180,6 +180,7 @@ private:
 
     void MarkDocumentDirty();
     void MarkStageDirty();
+    void ResetLayerInteraction();
 
     void ClearLayersGpu();
     void ClearStagePreviewGpu();
@@ -202,7 +203,7 @@ private:
     void RenderViewInspector();
     void RenderExportInspector();
     void RenderStage();
-    void RenderLayerContextMenu(CompositeLayer* targetLayer);
+    bool RenderLayerContextMenu(CompositeLayer* targetLayer);
     void RenderCanvasContextMenu();
     void RenderLibraryPicker();
     void RenderSavePopup();
@@ -230,7 +231,7 @@ private:
     void TriggerSaveToLibrary();
     void TriggerExportPng();
     bool ReplaceSelectedLayerWithImageFile(const std::string& path);
-    bool ReplaceSelectedLayerWithProjectFile(const std::string& path);
+    bool ReplaceLayerWithProjectFile(const std::string& layerId, const std::string& path);
     bool ConvertSelectedLayerToEditorProject();
     bool ExportCurrentPng(const std::string& path) const;
     bool UpdateLinkedProjectFromSelectedLayer();

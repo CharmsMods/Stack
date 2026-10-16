@@ -95,6 +95,7 @@ void EditorModule::DiscardBracketingDraft() {
         set->settings.erase("bracketingDraft");ui.processRequired=false;ui.pending=false;
         set->settings.erase("bracketingDraftSelection");
         ui.editedRecipe=Raw::Bracketing::Serialize(ui.recipe).dump();
+        ++ui.controlsRevision;
         ui.selectionRestored=false;RestoreBracketingSelection();
         ui.status="Pending input changes discarded.";MarkDirty();
     }
@@ -195,6 +196,7 @@ bool EditorModule::CommitBracketingDraft(bool process,std::string* error) {
         set->settings["bracketingSelection"]=selection;set->settings.erase("bracketingDraftSelection");
         ++m_Project->snapshot->hdrInputRevision;
         ui.storedRecipe=recipe.dump();ui.editedRecipe=ui.storedRecipe;
+        ++ui.controlsRevision;
         ui.processRequired=false;ui.pending=true;ui.failed=false;
         if(ui.job)ui.job->canceled=true;
         ui.publishRequested=true;

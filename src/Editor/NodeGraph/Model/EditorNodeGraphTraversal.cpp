@@ -88,7 +88,6 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::RawDevelopment:
             case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
-            case NodeKind::RawNeuralDenoise:
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:
             case NodeKind::HdrMerge:
@@ -189,7 +188,6 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
                 break;
             case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
-            case NodeKind::RawNeuralDenoise:
                 addInputCandidate(kRawInputSocketId);
                 break;
             case NodeKind::Mix:
@@ -305,9 +303,6 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
                 state.sceneReferred = true;
                 addInput(kImageInputSocketId);
                 break;
-            case NodeKind::RawNeuralDenoise:
-                addInput(kRawInputSocketId);
-                break;
             case NodeKind::Layer:
                 if (node.layerType == LayerType::ViewTransform) {
                     state.hasViewTransform = true;
@@ -373,39 +368,6 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
             case NodeKind::ConstantChannel:
                 addInput(kMatchExtentInputSocketId);
                 break;
-            case NodeKind::FrequencyFilter:
-            case NodeKind::FrequencyFft:
-                addInput(kChannelInputSocketId);
-                break;
-            case NodeKind::FrequencyIfft:
-            case NodeKind::SpectrumView:
-            case NodeKind::SpectrumSeparate:
-            case NodeKind::SpectrumAnalyzer:
-                addInput(kSpectrumInputSocketId);
-                break;
-            case NodeKind::ApplyFrequencyResponse:
-                addInput(kSpectrumInputSocketId);
-                break;
-            case NodeKind::CombineSpectra:
-                addInput(kSpectrumInputASocketId);
-                addInput(kSpectrumInputBSocketId);
-                break;
-            case NodeKind::SpectrumRecombine:
-                addInput(kSpectrumMagnitudeInputSocketId);
-                addInput(kSpectrumPhaseInputSocketId);
-                break;
-            case NodeKind::SpectrumMath:
-                addInput(kMixInputASocketId);
-                addInput(kMixInputBSocketId);
-                break;
-            case NodeKind::MagnitudePhase:
-                if (node.magnitudePhaseMode == MagnitudePhaseMode::Recombine) {
-                    addInput("magnitude");
-                    addInput("phase");
-                } else {
-                    addInput(kImageInputSocketId);
-                }
-                break;
             case NodeKind::ImageToMask:
                 addInput(kImageToMaskInputSocketId);
                 break;
@@ -427,9 +389,10 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
                 break;
             case NodeKind::Image:
             case NodeKind::ImageGenerator:
+            case NodeKind::MaskTexture:
             case NodeKind::MaskGenerator:
-            case NodeKind::FrequencyResponse:
-            case NodeKind::FrequencyMask:
+            
+            
             case NodeKind::CustomMask:
             case NodeKind::Value:
             case NodeKind::Composite:

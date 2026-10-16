@@ -1,5 +1,6 @@
 #pragma once
 #include "Raw/RawDevelopmentRecipe.h"
+#include "Raw/Demosaic/DemosaicCatalog.h"
 #include "Raw/Denoise/RawDenoiseBandSchedule.h"
 
 namespace Raw {
@@ -11,6 +12,10 @@ struct ViewportStageRegion {
 };
 namespace ViewportModules {
 inline ViewportStageRegion RawBaseRegion(const Stack::RawRecipe::RawDevelopmentRecipe& r, int, int, int, int) {
+    // Iterative/directional methods reconstruct at native resolution and retain
+    // full support independently of the requested viewport region.
+    if (Demosaic::UsesMultipassGpu(r.technical.demosaicMethod))
+        return {ViewportRegionRequirement::FullInput,0,true};
     // Sensor-coordinate CFA kernels retain their full input until tiled upload exists.
     return {ViewportRegionRequirement::Neighborhood,
         (r.technical.demosaicMethod == DemosaicMethod::MalvarHeCutler ? 2 : 1) +

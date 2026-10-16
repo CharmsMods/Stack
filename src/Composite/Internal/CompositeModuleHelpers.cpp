@@ -1479,7 +1479,7 @@ bool LoadEditorProjectLayerDataFromFile(const std::string& path, const bool limi
     return true;
 }
 
-void ApplyImportDataToNewLayer(const LayerFileLoadData& data, const float canvasW, const float canvasH, std::vector<CompositeLayer>& layers, std::string& selectedId) {
+void ApplyImportDataToNewLayer(const LayerFileLoadData& data, const FloatRect& viewRect, std::vector<CompositeLayer>& layers, std::string& selectedId) {
     CompositeLayer layer;
     layer.id = NewLayerId();
     layer.name = data.name.empty() ? "Layer" : data.name;
@@ -1507,15 +1507,15 @@ void ApplyImportDataToNewLayer(const LayerFileLoadData& data, const float canvas
     }
     layer.z = maxZ + 1;
 
-    const float targetW = canvasW * 0.8f;
-    const float targetH = canvasH * 0.8f;
+    const float targetW = viewRect.width * 0.8f;
+    const float targetH = viewRect.height * 0.8f;
     const float logicalW = std::max(1.0f, static_cast<float>(layer.logicalW));
     const float logicalH = std::max(1.0f, static_cast<float>(layer.logicalH));
     const float fitScale = std::min({ 1.0f, targetW / logicalW, targetH / logicalH });
     layer.scaleX = fitScale;
     layer.scaleY = fitScale;
-    layer.x = -(logicalW * layer.scaleX) * 0.5f;
-    layer.y = -(logicalH * layer.scaleY) * 0.5f;
+    layer.x = viewRect.x + (viewRect.width - logicalW * layer.scaleX) * 0.5f;
+    layer.y = viewRect.y + (viewRect.height - logicalH * layer.scaleY) * 0.5f;
 
     layer.tex = GLHelpers::CreateTextureFromPixels(layer.rgba.data(), layer.imgW, layer.imgH, 4);
     layers.push_back(std::move(layer));

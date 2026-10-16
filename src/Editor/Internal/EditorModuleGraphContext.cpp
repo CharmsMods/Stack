@@ -1,9 +1,13 @@
 #include "Editor/EditorModule.h"
+#include "Graph/LayerOperationParameters.h"
 #include "Project/RawLayerStack.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/LayerBase.h"
 
 Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
+    BeginProjectGraphHistory();
+    if (IsEditingRawLayerMaskGraph() && m_RawLayerMaskWorkspace->projectCanvas)
+        return GetRawProjectGraphEditorContext();
     Stack::Editor::GraphEditorContext context;
     context.documentId = GetProjectDocumentId();
     context.graphId = IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->layerId : "project";
@@ -27,11 +31,6 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
                 auto* layer = Stack::Project::FindRawAdjustmentLayer(candidate,m_RawLayerMaskWorkspace->layerId);
                 if (!layer) return false;
                 layer->graph = graph;
-                layer->processingSettings = nlohmann::json::array();
-                for (const auto& settings : GetLayers()) layer->processingSettings.push_back(settings->Serialize());
-                for (const auto& node : graph.GetNodes()) if (node.kind == EditorNodeGraph::NodeKind::Layer)
-                    while (layer->processingSettings.size() <= static_cast<std::size_t>(node.layerIndex))
-                        layer->processingSettings.push_back({{"type",node.typeId}});
                 return Stack::Project::ValidateRawLayerStack(candidate,error,&m_Project->graph,ResolveRawWorkspaceStageOutputNodeId());
             }
             return !(IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive()) ||
@@ -42,7 +41,8 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
     };
     context.canConnect = [this, stillOwned](int from, const std::string& output, int to, const std::string& input, std::string* reason) {
         if (!stillOwned()) return false;
-        auto proposal = Stack::GraphModel::ProposeEdit(GetNodeGraph(),GetNodeGraph().GetStructureRevision(),[&](auto& graph) {
+        const auto analysisGraph = GetNodeGraph().CloneForAnalysis();
+        auto proposal = Stack::GraphModel::ProposeEdit(analysisGraph,GetNodeGraph().GetStructureRevision(),[&](auto& graph) {
             std::string error;
             if (!graph.TryConnectSockets(from,output,to,input,&error)) throw std::runtime_error(error);
         });
@@ -54,8 +54,6 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
             auto* layer = Stack::Project::FindRawAdjustmentLayer(candidate,m_RawLayerMaskWorkspace->layerId);
             if (!layer) return false;
             layer->graph = std::move(proposal.candidate);
-            layer->processingSettings = nlohmann::json::array();
-            for (const auto& settings : GetLayers()) layer->processingSettings.push_back(settings->Serialize());
             valid = Stack::Project::ValidateRawLayerStack(candidate,error,&m_Project->graph,ResolveRawWorkspaceStageOutputNodeId());
         } else if (IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive())
             valid = Stack::Project::ValidateRawLayerStack(m_Project->rawLayers.State(),error,&proposal.candidate,ResolveRawWorkspaceStageOutputNodeId());
@@ -63,13 +61,16 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
         return valid;
     };
     context.animation = &GetGraphAnimation();
-    context.applyDocumentEdit = [this, stillOwned, layerRevision, projectRevision](Stack::GraphModel::EditProposal proposal,
+    context.applyDocumentEdit = [this, stillOwned, layerRevision, projectRevision, document](Stack::GraphModel::EditProposal proposal,
         nlohmann::json settings, Stack::Timeline::TimelineAnimationState animation, std::string& error) {
         if (!stillOwned()) { error = "The edit belongs to another graph or project."; return false; }
         if (projectRevision != m_Project->editRevision) { error = "The project changed while this edit was prepared."; return false; }
-        auto graph = GetNodeGraph();
-        if (!Stack::GraphModel::ApplyEdit(graph, graph.GetStructureRevision(), std::move(proposal), error)) return false;
-        if (!settings.is_array()) { error = "Invalid operation settings."; return false; }
+        if (!IsEditingRawLayerMaskGraph()) return ApplyProjectGraphDocumentEdit(document,projectRevision,
+            std::move(proposal),std::move(animation),ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right),error);
+        EditorNodeGraph::Graph graph;
+        if (!Stack::GraphModel::ApplyEdit(graph, GetNodeGraph().GetStructureRevision(), std::move(proposal), error)) return false;
+        Stack::GraphModel::ReindexLayerParameterRecords(graph);
+        settings=Stack::GraphModel::LayerParameterRecords(graph);
         if (IsEditingRawLayerMaskGraph()) {
             if (layerRevision != m_Project->rawLayers.Revision()) {
                 error = "The layer document changed while this edit was prepared.";
@@ -78,7 +79,7 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
             auto candidate = m_Project->rawLayers.State();
             auto* layer = Stack::Project::FindRawAdjustmentLayer(candidate, m_RawLayerMaskWorkspace->layerId);
             if (!layer) { error = "The edited layer no longer exists."; return false; }
-            layer->graph = graph; layer->processingSettings = settings; layer->animation = animation;
+            layer->graph = graph; layer->animation = animation;
             Stack::Project::RegisterRawMaskOutputs(candidate, layer->id);
             if (!Stack::Project::ValidateRawLayerStack(candidate, error, &m_Project->graph, ResolveRawWorkspaceStageOutputNodeId())) return false;
         }
@@ -89,18 +90,18 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
         std::vector<std::shared_ptr<LayerBase>> layers;
         try {
             for (std::size_t i = 0; i < settings.size(); ++i) {
-                if (i < GetLayers().size() && GetLayers()[i] && GetLayers()[i]->Serialize() == settings[i]) {
+                if (i < GetLayers().size() && GetLayers()[i] && Stack::GraphModel::CaptureLayerParameters(*GetLayers()[i]) == settings[i]) {
                     layers.push_back(GetLayers()[i]); continue;
                 }
                 auto layer = LayerRegistry::CreateLayerFromTypeId(settings[i].value("type", std::string{}));
                 if (!layer) { error = "An operation in this edit is not installed."; return false; }
-                layer->InitializeGL(); layer->Deserialize(settings[i]); layers.push_back(std::move(layer));
+                layer->InitializeGL(); Stack::GraphModel::PrepareLayerParameterDraft(*layer,settings[i]); layers.push_back(std::move(layer));
             }
         } catch (const std::exception& exception) { error = exception.what(); return false; }
         if (IsEditingRawLayerMaskGraph()) {
             auto candidate = m_Project->rawLayers.State();
             auto* layer = Stack::Project::FindRawAdjustmentLayer(candidate, m_RawLayerMaskWorkspace->layerId);
-            layer->graph = graph; layer->processingSettings = settings; layer->animation = animation;
+            layer->graph = graph; layer->animation = animation;
             Stack::Project::RegisterRawMaskOutputs(candidate, layer->id);
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) m_Project->rawLayers.BeginGesture();
             if (!m_Project->rawLayers.Apply(std::move(candidate), error)) return false;
@@ -117,20 +118,16 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
     };
     const auto applyDocumentEdit = context.applyDocumentEdit;
     context.applyEdit = [this, applyDocumentEdit](Stack::GraphModel::EditProposal proposal, std::string& error) {
-        auto settings = nlohmann::json::array();
-        for (const auto& layer : GetLayers()) settings.push_back(layer->Serialize());
-        return applyDocumentEdit(std::move(proposal), std::move(settings), GetGraphAnimation(), error);
+        // applyDocumentEdit derives operation records from the authored candidate.
+        return applyDocumentEdit(std::move(proposal), {}, GetGraphAnimation(), error);
     };
     context.selectNode = [this, stillOwned](int id) { if (stillOwned()) SelectGraphNode(id); };
     context.inspectParameters = [this, stillOwned](int id) {
         if (!stillOwned()) return;
-        SelectGraphNode(id);
-        const auto* node = GetNodeGraph().FindNode(id);
-        if (node && node->kind == EditorNodeGraph::NodeKind::RawOperation && CommitRawLayerMaskGraph()) RequestOpenRawLabTab();
-        else SwitchToComplexNodeSubWindow(id);
+        OpenRawProjectNodeEditor(id);
     };
     context.requestPreview = [this, stillOwned](int id, const std::string&) {
-        if (!stillOwned()) return;
+        if (!stillOwned() || IsViewMode()) return;
         if (IsEditingRawLayerMaskGraph()) m_RawLayerMaskWorkspace->previewOutputNodeId = id;
         else m_CompositeSelectedOutputNodeId = id;
         MarkRenderRefreshDirty();

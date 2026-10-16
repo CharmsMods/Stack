@@ -4,6 +4,7 @@
 #include "NodeMath/ReductionMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Utils/PixelBufferUtils.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +24,10 @@ namespace Stack::Renderer::GraphExecution {
 void GraphExecutionRuntime::BindMaskEvaluation() {
     evalMask = [this](int nodeId, const std::string& socketId) -> unsigned int {
         if (pipeline.m_ShouldCancelRender && pipeline.m_ShouldCancelRender()) return 0;
+        if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end()) {
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId=nodeId;
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=unavailable->second;return 0;
+        }
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
         if (const auto cached = maskCache.find(key); cached != maskCache.end()) {
             if (const auto extent = localTextureExtents.find(key);
@@ -45,7 +50,6 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
         const RenderGraphNode& node = *it->second;
         if (node.kind == RenderGraphNodeKind::Image ||
             node.kind == RenderGraphNodeKind::RawDevelopment ||
-            node.kind == RenderGraphNodeKind::RawNeuralDenoise ||
             node.kind == RenderGraphNodeKind::RawDecode ||
             node.kind == RenderGraphNodeKind::RawDevelop ||
             (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId != "maskOut") ||
@@ -60,10 +64,6 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             node.kind == RenderGraphNodeKind::RawOperation ||
             node.kind == RenderGraphNodeKind::Reformat ||
             (node.kind == RenderGraphNodeKind::DataMath && !IsScalarRenderSocket(executionContext, nodeId, socketId)) ||
-            node.kind == RenderGraphNodeKind::FrequencyFft ||
-            node.kind == RenderGraphNodeKind::SpectrumView ||
-            node.kind == RenderGraphNodeKind::SpectrumMath ||
-            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId != EditorNodeGraph::kMaskOutputSocketId) ||
             node.kind == RenderGraphNodeKind::ImageGenerator ||
             node.kind == RenderGraphNodeKind::ChannelCombine ||
             node.kind == RenderGraphNodeKind::Output) {
@@ -71,7 +71,18 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             visitingMasks.erase(key);
             return imgTex;
         }
-        if (node.kind == RenderGraphNodeKind::MaskGenerator) {
+        if (node.kind == RenderGraphNodeKind::MaskGenerator || node.kind == RenderGraphNodeKind::CustomMask) {
+            // The saved project association supplies geometry, not image pixels.
+            // Do not render a consumer (or the camera image) to generate a shape.
+            if (node.maskCanvasSourceNodeId > 0 || node.kind == RenderGraphNodeKind::CustomMask) {
+                const auto extent = ProjectMaskCanvasExtent(node);
+                if (extent.first <= 0 || extent.second <= 0) {
+                    visitingMasks.erase(key);
+                    return 0;
+                }
+                pipeline.m_Width = extent.first;
+                pipeline.m_Height = extent.second;
+            }
             if (const auto* extent = findInputLink(nodeId, EditorNodeGraph::kMatchExtentInputSocketId)) {
                 if (!evalImage(extent->fromNodeId, extent->fromSocketId)) {
                     visitingMasks.erase(key);
@@ -80,25 +91,27 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             }
         }
         const std::size_t fingerprint = fingerprintMask(nodeId, socketId);
-        if (const auto cached = pipeline.m_GraphMaskCache.find(key);
-            cached != pipeline.m_GraphMaskCache.end() &&
-            cached->second.fingerprint == fingerprint &&
-            cached->second.texture != 0) {
+        if (auto* cached = pipeline.FindGraphCacheEntry(pipeline.m_GraphMaskCache,key,fingerprint)) {
             ++pipeline.m_LastGraphExecutionStats.maskCacheHits;
-            pipeline.TouchGraphCacheEntry(cached->second);
-            if (cached->second.width > 0 && cached->second.height > 0) {
-                pipeline.m_Width = cached->second.width;
-                pipeline.m_Height = cached->second.height;
+            pipeline.TouchGraphCacheEntry(*cached);
+            if (cached->graphGeometry.Valid()) {
+                viewportGeometry[key] = cached->graphGeometry;
+                pipeline.m_CurrentGraphImageGeometry = cached->graphGeometry;
             }
-            maskCache[key] = cached->second.texture;
+            if (cached->width > 0 && cached->height > 0) {
+                pipeline.m_Width = cached->width;
+                pipeline.m_Height = cached->height;
+            }
+            maskCache[key] = cached->texture;
             localTextureExtents[key] = { pipeline.m_Width, pipeline.m_Height };
             visitingMasks.erase(key);
-            return cached->second.texture;
+            return cached->texture;
         }
         ++pipeline.m_LastGraphExecutionStats.maskCacheMisses;
 
         unsigned int result = 0;
         bool resultOwned = false;
+        Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup cleanup(result, resultOwned);
         if (node.kind == RenderGraphNodeKind::MaskGenerator) {
             RenderMaskSource mask;
             mask.nodeId = node.nodeId;
@@ -226,108 +239,13 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                     return pipeline.RenderChannelSplit(inputImage, channelIdx, fbo);
                 });
                 resultOwned = result != 0;
-            } else {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    GLfloat previousClearColor[4];
-                    glGetFloatv(GL_COLOR_CLEAR_VALUE, previousClearColor);
-                    if (socketId == "a") {
-                        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-                    } else {
-                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-                    }
-                    glClear(GL_COLOR_BUFFER_BIT);
-                    glClearColor(
-                        previousClearColor[0],
-                        previousClearColor[1],
-                        previousClearColor[2],
-                        previousClearColor[3]);
-                });
-                resultOwned = result != 0;
             }
-        } else if (node.kind == RenderGraphNodeKind::FrequencyFilter) {
-            const RenderGraphLink* channelLink = findInputLink(
-                node.nodeId, EditorNodeGraph::kChannelInputSocketId);
-            const unsigned int channel = channelLink
-                ? evalMask(channelLink->fromNodeId, channelLink->fromSocketId) : 0;
-            const int sourceWidth = pipeline.m_Width;
-            const int sourceHeight = pipeline.m_Height;
-            RenderFrequencyResponseSettings response =
-                node.frequencyFilterSettings.localResponse;
-            const RenderGraphLink* responseLink = findInputLink(
-                node.nodeId, EditorNodeGraph::kFrequencyResponseInputSocketId);
-            const bool responseReady = responseLink == nullptr ||
-                evalResponse(responseLink->fromNodeId, response);
-            double strength = node.frequencyFilterSettings.strength;
-            const RenderGraphLink* strengthLink = findInputLink(
-                node.nodeId,
-                EditorNodeGraph::ParameterInputSocketId(
-                    EditorNodeGraph::kStrengthParameterId));
-            const bool strengthReady = strengthLink == nullptr ||
-                evalScalar(strengthLink->fromNodeId, strengthLink->fromSocketId, strength);
-            strength = std::isfinite(strength)
-                ? std::clamp(strength, 0.0, 1.0)
-                : 1.0;
-            if (responseReady) {
-                CanonicalizeFrequencyResponseSettings(response);
-            }
-            if (channel != 0 && responseReady && strengthReady &&
-                (response.mode == RenderFrequencyFilterMode::AllPass || strength == 0.0)) {
-                // The default blank node is a bit-exact graph bypass. No FFT
-                // resource is allocated or cached for this path.
-                result = channel;
-                resultOwned = false;
-            } else if (channel != 0 && responseReady && strengthReady) {
-                RenderFrequencyResource spectrum = pipeline.RenderFourierTransform(
-                    channel,
-                    sourceWidth,
-                    sourceHeight,
-                    node.frequencyFilterSettings.edgePolicy,
-                    channelLink
-                        ? resolveChannelRole(
-                            channelLink->fromNodeId,
-                            channelLink->fromSocketId)
-                        : std::string("channel"));
-                RenderFrequencyResource filtered = pipeline.RenderApplyFrequencyResponse(
-                    spectrum, response, static_cast<float>(strength));
-                const RenderPipeline::GraphNodeRenderResult inverse = pipeline.RenderInverseFourierTransform(filtered);
-                result = inverse.texture;
-                resultOwned = inverse.owned;
-                if (spectrum.texture != 0) glDeleteTextures(1, &spectrum.texture);
-                if (filtered.texture != 0) glDeleteTextures(1, &filtered.texture);
-                pipeline.m_Width = sourceWidth;
-                pipeline.m_Height = sourceHeight;
-            }
-        } else if (node.kind == RenderGraphNodeKind::FrequencyIfft) {
-            const RenderGraphLink* spectrumLink = findInputLink(
-                node.nodeId, EditorNodeGraph::kSpectrumInputSocketId);
-            if (spectrumLink != nullptr) {
-                const RenderFrequencyResource spectrum = evalFrequency(
-                    spectrumLink->fromNodeId, spectrumLink->fromSocketId);
-                const RenderPipeline::GraphNodeRenderResult inverse = pipeline.RenderInverseFourierTransform(spectrum);
-                result = inverse.texture;
-                resultOwned = inverse.owned;
-                pipeline.m_Width = spectrum.sourceWidth;
-                pipeline.m_Height = spectrum.sourceHeight;
-                if (spectrum.valid && !spectrum.hermitian && result == 0) {
-                    pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
-                    pipeline.m_LastGraphExecutionStats.lastSpecializedFailure =
-                        "Inverse Fourier Transform rejected a non-Hermitian spectrum; "
-                        "it cannot produce a real Channel.";
-                }
-            }
-        } else if (node.kind == RenderGraphNodeKind::DataMath) {
+        }   else if (node.kind == RenderGraphNodeKind::DataMath) {
             const RenderPipeline::GraphNodeRenderResult dataMathResult =
                 pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
-        } else if (node.kind == RenderGraphNodeKind::FrequencyMask ||
-                   node.kind == RenderGraphNodeKind::MagnitudePhase) {
-            const RenderPipeline::GraphNodeRenderResult frequencyResult =
-                pipeline.RenderFrequencyGraphNode(executionContext, node, socketId, evalImage, evalMask);
-            result = frequencyResult.texture;
-            resultOwned = frequencyResult.owned;
-        } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask ||
+        }  else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask ||
                    node.kind == RenderGraphNodeKind::RawDetailFusion) {
             const RenderPipeline::GraphNodeRenderResult rawDetailResult =
                 pipeline.RenderRawDetailGraphNode(executionContext, node, socketId, evalImage, evalMask);
@@ -341,6 +259,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             return 0;
         }
         if (result) {
+            RecordViewportGeometry(nodeId, socketId, resultOwned);
             if (resultOwned &&
                 !pipeline.StoreGraphCacheEntry(
                     pipeline.m_GraphMaskCache,

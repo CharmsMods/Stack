@@ -1,5 +1,89 @@
 #include "Editor/EditorModule.h"
 #include <algorithm>
+#include <utility>
+
+namespace {
+using BackdropPatch = Stack::Renderer::RawImageBackdropFrame::Patch;
+
+BackdropPatch ClipBackdropPatch(const BackdropPatch& patch, ImVec2 minimum, ImVec2 maximum) {
+    auto clipped = patch;
+    const float width = patch.maximum.x - patch.minimum.x, height = patch.maximum.y - patch.minimum.y;
+    const auto uv = [&](ImVec2 point) {
+        return ImVec2(patch.uvMinimum.x + (patch.uvMaximum.x - patch.uvMinimum.x) * (point.x - patch.minimum.x) / width,
+            patch.uvMinimum.y + (patch.uvMaximum.y - patch.uvMinimum.y) * (point.y - patch.minimum.y) / height);
+    };
+    clipped.minimum = minimum; clipped.maximum = maximum;
+    clipped.uvMinimum = uv(minimum); clipped.uvMaximum = uv(maximum);
+    clipped.extendEdges = ImVec4(minimum.x == patch.minimum.x ? patch.extendEdges.x : 0.f,
+        maximum.y == patch.maximum.y ? patch.extendEdges.y : 0.f,
+        maximum.x == patch.maximum.x ? patch.extendEdges.z : 0.f,
+        minimum.y == patch.minimum.y ? patch.extendEdges.w : 0.f);
+    const auto& bounds = patch.imageBounds;
+    clipped.imageBounds = ImVec4(
+        bounds.x + (bounds.z - bounds.x) * (minimum.x - patch.minimum.x) / width,
+        bounds.y + (bounds.w - bounds.y) * (patch.maximum.y - maximum.y) / height,
+        bounds.x + (bounds.z - bounds.x) * (maximum.x - patch.minimum.x) / width,
+        bounds.y + (bounds.w - bounds.y) * (patch.maximum.y - minimum.y) / height);
+    return clipped;
+}
+
+void MakeBackdropCoverageDisjoint(std::vector<BackdropPatch>& patches) {
+    if (patches.size() < 2) return;
+    // Later matching-content detail replaces earlier overview pixels. Keep
+    // their coverage disjoint so transparent pixels are composed only once.
+    std::vector<BackdropPatch> accepted;
+    for (const auto& incoming : patches) {
+        std::vector<BackdropPatch> retained;
+        for (const auto& prior : accepted) {
+            const ImVec2 low(std::max(prior.minimum.x, incoming.minimum.x), std::max(prior.minimum.y, incoming.minimum.y));
+            const ImVec2 high(std::min(prior.maximum.x, incoming.maximum.x), std::min(prior.maximum.y, incoming.maximum.y));
+            if (low.x >= high.x || low.y >= high.y) { retained.push_back(prior); continue; }
+            const auto keep = [&](ImVec2 minimum, ImVec2 maximum) {
+                if (minimum.x < maximum.x && minimum.y < maximum.y)
+                    retained.push_back(ClipBackdropPatch(prior, minimum, maximum));
+            };
+            keep(prior.minimum, ImVec2(prior.maximum.x, low.y));
+            keep(ImVec2(prior.minimum.x, high.y), prior.maximum);
+            keep(ImVec2(prior.minimum.x, low.y), ImVec2(low.x, high.y));
+            keep(ImVec2(high.x, low.y), ImVec2(prior.maximum.x, high.y));
+        }
+        retained.push_back(incoming);
+        accepted = std::move(retained);
+    }
+    patches = std::move(accepted);
+}
+
+void ApplyBackdropBlend(std::vector<BackdropPatch>& patches, unsigned int current,
+    const GraphFrameTransition::BlendDescription& blend, ImVec2 imageMin, ImVec2 imageMax) {
+    const ImVec2 blendMin(imageMin.x + (imageMax.x - imageMin.x) * blend.imageBounds.x,
+        imageMax.y - (imageMax.y - imageMin.y) * blend.imageBounds.w);
+    const ImVec2 blendMax(imageMin.x + (imageMax.x - imageMin.x) * blend.imageBounds.z,
+        imageMax.y - (imageMax.y - imageMin.y) * blend.imageBounds.y);
+    std::vector<BackdropPatch> result;
+    for (const auto& patch : patches) {
+        if (patch.texture != current) { result.push_back(patch); continue; }
+        const ImVec2 low(std::max(patch.minimum.x, blendMin.x), std::max(patch.minimum.y, blendMin.y));
+        const ImVec2 high(std::min(patch.maximum.x, blendMax.x), std::min(patch.maximum.y, blendMax.y));
+        if (low.x >= high.x || low.y >= high.y) { result.push_back(patch); continue; }
+        const auto keep = [&](ImVec2 minimum, ImVec2 maximum) {
+            if (minimum.x < maximum.x && minimum.y < maximum.y)
+                result.push_back(ClipBackdropPatch(patch, minimum, maximum));
+        };
+        keep(patch.minimum, ImVec2(patch.maximum.x, low.y));
+        keep(ImVec2(patch.minimum.x, high.y), patch.maximum);
+        keep(ImVec2(patch.minimum.x, low.y), ImVec2(low.x, high.y));
+        keep(ImVec2(high.x, low.y), ImVec2(patch.maximum.x, high.y));
+        auto blended = ClipBackdropPatch(patch, low, high);
+        blended.previousTexture = blend.previousTexture;
+        blended.previousOffset = blend.previousOffset;
+        blended.previousScale = blend.previousScale;
+        blended.fadeAmount = blend.amount;
+        blended.encodedSrgb = blend.encoded;
+        result.push_back(std::move(blended));
+    }
+    patches = std::move(result);
+}
+}
 
 const Stack::Renderer::RawImageBackdropFrame* EditorModule::GetRawImageBackdrop() const {
     return m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.patches.empty()
@@ -7,14 +91,17 @@ const Stack::Renderer::RawImageBackdropFrame* EditorModule::GetRawImageBackdrop(
 }
 
 void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
-    ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview) {
-    if (m_PermanentGalleryWorkspace || IsBracketingToolActive() ||
+    ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview, bool forceSurround) {
+    if (m_PermanentGalleryWorkspace ||
         ImGui::GetWindowViewport() != ImGui::GetMainViewport() ||
         m_RawImageBackdrop.frame == ImGui::GetFrameCount()) return;
     auto& frame = m_RawImageBackdrop;
+    const bool rawPresentation = IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive();
+    const auto presentationTexture = rawPresentation ? m_RawWorkspacePresentationTexture.texture : m_Pipeline.GetOutputTexture();
     frame.frame = ImGui::GetFrameCount();
-    frame.presentationFingerprint = m_RawViewportPresentationContent;
+    frame.presentationFingerprint = rawPresentation ? m_RawViewportPresentationContent : GetViewportOutputRenderGeneration();
     frame.patches.clear();
+    frame.surroundPatches.clear();
     frame.completePhotoCoverage = false;
     frame.sharpDrawList = nullptr;
     frame.imageMinimum = imageMin; frame.imageMaximum = imageMax;
@@ -38,12 +125,20 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     frame.extensionOpacity = std::clamp(ui.previewSurroundFrom +
         ((ui.previewSurroundTarget ? 1.f : 0.f)-ui.previewSurroundFrom)*eased, 0.f, 1.f);
     const bool target = !atFit && (contact || ui.previewSurroundTarget);
-    if (target != ui.previewSurroundTarget) {
+    if (!forceSurround && target != ui.previewSurroundTarget) {
         ui.previewSurroundFrom = frame.extensionOpacity;
         ui.previewSurroundStarted = now;
         ui.previewSurroundTarget = target;
     }
     frame.extendImage = ui.previewSurroundTarget || frame.extensionOpacity > 0.f;
+    if(forceSurround) {frame.extendImage=true;frame.extensionOpacity=1.f;}
+    if (m_NodeOpenTransition.SurroundRequested()) {
+        // Opening a node reveals the surround after the photo settles. Keep
+        // its final opacity after the transition; an explicit Fit releases it.
+        frame.extensionOpacity = m_NodeOpenTransition.BlurOpacity(now);
+        frame.extendImage = frame.extensionOpacity > 0.f;
+        if (!frame.extendImage) return;
+    }
     frame.edgeOverlap = std::min(12.f, std::min(size.x, size.y)*.25f);
     // At fit there are no pixels beyond the ordinary image draw to compose.
     // Avoid the full-window copy and blur work until the photo leaves it.
@@ -51,17 +146,22 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
         imageMax.x <= viewMax.x && imageMax.y <= viewMax.y) return;
     // The overview only fills gaps while a newly exposed area is rendering.
     // Accepted regional/tiled detail overlays it at its true image position.
-    const bool regional = rawStagePreview && m_RawViewportPresentedRegion.Valid();
-    const bool tiled = m_RawWorkspacePreviewOutputKind == RawWorkspacePreviewOutputKind::Tiled;
-    const auto region = regional ? m_RawViewportPresentedRegion : Raw::ViewportRegion{};
+    Stack::Renderer::ViewportPreviewGeometry geometry;
+    const bool hasGeometry = TryGetViewportPreviewGeometry(geometry) && geometry.Valid();
+    const auto region = hasGeometry ? geometry.resident :
+        rawStagePreview ? m_RawViewportPresentedRegion : Raw::ViewportRegion{};
+    const bool regional = region.Partial();
+    const bool tiled = rawPresentation ? m_RawWorkspacePreviewOutputKind == RawWorkspacePreviewOutputKind::Tiled : HasViewportOutputTiles();
     frame.nativeExtent = ImVec2(
-        float(m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth :
-            region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width),
-        float(m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight :
-            region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height));
-    unsigned int fullTexture = (regional || tiled) ? m_RawViewportOverviewTexture.texture
-                                                  : m_RawWorkspacePresentationTexture.texture;
-    if ((regional || tiled) && m_RawViewportOverviewContent != m_RawViewportPresentationContent) fullTexture = 0;
+        float(hasGeometry ? geometry.logicalWidth : m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth :
+            region.Valid() ? region.fullWidth : rawPresentation ? m_RawWorkspacePresentationTexture.width : m_Pipeline.GetCanvasWidth()),
+        float(hasGeometry ? geometry.logicalHeight : m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight :
+            region.Valid() ? region.fullHeight : rawPresentation ? m_RawWorkspacePresentationTexture.height : m_Pipeline.GetCanvasHeight()));
+    unsigned int fullTexture = presentationTexture;
+    if (regional || tiled) {
+        int overviewWidth = 0, overviewHeight = 0;
+        if (!TryGetViewportPreviewOverview(fullTexture, overviewWidth, overviewHeight)) fullTexture = 0;
+    }
     if (IsViewportTextureSafeForDrawing(fullTexture)) {
         frame.patches.push_back({fullTexture, imageMin, imageMax});
         frame.completePhotoCoverage = true;
@@ -116,29 +216,51 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
             1.f - float(region.y) / region.fullHeight);
         frame.completePhotoCoverage = frame.completePhotoCoverage || !region.Partial();
     };
-    if (regional && !tiled) addRegion(m_RawWorkspacePresentationTexture.texture, m_RawViewportPresentedRegion);
+    if (regional && !tiled) addRegion(presentationTexture, region);
     // Retained detail belongs to every current RAW presentation, including
     // graph-backed output. Regional placement still follows rawStagePreview.
-    if (!tiled && m_RawViewportDetailContent &&
+    if (rawPresentation && !tiled && m_RawViewportDetailContent &&
         m_RawViewportDetailContent == m_RawViewportPresentationContent)
         addRegion(m_RawViewportDetailTexture.texture, m_RawViewportDetailRegion);
+    // Keep the complete accepted photo before detail cuts its overview into
+    // disjoint visible patches. A different camera crop must not restart the
+    // surround's Gaussian pyramid and noise-profile analysis.
+    frame.surroundPatches = frame.patches;
+    for (const auto& patch : frame.patches) {
+        const auto& bounds = patch.imageBounds;
+        if (bounds.x == 0.f && bounds.y == 0.f && bounds.z == 1.f && bounds.w == 1.f) {
+            frame.surroundPatches.assign(1, patch);
+            break;
+        }
+    }
+    MakeBackdropCoverageDisjoint(frame.patches);
 
     // finishImage publishes after the viewport has advanced or cancelled its
     // fade. Use that same blend everywhere, including beneath the controls.
     // The renderer only borrows these textures for this frame.
-    if (!tiled && m_RawViewportFadeDuration > 0 && m_RawViewportFadeStarted >= 0 &&
+    if (!m_NodeOpenTransition.Active() && !tiled && UsesGraphViewportPreview()) {
+        GraphFrameTransition::BlendDescription blend;
+        if (m_Viewport.FrameTransition().DescribeBlend(now, blend)) {
+            ApplyBackdropBlend(frame.patches, presentationTexture, blend, imageMin, imageMax);
+            ApplyBackdropBlend(frame.surroundPatches, presentationTexture, blend, imageMin, imageMax);
+        }
+    } else if (!m_NodeOpenTransition.Active() && !tiled && m_RawViewportFadeDuration > 0 && m_RawViewportFadeStarted >= 0 &&
         IsViewportTextureSafeForDrawing(m_RawViewportPreviousTexture.texture)) {
         const auto map = Raw::MapViewportFade(m_RawViewportFadeBase.region, m_RawViewportLastPresentation.region);
         if (map.valid) {
-            for (auto& patch : frame.patches) {
-                if (patch.texture != m_RawWorkspacePresentationTexture.texture) continue;
-                patch.previousTexture = m_RawViewportPreviousTexture.texture;
-                patch.previousOffset = ImVec2(float(map.x), float(map.y));
-                patch.previousScale = ImVec2(float(map.width), float(map.height));
-                patch.fadeAmount = float(std::clamp((ImGui::GetTime()-m_RawViewportFadeStarted) /
-                    m_RawViewportFadeDuration, 0.0, 1.0));
-                patch.encodedSrgb = m_RawViewportLastPresentation.encodedSrgb;
-            }
+            const auto blendPatches = [&](std::vector<BackdropPatch>& patches) {
+                for (auto& patch : patches) {
+                    if (patch.texture != m_RawWorkspacePresentationTexture.texture) continue;
+                    patch.previousTexture = m_RawViewportPreviousTexture.texture;
+                    patch.previousOffset = ImVec2(float(map.x), float(map.y));
+                    patch.previousScale = ImVec2(float(map.width), float(map.height));
+                    patch.fadeAmount = float(std::clamp((ImGui::GetTime()-m_RawViewportFadeStarted) /
+                        m_RawViewportFadeDuration, 0.0, 1.0));
+                    patch.encodedSrgb = m_RawViewportLastPresentation.encodedSrgb;
+                }
+            };
+            blendPatches(frame.patches);
+            blendPatches(frame.surroundPatches);
         }
     }
 }

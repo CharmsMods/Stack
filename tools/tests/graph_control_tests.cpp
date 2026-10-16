@@ -1,5 +1,6 @@
 #include "App/settings/NodeControlStyle.h"
 #include "Editor/NodeGraph/UI/ContinuousLinkStroke.h"
+#include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 #include "App/settings/PrimaryAction.h"
 #include <cstring>
 #include "App/settings/CreamPalette.h"
@@ -18,6 +19,8 @@
 #include <vector>
 
 void ValidateGraphCursor(const char* output);
+void ValidateFloatingSlider(const char* output);
+void ValidateFloatingSurfaces();
 
 namespace {
 void Require(bool pass, const char* message) {
@@ -105,8 +108,8 @@ void Frame(bool specimen = false) {
         const EditorNodeGraph::SocketType types[] = {
             EditorNodeGraph::SocketType::Image, EditorNodeGraph::SocketType::Mask,
             EditorNodeGraph::SocketType::Raw, EditorNodeGraph::SocketType::Channel,
-            EditorNodeGraph::SocketType::Scalar, EditorNodeGraph::SocketType::Spectrum };
-        const char* names[] = { "Image", "Mask", "RAW", "Channel", "Scalar", "Spectrum" };
+            EditorNodeGraph::SocketType::Scalar };
+        const char* names[] = { "Image", "Mask", "RAW", "Channel", "Scalar" };
         const ImVec4 socketColors[]{nodePalette.imageSocket,nodePalette.maskSocket,nodePalette.rawSocket,nodePalette.valueSocket,nodePalette.valueSocket,nodePalette.analysisSocket};
         for (int i = 0; i < 6; ++i) {
             EditorNodeGraph::SocketDefinition socket;
@@ -251,13 +254,29 @@ int main(int argc, char** argv) {
     config.rangePolicy = ImGuiExtras::GraphSliderRangePolicy::Bounded;
     int result = 0;
     try {
+        if (argc>1 && std::strcmp(argv[1],"--floating-surfaces")==0) {
+            ValidateFloatingSurfaces();
+            ImGui_ImplOpenGL3_Shutdown(); ImGui::DestroyContext();
+            glfwDestroyWindow(window); glfwTerminate(); return 0;
+        }
+        if (argc>1 && std::strcmp(argv[1],"--raw-slider")==0) {
+            ValidateFloatingSlider(argc>2 ? argv[2] : nullptr);
+            ImGui_ImplOpenGL3_Shutdown(); ImGui::DestroyContext();
+            glfwDestroyWindow(window); glfwTerminate(); return 0;
+        }
         using namespace Stack::Editor::NodeGraphUIVisuals;
         const ImVec2 a(800,30), b(1400,30), c(-500,500), d(100,500);
         const auto curve=SampleLinkCurve(a,b,c,d);
         Require(curve.front().point.x==a.x && curve.front().point.y==a.y && curve.back().point.x==d.x && curve.back().point.y==d.y,"Curve keeps exact socket-center endpoints");
-        Require(curve.size()>160,"Extreme zoomed bend exceeds old fixed sampling cap");
-        for (size_t i=1;i<curve.size();++i)
-            Require(std::hypot(curve[i].point.x-curve[i-1].point.x,curve[i].point.y-curve[i-1].point.y)<=4.01f,"Curve subdivision remains screen-space accurate");
+        for (size_t i=1;i<curve.size();++i) {
+            Require(curve[i].t>curve[i-1].t,"Curve samples advance along the wire");
+            for (int step=1;step<8;++step) {
+                const float t=curve[i-1].t+(curve[i].t-curve[i-1].t)*float(step)/8.f;
+                const auto exact=EditorNodeGraphUIMetrics::CubicBezierPoint(a,b,c,d,t);
+                Require(EditorNodeGraphUIMetrics::DistancePointToSegment(exact,curve[i-1].point,curve[i].point)<=.26f,
+                    "Extreme zoomed bend stays within a quarter screen pixel of the exact curve");
+            }
+        }
         Frame(); Frame();
         const ImVec2 idleSize = rowSize;
         Click(ImGuiMouseButton_Left);
@@ -365,6 +384,8 @@ int main(int argc, char** argv) {
             Require(stbi_write_png((std::string(argv[1])+".curve.png").c_str(),600,360,4,pixels.data(),600*4)!=0,"Write extreme curve specimen");
         }
         ValidateGraphCursor(argc>1 ? argv[1] : nullptr);
+        ValidateFloatingSlider(nullptr);
+        ValidateFloatingSurfaces();
         std::cout << "Graph control interaction checks passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; result = 1;

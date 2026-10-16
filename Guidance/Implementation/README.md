@@ -30,6 +30,7 @@ Resolve ordinary implementation choices from code and evidence. Ask when an unre
 | --- | --- |
 | Every code change, including small fixes, new files, APIs, dependencies and build integration | [Subsystem boundaries and files](boundaries.md) |
 | Controls, views, rendering, image processing, shaders or performance | [UI and processing](ui-and-processing.md) |
+| Adding or changing a graph node's editing surface in RAW | [Node editing surfaces](node-editors.md) |
 | Project state, history, tabs, jobs, callbacks, shared services or cancellation | [State and lifetimes](state-and-lifetimes.md) |
 | Saving, loading, import, export, caches on disk, discovery or deletion | [Persistence and sources](persistence.md) |
 | Editing or extending this guidance | [Maintaining the guidance](maintenance.md) |

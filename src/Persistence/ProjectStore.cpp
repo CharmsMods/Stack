@@ -1,5 +1,6 @@
 #include "Persistence/ProjectStore.h"
 #include "Persistence/ProjectCatalogChanges.h"
+#include "Persistence/ManagedAssetPaths.h"
 
 #include "Persistence/RawProjectEditPipeline.h"
 #include "Raw/RawTechnicalEvidence.h"
@@ -55,6 +56,7 @@ struct AssetLocation {
     std::uint64_t payloadLength = 0;
     std::string checksum;
     std::filesystem::path relativePath;
+    bool closetShared = false;
 };
 
 struct StagedAsset {
@@ -225,12 +227,27 @@ bool CopyStream(
     return copied == maximumBytes || input.eof();
 }
 
+bool FlushOwnedFile(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    const bool flushed = FlushFileBuffers(file) != FALSE;
+    return CloseHandle(file) != FALSE && flushed;
+#else
+    const int file = open(path.c_str(), O_WRONLY);
+    if (file < 0) return false;
+    const bool flushed = fsync(file) == 0;
+    return close(file) == 0 && flushed;
+#endif
+}
+
 bool WriteTextFile(const std::filesystem::path& path, const std::string& text) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) return false;
     output.write(text.data(), static_cast<std::streamsize>(text.size()));
     output.close();
-    return output.good();
+    return output.good() && FlushOwnedFile(path);
 }
 
 bool ReadJsonFile(const std::filesystem::path& path, json& value, std::string& error) {
@@ -354,6 +371,7 @@ json SerializeStoreEnvelope(
         if (!entry.second.relativePath.empty()) {
             location["relativePath"] = entry.second.relativePath.generic_u8string();
         }
+        location["scope"] = entry.second.closetShared ? "closet" : "project";
         storage["assets"][entry.first] = std::move(location);
     }
     if (coverLocation) {
@@ -427,6 +445,21 @@ bool DeserializeStoreEnvelope(
         location.payloadLength = iterator.value().value("payloadLength", 0ull);
         location.checksum = iterator.value().value("checksum", std::string());
         location.relativePath = std::filesystem::u8path(iterator.value().value("relativePath", std::string()));
+        const auto scope = iterator.value().value("scope", std::string("project"));
+        if (scope != "project" && scope != "closet") {
+            error = "Unknown project asset storage scope.";
+            return false;
+        }
+        location.closetShared = scope == "closet";
+        if (expectedKind == ProjectStorageKind::DirectoryBundle &&
+            (location.closetShared
+                ? (location.relativePath.empty() || location.relativePath.has_parent_path() ||
+                   location.relativePath != std::filesystem::path(location.checksum + "-" +
+                       std::to_string(location.payloadLength) + ".original"))
+                : !IsSafeManagedAssetPath(location.relativePath))) {
+            error = "Invalid managed project asset path.";
+            return false;
+        }
         locations.emplace(iterator.key(), std::move(location));
     }
     hasCover = false;
@@ -614,7 +647,8 @@ public:
         : m_Path(kind == ProjectStorageKind::DirectoryBundle
               ? NormalizeDirectoryStorePath(path)
               : std::move(path)),
-          m_Kind(kind), m_CommitMutex(CommitMutexForPath(m_Path)) {}
+          m_Kind(kind), m_CommitMutex(CommitMutexForPath(m_Path)),
+          m_SharedAssetRoot(kind == ProjectStorageKind::DirectoryBundle ? ClosetAssetRoot(m_Path) : std::filesystem::path{}) {}
 
     ProjectStorageKind StorageKind() const override { return m_Kind; }
     const std::filesystem::path& StoragePath() const override { return m_Path; }
@@ -630,6 +664,12 @@ public:
         return false;
     }
     bool IsReadOnlyRecovery() const override { return m_ReadOnlyRecovery; }
+    std::filesystem::path ResolveAssetFile(const std::string& assetId) const override {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto found = m_AssetLocations.find(assetId);
+        return m_Kind == ProjectStorageKind::DirectoryBundle && found != m_AssetLocations.end()
+            ? AssetPath(found->second) : std::filesystem::path{};
+    }
 
     bool Load(RawProjectSnapshot& snapshot, bool& recoveredPrevious, std::string& error) {
         std::lock_guard<std::mutex> lock(m_Mutex);
@@ -667,7 +707,7 @@ public:
                     sizeError.clear();
                     const std::uint64_t actualSize =
                         static_cast<std::uint64_t>(std::filesystem::file_size(
-                            m_Path / location->second.relativePath,
+                            AssetPath(location->second),
                             sizeError));
                     if (sizeError || actualSize != asset.byteLength) {
                         loadError = "A required managed asset is missing or has the wrong size: " +
@@ -742,6 +782,11 @@ public:
     ProjectStoreTransaction BeginTransaction(
         std::uint64_t expectedStorageRevision) override {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_StorageRevision != 0) {
+            std::uint64_t revision = 0;
+            std::string error;
+            if (!ReadCurrentRevision(revision, error)) return {};
+        }
         ProjectStoreTransaction transaction;
         transaction.transactionId = GenerateStableUuid();
         transaction.expectedStorageRevision = expectedStorageRevision;
@@ -796,8 +841,12 @@ public:
         std::lock_guard<std::mutex> lock(m_Mutex);
         TransactionState* state = FindTransaction(transaction, error);
         if (!state) return Finish(errorMessage, error, false);
-        if (m_AssetLocations.find(record.assetId) != m_AssetLocations.end() ||
-            state->assets.find(record.assetId) != state->assets.end()) {
+        if (const auto* existing = FindEmbeddedAsset(m_Snapshot, record.assetId)) {
+            record = *existing;
+            return Finish(errorMessage, std::string(), true);
+        }
+        if (const auto existing = state->assets.find(record.assetId); existing != state->assets.end()) {
+            record = existing->second.record;
             return Finish(errorMessage, std::string(), true);
         }
         std::string managedName = SanitizeManagedFileName(record.originalFilename);
@@ -829,6 +878,13 @@ public:
                 std::filesystem::u8path(managedName);
         }
         record.projectAssetPath = managedPath.generic_u8string();
+        if (!m_SharedAssetRoot.empty() &&
+            std::filesystem::exists(m_SharedAssetRoot / ContentAssetName(record))) {
+            if (!VerifyFileIdentity(m_SharedAssetRoot / ContentAssetName(record), record, error))
+                return Finish(errorMessage, error, false);
+            state->assets.emplace(record.assetId, StagedAsset{record, {}});
+            return Finish(errorMessage, {}, true);
+        }
         const std::filesystem::path stagedPath =
             state->stagingDirectory / FileNameForStagedAsset();
         std::ifstream input(sourcePath, std::ios::binary);
@@ -868,6 +924,13 @@ public:
             return Finish(errorMessage, std::string(), true);
         }
         EmbeddedAssetRecord stagedRecord = expectedRecord;
+        if (!m_SharedAssetRoot.empty() &&
+            std::filesystem::exists(m_SharedAssetRoot / ContentAssetName(stagedRecord))) {
+            if (!VerifyFileIdentity(m_SharedAssetRoot / ContentAssetName(stagedRecord), stagedRecord, error))
+                return Finish(errorMessage, error, false);
+            state->assets.emplace(stagedRecord.assetId, StagedAsset{stagedRecord, {}});
+            return Finish(errorMessage, {}, true);
+        }
         if (stagedRecord.displayName.empty()) {
             stagedRecord.displayName = stagedRecord.originalFilename;
         }
@@ -960,7 +1023,7 @@ public:
         }
         ProjectAssetStream result;
         if (m_Kind == ProjectStorageKind::DirectoryBundle) {
-            const std::filesystem::path assetPath = m_Path / found->second.relativePath;
+            const std::filesystem::path assetPath = AssetPath(found->second);
             auto stream = std::make_unique<std::ifstream>(assetPath, std::ios::binary);
             if (!*stream) {
                 Finish(errorMessage, "Could not open embedded project asset.", false);
@@ -1054,7 +1117,7 @@ public:
                     localErrors.push_back("Missing stored asset: " + asset.assetId);
                     continue;
                 }
-                temporary = m_Path / found->second.relativePath;
+                temporary = AssetPath(found->second);
                 std::string identityError;
                 if (!VerifyFileIdentity(temporary, asset, identityError)) {
                     localErrors.push_back(identityError + " " + asset.assetId);
@@ -1236,6 +1299,18 @@ private:
         // every handle to this path, including projects open in separate tabs.
         std::lock_guard<std::mutex> commitLock(*m_CommitMutex);
         std::lock_guard<std::mutex> lock(m_Mutex);
+#if defined(_WIN32)
+        // Serialize the read-revision/publish pair across Stack processes too.
+        // A child handle also prevents a directory rename during publication.
+        const auto lockPath = m_Kind == ProjectStorageKind::DirectoryBundle
+            ? m_Path / ".write.lock" : std::filesystem::path(m_Path.wstring() + L".write.lock");
+        const HANDLE fileLock = CreateFileW(lockPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+            0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (fileLock == INVALID_HANDLE_VALUE)
+            return {ProjectStoreCommitStatus::Conflict, m_StorageRevision,
+                "The project folder is unavailable or another process is saving it."};
+        struct CloseLock { HANDLE handle; ~CloseLock() { CloseHandle(handle); } } closeLock{fileLock};
+#endif
         if (m_ReadOnlyRecovery) {
             return { ProjectStoreCommitStatus::ReadOnlyRecovery, m_StorageRevision,
                      "A recovered previous manifest must be saved as a repaired copy." };
@@ -1339,6 +1414,10 @@ private:
         json manifest;
         if (m_Kind == ProjectStorageKind::DirectoryBundle) {
             if (!ReadJsonFile(CurrentManifestPath(), manifest, error)) return false;
+            if (!m_Snapshot.projectId.empty() && manifest.value("metadata", json::object()).value("projectId", std::string()) != m_Snapshot.projectId) {
+                error = "A different project now occupies the save location.";
+                return false;
+            }
             revision = manifest.value("_store", json::object()).value("generation", 0ull);
             return revision > 0u;
         }
@@ -1405,12 +1484,18 @@ private:
         auto newLocations = m_AssetLocations;
         for (const auto& entry : state.assets) {
             const EmbeddedAssetRecord& asset = entry.second.record;
+            if (!entry.second.stagingPath.empty() && !FlushOwnedFile(entry.second.stagingPath)) {
+                error = "Could not flush a staged project asset.";
+                return false;
+            }
             const auto authoredPath = std::filesystem::u8path(asset.projectAssetPath);
-            const std::filesystem::path relative = IsSafeManagedAssetPath(authoredPath)
+            const std::filesystem::path relative = !m_SharedAssetRoot.empty()
+                ? ContentAssetName(asset) : IsSafeManagedAssetPath(authoredPath)
                 ? authoredPath
                 : std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
                     FileNameForAsset(asset);
-            const std::filesystem::path destination = m_Path / relative;
+            const std::filesystem::path destination =
+                (m_SharedAssetRoot.empty() ? m_Path : m_SharedAssetRoot) / relative;
             std::filesystem::create_directories(
                 destination.parent_path(), filesystemError);
             if (filesystemError) {
@@ -1419,7 +1504,7 @@ private:
             }
             if (std::filesystem::exists(destination, filesystemError)) {
                 if (!VerifyFileIdentity(destination, asset, error)) return false;
-                std::filesystem::remove(entry.second.stagingPath, filesystemError);
+                if (!entry.second.stagingPath.empty()) std::filesystem::remove(entry.second.stagingPath, filesystemError);
             } else if (!MoveFileWithoutOverwrite(entry.second.stagingPath, destination)) {
                 // A file published by another process may have won the claim.
                 // Reuse it only when it has exactly the staged content.
@@ -1427,7 +1512,7 @@ private:
                 std::filesystem::remove(entry.second.stagingPath, filesystemError);
             }
             newLocations[asset.assetId] = AssetLocation {
-                0u, asset.byteLength, asset.sha256, relative
+                0u, asset.byteLength, asset.sha256, relative, !m_SharedAssetRoot.empty()
             };
         }
 
@@ -1638,6 +1723,12 @@ private:
     std::unordered_map<std::string, TransactionState> m_Transactions;
     mutable std::mutex m_Mutex;
     std::shared_ptr<std::mutex> m_CommitMutex;
+    std::filesystem::path m_SharedAssetRoot;
+
+    std::filesystem::path AssetPath(const AssetLocation& location) const {
+        if (location.closetShared && m_SharedAssetRoot.empty()) return {};
+        return ((location.closetShared ? m_SharedAssetRoot : m_Path) / location.relativePath).lexically_normal();
+    }
 };
 
 bool InitializeStorage(

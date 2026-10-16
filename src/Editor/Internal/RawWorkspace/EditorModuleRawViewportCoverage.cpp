@@ -7,7 +7,7 @@
 void EditorModule::UpdateRawViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     ImVec2 viewMin, ImVec2 viewMax, bool currentPreview) {
     ImRect coverage(viewMin, viewMax);
-    if (currentPreview && !m_PermanentGalleryWorkspace && !IsBracketingToolActive() &&
+    if (currentPreview && !m_PermanentGalleryWorkspace &&
         ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {
         // The photo beneath controls is part of the visible render demand.
         // Interaction and fitting still belong to the right-hand editing area.
@@ -16,6 +16,11 @@ void EditorModule::UpdateRawViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
             viewport->Pos.y + viewport->Size.y));
     }
     coverage.ClipWithFull(ImRect(imageMin, imageMax));
+    if (currentPreview && UsesGraphViewportPreview()) {
+        UpdateGraphViewportCoverage(imageMin, imageMax, coverage.Min, coverage.Max,
+            m_RawWorkspaceLabUi.previewPanning || m_RawWorkspaceLabUi.previewZoomAnimating);
+        return;
+    }
     // The generated surround can be navigated with no real photo on-screen.
     // Keep its accepted source instead of requesting a fabricated one-pixel
     // native crop or changing render demand to an empty intersection.
@@ -38,7 +43,8 @@ void EditorModule::UpdateRawViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     m_RawViewportRequest.visible = next;
     ++m_RawViewportRequest.generation;
     ClearRawViewportTransition();
-    UpdateRawViewportEditTiming(RawViewportRecipe());
+    // Camera movement does not change the recipe or the edit's workload keys.
+    // The decision input already reads the current visible region when needed.
     if (!m_RawViewportLastPresentation.diagnostic &&
         HasRawWorkspaceFullResolutionPreviewForSource(GetActiveRawWorkspacePreviewIdentity())) {
         m_RawViewportPresentedGeneration = m_RawViewportRequest.generation;

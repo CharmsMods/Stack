@@ -1,4 +1,4 @@
-#include "Raw/HdrDisplayMapping.h"
+#include "Raw/ViewTransform.h"
 #include "ToneLayers.h"
 
 #include "Renderer/FullscreenQuad.h"
@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,7 @@ uniform int uPointCurveSetEnabled;
 uniform int uExtendedSceneRange;
 uniform int uTruthfulV2SignedMath;
 uniform vec3 uLumaWeights;
+uniform vec3 uComponents;
 uniform int uDomain;
 uniform float uLogMinEv;
 uniform float uLogMaxEv;
@@ -121,13 +123,14 @@ float lumaOf(vec3 rgb) {
     return max(0.0, dot(rgb, uLumaWeights));
 }
 
-float curve(float x) {
-    return texture(uCurveLut, vec2(clamp(x, 0.0, 1.0), 0.5)).r;
-}
-
 vec4 curveSet(float x) {
-    return texture(uCurveLut, vec2(clamp(x, 0.0, 1.0), 0.5));
+    int size=textureSize(uCurveLut,0).x;
+    float position=clamp(x,0.0,1.0)*float(size-1);
+    int left=int(floor(position));
+    return mix(texelFetch(uCurveLut,ivec2(left,0),0),
+        texelFetch(uCurveLut,ivec2(min(left+1,size-1),0),0),position-float(left));
 }
+float curve(float x) {return curveSet(x).r;}
 
 float sceneToCurveCoord(float x) {
     if (uDomain == 1) {
@@ -319,9 +322,9 @@ void main() {
             vec4 greenMapped = curveSetExtended(greenCoord);
             vec4 blueMapped = curveSetExtended(blueCoord);
             rgb = vec3(
-                rgb.r <= 0.0 ? rgb.r : curveCoordToSceneUnclamped(redMapped.r),
-                rgb.g <= 0.0 ? rgb.g : curveCoordToSceneUnclamped(greenMapped.g),
-                rgb.b <= 0.0 ? rgb.b : curveCoordToSceneUnclamped(blueMapped.b));
+                uDomain == 1 && rgb.r <= 0.0 ? rgb.r : curveCoordToSceneUnclamped(redMapped.r),
+                uDomain == 1 && rgb.g <= 0.0 ? rgb.g : curveCoordToSceneUnclamped(greenMapped.g),
+                uDomain == 1 && rgb.b <= 0.0 ? rgb.b : curveCoordToSceneUnclamped(blueMapped.b));
         } else {
             float redCoord = sceneToCurveCoord(rgb.r);
             float greenCoord = sceneToCurveCoord(rgb.g);
@@ -349,7 +352,7 @@ void main() {
         rgb.b = toneResponse(rgb.b);
     }
     float outAlpha = color.a;
-    FragColor = vec4(rgb, outAlpha);
+    FragColor = vec4(rgb * uComponents, outAlpha);
 }
 )";
 
@@ -426,103 +429,14 @@ uniform int uInputIsRec2020;
 uniform int uEncodeSrgbOutput;
 uniform int uPhotographicHdr;
 
-float lumaOf(vec3 rgb) {
-    return max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
-}
-
-vec3 falseColor(float ev) {
-    if (ev < -4.0) return vec3(0.02, 0.05, 0.24);
-    if (ev < -2.0) return vec3(0.0, 0.34, 0.85);
-    if (ev < 0.0) return vec3(0.0, 0.65, 0.45);
-    if (ev < 2.0) return vec3(0.82, 0.72, 0.18);
-    if (ev < 4.0) return vec3(1.0, 0.42, 0.08);
-    return vec3(1.0, 0.06, 0.04);
-}
-
-float filmicCurve(float x) {
-    float black = uMiddleGrey * exp2(uBlackEv);
-    float white = uMiddleGrey * exp2(uWhiteEv);
-    x = max(0.0, x * exp2(uExposure) - black);
-    float norm = x / max(0.000001, white - black);
-    float safeContrast = max(0.05, uContrast);
-    float pivotInput = uMiddleGrey * exp2(uContrastPivotEv);
-    float pivotNorm = max(
-        0.000001,
-        (pivotInput - black) / max(0.000001, white - black));
-    norm = pivotNorm * pow(max(0.0, norm) / pivotNorm, safeContrast);
-    float toe = clamp(uToe, 0.0, 1.0);
-    norm = mix(norm, (norm + toe * norm / (norm + 0.18)) / (1.0 + toe), toe);
-    float shoulder = max(0.001, uShoulder);
-    float mapped = norm / (norm + shoulder);
-    float whiteMapped = 1.0 / (1.0 + shoulder);
-    return clamp(mapped / max(0.0001, whiteMapped), 0.0, 1.0);
-}
-
-vec3 compressDisplayGamut(vec3 rgb) {
-    float luma = clamp(lumaOf(rgb), 0.0, 1.0);
-    float maxChannel = max(rgb.r, max(rgb.g, rgb.b));
-    float minChannel = min(rgb.r, min(rgb.g, rgb.b));
-    float amount = 0.0;
-    if (maxChannel > 1.0) {
-        amount = max(amount, (maxChannel - 1.0) / max(0.00001, maxChannel - luma));
-    }
-    if (minChannel < 0.0) {
-        amount = max(amount, (0.0 - minChannel) / max(0.00001, luma - minChannel));
-    }
-    float highlightChroma = smoothstep(0.68, 1.0, luma) * smoothstep(0.92, 1.35, maxChannel);
-    amount = clamp(max(amount, highlightChroma * 0.45), 0.0, 1.0);
-    return mix(rgb, vec3(luma), amount);
-}
-
-vec3 rec2020ToLinearSrgb(vec3 rgb) {
-    return mat3(
-         1.6604910, -0.1245505, -0.0181508,
-        -0.5876411,  1.1328999, -0.1005789,
-        -0.0728499, -0.0083494,  1.1187297) * rgb;
-}
-
-vec3 linearToSrgb(vec3 rgb) {
-    vec3 low = rgb * 12.92;
-    vec3 high = 1.055 * pow(max(rgb, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
-    return mix(low, high, step(vec3(0.0031308), rgb));
-}
-
-)" ) + Raw::HdrDisplay::ShaderFunction() + R"(
-
-float displayCurve(float x) {
-    return uPhotographicHdr != 0 ? photographicHdrCurve(x) : filmicCurve(x);
-}
-
+)" ) + Raw::ViewTransform::ShaderFunctions() + R"(
 void main() {
     // At native size this is a pointwise color transform. Interpolated UVs
     // can drift from pixel centers and mix a bright neighbor into dark detail.
     vec4 color = all(equal(textureSize(uInputTex, 0), uOutputSize))
         ? texelFetch(uInputTex, ivec2(gl_FragCoord.xy), 0)
         : texture(uInputTex, vUV);
-    vec3 rgb = uInputIsRec2020 != 0 ? rec2020ToLinearSrgb(color.rgb) : color.rgb;
-    float oldLuma = lumaOf(rgb);
-    if (uDebugFalseColor != 0) {
-        float ev = log2(max(0.000001, oldLuma) / max(0.000001, uMiddleGrey));
-        float outAlpha = color.a;
-        FragColor = vec4(falseColor(ev), outAlpha);
-        return;
-    }
-    float newLuma = displayCurve(oldLuma);
-    if (uPreserveHue != 0) {
-        rgb = oldLuma > 0.00001 ? rgb * (newLuma / oldLuma) : vec3(newLuma);
-    } else {
-        rgb = vec3(displayCurve(rgb.r), displayCurve(rgb.g), displayCurve(rgb.b));
-    }
-    rgb = compressDisplayGamut(rgb);
-    float luma = lumaOf(rgb);
-    rgb = mix(vec3(luma), rgb, max(0.0, uSaturation));
-    rgb = compressDisplayGamut(rgb);
-    float outAlpha = color.a;
-    rgb = clamp(rgb, 0.0, 1.0);
-    if (uEncodeSrgbOutput != 0) {
-        rgb = linearToSrgb(rgb);
-    }
-    FragColor = vec4(rgb, outAlpha);
+    FragColor = vec4(applyViewTransform(color.rgb), color.a);
 }
 )";
 
@@ -661,13 +575,12 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     }
     UpdateLut();
     if (m_ShaderProgram == 0 || m_LutTexture == 0) {
-        DrawTonePassthrough(inputTexture, quad);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture0));
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture1));
         glActiveTexture(GL_TEXTURE0);
-        return;
+        throw std::runtime_error("Tone Curve program or authored LUT is unavailable.");
     }
     const EffectiveLocalBaselineSettings localBaseline = ComputeEffectiveLocalBaselineSettings();
     const float toneAnchor = ComputeEffectiveToneAnchor();
@@ -678,6 +591,7 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
+    glUniform3fv(glGetUniformLocation(m_ShaderProgram,"uComponents"),1,m_ExecutionComponents.data());
     glUniform2i(glGetUniformLocation(m_ShaderProgram, "uOutputSize"), width, height);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_LutTexture);
@@ -731,9 +645,7 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     quad.Draw();
     const GLenum drawError = glGetError();
     if (drawError != GL_NO_ERROR) {
-        std::cerr << "[ToneCurve] Draw failed with GL error " << drawError
-                  << "; passing input through.\n";
-        DrawTonePassthrough(inputTexture, quad);
+        std::cerr << "[ToneCurve] Draw failed with GL error " << drawError << "\n";
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture0));
@@ -741,6 +653,7 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture1));
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
+    if (drawError!=GL_NO_ERROR) throw std::runtime_error("Tone Curve GPU execution failed.");
 }
 
 void ToneCurveLayer::UpdateLut() {

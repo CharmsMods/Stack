@@ -7,4 +7,5 @@ struct GraphParameter {
     float initial, minimum, maximum;
 };
 std::vector<GraphParameter> GraphParameters(GraphOperationKind kind);
+std::vector<GraphParameter> GraphParameters(const GraphOperation& operation);
 }

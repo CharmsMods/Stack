@@ -1245,10 +1245,7 @@ const EditorNodeGraph::Node* FindUpstreamRawSourceNode(
         if (upstream->kind == EditorNodeGraph::NodeKind::RawSource) {
             return upstream;
         }
-        if (upstream->kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-            return nullptr;
-        }
-        rawInput = graph.FindInputLink(upstream->id, EditorNodeGraph::kRawInputSocketId);
+        return nullptr;
     }
     return nullptr;
 }

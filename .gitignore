@@ -4,6 +4,7 @@
 /out/
 /install/
 /outputs/
+/installer/outputs/
 /CMakeFiles/
 /CMakeCache.txt
 /*.sln
@@ -49,6 +50,9 @@ imgui.ini
 /_workspace/
 /_local_archive/
 /OLD/
+# Machine-local REA connection and discovery link; binaries stay in _workspace.
+/.codex/config.toml
+/.agents/skills/rea/
 migrate*.ps1
 migrate*.py
 tools/migrate*.py
@@ -60,6 +64,7 @@ tools/migrate*.py
 *.dng
 /bike test set/
 /denoise sets/
+/depth sets/
 
 # Neural Denoise model outputs, tooling, and ONNX/CUDA runtimes
 /tools/neural_denoise/
@@ -84,6 +89,12 @@ Desktop.ini
 # Local darktable checkout used for source research
 /darktable/
 /Darktable Source/
+
+# Local RapidRAW checkout used for source research
+/RapidRAW Source/
+
+# Local Tone Caliper binaries and research materials
+/Tone Caliper/
 
 # Local build and validation scratch files
 /_tmp/

@@ -85,17 +85,21 @@ bool Simplex(const std::vector<double>& values, std::size_t count) {
 }
 }
 std::vector<double> Evaluate(const std::vector<Knot>& knots, double ev) {
-    if (knots.empty()) return {};
-    if (ev<=knots.front().ev) return knots.front().share;
-    if (ev>=knots.back().ev) return knots.back().share;
+    std::vector<double> result;
+    Evaluate(knots,ev,result);
+    return result;
+}
+void Evaluate(const std::vector<Knot>& knots, double ev, std::vector<double>& result) {
+    if (knots.empty()) { result.clear(); return; }
+    if (ev<=knots.front().ev) { result=knots.front().share; return; }
+    if (ev>=knots.back().ev) { result=knots.back().share; return; }
     const auto it=std::upper_bound(knots.begin(),knots.end(),ev,
         [](double x,const Knot& k){return x<k.ev;});
     const auto& a=*(it-1); const auto& b=*it;
     const double t=Parameter(a,b,ev);
-    auto result=a.share;
+    result.resize(a.share.size());
     for (std::size_t i=0;i<result.size();++i)
         result[i]=Bezier(a.share[i],a.right[i],b.left[i],b.share[i],t);
-    return result;
 }
 void InsertKnot(std::vector<Knot>& knots, double ev) {
     if (knots.size()<2||ev<=knots.front().ev||ev>=knots.back().ev) return;
@@ -122,6 +126,12 @@ bool Validate(const BracketingRecipe& r, std::string& error, bool allowInactiveD
         if (entry.first < 0 || entry.first > 8 || entry.second < 0 || entry.second > 8)
             return fail("Invalid bracket orientation correction.");
     if (r.version!=RecipeVersion) return fail("Unsupported bracketing recipe version.");
+    if(!std::isfinite(r.depth.focus)||r.depth.focus<0||r.depth.focus>1||
+       !std::isfinite(r.depth.focusRange)||r.depth.focusRange<0||r.depth.focusRange>1||
+       !std::isfinite(r.depth.blurRadius)||r.depth.blurRadius<0||r.depth.blurRadius>64)
+        return fail("Invalid depth-of-field settings.");
+    if(r.depth.enabled&&r.reconstruction!=ReconstructionMode::Panorama&&r.alignmentMode!=AlignmentMode::AutomaticLocal)
+        return fail("Depth reconstruction needs Automatic local alignment.");
     if(std::string(ReconstructionModeName(r.reconstruction))=="invalid") return fail("Invalid reconstruction mode.");
     if(int(r.panorama.projection)<0||int(r.panorama.projection)>2||
        !std::isfinite(r.panorama.outputScale)||r.panorama.outputScale<.01||r.panorama.outputScale>1)
@@ -168,6 +178,7 @@ nlohmann::json Serialize(const BracketingRecipe& r) {
         {"reconstruction",ReconstructionModeName(r.reconstruction)},
         {"groups",nlohmann::json::array()},{"knots",nlohmann::json::array()}};
     j["panorama"]={{"projection",int(r.panorama.projection)},{"outputScale",r.panorama.outputScale},{"overlapDenoise",r.panorama.overlapDenoise}};
+    j["depth"]={{"enabled",r.depth.enabled},{"focus",r.depth.focus},{"focusRange",r.depth.focusRange},{"blurRadius",r.depth.blurRadius}};
     j["orientationOverrides"] = nlohmann::json::object();
     for (const auto& entry : r.orientationOverrides)
         j["orientationOverrides"][std::to_string(entry.first)] = entry.second;
@@ -187,6 +198,11 @@ bool Deserialize(const nlohmann::json& j,BracketingRecipe& output,std::string& e
         if(storedVersion<1||storedVersion>RecipeVersion) {error="Unsupported bracketing recipe version.";return false;}
         r.version=RecipeVersion;r.originFrameId=j.at("origin").get<std::string>();
         r.automatic=j.value("automatic",true);
+        if(j.contains("depth")) {
+            const auto& depth=j.at("depth");r.depth.enabled=depth.value("enabled",false);
+            r.depth.focus=depth.value("focus",.5);r.depth.focusRange=depth.value("focusRange",.08);
+            r.depth.blurRadius=depth.value("blurRadius",0.);
+        }
         if(j.contains("panorama")) {
             const auto& p=j.at("panorama");
             r.panorama.projection=static_cast<PanoramaProjection>(p.value("projection",0));

@@ -1,6 +1,9 @@
 #include "AppShell.h"
+#include "UiPerformanceTrace.h"
+#include "UiPerformanceProbe.h"
 #include "EdgeChrome.h"
 #include "WorkspacePresentation.h"
+#include "WorkspaceInputScope.h"
 #include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -30,12 +33,13 @@ void CloseMaskMenu(Stack::Navigation::RawMaskToolbarState& toolbar) {
 } // namespace
 
 bool AppShell::TopBarOwnsPanelToggle() const {
-    return m_RawMaskToolbar.enabled &&
-        m_RawMaskToolbar.revealAmount > m_NavigationRail.revealAmount;
+    return m_RawMaskToolbar.revealAmount > m_NavigationRail.revealAmount;
 }
 
 void AppShell::ToggleWorkspaceSectionPanel() {
+    if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     m_NavigationRail.panelOpen = !m_NavigationRail.panelOpen;
+    if (m_CurrentTabId == 1) m_Editor->SetWorkspacePanelOpen(m_NavigationRail.panelOpen);
     CancelProjectPillPreview();
 }
 
@@ -45,11 +49,12 @@ void AppShell::LayoutRawMaskToolbar() {
     const auto& io = ImGui::GetIO();
     const float scale = m_NavigationRail.scale;
     const float height = Stack::Navigation::BarExtent * scale;
-    toolbar.enabled = (m_CurrentTabId == 5 || m_CurrentTabId == 3) &&
+    const bool processing = m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace();
+    toolbar.enabled = ((m_CurrentTabId == 1 && m_Editor->IsViewMode()) || m_CurrentTabId == 5 || m_CurrentTabId == 3) &&
         m_ActiveProjectWorkspace != m_GalleryWorkspaceId &&
-        !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !m_Editor->IsAutoBracketWorkspace();
+        !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !processing;
     toolbar.menuDrawn = false;
-    const bool focused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool focused = m_UiPerformanceCapture || glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
     toolbar.menuOpen = toolbar.popupId && ImGui::IsPopupOpen(toolbar.popupId, ImGuiPopupFlags_None);
     if (toolbar.target) {
         const auto available = m_Editor->QueryRawOperationMaskAvailability();
@@ -59,9 +64,12 @@ void AppShell::LayoutRawMaskToolbar() {
     }
     if (!toolbar.menuOpen) toolbar.target.reset();
     if (!toolbar.enabled) {
-        CloseMaskMenu(toolbar);
-        toolbar.revealAmount = 0.f;
+        if (toolbar.menuOpen || toolbar.target) CloseMaskMenu(toolbar);
         toolbar.visibleUntil = 0.0;
+        // Keep the same visible geometry through View -> Graph. Clearing the
+        // bar immediately also teleports the destination canvas upward.
+        if (processing || Stack::Notifications::SystemReducedMotion()) toolbar.revealAmount = 0.f;
+        else Stack::Header::ApproachMotion(toolbar.revealAmount, 0.f, .24f);
     } else {
         const bool inWidth = io.MousePos.x >= viewport->Pos.x && io.MousePos.x < viewport->Pos.x + viewport->Size.x;
         const bool atEdge = inWidth && io.MousePos.y >= viewport->Pos.y && io.MousePos.y <= viewport->Pos.y + 2.f * scale;
@@ -72,7 +80,7 @@ void AppShell::LayoutRawMaskToolbar() {
             return BelongsTo(window, ToolbarWindow) || (TopBarOwnsPanelToggle() && BelongsTo(window, ToggleWindow));
         };
         const bool interacting = (context->ActiveId && belongs(context->ActiveIdWindow)) ||
-            (io.NavVisible && belongs(context->NavWindow));
+            (Stack::Navigation::NavigationInputActive() && belongs(context->NavWindow));
         Stack::Navigation::UpdateEdgeReveal(toolbar.revealAmount, toolbar.visibleUntil, focused,
             atEdge, hovered, interacting, toolbar.menuOpen, Stack::Notifications::SystemReducedMotion());
     }
@@ -80,14 +88,18 @@ void AppShell::LayoutRawMaskToolbar() {
     toolbar.position = ImVec2(viewport->Pos.x, viewport->Pos.y - height + toolbar.visibleHeight);
     toolbar.maskButtonPosition = ImVec2(viewport->Pos.x + (viewport->Size.x - Stack::Navigation::ButtonExtent * scale) * .5f,
         toolbar.position.y + Stack::Navigation::BarPadding * scale);
+
 }
 
 void AppShell::RenderRawMaskToolbar() {
+    Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Toolbar,
+        Stack::UiPerformance::Probe::Key(m_RawMaskToolbar.revealAmount));
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NavigationBars);
     auto& toolbar = m_RawMaskToolbar;
-    if (!toolbar.enabled) return;
+    if (toolbar.revealAmount<=.001f && !toolbar.menuOpen) return;
     const auto* viewport = ImGui::GetMainViewport();
     const float scale = m_NavigationRail.scale;
-    const auto palette = Stack::Header::ResolvePalette(m_Appearance ? m_Appearance->GetClearColor()
+    const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImVec4 tint = palette.caption;
     tint.w = Stack::Header::ResolveSectionTintOpacity(m_NavigationRail.panelAmount);
@@ -101,7 +113,22 @@ void AppShell::RenderRawMaskToolbar() {
     ImGui::Begin(ToolbarWindow, nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
-        (toolbar.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
+        (!toolbar.enabled || m_Editor->IsNodeOpenTransitionActive() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
+    if (!toolbar.enabled) {
+        // Only the retained visual exits. Do not resolve a mask target or run
+        // widget/menu work for a surface that can no longer accept commands.
+        auto color = palette.mutedText;
+        if (!toolbar.maskButtonEnabled) color.w *= ImGui::GetStyle().DisabledAlpha;
+        Stack::Navigation::DrawGlyph(ImGui::GetWindowDrawList(), Stack::Navigation::Glyph::Mask,
+            ImVec2(toolbar.maskButtonPosition.x+8.5f*scale,toolbar.maskButtonPosition.y+8.5f*scale),
+            21.f*scale,ImGui::GetColorU32(color));
+        m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
+        return;
+    }
+    Stack::Workspace::InputScope transitionInput(m_Editor->IsNodeOpenTransitionActive(), false);
     toolbar.popupId = ImGui::GetID("OperationMaskMenu");
     auto available = m_Editor->QueryRawOperationMaskAvailability();
     if (ActiveProjectLoadPhase() != LibraryToEditorProjectLoadPhase::None || m_RootTabBodyFadeActive ||
@@ -112,8 +139,9 @@ void AppShell::RenderRawMaskToolbar() {
         if (toolbar.target) CloseMaskMenu(toolbar);
     }
     ImGui::SetCursorScreenPos(toolbar.maskButtonPosition);
-    if (Stack::Navigation::IconButton("Create operation mask", Stack::Navigation::Glyph::Mask,
-            toolbar.menuOpen, available.target.has_value(), scale, palette, available.disabledReason.c_str())) {
+    toolbar.maskButtonEnabled = available.target.has_value();
+    if (Stack::Navigation::IconButton("Create mask", Stack::Navigation::Glyph::Mask,
+            ImGui::IsPopupOpen("OperationMaskMenu"), available.target.has_value(), scale, palette, available.disabledReason.c_str())) {
         CancelProjectPillPreview();
         toolbar.target = available.target;
         toolbar.targetWorkspace = m_ActiveProjectWorkspace;
@@ -133,11 +161,16 @@ void AppShell::RenderRawMaskToolbar() {
             ImGui::TextUnformatted(toolbar.target->displayLabel.c_str());
             ImGui::TextDisabled("%s", toolbar.target->layerLabel.c_str());
             ImGui::Separator();
+            if (ImGui::Selectable("Draw values (C-drag)",false,ImGuiSelectableFlags_NoAutoClosePopups)) {
+                if (m_Editor->BeginRawAssetCapture(*toolbar.target,Stack::RawAssetCapture::Shape::Stroke,
+                        Stack::RawAssetCapture::Channels::Both,toolbar.commandError)) ImGui::CloseCurrentPopup();
+            }
+            ImGui::Separator();
             for (auto kind : {EditorNodeGraph::MaskGeneratorKind::RadialGradient,
                              EditorNodeGraph::MaskGeneratorKind::LinearGradient,
                              EditorNodeGraph::MaskGeneratorKind::Square}) {
                 const char* name = kind == EditorNodeGraph::MaskGeneratorKind::RadialGradient ? "Radial" :
-                    kind == EditorNodeGraph::MaskGeneratorKind::LinearGradient ? "Linear" : "Custom mask";
+                    kind == EditorNodeGraph::MaskGeneratorKind::LinearGradient ? "Linear" : "Rectangle";
                 if (ImGui::Selectable(name, false, ImGuiSelectableFlags_NoAutoClosePopups)) {
                     if (m_Editor->CreateRawOperationMask(*toolbar.target, kind, toolbar.commandError))
                         ImGui::CloseCurrentPopup();
@@ -156,9 +189,10 @@ void AppShell::RenderRawMaskToolbar() {
 }
 
 void AppShell::RenderSharedPanelToggle() {
+    if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const float amount = std::max(m_NavigationRail.revealAmount, m_RawMaskToolbar.revealAmount);
     const float scale = m_NavigationRail.scale;
-    const auto palette = Stack::Header::ResolvePalette(m_Appearance ? m_Appearance->GetClearColor()
+    const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(m_RawMaskToolbar.panelTogglePosition);
     ImGui::SetNextWindowSize(ImVec2(Stack::Navigation::ButtonExtent * scale, Stack::Navigation::ButtonExtent * scale));
@@ -168,7 +202,8 @@ void AppShell::RenderSharedPanelToggle() {
     ImGui::Begin(ToggleWindow, nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing |
-        (amount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
+        (amount <= .001f || m_Editor->IsReturningToGraph() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
+    Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
             Stack::Navigation::Glyph::Panel, false, true, scale, palette))
         ToggleWorkspaceSectionPanel();

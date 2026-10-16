@@ -202,6 +202,12 @@ void RenderPipeline::ExecuteGraphImpl(
     }
     m_LastGraphImageCacheHits.clear();
     m_LastGraphExecutionStats = {};
+    m_GraphViewportGeometry = {};
+    m_CurrentGraphImageGeometry = {};
+    if (m_GraphViewportRequest.enabled && m_GraphViewportRequest.empty) {
+        m_OutputTexture = 0;
+        return;
+    }
     m_LastGraphExecutionStats.rawStageCacheBudgetBytes =
         m_RawDevelopStageCacheBudgetBytes;
     m_LastGraphExecutionStats.persistentCacheBudgetBytes =

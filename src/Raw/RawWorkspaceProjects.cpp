@@ -204,6 +204,12 @@ void AttachProjectToSource(
         info.status = StatusForProjectInfo(info);
     }
     info.associationReason = std::move(associationReason);
+    // Choose consistently when several versions use this source. The newest
+    // committed project wins, with a stable path tie-breaker.
+    if ((source.project.status == ProjectStatus::Existing || source.project.status == ProjectStatus::Embedded) &&
+        (source.project.projectModifiedTimeTicks > info.projectModifiedTimeTicks ||
+         (source.project.projectModifiedTimeTicks == info.projectModifiedTimeTicks &&
+          LowerGenericPathKey(source.project.absolutePath) < LowerGenericPathKey(info.absolutePath)))) return;
     source.project = std::move(info);
 }
 
@@ -382,11 +388,14 @@ bool ReadProjectInfoFromDocument(
     return true;
 }
 
-bool DiscoverProjects(
+namespace {
+
+bool AssociateWorkspaceProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
+    const std::vector<Stack::Project::ProjectRecord>& indexedProjects,
     CancellationPredicate shouldCancel) {
-    std::unordered_map<std::string, std::size_t> fingerprintToSource;
+    std::unordered_map<std::string, std::vector<std::size_t>> fingerprintToSource;
     std::unordered_map<std::string, std::size_t> absolutePathToSource;
 
     for (std::size_t index = 0; index < sources.size(); ++index) {
@@ -396,18 +405,12 @@ bool DiscoverProjects(
         SourceRecord& source = sources[index];
         source.project = BuildExpectedProjectInfo(layout, source);
         if (!source.fingerprint.empty()) {
-            fingerprintToSource[source.fingerprint] = index;
+            fingerprintToSource[source.fingerprint].push_back(index);
         }
         absolutePathToSource[LowerGenericPathKey(
             NormalizePath(source.absolutePath))] = index;
     }
 
-    // The shared ProjectIndex is rebuilt for the rest of the application as
-    // well, but a RAW Workspace owns its project population. Do not use the
-    // global snapshot here. Include projects directly in the browsed folder
-    // as well as its managed Projects folder, so external Save As copies are
-    // discoverable only after the user browses their location.
-    const auto indexedProjects = ScanWorkspaceProjects(layout);
     for (const Stack::Project::ProjectRecord& record : indexedProjects) {
         if (shouldCancel && shouldCancel()) {
             return false;
@@ -467,21 +470,19 @@ bool DiscoverProjects(
             ? fingerprintToSource.end()
             : fingerprintToSource.find(info.sourceFingerprint);
         if (fingerprintIt != fingerprintToSource.end()) {
-            AttachProjectToSource(
-                sources[fingerprintIt->second],
-                std::move(info),
-                absolutePath,
-                relativePath,
-                "source-fingerprint");
+            for (const auto sourceIndex : fingerprintIt->second)
+                AttachProjectToSource(sources[sourceIndex], info, absolutePath,
+                    relativePath, "source-fingerprint");
         }
     }
     return true;
 }
 
-bool DiscoverSourceSetProjects(
+bool AssociateWorkspaceSourceSetProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
+    const std::vector<Stack::Project::ProjectRecord>& indexedProjects,
     CancellationPredicate shouldCancel) {
     projects.clear();
     std::unordered_map<std::string, std::size_t> originPathToSource;
@@ -493,11 +494,6 @@ bool DiscoverSourceSetProjects(
         originPathToSource[LowerGenericPathKey(NormalizePath(source.absolutePath))] = index;
         byteLengthToSources[static_cast<std::uint64_t>(source.fileSizeBytes)].push_back(index);
     }
-
-    // The shared ProjectIndex also contains ordinary Library projects. RAW
-    // Workspace cards include the browsed folder and its managed Projects
-    // folder, including multiple independent projects for one source.
-    const auto indexedProjects = ScanWorkspaceProjects(layout);
 
     const auto inspectProject = [&](const Stack::Project::ProjectRecord& indexed) {
         const std::filesystem::path candidate = indexed.absolutePath;
@@ -522,6 +518,7 @@ bool DiscoverSourceSetProjects(
         entry.errorMessage = indexed.errorMessage;
         entry.multiFrameProject = indexed.multiFrameProject;
         entry.bracketingProject = std::any_of(indexed.sourceSets.begin(),indexed.sourceSets.end(),[](const auto& set){return set.settings.contains("bracketing");});
+        entry.hasSavedBracketingResult = indexed.hasSavedBracketingResult;
         entry.sourceSetCount = static_cast<std::uint64_t>(indexed.sourceSets.size());
         const bool invalidBurst = std::any_of(
             indexed.sourceSets.begin(),
@@ -572,19 +569,27 @@ bool DiscoverSourceSetProjects(
             }
         }
 
+        std::vector<std::string> sourceIdentities;
         for (const Stack::Project::MultiFrameSourceSet& sourceSet : indexed.sourceSets) {
-            entry.totalFrameCount += static_cast<std::uint64_t>(sourceSet.frames.size());
             if (sourceSet.inputFamily == Stack::Project::MultiFrameInputFamily::Raw) {
                 ++entry.rawSetCount;
             } else {
                 ++entry.rasterSetCount;
             }
             std::unordered_set<std::size_t> attachedSources;
+            const auto selectedFrame = [&](const auto& frame) {
+                const auto selected = sourceSet.settings.find("bracketingSelection");
+                return selected == sourceSet.settings.end() || (selected->is_array() &&
+                    std::find(selected->begin(), selected->end(), frame.frameId) != selected->end());
+            };
+            const auto sourceSetFrameCount = static_cast<std::uint64_t>(std::count_if(
+                sourceSet.frames.begin(), sourceSet.frames.end(), selectedFrame));
             for (const Stack::Project::SourceSetFrame& frame : sourceSet.frames) {
-                if(sourceSet.settings.contains("bracketingSelection")) {
-                    const auto& selected=sourceSet.settings["bracketingSelection"];
-                    if(std::find(selected.begin(),selected.end(),frame.frameId)==selected.end())continue;
-                }
+                if (!selectedFrame(frame)) continue;
+                ++entry.totalFrameCount;
+                const auto asset = std::find_if(indexed.sources.begin(), indexed.sources.end(),
+                    [&](const auto& candidate) { return candidate.assetId == frame.assetId; });
+                if (asset != indexed.sources.end()) sourceIdentities.push_back(asset->contentSha256);
                 const auto matches = assetSources.find(frame.assetId);
                 if (matches == assetSources.end()) continue;
                 for (std::size_t sourceIndex : matches->second) {
@@ -593,6 +598,7 @@ bool DiscoverSourceSetProjects(
                         entry.referenceSourceKey = sources[sourceIndex].relativePathKey;
                     }
                     if (!attachedSources.insert(sourceIndex).second) continue;
+                    entry.sourceKeys.push_back(sources[sourceIndex].relativePathKey);
                     SourceSetProjectMembership membership;
                     membership.projectId = entry.projectId;
                     membership.projectName = entry.projectName;
@@ -603,6 +609,10 @@ bool DiscoverSourceSetProjects(
                         entry.multiFrameProject;
                     membership.projectCoverThumbnailCachePath =
                         entry.coverThumbnailCachePath;
+                    membership.hasSavedBracketingResult = std::find(
+                        indexed.savedBracketingSourceSetIds.begin(), indexed.savedBracketingSourceSetIds.end(),
+                        sourceSet.sourceSetId) != indexed.savedBracketingSourceSetIds.end();
+                    membership.sourceSetFrameCount = sourceSetFrameCount;
                     sources[sourceIndex].sourceSetProjectMemberships.push_back(
                         std::move(membership));
                 }
@@ -614,6 +624,11 @@ bool DiscoverSourceSetProjects(
         std::unordered_set<std::size_t> directlyAttached;
         for (const Stack::Project::IndexedProjectSource& indexedSource :
              indexed.sources) {
+            // Source sets already define their selected frame relationships.
+            // The direct RAW fallback must not reattach excluded captures.
+            if (!indexed.sourceSets.empty()) break;
+            if (!indexedSource.originalPath.empty())
+                sourceIdentities.push_back(indexedSource.contentSha256);
             std::vector<std::size_t> matches;
             const auto origin = indexedSource.workspaceRelativePath.empty()
                 ? indexedSource.originalPath : layout.workspaceRoot / indexedSource.workspaceRelativePath;
@@ -638,6 +653,7 @@ bool DiscoverSourceSetProjects(
             }
             for (std::size_t sourceIndex : matches) {
                 if (!directlyAttached.insert(sourceIndex).second) continue;
+                entry.sourceKeys.push_back(sources[sourceIndex].relativePathKey);
                 const bool alreadyAttached = std::any_of(
                     sources[sourceIndex].sourceSetProjectMemberships.begin(),
                     sources[sourceIndex].sourceSetProjectMemberships.end(),
@@ -668,6 +684,11 @@ bool DiscoverSourceSetProjects(
                 static_cast<std::uint64_t>(directlyAttached.size());
             entry.rawSetCount = 1;
         }
+        std::sort(entry.sourceKeys.begin(), entry.sourceKeys.end());
+        entry.sourceKeys.erase(std::unique(entry.sourceKeys.begin(), entry.sourceKeys.end()), entry.sourceKeys.end());
+        if (sourceIdentities.empty() && !indexed.rawSourceFingerprint.empty())
+            sourceIdentities.push_back(indexed.rawSourceFingerprint);
+        entry.sourceIdentityKey = BuildGallerySourceIdentityKey(std::move(sourceIdentities));
         projects.push_back(std::move(entry));
     };
 
@@ -690,6 +711,41 @@ bool DiscoverSourceSetProjects(
         return ToLowerAscii(lhs.projectName) < ToLowerAscii(rhs.projectName);
     });
     return true;
+}
+
+} // namespace
+
+bool DiscoverProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    CancellationPredicate shouldCancel) {
+    if (shouldCancel && shouldCancel()) return false;
+    return AssociateWorkspaceProjects(
+        layout, sources, ScanWorkspaceProjects(layout), std::move(shouldCancel));
+}
+
+bool DiscoverSourceSetProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    std::vector<SourceSetProjectCatalogEntry>& projects,
+    CancellationPredicate shouldCancel) {
+    if (shouldCancel && shouldCancel()) return false;
+    return AssociateWorkspaceSourceSetProjects(
+        layout, sources, projects, ScanWorkspaceProjects(layout), std::move(shouldCancel));
+}
+
+bool DiscoverWorkspaceProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    std::vector<SourceSetProjectCatalogEntry>& projects,
+    CancellationPredicate shouldCancel) {
+    if (shouldCancel && shouldCancel()) return false;
+    // Keep discovery scoped to this operation. Both associations consume the
+    // same records; another workspace cannot replace them via the global index.
+    const auto indexedProjects = ScanWorkspaceProjects(layout);
+    if (shouldCancel && shouldCancel()) return false;
+    return AssociateWorkspaceProjects(layout, sources, indexedProjects, shouldCancel) &&
+        AssociateWorkspaceSourceSetProjects(layout, sources, projects, indexedProjects, shouldCancel);
 }
 
 } // namespace Stack::RawWorkspace

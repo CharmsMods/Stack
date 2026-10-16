@@ -41,9 +41,8 @@ void GraphExecutionRuntime::BindImageFingerprint() {
 
         const RenderGraphNode& node = *it->second;
         if (node.kind == RenderGraphNodeKind::RawOperation &&
-            (socketId == "inputImageOut" || socketId == "measurementImageOut")) {
-            const auto* input = socketId == "measurementImageOut" ? findInputLink(nodeId, "referenceIn") : nullptr;
-            if (!input) input = findInputLink(nodeId, "imageIn");
+            socketId == "inputImageOut") {
+            const auto* input = findInputLink(nodeId, "imageIn");
             const auto value = input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0;
             fingerprintingImages.erase(key);
             imageFingerprintCache[key] = value;
@@ -56,10 +55,6 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             node.kind == RenderGraphNodeKind::ImageToMask ||
             node.kind == RenderGraphNodeKind::ChannelSplit ||
             node.kind == RenderGraphNodeKind::ConstantChannel ||
-            node.kind == RenderGraphNodeKind::FrequencyFilter ||
-            node.kind == RenderGraphNodeKind::FrequencyIfft ||
-            node.kind == RenderGraphNodeKind::FrequencyMask ||
-            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId == EditorNodeGraph::kMaskOutputSocketId) ||
             (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
             (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             std::size_t maskFp = fingerprintMask(nodeId, socketId);
@@ -293,10 +288,6 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(
                 pipeline.m_RawDevelopmentGradingScopeSource == RawDevelopmentGradingScopeSource::None
                     ? std::uint64_t(0) : pipeline.m_RawDevelopmentGradingScopeRequestRevision));
-        } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
-            const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
-            HashCombine(fingerprint, rawInput ? fingerprintImage(rawInput->fromNodeId, rawInput->fromSocketId) : 0);
-            HashCombine(fingerprint, HashJson(NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings)));
         } else if (node.kind == RenderGraphNodeKind::RawDecode) {
             const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
             HashCombine(fingerprint, rawInput ? fingerprintImage(rawInput->fromNodeId, rawInput->fromSocketId) : 0);
@@ -489,17 +480,15 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
         } else if (node.kind == RenderGraphNodeKind::RawOperation) {
-            for (const char* port : {"imageIn", "referenceIn"}) {
-                const auto* input = findInputLink(node.nodeId, port);
-                HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
-            }
+            const auto* input = findInputLink(node.nodeId, "imageIn");
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
             for (const auto& link : graph.links) {
                 if (link.toNodeId != node.nodeId || (link.toSocketId != "maskIn" &&
                     link.toSocketId.rfind("gradient:", 0) != 0 && link.toSocketId.rfind("area:", 0) != 0)) continue;
                 HashCombine(fingerprint, HashValue(link.toSocketId));
                 HashCombine(fingerprint, fingerprintMask(link.fromNodeId, link.fromSocketId));
             }
-            for (const auto& parameter : Stack::RawRecipe::GraphParameters(node.rawOperation.kind)) {
+            for (const auto& parameter : node.uniformParameters) {
                 const auto* input = findInputLink(nodeId, EditorNodeGraph::ParameterInputSocketId(parameter.id));
                 if (input) { HashCombine(fingerprint, HashValue(parameter.id)); HashCombine(fingerprint, fingerprintScalar(input->fromNodeId, input->fromSocketId)); }
             }
@@ -513,8 +502,15 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
             HashCombine(fingerprint, maskLink ? fingerprintMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0);
             HashCombine(fingerprint, HashJson(node.layerJson));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
+            for (const auto& parameter : node.uniformParameters) {
+                const auto* binding=findInputLink(nodeId,EditorNodeGraph::ParameterInputSocketId(parameter.id));
+                if (!binding) continue;
+                HashCombine(fingerprint,HashValue(parameter.id));
+                HashCombine(fingerprint,fingerprintScalar(binding->fromNodeId,binding->fromSocketId));
+            }
+            // The input fingerprint already describes the requested extent.
+            // The mutable pipeline canvas may belong to a different branch.
+            HashCombine(fingerprint, HashValue(pipeline.m_PreviewMaxDimension));
         } else if (node.kind == RenderGraphNodeKind::TechnicalImage) {
             const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
             HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
@@ -534,6 +530,14 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(Stack::NodeMath::kReformatAlgorithmVersion));
             HashCombine(fingerprint, HashValue(node.reformatSettings.width));
             HashCombine(fingerprint, HashValue(node.reformatSettings.height));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.canvasRatio));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.customCanvasAspect));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.visibleAspect));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.sideBars));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.topBottomBars));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.sourceScale));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.sourceX));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.sourceY));
             HashCombine(fingerprint, HashValue(static_cast<int>(node.reformatSettings.filter)));
             HashCombine(fingerprint, HashValue(static_cast<int>(node.reformatSettings.border)));
         } else if (node.kind == RenderGraphNodeKind::Mix) {
@@ -586,54 +590,7 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(node.dataMathSettings.outMax));
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
-        } else if (node.kind == RenderGraphNodeKind::SpectrumView) {
-            const RenderGraphLink* input = findInputLink(
-                node.nodeId, EditorNodeGraph::kSpectrumInputSocketId);
-            HashCombine(fingerprint, input
-                ? fingerprintFrequency(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumViewSettings.mode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumViewSettings.lut)));
-            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.exposure));
-            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.gamma));
-            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.centerDc));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
-        } else if (node.kind == RenderGraphNodeKind::SpectrumMath) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, EditorNodeGraph::kMixInputASocketId);
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, EditorNodeGraph::kMixInputBSocketId);
-            const RenderGraphLink* maskInput = findInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId);
-            HashCombine(fingerprint, inputA ? fingerprintImage(inputA->fromNodeId, inputA->fromSocketId) : 0);
-            HashCombine(fingerprint, inputB ? fingerprintImage(inputB->fromNodeId, inputB->fromSocketId) : 0);
-            HashCombine(fingerprint, maskInput ? fingerprintMask(maskInput->fromNodeId, maskInput->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumMathMode)));
-            HashCombine(fingerprint, HashValue(node.spectrumMathSettings.amount));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
-        } else if (node.kind == RenderGraphNodeKind::MagnitudePhase) {
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.magnitudePhaseMode)));
-            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.exposure));
-            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.gamma));
-            if (node.magnitudePhaseMode == RenderMagnitudePhaseMode::Recombine &&
-                socketId == EditorNodeGraph::kImageOutputSocketId) {
-                const RenderGraphLink* magInput = findInputLink(node.nodeId, "magnitude");
-                const RenderGraphLink* phaseInput = findInputLink(node.nodeId, "phase");
-                HashCombine(fingerprint, magInput ? fingerprintMask(magInput->fromNodeId, magInput->fromSocketId) : 0);
-                HashCombine(fingerprint, phaseInput ? fingerprintMask(phaseInput->fromNodeId, phaseInput->fromSocketId) : 0);
-            } else {
-                const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-                HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
-            }
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
-        } else if (node.kind == RenderGraphNodeKind::SpectrumAnalyzer) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumAnalyzerMode)));
-            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.innerRadius));
-            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.outerRadius));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
-        } else if (node.kind == RenderGraphNodeKind::Output) {
+        }     else if (node.kind == RenderGraphNodeKind::Output) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
             if (input) {
                 const bool channelInput = IsScalarRenderSocket(
@@ -668,6 +625,7 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
         }
 
+        HashViewportDemand(fingerprint, nodeId, socketId);
         fingerprintingImages.erase(key);
         imageFingerprintCache[key] = fingerprint;
         return fingerprint;

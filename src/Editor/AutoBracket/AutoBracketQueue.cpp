@@ -1,5 +1,5 @@
 #include "AutoBracketQueue.h"
-#include "NodeMath/ContractTypes.h"
+#include "Raw/Bracketing/SourceSetIdentity.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
 #include <algorithm>
 #include <set>
@@ -14,14 +14,10 @@ const char* StateName(State state) {
     }return "Waiting";
 }
 std::string SourceIdentity(const std::vector<Source>& sources) {
-    std::set<std::string> identities;
-    for(const auto& source:sources) {
-        if(source.fingerprint.empty())return {};
-        identities.insert(source.fingerprint+":"+std::to_string(source.bytes));
-    }
-    std::string text="stack.auto-bracket.sources.v1\n";
-    for(const auto& identity:identities)text+=identity+"\n";
-    return identities.size()<2?std::string():NodeMath::Sha256ContentIdentity(text);
+    std::vector<Raw::Bracketing::CaptureContentIdentity> identities;
+    identities.reserve(sources.size());
+    for(const auto& source:sources)identities.push_back({source.fingerprint,source.bytes});
+    return Raw::Bracketing::SourceSetIdentity(identities);
 }
 std::vector<Candidate> CollectCandidates(const std::vector<RawWorkspace::SourceRecord>& sources,
     const std::vector<RawWorkspace::RawGallerySimilarityStack>& stacks) {
@@ -91,13 +87,22 @@ void Reconcile(Queue& queue,const std::vector<Candidate>& candidates,
         if(found==queue.items.end()){queue.items.emplace_back();found=std::prev(queue.items.end());}
         auto& item=*found;item.candidate=candidate;item.available=true;
         const auto existing=represented.find(candidate.identity);
-        if(existing!=represented.end()&&(item.projectId.empty()||item.projectId!=existing->second.first)) {
+        if(existing!=represented.end()&&item.state!=State::Running) {
             item.projectId=existing->second.first;item.projectPath=existing->second.second;
             item.state=State::Completed;item.error.clear();
-        }
-        if(item.state==State::Completed&&!item.projectPath.empty()) {
+        } else if(existing==represented.end()&&item.state==State::Completed) {
+            // Saved queue state is not proof of an engine result. Older queues
+            // also treated imported/edited projects as complete. Preserve such
+            // projects for review instead of mutating them in the background.
             std::error_code ec;
-            if(!std::filesystem::exists(item.projectPath,ec)&&!ec)item.state=State::Excluded;
+            const bool exists=!item.projectPath.empty()&&std::filesystem::exists(item.projectPath,ec);
+            if(exists||ec) {
+                item.state=State::Attention;
+                item.error="The saved burst result is unavailable or out of date. Open this project to review it.";
+            } else {
+                item.projectId.clear();item.projectPath.clear();item.state=State::Pending;
+                item.error.clear();
+            }
         }
     }
 }

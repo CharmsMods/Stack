@@ -24,7 +24,8 @@ std::filesystem::path TilePath(const ProcessingRequest& request,const PreparedDa
     unsigned tx,unsigned ty) {
     const auto& origin=data.sources[data.origin].frame;
     const auto identity=Stack::NodeMath::Sha256ContentIdentity(AnalysisIdentity(request)+
-        "|motion="+data.motionIdentity+"|tile="+std::to_string(origin.tileRawPixels)+"|prepared="+origin.cacheKey);
+        "|motion="+data.motionIdentity+(data.depthIdentity.empty()?"":"|depth="+data.depthIdentity)+
+        "|tile="+std::to_string(origin.tileRawPixels)+"|prepared="+origin.cacheKey);
     return data.directory/"group-measurements-v3"/identity.substr(7)/
         (std::to_string(tx)+"-"+std::to_string(ty)+"-temporal.bin");
 }
@@ -108,6 +109,14 @@ bool WriteGroupTile(const ProcessingRequest& request,const PreparedDataset& data
            !stream.write(reinterpret_cast<const char*>(packed.data()),packed.size()*sizeof(PackedObservation))) {
             stream.close();std::filesystem::remove(temporary,filesystemError);
             error="The group measurement cache could not be written.";return false;
+        }
+        // Buffered writes can succeed before a disk-full or close failure.
+        // Publish only after both operations have reported success.
+        stream.flush();
+        stream.close();
+        if(!stream) {
+            std::filesystem::remove(temporary,filesystemError);
+            error="The group measurement cache could not be completed.";return false;
         }
     }
     if(request.shouldCancel&&request.shouldCancel()) {

@@ -6,9 +6,31 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <thread>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace Stack::AutoBracket {
 namespace {
+class BackgroundWorkScope {
+public:
+    BackgroundWorkScope() {
+#if defined(_WIN32)
+        active_=SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_BEGIN)!=FALSE;
+#endif
+    }
+    ~BackgroundWorkScope() {
+#if defined(_WIN32)
+        if(active_)SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_END);
+#endif
+    }
+private:
+    bool active_=false;
+};
 void Status(const std::shared_ptr<Work>& work,const std::string& text) {
     {std::lock_guard<std::mutex> lock(work->mutex);work->status=text;}
     work->notifier.UpdateActivity(work->activity,text);
@@ -48,6 +70,10 @@ void BuildCover(const Raw::Bracketing::Preview& preview,Work& work) {
 }
 void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor& executor) {
     using namespace Project;
+    // This scope affects only the task's own thread, including import and
+    // result IO. The engine is explicitly limited to this one CPU worker;
+    // newly created std::threads must not be assumed to inherit this mode.
+    const BackgroundWorkScope background;
     bool committed=false;
     bool processingFailure=false;
     try {
@@ -113,8 +139,10 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
         if(!committed) {
             const auto provenance=set->settings.find("autoBracket");
             if(provenance!=set->settings.end()&&snapshot.persistedStorageRevision!=provenance->value("storageRevision",std::uint64_t{0})) {
-                work->outcome=State::Completed;Status(work,"Project retained with its existing edits.");
-                work->notifier.CompleteActivity(work->activity,"Existing bracket retained.",false);
+                work->outcome=State::Attention;
+                Status(work,"This bracket has existing edits and no current saved burst result. Open it to continue.");
+                work->notifier.FinishActivity(work->activity,Notifications::Outcome::Partial,
+                    "Existing bracket needs review.",work->status);
                 work->done=true;return;
             }
             if(set->settings.contains("bracketingDraft"))throw std::runtime_error("This bracket has saved input edits. Open it to continue.");
@@ -134,6 +162,10 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
             request.store=work->project.store;request.snapshot=snapshot;request.setId=set->sourceSetId;
             request.cacheRoot=work->cacheRoot;
             request.recipe=recipe;request.executeOpenGlTask=executor;request.restoreSavedResult=false;
+            // Leave CPU capacity for the editor while allowing a burst to use
+            // more than one core. The engine further caps this by live RAM.
+            request.workerLimit=std::max(1u,std::thread::hardware_concurrency()/2);
+            request.backgroundProcessing=true;
             request.shouldCancel=[work]{return work->cancel.load();};
             request.reportProgress=[work](double progress,const std::string& text){work->progress=progress;Status(work,text);};
             request.reportPresentation=[work](const Raw::Bracketing::ProcessingProgress& progress){

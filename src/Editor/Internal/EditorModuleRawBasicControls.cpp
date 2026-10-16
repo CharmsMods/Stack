@@ -1,3 +1,4 @@
+#include "Editor/Internal/RawDemosaicControls.h"
 #include "Editor/EditorModule.h"
 
 #include "Editor/Internal/EditorModuleRawControlShared.h"
@@ -143,25 +144,6 @@ void EditorModule::RenderRawSourceControls(EditorNodeGraph::Node& node, float co
     }
 }
 
-void EditorModule::RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
-    if (node.kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-        return;
-    }
-
-    (void)controlWidth;
-    (void)advanced;
-    const NeuralDenoise::NeuralDenoiseSettings& settings = node.rawNeuralDenoise.settings;
-
-    ImGuiExtras::RichSectionLabel("LEGACY RAW/CFA NEURAL DENOISE", 4.0f);
-    ImGui::TextWrapped(
-        "This retired node is preserved only so older Stack projects continue "
-        "to load. RAW data passes through unchanged.");
-    if (!settings.selectedModelId.empty()) {
-        ImGui::TextDisabled("Preserved model id: %s", settings.selectedModelId.c_str());
-    }
-    ImGui::TextDisabled("External model and runtime loading is disabled.");
-}
-
 void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
     if (node.kind != EditorNodeGraph::NodeKind::RawDecode) {
         return;
@@ -288,15 +270,7 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     if (demosaicEnabled) {
-        const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5", "Nearest Neighbor", "Hamilton-Adams" };
-        int demosaicMethod = static_cast<int>(settings.demosaicMethod);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
-            settings.demosaicMethod = static_cast<Raw::DemosaicMethod>(
-                std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
-        }
-        ImGui::TextDisabled("Method: %s", Raw::DemosaicMethodName(settings.demosaicMethod));
-        ImGui::TextDisabled("MHC, Nearest Neighbor, and Hamilton-Adams run in Stack's RAW pipeline.");
+        Stack::Editor::DrawDemosaicCombo("Method",settings.demosaicMethod,controlWidth);
     } else {
         ImGui::TextDisabled("Method: skipped");
         ImGui::TextDisabled("Status: source is already linear RGB, so demosaic is not used.");

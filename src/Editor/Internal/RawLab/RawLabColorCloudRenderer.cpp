@@ -74,7 +74,7 @@ void main() {
         : vec4(2.0, 2.0, 0.0, 1.0);
 
     discPosition = inAb;
-    float caught = step(0.5, inSelectedCatch);
+    float caught = clamp(inSelectedCatch, 0.0, 1.0);
     if (uShowSelectedCatch != 0) {
         gl_PointSize = mix(3.50, 5.88, caught) * uPointScale;
         pointAlpha = mix(0.022, 0.48, caught);

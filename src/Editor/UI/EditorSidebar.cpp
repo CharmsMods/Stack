@@ -414,11 +414,6 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
         ImGui::EndChild();
         return;
     }
-    if (node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-        editor->RenderRawNeuralDenoiseControls(*node, controlWidth, true);
-        ImGui::EndChild();
-        return;
-    }
     if (node->kind == EditorNodeGraph::NodeKind::RawDecode) {
         editor->RenderRawDecodeControls(*node, controlWidth, true);
         ImGui::EndChild();
@@ -463,7 +458,12 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
         return;
     }
     if (node->kind == EditorNodeGraph::NodeKind::CustomMask) {
-        editor->RenderCustomMaskControls(*node, controlWidth, true);
+        editor->RenderMaskTextureControls(*node, controlWidth);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::MaskTexture) {
+        m_NodeGraphUI.RenderOperationControls(editor,node->id);
         ImGui::EndChild();
         return;
     }

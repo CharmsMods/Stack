@@ -20,6 +20,7 @@ inline const char* LabToolName(EditorModuleTypes::RawLabTool tool) {
     case Tool::MultiFrame: return "Bracketing";
     case Tool::Inspect: return "Inspect";
     case Tool::Transform: return "Transform";
+    case Tool::GraphNode: return "Graph operation";
     }
     return "Camera";
 }

@@ -1,4 +1,5 @@
 #include "RawImageData.h"
+#include "Raw/Demosaic/DemosaicCatalog.h"
 
 #include <algorithm>
 
@@ -50,13 +51,7 @@ const char* RawProcessingVersionName(RawProcessingVersion version) {
 }
 
 const char* DemosaicMethodName(DemosaicMethod method) {
-    switch (method) {
-        case DemosaicMethod::Bilinear: return "Fast / Bilinear (preview-safe)";
-        case DemosaicMethod::MalvarHeCutler: return "Malvar-He-Cutler 5x5";
-        case DemosaicMethod::NearestNeighbor: return "Nearest Neighbor";
-        case DemosaicMethod::HamiltonAdams: return "Hamilton-Adams";
-    }
-    return "Fast / Bilinear (preview-safe)";
+    return Demosaic::Describe(method).label;
 }
 
 const char* RawWorkingSpaceName(RawWorkingSpace workingSpace) {
@@ -98,6 +93,8 @@ const char* NormalizedMosaicInputContractName(
             return "hdr-virtual-anchor-pre-gain";
         case NormalizedMosaicInputContract::BracketingPreGain:
             return "bracketing-pre-gain-v1";
+        case NormalizedMosaicInputContract::FloatDngPreGain:
+            return "float-dng-pre-gain-v1";
     }
     return "none";
 }

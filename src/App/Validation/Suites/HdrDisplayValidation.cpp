@@ -1,4 +1,5 @@
 #include "Raw/HdrDisplayMapping.h"
+#include "Raw/ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/GLLoader.h"
@@ -95,6 +96,25 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             if(i==0)contrast=texture[0]-texture[4];
         }
         Check(contrast>.0007&&contrast<.0011,"Photographic display unexpectedly flattened or amplified weak midtone texture");
+        // File output uses the shared CPU finish; compare it with the actual
+        // Stack layer shader, including signed and over-range camera colors.
+        const auto standardSettings=Stack::RawRecipe::DefaultViewTransformJson();
+        const Raw::ViewTransform::PreparedTransform standard;
+        float standardWorst=0;
+        const auto compareStandard=[&](const std::vector<float>& input,unsigned w,unsigned h) {
+            const auto output=Render(input,int(w),int(h),standardSettings);
+            for(std::size_t i=0;i<input.size()/4;++i) {
+                const auto expected=standard.Rgb({input[4*i],input[4*i+1],input[4*i+2]});
+                for(unsigned c=0;c<3;++c)standardWorst=std::max(standardWorst,
+                    std::abs(expected[c]-output[4*i+c]));
+                Check(output[4*i+3]==input[4*i+3],"Default view transform changed alpha");
+            }
+        };
+        compareStandard(ramp,width,1);
+        patch[0]=-.025f;patch[1]=.18f;patch[2]=3.f;
+        patch[4]=5.f;patch[5]=.10f;patch[6]=.03f;
+        compareStandard(patch,19,13);
+        Check(standardWorst<3e-5f,"Default Stack GPU finish differs from standalone CPU finish");
         ViewTransformLayer saved;saved.Deserialize(settings);ViewTransformLayer loaded;loaded.Deserialize(saved.Serialize());
         Check(loaded.Serialize()==saved.Serialize(),"Photographic display settings did not round-trip");
         // The RAW recipe has a separate allowed-field list. A layer-only round
@@ -105,7 +125,9 @@ bool ValidateHdrDisplay(int argc,char** argv) {
         const auto photographicRecipe=Stack::RawRecipe::SerializeRecipe(recipe);
         Check(photographicRecipe.at("viewTransform").at("displayCurve")==Raw::HdrDisplay::Photographic&&
             photographicRecipe!=standardRecipe,"RAW recipe discarded the selected display curve");
-        std::cout<<"HDR display: CPU/GPU maximum error "<<worst<<", middle-grey anchors, monotonicity, neutral colors, weak texture and native-size parity passed.\n";
+        std::cout<<"HDR display: photographic CPU/GPU maximum error "<<worst
+            <<", default Stack/standalone finish maximum error "<<standardWorst
+            <<", middle-grey anchors, monotonicity, neutral colors, weak texture and native-size parity passed.\n";
         if(argc) {
             Check(argc==5,"Use input.f32 width height output-directory white-EV for HDR display comparisons");
             const int w=std::stoi(argv[1]),h=std::stoi(argv[2]);

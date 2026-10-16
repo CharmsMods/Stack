@@ -112,7 +112,7 @@ std::shared_ptr<const Raw::RawImageData> DecodeSingleRawProjectSource(
         // path is not evidence that it contains the saved original.
         if (!document.projectStore->CopyAssetToFile(asset->assetId, sourcePath, &error)) return {};
     } else {
-        sourcePath = document.projectStore->StoragePath() / std::filesystem::u8path(asset->projectAssetPath);
+        sourcePath = document.projectStore->ResolveAssetFile(asset->assetId);
     }
     auto decoded = std::make_shared<Raw::RawImageData>();
     if (!Raw::RawLoader::LoadFile(sourcePath.u8string(), *decoded) ||

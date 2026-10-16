@@ -317,7 +317,11 @@ void EditorModule::RenderRawWorkspaceLabGradientDots(
             ui.selectedZonePoint = -1;
             ui.selectedTonePoint = -1;
             if (ev) { ui.zonesCurveGraph = {}; ui.zonesTargetedView = false; }
-            else for (auto& graph : ui.toneCurveGraphs) graph = {};
+            else {
+                for (auto& graph : ui.toneCurveGraphs) graph = {};
+                ui.sceneToneSelectedPoint = -1;
+                ui.sceneToneDraggingPoint = -1;
+            }
         }
         auto& mask = ev ? context.recipe.evGradients[static_cast<std::size_t>(i)].mask
             : context.recipe.toneGradients[static_cast<std::size_t>(i)].mask;
@@ -343,6 +347,8 @@ void EditorModule::RenderRawWorkspaceLabGradientDots(
                     copy.mask.id = NewGradientId();
                     context.recipe.toneGradients.push_back(std::move(copy));
                     selected = static_cast<int>(context.recipe.toneGradients.size()) - 1;
+                    ui.sceneToneSelectedPoint = -1;
+                    ui.sceneToneDraggingPoint = -1;
                     changed = true;
                 }
             }
@@ -350,6 +356,10 @@ void EditorModule::RenderRawWorkspaceLabGradientDots(
                 if (ev) context.recipe.evGradients.erase(context.recipe.evGradients.begin() + i);
                 else context.recipe.toneGradients.erase(context.recipe.toneGradients.begin() + i);
                 selected = -1;
+                if (!ev) {
+                    ui.sceneToneSelectedPoint = -1;
+                    ui.sceneToneDraggingPoint = -1;
+                }
                 changed = true;
                 deleted = true;
             }
@@ -365,8 +375,26 @@ void EditorModule::RenderRawWorkspaceLabGradientDots(
 void EditorModule::RenderRawWorkspaceLabGradientImage(
     const Stack::RawWorkspace::SourceRecord* source,
     const ImVec2& minimum, const ImVec2& maximum) {
-    if (!m_SelectedRawAdjustmentLayer.empty() &&
-        (m_RawWorkspaceLabUi.activeTool != RawLabTool::Zones || m_EditingRawLayerMask.has_value())) {
+    if (IsRawImageNavigationActive()) return;
+    if (const auto* editor=SelectedNodeEditor(); editor && editor->overlay) {
+        RawWorkspaceEditContext context;
+        if(BeginRawWorkspaceEditContext(source,context) && context.canEdit) {
+            context.editorState=&m_NodeEditorState;
+            const bool changed = editor->overlay(*this,context,minimum,maximum);
+            // Without a floating editor this is the host that observes the
+            // release or cancellation, even when that frame changes no value.
+            // The existing shape handles retain their explicit pointer owner.
+            // A floating editor continues to own its own idle gesture boundary.
+            if (changed || !editor->hasFloatingSurface)
+                CommitRawWorkspaceEditContext(context, changed,
+                    ImGui::IsAnyItemActive() || m_RawLayerMaskDrag >= 0);
+        }
+        return;
+    }
+    // Background is selected by an empty layer ID. An explicitly selected
+    // graph mask always owns viewport editing, regardless of the active tool.
+    if (m_EditingRawLayerMask || (!m_SelectedRawAdjustmentLayer.empty() &&
+        m_RawWorkspaceLabUi.activeTool != RawLabTool::Zones)) {
         RawWorkspaceEditContext layerContext;
         if (BeginRawWorkspaceEditContext(source, layerContext) && layerContext.canEdit)
             RenderRawLayerMaskHandles(layerContext, minimum, maximum);
@@ -462,6 +490,8 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
             selected = static_cast<int>(context.recipe.toneGradients.size()) - 1;
             for (auto& graph : ui.toneCurveGraphs) graph = {};
             ui.selectedTonePoint = -1;
+            ui.sceneToneSelectedPoint = -1;
+            ui.sceneToneDraggingPoint = -1;
         }
         ui.gradientDragHandle = 100;
         ui.gradientDragStart = mouse;

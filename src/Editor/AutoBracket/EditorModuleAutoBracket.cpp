@@ -20,7 +20,7 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
     if((!m_DocumentPersistenceEnabled&&!m_IsAutoBracketWorkspace)||Stack::Workspace::IsPreview())return;
     const double now=ImGui::GetTime();
     if(!m_AutoBracket) {
-        m_AutoBracket=std::make_unique<Stack::AutoBracket::AutoBracketCoordinator>();m_AutoBracket->Initialize();
+        m_AutoBracket=std::make_unique<Stack::AutoBracket::AutoBracketCoordinator>();
         m_AutoBracketPresentation=std::make_unique<Stack::AutoBracket::Presentation>();
         m_AutoBracket->SetProtectedProjectIds(m_AutoBracketProtectedProjectIds,m_AutoBracketProtectedProjectPaths);
         m_AutoBracket->NoteActivity(now);
@@ -31,7 +31,7 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
     const bool userActive=input.MouseDelta.x!=0||input.MouseDelta.y!=0||
         input.MouseWheel!=0||input.MouseWheelH!=0||!input.InputQueueCharacters.empty()||
         ImGui::IsAnyItemActive()||std::any_of(std::begin(input.KeysData),std::end(input.KeysData),
-            [](const ImGuiKeyData& key){return key.Down;});
+            [](const ImGuiKeyData& key){return key.Down&&key.DownDuration==0.f;});
     if(userActive)coordinator.NoteActivity(now);
     m_AutoBracketPresentation->Tick(now);
 
@@ -43,30 +43,51 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
         !m_RawWorkspaceSimilarityWorkerActive&&!m_RawWorkspaceSimilarityRebuildPending&&
         m_RawWorkspaceSimilarityPublishedGeneration==m_RawWorkspaceSimilarityGeneration.load()&&
         m_RawWorkspaceSimilarityWorkspaceKey==root.generic_string();
-    if(ready&&(m_AutoBracketRoot!=root.generic_string()||m_AutoBracketCatalogRevision!=m_RawWorkspaceGalleryRevision||
+    // Catalog-content invalidation is shared with the navigator. Selection,
+    // folder scope and thumbnail readiness do not change bracket candidates;
+    // similarity and authored grouping changes have their own revisions.
+    const auto catalogContentsRevision = m_RawWorkspaceNavigatorRevision;
+    if(ready&&(m_AutoBracketRoot!=root.generic_string()||m_AutoBracketCatalogRevision!=catalogContentsRevision||
         m_AutoBracketGroupingGeneration!=m_RawWorkspaceSimilarityPublishedGeneration||
         m_AutoBracketOrganizationRevision!=m_RawWorkspaceFilmstripOrganizationRevision)) {
         const auto candidates=Stack::AutoBracket::CollectCandidates(
             m_RawWorkspace.sources,ResolveRawWorkspaceFilmstripStacks());
-        std::map<std::string,std::vector<Stack::AutoBracket::Source>> projectSources;
-        for(const auto& source:m_RawWorkspace.sources)for(const auto& membership:source.sourceSetProjectMemberships)
-            projectSources[membership.projectId].push_back({source.absolutePath,source.fingerprint,source.fileSizeBytes});
+        std::unordered_map<std::string,const Stack::RawWorkspace::SourceRecord*> sourcesByKey;
+        for(const auto& source:m_RawWorkspace.sources)sourcesByKey.emplace(source.relativePathKey,&source);
+        std::unordered_map<std::string,std::filesystem::path> projectPaths;
+        for(const auto& project:m_RawWorkspace.sourceSetProjects)projectPaths.emplace(project.projectId,project.absolutePath);
         std::map<std::string,std::pair<std::string,std::filesystem::path>> represented;
-        for(const auto& project:m_RawWorkspace.sourceSetProjects)if(project.bracketingProject&&AutoBracketPathExists(project.absolutePath)) {
-            const auto identity=Stack::AutoBracket::SourceIdentity(projectSources[project.projectId]);
-            if(!identity.empty())represented.emplace(identity,std::make_pair(project.projectId,project.absolutePath));
+        // Badge eligibility and automatic skipping share the same exact,
+        // complete owning source-set membership contract.
+        for(const auto& set:Stack::RawWorkspace::BuildGalleryCompletedBurstSourceSets(m_RawWorkspace)) {
+            const auto project=projectPaths.find(set.projectId);
+            if(project==projectPaths.end()||!AutoBracketPathExists(project->second))continue;
+            std::vector<Stack::AutoBracket::Source> sources;sources.reserve(set.sourceKeys.size());
+            for(const auto& key:set.sourceKeys) {
+                const auto found=sourcesByKey.find(key);
+                if(found!=sourcesByKey.end())sources.push_back({found->second->absolutePath,
+                    found->second->fingerprint,found->second->fileSizeBytes});
+            }
+            const auto identity=Stack::AutoBracket::SourceIdentity(sources);
+            if(!identity.empty())represented.emplace(identity,std::make_pair(set.projectId,project->second));
         }
         coordinator.UpdateCandidates(candidates,represented);
-        m_AutoBracketRoot=root.generic_string();m_AutoBracketCatalogRevision=m_RawWorkspaceGalleryRevision;
+        m_AutoBracketRoot=root.generic_string();m_AutoBracketCatalogRevision=catalogContentsRevision;
         m_AutoBracketGroupingGeneration=m_RawWorkspaceSimilarityPublishedGeneration;
         m_AutoBracketOrganizationRevision=m_RawWorkspaceFilmstripOrganizationRevision;
     }
-    Stack::UiActivity::Snapshot foreground;CollectActivity(foreground);
-    const bool editingBusy=foreground.Busy()||
-        ImGui::IsAnyItemActive()||ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)||
-        (m_Bracketing&&(m_Bracketing->metadataJob||m_Bracketing->preparationJob||m_Bracketing->preparationRequested||
-            m_Bracketing->detailJob||m_Bracketing->inspectionJob||!m_Bracketing->awaitingProject.empty()||
-            (m_Bracketing->pending&&m_Bracketing->publishRequested)));
+    // Dedicated automatic and Gallery workspaces never consume document
+    // editing activity here. CollectActivity also formats catalog-wide detail,
+    // so do not scan every source for an unused result each rendered frame.
+    bool editingBusy=false;
+    if(!m_IsAutoBracketWorkspace&&!m_PermanentGalleryWorkspace) {
+        Stack::UiActivity::Snapshot foreground;CollectActivity(foreground);
+        editingBusy=foreground.Busy()||
+            ImGui::IsAnyItemActive()||ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)||
+            (m_Bracketing&&(m_Bracketing->metadataJob||m_Bracketing->preparationJob||m_Bracketing->preparationRequested||
+                m_Bracketing->detailJob||m_Bracketing->inspectionJob||!m_Bracketing->awaitingProject.empty()||
+                (m_Bracketing->pending&&m_Bracketing->publishRequested)));
+    }
     const bool busy=externalBusy||m_AutoBracketWorkspaceClosing||m_AutoBracketPresentation->animation.active||
         (!m_IsAutoBracketWorkspace&&!m_PermanentGalleryWorkspace&&editingBusy);
     const auto foregroundProjectId=m_IsAutoBracketWorkspace?std::string():
@@ -75,16 +96,18 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
     // separate workspace before any worker can change a project on disk.
     m_AutoBracketWorkspaceRequested=!m_IsAutoBracketWorkspace&&coordinator.CanStartWork(now,ready,busy,foregroundProjectId);
     coordinator.Tick(now,ready,busy||!m_IsAutoBracketWorkspace,[](Raw::OpenGlTask task,std::string& error) {
-        return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(std::move(task),error);
+        return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(
+            std::move(task),error,Raw::OpenGlTaskPriority::Background);
     },foregroundProjectId);
     if(auto work=coordinator.Current())if(work->generation!=m_AutoBracketPresentation->generation)
         m_AutoBracketPresentation->Begin(work,now);
     if(auto completed=coordinator.ConsumeCompleted()) {
         // Only catalog presentation is updated. The editor's document and result are untouched.
         if(completed->project && root==completed->root) {
-            Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace,completed->project.snapshot,completed->item.projectPath);
+            Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace,completed->project.snapshot,
+                completed->item.projectPath,completed->project.store);
             InvalidateRawWorkspaceGalleryPresentation();
-            m_AutoBracketCatalogChanged=true;
+            m_RawWorkspaceCatalogChanged=true;
         }
         m_AutoBracketPresentation->Complete(completed,now);
     }
@@ -94,11 +117,6 @@ bool EditorModule::ConsumeAutoBracketWorkspaceRequest() {
     const bool requested=m_AutoBracketWorkspaceRequested;
     m_AutoBracketWorkspaceRequested=false;
     return requested;
-}
-bool EditorModule::ConsumeAutoBracketCatalogChanged() {
-    const bool changed=m_AutoBracketCatalogChanged;
-    m_AutoBracketCatalogChanged=false;
-    return changed;
 }
 bool EditorModule::TransferAutoBracketingTo(EditorModule& target) {
     if(&target==this||m_IsAutoBracketWorkspace||!m_AutoBracket||target.m_AutoBracket||
@@ -123,6 +141,7 @@ bool EditorModule::TransferAutoBracketingTo(EditorModule& target) {
 }
 void EditorModule::SetAutoBracketProtectedProjectIds(const std::vector<std::string>& projectIds,
     const std::vector<std::filesystem::path>& paths) {
+    if(m_AutoBracketProtectedProjectIds==projectIds&&m_AutoBracketProtectedProjectPaths==paths)return;
     m_AutoBracketProtectedProjectIds=projectIds;
     m_AutoBracketProtectedProjectPaths=paths;
     if(m_AutoBracket)m_AutoBracket->SetProtectedProjectIds(projectIds,paths);
@@ -157,7 +176,7 @@ void EditorModule::ShutdownAutoBracketing() {
     if(m_AutoBracket)m_AutoBracket->Shutdown();
     m_AutoBracketPresentation.reset();m_AutoBracket.reset();
     m_IsAutoBracketWorkspace=false;m_AutoBracketWorkspaceClosing=false;m_AutoBracketWorkspaceRequested=false;
-    m_AutoBracketCatalogChanged=false;
+    m_RawWorkspaceCatalogChanged=false;
 }
 void EditorModule::RenderAutoBracketOverlay() {
     if(!m_IsAutoBracketWorkspace&&m_AutoBracket&&m_AutoBracketPresentation)
@@ -165,15 +184,24 @@ void EditorModule::RenderAutoBracketOverlay() {
 }
 void EditorModule::RenderAutoBracketWorkspace() {
     if(!m_IsAutoBracketWorkspace||!m_AutoBracket||!m_AutoBracketPresentation)return;
-    RenderAutoBracketQueueItems();
+    if(!m_AutoBracketPresentation->animation.active)RenderAutoBracketQueueItems();
     Stack::AutoBracket::DrawPresentation(*m_AutoBracketPresentation,*m_AutoBracket,true);
 }
-void EditorModule::RenderAutoBracketControls() {
-    if(!m_AutoBracket)return;
-    if(ImGui::SmallButton("Auto bracket"))ImGui::OpenPopup("Auto bracket controls");
-    if(ImGui::BeginPopup("Auto bracket controls")) {
-        bool enabled=m_AutoBracket->Enabled();
-        if(ImGui::Checkbox("Process automatically in a separate tab",&enabled))m_AutoBracket->SetEnabled(enabled);
+
+bool EditorModule::IsUserStartedProcessingBusy() const {
+    return Async::IsBusy(m_MultiFrameGraphProcessingTaskState) ||
+        Async::IsBusy(m_MfdExperimentalProcessingTaskState) ||
+        Async::IsBusy(m_HdrProcessingTaskState);
+}
+void EditorModule::RenderAutoBracketControls(bool submenu) {
+    if (submenu) {
+        if (!ImGui::BeginMenu("Auto bracket", m_AutoBracket != nullptr)) return;
+    } else {
+        if (!m_AutoBracket) return;
+        if (ImGui::SmallButton("Auto bracket")) ImGui::OpenPopup("Auto bracket controls");
+        if (!ImGui::BeginPopup("Auto bracket controls")) return;
+    }
+    {
         if(ImGui::Button("Run now")){m_AutoBracket->RunNow();ImGui::CloseCurrentPopup();}
         ImGui::SameLine();if(ImGui::Button(m_AutoBracket->GetQueue().paused?"Resume":"Pause until idle")) {
             if(m_AutoBracket->GetQueue().paused)m_AutoBracket->SetPaused(false);
@@ -190,10 +218,11 @@ void EditorModule::RenderAutoBracketControls() {
         }
         ImGui::Text("%u completed, %u remaining",completed,remaining);
         ImGui::TextWrapped("Processes existing stacks throughout this folder. Each bracket is saved separately.");
-        ImGui::TextWrapped("Starts when the folder is ready. After a pause or stop, resumes after one minute without input. Turn off automatic processing to keep it stopped.");
+        ImGui::TextWrapped("Starts automatically when the folder is ready. After a pause or stop, resumes after one minute without input.");
         if(!m_AutoBracket->Error().empty())ImGui::TextWrapped("%s",m_AutoBracket->Error().c_str());
         RenderAutoBracketQueueItems();
-        ImGui::EndPopup();
+        if (submenu) ImGui::EndMenu();
+        else ImGui::EndPopup();
     }
 }
 void EditorModule::RenderAutoBracketQueueItems() {
@@ -248,7 +277,16 @@ const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspaceCat
         const bool bracket=m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket;
         Stack::RawWorkspace::FilterGalleryProjectCards(m_RawWorkspaceCategoryPresentation,
             m_RawWorkspaceGalleryContentMode);
-        if(bracket&&m_AutoBracket)for(const auto& item:m_AutoBracket->GetQueue().items) {
+        if(bracket) AppendRawWorkspaceQueuedBrackets(projects);
+        m_RawWorkspaceCategoryRevision=m_RawWorkspaceGalleryRevision;m_RawWorkspaceCategoryMode=m_RawWorkspaceGalleryContentMode;
+        m_RawWorkspaceCategoryQueueRevision=queueRevision;
+    }
+    return m_RawWorkspaceCategoryPresentation;
+}
+
+void EditorModule::AppendRawWorkspaceQueuedBrackets(
+    std::vector<Stack::RawWorkspace::GalleryProjectView>& projects, bool resolveProjectPaths) {
+    if(m_AutoBracket)for(const auto& item:m_AutoBracket->GetQueue().items) {
             if(item.state==Stack::AutoBracket::State::Excluded||(!item.available&&item.state!=Stack::AutoBracket::State::Completed))continue;
             auto found=std::find_if(projects.begin(),projects.end(),[&](const auto& project){
                 return !item.projectId.empty()&&project.projectId==item.projectId;
@@ -260,18 +298,17 @@ const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspaceCat
                 found->projectName=item.candidate.name;
                 found->bracketingProject=true;found->multiFrameProject=true;
                 found->frameCount=item.candidate.sources.size();
-                if(!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath/"project.stack"))found->projectPath=item.projectPath;
+                if(resolveProjectPaths&&!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath/"project.stack"))found->projectPath=item.projectPath;
                 if(!item.candidate.sources.empty()) {
                     const auto source=std::find_if(m_RawWorkspace.sources.begin(),m_RawWorkspace.sources.end(),[&](const auto& source){
                         return source.fingerprint==item.candidate.sources.front().fingerprint;
                     });
-                    if(source!=m_RawWorkspace.sources.end())found->referenceSourceKey=source->relativePathKey;
+                    if(source!=m_RawWorkspace.sources.end()) {
+                        found->referenceSourceKey=source->relativePathKey;
+                        found->referenceSourceIndex=static_cast<std::size_t>(std::distance(m_RawWorkspace.sources.begin(),source));
+                    }
                 }
             }
             found->projectName+=" / "+std::string(Stack::AutoBracket::StateName(item.state));
         }
-        m_RawWorkspaceCategoryRevision=m_RawWorkspaceGalleryRevision;m_RawWorkspaceCategoryMode=m_RawWorkspaceGalleryContentMode;
-        m_RawWorkspaceCategoryQueueRevision=queueRevision;
-    }
-    return m_RawWorkspaceCategoryPresentation;
 }

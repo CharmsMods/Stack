@@ -1,71 +1,23 @@
 #include "ProcessingInternal.h"
+#include "CaptureCorrespondence.h"
 #include "PreparedTileSampler.h"
 #include "SceneGradient.h"
 #include "DetailFusion.h"
 #include "PreparedRegion.h"
+#include "TemporalGpu.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace Raw::Bracketing {
-namespace {
-constexpr double kUncertainLocalReliability = .20;
-
-bool IsHardLocalRejection(std::uint16_t bits) {
-    constexpr auto mask=
-        Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid)|
-        Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::SampleInvalid)|
-        Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::PatchRejected)|
-        Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::NonFiniteEvidence);
-    return (bits&mask)!=0;
-}
-
-} // namespace
-
 Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& layout,PreparedTileSampler& sampler,
     double referenceX,double referenceY,double referencePilot,
     const Mfd::RawSignalGradient& sceneGradient,std::string& error) {
     Observation result;const auto site=layout.SiteAt(static_cast<std::int64_t>(referenceX),static_cast<std::int64_t>(referenceY));
-    Mfd::RawCoordinate mapped=source.alignment.Map({referenceX,referenceY});
-    Mfd::SymmetricRawCovariance covariance{.0025,0,.0025};
-    double confidence=1,refinementConfidence=1;
-    if(source.localMotion) {
-        Mfd::LocalMotionOptions options;Mfd::LocalMotionFieldSample motion;
-        if(EvaluateCaptureMotion(source,{referenceX,referenceY},options,motion,&refinementConfidence)) {
-            mapped=motion.sourceRaw;covariance=motion.covarianceRaw;confidence=motion.alignmentConfidence;
-        } else confidence=0;
-        if(source.reliability&&confidence>0&&source.reliability->cellExtent.width&&source.reliability->cellExtent.height) {
-            const auto rawWidth=std::max<std::uint64_t>(1,source.frame.activeExtent.width);
-            const auto rawHeight=std::max<std::uint64_t>(1,source.frame.activeExtent.height);
-            const auto cellX=std::min<std::uint32_t>(static_cast<std::uint32_t>(
-                std::max(0.0,referenceX)*source.reliability->cellExtent.width/rawWidth),
-                static_cast<std::uint32_t>(source.reliability->cellExtent.width-1));
-            const auto cellY=std::min<std::uint32_t>(static_cast<std::uint32_t>(
-                std::max(0.0,referenceY)*source.reliability->cellExtent.height/rawHeight),
-                static_cast<std::uint32_t>(source.reliability->cellExtent.height-1));
-            double reliability=0;std::uint16_t rejectionBits=0;
-            if(!Mfd::ReadReliabilityStoreCell(*source.reliability,cellX,cellY,
-                reliability,&rejectionBits,nullptr)||IsHardLocalRejection(rejectionBits)) {
-                reliability=0;confidence=0;
-            } else {
-                // A low-confidence motion estimate is not the same thing as a
-                // contradictory measurement. In dark, defocused, or flat
-                // regions there may be too little texture to localize the
-                // alternate precisely, while the sample remains useful after
-                // registration variance is accounted for. Keep a conservative
-                // fraction of that evidence instead of falling back to one
-                // noisy reference frame. Hard validity and photometric
-                // rejection bits above still exclude unsafe measurements.
-                confidence=std::clamp(std::max(reliability,
-                    kUncertainLocalReliability),0.0,1.0);
-            }
-            // The stored reliability already contains local-motion confidence,
-            // photometric consistency, and neighborhood erosion.
-        }
-    } else if(source.alignmentDiagnostic.localApplied) confidence=0;
-    // The stored map predates the refinement. It may lower confidence but
-    // cannot erase uncertainty introduced by a newly accepted correction.
-    confidence=std::min(confidence,refinementConfidence);
+    const auto correspondence=EvaluateCaptureCorrespondence(source,{referenceX,referenceY});
+    const auto mapped=correspondence.sourceRaw;
+    const auto covariance=correspondence.covarianceRaw;
+    const double confidence=correspondence.confidence;
     const auto plane=layout.RawToPlane(mapped,site);const auto extent=layout.PlaneExtent(site,source.frame.activeExtent);
     if(!std::isfinite(plane.x)||!std::isfinite(plane.y)) return result;
     const auto nearestX=static_cast<std::int64_t>(std::llround(plane.x)),nearestY=static_cast<std::int64_t>(std::llround(plane.y));
@@ -73,7 +25,8 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
         const auto raw=layout.PlanePixelToRaw({nearestX,nearestY,site});Mfd::SameCfaTapInput nearest;
         if(sampler.ReadSample(source.frame,static_cast<std::uint64_t>(raw.x),static_cast<std::uint64_t>(raw.y),nearest,&error)&&
             std::isfinite(nearest.normalizedSample)&&std::isfinite(nearest.comparisonGain)&&nearest.comparisonGain>0&&
-            !Mfd::HasSampleFlag(nearest.sampleFlags,Mfd::PreparedSampleFlag::Defective)) {
+            !Mfd::HasSampleFlag(nearest.sampleFlags,Mfd::PreparedSampleFlag::Defective)&&
+            !Mfd::HasSampleFlag(nearest.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired)) {
             const auto normalized=nearest.normalizedSample,gain=nearest.comparisonGain;const auto flags=nearest.sampleFlags;
             result.finite=true;result.fallback=normalized*gain*source.scale;result.exposure=1/source.scale;
             result.clipped=Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip);
@@ -86,7 +39,7 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     parameters.referenceComparisonPilot=std::max(0.0,referencePilot);
     parameters.warpCovariance=covariance;
     Mfd::SameCfaSampleResult sampled;CaptureFallback fallback;
-    if(!sampler.SampleSameCfa(source.frame,source.noise,mapped,site,parameters,sampled,fallback)) {
+    if(!sampler.SampleSameCfa(source.frame,source.noise,mapped,site,parameters,sampled,fallback,&error)) {
         if(fallback.finite) {
             result.fallback=fallback.value;result.finite=true;result.exposure=1/source.scale;
             result.clipped=result.fallbackClipped=fallback.clipped;
@@ -118,13 +71,17 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     }
     result.measurementVariance=std::max(1e-12,sampled.interpolationVariance);
     result.uncertaintyVariance=sampled.residualModelVariance+sampled.exposureScaleVariance+
-        registrationRisk/std::max(kUncertainLocalReliability,confidence);
+        registrationRisk/std::max(kUncertainCaptureReliability,confidence);
     result.variance=result.measurementVariance+result.uncertaintyVariance;
     result.headroom=headroom;result.support=1;result.clipped=false;return result;
 }
 
 static bool EvaluateTemporalRegion(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
     std::vector<std::vector<Observation>>& groups,const Mfd::PreparedRawTile& origin,bool detailFusion,std::string& error) {
+    if(data.combiningGpu) {
+        if(data.combiningGpu->Combine(request,data,origin,detailFusion,groups,error))return true;
+        if(!error.empty())return false;
+    }
     Mfd::DirectoryNormalizedTileCache cache(data.directory);
     const auto count=origin.normalizedMosaic.size();groups.assign(request.recipe.groups.size(),std::vector<Observation>(count));
     std::vector<std::vector<double>> weight(groups.size(),std::vector<double>(count));
@@ -156,11 +113,13 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
             const auto flags=origin.sampleFlags[q];
             if(Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||
                 Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip)||
-                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)) continue;
+                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)||
+                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired)) continue;
             const double value=origin.normalizedMosaic[q]*origin.comparisonGain[q];
             if(std::isfinite(value)) {pilot+=value;++used;}
         }
-        const double point=origin.normalizedMosaic[p]*origin.comparisonGain[p];
+        const double point=Mfd::HasSampleFlag(origin.sampleFlags[p],Mfd::PreparedSampleFlag::DecoderRepaired)
+            ?0.0:origin.normalizedMosaic[p]*origin.comparisonGain[p];
         stablePilot[p]=std::max(0.0,used?pilot/used:(std::isfinite(point)?point:0.0));
     }
     for(const auto& source:data.sources) {
@@ -209,7 +168,9 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
             else {
                 const auto flags=tile.sampleFlags[p];const double normalized=tile.normalizedMosaic[p];const double gain=tile.comparisonGain[p]*source.scale;
                 sample.value=normalized*gain;sample.fallback=sample.value;sample.exposure=1/source.scale;
-                sample.finite=std::isfinite(sample.value)&&!Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective);
+                sample.finite=std::isfinite(sample.value)&&std::isfinite(gain)&&gain>0&&
+                    !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)&&
+                    !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired);
                 sample.clipped=Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip);
                 sample.fallbackClipped=sample.clipped;
                 if(sample.finite&&!sample.clipped) {
@@ -271,18 +232,21 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
             groups[g][y*origin.extent.width+x]=full[g][(y+origin.originY-top)*expanded.extent.width+x+origin.originX-left];
     return true;
 }
-Pixel Blend(const std::vector<Observation>& input,const std::vector<double>& requested,const BracketingRecipe& recipe,
+Pixel BlendWithWeights(const std::vector<Observation>& input,const double* requested,std::size_t requestedCount,
+    const BracketingRecipe& recipe,
     const std::array<double,64>* colorHeadroom) {
     Pixel p;double total=0;
+    if(input.size()!=recipe.groups.size()||input.size()>p.actual.size()||
+       (requested&&requestedCount!=input.size())||(!requested&&requestedCount!=0))return p;
     for(std::size_t i=0;i<input.size();++i)
         if(recipe.groups[i].enabled) p.localRejected|=input[i].localRejected;
     for(std::size_t i=0;i<input.size();++i) if(recipe.groups[i].enabled&&input[i].support>0) {
         const auto headroom=colorHeadroom?std::min(input[i].headroom,(*colorHeadroom)[i]):input[i].headroom;
-        p.actual[i]=(requested.empty()?1/std::max(1e-12,input[i].variance):requested[i])*headroom;
+        p.actual[i]=(requested?requested[i]:1/std::max(1e-12,input[i].variance))*headroom;
         total+=p.actual[i];
     }
-    if(total<=1e-20&&!requested.empty()) {
-        p=Blend(input,{},recipe,colorHeadroom);p.fallback=true;
+    if(total<=1e-20&&requested) {
+        p=BlendWithWeights(input,nullptr,0,recipe,colorHeadroom);p.fallback=true;
         if(p.fallbackReason==MeasurementFallbackReason::None)
             p.fallbackReason=MeasurementFallbackReason::AutomaticValidInput;
         return p;
@@ -316,6 +280,10 @@ Pixel Blend(const std::vector<Observation>& input,const std::vector<double>& req
         p.fallbackReason=MeasurementFallbackReason::ShortestExposure;
     } else p.fallbackReason=MeasurementFallbackReason::NoFiniteMeasurement;
     p.fallback=true;return p;
+}
+Pixel Blend(const std::vector<Observation>& input,const std::vector<double>& requested,const BracketingRecipe& recipe,
+    const std::array<double,64>* colorHeadroom) {
+    return BlendWithWeights(input,requested.empty()?nullptr:requested.data(),requested.size(),recipe,colorHeadroom);
 }
 double Luminance(const RawMetadata& metadata,const std::array<double,4>& cell) {
     Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(metadata.cfaPattern,layout);

@@ -192,9 +192,9 @@ bool TestReformatGeometry() {
         MakeFiniteRegion({ 11, -3, 2, 2 }), input, linear);
     ok &= Check(
         mapping.executable && mapping.border == BorderPolicy::Clamp &&
-        mapping.support == NeighborhoodSupport{ 1, 1, 1, 1 } &&
+        mapping.input.bounds == input.dataWindow &&
         mapping.input.kind == RenderRegionKind::Finite,
-        "Reformat maps output ROI through inverse pixel-center sampling with named linear support and clamp border");
+        "Framing retains the complete incoming image for nondestructive reframing");
 
     ReformatSettings invalid = nearest;
     invalid.width = 0;
@@ -229,6 +229,43 @@ bool TestReformatGeometry() {
             (NormalizedPixelCenter(0, 4) + NormalizedPixelCenter(1, 4)) * 0.5 -
             NormalizedPixelCenter(0, 2)) < 1e-12,
         "a half-resolution proxy center matches the center of its full-resolution pixel footprint");
+    ReformatSettings framing;
+    framing.width = 1920;
+    const int heights[] = {1080,1280,1080,1280,1440,1920,3413};
+    for (int ratio=1; ratio<7; ++ratio) {
+        framing.canvasRatio=ratio;
+        ok &= Check(ResolveFramingCanvas(framing,3,2).height==heights[ratio], "Framing preset resolves exact integer dimensions");
+    }
+    framing.canvasRatio=7; framing.customCanvasAspect=2.39f;
+    ok &= Check(ResolveFramingCanvas(framing,3,2).height==803, "Custom canvas aspect derives an exact 1920 x 803 raster");
+    framing.canvasRatio=0; framing.width=8; framing.height=8;
+    framing.visibleAspect=2.0f;
+    framing.filter=ReconstructionFilter::Nearest;
+    const auto bars=ReformatRgbaReference(source,2,2,framing);
+    bool symmetric=true;
+    for(int y=0;y<8;++y) for(int x=0;x<8;++x) {
+        const auto i=(y*8+x)*4;
+        if(y<2 || y>=6) symmetric &= bars[i]==0 && bars[i+1]==0 && bars[i+2]==0 && bars[i+3]==1;
+    }
+    ok &= Check(symmetric, "Framing emits symmetric opaque pure-black top/bottom bars");
+    framing.visibleAspect=0.5f;
+    const auto sides=ReformatRgbaReference(source,2,2,framing);
+    symmetric=true;
+    for(int y=0;y<8;++y) for(int x=0;x<8;++x) if(x<2 || x>=6) {
+        const auto i=(y*8+x)*4;
+        symmetric &= sides[i]==0 && sides[i+1]==0 && sides[i+2]==0 && sides[i+3]==1;
+    }
+    ok &= Check(symmetric, "Framing emits symmetric opaque pure-black side bars");
+    framing.visibleAspect=0; framing.sourceScale=2; framing.sourceX=1; framing.sourceY=-1;
+    const auto moved=ResolveFramingMapping(framing,2,2);
+    ok &= Check(moved.centerX==0.25 && moved.centerY==0.75 && moved.sampleWidth==0.5 && moved.sampleHeight==0.5,
+        "Source translation uses available slack without stretching or uncovered pixels");
+    framing.sourceScale=1; framing.sourceX=0; framing.sourceY=0;
+    const auto restored=ReformatRgbaReference(source,2,2,framing);
+    ok &= Check(source.size()==16 && restored.front()==source.front() && restored[restored.size()-2]==source[14],
+        "Reframing reads the unchanged complete source after hidden pixels become visible again");
+    framing.sourceScale=0.5;
+    ok &= Check(HasIssue(ValidateReformatSettings(framing), "framing"), "Framing rejects scale that could expose uncovered regions");
     return ok;
 }
 
@@ -238,18 +275,6 @@ bool TestSpecializedBoundaries() {
     ok &= Check(raw.valid && raw.opaque && raw.regionRequirement == RegionRequirement::FullFrame &&
         raw.inputType == LogicalValueType::Raw && raw.outputType == LogicalValueType::ColorImage,
         "RAW development is an opaque typed full-frame boundary");
-    const SpecializedStagePlan frequency = PlanSpecializedStage(SpecializedStageKind::FrequencyTransform);
-    ok &= Check(frequency.valid && frequency.capability == CapabilityClass::MultipassIterative &&
-        frequency.regionRequirement == RegionRequirement::FullFrame &&
-        frequency.inputType == LogicalValueType::Channel &&
-        frequency.outputType == LogicalValueType::ComplexSpectrum,
-        "frequency transforms are typed global multipass boundaries");
-    const SpecializedStagePlan inverse =
-        PlanSpecializedStage(SpecializedStageKind::FrequencyInverseTransform);
-    ok &= Check(inverse.valid && inverse.inputType == LogicalValueType::ComplexSpectrum &&
-        inverse.outputType == LogicalValueType::Channel &&
-        inverse.capability == CapabilityClass::MultipassIterative,
-        "inverse frequency transforms declare the opposite typed boundary explicitly");
     const SpecializedStagePlan external =
         PlanSpecializedStage(SpecializedStageKind::NeuralOrExternal);
     ok &= Check(external.valid && external.inputType == LogicalValueType::Raw &&

@@ -32,10 +32,9 @@ struct GraphSnapshotInputs {
     const HdrAdoptedRawResult* hdrResult = nullptr;
     int stageOutputNodeId = 0;
     bool executionInspectionEnabled = false;
-    // Graphs owned by a RAW layer retain authored processing settings without
-    // creating editor/GL layer instances solely to capture a render snapshot.
-    const nlohmann::json* layerSettings = nullptr;
     const EditorNodeGraph::GraphOutputContext* outputContextOverrides = nullptr;
+    std::string documentId;
+    std::uint64_t authoredRevision = 0;
 };
 
 struct GraphSnapshotResult {

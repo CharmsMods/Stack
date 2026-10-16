@@ -382,8 +382,7 @@ bool EvaluateSameCfaFootprintScalar(
             error);
     }
 
-    std::vector<InterpolationVarianceTerm> interpolationTerms;
-    interpolationTerms.reserve(kSameCfaTapCount);
+    std::array<InterpolationVarianceTerm, kSameCfaTapCount> interpolationTerms;
     double value = 0.0;
     double darkVariance = 0.0;
     double gradientXPlane = 0.0;
@@ -463,19 +462,20 @@ bool EvaluateSameCfaFootprintScalar(
             footprint.derivativeXPlane[index] * comparisonSample;
         gradientYPlane +=
             footprint.derivativeYPlane[index] * comparisonSample;
-        interpolationTerms.push_back({
+        interpolationTerms[index] = {
             coefficient,
             propagated.variance,
             gain,
             usableCodeSpanDn
-        });
+        };
     }
 
     double interpolationVariance = 0.0;
     double effectiveDnStepSquared = 0.0;
     std::string varianceError;
     if (!PropagateInterpolationVariance(
-            interpolationTerms,
+            interpolationTerms.data(),
+            interpolationTerms.size(),
             interpolationVariance,
             effectiveDnStepSquared,
             &varianceError)) {

@@ -1,22 +1,13 @@
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#endif
 #include "Editor/EditorModule.h"
 #include "BracketingSession.h"
+#include "Notifications/NotificationPresenter.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
 
 namespace {
 bool ReducedProcessingMotion() {
-#if defined(_WIN32)
-    BOOL enabled=TRUE;
-    if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&enabled,0))return !enabled;
-#endif
-    return false;
+    return Stack::Notifications::SystemReducedMotion();
 }
 ImU32 ProcessingInk(float alpha,float brightness=1) {
     return ImGui::ColorConvertFloat4ToU32({brightness,brightness,brightness,alpha});
@@ -37,12 +28,21 @@ void EditorModule::UpdateBracketingPresentation(bool foreground) {
         auto& presentation = *m_Bracketing->presentation;
         presentation.previousFocus = presentation.focusWindowId = 0;
         presentation.focusCaptured = false;
+        // Keep the project-owned operation and bounded mailbox, while hidden
+        // projects release scene resources and stop their presentation work.
+        if(presentation.sceneVisible) {
+            presentation.renderer.Release();presentation.sceneVisible=false;
+        }
     }
     if(!IsBracketingPresentationActive()) {
         if(foreground&&m_Bracketing&&m_Bracketing->presentation)m_Bracketing->presentation->RestoreFocus();
         if(m_Bracketing&&m_Bracketing->presentation) {
             auto& presentation=*m_Bracketing->presentation;
-            presentation.renderer.Release();presentation.director={};presentation.mailbox->DiscardEvidence();
+            if(!presentation.terminalReleased) {
+                presentation.renderer.Release();presentation.sceneVisible=false;
+                presentation.director={};presentation.mailbox->DiscardEvidence();
+                presentation.terminalReleased=true;
+            }
         }
         return;
     }
@@ -78,13 +78,16 @@ void EditorModule::CancelBracketingPresentation() {
 void EditorModule::RenderBracketingPresentation(ImVec4, ImVec2 bodyPosition, ImVec2 bodySize) {
     if(!IsBracketingPresentationActive())return;
     auto& p=*m_Bracketing->presentation;
+    p.sceneVisible=true;
     if(!p.focusCaptured) {
         auto* window=ImGui::GetCurrentContext()->NavWindow;
         p.previousFocus=window?window->ID:0;p.focusCaptured=true;
     }
-    auto latest=p.mailbox->Read();if(!latest)latest=std::make_shared<Stack::Editor::ProcessingSnapshot>();
+    auto latest=p.mailbox->Read();
+    static const Stack::Editor::ProcessingSnapshot empty;
+    const auto& current=latest?*latest:empty;
     const double now=ImGui::GetTime();const bool reduced=ReducedProcessingMotion();
-    auto snapshot=p.director.Select(*latest,now,reduced);
+    const auto& snapshot=p.director.Select(current,now,reduced);
     const float finish=p.director.Finish(now);
     const float enter=reduced?1.f:std::clamp(float((now-p.began)/.25),0.f,1.f);
     const float alpha=enter*(1-finish);
@@ -100,27 +103,25 @@ void EditorModule::RenderBracketingPresentation(ImVec4, ImVec2 bodyPosition, ImV
     auto* draw=ImGui::GetWindowDrawList();
     draw->Flags|=ImDrawListFlags_AntiAliasedLines|ImDrawListFlags_AntiAliasedFill;
     const auto end=ImVec2{bodyPosition.x+bodySize.x,bodyPosition.y+bodySize.y};
-    draw->AddRectFilled(bodyPosition,end,ImGui::ColorConvertFloat4ToU32({.012f,.014f,.018f,alpha}));
+    // Cover the editor immediately; only the ready-result handoff reveals it.
+    draw->AddRectFilled(bodyPosition,end,ImGui::ColorConvertFloat4ToU32({0,0,0,1-finish}));
     const float font=ImGui::GetFontSize(),margin=std::max(28.f,font*2.2f);
-    const float top=std::max(86.f,font*5.8f),bottom=std::max(76.f,font*4.5f);
-    const ImVec2 scenePosition{bodyPosition.x,bodyPosition.y+top};
-    const ImVec2 sceneSize{bodySize.x,std::max(1.f,bodySize.y-top-bottom)};
+    const ImVec2 scenePosition=bodyPosition;
+    const ImVec2 sceneSize=bodySize;
     unsigned scene=0;
-    try {scene=p.renderer.Draw(snapshot,p.cards,sceneSize,{.012f,.014f,.018f,1},now-p.began,reduced);}
+    try {scene=p.renderer.Draw(snapshot,p.cards,sceneSize,{0,0,0,1},now-p.began,reduced);}
     catch(...) {scene=0;}
     if(scene) {
         draw->AddImage((ImTextureID)(intptr_t)scene,scenePosition,{end.x,scenePosition.y+sceneSize.y},{0,1},{1,0},ProcessingInk(alpha));
         p.renderer.Annotate(draw,scenePosition,sceneSize,snapshot,alpha);
     }
     const char* heading=p.canceling?"Canceling...":Raw::Bracketing::ProcessingStageTitle(snapshot.progress.stage);
-    draw->AddText({bodyPosition.x+margin,bodyPosition.y+margin},ProcessingInk(alpha*.5f),"BRACKETING");
-    draw->AddText({bodyPosition.x+margin,bodyPosition.y+margin+font*1.8f},ProcessingInk(alpha),heading);
-    if(snapshot.evidence&&!snapshot.evidence->caption.empty())
-        draw->AddText({bodyPosition.x+margin,bodyPosition.y+margin+font*3.25f},ProcessingInk(alpha*.45f),snapshot.evidence->caption.c_str());
-    else if(!scene&&!snapshot.progress.detail.empty())
-        draw->AddText({bodyPosition.x+margin,bodyPosition.y+margin+font*3.25f},ProcessingInk(alpha*.55f),snapshot.progress.detail.c_str());
     const float lineY=end.y-margin-font;
-    const auto& live=latest->progress;
+    draw->AddText({bodyPosition.x+margin,lineY-font*3},ProcessingInk(alpha*.5f),"Bracketing");
+    draw->AddText({bodyPosition.x+margin,lineY-font*1.6f},ProcessingInk(alpha),heading);
+    if(!scene&&!snapshot.progress.detail.empty())
+        draw->AddText({bodyPosition.x+margin,bodyPosition.y+margin},ProcessingInk(alpha*.55f),snapshot.progress.detail.c_str());
+    const auto& live=current.progress;
     const float dotStep=std::max(9.f,font*.7f);
     const unsigned dots=unsigned(std::min<std::size_t>(24,std::max<std::size_t>(1,p.cards.size())));
     const double fraction=live.total?std::clamp(double(live.completed)/live.total,0.,1.):0;

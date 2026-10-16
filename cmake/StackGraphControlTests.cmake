@@ -1,6 +1,11 @@
 add_executable(StackGraphControlTests
     tools/tests/graph_control_tests.cpp
     tools/tests/graph_cursor_tests.cpp
+    tools/tests/floating_slider_tests.cpp
+    tools/tests/floating_surface_tests.cpp
+    src/Utils/FloatingSurfaceInput.cpp
+    src/Editor/Internal/RawLab/RawCalibrationEditor.cpp
+    src/Raw/RawColorCalibration.cpp
     src/App/GraphNativeCursor.cpp
     src/Editor/NodeGraph/UI/ContinuousLinkStroke.cpp
     src/Editor/NodeGraph/UI/NodeSurfaceDrawing.cpp
@@ -9,6 +14,9 @@ add_executable(StackGraphControlTests
     src/Utils/ImGuiExtras.cpp
     src/Utils/GraphCursor.cpp
     src/Utils/GraphNumericControls.cpp
+    src/Utils/FloatingSlider.cpp
+    src/Utils/MorphingLabel.cpp
+    src/ThirdParty/imstb_truetype_impl.cpp
     src/Editor/NodeGraph/UI/NodeSocketGlyphs.cpp)
 target_include_directories(StackGraphControlTests PRIVATE src src/ThirdParty)
 target_link_libraries(StackGraphControlTests PRIVATE imgui_core)

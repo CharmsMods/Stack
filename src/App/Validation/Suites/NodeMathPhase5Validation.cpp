@@ -4,6 +4,7 @@
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/NodeGraph/GraphConnectionPresentation.h"
 #include "Editor/NodeGraph/GraphWireReadout.h"
@@ -41,7 +42,7 @@ std::vector<SocketCatalogNode> BuildSocketCatalogNodes() {
     std::vector<SocketCatalogNode> result;
     std::set<std::pair<int, int>> includedKindsAndValues;
     for (const EditorNodeGraphDefinitions::NodeCatalogEntry& entry :
-            EditorNodeGraphDefinitions::BuildNodeCatalogEntries()) {
+            EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries()) {
         result.push_back(SocketCatalogNode{
             entry.label,
             entry.category,
@@ -541,10 +542,6 @@ bool ValidateConnectionLabelInformationSystem() {
     EditorNodeGraph::DeserializeGraphPayload(
         persisted,
         reloadedGraph,
-        0,
-        {},
-        0,
-        0,
         0);
     const std::string serialized = persisted.dump();
     ok &= Phase5Check(
@@ -646,14 +643,6 @@ bool ValidatePhase5BSocketPresentation() {
         ok &= Phase5Check(!PrimaryDescription(socket).empty(),
             "a socket family produced no plain-language wire description");
     }
-    EditorNodeGraph::SocketDefinition spectrum {
-        EditorNodeGraph::kSpectrumOutputSocketId, 1,
-        EditorNodeGraph::SocketDirection::Output,
-        EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true };
-    NormalizeSocketDefinition(EditorNodeGraph::NodeKind::FrequencyFft, spectrum);
-    ok &= Phase5Check(
-        PrimaryDescription(spectrum) == "Complex spectrum · 2 components",
-        "complex-spectrum formatting does not report its declared component shape");
     ok &= Phase5Check(
         PrimaryDescription(redChannel) == "Red channel · 1 channel",
         "channel formatting does not distinguish a channel from a semantic mask");

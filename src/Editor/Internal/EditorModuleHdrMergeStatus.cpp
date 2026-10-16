@@ -215,10 +215,7 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
                     context.metadata = rawNode->rawSource.metadata;
                     break;
                 }
-                if (rawNode->kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-                    break;
-                }
-                rawInput = m_Project->graph.FindInputLink(rawNode->id, EditorNodeGraph::kRawInputSocketId);
+                break;
             }
         }
 

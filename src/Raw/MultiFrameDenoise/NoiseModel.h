@@ -3,6 +3,7 @@
 #include "Raw/MultiFrameDenoise/Preparation.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -108,6 +109,13 @@ struct InterpolationVarianceTerm {
     double comparisonGain = 1.0;
     double usableCodeSpanDn = 1.0;
 };
+
+bool PropagateInterpolationVariance(
+    const InterpolationVarianceTerm* terms,
+    std::size_t termCount,
+    double& variance,
+    double& effectiveDnStepSquared,
+    std::string* error = nullptr);
 
 bool PropagateInterpolationVariance(
     const std::vector<InterpolationVarianceTerm>& terms,

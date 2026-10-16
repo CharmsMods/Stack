@@ -1,5 +1,6 @@
 #include "Raw/RawGraphOperation.h"
 #include "Persistence/RawProjectEditPipeline.h"
+#include "Persistence/ManagedAssetPaths.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -280,8 +281,7 @@ bool RebaseSingleRawRecipeToManagedAsset(
     }
 
     Stack::RawRecipe::RawDevelopmentRecipe recipe = binding.recipe;
-    recipe.source.sourcePath = (
-        projectRoot / asset->projectAssetPath).lexically_normal().string();
+    recipe.source.sourcePath = ManagedAssetFilePath(projectRoot, *asset).lexically_normal().string();
     const std::uint64_t preservedPostRecipeRevision =
         snapshot.postRecipeRevision;
     const RawProjectEditRecipeUpdate update = StoreRawProjectEditRecipe(
@@ -451,11 +451,13 @@ bool StoreSingleRawRecipeInPipeline(
     }
 
     nlohmann::json* rawNode = nullptr;
+    const auto boundUuid = pipelineData.value("rawLayerSourceNodeUuid", std::string());
     for (nlohmann::json& node : *nodes) {
         if (!node.is_object() ||
             node.value("kind", std::string()) != "RawDevelopment") {
             continue;
         }
+        if (!boundUuid.empty() && node.value("instanceUuid", std::string()) != boundUuid) continue;
         if (rawNode != nullptr) {
             if (errorMessage) {
                 *errorMessage =

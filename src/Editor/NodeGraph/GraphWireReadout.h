@@ -443,19 +443,6 @@ inline Readout Build(const Input& input) {
             result.primary = "Metadata";
             result.secondary = DataSummary(input.value);
             break;
-        case LogicalValueType::ComplexSpectrum:
-            result.primary = "Spectrum" + std::string(kSeparator) + "Complex";
-            break;
-        case LogicalValueType::FrequencyResponse:
-            result.primary = "Frequency response";
-            result.secondary = "Resolution-independent response";
-            break;
-        case LogicalValueType::SpectrumMagnitude:
-            result.primary = "Spectrum" + std::string(kSeparator) + "Magnitude";
-            break;
-        case LogicalValueType::SpectrumPhase:
-            result.primary = "Spectrum" + std::string(kSeparator) + "Phase";
-            break;
         case LogicalValueType::Raw:
             result.primary = "RAW";
             result.secondary = "Sensor data";

@@ -95,6 +95,7 @@ bool RenderPipeline::StoreGraphCacheEntry(
     bool owned) {
     CachedGraphTexture replacement;
     replacement.viewportRegion = m_RawViewportAppliedRegion;
+    replacement.graphGeometry = m_CurrentGraphImageGeometry;
     replacement.texture = texture;
     replacement.fingerprint = fingerprint;
     replacement.width = m_Width;
@@ -103,11 +104,32 @@ bool RenderPipeline::StoreGraphCacheEntry(
     replacement.bytes = owned
         ? EstimateGraphTargetBytes(m_Width, m_Height)
         : 0;
+    if(owned && texture) {
+        const Stack::Renderer::GLState::TextureBinding binding(GL_TEXTURE_2D,GL_TEXTURE_BINDING_2D);
+        glBindTexture(GL_TEXTURE_2D,texture);
+        GLint bits=0;
+        for(const auto component:{GL_TEXTURE_RED_SIZE,GL_TEXTURE_GREEN_SIZE,GL_TEXTURE_BLUE_SIZE,GL_TEXTURE_ALPHA_SIZE}) {
+            GLint size=0;glGetTexLevelParameteriv(GL_TEXTURE_2D,0,component,&size);bits+=size;
+        }
+        binding.Restore();
+        if(bits>0) replacement.bytes=std::uint64_t(m_Width)*m_Height*((bits+7)/8);
+    }
     replacement.lastUseSerial = ++m_GraphResourceUseSerial;
 
     try {
         const auto location = cache.try_emplace(key).first;
         auto& entry = location->second;
+        // A thumbnail, editing preview and native render can all use the same
+        // immutable source. Keep the other extent within the existing LRU
+        // budget instead of making each request evict the previous one.
+        if(entry.owned && entry.texture && entry.texture!=texture &&
+            (entry.width!=replacement.width || entry.height!=replacement.height ||
+             entry.graphGeometry.resident != replacement.graphGeometry.resident)) {
+            const auto variant=key+"@"+std::to_string(entry.fingerprint);
+            ReleaseGraphCacheEntry(cache,variant);
+            cache.emplace(variant,entry);
+            entry={};
+        }
         const unsigned int priorTexture = entry.texture;
         const bool deletePrior =
             entry.owned &&
@@ -131,89 +153,36 @@ void RenderPipeline::TouchGraphCacheEntry(CachedGraphTexture& entry) {
     entry.lastUseSerial = ++m_GraphResourceUseSerial;
 }
 
-void RenderPipeline::DeleteFrequencyCacheEntry(CachedGraphFrequency& entry) {
-    if (entry.owned && entry.resource.texture != 0 &&
-        entry.resource.texture != m_SourceTexture &&
-        entry.resource.texture != m_ExternalOutputTexture) {
-        glDeleteTextures(1, &entry.resource.texture);
+RenderPipeline::CachedGraphTexture* RenderPipeline::FindGraphCacheEntry(
+    std::unordered_map<std::string,CachedGraphTexture>& cache,const std::string& key,std::size_t fingerprint) {
+    const auto current=cache.find(key);
+    if(current!=cache.end() && current->second.fingerprint==fingerprint && current->second.texture)
+        return &current->second;
+    const auto savedKey=key+"@"+std::to_string(fingerprint);
+    const auto saved=cache.find(savedKey);
+    if(saved==cache.end() || !saved->second.texture) return nullptr;
+    // Keep the unsuffixed entry as the currently requested representation for
+    // analysis/readback callers. Every texture still has exactly one owner.
+    const auto restored=saved->second;
+    auto& entry=cache.try_emplace(key).first->second;
+    if(entry.owned && entry.texture) {
+        const auto variant=key+"@"+std::to_string(entry.fingerprint);
+        auto& archived=cache.try_emplace(variant).first->second;
+        DeleteGraphCacheEntry(archived);
+        archived=entry;
     }
-    entry = {};
+    entry=restored;
+    cache.erase(savedKey);
+    return &entry;
 }
 
-void RenderPipeline::DestroyFrequencyCache() {
-    for (auto& [key, entry] : m_GraphFrequencyCache) {
-        (void)key;
-        DeleteFrequencyCacheEntry(entry);
-    }
-    m_GraphFrequencyCache.clear();
-    m_GraphFrequencyAnalysisCache.clear();
-}
 
-bool RenderPipeline::StoreFrequencyCacheEntry(
-    const std::string& key,
-    const RenderFrequencyResource& resource,
-    std::size_t fingerprint,
-    bool owned) {
-    CachedGraphFrequency replacement;
-    try {
-        replacement.resource = resource;
-    } catch (const std::bad_alloc&) {
-        return false;
-    } catch (const std::length_error&) {
-        return false;
-    }
-    replacement.fingerprint = fingerprint;
-    replacement.owned = owned;
-    replacement.bytes = owned
-        ? static_cast<std::uint64_t>(std::max(resource.paddedWidth, 0)) *
-          static_cast<std::uint64_t>(std::max(resource.paddedHeight, 0)) *
-          2u * sizeof(float)
-        : 0;
-    replacement.lastUseSerial = ++m_GraphResourceUseSerial;
-    static_assert(
-        std::is_nothrow_move_assignable_v<CachedGraphFrequency>,
-        "Frequency-cache replacement must commit without throwing.");
 
-    try {
-        const auto location =
-            m_GraphFrequencyCache.try_emplace(key).first;
-        auto& entry = location->second;
-        const unsigned int priorTexture = entry.resource.texture;
-        const bool deletePrior =
-            entry.owned &&
-            priorTexture != 0 &&
-            priorTexture != resource.texture;
-        entry = std::move(replacement);
-        if (deletePrior) {
-            glDeleteTextures(1, &priorTexture);
-        }
-    } catch (const std::bad_alloc&) {
-        return false;
-    } catch (const std::length_error&) {
-        return false;
-    }
-    return true;
-}
 
-void RenderPipeline::PruneInactiveFrequencyCache(
-    const GraphExecutionContext& executionContext) {
-    for (auto it = m_GraphFrequencyCache.begin(); it != m_GraphFrequencyCache.end(); ) {
-        if (!executionContext.IsActiveNode(ExtractNodeIdFromCacheKey(it->first))) {
-            DeleteFrequencyCacheEntry(it->second);
-            it = m_GraphFrequencyCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = m_GraphFrequencyAnalysisCache.begin();
-         it != m_GraphFrequencyAnalysisCache.end(); ) {
-        if (!executionContext.IsActiveNode(ExtractNodeIdFromCacheKey(it->first))) {
-            it = m_GraphFrequencyAnalysisCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
+
+
+
+
 
 std::uint64_t RenderPipeline::GraphPersistentCacheBytes() const {
     std::uint64_t total = 0;
@@ -229,7 +198,6 @@ std::uint64_t RenderPipeline::GraphPersistentCacheBytes() const {
     };
     addCache(m_GraphImageCache);
     addCache(m_GraphMaskCache);
-    addCache(m_GraphFrequencyCache);
     addCache(m_LutTextureCache);
     return total;
 }
@@ -237,7 +205,6 @@ std::uint64_t RenderPipeline::GraphPersistentCacheBytes() const {
 void RenderPipeline::TrimGraphPersistentCachesToBudget() {
     enum class CacheKind {
         None,
-        Frequency,
         Image,
         Lut,
         Mask
@@ -288,28 +255,13 @@ void RenderPipeline::TrimGraphPersistentCachesToBudget() {
         considerTextureCache(m_GraphImageCache, CacheKind::Image);
         considerTextureCache(m_GraphMaskCache, CacheKind::Mask);
         considerTextureCache(m_LutTextureCache, CacheKind::Lut);
-        for (const auto& [key, entry] : m_GraphFrequencyCache) {
-            consider(
-                CacheKind::Frequency,
-                key,
-                entry.bytes,
-                entry.lastUseSerial,
-                false);
-        }
+
 
         if (victimKey == nullptr) break;
         totalBytes = victimBytes >= totalBytes
             ? 0
             : totalBytes - victimBytes;
         switch (victimKind) {
-            case CacheKind::Frequency: {
-                const auto it = m_GraphFrequencyCache.find(*victimKey);
-                if (it != m_GraphFrequencyCache.end()) {
-                    DeleteFrequencyCacheEntry(it->second);
-                    m_GraphFrequencyCache.erase(it);
-                }
-                break;
-            }
             case CacheKind::Image:
                 ReleaseGraphCacheEntry(m_GraphImageCache, *victimKey);
                 break;

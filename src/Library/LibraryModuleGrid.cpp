@@ -128,6 +128,7 @@ void LibraryModule::RenderLibraryGrid(
                 m_LibraryViewScale * searchResultScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(asset->fileName));
+            contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(idx));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, asset->width)));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, asset->height)));
         }
@@ -148,6 +149,7 @@ void LibraryModule::RenderLibraryGrid(
                 m_LibraryViewScale * searchResultScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(project->fileName));
+            contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(idx));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, project->sourceWidth)));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, project->sourceHeight)));
         }
@@ -156,6 +158,7 @@ void LibraryModule::RenderLibraryGrid(
     std::ostringstream layoutKey;
     layoutKey << (m_ShowAssets ? 'A' : 'P')
               << '|' << static_cast<int>(std::round(layoutWidth))
+              << '|' << static_cast<int>(std::round(ImGui::GetWindowHeight()))
               << '|' << static_cast<int>(std::round(m_LibraryViewScale * 1000.0f))
               << '|' << refreshSnapshot.generation
               << '|' << m_FilterNoTag
@@ -229,7 +232,7 @@ void LibraryModule::RenderLibraryGrid(
         }
     }
     std::sort(entranceOrder.begin(), entranceOrder.end(), [](const auto& lhs, const auto& rhs) {
-        if (std::abs(lhs.second->y - rhs.second->y) > 0.5f) {
+        if (lhs.second->y != rhs.second->y) {
             return lhs.second->y < rhs.second->y;
         }
         return lhs.second->x < rhs.second->x;

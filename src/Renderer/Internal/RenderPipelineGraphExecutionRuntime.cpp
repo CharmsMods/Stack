@@ -3,6 +3,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "NodeMath/ReductionMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
+#include "Renderer/RawPreviewProxy.h"
 #include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
@@ -19,6 +20,14 @@
 #include <vector>
 
 namespace Stack::Renderer::GraphExecution {
+
+std::pair<int,int> GraphExecutionRuntime::ProjectMaskCanvasExtent(const RenderGraphNode& node) const {
+    const auto& spatial = node.semanticDescriptor.spatial;
+    if (node.kind == RenderGraphNodeKind::CustomMask && node.maskCanvasSourceNodeId<=0)
+        return RawPreviewProxy::FitPreviewExtent(node.customMask.width,node.customMask.height,pipeline.m_PreviewMaxDimension);
+    if (spatial.state != Stack::NodeMath::KnowledgeState::Known) return {0,0};
+    return RawPreviewProxy::FitPreviewExtent(spatial.value.nativeWidth,spatial.value.nativeHeight,pipeline.m_PreviewMaxDimension);
+}
 
 GraphExecutionRuntime::GraphExecutionRuntime(
     RenderPipeline& pipeline,
@@ -52,23 +61,30 @@ GraphExecutionRuntime::GraphExecutionRuntime(
     scalarFingerprintCache.reserve(executionEntryCapacity);
     visitingScalars.reserve(executionEntryCapacity);
     fingerprintingScalars.reserve(executionEntryCapacity);
-    frequencyCache.reserve(executionEntryCapacity);
-    frequencyFingerprintCache.reserve(executionEntryCapacity);
-    visitingFrequency.reserve(executionEntryCapacity);
-    fingerprintingFrequency.reserve(executionEntryCapacity);
-    responseCache.reserve(graph.nodes.size());
-    responseFingerprintCache.reserve(graph.nodes.size());
-    spectrumAnalysisCache.reserve(graph.nodes.size());
     pointwiseFusionDisabledNodes.reserve(graph.nodes.size());
+    std::vector<RenderGraphViewportEndpoint> completeConsumers;
+    if (graph.rawLayerScopeNodeId > 0 && pipeline.m_RawDevelopmentGraphScopeStage != RawDevelopmentGraphScopeStage::None)
+        completeConsumers.push_back({graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId});
+    if (rawDevelopmentSideEffectsRequested)
+        for (const auto& node : graph.nodes) if (node.kind == RenderGraphNodeKind::RawDevelopment)
+            completeConsumers.push_back({node.nodeId, "imageOut"});
+    viewportPlan = RenderTiling::PlanGraphViewport(graph, pipeline.m_BaseCanvasWidth, pipeline.m_BaseCanvasHeight,
+        pipeline.m_PreviewMaxDimension, pipeline.m_GraphViewportRequest, completeConsumers);
+    if (pipeline.m_GraphViewportRequest.enabled && !pipeline.m_GraphViewportRequest.empty && !viewportPlan.valid)
+        throw std::runtime_error(viewportPlan.reason);
+    if (viewportPlan.valid) {
+        pipeline.m_LastGraphExecutionStats.viewportCompleteDependencyPixels = viewportPlan.fullInputPixels;
+        pipeline.m_LastGraphExecutionStats.viewportWorkingBytes = viewportPlan.workingBytes;
+        pipeline.m_LastGraphExecutionStats.viewportPlanFingerprint = viewportPlan.fingerprint;
+    }
 
     BindMaskFingerprint();
     BindScalarFingerprint();
     BindImageFingerprint();
-    BindFrequencyFingerprints();
-    BindFrequencyEvaluation();
     BindMaskEvaluation();
-    BindSpectrumAndScalarEvaluation();
+    BindScalarEvaluation();
     BindImageEvaluation();
+    BindViewportEvaluation();
 }
 
 void GraphExecutionRuntime::Execute() {
@@ -79,39 +95,15 @@ void GraphExecutionRuntime::Execute() {
             continue;
         }
         const RenderGraphNode& node = *scheduledNode->second;
-        const bool scalarValueOutput =
-            (node.kind == RenderGraphNodeKind::FieldMean &&
-             scheduled.socketId == EditorNodeGraph::kValueOutputSocketId) ||
-            (node.kind == RenderGraphNodeKind::SpectrumAnalyzer &&
-             (scheduled.socketId ==
-                  EditorNodeGraph::kBandPowerOutputSocketId ||
-              scheduled.socketId ==
-                  EditorNodeGraph::kPeakFrequencyOutputSocketId ||
-              scheduled.socketId ==
-                  EditorNodeGraph::kPeakDirectionOutputSocketId));
+        const bool scalarValueOutput = ((node.kind == RenderGraphNodeKind::FieldMean || node.kind == RenderGraphNodeKind::Value) &&
+            scheduled.socketId == EditorNodeGraph::kValueOutputSocketId) ||
+            (node.kind == RenderGraphNodeKind::DataMath && node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values);
         if (scalarValueOutput) {
             double ignoredValue = 0.0;
             (void)evalScalar(
                 scheduled.nodeId,
                 scheduled.socketId,
                 ignoredValue);
-            continue;
-        }
-        if (node.kind == RenderGraphNodeKind::FrequencyResponse) {
-            RenderFrequencyResponseSettings ignoredResponse;
-            (void)evalResponse(scheduled.nodeId, ignoredResponse);
-            continue;
-        }
-        const bool frequencyOutput =
-            node.kind == RenderGraphNodeKind::FrequencyFft ||
-            node.kind == RenderGraphNodeKind::ApplyFrequencyResponse ||
-            node.kind == RenderGraphNodeKind::CombineSpectra ||
-            node.kind == RenderGraphNodeKind::SpectrumSeparate ||
-            node.kind == RenderGraphNodeKind::SpectrumRecombine;
-        if (frequencyOutput) {
-            (void)evalFrequency(
-                scheduled.nodeId,
-                scheduled.socketId);
             continue;
         }
         if (IsScalarRenderSocket(
@@ -153,11 +145,7 @@ void GraphExecutionRuntime::Execute() {
          outputIt->second->kind == RenderGraphNodeKind::CustomMask ||
          outputIt->second->kind == RenderGraphNodeKind::ChannelSplit ||
          outputIt->second->kind == RenderGraphNodeKind::ConstantChannel ||
-         outputIt->second->kind == RenderGraphNodeKind::FrequencyFilter ||
-         outputIt->second->kind == RenderGraphNodeKind::FrequencyIfft ||
-         outputIt->second->kind == RenderGraphNodeKind::FrequencyMask ||
          (outputIt->second->kind == RenderGraphNodeKind::DataMath && IsScalarRenderSocket(executionContext, graph.outputNodeId, graph.outputSocketId)) ||
-         (outputIt->second->kind == RenderGraphNodeKind::MagnitudePhase && graph.outputSocketId == EditorNodeGraph::kMaskOutputSocketId) ||
          (outputIt->second->kind == RenderGraphNodeKind::RawDetailAutoMask && graph.outputSocketId == "maskOut") ||
          (outputIt->second->kind == RenderGraphNodeKind::RawDetailFusion && graph.outputSocketId == "maskOut"))) {
         finalTexture = evalMask(graph.outputNodeId, graph.outputSocketId);
@@ -165,14 +153,32 @@ void GraphExecutionRuntime::Execute() {
         finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);
     }
     const auto finalRegion = pipeline.m_RawViewportAppliedRegion;
+    const auto finalGeometry = pipeline.m_CurrentGraphImageGeometry;
     const int finalWidth = pipeline.m_Width;
     const int finalHeight = pipeline.m_Height;
     if (graph.rawLayerScopeNodeId > 0 && pipeline.m_RawDevelopmentGraphScopeStage != RawDevelopmentGraphScopeStage::None) {
         const auto scopeTexture = evalImage(graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);
         if (pipeline.m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput)
             pipeline.CaptureRawLayerLocalScope(executionContext, graph.rawLayerScopeOperationId, scopeTexture, evalMask);
-        else pipeline.CaptureRawDevelopmentGraphScopeReadback(pipeline.m_RawDevelopmentGraphScopeStage,
-            scopeTexture, pipeline.m_Width, pipeline.m_Height, "scene-linear-raw-layer-tool-input", true);
+        else {
+            const auto& descriptor=graph.rawLayerScopeDescriptor;
+            const bool linear=descriptor.transfer.state==Stack::NodeMath::KnowledgeState::Known &&
+                descriptor.transfer.value.kind==Stack::NodeMath::TransferKind::Linear;
+            pipeline.CaptureRawDevelopmentGraphScopeReadback(pipeline.m_RawDevelopmentGraphScopeStage,
+                scopeTexture, pipeline.m_Width, pipeline.m_Height, "authored-node-input-values", linear);
+            auto& readback = pipeline.m_RawDevelopmentGraphScopeReadback;
+            if (readback.valid) readback.graphInputFingerprint=fingerprintImage(graph.rawLayerScopeNodeId,graph.rawLayerScopeSocketId);
+            if (readback.valid && readback.stage == RawDevelopmentGraphScopeStage::ColorWarpInput) {
+                const auto native = pipeline.ResolveGraphNativeExtent(executionContext,
+                    graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);
+                if (native.first > 0 && native.second > 0) {
+                    readback.sourceWidth = native.first;
+                    readback.sourceHeight = native.second;
+                }
+                readback.graphInputFingerprint = fingerprintImage(
+                    graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);
+            }
+        }
     }
     pipeline.m_OutputTexture = finalTexture ? finalTexture : 0;
     pipeline.m_GraphSourceTexture = 0;
@@ -194,6 +200,15 @@ void GraphExecutionRuntime::Execute() {
         }
     }
     pipeline.m_RawViewportAppliedRegion = finalRegion;
+    pipeline.m_GraphViewportGeometry = finalGeometry;
+    // Input crops are owned by this execution until publication. A pass-through
+    // output can itself be a crop, so transfer that one to the pipeline owner.
+    for (auto& temporary : viewportTemporaryTextures)
+        if (temporary && temporary == finalTexture) {
+            pipeline.m_ExternalOutputTexture = temporary;
+            temporary = 0;
+            break;
+        }
     if (finalTexture != 0 && finalWidth > 0 && finalHeight > 0) {
         pipeline.m_Width = finalWidth;
         pipeline.m_Height = finalHeight;
@@ -201,7 +216,6 @@ void GraphExecutionRuntime::Execute() {
 
     pipeline.PruneInactiveGraphCache(pipeline.m_GraphImageCache, executionContext);
     pipeline.PruneInactiveGraphCache(pipeline.m_GraphMaskCache, executionContext);
-    pipeline.PruneInactiveFrequencyCache(executionContext);
     for (auto scalarIt = pipeline.m_GraphScalarCache.begin(); scalarIt != pipeline.m_GraphScalarCache.end(); ) {
         if (!executionContext.IsActiveNode(ExtractNodeIdFromCacheKey(scalarIt->first))) {
             scalarIt = pipeline.m_GraphScalarCache.erase(scalarIt);

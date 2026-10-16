@@ -32,6 +32,10 @@ struct RawColorCalibrationTransform {
 RawColorCalibrationRecipe SanitizeColorCalibration(const RawColorCalibrationRecipe& recipe);
 bool IsColorCalibrationActive(const RawColorCalibrationRecipe& recipe);
 CalibrationChromaticities ColorCalibrationPrimaries(const RawColorCalibrationRecipe& recipe);
+// Inverse of the primary diagram mapping. Keeps angle continuous across a
+// full turn; zero radius retains the previous angle.
+RawPrimaryCalibration ColorCalibrationControlForPosition(
+    int primary, const std::array<double, 2>& xy, RawPrimaryCalibration previous);
 RawColorCalibrationTransform BuildColorCalibrationTransform(
     const RawColorCalibrationRecipe& recipe, Raw::RawWorkingSpace workingSpace);
 nlohmann::json SerializeColorCalibration(const RawColorCalibrationRecipe& recipe);

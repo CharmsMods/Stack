@@ -3,6 +3,9 @@
 #include "ProcessingPresentation.h"
 #include "Notifications/AsyncActivity.h"
 #include <imgui.h>
+#include <array>
+#include <limits>
+#include <unordered_map>
 
 namespace Stack::Editor {
 using Project::BracketingDraftSource;
@@ -14,6 +17,28 @@ using Project::MakeBracketingInteractiveRaw;
 // The editor adds presentation to one project's processing state. The base
 // remains usable without constructing any editor or UI.
 struct BracketingSession : Project::BracketingState {
+    // Presentation preparation is invalidated by accepted recipe changes, not
+    // camera movement, a floating-tool drag, or an unchanged visible frame.
+    std::uint64_t controlsRevision = 0;
+    std::uint64_t metadataCheckedRevision = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t observedDocumentRevision = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t observedInputRevision = std::numeric_limits<std::uint64_t>::max();
+    std::string observedStoredRecipe;
+    struct ControlsCache {
+        std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
+        bool hasContributions = false;
+        std::vector<ImVec4> colors;
+        std::unordered_map<std::string, std::size_t> sourceIndices;
+        std::vector<std::string> readingCaptions;
+    } controls;
+    struct CurvePlotCache {
+        std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
+        std::weak_ptr<const Raw::Bracketing::BracketingAnalysis> analysis;
+        float minimum = 0, maximum = 0;
+        bool automatic = false;
+        std::vector<Raw::Bracketing::Knot> suggestion;
+        std::array<std::vector<double>, 257> visible, suggested;
+    } curvePlot;
     bool selectionRestored = false, synchronizing = false;
     bool gradedResult = true;
     bool orientationReviewRequested = false;
@@ -39,6 +64,8 @@ struct BracketingSession : Project::BracketingState {
     ~BracketingSession();
 };
 ImVec4 BracketColor(const Raw::Bracketing::BracketingRecipe&,std::size_t group);
+void PrepareBracketingControls(BracketingSession&);
+bool DrawBracketingContributionTool(BracketingSession&);
 bool DrawBracketingCurves(BracketingSession&,const ImVec2&);
 void DrawBracketingPreview(BracketingSession&,const ImVec2&);
 std::shared_ptr<const Raw::Bracketing::CapturePreview> UpdateBracketingInspection(BracketingSession&,int view,const std::string& frame);

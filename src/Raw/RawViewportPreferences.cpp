@@ -56,8 +56,10 @@ void ViewportPreferencesStore::Load(const std::filesystem::path& directory) {
         std::ifstream input(path);
         const auto doc = nlohmann::json::parse(input, nullptr, false);
         if (doc.is_object()) {
-            m_Value.targetFps = ReadInt(doc, legacy ? "rawViewportTargetFps" : "targetFps", 30, 5, kMaximumViewportTargetFps);
-            m_Value.fadeBelowFps = ReadInt(doc, legacy ? "rawViewportFadeBelowFps" : "fadeBelowFps", 30, 5, kMaximumViewportFadeBelowFps);
+            m_Value.targetFps = ReadInt(doc, legacy ? "rawViewportTargetFps" : "targetFps",
+                m_Value.targetFps, kMinimumViewportTargetFps, kMaximumViewportTargetFps);
+            m_Value.fadeBelowFps = ReadInt(doc, legacy ? "rawViewportFadeBelowFps" : "fadeBelowFps",
+                m_Value.fadeBelowFps, kMinimumViewportFadeBelowFps, kMaximumViewportFadeBelowFps);
             m_Value.smoothUpdates = ReadBool(doc, legacy ? "smoothRawViewportUpdates" : "smoothUpdates", true);
             m_Value.minimumDetailPercent = ReadInt(doc, "minimumDetailPercent", 100, 25, 100);
             m_Value.mode = ReadInt(doc, "mode", 0, 0, 1) == 1 ? ViewportInteractionMode::PreserveDetail : ViewportInteractionMode::TargetFps;

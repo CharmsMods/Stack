@@ -33,6 +33,7 @@
 #include <unordered_map>
 
 struct GLFWwindow;
+struct UiPerformanceCapture;
 
 class AppShell {
 public:
@@ -41,6 +42,9 @@ public:
 
     bool Initialize(const std::string& title, int width, int height);
     void Run();
+    void ConfigureUiPerformanceCapture(std::filesystem::path project,std::filesystem::path output,
+        const std::string& onlyScenario = {});
+    bool WasUiPerformanceCaptureSuccessful() const;
     void Shutdown();
 
     void ConfigureDiagnosticProjectOpen(
@@ -52,6 +56,9 @@ public:
         std::filesystem::path destination,
         bool sourceImage = false);
     bool WasDiagnosticQueueExportSuccessful() const;
+    void ConfigureDiagnosticQueueCurrent(
+        std::filesystem::path projectPath,
+        std::filesystem::path destination);
     void ConfigureDiagnosticGalleryInspection(
         std::filesystem::path firstSource,
         std::filesystem::path latestSource);
@@ -64,6 +71,11 @@ public:
     void HandleDrop(int count, const char** paths);
 
 private:
+    void PaceUiPerformanceCapture();
+    void TickUiPerformanceCapture();
+    void TickUiViewportQualityCapture();
+    void FinishUiPerformanceFrame();
+    std::unique_ptr<UiPerformanceCapture> m_UiPerformanceCapture;
     void ApplyRailNavigation();
     void LayoutNavigationRail();
     void RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity);
@@ -160,7 +172,6 @@ private:
         const ImVec4& surfaceColor);
     void RenderLibraryWindow();
     bool IsLibraryWindowOpenAndHovered() const;
-    void RenderLegalGate();
     void RenderClosingFrame();
     void StartAutomaticUpdateCheckIfAllowed();
     void RenderEditorSavePrompts();
@@ -192,6 +203,7 @@ private:
     Stack::Notifications::PresentationContext NotificationContext();
     void TickDiagnosticProjectOpen();
     void TickDiagnosticQueueExport();
+    void StartDiagnosticQueueCurrent();
     void TickDiagnosticGalleryInspection();
     void CompleteDiagnosticGalleryInspection(
         Stack::RawGalleryInspection::Result result);
@@ -324,7 +336,6 @@ private:
     std::string m_PendingMainWindowCloseSource;
     bool m_SettingsPopupOpen = false;
     double m_SettingsPopupOpenedAt = 0.0;
-    bool m_ShowLegalGateReview = false;
     bool m_ShowOpenProjectPrompt = false;
     bool m_ShowFileDispositionPrompt = false;
     bool m_FileActionSavePending = false;
@@ -332,6 +343,12 @@ private:
     PendingFileAction m_PendingFileAction = PendingFileAction::None;
     std::filesystem::path m_PendingFileProjectPath;
     std::filesystem::path m_PendingFileMenuSaveAsDestination;
+    std::uint64_t m_PendingFileMenuSaveAsWorkspace = 0;
+    std::string m_PendingFileMenuSaveAsDocument;
+    bool m_ShowProjectRenamePrompt = false;
+    std::uint64_t m_ProjectRenameWorkspace = 0;
+    std::string m_ProjectRenameDocument;
+    char m_ProjectRenameBuffer[256] = {};
     int m_PendingFileMenuSaveAsQueuedFrame = -1;
     char m_SaveNameBuffer[256] = {};
     std::shared_ptr<Stack::Notifications::NotificationStore> m_NotificationStore =
@@ -363,6 +380,9 @@ private:
     std::filesystem::path m_DiagnosticQueueProjectPath;
     std::filesystem::path m_DiagnosticQueueDestination;
     bool m_DiagnosticQueueSourceImage = false;
+    bool m_DiagnosticQueueCurrent = false;
+    int m_DiagnosticQueueExpectedWidth = 0;
+    int m_DiagnosticQueueExpectedHeight = 0;
     double m_DiagnosticQueueStartedAt = 0.0;
     bool m_DiagnosticQueueActive = false;
     bool m_DiagnosticQueueSuccessful = false;
@@ -388,11 +408,11 @@ private:
     std::unique_ptr<AppLegal::Manager> m_LegalManager;
     std::unique_ptr<AppUpdate::UpdateManager> m_UpdateManager;
     bool m_StartupUpdateCheckStarted = false;
-    std::string m_LegalActionError;
     AppSettingsPopup::State m_SettingsPopupState;
     EditorModule* m_Editor = nullptr;
     LibraryModule m_Library;
     CompositeModule m_Composite;
     Stack::Queue::QueueModule m_Queue;
     Stack::Queue::QueueRenderCoordinator m_QueueRenderer;
+    std::string m_QueueRendererStatusForwarded;
 };

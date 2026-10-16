@@ -5,6 +5,7 @@
 #include "Project/GraphImageContracts.h"
 #include "Project/GraphSnapshotConversions.h"
 #include "Project/GraphSnapshotLookup.h"
+#include "Raw/RawSourceMetadata.h"
 #include "Persistence/RawProjectModel.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/NodeDependencyGraph.h"
@@ -180,17 +181,28 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             continue;
         }
         RenderGraphNode renderNode;
+        renderNode.authoredDocumentId = inputs.documentId;
+        renderNode.authoredGraphId = inputs.graphId;
+        renderNode.authoredNodeUuid = node.instanceUuid;
+        renderNode.authoredRevision = inputs.authoredRevision;
+        renderNode.evaluatedFrame=frameEvaluation.request.frame;
         renderNode.nodeId = node.id;
         renderNode.role = node.role;
         renderNode.reference = node.reference;
         renderNode.publishedType = node.role == Stack::GraphModel::NodeRole::Reference
             ? node.referenceType : node.outputSettings.publishedType;
-        if (const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(node))
+        if (const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(node)) {
             renderNode.outputDependencies = definition->outputDependencies;
-        if (node.kind == EditorNodeGraph::NodeKind::RawOperation)
-            for (auto& dependency : renderNode.outputDependencies)
-                if (dependency.output == "measurementImageOut")
-                    dependency.inputs = {graph.FindInputLink(node.id, "referenceIn") ? "referenceIn" : "imageIn"};
+            for (const auto& parameter : definition->parameters) {
+                if (!parameter.graphInputCapable || parameter.logicalType != NodeMath::LogicalValueType::Scalar) continue;
+                std::string path = parameter.storageKey;
+                if (node.kind == EditorNodeGraph::NodeKind::Layer)
+                    path = (nlohmann::json::json_pointer{} / parameter.storageKey).to_string();
+                if (node.kind != EditorNodeGraph::NodeKind::Layer && node.kind != EditorNodeGraph::NodeKind::RawOperation) continue;
+                renderNode.uniformParameters.push_back({parameter.id,parameter.label,std::move(path),
+                    parameter.minimum,parameter.maximum,parameter.hasNumericDomain});
+            }
+        }
         const auto dirty = inputs.nodeDirtyGenerations.find(node.id);
         renderNode.requestRevision = dirty == inputs.nodeDirtyGenerations.end()
             ? 1 : std::max<std::uint64_t>(1, dirty->second);
@@ -247,10 +259,9 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                             inputs.singleRawSource;
                     }
                 }
-                break;
-            case EditorNodeGraph::NodeKind::RawNeuralDenoise:
-                renderNode.kind = RenderGraphNodeKind::RawNeuralDenoise;
-                renderNode.rawNeuralDenoise.settings = node.rawNeuralDenoise.settings;
+                if (!renderNode.rawDevelopment.embeddedRawData)
+                    renderNode.rawDevelopment.sourceMetadata = Raw::AcquireSourceMetadata(
+                        renderNode.rawDevelopment.recipe.source.sourcePath);
                 break;
             case EditorNodeGraph::NodeKind::RawDecode:
                 renderNode.kind = RenderGraphNodeKind::RawDecode;
@@ -472,12 +483,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 break;
             case EditorNodeGraph::NodeKind::Layer:
                 renderNode.kind = RenderGraphNodeKind::Layer;
-                if (inputs.layerSettings && node.layerIndex >= 0 &&
-                    node.layerIndex < static_cast<int>(inputs.layerSettings->size())) {
-                    renderNode.layerJson = (*inputs.layerSettings)[node.layerIndex];
-                } else if (node.layerIndex >= 0 && node.layerIndex < static_cast<int>(inputs.layers.size()) && inputs.layers[node.layerIndex]) {
-                    renderNode.layerJson = inputs.layers[node.layerIndex]->Serialize();
-                }
+                renderNode.layerJson = node.layerParameters;
                 Stack::Timeline::ApplyFrameEvaluationContextToLayerJson(frameContext, node.id, node.layerType,
                     renderNode.layerJson, inputs.graphId, node.instanceUuid);
                 break;
@@ -486,6 +492,9 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 renderNode.outputChannelViewMode =
                     node.outputSettings.channelViewMode;
                 break;
+            // Both authored sources use the same GPU shape rasterizer. MaskTexture
+            // has its own source contract and no incoming image dependency.
+            case EditorNodeGraph::NodeKind::MaskTexture:
             case EditorNodeGraph::NodeKind::MaskGenerator:
                 renderNode.kind = RenderGraphNodeKind::MaskGenerator;
                 renderNode.maskKind = ToRenderMaskKind(node.maskKind);
@@ -523,12 +532,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             case EditorNodeGraph::NodeKind::DataMath:
                 renderNode.kind = RenderGraphNodeKind::DataMath;
                 renderNode.dataMathMode = static_cast<RenderDataMathMode>(node.dataMathMode);
-                renderNode.dataMathSettings.constantA = node.dataMathSettings.constantA;
-                renderNode.dataMathSettings.constantB = node.dataMathSettings.constantB;
-                renderNode.dataMathSettings.minValue = node.dataMathSettings.minValue;
-                renderNode.dataMathSettings.maxValue = node.dataMathSettings.maxValue;
-                renderNode.dataMathSettings.outMin = node.dataMathSettings.outMin;
-                renderNode.dataMathSettings.outMax = node.dataMathSettings.outMax;
+                renderNode.dataMathSettings = node.dataMathSettings;
                 break;
             case EditorNodeGraph::NodeKind::TechnicalImage:
                 renderNode.kind = RenderGraphNodeKind::TechnicalImage;
@@ -541,170 +545,6 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                             EditorNodeGraph::kExposureValueInputSocketId,
                             connectedExposure)) {
                         renderNode.technicalExposureValue = static_cast<float>(connectedExposure);
-                    }
-                }
-                break;
-            case EditorNodeGraph::NodeKind::FrequencyFilter: {
-                renderNode.kind = RenderGraphNodeKind::FrequencyFilter;
-                renderNode.frequencyFilterSettings.localResponse =
-                    ToRenderFrequencyResponseSettings(node.frequencyFilterSettings.localResponse);
-                renderNode.frequencyFilterSettings.edgePolicy =
-                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyFilterSettings.edgePolicy);
-                renderNode.frequencyFilterSettings.strength =
-                    node.frequencyFilterSettings.strength;
-                double connected = 0.0;
-                if (graphLookup.TryResolveUniformScalarInput(
-                        node.id,
-                        EditorNodeGraph::ParameterInputSocketId(
-                            EditorNodeGraph::kStrengthParameterId),
-                        connected)) {
-                    renderNode.frequencyFilterSettings.strength =
-                        std::clamp(static_cast<float>(connected), 0.0f, 1.0f);
-                }
-                break;
-            }
-            case EditorNodeGraph::NodeKind::FrequencyResponse: {
-                renderNode.kind = RenderGraphNodeKind::FrequencyResponse;
-                renderNode.frequencyResponseSettings =
-                    ToRenderFrequencyResponseSettings(node.frequencyResponseSettings);
-                const auto resolve = [&](const char* parameterId, float& target, float minimum, float maximum) {
-                    double connected = 0.0;
-                    if (graphLookup.TryResolveUniformScalarInput(
-                            node.id,
-                            EditorNodeGraph::ParameterInputSocketId(parameterId),
-                            connected)) {
-                        target = std::clamp(static_cast<float>(connected), minimum, maximum);
-                    }
-                };
-                resolve(EditorNodeGraph::kLowCutoffParameterId,
-                    renderNode.frequencyResponseSettings.lowCutoff, 0.0f, 0.5f);
-                resolve(EditorNodeGraph::kHighCutoffParameterId,
-                    renderNode.frequencyResponseSettings.highCutoff, 0.0f, 0.5f);
-                resolve(EditorNodeGraph::kTransitionWidthParameterId,
-                    renderNode.frequencyResponseSettings.transitionWidth, 0.0f, 0.5f);
-                resolve(EditorNodeGraph::kButterworthOrderParameterId,
-                    renderNode.frequencyResponseSettings.butterworthOrder, 1.0f, 12.0f);
-                for (std::size_t notchIndex = 0;
-                     notchIndex < renderNode.frequencyResponseSettings.notches.size();
-                     ++notchIndex) {
-                    RenderFrequencyNotch& notch =
-                        renderNode.frequencyResponseSettings.notches[notchIndex];
-                    const auto resolveNotch = [&](const char* field,
-                                                  float& target,
-                                                  float minimum,
-                                                  float maximum) {
-                        const std::string parameterId =
-                            EditorNodeGraph::FrequencyNotchParameterId(
-                                node.frequencyResponseSettings.notches[notchIndex].id,
-                                field);
-                        double connected = 0.0;
-                        if (graphLookup.TryResolveUniformScalarInput(
-                                node.id,
-                                EditorNodeGraph::ParameterInputSocketId(parameterId),
-                                connected)) {
-                            target = std::clamp(
-                                static_cast<float>(connected), minimum, maximum);
-                        }
-                    };
-                    resolveNotch(
-                        "frequency", notch.frequency, 0.0f, 0.5f);
-                    resolveNotch(
-                        "direction", notch.directionDegrees, -180.0f, 180.0f);
-                    resolveNotch(
-                        "width", notch.width, 0.001f, 0.25f);
-                }
-                break;
-            }
-            case EditorNodeGraph::NodeKind::FrequencyFft:
-                renderNode.kind = RenderGraphNodeKind::FrequencyFft;
-                renderNode.frequencyFftSettings.edgePolicy =
-                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyFftSettings.edgePolicy);
-                break;
-            case EditorNodeGraph::NodeKind::FrequencyIfft:
-                renderNode.kind = RenderGraphNodeKind::FrequencyIfft;
-                renderNode.frequencyIfftSettings.edgePolicy =
-                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyIfftSettings.edgePolicy);
-                break;
-            case EditorNodeGraph::NodeKind::SpectrumView:
-                renderNode.kind = RenderGraphNodeKind::SpectrumView;
-                renderNode.spectrumViewSettings.mode =
-                    static_cast<RenderSpectrumViewMode>(node.spectrumViewSettings.mode);
-                renderNode.spectrumViewSettings.lut = static_cast<RenderSpectrumViewLut>(node.spectrumViewSettings.lut);
-                renderNode.spectrumViewSettings.exposure = node.spectrumViewSettings.exposure;
-                renderNode.spectrumViewSettings.gamma = node.spectrumViewSettings.gamma;
-                renderNode.spectrumViewSettings.centerDc = node.spectrumViewSettings.centerDc;
-                break;
-            case EditorNodeGraph::NodeKind::ApplyFrequencyResponse: {
-                renderNode.kind = RenderGraphNodeKind::ApplyFrequencyResponse;
-                renderNode.applyFrequencyResponseSettings.strength =
-                    node.applyFrequencyResponseSettings.strength;
-                double connected = 0.0;
-                if (graphLookup.TryResolveUniformScalarInput(
-                        node.id,
-                        EditorNodeGraph::ParameterInputSocketId(
-                            EditorNodeGraph::kStrengthParameterId),
-                        connected)) {
-                    renderNode.applyFrequencyResponseSettings.strength =
-                        std::clamp(static_cast<float>(connected), 0.0f, 1.0f);
-                }
-                break;
-            }
-            case EditorNodeGraph::NodeKind::CombineSpectra:
-                renderNode.kind = RenderGraphNodeKind::CombineSpectra;
-                renderNode.combineSpectraSettings.mode =
-                    static_cast<RenderSpectrumCombineMode>(node.combineSpectraSettings.mode);
-                break;
-            case EditorNodeGraph::NodeKind::SpectrumSeparate:
-                renderNode.kind = RenderGraphNodeKind::SpectrumSeparate;
-                break;
-            case EditorNodeGraph::NodeKind::SpectrumRecombine:
-                renderNode.kind = RenderGraphNodeKind::SpectrumRecombine;
-                break;
-            case EditorNodeGraph::NodeKind::FrequencyMask:
-                renderNode.kind = RenderGraphNodeKind::FrequencyMask;
-                renderNode.frequencyMaskSettings.shape = static_cast<RenderFrequencyMaskShape>(node.frequencyMaskShape);
-                renderNode.frequencyMaskSettings.cutoff = node.frequencyMaskSettings.cutoff;
-                renderNode.frequencyMaskSettings.width = node.frequencyMaskSettings.width;
-                renderNode.frequencyMaskSettings.feather = node.frequencyMaskSettings.feather;
-                renderNode.frequencyMaskSettings.order = node.frequencyMaskSettings.order;
-                renderNode.frequencyMaskSettings.centerX = node.frequencyMaskSettings.centerX;
-                renderNode.frequencyMaskSettings.centerY = node.frequencyMaskSettings.centerY;
-                renderNode.frequencyMaskSettings.invert = node.frequencyMaskSettings.invert;
-                break;
-            case EditorNodeGraph::NodeKind::SpectrumMath:
-                renderNode.kind = RenderGraphNodeKind::SpectrumMath;
-                renderNode.spectrumMathMode = static_cast<RenderSpectrumMathMode>(node.spectrumMathMode);
-                renderNode.spectrumMathSettings.amount = node.spectrumMathSettings.amount;
-                break;
-            case EditorNodeGraph::NodeKind::MagnitudePhase:
-                renderNode.kind = RenderGraphNodeKind::MagnitudePhase;
-                renderNode.magnitudePhaseMode = static_cast<RenderMagnitudePhaseMode>(node.magnitudePhaseMode);
-                renderNode.magnitudePhaseSettings.exposure = node.magnitudePhaseSettings.exposure;
-                renderNode.magnitudePhaseSettings.gamma = node.magnitudePhaseSettings.gamma;
-                break;
-            case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-                renderNode.kind = RenderGraphNodeKind::SpectrumAnalyzer;
-                renderNode.spectrumAnalyzerMode = static_cast<RenderSpectrumAnalyzerMode>(node.spectrumAnalyzerMode);
-                renderNode.spectrumAnalyzerSettings.innerRadius = node.spectrumAnalyzerSettings.innerRadius;
-                renderNode.spectrumAnalyzerSettings.outerRadius = node.spectrumAnalyzerSettings.outerRadius;
-                renderNode.spectrumAnalyzerSettings.excludeDc = node.spectrumAnalyzerSettings.excludeDc;
-                {
-                    double connected = 0.0;
-                    if (graphLookup.TryResolveUniformScalarInput(
-                            node.id,
-                            EditorNodeGraph::ParameterInputSocketId(
-                                EditorNodeGraph::kAnalyzerLowParameterId),
-                            connected)) {
-                        renderNode.spectrumAnalyzerSettings.innerRadius =
-                            std::clamp(static_cast<float>(connected), 0.0f, 0.70710678f);
-                    }
-                    if (graphLookup.TryResolveUniformScalarInput(
-                            node.id,
-                            EditorNodeGraph::ParameterInputSocketId(
-                                EditorNodeGraph::kAnalyzerHighParameterId),
-                            connected)) {
-                        renderNode.spectrumAnalyzerSettings.outerRadius =
-                            std::clamp(static_cast<float>(connected), 0.0f, 0.70710678f);
                     }
                 }
                 break;
@@ -731,11 +571,13 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 renderNode.reformatSettings = node.reformatSettings;
                 break;
             case EditorNodeGraph::NodeKind::Value:
-                if (node.value.value.logicalType != NodeMath::LogicalValueType::Scalar ||
-                    node.value.value.availability != NodeMath::ValueAvailability::Known ||
-                    !std::holds_alternative<double>(node.value.value.payload)) continue;
+                if (node.value.value.logicalType != NodeMath::LogicalValueType::Scalar) continue;
                 renderNode.kind = RenderGraphNodeKind::Value;
-                renderNode.scalarValue = std::get<double>(node.value.value.payload);
+                if (node.value.value.availability == NodeMath::ValueAvailability::Known &&
+                    std::holds_alternative<double>(node.value.value.payload))
+                    renderNode.scalarValue = std::get<double>(node.value.value.payload);
+                else snapshot.unavailableOutputs[node.id] = node.value.value.message.empty()
+                    ? "The connected Scalar Value is unavailable." : node.value.value.message;
                 break;
             case EditorNodeGraph::NodeKind::Composite:
             case EditorNodeGraph::NodeKind::Scope:
@@ -803,8 +645,10 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 DeclareRawSceneOutput(descriptor,
                     node.rawDevelopment.recipe.technical.workingSpace, "raw.scene-output");
             }
-            if (node.rawDevelopment.embeddedRawData) {
-                const auto& metadata = node.rawDevelopment.embeddedRawData->metadata;
+            const auto* sourceMetadata = node.rawDevelopment.embeddedRawData
+                ? &node.rawDevelopment.embeddedRawData->metadata : node.rawDevelopment.sourceMetadata.get();
+            if (sourceMetadata && sourceMetadata->error.empty()) {
+                const auto& metadata = *sourceMetadata;
                 Stack::NodeMath::SpatialDescriptor spatial;
                 spatial.kind = Stack::NodeMath::SpatialExtentKind::Finite;
                 spatial.fullWindow = spatial.dataWindow = { 0, 0,

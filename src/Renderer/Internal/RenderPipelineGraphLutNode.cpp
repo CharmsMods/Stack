@@ -203,10 +203,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
     const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
     m_Width = inputWidth;
     m_Height = inputHeight;
-    if (maskLink != nullptr && maskTexture == 0) {
-        publishInput();
-        return result;
-    }
     if (maskTexture) {
         EnsureMaskPrograms();
         Stack::Renderer::ScopedGLTexture blended(

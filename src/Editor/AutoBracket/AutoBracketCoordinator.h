@@ -29,7 +29,6 @@ struct Work {
 };
 class AutoBracketCoordinator {
 public:
-    void Initialize();
     void SetNotificationScope(Notifications::Notifier notifier) { notifier_=std::move(notifier); }
     void Shutdown();
     bool SetRoot(const std::filesystem::path&,double now);
@@ -42,7 +41,6 @@ public:
     bool IsWritingProject(const std::filesystem::path&) const;
     void NoteActivity(double now) {lastActivity_=now;}
     void RunNow();
-    void SetEnabled(bool);
     void SetPaused(bool);
     void PauseUntilIdle(double now);
     void Retry(const std::string&);
@@ -53,7 +51,6 @@ public:
     void DismissForeground();
     bool Busy() const {return work_&&!work_->done;}
     bool HasWork() const {return work_!=nullptr;}
-    bool Enabled() const {return enabled_;}
     bool WaitingForChoice() const {return pendingAction_&&!takeoverChosen_;}
     bool Yielding() const {return pendingAction_!=nullptr;}
     const std::string& ActionLabel() const {return actionLabel_;}
@@ -70,7 +67,7 @@ private:
     void Begin(Item&,const Raw::OpenGlTaskExecutor&);
     bool IsPendingWorkEligible(const Item&,const std::string& foregroundProjectId) const;
     Queue queue_;
-    bool enabled_=true,manualRun_=false,takeoverChosen_=false,loaded_=false,storageBlocked_=false;
+    bool manualRun_=false,takeoverChosen_=false,loaded_=false,storageBlocked_=false;
     double lastActivity_=0;
     std::uint64_t generation_=0,revision_=0;
     std::uint64_t foregroundRequestId_=0;

@@ -13,7 +13,7 @@ using Project::ProcessingSnapshot;
 using Project::ProcessingMailbox;
 class ProcessingDirector {
 public:
-    ProcessingSnapshot Select(const ProcessingSnapshot&,double now,bool reduced);
+    const ProcessingSnapshot& Select(const ProcessingSnapshot&,double now,bool reduced);
     void Ready(const ProcessingSnapshot&,double now,bool reduced);
     void Skip(double now);
     bool Done(double now) const {return readyAt_>=0 && now>=deadline_;}
@@ -27,6 +27,14 @@ private:
     std::vector<ProcessingMilestone> ending_;
     ProcessingMilestone displayed_;
     bool hasDisplayed_=false;
+    ProcessingSnapshot selected_;
+    bool hasSelected_=false,hasEvidenceKey_=false;
+    std::uint64_t keyOccurrence_=0;
+    std::string keyCapture_,inputEvidenceKey_;
+    std::shared_ptr<const Raw::Bracketing::ProcessingEvidence> keyEvidence_;
+    double selectedPublication_=-1;
+    std::uint64_t selectedSequence_=0;
+    const ProcessingSnapshot& PrepareSelection(const ProcessingSnapshot&,const ProcessingMilestone*);
 };
 struct ProcessingCard {
     std::string id,label;
@@ -48,6 +56,8 @@ public:
     float AnnotationOpacity() const;
 private:
     unsigned program_=0,vao_=0,vbo_=0,fbo_=0,output_=0;
+    int imageUniform_=-1,fullscreenUniform_=-1,kindUniform_=-1,tintUniform_=-1,
+        cropUniform_=-1,warpXUniform_=-1,warpYUniform_=-1;
     int width_=0,height_=0;
     bool failed_=false;
     double lastDraw_=-1,stageStart_=0;
@@ -70,6 +80,8 @@ private:
     double evidenceStart_=0;
     std::string layoutKey_;
     double layoutChangedAt_=0;
+    double consumedPublication_=-1;
+    std::uint64_t consumedSequence_=0;
     unsigned previousOutput_=0,previousFbo_=0;
     double dissolveStart_=0,dissolveDuration_=0;
 };
@@ -80,6 +92,7 @@ struct ProcessingPresentation {
     std::string recipeIdentity,projectId;
     std::uint64_t generation=0,expectedHash=0;
     bool active=false,canceling=false,waitingForRaw=false;
+    bool sceneVisible=false,terminalReleased=false;
     ImGuiID previousFocus=0,focusWindowId=0;
     bool focusCaptured=false;
     double began=0,finishedAt=-1;

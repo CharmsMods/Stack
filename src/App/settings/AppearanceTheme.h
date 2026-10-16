@@ -111,9 +111,9 @@ struct AppearanceLibrary {
     bool graphSpotlightHaloOutlines = false;
     bool graphDottedMaskLinks = false;
     bool graphStraightLinks = false;
-    float graphLineOpacity = 1.0f;
-    float graphPanSensitivity = 0.28f;
-    float graphNodeSliderDragSensitivity = 0.16f;
+    float graphLineOpacity = 0.20f;
+    float graphPanSensitivity = 0.40f;
+    float graphNodeSliderDragSensitivity = 0.10f;
     GraphConnectionLabelVisibility graphConnectionLabels =
         GraphConnectionLabelVisibility::Adaptive;
     GraphConnectionTextLayout graphConnectionTextLayout =
@@ -161,7 +161,10 @@ const ThemeDefinition* FindPresetById(const AppearanceLibrary& library, const st
 ThemeDefinition* FindPresetById(AppearanceLibrary& library, const std::string& presetId);
 
 bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary);
+bool LoadAppearanceLibrary(const std::filesystem::path& settingsPath, AppearanceLibrary& outLibrary);
 bool SaveAppearanceLibrary(const AppearanceLibrary& library, std::string* errorMessage = nullptr);
+bool SaveAppearanceLibrary(const std::filesystem::path& settingsPath,
+    const AppearanceLibrary& library, std::string* errorMessage = nullptr);
 bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessage = nullptr);
 bool LoadThemePresetFile(const std::filesystem::path& path, ThemeDefinition& outTheme, std::string* errorMessage = nullptr);
 bool SaveThemePresetFile(const std::filesystem::path& path, const ThemeDefinition& theme, std::string* errorMessage = nullptr);

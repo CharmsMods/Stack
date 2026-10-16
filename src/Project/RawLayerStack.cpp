@@ -1,11 +1,22 @@
 #include "Project/RawLayerStack.h"
+#include "Project/RawCapturedMask.h"
+#include "NodeMath/ToneCurveParameters.h"
 
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace Stack::Project {
 namespace {
+void ClearPendingAnalysis(RawLayerStackState& state) {
+    const auto clear=[](RawAdjustmentLayer& layer) {
+        for (auto& node:layer.graph.GetNodes()) if (node.kind==EditorNodeGraph::NodeKind::RawOperation &&
+            node.rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve)
+            NodeMath::ClearPendingToneCurveAnalysis(node.rawOperation.parameters);
+    };
+    clear(state.background);for (auto& layer:state.layers) clear(layer);
+}
 std::string NextIdentity(RawLayerStackState& state, const char* prefix) {
     if (state.nextId == 0 || state.nextId == std::numeric_limits<std::uint64_t>::max())
         throw std::overflow_error("RAW layer identity space is exhausted.");
@@ -43,9 +54,14 @@ const RawMaskOutput* FindRawMaskOutput(const RawLayerStackState& state, const Ra
 }
 
 std::string AddRawAdjustmentLayer(RawLayerStackState& state, std::string name) {
+    const auto input = RawMainOutputEndpoint(state);
     auto layer = MakeRawLayer(NextIdentity(state, "layer-"),
         name.empty() ? "Layer " + std::to_string(state.layers.size() + 1) : std::move(name));
     const auto id = layer.id;
+    if (state.explicitRouting) {
+        layer.imageInput = input;
+        state.imageOutput = RawLayerEndpoint(layer,*FindRawRole(layer,GraphModel::NodeRole::LayerResult));
+    }
     state.layers.push_back(std::move(layer));
     return id;
 }
@@ -57,10 +73,33 @@ bool MoveRawAdjustmentLayer(RawLayerStackState& state, const std::string& id,
         return false;
     }
     auto candidate = state;
+    if (candidate.explicitRouting) {
+        // The list represents a simple main chain. Branches are reordered by
+        // their visible graph wires instead of silently rerouting other outputs.
+        auto expected = RawLayerEndpoint(candidate.background,*FindRawRole(candidate.background,GraphModel::NodeRole::LayerResult));
+        for (const auto& layer : candidate.layers) {
+            if (!layer.imageInput || !(*layer.imageInput == expected)) {
+                error = "Reorder this branched chain by connecting its layer caps in Graph.";
+                return false;
+            }
+            expected = RawLayerEndpoint(layer,*FindRawRole(layer,GraphModel::NodeRole::LayerResult));
+        }
+        if (!candidate.imageOutput || !(*candidate.imageOutput == expected)) {
+            error = "Reorder this chain in Graph."; return false;
+        }
+    }
     const auto oldIndex = static_cast<std::size_t>(FindRawAdjustmentLayer(candidate, id) - candidate.layers.data());
     auto moved = std::move(candidate.layers[oldIndex]);
     candidate.layers.erase(candidate.layers.begin() + oldIndex);
     candidate.layers.insert(candidate.layers.begin() + index, std::move(moved));
+    if (candidate.explicitRouting) {
+        auto previous = RawLayerEndpoint(candidate.background,*FindRawRole(candidate.background,GraphModel::NodeRole::LayerResult));
+        for (auto& layer : candidate.layers) {
+            layer.imageInput = previous;
+            previous = RawLayerEndpoint(layer,*FindRawRole(layer,GraphModel::NodeRole::LayerResult));
+        }
+        candidate.imageOutput = previous;
+    }
     if (!ValidateRawLayerStack(candidate, error)) return false;
     state = std::move(candidate);
     return true;
@@ -89,11 +128,34 @@ const EditorNodeGraph::Node* FindRawPublishedNode(const RawAdjustmentLayer& laye
     return nullptr;
 }
 
+RawMaskReference AddRawShapeMask(RawLayerStackState& state, const std::string& layerId,
+    EditorNodeGraph::MaskGeneratorKind kind, std::string name) {
+    using Kind = EditorNodeGraph::MaskGeneratorKind;
+    if (kind != Kind::LinearGradient && kind != Kind::RadialGradient && kind != Kind::Square)
+        throw std::invalid_argument("A drawn mask needs a geometric shape.");
+    auto* layer = FindRawAdjustmentLayer(state,layerId);
+    if (!layer) return {};
+    const auto id = NextIdentity(state,"mask-");
+    auto* source = layer->graph.AddMaskTextureNode(kind,{0,230.f * layer->maskOutputs.size()});
+    source->title = name + " mask texture";
+    // The owning RAW project supplies the canvas. No adjustment supplies pixels
+    // to this source, and its shape remains editable independently of consumers.
+    source->rawCoverage = {{"canvas","project"}};
+    layer->maskOutputs.push_back({id,std::move(name),source->id,source->instanceUuid});
+    return {layer->id,id};
+}
+
+GraphModel::Endpoint RawMaskEndpoint(const RawAdjustmentLayer& layer, const EditorNodeGraph::Node& node) {
+    return RawLayerEndpoint(layer,node,(node.kind == EditorNodeGraph::NodeKind::MaskGenerator || node.kind == EditorNodeGraph::NodeKind::MaskTexture || node.kind == EditorNodeGraph::NodeKind::CustomMask) ? "maskOut" : "imageOut");
+}
+
 void RegisterRawMaskOutputs(RawLayerStackState& state, const std::string& layerId) {
     auto* layer = FindRawAdjustmentLayer(state, layerId);
     if (!layer) return;
     for (const auto& node : layer->graph.GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::Output || !node.outputSettings.maskOutput) continue;
+        const bool shape = (node.kind == EditorNodeGraph::NodeKind::MaskGenerator || node.kind == EditorNodeGraph::NodeKind::MaskTexture || node.kind == EditorNodeGraph::NodeKind::CustomMask) &&
+            node.role == GraphModel::NodeRole::Ordinary && node.rawCoverage.value("canvas",std::string{}) == "project";
+        if (!shape && (node.kind != EditorNodeGraph::NodeKind::Output || !node.outputSettings.maskOutput)) continue;
         const auto found = std::find_if(layer->maskOutputs.begin(), layer->maskOutputs.end(),
             [&](const auto& output) { return output.nodeUuid == node.instanceUuid; });
         if (found == layer->maskOutputs.end())
@@ -102,16 +164,47 @@ void RegisterRawMaskOutputs(RawLayerStackState& state, const std::string& layerI
     }
 }
 
+bool RawLayerStackDocument::CompleteMaskCapture(const std::string& layerId, const std::string& maskUuid,
+    const std::string& token, const Assets::Record& asset, std::string& error) try {
+    if (!asset.data || asset.kind!=Assets::Kind::Mask) {error="Capture has no coverage pixels.";return false;}
+    const auto payload=CapturedMaskPayload(asset.data);
+    const auto complete=[&](RawLayerStackState& state) {
+        auto* layer=FindRawAdjustmentLayer(state,layerId);
+        if(!layer) return false;
+        for(auto& node:layer->graph.EditNodes()) if(node.instanceUuid==maskUuid &&
+            node.rawCoverage.value("captureToken",std::string{})==token) {
+            node.customMask=payload;node.title=asset.name;node.rawCoverage.erase("captureToken");
+            if(std::none_of(state.assets.begin(),state.assets.end(),[&](const auto& a){return a.id==asset.id;})) state.assets.push_back(asset);
+            return true;
+        }
+        return false;
+    };
+    auto next=m_State;
+    if(!complete(next)) {error="The unfinished mask was removed or replaced.";return false;}
+    if(!ValidateRawLayerStack(next,error)) return false;
+    // Fill the same logical capture in history too. Undoing a later curve edit
+    // must not restore an unfinished black placeholder or require a second undo
+    // merely to remove asynchronous completion.
+    auto undo=m_Undo,redo=m_Redo;auto gesture=m_Gesture;
+    for(auto& entry:undo) complete(entry.state);
+    for(auto& entry:redo) complete(entry.state);
+    if(gesture) complete(*gesture);
+    m_State=std::move(next);m_Undo=std::move(undo);m_Redo=std::move(redo);m_Gesture=std::move(gesture);
+    ++m_Revision;++m_ProcessingRevision;error.clear();return true;
+} catch (const std::exception& failure) {
+    error=failure.what();return false;
+}
+
 void RawLayerStackDocument::PushUndo(RawLayerStackState state, bool affectsPixels,
     std::optional<RawLayerSourceHistory> source) {
     constexpr std::size_t limit = 64;
     if (m_Undo.size() == limit) m_Undo.pop_front();
     m_Undo.push_back({std::move(state), affectsPixels, std::move(source)});
 }
-bool RawLayerStackDocument::Apply(RawLayerStackState candidate, std::string& error, bool affectsPixels) {
+bool RawLayerStackDocument::Apply(RawLayerStackState candidate, std::string& error, bool affectsPixels, bool completesAction) {
     if (!ValidateRawLayerStack(candidate, error)) return false;
     if (m_Gesture) { m_GestureChanged = true; m_GestureAffectsPixels |= affectsPixels; }
-    else {
+    else if (!completesAction) {
         PushUndo(std::move(m_State), affectsPixels);
         m_Redo.clear();
     }
@@ -134,7 +227,7 @@ bool RawLayerStackDocument::ApplySourceEdit(RawLayerStackState candidate,
     prepared.source = source.source;
     const bool sourceChanged = RawRecipe::SerializeWorkspaceSourceRecipe(source) !=
         RawRecipe::SerializeWorkspaceSourceRecipe(prepared);
-    if (!sourceChanged && SerializeRawLayerStack(candidate) == SerializeRawLayerStack(m_State)) return true;
+    if (!sourceChanged && SameRawLayerStackState(candidate,m_State)) return true;
     auto before = sourceChanged ? std::optional<RawLayerSourceHistory>(RawLayerSourceHistory{source,sourceSetId}) : std::nullopt;
     if (m_Gesture) {
         if (!m_GestureSource && before) m_GestureSource = std::move(before);
@@ -177,7 +270,7 @@ void RawLayerStackDocument::EndGesture() {
     const bool sourceChanged = m_GestureSource && m_GestureSourceAfter &&
         RawRecipe::SerializeWorkspaceSourceRecipe(m_GestureSource->recipe) !=
         RawRecipe::SerializeWorkspaceSourceRecipe(*m_GestureSourceAfter);
-    if (m_GestureChanged && (sourceChanged || SerializeRawLayerStack(*m_Gesture) != SerializeRawLayerStack(m_State))) {
+    if (m_GestureChanged && (sourceChanged || !SameRawLayerStackState(*m_Gesture,m_State))) {
         PushUndo(std::move(*m_Gesture), m_GestureAffectsPixels,sourceChanged ? std::move(m_GestureSource) : std::nullopt);
         m_Redo.clear();
     }
@@ -198,6 +291,7 @@ bool RawLayerStackDocument::CancelGesture(RawRecipe::RawDevelopmentRecipe* sourc
     const bool changed = m_GestureChanged;
     const bool pixelsChanged = m_GestureAffectsPixels;
     m_State = std::move(*m_Gesture);
+    ClearPendingAnalysis(m_State);
     if (m_GestureSource) *source = std::move(m_GestureSource->recipe);
     m_Gesture.reset();
     m_GestureSource.reset();
@@ -218,6 +312,7 @@ bool RawLayerStackDocument::Undo(std::string* error, const EditorNodeGraph::Grap
     auto currentSource = m_Undo.back().source ? std::optional<RawLayerSourceHistory>(RawLayerSourceHistory{*source,m_Undo.back().source->sourceSetId}) : std::nullopt;
     m_Redo.push_back({std::move(m_State), affectsPixels, std::move(currentSource)});
     m_State = std::move(m_Undo.back().state);
+    ClearPendingAnalysis(m_State);
     if (m_Undo.back().source) *source = std::move(m_Undo.back().source->recipe);
     m_Undo.pop_back();
     ++m_Revision;
@@ -235,6 +330,7 @@ bool RawLayerStackDocument::Redo(std::string* error, const EditorNodeGraph::Grap
     auto currentSource = m_Redo.back().source ? std::optional<RawLayerSourceHistory>(RawLayerSourceHistory{*source,m_Redo.back().source->sourceSetId}) : std::nullopt;
     PushUndo(std::move(m_State), affectsPixels, std::move(currentSource));
     m_State = std::move(m_Redo.back().state);
+    ClearPendingAnalysis(m_State);
     if (m_Redo.back().source) *source = std::move(m_Redo.back().source->recipe);
     m_Redo.pop_back();
     ++m_Revision;

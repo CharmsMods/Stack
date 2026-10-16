@@ -174,7 +174,9 @@ void Presenter::RenderRecord(NotificationStore& store, const Record& record,
         Muted(record.content.details);
         ImGui::TreePop();
     }
-    if (record.content.customBody && record.ownerValid && (dialog || record.kind != RecordKind::Decision)) record.content.customBody();
+    if (record.content.customBody && record.ownerValid &&
+        store.IsOperationCurrent(record.owner, record.operationId) &&
+        (dialog || record.kind != RecordKind::Decision)) record.content.customBody();
     if (!record.actionError.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, StatusInk(record));
         Wrapped(record.actionError);
@@ -184,7 +186,7 @@ void Presenter::RenderRecord(NotificationStore& store, const Record& record,
     if (!dialog) {
         ImGui::Spacing();
         RenderActions(store, record, false);
-        if (record.kind == RecordKind::Decision && record.ownerValid) {
+        if (record.kind == RecordKind::Decision && record.ownerValid && !record.Terminal()) {
             if (ImGui::Button("Review")) {
                 store.RequestCenter(record.id);
                 m_Dialog = record.id;

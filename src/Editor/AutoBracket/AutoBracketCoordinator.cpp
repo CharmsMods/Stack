@@ -3,13 +3,11 @@
 #include "Async/TaskSystem.h"
 #include "Persistence/ProjectIndex.h"
 #include "Project/ProjectPath.h"
-#include "Raw/Internal/RawWorkspaceStorageIO.h"
 #include <algorithm>
 #include <thread>
 
 namespace Stack::AutoBracket {
 namespace {
-std::filesystem::path PreferencePath(){return AppPaths::GetSettingsDirectory()/"auto-bracket.json";}
 struct Dispatch {
     std::shared_ptr<Work> work;
     std::atomic<bool> started{false};
@@ -21,11 +19,6 @@ struct Dispatch {
         }
     }
 };
-}
-void AutoBracketCoordinator::Initialize() {
-    Project::json value;if(RawWorkspace::StorageIO::ReadJsonFile(PreferencePath(),value)&&value.is_object()&&
-        value.contains("enabled")&&value["enabled"].is_boolean())
-        enabled_=value.value("enabled",true);
 }
 void AutoBracketCoordinator::Shutdown() {
     pendingAction_={};manualRun_=false;
@@ -47,6 +40,9 @@ bool AutoBracketCoordinator::SetRoot(const std::filesystem::path& root,double no
     queue_={};queue_.root=root;lastActivity_=now;manualRun_=false;completed_.reset();error_.clear();
     loaded_=true;storageBlocked_=false;
     if(!root.empty()&&!LoadQueue(root,queue_,error_))storageBlocked_=true;
+    // User pauses are temporary, including legacy queues that saved an
+    // indefinite pause. Unreadable storage still requires explicit recovery.
+    if(queue_.paused&&!storageBlocked_)queue_.resumeWhenIdle=true;
     ++revision_;return true;
 }
 bool AutoBracketCoordinator::Persist() {
@@ -61,12 +57,9 @@ void AutoBracketCoordinator::UpdateCandidates(const std::vector<Candidate>& cand
     const std::map<std::string,std::pair<std::string,std::filesystem::path>>& represented) {
     Reconcile(queue_,candidates,represented);Persist();
 }
-void AutoBracketCoordinator::SetEnabled(bool enabled) {
-    if(!RawWorkspace::StorageIO::WriteJsonFile(PreferencePath(),{{"enabled",enabled}},&error_))return;
-    enabled_=enabled;if(!enabled)manualRun_=false;++revision_;
-}
 void AutoBracketCoordinator::RunNow(){manualRun_=true;SetPaused(false);}
 void AutoBracketCoordinator::SetPaused(bool paused) {
+    if(paused){PauseUntilIdle(lastActivity_);return;}
     queue_.paused=paused;queue_.resumeWhenIdle=false;if(paused)manualRun_=false;
     // An explicit resume can retry a failed catalog write; corrupt queues remain protected.
     if(storageBlocked_&&!paused) {
@@ -85,7 +78,10 @@ void AutoBracketCoordinator::PauseUntilIdle(double now) {
 }
 void AutoBracketCoordinator::Retry(const std::string& identity) {
     for(auto& item:queue_.items)if(item.candidate.identity==identity&&item.state!=State::Running) {
-        if(item.state==State::Excluded){item.projectId.clear();item.projectPath.clear();}
+        // Attention may refer to a user-edited project with no current burst
+        // output, including a legacy queue association. Retrying it explicitly
+        // creates a separate variant; never process over the retained edits.
+        if(item.state==State::Excluded||item.state==State::Attention){item.projectId.clear();item.projectPath.clear();}
         item.state=State::Pending;item.error.clear();break;
     }
     Persist();
@@ -108,6 +104,7 @@ void AutoBracketCoordinator::DismissForeground(){pendingAction_={};actionLabel_.
 void AutoBracketCoordinator::CancelCurrent(){if(work_)work_->cancel=true;manualRun_=false;}
 void AutoBracketCoordinator::SetProtectedProjectIds(const std::vector<std::string>& projectIds,
     const std::vector<std::filesystem::path>& paths) {
+    if(protectedProjectIds_==projectIds&&protectedProjectPaths_==paths)return;
     protectedProjectIds_=projectIds;
     protectedProjectPaths_=paths;
     if(work_&&(IsProtectedPath(work_->item.projectPath)||
@@ -185,7 +182,6 @@ void AutoBracketCoordinator::Tick(double now,bool ready,bool foregroundBusy,cons
 bool AutoBracketCoordinator::CanStartWork(double now,bool ready,bool foregroundBusy,const std::string& foregroundProjectId) const {
     if(work_||completed_||pendingAction_||!loaded_||queue_.root.empty()||storageBlocked_||!ready||foregroundBusy)return false;
     if(queue_.paused&&(!queue_.resumeWhenIdle||IdleSeconds(now)<kResumeIdleSeconds))return false;
-    if(!manualRun_&&!enabled_)return false;
     return std::any_of(queue_.items.begin(),queue_.items.end(),[&](const auto& item){
         return IsPendingWorkEligible(item,foregroundProjectId);
     });

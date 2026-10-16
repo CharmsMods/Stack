@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace Raw {
+struct ReconstructionDepth;
 
 enum class CfaPattern {
     Unknown,
@@ -31,7 +32,23 @@ enum class DemosaicMethod {
     Bilinear,
     MalvarHeCutler,
     NearestNeighbor,
-    HamiltonAdams
+    HamiltonAdams,
+    EdgeWeighted,
+    SmoothHue,
+    Lmmse,
+    LmmseRefined,
+    Dcb,
+    DcbEnhanced,
+    MalvarHamilton,
+    HamiltonLmmse,
+    DcbLmmseDetail,
+    DcbLmmseShadows,
+    DcbLmmseChroma,
+    DcbLmmseMalvar,
+    Ppg,
+    Vng,
+    VngFourColor,
+    Ahd
 };
 
 enum class RawWorkingSpace {
@@ -58,7 +75,10 @@ enum class NormalizedMosaicInputContract {
     None,
     MfdReferencePreGain,
     HdrVirtualAnchorPreGain,
-    BracketingPreGain
+    BracketingPreGain,
+    // Imported floating-point DNG: black/white normalization already applied,
+    // signed/HDR range retained, optional DNG gain maps remain downstream.
+    FloatDngPreGain
 };
 
 enum class RawDecoderBackend {
@@ -321,6 +341,7 @@ struct RawMetadata {
     float isoSpeed = 0.0f;
     float apertureFNumber = 0.0f;
     float focalLengthMm = 0.0f;
+    float focalLength35mm = 0.0f;
     float focusDistanceMeters = 0.0f;
     std::string lensModel;
     std::int64_t captureTimestamp = 0;
@@ -470,6 +491,7 @@ struct RawImageData {
     // Reconstructed camera RGB has already passed sensor normalization and
     // pointwise calibration. White balance and camera color conversion follow.
     bool reconstructedCameraRgb = false;
+    std::shared_ptr<const ReconstructionDepth> reconstructionDepth;
     // Geometric coverage, independent of sensor validity or clipping. Null is opaque.
     // Covered reconstructions store both color and coverage with row zero at the top.
     std::shared_ptr<const std::vector<float>> outputCoverage;

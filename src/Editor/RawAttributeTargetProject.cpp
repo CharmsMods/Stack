@@ -3,6 +3,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Persistence/ProjectStore.h"
+#include "Persistence/ManagedAssetPaths.h"
 #include "Raw/RawLoader.h"
 
 #include <algorithm>
@@ -248,7 +249,7 @@ CreatedTargetProjectResult CreateProjectAndPasteAttributes(
     }
 
     recipe.source.sourcePath =
-        (projectRoot / asset.projectAssetPath).lexically_normal().string();
+        Stack::Project::ManagedAssetFilePath(projectRoot, asset).lexically_normal().string();
     recipe.source.fingerprint = asset.originalFileFingerprint;
     recipe.source.fileSizeBytes = asset.byteLength;
     nlohmann::json pipeline;

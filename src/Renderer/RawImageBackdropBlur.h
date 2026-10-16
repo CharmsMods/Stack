@@ -6,7 +6,7 @@
 namespace Stack::Renderer {
 struct RawImageBackdropFrame;
 
-// A local Gaussian pyramid and a broad color field over the complete photo.
+// A display-linear Gaussian pyramid and broad field over the complete photo.
 // Pixel identity and allocation are independent of window placement; the
 // owning backdrop supplies its current GL context.
 class RawImageBackdropBlur {

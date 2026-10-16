@@ -422,7 +422,7 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
     }
 
     EditorNodeGraph::Graph tempGraph;
-    EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(layerArray.size()), {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(layerArray.size()));
 
     std::vector<int> syntheticOutputNodeIds;
     for (const EditorNodeGraph::Node& node : tempGraph.GetNodes()) {

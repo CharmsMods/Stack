@@ -6,6 +6,8 @@ add_executable(StackWorkspaceCompositorTests
     tools/tests/workspace_compositor_tests.cpp
     src/App/WorkspaceSwitcherDrawing.cpp
     src/Renderer/WorkspaceCompositor.cpp
+    src/App/UiPerformanceTrace.cpp
+    src/App/AppPaths.cpp
     src/Renderer/WorkspacePreviewCache.cpp
     src/Renderer/RawImageBackdrop.cpp
     src/Renderer/RawImageBackdropBlur.cpp
@@ -15,7 +17,7 @@ add_executable(StackWorkspaceCompositorTests
 target_include_directories(StackWorkspaceCompositorTests PRIVATE src)
 target_link_libraries(StackWorkspaceCompositorTests PRIVATE imgui_core)
 if(WIN32)
-    target_link_libraries(StackWorkspaceCompositorTests PRIVATE opengl32)
+    target_link_libraries(StackWorkspaceCompositorTests PRIVATE opengl32 shell32 ole32)
 elseif(APPLE)
     target_link_libraries(StackWorkspaceCompositorTests PRIVATE "-framework OpenGL")
 else()

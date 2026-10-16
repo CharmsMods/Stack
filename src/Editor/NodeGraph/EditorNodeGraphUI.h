@@ -1,11 +1,13 @@
 #pragma once
 
 #include "Editor/GraphCapture.h"
+#include "Editor/UI/NodeOpenTransition.h"
 #include "Editor/NodeGraph/GraphEditorContext.h"
 #include "EditorNodeGraph.h"
 #include "Editor/NodeGraph/UI/NodeSocketIconTexture.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 #include "ThirdParty/json.hpp"
+#include "Utils/FloatingSlider.h"
 #include <imgui.h>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +31,11 @@ public:
     void Initialize();
     void Shutdown();
     void Render(EditorModule* editor);
+    Stack::Editor::NodeOpenTransition::Appearance CaptureNodeAppearance(
+        EditorModule* editor, int nodeId, ImVec2 canvasMinimum, ImVec2 canvasMaximum);
+    void RenderOperationControls(EditorModule* editor, int nodeId);
+    bool RenderRawScalarControl(const char* owner, const char* label, float* value,
+        float minimum, float maximum, const char* format);
     Stack::EditorGraphCapture::GraphViewportSnapshot GetGraphCaptureViewportSnapshot() const;
     void RenderGraphCapture(
         EditorModule* editor,
@@ -47,6 +54,7 @@ public:
     bool IsCatalogDocked() const { return HasCatalogHost() && m_CatalogHostExpanded; }
     void CloseTransientDrawers();
     void ResetProjectInteractionState();
+    void OpenMaskTextureInspector(const EditorNodeGraph::Node& node);
     void RenderNodesPanelDrawer(
         EditorModule* editor,
         float panelWidth,
@@ -65,6 +73,9 @@ public:
 
 
 private:
+    Stack::Editor::NodeOpenTransition::Appearance m_NodeOpenAppearance;
+    void RenderMaskTextureInspector(EditorModule* editor);
+    ImGuiExtras::FloatingSliderState m_RawSliderState;
     Stack::Editor::GraphEditorContext m_GraphContext;
     mutable std::unordered_map<std::string,bool> m_ConnectionCapabilityCache;
     bool CanConnectInContext(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
@@ -127,13 +138,20 @@ private:
         Stack::Editor::NodeGraphUILayout::NodeLogicalLayout logicalLayout;
         std::uint64_t logicalContentRevision = 0;
         std::uint64_t logicalRevision = 0;
+        std::uint64_t logicalInputRevision = 0;
         bool hasLogicalLayout = false;
+        bool hasLogicalInputs = false;
+        bool hasProjection = false;
+        std::uint64_t projectedLogicalRevision = 0;
+        EditorNodeGraph::Vec2 projectedPosition {}, projectedOrigin {}, projectedPan {};
+        float projectedZoom = 0.0f;
         CachedRect frameRect;
         CachedRect headerRect;
         CachedRect contentRect;
         CachedRect contentUsedRect;
         CachedRect persistentVisualRect;
         CachedRect overlayRect;
+        CachedRect baseOverlayRect;
         CachedRect interactionRect;
         std::vector<SocketAnchor> socketAnchors;
     };
@@ -145,7 +163,6 @@ private:
         bool showValidation = true;
         bool showContextMenu = true;
         bool showNodeBrowser = true;
-        bool showZoomDial = true;
         bool showGrid = true;
         Stack::EditorGraphCapture::Background background =
             Stack::EditorGraphCapture::Background::CurrentAppearance;
@@ -182,6 +199,7 @@ private:
         std::function<bool(const char*, const char*, float*, float, float)>
             renderSlider;
         std::function<void()> drawInlineSeparator;
+        std::function<void()>& pendingGraphAction;
     };
 
     EditorNodeGraph::Vec2 ScreenToGraph(const EditorNodeGraph::Vec2& screen) const;
@@ -199,12 +217,14 @@ private:
     void ClampPanToContent(const EditorNodeGraph::Graph& graph);
     void StopMiddlePanCapture();
     bool UpdateMiddlePanCapture(EditorModule* editor, bool graphHovered, bool allowStart);
+    void UpdateActiveNodeDrag(EditorModule* editor, EditorNodeGraph::Graph& graph);
 
     void RenderContextMenu(EditorModule* editor);
-    void RenderNode(EditorModule* editor, EditorNodeGraph::Node& node);
+    void RenderNode(EditorModule* editor, EditorNodeGraph::Node& node,
+        std::function<void()>& pendingGraphAction);
     bool RenderSourceNodeContent(NodeContentRenderContext& context);
     bool RenderMaskDataNodeContent(NodeContentRenderContext& context);
-    bool RenderFrequencyNodeContent(NodeContentRenderContext& context);
+
     bool RenderUtilityNodeContent(NodeContentRenderContext& context);
     void RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph);
     void RenderLinks(const EditorNodeGraph::Graph& graph);
@@ -212,12 +232,6 @@ private:
     void RenderPendingInputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredOutput);
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
     void RenderNodeBrowser(EditorModule* editor);
-    void RenderGraphZoomDial(
-        EditorModule* editor,
-        ImDrawList* drawList,
-        const ImVec2& canvasMin,
-        const ImVec2& canvasMax,
-        const ImVec2& canvasSize) const;
     void RenderInteractionDebugOverlay(const EditorNodeGraph::Graph& graph, int hoveredNodeId, GraphMouseOwner owner);
     void RenderChannelSplitConfirmPrompt(EditorModule* editor);
     void RenderGraphCanvas(
@@ -288,6 +302,11 @@ private:
         const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Node& node,
         NodeLayoutCache& cache) const;
+    void RefreshLogicalNodeLayoutCache(const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node, NodeLayoutCache& cache) const;
+    void ProjectNodeLayoutCache(const EditorNodeGraph::Node& node, NodeLayoutCache& cache) const;
+    std::uint64_t LogicalNodeInputRevision(const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
     Stack::Editor::NodeGraphUILayout::NodeLogicalLayout BuildLogicalNodeLayout(
         const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Node& node) const;
@@ -392,6 +411,9 @@ private:
     EditorNodeGraph::Vec2 m_CanvasMax;
     char m_SearchBuffer[128] = {};
     char m_NodeBrowserSearchBuffer[128] = {};
+    bool m_CatalogAssetsTab = false;
+    std::string m_MaskTextureInspectorUuid, m_MaskTextureInspectorOwner;
+    bool m_OpenMaskTextureInspector = false;
     ImVec2 m_CatalogHostPosition {};
     ImVec2 m_CatalogHostSize {};
     float m_CatalogHostVisibleWidth = 0.0f;
@@ -424,8 +446,14 @@ private:
     std::uint64_t m_NodeBrowserFilterCacheGraphRevision = 0;
     std::string m_NodeBrowserFilterCacheSearch;
     std::vector<std::size_t> m_NodeBrowserFilteredEntryIndices;
+    std::unordered_set<std::string> m_NodeBrowserVisibleKeys;
+    bool m_NodeBrowserVisibleCacheOpen = false;
+    bool m_NodeBrowserEntryAnimationsSettled = false;
     std::map<std::string, float> m_NodeBrowserEntryAlpha;
     std::map<int, unsigned int> m_ImagePreviewTextures;
+    struct ImagePreviewDecode;
+    std::map<int, std::shared_ptr<ImagePreviewDecode>> m_ImagePreviewDecodes;
+    int m_ImagePreviewDecodeFrame = -1;
     std::map<int, size_t> m_ImagePreviewFingerprints;
     std::map<int, ImVec2> m_ImagePreviewSizes;
     std::map<int, unsigned int> m_GraphPreviewTextures;
@@ -444,6 +472,9 @@ private:
     int m_LinkHitTestFrame = -1;
     const EditorNodeGraph::Graph* m_LinkHitTestGraph = nullptr;
     std::uint64_t m_LinkHitTestGraphRevision = 0;
+    std::uint64_t m_LinkHitTestProjectionRevision = 0;
+    std::uint64_t m_LinkHitTestDocumentRevision = 0;
+    bool m_LinkHitTestStraight = false, m_LinkHitTestLabelsHidden = false;
     EditorNodeGraph::Vec2 m_LinkHitTestScreenPos {};
     EditorNodeGraph::Link m_LinkHitTestResult;
     std::unordered_set<int> m_RevealedAdvancedInputNodes;
@@ -455,6 +486,7 @@ private:
     std::unordered_map<int, float> m_GroupEmphasisAnim;
     std::unordered_map<int, std::uint64_t> m_NodeFrontOrder;
     std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
+    mutable std::uint64_t m_NodeProjectionRevision = 0;
     std::vector<CachedRect> m_VisibleNodeFrameRects;
     mutable std::unordered_map<int, float> m_NodeMeasuredBaseHeights;
     mutable std::unordered_map<int, std::uint64_t>
@@ -463,9 +495,11 @@ private:
     std::uint64_t m_NodeFrontOrderCounter = 1;
     int m_NodeOrderCacheFrame = -1;
     const EditorNodeGraph::Graph* m_NodeOrderCacheGraph = nullptr;
+    const EditorNodeGraph::Node* m_NodeOrderCacheNodes = nullptr;
     std::uint64_t m_NodeOrderCacheGraphRevision = 0;
     std::size_t m_NodeOrderCacheNodeCount = 0;
     std::uint64_t m_NodeOrderCacheFrontCounter = 0;
+    std::uint64_t m_NodeOrderCachePresentation = 0;
     std::vector<int> m_NodeRenderOrderCache;
     std::vector<int> m_NodeHitTestOrderCache;
     EditorNodeGraph::Graph* m_RenderGraphOverride = nullptr;

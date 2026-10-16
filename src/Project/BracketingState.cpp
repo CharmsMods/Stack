@@ -10,6 +10,7 @@ void BracketingState::CancelJobs() {
     if (preparationJob) preparationJob->canceled = true;
     if (detailJob) detailJob->canceled = true;
     if (inspectionJob) inspectionJob->canceled = true;
+    if (previewJob) previewJob->canceled = true;
 }
 
 bool BracketingInputsChanged(const Raw::Bracketing::BracketingRecipe& before,
@@ -19,6 +20,10 @@ bool BracketingInputsChanged(const Raw::Bracketing::BracketingRecipe& before,
     for (auto* value : {&left, &right}) {
         value->erase("knots");
         value->erase("automatic");
+        if(value->contains("depth")) {
+            (*value)["depth"].erase("focus");(*value)["depth"].erase("focusRange");
+            (*value)["depth"].erase("blurRadius");
+        }
         for (auto& group : (*value)["groups"]) {
             group.erase("name");
             group.erase("colorSlot");
@@ -36,6 +41,8 @@ BracketingEditOutcome CommitBracketingEdit(BracketingState& state,
     const auto edited = Raw::Bracketing::Serialize(state.recipe).dump();
     if (edited == before) return outcome;
     outcome.changed = true;
+    ++state.previewRevision;
+    if (state.previewJob) state.previewJob->canceled = true;
     Raw::Bracketing::BracketingRecipe previous;
     std::string error;
     bool inputs = state.newProject;
@@ -63,7 +70,7 @@ BracketingEditOutcome CommitBracketingEdit(BracketingState& state,
     state.previewDirty = state.pending;
     state.status = state.processRequired
         ? "Changes pending. Press Process to update the result."
-        : "Updating contribution blend...";
+        : "Updating bracket output...";
     if (!document || state.newProject) return outcome;
     auto* set = FindSourceSet(*document, state.setId);
     if (!set) return outcome;
@@ -102,7 +109,9 @@ bool CanAdoptBracketingJob(const BracketingState& state, const BracketingJob& jo
 }
 
 bool AdoptBracketingJob(BracketingState& state, BracketingJob& job) {
-    if(job.result.analysis&&job.result.analysis->panorama)state.panoramaAnalysis=job.result.analysis;
+    if (job.result.analysis && (job.result.analysis->panorama ||
+        (state.recipe.reconstruction == Raw::Bracketing::ReconstructionMode::Panorama &&
+         job.result.analysis->sessionLease))) state.panoramaAnalysis = job.result.analysis;
     state.status = job.result.message;
     state.failed = job.result.status != Raw::Bracketing::BracketingResult::Status::Completed || !job.result.raw;
     if (state.failed) {
@@ -110,6 +119,8 @@ bool AdoptBracketingJob(BracketingState& state, BracketingJob& job) {
         return false;
     }
     state.preparationFailed = false;
+    ++state.previewRevision;
+    if (state.previewJob) state.previewJob->canceled = true;
     state.result = std::make_shared<Raw::Bracketing::BracketingResult>(std::move(job.result));
     state.completedRecipe = job.recipeIdentity;
     state.completedRevision = job.revision;
@@ -122,17 +133,6 @@ bool AdoptBracketingJob(BracketingState& state, BracketingJob& job) {
 bool ShouldStartPendingBracketing(const BracketingState& state, double now, bool interactionActive) {
     return state.publishRequested && state.pending && !state.processRequired &&
         !state.job && !state.failed && now - state.changedAt > .4 && !interactionActive;
-}
-
-bool RefreshBracketingInteractivePreview(BracketingState& state) {
-    if(state.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama)return false;
-    if (!state.previewDirty || state.failed || (!state.pending && !state.publishRequested) ||
-        state.processRequired || !state.result || !state.result->analysis) return false;
-    if (state.preview.samples.size() == static_cast<std::size_t>(state.preview.width) * state.preview.height * 4 * state.recipe.groups.size())
-        state.preview = Raw::Bracketing::ReblendPreview(state.preview, state.recipe, *state.result->analysis);
-    state.previewDirty = false;
-    state.interactiveRaw = MakeBracketingInteractiveRaw(state);
-    return bool(state.interactiveRaw);
 }
 
 } // namespace Stack::Project

@@ -3,14 +3,19 @@
 
 Stack::GraphRendering::RequestTag EditorModule::CurrentGraphRenderTag() const {
     Stack::GraphRendering::RequestTag tag;
-    tag.enabled = !m_RawWorkspaceRootTabActive || !IsRawWorkspaceProjectActive();
+    tag.enabled = UsesGraphViewportPreview();
     tag.outputNodeId = m_Project->graph.ResolvePreviewOutputNodeId();
-    tag.inspectionNodeId = m_AutoGainMaskPreviewNodeId;
+    tag.inspectionNodeId = IsViewMode() ? 0 : m_AutoGainMaskPreviewNodeId;
     tag.composite = GetViewportMode() == ViewportMode::CompositeCanvas;
     tag.structureRevision = m_Project->graph.GetStructureRevision();
     tag.revision = m_RenderRevision;
-    if (IsEditingRawLayerMaskGraph())
+    if (IsEditingRawLayerMaskGraph() && !IsViewMode()) {
+        const auto& workspace = *m_RawLayerMaskWorkspace;
+        tag.outputNodeId = workspace.previewOutputNodeId > 0 ? workspace.previewOutputNodeId :
+            workspace.projectCanvas ? workspace.projectCanvas->output : 0;
+        tag.structureRevision = workspace.graph.GetStructureRevision();
         StackHash::HashCombine(tag.sourceIdentity, StackHash::HashValue(m_RawLayerMaskWorkspace->layerId));
+    }
     for (const auto& node : m_Project->graph.GetNodes()) {
         using Kind = EditorNodeGraph::NodeKind;
         if (node.kind == Kind::Image || node.kind == Kind::RawSource ||

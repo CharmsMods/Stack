@@ -59,7 +59,7 @@ int main(int argc,char** argv) {
         glViewport(0,0,800,600);
         glEnable(GL_SCISSOR_TEST); glEnable(GL_CULL_FACE);
         Check(compositor.Render(ImGui::GetDrawData(),sw,ImVec4(0,0,0,1)),"compositor failed");
-        Check(glIsEnabled(GL_SCISSOR_TEST) && glIsEnabled(GL_CULL_FACE),"compositor leaked GL enable state");
+        Check(!glIsEnabled(GL_SCISSOR_TEST) && !glIsEnabled(GL_CULL_FACE),"compositor did not establish presentation state");
         glDisable(GL_SCISSOR_TEST); glDisable(GL_CULL_FACE);
         auto pixel=[](int x,int y) { std::array<unsigned char,4> p{}; glReadPixels(x,599-y,1,1,GL_RGBA,GL_UNSIGNED_BYTE,p.data()); return p; };
         auto top=pixel(410,160),bottom=pixel(410,450),fixed=pixel(15,15);
@@ -102,10 +102,10 @@ int main(int argc,char** argv) {
             auto tex=GLHelpers::CreateTextureFromPixels(nullptr,w,h,4); auto fb=GLHelpers::CreateFBO(tex);
             glBindFramebuffer(GL_FRAMEBUFFER,fb); glViewport(0,0,w,h); frame(w,h);
             auto measure=[&](bool composed) {
-                for(int i=0;i<8;++i) { if(composed) compositor.Render(ImGui::GetDrawData(),sw,ImVec4(0,0,0,1)); else ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
+                for(int i=0;i<8;++i) { if(composed) compositor.Render(ImGui::GetDrawData(),sw,ImVec4(0,0,0,1),nullptr,-1,0,false,nullptr,fb); else ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
                 glFinish(); GLuint timer[2]{}; glGenQueries(2,timer);
                 glQueryCounter(timer[0],GL_TIMESTAMP);
-                for(int i=0;i<40;++i) { if(composed) compositor.Render(ImGui::GetDrawData(),sw,ImVec4(0,0,0,1)); else ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
+                for(int i=0;i<40;++i) { if(composed) compositor.Render(ImGui::GetDrawData(),sw,ImVec4(0,0,0,1),nullptr,-1,0,false,nullptr,fb); else ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
                 glQueryCounter(timer[1],GL_TIMESTAMP); glFinish();
                 GLuint64 start=0,end=0; glGetQueryObjectui64v(timer[0],GL_QUERY_RESULT,&start); glGetQueryObjectui64v(timer[1],GL_QUERY_RESULT,&end);
                 glDeleteQueries(2,timer); return double(end-start)/1e6/40;

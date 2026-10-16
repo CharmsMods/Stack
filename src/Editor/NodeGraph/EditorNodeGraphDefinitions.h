@@ -28,7 +28,6 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node);
 std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGraph::Node& node, bool visibleOnly);
 std::string DefaultInputSocket(const EditorNodeGraph::Node& node);
 std::string DefaultOutputSocket(const EditorNodeGraph::Node& node);
-std::vector<NodeCatalogEntry> BuildNodeCatalogEntries();
 EditorNodeGraph::Node BuildPrototypeNode(const NodeCatalogEntry& entry);
 Stack::NodeMath::FirstClassValue BuildDefaultFirstClassValue(
     Stack::NodeMath::LogicalValueType type);

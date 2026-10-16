@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace Stack::RawRecipe {
@@ -24,7 +25,7 @@ Matrix Inverse(const Matrix& a) {
         a[3]*a[7]-a[4]*a[6], a[1]*a[6]-a[0]*a[7], a[0]*a[4]-a[1]*a[3]
     };
     const double determinant = a[0]*result[0] + a[1]*result[3] + a[2]*result[6];
-    if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12)
+    if (!std::isfinite(determinant) || determinant == 0.0)
         throw std::runtime_error("Color Calibration primary matrix is singular");
     for (auto& value : result) value /= determinant;
     return result;
@@ -52,17 +53,20 @@ Matrix PrimariesToXyz(const CalibrationChromaticities& primaries) {
 }
 
 float Control(float value) {
-    return std::isfinite(value) ? std::clamp(value, -100.0f, 100.0f) : 0.0f;
+    return std::isfinite(value) ? value : 0.0f;
 }
 } // namespace
 
 RawColorCalibrationRecipe SanitizeColorCalibration(const RawColorCalibrationRecipe& input) {
     auto recipe = input;
-    if (recipe.version != 1)
+    if (recipe.version != 1 && recipe.version != 2)
         throw std::runtime_error("Unsupported Color Calibration version");
     for (auto& primary : recipe.primaries) {
         primary.hue = Control(primary.hue);
         primary.saturation = Control(primary.saturation);
+        // Keep legacy documents byte-canonical until an unrestricted value
+        // is authored. Older readers reject v2 instead of silently clamping.
+        if (std::abs(primary.hue) > 100.f || std::abs(primary.saturation) > 100.f) recipe.version = 2;
     }
     return recipe;
 }
@@ -79,7 +83,7 @@ CalibrationChromaticities ColorCalibrationPrimaries(const RawColorCalibrationRec
     const auto recipe = SanitizeColorCalibration(input);
     auto result = kCalibrationPrimaries;
     for (int i = 0; i < 3; ++i) {
-        const double angle = recipe.primaries[i].hue * (0.2 * 3.14159265358979323846 / 180.0);
+        const double angle = std::remainder(double(recipe.primaries[i].hue), 1800.0) * (0.2 * 3.14159265358979323846 / 180.0);
         const double scale = std::exp2(recipe.primaries[i].saturation / 100.0);
         const double x = result[i][0] - kCalibrationWhite[0];
         const double y = result[i][1] - kCalibrationWhite[1];
@@ -89,6 +93,24 @@ CalibrationChromaticities ColorCalibrationPrimaries(const RawColorCalibrationRec
         };
     }
     return result;
+}
+
+RawPrimaryCalibration ColorCalibrationControlForPosition(
+    int primary, const std::array<double, 2>& xy, RawPrimaryCalibration previous) {
+    const auto& original = kCalibrationPrimaries.at(primary);
+    const double x = xy[0] - kCalibrationWhite[0], y = xy[1] - kCalibrationWhite[1];
+    const double ox = original[0] - kCalibrationWhite[0], oy = original[1] - kCalibrationWhite[1];
+    const double radius = std::hypot(x, y);
+    if (radius > 0.0) {
+        const double angle = (std::atan2(y,x) - std::atan2(oy,ox)) * (900.0 / 3.14159265358979323846);
+        previous.hue += static_cast<float>(std::remainder(angle - double(previous.hue), 1800.0));
+        previous.saturation = static_cast<float>(100.0 * std::log2(radius / std::hypot(ox,oy)));
+    } else {
+        // A finite value whose exponential is exactly zero at machine
+        // precision. JSON round-trips it without an infinity/null sentinel.
+        previous.saturation = std::numeric_limits<float>::lowest();
+    }
+    return previous;
 }
 
 RawColorCalibrationTransform BuildColorCalibrationTransform(
@@ -104,8 +126,11 @@ RawColorCalibrationTransform BuildColorCalibrationTransform(
     const Matrix transform = workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
         ? Multiply(referenceInverse, adjusted)
         : Multiply(Multiply(Multiply(srgbInverse, adjusted), referenceInverse), srgb);
-    for (std::size_t i = 0; i < transform.size(); ++i)
+    for (std::size_t i = 0; i < transform.size(); ++i) {
         result.matrix[i] = static_cast<float>(transform[i]);
+        if (!std::isfinite(result.matrix[i]))
+            throw std::runtime_error("Color Calibration has no finite transform for these primaries");
+    }
     return result;
 }
 

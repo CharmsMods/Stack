@@ -216,7 +216,7 @@ function Resolve-CMakePath {
 }
 
 function Close-RunningStackProcess {
-    $runningProcesses = Get-Process -Name Stack, StackModelService -ErrorAction SilentlyContinue
+    $runningProcesses = Get-Process -Name Stack, StackBurst, StackModelService -ErrorAction SilentlyContinue
     if ($runningProcesses) {
         Write-Host "Closing running Stack processes so the build can finish cleanly..."
         $runningProcesses | Stop-Process -Force
@@ -607,20 +607,6 @@ function Copy-OptionalFfmpegProvider {
     Copy-ReleaseDirectoryContents -SourceDir $Paths.FfmpegProviderSourceDir -DestinationDir $destinationDir
     Write-Host "Copied optional FFmpeg provider to: $destinationDir"
     return $true
-}
-
-function New-LicensePageFile {
-    param(
-        [string]$RootDir,
-        [string]$DestinationPath
-    )
-
-    $eulaPath = Join-Path $RootDir "legal\EULA.txt"
-    if (-not (Test-Path -LiteralPath $eulaPath)) {
-        throw "A Stack binary EULA is required before packaging an installer."
-    }
-    Ensure-StackDirectory -Path (Split-Path -Parent $DestinationPath)
-    Copy-Item -LiteralPath $eulaPath -Destination $DestinationPath -Force
 }
 
 function Write-Sha256Sums {

@@ -213,7 +213,7 @@ void LibraryModule::RenderPreviewPopup(
 
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
     ImGui::Indent(18.0f);
-    const float panelWrapX = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - 34.0f;
+    const float panelWrapX = ImGui::GetWindowSize().x - 34.0f;
     const float contentWidth = std::max(0.0f, ImGui::GetContentRegionAvail().x - 28.0f);
 
     ImGui::PushTextWrapPos(panelWrapX);
@@ -496,7 +496,7 @@ void LibraryModule::RenderAssetPreviewPopup(
 
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
     ImGui::Indent(18.0f);
-    const float panelWrapX = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - 34.0f;
+    const float panelWrapX = ImGui::GetWindowSize().x - 34.0f;
     const float contentWidth = std::max(0.0f, ImGui::GetContentRegionAvail().x - 28.0f);
 
     ImGui::PushTextWrapPos(panelWrapX);

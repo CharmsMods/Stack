@@ -59,17 +59,7 @@ std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
             1,
             std::max(GetNodeDirtyGeneration(previewNodeId), GetNodeDirtyGeneration(input->fromNodeId)));
     }
-    if (node && node->kind == EditorNodeGraph::NodeKind::FrequencyFilter) {
-        const EditorNodeGraph::Link* input =
-            m_Project->graph.FindAnyInputLink(
-                previewNodeId, EditorNodeGraph::kChannelInputSocketId);
-        if (!input) return 0;
-        return std::max<std::uint64_t>(
-            1,
-            std::max(
-                GetNodeDirtyGeneration(previewNodeId),
-                GetNodeDirtyGeneration(input->fromNodeId)));
-    }
+    
     const EditorNodeGraph::Link* input =
         m_Project->graph.FindAnyInputLink(previewNodeId,
             node && node->kind == EditorNodeGraph::NodeKind::Scope

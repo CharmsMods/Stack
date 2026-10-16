@@ -67,9 +67,12 @@ bool OpenUrl(const std::string& url, std::string* errorMessage) {
 
 bool OpenPath(const std::filesystem::path& path, std::string* errorMessage) {
 #if defined(_WIN32)
-    if (path.empty() || !std::filesystem::exists(path)) {
+    std::error_code pathError;
+    const bool exists = !path.empty() && std::filesystem::exists(path, pathError);
+    if (!exists || pathError) {
         if (errorMessage != nullptr) {
-            *errorMessage = "The requested file or folder does not exist.";
+            *errorMessage = pathError ? "Windows could not access the requested file or folder."
+                                     : "The requested file or folder does not exist.";
         }
         return false;
     }

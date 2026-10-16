@@ -195,7 +195,7 @@ CustomMaskObject DeserializeCustomMaskObject(const nlohmann::json& value) {
 
 } // namespace
 
-nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload) {
+nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload, bool includeRaster) {
     nlohmann::json objects = nlohmann::json::array();
     for (const CustomMaskObject& object : payload.objects) {
         objects.push_back(SerializeCustomMaskObject(object));
@@ -210,7 +210,7 @@ nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload) {
         { "height", payload.height },
         { "aspectLocked", payload.aspectLocked },
         { "rasterFormat", "u16le-normalized" },
-        { "rasterLayer", nlohmann::json::binary(EncodeCustomMaskRasterU16(payload.rasterLayer)) },
+        { "rasterLayer", nlohmann::json::binary(includeRaster ? EncodeCustomMaskRasterU16(payload.rasterLayer.Values()) : std::vector<unsigned char>{}) },
         { "objects", std::move(objects) },
         { "nextObjectId", payload.nextObjectId },
         { "globalOps", {
@@ -234,9 +234,8 @@ nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload) {
 CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
     CustomMaskPayload payload;
     if (!value.is_object()) {
-        payload.rasterLayer.assign(
-            static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height),
-            0.0f);
+        payload.rasterLayer = std::vector<float>(
+            static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height), 0.0f);
         return payload;
     }
 
@@ -247,11 +246,11 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
     payload.width = std::clamp(
         value.value("width", payload.width),
         1,
-        kMaximumCustomMaskDimension);
+        kMaximumMaskRasterDimension);
     payload.height = std::clamp(
         value.value("height", payload.height),
         1,
-        kMaximumCustomMaskDimension);
+        kMaximumMaskRasterDimension);
     payload.aspectLocked = value.value("aspectLocked", payload.aspectLocked);
     const auto rasterIt = value.find("rasterLayer");
     payload.rasterLayer = rasterIt != value.end()
@@ -319,7 +318,7 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
         static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
     if (!payload.rasterLayer.empty() &&
         payload.rasterLayer.size() != expected) {
-        std::vector<float>().swap(payload.rasterLayer);
+        payload.rasterLayer = std::vector<float>{};
     }
     return payload;
 }

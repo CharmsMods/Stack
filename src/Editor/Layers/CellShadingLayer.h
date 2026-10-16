@@ -2,6 +2,7 @@
 
 #include "LayerBase.h"
 #include "Renderer/GLHelpers.h"
+#include <array>
 
 class CellShadingLayer : public LayerBase {
 public:
@@ -20,6 +21,10 @@ public:
 
 private:
     unsigned int m_ShaderProgram = 0;
+    bool m_ExecutionScalar = false;
+    std::array<float,3> m_ExecutionLuma {.2126f,.7152f,.0722f};
+    std::array<float,3> m_ExecutionComponents {1,1,1};
+    std::array<int,2> m_ExecutionSourceSize {0,0};
 
     int m_Levels = 4;
     float m_Bias = 0.0f;

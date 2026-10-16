@@ -1,72 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-function Get-StackLegalManifest {
-    param([Parameter(Mandatory = $true)][string]$Root)
-
-    $path = Join-Path $Root "legal\RELEASE_LEGAL_STATUS.json"
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Missing Stack legal approval manifest: $path"
-    }
-    return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
-}
-
-function Test-StackLegalPacket {
-    param(
-        [Parameter(Mandatory = $true)][string]$Root,
-        [switch]$RequireApproved
-    )
-
-    $manifest = Get-StackLegalManifest -Root $Root
-    if ($manifest.schemaVersion -ne 1) {
-        throw "Unsupported Stack legal manifest schema: $($manifest.schemaVersion)"
-    }
-    if ($manifest.legalOwner -ne "Darynn Ho") {
-        throw "The legal manifest owner must be Darynn Ho."
-    }
-
-    $errors = New-Object System.Collections.Generic.List[string]
-    foreach ($property in $manifest.documents.PSObject.Properties) {
-        $document = $property.Value
-        $documentPath = Join-Path $Root ([string]$document.path)
-        if (-not (Test-Path -LiteralPath $documentPath -PathType Leaf)) {
-            $errors.Add("Missing $($property.Name): $($document.path)")
-            continue
-        }
-        $actualHash = (Get-FileHash -LiteralPath $documentPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $expectedHash = ([string]$document.sha256).ToLowerInvariant()
-        if ($actualHash -ne $expectedHash) {
-            $errors.Add("$($property.Name) hash changed. Expected $expectedHash; found $actualHash")
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$document.version)) {
-            $errors.Add("$($property.Name) does not have a version.")
-        }
-    }
-
-    if ($RequireApproved) {
-        if ($manifest.approvalState -ne "approved") {
-            $errors.Add("Legal approval state is '$($manifest.approvalState)', not 'approved'.")
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$manifest.approvalDate)) {
-            $errors.Add("An approved legal packet must record approvalDate.")
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$manifest.approvalReference)) {
-            $errors.Add("An approved legal packet must record a non-secret external approvalReference.")
-        }
-    }
-
-    if ($errors.Count -gt 0) {
-        throw ("Stack legal validation failed:`n - " + ($errors -join "`n - "))
-    }
-
-    return [pscustomobject]@{
-        Manifest = $manifest
-        EulaVersion = [string]$manifest.documents.eula.version
-        EulaSha256 = ([string]$manifest.documents.eula.sha256).ToLowerInvariant()
-        PrivacyVersion = [string]$manifest.documents.privacy.version
-        ApprovalState = [string]$manifest.approvalState
-    }
-}
-
 function Get-StackThirdPartyManifest {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -101,12 +34,14 @@ function Get-StackApplicableComponents {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [string]$StageDir,
-        [ValidateSet("desktop", "website")][string]$Scope = "desktop"
+        [ValidateSet("desktop", "website")][string]$Scope = "desktop",
+        [string[]]$ComponentIds = @()
     )
 
     $manifest = Get-StackThirdPartyManifest -Root $Root
     return @($manifest.components | Where-Object {
         ([string]$_.scope -eq $Scope) -and
+        (($ComponentIds.Count -eq 0) -or ($_.id -in $ComponentIds)) -and
         (Test-StackComponentPresent -Component $_ -StageDir $StageDir)
     })
 }
@@ -116,16 +51,24 @@ function Write-StackThirdPartyNotices {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$DestinationPath,
         [string]$StageDir,
-        [ValidateSet("desktop", "website")][string]$Scope = "desktop"
+        [ValidateSet("desktop", "website")][string]$Scope = "desktop",
+        [string[]]$ComponentIds = @()
     )
 
-    $components = @(Get-StackApplicableComponents -Root $Root -StageDir $StageDir -Scope $Scope)
+    $components = @(Get-StackApplicableComponents -Root $Root -StageDir $StageDir -Scope $Scope -ComponentIds $ComponentIds)
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("# Third-Party Notices")
     $lines.Add("")
     $lines.Add("This file is generated from `legal/THIRD_PARTY_COMPONENTS.json`.")
-    $lines.Add("Stack's proprietary terms do not replace or restrict the licenses below.")
+    $lines.Add("Third-party components retain their respective licenses and copyright notices below.")
     $lines.Add("")
+    if ($Scope -eq "desktop") {
+        $lines.Add("## Adobe DNG technology")
+        $lines.Add("")
+        $lines.Add("This product includes DNG technology under license by Adobe.")
+        $lines.Add("See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://helpx.adobe.com/camera-raw/desktop/dng-and-file-formats/digital-negative.html#DNGSpecificationpatentlicense).")
+        $lines.Add("")
+    }
     foreach ($component in $components) {
         $lines.Add("## $($component.name)")
         $lines.Add("")
@@ -162,18 +105,27 @@ function Write-StackThirdPartyNotices {
 function Test-StackThirdPartyStage {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$StageDir
+        [Parameter(Mandatory = $true)][string]$StageDir,
+        [string[]]$ComponentIds = @()
     )
 
     $legalDir = Join-Path $StageDir "Stack\App\Legal"
-    foreach ($required in @("EULA.txt", "PRIVACY.md", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
+    foreach ($required in @("THIRD_PARTY_NOTICES.md", "Adobe-DNG-Notice.txt")) {
         if (-not (Test-Path -LiteralPath (Join-Path $legalDir $required) -PathType Leaf)) {
             throw "Release stage is missing Stack/App/Legal/$required"
         }
     }
 
+    # The custom Stack agreement is archived, including its former runtime copy
+    # of the repository source license. Reject stale incremental-build payloads.
+    foreach ($archived in @("EULA.txt", "PRIVACY.md", "LICENSE", "INFO_BEFORE_INSTALL.txt", "RELEASE_LEGAL_STATUS.json", "archive")) {
+        if (Test-Path -LiteralPath (Join-Path $legalDir $archived)) {
+            throw "Release stage contains archived Stack agreement material: Stack/App/Legal/$archived. Rebuild before packaging."
+        }
+    }
+
     $thirdPartyDir = Join-Path $legalDir "ThirdParty"
-    $components = @(Get-StackApplicableComponents -Root $Root -StageDir $StageDir -Scope desktop)
+    $components = @(Get-StackApplicableComponents -Root $Root -StageDir $StageDir -Scope desktop -ComponentIds $ComponentIds)
     foreach ($component in $components) {
         foreach ($licenseFile in @($component.licenseFiles)) {
             $path = Join-Path $thirdPartyDir ([string]$licenseFile)
@@ -207,16 +159,20 @@ function Write-StackSpdxSbom {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$StageDir,
         [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$DestinationPath
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [string]$ProductName = "Stack",
+        [string]$ProductId = "Stack",
+        [string[]]$ComponentIds = @()
     )
 
-    $components = @(Test-StackThirdPartyStage -Root $Root -StageDir $StageDir)
+    $productSpdxId = "SPDXRef-Package-$(ConvertTo-SpdxId -Value $ProductId)"
+    $components = @(Test-StackThirdPartyStage -Root $Root -StageDir $StageDir -ComponentIds $ComponentIds)
     $files = New-Object System.Collections.Generic.List[object]
     $relationships = New-Object System.Collections.Generic.List[object]
     $relationships.Add([ordered]@{
         spdxElementId = "SPDXRef-DOCUMENT"
         relationshipType = "DESCRIBES"
-        relatedSpdxElement = "SPDXRef-Package-Stack"
+        relatedSpdxElement = $productSpdxId
     })
 
     $index = 0
@@ -236,7 +192,7 @@ function Write-StackSpdxSbom {
             copyrightText = "NOASSERTION"
         })
         $relationships.Add([ordered]@{
-            spdxElementId = "SPDXRef-Package-Stack"
+            spdxElementId = $productSpdxId
             relationshipType = "CONTAINS"
             relatedSpdxElement = $fileId
         })
@@ -244,13 +200,13 @@ function Write-StackSpdxSbom {
 
     $packages = New-Object System.Collections.Generic.List[object]
     $packages.Add([ordered]@{
-        name = "Stack"
-        SPDXID = "SPDXRef-Package-Stack"
+        name = $ProductName
+        SPDXID = $productSpdxId
         versionInfo = $Version
         downloadLocation = "https://github.com/CharmsMods/Stack/releases"
         filesAnalyzed = $true
-        licenseConcluded = "LicenseRef-Stack-EULA"
-        licenseDeclared = "LicenseRef-Stack-EULA"
+        licenseConcluded = "NOASSERTION"
+        licenseDeclared = "NOASSERTION"
         copyrightText = "Copyright (c) 2024-2026 Darynn Ho"
     })
     foreach ($component in $components) {
@@ -266,7 +222,7 @@ function Write-StackSpdxSbom {
             copyrightText = [string]$component.copyright
         })
         $relationships.Add([ordered]@{
-            spdxElementId = "SPDXRef-Package-Stack"
+            spdxElementId = $productSpdxId
             relationshipType = "DEPENDS_ON"
             relatedSpdxElement = $componentId
         })
@@ -276,21 +232,16 @@ function Write-StackSpdxSbom {
         spdxVersion = "SPDX-2.3"
         dataLicense = "CC0-1.0"
         SPDXID = "SPDXRef-DOCUMENT"
-        name = "Stack-$Version-win-x64"
-        documentNamespace = "https://github.com/CharmsMods/Stack/spdx/$Version/$([guid]::NewGuid())"
+        name = "$ProductId-$Version-win-x64"
+        documentNamespace = "https://github.com/CharmsMods/Stack/spdx/$ProductId/$Version/$([guid]::NewGuid())"
         creationInfo = [ordered]@{
             created = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             creators = @("Tool: Stack release compliance", "Person: Darynn Ho")
         }
-        documentDescribes = @("SPDXRef-Package-Stack")
+        documentDescribes = @($productSpdxId)
         packages = $packages
         files = $files
         relationships = $relationships
-        hasExtractedLicensingInfos = @([ordered]@{
-            licenseId = "LicenseRef-Stack-EULA"
-            extractedText = "Official Stack binaries are governed by the EULA.txt file included in the package."
-            name = "Stack End User License Agreement"
-        })
     }
 
     $destinationDirectory = Split-Path -Parent $DestinationPath

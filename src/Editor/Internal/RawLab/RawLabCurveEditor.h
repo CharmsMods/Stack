@@ -3,6 +3,7 @@
 #include "Editor/EditorModuleTypes.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Renderer/RenderPipeline.h"
+#include "NodeMath/ImageOperationInput.h"
 
 #include <imgui.h>
 
@@ -52,6 +53,11 @@ RawLabGraphHistogram BuildRawLabFinishToneHistogram(
     float maximumEv,
     float middleGrey);
 
+RawLabGraphHistogram BuildNodeInputToneHistogram(
+    const RawDevelopmentGraphScopeReadback& scope,
+    const NodeMath::ImageOperationInput& input, bool componentMode,
+    int domain, float minimumEv, float maximumEv, float middleGrey);
+
 RawLabToneGraphViewRange BuildRawLabToneGraphViewRange(
     const RawLabGraphHistogram& histogram,
     int activeCurve,
@@ -89,7 +95,16 @@ bool DrawBezierCurveInteraction(
     int maximumPoints,
     const std::function<RawRecipe::RawBezierSegment(const std::vector<RawRecipe::RawBezierCurvePoint>&, std::size_t)>& segmentBuilder = {},
     bool preserveEndpointX = true,
-    float* exposureEv = nullptr);
+    float* exposureEv = nullptr,
+    float interactionScale = 1.f);
+
+// The same frameless Bezier design as Local EV, with a caller-owned response
+// curve and neutral multiplier. Returns its plot bounds for a linked loupe.
+bool DrawFramelessResponseBezier(const char* id,
+    std::vector<RawRecipe::RawBezierCurvePoint>& points,
+    EditorModuleTypes::RawCurveGraphUiState& interaction,int& selectedPoint,
+    const RawLabGraphHistogram& histogram,ImVec2 size,float scale,
+    ImVec2& plotMinimum,ImVec2& plotMaximum,float probe);
 
 bool DrawFramelessToneCurveBezier(
     const char* id,
@@ -113,6 +128,7 @@ bool DrawFramelessLocalRangeBezier(
     const ImVec2& size,
     bool drawTargetZones,
     float* exposureEv = nullptr,
-    bool* curveChanged = nullptr);
+    bool* curveChanged = nullptr,
+    bool minimal = false);
 
 } // namespace Stack::Editor::RawLabInternal

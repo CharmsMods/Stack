@@ -1,0 +1,9 @@
+Adobe DNG technology notice
+
+This product includes DNG technology under license by Adobe.
+
+The DNG Specification patent license is published by Adobe:
+https://helpx.adobe.com/camera-raw/desktop/dng-and-file-formats/digital-negative.html#DNGSpecificationpatentlicense
+
+Stack's DNG writer implements the public file-format specification. No Adobe
+DNG SDK code or Adobe DNG Converter executable is included in this package.

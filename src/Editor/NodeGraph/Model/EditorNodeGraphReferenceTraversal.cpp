@@ -76,15 +76,13 @@ int Graph::ResolveReferenceSourceNodeId(
             case NodeKind::RawSource:
             case NodeKind::RawDevelopment:
             case NodeKind::ImageGenerator:
+            case NodeKind::MaskTexture:
             case NodeKind::MaskGenerator:
             case NodeKind::CustomMask:
-            case NodeKind::FrequencyMask:
+            
             case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
                 useCurrentNode();
-                break;
-            case NodeKind::RawNeuralDenoise:
-                addInput(kRawInputSocketId);
                 break;
             case NodeKind::Layer:
             case NodeKind::RawOperation:
@@ -178,40 +176,12 @@ int Graph::ResolveReferenceSourceNodeId(
             case NodeKind::ImageToMask:
                 addInput(kImageToMaskInputSocketId);
                 break;
-            case NodeKind::FrequencyFilter:
-            case NodeKind::FrequencyFft:
-                addInput(kChannelInputSocketId);
-                break;
-            case NodeKind::FrequencyIfft:
-            case NodeKind::SpectrumView:
-            case NodeKind::SpectrumSeparate:
-            case NodeKind::SpectrumAnalyzer:
-                addInput(kSpectrumInputSocketId);
-                break;
-            case NodeKind::ApplyFrequencyResponse:
-                addInput(kSpectrumInputSocketId);
-                break;
-            case NodeKind::CombineSpectra:
-                addInput(kSpectrumInputASocketId);
-                break;
-            case NodeKind::SpectrumRecombine:
-                addInput(kSpectrumMagnitudeInputSocketId);
-                break;
-            case NodeKind::SpectrumMath:
-                addInput(kMixInputASocketId);
-                break;
-            case NodeKind::MagnitudePhase:
-                addInput(
-                    node->magnitudePhaseMode == MagnitudePhaseMode::Recombine
-                        ? "magnitude"
-                        : kImageInputSocketId);
-                break;
             case NodeKind::Composite:
             case NodeKind::Scope:
             case NodeKind::Preview:
             case NodeKind::FieldMean:
             case NodeKind::Value:
-            case NodeKind::FrequencyResponse:
+            
                 break;
         }
         return plan;
@@ -272,7 +242,7 @@ int Graph::ResolveReferenceSourceNodeId(
                 const Node* source = FindNode(sourceId);
                 return source &&
                     (source->kind == NodeKind::ImageGenerator ||
-                     source->kind == NodeKind::MaskGenerator ||
+                     source->kind == NodeKind::MaskTexture || source->kind == NodeKind::MaskGenerator ||
                      source->kind == NodeKind::CustomMask);
             };
             if (sourceA > 0 &&

@@ -141,6 +141,8 @@ void AppShell::RequestFileMenuSave() {
 }
 
 void AppShell::RequestFileMenuSaveAs() {
+    const auto workspaceId = m_ActiveProjectWorkspace;
+    const auto documentId = m_Editor->EnsureProjectDocumentId();
     const EditorModule::ProjectFileCommandContext context =
         m_Editor->GetProjectFileCommandContext();
     if (!context.canSaveAs) {
@@ -190,6 +192,8 @@ void AppShell::RequestFileMenuSaveAs() {
     // mutation until the following ImGui frame so the save cannot be dropped
     // while the menu/dialog frame is still unwinding.
     m_PendingFileMenuSaveAsDestination = std::move(destination);
+    m_PendingFileMenuSaveAsWorkspace = workspaceId;
+    m_PendingFileMenuSaveAsDocument = documentId;
     m_PendingFileMenuSaveAsQueuedFrame = ImGui::GetFrameCount();
 }
 
@@ -204,7 +208,9 @@ void AppShell::DispatchPendingFileMenuSaveAs() {
         std::move(m_PendingFileMenuSaveAsDestination);
     m_PendingFileMenuSaveAsDestination.clear();
     m_PendingFileMenuSaveAsQueuedFrame = -1;
-    m_Editor->RequestSaveProjectAs(destination);
+    auto* workspace = FindProjectWorkspace(m_PendingFileMenuSaveAsWorkspace);
+    if (workspace && workspace->editor->GetProjectDocumentId() == m_PendingFileMenuSaveAsDocument)
+        workspace->editor->RequestSaveProjectAs(destination);
 }
 
 void AppShell::ClearPendingFileAction() {
@@ -373,6 +379,7 @@ void AppShell::CancelWorkForMainWindowClose() {
     Stack::RawGalleryInspection::Request cancelInspection;
     cancelInspection.cancel = true;
     m_QueueRenderer.RequestInspection(std::move(cancelInspection), {});
+    m_QueueRenderer.RequestWorkerShutdownForAppClose();
     for (auto& workspace : m_ProjectWorkspaces)
         if (workspace->editor->IsAutoBracketWorkspace()) workspace->editor->CancelAutoBracketingForWorkspaceClose(false);
     ReleaseLockedScrubCursor(false);

@@ -1,4 +1,7 @@
 #include "Editor/EditorModule.h"
+#include "Editor/NodeEditors/ToneCurveEditorState.h"
+#include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
+#include "Editor/NodeEditors/RawWorkspaceEditContext.h"
 
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/GLHelpers.h"
@@ -151,7 +154,48 @@ bool EditorModule::ProbeViewTransformInputStats(int viewTransformNodeId, RenderT
     return outStats.valid;
 }
 
+ToneCurveLayer* EditorModule::ResolveCanonicalToneEditor(int nodeId) {
+    const auto* node=SelectedEditingNode();
+    if (!node || node->id!=nodeId || !m_Project->nodeEditor ||
+        node->kind!=EditorNodeGraph::NodeKind::RawOperation ||
+        node->rawOperation.kind!=Stack::RawRecipe::GraphOperationKind::ToneCurve ||
+        node->rawOperation.parameters.value("curveMode",std::string{})!="advanced") return nullptr;
+    auto& state=m_NodeEditorState.Get<Stack::Editor::ToneCurveEditorState>(*m_Project->nodeEditor);
+    if (!state.advanced) state.advanced=std::make_shared<ToneCurveLayer>();
+    const auto& parameters=node->rawOperation.parameters.at("advanced");
+    if (state.appliedAdvanced!=parameters) {
+        ToneCurveLayer defaults;
+        state.advanced->Deserialize(defaults.Serialize());
+        state.advanced->Deserialize(parameters);state.appliedAdvanced=parameters;
+    }
+    return state.advanced.get();
+}
+
+void EditorModule::CommitCanonicalToneEditor(int nodeId,const ToneCurveLayer& tone,bool active) {
+    const auto* node=SelectedEditingNode();
+    if (!node || node->id!=nodeId || !m_Project->nodeEditor ||
+        node->kind!=EditorNodeGraph::NodeKind::RawOperation) return;
+    RawWorkspaceEditContext context;
+    const auto phase=m_Project->lifecycle.Phase();
+    context.canEdit=phase!=Stack::Project::ProjectLifecyclePhase::Loading &&
+        phase!=Stack::Project::ProjectLifecyclePhase::Conflict &&
+        phase!=Stack::Project::ProjectLifecyclePhase::Importing &&
+        phase!=Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery && !IsWorkspaceTransitionPending();
+    BindRawOperationContext(context);
+    if (!context.canEdit) return;
+    const auto payload=tone.Serialize();
+    const bool changed=context.recipe.finishTone.layerJson.at("advanced")!=payload;
+    context.recipe.finishTone.layerJson["advanced"]=payload;
+    CommitRawWorkspaceEditContext(context,changed,active);
+    if (context.error.empty())
+        m_NodeEditorState.Get<Stack::Editor::ToneCurveEditorState>(*m_Project->nodeEditor).appliedAdvanced=payload;
+}
+
 int EditorModule::ResolveFocusedToneCurveNodeId() const {
+    if (const auto* selected=SelectedEditingNode(); selected &&
+        selected->kind==EditorNodeGraph::NodeKind::RawOperation &&
+        selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve &&
+        selected->rawOperation.parameters.value("curveMode",std::string{})=="advanced") return selected->id;
     auto isToneCurveNodeId = [&](int nodeId) {
         const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
         if (!node) {
@@ -182,6 +226,10 @@ int EditorModule::ResolveFocusedToneCurveNodeId() const {
 }
 
 bool EditorModule::HasFocusedToneCurveViewportInteraction() const {
+    if (const auto* selected=SelectedEditingNode(); selected &&
+        selected->kind==EditorNodeGraph::NodeKind::RawOperation &&
+        selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve)
+        return selected->rawOperation.parameters.value("curveMode",std::string{})=="advanced";
     const int toneCurveNodeId = ResolveFocusedToneCurveNodeId();
     if (toneCurveNodeId <= 0) {
         return false;
@@ -205,7 +253,9 @@ void EditorModule::ClearTrackedToneCurveProbe() {
         return;
     }
     const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(m_LastToneCurveProbeNodeId);
-    if (node &&
+    if (auto* canonical=ResolveCanonicalToneEditor(m_LastToneCurveProbeNodeId)) {
+        canonical->ClearViewportProbe();canonical->EndViewportTargetDrag();
+    } else if (node &&
         node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerType == LayerType::ToneCurve &&
         node->layerIndex >= 0 &&
@@ -223,6 +273,9 @@ void EditorModule::ClearTrackedToneCurveProbe() {
 }
 
 void EditorModule::ClearToneCurveViewportProbe() {
+    if (const auto* selected=SelectedEditingNode()) if (auto* canonical=ResolveCanonicalToneEditor(selected->id)) {
+        canonical->ClearViewportProbe();return;
+    }
     const int toneCurveNodeId = ResolveFocusedToneCurveNodeId();
     if (toneCurveNodeId <= 0) {
         ClearTrackedToneCurveProbe();
@@ -269,9 +322,22 @@ bool EditorModule::SampleToneCurveViewportPixel(
     std::array<float, 4>& outRgba) const {
     outRgba = { 0.0f, 0.0f, 0.0f, 0.0f };
 
-    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(toneCurveNodeId);
-    if (!node) {
-        return false;
+    const auto* selected=SelectedEditingNode();
+    const EditorNodeGraph::Node* node = selected && selected->id==toneCurveNodeId &&
+        selected->kind==EditorNodeGraph::NodeKind::RawOperation ? selected : GetNodeGraph().FindNode(toneCurveNodeId);
+    if (!node) return false;
+    if (node->kind==EditorNodeGraph::NodeKind::RawOperation && basis==ToneCurveSamplingBasis::CurveInput) {
+        RawWorkspaceEditContext context;BindRawOperationContext(context);
+        if (!context.nodeTarget || !m_RawWorkspaceGraphScopeReadback.valid ||
+            m_RawWorkspaceFinishToneInputGraphScopeCache.sourceKey!=context.nodeTarget->Key() ||
+            m_RawWorkspaceFinishToneInputGraphScopeCache.inputFingerprint!=Stack::Editor::NodeInputAnalysisIdentity(
+                *context.nodeTarget,m_Project->editRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame)) return false;
+        const auto& scope=m_RawWorkspaceGraphScopeReadback;
+        const int x=std::clamp(int(u*scope.width),0,scope.width-1);
+        const int y=std::clamp(int(v*scope.height),0,scope.height-1);
+        const auto index=(static_cast<std::size_t>(y)*scope.width+x)*3u;
+        if (index+2>=scope.pixels.size()) return false;
+        outRgba={scope.pixels[index],scope.pixels[index+1],scope.pixels[index+2],1};return true;
     }
 
     if (basis == ToneCurveSamplingBasis::FinalPreview && !IsEditingRawLayerMaskGraph()) {
@@ -296,8 +362,8 @@ bool EditorModule::SampleToneCurveViewportPixel(
     outputNode.kind = RenderGraphNodeKind::Output;
     snapshot.nodes.push_back(std::move(outputNode));
 
-    if (node->kind == EditorNodeGraph::NodeKind::Layer &&
-        node->layerType == LayerType::ToneCurve) {
+    if ((node->kind == EditorNodeGraph::NodeKind::Layer && node->layerType == LayerType::ToneCurve) ||
+        (node->kind==EditorNodeGraph::NodeKind::RawOperation && node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve)) {
         const EditorNodeGraph::Link* input = GetNodeGraph().FindInputLink(toneCurveNodeId, EditorNodeGraph::kImageInputSocketId);
         if (!input) {
             return false;
@@ -377,6 +443,13 @@ bool EditorModule::SampleToneCurveViewportPixel(
 }
 
 void EditorModule::UpdateToneCurveViewportProbe(float u, float v) {
+    if (const auto* selected=SelectedEditingNode()) if (auto* canonical=ResolveCanonicalToneEditor(selected->id)) {
+        std::array<float,4> rgba{};
+        const auto basis=canonical->GetSamplingBasis();
+        if (SampleToneCurveViewportPixel(selected->id,basis,u,v,rgba)) canonical->UpdateViewportProbe(basis,u,v,rgba);
+        else canonical->ClearViewportProbe();
+        m_LastToneCurveProbeNodeId=selected->id;return;
+    }
     if (m_CanvasToolKind == CanvasToolKind::PickColor || m_CanvasToolKind == CanvasToolKind::AdjustAberrationCenter) {
         ClearTrackedToneCurveProbe();
         return;
@@ -395,8 +468,8 @@ void EditorModule::UpdateToneCurveViewportProbe(float u, float v) {
     }
 
     ToneCurveLayer integratedTone;
-    ToneCurveLayer* toneCurve = nullptr;
-    if (node->kind == EditorNodeGraph::NodeKind::Layer &&
+    ToneCurveLayer* toneCurve = ResolveCanonicalToneEditor(node->id);
+    if (!toneCurve && node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerType == LayerType::ToneCurve &&
         node->layerIndex >= 0 &&
         node->layerIndex < static_cast<int>(GetLayers().size())) {
@@ -421,7 +494,7 @@ void EditorModule::UpdateToneCurveViewportProbe(float u, float v) {
     std::array<float, 4> rgba {};
     ToneCurveSamplingBasis sampledBasis = toneCurve->GetSamplingBasis();
     bool sampled = SampleToneCurveViewportPixel(toneCurveNodeId, sampledBasis, u, v, rgba);
-    if (!sampled && sampledBasis == ToneCurveSamplingBasis::CurveInput) {
+    if (!sampled && node->kind!=EditorNodeGraph::NodeKind::RawOperation && sampledBasis == ToneCurveSamplingBasis::CurveInput) {
         sampledBasis = ToneCurveSamplingBasis::FinalPreview;
         sampled = SampleToneCurveViewportPixel(toneCurveNodeId, sampledBasis, u, v, rgba);
     }
@@ -442,6 +515,12 @@ void EditorModule::UpdateToneCurveViewportProbe(float u, float v) {
 }
 
 void EditorModule::BeginToneCurveViewportTargetDrag(float u, float v) {
+    if (const auto* selected=SelectedEditingNode()) if (auto* canonical=ResolveCanonicalToneEditor(selected->id)) {
+        std::array<float,4> rgba{};const auto basis=canonical->GetSamplingBasis();
+        if (SampleToneCurveViewportPixel(selected->id,basis,u,v,rgba) && canonical->BeginViewportTargetDrag(basis,u,v,rgba))
+            CommitCanonicalToneEditor(selected->id,*canonical,true);
+        return;
+    }
     const int toneCurveNodeId = m_CanvasToolKind == CanvasToolKind::ToneCurveTarget
         ? m_CanvasToolOwnerNodeId
         : ResolveFocusedToneCurveNodeId();
@@ -455,8 +534,8 @@ void EditorModule::BeginToneCurveViewportTargetDrag(float u, float v) {
     }
 
     ToneCurveLayer integratedTone;
-    ToneCurveLayer* toneCurve = nullptr;
-    if (node->kind == EditorNodeGraph::NodeKind::Layer &&
+    ToneCurveLayer* toneCurve = ResolveCanonicalToneEditor(node->id);
+    if (!toneCurve && node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerType == LayerType::ToneCurve &&
         node->layerIndex >= 0 &&
         node->layerIndex < static_cast<int>(GetLayers().size())) {
@@ -476,7 +555,7 @@ void EditorModule::BeginToneCurveViewportTargetDrag(float u, float v) {
     std::array<float, 4> rgba {};
     ToneCurveSamplingBasis sampledBasis = toneCurve->GetSamplingBasis();
     bool sampled = SampleToneCurveViewportPixel(toneCurveNodeId, sampledBasis, u, v, rgba);
-    if (!sampled && sampledBasis == ToneCurveSamplingBasis::CurveInput) {
+    if (!sampled && node->kind!=EditorNodeGraph::NodeKind::RawOperation && sampledBasis == ToneCurveSamplingBasis::CurveInput) {
         sampledBasis = ToneCurveSamplingBasis::FinalPreview;
         sampled = SampleToneCurveViewportPixel(toneCurveNodeId, sampledBasis, u, v, rgba);
     }
@@ -493,11 +572,15 @@ void EditorModule::BeginToneCurveViewportTargetDrag(float u, float v) {
             StoreIntegratedToneTransientState(toneCurveNodeId, *toneCurve);
         }
         m_LastToneCurveProbeNodeId = toneCurveNodeId;
-        MarkGraphEdited(toneCurveNodeId);
+        if (node->kind==EditorNodeGraph::NodeKind::RawOperation) CommitCanonicalToneEditor(toneCurveNodeId,*toneCurve,true);
+        else MarkGraphEdited(toneCurveNodeId);
     }
 }
 
 void EditorModule::UpdateToneCurveViewportTargetDrag(float deltaCurveY) {
+    if (const auto* selected=SelectedEditingNode()) if (auto* canonical=ResolveCanonicalToneEditor(selected->id)) {
+        canonical->UpdateViewportTargetDrag(deltaCurveY);CommitCanonicalToneEditor(selected->id,*canonical,true);return;
+    }
     if (m_CanvasToolKind != CanvasToolKind::ToneCurveTarget || m_CanvasToolOwnerNodeId <= 0) {
         return;
     }
@@ -507,8 +590,8 @@ void EditorModule::UpdateToneCurveViewportTargetDrag(float deltaCurveY) {
     }
 
     ToneCurveLayer integratedTone;
-    ToneCurveLayer* toneCurve = nullptr;
-    if (node->kind == EditorNodeGraph::NodeKind::Layer &&
+    ToneCurveLayer* toneCurve = ResolveCanonicalToneEditor(node->id);
+    if (!toneCurve && node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerType == LayerType::ToneCurve &&
         node->layerIndex >= 0 &&
         node->layerIndex < static_cast<int>(GetLayers().size())) {
@@ -530,10 +613,14 @@ void EditorModule::UpdateToneCurveViewportTargetDrag(float deltaCurveY) {
         node->rawDevelop.integratedToneLayerJson = toneCurve->Serialize();
         StoreIntegratedToneTransientState(m_CanvasToolOwnerNodeId, *toneCurve);
     }
-    MarkGraphEdited(m_CanvasToolOwnerNodeId);
+    if (node->kind==EditorNodeGraph::NodeKind::RawOperation) CommitCanonicalToneEditor(m_CanvasToolOwnerNodeId,*toneCurve,true);
+    else MarkGraphEdited(m_CanvasToolOwnerNodeId);
 }
 
 void EditorModule::EndToneCurveViewportTargetDrag() {
+    if (const auto* selected=SelectedEditingNode()) if (auto* canonical=ResolveCanonicalToneEditor(selected->id)) {
+        canonical->EndViewportTargetDrag();CommitCanonicalToneEditor(selected->id,*canonical,false);return;
+    }
     const int toneCurveNodeId = m_CanvasToolKind == CanvasToolKind::ToneCurveTarget
         ? m_CanvasToolOwnerNodeId
         : m_LastToneCurveProbeNodeId;
@@ -547,8 +634,8 @@ void EditorModule::EndToneCurveViewportTargetDrag() {
     }
 
     ToneCurveLayer integratedTone;
-    ToneCurveLayer* toneCurve = nullptr;
-    if (node->kind == EditorNodeGraph::NodeKind::Layer &&
+    ToneCurveLayer* toneCurve = ResolveCanonicalToneEditor(node->id);
+    if (!toneCurve && node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerType == LayerType::ToneCurve &&
         node->layerIndex >= 0 &&
         node->layerIndex < static_cast<int>(GetLayers().size())) {
@@ -566,6 +653,7 @@ void EditorModule::EndToneCurveViewportTargetDrag() {
     }
 
     toneCurve->EndViewportTargetDrag();
+    if (node->kind==EditorNodeGraph::NodeKind::RawOperation) CommitCanonicalToneEditor(toneCurveNodeId,*toneCurve,false);
     if (node->kind == EditorNodeGraph::NodeKind::RawDevelop) {
         StoreIntegratedToneTransientState(toneCurveNodeId, *toneCurve);
     }

@@ -551,31 +551,61 @@ void LibraryManager::RequestLibrarySignatureAsync() {
         m_LibrarySignatureTaskState = Async::TaskState::Queued;
     }
 
-    Async::TaskSystem::Get().Submit(MakeActivityMetadata("Checking library", true), [this, generation]() {
-        {
-            std::lock_guard<std::mutex> lock(m_SignatureMutex);
-            if (generation != m_LibrarySignatureGeneration) {
-                return;
-            }
-            m_LibrarySignatureTaskState = Async::TaskState::Running;
-        }
-
-        const std::uintmax_t latestSignature = BuildLibrarySignature();
-
-        Async::TaskSystem::Get().PostToMain([this, generation, latestSignature]() {
-            bool shouldRefresh = false;
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Checking library", true), [this, generation]() {
             {
                 std::lock_guard<std::mutex> lock(m_SignatureMutex);
                 if (generation != m_LibrarySignatureGeneration) {
                     return;
                 }
-                m_LibrarySignatureTaskState = Async::TaskState::Idle;
-                shouldRefresh = latestSignature != m_LastLibrarySignature;
+                m_LibrarySignatureTaskState = Async::TaskState::Running;
             }
 
-            if (shouldRefresh) {
-                RequestRefreshLibraryAsync();
+            std::uintmax_t latestSignature = 0;
+            bool checked = false;
+            try {
+                latestSignature = BuildLibrarySignature();
+                checked = true;
+            } catch (...) {
+                // Keep the previous catalog and allow a later automatic check.
+            }
+
+            bool published = false;
+            try {
+                published = Async::TaskSystem::Get().PostToMain([this, generation, latestSignature, checked]() {
+                    bool shouldRefresh = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_SignatureMutex);
+                        if (generation != m_LibrarySignatureGeneration) {
+                            return;
+                        }
+                        m_LibrarySignatureTaskState = checked
+                            ? Async::TaskState::Idle : Async::TaskState::Failed;
+                        shouldRefresh = checked && latestSignature != m_LastLibrarySignature;
+                    }
+
+                    if (shouldRefresh) {
+                        RequestRefreshLibraryAsync();
+                    }
+                });
+            } catch (...) {
+                published = false;
+            }
+            if (!published) {
+                std::lock_guard<std::mutex> lock(m_SignatureMutex);
+                if (generation == m_LibrarySignatureGeneration) {
+                    m_LibrarySignatureTaskState = Async::TaskState::Failed;
+                }
             }
         });
-    });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted) {
+        std::lock_guard<std::mutex> lock(m_SignatureMutex);
+        if (generation == m_LibrarySignatureGeneration) {
+            m_LibrarySignatureTaskState = Async::TaskState::Failed;
+        }
+    }
 }

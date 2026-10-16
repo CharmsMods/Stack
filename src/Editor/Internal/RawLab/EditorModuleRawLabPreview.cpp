@@ -1,11 +1,17 @@
 #include "Editor/UI/ViewportNavigation.h"
 #include "Editor/EditorModule.h"
+#include "App/UiPerformanceProbe.h"
+#include "App/UiPerformanceTrace.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
+#include "Editor/Internal/RawLab/RawFloatingInputTrace.h"
+#include "Editor/NodeEditors/ColorWarpFeedback.h"
 
 #include "Async/TaskSystem.h"
 #include "Raw/RawColorWarpMask.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/ImGuiExtras.h"
+#include "Notifications/NotificationPresenter.h"
+#include "App/WorkspacePresentation.h"
 
 #include <imgui_internal.h>
 
@@ -182,6 +188,25 @@ bool DrawLabTileSet(
     return true;
 }
 
+template<class Draw>
+void DrawLabCoverageWithoutDetail(ImDrawList* list, ImVec2 minimum, ImVec2 maximum,
+    const ImRect* detail, Draw draw) {
+    if (!detail) { draw(); return; }
+    const ImVec2 low(std::max(minimum.x, detail->Min.x), std::max(minimum.y, detail->Min.y));
+    const ImVec2 high(std::min(maximum.x, detail->Max.x), std::min(maximum.y, detail->Max.y));
+    if (low.x >= high.x || low.y >= high.y) { draw(); return; }
+    const auto clipped = [&](ImVec2 clipMin, ImVec2 clipMax) {
+        if (clipMin.x >= clipMax.x || clipMin.y >= clipMax.y) return;
+        list->PushClipRect(clipMin, clipMax, true);
+        draw();
+        list->PopClipRect();
+    };
+    clipped(minimum, ImVec2(maximum.x, low.y));
+    clipped(ImVec2(minimum.x, high.y), maximum);
+    clipped(ImVec2(minimum.x, low.y), ImVec2(low.x, high.y));
+    clipped(ImVec2(high.x, low.y), ImVec2(maximum.x, high.y));
+}
+
 } // namespace
 
 int EditorModule::GetRawWorkspaceColorWarpDisplayedPin(
@@ -282,10 +307,37 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             start.x + (bounds.x - imageSize.x) * 0.5f,
             start.y + verticalFreeSpace * 0.5f);
     };
-    const RawWorkspacePreviewContext preview = ResolveRawWorkspacePreviewContext(selectedSource);
+    // Gallery focus is not a rendered bracket result. Until import creates
+    // the source project, show the capture-set state rather than one thumbnail.
+    const bool bracketDraft = IsBracketingToolActive() &&
+        !IsRawWorkspaceProjectActive() && !IsMultiFrameRawProjectActive();
+    const RawWorkspacePreviewContext preview = bracketDraft ? RawWorkspacePreviewContext{}
+        : ResolveRawWorkspacePreviewContext(selectedSource);
     if (preview.identity.empty()) {
-        // The Gallery workspace owns browsing and the empty-folder action.
-        // Bracket/Edit previews only display an image once one is open.
+        // Draft capture sets have no image until Process completes. Explain
+        // the next action in the ordinary canvas; keep their controls in Source.
+        if (IsBracketingToolActive()) {
+            const ImVec2 start = ImGui::GetCursorScreenPos();
+            const ImVec2 available = ImGui::GetContentRegionAvail();
+            const float scale = ImGui::GetFontSize() / 13.0f;
+            const float width = std::max(1.0f, std::min(380.0f * scale, available.x));
+            ImGui::SetCursorScreenPos(ImVec2(
+                start.x + std::max(0.0f, (available.x - width) * 0.5f),
+                start.y + std::max(0.0f, (available.y - 116.0f * scale) * 0.42f)));
+            ImGui::BeginGroup();
+            ImGui::TextUnformatted("Bracketing");
+            ImGui::Spacing();
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width);
+            ImGui::TextDisabled(m_Bracketing
+                ? "Review captures in the Source panel, then choose Process."
+                : "Open Bracketing to review captures and processing settings.");
+            ImGui::PopTextWrapPos();
+            if (!WorkspacePanelOpen()) {
+                ImGui::Spacing();
+                if (ImGui::Button("Open Bracketing")) OpenBracketingTool();
+            }
+            ImGui::EndGroup();
+        }
         return;
     }
 
@@ -303,6 +355,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         m_RawWorkspaceLabUi.previewLayout = {};
         m_RawWorkspaceLabUi.previewSurroundFrom = m_RawImageBackdrop.extensionOpacity;
         m_RawWorkspaceLabUi.previewSurroundTarget = false;
+        if (!m_NodeOpenTransition.Active()) m_NodeOpenTransition.ClearSurround();
         m_RawWorkspaceLabUi.previewSurroundStarted = ImGui::GetTime();
         m_RawWorkspaceLabUi.selectedEvGradient = -1;
         m_RawWorkspaceLabUi.selectedToneGradient = -1;
@@ -391,7 +444,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     const bool gradientLayout =
         m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones ||
         m_RawWorkspaceLabUi.activeTool == RawLabTool::Tone;
-    const bool floatingTools = m_RawFloatingSurface.frame == ImGui::GetFrameCount() &&
+    const bool floatingTools = (m_NodeOpenTransition.Active() || m_RawFloatingSurface.frame == ImGui::GetFrameCount()) &&
         ImGui::GetWindowViewport() == ImGui::GetMainViewport();
     const float colorSideMargin = !floatingTools && colorLayout ? 18.0f : 0.0f;
     const float colorVerticalMargin = floatingTools ? 0.f : gradientLayout ? 36.0f : colorLayout &&
@@ -561,6 +614,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     }
 
     bool previewNavigationHandled = false;
+    std::unique_ptr<ImGuiExtras::FloatingSurfaceInputScope> imagePointerScope;
     auto imageRectFor = [&](float width, float height, bool rememberLayout = true) {
         const ImVec2 baseImageSize = imageSizeFor(width, height, imageBounds);
         auto& ui = m_RawWorkspaceLabUi;
@@ -626,10 +680,28 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (!previewNavigationHandled) {
             previewNavigationHandled = true;
             ImGuiIO& previewIo = ImGui::GetIO();
+            // The demosaic list stays open for detail comparisons. Permit
+            // navigation over the exposed canvas, while the list, other
+            // controls and modal dialogs retain their own pointer ownership.
+            const bool sourceMenuOpen = m_RawFloatingSurface.frame == ImGui::GetFrameCount() &&
+                m_RawFloatingSurface.imageNavigationMenuOpen &&
+                ImGui::GetCurrentContext()->OpenPopupStack.Size == 1 && !ImGui::GetTopMostPopupModal();
             const bool previewWindowHovered = ImGui::IsWindowHovered(
-                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                (sourceMenuOpen ? ImGuiHoveredFlags_AllowWhenBlockedByPopup : 0));
             const bool previewHovered =
-                previewWindowHovered && bounds.Contains(previewIo.MousePos);
+                (previewWindowHovered || IsRawImageNavigationActive()) && bounds.Contains(previewIo.MousePos);
+
+            if(currentRawPreview && !Stack::Workspace::IsPreview()) {
+                const bool editOwnsPointer=ui.zoneAreas.active || ui.gradientDragHandle>=0 ||
+                    m_RawAssetCapture.armed || m_RawAssetCapture.drawing ||
+                    ui.colorWarpPendingCircleDrawing || (m_EditingRawLayerMask && m_RawLayerMaskDrag>=0);
+                const bool canStart=previewHovered && !RawFloatingSurfaceOwnsPointer() &&
+                    !editOwnsPointer && !previewIo.WantTextInput && !ImGui::IsAnyItemActive() &&
+                    !ImGui::IsKeyDown(ImGuiKey_Space) && !ImGui::IsKeyDown(ImGuiKey_C) &&
+                    !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
+                imagePointerScope=std::make_unique<ImGuiExtras::FloatingSurfaceInputScope>(m_RawImageInput,canStart);
+            }
 
             Stack::ViewportNavigation::Input navigationInput;
             navigationInput.panConstraint = Stack::ViewportNavigation::PanConstraint::BoundedSurround;
@@ -640,19 +712,31 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             navigationInput.wheel = previewIo.MouseWheel * .5f;
             navigationInput.seconds = previewIo.DeltaTime;
             navigationInput.hovered = previewHovered;
-            navigationInput.wheelAllowed = !colorLayout ||
+            navigationInput.wheelAllowed = !previewIo.KeyAlt && (!colorLayout ||
                 (!m_RawWorkspaceLabUi.colorWarpPendingCircleActive &&
                  !(m_RawWorkspaceLabUi.colorWarpInspectionActive &&
-                   (previewIo.KeyCtrl || previewIo.KeyShift)));
+                   (previewIo.KeyCtrl || previewIo.KeyShift))));
+            const bool spaceStart = previewHovered && IsRawImageNavigationActive() &&
+                !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+            if (spaceStart) ui.previewSpacePanning = true;
+            if (previewIo.AppFocusLost || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) ui.previewSpacePanning = false;
             navigationInput.middleClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
             navigationInput.middleDown = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+            navigationInput.middleClicked |= spaceStart;
+            navigationInput.middleDown |= ui.previewSpacePanning;
+            const bool chordPan=m_RawImageInput.moving;
+            navigationInput.middleClicked |= chordPan && !navigation.panning;
+            navigationInput.middleDown |= chordPan;
             navigationInput.reset = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle);
             // A resize may put the preserved scale outside the usual fit-relative
             // limits. The next wheel step must not jump back across that range.
             navigationInput.minimumZoom = std::min({.10f, navigation.zoom, navigation.target});
             navigationInput.maximumZoom = std::max({12.0f, navigation.zoom, navigation.target});
-            if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones &&
-                m_RawWorkspaceLabUi.zoneAreas.active) {
+            const float targetBefore = navigation.target;
+            if ((m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones &&
+                 m_RawWorkspaceLabUi.zoneAreas.active) ||
+                (m_EditingRawLayerMask && m_RawLayerMaskDrag >= 0) ||
+                (m_RawAssetCapture.armed && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ui.previewSpacePanning)) {
                 // Keep the image under an authored stroke fixed through release.
                 navigation.target = navigation.zoom;
                 navigation.animating = navigation.panning = false;
@@ -660,6 +744,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 Stack::ViewportNavigation::Update(navigation, navigationInput, baseImageSize,
                     bounds.Min, bounds.Max, unpannedMinimumFor);
                 if (previewHovered && navigationInput.reset) {
+                    m_NodeOpenTransition.ClearSurround();
+                    ui.previewSurroundFrom = m_RawImageBackdrop.extensionOpacity;
+                    ui.previewSurroundStarted = ImGui::GetTime();
+                    ui.previewSurroundTarget = false;
                     layout.fitting = !ui.previewActualPixels;
                 } else if (previewHovered && navigationInput.wheelAllowed &&
                     !navigationInput.middleDown && std::abs(navigationInput.wheel) > 0.0001f) {
@@ -670,8 +758,12 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 if (navigation.panning && (std::abs(navigationInput.delta.x) > .001f ||
                     std::abs(navigationInput.delta.y) > .001f)) layout.fitting = false;
             }
-            if (m_RawWorkspaceLabUi.previewPanning)
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            if (previewHovered && IsRawImageNavigationActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            else if (m_RawWorkspaceLabUi.previewPanning) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            Stack::Editor::RawLabInternal::TraceRawImageNavigation(this,
+                static_cast<int>(ui.activeTool), "raw-image-update", RawFloatingSurfaceOwnsPointer(),
+                previewHovered, navigationInput.wheelAllowed, navigation.zoom,
+                targetBefore, navigation.target);
 
             imageSize = scaledImageSize();
             unpannedMinimum = unpannedMinimumFor(imageSize);
@@ -679,7 +771,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 unpannedMinimum.x + m_RawWorkspaceLabUi.previewPanX,
                 unpannedMinimum.y + m_RawWorkspaceLabUi.previewPanY);
         }
-        const ImRect fullRect(imageMinimum,
+        ImRect fullRect(imageMinimum,
             ImVec2(imageMinimum.x + imageSize.x, imageMinimum.y + imageSize.y));
         if (rememberLayout) {
             layout.valid = true;
@@ -691,7 +783,21 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             layout.imageMinimum = imageMinimum;
             layout.imageSize = imageSize;
         }
+        // Render demand follows the settled camera, not the opening card's
+        // temporary geometry. Morphing must not submit a new raster each frame.
+        if (currentRawPreview && rememberLayout && m_NodeOpenTransition.Active() && !Stack::Workspace::IsPreview()) {
+            UpdateRawViewportCoverage(fullRect.Min, fullRect.Max, bounds.Min, bounds.Max, currentRawPreview);
+            PresentNodeOpenImage(fullRect.Min, fullRect.Max);
+            return fullRect;
+        }
+        if(currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview()) {
+            const auto displayed=m_RawImageViewTransition.Present(Stack::Editor::ImageViewTransition::View::Raw,
+                preview.identity,{fullRect.Min,fullRect.Max},ImGui::GetTime(),Stack::Notifications::SystemReducedMotion());
+            fullRect={displayed.minimum,displayed.maximum};
+        }
         UpdateRawViewportCoverage(fullRect.Min, fullRect.Max, bounds.Min, bounds.Max, currentRawPreview);
+        if (currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview())
+            PresentNodeOpenImage(fullRect.Min, fullRect.Max);
         return fullRect;
     };
     auto drawLocalOverlay = [&](const ImRect& imageRect) {
@@ -715,9 +821,13 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (currentRawPreview) {
             ImRect visible = bounds;
             visible.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
-            PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview);
+            PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview,
+                m_RawImageViewTransition.Active());
         }
         m_BracketingImageMin=imageRect.Min;m_BracketingImageMax=imageRect.Max;
+        // The card is presentation geometry, not a stable picking/probe area.
+        // Defer scopes, capture handles and diagnostic overlays until settled.
+        if (m_NodeOpenTransition.Active()) return;
         DrawMultiFrameRawDiagnosticOverlay(drawList, imageRect.Min, imageRect.Max);
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
             ImGui::IsKeyPressed(ImGuiKey_Escape)) {
@@ -737,13 +847,25 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             colorUi.colorWarpDiagnosticLocked = false;
             colorUi.colorWarpInspectedRegionId.clear();
         }
-        if (!(m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones &&
+        if(currentRawPreview && !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt &&
+           ImGui::IsKeyDown(ImGuiKey_C) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+           imageRect.Contains(ImGui::GetIO().MousePos) && ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() &&
+           !IsRawImageNavigationActive() && !m_RawAssetCapture.armed && !m_RawAssetCapture.pending) {
+            const auto available=QueryRawAssetCaptureAvailability();
+            if(available.target) BeginRawAssetCapture(*available.target,Stack::RawAssetCapture::Shape::Stroke,
+                Stack::RawAssetCapture::Channels::Both,m_RawAssetCapture.status);
+        }
+        const bool capturingAsset = m_RawAssetCapture.armed || m_RawAssetCapture.drawing;
+        if(currentRawPreview && !capturingAsset) UpdateRawCurveProbe(imageRect.Min,imageRect.Max,previewRecipe.cropRotation);
+        if (!capturingAsset && !(m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones &&
               m_RawWorkspaceLabUi.selectedEvGradient >= 0))
             drawLocalOverlay(imageRect);
-        if (currentRawPreview)
+        if (currentRawPreview && (capturingAsset || m_RawAssetCapture.pending) && (!IsRawImageNavigationActive() || m_RawAssetCapture.drawing || m_RawAssetCapture.actionMenu))
+            RenderRawAssetCaptureOverlay(imageRect.Min,imageRect.Max,previewRecipe.cropRotation);
+        if (currentRawPreview && !capturingAsset)
             RenderRawWorkspaceLabGradientImage(selectedSource,
                 imageRect.Min, imageRect.Max);
-        if (currentRawPreview) RenderRawWorkspaceLabImageAreas(selectedSource, imageRect.Min, imageRect.Max);
+        if (currentRawPreview && !capturingAsset && !IsRawImageNavigationActive()) RenderRawWorkspaceLabImageAreas(selectedSource, imageRect.Min, imageRect.Max);
         const int colorWarpDisplayedPin =
             GetRawWorkspaceColorWarpDisplayedPin(previewRecipe);
         const int colorWarpSelectionViewMode =
@@ -756,7 +878,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             colorWarpSelectionViewMode == 2 ||
             m_RawWorkspaceLabUi.colorWarpLightnessRangePreviewActive;
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
-            currentRawPreview &&
+            currentRawPreview && !capturingAsset &&
             (colorWarpDiagnosticHeld ||
              m_RawWorkspaceLabUi.colorWarpDiagnosticLocked ||
              colorWarpSelectionViewMode == 2)) {
@@ -788,7 +910,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             }
         }
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
-            currentRawPreview &&
+            currentRawPreview && !capturingAsset &&
             colorWarpDiagnosticRequested &&
             colorWarpDisplayedPin >= 0 &&
             colorWarpDisplayedPin < static_cast<int>(
@@ -839,12 +961,31 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         diagnosticPins.push_back(pin);
                     }
                 }
-                std::size_t overlayFingerprint = std::hash<std::string> {}(
-                    Stack::RawRecipe::SerializeColorWarpRecipe(previewRecipe.colorWarp).dump());
+                Stack::Editor::ColorWarpFeedback* feedbackCache = preview.edit.nodeTarget
+                    ? &m_NodeEditorState.Get<Stack::Editor::ColorWarpFeedback>(*preview.edit.nodeTarget)
+                    : nullptr;
+                if (feedbackCache) {
+                    feedbackCache->Update(colorScope,
+                        previewIdentity + preview.edit.nodeTarget->Key(),
+                        m_RawWorkspaceColorWarpInputGraphScopeCache.inputFingerprint,
+                        previewRecipe.colorWarp, previewRecipe.technical.workingSpace,
+                        [this](std::function<void()> job) {
+                            return ProjectTasks().SubmitHighPriority("Analyzing colors", std::move(job));
+                        });
+                }
+                const auto feedback = feedbackCache ? feedbackCache->Current() : nullptr;
+                std::size_t overlayFingerprint = feedbackCache ? feedbackCache->Key() : 0u;
+                const auto hashFeedback = [&](std::size_t value) {
+                    overlayFingerprint ^= value + 0x9e3779b97f4a7c15ull +
+                        (overlayFingerprint << 6u) + (overlayFingerprint >> 2u);
+                };
+                hashFeedback(previewRecipe.colorWarp.enabled);
+                hashFeedback(std::hash<float>{}(previewRecipe.colorWarp.strength));
+                for (const auto& pin : previewRecipe.colorWarp.pins)
+                    hashFeedback(std::hash<float>{}(pin.strength));
+                for (const auto& pin : diagnosticPins)
+                    hashFeedback(std::hash<std::string>{}(pin.id));
                 overlayFingerprint ^= std::hash<std::string> {}(selectedPin.id) +
-                    0x9e3779b97f4a7c15ull + (overlayFingerprint << 6u) +
-                    (overlayFingerprint >> 2u);
-                overlayFingerprint ^= m_RawWorkspaceColorWarpInputGraphScopeCache.inputFingerprint +
                     0x9e3779b97f4a7c15ull + (overlayFingerprint << 6u) +
                     (overlayFingerprint >> 2u);
                 overlayFingerprint ^= isolate ? 0xa531u : 0x5ca1u;
@@ -858,7 +999,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         colorScope.width ||
                     m_RawWorkspaceLabUi.colorWarpAffectedOverlayHeight !=
                         colorScope.height;
-                if (rebuildOverlay &&
+                if (feedback && rebuildOverlay &&
                     m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint !=
                         overlayFingerprint) {
                     auto state = std::make_shared<
@@ -870,89 +1011,15 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     m_RawWorkspaceLabUi.colorWarpDiagnosticState = state;
                     m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint =
                         overlayFingerprint;
-                    const auto scopePixels = colorScope.pixels;
-                    const int scopeWidth = colorScope.width;
-                    const int scopeHeight = colorScope.height;
-                    const int sourceWidth = colorScope.sourceWidth;
-                    const int sourceHeight = colorScope.sourceHeight;
-                    const auto regions = previewRecipe.colorWarp.regions;
-                    const auto workingSpace = previewRecipe.technical.workingSpace;
+                    const auto colorWarp = previewRecipe.colorWarp;
                     const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
-                        [state, scopePixels, scopeWidth, scopeHeight,
-                         sourceWidth, sourceHeight, diagnosticPins, regions,
-                         workingSpace]() mutable {
-                            Stack::RawRecipe::RawColorWarpMaskGuide guide;
-                            guide.width = scopeWidth;
-                            guide.height = scopeHeight;
-                            guide.sourceWidth = sourceWidth;
-                            guide.sourceHeight = sourceHeight;
-                            const std::size_t count =
-                                static_cast<std::size_t>(scopeWidth) * scopeHeight;
-                            guide.pixels.resize(count);
-                            for (std::size_t index = 0; index < count; ++index) {
-                                const std::size_t offset = index * 3u;
-                                guide.pixels[index] =
-                                    Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
-                                        { scopePixels[offset + 0u],
-                                          scopePixels[offset + 1u],
-                                          scopePixels[offset + 2u] },
-                                        workingSpace);
-                            }
-                            std::vector<unsigned char> pixels(count * 4u, 0u);
-                            bool spatialAvailable = false;
-                            for (const auto& pin : diagnosticPins) {
-                                const auto region = std::find_if(
-                                    regions.begin(), regions.end(),
-                                    [&](const auto& candidate) {
-                                        return candidate.id == pin.regionId;
-                                    });
-                                const auto* regionPtr = region == regions.end()
-                                    ? nullptr
-                                    : &*region;
-                                auto fields = Stack::RawRecipe::BuildRawColorWarpMaskFields(
-                                    guide, pin, regionPtr);
-                                spatialAvailable = spatialAvailable || fields.spatialAvailable;
-                                const float spatialStrength = regionPtr
-                                    ? regionPtr->spatialSupport
-                                    : 0.0f;
-                                for (std::size_t index = 0; index < count; ++index) {
-                                    const auto& coordinate = guide.pixels[index];
-                                    const float direct =
-                                        Stack::RawRecipe::EvaluateColorWarpPinShapeWeight(
-                                            pin, coordinate.a, coordinate.b) *
-                                        Stack::RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                                            pin, coordinate.sceneEv);
-                                    const float gatedDirect = direct *
-                                        (fields.gate[index] / 255.0f);
-                                    const float spatial = fields.support[index] /
-                                        255.0f * spatialStrength;
-                                    const float boundary = fields.boundary[index] / 255.0f;
-                                    const std::size_t destination = index * 4u;
-                                    if (std::max(gatedDirect, spatial) * boundary <= 0.01f) {
-                                        pixels[destination + 3u] = std::max<unsigned char>(
-                                            pixels[destination + 3u], 205u);
-                                    } else if (fields.edge[index] != 0u ||
-                                               boundary < 0.98f) {
-                                        pixels[destination + 0u] = 174u;
-                                        pixels[destination + 1u] = 104u;
-                                        pixels[destination + 2u] = 242u;
-                                        pixels[destination + 3u] = 218u;
-                                    } else if (spatial > gatedDirect) {
-                                        pixels[destination + 0u] = 238u;
-                                        pixels[destination + 1u] = 160u;
-                                        pixels[destination + 2u] = 62u;
-                                        pixels[destination + 3u] = 218u;
-                                    } else {
-                                        pixels[destination + 0u] = 48u;
-                                        pixels[destination + 1u] = 210u;
-                                        pixels[destination + 2u] = 224u;
-                                        pixels[destination + 3u] = 218u;
-                                    }
-                                }
-                            }
+                        [state, feedback, colorWarp, diagnosticPins]() {
+                            auto pixels = Stack::Editor::BuildColorWarpFeedbackOverlay(
+                                *feedback, colorWarp, diagnosticPins);
                             std::lock_guard<std::mutex> lock(state->mutex);
                             state->pixels = std::move(pixels);
-                            state->spatialAvailable = spatialAvailable;
+                            state->spatialAvailable = std::any_of(feedback->fields.begin(),
+                                feedback->fields.end(), [](const auto& field) { return field.spatialAvailable; });
                             state->ready = true;
                         });
                     if (!submitted) {
@@ -965,7 +1032,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         m_RawWorkspaceLabUi.colorWarpDiagnosticState;
                     std::lock_guard<std::mutex> lock(completedState->mutex);
                     auto& state = *completedState;
-                    if (state.ready && state.generation ==
+                    if (feedback && state.ready && state.generation ==
                             m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration &&
                         state.fingerprint == overlayFingerprint) {
                         const unsigned int replacement = GLHelpers::CreateTextureFromPixels(
@@ -983,7 +1050,9 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         m_RawWorkspaceLabUi.colorWarpDiagnosticState.reset();
                     }
                 }
-                if (m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0) {
+                if (feedback && m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0 &&
+                    m_RawWorkspaceLabUi.colorWarpAffectedOverlaySourceKey == previewIdentity &&
+                    m_RawWorkspaceLabUi.colorWarpAffectedOverlayFingerprint == overlayFingerprint) {
                     const float uInset =
                         m_RawWorkspaceLabUi.colorWarpAffectedOverlayWidth > 1
                         ? 0.5f / static_cast<float>(
@@ -1045,7 +1114,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 kWorkingLabel);
         }
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
-            currentRawPreview) {
+            currentRawPreview && !m_EditingRawLayerMask && !capturingAsset && !IsRawImageNavigationActive()) {
             const std::string previewIdentity =
                 GetActiveRawWorkspacePreviewIdentity();
             const RawDevelopmentGraphScopeReadback& cachedColorScope =
@@ -1545,7 +1614,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 }
             }
         }
-        if (selectedSource && !preview.edit.multiFrameResult) HandleRawWorkspaceLocalRangeTargetInteraction(
+        if (selectedSource && !preview.edit.multiFrameResult && !m_EditingRawLayerMask && !capturingAsset) HandleRawWorkspaceLocalRangeTargetInteraction(
             *selectedSource,
             imageRect.Min,
             imageRect.Max,
@@ -1555,14 +1624,27 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
 
     // Fence only photo draws, including overview, tiles, update fades and
     // retained detail. Overlays added by finishImage stay outside this range.
+    int firstPhotoVertex = 0;
+    bool openingPhotoClip = false;
     const auto beginPhoto = [&]() {
+        openingPhotoClip = m_NodeOpenTransition.Active();
+        if (openingPhotoClip) {
+            const auto* viewport = ImGui::GetMainViewport();
+            drawList->PushClipRect(viewport->WorkPos,
+                ImVec2(viewport->WorkPos.x+viewport->WorkSize.x,viewport->WorkPos.y+viewport->WorkSize.y),false);
+        }
+        firstPhotoVertex = drawList->VtxBuffer.Size;
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         return drawList->CmdBuffer.Size - 1;
     };
     const auto endPhoto = [&](const ImRect& rect, int first, bool drawn) {
         const int end = drawList->CmdBuffer.Size;
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-        if (!drawn) return;
+        if (!drawn) { if (openingPhotoClip) drawList->PopClipRect(); return; }
+        FinishNodeOpenPhoto(drawList, firstPhotoVertex);
+        if (openingPhotoClip) drawList->PopClipRect();
+        Stack::UiPerformance::Probe::ImageDrawn(ActiveViewportPreviewState().acceptedGeneration,
+            {rect.Min.x,rect.Min.y,rect.GetWidth(),rect.GetHeight()});
         finishImage(rect);
         if (m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.sharpDrawList &&
             ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {
@@ -1590,38 +1672,77 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         IsViewportTextureSafeForDrawing(m_RawWorkspacePresentationTexture.texture) &&
         m_RawWorkspacePresentationTexture.width > 0 &&
         m_RawWorkspacePresentationTexture.height > 0) {
-        const auto region = rawStagePreview ? m_RawViewportPresentedRegion : Raw::ViewportRegion{};
+        Stack::Renderer::ViewportPreviewGeometry geometry;
+        const bool hasGeometry = TryGetViewportPreviewGeometry(geometry) && geometry.Valid();
+        const auto region = hasGeometry ? geometry.resident :
+            rawStagePreview ? m_RawViewportPresentedRegion : Raw::ViewportRegion{};
         const ImRect imageRect = imageRectFor(
-            static_cast<float>(m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth : region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width),
-            static_cast<float>(m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight : region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height));
+            static_cast<float>(hasGeometry ? geometry.logicalWidth : m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth : region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width),
+            static_cast<float>(hasGeometry ? geometry.logicalHeight : m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight : region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height));
         const int firstPhotoCommand = beginPhoto();
-        if (region.Valid() && IsViewportTextureSafeForDrawing(m_RawViewportOverviewTexture.texture)) {
-            drawList->AddImage((ImTextureID)(intptr_t)m_RawViewportOverviewTexture.texture,
-                imageRect.Min, imageRect.Max, ImVec2(0, 1), ImVec2(1, 0));
-        }
         const ImVec2 rasterMin = region.Valid() ? ImVec2(
             imageRect.Min.x + imageRect.GetWidth() * region.x / region.fullWidth,
             imageRect.Min.y + imageRect.GetHeight() * region.y / region.fullHeight) : imageRect.Min;
         const ImVec2 rasterMax = region.Valid() ? ImVec2(
             imageRect.Min.x + imageRect.GetWidth() * (region.x + region.width) / region.fullWidth,
             imageRect.Min.y + imageRect.GetHeight() * (region.y + region.height) / region.fullHeight) : imageRect.Max;
+        const bool hasRetainedDetail = m_RawViewportDetailContent &&
+            m_RawViewportDetailContent == m_RawViewportPresentationContent &&
+            IsViewportTextureSafeForDrawing(m_RawViewportDetailTexture.texture);
+        ImRect detailBounds = imageRect;
+        if (hasRetainedDetail && m_RawViewportDetailRegion.Valid()) {
+            const auto& detail = m_RawViewportDetailRegion;
+            detailBounds = ImRect(
+                ImVec2(imageRect.Min.x + imageRect.GetWidth() * detail.x / detail.fullWidth,
+                    imageRect.Min.y + imageRect.GetHeight() * detail.y / detail.fullHeight),
+                ImVec2(imageRect.Min.x + imageRect.GetWidth() * (detail.x + detail.width) / detail.fullWidth,
+                    imageRect.Min.y + imageRect.GetHeight() * (detail.y + detail.height) / detail.fullHeight));
+        }
+        unsigned int overview = 0;
+        int overviewWidth = 0, overviewHeight = 0;
+        if (region.Partial() && TryGetViewportPreviewOverview(overview, overviewWidth, overviewHeight)) {
+            const auto uv = [&](ImVec2 point) {
+                return ImVec2((point.x - imageRect.Min.x) / imageRect.GetWidth(),
+                    1.f - (point.y - imageRect.Min.y) / imageRect.GetHeight());
+            };
+            const auto gap = [&](ImVec2 low, ImVec2 high) {
+                if (low.x >= high.x || low.y >= high.y) return;
+                DrawLabCoverageWithoutDetail(drawList, low, high, hasRetainedDetail ? &detailBounds : nullptr, [&] {
+                    drawList->AddImage((ImTextureID)(intptr_t)overview, low, high, uv(low), uv(high));
+                });
+            };
+            gap(imageRect.Min, ImVec2(imageRect.Max.x, rasterMin.y));
+            gap(ImVec2(imageRect.Min.x, rasterMax.y), imageRect.Max);
+            gap(ImVec2(imageRect.Min.x, rasterMin.y), ImVec2(rasterMin.x, rasterMax.y));
+            gap(ImVec2(rasterMax.x, rasterMin.y), ImVec2(imageRect.Max.x, rasterMax.y));
+        }
         publishImageRect(imageRect);
         // A standalone presentation texture is clamped at its edges, so it
         // must use the complete normalized domain. Insetting both UV edges
         // by half a texel compresses W source samples into W-1 texel spans;
         // at 1:1 that places screen samples between adjacent photo pixels and
         // makes a genuinely native raster look like a softened proxy.
-        if (!DrawRawViewportTransition(drawList, rasterMin, rasterMax)) drawList->AddImage(
-            (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.texture,
-            rasterMin,
-            rasterMax,
-            ImVec2(0.0f, 1.0f),
-            ImVec2(1.0f, 0.0f));
+        if (UsesGraphViewportPreview() && (m_RawWorkspaceLabUi.colorWarpInspectionActive ||
+            m_RawWorkspaceLabUi.colorWarpDiagnosticLocked || m_RawWorkspaceLabUi.colorWarpLightnessRangePreviewActive ||
+            (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color && (ImGui::IsKeyDown(ImGuiKey_H) ||
+                GetRawWorkspaceColorWarpViewMode(RawViewportRecipe()) == 2))))
+            m_Viewport.FrameTransition().Clear();
+        DrawLabCoverageWithoutDetail(drawList, rasterMin, rasterMax, hasRetainedDetail ? &detailBounds : nullptr, [&] {
+            const bool blended = !m_NodeOpenTransition.Active() && (UsesGraphViewportPreview()
+                ? m_Viewport.FrameTransition().Draw(drawList, m_RawWorkspacePresentationTexture.texture,
+                    rasterMin, rasterMax, ImGui::GetTime(), ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, 0)
+                : DrawRawViewportTransition(drawList, rasterMin, rasterMax));
+            if (!blended) drawList->AddImage(
+                (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.texture,
+                rasterMin, rasterMax, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+        });
         DrawRawViewportDetail(drawList, imageRect.Min, imageRect.Max);
         endPhoto(imageRect, firstPhotoCommand, true);
         drewPreview = true;
     }
-    if (!drewPreview) {
+    if (!drewPreview && m_NodeOpenTransition.Active()) {
+        m_NodeOpenTransition.DrawNode(*drawList, ImGui::GetTime());
+    } else if (!drewPreview) {
         const ImRect placeholder = imageRectFor(4.0f, 3.0f, false);
 
         const ImU32 placeholderColor = ImGui::GetColorU32(ImVec4(0.5f, 0.5f, 0.5f, 0.12f));
@@ -1643,7 +1764,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
 
 void EditorModule::RenderRawWorkspaceLabPreview(
     const Stack::RawWorkspace::SourceRecord* selectedSource) {
-    if(IsBracketingToolActive()&&RenderBracketingViewport())return;
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewImage);
     const ImVec2 previewAvailable = ImGui::GetContentRegionAvail();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 4.0f));
     ImGui::BeginChild(

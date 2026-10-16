@@ -11,7 +11,6 @@
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/GLStateGuards.h"
-#include "Renderer/Frequency/GpuFft.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/RenderTiling.h"
 #include "Utils/SharedPixelBuffer.h"
@@ -271,315 +270,7 @@ std::vector<float> ReadPhase6ComplexTexture(
     return error == GL_NO_ERROR ? result : std::vector<float>{};
 }
 
-bool ValidateGpuFftAgainstCpuReference() {
-    constexpr int sourceWidth = 7;
-    constexpr int sourceHeight = 5;
-    constexpr int paddedWidth = 8;
-    constexpr int paddedHeight = 8;
-    constexpr int originX = 0;
-    constexpr int originY = 1;
-    std::vector<float> source(
-        static_cast<std::size_t>(sourceWidth) *
-        static_cast<std::size_t>(sourceHeight) * 4u,
-        1.0f);
-    for (int y = 0; y < sourceHeight; ++y) {
-        for (int x = 0; x < sourceWidth; ++x) {
-            const std::size_t index =
-                (static_cast<std::size_t>(y) * sourceWidth + x) * 4u;
-            const float value =
-                (static_cast<float>((x * 11 + y * 7) % 19) - 9.0f) * 0.625f;
-            source[index + 0] = value;
-            source[index + 1] = -value * 0.5f;
-            source[index + 2] = value * 1.75f;
-        }
-    }
 
-    unsigned int sourceTexture = 0;
-    glGenTextures(1, &sourceTexture);
-    glBindTexture(GL_TEXTURE_2D, sourceTexture);
-    glTexImage2D(
-        GL_TEXTURE_2D, 0, GL_RGBA16F,
-        sourceWidth, sourceHeight, 0,
-        GL_RGBA, GL_FLOAT, source.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    if (sourceTexture == 0 || glGetError() != GL_NO_ERROR) return false;
-
-    const auto wrapIndex = [](int value, int size) {
-        const int result = value % size;
-        return result < 0 ? result + size : result;
-    };
-    const auto mirrorIndex = [&](int value, int size) {
-        const int period = 2 * (size - 1);
-        const int folded = wrapIndex(value, period);
-        return folded < size ? folded : period - folded;
-    };
-
-    Stack::Renderer::Frequency::GpuFft fft;
-    bool ok =
-        Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(1) == 1 &&
-        Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(7) == 8 &&
-        Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(
-            std::numeric_limits<int>::max()) == 0 &&
-        fft.Forward(
-            sourceTexture,
-            sourceWidth,
-            sourceHeight,
-            sourceWidth,
-            paddedHeight,
-            originX,
-            originY,
-            Stack::Renderer::Frequency::FftEdgePolicy::Mirror) == 0;
-    for (Stack::Renderer::Frequency::FftEdgePolicy policy : {
-             Stack::Renderer::Frequency::FftEdgePolicy::Mirror,
-             Stack::Renderer::Frequency::FftEdgePolicy::Wrap,
-             Stack::Renderer::Frequency::FftEdgePolicy::ZeroPad}) {
-        std::vector<double> packed(
-            static_cast<std::size_t>(paddedWidth) * paddedHeight, 0.0);
-        for (int y = 0; y < paddedHeight; ++y) {
-            for (int x = 0; x < paddedWidth; ++x) {
-                int sourceX = x - originX;
-                int sourceY = y - originY;
-                const bool inside =
-                    sourceX >= 0 && sourceX < sourceWidth &&
-                    sourceY >= 0 && sourceY < sourceHeight;
-                if (!inside &&
-                    policy == Stack::Renderer::Frequency::FftEdgePolicy::ZeroPad)
-                    continue;
-                if (!inside &&
-                    policy == Stack::Renderer::Frequency::FftEdgePolicy::Mirror) {
-                    sourceX = mirrorIndex(sourceX, sourceWidth);
-                    sourceY = mirrorIndex(sourceY, sourceHeight);
-                } else if (!inside) {
-                    sourceX = wrapIndex(sourceX, sourceWidth);
-                    sourceY = wrapIndex(sourceY, sourceHeight);
-                }
-                packed[static_cast<std::size_t>(y) * paddedWidth + x] =
-                    source[(static_cast<std::size_t>(sourceY) * sourceWidth +
-                            sourceX) * 4u];
-            }
-        }
-
-        std::vector<std::complex<double>> reference(
-            static_cast<std::size_t>(paddedWidth) * paddedHeight);
-        constexpr double twoPi = 6.28318530717958647692;
-        for (int ky = 0; ky < paddedHeight; ++ky) {
-            for (int kx = 0; kx < paddedWidth; ++kx) {
-                std::complex<double> sum;
-                for (int y = 0; y < paddedHeight; ++y) {
-                    for (int x = 0; x < paddedWidth; ++x) {
-                        const double angle = -twoPi * (
-                            static_cast<double>(kx * x) / paddedWidth +
-                            static_cast<double>(ky * y) / paddedHeight);
-                        sum += packed[static_cast<std::size_t>(y) * paddedWidth + x] *
-                            std::complex<double>(std::cos(angle), std::sin(angle));
-                    }
-                }
-                reference[static_cast<std::size_t>(ky) * paddedWidth + kx] = sum;
-            }
-        }
-
-        unsigned int spectrum = 0;
-        if (policy == Stack::Renderer::Frequency::FftEdgePolicy::Mirror) {
-            struct ImageBindingState {
-                GLint texture = 0;
-                GLint level = 0;
-                GLint layered = GL_FALSE;
-                GLint layer = 0;
-                GLint access = GL_READ_ONLY;
-                GLint format = GL_RGBA16F;
-            };
-            const auto readImageBinding = [](GLuint unit) {
-                ImageBindingState state;
-                glGetIntegeri_v(GL_IMAGE_BINDING_NAME, unit, &state.texture);
-                glGetIntegeri_v(GL_IMAGE_BINDING_LEVEL, unit, &state.level);
-                glGetIntegeri_v(GL_IMAGE_BINDING_LAYERED, unit, &state.layered);
-                glGetIntegeri_v(GL_IMAGE_BINDING_LAYER, unit, &state.layer);
-                glGetIntegeri_v(GL_IMAGE_BINDING_ACCESS, unit, &state.access);
-                glGetIntegeri_v(GL_IMAGE_BINDING_FORMAT, unit, &state.format);
-                return state;
-            };
-            const auto sameImageBinding = [](
-                const ImageBindingState& left,
-                const ImageBindingState& right) {
-                return left.texture == right.texture &&
-                    left.level == right.level &&
-                    left.layered == right.layered &&
-                    left.layer == right.layer &&
-                    left.access == right.access &&
-                    left.format == right.format;
-            };
-            const auto restoreImageBinding = [](
-                GLuint unit,
-                const ImageBindingState& state) {
-                const GLuint texture =
-                    state.texture > 0 &&
-                        glIsTexture(static_cast<GLuint>(state.texture))
-                    ? static_cast<GLuint>(state.texture)
-                    : 0;
-                glBindImageTexture(
-                    unit,
-                    texture,
-                    state.level,
-                    static_cast<GLboolean>(state.layered),
-                    state.layer,
-                    static_cast<GLenum>(state.access),
-                    state.format != 0
-                        ? static_cast<GLenum>(state.format)
-                        : GL_RGBA16F);
-            };
-            const Stack::Renderer::GLState::FramebufferState savedState;
-            const ImageBindingState savedImage0 = readImageBinding(0);
-            const ImageBindingState savedImage1 = readImageBinding(1);
-            const unsigned int readProbe = GLHelpers::CreateFBO(sourceTexture);
-            const unsigned int drawProbe = GLHelpers::CreateFBO(sourceTexture);
-            const unsigned int textureProbe =
-                GLHelpers::CreateEmptyTexture(1, 1);
-            GLint savedProgram = 0;
-            GLint savedActiveTexture = GL_TEXTURE0;
-            GLint savedTexture0 = 0;
-            glGetIntegerv(GL_CURRENT_PROGRAM, &savedProgram);
-            glGetIntegerv(GL_ACTIVE_TEXTURE, &savedActiveTexture);
-            glActiveTexture(GL_TEXTURE0);
-            glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTexture0);
-            if (readProbe == 0 || drawProbe == 0 || textureProbe == 0) {
-                ok = false;
-            } else {
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, readProbe);
-                glReadBuffer(GL_COLOR_ATTACHMENT0);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawProbe);
-                glDrawBuffer(GL_COLOR_ATTACHMENT0);
-                glBindTexture(GL_TEXTURE_2D, textureProbe);
-                glBindImageTexture(
-                    0, textureProbe, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA16F);
-                glBindImageTexture(
-                    1, textureProbe, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-                const ImageBindingState expectedImage0 = readImageBinding(0);
-                const ImageBindingState expectedImage1 = readImageBinding(1);
-                glActiveTexture(GL_TEXTURE3);
-                glUseProgram(0);
-                spectrum = fft.Forward(
-                    sourceTexture,
-                    sourceWidth,
-                    sourceHeight,
-                    paddedWidth,
-                    paddedHeight,
-                    originX,
-                    originY,
-                    policy);
-                GLint restoredRead = 0;
-                GLint restoredDraw = 0;
-                GLint restoredProgram = -1;
-                GLint restoredActiveTexture = 0;
-                GLint restoredTexture0 = 0;
-                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restoredRead);
-                glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restoredDraw);
-                glGetIntegerv(GL_CURRENT_PROGRAM, &restoredProgram);
-                glGetIntegerv(GL_ACTIVE_TEXTURE, &restoredActiveTexture);
-                glActiveTexture(GL_TEXTURE0);
-                glGetIntegerv(GL_TEXTURE_BINDING_2D, &restoredTexture0);
-                const ImageBindingState restoredImage0 = readImageBinding(0);
-                const ImageBindingState restoredImage1 = readImageBinding(1);
-                ok &= restoredRead == static_cast<GLint>(readProbe) &&
-                    restoredDraw == static_cast<GLint>(drawProbe) &&
-                    restoredProgram == 0 &&
-                    restoredActiveTexture == GL_TEXTURE3 &&
-                    restoredTexture0 == static_cast<GLint>(textureProbe) &&
-                    sameImageBinding(restoredImage0, expectedImage0) &&
-                    sameImageBinding(restoredImage1, expectedImage1);
-            }
-            savedState.Restore();
-            restoreImageBinding(0, savedImage0);
-            restoreImageBinding(1, savedImage1);
-            glUseProgram(static_cast<GLuint>(savedProgram));
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(
-                GL_TEXTURE_2D,
-                static_cast<GLuint>(savedTexture0));
-            glActiveTexture(static_cast<GLenum>(savedActiveTexture));
-            if (readProbe != 0) glDeleteFramebuffers(1, &readProbe);
-            if (drawProbe != 0) glDeleteFramebuffers(1, &drawProbe);
-            if (textureProbe != 0) glDeleteTextures(1, &textureProbe);
-        } else {
-            spectrum = fft.Forward(
-                sourceTexture,
-                sourceWidth,
-                sourceHeight,
-                paddedWidth,
-                paddedHeight,
-                originX,
-                originY,
-                policy);
-        }
-        const std::vector<float> measured =
-            ReadPhase6ComplexTexture(spectrum, paddedWidth, paddedHeight);
-        double maximumError = 0.0;
-        double maximumReference = 1.0;
-        if (measured.size() != reference.size() * 2u) {
-            ok = false;
-        } else {
-            for (std::size_t index = 0; index < reference.size(); ++index) {
-                maximumError = std::max(
-                    maximumError,
-                    std::abs(
-                        static_cast<double>(measured[index * 2u]) -
-                        reference[index].real()));
-                maximumError = std::max(
-                    maximumError,
-                    std::abs(
-                        static_cast<double>(measured[index * 2u + 1u]) -
-                        reference[index].imag()));
-                maximumReference = std::max(
-                    maximumReference, std::abs(reference[index]));
-            }
-            const double relativeError =
-                maximumError / maximumReference;
-            if (relativeError >= 0.0125) {
-                std::cerr
-                    << "Phase 6 FFT reference mismatch for edge policy "
-                    << static_cast<int>(policy)
-                    << ": max error " << maximumError
-                    << ", relative error " << relativeError
-                    << ", measured DC "
-                    << (measured.empty() ? 0.0f : measured[0])
-                    << ", reference DC " << reference[0].real()
-                    << ".\n";
-                ok = false;
-            }
-        }
-        const unsigned int reconstructed = fft.Inverse(
-            spectrum, paddedWidth, paddedHeight);
-        const std::vector<float> reconstructedSamples =
-            ReadPhase6ComplexTexture(
-                reconstructed, paddedWidth, paddedHeight);
-        double inverseError = 0.0;
-        if (reconstructedSamples.size() != packed.size() * 2u) {
-            ok = false;
-        } else {
-            for (std::size_t index = 0; index < packed.size(); ++index) {
-                inverseError = std::max(
-                    inverseError,
-                    std::abs(
-                        static_cast<double>(
-                            reconstructedSamples[index * 2u]) -
-                        packed[index]));
-            }
-            if (inverseError >= 0.0125) {
-                std::cerr
-                    << "Phase 6 inverse FFT mismatch for edge policy "
-                    << static_cast<int>(policy)
-                    << ": max error " << inverseError << ".\n";
-                ok = false;
-            }
-        }
-        if (reconstructed != 0)
-            glDeleteTextures(1, &reconstructed);
-        if (spectrum != 0) glDeleteTextures(1, &spectrum);
-    }
-    glDeleteTextures(1, &sourceTexture);
-    return ok;
-}
 
 bool RunPhase6BReductionValidation() {
     constexpr int width = 8;
@@ -692,6 +383,15 @@ bool BuildAuthoredReformatGraph(
     reformat->reformatSettings.height = outputHeight;
     reformat->reformatSettings.filter = filter;
     reformat->reformatSettings.border = NodeMath::BorderPolicy::Clamp;
+    reformat->reformatSettings.canvasRatio = 7;
+    reformat->reformatSettings.customCanvasAspect = float(outputWidth) / outputHeight;
+    reformat->reformatSettings.visibleAspect = 2.39f;
+    reformat->reformatSettings.sideBars = 0.03f;
+    reformat->reformatSettings.topBottomBars = 0.06f;
+    reformat->reformatSettings.sourceScale = 1.2f;
+    reformat->reformatSettings.sourceX = 0.3f;
+    reformat->reformatSettings.sourceY = -0.4f;
+    const auto authoredFraming = reformat->reformatSettings;
     const int reformatId = reformat->id;
     const int exposureId = graph.AddTechnicalImageNode(
         NodeMath::TechnicalImageOperation::Exposure, { 560.0f, 0.0f })->id;
@@ -730,9 +430,10 @@ bool BuildAuthoredReformatGraph(
         nlohmann::json::array(), graph);
     EditorNodeGraph::Graph restored;
     EditorNodeGraph::DeserializeGraphPayload(
-        saved, restored, 0, {}, 0, 0, 4);
+        saved, restored, 0);
     const EditorNodeGraph::Node* restoredReformat = restored.FindNode(reformatId);
     if (!restoredReformat || restoredReformat->kind != EditorNodeGraph::NodeKind::Reformat ||
+        !(restoredReformat->reformatSettings == authoredFraming) ||
         restoredReformat->reformatSettings.width != outputWidth ||
         restoredReformat->reformatSettings.height != outputHeight ||
         restoredReformat->reformatSettings.filter != filter ||
@@ -805,6 +506,14 @@ bool RunPhase6GeometryValidation() {
     referenceSettings.height = outputHeight;
     referenceSettings.filter = NodeMath::ReconstructionFilter::Linear;
     referenceSettings.border = NodeMath::BorderPolicy::Clamp;
+    referenceSettings.canvasRatio = 7;
+    referenceSettings.customCanvasAspect = float(outputWidth) / outputHeight;
+    referenceSettings.visibleAspect = 2.39f;
+    referenceSettings.sideBars = 0.03f;
+    referenceSettings.topBottomBars = 0.06f;
+    referenceSettings.sourceScale = 1.2f;
+    referenceSettings.sourceX = 0.3f;
+    referenceSettings.sourceY = -0.4f;
     std::vector<float> reference = NodeMath::ReformatRgbaReference(
         normalized, width, height, referenceSettings);
     const float exposureScale = std::exp2(0.25f);
@@ -828,6 +537,13 @@ bool RunPhase6GeometryValidation() {
     int exportWidth = 0;
     int exportHeight = 0;
     const auto exported = pipeline.GetOutputPixels(exportWidth, exportHeight);
+    int fullPreviewWidth=0, fullPreviewHeight=0;
+    const auto fullPreview=pipeline.GetPreviewPixels(fullPreviewWidth,fullPreviewHeight,0);
+    bool consumersMatch=fullPreview.size()==exported.size() && fullPreviewWidth==exportWidth && fullPreviewHeight==exportHeight;
+    if(consumersMatch) for(int y=0;y<exportHeight;++y) for(int x=0;x<exportWidth*4;++x)
+        consumersMatch &= fullPreview[std::size_t(y)*exportWidth*4+x] == exported[std::size_t(exportHeight-1-y)*exportWidth*4+x];
+    ok &= Phase6Check(consumersMatch,"Framing preview and export pixels differ after accounting for readback row orientation");
+
     const GraphExecutionStats consumerStats = pipeline.GetLastGraphExecutionStats();
     ok &= Phase6Check(
         !preview.empty() && previewWidth == 3 && previewHeight == 2 &&
@@ -1159,608 +875,11 @@ bool RunPhase6CustomMaskPolygonValidation() {
     return ok;
 }
 
-bool BuildAuthoredFrequencyRoundTrip(
-    const std::vector<unsigned char>& pixels,
-    int width,
-    int height,
-    RenderGraphSnapshot& snapshot,
-    std::string& error) {
-    EditorNodeGraph::Graph graph;
-    graph.Clear();
-    EditorNodeGraph::ImagePayload source;
-    source.label = "Phase 6 Frequency Source";
-    source.width = width;
-    source.height = height;
-    source.channels = 4;
-    source.originalChannels = 4;
-    source.pixels = pixels;
-    const int sourceId = graph.AddImageNode(std::move(source), { 0.0f, 0.0f })->id;
-    const int splitId = graph.AddChannelSplitNode({ 220.0f, 0.0f })->id;
-    const int fftId = graph.AddFrequencyFftNode({ 440.0f, 0.0f })->id;
-    const int separateId =
-        graph.AddSpectrumSeparateNode({ 660.0f, 0.0f })->id;
-    const int recombineId =
-        graph.AddSpectrumRecombineNode({ 880.0f, 0.0f })->id;
-    const int ifftId = graph.AddFrequencyIfftNode({ 1100.0f, 0.0f })->id;
-    const int outputId = graph.AddOutputNode({ 1320.0f, 0.0f }, true)->id;
-    if (!graph.TryConnectSockets(sourceId, EditorNodeGraph::kImageOutputSocketId,
-            splitId, EditorNodeGraph::kImageInputSocketId, &error) ||
-        !graph.TryConnectSockets(splitId, "r",
-            fftId, EditorNodeGraph::kChannelInputSocketId, &error) ||
-        !graph.TryConnectSockets(fftId, EditorNodeGraph::kSpectrumOutputSocketId,
-            separateId, EditorNodeGraph::kSpectrumInputSocketId, &error) ||
-        !graph.TryConnectSockets(
-            separateId, EditorNodeGraph::kSpectrumMagnitudeOutputSocketId,
-            recombineId, EditorNodeGraph::kSpectrumMagnitudeInputSocketId,
-            &error) ||
-        !graph.TryConnectSockets(
-            separateId, EditorNodeGraph::kSpectrumPhaseOutputSocketId,
-            recombineId, EditorNodeGraph::kSpectrumPhaseInputSocketId,
-            &error) ||
-        !graph.TryConnectSockets(
-            recombineId, EditorNodeGraph::kSpectrumOutputSocketId,
-            ifftId, EditorNodeGraph::kSpectrumInputSocketId, &error) ||
-        !graph.TryConnectSockets(ifftId, EditorNodeGraph::kChannelOutputSocketId,
-            outputId, EditorNodeGraph::kImageInputSocketId, &error)) {
-        return false;
-    }
-    EditorModule editor;
-    editor.GetNodeGraph() = std::move(graph);
-    snapshot = editor.BuildGraphSnapshot();
-    snapshot.executionInspectionEnabled = true;
-    return snapshot.outputNodeId == outputId && !snapshot.nodes.empty();
-}
 
-bool ValidateFrequencyEditorActions() {
-    EditorModule editor;
-    EditorNodeGraph::Graph& graph = editor.GetNodeGraph();
-    graph.Clear();
-    const int splitId = graph.AddChannelSplitNode({ 0.0f, 0.0f })->id;
-    EditorNodeGraph::Node* filter = graph.AddFrequencyFilterNode(
-        EditorNodeGraph::FrequencyFilterMode::BandStop, { 240.0f, 0.0f });
-    const int filterId = filter->id;
-    filter->frequencyFilterSettings.strength = 0.63f;
-    filter->frequencyFilterSettings.edgePolicy =
-        EditorNodeGraph::FrequencyEdgePolicy::Wrap;
-    filter->frequencyFilterSettings.localResponse.lowCutoff = 0.08f;
-    filter->frequencyFilterSettings.localResponse.highCutoff = 0.22f;
-    const int outputId = graph.AddOutputNode({ 520.0f, 0.0f }, true)->id;
-    EditorNodeGraph::ImagePayload unrelatedPayload;
-    unrelatedPayload.label = "Frequency history payload sentinel";
-    unrelatedPayload.width = 16;
-    unrelatedPayload.height = 16;
-    unrelatedPayload.channels = 4;
-    unrelatedPayload.pixels.resize(16u * 16u * 4u, 127u);
-    const int unrelatedImageId = graph.AddImageNode(
-        std::move(unrelatedPayload),
-        { 0.0f, 240.0f })->id;
-    const unsigned char* unrelatedPixelsBefore =
-        graph.FindNode(unrelatedImageId)->image.pixels.data();
-    std::string error;
-    bool ok = graph.TryConnectSockets(
-        splitId, "r", filterId, EditorNodeGraph::kChannelInputSocketId, &error);
-    ok = ok && graph.TryConnectSockets(
-        filterId,
-        EditorNodeGraph::kChannelOutputSocketId,
-        outputId,
-        EditorNodeGraph::kImageInputSocketId,
-        &error);
-    ok = ok && editor.SetFrequencyParameterExposed(
-        filterId, EditorNodeGraph::kStrengthParameterId, true);
-    ok = Phase6Check(
-        ok, error.empty() ? "could not author the Frequency Filter action fixture" : error);
 
-    const std::size_t originalNodeCount = graph.GetNodes().size();
-    ok &= Phase6Check(
-        editor.ExtractFrequencyResponseNode(filterId, &error),
-        error.empty() ? "Extract Response Node failed" : error);
-    const EditorNodeGraph::Link* extractedLink = graph.FindAnyInputLink(
-        filterId, EditorNodeGraph::kFrequencyResponseInputSocketId);
-    const EditorNodeGraph::Node* extracted = extractedLink == nullptr
-        ? nullptr : graph.FindNode(extractedLink->fromNodeId);
-    ok &= Phase6Check(
-        graph.GetNodes().size() == originalNodeCount + 1 &&
-        extracted != nullptr &&
-        extracted->kind == EditorNodeGraph::NodeKind::FrequencyResponse &&
-        std::abs(extracted->frequencyResponseSettings.lowCutoff - 0.08f) < 1.0e-6f &&
-        std::abs(extracted->frequencyResponseSettings.highCutoff - 0.22f) < 1.0e-6f,
-        "Extract Response Node did not preserve the local response settings");
-    ok &= Phase6Check(
-        editor.UndoFrequencyGraphAction() &&
-        graph.GetNodes().size() == originalNodeCount &&
-        graph.FindAnyInputLink(
-            filterId, EditorNodeGraph::kFrequencyResponseInputSocketId) == nullptr,
-        "Extract Response Node was not a single undoable graph edit");
-    ok &= Phase6Check(
-        editor.RedoFrequencyGraphAction() &&
-        graph.FindAnyInputLink(
-            filterId, EditorNodeGraph::kFrequencyResponseInputSocketId) != nullptr,
-        "Extract Response Node could not be redone");
-    ok &= Phase6Check(
-        editor.UndoFrequencyGraphAction(),
-        "the action fixture could not return to its pre-extraction graph");
 
-    error.clear();
-    ok &= Phase6Check(
-        editor.ExpandFrequencyFilterNode(filterId, &error),
-        error.empty() ? "Expand to Advanced Nodes failed" : error);
-    const auto countKind = [&](EditorNodeGraph::NodeKind kind) {
-        return static_cast<int>(std::count_if(
-            graph.GetNodes().begin(), graph.GetNodes().end(),
-            [&](const EditorNodeGraph::Node& node) { return node.kind == kind; }));
-    };
-    const EditorNodeGraph::Node* apply = nullptr;
-    const EditorNodeGraph::Node* inverse = nullptr;
-    const EditorNodeGraph::Node* transform = nullptr;
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::ApplyFrequencyResponse) apply = &node;
-        if (node.kind == EditorNodeGraph::NodeKind::FrequencyIfft) inverse = &node;
-        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFft) transform = &node;
-    }
-    const bool strengthExposed = apply != nullptr &&
-        std::find(
-            apply->exposedParameterIds.begin(),
-            apply->exposedParameterIds.end(),
-            EditorNodeGraph::kStrengthParameterId) !=
-            apply->exposedParameterIds.end();
-    const EditorNodeGraph::Link* advancedInput = transform == nullptr
-        ? nullptr : graph.FindAnyInputLink(
-            transform->id, EditorNodeGraph::kChannelInputSocketId);
-    const EditorNodeGraph::Link* preservedOutput =
-        graph.FindAnyInputLink(
-            outputId,
-            EditorNodeGraph::kImageInputSocketId);
-    ok &= Phase6Check(
-        graph.FindNode(filterId) == nullptr &&
-        countKind(EditorNodeGraph::NodeKind::FrequencyFft) == 1 &&
-        countKind(EditorNodeGraph::NodeKind::FrequencyResponse) == 1 &&
-        countKind(EditorNodeGraph::NodeKind::ApplyFrequencyResponse) == 1 &&
-        countKind(EditorNodeGraph::NodeKind::FrequencyIfft) == 1 &&
-        advancedInput != nullptr && advancedInput->fromNodeId == splitId &&
-        inverse != nullptr && preservedOutput != nullptr &&
-        preservedOutput->fromNodeId == inverse->id &&
-        strengthExposed &&
-        std::abs(apply->applyFrequencyResponseSettings.strength - 0.63f) < 1.0e-6f,
-        "Expand to Advanced Nodes did not preserve connections, settings, or exposure");
-    ok &= Phase6Check(
-        editor.UndoFrequencyGraphAction() &&
-        graph.FindNode(filterId) != nullptr &&
-        graph.GetNodes().size() == originalNodeCount,
-        "Expand to Advanced Nodes was not a single undoable graph edit");
-    ok &= Phase6Check(
-        editor.RedoFrequencyGraphAction() &&
-        graph.FindNode(filterId) == nullptr &&
-        countKind(EditorNodeGraph::NodeKind::ApplyFrequencyResponse) == 1 &&
-        graph.FindNode(unrelatedImageId) != nullptr &&
-        graph.FindNode(unrelatedImageId)->image.pixels.data() ==
-            unrelatedPixelsBefore,
-        "Expand redo failed or frequency history replaced an unrelated image payload");
-    const int laterEditId = graph.AddValueNode(
-        Stack::NodeMath::MakeUniformScalar(0.25),
-        { 760.0f, 220.0f })->id;
-    ok &= Phase6Check(
-        editor.CanUndoFrequencyGraphAction() &&
-        !editor.UndoFrequencyGraphAction() &&
-        !editor.CanUndoFrequencyGraphAction() &&
-        !editor.CanRedoFrequencyGraphAction() &&
-        graph.FindNode(laterEditId) != nullptr,
-        "a newer structural edit should invalidate stale frequency history without being overwritten");
 
-    EditorModule rollbackEditor;
-    EditorNodeGraph::Graph& rollbackGraph =
-        rollbackEditor.GetNodeGraph();
-    rollbackGraph.Clear();
-    const int rollbackSplitId =
-        rollbackGraph.AddChannelSplitNode(
-            { 0.0f, 0.0f })->id;
-    const int rollbackFilterId =
-        rollbackGraph.AddFrequencyFilterNode(
-            EditorNodeGraph::FrequencyFilterMode::LowPass,
-            { 240.0f, 0.0f })->id;
-    const int rollbackTargetId =
-        rollbackGraph.AddOutputNode(
-            { 520.0f, 0.0f },
-            true)->id;
-    error.clear();
-    ok &= Phase6Check(
-        rollbackGraph.TryConnectSockets(
-            rollbackSplitId,
-            "r",
-            rollbackFilterId,
-            EditorNodeGraph::kChannelInputSocketId,
-            &error) &&
-        rollbackGraph.TryConnectSockets(
-            rollbackFilterId,
-            EditorNodeGraph::kChannelOutputSocketId,
-            rollbackTargetId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error),
-        "advanced frequency rollback fixture could not connect");
-    auto& rollbackNodes = rollbackGraph.EditNodes();
-    const auto invalidRollbackTarget = std::find_if(
-        rollbackNodes.begin(),
-        rollbackNodes.end(),
-        [rollbackTargetId](const auto& node) {
-            return node.id == rollbackTargetId;
-        });
-    const bool foundRollbackTarget =
-        invalidRollbackTarget != rollbackNodes.end();
-    if (foundRollbackTarget) {
-        invalidRollbackTarget->kind =
-            EditorNodeGraph::NodeKind::Value;
-    }
-    const std::size_t rollbackNodeCount =
-        rollbackGraph.GetNodes().size();
-    const std::size_t rollbackLinkCount =
-        rollbackGraph.GetLinks().size();
-    const int rollbackNextNodeId =
-        rollbackGraph.GetNextNodeId();
-    error.clear();
-    ok &= Phase6Check(
-        foundRollbackTarget &&
-        !rollbackEditor.ExpandFrequencyFilterNode(
-            rollbackFilterId,
-            &error) &&
-        rollbackGraph.GetNodes().size() ==
-            rollbackNodeCount &&
-        rollbackGraph.GetLinks().size() ==
-            rollbackLinkCount &&
-        rollbackGraph.GetNextNodeId() ==
-            rollbackNextNodeId &&
-        rollbackGraph.FindNode(rollbackFilterId) != nullptr &&
-        rollbackGraph.FindAnyInputLink(
-            rollbackFilterId,
-            EditorNodeGraph::kChannelInputSocketId) != nullptr &&
-        rollbackGraph.FindAnyInputLink(
-            rollbackTargetId,
-            EditorNodeGraph::kImageInputSocketId) != nullptr,
-        "failed advanced frequency rewiring should restore the exact filter, links, and node-ID state");
-    return ok;
-}
 
-bool ValidateSpectrumAnalyzerFixture() {
-    constexpr int width = 8;
-    constexpr int height = 8;
-    std::vector<unsigned char> source(
-        static_cast<std::size_t>(width * height) * 4u);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const double wave =
-                std::cos(2.0 * 3.14159265358979323846 *
-                    0.25 * static_cast<double>(x));
-            const unsigned char value = static_cast<unsigned char>(
-                std::clamp(std::lround(128.0 + 100.0 * wave), 0l, 255l));
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width +
-                 static_cast<std::size_t>(x)) * 4u;
-            source[offset] = value;
-            source[offset + 1u] = value;
-            source[offset + 2u] = value;
-            source[offset + 3u] = 255;
-        }
-    }
-
-    EditorNodeGraph::Graph graph;
-    EditorNodeGraph::ImagePayload image;
-    image.width = width;
-    image.height = height;
-    image.channels = 4;
-    image.originalChannels = 4;
-    image.pixels = source;
-    const int sourceId = graph.AddImageNode(
-        std::move(image), { 0.0f, 0.0f })->id;
-    const int splitId = graph.AddChannelSplitNode({ 180.0f, 0.0f })->id;
-    const int fftId = graph.AddFrequencyFftNode({ 360.0f, 0.0f })->id;
-    const int responseId =
-        graph.AddFrequencyResponseNode({ 540.0f, 160.0f })->id;
-    const int analyzerId =
-        graph.AddSpectrumAnalyzerNode(
-            EditorNodeGraph::SpectrumAnalyzerMode::RadialEnergy,
-            { 540.0f, -160.0f })->id;
-    const int applyId =
-        graph.AddApplyFrequencyResponseNode({ 560.0f, 0.0f })->id;
-    const int inverseId =
-        graph.AddFrequencyIfftNode({ 760.0f, 0.0f })->id;
-    const int outputId =
-        graph.AddOutputNode({ 940.0f, 0.0f }, true)->id;
-    EditorNodeGraph::Node* analyzer = graph.FindNode(analyzerId);
-    analyzer->spectrumAnalyzerSettings.innerRadius = 0.24f;
-    analyzer->spectrumAnalyzerSettings.outerRadius = 0.26f;
-    analyzer->spectrumAnalyzerSettings.excludeDc = true;
-    graph.SetParameterExposed(
-        applyId, EditorNodeGraph::kStrengthParameterId, true);
-    std::string error;
-    bool authored =
-        graph.TryConnectSockets(
-            sourceId, EditorNodeGraph::kImageOutputSocketId,
-            splitId, EditorNodeGraph::kImageInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            splitId, "r", fftId,
-            EditorNodeGraph::kChannelInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            fftId, EditorNodeGraph::kSpectrumOutputSocketId,
-            analyzerId, EditorNodeGraph::kSpectrumInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            fftId, EditorNodeGraph::kSpectrumOutputSocketId,
-            applyId, EditorNodeGraph::kSpectrumInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            responseId,
-            EditorNodeGraph::kFrequencyResponseOutputSocketId,
-            applyId,
-            EditorNodeGraph::kFrequencyResponseInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            analyzerId, EditorNodeGraph::kBandPowerOutputSocketId,
-            applyId,
-            EditorNodeGraph::ParameterInputSocketId(
-                EditorNodeGraph::kStrengthParameterId),
-            &error) &&
-        graph.TryConnectSockets(
-            applyId, EditorNodeGraph::kSpectrumOutputSocketId,
-            inverseId, EditorNodeGraph::kSpectrumInputSocketId, &error) &&
-        graph.TryConnectSockets(
-            inverseId, EditorNodeGraph::kChannelOutputSocketId,
-            outputId, EditorNodeGraph::kImageInputSocketId, &error);
-    bool ok = Phase6Check(
-        authored,
-        error.empty() ? "could not author the deterministic Spectrum Analyzer fixture" : error);
-    if (!authored) return false;
-
-    EditorModule editor;
-    editor.GetNodeGraph() = std::move(graph);
-    RenderGraphSnapshot snapshot = editor.BuildGraphSnapshot();
-    snapshot.executionInspectionEnabled = true;
-    RenderPipeline pipeline;
-    pipeline.Initialize();
-    pipeline.LoadSourceFromPixels(source.data(), width, height, 4);
-    pipeline.ExecuteGraph(snapshot);
-    RenderSpectrumAnalysis analysis;
-    ok &= Phase6Check(
-        pipeline.GetCachedSpectrumAnalysis(analyzerId, analysis),
-        "Spectrum Analyzer did not publish its typed analysis result");
-    const int expectedBin = static_cast<int>(
-        std::floor(0.25 / 0.70710678 * 255.0));
-    const float direction = std::abs(analysis.peakDirectionDegrees);
-    ok &= Phase6Check(
-        analysis.valid &&
-        analysis.radialPower[static_cast<std::size_t>(expectedBin)] > 0.0f &&
-        analysis.bandPower > 0.999f &&
-        std::abs(analysis.peakFrequency - 0.25f) < 1.0e-5f &&
-        (direction < 1.0e-3f ||
-         std::abs(direction - 180.0f) < 1.0e-3f),
-        "Spectrum Analyzer curve, band fraction, or peak measurement "
-        "did not match the deterministic quarter-cycle fixture");
-
-    const std::size_t originalAnalysisFingerprint = analysis.fingerprint;
-    const auto analyzerSnapshotIt = std::find_if(
-        snapshot.nodes.begin(),
-        snapshot.nodes.end(),
-        [analyzerId](const RenderGraphNode& node) {
-            return node.nodeId == analyzerId;
-        });
-    if (analyzerSnapshotIt != snapshot.nodes.end()) {
-        analyzerSnapshotIt->definitionVersion += "-replacement";
-        pipeline.ExecuteGraph(snapshot);
-        RenderSpectrumAnalysis replacementAnalysis;
-        ok &= Phase6Check(
-            pipeline.GetCachedSpectrumAnalysis(
-                analyzerId, replacementAnalysis) &&
-                replacementAnalysis.fingerprint !=
-                    originalAnalysisFingerprint,
-            "Spectrum Analyzer reused persistent analysis after an "
-            "exact-definition version change");
-    } else {
-        ok &= Phase6Check(
-            false,
-            "Spectrum Analyzer was missing from its render snapshot");
-    }
-    return ok;
-}
-
-struct FrequencyFilterFixtureResult {
-    std::vector<float> pixels;
-    std::string specializedFailure;
-};
-
-FrequencyFilterFixtureResult RenderFrequencyFilterFixture(
-    const std::vector<unsigned char>& source,
-    int width,
-    int height,
-    const EditorNodeGraph::FrequencyFilterSettings& settings) {
-    EditorNodeGraph::Graph graph;
-    EditorNodeGraph::ImagePayload image;
-    image.width = width;
-    image.height = height;
-    image.channels = 4;
-    image.originalChannels = 4;
-    image.pixels = source;
-    const int sourceId =
-        graph.AddImageNode(std::move(image), { 0.0f, 0.0f })->id;
-    const int splitId =
-        graph.AddChannelSplitNode({ 180.0f, 0.0f })->id;
-    EditorNodeGraph::Node* filter = graph.AddFrequencyFilterNode(
-        settings.localResponse.mode, { 360.0f, 0.0f });
-    filter->frequencyFilterSettings = settings;
-    const int filterId = filter->id;
-    const int outputId =
-        graph.AddOutputNode({ 580.0f, 0.0f }, true)->id;
-    if (!graph.TryConnectSockets(
-            sourceId, EditorNodeGraph::kImageOutputSocketId,
-            splitId, EditorNodeGraph::kImageInputSocketId) ||
-        !graph.TryConnectSockets(
-            splitId, "r", filterId,
-            EditorNodeGraph::kChannelInputSocketId) ||
-        !graph.TryConnectSockets(
-            filterId, EditorNodeGraph::kChannelOutputSocketId,
-            outputId, EditorNodeGraph::kImageInputSocketId)) {
-        return {};
-    }
-    EditorModule editor;
-    editor.GetNodeGraph() = std::move(graph);
-    RenderGraphSnapshot snapshot = editor.BuildGraphSnapshot();
-    RenderPipeline pipeline;
-    pipeline.Initialize();
-    pipeline.LoadSourceFromPixels(source.data(), width, height, 4);
-    pipeline.ExecuteGraph(snapshot);
-    FrequencyFilterFixtureResult result;
-    result.pixels = ReadPhase6Texture(
-        pipeline.GetOutputTexture(), width, height);
-    result.specializedFailure =
-        pipeline.GetLastGraphExecutionStats().lastSpecializedFailure;
-    return result;
-}
-
-bool ValidateFrequencyResponsesAndStrength() {
-    constexpr int width = 16;
-    constexpr int height = 8;
-    std::vector<unsigned char> source(
-        static_cast<std::size_t>(width * height) * 4u);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const double wave = std::cos(
-                2.0 * 3.14159265358979323846 *
-                0.25 * static_cast<double>(x));
-            const unsigned char value = static_cast<unsigned char>(
-                std::clamp(std::lround(128.0 + 100.0 * wave), 0l, 255l));
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width +
-                 static_cast<std::size_t>(x)) * 4u;
-            source[offset] = value;
-            source[offset + 1u] = value;
-            source[offset + 2u] = value;
-            source[offset + 3u] = 255;
-        }
-    }
-    std::vector<float> reference(
-        static_cast<std::size_t>(width * height) * 4u, 1.0f);
-    for (std::size_t offset = 0; offset < reference.size();
-         offset += 4u) {
-        const float value =
-            static_cast<float>(source[offset]) / 255.0f;
-        reference[offset] = value;
-        reference[offset + 1u] = value;
-        reference[offset + 2u] = value;
-    }
-
-    EditorNodeGraph::FrequencyFilterSettings settings;
-    settings.localResponse.mode =
-        EditorNodeGraph::FrequencyFilterMode::LowPass;
-    settings.localResponse.lowCutoff = 0.08f;
-    settings.localResponse.transitionWidth = 0.02f;
-    settings.strength = 0.0f;
-    FrequencyFilterFixtureResult bypass =
-        RenderFrequencyFilterFixture(source, width, height, settings);
-    bool ok = Phase6Check(
-        !bypass.pixels.empty() &&
-        MaximumDifference(bypass.pixels, reference) <= 5.0e-4 &&
-        bypass.specializedFailure.empty(),
-        "Frequency Filter strength 0 was not an exact no-FFT bypass");
-
-    settings.strength = 1.0f;
-    for (EditorNodeGraph::FrequencyTransitionProfile profile : {
-             EditorNodeGraph::FrequencyTransitionProfile::Smooth,
-             EditorNodeGraph::FrequencyTransitionProfile::Gaussian,
-             EditorNodeGraph::FrequencyTransitionProfile::Butterworth,
-             EditorNodeGraph::FrequencyTransitionProfile::Hard }) {
-        settings.localResponse.profile = profile;
-        FrequencyFilterFixtureResult filtered =
-            RenderFrequencyFilterFixture(source, width, height, settings);
-        float minimum = std::numeric_limits<float>::max();
-        float maximum = std::numeric_limits<float>::lowest();
-        for (std::size_t offset = 0; offset < filtered.pixels.size();
-             offset += 4u) {
-            minimum = std::min(minimum, filtered.pixels[offset]);
-            maximum = std::max(maximum, filtered.pixels[offset]);
-        }
-        ok &= Phase6Check(
-            !filtered.pixels.empty() &&
-            maximum - minimum < 0.04f &&
-            filtered.specializedFailure.empty(),
-            "a Frequency Response transition profile did not suppress "
-            "the deterministic out-of-band signal or preserve Hermitian output");
-    }
-
-    std::vector<unsigned char> notchSource = source;
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const double wave =
-                55.0 * std::cos(
-                    2.0 * 3.14159265358979323846 *
-                    0.125 * static_cast<double>(x)) +
-                55.0 * std::cos(
-                    2.0 * 3.14159265358979323846 *
-                    0.25 * static_cast<double>(x));
-            const unsigned char value = static_cast<unsigned char>(
-                std::clamp(std::lround(128.0 + wave), 0l, 255l));
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width +
-                 static_cast<std::size_t>(x)) * 4u;
-            notchSource[offset] = value;
-            notchSource[offset + 1u] = value;
-            notchSource[offset + 2u] = value;
-        }
-    }
-    settings.localResponse.mode =
-        EditorNodeGraph::FrequencyFilterMode::NotchReject;
-    settings.localResponse.profile =
-        EditorNodeGraph::FrequencyTransitionProfile::Hard;
-    settings.localResponse.notches = {
-        { "fixture-notch-a", 0.125f, 0.0f, 0.01f },
-        { "fixture-notch-b", 0.25f, 0.0f, 0.01f }
-    };
-    FrequencyFilterFixtureResult notched =
-        RenderFrequencyFilterFixture(
-            notchSource, width, height, settings);
-    float notchMinimum = std::numeric_limits<float>::max();
-    float notchMaximum = std::numeric_limits<float>::lowest();
-    for (std::size_t offset = 0; offset < notched.pixels.size();
-         offset += 4u) {
-        notchMinimum = std::min(notchMinimum, notched.pixels[offset]);
-        notchMaximum = std::max(notchMaximum, notched.pixels[offset]);
-    }
-    ok &= Phase6Check(
-        !notched.pixels.empty() &&
-        notchMaximum - notchMinimum < 0.04f &&
-        notched.specializedFailure.empty(),
-        "multiple mirrored notch pairs did not reject both deterministic "
-        "frequencies while preserving a real inverse Channel");
-
-    EditorNodeGraph::FrequencyFilterSettings malformed = settings;
-    malformed.localResponse.mode =
-        EditorNodeGraph::FrequencyFilterMode::LowPass;
-    malformed.localResponse.profile =
-        EditorNodeGraph::FrequencyTransitionProfile::Smooth;
-    malformed.localResponse.lowCutoff = 9.0f;
-    malformed.localResponse.highCutoff = -4.0f;
-    malformed.localResponse.transitionWidth = 8.0f;
-    malformed.localResponse.butterworthOrder = 99.0f;
-    malformed.localResponse.notches = {
-        { "out-of-domain", 8.0f, 720.0f, 4.0f }
-    };
-    EditorNodeGraph::FrequencyFilterSettings canonical = malformed;
-    canonical.localResponse.lowCutoff = 0.0f;
-    canonical.localResponse.highCutoff = 0.5f;
-    canonical.localResponse.transitionWidth = 0.5f;
-    canonical.localResponse.butterworthOrder = 12.0f;
-    canonical.localResponse.notches = {
-        { "out-of-domain", 0.5f, 180.0f, 0.25f }
-    };
-    const FrequencyFilterFixtureResult malformedResult =
-        RenderFrequencyFilterFixture(
-            source, width, height, malformed);
-    const FrequencyFilterFixtureResult canonicalResult =
-        RenderFrequencyFilterFixture(
-            source, width, height, canonical);
-    ok &= Phase6Check(
-        !malformedResult.pixels.empty() &&
-        !canonicalResult.pixels.empty() &&
-        MaximumDifference(
-            malformedResult.pixels,
-            canonicalResult.pixels) <= 1.0e-6 &&
-        malformedResult.specializedFailure.empty(),
-        "a local Frequency Filter bypassed the canonical Response parameter "
-        "domain used by an extracted Response node");
-    return ok;
-}
 
 bool RunPhase7ConstantChannelValidation() {
     constexpr int width = 7;
@@ -1891,143 +1010,7 @@ bool RunPhase7ConstantChannelValidation() {
     return ok;
 }
 
-bool RunPhase6SpecializedValidation() {
-    constexpr int width = 7;
-    constexpr int height = 5;
-    constexpr double tolerance = 7.5e-3;
-    std::vector<unsigned char> source(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const unsigned char value = static_cast<unsigned char>((x * 29 + y * 41) & 255);
-            const std::size_t index =
-                (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * 4u;
-            source[index + 0] = value;
-            source[index + 1] = value;
-            source[index + 2] = value;
-            source[index + 3] = 255;
-        }
-    }
-    RenderGraphSnapshot graph;
-    std::string error;
-    bool ok = Phase6Check(BuildAuthoredFrequencyRoundTrip(
-        source, width, height, graph, error),
-        error.empty() ? "the authored FFT/IFFT graph did not lower" : error);
-    ok &= ValidateFrequencyEditorActions();
-    ok &= ValidateSpectrumAnalyzerFixture();
-    ok &= ValidateFrequencyResponsesAndStrength();
-    ok &= Phase6Check(
-        ValidateGpuFftAgainstCpuReference(),
-        "odd, non-power-of-two, signed HDR GPU FFT results diverged from the CPU DFT reference");
-    const RenderGraphRegionPlan plan = RenderTiling::PlanGraphRegions(graph, width, height);
-    const auto isTypedTransform = [](const auto& stage, NodeMath::SpecializedStageKind kind) {
-        return stage.specializedKind == kind &&
-            stage.capability == NodeMath::CapabilityClass::MultipassIterative &&
-            stage.regionRequirement == NodeMath::RegionRequirement::FullFrame;
-    };
-    const int forwardStages = static_cast<int>(std::count_if(
-        plan.stages.begin(), plan.stages.end(), [&](const auto& stage) {
-            return isTypedTransform(stage, NodeMath::SpecializedStageKind::FrequencyTransform);
-        }));
-    const int inverseStages = static_cast<int>(std::count_if(
-        plan.stages.begin(), plan.stages.end(), [&](const auto& stage) {
-            return isTypedTransform(stage, NodeMath::SpecializedStageKind::FrequencyInverseTransform);
-        }));
-    ok &= Phase6Check(
-        plan.valid && plan.requiresFullFrame && !plan.tileable &&
-            forwardStages == 1 && inverseStages == 1,
-        "FFT and IFFT were not planned as distinct typed full-frame multipass stages");
 
-    RenderPipeline pipeline;
-    pipeline.Initialize();
-    pipeline.LoadSourceFromPixels(source.data(), width, height, 4);
-    pipeline.ExecuteGraph(graph);
-    const std::vector<float> rendered = ReadPhase6Texture(
-        pipeline.GetOutputTexture(), width, height);
-    std::vector<float> reference(rendered.size(), 1.0f);
-    for (std::size_t index = 0; index < reference.size(); index += 4) {
-        const float value = static_cast<float>(source[index]) / 255.0f;
-        reference[index + 0] = value;
-        reference[index + 1] = value;
-        reference[index + 2] = value;
-        reference[index + 3] = 1.0f;
-    }
-    const double difference = MaximumDifference(rendered, reference);
-    const GraphExecutionStats stats = pipeline.GetLastGraphExecutionStats();
-    ok &= Phase6Check(
-        !rendered.empty() && difference <= tolerance &&
-        stats.lastSpecializedFailure.empty() &&
-        stats.frequencyCacheHits > 0 &&
-        stats.frequencyCacheMisses > 0,
-        "the representative specialized chain failed, bypassed its typed "
-        "frequency cache, or differed by " + std::to_string(difference));
-
-    RenderGraphSnapshot previewGraph = graph;
-    const auto splitIt = std::find_if(
-        previewGraph.nodes.begin(),
-        previewGraph.nodes.end(),
-        [](const RenderGraphNode& node) {
-            return node.kind == RenderGraphNodeKind::ChannelSplit;
-        });
-    const int previewSplitId =
-        splitIt != previewGraph.nodes.end() ? splitIt->nodeId : -1;
-    constexpr int transientTransformId = -200001;
-    constexpr int transientViewId = -200002;
-    RenderGraphNode transientTransform;
-    transientTransform.nodeId = transientTransformId;
-    transientTransform.kind = RenderGraphNodeKind::FrequencyFft;
-    transientTransform.frequencyFftSettings.edgePolicy =
-        RenderFrequencyEdgePolicy::Mirror;
-    RenderGraphNode transientView;
-    transientView.nodeId = transientViewId;
-    transientView.kind = RenderGraphNodeKind::SpectrumView;
-    transientView.spectrumViewSettings.mode =
-        RenderSpectrumViewMode::Magnitude;
-    transientView.spectrumViewSettings.centerDc = true;
-    previewGraph.nodes.push_back(std::move(transientTransform));
-    previewGraph.nodes.push_back(std::move(transientView));
-    if (previewSplitId > 0) {
-        previewGraph.links.push_back(RenderGraphLink{
-            previewSplitId,
-            "r",
-            transientTransformId,
-            EditorNodeGraph::kChannelInputSocketId
-        });
-    }
-    previewGraph.links.push_back(RenderGraphLink{
-        transientTransformId,
-        EditorNodeGraph::kSpectrumOutputSocketId,
-        transientViewId,
-        EditorNodeGraph::kSpectrumInputSocketId
-    });
-    previewGraph.outputNodeId = transientViewId;
-    previewGraph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
-    const RenderGraphRegionPlan previewPlan =
-        RenderTiling::PlanGraphRegions(previewGraph, width, height);
-    pipeline.ExecuteGraph(previewGraph);
-    int previewWidth = 0;
-    int previewHeight = 0;
-    const std::vector<unsigned char> previewPixels =
-        pipeline.GetPreviewPixels(previewWidth, previewHeight, 512);
-    ok &= Phase6Check(
-        previewSplitId > 0 &&
-        previewPlan.valid &&
-        !previewPixels.empty() &&
-        previewWidth == width &&
-        previewHeight == height &&
-        pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
-        "the Frequency Filter spectrum preview rejected its negative "
-        "transient transform/view node IDs or produced no pixels");
-    if (ok) {
-        std::cout
-            << "Phase 6 specialized validation passed: authored FFT -> "
-               "Separate -> Recombine -> IFFT round-trip, response profiles, "
-               "mirrored notches, analyzer, transient preview, and editor "
-               "actions (max difference "
-            << difference << ").\n";
-    }
-    return ok;
-}
 
 bool RunPhase6ValidationWithContext() {
     constexpr int width = 530;
@@ -2111,7 +1094,6 @@ bool RunPhase6ValidationWithContext() {
     ok &= RunPhase6ConnectedMaskFailureValidation();
     ok &= RunPhase6CustomMaskPolygonValidation();
     ok &= RunPhase7ConstantChannelValidation();
-    ok &= RunPhase6SpecializedValidation();
     ok &= ValidateNodeMathMultiTreeWithCurrentContext();
     ok &= ValidateEditorRenderWorkerPreviewBatch(
         glfwGetCurrentContext());
@@ -2122,7 +1104,7 @@ bool RunPhase6ValidationWithContext() {
     ok &= ValidateEditorGraphTransactions();
     if (ok) {
         std::cout << "Phase 6 live validation passed: pointwise, geometry, neighborhood, "
-                     "reduction, typed consumers, and specialized frequency execution share "
+                     "reduction and typed consumers share "
                      "the planner/diagnostic framework (Gaussian max difference "
                   << maximumDifference << ").\n";
     }
@@ -2131,7 +1113,7 @@ bool RunPhase6ValidationWithContext() {
 
 } // namespace
 
-bool ValidateNodeMathPhase6Integration(bool calibrationOnly, bool transactionsOnly) {
+bool ValidateNodeMathPhase6Integration(bool calibrationOnly, bool transactionsOnly, bool framingOnly) {
     if (!glfwInit()) {
         std::cerr << "Phase 6 validation failed: glfwInit failed.\n";
         return false;
@@ -2157,7 +1139,12 @@ bool ValidateNodeMathPhase6Integration(bool calibrationOnly, bool transactionsOn
     }
     if (transactionsOnly) ValidateProjectGraphSnapshotBuilder();
     bool result = false;
-    if (calibrationOnly) {
+    if (framingOnly) {
+        result = RunPhase6GeometryValidation();
+        result &= RunPhase6BranchedExtentValidation();
+        if (result) std::cout << "Framing geometry, serialization, preview/export and branch extent checks passed.\n";
+    }
+    else if (calibrationOnly) {
         result = ValidateRawViewportCalibration(window);
         // Worker lifetime checks may change the current context. Direct
         // pipeline checks must explicitly restore their owning context.

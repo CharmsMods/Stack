@@ -1,4 +1,5 @@
 #include "Raw/RawGraphOperation.h"
+#include "NodeMath/ToneCurveParameters.h"
 
 #include <stdexcept>
 
@@ -8,8 +9,7 @@ const char* GraphOperationId(GraphOperationKind kind) {
         case GraphOperationKind::Calibration: return "calibration";
         case GraphOperationKind::Exposure: return "exposure";
         case GraphOperationKind::LocalEv: return "local-ev";
-        case GraphOperationKind::LuminanceTone: return "luminance-tone";
-        case GraphOperationKind::RgbCurves: return "rgb-curves";
+        case GraphOperationKind::ToneCurve: return "tone-curve";
         case GraphOperationKind::ColorWarp: return "color-warp";
         case GraphOperationKind::DetailContrast: return "detail-contrast";
         default: return "invalid";
@@ -20,8 +20,7 @@ const char* GraphOperationLabel(GraphOperationKind kind) {
         case GraphOperationKind::Calibration: return "Color Calibration";
         case GraphOperationKind::Exposure: return "Exposure";
         case GraphOperationKind::LocalEv: return "Local EV";
-        case GraphOperationKind::LuminanceTone: return "Luminance Tone";
-        case GraphOperationKind::RgbCurves: return "RGB Curves";
+        case GraphOperationKind::ToneCurve: return "Tone Curve";
         case GraphOperationKind::ColorWarp: return "Color Warp";
         case GraphOperationKind::DetailContrast: return "Detail Contrast";
         default: return "Unknown photo operation";
@@ -29,6 +28,9 @@ const char* GraphOperationLabel(GraphOperationKind kind) {
 }
 GraphOperation MakeGraphOperation(GraphOperationKind kind) {
     GraphOperation operation; operation.kind = kind;
+    if (kind==GraphOperationKind::ToneCurve) {
+        operation.parameters=NodeMath::DefaultToneCurveParameters(); return operation;
+    }
     WriteGraphOperation(operation, MakeDefaultRecipe({}));
     return operation;
 }
@@ -42,12 +44,11 @@ RawDevelopmentRecipe ReadGraphOperation(const GraphOperation& operation) {
             auto serialized = SerializeRecipe(recipe);
             if (p.contains("localRange")) serialized["localRange"] = p.at("localRange");
             if (p.contains("evGradients")) serialized["evGradients"] = p.at("evGradients");
-            recipe = DeserializeRecipe(serialized); break;
+            recipe = DeserializeRecipe(serialized);
+            recipe.preToneExposureEv = p.value("ev",0.f);
+            break;
         }
-        case GraphOperationKind::LuminanceTone: recipe.finishTone.layerJson["luminanceTone"] = SerializeSceneTone(ReadSceneTone(p)); break;
-        case GraphOperationKind::RgbCurves:
-            if (!p.empty()) recipe.finishTone.layerJson = p;
-            recipe.finishTone.layerJson["luminanceTone"] = SerializeSceneTone(SceneTone{}); break;
+        case GraphOperationKind::ToneCurve: recipe.finishTone.layerJson=p; break;
         case GraphOperationKind::ColorWarp: recipe.colorWarp = DeserializeColorWarpRecipe(p); break;
         case GraphOperationKind::DetailContrast: recipe.detailContrast = ReadDetailContrast(p); break;
         default: throw std::runtime_error("Unknown RAW graph operation.");
@@ -60,12 +61,11 @@ void WriteGraphOperation(GraphOperation& operation, const RawDevelopmentRecipe& 
         case GraphOperationKind::Exposure: operation.parameters = {{"ev", edited.preToneExposureEv}}; break;
         case GraphOperationKind::LocalEv: {
             const auto serialized = SerializeRecipe(edited);
-            operation.parameters = {{"localRange", serialized.at("localRange")}, {"evGradients", serialized.at("evGradients")}}; break;
+            operation.parameters = {{"localRange", serialized.at("localRange")}, {"evGradients", serialized.at("evGradients")}};
+            if (edited.preToneExposureEv != 0.f) operation.parameters["ev"] = edited.preToneExposureEv;
+            break;
         }
-        case GraphOperationKind::LuminanceTone: operation.parameters = SerializeSceneTone(ReadSceneTone(edited.finishTone.layerJson.value("luminanceTone", nlohmann::json::object()))); break;
-        case GraphOperationKind::RgbCurves:
-            operation.parameters = edited.finishTone.layerJson;
-            operation.parameters.erase("luminanceTone"); break;
+        case GraphOperationKind::ToneCurve: operation.parameters=NodeMath::CaptureToneCurveParameters(edited.finishTone.layerJson); break;
         case GraphOperationKind::ColorWarp: operation.parameters = SerializeColorWarpRecipe(edited.colorWarp); break;
         case GraphOperationKind::DetailContrast: operation.parameters = SerializeDetailContrast(edited.detailContrast); break;
         default: throw std::runtime_error("Unknown RAW graph operation.");
@@ -82,6 +82,10 @@ GraphOperation DeserializeGraphOperation(const nlohmann::json& value) {
         operation.kind = kind; operation.enabled = value.at("enabled").get<bool>();
         operation.parameters = value.at("parameters");
         if (!operation.parameters.is_object()) throw std::runtime_error("Invalid photo operation parameters.");
+        if (kind==GraphOperationKind::ToneCurve) {
+            std::string error;
+            if (!NodeMath::ValidateToneCurveParameters(operation.parameters,error)) throw std::runtime_error(error);
+        }
         return operation;
     }
     throw std::runtime_error("Unknown photo operation definition.");

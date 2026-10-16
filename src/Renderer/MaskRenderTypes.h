@@ -1,10 +1,11 @@
 #pragma once
+#include "NodeMath/Arithmetic.h"
+#include "NodeMath/UniformParameter.h"
 
 #include "Color/LutData.h"
 #include "Graph/OutputDependencies.h"
 #include "Editor/Layers/LayerBase.h"
 #include "MFSR/MFSRTypes.h"
-#include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "NodeMath/ContractTypes.h"
 #include "NodeMath/OutputInspection.h"
 #include "NodeMath/TechnicalImageMath.h"
@@ -14,6 +15,7 @@
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
 #include "Utils/SharedPixelBuffer.h"
+#include "Assets/MaskRaster.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -151,7 +153,7 @@ struct RenderCustomMaskObject {
 struct RenderCustomMaskPayload {
     int width = 1024;
     int height = 1024;
-    std::vector<float> rasterLayer;
+    Stack::Assets::MaskRaster rasterLayer;
     std::vector<RenderCustomMaskObject> objects;
     bool invert = false;
     float blurRadius = 0.0f;
@@ -173,7 +175,6 @@ enum class RenderGraphNodeKind {
     Image,
     RawSource,
     RawDevelopment,
-    RawNeuralDenoise,
     RawDecode,
     RawDevelop,
     RawDetailAutoMask,
@@ -196,19 +197,6 @@ enum class RenderGraphNodeKind {
     CustomMask,
     DataMath,
     TechnicalImage,
-    FrequencyFilter,
-    FrequencyResponse,
-    FrequencyFft,
-    FrequencyIfft,
-    SpectrumView,
-    ApplyFrequencyResponse,
-    CombineSpectra,
-    SpectrumSeparate,
-    SpectrumRecombine,
-    FrequencyMask,
-    SpectrumMath,
-    MagnitudePhase,
-    SpectrumAnalyzer,
     FieldMean,
     Reformat,
     RawOperation,
@@ -225,200 +213,33 @@ enum class RenderMixBlendMode {
     PremultipliedSourceOver
 };
 
-enum class RenderDataMathMode {
-    Clamp,
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Average,
-    Min,
-    Max,
-    Difference,
-    Remap,
-    ImageAverage
-};
+using RenderDataMathMode = Stack::NodeMath::ArithmeticMode;
 
-struct RenderDataMathSettings {
-    float constantA = 0.0f;
-    float constantB = 1.0f;
-    float minValue = 0.0f;
-    float maxValue = 1.0f;
-    float outMin = 0.0f;
-    float outMax = 1.0f;
-};
+using RenderDataMathSettings = Stack::NodeMath::ArithmeticSettings;
 
-enum class RenderSpectrumViewLut {
-    Turbo,
-    Viridis,
-    Inferno,
-    Grayscale
-};
 
-enum class RenderFrequencyMaskShape {
-    LowPass,
-    HighPass,
-    BandPass,
-    BandStop,
-    Notch,
-    Gaussian,
-    Butterworth
-};
 
-enum class RenderSpectrumMathMode {
-    Multiply,
-    Add,
-    Subtract,
-    Difference
-};
 
-enum class RenderMagnitudePhaseMode {
-    Magnitude,
-    Phase,
-    Recombine
-};
 
-enum class RenderSpectrumAnalyzerMode {
-    RadialEnergy,
-    DominantFrequency
-};
 
-enum class RenderFrequencyFilterMode {
-    AllPass,
-    LowPass,
-    HighPass,
-    BandPass,
-    BandStop,
-    NotchReject
-};
 
-enum class RenderFrequencyTransitionProfile {
-    Smooth,
-    Gaussian,
-    Butterworth,
-    Hard
-};
 
-enum class RenderFrequencyEdgePolicy {
-    Mirror,
-    Wrap,
-    ZeroPad
-};
 
-enum class RenderSpectrumCombineMode {
-    Add,
-    Subtract
-};
 
-enum class RenderSpectrumViewMode {
-    Magnitude,
-    Phase,
-    Real,
-    Imaginary
-};
 
-struct RenderFrequencyNotch {
-    std::string id;
-    float frequency = 0.25f;
-    float directionDegrees = 0.0f;
-    float width = 0.025f;
-};
 
-struct RenderFrequencyResponseSettings {
-    RenderFrequencyFilterMode mode = RenderFrequencyFilterMode::AllPass;
-    RenderFrequencyTransitionProfile profile = RenderFrequencyTransitionProfile::Smooth;
-    float lowCutoff = 0.08f;
-    float highCutoff = 0.25f;
-    float transitionWidth = 0.025f;
-    float butterworthOrder = 2.0f;
-    std::vector<RenderFrequencyNotch> notches;
-};
 
-struct RenderFrequencyFilterSettings {
-    RenderFrequencyResponseSettings localResponse;
-    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
-    float strength = 1.0f;
-};
 
-struct RenderApplyFrequencyResponseSettings {
-    float strength = 1.0f;
-};
 
-struct RenderCombineSpectraSettings {
-    RenderSpectrumCombineMode mode = RenderSpectrumCombineMode::Add;
-};
 
-struct RenderFrequencyFftSettings {
-    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
-};
 
-struct RenderSpectrumViewSettings {
-    RenderSpectrumViewMode mode = RenderSpectrumViewMode::Magnitude;
-    RenderSpectrumViewLut lut = RenderSpectrumViewLut::Turbo;
-    float exposure = 1.0f;
-    float gamma = 1.0f;
-    bool centerDc = true;
-};
 
-struct RenderFrequencyMaskSettings {
-    RenderFrequencyMaskShape shape = RenderFrequencyMaskShape::LowPass;
-    float cutoff = 0.25f;
-    float width = 0.12f;
-    float feather = 0.08f;
-    float order = 2.0f;
-    float centerX = 0.5f;
-    float centerY = 0.5f;
-    bool invert = false;
-};
 
-struct RenderSpectrumMathSettings {
-    float amount = 1.0f;
-};
 
-struct RenderMagnitudePhaseSettings {
-    float exposure = 1.0f;
-    float gamma = 1.0f;
-};
 
-struct RenderSpectrumAnalyzerSettings {
-    float innerRadius = 0.0f;
-    float outerRadius = 0.5f;
-    bool excludeDc = true;
-};
 
-enum class RenderFrequencyResourceKind {
-    Spectrum,
-    Magnitude,
-    Phase
-};
 
-struct RenderFrequencyResource {
-    unsigned int texture = 0;
-    RenderFrequencyResourceKind kind = RenderFrequencyResourceKind::Spectrum;
-    int sourceWidth = 0;
-    int sourceHeight = 0;
-    int paddedWidth = 0;
-    int paddedHeight = 0;
-    int paddingOriginX = 0;
-    int paddingOriginY = 0;
-    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
-    std::string sourceRole;
-    std::string normalization = "forward-unscaled-inverse-1-over-n";
-    std::string precision = "rg32f";
-    std::string coordinateConvention = "unshifted-dft-cycles-per-pixel";
-    bool hermitian = true;
-    bool valid = false;
-};
 
-struct RenderSpectrumAnalysis {
-    bool valid = false;
-    std::array<float, 256> radialPower {};
-    float bandPower = 0.0f;
-    float peakFrequency = 0.0f;
-    float peakDirectionDegrees = 0.0f;
-    std::size_t fingerprint = 0;
-    std::string error;
-};
 
 struct RenderGraphImagePayload {
     SharedPixelBuffer pixels;
@@ -440,6 +261,9 @@ struct RenderGraphRawDevelopmentPayload {
     // RAW Development nodes leave this empty and continue to load the
     // recipe source path lazily.
     std::shared_ptr<const Raw::RawImageData> embeddedRawData;
+    // Runtime source geometry for lazy file development, independent of pixel
+    // decoding. Embedded RAW and adopted merges supply their own metadata.
+    std::shared_ptr<const Raw::RawMetadata> sourceMetadata;
 };
 
 struct RenderGraphRawDevelopPayload {
@@ -452,10 +276,6 @@ struct RenderGraphRawDevelopPayload {
 
 struct RenderGraphRawDecodePayload {
     Raw::RawDevelopSettings settings;
-};
-
-struct RenderGraphRawNeuralDenoisePayload {
-    NeuralDenoise::NeuralDenoiseSettings settings;
 };
 
 struct RenderGraphRawDetailFusionPayload {
@@ -492,6 +312,10 @@ struct RenderGraphRawProjectSourceSetPayload {
 using RenderGraphLutPayload = ColorLut::LutPayload;
 
 struct ToneCurveAutoRewriteFeedback {
+    std::string documentId, graphId, nodeUuid, definitionHash;
+    std::uint64_t authoredRevision=0;
+    std::size_t sourceIdentity=0, inputFingerprint=0;
+    int evaluatedFrame=0;
     bool valid = false;
     int nodeId = -1;
     std::uint64_t requestRevision = 0;
@@ -515,6 +339,11 @@ struct ToneCurveAutoRewriteFeedback {
 };
 
 struct RenderGraphNode {
+    std::string authoredDocumentId, authoredGraphId, authoredNodeUuid;
+    std::uint64_t authoredRevision = 0;
+    int evaluatedFrame = 0;
+    std::size_t uniformSourceIdentity = 0;
+    std::vector<Stack::NodeMath::UniformParameter> uniformParameters;
     Stack::GraphModel::NodeRole role = Stack::GraphModel::NodeRole::Ordinary;
     Stack::GraphModel::Endpoint reference;
     Stack::NodeMath::LogicalValueType publishedType = Stack::NodeMath::LogicalValueType::Invalid;
@@ -524,6 +353,9 @@ struct RenderGraphNode {
     Raw::RawWorkingSpace rawWorkingSpace = Raw::RawWorkingSpace::LinearRec2020D65;
     int nativeWidth = 0;
     int nativeHeight = 0;
+    // Render-time canvas association, not an authored pixel input. It always
+    // names the owning project's prepared source, never a mask consumer.
+    int maskCanvasSourceNodeId = 0;
     std::vector<Stack::GraphModel::OutputDependency> outputDependencies;
     int nodeId = -1;
     std::uint64_t requestRevision = 0;
@@ -537,7 +369,6 @@ struct RenderGraphNode {
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
     RenderGraphRawDevelopmentPayload rawDevelopment;
-    RenderGraphRawNeuralDenoisePayload rawNeuralDenoise;
     RenderGraphRawDecodePayload rawDecode;
     RenderGraphRawDevelopPayload rawDevelop;
     RenderGraphRawDetailAutoMaskPayload rawDetailAutoMask;
@@ -567,20 +398,6 @@ struct RenderGraphNode {
     Stack::NodeMath::ReformatSettings reformatSettings;
     Stack::NodeMath::ValueDescriptor semanticDescriptor;
     std::string semanticDescriptorIdentity;
-    RenderFrequencyFilterSettings frequencyFilterSettings;
-    RenderFrequencyResponseSettings frequencyResponseSettings;
-    RenderFrequencyFftSettings frequencyFftSettings;
-    RenderFrequencyFftSettings frequencyIfftSettings;
-    RenderSpectrumViewSettings spectrumViewSettings;
-    RenderApplyFrequencyResponseSettings applyFrequencyResponseSettings;
-    RenderCombineSpectraSettings combineSpectraSettings;
-    RenderFrequencyMaskSettings frequencyMaskSettings;
-    RenderSpectrumMathMode spectrumMathMode = RenderSpectrumMathMode::Multiply;
-    RenderSpectrumMathSettings spectrumMathSettings;
-    RenderMagnitudePhaseMode magnitudePhaseMode = RenderMagnitudePhaseMode::Magnitude;
-    RenderMagnitudePhaseSettings magnitudePhaseSettings;
-    RenderSpectrumAnalyzerMode spectrumAnalyzerMode = RenderSpectrumAnalyzerMode::RadialEnergy;
-    RenderSpectrumAnalyzerSettings spectrumAnalyzerSettings;
 };
 
 struct RenderGraphLink {
@@ -628,6 +445,7 @@ struct RenderGraphSnapshot {
     int rawLayerScopeNodeId = 0;
     int rawLayerScopeOperationId = 0;
     std::string rawLayerScopeSocketId = "imageOut";
+    Stack::NodeMath::ValueDescriptor rawLayerScopeDescriptor;
     std::unordered_map<int, std::string> unavailableOutputs;
     int outputNodeId = -1;
     std::string outputSocketId;

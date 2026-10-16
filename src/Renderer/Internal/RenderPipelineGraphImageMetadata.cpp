@@ -32,8 +32,6 @@ std::pair<int,int> RenderPipeline::ResolveGraphNativeExtent(
         if (inputs == context.inputLinks.end()) continue;
         // Primary image geometry wins over masks and scalar controls.
         const RenderGraphLink* primary = context.FindInputLink(node.nodeId,"imageIn");
-        if (node.kind == RenderGraphNodeKind::RawOperation && endpoint.second == "measurementImageOut")
-            if (const auto* reference = context.FindInputLink(node.nodeId,"referenceIn")) primary = reference;
         if (primary) { pending.push_back({primary->fromNodeId,primary->fromSocketId}); continue; }
         for (const auto& input : inputs->second) {
             const auto& link = *input.second;

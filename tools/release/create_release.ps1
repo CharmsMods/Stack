@@ -2,6 +2,7 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$BuildDir = "",
     [string]$OutputDir = "",
+    [ValidateSet("Stack", "Burst")][string]$Product = "Stack",
     [switch]$PublicRelease,
     [switch]$LocalTestPackage,
     [switch]$SkipBuild,
@@ -14,6 +15,8 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\dev\stack_workflow.ps1")
 . (Join-Path $PSScriptRoot "legal_compliance.ps1")
+. (Join-Path $PSScriptRoot "product_payload.ps1")
+$productDefinition = Get-StackProduct -Product $Product
 
 if ($PublicRelease -and $LocalTestPackage) {
     throw "Cannot specify both -PublicRelease and -LocalTestPackage."
@@ -28,8 +31,6 @@ if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = $paths.BuildDir
 }
 $BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
-
-$legalStatus = Test-StackLegalPacket -Root $Root -RequireApproved:$PublicRelease
 
 function Resolve-StackSignToolPath {
     if (-not [string]::IsNullOrWhiteSpace($env:STACK_SIGNTOOL_PATH)) {
@@ -83,12 +84,11 @@ function Invoke-StackSignFile {
 function Sign-StackPayload {
     param(
         [Parameter(Mandatory = $true)][object]$Configuration,
-        [Parameter(Mandatory = $true)][string]$StageDir
+        [Parameter(Mandatory = $true)][string]$StageDir,
+        [Parameter(Mandatory = $true)][object]$Definition
     )
-    $stackSigningTargets = @(
-        (Join-Path $StageDir "Stack.exe"),
-        (Join-Path $StageDir "Stack\App\Runtime\libraw.dll")
-    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    $stackSigningTargets = @(Get-StackProductSigningFiles -Definition $Definition | Sort-Object -Unique |
+        ForEach-Object { Resolve-StackPayloadPath $StageDir $_ })
 
     foreach ($path in $stackSigningTargets) {
         Invoke-StackSignFile -Configuration $Configuration -Path $path
@@ -115,35 +115,10 @@ function Sign-StackPayload {
     }
 }
 
-function Test-StagedLegalHashes {
-    param(
-        [Parameter(Mandatory = $true)][object]$Manifest,
-        [Parameter(Mandatory = $true)][string]$StageDir
-    )
-    $nameMap = @{
-        sourceLicense = "LICENSE"
-        eula = "EULA.txt"
-        privacy = "PRIVACY.md"
-        installerInformation = "INFO_BEFORE_INSTALL.txt"
-    }
-    $legalDir = Join-Path $StageDir "Stack\App\Legal"
-    foreach ($property in $Manifest.documents.PSObject.Properties) {
-        $stageName = $nameMap[$property.Name]
-        $stagePath = Join-Path $legalDir $stageName
-        if (-not (Test-Path -LiteralPath $stagePath -PathType Leaf)) {
-            throw "The build is missing current legal file Stack/App/Legal/$stageName. Rebuild before packaging."
-        }
-        $stageHash = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($stageHash -ne ([string]$property.Value.sha256).ToLowerInvariant()) {
-            throw "The staged $stageName does not match the legal manifest. Rebuild before packaging."
-        }
-    }
-}
-
 Invoke-StackEnvironmentRepair -Root $Root
 
 if (-not $SkipBuild) {
-    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $BuildDir
+    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $BuildDir -Product $Product
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -153,76 +128,70 @@ $usingCanonicalOutput = [string]::IsNullOrWhiteSpace($OutputDir)
 if ($usingCanonicalOutput) {
     Initialize-ReleaseFolders -Paths $paths
     if ($LocalTestPackage) {
-        Ensure-StackDirectory -Path $paths.LocalTestReleaseDir
-        $archived = Move-StackDirectoryContentsToArchive `
-            -SourceDir $paths.LocalTestReleaseDir `
-            -ArchiveRoot $paths.ReleaseArchiveDir `
-            -Label ("local-test-" + (Get-StackTimestamp))
-        if ($archived) {
-            Write-Host "Archived the previous local-test package to: $archived"
-        }
         $OutputDir = $paths.LocalTestReleaseDir
     }
     else {
-        Prepare-CurrentReleaseOutput -Paths $paths
         $OutputDir = $paths.CurrentReleaseDir
     }
 }
 else {
     Ensure-StackDirectory -Path $OutputDir
 }
-$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+$outputRoot = [System.IO.Path]::GetFullPath($OutputDir)
+$OutputDir = Resolve-StackPayloadPath $outputRoot $Product
+Ensure-StackDirectory -Path $OutputDir
 
 $versionInfo = Get-StackVersionInfo -VersionFile (Join-Path $Root "cmake\StackVersion.cmake")
 if ($LocalTestPackage) {
-    $stageDir = Join-Path $OutputDir ("Stack-LOCAL-TEST-{0}-win-x64" -f $versionInfo.Tag)
-    $portableZipPath = Join-Path $OutputDir ("Stack-LOCAL-TEST-UNSIGNED-LEGAL-DRAFT-{0}-win-x64.zip" -f $versionInfo.Tag)
-    $installerPath = Join-Path $OutputDir ("StackSetup-LOCAL-TEST-UNSIGNED-LEGAL-DRAFT-{0}.exe" -f $versionInfo.Version)
-    $sbomOutputPath = Join-Path $OutputDir ("Stack-LOCAL-TEST-{0}.spdx.json" -f $versionInfo.Tag)
+    $stageDir = Join-Path $OutputDir ("{0}-LOCAL-TEST-{1}-win-x64" -f $productDefinition.artifactName, $versionInfo.Tag)
+    $portableZipPath = Join-Path $OutputDir ("{0}-LOCAL-TEST-UNSIGNED-{1}-win-x64.zip" -f $productDefinition.artifactName, $versionInfo.Tag)
+    $installerPath = Join-Path $OutputDir ("{0}-LOCAL-TEST-UNSIGNED-{1}.exe" -f $productDefinition.installerName, $versionInfo.Version)
+    $sbomOutputPath = Join-Path $OutputDir ("{0}-LOCAL-TEST-{1}.spdx.json" -f $productDefinition.artifactName, $versionInfo.Tag)
 }
 else {
-    $stageDir = Join-Path $OutputDir ("Stack-{0}-win-x64" -f $versionInfo.Tag)
-    $portableZipPath = Join-Path $OutputDir ("Stack-{0}-win-x64.zip" -f $versionInfo.Tag)
-    $installerPath = Join-Path $OutputDir ("StackSetup-{0}-win-x64.exe" -f $versionInfo.Tag)
-    $sbomOutputPath = Join-Path $OutputDir ("Stack-{0}.spdx.json" -f $versionInfo.Tag)
+    $stageDir = Join-Path $OutputDir ("{0}-{1}-win-x64" -f $productDefinition.artifactName, $versionInfo.Tag)
+    $portableZipPath = Join-Path $OutputDir ("{0}-{1}-win-x64.zip" -f $productDefinition.artifactName, $versionInfo.Tag)
+    $installerPath = Join-Path $OutputDir ("{0}-{1}-win-x64.exe" -f $productDefinition.installerName, $versionInfo.Tag)
+    $sbomOutputPath = Join-Path $OutputDir ("{0}-{1}.spdx.json" -f $productDefinition.artifactName, $versionInfo.Tag)
 }
-$hashesPath = Join-Path $OutputDir "SHA256SUMS.txt"
+$hashesPath = Join-Path $OutputDir ($productDefinition.artifactName + "-SHA256SUMS.txt")
 $markerFile = Join-Path $Root "installer\StackInstalledBuild.marker"
-$eulaPath = Join-Path $Root "legal\EULA.txt"
-$infoBeforePath = Join-Path $Root "legal\INFO_BEFORE_INSTALL.txt"
 
-if (-not $usingCanonicalOutput) {
-    $customArchiveRoot = Join-Path $OutputDir "_archive"
-    foreach ($path in @($stageDir, $portableZipPath, $installerPath, $sbomOutputPath, $hashesPath)) {
-        $archivedPath = Move-StackItemToArchive -SourcePath $path -ArchiveRoot $customArchiveRoot
-        if ($archivedPath) {
-            Write-Host "Archived existing release artifact to: $archivedPath"
-        }
-    }
+$productArchiveRoot = if ($usingCanonicalOutput) {
+    Join-Path $paths.ReleaseArchiveDir $(if ($LocalTestPackage) { "local-test\$Product" } else { $Product })
+} else { Join-Path $outputRoot "_archive\$Product" }
+# Only this product's directory is rotated. Building Burst must not archive Stack.
+$verifiedProductOutput = Resolve-StackPayloadPath $outputRoot $Product
+if (-not $OutputDir.Equals($verifiedProductOutput, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unexpected product output directory: $OutputDir"
+}
+$archivedPath = Move-StackDirectoryContentsToArchive -SourceDir $OutputDir `
+    -ArchiveRoot $productArchiveRoot -Label $productDefinition.artifactName
+if ($archivedPath) {
+    Write-Host "Archived previous $($productDefinition.name) artifacts to: $archivedPath"
 }
 
 Ensure-StackDirectory -Path $OutputDir
 Ensure-StackDirectory -Path $stageDir
-Copy-ReleaseFile -SourcePath (Join-Path $BuildDir "Stack.exe") -DestinationPath (Join-Path $stageDir "Stack.exe")
-Copy-ReleaseDirectoryContents `
-    -SourceDir (Join-Path $BuildDir "Stack\App") `
-    -DestinationDir (Join-Path $stageDir "Stack\App")
+Copy-StackProductPayload -Definition $productDefinition -Root $Root -BuildDir $BuildDir -StageDir $stageDir
 
-Copy-OptionalFfmpegProvider -Paths $paths -StageDir $stageDir | Out-Null
+# These inventories belong to release generation, not the developer payload.
+# Regenerate only the selected product's current metadata below.
+foreach ($inventoryName in @("Stack.spdx.json", "StackBurst.spdx.json")) {
+    $inventoryPath = Resolve-StackPayloadPath $stageDir ("Stack/App/Legal/" + $inventoryName)
+    if (Test-Path -LiteralPath $inventoryPath -PathType Leaf) {
+        Remove-Item -LiteralPath $inventoryPath -Force
+    }
+}
+
+if ($Product -eq "Stack") { Copy-OptionalFfmpegProvider -Paths $paths -StageDir $stageDir | Out-Null }
 
 if ($LocalTestPackage) {
-    $localTestMarker = Join-Path $stageDir "Stack\App\StackLocalTestBuild.marker"
+    $localTestMarker = Join-Path $stageDir ("Stack\App\" + $productDefinition.artifactName + "LocalTestBuild.marker")
     [System.IO.File]::WriteAllText($localTestMarker, "LOCAL TEST BUILD - NOT FOR PUBLIC DISTRIBUTION`r`n")
 }
 
-$stageEntries = @(Get-ChildItem -LiteralPath $stageDir -Force | Select-Object -ExpandProperty Name | Sort-Object)
-if (($stageEntries -join '|') -ne 'Stack|Stack.exe') {
-    throw "Release staging must contain only Stack.exe and Stack. Found: $($stageEntries -join ', ')"
-}
-if ((Test-Path -LiteralPath (Join-Path $stageDir "Stack\User")) -or
-    (Test-Path -LiteralPath (Join-Path $stageDir "Stack\Temp"))) {
-    throw "Release staging must not contain Stack user or temporary data."
-}
+Test-StackProductPayload -Definition $productDefinition -StageDir $stageDir -Version $versionInfo.Version
 
 $modelArtifacts = @(Get-ChildItem -LiteralPath $stageDir -Recurse -File | Where-Object {
     $_.Extension.ToLowerInvariant() -in @(
@@ -235,12 +204,12 @@ if ($modelArtifacts.Count -gt 0) {
     throw "Model artifacts cannot ship until an explicit reviewed redistribution ledger and required notices are implemented. Found: $($relativeModels -join ', ')"
 }
 
-Test-StagedLegalHashes -Manifest $legalStatus.Manifest -StageDir $stageDir
 Write-StackThirdPartyNotices `
     -Root $Root `
     -DestinationPath (Join-Path $stageDir "Stack\App\Legal\THIRD_PARTY_NOTICES.md") `
+    -ComponentIds @($productDefinition.thirdPartyIds) `
     -StageDir $stageDir
-Test-StackThirdPartyStage -Root $Root -StageDir $stageDir | Out-Null
+Test-StackThirdPartyStage -Root $Root -StageDir $stageDir -ComponentIds @($productDefinition.thirdPartyIds) | Out-Null
 
 $libRawSourceArchive = $null
 if (Test-Path -LiteralPath (Join-Path $stageDir "Stack\App\Runtime\libraw.dll")) {
@@ -253,14 +222,16 @@ if (Test-Path -LiteralPath (Join-Path $stageDir "Stack\App\Runtime\libraw.dll"))
 $signingConfiguration = $null
 if ($PublicRelease) {
     $signingConfiguration = Get-StackSigningConfiguration
-    Sign-StackPayload -Configuration $signingConfiguration -StageDir $stageDir
+    Sign-StackPayload -Configuration $signingConfiguration -StageDir $stageDir -Definition $productDefinition
 }
 
-$sbomStagePath = Join-Path $stageDir "Stack\App\Legal\Stack.spdx.json"
+$sbomStagePath = Join-Path $stageDir ("Stack\App\Legal\" + $productDefinition.artifactName + ".spdx.json")
 Write-StackSpdxSbom `
     -Root $Root `
     -StageDir $stageDir `
     -Version $versionInfo.Version `
+    -ProductName $productDefinition.name -ProductId $productDefinition.artifactName `
+    -ComponentIds @($productDefinition.thirdPartyIds) `
     -DestinationPath $sbomStagePath
 Copy-ReleaseFile -SourcePath $sbomStagePath -DestinationPath $sbomOutputPath
 
@@ -275,17 +246,14 @@ if (-not $SkipInstaller) {
     }
 
     $isccArguments = @(
+        "/DStackProduct=$Product",
+        "/DStackShellClsid=$(if ($LocalTestPackage) { $productDefinition.localTestShellClsid } else { $productDefinition.shellClsid })",
         "/DStackVersion=$($versionInfo.Version)",
         "/DStackVersionTag=$($versionInfo.Tag)",
         "/DStackPublisher=$($versionInfo.Publisher)",
         "/DStackSourceDir=$stageDir",
         "/DStackOutputDir=$OutputDir",
-        "/DStackEulaFile=$eulaPath",
-        "/DStackInfoBeforeFile=$infoBeforePath",
         "/DStackMarkerFile=$markerFile",
-        "/DStackEulaVersion=$($legalStatus.EulaVersion)",
-        "/DStackEulaSha256=$($legalStatus.EulaSha256)",
-        "/DStackPrivacyVersion=$($legalStatus.PrivacyVersion)",
         "/DStackLocalTest=$([int][bool]$LocalTestPackage)",
         "/DStackPublicRelease=$([int][bool]$PublicRelease)"
     )
@@ -321,16 +289,13 @@ if (-not $SkipHashes) {
 
 Write-Host ""
 if ($PublicRelease) {
-    Write-Host "PUBLIC release packaging complete. Legal approval and Authenticode gates passed."
+    Write-Host "PUBLIC release packaging complete. Third-party payload and Authenticode checks passed."
 }
 elseif ($LocalTestPackage) {
-    Write-Host "LOCAL TEST packaging complete. This package is unsigned, uses draft legal text, and must not be published."
+    Write-Host "LOCAL TEST packaging complete. This package is unsigned, uses an isolated profile, and must not be published."
 }
 else {
-    Write-Host "Standard packaging complete. This installer is unsigned. Legal approval state: $($legalStatus.ApprovalState)."
-    if ($legalStatus.ApprovalState -ne "approved") {
-        Write-Host "Do not publish this package while its legal documents are drafts."
-    }
+    Write-Host "Standard packaging complete. This installer is unsigned. Third-party payload checks passed."
 }
 Write-Host "Output folder: $OutputDir"
 Write-Host "Stage directory: $stageDir"

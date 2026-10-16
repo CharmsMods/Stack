@@ -31,6 +31,11 @@ void EditorModule::OpenBracketingTool() {
     m_RawWorkspaceLabUi.galleryNavigationMode=RawGalleryNavigationMode::ProjectRoot;
     m_RawWorkspaceGalleryContentMode=Stack::RawWorkspace::GalleryContentMode::Gallery;
     BeginBracketingDraft();
+    BindBracketingSourceNodeEditor();
+    // Capture-set entry opens its controls before the shell consumes View's
+    // navigation request. Later frames preserve the user's collapse choice.
+    m_Project->workspace.viewPanelOpen=true;
+    RequestRawSettingsPanel();
 }
 void EditorModule::BeginBracketingDraft(bool fresh) {
     if(Stack::Workspace::IsPreview())return;
@@ -43,8 +48,9 @@ void EditorModule::BeginBracketingDraft(bool fresh) {
     if(!fresh&&m_Bracketing&&m_Bracketing->newProject)return;
     if(!fresh&&IsMultiFrameRawProjectActive())return;
     m_Bracketing=std::make_shared<Stack::Editor::BracketingSession>();
+    m_Project->nodeEditor.reset();
     m_Bracketing->newProject=true;
-    m_Bracketing->boundDocument=GetCurrentProjectFileName();
+    m_Bracketing->boundDocument=EnsureProjectDocumentId();
     m_Bracketing->processRequired=true;
     m_Bracketing->status="Select captures in the filmstrip or Gallery, then press Process.";
     SyncBracketingSelection();
@@ -76,7 +82,7 @@ void EditorModule::RestoreBracketingSelection() {
         if(source.sourceKey.empty()) {
             std::error_code ec;
             if(!std::filesystem::is_regular_file(source.path,ec)) {
-                const auto managed=m_Project->store->StoragePath()/std::filesystem::u8path(asset->projectAssetPath);
+                const auto managed=m_Project->store->ResolveAssetFile(asset->assetId);
                 if(std::filesystem::is_regular_file(managed,ec))source.path=managed;
                 else {
                     source.path=AppPaths::GetCacheDirectory()/"BracketingOriginals"/
@@ -100,6 +106,7 @@ void EditorModule::RestoreBracketingSelection() {
     }
     ui.projectName=m_Project->snapshot->projectName;
     ui.selectionRestored=true;
+    ++ui.controlsRevision;
     if(!materialize.empty()) {
         auto job=std::make_shared<Stack::Editor::BracketingMetadataJob>();ui.metadataJob=job;
         auto store=m_Project->store;
@@ -141,6 +148,7 @@ void EditorModule::SyncBracketingSelection() {
     if(same)return;
     for(const auto& source:ui.sources)ui.sourceHistory[source.frameId]=source;
     ui.sources=std::move(sources);
+    ++ui.controlsRevision;
     Stack::Editor::RegroupBracketingDraft(ui);
     ui.processRequired=true;
     CommitBracketingEdit();
@@ -185,6 +193,7 @@ void EditorModule::AddBracketingDraftFiles(const std::vector<std::filesystem::pa
         m_Bracketing->sources.push_back(std::move(source));
     }
     if(before==m_Bracketing->sources.size())return;
+    ++m_Bracketing->controlsRevision;
     m_Bracketing->processRequired=true;
     Stack::Editor::RegroupBracketingDraft(*m_Bracketing);CommitBracketingEdit();
 }
@@ -196,6 +205,7 @@ void EditorModule::RemoveBracketingDraftSource(const std::string& id) {
         keys.erase(std::remove(keys.begin(),keys.end(),s.sourceKey),keys.end());
     }
     ui.sources.erase(std::remove_if(ui.sources.begin(),ui.sources.end(),[&](const auto& s){return s.frameId==id;}),ui.sources.end());
+    ++ui.controlsRevision;
     ui.processRequired=true;
     Stack::Editor::RegroupBracketingDraft(ui);CommitBracketingEdit();
     InvalidateRawWorkspaceGalleryPresentation();
@@ -219,11 +229,14 @@ void EditorModule::TickBracketingDraft() {
         // Existing arrangements remain intact, including user-created groups.
         Stack::Editor::RegroupBracketingDraft(ui);
         ui.editedRecipe=Raw::Bracketing::Serialize(ui.recipe).dump();
+        ++ui.controlsRevision;
     }
-    if(!ui.metadataJob) {
-        auto job=std::make_shared<Stack::Editor::BracketingMetadataJob>();
-        for(const auto& s:ui.sources)if(!s.inspected)job->sources.push_back(s);
-        if(!job->sources.empty()) {
+    if(!ui.metadataJob&&ui.metadataCheckedRevision!=ui.controlsRevision) {
+        ui.metadataCheckedRevision=ui.controlsRevision;
+        const auto pending=std::find_if(ui.sources.begin(),ui.sources.end(),[](const auto& source){return !source.inspected;});
+        if(pending!=ui.sources.end()) {
+            auto job=std::make_shared<Stack::Editor::BracketingMetadataJob>();
+            for(auto source=pending;source!=ui.sources.end();++source)if(!source->inspected)job->sources.push_back(*source);
             ui.metadataJob=job;
             if(!ProjectTasks().Submit("Reading capture details",[job] {
                 for(auto& source:job->sources) {
@@ -237,7 +250,7 @@ void EditorModule::TickBracketingDraft() {
                     source.inspected=true;
                 }
                 job->done=true;
-            })) {ui.metadataJob.reset();ui.status="Could not inspect captures. Retry selection.";}
+            })) {ui.metadataJob.reset();ui.metadataCheckedRevision=std::numeric_limits<std::uint64_t>::max();ui.status="Could not inspect captures. Retry selection.";}
         }
     }
 }

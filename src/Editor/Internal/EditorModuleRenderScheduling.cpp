@@ -1,4 +1,6 @@
 #include "Renderer/ViewportTextureCopy.h"
+#include "App/UiPerformanceTrace.h"
+#include "App/UiPerformanceProbe.h"
 #include "Editor/EditorModule.h"
 
 #include "App/settings/AppearanceTheme.h"
@@ -34,6 +36,7 @@
 using namespace Stack::EditorRendering::Internal;
 
 void EditorModule::SubmitRenderIfReady() noexcept {
+    Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewSubmission);
     try {
         SubmitRenderIfReadyImpl();
     } catch (...) {
@@ -80,19 +83,23 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             ? m_RawRenderClientId != 0
             : m_RenderWorkerAvailable;
     const double now = ImGui::GetTime();
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) m_RawCurveDragCleanupPending = true;
+    else if (m_RawCurveDragCleanupPending && !ImGui::IsAnyItemActive())
+        ClearRawCurveDragState();
     if (m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
         m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive()) {
         return;
     }
-    if (m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
+    if (UsesGraphViewportPreview()) UpdateViewportPreviewRefinement(now);
+    else if (m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
     if (rawWorkspaceActive &&
         allowBackgroundRenderWorker &&
-        TrySubmitRawWorkspaceCachePrewarm(now)) {
+        !m_RawAssetCapture.pending && !m_RawAssetCapture.armed && TrySubmitRawWorkspaceCachePrewarm(now)) {
         return;
     }
-    if (rawWorkspaceActive && allowBackgroundRenderWorker &&
+    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && !m_RawAssetCapture.pending && !m_RawAssetCapture.armed &&
         TrySubmitRawViewportMaintenance(now)) return;
-    if (rawWorkspaceActive && allowBackgroundRenderWorker &&
+    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && !m_RawAssetCapture.pending && !m_RawAssetCapture.armed &&
         TrySubmitRawViewportCalibration(now)) return;
     if (!allowBackgroundRenderWorker && !m_RenderDirty) {
         return;
@@ -103,6 +110,25 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     // instead keeps useful active work and replaces its single pending request.
     const bool workerBusy = allowBackgroundRenderWorker &&
         (m_RenderPending || IsAnyRenderBackendBusy());
+    if (!compositeMode && m_RenderDirty) {
+        const auto& view = ActiveViewportPreviewState();
+        // Coalesce edits in the document while a useful interactive frame is
+        // running. Do not serialize, hash and region-plan another full graph
+        // on every UI frame merely to replace a pending snapshot.
+        // A context switch or an edit interrupting native refinement is still
+        // allowed to reach the worker's cancellation boundary promptly.
+        const bool snapshotWorkPending = m_RawRenderClientId != 0
+            ? Stack::EditorRendering::RawRenderService::Get().HasSnapshotWorkFor(m_RawRenderClientId)
+            : m_RenderWorker.HasSnapshotWorkFor(0);
+        if (UsesGraphViewportPreview() && (snapshotWorkPending || !m_DeferredRenderResults.empty()) &&
+            view.submittedPurpose == RawRenderPurpose::InteractivePresentation &&
+            Stack::GraphRendering::SameContext(view.submittedTag,CurrentGraphRenderTag())) return;
+        // The FPS setting limits preparation/submission as well as resolution.
+        // This is a cadence limit, not a quiet-period debounce: continuous
+        // input keeps producing frames at the configured rate.
+        if (view.lastSubmissionAt >= 0 && now-view.lastSubmissionAt <
+            1.0/std::max(1,GetRawViewportTargetFps())) return;
+    }
     m_GraphPerformanceStats.lastPreviewRequestBuildMs = 0.0f;
     m_GraphPerformanceStats.lastCompositeRequestBuildMs = 0.0f;
     std::vector<EditorRenderWorker::PreviewRequest> previewRequests;
@@ -152,6 +178,8 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         }
         m_GraphPerformanceStats.lastSnapshotBuildMs =
             MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
+        if (Stack::UiPerformance::Probe::Active() && m_GraphPerformanceStats.lastSnapshotBuildMs > 5.0)
+            std::clog << "Viewport snapshot build ms=" << m_GraphPerformanceStats.lastSnapshotBuildMs << '\n';
         snapshot.outputConnected = false;
         snapshot.sourcePixels = {};
         if (!snapshot.rawWorkspace.sourceKey.empty()) {
@@ -342,6 +370,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         return;
     }
 
+    ActiveViewportPreviewState().lastSubmissionAt = now;
     m_RenderGeneration =
         Stack::EditorRenderScheduling::NextGlobalGeneration();
     m_LastSubmittedRenderRevision = m_RenderRevision;
@@ -354,6 +383,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     if (allowBackgroundRenderWorker &&
         rawWorkspaceActive &&
         m_RawWorkspaceRootTabActive &&
+        !UsesGraphViewportPreview() &&
         TrySubmitRawRenderCommand(
             m_RenderGeneration,
             previewRequests)) {
@@ -590,9 +620,9 @@ void EditorModule::SubmitRenderIfReadyImpl() {
                 ClearRawWorkspaceLocalRangeOverlayState();
             }
         }
-        if (rawWorkspaceActive && publishedRawPresentation && !snapshot.rawWorkspace.analysisRequested &&
+        if (((rawWorkspaceActive && publishedRawPresentation) || !snapshot.rawWorkspace.graphScopeOwnerKey.empty()) && !snapshot.rawWorkspace.analysisRequested &&
             snapshot.rawWorkspace.graphScopeStage != RawDevelopmentGraphScopeStage::None) {
-            CacheRawWorkspaceGraphScopeReadback(snapshot.rawWorkspace.sourceKey,
+            CacheRawWorkspaceGraphScopeReadback(snapshot.rawWorkspace.graphScopeOwnerKey.empty() ? snapshot.rawWorkspace.sourceKey : snapshot.rawWorkspace.graphScopeOwnerKey,
                 snapshot.rawWorkspace.graphScopeInputFingerprint, m_Pipeline.GetRawDevelopmentGraphScopeReadback());
             RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool();
         }
@@ -602,10 +632,11 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             m_RawWorkspaceStageStatsReadbacks = m_Pipeline.GetRawDevelopmentStageStatsReadbacks();
             m_RawWorkspaceGraphScopeReadback =
                 m_Pipeline.GetRawDevelopmentGraphScopeReadback();
+            m_RawWorkspaceGraphScopeReadbackRevision = 0;
             if (publishedRawPresentation) {
                 m_BracketingPresentedSourceHash=snapshot.rawWorkspace.sourceHash;
                 CacheRawWorkspaceGraphScopeReadback(
-                    snapshot.rawWorkspace.sourceKey,
+                    snapshot.rawWorkspace.graphScopeOwnerKey.empty() ? snapshot.rawWorkspace.sourceKey : snapshot.rawWorkspace.graphScopeOwnerKey,
                     snapshot.rawWorkspace.graphScopeInputFingerprint,
                     m_RawWorkspaceGraphScopeReadback);
             }
@@ -692,6 +723,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         m_GraphPerformanceStats.lastRawPreviewMaxDimension =
             snapshot.previewMaxDimension;
         m_GraphPerformanceStats.lastMainGraphStats = graphExecutionStats;
+        PublishUniformParameterFeedback(graphExecutionStats);
         m_GraphPerformanceStats.lastPreviewRenderMs = 0.0f;
         m_GraphPerformanceStats.lastCompositeRenderMs = 0.0f;
         m_GraphPerformanceStats.lastRenderedPreviewCount = 0;
@@ -834,7 +866,8 @@ void EditorModule::SubmitRenderIfReadyImpl() {
                 RefreshPendingMultiFrameProjectCover();
             }
         }
-        ApplyToneCurveAutoRewriteFeedback(m_Pipeline.GetToneCurveAutoRewriteFeedback());
+        if (m_Pipeline.GetOutputTexture()!=0 && m_Pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty())
+            ApplyToneCurveAutoRewriteFeedback(m_Pipeline.GetToneCurveAutoRewriteFeedback());
         for (int nodeId : activeHdrMergeNodeIds) {
             m_HdrMergeRequestedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);
             m_HdrMergeCompletedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);

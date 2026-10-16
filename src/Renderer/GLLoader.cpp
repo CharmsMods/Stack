@@ -25,6 +25,7 @@ void(APIENTRY* glUniform1f_)(GLint, GLfloat) = nullptr;
 void(APIENTRY* glUniform1fv_)(GLint, GLsizei, const GLfloat*) = nullptr;
 void(APIENTRY* glUniform2f_)(GLint, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform2i_)(GLint, GLint, GLint) = nullptr;
+void(APIENTRY* glUniform4i_)(GLint, GLint, GLint, GLint, GLint) = nullptr;
 void(APIENTRY* glUniform3f_)(GLint, GLfloat, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform4f_)(GLint, GLfloat, GLfloat, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform3fv_)(GLint, GLsizei, const GLfloat*) = nullptr;
@@ -108,6 +109,7 @@ bool LoadGLFunctions() {
     LOAD(glUniform1fv_, "glUniform1fv");
     LOAD(glUniform2f_, "glUniform2f");
     LOAD(glUniform2i_, "glUniform2i");
+    LOAD(glUniform4i_, "glUniform4i");
     LOAD(glUniform3f_, "glUniform3f");
     LOAD(glUniform4f_, "glUniform4f");
     LOAD(glUniform3fv_, "glUniform3fv");

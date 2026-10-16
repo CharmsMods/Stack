@@ -1068,7 +1068,7 @@ void ClassicalRgbDenoiseLayer::MarkDenoiseUiDirty(EditorModule* editor) const {
     if (m_ActiveUiNodeId >= 0) {
         editor->MarkRenderDirty(m_ActiveUiNodeId);
     } else {
-        editor->MarkSelectedLayerRenderDirty();
+        editor->MarkRenderRefreshDirty();
     }
 }
 

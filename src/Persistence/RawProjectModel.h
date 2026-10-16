@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Persistence/MultiFrameGraph.h"
+#include "Raw/RawCaptureCompatibility.h"
 #include "ThirdParty/json.hpp"
 
 #include <cstdint>
@@ -15,8 +16,8 @@ namespace Stack::Project {
 
 using json = nlohmann::json;
 
-inline constexpr std::uint32_t kRawProjectSourceSetSchemaVersion = 8;
-inline constexpr std::uint32_t kRawWorkspaceProjectSchemaVersion = 5;
+inline constexpr std::uint32_t kRawProjectSourceSetSchemaVersion = 9;
+inline constexpr std::uint32_t kRawWorkspaceProjectSchemaVersion = 6;
 inline constexpr std::uint32_t kMultiFrameOperationSchemaVersion = 1;
 inline constexpr std::uint32_t kMfdOperationSchemaVersion = 5;
 inline constexpr std::uint32_t kHdrOperationSchemaVersion = 1;
@@ -53,11 +54,6 @@ enum class MultiFrameOperationIntent {
     RawBurstHdr
 };
 
-enum class MfdInputDomain {
-    MosaicCfa,
-    LinearRgbUnsupported
-};
-
 enum class MfdResultState {
     Unavailable,
     Rendering,
@@ -65,38 +61,6 @@ enum class MfdResultState {
     Stale,
     Failed,
     Canceled
-};
-
-struct RawCaptureCompatibilitySummary {
-    MfdInputDomain inputDomain = MfdInputDomain::MosaicCfa;
-    std::string pixelLayout;
-    std::string cfaPattern;
-    std::string cameraMake;
-    std::string cameraModel;
-    std::string uniqueCameraModel;
-    int rawWidth = 0;
-    int rawHeight = 0;
-    int visibleWidth = 0;
-    int visibleHeight = 0;
-    int leftMargin = 0;
-    int topMargin = 0;
-    int bitDepth = 0;
-    int orientation = 0;
-    double exposureTimeSeconds = 0.0;
-    double isoSpeed = 0.0;
-    double apertureFNumber = 0.0;
-    double focalLengthMm = 0.0;
-    double focusDistanceMeters = 0.0;
-    std::string lensModel;
-    bool hasDngNoiseProfile = false;
-    int dngNoiseProfilePlaneCount = 0;
-    bool hasDngLinearResponseLimit = false;
-    double dngLinearResponseLimit = 1.0;
-    int dngUnsupportedOpcodeCount = 0;
-    std::string exposureConfidenceProvenance;
-    std::int64_t captureTimestamp = 0;
-    bool supported = false;
-    std::string rejectionReason;
 };
 
 enum class MultiFrameSetStatus {
@@ -192,7 +156,6 @@ const char* ProjectStorageKindName(ProjectStorageKind value);
 const char* ProjectCreationOriginName(ProjectCreationOrigin value);
 const char* MultiFrameInputFamilyName(MultiFrameInputFamily value);
 const char* MultiFrameOperationIntentName(MultiFrameOperationIntent value);
-const char* MfdInputDomainName(MfdInputDomain value);
 const char* MfdResultStateName(MfdResultState value);
 
 ProjectDocumentKind ClassifyProjectDocument(const RawProjectSnapshot& snapshot);
@@ -202,28 +165,11 @@ bool ParseProjectStorageKind(const std::string& value, ProjectStorageKind& resul
 bool ParseProjectCreationOrigin(const std::string& value, ProjectCreationOrigin& result);
 bool ParseMultiFrameInputFamily(const std::string& value, MultiFrameInputFamily& result);
 bool ParseMultiFrameOperationIntent(const std::string& value, MultiFrameOperationIntent& result);
-bool ParseMfdInputDomain(const std::string& value, MfdInputDomain& result);
 
 json MakeDefaultMfdOperationSettings();
 json MakeDefaultHdrOperationSettings();
 
-RawCaptureCompatibilitySummary BuildRawCaptureCompatibilitySummary(
-    const Raw::RawMetadata& metadata);
-json SerializeRawCaptureCompatibilitySummary(
-    const RawCaptureCompatibilitySummary& summary);
-bool DeserializeRawCaptureCompatibilitySummary(
-    const json& value,
-    RawCaptureCompatibilitySummary& summary,
-    std::string* errorMessage = nullptr);
-bool AreMfdCapturesStructurallyCompatible(
-    const RawCaptureCompatibilitySummary& reference,
-    const RawCaptureCompatibilitySummary& candidate,
-    std::string* reason = nullptr);
-bool AreHdrCapturesStructurallyCompatible(
-    const RawCaptureCompatibilitySummary& reference,
-    const RawCaptureCompatibilitySummary& candidate,
-    std::string* reason = nullptr,
-    std::vector<std::string>* warnings = nullptr);
+
 
 std::string GenerateStableUuid();
 std::string MakeAssetId(const std::string& sha256, std::uint64_t byteLength);

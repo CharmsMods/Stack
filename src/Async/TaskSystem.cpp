@@ -1,6 +1,8 @@
 #include "TaskSystem.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <exception>
 #include <iostream>
 
@@ -301,8 +303,11 @@ bool TaskSystem::PostToMain(ActivityMetadata activity, Task task) {
     return PostToMain(TrackActivity(std::move(activity), std::move(task)));
 }
 
-void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
+void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMilliseconds) {
     std::size_t processed = 0;
+    const bool timeLimited = std::isfinite(maxMilliseconds) && maxMilliseconds > 0.0;
+    const auto started = timeLimited ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
 
     while (true) {
         Task task;
@@ -328,6 +333,10 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
 
         ++processed;
         if (maxTasks > 0 && processed >= maxTasks) {
+            break;
+        }
+        if (timeLimited && std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count() >= maxMilliseconds) {
             break;
         }
     }
