@@ -180,14 +180,28 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             " to the reference capture using image overlap. Enter relative EV for those inputs in the capture controls.";
         return false;
     }
+    std::vector<double> scales(n),scaleVariances(n);
     for(std::size_t i=0;i<n;++i) {
-        auto& source=data.sources[i];source.scale=std::exp2(gains[i]);
+        scales[i]=std::exp2(gains[i]);
         // Search seeds carry deliberately broad uncertainty and can never be
         // published as calibrated HDR. The post-local solve resolves/excludes
         // them before any fusion runs.
         if(unresolved[i])variance[i]=4.;
+        scaleVariances[i]=std::pow(std::log(2.)*scales[i],2)*variance[i];
+        if(!std::isfinite(scales[i])||scales[i]<=0||
+           !std::isfinite(scaleVariances[i])||scaleVariances[i]<0||
+           (variance[i]>0&&scaleVariances[i]==0)) {
+            error="Exposure calibration for "+data.sources[i].id+
+                " produced a gain or gain variance outside the representable numerical range.";
+            return false;
+        }
+    }
+    // Publish only after every derived value is representable. A finite EV
+    // solution can still overflow gain variance or underflow it to false zero.
+    for(std::size_t i=0;i<n;++i) {
+        auto& source=data.sources[i];source.scale=scales[i];
         source.exposureCalibrated=!unresolved[i]&&(source.enabled||i==data.origin);
-        source.scaleVariance=std::pow(std::log(2.)*source.scale,2)*variance[i];
+        source.scaleVariance=scaleVariances[i];
     }
     for(std::size_t i=0;i<n;++i) {
         const auto& source=data.sources[i];

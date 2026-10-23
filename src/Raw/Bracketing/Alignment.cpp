@@ -150,12 +150,15 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     if(data.sources.empty()||data.origin>=data.sources.size()) {error="Bracketing alignment has no reference capture.";return false;}
     auto& reference=data.sources[data.origin];
-    const auto referenceExposure=ExposureDistribution(reference);
     const Mfd::RawCoordinate center={.5*(data.width-1.0),.5*(data.height-1.0)};
-    for(auto& source:data.sources) {
-        source.alignment={};source.alignment.centerRaw=center;
-        source.alignmentDiagnostic={};source.alignmentDiagnostic.message="Fixed reference coordinates.";
-        source.scale=(&source==&reference)?1.:PreliminaryScale(request,source,referenceExposure);
+    {
+        // Seed-only sorted samples need not remain resident during FFT/search.
+        const auto referenceExposure=ExposureDistribution(reference);
+        for(auto& source:data.sources) {
+            source.alignment={};source.alignment.centerRaw=center;
+            source.alignmentDiagnostic={};source.alignmentDiagnostic.message="Fixed reference coordinates.";
+            source.scale=(&source==&reference)?1.:PreliminaryScale(request,source,referenceExposure);
+        }
     }
     reference.alignmentDiagnostic.message="Alignment reference (fixed output grid).";
     if(request.recipe.alignmentMode==AlignmentMode::FixedCoordinates) {
