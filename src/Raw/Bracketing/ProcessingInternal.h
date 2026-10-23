@@ -21,6 +21,7 @@ struct PreparedSource {
     Mfd::NoiseModel noise;
     double scale=1;
     double scaleVariance=0;
+    bool exposureCalibrated=false;
     double detailPreference=1;
     std::shared_ptr<CapturePreview> original;
     mutable std::weak_ptr<const ProcessingThumbnail> presentationThumbnail;
@@ -83,7 +84,7 @@ bool Prepare(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&
 bool PrepareSources(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool Align(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool AlignLocal(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
-bool Calibrate(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&,bool allowFallback=true);
+bool Calibrate(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&,bool allowFallback=true,bool deferUnconnected=false);
 bool RefineBurstNoise(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool ReadGroups(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,
     std::vector<std::vector<Observation>>&,Mfd::PreparedRawTile&,std::string&);

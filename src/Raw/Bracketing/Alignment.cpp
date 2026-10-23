@@ -1,5 +1,6 @@
 #include "Alignment.h"
 #include "AlignmentProxy.h"
+#include "AlignmentExposureSeed.h"
 #include "PresentationEvidence.h"
 
 #include <algorithm>
@@ -56,17 +57,34 @@ bool SampleProxySource(const PreparedSource& source,Mfd::RawCoordinate sourceRaw
     return std::isfinite(value);
 }
 
-double PreliminaryScale(const ProcessingRequest& request,const PreparedDataset& data,const PreparedSource& source) {
+AlignmentExposureDistribution ExposureDistribution(const PreparedSource& source) {
+    AlignmentExposureDistribution result;
+    if(!source.original)return result;
+    const auto& rgb=source.original->rgb;
+    for(unsigned c=0;c<3;++c) {
+        auto& values=result.channels[c];values.reserve(rgb.size()/3);
+        for(std::size_t p=c;p<rgb.size();p+=3)if(std::isfinite(rgb[p]))values.push_back(rgb[p]);
+        std::sort(values.begin(),values.end());
+    }
+    // Deliberately do not claim the full averaging gain of the proxy here.
+    // The largest site noise gives a conservative search-only dark cutoff.
+    for(const auto& site:source.noise.sites) {
+        result.shotVariance=std::max(result.shotVariance,site.shotScale);
+        result.offsetVariance=std::max(result.offsetVariance,site.offsetVariance+
+            (site.quantizationIncluded?0:site.quantizationVariance));
+    }
+    for(double span:source.frame.calibration.usableSpanByCfaSite)
+        if(std::isfinite(span)&&span>0)result.signalFloor=std::max(result.signalFloor,2./span);
+    return result;
+}
+
+double PreliminaryScale(const ProcessingRequest& request,const PreparedSource& source,
+    const AlignmentExposureDistribution& reference) {
     for(const auto& group:request.recipe.groups) for(const auto& frame:group.frames) if(frame.id==source.id&&frame.manualExposure)
         return std::exp2(-frame.relativeEv);
-    const auto& origin=data.sources[data.origin].metadata;
-    const auto exposure=[](const RawMetadata& metadata) {
-        const double aperture=metadata.apertureFNumber>0?metadata.apertureFNumber:1.0;
-        return metadata.exposureTimeSeconds>0&&metadata.isoSpeed>0
-            ? static_cast<double>(metadata.exposureTimeSeconds)*metadata.isoSpeed/(aperture*aperture):0.0;
-    };
-    const double a=exposure(origin),b=exposure(source.metadata);
-    return a>0&&b>0?a/b:1.0;
+    // Scene composition and clipping can change marginal ranks. This value
+    // only seeds registration; registered image evidence must calibrate gain.
+    return EstimateAlignmentExposureSeed(reference,ExposureDistribution(source));
 }
 
 std::vector<Mfd::AffineReferenceSample> ReferenceSamples(const PreparedSource& source) {
@@ -132,11 +150,12 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     if(data.sources.empty()||data.origin>=data.sources.size()) {error="Bracketing alignment has no reference capture.";return false;}
     auto& reference=data.sources[data.origin];
+    const auto referenceExposure=ExposureDistribution(reference);
     const Mfd::RawCoordinate center={.5*(data.width-1.0),.5*(data.height-1.0)};
     for(auto& source:data.sources) {
         source.alignment={};source.alignment.centerRaw=center;
         source.alignmentDiagnostic={};source.alignmentDiagnostic.message="Fixed reference coordinates.";
-        source.scale=PreliminaryScale(request,data,source);
+        source.scale=(&source==&reference)?1.:PreliminaryScale(request,source,referenceExposure);
     }
     reference.alignmentDiagnostic.message="Alignment reference (fixed output grid).";
     if(request.recipe.alignmentMode==AlignmentMode::FixedCoordinates) {
@@ -147,10 +166,10 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
     std::size_t alternate=0;
     const auto alternateCount=data.sources.size()-1;
     // The reference proxy is immutable throughout this operation. Keep its
-    // affine evidence and the four phase workspaces for all alternate captures.
+    // affine evidence and the three phase workspaces for all alternate captures.
     std::vector<Mfd::AffineReferenceSample> affineSamples;
     bool affineSamplesPrepared=false;
-    std::vector<Mfd::GlobalPlanePair> pairs(4);
+    std::vector<Mfd::GlobalPlanePair> pairs(3);
     for(std::size_t i=0;i<data.sources.size();++i) {
         if(i==data.origin) continue;
         auto& source=data.sources[i];
@@ -174,19 +193,12 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
         // only a motion initializer; radiometric sampling still rejects clipping.
         const double phaseCeiling=.8*std::min(1.0,source.scale);
         std::size_t planeIndex=0;
-        for(const auto site:{Mfd::CfaSite::Red,Mfd::CfaSite::Green0,Mfd::CfaSite::Green1,Mfd::CfaSite::Blue}) {
+        // The proxy already averages both green sites. Counting that channel
+        // twice would satisfy two-plane consensus with one independent signal.
+        for(const auto site:{Mfd::CfaSite::Red,Mfd::CfaSite::Green0,Mfd::CfaSite::Blue}) {
             auto& sitePair=pairs[planeIndex++];sitePair.site=site;
             sitePair.extent={reference.original->width,reference.original->height};
             sitePair.rawPixelsPerPlanePixel=reference.proxyStride;
-            if(site==Mfd::CfaSite::Green1) {
-                // Both green phase inputs use the same proxy green channel.
-                // Keep both consensus planes while copying the identical
-                // prepared samples instead of rescaling and clamping twice.
-                const auto& green=pairs[1];
-                sitePair.reference=green.reference;sitePair.alternate=green.alternate;
-                sitePair.validMask=green.validMask;
-                continue;
-            }
             sitePair.reference.resize(count);sitePair.alternate.resize(count);sitePair.validMask.resize(count);
             for(std::size_t p=0;p<count;++p) {
                 sitePair.reference[p]=ProxySiteValue(*reference.original,p,site);

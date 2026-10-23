@@ -221,24 +221,33 @@ bool AreHdrCapturesStructurallyCompatible(
     const RawCaptureCompatibilitySummary& candidate,
     std::string* reason,
     std::vector<std::string>* warnings) {
-    if (!AreMfdCapturesStructurallyCompatible(reference, candidate, reason)) return false;
     const auto incompatible = [&](const std::string& message) {
         if (reason) *reason = message;
         return false;
     };
-    if (reference.focalLengthMm > 0.0 && candidate.focalLengthMm > 0.0 &&
-        std::abs(reference.focalLengthMm - candidate.focalLengthMm) > 0.1) {
-        return incompatible("HDR brackets must use the same focal length.");
-    }
-    if (!reference.lensModel.empty() && !candidate.lensModel.empty() &&
-        Lower(reference.lensModel) != Lower(candidate.lensModel)) {
-        return incompatible("HDR brackets must use the same lens.");
-    }
+    // HDR compares independently normalized sensor measurements. Camera/lens
+    // labels and sample precision are advisory, not evidence that pixels cannot
+    // align. Retain the geometry/CFA contract needed by same-colour sampling.
+    if (!reference.supported || !candidate.supported ||
+        reference.inputDomain != MfdInputDomain::MosaicCfa ||
+        candidate.inputDomain != MfdInputDomain::MosaicCfa)
+        return incompatible("HDR requires supported mosaiced RAW captures.");
+    if (reference.cfaPattern != candidate.cfaPattern)
+        return incompatible("HDR captures use different CFA patterns.");
+    if (reference.visibleWidth != candidate.visibleWidth ||
+        reference.visibleHeight != candidate.visibleHeight)
+        return incompatible("HDR requires matching active-image dimensions.");
+    if (reference.orientation != candidate.orientation)
+        return incompatible("Resolve differing capture orientations before HDR reconstruction.");
     if (warnings) {
-        if (reference.apertureFNumber <= 0.0 || candidate.apertureFNumber <= 0.0)
-            warnings->push_back("Aperture metadata is missing; exposure matching may need per-frame offsets.");
-        if (reference.focalLengthMm <= 0.0 || candidate.focalLengthMm <= 0.0)
-            warnings->push_back("Focal-length metadata is missing; lens geometry could not be fully verified.");
+        if (Lower(reference.cameraMake + reference.cameraModel + reference.uniqueCameraModel) !=
+            Lower(candidate.cameraMake + candidate.cameraModel + candidate.uniqueCameraModel))
+            warnings->push_back("Camera labels differ or are missing; using decoded sensor geometry and image evidence. Different physical sensor colour responses are not automatically harmonized.");
+        if ((!reference.lensModel.empty() && !candidate.lensModel.empty() &&
+             Lower(reference.lensModel) != Lower(candidate.lensModel)) ||
+            (reference.focalLengthMm > 0 && candidate.focalLengthMm > 0 &&
+             std::abs(reference.focalLengthMm - candidate.focalLengthMm) > .1))
+            warnings->push_back("Lens metadata differs; image registration and local reliability determine usable overlap.");
         if (reference.focusDistanceMeters <= 0.0 || candidate.focusDistanceMeters <= 0.0) {
             warnings->push_back("Focus-distance metadata is missing; focus compatibility could not be verified.");
         } else {
@@ -248,8 +257,7 @@ bool AreHdrCapturesStructurallyCompatible(
             if (std::abs(reference.focusDistanceMeters - candidate.focusDistanceMeters) >
                 std::max(0.01, scale * 0.02)) {
                 warnings->push_back(
-                    "Focus distances differ. Bracketing will preserve the original sample "
-                    "coordinates without correcting focus breathing or sharpness changes.");
+                    "Focus distances differ. Image registration and sharpness evidence determine usable contributions; missing detail is not reconstructed from metadata.");
             }
         }
     }

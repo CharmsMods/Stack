@@ -6,17 +6,32 @@
 namespace Raw::Bracketing {
 struct ExposureEdge {std::size_t a=0,b=0;double ev=0,variance=.0004;};
 
+// Linear-time reachability for sparse overlap graphs. Return only components
+// with an explicit anchor; disconnected captures have no observable RAW scale.
+inline std::vector<bool> ConnectedExposureNodes(const std::vector<ExposureEdge>& edges,
+    const std::vector<bool>& fixed) {
+    std::vector<std::vector<std::size_t>> neighbors(fixed.size());
+    for(const auto& edge:edges) if(edge.a<fixed.size()&&edge.b<fixed.size()) {
+        neighbors[edge.a].push_back(edge.b);neighbors[edge.b].push_back(edge.a);
+    }
+    auto reached=fixed;std::vector<std::size_t> queue;
+    for(std::size_t i=0;i<fixed.size();++i)if(fixed[i])queue.push_back(i);
+    for(std::size_t p=0;p<queue.size();++p)for(auto next:neighbors[queue[p]])if(!reached[next]) {
+        reached[next]=true;queue.push_back(next);
+    }
+    return reached;
+}
+
 // Estimate all relative log gains jointly. Fixed entries include the persisted
 // origin and user corrections. The inverse normal matrix supplies uncertainty
 // in EV squared rather than assuming an exact scale after calibration.
 inline bool SolveExposureGraph(const std::vector<ExposureEdge>& edges,
     const std::vector<bool>& fixed,std::vector<double>& ev,std::vector<double>& variance) {
     const auto n=ev.size();if(fixed.size()!=n) return false;
-    auto reached=fixed;
-    for(std::size_t pass=0;pass<n;++pass) for(const auto& edge:edges) {
-        if(edge.a>=n||edge.b>=n||!(edge.variance>0)||!std::isfinite(edge.ev)) return false;
-        if(reached[edge.a]||reached[edge.b]) reached[edge.a]=reached[edge.b]=true;
-    }
+    for(const auto& edge:edges)
+        if(edge.a>=n||edge.b>=n||!(edge.variance>0)||!std::isfinite(edge.variance)||!std::isfinite(edge.ev)) return false;
+    for(std::size_t i=0;i<n;++i)if(!std::isfinite(ev[i]))return false;
+    const auto reached=ConnectedExposureNodes(edges,fixed);
     if(std::find(reached.begin(),reached.end(),false)!=reached.end()) return false;
     std::vector<int> index(n,-1);unsigned count=0;
     for(std::size_t i=0;i<n;++i) if(!fixed[i]) index[i]=count++;

@@ -7,7 +7,6 @@
 
 namespace Raw::Bracketing {
 struct ExposurePatch {
-    std::array<double,25> values{};
     std::array<std::array<double,3>,25> color{};
     std::uint32_t valid=0;
 };
@@ -46,7 +45,7 @@ public:
                 double value=0;
                 if(SampleAlignmentProxyColor(data_.sources[sourceIndex],raw,value,patch.color[sample])&&
                     *std::max_element(patch.color[sample].begin(),patch.color[sample].end())<.8) {
-                    patch.values[sample]=value;patch.valid|=1u<<sample;
+                    patch.valid|=1u<<sample;
                 }
             }
         }

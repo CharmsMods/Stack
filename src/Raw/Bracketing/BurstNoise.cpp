@@ -10,10 +10,26 @@ namespace {
 bool NeedsEstimate(const PreparedSource& source) {
     return source.noise.quality>=Mfd::NoiseModelQuality::EstimatedBurst;
 }
-bool SameSensitivity(const PreparedSource& a,const PreparedSource& b) {
-    return a.metadata.hasIsoSpeed&&b.metadata.hasIsoSpeed&&a.metadata.isoSpeed>0&&b.metadata.isoSpeed>0&&
-        std::abs(std::log2(a.metadata.isoSpeed/b.metadata.isoSpeed))<.01;
+bool SameNoiseDomain(const PreparedSource& a,const PreparedSource& b) {
+    // ISO labels do not establish equal normalized RAW noise. Pool only
+    // measured/calibrated models that already agree in their actual signal
+    // domain, and only after image exposure calibration has succeeded.
+    if(!a.exposureCalibrated||!b.exposureCalibrated||
+       a.noise.quality>=Mfd::NoiseModelQuality::GenericLowConfidence||
+       b.noise.quality>=Mfd::NoiseModelQuality::GenericLowConfidence)return false;
+    const auto close=[](double x,double y) {
+        return std::isfinite(x)&&std::isfinite(y)&&x>=0&&y>=0&&
+            std::abs(x-y)<=.1*std::max({1e-12,x,y});
+    };
+    for(unsigned site=0;site<4;++site) {
+        const auto& x=a.noise.sites[site];const auto& y=b.noise.sites[site];
+        if(!close(x.shotScale,y.shotScale)||!close(x.offsetVariance,y.offsetVariance)||
+           !close(x.quantizationVariance,y.quantizationVariance)||
+           x.quantizationIncluded!=y.quantizationIncluded)return false;
+    }
+    return true;
 }
+
 bool ReadNearest(PreparedTileSampler& sampler,const PreparedSource& source,
     const Mfd::CfaLayout& layout,Mfd::RawCoordinate coordinate,Mfd::CfaSite site,
     Mfd::SameCfaTapInput& sample,std::string& error) {
@@ -49,17 +65,24 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
             request.reportPresentation(progress);
         }
 
+        const auto registered=[&](std::size_t i) {
+            return i==data.origin||request.recipe.alignmentMode==AlignmentMode::FixedCoordinates||
+                data.sources[i].alignmentDiagnostic.accepted;
+        };
+        // A failed global warp may still be recovered by local alignment later.
+        // Until then its scene displacement is not evidence of sensor noise.
+        if(!registered(anchorIndex))continue;
         std::vector<std::size_t> members;
         for(std::size_t i=0;i<data.sources.size();++i)
-            if((data.sources[i].enabled||i==data.origin)&&SameSensitivity(anchor,data.sources[i])) {
+            if((data.sources[i].enabled||i==data.origin)&&registered(i)&&SameNoiseDomain(anchor,data.sources[i])) {
                 members.push_back(i);analyzed[i]=true;
             }
         if(members.size()<2) continue;
         bool needed=false;
         for(auto i:members) needed|=NeedsEstimate(data.sources[i]);
         if(!needed) continue;
-        // Noise belongs to the sensor sensitivity, not the UI exposure group.
-        // Pool shutter brackets at the same ISO too, and calibrate the fixed
+        // Noise belongs to a measured signal domain, not an ISO tag or UI group.
+        // Pool compatible image-calibrated brackets, and calibrate the fixed
         // origin even when it has been excluded as an output contributor.
         std::stable_sort(members.begin(),members.end(),[&](auto a,auto b) {
             return std::abs(std::log(data.sources[a].scale/anchor.scale))<
@@ -73,7 +96,7 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
         for(std::size_t member=0;member<members.size()&&pairs<2;++member) {
             if(members[member]==anchorIndex) continue;
             const auto& alternate=data.sources[members[member]];
-            if(!SameSensitivity(anchor,alternate)) continue;
+            if(!SameNoiseDomain(anchor,alternate)) continue;
             ++pairs;
             PreparedTileSampler sampler(data.directory,8);
             const unsigned stride=std::max(32u,static_cast<unsigned>(
@@ -119,15 +142,24 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
         }
         for(auto i:members) {
             auto& source=data.sources[i];
-            if(!NeedsEstimate(source)||!SameSensitivity(anchor,source)) continue;
-            source.noise.sites=profiles;source.noise.quality=Mfd::NoiseModelQuality::EstimatedBurst;
+            if(!NeedsEstimate(source)) continue;
+            auto sourceProfiles=profiles;
+            for(unsigned site=0;site<4;++site) {
+                const auto& previous=source.noise.sites[site];
+                auto& profile=sourceProfiles[site];
+                profile.quantizationVariance=previous.quantizationVariance;
+                profile.offsetVariance=std::max(profile.offsetVariance,profile.quantizationVariance);
+                profile.residualModelTau0=previous.residualModelTau0;
+                profile.residualModelTau1=previous.residualModelTau1;
+            }
+            source.noise.sites=sourceProfiles;source.noise.quality=Mfd::NoiseModelQuality::EstimatedBurst;
             source.noise.diagnostics.quality=source.noise.quality;
-            source.noise.diagnostics.source="temporal-burst-haar-v1";
+            source.noise.diagnostics.source="temporal-burst-haar-v2-image-domain";
             source.noise.diagnostics.sourceRecordId="bracketing-temporal-pairs";
             source.noise.diagnostics.correlatedNoiseUnmodeled=true;
             source.noise.diagnostics.warnings.clear();
             source.noise.diagnostics.warnings.push_back("Temporal noise calibration does not measure correlated or fixed-pattern noise. Narrow signal ranges retain the prior shot/read ratio.");
-            nlohmann::json identity={{"frame",source.frame.cacheKey},{"method","temporal-burst-haar-v1"}};
+            nlohmann::json identity={{"frame",source.frame.cacheKey},{"method","temporal-burst-haar-v2-image-domain"}};
             for(unsigned site=0;site<4;++site) {
                 auto& diagnostic=source.noise.diagnostics.sites[site];
                 diagnostic.acceptedBlockCount=blocks[site].size();diagnostic.candidateBlockCount=blocks[site].size();diagnostic.valid=true;
@@ -138,8 +170,8 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
                 diagnostic.reason=fits[site].limitedRange
                     ?"temporal differences; limited signal range calibrates the prior shot/read ratio"
                     :"temporal differences; Poisson-Gaussian coefficients fitted across signal bins";
-                identity["profiles"].push_back({profiles[site].shotScale,profiles[site].offsetVariance,
-                    profiles[site].quantizationVariance});
+                identity["profiles"].push_back({sourceProfiles[site].shotScale,sourceProfiles[site].offsetVariance,
+                    sourceProfiles[site].quantizationVariance});
             }
             const auto serialized=identity.dump();
             source.noise.identitySha256=Stack::RawEvidence::ComputeSourceIdentity(

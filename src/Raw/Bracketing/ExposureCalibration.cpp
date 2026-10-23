@@ -53,32 +53,35 @@ bool PatchRatio(const PreparedSource& a,const PreparedSource& b,const ExposurePa
     }
     return ConsistentExposureRatio(ev,variance,usable,ratio,ratioVariance);
 }
-bool MatchingDenoiseScale(const PreparedSource& a,const PreparedSource& b,double& ev) {
-    const auto& ma=a.metadata;const auto& mb=b.metadata;
-    if(a.group!=b.group||!ma.hasExposureTime||!mb.hasExposureTime||!ma.hasIsoSpeed||!mb.hasIsoSpeed||
-       !(ma.exposureTimeSeconds>0)||!(mb.exposureTimeSeconds>0)||!(ma.isoSpeed>0)||!(mb.isoSpeed>0)) return false;
-    const double apertureA=ma.apertureFNumber>0?ma.apertureFNumber:1.0;
-    const double apertureB=mb.apertureFNumber>0?mb.apertureFNumber:1.0;
-    const double shutter=std::log2(ma.exposureTimeSeconds/mb.exposureTimeSeconds)-2*std::log2(apertureA/apertureB);
-    const double iso=std::log2(ma.isoSpeed/mb.isoSpeed);
-    ev=shutter+iso;return std::isfinite(ev)&&std::abs(shutter)<=.15+1e-6&&std::abs(iso)<=.05+1e-6;
-}
+
 }
 bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
-    std::vector<std::string>& diagnostics,std::string& error,bool allowFallback) {
+    std::vector<std::string>& diagnostics,std::string& error,bool allowFallback,bool deferUnconnected) {
     const auto n=data.sources.size();
     if(n==0||data.origin>=n) {error="Exposure calibration has no reference capture.";return false;}
     std::vector<bool> fixed(n,false);
-    std::vector<double> gains(n,0),variance;
+    std::vector<double> gains(n,0),variance,retainedVariance(n,0);
+    std::vector<bool> retained(n,false);
+    double retainedAnchorVariance=0;
     fixed[data.origin]=true;
     for(std::size_t i=0;i<n;++i) {
-        gains[i]=std::log2(data.sources[i].scale);
+        gains[i]=std::isfinite(data.sources[i].scale)&&data.sources[i].scale>0
+            ?std::log2(data.sources[i].scale):0;
+        if(!data.sources[i].enabled&&i!=data.origin) {fixed[i]=true;continue;}
         if(i==data.origin) {gains[i]=0;continue;}
+        if(allowFallback&&!deferUnconnected&&data.sources[i].exposureCalibrated) {
+            // Resolving another provisional capture must not discard a
+            // previously measured exposure when local overlap becomes sparse.
+            retained[i]=fixed[i]=true;
+            const double scale=data.sources[i].scale;
+            retainedVariance[i]=data.sources[i].scaleVariance/std::pow(std::log(2.)*scale,2);
+            retainedAnchorVariance=std::max(retainedAnchorVariance,retainedVariance[i]);
+        }
         for(const auto& group:request.recipe.groups) for(const auto& frame:group.frames)
             if(frame.id==data.sources[i].id&&frame.manualExposure) {fixed[i]=true;gains[i]=-frame.relativeEv;}
     }
     std::vector<ExposureEdge> edges;
-    std::vector<ExposureEdge> imageFallbacks,metadataFallbacks;
+    std::vector<ExposureEdge> imageFallbacks;
     std::vector<std::string> overlapEvidence;
     // Spatial bins prevent a dense textured object from dominating all of the
     // exposure evidence. Cost is bounded per pair even for very large sensors.
@@ -87,6 +90,8 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
     for(const auto& source:data.sources)signalFloors.push_back(QuantizedSignalFloor(source));
     for(std::size_t a=0;a<n;++a) for(std::size_t b=a+1;b<n;++b) {
         if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
+        if((!data.sources[a].enabled&&a!=data.origin)||
+           (!data.sources[b].enabled&&b!=data.origin))continue;
         std::array<std::vector<double>,64> tiles,tileVariance;
         const auto& samplesA=evidence.Get(a);const auto& samplesB=evidence.Get(b);
         for(std::size_t p=0;p<evidence.points.size();++p) {
@@ -105,7 +110,6 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             // spatial bins reduce this uncertainty, not every proxy tap.
             measurementVariance+=MedianNoiseValue(std::move(tileVariance[bin]));
         }
-        bool measured=false;
         if(tileRatios.size()>=2) {
             std::sort(tileRatios.begin(),tileRatios.end());
             const double median=MedianNoiseValue(tileRatios);
@@ -113,7 +117,7 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             const double sigma=std::max({.0001,1.58*spread/std::sqrt(static_cast<double>(tileRatios.size())),
                 std::sqrt(measurementVariance)/tileRatios.size()});
             if(tileRatios.size()>=4&&spread<.5&&sigma<.04) {
-                edges.push_back({a,b,median,sigma*sigma});measured=true;
+                edges.push_back({a,b,median,sigma*sigma});
             } else if(allowFallback&&spread<.5&&sigma<.25) {
                 // Keep colour/noise/clipping checks, but distinguish a usable
                 // coarse estimate from a high-precision calibration.
@@ -123,17 +127,37 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
                 std::to_string(tileRatios.size())+", EV="+std::to_string(median)+", spread="+
                 std::to_string(spread)+", sigma="+std::to_string(sigma));
         }
-        double metadataEv=0;
-        if(!measured&&MatchingDenoiseScale(data.sources[a],data.sources[b],metadataEv))
-            edges.push_back({a,b,metadataEv,.03*.03});
-        if(allowFallback&&MetadataExposureRatio(data.sources[a],data.sources[b],metadataEv))
-            metadataFallbacks.push_back({a,b,metadataEv,1.0});
+
     }
+    std::vector<bool> unresolved(n,false);
     if(allowFallback) {
         ConnectExposureFallbacks(edges,std::move(imageFallbacks),fixed,data,
             "Limited image-overlap estimate",diagnostics);
-        ConnectExposureFallbacks(edges,std::move(metadataFallbacks),fixed,data,
-            "Camera-settings exposure fallback (not image calibrated)",diagnostics);
+        // No camera-settings constraints: labels cannot establish RAW gain.
+        // Keep every component connected to the reference or a user EV anchor.
+        // An unobservable capture must not corrupt those measurements or abort
+        // a useful reconstruction. Exclusion is processing state, not a saved
+        // recipe edit, so changing inputs/EV reruns the decision.
+        const auto connected=ConnectedExposureNodes(edges,fixed);
+        for(std::size_t i=0;i<n;++i) if(!connected[i]) {
+            unresolved[i]=true;fixed[i]=true;
+            if(deferUnconnected) {
+                diagnostics.push_back(data.sources[i].id+
+                    ": relative exposure is not yet observable; retaining an uncertain image-only search seed for local alignment.");
+                continue;
+            }
+            data.sources[i].enabled=false;gains[i]=0;
+            diagnostics.push_back(data.sources[i].id+
+                ": excluded from fusion because image overlap could not establish relative exposure. "
+                "Other calibrated captures remain usable; enter a manual relative EV to include this capture.");
+        }
+        edges.erase(std::remove_if(edges.begin(),edges.end(),[&](const auto& edge) {
+            return !connected[edge.a]||!connected[edge.b];
+        }),edges.end());
+        if(std::none_of(data.sources.begin(),data.sources.end(),[](const auto& source){return source.enabled;})) {
+            error="No enabled capture has a measurable relative exposure. Enable the reference or provide a manual relative EV.";
+            return false;
+        }
     }
     if(!SolveExposureGraph(edges,fixed,gains,variance)) {
         diagnostics.insert(diagnostics.end(),overlapEvidence.begin(),overlapEvidence.end());
@@ -149,16 +173,24 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             if(!missing.empty()) missing+=", ";missing+=name.empty()?data.sources[i].id:name;
         }
         error="Exposure calibration could not connect "+(missing.empty()?std::string("every capture"):missing)+
-            " to the reference capture using image overlap or available exposure settings. Enter relative EV for those inputs in the capture controls.";
+            " to the reference capture using image overlap. Enter relative EV for those inputs in the capture controls.";
         return false;
     }
     for(std::size_t i=0;i<n;++i) {
         auto& source=data.sources[i];source.scale=std::exp2(gains[i]);
+        // Search seeds carry deliberately broad uncertainty and can never be
+        // published as calibrated HDR. The post-local solve resolves/excludes
+        // them before any fusion runs.
+        if(retained[i])variance[i]=retainedVariance[i];
+        else if(!fixed[i])variance[i]+=retainedAnchorVariance;
+        if(unresolved[i])variance[i]=4.;
+        source.exposureCalibrated=!unresolved[i]&&(source.enabled||i==data.origin);
         source.scaleVariance=std::pow(std::log(2.)*source.scale,2)*variance[i];
     }
     for(std::size_t i=0;i<n;++i) {
         const auto& source=data.sources[i];
         ReportPresentation(request,ProcessingStage::Exposure,i+1,n,source.id,"Relative exposure "+std::to_string(-gains[i])+" EV");
+        if(!source.exposureCalibrated)continue;
         ObserveExposure(request,data,source);
         diagnostics.push_back(source.id+": joint exposure "+std::to_string(-gains[i])+" EV, estimated uncertainty "+
             std::to_string(std::sqrt(variance[i]))+" EV.");

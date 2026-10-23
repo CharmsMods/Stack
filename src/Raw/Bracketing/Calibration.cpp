@@ -164,16 +164,16 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         ProcessingTimer timer(data.stageSeconds,"global_alignment");
         if(!Align(request,data,diagnostics,error)) return false;
     }
+    {
+        ProcessingTimer timer(data.stageSeconds,"exposure_calibration");
+        ReportPresentation(request,ProcessingStage::Exposure);
+        if(!Calibrate(request,data,diagnostics,error,true,true)) return false;
+    }
     ReportPresentation(request,ProcessingStage::Noise);
     if(request.reportProgress) request.reportProgress(.09,"Measuring burst noise");
     {
         ProcessingTimer timer(data.stageSeconds,"noise_calibration");
         if(!RefineBurstNoise(request,data,diagnostics,error)) return false;
-    }
-    {
-        ProcessingTimer timer(data.stageSeconds,"exposure_calibration");
-        ReportPresentation(request,ProcessingStage::Exposure);
-        if(!Calibrate(request,data,diagnostics,error)) return false;
     }
     const bool refineHdr=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&request.recipe.groups.size()>1;
     auto localRequest=request;
@@ -182,14 +182,18 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         request.reportProgress(.10+.36*std::clamp((progress-.10)/.42,0.,1.),stage);
     };
     if(!AlignLocal(localRequest,data,diagnostics,error)) return false;
-    if(refineHdr) {
+    const bool unresolvedExposure=std::any_of(data.sources.begin(),data.sources.end(),
+        [&](const auto& source){return source.enabled&&!source.exposureCalibrated;});
+    if(refineHdr||unresolvedExposure) {
         const auto beforeCount=diagnostics.size();std::vector<double> previousScales,previousVariance;
         for(const auto& source:data.sources) {previousScales.push_back(source.scale);previousVariance.push_back(source.scaleVariance);}
         // Revisit the joint solve once correspondence is known. This step is
         // bounded and retains the earlier solve if local overlap is inadequate.
         // A local retry must not replace an image estimate with a new fallback.
         ReportPresentation(request,ProcessingStage::Exposure);
-        if(!Calibrate(request,data,diagnostics,error,false)) {
+        if(!Calibrate(request,data,diagnostics,error,unresolvedExposure)) {
+            // Never retain an uncalibrated search seed as a fusion scale.
+            if(unresolvedExposure)return false;
             if(request.shouldCancel&&request.shouldCancel()) return false;
             diagnostics.resize(beforeCount);error.clear();
             diagnostics.push_back("Local overlap could not connect every exposure; retained the initial exposure estimates and their uncertainty.");
