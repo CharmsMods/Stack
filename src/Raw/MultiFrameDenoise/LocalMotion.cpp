@@ -654,6 +654,7 @@ struct PatchReferenceGeometry {
     };
     std::array<Site, 4> sites;
     std::vector<Sample> samples;
+    std::size_t validSampleCount = 0u;
     const LocalMotionDirectionRequest* request = nullptr;
     RawCoordinate centerRaw;
     std::uint32_t level = 0u;
@@ -662,6 +663,7 @@ struct PatchReferenceGeometry {
     bool Prepare(const LocalMotionDirectionRequest& input, RawCoordinate center,
         std::uint32_t levelIndex, std::uint32_t patchLevelPixels) {
         request = nullptr;
+        validSampleCount = 0u;
         samples.clear();
         constexpr std::size_t maximumBytes = 128u * 1024u;
         const std::uint64_t area = std::uint64_t(patchLevelPixels) * patchLevelPixels;
@@ -706,6 +708,7 @@ struct PatchReferenceGeometry {
                     sample.mappedSourceRaw = input.globalWarp.Map(input.reference->layout.PlaneToRaw(plane));
                     sample.signal = reference.signal[index];
                     sample.variance = reference.variance[index];
+                    ++validSampleCount;
                 }
             }
         }
@@ -766,6 +769,10 @@ bool EvaluatePatch(
     if (geometry && !geometry->Matches(request, centerRaw, levelIndex, patchLevelPixels)) geometry = nullptr;
     statistics.nominalCount = static_cast<std::uint64_t>(patchLevelPixels) *
         patchLevelPixels * kSites.size();
+    // Matching geometry has already validated both levels and every reference
+    // tap. No candidate displacement can recover an entirely invalid patch.
+    // Keep the same empty statistics as the normal zero-valid-sample exit.
+    if (geometry && geometry->validSampleCount == 0u) return true;
     statistics.residuals.reserve(
         calculateNormal ? static_cast<std::size_t>(statistics.nominalCount) : 0u);
     double robustCostSum = 0.0;

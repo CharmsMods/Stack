@@ -243,9 +243,17 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
             diagnostics.push_back("Local overlap could not connect every exposure; retained the initial exposure estimates and their uncertainty.");
         } else {
             bool changed=false;
-            for(std::size_t i=0;i<data.sources.size();++i)
-                changed|=std::abs(std::log2(data.sources[i].scale/previousScales[i]))>1e-6||
-                    std::abs(data.sources[i].scaleVariance-previousVariance[i])>1e-12;
+            for(std::size_t i=0;i<data.sources.size();++i) {
+                const auto& source=data.sources[i];
+                // Fusion consumes dimensionless relative gain variance. An
+                // absolute gain-variance tolerance hides meaningful changes
+                // for captures scaled far below the reference exposure.
+                const double relativeVariance=source.scaleVariance/(source.scale*source.scale);
+                const double previousRelativeVariance=previousVariance[i]/(previousScales[i]*previousScales[i]);
+                changed|=std::abs(std::log2(source.scale/previousScales[i]))>1e-6||
+                    !std::isfinite(relativeVariance)||!std::isfinite(previousRelativeVariance)||
+                    std::abs(relativeVariance-previousRelativeVariance)>1e-12;
+            }
             if(changed) {
                 diagnostics.push_back("Updated HDR exposure scales from local correspondence; refreshing confidence without repeating motion search.");
                 if(request.reportProgress) localRequest.reportProgress=[&](double progress,const std::string& stage) {

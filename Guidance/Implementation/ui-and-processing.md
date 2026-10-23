@@ -87,6 +87,11 @@ accepted global registration or genuine structured local-search support; a compo
 field needs that evidence for both the anchor and relative link. Refresh preserves
 this provenance. Flat pixels remain useful with independently established geometry;
 explicit fixed coordinates and manual EV anchors retain their separate meanings.
+Exposure-refresh comparisons use relative gain variance, matching the fusion
+domain rather than an absolute gain-dependent tolerance. Current uncertainty
+propagation retains marginal variances; correlations from shared exposure-graph
+paths and repeated overlapping pyramid filtering are not fully represented.
+Do not present these estimates as a complete covariance-calibrated confidence.
 
 Optional background: [Ward's exposure-resistant registration](https://www.anyhere.com/gward/papers/jgtpap2.pdf)
 informs the separation of search evidence from radiometric samples; [Hanji and
