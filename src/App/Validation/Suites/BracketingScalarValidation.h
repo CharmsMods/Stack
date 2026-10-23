@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Raw/Bracketing/AlignmentExposureCohorts.h"
+#include "Raw/Bracketing/AlignmentExposureSeed.h"
+#include "Raw/RawCaptureCompatibility.h"
 #include "Raw/Bracketing/ExposureGraph.h"
 #include "Raw/Tone/BurstStartingLook.h"
 
@@ -150,6 +152,69 @@ inline void ValidateExposureCohorts() {
     }
 }
 
+inline void ValidateImageFirstAdmission() {
+    using namespace Stack::Project;
+    RawCaptureCompatibilitySummary reference;
+    reference.supported = true;
+    reference.cfaPattern = "RGGB";
+    reference.visibleWidth = reference.visibleHeight = 128;
+    reference.rawWidth = 132;
+    reference.rawHeight = 130;
+    reference.leftMargin = reference.topMargin = 2;
+    reference.orientation = 1;
+    reference.bitDepth = 12;
+    reference.cameraMake = "Known";
+    reference.cameraModel = "A";
+    reference.lensModel = "First";
+    reference.focalLengthMm = 30;
+
+    auto alternate = reference;
+    alternate.cameraMake.clear();
+    alternate.cameraModel.clear();
+    alternate.lensModel = "Second";
+    alternate.focalLengthMm = 120;
+    alternate.rawWidth = alternate.rawHeight = 128;
+    alternate.leftMargin = alternate.topMargin = 0;
+    alternate.bitDepth = 16;
+    alternate.exposureTimeSeconds = std::numeric_limits<double>::quiet_NaN();
+    alternate.isoSpeed = std::numeric_limits<double>::infinity();
+    alternate.apertureFNumber = -1;
+    std::vector<std::string> warnings;
+    Require(AreHdrCapturesStructurallyCompatible(reference, alternate, nullptr, &warnings),
+        "Advisory metadata differences rejected compatible HDR inputs");
+    Require(!warnings.empty(), "Differing camera labels produced no compatibility warning");
+    Require(!AreMfdCapturesStructurallyCompatible(reference, alternate),
+        "HDR admission changes relaxed the separate MFD contract");
+    for (unsigned condition = 0; condition < 5; ++condition) {
+        auto incompatible = alternate;
+        if (condition == 0) incompatible.supported = false;
+        if (condition == 1) incompatible.cfaPattern = "BGGR";
+        if (condition == 2) incompatible.visibleWidth = 126;
+        if (condition == 3) incompatible.orientation = 6;
+        if (condition == 4) incompatible.inputDomain = MfdInputDomain::LinearRgbUnsupported;
+        Require(!AreHdrCapturesStructurallyCompatible(reference, incompatible),
+            "Decoding-critical HDR mismatch was accepted");
+    }
+
+    using namespace Raw::Bracketing;
+    AlignmentExposureDistribution a, b;
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        for (unsigned sample = 0; sample < 100; ++sample) {
+            a.channels[channel].push_back(sample * .004);
+            b.channels[channel].push_back(sample * .002);
+        }
+    }
+    Require(Near(EstimateAlignmentExposureSeed(a, b), 2), "Image-rank exposure seed changed");
+    for (double unavailable : {0., 1.}) {
+        for (auto& channel : b.channels) std::fill(channel.begin(), channel.end(), unavailable);
+        Require(EstimateAlignmentExposureSeed(a, b) == 1,
+            "Black or clipped samples invented an exposure search seed");
+    }
+    a.channels = {};
+    Require(EstimateAlignmentExposureSeed(a, b) == 1,
+        "Empty image evidence invented an exposure search seed");
+}
+
 inline void ValidateStartingLook() {
     using Stack::RawRecipe::PlanBurstStartingLook;
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -186,6 +251,7 @@ inline void ValidateStartingLook() {
 inline void ValidateBracketingScalars() {
     BracketingScalarValidation::ValidateExposureGraph();
     BracketingScalarValidation::ValidateExposureCohorts();
+    BracketingScalarValidation::ValidateImageFirstAdmission();
     BracketingScalarValidation::ValidateStartingLook();
 }
 

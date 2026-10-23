@@ -4,9 +4,67 @@
 #include "Raw/Bracketing/ExposureGraph.h"
 #include <random>
 #include <stdexcept>
+#include <limits>
 
 namespace Stack::Validation {
+inline void ValidateBracketingNoiseResolutionFailures() {
+    using namespace Raw::Mfd;
+    PreparedRawFrame frame;
+    frame.cacheKey=frame.sourceContentSha256=std::string(64,'b');
+    frame.sensorActiveArea={0,0,64,64};frame.activeExtent={64,64};
+    frame.activeCfaPattern=Raw::CfaPattern::RGGB;
+    frame.tileRawPixels=64;frame.tileColumns=frame.tileRows=1;
+    frame.calibration.maximumBlackByCfaSite.fill(64);
+    frame.calibration.whiteLevelByCfaSite.fill(4159);
+    frame.calibration.usableSpanByCfaSite.fill(4095);
+    PreparedRawTile tile;tile.extent=frame.activeExtent;
+    tile.normalizedMosaic.assign(4096,.02f);
+    tile.comparisonGain.assign(4096,1.f);tile.sampleFlags.assign(4096,0);
+    MemoryNormalizedTileCache cache;std::string error;
+    if(!cache.Write(frame.cacheKey,tile,&error))throw std::runtime_error(error);
+    NoiseResolutionOptions options;options.enableGenericLowConfidence=true;
+    for(auto& site:options.genericLowConfidenceSites) {
+        site.shotScale=1e-4;site.offsetVariance=1e-7;
+    }
+    struct Canceled {};
+    // Entry, tile, and both block rows must honor cancellation. A rejected
+    // estimate may fall back, but an exception must unwind without doing so.
+    for(unsigned stop:{1u,2u,3u,4u}) {
+        unsigned calls=0;
+        options.burstEstimate.checkCancellation=[&] {if(++calls==stop)throw Canceled{};};
+        NoiseModel model;model.identitySha256="unchanged";bool canceled=false;
+        try {EstimateNoiseModelFromPreparedFrame(frame,cache,options.burstEstimate,model,&error);}
+        catch(const Canceled&) {canceled=true;}
+        if(!canceled||calls!=stop||model.identitySha256!="unchanged")
+            throw std::runtime_error("Canceled noise estimation published a partial result or missed a cancellation boundary");
+        calls=0;canceled=false;
+        try {(void)ResolveNoiseModel({},frame,&cache,options);}
+        catch(const Canceled&) {canceled=true;}
+        if(!canceled||calls!=stop)
+            throw std::runtime_error("Noise resolution swallowed cancellation and selected a fallback");
+    }
+    options.burstEstimate.checkCancellation={};
+    Raw::RawMetadata metadata;
+    metadata.isoSpeed=std::numeric_limits<float>::infinity();
+    metadata.exposureTimeSeconds=metadata.apertureFNumber=std::numeric_limits<float>::quiet_NaN();
+    metadata.hasDngNoiseProfile=true;
+    metadata.dngNoiseProfile={{std::numeric_limits<double>::quiet_NaN(),1e-7}};
+    const auto fallback=ResolveNoiseModel(metadata,frame,&cache,options);
+    if(!fallback.resolved||fallback.model.quality!=NoiseModelQuality::GenericLowConfidence||
+       !ValidateNoiseModel(fallback.model))
+        throw std::runtime_error("Malformed noise metadata prevented a valid generic fallback");
+    metadata.dngNoiseProfile={{1e-4,1e-7}};
+    options.burstEstimate.checkCancellation=[] {throw Canceled{};};
+    // Valid embedded calibration must not run the image-estimation fallback.
+    NoiseResolutionResult trusted;
+    try {trusted=ResolveNoiseModel(metadata,frame,&cache,options);}
+    catch(const Canceled&) {throw std::runtime_error("Valid DNG calibration unnecessarily invoked image estimation");}
+    if(!trusted.resolved||trusted.model.quality!=NoiseModelQuality::TrustedMetadata)
+        throw std::runtime_error("Valid DNG noise calibration lost precedence");
+}
+
 inline void ValidateBracketingNoiseEvidence() {
+    ValidateBracketingNoiseResolutionFailures();
     using namespace Raw::Bracketing;
     std::mt19937 random(4157);std::normal_distribution<double> normal;
     std::vector<BurstNoiseBlock> blocks;

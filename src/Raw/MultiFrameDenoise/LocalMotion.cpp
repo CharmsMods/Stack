@@ -559,21 +559,9 @@ bool BuildCfaPlanePyramidImpl(
             next.variance.assign(nextCount, 0.0);
             next.validMask.assign(nextCount, 0u);
             for (std::uint64_t y = 0u; y < next.extent.height; ++y) {
-                const std::int64_t centerY = static_cast<std::int64_t>(2u * y);
-                std::array<std::size_t, 5> sourceRows;
-                for (std::int64_t kernelY = -2; kernelY <= 2; ++kernelY) {
-                    const auto sampleY = ReflectIndex(centerY + kernelY,
-                        static_cast<std::int64_t>(previous.extent.height));
-                    sourceRows[static_cast<std::size_t>(kernelY + 2)] =
-                        PixelIndex(previous.extent, 0u, static_cast<std::uint64_t>(sampleY));
-                }
                 for (std::uint64_t x = 0u; x < next.extent.width; ++x) {
                     const std::int64_t centerX = static_cast<std::int64_t>(2u * x);
-                    std::array<std::size_t, 5> sourceColumns;
-                    for (std::int64_t kernelX = -2; kernelX <= 2; ++kernelX)
-                        sourceColumns[static_cast<std::size_t>(kernelX + 2)] =
-                            static_cast<std::size_t>(ReflectIndex(centerX + kernelX,
-                                static_cast<std::int64_t>(previous.extent.width)));
+                    const std::int64_t centerY = static_cast<std::int64_t>(2u * y);
                     double signal = 0.0;
                     double variance = 0.0;
                     bool valid = centerX >= 2 && centerY >= 2 &&
@@ -582,14 +570,19 @@ bool BuildCfaPlanePyramidImpl(
                     for (std::int64_t kernelY = -2; kernelY <= 2; ++kernelY) {
                         const double weightY = parameters.pyramidKernel[
                             static_cast<std::size_t>(kernelY + 2)];
+                        const std::int64_t sampleY = ReflectIndex(
+                            centerY + kernelY,
+                            static_cast<std::int64_t>(previous.extent.height));
                         for (std::int64_t kernelX = -2; kernelX <= 2; ++kernelX) {
                             const double weightX = parameters.pyramidKernel[
                                 static_cast<std::size_t>(kernelX + 2)];
-                            // Hoist only integer address work. Keep every
-                            // coefficient, sum and mask in the original order.
-                            const std::size_t sourceIndex =
-                                sourceRows[static_cast<std::size_t>(kernelY + 2)] +
-                                sourceColumns[static_cast<std::size_t>(kernelX + 2)];
+                            const std::int64_t sampleX = ReflectIndex(
+                                centerX + kernelX,
+                                static_cast<std::int64_t>(previous.extent.width));
+                            const std::size_t sourceIndex = PixelIndex(
+                                previous.extent,
+                                static_cast<std::uint64_t>(sampleX),
+                                static_cast<std::uint64_t>(sampleY));
                             const double coefficient = weightX * weightY;
                             signal += coefficient * previous.signal[sourceIndex];
                             variance += coefficient * coefficient *
