@@ -166,7 +166,14 @@ public:
             if(!tile.Run([&](std::string& e){if(g==0)tile.Upload(0,referenceTaps.size()*sizeof(Tap),referenceTaps.data());
                 tile.Upload(5,sizeof(Parameters),&referenceParameters);
                 tile.Dispatch(0,left,top,width,height,data,left-4,top-4,width+8,height+8,reference,false,false,
-                    request.recipe.alignmentMode==AlignmentMode::AutomaticLocal,g==0);return tile.Status(e);},gpuError))break;
+                    request.recipe.alignmentMode==AlignmentMode::AutomaticLocal,g==0);
+                // Later groups only clear sums; Prepare cannot sample or set
+                // failed when initializeGuide is false. Avoid a blocking flag
+                // readback here. The final Status still checks every Sample.
+                return g>0||tile.Status(e);},gpuError))break;
+            // The guide now resides in its SSBO and later groups reuse it.
+            // Release the CPU-only staging copy before loading source regions.
+            if(g==0)std::vector<Tap>().swap(referenceTaps);
             const bool bands=detailFusion&&std::any_of(data.sources.begin(),data.sources.end(),
                 [&](const auto& s){return s.enabled&&s.group==g&&s.detailPreference<.999;});
             for(const auto& source:data.sources){
