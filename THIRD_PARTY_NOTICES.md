@@ -79,3 +79,27 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 - License: BSD-2-Clause
 - Copyright: Copyright (c) 2010-2011 Pascal Getreuer
 - Included license files: `ZhangWu-BSD-2-Clause.txt`
+
+## Roboto Medium font
+
+- Version: 2.001152; 2014
+- Upstream: https://github.com/googlefonts/roboto
+- License: Apache-2.0
+- Copyright: Copyright 2011 Google Inc. All Rights Reserved.
+- Included license files: `Roboto-Apache-2.0.txt`, `DesktopFonts-NOTICE.txt`
+
+## Press Start 2P font
+
+- Version: 3.000
+- Upstream: http://www.zone38.net/
+- License: OFL-1.1
+- Copyright: Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net), with Reserved Font Name "Press Start 2P"
+- Included license files: `SIL-OFL-1.1.txt`, `DesktopFonts-NOTICE.txt`
+
+## Silkscreen font
+
+- Version: 1.001
+- Upstream: https://github.com/googlefonts/silkscreen
+- License: OFL-1.1
+- Copyright: Copyright 2001 The Silkscreen Project Authors (https://github.com/googlefonts/silkscreen)
+- Included license files: `SIL-OFL-1.1.txt`, `DesktopFonts-NOTICE.txt`

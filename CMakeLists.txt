@@ -436,6 +436,9 @@ add_custom_target(StackRuntimePayload
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/stb-MIT-or-Public-Domain.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/stb-MIT-or-Public-Domain.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Roboto-Apache-2.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/SIL-OFL-1.1.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/DesktopFonts-NOTICE.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/DCB-BSD-3-Clause.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/ZhangWu-BSD-2-Clause.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-CDDL-1.0.txt"

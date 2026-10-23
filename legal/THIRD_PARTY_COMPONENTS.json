@@ -10,7 +10,10 @@
       "copyright": "Copyright Monash University and libavoid contributors",
       "scope": "desktop",
       "presence": "always",
-      "licenseFiles": ["LibavoidSource/libavoid/LICENSE.LGPL", "LibavoidSource/CMakeLists.txt"]
+      "licenseFiles": [
+        "LibavoidSource/libavoid/LICENSE.LGPL",
+        "LibavoidSource/CMakeLists.txt"
+      ]
     },
     {
       "id": "dear-imgui",
@@ -174,6 +177,48 @@
       "presence": "always",
       "licenseFiles": [
         "ZhangWu-BSD-2-Clause.txt"
+      ]
+    },
+    {
+      "id": "roboto-font",
+      "name": "Roboto Medium font",
+      "version": "2.001152; 2014",
+      "homepage": "https://github.com/googlefonts/roboto",
+      "license": "Apache-2.0",
+      "copyright": "Copyright 2011 Google Inc. All Rights Reserved.",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "Roboto-Apache-2.0.txt",
+        "DesktopFonts-NOTICE.txt"
+      ]
+    },
+    {
+      "id": "press-start-2p-font",
+      "name": "Press Start 2P font",
+      "version": "3.000",
+      "homepage": "http://www.zone38.net/",
+      "license": "OFL-1.1",
+      "copyright": "Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net), with Reserved Font Name \"Press Start 2P\"",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "SIL-OFL-1.1.txt",
+        "DesktopFonts-NOTICE.txt"
+      ]
+    },
+    {
+      "id": "silkscreen-font",
+      "name": "Silkscreen font",
+      "version": "1.001",
+      "homepage": "https://github.com/googlefonts/silkscreen",
+      "license": "OFL-1.1",
+      "copyright": "Copyright 2001 The Silkscreen Project Authors (https://github.com/googlefonts/silkscreen)",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "SIL-OFL-1.1.txt",
+        "DesktopFonts-NOTICE.txt"
       ]
     }
   ]

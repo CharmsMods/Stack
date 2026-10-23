@@ -1,0 +1,36 @@
+Stack desktop fonts
+
+These notices describe the actual source font files in Assets/Fonts.
+Version, copyright and license identifiers below are transcribed from each
+font's embedded name table. Font names do not imply sponsorship or endorsement.
+Stack's source license does not replace the licenses for these fonts.
+
+Roboto-Medium.ttf
+Version 2.001152; 2014
+Copyright 2011 Google Inc. All Rights Reserved.
+Roboto is a trademark of Google.
+Licensed under the Apache License, Version 2.0.
+See Roboto-Apache-2.0.txt.
+Source Git blob: 39c63d7461796094c0b8889ee8fe2706d344a99a
+
+PressStart2P-Regular.ttf
+Version 3.000
+Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net),
+with Reserved Font Name "Press Start 2P".
+Licensed under the SIL Open Font License, Version 1.1.
+See SIL-OFL-1.1.txt. Preserve the Reserved Font Name restriction when
+distributing modified font software.
+Source Git blob: 39adf42efa597906e53be689474ac82214112124
+
+Silkscreen-Regular.ttf
+Version 1.001; ttfautohint (v1.8.4.7-5d5b)
+Copyright 2001 The Silkscreen Project Authors
+(https://github.com/googlefonts/silkscreen)
+Licensed under the SIL Open Font License, Version 1.1.
+See SIL-OFL-1.1.txt.
+Source Git blob: 8caff819d666217fe8240ede768ef86d086b453b
+
+Roboto is embedded by tools/assets/bake_fonts.py. Press Start 2P and
+Silkscreen are loaded from src/App/Resources/Embedded8BitFont.h.
+Keep these notices and the applicable license texts with binary packages
+containing these fonts. These terms govern the fonts, not users' images.

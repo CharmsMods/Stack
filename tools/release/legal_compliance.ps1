@@ -151,6 +151,9 @@ function Get-SpdxLicenseExpression {
         "stb" { return "MIT OR Unlicense" }
         "libraw" { return "LGPL-2.1-only" }
         "libavoid" { return "LGPL-2.1-or-later" }
+        "roboto-font" { return "Apache-2.0" }
+        "press-start-2p-font" { return "OFL-1.1" }
+        "silkscreen-font" { return "OFL-1.1" }
         default { return "NOASSERTION" }
     }
 }

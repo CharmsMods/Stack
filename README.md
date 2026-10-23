@@ -1,6 +1,6 @@
 # Stack
 
-Stack is a native desktop image compositing application for Windows, written in C++ with OpenGL and Dear ImGui. A node-based processing backend supports both graph editing and tailored visual editing views.
+Stack is a native desktop image compositing application for Windows, written in C++ with OpenGL and Dear ImGui. A node-based processing backend supports both graph editing and visual editing views with controls designed for each tool.
 
 The project is under active development. Features, interfaces and output behavior can change; source availability alone does not establish release readiness or performance.
 
