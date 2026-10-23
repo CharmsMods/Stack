@@ -8,6 +8,7 @@
 #include "BracketingNoiseValidation.h"
 #include "BracketingLocalDetailValidation.h"
 #include "BracketingExposureValidation.h"
+#include "BracketingScalarValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSharpnessValidation.h"
 #include "Raw/RawProcessingMath.h"
@@ -119,6 +120,7 @@ bool ValidateBracketing() {
     using namespace Raw::Bracketing;
     const auto directory=std::filesystem::temp_directory_path()/("stack-bracketing-validation-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
+        ValidateBracketingScalars();
         ValidateBracketingHdrColor();
         ValidateBracketingBorders();
         ValidateBracketingBurstAlignment();
