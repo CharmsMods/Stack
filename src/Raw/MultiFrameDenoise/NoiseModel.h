@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -234,6 +235,10 @@ struct BurstNoiseEstimationOptions {
     double maximumGreenRelativeDisagreement = 0.50;
     double gradientAbsoluteLimit = 0.02;
     double gradientNoiseSigmaMultiplier = 4.0;
+    // Called synchronously during estimation. May throw to abort the operation;
+    // exceptions propagate through noise resolution without selecting a fallback.
+    // Empty preserves the existing non-cancelable estimation behavior.
+    std::function<void()> checkCancellation;
 };
 
 struct NoiseResolutionOptions {

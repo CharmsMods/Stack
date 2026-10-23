@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace Raw::Bracketing {
@@ -86,6 +87,12 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         PreparedSource s;s.id=f.id;s.group=g;s.enabled=enabled;s.metadata=raw.metadata;s.frame=std::move(prepared.frame);
         Mfd::NoiseResolutionOptions noiseOptions;
         noiseOptions.enableGenericLowConfidence=true;
+        // The estimate is synchronous. Abort through the processor's existing
+        // exception path instead of turning cancellation into generic fallback.
+        noiseOptions.burstEstimate.checkCancellation=[&request] {
+            if(request.shouldCancel&&request.shouldCancel())
+                throw std::runtime_error("Canceled");
+        };
         // This final fallback remains an uncalibrated prior, not measured
         // sensor precision. Preserve existing finite-tag behavior, but never
         // let NaN/Inf/invalid advisory ISO make a decoded capture unusable.

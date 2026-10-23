@@ -887,6 +887,7 @@ bool EstimateNoiseModelFromPreparedFrame(
     const BurstNoiseEstimationOptions& options,
     NoiseModel& model,
     std::string* error) {
+    if (options.checkCancellation) options.checkCancellation();
     if (!ValidBurstOptions(options)) {
         return SetError(error, "MFD burst noise-estimation options are invalid.");
     }
@@ -901,6 +902,7 @@ bool EstimateNoiseModelFromPreparedFrame(
     const std::uint64_t blockSize = options.blockRawPixels;
     for (std::uint32_t tileY = 0; tileY < preparedFrame.tileRows; ++tileY) {
         for (std::uint32_t tileX = 0; tileX < preparedFrame.tileColumns; ++tileX) {
+            if (options.checkCancellation) options.checkCancellation();
             PreparedRawTile tile;
             std::string tileError;
             if (ReadPreparedTile(
@@ -915,6 +917,7 @@ bool EstimateNoiseModelFromPreparedFrame(
             const std::uint64_t completeBlocksX = tile.extent.width / blockSize;
             const std::uint64_t completeBlocksY = tile.extent.height / blockSize;
             for (std::uint64_t blockY = 0; blockY < completeBlocksY; ++blockY) {
+                if (options.checkCancellation) options.checkCancellation();
                 for (std::uint64_t blockX = 0; blockX < completeBlocksX; ++blockX) {
                     const std::uint64_t originX = blockX * blockSize;
                     const std::uint64_t originY = blockY * blockSize;
