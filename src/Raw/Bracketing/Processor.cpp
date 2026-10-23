@@ -401,7 +401,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.status=BracketingResult::Status::Completed;
         analysis->stageSeconds["hdr_output_and_preview"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-mergeStart).count();
         const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});
-        result.message=enabled==1?"Single capture passthrough. No multi-frame noise reduction.":"Bracket ready.";
+        result.message=enabled==1?"Single capture contribution. No multi-frame noise reduction or additional recovered dynamic range.":"Bracket ready.";
         auto reconstructionRequest=request;
         reconstructionRequest.reportProgress=submittedRequest.reportProgress;
         if(!ReconstructSuperResolution(reconstructionRequest,result,error)) return fail(error);

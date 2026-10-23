@@ -2150,7 +2150,9 @@ bool EstimateLocalMotionDirection(
             reportProgress();
         }
         if (node.state != MotionNodeState::FlatSafe) continue;
-        std::vector<RawCoordinate> structuredNeighbors;
+        // The 3x3 stencil visits at most eight neighbors, in dy/dx order.
+        std::array<RawCoordinate, 8> structuredNeighbors {};
+        std::size_t structuredNeighborCount = 0u;
         for (std::int32_t dy = -1; dy <= 1; ++dy) {
             for (std::int32_t dx = -1; dx <= 1; ++dx) {
                 if (dx == 0 && dy == 0) continue;
@@ -2166,20 +2168,20 @@ bool EstimateLocalMotionDirection(
                 const MotionNode& neighbor = result.nodes[static_cast<std::size_t>(
                     neighborY * static_cast<std::int32_t>(result.width) + neighborX)];
                 if (neighbor.state != MotionNodeState::Structured) continue;
-                structuredNeighbors.push_back(neighbor.residualRaw);
+                structuredNeighbors[structuredNeighborCount++] = neighbor.residualRaw;
             }
         }
         RawCoordinate prediction {};
-        if (!structuredNeighbors.empty()) {
-            for (RawCoordinate neighbor : structuredNeighbors) {
-                prediction = Add(prediction, neighbor);
+        if (structuredNeighborCount != 0u) {
+            for (std::size_t i = 0u; i < structuredNeighborCount; ++i) {
+                prediction = Add(prediction, structuredNeighbors[i]);
             }
             prediction = Scale(
-                prediction, 1.0 / static_cast<double>(structuredNeighbors.size()));
+                prediction, 1.0 / static_cast<double>(structuredNeighborCount));
         }
         bool neighborAccepted = true;
-        for (RawCoordinate neighbor : structuredNeighbors) {
-            if (std::sqrt(SquaredNorm(Subtract(neighbor, prediction))) >
+        for (std::size_t i = 0u; i < structuredNeighborCount; ++i) {
+            if (std::sqrt(SquaredNorm(Subtract(structuredNeighbors[i], prediction))) >
                 request.options.registration.
                     flatSafeNeighborDifferenceLimitRawPixels) {
                 neighborAccepted = false;
