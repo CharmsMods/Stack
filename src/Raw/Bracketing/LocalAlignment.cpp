@@ -191,6 +191,13 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     const auto workers=ResolveBracketingWorkerCount(
         request.memoryBudgetBytes,request.workerCount);
     auto& reference=data.sources[data.origin];
+    // A confidence refresh reuses every accepted motion field and samples
+    // only level zero. Do not rebuild unused coarse search levels. Keep the
+    // original registration parameters for motion/reliability evaluation.
+    const bool reliabilityOnly=std::all_of(data.sources.begin(),data.sources.end(),
+        [&](const PreparedSource& source){return !source.enabled||&source==&reference||source.localMotion;});
+    auto pyramidParameters=parameters;
+    if(reliabilityOnly)pyramidParameters.registration.pyramidLevels=1;
     auto originInspection=std::make_shared<AlignmentInspection>();
     originInspection->width=data.width/2;originInspection->height=data.height/2;
     originInspection->rawWidth=data.width;originInspection->rawHeight=data.height;
@@ -205,7 +212,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     if(request.reportProgress) request.reportProgress(.10,"Building reference alignment pyramid");
     {
         ProcessingTimer timer(data.stageSeconds,"local_pyramids");
-        if(!BuildPyramid(reference,data.directory,parameters,request.shouldCancel,referencePyramid,error)) return false;
+        if(!BuildPyramid(reference,data.directory,pyramidParameters,request.shouldCancel,referencePyramid,error)) return false;
     }
     const auto alternateCount=std::count_if(data.sources.begin(),data.sources.end(),
         [&](const PreparedSource& source){return source.enabled&&source.id!=reference.id;});
@@ -248,7 +255,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         Mfd::CfaPlanePyramid alternatePyramid;
         {
             ProcessingTimer timer(data.stageSeconds,"local_pyramids");
-            if(!BuildPyramid(source,data.directory,parameters,request.shouldCancel,alternatePyramid,error)) return false;
+            if(!BuildPyramid(source,data.directory,pyramidParameters,request.shouldCancel,alternatePyramid,error)) return false;
         }
         Mfd::BidirectionalLocalMotionRequest motionRequest;
         const auto anchorIndex=groupAnchors[source.group];
@@ -260,8 +267,9 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         if(groupPair&&!GroupRelativeWarp(data.sources[anchorIndex],source,pairWarp))groupPair=false;
         const auto pairReference=groupPair?anchorIndex:data.origin;
         if(pyramidReference!=pairReference) {
+            ProcessingTimer timer(data.stageSeconds,"local_pyramids");
             referencePyramid={};
-            if(!BuildPyramid(data.sources[pairReference],data.directory,parameters,request.shouldCancel,referencePyramid,error))return false;
+            if(!BuildPyramid(data.sources[pairReference],data.directory,pyramidParameters,request.shouldCancel,referencePyramid,error))return false;
             pyramidReference=pairReference;
         }
         motionRequest.reference=&referencePyramid;motionRequest.alternate=&alternatePyramid;
@@ -358,8 +366,9 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
                 "; composed with its verified mapping to the output reference.");
         }
         if(pyramidReference!=data.origin) {
+            ProcessingTimer timer(data.stageSeconds,"local_pyramids");
             referencePyramid={};
-            if(!BuildPyramid(reference,data.directory,parameters,request.shouldCancel,referencePyramid,error))return false;
+            if(!BuildPyramid(reference,data.directory,pyramidParameters,request.shouldCancel,referencePyramid,error))return false;
             pyramidReference=data.origin;
         }
         ObserveMotion(request,source,motion.forward,false);

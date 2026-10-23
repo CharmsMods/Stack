@@ -23,7 +23,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
             j["alignmentProposals"].push_back(AlignmentProposalIdentity(p));
     }
     j["samplingProfile"]="local-bayer-phase-coverage-v1";
-    j["exposureProfile"]="image-only-overlap-v3-selective-fallback";
+    j["exposureProfile"]="image-only-overlap-v4-registered-evidence";
     j["noiseProfile"]="temporal-burst-haar-v2-image-domain";
     j["groupMemoryProfile"]="adaptive-prepared-tiles-v1";
     j["detailProfile"]=kLocalDetailRevision;

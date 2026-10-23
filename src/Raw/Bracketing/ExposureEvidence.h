@@ -30,13 +30,21 @@ public:
         capacity_=std::min<std::size_t>(data.sources.size(),
             std::max<std::uint64_t>(2,request.memoryBudgetBytes/16/perSource));
     }
+    bool HasRegisteredGeometry(std::size_t sourceIndex) const {
+        const auto& source=data_.sources[sourceIndex];
+        // Identity after failed global search is only an initializer, not
+        // correspondence. Local fields still pass the per-point confidence
+        // check in SampleAlignmentProxyColor below.
+        return sourceIndex==data_.origin||request_.recipe.alignmentMode==AlignmentMode::FixedCoordinates||
+            source.alignmentDiagnostic.accepted||bool(source.localMotion);
+    }
     const std::vector<ExposurePatch>& Get(std::size_t sourceIndex) {
         const auto found=std::find_if(entries_.begin(),entries_.end(),
             [&](const auto& entry){return entry.source==sourceIndex;});
         if(found!=entries_.end()) {entries_.splice(entries_.begin(),entries_,found);return entries_.front().patches;}
         if(entries_.size()>=capacity_) entries_.pop_back();
         Entry entry;entry.source=sourceIndex;entry.patches.resize(points.size());
-        for(std::size_t p=0;p<points.size();++p) {
+        for(std::size_t p=0;HasRegisteredGeometry(sourceIndex)&&p<points.size();++p) {
             if(request_.shouldCancel&&request_.shouldCancel()) throw std::runtime_error("Canceled");
             auto& patch=entry.patches[p];unsigned sample=0;
             for(int dy=-2;dy<=2;++dy) for(int dx=-2;dx<=2;++dx,++sample) {

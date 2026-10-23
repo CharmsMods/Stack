@@ -9,9 +9,15 @@ BracketingRecipe SuggestGroups(const std::vector<CaptureExposure>& inputs) {
     std::vector<Capture> captures;
     captures.reserve(inputs.size());
     for (const auto& input : inputs) {
-        const double aperture=input.apertureFNumber>0?2*std::log2(input.apertureFNumber):0;
-        const double shutter=(input.exposureTimeSeconds>0?std::log2(input.exposureTimeSeconds):0)-aperture;
-        const double iso=input.isoSpeed>0?std::log2(input.isoSpeed):0;
+        // Tags suggest editable UI groups only. Missing or malformed values
+        // must not produce NaN/Inf recipe EVs or violate sort ordering; the
+        // worker calibrates actual relative exposure from registered images.
+        const auto logHint=[](double value) {
+            return std::isfinite(value)&&value>0?std::log2(value):0.;
+        };
+        const double aperture=2*logHint(input.apertureFNumber);
+        const double shutter=logHint(input.exposureTimeSeconds)-aperture;
+        const double iso=logHint(input.isoSpeed);
         captures.push_back({input.frameId,shutter,iso,shutter+iso});
     }
     std::stable_sort(captures.begin(),captures.end(),[](const auto& a,const auto& b){return a.ev<b.ev;});
@@ -29,7 +35,11 @@ BracketingRecipe SuggestGroups(const std::vector<CaptureExposure>& inputs) {
         }
         auto& spread=anchors[g];spread.minShutter=std::min(spread.minShutter,c.shutter);spread.maxShutter=std::max(spread.maxShutter,c.shutter);
         spread.minIso=std::min(spread.minIso,c.iso);spread.maxIso=std::max(spread.maxIso,c.iso);
-        recipe.groups[g].frames.push_back({c.id,true,false,c.ev-captures[captures.size()/2].ev});
+        // The value is only a non-manual display hint. Keep extreme but
+        // finite tags within the recipe's editable range rather than rejecting
+        // a dataset before its image-derived calibration can run.
+        const double relative=std::clamp(c.ev-captures[captures.size()/2].ev,-32.,32.);
+        recipe.groups[g].frames.push_back({c.id,true,false,relative});
     }
     recipe.knots=Raw::Bracketing::EqualCurves(recipe.groups.size());return recipe;
 }

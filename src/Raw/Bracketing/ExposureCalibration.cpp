@@ -60,9 +60,8 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
     const auto n=data.sources.size();
     if(n==0||data.origin>=n) {error="Exposure calibration has no reference capture.";return false;}
     std::vector<bool> fixed(n,false);
-    std::vector<double> gains(n,0),variance,retainedVariance(n,0);
-    std::vector<bool> retained(n,false);
-    double retainedAnchorVariance=0;
+    std::vector<double> gains(n,0),variance;
+    std::vector<ExposureEdge> previousEvidence;
     fixed[data.origin]=true;
     for(std::size_t i=0;i<n;++i) {
         gains[i]=std::isfinite(data.sources[i].scale)&&data.sources[i].scale>0
@@ -70,12 +69,12 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
         if(!data.sources[i].enabled&&i!=data.origin) {fixed[i]=true;continue;}
         if(i==data.origin) {gains[i]=0;continue;}
         if(allowFallback&&!deferUnconnected&&data.sources[i].exposureCalibrated) {
-            // Resolving another provisional capture must not discard a
-            // previously measured exposure when local overlap becomes sparse.
-            retained[i]=fixed[i]=true;
+            // Prior measurements can reconnect sparse local evidence, but
+            // are not exact anchors and must not freeze better local fits.
             const double scale=data.sources[i].scale;
-            retainedVariance[i]=data.sources[i].scaleVariance/std::pow(std::log(2.)*scale,2);
-            retainedAnchorVariance=std::max(retainedAnchorVariance,retainedVariance[i]);
+            const double v=data.sources[i].scaleVariance/std::pow(std::log(2.)*scale,2);
+            if(std::isfinite(v)&&v>=0)
+                previousEvidence.push_back({data.origin,i,gains[i],std::max(1e-12,v)});
         }
         for(const auto& group:request.recipe.groups) for(const auto& frame:group.frames)
             if(frame.id==data.sources[i].id&&frame.manualExposure) {fixed[i]=true;gains[i]=-frame.relativeEv;}
@@ -92,6 +91,7 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
         if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
         if((!data.sources[a].enabled&&a!=data.origin)||
            (!data.sources[b].enabled&&b!=data.origin))continue;
+        if(!evidence.HasRegisteredGeometry(a)||!evidence.HasRegisteredGeometry(b))continue;
         std::array<std::vector<double>,64> tiles,tileVariance;
         const auto& samplesA=evidence.Get(a);const auto& samplesB=evidence.Get(b);
         for(std::size_t p=0;p<evidence.points.size();++p) {
@@ -133,6 +133,10 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
     if(allowFallback) {
         ConnectExposureFallbacks(edges,std::move(imageFallbacks),fixed,data,
             "Limited image-overlap estimate",diagnostics);
+        // Prefer current registered overlap. Only otherwise-unanchored
+        // components reuse a previous image measurement with its uncertainty.
+        ConnectExposureFallbacks(edges,std::move(previousEvidence),fixed,data,
+            "Retained prior image-overlap estimate",diagnostics);
         // No camera-settings constraints: labels cannot establish RAW gain.
         // Keep every component connected to the reference or a user EV anchor.
         // An unobservable capture must not corrupt those measurements or abort
@@ -181,8 +185,6 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
         // Search seeds carry deliberately broad uncertainty and can never be
         // published as calibrated HDR. The post-local solve resolves/excludes
         // them before any fusion runs.
-        if(retained[i])variance[i]=retainedVariance[i];
-        else if(!fixed[i])variance[i]+=retainedAnchorVariance;
         if(unresolved[i])variance[i]=4.;
         source.exposureCalibrated=!unresolved[i]&&(source.enabled||i==data.origin);
         source.scaleVariance=std::pow(std::log(2.)*source.scale,2)*variance[i];

@@ -10,7 +10,8 @@ struct CaptureExposure {
     double isoSpeed = 0;
 };
 
-// Input order breaks equal-exposure ties. This is the shared metadata policy
-// used by saved-project creation and explicit selected-file bursts.
+// Input order breaks equal-exposure ties. Metadata is an editable UI grouping
+// hint shared by project creation and selected-file bursts, never a calibrated
+// gain or an admission requirement. Invalid tags behave like missing tags.
 BracketingRecipe SuggestGroups(const std::vector<CaptureExposure>& captures);
 } // namespace Raw::Bracketing
