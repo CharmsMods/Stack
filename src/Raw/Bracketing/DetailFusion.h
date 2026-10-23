@@ -14,9 +14,9 @@ struct DetailFusionAccumulator {
     double baseWeight=0,detailWeight=0,baseSquared=0,detailSquared=0;
     double base=0,detail=0,baseVariance=0,detailVariance=0,crossVariance=0;
     double baseUncertainty=0,detailUncertainty=0;
-    void Add(const Observation& sample,const CoarseMeasurement& coarse,double preference) {
-        if(sample.support<=0||!sample.finite||sample.clipped) return;
-        const double w=1/std::max(1e-12,sample.variance);
+    void Add(const Observation& sample,const CoarseMeasurement& coarse,double preference,double contribution=1.) {
+        if(sample.support<=0||!sample.finite||sample.clipped||contribution<=0) return;
+        const double w=contribution/std::max(1e-12,sample.variance);
         const double d=w*std::clamp(preference,.05,1.);
         const double covariance=std::clamp(coarse.centerCovariance,0.,
             std::sqrt(std::max(0.,coarse.variance*sample.measurementVariance)));

@@ -54,7 +54,29 @@ for responsiveness; do not omit alignment/refinement because a different host su
 a smaller budget. Resource or execution failures must remain errors, distinct from
 evidence-based rejection of an unreliable match. Standalone finished outputs use the
 shared default [View Transform](../../src/Raw/ViewTransform.h); authored Stack edits
-can intentionally change the developed appearance.
+can intentionally change the developed appearance. Newly imported Bracketing drafts
+can initialize the untouched default Local EV and Tone Curve nodes once, using
+accepted scene-linear analysis and the ordinary RAW-layer history transaction.
+This starting look changes neither reconstructed RAW nor standalone file output.
+It is session-owned, rejects changed document/source/node revisions or custom
+presentation, and does not rearm on undo, saved-project reopen or reprocessing.
+
+HDR admission checks decoded CFA, active-image size and resolved orientation, not
+camera/lens labels or exposure tags. The alignment initializer uses bounded image
+ranks only; it is not a radiometric calibration. Registered, noise-aware image
+patches and explicit user EV anchors establish relative exposure. Captures without
+observable overlap get a local-alignment retry, then are excluded with diagnostics
+rather than assigned an EXIF gain or causing usable captures to fail. Missing
+information is not recovered HDR. Decoder black/white levels and CFA calibration
+remain necessary to interpret sensor samples correctly. Temporal noise fitting
+requires calibrated image gain, accepted geometry and compatible measured noise
+profiles; ISO equality alone is not a sensor-noise model. Capture headroom weights
+apply before group averaging with matching CPU/GPU and detail-band arithmetic.
+
+Optional background: [Ward's exposure-resistant registration](https://www.anyhere.com/gward/papers/jgtpap2.pdf)
+informs the separation of search evidence from radiometric samples; [Hanji and
+Mantiuk's image-based exposure estimation](https://arxiv.org/abs/2308.02968) informs
+noise-aware overlap fitting. Neither substitutes for validation on real captures.
 
 The shared `ProcessingRequest::alignmentProposals` contract accepts optional,
 content-addressed forward/reverse motion fields as experimental search seeds.

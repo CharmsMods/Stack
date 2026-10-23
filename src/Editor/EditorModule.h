@@ -275,6 +275,9 @@ public:
     void RenderBracketingPresentation(ImVec4 background, ImVec2 bodyPosition, ImVec2 bodySize);
     void CancelBracketingPresentation();
     void TickBracketing(bool foreground = true);
+    void ArmBracketingStartingLook();
+    void PrepareBracketingStartingLookAnalysis();
+    void TryApplyBracketingStartingLook(const RenderTextureStats& stats, std::uint64_t sourceHash);
     void ResetBracketingForProjectLoad(const std::filesystem::path& projectPath);
     void RefreshBracketingProjectCard();
     bool CaptureBracketingDraftForCopy(

@@ -157,10 +157,20 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
                 fallbackRejected[group][p]=sample.localRejected;
             }
             o.finite=true;if(sample.support<=0) return;
+            const double h=std::isfinite(sample.headroom)?std::clamp(sample.headroom,0.,1.):0.;
+            // Keep untapered, valid measurements only while every capture has
+            // zero headroom. The first positive taper replaces that fallback;
+            // it must not retain near-clipped contributions from earlier frames.
+            if(h>0&&o.headroom<=0&&weight[group][p]>0) {
+                o.value=o.variance=o.measurementVariance=o.uncertaintyVariance=0;
+                o.fixedReference=false;weight[group][p]=squared[group][p]=0;
+                if(useBands)bands[group][p]={};
+            }
+            if(h<=0&&o.headroom>0)return;
             o.fixedReference|=sample.fixedReference;
-            const double w=1/sample.variance;
+            const double w=(h>0?h:1.)/sample.variance;
             if(weight[group][p]==0) o.measurementVariance=0;
-            o.value+=w*sample.value;o.variance+=w*w*sample.variance;o.headroom+=w*sample.headroom;
+            o.value+=w*sample.value;o.variance+=w*w*sample.variance;o.headroom+=w*h;
             o.measurementVariance+=w*w*sample.measurementVariance;
             o.uncertaintyVariance+=w*w*sample.uncertaintyVariance;
             weight[group][p]+=w;squared[group][p]+=w*w;
@@ -205,12 +215,17 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
             const auto coarse=CoarseSample(samples,static_cast<unsigned>(origin.extent.width),
                 static_cast<unsigned>(origin.extent.height),static_cast<unsigned>(p%origin.extent.width),
                 static_cast<unsigned>(p/origin.extent.width),aligned?2.5:1.);
-            bands[group][p].Add(samples[p],coarse,source.detailPreference);
+            const double h=std::isfinite(samples[p].headroom)?std::clamp(samples[p].headroom,0.,1.):0.;
+            const double contribution=h>0?h:(groups[group][p].headroom>0?0.:1.);
+            bands[group][p].Add(samples[p],coarse,source.detailPreference,contribution);
         }
     }
     for(std::size_t g=0;g<groups.size();++g) for(std::size_t p=0;p<count;++p) {
         auto& o=groups[g][p];const double w=weight[g][p];
         if(w>0) {o.value/=w;o.variance/=w*w;o.measurementVariance/=w*w;
+            // Retain weighted headroom for inter-group precision. Before any
+            // two-band/color-coherence adjustment, w_i=h_i/v_i gives
+            // headroom/groupVariance=sum(h_i/v_i), not a squared taper.
             o.uncertaintyVariance/=w*w;o.headroom/=w;o.support=w*w/squared[g][p];o.clipped=false;
             if(detailFusion&&!bands[g].empty()) bands[g][p].Finish(o);
         }

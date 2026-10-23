@@ -39,6 +39,14 @@ struct BracketingSession : Project::BracketingState {
         std::vector<Raw::Bracketing::Knot> suggestion;
         std::array<std::vector<double>, 257> visible, suggested;
     } curvePlot;
+    // Only a newly imported draft can arm this transient one-shot. It is not
+    // restored from disk or history, so reopen/undo cannot reapply a look.
+    struct StartingLook {
+        bool armed = false, awaitingAnalysis = false;
+        std::string documentId, localEvUuid, toneUuid;
+        std::uint64_t layerRevision = 0, editRevision = 0, sourceHash = 0, inputRevision = 0;
+        nlohmann::json layers, sourceRecipe, composition;
+    } startingLook;
     bool selectionRestored = false, synchronizing = false;
     bool gradedResult = true;
     bool orientationReviewRequested = false;

@@ -1002,6 +1002,11 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
         }
         FinishViewportPreviewRequest(result, result.success && result.error.empty());
+        if (result.success && result.error.empty() && rawWorkspaceResultMatchesActive &&
+            result.rawWorkspace.analysisCaptured &&
+            (acceptedMainFrame || result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes))
+            TryApplyBracketingStartingLook(result.rawWorkspace.viewTransformInputStats,
+                result.rawWorkspace.sourceHash);
         if (result.success && result.error.empty() && result.viewportPreview.enabled &&
             result.viewportPreviewGeometry.NativeSamples() && !result.telemetry.interactionActive &&
             m_RawWorkspaceAnalysisRequested && !result.rawWorkspace.analysisCaptured) {

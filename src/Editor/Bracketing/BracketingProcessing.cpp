@@ -177,6 +177,7 @@ void EditorModule::TickBracketing(bool foreground) {
             state->awaitingProject.clear();state->newProject=false;
             state->projectId=m_Project->snapshot->projectId;
             state->setId=m_Project->snapshot->activeSourceSetId;
+            ArmBracketingStartingLook();
             const bool saved = CommitBracketingDraft(state->processAfterImport,nullptr);
             auto completion = std::exchange(state->saveBeforeCloseCompletion, {});
             if (completion) completion(saved);
@@ -375,6 +376,7 @@ void EditorModule::TickBracketing(bool foreground) {
             node.multiFrameHdr.resultState="ready";node.multiFrameHdr.presentationStatus="Bracket result ready.";
         }
         m_RawWorkspaceStaleRenderStatusText.clear();m_MultiFrameProjectCoverRefreshPending=true;MarkRenderDirty();
+        PrepareBracketingStartingLookAnalysis();
     }
     // A superseded job can finish after navigation has left Bracketing. RAW
     // must start the requested revision without depending on that tab drawing.

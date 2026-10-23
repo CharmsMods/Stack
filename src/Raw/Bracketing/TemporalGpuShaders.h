@@ -195,7 +195,7 @@ inline const char* Accumulate=R"GLSL(
 void main(){
     int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
     int index=groupIndex*target.z*target.w+i;Accumulator a=sums[index];Observation s=samples[i];
-    a.o.flags|=s.flags&REJECTED;
+    a.o.flags|=s.flags&REJECTED;double contribution=0.LF;
     if((s.flags&FINITE)!=0u){
         bool oldRejected=(a.o.flags&FALLBACK_REJECTED)!=0u,newRejected=(s.flags&REJECTED)!=0u;
         if((a.o.flags&FINITE)==0u||(oldRejected&&!newRejected)||
@@ -205,14 +205,24 @@ void main(){
                 (s.flags&(CLIPPED|FALLBACK_CLIP))|(newRejected?FALLBACK_REJECTED:0u);}
         a.o.flags|=FINITE;
         if(s.support>0.LF){
-            a.o.flags|=s.flags&REFERENCE;double w=1.LF/s.variance;
-            if(a.weight==0.LF)a.o.measurement=0.LF;
-            a.o.value+=w*s.value;a.o.variance+=w*w*s.variance;a.o.headroom+=w*s.headroom;
-            a.o.measurement+=w*w*s.measurement;a.o.uncertainty+=w*w*s.uncertainty;
-            a.weight+=w;a.squared+=w*w;
+            double h=finiteValue(s.headroom)?clamp(s.headroom,0.LF,1.LF):0.LF;
+            if(h>0.LF&&a.o.headroom<=0.LF&&a.weight>0.LF){
+                a.o.value=0.LF;a.o.variance=0.LF;a.o.measurement=0.LF;a.o.uncertainty=0.LF;
+                a.o.flags&=~REFERENCE;a.weight=0.LF;a.squared=0.LF;
+                a.bw=0.LF;a.dw=0.LF;a.bs=0.LF;a.ds=0.LF;a.base=0.LF;a.detail=0.LF;
+                a.bv=0.LF;a.dv=0.LF;a.cv=0.LF;a.bu=0.LF;a.du=0.LF;
+            }
+            contribution=h>0.LF?h:(a.o.headroom>0.LF?0.LF:1.LF);
+            if(contribution>0.LF){
+                a.o.flags|=s.flags&REFERENCE;double w=contribution/s.variance;
+                if(a.weight==0.LF)a.o.measurement=0.LF;
+                a.o.value+=w*s.value;a.o.variance+=w*w*s.variance;a.o.headroom+=w*h;
+                a.o.measurement+=w*w*s.measurement;a.o.uncertainty+=w*w*s.uncertainty;
+                a.weight+=w;a.squared+=w*w;
+            }
         }
     }
-    if(useBands!=0&&s.support>0.LF&&(s.flags&(FINITE|CLIPPED))==FINITE){
+    if(useBands!=0&&contribution>0.LF&&s.support>0.LF&&(s.flags&(FINITE|CLIPPED))==FINITE){
         ivec2 p=ivec2(i%target.z,i/target.z);double coarse=0.LF,cv=0.LF,total=0.LF,cw=0.LF;
         for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx){
             ivec2 q=p+2*ivec2(dx,dy);if(any(lessThan(q,ivec2(0)))||any(greaterThanEqual(q,target.zw)))continue;
@@ -223,7 +233,7 @@ void main(){
         double covariance=s.measurement;
         if(total>0.LF){coarse/=total;double area=aligned!=0?2.5LF:1.LF;cv*=area/(total*total);covariance=min(s.measurement,area*cw/total*s.measurement);}
         else{coarse=s.value;cv=s.measurement;}
-        double w=1.LF/max(1e-12LF,s.variance),d=w*clamp(params[18],.05LF,1.LF);
+        double w=contribution/max(1e-12LF,s.variance),d=w*clamp(params[18],.05LF,1.LF);
         covariance=clamp(covariance,0.LF,sqrt(max(0.LF,cv*s.measurement)));
         a.bw+=w;a.dw+=d;a.bs+=w*w;a.ds+=d*d;a.base+=w*coarse;a.detail+=d*(s.value-coarse);
         a.bv+=w*w*cv;a.dv+=d*d*max(0.LF,s.measurement+cv-2.LF*covariance);a.cv+=w*d*(covariance-cv);
