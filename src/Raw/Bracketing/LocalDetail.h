@@ -4,7 +4,7 @@
 #include <limits>
 
 namespace Raw::Bracketing {
-inline constexpr const char* kLocalDetailRevision="local-temporal-dct-v1";
+inline constexpr const char* kLocalDetailRevision="local-temporal-dct-v2-headroom-baseline";
 inline std::uint64_t LocalDetailPatchCacheBytes(std::uint64_t memoryBudgetBytes) {
     return std::min<std::uint64_t>(32ull*1024*1024,memoryBudgetBytes/32);
 }

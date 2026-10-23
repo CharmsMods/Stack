@@ -187,7 +187,7 @@ bool EvaluateLocalDetailPatch(const ProcessingRequest& request,const PreparedDat
                 if(!error.empty())return false;
                 // A partial patch cannot overrule a local rejection or a clip.
                 // It keeps the established per-pixel temporal fallback.
-                if(!sample.finite||sample.clipped||sample.support<=0||sample.localRejected||sample.headroom<.99){out.sampleRejected=true;return true;}
+                if(!sample.finite||sample.clipped||sample.support<=0||sample.localRejected||!std::isfinite(sample.headroom)||sample.headroom<.99){out.sampleRejected=true;return true;}
                 if(cached&&cached->ready)noise.Add(sample,cached->noise);
                 else if(cached) {
                     if(!LocalDetailNoise::PrepareRow(data,source,sampler,rx,ry,pilots[c][p],sample,cached->noise,error))return error.empty();
@@ -217,7 +217,9 @@ bool EvaluateLocalDetailPatch(const ProcessingRequest& request,const PreparedDat
             const unsigned p=y*n+x,q=(y+1)*side+x+1;double sum=0,detailSum=0,value=0;
             DetailFusionAccumulator accumulator;
             for(std::size_t f=0;f<captures.size();++f) {
-                const auto& sample=captures[f].samples[c][q];const double w=1/sample.variance;
+                const auto& sample=captures[f].samples[c][q];
+                const double h=std::isfinite(sample.headroom)?std::clamp(sample.headroom,0.,1.):0.;
+                const double w=h/sample.variance;
                 sum+=w;detailSum+=w*std::clamp(data.sources[sources[f]].detailPreference,.05,1.);value+=w*sample.value;
                 if(bands) {
                     // Full valid same-CFA 3x3 support. Signal math is identical
@@ -225,14 +227,17 @@ bool EvaluateLocalDetailPatch(const ProcessingRequest& request,const PreparedDat
                     double coarse=0;constexpr double kernel[3]={1,2,1};
                     for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx)
                         coarse+=kernel[dx+1]*kernel[dy+1]*captures[f].samples[c][std::size_t(int(y)+1+dy)*side+int(x)+1+dx].value/16;
-                    accumulator.Add(sample,{coarse,0,0},data.sources[sources[f]].detailPreference);
+                    accumulator.Add(sample,{coarse,0,0},data.sources[sources[f]].detailPreference,h);
                 }
             }
             baseline[p]=value/sum;
             if(bands) {Observation merged;accumulator.Finish(merged);baseline[p]=merged.value;}
             for(std::size_t f=0;f<captures.size();++f) {
-                const double a=(1/captures[f].samples[c][q].variance)/sum;
-                const double d=bands?(1/captures[f].samples[c][q].variance)*std::clamp(data.sources[sources[f]].detailPreference,.05,1.)/detailSum:a;
+                const auto& sample=captures[f].samples[c][q];
+                const double h=std::isfinite(sample.headroom)?std::clamp(sample.headroom,0.,1.):0.;
+                const double w=h/sample.variance;
+                const double a=w/sum;
+                const double d=bands?w*std::clamp(data.sources[sources[f]].detailPreference,.05,1.)/detailSum:a;
                 detailWeights[f*n*n+p]=d;captures[f].meanBase[c]+=a/(n*n);
                 captures[f].bandDifference[c]=std::max(captures[f].bandDifference[c],std::abs(a-d));
                 captures[f].baseNorm[c]=std::max(captures[f].baseNorm[c],std::abs(d));
