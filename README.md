@@ -20,9 +20,9 @@ Original camera RAW files are read-only inputs. Keep backups of important images
 
 ## Source and build documentation
 
-**Read the [current source license](LICENSE) before using the source.** The repository is currently source-available under a proprietary license, not GPL or another open-source license. Public visibility does not grant permission to build, modify or redistribute Stack beyond that license.
+Stack's original program source, build scripts, documentation and program assets are licensed under [GPL version 3 only](LICENSE) (GPL-3.0-only). You may build, modify and redistribute covered software, including for a fee, subject to that license. Third-party components retain their own terms; see the [licensing scope](legal/README.md).
 
-For the maintainer and others with the necessary permission, [Building and packaging](Guidance/BUILDING.md) describes the Windows build workflow, tool requirements, output layout and focused checks. The normal full-product entry point is `build.cmd`; it closes running Stack app and worker instances before building. No build or runtime verification is implied by this README.
+[Building and packaging](Guidance/BUILDING.md) describes the Windows build workflow, tool requirements, output layout and focused checks. The normal full-product entry point is `build.cmd`; it closes running Stack app and worker instances before building. No build or runtime verification is implied by this README.
 
 - [Repository layout](Guidance/REPOSITORY.md)
 - [Implementation guidance](Guidance/Implementation/README.md)
@@ -30,7 +30,7 @@ For the maintainer and others with the necessary permission, [Building and packa
 
 ## Licensing and third-party components
 
-Stack's own source terms are in [LICENSE](LICENSE). Third-party code, libraries, fonts and other materials retain their respective licenses; they are not relicensed by Stack's source license.
+Stack's GPL-3.0-only source terms are in [LICENSE](LICENSE). Third-party code, libraries, fonts and other materials retain their respective licenses; they are not relicensed by Stack's source license.
 
 See [third-party component metadata](legal/THIRD_PARTY_COMPONENTS.json), [third-party notices](THIRD_PARTY_NOTICES.md) and the [legal documentation](legal/README.md). Some dependencies and notices are selected when a package is staged, so consult the legal materials included with the particular binary package as well. The archived custom application agreement is historical material, not an active package input.
 

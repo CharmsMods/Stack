@@ -68,9 +68,9 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 
 - Version: 0.22.1 float CPU and GPU adaptations
 - Upstream: https://github.com/LibRaw/LibRaw/tree/0.22.1/src/demosaic
-- License: CDDL-1.0 option
+- License: GPL-3.0-only (LibRaw LGPL 2.1 section 3 election)
 - Copyright: Copyright 2019-2025 LibRaw LLC; dcraw copyright 1997-2018 Dave Coffin
-- Included license files: `LibRaw-Demosaic-CDDL-1.0.txt`, `LibRaw-Demosaic-NOTICE.txt`, `LibRawDemosaicSource/ClassicDemosaic.cpp`, `LibRawDemosaicSource/ClassicDemosaicTerms.h`, `LibRawDemosaicSource/GpuClassic.cpp`, `LibRawDemosaicSource/GpuClassicShaders.h`
+- Included license files: `LibRaw-Demosaic-GPL-3.0.txt`, `LibRaw-Demosaic-NOTICE.txt`, `LibRawDemosaicSource/ClassicDemosaic.cpp`, `LibRawDemosaicSource/ClassicDemosaicTerms.h`, `LibRawDemosaicSource/GpuClassic.cpp`, `LibRawDemosaicSource/GpuClassicShaders.h`
 
 ## Zhang-Wu LMMSE demosaicing
 
@@ -103,3 +103,11 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 - License: OFL-1.1
 - Copyright: Copyright 2001 The Silkscreen Project Authors (https://github.com/googlefonts/silkscreen)
 - Included license files: `SIL-OFL-1.1.txt`, `DesktopFonts-NOTICE.txt`
+
+## Phosphor arrow-right-fill icon
+
+- Version: 2b75f3ad12b420c9504ef05df8d2564a28f8500e
+- Upstream: https://github.com/phosphor-icons/core
+- License: MIT
+- Copyright: Copyright (c) 2023 Phosphor Icons
+- Included license files: `Phosphor-Icons-MIT.txt`, `Phosphor-Icons-NOTICE.txt`

@@ -10,9 +10,16 @@ LibRaw does not use RESTRICTED code from dcraw.c.
 PPG is by Alain Desbiolles. AHD is based on work by Keigo Hirakawa,
 Thomas Parks and Paul Lee.
 
-These adaptations use the Common Development and Distribution License,
-Version 1.0, option expressly offered by LibRaw. The accompanying
-LibRaw-Demosaic-CDDL-1.0.txt contains the complete license.
+These copies are distributed under GNU GPL version 3 only.
+The exact upstream files offer a choice of LGPL 2.1 or CDDL 1.0. For these
+copies, the LGPL 2.1 option is selected and its section 3 election to ordinary
+GNU GPL version 3 is exercised. Stack's modifications to these copies are
+also made available under GPL-3.0-only. Original copyright and provenance
+notices are retained. See LibRaw-Demosaic-GPL-3.0.txt for the full GPL text.
+
+This record applies to these adapted source files, not the separate
+libraw.dll, whose LGPL selection and source/build record remain unchanged.
+It does not withdraw rights previously granted for earlier CDDL copies.
 
 Stack modifications, October 2026: floating-point CPU references and OpenGL
 compute passes; explicit input ownership and cancellation; mirrored Bayer
@@ -27,7 +34,7 @@ Stack source distribution under src/Raw/Demosaic/:
     GpuClassic.cpp
     GpuClassicShaders.h
 
-The CDDL grants apply to those covered files. Stack's separate proprietary
-terms do not replace or limit rights granted under the CDDL for these files.
-Any additional terms or warranties for the larger Stack application are
-offered by Stack's publisher alone, not LibRaw or its contributors.
+The GPL grants apply to these covered copies. No claim of authorship,
+endorsement or warranty by LibRaw or its contributors is made for Stack's
+modifications. Preserve this record and the complete corresponding source
+when redistributing as required by the GPL.

@@ -404,7 +404,7 @@ add_custom_target(StackRuntimePayload
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Legal"
     # Remove the old bundled agreement packet on incremental builds. The
-    # repository source license remains outside the application payload.
+    # current GPL notice and text are staged separately below.
     COMMAND ${CMAKE_COMMAND} -E rm -f
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/EULA.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/PRIVACY.md"
@@ -414,6 +414,12 @@ add_custom_target(StackRuntimePayload
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/GPL-3.0.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/STACK-LICENSE-NOTICE.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/STACK-LICENSE-NOTICE.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/Adobe-DNG-Notice.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/Adobe-DNG-Notice.txt"
@@ -439,9 +445,11 @@ add_custom_target(StackRuntimePayload
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Roboto-Apache-2.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/SIL-OFL-1.1.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/DesktopFonts-NOTICE.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Phosphor-Icons-MIT.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Phosphor-Icons-NOTICE.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/DCB-BSD-3-Clause.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/ZhangWu-BSD-2-Clause.txt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-CDDL-1.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-GPL-3.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-NOTICE.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-Apache-2.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-COPYRIGHT.txt"

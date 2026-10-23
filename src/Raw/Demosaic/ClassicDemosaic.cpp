@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: CDDL-1.0
+// SPDX-License-Identifier: GPL-3.0-only
 // Float reference adaptations of LibRaw 0.22.1 PPG, VNG and AHD.
 // Copyright 2019-2025 LibRaw LLC. dcraw copyright 1997-2018 Dave Coffin.
 // PPG by Alain Desbiolles. AHD based on Hirakawa, Parks and Paul Lee.
-// Distributed under LibRaw's CDDL option. See
-// legal/third_party/LibRaw-Demosaic-NOTICE.txt and LibRaw-Demosaic-CDDL-1.0.txt.
+// Distributed under GPL-3.0-only via LibRaw's LGPL 2.1 option, section 3. See
+// legal/third_party/LibRaw-Demosaic-NOTICE.txt and LibRaw-Demosaic-GPL-3.0.txt.
 // Stack changes: explicit input/ownership, float HDR data, mirrored boundaries,
 // cancellation, separate image passes and preserved recorded CFA samples.
 #include "FloatDemosaicInternal.h"

@@ -1,0 +1,34 @@
+Stack
+Copyright (c) 2024-2026 Darynn Ho
+
+Stack's original program source, build scripts, documentation and program assets are licensed under the GNU
+General Public License, version 3 only (SPDX-License-Identifier: GPL-3.0-only).
+See GPL-3.0.txt in a binary package or LICENSE in the source repository.
+
+You may use, modify and redistribute covered software, including for a fee,
+subject to GPL version 3. Covered distributions must preserve notices and
+satisfy the license's corresponding-source requirements. There is no warranty
+except where separately stated in writing. This notice does not add restrictions
+to the GPL.
+
+The grant covers these original materials to the extent of rights held by the
+Stack copyright holder, including original icons and generated program assets.
+It does not assert exclusive copyright in generated material.
+
+Third-party libraries, copied code, fonts, icons and other third-party materials
+retain their own applicable licenses and notices. This grant does not claim
+ownership of or replace rights granted for third-party materials. Consult
+THIRD_PARTY_NOTICES.md and ThirdParty/ in the package, and legal/ in the source.
+The LibRaw-derived demosaicing adaptations have a specific GPL-3.0-only
+conversion record in ThirdParty/LibRaw-Demosaic-NOTICE.txt in the package; the separate LibRaw DLL remains
+under its recorded LGPL option.
+
+No trademark rights in the Stack or CharmsMods names or logos are granted by
+this notice. Naming the software truthfully does not imply endorsement.
+Users retain their rights in their own images and projects.
+
+A binary download is not complete corresponding source. Distributors must
+provide the matching buildable source, required build/install scripts and
+applicable dependency materials by a method allowed by GPL version 3.
+A link to a moving development branch alone is not a substitute for matching
+source. Earlier releases retain the terms applicable to those releases.

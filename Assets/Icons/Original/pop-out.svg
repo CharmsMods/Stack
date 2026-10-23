@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="980" viewBox="0 0 24 24">
+  <title>Pop out canvas</title>
+  <g fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 4 H5 A2 2 0 0 0 3 6 V19 A2 2 0 0 0 5 21 H18 A2 2 0 0 0 20 19 V12"/>
+    <path d="M15 3 H21 V9 M10 14 L21 3"/>
+  </g>
+</svg>

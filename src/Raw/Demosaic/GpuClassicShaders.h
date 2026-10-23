@@ -1,9 +1,9 @@
 #pragma once
-// SPDX-License-Identifier: CDDL-1.0
+// SPDX-License-Identifier: GPL-3.0-only
 // Float GPU adaptations of LibRaw 0.22.1 PPG, VNG and AHD.
 // Copyright 2019-2025 LibRaw LLC. dcraw copyright 1997-2018 Dave Coffin.
 // PPG by Alain Desbiolles. AHD based on Hirakawa, Parks and Paul Lee.
-// Distributed under LibRaw's CDDL option. Full notice and source distribution
+// Distributed under GPL-3.0-only via LibRaw's LGPL 2.1 option, section 3. Full notice and source distribution
 // details: legal/third_party/LibRaw-Demosaic-NOTICE.txt.
 // Stack changes: separate GPU passes, mirrored boundaries, explicit camera
 // transform, float arithmetic, preserved signed/HDR values and recorded samples.

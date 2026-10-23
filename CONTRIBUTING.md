@@ -1,7 +1,8 @@
 # Contributing to Stack
 
-Stack's public repository is provided for source inspection and issue reporting.
-It is not an open-source development project.
+Stack's original program source, build scripts, documentation and program assets are licensed under
+GPL-3.0-only. See [LICENSE](LICENSE) and the
+[licensing scope and dependency records](legal/README.md).
 
 ## Bug reports and feedback
 
@@ -11,17 +12,17 @@ behavior, and minimal reproduction steps. Remove private images, paths, project
 data, and personal information before posting.
 
 For a security vulnerability, do not open a public Issue. Use GitHub's private
-vulnerability-reporting feature described in [`SECURITY.md`](SECURITY.md).
+vulnerability-reporting feature described in [SECURITY.md](SECURITY.md).
 
 ## Code and creative contributions
 
-Unsolicited pull requests, patches, source code, designs, icons, documentation,
-and other creative contributions are not accepted. This avoids ambiguity about
-ownership and Stack's commercial licensing. A pull request may be closed without
-review.
+The maintainer is not currently accepting unsolicited pull requests, patches,
+designs, icons, documentation or other creative contributions. Contact the
+maintainer and agree on contribution terms in writing before submitting them.
+This project policy does not restrict the rights to fork, modify or redistribute
+already GPL-covered code under its license.
 
-Only submit creative material when Darynn Ho has requested it in writing and a
-separate written contribution agreement is in place first.
-
-The repository remains governed by the [`LICENSE`](LICENSE). Creating a fork,
-clone, issue, or pull request does not grant additional rights to Stack source.
+Contributors must identify third-party material and preserve its provenance,
+copyright and license notices. A contribution does not automatically transfer
+its copyright to the maintainer or grant a right to relicense it under
+proprietary terms. Any separate rights agreement must be explicit.

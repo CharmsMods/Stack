@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: CDDL-1.0
+// SPDX-License-Identifier: GPL-3.0-only
 // GPU orchestration for the LibRaw-derived algorithms. See the accompanying
-// legal/third_party/LibRaw-Demosaic-NOTICE.txt and CDDL license.
+// legal/third_party/LibRaw-Demosaic-NOTICE.txt and GPL-3.0-only license.
 #include "GpuDemosaicInternal.h"
 #include "GpuDemosaicShaders.h"
 #include "GpuClassicShaders.h"

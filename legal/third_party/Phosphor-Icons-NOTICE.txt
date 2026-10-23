@@ -1,0 +1,10 @@
+Assets/Icons/arrow-right-fill.svg
+
+Adapted from Phosphor Icons:
+https://github.com/phosphor-icons/core/blob/2b75f3ad12b420c9504ef05df8d2564a28f8500e/assets/fill/arrow-right-fill.svg
+
+Copyright (c) 2023 Phosphor Icons
+License: MIT. See Phosphor-Icons-MIT.txt.
+
+Stack's version preserves the path geometry and changes the fill from
+currentColor to #ffffff. This notice does not imply endorsement by Phosphor.

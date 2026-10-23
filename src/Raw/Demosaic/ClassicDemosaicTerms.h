@@ -1,9 +1,9 @@
 #pragma once
-// SPDX-License-Identifier: CDDL-1.0
+// SPDX-License-Identifier: GPL-3.0-only
 // Gradient terms adapted from LibRaw 0.22.1 misc_demosaic.cpp.
 // Copyright 2019-2025 LibRaw LLC. dcraw copyright 1997-2018 Dave Coffin.
-// Distributed under the CDDL option offered by LibRaw. See
-// legal/third_party/LibRaw-Demosaic-CDDL-1.0.txt and the accompanying notice.
+// Distributed under GPL-3.0-only via LibRaw's LGPL 2.1 option, section 3. See
+// legal/third_party/LibRaw-Demosaic-GPL-3.0.txt and the accompanying notice.
 namespace Raw::Demosaic::Classic {
 inline constexpr int VngTerms[64][6] = {
     {-2,-2,+0,-1,0,0x01},

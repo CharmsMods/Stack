@@ -153,12 +153,12 @@
       "name": "LibRaw PPG, VNG and AHD demosaicing adaptations",
       "version": "0.22.1 float CPU and GPU adaptations",
       "homepage": "https://github.com/LibRaw/LibRaw/tree/0.22.1/src/demosaic",
-      "license": "CDDL-1.0 option",
+      "license": "GPL-3.0-only (LibRaw LGPL 2.1 section 3 election)",
       "copyright": "Copyright 2019-2025 LibRaw LLC; dcraw copyright 1997-2018 Dave Coffin",
       "scope": "desktop",
       "presence": "always",
       "licenseFiles": [
-        "LibRaw-Demosaic-CDDL-1.0.txt",
+        "LibRaw-Demosaic-GPL-3.0.txt",
         "LibRaw-Demosaic-NOTICE.txt",
         "LibRawDemosaicSource/ClassicDemosaic.cpp",
         "LibRawDemosaicSource/ClassicDemosaicTerms.h",
@@ -219,6 +219,20 @@
       "licenseFiles": [
         "SIL-OFL-1.1.txt",
         "DesktopFonts-NOTICE.txt"
+      ]
+    },
+    {
+      "id": "phosphor-icons",
+      "name": "Phosphor arrow-right-fill icon",
+      "version": "2b75f3ad12b420c9504ef05df8d2564a28f8500e",
+      "homepage": "https://github.com/phosphor-icons/core",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2023 Phosphor Icons",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "Phosphor-Icons-MIT.txt",
+        "Phosphor-Icons-NOTICE.txt"
       ]
     }
   ]

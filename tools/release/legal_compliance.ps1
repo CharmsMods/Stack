@@ -110,7 +110,7 @@ function Test-StackThirdPartyStage {
     )
 
     $legalDir = Join-Path $StageDir "Stack\App\Legal"
-    foreach ($required in @("THIRD_PARTY_NOTICES.md", "Adobe-DNG-Notice.txt")) {
+    foreach ($required in @("THIRD_PARTY_NOTICES.md", "Adobe-DNG-Notice.txt", "GPL-3.0.txt", "STACK-LICENSE-NOTICE.txt")) {
         if (-not (Test-Path -LiteralPath (Join-Path $legalDir $required) -PathType Leaf)) {
             throw "Release stage is missing Stack/App/Legal/$required"
         }
@@ -151,9 +151,11 @@ function Get-SpdxLicenseExpression {
         "stb" { return "MIT OR Unlicense" }
         "libraw" { return "LGPL-2.1-only" }
         "libavoid" { return "LGPL-2.1-or-later" }
+        "libraw-classic-demosaic" { return "GPL-3.0-only" }
         "roboto-font" { return "Apache-2.0" }
         "press-start-2p-font" { return "OFL-1.1" }
         "silkscreen-font" { return "OFL-1.1" }
+        "phosphor-icons" { return "MIT" }
         default { return "NOASSERTION" }
     }
 }
@@ -210,7 +212,7 @@ function Write-StackSpdxSbom {
         downloadLocation = "https://github.com/CharmsMods/Stack/releases"
         filesAnalyzed = $true
         licenseConcluded = "NOASSERTION"
-        licenseDeclared = "NOASSERTION"
+        licenseDeclared = "GPL-3.0-only"
         copyrightText = "Copyright (c) 2024-2026 Darynn Ho"
     })
     foreach ($component in $components) {
