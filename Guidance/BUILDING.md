@@ -28,6 +28,69 @@ For C-drag capture checks on an existing RAW image, run `Stack.exe --validate-ra
 
 For the existing RAW graph editing checks without the separate shared-curve interaction preflight, run `Stack.exe --validate-raw-graph-canvas`. This hidden-context check disables document saving and covers connection eligibility, creation, deletion, cycle rejection, node opening, and document reload. The full `--validate-raw-graph-editing` command retains the shared-curve preflight.
 
+## Current Burst engine changes and verification
+
+The October 23, 2026 source update is not a published release. It changes HDR
+admission and exposure fitting to use decoded layout and registered image evidence
+rather than camera/exposure labels. Unresolved captures get a local-alignment retry,
+then a documented exclusion instead of an invented metadata gain. It also improves
+per-capture highlight-headroom weighting, registration provenance, noise-failure
+reporting and cancellation. Decoder CFA, orientation and black/white calibration
+are still required; missing information does not create recovered dynamic range.
+
+New, untouched Bracketing imports can initialize their default Local EV and Tone
+Curve nodes once. This is an editable starting look, not a change to reconstructed
+RAW or standalone output. It does not overwrite existing edits or run again after
+undo, reopening a saved project or reprocessing. Ordinary tone edits reuse the
+reconstruction and request display refinement, not another capture merge.
+
+Older saved finished results reopen as saved. **Explicitly process the bracket
+again to use the updated engine**; merely opening it or changing a tone node is
+not a reconstruction upgrade. Use a project copy when retaining an older result
+for comparison, and keep the original RAW inputs unchanged.
+
+### Checks completed and remaining limits
+
+- Cloud C++17 checks passed for changed engine/editor translation units. Bounded
+  executable checks passed for exposure graphs/cohorts, metadata admission, image
+  search seeds, calibration fallback/publication, motion/covariance, border/cache
+  behavior, noise cancellation and precedence, detail fusion and starting-look math.
+  Scalar/noise AddressSanitizer and UndefinedBehaviorSanitizer runs passed; leak
+  checking was unavailable in that execution environment.
+- All four temporal compute shaders compiled and linked on software Mesa. Actual
+  Accumulate/Finish dispatch passed 26 small arithmetic/flag cases. Later-group
+  Prepare reset and failure propagation were checked separately. This is not a
+  complete GPU-wrapper, spatial-detail, Windows or hardware-driver validation.
+- A measured pyramid-index optimization regression was removed. Residual-buffer
+  reuse reduced allocation calls in one controlled fixture, but timing overlapped.
+  Redundant later-group GPU status readbacks and reference staging were removed.
+  No end-to-end speedup or real-camera image-quality improvement is established.
+- Full Windows build and user-selected capture testing remain outstanding. The
+  full `Process` integration check was blocked by unavailable OpenCV development
+  headers; component checks do not replace it. Shared exposure-error correlations and very dark reference-guide observability remain
+  modeling limitations; reported uncertainty is not a complete covariance model.
+
+### First checks after pulling and building
+
+1. Preserve local edits, pull the latest source without overwriting them, and use
+   the Windows build entry point above. Confirm the built worker with
+   `build/StackBurst.exe --version` and `--self-check`.
+2. Choose a small familiar set, plus a dark/noisy bracket and a highlight-heavy
+   bracket. Process explicitly into new outputs. Inspect fine edges, moving
+   objects, shadow noise, highlight color and any capture-exclusion diagnostics.
+   These are suggested checks, not results already verified on your images.
+3. For the automatic starting look, use a newly imported untouched default draft.
+   Check its editable Local EV/Tone Curve settings and undo. An older project is
+   expected to retain its authored look rather than automatically change.
+4. Confirm that an older finished project only gains the new reconstruction after
+   explicit processing. If investigating backend differences, use the CPU/auto
+   manifest option described above and retain the actual tile-count diagnostics.
+
+The durable scalar, noise and exposure regressions are part of the existing
+`--validate-bracketing` suite in the optional diagnostics build described above.
+That command runs more than the focused cloud checks and is not available in the
+normal shipping executable. Follow the agreed validation scope before running it.
+
 ## Optional AI alignment package
 
 Stack's Bracketing reconstruction controls and the standalone Burst window expose **AI-assisted alignment (experimental)**, off by default. The standalone batch manifest accepts `"aiAlignment": true`. The saved recipe keeps the choice; AI requires Automatic local alignment and is not used for panorama. It proposes motion with SEA-RAFT-M, then keeps the shared native RAW refinement, verification and reconstruction rules. Turning it off starts no model process.
