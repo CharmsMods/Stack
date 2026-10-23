@@ -35,6 +35,9 @@ struct ReliabilityResidualSample {
     double alternateValue = 0.0;
     double referenceGateVariance = 0.0;
     double alternateGateVariance = 0.0;
+    // A clipped reference constrains brightness from below; it is not an
+    // exact radiance observation or positive evidence of correspondence.
+    bool referenceIsLowerBound = false;
 };
 
 using ReliabilityResidualEvaluator = std::function<bool(

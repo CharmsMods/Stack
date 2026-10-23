@@ -131,6 +131,32 @@ void ValidateViewportPlans() {
         "Blur must retain complete dependencies while its pointwise suffix renders visible demand");
     RequireViewport(plan.workingBytes > 0 && plan.regionalPixels < plan.completePixels,
         "Viewport resource estimate omitted complete dependencies or regional work");
+    auto controlled = graph;
+    RenderGraphNode value; value.nodeId = 5; value.kind = RenderGraphNodeKind::Value; value.scalarValue = .25;
+    RenderGraphNode arithmetic; arithmetic.nodeId = 6; arithmetic.kind = RenderGraphNodeKind::DataMath;
+    arithmetic.dataMathSettings.domain = NodeMath::ArithmeticDomain::Values;
+    arithmetic.dataMathMode = RenderDataMathMode::Multiply; arithmetic.dataMathSettings.constantB = 2;
+    controlled.nodes.push_back(value); controlled.nodes.push_back(arithmetic);
+    controlled.links.push_back({5,"valueOut",6,"imageA"});
+    controlled.links.push_back({6,"imageOut",3,"evIn"});
+    const auto controlPlan = RenderTiling::PlanGraphViewportRegions(controlled,96,64,request,48);
+    RequireViewport(controlPlan.valid && controlPlan.stages.count({5,"valueOut"}) &&
+        controlPlan.stages.count({6,"imageOut"}) && controlPlan.completePixels == plan.completePixels &&
+        controlPlan.regionalPixels == plan.regionalPixels && controlPlan.workingBytes == plan.workingBytes,
+        "Uniform Value/arithmetic controls were charged as image outputs or cropped textures");
+    auto reduced = graph;
+    RenderGraphNode field; field.nodeId = 5; field.kind = RenderGraphNodeKind::ImageToMask;
+    reduced.nodes.push_back(field); reduced.links.push_back({2,"imageOut",5,"imageIn"});
+    const auto fullFieldPlan = RenderTiling::PlanGraphViewport(reduced,96,64,48,request,{{5,"maskOut"}});
+    RenderGraphNode mean; mean.nodeId = 6; mean.kind = RenderGraphNodeKind::FieldMean;
+    reduced.nodes.push_back(mean); reduced.links.push_back({5,"maskOut",6,"fieldIn"});
+    reduced.links.push_back({6,"valueOut",3,"evIn"});
+    const auto reductionPlan = RenderTiling::PlanGraphViewportRegions(reduced,96,64,request,48);
+    RequireViewport(reductionPlan.valid && reductionPlan.stages.at({5,"maskOut"}).demand == WholeImageRegion(96,64) &&
+        reductionPlan.completePixels == fullFieldPlan.completePixels &&
+        reductionPlan.regionalPixels == fullFieldPlan.regionalPixels &&
+        reductionPlan.workingBytes == fullFieldPlan.workingBytes && reductionPlan.workingBytes > plan.workingBytes,
+        "Scalar reduction accounting omitted its complete field dependency or charged its value as a texture");
     auto scoped = graph; scoped.rawLayerScopeNodeId = 3; scoped.rawLayerScopeSocketId = "imageOut";
     const auto scopePlan = RenderTiling::PlanGraphViewportRegions(scoped,96,64,request,48);
     RequireViewport(scopePlan.stages.at({3,"imageOut"}).demand == WholeImageRegion(96,64) &&

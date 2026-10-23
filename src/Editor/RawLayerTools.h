@@ -10,9 +10,9 @@ namespace Stack::Editor {
 inline std::vector<const EditorNodeGraph::Node*> RawLayerToolNodes(const EditorNodeGraph::Graph& graph) {
     std::vector<const EditorNodeGraph::Node*> result;
     for (const auto& node : graph.GetNodes()) {
-        const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(node);
-        if (node.role == GraphModel::NodeRole::Ordinary && node.definitionResolved &&
-            definition && !definition->parameters.empty()) result.push_back(&node);
+        const auto definition = EditorNodeGraphDefinitions::ResolveNodeDefinition(graph,node);
+        if (node.role == GraphModel::NodeRole::Ordinary && definition &&
+            definition.ParameterCount() != 0) result.push_back(&node);
     }
     return result;
 }

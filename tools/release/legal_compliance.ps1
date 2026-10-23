@@ -150,6 +150,7 @@ function Get-SpdxLicenseExpression {
         "nlohmann-json" { return "MIT" }
         "stb" { return "MIT OR Unlicense" }
         "libraw" { return "LGPL-2.1-only" }
+        "libavoid" { return "LGPL-2.1-or-later" }
         default { return "NOASSERTION" }
     }
 }

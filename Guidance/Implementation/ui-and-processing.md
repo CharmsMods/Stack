@@ -19,7 +19,11 @@ Keep hover, focus, drawer state and animation timing with their presentation own
 
 Input descriptors and plotted histograms are derived UI data. Cache them within the document/node owner using the relevant graph, source, timeline and accepted-readback revisions plus display-domain settings. Uncommitted graph or timeline drafts require fresh descriptor evaluation; camera and floating-tool movement do not require rescanning unchanged image samples.
 
+Graph channel colors use `GraphOutputDescription` component origin and role. A modified channel keeps that identity while it still derives from one source component; independent spatial operands or different channels clear it. Uniform numeric coefficients do not introduce another image lineage. Neutral themes retain these semantic channel colors. Drawing reads the editor's revisioned output-description cache. Direct component sockets are authored `Node::channelOutputs` declarations managed by `NodeGraph/ChannelOutputs`; execution lowers them through the existing Channel Split operation and publishes the authored endpoint aliases. RAW technical-source declarations belong to `RawLayerStackState::sourceChannelOutputs`. Fold redundant splits only inside an explicit graph edit, preserving retained compound input contracts and the existing history/layout owners; do not scan for them during drawing.
+
 ## Connect new behavior to existing behavior
+
+Retained decompiled containers own their `compoundMembers`; rectangle overlap alone is not ownership. The shared membership helper handles explicit admission/departure, and measured bounds include nested containers. Packing transfers all owned operations, including effect-layer nodes, and exposes crossing output dependencies as compound ports. The Inputs gateway is a presentation of real typed endpoints, not another processing operation. Its binding cache follows graph ownership and structure revisions; displayed wire geometry and picking use the same entry/exit anchors. The RAW canvas omits the redundant layer Start while `RawProjectGraph` preserves and reconstructs the internal `CurrentImage` boundary on commit.
 
 For a new processing control, locate its parameter model, edit action, invalidation path, engine input and result publication. If the edit is meant to persist, include its saved representation and load path. If it supports undo or reset, check those operations too. Extend the existing semantic path instead of making preview, graph, queue and export interpret the same parameter differently.
 
@@ -51,6 +55,22 @@ a smaller budget. Resource or execution failures must remain errors, distinct fr
 evidence-based rejection of an unreliable match. Standalone finished outputs use the
 shared default [View Transform](../../src/Raw/ViewTransform.h); authored Stack edits
 can intentionally change the developed appearance.
+
+The shared `ProcessingRequest::alignmentProposals` contract accepts optional,
+content-addressed forward/reverse motion fields as experimental search seeds.
+Both hosts use the same RAW refinement, verification and confidence decisions;
+proposal values never supply output pixels or override rejection. Source hashes,
+model/preprocessing identity, geometry and flow hashes participate in cache identity.
+Normal requests omit these assets. The saved recipe's `aiAlignment` switch
+defaults to false in both hosts. When enabled, the shared engine builds bounded
+guides from prepared RAW captures and invokes the optional pinned SEA-RAFT
+package before native registration. Inference ends before native search/merge;
+the model supplies motion proposals only. The worker owns cancellation and the
+child lifetime. Model/runtime failures are explicit errors, not silent changes
+to the selected recipe. The package is optional and separate from the normal
+application payload; see [Building](../BUILDING.md). Never run package discovery
+or inference from frame drawing. Changing the switch uses normal recipe history,
+persistence and analysis invalidation.
 
 Capture combining uses the prepared-session [TemporalGpu](../../src/Raw/Bracketing/TemporalGpu.h)
 owner for double-precision sampling, uncertainty propagation and ordered temporal/detail

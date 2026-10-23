@@ -33,6 +33,9 @@ public:
     }
     void Begin(ProjectGraphState state) { if (!m_Current) m_Current = std::move(state); }
     bool HasBaseline() const { return m_Current.has_value(); }
+    // Reconcile a presentation-only restore with current accepted async state
+    // without dropping the redo entry created by AcceptRestore.
+    void RefreshCurrent(ProjectGraphState state) { m_Current=std::move(state); }
     std::shared_ptr<const std::vector<unsigned char>> RetainImageBytes(const std::string& key,
         const std::vector<unsigned char>& bytes) {
         if (bytes.empty()) return {};
@@ -44,12 +47,13 @@ public:
         }
         return retained;
     }
-    void Observe(ProjectGraphState state, bool gesture) {
+    void Observe(ProjectGraphState state, bool gesture, bool affectsPixels = true) {
         if (!m_Current) { Reset(std::move(state)); return; }
         if (gesture) {
-            if (!m_Gesture) m_Gesture = *m_Current;
+            if (!m_Gesture) {m_Gesture = *m_Current;m_GestureAffectsPixels=false;}
+            m_GestureAffectsPixels |= affectsPixels;
         } else if (m_Gesture) EndGesture();
-        else PushUndo(*m_Current);
+        else PushUndo(*m_Current,affectsPixels);
         m_Current = std::move(state); m_Redo.clear();
         PruneImageBytes();
     }
@@ -60,28 +64,34 @@ public:
         m_Current=std::move(state);m_Redo.clear();PruneImageBytes();
     }
     void EndGesture() {
-        if (m_Gesture) { PushUndo(std::move(*m_Gesture)); m_Gesture.reset(); }
+        if (m_Gesture) { PushUndo(std::move(*m_Gesture),m_GestureAffectsPixels); m_Gesture.reset(); }
     }
     bool CanUndo() const { return m_Gesture.has_value() || !m_Undo.empty(); }
     bool CanRedo() const { return !m_Redo.empty(); }
     bool GestureActive() const { return m_Gesture.has_value(); }
     const ProjectGraphState* CancelCandidate() const { return m_Gesture ? &*m_Gesture : nullptr; }
+    bool CancelAffectsPixels() const { return m_GestureAffectsPixels; }
     void AcceptCancel() { m_Current = std::move(m_Gesture); m_Gesture.reset(); }
     const ProjectGraphState* Candidate(bool redo) {
         EndGesture();
         const auto& stack = redo ? m_Redo : m_Undo;
-        return stack.empty() ? nullptr : &stack.back();
+        return stack.empty() ? nullptr : &stack.back().state;
+    }
+    bool CandidateAffectsPixels(bool redo) const {
+        const auto& stack = redo ? m_Redo : m_Undo;
+        return !stack.empty() && stack.back().affectsPixels;
     }
     void AcceptRestore(bool redo) {
         auto& from = redo ? m_Redo : m_Undo;
         auto& to = redo ? m_Undo : m_Redo;
-        to.push_back(std::move(*m_Current));
-        m_Current = std::move(from.back()); from.pop_back();
+        to.push_back({std::move(*m_Current),from.back().affectsPixels});
+        m_Current = std::move(from.back().state); from.pop_back();
     }
 private:
-    void PushUndo(ProjectGraphState state) {
+    struct Entry { ProjectGraphState state; bool affectsPixels; };
+    void PushUndo(ProjectGraphState state, bool affectsPixels = true) {
         if (m_Undo.size() == 64) m_Undo.pop_front();
-        m_Undo.push_back(std::move(state));
+        m_Undo.push_back({std::move(state),affectsPixels});
     }
     void PruneImageBytes() {
         for (auto entry=m_ImageBytes.begin();entry!=m_ImageBytes.end();)
@@ -89,7 +99,8 @@ private:
     }
     std::optional<ProjectGraphState> m_Current;
     std::optional<ProjectGraphState> m_Gesture;
-    std::deque<ProjectGraphState> m_Undo, m_Redo;
+    bool m_GestureAffectsPixels = false;
+    std::deque<Entry> m_Undo, m_Redo;
     std::unordered_map<std::string,std::weak_ptr<const std::vector<unsigned char>>> m_ImageBytes;
 };
 }

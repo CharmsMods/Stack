@@ -7,8 +7,16 @@
 using namespace Stack::Editor::RawLabInternal;
 
 bool EditorModule::ResetRawWorkspaceActiveTool(RawWorkspaceEditContext& context) {
-    if (const auto* editor = SelectedNodeEditor())
+    if (const auto* editor = SelectedNodeEditor()) {
+        if (editor->reset && !context.nodeDraft) {
+            const auto* node=SelectedEditingNode();
+            if (node && node->kind!=EditorNodeGraph::NodeKind::RawOperation) {
+                context.nodeDraft=*node;
+                if (node->kind==EditorNodeGraph::NodeKind::Layer) context.nodeSettings=node->layerParameters;
+            }
+        }
         return editor->reset ? editor->reset(*this,context) : false;
+    }
     switch (m_RawWorkspaceLabUi.activeTool) {
         case RawLabTool::Transform:
             context.recipe.cropRotation = {};

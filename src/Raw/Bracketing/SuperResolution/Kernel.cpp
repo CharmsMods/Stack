@@ -38,12 +38,14 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
     // Reject a capture's incomplete color footprint as a whole. Dropping only
     // clipped green taps while retaining red/blue sky taps reconstructs a
     // magenta edge. The same shoulder weight must apply to every color too.
-    float headroom=1;
+    float headroom=1;std::array<bool,3> usable{};
     for(int yy=cy-3;yy<=cy+3;++yy)for(int xx=cx-3;xx<=cx+3;++xx) {
         if(xx<f.left||yy<f.top||xx>=f.left+f.width||yy>=f.top+f.height)continue;
-        headroom=std::min(headroom,f.samples[std::size_t(yy-f.top)*f.width+xx-f.left].w);
+        const auto s=f.samples[std::size_t(yy-f.top)*f.width+xx-f.left];
+        if(s.w>=0)headroom=std::min(headroom,s.w);
+        if(s.w>0)usable[f.colors[((yy&1)<<1)|(xx&1)]]=true;
     }
-    if(headroom<=0)return;
+    if(headroom<=0||!usable[0]||!usable[1]||!usable[2])return;
     std::array<float,3> weights{},broadWeights{};
     for(int yy=cy-3;yy<=cy+3;++yy) for(int xx=cx-3;xx<=cx+3;++xx) {
         if(xx<f.left||yy<f.top||xx>=f.left+f.width||yy>=f.top+f.height)continue;
@@ -91,15 +93,14 @@ bool AccumulateCpu(Tile& t,const FrameRegion& f,const std::function<bool()>& can
     if(canceled){error="Canceled";return false;}
     return true;
 }
-ChannelResult Resolve(const PixelAccumulator& p,unsigned channel) {
-    const auto& n=p.narrow[channel];const auto& b=p.broad[channel];
-    if(!(b.weight>1e-12f))return {};
+namespace {
+float ResolveAlpha(const PixelAccumulator& p,float samplingConfidence) {
     // Use the same continuous coverage decision for all colors. Switching a
     // sparse color independently between kernels creates false-color contours.
     // Uniformly distributed samples have narrow/broad mass equal to the ratio
     // of Gaussian areas. A deficit signals missing sampling phases.
     const float area=1/std::sqrt(std::max(1e-12f,p.kernel.x*p.kernel.z-p.kernel.y*p.kernel.y));
-    float confidence=1;
+    float confidence=std::isfinite(samplingConfidence)?std::clamp(samplingConfidence,0.f,1.f):0;
     for(unsigned c=0;c<3;++c) {
         const auto& nc=p.narrow[c];
         // Compare areas using the same capture preference on both kernels.
@@ -108,11 +109,23 @@ ChannelResult Resolve(const PixelAccumulator& p,unsigned channel) {
         const float support=nc.weight*nc.weight/std::max(1e-30f,nc.frameWeightSquared);
         confidence=std::min({confidence,std::clamp((coverage-.2f)/.8f,0.f,1.f),std::clamp((support-1.f)/2.f,0.f,1.f)});
     }
-    const float alpha=confidence*confidence*(3-2*confidence);
+    return confidence*confidence*(3-2*confidence);
+}
+ChannelResult ResolveChannel(const PixelAccumulator& p,unsigned channel,float alpha) {
+    const auto& n=p.narrow[channel];const auto& b=p.broad[channel];
+    if(!(b.weight>1e-12f))return {};
     const float a=n.weight>1e-12f?alpha/n.weight:0,beta=(1-alpha)/b.weight;
     const float variance=a*a*n.noise+beta*beta*b.noise+2*a*beta*p.crossNoise[channel];
     const float frameSquared=a*a*n.frameWeightSquared+beta*beta*b.frameWeightSquared+2*a*beta*p.crossFrameWeight[channel];
     const float uncertainty=a*a*p.narrowUncertainty[channel]+beta*beta*p.broadUncertainty[channel]+2*a*beta*p.crossUncertainty[channel];
     return {a*n.value+beta*b.value,variance,1/std::max(1e-30f,frameSquared),true,uncertainty};
+}
+}
+ChannelResult Resolve(const PixelAccumulator& p,unsigned channel,float samplingConfidence) {
+    return ResolveChannel(p,channel,ResolveAlpha(p,samplingConfidence));
+}
+std::array<ChannelResult,3> ResolveChannels(const PixelAccumulator& p,float samplingConfidence) {
+    const float alpha=ResolveAlpha(p,samplingConfidence);
+    return {ResolveChannel(p,0,alpha),ResolveChannel(p,1,alpha),ResolveChannel(p,2,alpha)};
 }
 }

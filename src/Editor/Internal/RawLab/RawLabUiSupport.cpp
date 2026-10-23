@@ -1,4 +1,5 @@
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
+#include "Library/LibraryControls.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +7,7 @@
 namespace Stack::Editor::RawLabInternal {
 namespace {
 
-constexpr float kDrawerResponseSeconds = 0.11f;
+constexpr float kDrawerResponseSeconds = 0.055f;
 
 void PushBareButtonColors(bool active) {
     const ImVec4 transparent(0.0f, 0.0f, 0.0f, 0.0f);
@@ -34,7 +35,8 @@ float AnimateRawLabDrawerHeight(
     float current,
     float target,
     float deltaTimeSeconds) {
-    const float delta = std::clamp(deltaTimeSeconds, 0.0f, 0.05f);
+    if (current == target || Stack::LibraryUi::ReducedMotion()) return target;
+    const float delta = std::max(deltaTimeSeconds, 0.0f);
     const float response = 1.0f - std::exp(-delta / kDrawerResponseSeconds);
     const float next = current + (target - current) * response;
     return std::abs(next - target) <= 0.25f ? target : next;

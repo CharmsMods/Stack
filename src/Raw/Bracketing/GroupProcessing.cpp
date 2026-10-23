@@ -3,6 +3,7 @@
 #include "GroupTileStore.h"
 #include "LocalDetail.h"
 #include <algorithm>
+#include <chrono>
 
 namespace Raw::Bracketing {
 namespace {
@@ -11,12 +12,21 @@ bool MultipleInputs(const PreparedDataset& data) {
 }
 bool TemporalGroups(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
     std::vector<std::vector<Observation>>& groups,std::string& error) {
-    if(ReadGroupTile(request,data,tx,ty,groups)) return true;
+    const auto start=std::chrono::steady_clock::now();
+    const bool hit=ReadGroupTile(request,data,tx,ty,groups);
+    const auto read=std::chrono::steady_clock::now();
+    const auto seconds=[](auto a,auto b){return std::chrono::duration<double>(b-a).count();};
+    if(hit){data.groupMetrics.Add(0,0,seconds(start,read),true,{});return true;}
     Mfd::PreparedRawTile unused;
     if(!ReadTemporalGroups(request,data,tx,ty,groups,unused,error)) return false;
-    if(!CombineLocalDetail(request,data,tx,ty,groups,error))return false;
+    const auto temporal=std::chrono::steady_clock::now();LocalDetailStats patches;
+    if(!CombineLocalDetail(request,data,tx,ty,groups,error,&patches))return false;
+    const auto detail=std::chrono::steady_clock::now();
     CanonicalizeGroupTile(groups);
-    return WriteGroupTile(request,data,tx,ty,groups,error);
+    if(!WriteGroupTile(request,data,tx,ty,groups,error))return false;
+    data.groupMetrics.Add(seconds(read,temporal),seconds(temporal,detail),
+        seconds(start,read)+seconds(detail,std::chrono::steady_clock::now()),false,patches);
+    return true;
 }
 
 }

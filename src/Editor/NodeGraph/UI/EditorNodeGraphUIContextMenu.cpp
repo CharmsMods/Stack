@@ -2,6 +2,8 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
+#include "NodeMath/ChannelImageSemantics.h"
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Library/LibraryManager.h"
@@ -11,6 +13,7 @@
 #include "Utils/ImGuiExtras.h"
 #include "Utils/Utf8Text.h"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <functional>
 #include <utility>
@@ -72,6 +75,35 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(m_ContextNodeId);
         if (node) {
             ImGui::TextDisabled("%s", node->title.c_str());
+            const auto nodeSockets=editor->GetNodeGraph().GetSockets(*node,false);
+            const bool hasImageOutput=std::any_of(nodeSockets.begin(),nodeSockets.end(),[](const auto& socket) {
+                return socket.direction==EditorNodeGraph::SocketDirection::Output && socket.logicalType==Stack::NodeMath::LogicalValueType::ColorImage;
+            });
+            if(hasImageOutput && ImGui::BeginMenu("Channel outputs")) {
+                for(const auto& socket:nodeSockets) {
+                    if(socket.direction!=EditorNodeGraph::SocketDirection::Output ||
+                        socket.logicalType!=Stack::NodeMath::LogicalValueType::ColorImage)continue;
+                    const auto* described=editor->GetGraphOutputDescription(node->id,socket.id);
+                    const bool image=!described || described->descriptor.logicalType==Stack::NodeMath::LogicalValueType::ColorImage;
+                    ImGui::PushID(socket.id.c_str());
+                    for(const auto& entry:std::initializer_list<std::pair<const char*,const char*>>{{"r","Red"},{"g","Green"},{"b","Blue"},{"a","Alpha"}}) {
+                        bool available=image;
+                        if(described && described->descriptor.presentImageComponents.state==Stack::NodeMath::KnowledgeState::Known) {
+                            const auto component=Stack::NodeMath::ParseImageComponentToken(std::string(1,static_cast<char>(std::toupper(entry.first[0]))));
+                            available &= component && Stack::NodeMath::HasImageComponent(described->descriptor.presentImageComponents.value,*component);
+                        }
+                        const auto id=EditorNodeGraph::ChannelOutputId(socket.id,entry.first);
+                        const bool exists=editor->GetNodeGraph().FindSocket(node->id,id,nullptr);
+                        const std::string label=socket.label+" / "+entry.second;
+                        if(ImGui::MenuItem(label.c_str(),nullptr,exists,available && !exists))
+                            pendingNodeAction=[this,editor,nodeId=node->id,base=socket.id,component=std::string(entry.first)] {
+                                ExposeChannelSocket(editor,nodeId,base,component);
+                            };
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndMenu();
+            }
             const bool protectedNode = node->role == Stack::GraphModel::NodeRole::OriginalImage ||
                 node->role == Stack::GraphModel::NodeRole::CurrentImage || node->role == Stack::GraphModel::NodeRole::LayerResult;
             const bool canDeleteNode = !protectedNode && (node->kind != EditorNodeGraph::NodeKind::Output ||
@@ -236,6 +268,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     pendingNodeAction = [editor, nodeId = node->id] { editor->ToggleOutputNodeEnabled(nodeId); };
                 }
             }
+            if (node->kind == EditorNodeGraph::NodeKind::ChannelSplit) {
+                if (ImGui::MenuItem("Missing alpha is opaque",nullptr,node->splitMissingAlphaIsOpaque)) {
+                    node->splitMissingAlphaIsOpaque=!node->splitMissingAlphaIsOpaque;
+                    editor->MarkGraphEdited(node->id);
+                }
+            }
             if (node->kind == EditorNodeGraph::NodeKind::Layer) {
                 if (ImGui::MenuItem("Split")) {
                     pendingNodeAction = [editor, nodeId = node->id] { editor->SplitLayerNodeIntoChannels(nodeId); };
@@ -263,6 +301,31 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     pendingNodeAction = [editor] { editor->OpenRawLayerMaskGraph(Stack::Project::kRawBackgroundId); };
                 }
             }
+            for (const auto& group : editor->GetNodeGraph().GetGroups()) {
+                if (!group.compoundBoundary.is_object() ||
+                    std::find(group.compoundMembers.begin(),group.compoundMembers.end(),node->id)==group.compoundMembers.end()) continue;
+                const std::string label="Repack edited "+group.title+"##"+std::to_string(group.id);
+                if (ImGui::MenuItem(label.c_str())) {
+                    const int groupId=group.id;
+                    pendingNodeAction=[editor,groupId] {
+                        std::string error;
+                        if(!editor->RepackCompoundGroup(groupId,&error))
+                            PostNodeGraphContextNotification(editor,UiNotificationSeverity::Error,error,"compound-repack");
+                    };
+                }
+            }
+            const auto decomposition=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(editor->GetNodeGraph(),*node);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Decompile one level",nullptr,false,decomposition.canDecompile)) {
+                const int nodeId=node->id;
+                pendingNodeAction=[this,editor,nodeId] {
+                    std::string error;
+                    if (!DecompileNode(editor,nodeId,&error))
+                        PostNodeGraphContextNotification(editor,UiNotificationSeverity::Error,error,"node-decompile");
+                };
+            }
+            if (!decomposition.canDecompile && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s",decomposition.reason.c_str());
             if (node->kind == EditorNodeGraph::NodeKind::Compound) {
                 const int compoundNodeId = node->id;
                 ImGui::Separator();
@@ -273,17 +336,10 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                             error, "compound-make-unique");
                     }
                 }
-                if (ImGui::MenuItem("Unpack")) {
-                    std::string error;
-                    if (!editor->UnpackCompoundNode(compoundNodeId, &error)) {
-                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
-                            error, "compound-unpack");
-                    }
-                }
                 if (ImGui::MenuItem("Edit As Unique Graph")) {
                     std::string error;
                     if (!editor->MakeCompoundNodeUnique(compoundNodeId, &error) ||
-                        !editor->UnpackCompoundNode(compoundNodeId, &error)) {
+                        !DecompileNode(editor,compoundNodeId, &error)) {
                         PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
                             error, "compound-edit-unique");
                     }
@@ -295,6 +351,19 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                             error, "compound-update");
                     }
                 }
+            }
+        }
+        ImGui::EndPopup();
+    }
+    else if (contextMenuOpen && m_ContextTarget == ContextTarget::Group) {
+        if (const auto* group = editor->GetNodeGraph().FindGroup(m_ContextGroupId)) {
+            ImGui::TextDisabled("%s", group->title.c_str());
+            if (group->compoundBoundary.is_object() && ImGui::MenuItem("Recompile")) {
+                pendingNodeAction = [editor, groupId = group->id] {
+                    std::string error;
+                    if (!editor->RepackCompoundGroup(groupId, &error))
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error, error, "compound-repack");
+                };
             }
         }
         ImGui::EndPopup();

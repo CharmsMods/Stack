@@ -7,6 +7,17 @@
 
 namespace Stack::Renderer::GraphExecution {
 
+bool IsUniformRenderSocket(const GraphExecutionContext& context, int nodeId, std::string_view socketId) {
+    const auto found = context.nodes.find(nodeId);
+    if (found == context.nodes.end() || !found->second) return false;
+    const auto& node = *found->second;
+    return (node.kind == RenderGraphNodeKind::Value || node.kind == RenderGraphNodeKind::FieldMean)
+        ? socketId == EditorNodeGraph::kValueOutputSocketId
+        : node.kind == RenderGraphNodeKind::DataMath &&
+            node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+            socketId == EditorNodeGraph::kImageOutputSocketId;
+}
+
 std::vector<DataMathInputLinkInfo> CollectDataMathAverageInputs(
     const GraphExecutionContext& executionContext,
     int nodeId) {
@@ -67,6 +78,10 @@ bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nod
             plan.result = true;
             return plan;
         }
+        if (IsUniformRenderSocket(executionContext, currentNodeId, currentSocketId)) {
+            plan.result = true;
+            return plan;
+        }
 
         const RenderGraphNode& node = *nodeIt->second;
         const auto requireInput = [&](std::string_view inputSocketId) {
@@ -110,6 +125,7 @@ bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nod
                 }
                 break;
             case RenderGraphNodeKind::DataMath:
+                if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel) {plan.result=true;break;}
                 if (currentSocketId != EditorNodeGraph::kImageOutputSocketId) {
                     break;
                 }

@@ -10,5 +10,9 @@ bool SampleAlignmentProxy(
     const PreparedSource& source,
     Mfd::RawCoordinate referenceRaw,
     double& value);
+// Calibration keeps channel agreement observable instead of reducing the
+// measurements to luminance before estimating an exposure ratio.
+bool SampleAlignmentProxyColor(const PreparedSource&,Mfd::RawCoordinate,
+    double& luminance,std::array<double,3>& color);
 
 } // namespace Raw::Bracketing

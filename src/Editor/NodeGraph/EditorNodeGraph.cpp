@@ -1,5 +1,6 @@
 #include "Editor/LayerRegistry.h"
 #include "EditorNodeGraph.h"
+#include "ChannelOutputs.h"
 #include "EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
@@ -586,6 +587,7 @@ Node* Graph::AddCompoundNode(
     Stack::NodeMath::ResolveCompoundInstance(node.compound.instance, m_CompoundDefinitions);
     if (const Stack::NodeMath::CompoundDefinition* resolved = FindCompoundDefinition(definition)) {
         node.title = resolved->label;
+        node.notes = resolved->description;
         node.definitionId = resolved->identity.id;
         node.definitionVersion = Stack::NodeMath::ToString(resolved->identity.version);
         node.definitionHash = resolved->identity.contentHash;
@@ -742,6 +744,8 @@ void Graph::RemoveLayerNode(int layerIndex) {
         m_Links.end());
 
     for (int id : removedNodeIds) {
+        for(auto& group:m_Groups)group.compoundMembers.erase(
+            std::remove(group.compoundMembers.begin(),group.compoundMembers.end(),id),group.compoundMembers.end());
         m_SelectedNodeIds.erase(
             std::remove(m_SelectedNodeIds.begin(), m_SelectedNodeIds.end(), id),
             m_SelectedNodeIds.end());
@@ -883,6 +887,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             output.label = "Result";
             sockets.push_back(std::move(output));
         }
+        for (const auto& output : node.channelOutputs) sockets.push_back(ChannelOutputSocket(node.id,output));
         for (SocketDefinition& socket : sockets) {
             SocketPresentation::NormalizeSocketDefinition(node.kind, socket);
         }
@@ -896,9 +901,8 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         }),sockets.end());
         return sockets;
     };
-    if (!node.rawLayerOwnerId.empty() &&
-        (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
-         node.role == Stack::GraphModel::NodeRole::LayerResult)) {
+    if (node.role == Stack::GraphModel::NodeRole::LayerResult ||
+        (!node.rawLayerOwnerId.empty() && node.role == Stack::GraphModel::NodeRole::CurrentImage)) {
         return finalize({
             {kImageInputSocketId, node.id, SocketDirection::Input, SocketType::Image, "Image", false, true},
             {kImageOutputSocketId, node.id, SocketDirection::Output, SocketType::Image, "Image", false, true}});
@@ -966,6 +970,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             }
         };
         for (const Stack::NodeMath::CompoundPortDefinition& port : node.compound.instance.interfaceSnapshot) {
+            if (visibleOnly && port.advanced) continue;
             sockets.push_back({
                 port.id,
                 node.id,
@@ -974,7 +979,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
                 socketType(port.logicalType),
                 port.label,
                 port.optional,
-                true
+                !port.advanced
             });
             sockets.back().logicalType = port.logicalType;
         }
@@ -1045,6 +1050,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         });
 
         const bool uniformValues = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values;
+        const bool channelValues = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel;
         const bool averageMode = IsDataMathAverageMode(node.dataMathMode);
         const bool scalarAverageMode = node.dataMathMode == DataMathMode::Average;
         const bool imageAverageMode = node.dataMathMode == DataMathMode::ImageAverage;
@@ -1064,9 +1070,9 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             add(
                 DataMathInputSocketId(inputIndex),
                 SocketDirection::Input,
-                uniformValues ? SocketType::Scalar : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image),
+                uniformValues ? SocketType::Scalar : (channelValues ? SocketType::Channel : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image)),
                 scalarAverageMode ? ScalarInputSocketLabel(inputIndex) : DataMathInputSocketLabel(inputIndex),
-                inputIndex != 0,
+                uniformValues || inputIndex != 0,
                 true);
         }
 
@@ -1089,7 +1095,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
                 true,
                 revealMaskAwareSockets);
         }
-        add(kImageOutputSocketId, SocketDirection::Output, uniformValues ? SocketType::Scalar : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image), uniformValues ? "Value" : (scalarAverageMode ? "Scalar Out" : "Data Out"), false, true);
+        add(kImageOutputSocketId, SocketDirection::Output, uniformValues ? SocketType::Scalar : (channelValues ? SocketType::Channel : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image)), uniformValues ? "Value" : (scalarAverageMode ? "Scalar Out" : "Data Out"), false, true);
         return finalize(std::move(sockets));
     }
 

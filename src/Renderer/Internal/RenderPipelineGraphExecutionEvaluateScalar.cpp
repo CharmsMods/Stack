@@ -71,6 +71,10 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
             std::string error;
             if (!Stack::NodeMath::EvaluateUniformArithmetic(node.dataMathMode, node.dataMathSettings, inputs, value, error))
                 return finishFailure(std::move(error));
+            if (!error.empty()) {
+                pipeline.m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
+                pipeline.m_LastGraphExecutionStats.lastReductionFailure = error;
+            }
             scalarCache[key] = value;
             visitingScalars.erase(key);
             return true;

@@ -28,7 +28,9 @@ void LibraryModule::RenderPreviewPopup(
     }
 
     const float previewProgressTarget = (m_PreviewProject && !m_ProjectPreviewClosing) ? 1.0f : 0.0f;
-    m_ProjectPreviewTransition = ImGuiExtras::AnimateTowards(m_ProjectPreviewTransition, previewProgressTarget, ImGui::GetIO().DeltaTime, kPreviewMotionSpeed);
+    const bool reducedMotion = Stack::LibraryUi::ReducedMotion();
+    m_ProjectPreviewTransition = reducedMotion ? previewProgressTarget :
+        ImGuiExtras::AnimateTowards(m_ProjectPreviewTransition, previewProgressTarget, ImGui::GetIO().DeltaTime, kPreviewMotionSpeed);
     const float previewAlpha = ImGuiExtras::EaseOutCubic(m_ProjectPreviewTransition);
     const float closeProgress = std::clamp(1.0f - m_ProjectPreviewTransition, 0.0f, 1.0f);
     const float delayedContentClose = std::clamp((closeProgress - 0.34f) / 0.66f, 0.0f, 1.0f);
@@ -53,7 +55,7 @@ void LibraryModule::RenderPreviewPopup(
         return;
     }
 
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGuiViewport* viewport = ImGui::GetWindowViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -84,14 +86,14 @@ void LibraryModule::RenderPreviewPopup(
         std::min(viewport->Size.y * 0.70f, 820.0f));
     const ImVec2 contentSize(baseContentSize.x * contentScale, baseContentSize.y * contentScale);
     const float detailsCollapsedWidth = 52.0f;
-    const float detailsExpandedWidth = 348.0f;
+    const float detailsExpandedWidth = std::min(348.0f, std::max(detailsCollapsedWidth, contentSize.x * 0.44f));
     const float detailsWidth =
         detailsCollapsedWidth + ((detailsExpandedWidth - detailsCollapsedWidth) * m_ProjectPreviewMenuHover);
     const float gap = 18.0f;
     const ImVec2 contentMin(
         viewport->Pos.x + (viewport->Size.x - contentSize.x) * 0.5f,
         viewport->Pos.y + (viewport->Size.y - contentSize.y) * 0.5f + ((1.0f - contentProgress) * 14.0f) + (closeContentAmount * 8.0f));
-    const ImVec2 previewArea(std::max(360.0f, contentSize.x - detailsWidth - gap), contentSize.y);
+    const ImVec2 previewArea(std::max(1.0f, contentSize.x - detailsWidth - gap), contentSize.y);
     const ImVec2 sideArea(detailsWidth, contentSize.y);
 
     const ImVec2 fittedImageSize = FitImageToBounds(
@@ -112,12 +114,17 @@ void LibraryModule::RenderPreviewPopup(
     const bool canCloseFromBackdrop = contentProgress >= 0.92f;
     const bool clickedBackdrop =
         canCloseFromBackdrop &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !m_ProjectPreviewClosing &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !finalImageRect.Contains(ImGui::GetIO().MousePos) &&
         !detailsRect.Contains(ImGui::GetIO().MousePos);
-    if (clickedBackdrop) {
+    const bool escapePressed = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (clickedBackdrop || escapePressed) {
         m_ProjectPreviewClosing = true;
     }
 
@@ -170,13 +177,13 @@ void LibraryModule::RenderPreviewPopup(
     ImGui::SetCursorPos(ImVec2(
         contentMin.x + previewArea.x + gap - viewport->Pos.x,
         contentMin.y - viewport->Pos.y));
-    ImGui::BeginChild("LibraryPreviewDetails", sideArea, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild("LibraryPreviewDetails", sideArea, false);
     ImGui::GetWindowDrawList()->AddRectFilled(
         ImGui::GetWindowPos(),
         ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y),
         IM_COL32(255, 255, 255, 10),
         18.0f);
-    m_ProjectPreviewMenuHover = ImGuiExtras::AnimateTowards(
+    m_ProjectPreviewMenuHover = reducedMotion ? 1.0f : ImGuiExtras::AnimateTowards(
         m_ProjectPreviewMenuHover,
         1.0f,
         ImGui::GetIO().DeltaTime,
@@ -322,7 +329,9 @@ void LibraryModule::RenderAssetPreviewPopup(
     }
 
     const float previewProgressTarget = (m_PreviewAsset && !m_AssetPreviewClosing) ? 1.0f : 0.0f;
-    m_AssetPreviewTransition = ImGuiExtras::AnimateTowards(m_AssetPreviewTransition, previewProgressTarget, ImGui::GetIO().DeltaTime, kPreviewMotionSpeed);
+    const bool reducedMotion = Stack::LibraryUi::ReducedMotion();
+    m_AssetPreviewTransition = reducedMotion ? previewProgressTarget :
+        ImGuiExtras::AnimateTowards(m_AssetPreviewTransition, previewProgressTarget, ImGui::GetIO().DeltaTime, kPreviewMotionSpeed);
     const float previewAlpha = ImGuiExtras::EaseOutCubic(m_AssetPreviewTransition);
     const float closeProgress = std::clamp(1.0f - m_AssetPreviewTransition, 0.0f, 1.0f);
     const float delayedContentClose = std::clamp((closeProgress - 0.34f) / 0.66f, 0.0f, 1.0f);
@@ -342,7 +351,7 @@ void LibraryModule::RenderAssetPreviewPopup(
         return;
     }
 
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGuiViewport* viewport = ImGui::GetWindowViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -373,14 +382,14 @@ void LibraryModule::RenderAssetPreviewPopup(
         std::min(viewport->Size.y * 0.70f, 820.0f));
     const ImVec2 contentSize(baseContentSize.x * contentScale, baseContentSize.y * contentScale);
     const float detailsCollapsedWidth = 52.0f;
-    const float detailsExpandedWidth = 348.0f;
+    const float detailsExpandedWidth = std::min(348.0f, std::max(detailsCollapsedWidth, contentSize.x * 0.44f));
     const float detailsWidth =
         detailsCollapsedWidth + ((detailsExpandedWidth - detailsCollapsedWidth) * m_AssetPreviewMenuHover);
     const float gap = 18.0f;
     const ImVec2 contentMin(
         viewport->Pos.x + (viewport->Size.x - contentSize.x) * 0.5f,
         viewport->Pos.y + (viewport->Size.y - contentSize.y) * 0.5f + ((1.0f - contentProgress) * 14.0f) + (closeContentAmount * 8.0f));
-    const ImVec2 previewArea(std::max(360.0f, contentSize.x - detailsWidth - gap), contentSize.y);
+    const ImVec2 previewArea(std::max(1.0f, contentSize.x - detailsWidth - gap), contentSize.y);
     const ImVec2 sideArea(detailsWidth, contentSize.y);
 
     const ImVec2 fittedImageSize = FitImageToBounds(
@@ -401,12 +410,17 @@ void LibraryModule::RenderAssetPreviewPopup(
     const bool canCloseFromBackdrop = contentProgress >= 0.92f;
     const bool clickedBackdrop =
         canCloseFromBackdrop &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !m_AssetPreviewClosing &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !finalImageRect.Contains(ImGui::GetIO().MousePos) &&
         !detailsRect.Contains(ImGui::GetIO().MousePos);
-    if (clickedBackdrop) {
+    const bool escapePressed = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (clickedBackdrop || escapePressed) {
         m_AssetPreviewClosing = true;
     }
 
@@ -456,7 +470,7 @@ void LibraryModule::RenderAssetPreviewPopup(
     ImGui::SetCursorPos(ImVec2(
         contentMin.x + previewArea.x + gap - viewport->Pos.x,
         contentMin.y - viewport->Pos.y));
-    ImGui::BeginChild("LibraryAssetDetails", sideArea, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild("LibraryAssetDetails", sideArea, false);
     ImGui::GetWindowDrawList()->AddRectFilled(
         ImGui::GetWindowPos(),
         ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y),
@@ -464,7 +478,7 @@ void LibraryModule::RenderAssetPreviewPopup(
         18.0f);
     const bool anyPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
     const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || anyPopupOpen;
-    m_AssetPreviewMenuHover = ImGuiExtras::AnimateTowards(
+    m_AssetPreviewMenuHover = reducedMotion ? (detailsHovered ? 1.0f : 0.0f) : ImGuiExtras::AnimateTowards(
         m_AssetPreviewMenuHover,
         detailsHovered ? 1.0f : 0.0f,
         ImGui::GetIO().DeltaTime,

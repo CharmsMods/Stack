@@ -225,6 +225,11 @@ bool EditorModule::HasActiveRawWorkspacePresentationForValidation() const {
         GetActiveRawWorkspacePreviewIdentity());
 }
 
+bool EditorModule::HasCurrentRawWorkspacePresentation() const {
+    return HasRawWorkspaceCurrentPresentationForSource(
+        GetActiveRawWorkspacePreviewIdentity());
+}
+
 bool EditorModule::TryGetActiveRawWorkspacePresentationTexture(
     unsigned int& outTexture,
     int& outWidth,
@@ -615,9 +620,21 @@ bool EditorModule::HasRawWorkspaceCurrentPresentationForSource(const std::string
                    m_Project->snapshot->mfdInputRevision);
         if (!adoptedCurrent) return false;
     }
-    return HasRawWorkspaceLivePreviewForSource(sourceKey) &&
-        m_ViewportOutputRenderGeneration != 0 &&
-        m_ViewportOutputRenderGeneration == m_LatestRawPresentationGeneration && !m_RenderDirty;
+    if (!HasRawWorkspaceLivePreviewForSource(sourceKey) ||
+        m_ViewportOutputRenderGeneration == 0 ||
+        m_ViewportOutputRenderGeneration != m_LatestRawPresentationGeneration ||
+        m_RenderDirty || m_LastSubmittedRenderRevision != m_RenderRevision) return false;
+    if (UsesGraphViewportPreview()) {
+        const auto& state=ActiveViewportPreviewState();
+        // The submission path owns the content fingerprint. Read its cached
+        // accepted/submitted identities rather than rebuilding the graph just
+        // to distinguish a retained image from the current edit.
+        return state.acceptedGeneration == m_ViewportOutputRenderGeneration &&
+            state.acceptedContentIdentity != 0 &&
+            state.acceptedContentIdentity == state.contentIdentity &&
+            Stack::GraphRendering::SameContext(state.acceptedTag,state.submittedTag);
+    }
+    return true;
 }
 
 bool EditorModule::HasRawWorkspaceFullResolutionPreviewForSource(const std::string& sourceKey) const {

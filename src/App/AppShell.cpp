@@ -3388,7 +3388,9 @@ float AppShell::ConsumeRootTabBodyFadeAlpha(int* outRenderTabId) {
         const float t = std::clamp(value, 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
     };
-    const double elapsed = ImGui::GetTime() - m_RootTabBodyFadeStartedAt;
+    const double elapsed = Stack::Notifications::SystemReducedMotion()
+        ? kRootTabBodyFadeOutSeconds + kRootTabBodyFadeInSeconds
+        : ImGui::GetTime() - m_RootTabBodyFadeStartedAt;
     if (elapsed < kRootTabBodyFadeOutSeconds) {
         if (outRenderTabId) {
             *outRenderTabId = m_RootTabBodyFadeFromTab;

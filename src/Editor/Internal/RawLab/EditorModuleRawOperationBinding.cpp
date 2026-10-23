@@ -5,6 +5,7 @@
 #include "Project/RawLayerStack.h"
 #include "Project/RawNodeEditing.h"
 #include "Project/GraphImageContracts.h"
+#include "Project/GraphSnapshotLookup.h"
 #include "Raw/RawGraphParameters.h"
 
 using namespace Stack::Project;
@@ -32,15 +33,41 @@ void EditorModule::BindNodeInputContext(RawWorkspaceEditContext& context) const 
     if (cache.descriptorValid && !transientDraft && cache.descriptorKey==key) {
         context.inputDescriptor=cache.descriptor;
     } else {
-        const auto snapshot=BuildGraphSnapshot();
-        const auto compiled=std::find_if(snapshot.nodes.begin(),snapshot.nodes.end(),[&](const auto& node) {
-            return node.authoredNodeUuid==context.nodeTarget->nodeUuid && node.authoredGraphId==context.nodeTarget->layerId;
-        });
-        if (compiled!=snapshot.nodes.end()) {
-            const auto input=std::find_if(snapshot.links.begin(),snapshot.links.end(),[&](const auto& link) {
-                return link.toNodeId==compiled->nodeId && link.toSocketId=="imageIn";
+        const auto& target=*context.nodeTarget;
+        const EditorNodeGraph::Graph* owner=nullptr;
+        if (target.layerId==kProjectGraphId) owner=&m_Project->graph;
+        else if (const auto* layer=FindRawAdjustmentLayer(m_Project->rawLayers.State(),target.layerId)) owner=&layer->graph;
+        std::optional<Stack::GraphModel::Endpoint> incoming;
+        if (owner) {
+            const auto authored=std::find_if(owner->GetNodes().begin(),owner->GetNodes().end(),[&](const auto& node) {
+                return node.instanceUuid==target.nodeUuid;
             });
-            if (input!=snapshot.links.end()) context.inputDescriptor=input->semanticDescriptor;
+            if (authored!=owner->GetNodes().end()) {
+                const auto inputSocket=owner->DefaultInputSocket(*authored);
+                if (const auto* link=owner->FindAnyInputLink(authored->id,inputSocket)) {
+                    if (const auto* producer=owner->FindNode(link->fromNodeId))
+                        incoming=Stack::GraphModel::Endpoint{target.layerId,producer->instanceUuid,link->fromSocketId};
+                }
+            }
+        }
+        // Packed nodes may disappear during lowering and expose a public input
+        // whose name differs from the executable node's imageIn. Resolve the
+        // authored producer endpoint once on invalidation, through the same
+        // aliases used by View and inspection.
+        if (incoming) {
+            const auto snapshot=BuildGraphSnapshot();
+            if (const auto producer=ResolveGraphSnapshotOutput(snapshot,*incoming)) {
+                const auto link=std::find_if(snapshot.links.begin(),snapshot.links.end(),[&](const auto& candidate) {
+                    return candidate.fromNodeId==producer->nodeId && candidate.fromSocketId==producer->socketId;
+                });
+                if (link!=snapshot.links.end()) context.inputDescriptor=link->semanticDescriptor;
+                else {
+                    const auto node=std::find_if(snapshot.nodes.begin(),snapshot.nodes.end(),[&](const auto& candidate) {
+                        return candidate.nodeId==producer->nodeId;
+                    });
+                    if (node!=snapshot.nodes.end()) context.inputDescriptor=node->semanticDescriptor;
+                }
+            }
         }
         cache.descriptorKey=key;cache.descriptor=context.inputDescriptor;
         cache.descriptorValid=!transientDraft;
@@ -98,9 +125,12 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
             // analysis to copy/prepare while the ordinary View is submitted.
             return;
         }
-        if (node->kind != EditorNodeGraph::NodeKind::RawOperation) context.nodeDraft = *node;
-        if (node->kind == EditorNodeGraph::NodeKind::Layer)
-            context.nodeSettings = node->layerParameters;
+        const auto& editor=Stack::Editor::FindNodeEditor(*node);
+        const bool editsNodeDraft=editor.primary || editor.settings || editor.overlay;
+        if (node->kind!=EditorNodeGraph::NodeKind::RawOperation && editsNodeDraft) {
+            context.nodeDraft=*node;
+            if (node->kind==EditorNodeGraph::NodeKind::Layer) context.nodeSettings=node->layerParameters;
+        }
         if (node->kind == EditorNodeGraph::NodeKind::RawOperation)
             context.recipe = m_RawOperationRecipeCache.Read(node->rawOperation,
                 node->instanceUuid, GetProjectDocumentId(), m_Project->editRevision);
@@ -127,7 +157,9 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
             if(input) context.inputs.emplace(link.toSocketId,*input);
         }
         const auto& editor = Stack::Editor::FindNodeEditor(*node);
-        const bool editsNodeDraft = editor.primary || editor.settings || editor.reset || editor.overlay;
+        // A reset-only fallback prepares its draft when Reset is pressed,
+        // rather than copying an embedded recipe instance on every draw.
+        const bool editsNodeDraft = editor.primary || editor.settings || editor.overlay;
         if(node->kind!=EditorNodeGraph::NodeKind::RawOperation && editsNodeDraft) {
             context.nodeDraft=*node;
             if(node->kind==EditorNodeGraph::NodeKind::Layer)

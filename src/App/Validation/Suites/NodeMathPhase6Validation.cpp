@@ -16,6 +16,7 @@
 #include "Utils/SharedPixelBuffer.h"
 
 #include <GLFW/glfw3.h>
+#include <imgui.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1137,6 +1138,13 @@ bool ValidateNodeMathPhase6Integration(bool calibrationOnly, bool transactionsOn
         glfwTerminate();
         return false;
     }
+    // Project commands inspect gesture state even without submitting widgets.
+    // Keep their UI context alive across both standalone transaction checks.
+    struct TransactionUiScope {
+        ImGuiContext* owned = nullptr;
+        ~TransactionUiScope() { if (owned) ImGui::DestroyContext(owned); }
+    } transactionUi;
+    if (transactionsOnly && !ImGui::GetCurrentContext()) transactionUi.owned=ImGui::CreateContext();
     if (transactionsOnly) ValidateProjectGraphSnapshotBuilder();
     bool result = false;
     if (framingOnly) {

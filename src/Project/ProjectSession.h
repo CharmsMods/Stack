@@ -24,6 +24,8 @@ class LayerBase;
 
 namespace Stack::Project {
 
+struct GraphSnapshotCache;
+
 struct RawInteractionDraft {
     std::string sourceKey;
     RawRecipe::RawSourceReference source;
@@ -65,6 +67,8 @@ public:
     std::shared_ptr<const Raw::RawImageData> singleRawSource;
     RawRecipe::RawDevelopmentRecipe rawRecipe;
     RawLayerStackDocument rawLayers;
+    // Derived compilation only; never serialized or copied into authored history.
+    mutable std::unique_ptr<GraphSnapshotCache> compiledGraphCache;
     // Per-project presentation state, excluded from authored processing and persistence.
     std::unordered_map<std::string, std::string> rawOperationSelection;
     std::optional<NodeEditTarget> nodeEditor;

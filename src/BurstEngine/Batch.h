@@ -8,6 +8,7 @@ struct BatchOptions {
     std::vector<Output::Format> formats{Output::Format::Dng};
     OutputLocation location=OutputLocation::NewFolder;
     bool preferGpuCombining=true;
+    bool aiAlignment=false;
 };
 struct BatchProgress {
     std::size_t set=0, total=0, outputs=0;

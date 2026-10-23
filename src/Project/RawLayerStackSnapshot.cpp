@@ -1,6 +1,9 @@
 #include "Project/RawLayerStackSnapshot.h"
+#include "Project/RawProjectGraph.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Project/GraphSnapshotBuilder.h"
+#include "Project/GraphSnapshotLookup.h"
 #include "Project/GraphImageContracts.h"
 #include "NodeMath/DescriptorSerialization.h"
 
@@ -25,13 +28,18 @@ Stack::NodeMath::ValueDescriptor RawLayerSceneDescriptor(Raw::RawWorkingSpace sp
         space == Raw::RawWorkingSpace::LinearRec2020D65 ? "rec2020-d65" : "srgb-d65", {}, ColorRelation::Standard});
     descriptor.transfer = SemanticField<TransferDescriptor>::Known({TransferKind::Linear, 0.0, {}});
     descriptor.reference = SemanticField<ReferenceState>::Known(ReferenceState::Scene);
-    descriptor.alpha = SemanticField<AlphaMode>::Known(AlphaMode::Opaque);
+    descriptor.presentImageComponents = SemanticField<ImageComponentSet>::Known(
+        MakeImageComponentSet({ImageComponent::Red,ImageComponent::Green,ImageComponent::Blue,ImageComponent::Alpha}));
+    descriptor.channels = SemanticField<ChannelDescriptor>::Known(
+        MakeImageChannelDescriptor(descriptor.presentImageComponents.value));
+    descriptor.alpha = SemanticField<AlphaMode>::Known(AlphaMode::Straight);
     descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float32);
     return descriptor;
 }
 
 bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState& state,
-    int backgroundNodeId, std::uint64_t revision, std::string& error, int frame, int duration, int framesPerSecond, const EditorNodeGraph::Graph* composition) {
+    int backgroundNodeId, std::uint64_t revision, std::string& error, int frame, int duration, int framesPerSecond,
+    const EditorNodeGraph::Graph* composition, EditorNodeGraph::GraphOutputDescriptions* outputDescriptions) {
     if (!ValidateRawLayerStack(state, error, composition, backgroundNodeId)) return false;
     auto candidate = snapshot;
     const auto backgroundIt = std::find_if(candidate.nodes.begin(), candidate.nodes.end(),
@@ -100,10 +108,11 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             const RawAdjustmentLayer* layer;
             RenderGraphSnapshot snapshot;
             std::unordered_map<int, int> ids;
-            int incoming = 0;
+            Socket incoming;
             int result = 0;
         };
         std::vector<LayerCapture> captures;
+        EditorNodeGraph::GraphOutputDescriptions layerDescriptions;
         std::unordered_set<int> typedAliases;
         std::unordered_map<std::string, Socket> endpoints;
         const auto endpointKey = [](const GraphModel::Endpoint& endpoint) {
@@ -111,6 +120,19 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
         };
         endpoints[endpointKey(RawPreparedSourceEndpoint())] = {base};
         endpoints[endpointKey({kRawPreparedSourceGraph,"original","imageOut"})] = {original};
+        std::unordered_map<bool,int> sourceExtractors;
+        for(const auto& output:state.sourceChannelOutputs) {
+            auto found=sourceExtractors.find(output.missingAlphaIsOpaque);
+            if(found==sourceExtractors.end()) {
+                RenderGraphNode extractor;extractor.nodeId=stableAllocate(output.missingAlphaIsOpaque?"raw/source-components/opaque":"raw/source-components/exact");
+                extractor.kind=RenderGraphNodeKind::ChannelSplit;extractor.splitMissingAlphaIsOpaque=output.missingAlphaIsOpaque;
+                const int id=extractor.nodeId;addNode(std::move(extractor));link({base},id,"imageIn");
+                found=sourceExtractors.emplace(output.missingAlphaIsOpaque,id).first;
+            }
+            auto endpoint=RawPreparedSourceEndpoint();endpoint.portId=output.id;
+            endpoints[endpointKey(endpoint)]={found->second,output.component};
+            candidate.authoredOutputAliases.push_back({endpoint,found->second,output.component});
+        }
         if (composition) for (const auto& node : composition->GetNodes()) {
             if (node.kind == EditorNodeGraph::NodeKind::Output &&
                 node.outputSettings.publishedType != LogicalValueType::Invalid &&
@@ -150,12 +172,23 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                     (node.role == GraphModel::NodeRole::Reference && node.kind == EditorNodeGraph::NodeKind::Image))
                     sources.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(node.id, "imageOut")] = scene;
             input.outputContextOverrides = &sources;
-            LayerCapture capture{layer, BuildGraphSnapshot(input).snapshot, {}, previous, stableAllocate(layer->id + "/result")};
+            auto lowered = BuildGraphSnapshot(input);
+            if (outputDescriptions) for (auto& [identity, description] : lowered.outputDescriptions)
+                layerDescriptions.emplace("raw/" + layer->id + "/" + identity, std::move(description));
+            LayerCapture capture{layer, std::move(lowered.snapshot), {}, {previous}, stableAllocate(layer->id + "/result")};
+            if (capture.snapshot.nodes.empty()) {
+                const auto failure = std::find_if(capture.snapshot.semanticDiagnostics.begin(), capture.snapshot.semanticDiagnostics.end(),
+                    [](const auto& diagnostic) { return diagnostic.severity == DiagnosticSeverity::HardError ||
+                        diagnostic.severity == DiagnosticSeverity::RuntimeFault; });
+                if (failure != capture.snapshot.semanticDiagnostics.end())
+                    throw std::runtime_error(layer->name + ": " + failure->message);
+            }
             for (auto& node:capture.snapshot.nodes) node.uniformSourceIdentity=source.uniformSourceIdentity;
             for (const auto& node : capture.snapshot.nodes) {
                 const auto* authored = layer->graph.FindNode(node.nodeId);
                 capture.ids.emplace(node.nodeId, stableAllocate(layer->id + "/" +
-                    (authored ? authored->instanceUuid : "$expanded-" + std::to_string(node.nodeId))));
+                    (authored ? authored->instanceUuid : node.authoredNodeUuid.empty()
+                        ? "$expanded-" + std::to_string(node.nodeId) : node.authoredNodeUuid)));
                 if (isTypedAlias(node.publishedType)) typedAliases.insert(capture.ids.at(node.nodeId));
             }
             for (const auto& node : layer->graph.GetNodes()) {
@@ -165,12 +198,21 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 if (type != LogicalValueType::Invalid && type != LogicalValueType::ColorImage &&
                     !EditorNodeGraph::IsSingleChannelValue(type)) typedAliases.insert(id->second);
                 for (const auto& socket : layer->graph.GetSockets(node, false))
-                    if (socket.direction == EditorNodeGraph::SocketDirection::Output) endpoints[endpointKey(RawLayerEndpoint(*layer, node, socket.id))] = {id->second, socket.id};
+                    if (socket.direction == EditorNodeGraph::SocketDirection::Output) {
+                        if(EditorNodeGraph::FindChannelOutput(node,socket.id))continue;
+                        const auto endpoint = RawLayerEndpoint(*layer, node, socket.id);
+                        endpoints[endpointKey(endpoint)] = {id->second, socket.id};
+                        candidate.authoredOutputAliases.push_back({endpoint,
+                            node.role == GraphModel::NodeRole::LayerResult ? capture.result : id->second, socket.id});
+                    }
                 if (node.kind == EditorNodeGraph::NodeKind::Output)
                     endpoints[endpointKey(RawLayerEndpoint(*layer, node))] = {node.role == GraphModel::NodeRole::LayerResult ? capture.result : id->second};
             }
+            const auto* layerEnd=FindRawRole(*layer,GraphModel::NodeRole::LayerResult);
             for (const auto& alias : capture.snapshot.authoredOutputAliases)
-                endpoints[endpointKey(alias.authored)] = {capture.ids.at(alias.nodeId),alias.socketId};
+                endpoints[endpointKey(alias.authored)] = layerEnd && alias.authored.nodeUuid==layerEnd->instanceUuid && alias.authored.portId=="imageOut"
+                    ? Socket{capture.result} : Socket{capture.ids.at(alias.nodeId),alias.socketId};
+            AppendGraphSnapshotMetadata(candidate, capture.snapshot, capture.ids, layer->id);
             candidate.rawLayerMaskNodeIds[layer->id] = capture.ids;
             candidate.rawLayerStageNodeIds[layer->id + "/input"] = previous;
             candidate.rawLayerStageNodeIds[layer->id + "/output"] = capture.result;
@@ -194,8 +236,8 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             return Socket{};
         };
         for (auto& capture : captures) {
-            capture.incoming = routedInput(RawLayerInputEndpoint(state,capture.layer->id)).node;
-            candidate.rawLayerStageNodeIds[capture.layer->id + "/input"] = capture.incoming;
+            capture.incoming = routedInput(RawLayerInputEndpoint(state,capture.layer->id));
+            candidate.rawLayerStageNodeIds[capture.layer->id + "/input"] = capture.incoming.node;
         }
         const auto mainOutput = routedInput(RawMainOutputEndpoint(state));
         const auto inactive = [&](const RawAdjustmentLayer& layer) {
@@ -244,7 +286,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                     pass(node.nodeId, {});
                 }
                 else if (node.role == GraphModel::NodeRole::OriginalImage) pass(node.nodeId, {original});
-                else if (node.role == GraphModel::NodeRole::CurrentImage) pass(node.nodeId, {capture.incoming});
+                else if (node.role == GraphModel::NodeRole::CurrentImage) pass(node.nodeId, capture.incoming);
                 else if (node.role == GraphModel::NodeRole::Reference) {
                     const auto found = endpoints.find(endpointKey(node.reference));
                     const bool mask = node.kind == RenderGraphNodeKind::MaskGenerator;
@@ -269,7 +311,11 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 }
             }
             if (!inactive(layer)) for (auto connection : capture.snapshot.links) {
-                connection.fromNodeId = capture.ids.at(connection.fromNodeId);
+                // Layer End is the blended result even when consumed by another
+                // operation in the same owned graph.
+                const auto* producer=layer.graph.FindNode(connection.fromNodeId);
+                connection.fromNodeId = producer && producer->role == GraphModel::NodeRole::LayerResult
+                    ? capture.result : capture.ids.at(connection.fromNodeId);
                 connection.toNodeId = capture.ids.at(connection.toNodeId);
                 candidate.links.push_back(std::move(connection));
             }
@@ -284,7 +330,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 blend.nodeId = capture.result; blend.kind = RenderGraphNodeKind::Mix;
                 blend.mixFactor = layer.opacity; blend.mixBlendMode = RenderMixBlendMode::Normal;
                 addNode(std::move(blend));
-                link({capture.incoming}, capture.result, "imageA");
+                link(capture.incoming, capture.result, "imageA");
                 link({capture.ids.at(result->id)}, capture.result, "imageB");
                 if (layer.layerMask) {
                     const auto mask = masks.find(MaskKey(*layer.layerMask));
@@ -318,7 +364,7 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             }
         }
         pass(backgroundNodeId, mainOutput);
-        if (!mainOutput.node) candidate.unavailableOutputs[backgroundNodeId] = "Connect a layer End to the image output.";
+        if (!mainOutput.node) candidate.unavailableOutputs[backgroundNodeId] = "Connect a color image result to the image output.";
         // The finished RAW stack remains scene-linear for outer composition.
         // The presentation transform runs once at the requested final output.
         {
@@ -359,8 +405,69 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             candidate.outputNodeId = cropId;
         }
         BindGraphImageContracts(candidate);
+        if (outputDescriptions) {
+            // Cross-layer references require the whole authored dependency
+            // graph to retain component identity. Analyze it once per compiled
+            // snapshot, with shared image storage and the actual source facts.
+            const auto projected=BuildRawProjectGraph(state,true);
+            EditorNodeGraph::GraphOutputContext context;
+            context.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(projected.preparedSource,"imageOut")]=scene;
+            const auto described=EditorNodeGraph::DescribeGraphOutputs(projected.graph,context);
+            for(const auto& node:projected.graph.GetNodes())for(const auto& socket:projected.graph.GetSockets(node,false)) {
+                if(socket.direction!=EditorNodeGraph::SocketDirection::Output)continue;
+                const auto description=described.find(EditorNodeGraph::GraphOutputIdentity(node.id,socket.id));
+                if(description==described.end())continue;
+                if(node.id==projected.preparedSource)
+                    layerDescriptions["raw/$raw-source/technical/"+socket.id]=description->second;
+                else if(!node.rawLayerOwnerId.empty()) {
+                    layerDescriptions["raw/"+node.rawLayerOwnerId+"/"+node.instanceUuid+"/"+socket.id]=description->second;
+                    const auto* layer=FindRawAdjustmentLayer(state,node.rawLayerOwnerId);
+                    for(const auto& owned:layer->graph.GetNodes())if(owned.instanceUuid==node.instanceUuid)
+                        layerDescriptions["raw/"+layer->id+"/"+EditorNodeGraph::GraphOutputIdentity(owned.id,socket.id)]=description->second;
+                }
+            }
+            std::unordered_map<int, const RenderGraphNode*> boundNodes;
+            std::unordered_map<std::string, const ValueDescriptor*> boundOutputs;
+            for (const auto& node : candidate.nodes) boundNodes.emplace(node.nodeId, &node);
+            for (const auto& connection : candidate.links)
+                boundOutputs.emplace(EditorNodeGraph::GraphOutputIdentity(connection.fromNodeId, connection.fromSocketId),
+                    &connection.semanticDescriptor);
+            for (const auto& capture : captures) {
+                std::unordered_map<std::string, int> authoredIds;
+                for (const auto& node : capture.layer->graph.GetNodes()) authoredIds.emplace(node.instanceUuid, node.id);
+                for (const auto& alias : candidate.authoredOutputAliases) {
+                    if (alias.authored.graphId != capture.layer->id) continue;
+                    const auto authored = authoredIds.find(alias.authored.nodeUuid);
+                    const auto compiled = boundNodes.find(alias.nodeId);
+                    if (authored == authoredIds.end() || compiled == boundNodes.end()) continue;
+                    const auto key = "raw/" + capture.layer->id + "/" +
+                        EditorNodeGraph::GraphOutputIdentity(authored->second, alias.authored.portId);
+                    const auto description = layerDescriptions.find(key);
+                    if (description == layerDescriptions.end()) continue;
+                    const auto connected = boundOutputs.find(EditorNodeGraph::GraphOutputIdentity(alias.nodeId, alias.socketId));
+                    const auto& descriptor = connected != boundOutputs.end() ? *connected->second : compiled->second->semanticDescriptor;
+                    if (descriptor.spatial.state == KnowledgeState::Known)
+                        description->second.descriptor.spatial = descriptor.spatial;
+                }
+                // The projected RAW canvas has view-local integer IDs. Index
+                // descriptions by stable authored UUID once at compilation,
+                // avoiding a layer-graph scan for each visible socket query.
+                for (const auto& node : capture.layer->graph.GetNodes())
+                    for (const auto& socket : capture.layer->graph.GetSockets(node,false)) {
+                        if (socket.direction != EditorNodeGraph::SocketDirection::Output) continue;
+                        const auto localKey = "raw/" + capture.layer->id + "/" +
+                            EditorNodeGraph::GraphOutputIdentity(node.id,socket.id);
+                        const auto description = layerDescriptions.find(localKey);
+                        if (description != layerDescriptions.end())
+                            layerDescriptions.emplace("raw/" + capture.layer->id + "/" +
+                                node.instanceUuid + "/" + socket.id,description->second);
+                    }
+            }
+        }
         candidate.semanticFingerprint += ":raw-layer-graphs:" + std::to_string(revision);
         snapshot = std::move(candidate);
+        if (outputDescriptions) for (auto& [identity, description] : layerDescriptions)
+            (*outputDescriptions)[identity] = std::move(description);
         return true;
     } catch (const std::exception& exception) {
         error = std::string("Cannot build RAW layer rendering: ") + exception.what();

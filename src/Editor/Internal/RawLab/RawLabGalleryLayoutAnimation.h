@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Stack::Editor::RawLabInternal {
 
@@ -31,10 +32,13 @@ public:
     ImVec2 AnchorFraction() const { return m_AnchorFraction; }
     void AnchorApplied() { m_AnchorPending = false; }
     void Draw(ImDrawList* draw, const ImRect& bounds,
-        const std::function<Texture(const std::string&)>& texture) const;
+        const std::function<Texture(const std::string&)>& texture);
+    // Map a tile's decoration/input geometry with its image. Layout itself
+    // stays at the destination so motion cannot change scrolling extents.
+    bool DisplayRect(const std::string& key, const ImRect& target, ImRect& displayed) const;
+    std::string ImageAt(const ImVec2& point) const;
     bool Protects(const std::string& key) const;
     bool Active() const { return m_Active; }
-    float ContentAlpha() const { return m_Active ? m_Progress : 1.0f; }
     void Reset();
 
 private:
@@ -48,6 +52,7 @@ private:
     };
     using Layout = std::unordered_map<std::string, Pose>;
     Layout Sample() const;
+    Pose SamplePose(const std::string& key, const Pose& destination) const;
     static Pose Interpolate(const Pose& from, const Pose& to, float amount);
     static Pose OffscreenEndpoint(const Pose& pose, bool grid);
     bool Participates(const std::string& key) const;
@@ -55,8 +60,10 @@ private:
     std::string m_Workspace;
     Layout m_Layout;
     Layout m_From;
+    std::vector<std::pair<std::string, Pose>> m_Presented;
     int m_Frame = -1;
     double m_StartedAt = 0.0;
+    double m_Duration = 0.22;
     float m_Progress = 1.0f;
     bool m_Grid = false;
     std::uint64_t m_OrderRevision = 0;

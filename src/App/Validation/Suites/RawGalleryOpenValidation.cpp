@@ -1,6 +1,7 @@
 #include "App/Validation/ValidationSuites.h"
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Renderer/GLLoader.h"
 #include "Persistence/ProjectOpenCoordinator.h"
 #include "Renderer/WorkspaceCompositor.h"
@@ -21,9 +22,10 @@
 
 namespace Stack::Validation {
 void ValidateRawNodeTransitions(EditorModule&, const std::function<void(const std::function<void()>&)>&);
+void ValidateRawGraphInsertions(EditorModule& editor);
 
 bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scratchPath, bool persistenceChecks,
-    bool nodeTransitionChecks) {
+    bool nodeTransitionChecks, bool halationChecks) {
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -38,7 +40,8 @@ bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scrat
     ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
     unsigned char* fontPixels = nullptr;
     int fontWidth = 0, fontHeight = 0;
-    if (nodeTransitionChecks) ImGui_ImplOpenGL3_Init("#version 430");
+    const bool renderInterface=nodeTransitionChecks || halationChecks;
+    if (renderInterface) ImGui_ImplOpenGL3_Init("#version 430");
     else ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&fontPixels, &fontWidth, &fontHeight);
     Async::TaskSystem::Get().Initialize();
     auto editor = std::make_unique<EditorModule>();
@@ -63,14 +66,14 @@ bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scrat
         const auto frame = [&](const std::function<void()>& action = {}) {
             glfwPollEvents();
             Async::TaskSystem::Get().PumpMainThreadTasks(4);
-            if (nodeTransitionChecks) ImGui_ImplOpenGL3_NewFrame();
+            if (renderInterface) ImGui_ImplOpenGL3_NewFrame();
             ImGui::NewFrame();
             editor->PumpNonRenderingWork(2.5);
             ImGui::SetNextWindowPos({0, 0});
             ImGui::SetNextWindowSize({1000, 700});
             ImGui::Begin("RAW diagnostic", nullptr,
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar);
-            if (nodeTransitionChecks) {
+            if (renderInterface) {
                 editor->UpdateNodeOpenTransition();
                 const auto origin = ImGui::GetCursorScreenPos();
                 const auto size = ImGui::GetContentRegionAvail();
@@ -79,7 +82,7 @@ bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scrat
                 editor->RenderUI();
             } else editor->RenderRawWorkspaceLabUI();
             ImGui::End();
-            if (nodeTransitionChecks) {
+            if (renderInterface) {
                 ImGui::Render();
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0,0,1000,700);
@@ -146,6 +149,113 @@ bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scrat
         if (high - low < 0.001f) throw std::runtime_error("First-frame texture is blank");
         std::cout << "PASS Gallery RAW first frame: " << width << 'x' << height
             << " RGB range=" << low << ".." << high << '\n' << std::flush;
+        if (halationChecks) {
+            const auto require=[](bool ok,const std::string& reason) {
+                if (!ok) throw std::runtime_error(reason);
+            };
+            require(editor->LeaveRawWorkspaceRootTab(true),"Could not enter Graph for connection validation");
+            editor->OpenRawLayerMaskGraph({});
+            ValidateRawGraphInsertions(*editor);
+            const auto checkCurrentPresentation=[&](std::uint64_t before,const char* phase) {
+                const auto failure=std::string(phase)+": the changed RAW graph did not publish a current image";
+                wait([&] {
+                    return editor->GetViewportOutputRenderGeneration()>before &&
+                        !editor->IsEditorRenderBusy() && editor->HasCurrentRawWorkspacePresentation();
+                },failure.c_str());
+                unsigned image=0; int imageWidth=0,imageHeight=0;
+                require(editor->TryGetActiveRawWorkspacePresentationTexture(image,imageWidth,imageHeight) &&
+                    image && imageWidth>0 && imageHeight>0,
+                    std::string(phase)+": no accepted texture; "+editor->GetActiveRawWorkspacePresentationDiagnosticForValidation());
+                std::vector<float> result(static_cast<std::size_t>(imageWidth)*imageHeight*4);
+                glBindTexture(GL_TEXTURE_2D,image);
+                glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,result.data());
+                float minimum=1e30f,maximum=-1e30f;
+                for (std::size_t i=0;i<result.size();++i) {
+                    if (!std::isfinite(result[i])) throw std::runtime_error(std::string(phase)+": nonfinite accepted pixel");
+                    if (i%4!=3) {minimum=std::min(minimum,result[i]);maximum=std::max(maximum,result[i]);}
+                }
+                require(maximum-minimum>.001f,std::string(phase)+": accepted image is blank; "+
+                    editor->GetActiveRawWorkspacePresentationDiagnosticForValidation());
+                std::cout << "PASS RAW Gallery " << phase << ": generation=" << editor->GetViewportOutputRenderGeneration()
+                    << " size=" << imageWidth << 'x' << imageHeight << " RGB range=" << minimum << ".." << maximum
+                    << " " << editor->GetActiveRawWorkspacePresentationDiagnosticForValidation() << '\n' << std::flush;
+            };
+            std::string compoundUuid,error;
+            auto before=editor->GetViewportOutputRenderGeneration();
+            frame([&] {
+                require(editor->LeaveRawWorkspaceRootTab(true),"Could not enter Graph from the opened RAW");
+                editor->OpenRawLayerMaskGraph({});
+                auto& graph=editor->GetNodeGraph();
+                const auto end=std::find_if(graph.GetNodes().begin(),graph.GetNodes().end(),[](const auto& node) {
+                    return node.role==Stack::GraphModel::NodeRole::LayerResult &&
+                        node.rawLayerOwnerId==Stack::Project::kRawBackgroundId;
+                });
+                require(end!=graph.GetNodes().end(),"The RAW Background End is missing");
+                const auto output=std::find_if(graph.GetNodes().begin(),graph.GetNodes().end(),[](const auto& node) {
+                    return node.kind==EditorNodeGraph::NodeKind::Output && node.rawLayerOwnerId.empty();
+                });
+                require(output!=graph.GetNodes().end(),"The project image output is missing");
+                const int endId=output->id;
+                const auto* incoming=graph.FindAnyInputLink(endId,"imageIn");
+                require(incoming!=nullptr,"The initial RAW image chain is disconnected");
+                const auto previous=*incoming;
+                const auto& catalog=EditorNodeGraphDefinitions::GetShippedCompoundTemplates();
+                const auto recipe=std::find_if(catalog.begin(),catalog.end(),[](const auto& value) {
+                    return value.identity.id=="stack:compound/halation";
+                });
+                require(recipe!=catalog.end(),"The plain Halation template is absent");
+                editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(recipe-catalog.begin()),{1000,300});
+                const int effect=graph.GetSelectedNodeId();
+                require(graph.FindNode(effect) && graph.FindNode(effect)->kind==EditorNodeGraph::NodeKind::Compound,
+                    "The Halation creation command did not add an instance");
+                compoundUuid=graph.FindNode(effect)->instanceUuid;
+                require(editor->ConnectGraphSockets(previous.fromNodeId,previous.fromSocketId,effect,"image-in",&error),error);
+                require(editor->ConnectGraphSockets(effect,"image-out",endId,"imageIn",&error),error);
+                require(!editor->HasCurrentRawWorkspacePresentation(),
+                    "The retained image was reported current immediately after connecting Halation");
+                require(editor->OpenRawProjectNodeEditor(effect),"Halation did not open in View");
+                require(editor->EnterRawWorkspaceRootTab(),"The RAW View handoff failed");
+                const auto& labels=editor->GetRawLayerToolLabels();
+                const int selected=editor->GetRawLayerToolIndex();
+                require(selected>=0 && selected<static_cast<int>(labels.size()) && labels[selected]=="Halation",
+                    "Alt navigation did not retain the Halation instance");
+            });
+            checkCurrentPresentation(before,"packed Halation");
+            ImVec2 controlsMin,controlsMax;
+            require(editor->GetRawActiveControlBounds(controlsMin,controlsMax),
+                "Halation's graph-control fallback did not draw on the View surface");
+            before=editor->GetViewportOutputRenderGeneration();
+            frame([&] {
+                require(editor->LeaveRawWorkspaceRootTab(true),"Could not return to Graph for decompilation");
+                editor->OpenRawLayerMaskGraph({});
+                auto& graph=editor->GetNodeGraph();
+                const auto effect=std::find_if(graph.GetNodes().begin(),graph.GetNodes().end(),[&](const auto& node) {
+                    return node.instanceUuid==compoundUuid;
+                });
+                require(effect!=graph.GetNodes().end(),"The packed instance was lost");
+                require(editor->UnpackCompoundNode(effect->id,&error),error);
+                require(!editor->HasCurrentRawWorkspacePresentation(),
+                    "The retained image was reported current immediately after decompilation");
+                require(editor->EnterRawWorkspaceRootTab(),"The decompiled RAW View handoff failed");
+            });
+            checkCurrentPresentation(before,"one-level decompiled Halation");
+            before=editor->GetViewportOutputRenderGeneration();
+            frame([&] {
+                require(editor->LeaveRawWorkspaceRootTab(true),"Could not return to Graph for repacking");
+                editor->OpenRawLayerMaskGraph({});
+                const auto& groups=editor->GetNodeGraph().GetGroups();
+                const auto group=std::find_if(groups.begin(),groups.end(),[&](const auto& item) {
+                    return item.compoundBoundary.is_object() &&
+                        item.compoundBoundary.value("instanceUuid",std::string{})==compoundUuid;
+                });
+                require(group!=groups.end(),"The retained compound boundary is missing");
+                require(editor->RepackCompoundGroup(group->id,&error),error);
+                require(!editor->HasCurrentRawWorkspacePresentation(),
+                    "The retained image was reported current immediately after repacking");
+                require(editor->EnterRawWorkspaceRootTab(),"The repacked RAW View handoff failed");
+            });
+            checkCurrentPresentation(before,"repacked Halation");
+        }
         if (nodeTransitionChecks) {
             if (const auto* projectPath = std::getenv("STACK_NODE_TRANSITION_PROJECT")) {
                 // Load a read-only candidate; persistence stays disabled throughout this fixture.
@@ -284,7 +394,7 @@ bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scrat
     editor->Shutdown();
     Async::TaskSystem::Get().Shutdown();
     editor.reset();
-    if (nodeTransitionChecks) ImGui_ImplOpenGL3_Shutdown();
+    if (renderInterface) ImGui_ImplOpenGL3_Shutdown();
     ImGui::DestroyContext();
     glfwDestroyWindow(window);
     glfwTerminate();

@@ -49,6 +49,9 @@ struct GraphEvaluationSchedule {
     bool valid = false;
     std::string error;
     std::vector<ScheduledGraphOutput> outputs;
+    // Requested outputs are materialization boundaries, including auxiliary
+    // inspection/scope roots that need their own pixels after optimization.
+    std::vector<ScheduledGraphOutput> requestedOutputs;
 };
 
 GraphTopologyIndex BuildGraphTopologyIndex(

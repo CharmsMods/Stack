@@ -94,7 +94,7 @@ struct ThumbnailSignature {
     std::string sourceFingerprint;
     int rawLoaderAlgorithmVersion = 1;
     int neutralPreviewSettingsVersion = 1;
-    int thumbnailVersion = 2;
+    int thumbnailVersion = 3;
     int maxDimension = kNeutralThumbnailMaxDimension;
 };
 

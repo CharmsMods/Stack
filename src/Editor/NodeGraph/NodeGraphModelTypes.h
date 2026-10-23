@@ -10,6 +10,16 @@
 
 namespace EditorNodeGraph {
 
+// An authored view of one component of this node's native image output.
+// Execution lowers these ports through the ordinary channel extractor.
+struct ChannelOutput {
+    std::string id;
+    std::string sourceSocket;
+    std::string component;
+    bool missingAlphaIsOpaque = false;
+    std::string notes;
+};
+
 struct Node {
     int id = 0;
     std::string instanceUuid;
@@ -27,6 +37,9 @@ struct Node {
     nlohmann::json layerParameters = nlohmann::json::object();
     std::string typeId;
     std::string title;
+    // Authored graph annotation; presentation only, never an operation input.
+    std::string notes;
+    std::vector<ChannelOutput> channelOutputs;
     Vec2 position;
     bool expanded = true;
     ScopeKind scopeKind = ScopeKind::Histogram;
@@ -51,6 +64,7 @@ struct Node {
     bool outputEnabled = true;
     OutputSettings outputSettings;
     ConstantChannelSettings constantChannelSettings;
+    bool splitMissingAlphaIsOpaque = false;
     ImageCombineSettings imageCombineSettings;
     std::string definitionId;
     std::string definitionVersion;
@@ -91,6 +105,9 @@ struct NodeGroup {
     std::string title = "New Group";
     Vec2 position;
     Vec2 size;
+    // Retained authored boundary; the actual graph remains in member nodes.
+    nlohmann::json compoundBoundary;
+    std::vector<int> compoundMembers;
 };
 
 struct CompletedChainInfo {

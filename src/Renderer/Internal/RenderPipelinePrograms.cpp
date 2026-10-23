@@ -898,7 +898,8 @@ void RenderPipeline::EnsureDataMathProgram() {
             } else if (uMode == 3) {
                 result = a * b;
             } else if (uMode == 4) {
-                result = a / max(abs(b), vec4(0.00001));
+                for (int c = 0; c < 4; ++c)
+                    result[c] = b[c] == 0.0 ? 0.0 : a[c] / b[c];
             } else if (uMode == 5) {
                 result = (a + b) * 0.5;
             } else if (uMode == 6) {
@@ -916,6 +917,8 @@ void RenderPipeline::EnsureDataMathProgram() {
                 float v = result.r;
                 FragColor = vec4(v, v, v, 1.0);
             } else {
+                result.a = uHasA != 0 && uScalarA == 0 ? a.a :
+                    (uHasB != 0 && uScalarB == 0 ? b.a : 1.0);
                 FragColor = result;
             }
         }
@@ -1325,6 +1328,7 @@ void RenderPipeline::EnsureChannelPrograms() {
             if (uChannel == 1) v = col.g;
             else if (uChannel == 2) v = col.b;
             else if (uChannel == 3) v = col.a;
+            else if (uChannel == 4) v = 1.0;
             FragColor = vec4(v, v, v, 1.0);
         }
     )";

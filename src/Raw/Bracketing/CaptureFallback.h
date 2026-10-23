@@ -8,6 +8,15 @@ struct CaptureFallback {
     bool finite=false,clipped=false;
 };
 
+// A shorter exposure does not make rejected geometry a better display source.
+// Preserve an available fallback whose registration has not been contradicted;
+// only compare exposures within the same registration-evidence class.
+inline bool PreferCaptureFallback(bool haveCurrent,bool currentRejected,double currentExposure,
+    bool candidateRejected,double candidateExposure) {
+    return !haveCurrent||(currentRejected&&!candidateRejected)||
+        (currentRejected==candidateRejected&&candidateExposure<currentExposure);
+}
+
 // A display fallback retains the same registered footprint even when clipping
 // disqualifies it as a measurement. Switching only a clipped color to nearest
 // sampling changes its edge position relative to the other colors.

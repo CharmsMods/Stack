@@ -2282,7 +2282,7 @@ bool EditorModule::RequestSaveProjectAs(
             capturedEditRevision,
             document,
             savedStore,
-            onComplete = std::move(onComplete)
+            onComplete
         ]() mutable {
             bool success = false;
             try {
@@ -2292,8 +2292,10 @@ bool EditorModule::RequestSaveProjectAs(
                         destination.parent_path(),
                         directoryError);
                 }
+                // Save As must claim a new store; an existing destination may
+                // belong to another project even when its display name matches.
                 success = !directoryError &&
-                    StackBinaryFormat::WriteProjectFile(destination, *document);
+                    StackBinaryFormat::WriteProjectFile(destination, *document, true);
                 if (success) {
                     *savedStore = Stack::Project::OpenProjectStore(destination);
                     success = static_cast<bool>(*savedStore);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Project/RawLayerStack.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Renderer/MaskRenderTypes.h"
 
 namespace Stack::Project {
@@ -13,7 +14,8 @@ Stack::NodeMath::ValueDescriptor RawLayerSceneDescriptor(Raw::RawWorkingSpace sp
 bool LowerRawLayerStack(
     RenderGraphSnapshot& snapshot, const RawLayerStackState& state,
     int backgroundNodeId, std::uint64_t revision, std::string& error, int frame = 0, int duration = 120, int framesPerSecond = 30,
-    const EditorNodeGraph::Graph* composition = nullptr);
+    const EditorNodeGraph::Graph* composition = nullptr,
+    EditorNodeGraph::GraphOutputDescriptions* outputDescriptions = nullptr);
 
 // Apply to a private preview snapshot. Image thumbnails include the shared
 // viewing transform; mask thumbnails read exactly the numerical attachment.

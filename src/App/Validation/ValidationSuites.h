@@ -6,7 +6,7 @@
 
 namespace Stack::Validation {
 bool ValidateRawGalleryOpen(const std::string& rawPath, const std::string& scratchPath, bool persistenceChecks = false,
-    bool nodeTransitionChecks = false);
+    bool nodeTransitionChecks = false, bool halationChecks = false);
 bool ValidateBracketingDepth(int argc,char** argv);
 bool ValidateBracketingNodeSurface(int argc, char** argv);
 bool ValidateBracketingContributionUi(const std::filesystem::path& savedProjectJson,
@@ -20,6 +20,7 @@ bool ValidateRawDecodeCancellation(const std::string& path);
 bool ValidateToneCurveAutoIntegration();
 bool ValidateNodeMathPhase4Integration();
 bool ValidateNodeMathPhase5Integration();
+bool ValidateGraphModularity(const std::string& outputFolder);
 bool ValidateNodeMathPhase6Integration(bool calibrationOnly = false, bool transactionsOnly = false, bool framingOnly = false);
 bool ValidateEditorGraphTransactions();
 bool ValidateProjectWorkspaces(const std::string& projectPath);

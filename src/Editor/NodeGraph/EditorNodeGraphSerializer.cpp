@@ -1,4 +1,5 @@
 #include "NodeMath/ToneCurveParameters.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Editor/LayerRegistry.h"
 #include "EditorNodeGraphSerializer.h"
 #include "Graph/LayerOperationParameters.h"
@@ -172,7 +173,11 @@ std::vector<unsigned char> BuildImagePayloadStoragePngBytes(const ImagePayload& 
     if (!image.pngBytes.empty()) {
         return image.pngBytes;
     }
-    return EncodeImagePayloadPngForStorage(image.pixels, image.width, image.height, image.channels);
+    // Analysis/transaction clones share immutable source pixels instead of
+    // duplicating them. Persistence must retain that same source payload.
+    const auto& pixels = image.pixels.empty() && image.sharedPixels
+        ? *image.sharedPixels : image.pixels;
+    return EncodeImagePayloadPngForStorage(pixels, image.width, image.height, image.channels);
 }
 
 } // namespace
@@ -303,7 +308,10 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["layerIndex"] = node.layerIndex;
         item["typeId"] = node.typeId;
         if (node.kind==NodeKind::Layer) item["parameters"]=node.layerParameters;
+        if (node.kind==NodeKind::ChannelSplit && node.splitMissingAlphaIsOpaque) item["missingAlphaIsOpaque"]=true;
         item["title"] = node.title;
+        item["notes"] = node.notes;
+        item["channelOutputs"] = SerializeChannelOutputs(node.channelOutputs);
         item["x"] = node.position.x;
         item["y"] = node.position.y;
         item["expanded"] = node.expanded;
@@ -510,6 +518,10 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             { "width", group.size.x },
             { "height", group.size.y }
         });
+        if (group.compoundBoundary.is_object()) {
+            groupsJson.back()["compoundBoundary"] = group.compoundBoundary;
+            groupsJson.back()["compoundMembers"] = group.compoundMembers;
+        }
     }
     graphJson["groups"] = std::move(groupsJson);
 
@@ -545,10 +557,14 @@ void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData) {
         }
     }
 
-    // Groups are canvas-only organization and cannot be represented without
-    // their position and bounds.
-    graphJson.erase("groups");
-    graphJson.erase("nextGroupId");
+    // A retained compound boundary is authored state: dropping it would make
+    // a layout-free save unable to repack an edited decompilation.
+    if (auto groups = graphJson.find("groups"); groups != graphJson.end() && groups->is_array()) {
+        groups->erase(std::remove_if(groups->begin(), groups->end(), [](const auto& group) {
+            return !group.contains("compoundBoundary") || !group["compoundBoundary"].is_object();
+        }), groups->end());
+        if (groups->empty()) { graphJson.erase("groups"); graphJson.erase("nextGroupId"); }
+    }
     graphJson.erase("selectedNodeId");
 }
 
@@ -609,6 +625,8 @@ void Serialization::ReadCurrentGraphPayload(
         node.layerIndex = item.value("layerIndex", -1);
         node.typeId = item.value("typeId", std::string());
         node.title = item.value("title", std::string());
+        node.notes = item.value("notes", std::string());
+        node.channelOutputs = DeserializeChannelOutputs(item.value("channelOutputs",nlohmann::json::array()));
         node.position.x = item.value("x", 0.0f);
         node.position.y = item.value("y", 0.0f);
         node.expanded = item.value("expanded", false);
@@ -949,6 +967,7 @@ void Serialization::ReadCurrentGraphPayload(
             }
         } else if (kind == "ChannelSplit") {
             node.kind = NodeKind::ChannelSplit;
+            node.splitMissingAlphaIsOpaque = item.value("missingAlphaIsOpaque",false);
             if (node.title.empty()) {
                 node.title = "Channel Split";
             }
@@ -1073,6 +1092,8 @@ void Serialization::ReadCurrentGraphPayload(
             group.position.y = item.value("y", 0.0f);
             group.size.x = item.value("width", 200.0f);
             group.size.y = item.value("height", 150.0f);
+            group.compoundBoundary = item.value("compoundBoundary", nlohmann::json{});
+            group.compoundMembers = item.value("compoundMembers", std::vector<int>{});
             maxGroupId = std::max(maxGroupId, group.id);
             graph.GetGroups().push_back(std::move(group));
         }

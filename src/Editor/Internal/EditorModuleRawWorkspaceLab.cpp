@@ -1353,19 +1353,10 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                         tileHeight - kFilmstripBottomPadding);
                 ImGui::SetCursorPosY(
                     ImGui::GetCursorPosY() + thumbnailOffset);
-                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha *
-                    m_RawWorkspaceGalleryLayoutAnimation.ContentAlpha());
-                const bool layoutAnimating = m_RawWorkspaceGalleryLayoutAnimation.Active();
-                if (layoutAnimating) ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-                {
-                    Stack::Workspace::InputScope transitionInput(layoutAnimating, false);
-                    RenderRawWorkspaceLabGalleryContent(
-                        true,
-                        expandedDrawer,
-                        expandedDrawer ? drawerExpansionProgress : 0.0f);
-                }
-                if (layoutAnimating) ImGui::PopItemFlag();
-                ImGui::PopStyleVar();
+                RenderRawWorkspaceLabGalleryContent(
+                    true,
+                    expandedDrawer,
+                    expandedDrawer ? drawerExpansionProgress : 0.0f);
                 const float scrollX = ImGui::GetScrollX();
                 const float scrollMaxX = ImGui::GetScrollMaxX();
                 const float viewportWidth = ImGui::GetWindowSize().x;

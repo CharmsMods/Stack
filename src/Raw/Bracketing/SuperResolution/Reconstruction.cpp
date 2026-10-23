@@ -19,7 +19,9 @@ struct GpuSession {
     bool enabled=false,used=false,verified=false;
     std::string fallback;
     explicit GpuSession(const ProcessingRequest& r):request(r),enabled(bool(r.executeOpenGlTask)){}
-    ~GpuSession(){if(request.executeOpenGlTask){std::string e;request.executeOpenGlTask([&](std::string&){kernel.Release();return true;},e);}}
+    ~GpuSession(){if(request.executeOpenGlTask){std::string e;try {
+        request.executeOpenGlTask([&](std::string&){kernel.Release();return true;},e);
+    }catch(...) { /* Context teardown must not terminate failure unwinding. */ }}}
     bool Call(const Raw::OpenGlTask& task) {
         if(!enabled)return false;
         std::string error;
@@ -33,6 +35,7 @@ struct GpuSession {
 struct NativeFallback {
     Mfd::PreparedRawTile tile;
     std::vector<std::vector<Observation>> groups;
+    ColorObservations values;
     Pixel Read(const ProcessingRequest& request,const PreparedDataset& data,
         unsigned x,unsigned y,unsigned channel,const std::vector<double>& shares,std::string& error) {
         Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(data.sources[data.origin].frame.activeCfaPattern,layout);
@@ -50,7 +53,7 @@ struct NativeFallback {
             if(!ReadGroups(request,data,selectedX/side,selectedY/side,groups,tile,error))return {};
         }
         const auto p=std::size_t((selectedY&~1u)-tile.originY)*tile.extent.width+(selectedX&~1u)-tile.originX;
-        ColorObservations values;GatherColorCell(groups,p,tile.extent.width,values);
+        GatherColorCell(groups,p,tile.extent.width,values);
         auto blended=BlendColor(values,shares,request.recipe)[(selectedY%2)*2+selectedX%2];
         blended.fallback=true;
         if(blended.fallbackReason==MeasurementFallbackReason::None)blended.fallbackReason=MeasurementFallbackReason::AutomaticValidInput;
@@ -60,7 +63,6 @@ struct NativeFallback {
 bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysis,std::size_t group,
     Sr::Tile& tile,PreparedTileSampler& sampler,GpuSession& gpu,std::string& error) {
     const auto& data=*analysis.prepared;
-    const Sr::Tile initial=tile;
     const auto observe=[&] {try {
         if(!request.evidenceStream||tile.pixels.empty())return;
         ProcessingEvidence e;e.caption="Measured reconstruction kernels";
@@ -78,12 +80,19 @@ bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysi
         }catch(...) { /* Observation must not change reconstruction. */ }
     };
     bool accelerated=gpu.Call([&](std::string& e){return gpu.kernel.Begin(tile,e);});
+    // MakeTile supplies zero accumulators. Only the kernels need retaining if
+    // a failed/partially-read GPU tile has to restart the complete CPU pass.
+    std::vector<Sr::Vec4> initialKernels;
+    if(accelerated) {
+        initialKernels.reserve(tile.pixels.size());
+        for(const auto& pixel:tile.pixels)initialKernels.push_back(pixel.kernel);
+    }
     constexpr unsigned probes=17;
     std::array<std::size_t,probes> indices{};std::array<Sr::PixelAccumulator,probes> expected{};
     for(unsigned i=0;i<probes;++i){indices[i]=i*(tile.pixels.size()-1)/(probes-1);expected[i]=tile.pixels[indices[i]];}
+    Sr::FrameRegion frame;
     const auto run=[&](bool useGpu)->bool {
         for(const auto& source:data.sources)if(source.enabled&&source.group==group) {
-            Sr::FrameRegion frame;
             if(!Sr::BuildFrameRegion(analysis,source,tile,sampler,frame,request.shouldCancel,error))return false;
             if(useGpu) {
                 if(!gpu.verified)for(unsigned i=0;i<probes;++i)
@@ -96,10 +105,13 @@ bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysi
     if(accelerated) {
         accelerated=run(true)&&gpu.Call([&](std::string& e){return gpu.kernel.Read(tile,e);});
         if(accelerated&&!gpu.verified) {
-            for(unsigned i=0;i<probes;++i)for(unsigned c=0;c<3;++c) {
-                const auto a=Sr::Resolve(tile.pixels[indices[i]],c),b=Sr::Resolve(expected[i],c);
-                if(a.valid!=b.valid||!std::isfinite(a.value)||std::abs(a.value-b.value)>2e-5f*std::max(1.f,std::abs(b.value))||
-                   std::abs(a.support-b.support)>1e-3f*std::max(1.f,b.support))accelerated=false;
+            for(unsigned i=0;i<probes;++i) {
+                const auto actual=Sr::ResolveChannels(tile.pixels[indices[i]]),expectedChannels=Sr::ResolveChannels(expected[i]);
+                for(unsigned c=0;c<3;++c) {
+                    const auto& a=actual[c];const auto& b=expectedChannels[c];
+                    if(a.valid!=b.valid||!std::isfinite(a.value)||std::abs(a.value-b.value)>2e-5f*std::max(1.f,std::abs(b.value))||
+                       std::abs(a.support-b.support)>1e-3f*std::max(1.f,b.support))accelerated=false;
+                }
             }
             if(!accelerated){gpu.enabled=false;gpu.fallback="CPU verification rejected GPU reconstruction.";}
             else gpu.verified=true;
@@ -107,7 +119,9 @@ bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysi
         if(accelerated){gpu.used=true;observe();return true;}
         if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
         if(!error.empty())return false;
-        tile=initial;
+        for(std::size_t i=0;i<tile.pixels.size();++i) {
+            tile.pixels[i]={};tile.pixels[i].kernel=initialKernels[i];
+        }
     }
     const bool complete=run(false);if(complete)observe();return complete;
 }
@@ -149,7 +163,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
         result.analysis->guideEv.capacity()*sizeof(float)+p.guideEv.size()*sizeof(unsigned);
     requirements.sourceTileBytes=std::uint64_t(sourceTile)*sourceTile*9;
     requirements.preferredCacheTiles=data.sources.size()*4+4;
-    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*sizeof(Sr::PixelAccumulator)+groups*4;
+    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4;
     const auto memoryPlan=Sr::PlanMemory(requirements,request.memoryBudgetBytes,
         request.automaticMemoryBudget,Mfd::QueryPhysicalMemorySnapshot());
     if(!memoryPlan.fits){error=memoryPlan.message;return false;}
@@ -191,26 +205,28 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     std::fill(preview.contributions.begin(),preview.contributions.end(),0.f);
     std::fill(preview.diagnostics.begin(),preview.diagnostics.end(),0);
     const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});
+    std::vector<std::vector<std::array<Sr::ChannelResult,3>>> groupResults(groups);
+    std::vector<float> actual;std::vector<double> shares;ColorObservations observations;
+    for(auto& site:observations)site.resize(groups);
     result.invalidSamples=result.fallbackSamples=result.unrecoverableSamples=0;
     if(request.evidenceStream)request.evidenceStream->Begin(request,ProcessingStage::Reconstruction,width,height,raw->metadata);
     for(unsigned top=0;top<height;top+=tileSide)for(unsigned left=0;left<width;left+=tileSide) {
         if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
         const auto tw=std::min(tileSide,width-left),th=std::min(tileSide,height-top);const auto count=std::size_t(tw)*th;
-        std::vector<std::vector<std::array<Sr::ChannelResult,3>>> groupResults(groups);
         for(std::size_t g=0;g<groups;++g) {
-            auto tile=Sr::MakeTile(left,top,tw,th,scale,*result.analysis,diverse);
+            auto tile=Sr::MakeTile(left,top,tw,th,scale,*result.analysis,g);
             if(!RunGroup(request,*result.analysis,g,tile,sampler,gpu,error))return false;
             groupResults[g].resize(count);
-            for(std::size_t p=0;p<count;++p)for(unsigned c=0;c<3;++c)groupResults[g][p][c]=Sr::Resolve(tile.pixels[p],c);
+            for(std::size_t p=0;p<count;++p)
+                groupResults[g][p]=Sr::ResolveChannels(tile.pixels[p],tile.samplingConfidence[p]);
         }
-        std::vector<float> actual(count*groups);ColorObservations observations;
-        for(auto& site:observations)site.resize(groups);
+        actual.assign(count*groups,0.f);
         for(unsigned y=0;y<th;++y)for(unsigned x=0;x<tw;++x) {
             const auto p=std::size_t(y)*tw+x,index=std::size_t(top+y)*width+left+x;
             const unsigned sx=std::min(data.width-1,(left+x)/scale),sy=std::min(data.height-1,(top+y)/scale);
             const auto nativeIndex=std::size_t(sy)*data.width+sx;
             const float ev=result.analysis->guideEv[(sy/2)*(data.width/2)+sx/2];
-            const auto shares=Evaluate(request.recipe.automatic?result.analysis->suggestion:request.recipe.knots,ev);
+            Evaluate(request.recipe.automatic?result.analysis->suggestion:request.recipe.knots,ev,shares);
             bool valid=true,didFallback=false,clipped=false;float minSupport=float(enabled),maxVariance=0,maxUncertainty=0;
             auto reason=MeasurementFallbackReason::None;
             for(unsigned c=0;c<3;++c) {

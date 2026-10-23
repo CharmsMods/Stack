@@ -1,4 +1,5 @@
 #include "Project/RawLayerStack.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
@@ -80,6 +81,11 @@ nlohmann::json SerializeLayerStack(const RawLayerStackState& state, bool include
     for (const auto& layer : state.layers) layers.push_back(serializeLayer(layer));
     Json result = {{"version", kRawLayerStackSchemaVersion}, {"nextId", state.nextId}, {"background", serializeLayer(state.background)}, {"layers", std::move(layers)},
         {"explicitRouting",state.explicitRouting},{"imageOutput",EndpointJson(state.imageOutput)}};
+    if(state.sourceCanvasPosition)result["sourceCanvasPosition"]={state.sourceCanvasPosition->x,state.sourceCanvasPosition->y};
+    if(state.outputCanvasPosition)result["outputCanvasPosition"]={state.outputCanvasPosition->x,state.outputCanvasPosition->y};
+    result["sourceCanvasNotes"]=state.sourceCanvasNotes;
+    result["sourceChannelOutputs"]=EditorNodeGraph::SerializeChannelOutputs(state.sourceChannelOutputs);
+    result["outputCanvasNotes"]=state.outputCanvasNotes;
     if (includeAssets) result["createdAssets"] = Assets::SerializeLibrary(state.assets);
     return result;
 }
@@ -153,6 +159,16 @@ bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& r
             return layer;
         };
         RawLayerStackState candidate;
+        const auto readPosition=[&](const char* key)->std::optional<EditorNodeGraph::Vec2> {
+            if(!value.contains(key))return std::nullopt;
+            const auto& position=value.at(key);
+            if(!position.is_array() || position.size()!=2)throw std::runtime_error("Invalid RAW canvas anchor position.");
+            return EditorNodeGraph::Vec2{position.at(0).get<float>(),position.at(1).get<float>()};
+        };
+        candidate.sourceCanvasPosition=readPosition("sourceCanvasPosition");candidate.outputCanvasPosition=readPosition("outputCanvasPosition");
+        candidate.sourceCanvasNotes=value.value("sourceCanvasNotes",std::string{});
+        candidate.sourceChannelOutputs=EditorNodeGraph::DeserializeChannelOutputs(value.value("sourceChannelOutputs",Json::array()));
+        candidate.outputCanvasNotes=value.value("outputCanvasNotes",std::string{});
         candidate.explicitRouting = value.value("explicitRouting",false);
         if (candidate.explicitRouting && value.contains("imageOutput")) candidate.imageOutput = ReadEndpoint(value.at("imageOutput"));
         candidate.nextId = value.at("nextId").get<std::uint64_t>();

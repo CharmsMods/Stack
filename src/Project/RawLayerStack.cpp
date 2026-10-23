@@ -9,6 +9,20 @@
 
 namespace Stack::Project {
 namespace {
+void SwapNotes(RawLayerStackState& live, RawLayerStackState& saved) {
+    live.sourceCanvasNotes.swap(saved.sourceCanvasNotes);
+    live.outputCanvasNotes.swap(saved.outputCanvasNotes);
+    for (const auto* owner : RawLayersInOrder(live)) {
+        auto* layer = FindRawAdjustmentLayer(live, owner->id);
+        auto* previous = FindRawAdjustmentLayer(saved, owner->id);
+        if (!previous) continue;
+        for (auto& node : layer->graph.GetNodes()) {
+            auto* old = previous->graph.FindNode(node.id);
+            if (old && old->instanceUuid == node.instanceUuid) node.notes.swap(old->notes);
+        }
+    }
+}
+
 void ClearPendingAnalysis(RawLayerStackState& state) {
     const auto clear=[](RawAdjustmentLayer& layer) {
         for (auto& node:layer.graph.GetNodes()) if (node.kind==EditorNodeGraph::NodeKind::RawOperation &&
@@ -196,22 +210,54 @@ bool RawLayerStackDocument::CompleteMaskCapture(const std::string& layerId, cons
 }
 
 void RawLayerStackDocument::PushUndo(RawLayerStackState state, bool affectsPixels,
-    std::optional<RawLayerSourceHistory> source) {
+    std::optional<RawLayerSourceHistory> source, bool notesOnly) {
     constexpr std::size_t limit = 64;
     if (m_Undo.size() == limit) m_Undo.pop_front();
-    m_Undo.push_back({std::move(state), affectsPixels, std::move(source)});
+    m_Undo.push_back({std::move(state), affectsPixels, std::move(source), notesOnly});
 }
-bool RawLayerStackDocument::Apply(RawLayerStackState candidate, std::string& error, bool affectsPixels, bool completesAction) {
-    if (!ValidateRawLayerStack(candidate, error)) return false;
+RawLayerStackDocument::PreparedEdit::PreparedEdit(const RawLayerStackDocument* owner,
+    std::uint64_t revision, RawLayerStackState state, const EditorNodeGraph::Graph* composition,
+    std::uint64_t dependencyRevision)
+    : m_Owner(owner), m_Revision(revision), m_State(std::make_unique<RawLayerStackState>(std::move(state))), m_Composition(composition),
+      m_CompositionRevision(composition ? composition->GetStructureRevision() : 0),
+      m_DependencyRevision(dependencyRevision) {}
+
+std::optional<RawLayerStackDocument::PreparedEdit> RawLayerStackDocument::Prepare(
+    RawLayerStackState candidate, std::string& error, const EditorNodeGraph::Graph* composition,
+    int sourceNodeId, std::uint64_t dependencyRevision) const {
+    if (!ValidateRawLayerStack(candidate, error, composition, sourceNodeId)) return std::nullopt;
+    return PreparedEdit(this, m_Revision, std::move(candidate), composition, dependencyRevision);
+}
+
+bool RawLayerStackDocument::Commit(PreparedEdit prepared, std::string& error, bool affectsPixels,
+    bool completesAction, std::uint64_t dependencyRevision, const EditorNodeGraph::Graph* composition) {
+    if (!prepared.m_State || prepared.m_Owner != this || prepared.m_Revision != m_Revision ||
+        prepared.m_DependencyRevision != dependencyRevision ||
+        prepared.m_Composition != composition ||
+        (composition && composition->GetStructureRevision() != prepared.m_CompositionRevision)) {
+        error = "The project changed while this edit was prepared.";
+        return false;
+    }
     if (m_Gesture) { m_GestureChanged = true; m_GestureAffectsPixels |= affectsPixels; }
     else if (!completesAction) {
-        PushUndo(std::move(m_State), affectsPixels);
+        // Reserve the history entry before moving any live document state.
+        // Allocation failure during preparation of history leaves the owner intact.
+        m_Undo.emplace_back();
+        m_Undo.back().state = std::move(m_State);
+        m_Undo.back().affectsPixels = affectsPixels;
+        if (m_Undo.size() > 64) m_Undo.pop_front();
         m_Redo.clear();
     }
-    m_State = std::move(candidate);
+    m_State = std::move(*prepared.m_State);
     ++m_Revision;
     if (affectsPixels) ++m_ProcessingRevision;
+    error.clear();
     return true;
+}
+
+bool RawLayerStackDocument::Apply(RawLayerStackState candidate, std::string& error, bool affectsPixels, bool completesAction) {
+    auto prepared = Prepare(std::move(candidate), error);
+    return prepared && Commit(std::move(*prepared), error, affectsPixels, completesAction);
 }
 bool RawLayerStackDocument::ApplySourceEdit(RawLayerStackState candidate,
     RawRecipe::RawDevelopmentRecipe& source, const RawRecipe::RawDevelopmentRecipe& nextSource,
@@ -285,6 +331,11 @@ const RawLayerSourceHistory* RawLayerStackDocument::PendingSourceHistory(RawLaye
     const auto& entries = action == RawLayerHistoryAction::Undo ? m_Undo : m_Redo;
     return !entries.empty() && entries.back().source ? &*entries.back().source : nullptr;
 }
+bool RawLayerStackDocument::PendingHistoryIsNotesOnly(RawLayerHistoryAction action) const {
+    if (action == RawLayerHistoryAction::CancelGesture) return false;
+    const auto& entries = action == RawLayerHistoryAction::Undo ? m_Undo : m_Redo;
+    return !entries.empty() && entries.back().notesOnly;
+}
 bool RawLayerStackDocument::CancelGesture(RawRecipe::RawDevelopmentRecipe* source) {
     if (!m_Gesture) return false;
     if (m_GestureSource && !source) return false;
@@ -305,6 +356,15 @@ bool RawLayerStackDocument::Undo(std::string* error, const EditorNodeGraph::Grap
     RawRecipe::RawDevelopmentRecipe* source) {
     EndGesture();
     if (m_Undo.empty()) return false;
+    if (m_Undo.back().notesOnly) {
+        // Restore only annotations: accepted async parameters and pending work
+        // belong to the current document, not this presentation history entry.
+        SwapNotes(m_State, m_Undo.back().state);
+        m_Redo.push_back(std::move(m_Undo.back())); m_Undo.pop_back();
+        ++m_Revision;
+        if (error) error->clear();
+        return true;
+    }
     if (m_Undo.back().source && !source) { if (error) *error = "Source settings are required to undo this edit."; return false; }
     std::string reason;
     if (!ValidateRawLayerStack(m_Undo.back().state,reason,composition,sourceNodeId)) { if (error) *error = reason; return false; }
@@ -323,6 +383,14 @@ bool RawLayerStackDocument::Redo(std::string* error, const EditorNodeGraph::Grap
     RawRecipe::RawDevelopmentRecipe* source) {
     EndGesture();
     if (m_Redo.empty()) return false;
+    if (m_Redo.back().notesOnly) {
+        SwapNotes(m_State, m_Redo.back().state);
+        if (m_Undo.size() == 64) m_Undo.pop_front();
+        m_Undo.push_back(std::move(m_Redo.back())); m_Redo.pop_back();
+        ++m_Revision;
+        if (error) error->clear();
+        return true;
+    }
     if (m_Redo.back().source && !source) { if (error) *error = "Source settings are required to redo this edit."; return false; }
     std::string reason;
     if (!ValidateRawLayerStack(m_Redo.back().state,reason,composition,sourceNodeId)) { if (error) *error = reason; return false; }

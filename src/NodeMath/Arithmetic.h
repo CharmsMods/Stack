@@ -13,10 +13,15 @@ enum class ArithmeticMode {
 
 // Values is uniform arithmetic; Spatial retains the existing image/channel
 // computation. This authored domain keeps socket types stable on disconnect.
-enum class ArithmeticDomain { Spatial, Values };
+enum class ArithmeticDomain { Spatial, Values, Channel };
 
 struct ArithmeticSettings {
     ArithmeticDomain domain = ArithmeticDomain::Spatial;
+    // Current graphs use signed RGB math, base alpha, uniform broadcasting
+    // and an explicit zero-denominator result. Obsolete graph formats reject.
+    std::string requiredLinearBasis;
+    bool boundedMask = false;
+    bool percentageInput = false;
     float constantA = 0.0f;
     float constantB = 1.0f;
     float minValue = 0.0f;
@@ -45,7 +50,11 @@ inline bool EvaluateUniformArithmetic(ArithmeticMode mode, const ArithmeticSetti
     case ArithmeticMode::Subtract: result = a - b; break;
     case ArithmeticMode::Multiply: result = a * b; break;
     case ArithmeticMode::Divide:
-        if (b == 0) return fail("Value Math cannot divide by zero.");
+        if (b == 0) {
+            result = 0;
+            error = "Divide by zero: returned zero.";
+            return true;
+        }
         result = a / b; break;
     case ArithmeticMode::Average:
         if (inputs.empty()) result = a;

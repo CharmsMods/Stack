@@ -108,6 +108,7 @@ namespace Raw::MultiFrame { class GraphProcessingCache; }
 namespace Stack::Editor { struct FusionWorkspaceUiState; }
 namespace Stack::Editor { struct BracketingSession; }
 namespace Stack::Editor::RawLabInternal { class GalleryDetails; }
+namespace Stack::Project { struct GraphSnapshotResult; }
 
 namespace Stack::AutoBracket { class AutoBracketCoordinator; struct Presentation; }
 
@@ -443,6 +444,8 @@ public:
     void PublishNodeOpenBackdrop(ImVec2 minimum, ImVec2 maximum, ImVec2 viewMinimum,
         ImVec2 viewMaximum, ImDrawList* drawList, int firstCommand);
     int ResolveRawCanvasRenderNode(const RenderGraphSnapshot& snapshot, int nodeId) const;
+    bool ResolveRawCanvasRenderOutput(const RenderGraphSnapshot& snapshot, int nodeId,
+        const std::string& socketId, int& compiledNodeId, std::string& compiledSocketId) const;
     bool IsRawProjectCanvas() const;
     void RenderGraphWorkspace();
     bool IsRawImageNavigationActive() const;
@@ -479,6 +482,11 @@ public:
     bool RestoreRawLayerHistoryEdit(bool redo);
     void RenderRawLayerGraphToolbar();
     void FinishRawLayerGraphFrame();
+    void MarkGraphLayoutEdited(bool gestureActive = false);
+    bool SetGraphNodeNotes(const std::string& documentId, const std::string& graphId,
+        int nodeId, const std::string& instanceUuid, const std::string& notes,
+        std::string* error = nullptr);
+    void EndGraphLayoutGesture(bool cancelled = false);
     void MarkGraphEdited(int touchedNodeId = -1, bool affectsPixels = true);
     bool IsGraphOutputConnected() const;
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
@@ -630,7 +638,8 @@ public:
     bool AbsorbDirectDownstreamToneFinishIntoDevelop(int sourceNodeId);
     int FindNearestUpstreamRawDevelopNode(int sourceNodeId) const;
     bool SelectUpstreamDevelopForToneNode(int toneNodeId);
-    bool ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
+    bool ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr,
+        const std::function<EditorNodeGraph::GraphRect(const EditorNodeGraph::Graph&, const EditorNodeGraph::Node&)>& measure = {});
     bool RemoveGraphLink(int fromNodeId, int toNodeId);
     bool RemoveGraphLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId);
     bool DeleteSelectedGraphLink();
@@ -653,7 +662,12 @@ public:
     void AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation operation, EditorNodeGraph::Vec2 graphPosition);
     void AddCompoundTemplateNodeAt(std::size_t templateIndex, EditorNodeGraph::Vec2 graphPosition);
     bool MakeCompoundNodeUnique(int nodeId, std::string* error = nullptr);
-    bool UnpackCompoundNode(int nodeId, std::string* error = nullptr);
+    bool UnpackCompoundNode(int nodeId, std::string* error = nullptr,
+        const std::function<EditorNodeGraph::GraphRect(const EditorNodeGraph::Graph&,
+            const EditorNodeGraph::Node&)>& measure = {},
+        const std::function<std::optional<EditorNodeGraph::Vec2>(const EditorNodeGraph::Graph&,
+            const EditorNodeGraph::Node&, const std::string&, EditorNodeGraph::SocketDirection)>& measureSocket = {});
+    bool RepackCompoundGroup(int groupId, std::string* error = nullptr);
     bool UpdateCompoundNodeToLatestEmbeddedVersion(int nodeId, std::string* error = nullptr);
     bool CreateCompoundFromSelection(const std::string& label, std::string* error = nullptr);
 
@@ -895,7 +909,7 @@ public:
     }
     void ClearDirty();
     bool ClearDirtyIfRevision(std::uint64_t expectedRevision);
-    void MarkDirty();
+    void MarkDirty(bool refreshCover = true);
     bool IsRawWorkspaceProjectActive() const {
         return (m_Project->snapshot != nullptr &&
                 m_Project->snapshot->projectKindHint ==
@@ -1130,6 +1144,9 @@ public:
         unsigned int& outTexture,
         int& outWidth,
         int& outHeight) const;
+    // Retained pixels may remain drawable while edits await rendering. This
+    // reports whether the active RAW presentation has caught up with them.
+    bool HasCurrentRawWorkspacePresentation() const;
     bool TryGetViewportPreviewGeometry(Stack::Renderer::ViewportPreviewGeometry& geometry) const;
     bool TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height) const;
     void UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
@@ -1616,6 +1633,11 @@ private:
     mutable EditorNodeGraph::GraphOutputDescriptions m_GraphOutputDescriptions;
     mutable std::uint64_t m_GraphOutputDescriptionRenderRevision = 0;
     mutable std::uint64_t m_GraphOutputDescriptionStructureRevision = 0;
+    std::shared_ptr<const void> m_GraphSnapshotProducerIdentity = std::make_shared<const unsigned char>(0);
+    mutable std::weak_ptr<const Stack::Project::GraphSnapshotResult> m_PublishedGraphSnapshot;
+    std::shared_ptr<const Stack::Project::GraphSnapshotResult> EnsureCompiledGraphSnapshot(
+        int timelineFrame, int stageOutputNodeId) const;
+    void PublishCompiledGraphSemantics(const std::shared_ptr<const Stack::Project::GraphSnapshotResult>& result) const;
     std::unordered_map<std::string, Stack::NodeMath::FirstClassValue>
         m_LastGraphUniformOutputValues;
     std::uint64_t m_LastGraphUniformOutputGeneration = 0;

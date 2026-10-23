@@ -8,6 +8,7 @@
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
 #include "Editor/Internal/RawLab/DetailContrastEditor.h"
 #include "Utils/FloatingSlider.h"
+#include <algorithm>
 
 namespace Stack::Editor {
 using namespace RawLabInternal;
@@ -135,6 +136,25 @@ const NodeEditorDefinition& FindNodeEditor(const EditorNodeGraph::Node& node) {
         (node.kind!=EditorNodeGraph::NodeKind::MultiFrameHdr || node.multiFrameHdr.bracketingSource)) {
         for(const auto& editor:NodeEditorDefinitions())
             if(editor.definitionId==definition->identity.id) return editor;
+    }
+    if (node.kind==EditorNodeGraph::NodeKind::Compound && node.definitionResolved) {
+        // Embedded recipes use the existing graph controls. Reset only local
+        // fallbacks; a connected parameter retains its authored fallback.
+        static const NodeEditorDefinition compoundControls=[] {
+            NodeEditorDefinition editor;
+            editor.reset=[](EditorModule&,RawWorkspaceEditContext& context) {
+                if (!context.nodeDraft || context.nodeDraft->kind!=EditorNodeGraph::NodeKind::Compound)
+                    return false;
+                auto& overrides=context.nodeDraft->compound.instance.parameterOverrides;
+                const auto previous=overrides.size();
+                overrides.erase(std::remove_if(overrides.begin(),overrides.end(),[&](const auto& value) {
+                    return context.drivenParameters.count(value.parameterId)==0;
+                }),overrides.end());
+                return overrides.size()!=previous;
+            };
+            return editor;
+        }();
+        return compoundControls;
     }
     static const NodeEditorDefinition graphControls;
     return graphControls;

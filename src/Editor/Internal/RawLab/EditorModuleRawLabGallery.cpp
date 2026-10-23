@@ -1,4 +1,5 @@
 #include "App/WorkspacePresentation.h"
+#include "App/AppHeaderStyle.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Bracketing/BracketingGallery.h"
 #include "Editor/Internal/RawLab/RawLabGalleryLayout.h"
@@ -353,8 +354,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     bool expandedFilmstripDrawer,
     float filmstripDrawerExpansion) {
     auto& layoutMotion = m_RawWorkspaceGalleryLayoutAnimation;
+    if (ImGui::GetCurrentWindow()->SkipItems) {
+        layoutMotion.Reset();
+        return;
+    }
     const ImRect viewClip = ImGui::GetCurrentWindow()->ClipRect;
     if (m_PermanentGalleryWorkspace) layoutMotion.SetViewport(viewClip);
+    const std::string movingImageAtPointer = layoutMotion.ImageAt(ImGui::GetIO().MousePos);
     bool gridAnchorApplied = false;
     const auto applyGridAnchor = [&](const std::string& key, const ImVec2& minimum, float imageHeight) {
         if (compactFilmstrip || !m_PermanentGalleryWorkspace || !layoutMotion.AnchorPending() ||
@@ -651,6 +657,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         ImGui::PushID("RawGalleryTile");
         ImGui::PushID(itemId);
         const ImVec2 tileMinimum = ImGui::GetCursorScreenPos();
+        const Stack::Editor::RawLabInternal::GalleryTileMotion tileMotion(layoutMotion,
+            source.relativePathKey, ImRect(tileMinimum,
+                ImVec2(tileMinimum.x + tileSize.x, tileMinimum.y + tileSize.y)));
+        const bool pointerEnabled = movingImageAtPointer.empty() ||
+            movingImageAtPointer == source.relativePathKey;
         ImGuiButtonFlags tileButtonFlags =
             ImGuiButtonFlags_PressedOnClickRelease |
             ImGuiButtonFlags_PressedOnDoubleClick;
@@ -666,14 +677,14 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             "##tile",
             tileSize,
             exposedHeight,
-            tileButtonFlags);
-        const bool pointerOnVisibleCard = previewHoverEnabled &&
-            ImGui::GetIO().MousePos.y < previewHoverBottomY;
+            tileButtonFlags, &tileMotion, pointerEnabled);
+        const bool pointerOnVisibleCard = previewHoverEnabled && pointerEnabled &&
+            ImGui::GetIO().MousePos.y < tileMotion.Map(ImVec2(tileMinimum.x, previewHoverBottomY)).y;
         const bool queuePlaceholder=projectsOnly&&projectPath.empty();
         const bool tilePressed = rawTilePressed && pointerOnVisibleCard&&!queuePlaceholder;
         const bool tileHovered = pointerOnVisibleCard &&
             ImGui::IsItemHovered() &&
-            ImGui::GetIO().MousePos.y >= tileMinimum.y;
+            ImGui::GetIO().MousePos.y >= tileMotion.Map(tileMinimum).y;
         if (compactFilmstrip && tileHovered &&
             currentFilmstripTimelineIndex <
                 m_RawWorkspaceLabFilmstripTimelineEntries.size()) {
@@ -700,7 +711,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             ImVec2(
                 tileRect.Max.x,
                 std::min(tileRect.Max.y, tileRect.Min.y + imageHeight)));
-        const bool draggableFilmstripSource = compactFilmstrip &&
+        const bool draggableFilmstripSource = compactFilmstrip && !tileMotion.Active() &&
             CanEditRawWorkspaceFilmstripOrganization() &&
             projectPath.empty() &&
             !source.relativePathKey.empty() &&
@@ -1235,7 +1246,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const ImRect versionsBadge(
             ImVec2(imageArea.Max.x - versionsSize.x - 14.0f, imageArea.Min.y + 5.0f),
             ImVec2(imageArea.Max.x - 5.0f, imageArea.Min.y + versionsSize.y + 11.0f));
-        const bool versionsPressed = stackedProjects && tilePressed && versionsBadge.Contains(ImGui::GetIO().MousePos);
+        const bool versionsPressed = stackedProjects && tilePressed && tileMotion.Map(versionsBadge).Contains(ImGui::GetIO().MousePos);
         if (stackedProjects) {
             drawList->AddRectFilled(versionsBadge.Min, versionsBadge.Max,
                 ImGui::GetColorU32(ImVec4(0, 0, 0, 0.73f)), 4.0f);
@@ -1297,7 +1308,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     doubleClicked && !creationMode && !selectionModifier);
             }
         }
-        if (!queuePlaceholder && ImGui::BeginPopupContextItem("RawGalleryEditContext")) {
+        if (!queuePlaceholder && pointerOnVisibleCard && ImGui::IsItemHovered() &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Right)) ImGui::OpenPopup("RawGalleryEditContext");
+        if (!queuePlaceholder && ImGui::BeginPopup("RawGalleryEditContext")) {
             if (!activeProjectPath.empty()) {
                 if (!isProjectSelected(activeProjectPath)) {
                     selectProject(
@@ -1418,7 +1431,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId),
                 ImGui::GetFrameCount(), ImGui::GetTime());
         }
-        if (activeProjectPath.empty()) {
+        if (!compactFilmstrip && tileHovered && activeProjectPath.empty()) {
             std::string tooltip = selected
                 ? displayLabel + "\nSelected frame " +
                     std::to_string(selectionOrdinal) +
@@ -1429,10 +1442,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 tooltip += "\nHold Ctrl to cycle images. Double-click to view the stack in Filmstrip.";
             }
             if (completedBurst) tooltip += "\nA finished burst is saved in Brackets. Creating another capture set creates a separate project.";
-            if (!compactFilmstrip) {
-                LabTooltip(tooltip.c_str());
-            }
-        } else {
+            LabTooltip(tooltip.c_str());
+        } else if (!compactFilmstrip && tileHovered) {
             const std::string tooltip = stackedProjects
                 ? activeProjectName + "\nProject " +
                     std::to_string(activeProjectIndex + 1u) + " of " +
@@ -1444,9 +1455,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     "\nCtrl-click toggles; Shift-click selects a range."
                 : activeProjectName +
                     "\nCtrl-click toggles; Shift-click selects a range.";
-            if (!compactFilmstrip) {
-                LabTooltip(tooltip.c_str());
-            }
+            LabTooltip(tooltip.c_str());
         }
         if (versionsPressed) ImGui::OpenPopup("Gallery saved versions");
         if (ImGui::BeginPopup("Gallery saved versions")) {
@@ -1804,7 +1813,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             m_RawWorkspaceLabFilmstripScrollLastAppliedX = currentScrollX;
         }
 
-        if (!layoutMotion.Active() && !m_LibraryWindowHovered &&
+        if (!m_LibraryWindowHovered &&
             !io.KeyCtrl &&
             ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
             const float wheel = std::abs(io.MouseWheelH) > 0.0001f
@@ -2127,12 +2136,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 }
                 // The permanent Gallery's identity-based overlay owns sorting
                 // motion. Its destination slots must already be at rest.
-                if (m_PermanentGalleryWorkspace || Stack::LibraryUi::ReducedMotion() ||
-                    std::abs(desiredSlotX - slotAnimation.slotX) < .1f) {
+                if (m_PermanentGalleryWorkspace || std::abs(desiredSlotX - slotAnimation.slotX) < .1f ||
+                    Stack::LibraryUi::ReducedMotion()) {
                     slotAnimation.slotX = desiredSlotX;
                 } else {
                     const float slotResponse = 1.0f - std::exp(
-                        -std::clamp(io.DeltaTime, 0.0f, 0.05f) / 0.14f);
+                        -std::max(io.DeltaTime, 0.0f) / 0.055f);
                     slotAnimation.slotX +=
                         (desiredSlotX - slotAnimation.slotX) * slotResponse;
                 }
@@ -2814,7 +2823,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawWorkspaceLabGalleryScrollTargetY = currentScrollY;
         m_RawWorkspaceLabGalleryScrollCurrentY = currentScrollY;
     }
-    if (!layoutMotion.Active() && !m_LibraryWindowHovered &&
+    if (!m_LibraryWindowHovered &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
         const ImGuiIO& io = ImGui::GetIO();
         if (!io.KeyCtrl && std::abs(io.MouseWheel) > 0.0001f) {
@@ -2880,11 +2889,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             animation.initialized = true;
         } else {
             const float delta = target - animation.expansion;
-            if (std::abs(delta) < 0.001f) {
+            if (std::abs(delta) < 0.001f || Stack::LibraryUi::ReducedMotion()) {
                 animation.expansion = target;
             } else {
-                animation.expansion += delta *
-                    (1.0f - std::exp(-ImGui::GetIO().DeltaTime * 16.0f));
+                Stack::Header::ApproachMotion(animation.expansion, target, .18f);
             }
         }
 
@@ -3039,8 +3047,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
 
                 float& hoverAmount =
                     m_RawWorkspaceLabGalleryMiniThumbnailHover[item.animationKey];
-                hoverAmount += ((hovered ? 1.0f : 0.0f) - hoverAmount) *
-                    (1.0f - std::exp(-ImGui::GetIO().DeltaTime * 18.0f));
+                const float hoverTarget = hovered ? 1.0f : 0.0f;
+                if (std::abs(hoverTarget - hoverAmount) < .001f || Stack::LibraryUi::ReducedMotion())
+                    hoverAmount = hoverTarget;
+                else hoverAmount += (hoverTarget - hoverAmount) *
+                    (1.0f - std::exp(-ImGui::GetIO().DeltaTime * 24.0f));
                 const float scale = 1.0f + hoverAmount * 0.15f;
                 const ImVec2 miniCenter(
                     (miniMinimum.x + miniMaximum.x) * 0.5f,
@@ -3104,7 +3115,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             const ImVec2 clipMaximum(
                 contentStart.x + availableWidth,
                 contentStart.y + animatedHeight);
-            ImGui::PushClipRect(contentStart, clipMaximum, true);
+            // Moving tiles can cross folder sections; their whole image and
+            // decoration share the viewport until the layout settles.
+            ImGui::PushClipRect(layoutMotion.Active() ? viewClip.Min : contentStart,
+                layoutMotion.Active() ? viewClip.Max : clipMaximum, true);
             const ImRect galleryClip = ImGui::GetCurrentWindow()->ClipRect;
             const auto visibleRows = ComputeGalleryVisibleRange(
                 rowCount,

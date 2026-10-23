@@ -568,20 +568,46 @@ struct AffineNormalEvaluation {
     std::array<double, 36> normal {};
     std::array<double, 6> gradient {};
     std::vector<double> standardizedResiduals;
+    // Indexed by reference sample. Negative losses denote unavailable evidence.
+    std::vector<double> sampleLosses;
+    std::vector<double> inverseSigmas;
 };
+
+bool CompareAffineEvidence(const AffineNormalEvaluation& before,
+    const AffineNormalEvaluation& after, std::uint64_t minimumSamples,
+    double& beforeObjective, double& afterObjective) {
+    beforeObjective = afterObjective = 0.0;
+    std::uint64_t commonCount = 0u;
+    if (before.sampleLosses.size() != after.sampleLosses.size()) return false;
+    for (std::size_t i = 0u; i < before.sampleLosses.size(); ++i) {
+        if (before.sampleLosses[i] < 0.0 || after.sampleLosses[i] < 0.0) continue;
+        beforeObjective += before.sampleLosses[i];
+        afterObjective += after.sampleLosses[i];
+        ++commonCount;
+    }
+    // Dropping a clipped or off-image observation cannot itself improve a
+    // transform. Compare both models on exactly the same observable samples.
+    return commonCount >= minimumSamples &&
+        Finite(beforeObjective) && Finite(afterObjective);
+}
 
 AffineNormalEvaluation EvaluateAffineNormal(
     const std::vector<AffineReferenceSample>& referenceSamples,
     const AffineSourceEvaluator& sourceEvaluator,
     const AffineModel& model,
     const AffineRefinementOptions& options,
-    bool buildNormal) {
+    bool buildNormal,
+    const std::vector<double>* fixedInverseSigmas = nullptr) {
     AffineNormalEvaluation evaluation;
     const double coordinateScale = std::max<double>(
         1.0,
         std::max(options.referenceExtent.width, options.referenceExtent.height));
     evaluation.standardizedResiduals.reserve(referenceSamples.size());
-    for (const AffineReferenceSample& reference : referenceSamples) {
+    evaluation.sampleLosses.assign(referenceSamples.size(), -1.0);
+    if (!fixedInverseSigmas) evaluation.inverseSigmas.assign(referenceSamples.size(), 0.0);
+    for (std::size_t sampleIndex = 0u; sampleIndex < referenceSamples.size(); ++sampleIndex) {
+        const AffineReferenceSample& reference = referenceSamples[sampleIndex];
+        if (fixedInverseSigmas && (*fixedInverseSigmas)[sampleIndex] <= 0.0) continue;
         if (!reference.valid || !KnownSite(reference.site) ||
             !Finite(reference.referenceRaw.x) ||
             !Finite(reference.referenceRaw.y) ||
@@ -604,11 +630,19 @@ AffineNormalEvaluation EvaluateAffineNormal(
             options.exposureScale * options.exposureScale * source.variance +
             options.numericalVarianceFloor;
         if (!Finite(variance) || variance <= 0.0) continue;
-        const double inverseSigma = 1.0 / std::sqrt(variance);
+        // Keep the seed's sensor-noise scale fixed during geometric fitting.
+        // Moving toward a noisier/bright sample must not lower the objective
+        // merely by increasing its denominator.
+        const double inverseSigma = fixedInverseSigmas
+            ? (*fixedInverseSigmas)[sampleIndex] : 1.0 / std::sqrt(variance);
         const double residual = (reference.referenceValue -
             options.exposureScale * source.value) * inverseSigma;
         if (!Finite(residual)) continue;
-        evaluation.objective += HuberLoss(residual, options.huberDelta);
+        const double loss = HuberLoss(residual, options.huberDelta);
+        if (!Finite(loss)) continue;
+        evaluation.sampleLosses[sampleIndex] = loss;
+        if (!fixedInverseSigmas) evaluation.inverseSigmas[sampleIndex] = inverseSigma;
+        evaluation.objective += loss;
         evaluation.standardizedResiduals.push_back(residual);
         ++evaluation.sampleCount;
         if (!buildNormal) continue;
@@ -1275,6 +1309,12 @@ RawCoordinate AffineModel::Map(RawCoordinate referenceRaw) const {
     };
 }
 
+bool AffineModel::IsIdentity() const {
+    return Finite(centerRaw.x) && Finite(centerRaw.y) &&
+        linear == std::array<double, 4>{1.0, 0.0, 0.0, 1.0} &&
+        translationRaw.x == 0.0 && translationRaw.y == 0.0;
+}
+
 const char* AffineRefinementFailureName(AffineRefinementFailure failure) {
     switch (failure) {
         case AffineRefinementFailure::None: return "none";
@@ -1333,6 +1373,8 @@ bool RefineGlobalAffine(
         return SetError(error, result.message);
     }
 
+    const AffineNormalEvaluation initial = current;
+
     for (std::uint32_t iteration = 0u;
          iteration < options.iterations;
          ++iteration) {
@@ -1367,9 +1409,13 @@ bool RefineGlobalAffine(
                 sourceEvaluator,
                 candidate,
                 options,
-                false);
+                false,
+                &initial.inverseSigmas);
+            double currentObjective = 0.0, candidateObjective = 0.0;
             if (candidateEvaluation.valid &&
-                candidateEvaluation.objective + 1.0e-12 < current.objective) {
+                CompareAffineEvidence(current, candidateEvaluation, options.minimumSamples,
+                    currentObjective, candidateObjective) &&
+                candidateObjective + 1.0e-12 < currentObjective) {
                 result.model = candidate;
                 result.normalCondition = condition;
                 ++result.acceptedIterations;
@@ -1378,7 +1424,8 @@ bool RefineGlobalAffine(
                     sourceEvaluator,
                     result.model,
                     options,
-                    true);
+                    true,
+                    &initial.inverseSigmas);
                 result.finalObjective = current.objective;
                 result.validSampleCount = current.sampleCount;
                 acceptedStep = true;
@@ -1388,7 +1435,9 @@ bool RefineGlobalAffine(
         }
         if (!acceptedStep) break;
     }
-    if (result.acceptedIterations == 0u ||
+    const bool comparable = CompareAffineEvidence(initial, current, options.minimumSamples,
+        result.initialObjective, result.finalObjective);
+    if (!comparable || result.acceptedIterations == 0u ||
         !Finite(result.finalObjective) ||
         result.finalObjective >= result.initialObjective) {
         result.failure = AffineRefinementFailure::NoImprovement;

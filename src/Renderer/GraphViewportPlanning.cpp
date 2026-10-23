@@ -16,6 +16,13 @@ using Stage = RenderGraphViewportStage;
 using Stack::Renderer::ImageRegion;
 using namespace Stack::NodeMath;
 
+bool UniformOutput(const RenderGraphNode& node, const std::string& socket) {
+    return ((node.kind == RenderGraphNodeKind::Value || node.kind == RenderGraphNodeKind::FieldMean) &&
+            socket == EditorNodeGraph::kValueOutputSocketId) ||
+        (node.kind == RenderGraphNodeKind::DataMath && node.dataMathSettings.domain == ArithmeticDomain::Values &&
+            socket == EditorNodeGraph::kImageOutputSocketId);
+}
+
 bool PointwiseTone(const nlohmann::json& tone) {
     return tone.is_object() && !tone.value("localBaselineEnabled", false) &&
         !tone.value("autoCalibratePending", false) && tone.value("targetScope", 0) == 0 &&
@@ -269,6 +276,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
             stage.inputs.push_back({link->toSocketId, source, inputDemand});
             upstream.demand = UnionDemand(upstream.demand, inputDemand);
         }
+        // Uniform outputs live in the scalar cache, not a full image texture.
+        // Propagate dependencies first: FieldMean still consumes its complete
+        // source field even though its own result is a single value.
+        if (UniformOutput(node, it->socketId)) continue;
         const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand, stage.renderWidth, stage.renderHeight);
         const auto pixels = std::uint64_t(resident.width) * resident.height;
         const auto completePixels = std::uint64_t(stage.spatial.fullWindow.width) * stage.spatial.fullWindow.height;
@@ -291,6 +302,7 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     std::uint64_t inputCropPixels = 0;
     std::set<std::tuple<int,std::string,int,int,int,int,int,int>> crops;
     const auto countCrop = [&](const Endpoint& source, const ImageRegion& target) {
+        if (UniformOutput(*nodes.at(source.nodeId), source.socketId)) return;
         const auto& stage = plan.stages.at(source);
         const auto resident = stage.regionalExecutable ?
             Stack::Renderer::ScaleImageRegion(stage.demand,stage.renderWidth,stage.renderHeight) :

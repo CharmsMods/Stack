@@ -3,6 +3,7 @@
 #include "App/WorkspacePresentation.h"
 #include "Project/RawLayerStack.h"
 #include "Project/RawLayerSourceTransactions.h"
+#include "Project/RawProjectGraph.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -10,8 +11,11 @@
 using namespace Stack::Project;
 
 bool EditorModule::ApplyRawLayerStackEdit(RawLayerStackState candidate, bool affectsPixels, bool completesAction) {
-    if (!ValidateRawLayerStack(candidate, m_RawLayerStatus, &m_Project->graph, ResolveRawWorkspaceStageOutputNodeId())) return false;
-    if (!m_Project->rawLayers.Apply(std::move(candidate), m_RawLayerStatus, affectsPixels, completesAction)) return false;
+    const auto revision = m_Project->editRevision;
+    auto prepared = m_Project->rawLayers.Prepare(std::move(candidate), m_RawLayerStatus,
+        &m_Project->graph, ResolveRawWorkspaceStageOutputNodeId(), revision);
+    if (!prepared || !m_Project->rawLayers.Commit(std::move(*prepared), m_RawLayerStatus,
+        affectsPixels, completesAction, m_Project->editRevision, &m_Project->graph)) return false;
     ReconcileRawNodeEditorSelection();
     MarkDirty();
     if (affectsPixels) {
@@ -31,6 +35,7 @@ bool EditorModule::RestoreRawLayerHistoryEdit(bool redo) {
     if (!CommitRawLayerMaskGraph()) return false;
     m_Project->rawLayers.EndGesture();
     const auto action = redo ? RawLayerHistoryAction::Redo : RawLayerHistoryAction::Undo;
+    const bool notesOnly = m_Project->rawLayers.PendingHistoryIsNotesOnly(action);
     const auto* pending = m_Project->rawLayers.PendingSourceHistory(action);
     if (pending && !pending->sourceSetId.empty() && m_Project->snapshot && m_Project->snapshot.use_count() != 1)
         m_Project->snapshot = std::make_shared<RawProjectSnapshot>(*m_Project->snapshot);
@@ -40,6 +45,15 @@ bool EditorModule::RestoreRawLayerHistoryEdit(bool redo) {
         m_Project->snapshot.get(),&m_Project->graph,sourceId);
     if (!update.success) { m_RawLayerStatus = update.errorMessage; return false; }
     m_RawLayerStatus.clear();
+    if (notesOnly) {
+        if (m_RawLayerMaskWorkspace && m_RawLayerMaskWorkspace->projectCanvas) {
+            auto& workspace = *m_RawLayerMaskWorkspace;
+            RefreshRawProjectGraphNotes(m_Project->rawLayers.State(), *workspace.projectCanvas, workspace.graph);
+            workspace.revision = m_Project->rawLayers.Revision();
+        }
+        MarkDirty(false);
+        return true;
+    }
     if(m_RawAssetCapture.pending) {
         if(m_RawAssetCapture.cancellation) m_RawAssetCapture.cancellation->store(true);
         m_RawAssetCapture.pending=false;m_RawAssetCapture.application.reset();

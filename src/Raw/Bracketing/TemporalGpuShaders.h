@@ -27,8 +27,10 @@ uniform ivec4 region; // source left, top, width, height
 uniform ivec4 target; // output left, top, width, height
 uniform ivec2 sensor;
 uniform ivec4 sites;
-uniform int aligned,reference,groupIndex,useBands,localGuide,groupCount;
+uniform int aligned,reference,groupIndex,useBands,localGuide,groupCount,initializeGuide;
 const uint FINITE=1u,CLIPPED=2u,REJECTED=4u,REFERENCE=8u,FALLBACK_CLIP=16u;
+// Transient accumulator provenance; not exported as a measurement flag.
+const uint FALLBACK_REJECTED=32u;
 bool finiteValue(double x){return !isnan(x)&&!isinf(x);}
 Observation emptyObservation(){return Observation(0.LF,0.LF,0.LF,0.LF,0.LF,0.LF,-1.LF,0.LF,0u,0u);}
 int siteAt(ivec2 p){return sites[(p.y&1)*2+(p.x&1)];}
@@ -61,6 +63,7 @@ double risk(dvec2 gradient,Mapping m){
 inline const char* Prepare=R"GLSL(
 void main(){
     uint i=gl_GlobalInvocationID.x;if(i>=uint(target.z*target.w))return;
+    if(initializeGuide!=0){
     ivec2 q=ivec2(int(i)%target.z,int(i)/target.z),p=target.xy+q;
     double pilot=0.LF;int used=0;
     for(int dy=0;dy<4;dy+=2)for(int dx=0;dx<4;dx+=2){
@@ -87,6 +90,7 @@ void main(){
         double retained=energy>0.LF?sqrt(max(0.LF,energy-2.LF*variance/200.LF)/energy):0.LF;
         guides[i]=dvec4(pilot,gx*retained,gy*retained,1.LF);
     }else guides[i]=dvec4(pilot,0.LF,0.LF,0.LF);
+    }
     for(int g=0;g<groupCount;++g){
         Accumulator a;a.o=emptyObservation();a.weight=0.LF;a.squared=0.LF;
         a.bw=0.LF;a.dw=0.LF;a.bs=0.LF;a.ds=0.LF;a.base=0.LF;a.detail=0.LF;
@@ -176,8 +180,12 @@ void main(){
     int index=groupIndex*target.z*target.w+i;Accumulator a=sums[index];Observation s=samples[i];
     a.o.flags|=s.flags&REJECTED;
     if((s.flags&FINITE)!=0u){
-        if((a.o.flags&FINITE)==0u||s.exposure<a.o.exposure){a.o.fallback=s.fallback;a.o.exposure=s.exposure;
-            a.o.flags=(a.o.flags&~(CLIPPED|FALLBACK_CLIP))|(s.flags&(CLIPPED|FALLBACK_CLIP));}
+        bool oldRejected=(a.o.flags&FALLBACK_REJECTED)!=0u,newRejected=(s.flags&REJECTED)!=0u;
+        if((a.o.flags&FINITE)==0u||(oldRejected&&!newRejected)||
+           (oldRejected==newRejected&&s.exposure<a.o.exposure)){
+            a.o.fallback=s.fallback;a.o.exposure=s.exposure;
+            a.o.flags=(a.o.flags&~(CLIPPED|FALLBACK_CLIP|FALLBACK_REJECTED))|
+                (s.flags&(CLIPPED|FALLBACK_CLIP))|(newRejected?FALLBACK_REJECTED:0u);}
         a.o.flags|=FINITE;
         if(s.support>0.LF){
             a.o.flags|=s.flags&REFERENCE;double w=1.LF/s.variance;

@@ -36,6 +36,19 @@ bool EditorModule::RestoreProjectGraphHistory(bool redo, bool cancel) {
     auto& history = m_Project->graphHistory;
     const auto* candidate = cancel ? history.CancelCandidate() : history.Candidate(redo);
     if (!candidate) return false;
+    const bool affectsPixels = cancel ? history.CancelAffectsPixels() : history.CandidateAffectsPixels(redo);
+    if (!affectsPixels) {
+        // Notes-only history must not replace source results accepted after the
+        // note was written. Restore annotations by stable instance identity.
+        for (auto& node:m_Project->graph.GetNodes()) {
+            const auto* saved=candidate->graph.FindNode(node.id);
+            if (saved && saved->instanceUuid==node.instanceUuid) node.notes=saved->notes;
+        }
+        if (cancel) history.AcceptCancel(); else history.AcceptRestore(redo);
+        history.RefreshCurrent(CaptureProjectGraphState());
+        MarkDirty(false);
+        return true;
+    }
     auto state = *candidate;
     for (auto& node:state.graph.GetNodes()) if (node.kind==EditorNodeGraph::NodeKind::RawOperation &&
         node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve)

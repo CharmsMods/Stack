@@ -641,6 +641,14 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
 
 std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Compound: {
+            const auto& ports = node.compound.instance.interfaceSnapshot;
+            for (const auto& port : ports)
+                if (port.direction == Stack::NodeMath::PortDirection::Output && !port.advanced) return port.id;
+            for (const auto& port : ports)
+                if (port.direction == Stack::NodeMath::PortDirection::Output) return port.id;
+            return {};
+        }
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawDevelopment:
         case EditorNodeGraph::NodeKind::RawDecode:

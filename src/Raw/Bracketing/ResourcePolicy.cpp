@@ -17,10 +17,13 @@ std::uint64_t EstimateBracketingPeakResidentBytes(unsigned width,unsigned height
     const long double preview=std::min<long double>(pixels/4,640.0L*640)*
         (4*groupCount*sizeof(Preview::Sample)+8*groupCount+32);
     const long double pyramids=localAlignment?pixels*2*(2*sizeof(double)+sizeof(std::uint8_t))*1.34L:0;
+    // Two level-zero clipping masks and one float contradiction per Bayer
+    // reliability cell (the full-resolution grid is the conservative bound).
+    const long double clippingEvidence=localAlignment?pixels*(2*sizeof(std::uint8_t)+.25L*sizeof(float)):0;
     const long double reliability=localAlignment?pixels*.25L*std::max<std::size_t>(1,sourceCount-1)*3:0;
     const long double tileWorkers=static_cast<long double>(std::max<std::uint32_t>(1,workerCount))*
         GroupWorkerBytes(groupCount,512,sourceCount);
-    return saturated(output+preparedTiles+pyramids+reliability+preview+tileWorkers+64.0L*1024*1024);
+    return saturated(output+preparedTiles+pyramids+clippingEvidence+reliability+preview+tileWorkers+64.0L*1024*1024);
 }
 
 std::uint32_t ResolveBracketingWorkerCount(

@@ -514,7 +514,8 @@ bool BuildCfaPlanePyramidImpl(
             base.extent.height != expected.height ||
             !CheckedSampleCount(base.extent, count) || count == 0u ||
             base.signal.size() != count || base.variance.size() != count ||
-            (!base.validMask.empty() && base.validMask.size() != count)) {
+            (!base.validMask.empty() && base.validMask.size() != count) ||
+            (!base.clippedMask.empty() && base.clippedMask.size() != count)) {
             return Fail(error, "MFD CFA pyramid base plane does not match the CFA layout.");
         }
         CfaPyramidLevel level;
@@ -527,10 +528,12 @@ bool BuildCfaPlanePyramidImpl(
         level.variance = std::move(base.variance);
         if (base.validMask.empty()) level.validMask.assign(count, 1u);
         else level.validMask = std::move(base.validMask);
+        level.clippedMask = std::move(base.clippedMask);
         for (std::size_t index = 0u; index < count; ++index) {
             if (!Finite(level.signal[index]) || !Finite(level.variance[index]) ||
                 level.variance[index] < 0.0) {
                 level.validMask[index] = 0u;
+                if (!level.clippedMask.empty()) level.clippedMask[index] = 0u;
             }
         }
         result.planes[SiteIndex(site)].push_back(std::move(level));
@@ -628,6 +631,91 @@ bool BuildCfaPlanePyramid(
 
 namespace {
 
+// One node's immutable reference geometry is shared by its candidate scores
+// and refinement proposals. The 128 KiB limit fits the existing per-worker
+// alignment workspace reserve; larger custom patches use the original path.
+struct PatchReferenceGeometry {
+    struct Sample {
+        RawCoordinate mappedSourceRaw;
+        double signal = 0.0;
+        double variance = -1.0;
+    };
+    struct Site {
+        const CfaPyramidLevel* reference = nullptr;
+        const CfaPyramidLevel* source = nullptr;
+        CfaOffset sourceOffset;
+    };
+    std::array<Site, 4> sites;
+    std::vector<Sample> samples;
+    const LocalMotionDirectionRequest* request = nullptr;
+    RawCoordinate centerRaw;
+    std::uint32_t level = 0u;
+    std::uint32_t patch = 0u;
+
+    bool Prepare(const LocalMotionDirectionRequest& input, RawCoordinate center,
+        std::uint32_t levelIndex, std::uint32_t patchLevelPixels) {
+        request = nullptr;
+        samples.clear();
+        constexpr std::size_t maximumBytes = 128u * 1024u;
+        const std::uint64_t area = std::uint64_t(patchLevelPixels) * patchLevelPixels;
+        if (!input.reference || !input.source || !Finite(center) || area == 0u ||
+            area > maximumBytes / (kSites.size() * sizeof(Sample))) return false;
+        const double levelScale = std::ldexp(1.0, levelIndex);
+        for (CfaSite site : kSites) {
+            auto& geometry = sites[SiteIndex(site)];
+            geometry.reference = FindCfaPyramidLevel(*input.reference, site, levelIndex);
+            geometry.source = FindCfaPyramidLevel(*input.source, site, levelIndex);
+            if (!geometry.reference || !geometry.source ||
+                !ValidateLevel(*geometry.reference) || !ValidateLevel(*geometry.source)) return false;
+            geometry.sourceOffset = input.source->layout.OffsetFor(site);
+        }
+        try {
+            samples.resize(static_cast<std::size_t>(area * kSites.size()));
+        } catch (const std::bad_alloc&) {
+            return false; // Reuse is optional; retain the uncached computation.
+        }
+        for (CfaSite site : kSites) {
+            const auto& reference = *sites[SiteIndex(site)].reference;
+            const auto centerPlane = input.reference->layout.RawToPlane(center, site);
+            const auto startX = static_cast<std::int64_t>(std::floor(
+                centerPlane.x / levelScale - 0.5 * static_cast<double>(patchLevelPixels)));
+            const auto startY = static_cast<std::int64_t>(std::floor(
+                centerPlane.y / levelScale - 0.5 * static_cast<double>(patchLevelPixels)));
+            for (std::uint32_t y = 0u; y < patchLevelPixels; ++y) {
+                const auto referenceY = startY + y;
+                if (referenceY < 0 || referenceY >= static_cast<std::int64_t>(reference.extent.height)) continue;
+                for (std::uint32_t x = 0u; x < patchLevelPixels; ++x) {
+                    const auto referenceX = startX + x;
+                    if (referenceX < 0 || referenceX >= static_cast<std::int64_t>(reference.extent.width)) continue;
+                    const auto index = PixelIndex(reference.extent,
+                        static_cast<std::uint64_t>(referenceX), static_cast<std::uint64_t>(referenceY));
+                    if (reference.validMask[index] == 0u || !Finite(reference.signal[index]) ||
+                        !Finite(reference.variance[index]) || reference.variance[index] < 0.0) continue;
+                    const CfaPlaneCoordinate plane {
+                        static_cast<double>(referenceX) * levelScale,
+                        static_cast<double>(referenceY) * levelScale, site
+                    };
+                    auto& sample = samples[SiteIndex(site) * area + y * patchLevelPixels + x];
+                    sample.mappedSourceRaw = input.globalWarp.Map(input.reference->layout.PlaneToRaw(plane));
+                    sample.signal = reference.signal[index];
+                    sample.variance = reference.variance[index];
+                }
+            }
+        }
+        request = &input;
+        centerRaw = center;
+        level = levelIndex;
+        patch = patchLevelPixels;
+        return true;
+    }
+
+    bool Matches(const LocalMotionDirectionRequest& input, RawCoordinate center,
+        std::uint32_t levelIndex, std::uint32_t patchLevelPixels) const {
+        return request == &input && centerRaw.x == center.x && centerRaw.y == center.y &&
+            level == levelIndex && patch == patchLevelPixels;
+    }
+};
+
 struct PatchStatistics {
     bool valid = false;
     std::uint64_t validCount = 0u;
@@ -654,7 +742,8 @@ bool EvaluatePatch(
     std::uint32_t patchLevelPixels,
     bool calculateNormal,
     bool calculateFlatPhotometricCost,
-    PatchStatistics& statistics) {
+    PatchStatistics& statistics,
+    const PatchReferenceGeometry* geometry = nullptr) {
     statistics = {};
     if (!request.reference || !request.source || patchLevelPixels == 0u ||
         !Finite(centerRaw) || !Finite(residualRaw) ||
@@ -663,6 +752,7 @@ bool EvaluatePatch(
     }
     const double levelScale = std::ldexp(1.0, levelIndex);
     const double rawPixelsPerLevelPixel = std::ldexp(2.0, levelIndex);
+    if (geometry && !geometry->Matches(request, centerRaw, levelIndex, patchLevelPixels)) geometry = nullptr;
     statistics.nominalCount = static_cast<std::uint64_t>(patchLevelPixels) *
         patchLevelPixels * kSites.size();
     statistics.residuals.reserve(
@@ -675,16 +765,17 @@ bool EvaluatePatch(
     }
 
     for (CfaSite site : kSites) {
-        const CfaPyramidLevel* referenceLevel = FindCfaPyramidLevel(
+        const auto* siteGeometry = geometry ? &geometry->sites[SiteIndex(site)] : nullptr;
+        const CfaPyramidLevel* referenceLevel = siteGeometry ? siteGeometry->reference : FindCfaPyramidLevel(
             *request.reference, site, levelIndex);
-        const CfaPyramidLevel* sourceLevel = FindCfaPyramidLevel(
+        const CfaPyramidLevel* sourceLevel = siteGeometry ? siteGeometry->source : FindCfaPyramidLevel(
             *request.source, site, levelIndex);
-        if (!referenceLevel || !sourceLevel ||
-            !ValidateLevel(*referenceLevel) || !ValidateLevel(*sourceLevel)) {
+        if (!siteGeometry && (!referenceLevel || !sourceLevel ||
+            !ValidateLevel(*referenceLevel) || !ValidateLevel(*sourceLevel))) {
             return false;
         }
-        const CfaPlaneCoordinate centerPlane = request.reference->layout.RawToPlane(
-            centerRaw, site);
+        const CfaPlaneCoordinate centerPlane = siteGeometry ? CfaPlaneCoordinate{} :
+            request.reference->layout.RawToPlane(centerRaw, site);
         const double centerLevelX = centerPlane.x / levelScale;
         const double centerLevelY = centerPlane.y / levelScale;
         const std::int64_t startX = static_cast<std::int64_t>(
@@ -693,37 +784,52 @@ bool EvaluatePatch(
             std::floor(centerLevelY - 0.5 * static_cast<double>(patchLevelPixels)));
         for (std::uint32_t patchY = 0u; patchY < patchLevelPixels; ++patchY) {
             const std::int64_t referenceY = startY + patchY;
-            if (referenceY < 0 ||
-                referenceY >= static_cast<std::int64_t>(referenceLevel->extent.height)) {
+            if (!siteGeometry && (referenceY < 0 ||
+                referenceY >= static_cast<std::int64_t>(referenceLevel->extent.height))) {
                 continue;
             }
             for (std::uint32_t patchX = 0u; patchX < patchLevelPixels; ++patchX) {
-                const std::int64_t referenceX = startX + patchX;
-                if (referenceX < 0 ||
-                    referenceX >= static_cast<std::int64_t>(referenceLevel->extent.width)) {
-                    continue;
+                double referenceSignal, referenceVariance;
+                RawCoordinate sourceRaw;
+                if (siteGeometry) {
+                    const auto& sample = geometry->samples[
+                        (SiteIndex(site) * std::size_t(patchLevelPixels) + patchY) * patchLevelPixels + patchX];
+                    if (sample.variance < 0.0) continue;
+                    referenceSignal = sample.signal;
+                    referenceVariance = sample.variance;
+                    sourceRaw = sample.mappedSourceRaw;
+                } else {
+                    const std::int64_t referenceX = startX + patchX;
+                    if (referenceX < 0 ||
+                        referenceX >= static_cast<std::int64_t>(referenceLevel->extent.width)) {
+                        continue;
+                    }
+                    const std::size_t referenceIndex = PixelIndex(
+                        referenceLevel->extent,
+                        static_cast<std::uint64_t>(referenceX),
+                        static_cast<std::uint64_t>(referenceY));
+                    if (referenceLevel->validMask[referenceIndex] == 0u ||
+                        !Finite(referenceLevel->signal[referenceIndex]) ||
+                        !Finite(referenceLevel->variance[referenceIndex]) ||
+                        referenceLevel->variance[referenceIndex] < 0.0) {
+                        continue;
+                    }
+                    const CfaPlaneCoordinate referencePlane {
+                        static_cast<double>(referenceX) * levelScale,
+                        static_cast<double>(referenceY) * levelScale,
+                        site
+                    };
+                    const RawCoordinate referenceRaw =
+                        request.reference->layout.PlaneToRaw(referencePlane);
+                    sourceRaw = request.globalWarp.Map(referenceRaw);
+                    referenceSignal = referenceLevel->signal[referenceIndex];
+                    referenceVariance = referenceLevel->variance[referenceIndex];
                 }
-                const std::size_t referenceIndex = PixelIndex(
-                    referenceLevel->extent,
-                    static_cast<std::uint64_t>(referenceX),
-                    static_cast<std::uint64_t>(referenceY));
-                if (referenceLevel->validMask[referenceIndex] == 0u ||
-                    !Finite(referenceLevel->signal[referenceIndex]) ||
-                    !Finite(referenceLevel->variance[referenceIndex]) ||
-                    referenceLevel->variance[referenceIndex] < 0.0) {
-                    continue;
-                }
-                const CfaPlaneCoordinate referencePlane {
-                    static_cast<double>(referenceX) * levelScale,
-                    static_cast<double>(referenceY) * levelScale,
-                    site
-                };
-                const RawCoordinate referenceRaw =
-                    request.reference->layout.PlaneToRaw(referencePlane);
-                RawCoordinate sourceRaw = request.globalWarp.Map(referenceRaw);
                 sourceRaw = Add(sourceRaw, residualRaw);
-                const CfaPlaneCoordinate sourcePlane =
-                    request.source->layout.RawToPlane(sourceRaw, site);
+                const CfaPlaneCoordinate sourcePlane = siteGeometry ? CfaPlaneCoordinate {
+                    (sourceRaw.x - static_cast<double>(siteGeometry->sourceOffset.x)) * 0.5,
+                    (sourceRaw.y - static_cast<double>(siteGeometry->sourceOffset.y)) * 0.5, site
+                } : request.source->layout.RawToPlane(sourceRaw, site);
                 LevelSample sourceSample;
                 const bool sampled = (calculateNormal || calculateFlatPhotometricCost)
                     ? SampleLevelKeys<true>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
@@ -734,14 +840,14 @@ bool EvaluatePatch(
                     continue;
                 }
                 const double variance =
-                    referenceLevel->variance[referenceIndex] +
+                    referenceVariance +
                     request.exposureScale * request.exposureScale *
                         sourceSample.variance +
                     request.options.registration.localNumericalVarianceFloor;
                 if (!Finite(variance) || variance <= 0.0) continue;
                 const double denominator = std::sqrt(variance);
                 const double residual =
-                    (referenceLevel->signal[referenceIndex] -
+                    (referenceSignal -
                         request.exposureScale * sourceSample.value) /
                     denominator;
                 if (!Finite(residual)) continue;
@@ -854,6 +960,15 @@ void AddUniqueSeed(std::vector<RawCoordinate>& seeds, RawCoordinate seed) {
         }
     }
     seeds.push_back(seed);
+}
+
+void AddProposalSeed(const LocalMotionDirectionRequest& request,RawCoordinate center,
+    std::vector<RawCoordinate>& seeds) {
+    RawCoordinate source;
+    if(request.proposal&&request.proposal(center,source)&&Finite(source)&&
+       source.x>=0&&source.y>=0&&source.x<request.source->rawExtent.width&&
+       source.y<request.source->rawExtent.height)
+        AddUniqueSeed(seeds,Subtract(source,request.globalWarp.Map(center)));
 }
 
 void BuildDiscreteCandidates(
@@ -993,6 +1108,9 @@ bool VerifyAcceleratedCandidates(
     const std::uint32_t patch = level == 0u
         ? request.options.registration.finestPatchPlanePixels
         : request.options.registration.coarsePatchLevelPixels;
+    PatchReferenceGeometry referenceGeometry;
+    const auto* geometry = referenceGeometry.Prepare(request, centerRaw, level, patch)
+        ? &referenceGeometry : nullptr;
     for (std::size_t index = 0u; index < candidates.size(); ++index) {
         if (verify[index] == 0u) {
             candidates[index].statistics.valid = false;
@@ -1001,7 +1119,7 @@ bool VerifyAcceleratedCandidates(
         PatchStatistics authoritative;
         if (!EvaluatePatch(
                 request, centerRaw, level, candidates[index].residualRaw,
-                patch, false, false, authoritative) ||
+                patch, false, false, authoritative, geometry) ||
             !authoritative.valid ||
             authoritative.validFraction <
                 request.options.registration.minimumTileValidFraction) {
@@ -1029,6 +1147,9 @@ bool SearchTileAtLevel(
     const std::uint32_t patch = level == 0u
         ? request.options.registration.finestPatchPlanePixels
         : request.options.registration.coarsePatchLevelPixels;
+    PatchReferenceGeometry referenceGeometry;
+    const auto* geometry = referenceGeometry.Prepare(request, centerRaw, level, patch)
+        ? &referenceGeometry : nullptr;
     std::vector<Candidate> candidates;
     for (RawCoordinate seed : seedsRaw) {
         for (std::int32_t dy = -static_cast<std::int32_t>(radius);
@@ -1060,7 +1181,7 @@ bool SearchTileAtLevel(
                         patch,
                         false,
                         false,
-                        candidate.statistics) ||
+                        candidate.statistics, geometry) ||
                     !candidate.statistics.valid ||
                     candidate.statistics.validFraction <
                         request.options.registration.minimumTileValidFraction) {
@@ -1146,11 +1267,15 @@ bool RefineTileSubpixel(
     const LocalMotionDirectionRequest& request,
     RawCoordinate centerRaw,
     RawCoordinate discreteResidualRaw,
-    RefinedTile& refined) {
+    RefinedTile& refined,
+    const PatchStatistics* initialStatistics = nullptr) {
     refined = {};
     RawCoordinate currentRaw = discreteResidualRaw;
     PatchStatistics current;
-    if (!EvaluatePatch(
+    // Burst refinement has already evaluated this exact center and seed for
+    // its cost gate. Reuse those FP64 statistics without another interpolation.
+    if (initialStatistics) current = *initialStatistics;
+    else if (!EvaluatePatch(
             request,
             centerRaw,
             0u,
@@ -1158,8 +1283,10 @@ bool RefineTileSubpixel(
             request.options.registration.finestPatchPlanePixels,
             true,
             false,
-            current) ||
-        !current.valid ||
+            current)) {
+        return false;
+    }
+    if (!current.valid ||
         current.validFraction <
             request.options.registration.minimumTileValidFraction ||
         current.validCount < static_cast<std::uint64_t>(
@@ -1167,6 +1294,9 @@ bool RefineTileSubpixel(
         return false;
     }
     std::uint32_t costIncreases = 0u;
+    PatchReferenceGeometry referenceGeometry;
+    const PatchReferenceGeometry* geometry = nullptr;
+    bool preparedGeometry = false;
     for (std::uint32_t iteration = 0u;
          iteration < request.options.registration.subpixelIterations;
          ++iteration) {
@@ -1199,6 +1329,15 @@ bool RefineTileSubpixel(
                 maximumDistanceFromDiscreteSeedPlanePixels) {
             break;
         }
+        // Keep rejected/fully converged nodes allocation-free. Only proposals
+        // that actually need another patch evaluation prepare reusable data.
+        if (!preparedGeometry) {
+            preparedGeometry = true;
+            if (referenceGeometry.Prepare(request, centerRaw, 0u,
+                    request.options.registration.finestPatchPlanePixels)) {
+                geometry = &referenceGeometry;
+            }
+        }
         PatchStatistics proposed;
         bool proposedValid = EvaluatePatch(
                 request,
@@ -1208,7 +1347,7 @@ bool RefineTileSubpixel(
                 request.options.registration.finestPatchPlanePixels,
                 true,
                 false,
-                proposed) &&
+                proposed, geometry) &&
             proposed.valid &&
             proposed.validFraction >=
                 request.options.registration.minimumTileValidFraction;
@@ -1224,7 +1363,7 @@ bool RefineTileSubpixel(
                     request.options.registration.finestPatchPlanePixels,
                     true,
                     false,
-                    proposed) &&
+                    proposed, geometry) &&
                 proposed.valid &&
                 proposed.validFraction >=
                     request.options.registration.minimumTileValidFraction;
@@ -1544,6 +1683,7 @@ bool EstimateLocalMotionDirection(
                     }
                     std::vector<RawCoordinate> seeds;
                     AddUniqueSeed(seeds, node.predictionRaw);
+                    AddProposalSeed(request,node.centerRaw,seeds);
                     if (level + 1u <
                             request.options.registration.pyramidLevels &&
                         prior[index].valid &&
@@ -1713,6 +1853,7 @@ bool EstimateLocalMotionDirection(
                     }
                     std::vector<RawCoordinate> seeds;
                     AddUniqueSeed(seeds, prediction);
+                    AddProposalSeed(request,center,seeds);
                     if (level + 1u <
                             request.options.registration.pyramidLevels &&
                         prior[index].valid &&
@@ -2078,7 +2219,8 @@ bool EvaluateLocalMotionField(
     RawCoordinate referenceRaw,
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
-    std::string* error) {
+    std::string* error,
+    bool includeDiagnostic) {
     result = {};
     result.referenceRaw = referenceRaw;
     if (!grid.valid || grid.width == 0u || grid.height == 0u ||
@@ -2087,7 +2229,7 @@ bool EvaluateLocalMotionField(
         !Finite(referenceRaw) || grid.spacingRawX <= 0.0 ||
         grid.spacingRawY <= 0.0) {
         result.rejectReason = MotionNodeRejectReason::NumericalFailure;
-        result.message = "MFD local-motion field is invalid.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion field is invalid.";
         return Fail(error, result.message);
     }
     const double gridX = (referenceRaw.x - grid.originRawX) / grid.spacingRawX;
@@ -2096,7 +2238,7 @@ bool EvaluateLocalMotionField(
         gridX > static_cast<double>(grid.width - 1u) + 1.0e-12 ||
         gridY > static_cast<double>(grid.height - 1u) + 1.0e-12) {
         result.rejectReason = MotionNodeRejectReason::SourceBorder;
-        result.message = "MFD local-motion coordinate lies outside the motion grid.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion coordinate lies outside the motion grid.";
         return Fail(error, result.message);
     }
     const std::uint32_t x0 = grid.width == 1u
@@ -2140,7 +2282,7 @@ bool EvaluateLocalMotionField(
     if (!Finite(alphaSum) || alphaSum <=
         options.registration.interpolationWeightEpsilon) {
         result.rejectReason = MotionNodeRejectReason::InsufficientCoverage;
-        result.message = "MFD local-motion interpolation has no confident support.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion interpolation has no confident support.";
         return Fail(error, result.message);
     }
     mean = Scale(mean, 1.0 / alphaSum);
@@ -2167,7 +2309,7 @@ bool EvaluateLocalMotionField(
     if (!CovarianceEigenvalues(
             disagreement, disagreementLow, disagreementHigh)) {
         result.rejectReason = MotionNodeRejectReason::InvalidCovariance;
-        result.message = "MFD local-motion disagreement covariance is invalid.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion disagreement covariance is invalid.";
         return Fail(error, result.message);
     }
     result.disagreementSigmaRaw = std::sqrt(std::max(0.0, disagreementHigh));
@@ -2177,7 +2319,7 @@ bool EvaluateLocalMotionField(
     if (result.disagreementSigmaRaw >
         options.registration.motionDisagreementHardLimitRawPixels) {
         result.rejectReason = MotionNodeRejectReason::MotionFieldAmbiguous;
-        result.message = "MFD local-motion nodes disagree beyond the hard limit.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion nodes disagree beyond the hard limit.";
         return Fail(error, result.message);
     }
     if (!ClampCovariance(
@@ -2186,7 +2328,7 @@ bool EvaluateLocalMotionField(
             options.registration.warpCovarianceEigenvalueMaxRawPixels,
             result.covarianceRaw)) {
         result.rejectReason = MotionNodeRejectReason::InvalidCovariance;
-        result.message = "MFD interpolated local-motion covariance is invalid.";
+        if (includeDiagnostic || error) result.message = "MFD interpolated local-motion covariance is invalid.";
         return Fail(error, result.message);
     }
     const double disagreementRatio = result.disagreementSigmaRaw /
@@ -2199,12 +2341,12 @@ bool EvaluateLocalMotionField(
         result.sourceRaw.x > static_cast<double>(grid.sourceRawExtent.width - 1u) ||
         result.sourceRaw.y > static_cast<double>(grid.sourceRawExtent.height - 1u)) {
         result.rejectReason = MotionNodeRejectReason::SourceBorder;
-        result.message = "MFD local-motion warp leaves the source active area.";
+        if (includeDiagnostic || error) result.message = "MFD local-motion warp leaves the source active area.";
         return Fail(error, result.message);
     }
     result.valid = true;
     result.rejectReason = MotionNodeRejectReason::None;
-    result.message = "MFD local-motion field sample is valid.";
+    if (includeDiagnostic) result.message = "MFD local-motion field sample is valid.";
     return true;
 }
 
@@ -2252,7 +2394,7 @@ bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& reque
     if(!EvaluatePatch(forward,referenceRaw,0,seed,forward.options.registration.finestPatchPlanePixels,
         true,false,before)||!before.valid||before.robustCost<.6)return false;
     RefinedTile refined;
-    if(!RefineTileSubpixel(forward,referenceRaw,seed,refined)||!refined.observable||
+    if(!RefineTileSubpixel(forward,referenceRaw,seed,refined,&before)||!refined.observable||
        refined.statistics.robustCost>=before.robustCost*.95||
        refined.statistics.validCount<before.validCount)return false;
     const auto correction=Subtract(refined.residualRaw,seed);
@@ -2328,6 +2470,7 @@ bool EstimateBidirectionalLocalMotion(
     forwardRequest.globalWarp = request.referenceToAlternate;
     forwardRequest.exposureScale = request.exposureScale;
     forwardRequest.globalCovariance = request.forwardGlobalCovariance;
+    forwardRequest.proposal = request.forwardProposal;
     forwardRequest.options = request.options;
     forwardRequest.workerCount = request.evaluateDiscreteCandidates
         ? std::max(1u, request.workerCount)
@@ -2342,6 +2485,7 @@ bool EstimateBidirectionalLocalMotion(
     reverseRequest.globalWarp = inverseGlobal;
     reverseRequest.exposureScale = 1.0 / request.exposureScale;
     reverseRequest.globalCovariance = request.reverseGlobalCovariance;
+    reverseRequest.proposal = request.reverseProposal;
     reverseRequest.options = request.options;
     reverseRequest.workerCount = forwardRequest.workerCount;
     reverseRequest.evaluateDiscreteCandidates =

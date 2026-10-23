@@ -342,6 +342,7 @@ bool RenderPipeline::RenderDataMath(
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMin"), settings.outMin);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMax"), settings.outMax);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uScalarOutput"), scalarOutput ? 1 : 0);
+    ++m_LastGraphExecutionStats.dataMathDrawSubmissions;
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);

@@ -2,6 +2,17 @@
   "schemaVersion": 1,
   "components": [
     {
+      "id": "libavoid",
+      "name": "Adaptagrams libavoid",
+      "version": "840ebcff20dbba36ad03a2160edf7cbaf9859984",
+      "homepage": "https://github.com/mjwybrow/adaptagrams",
+      "license": "LGPL-2.1-or-later",
+      "copyright": "Copyright Monash University and libavoid contributors",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": ["LibavoidSource/libavoid/LICENSE.LGPL", "LibavoidSource/CMakeLists.txt"]
+    },
+    {
       "id": "dear-imgui",
       "name": "Dear ImGui",
       "version": "commit 5a76f2adf1b0403b86a45010121fb32a6bff8680",

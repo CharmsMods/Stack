@@ -1,6 +1,7 @@
 #include "LibraryModule.h"
 
 #include "App/settings/AppearanceTheme.h"
+#include "LibraryControls.h"
 #include "TagManager.h"
 
 #include <imgui.h>
@@ -56,8 +57,8 @@ void LibraryModule::RenderTagsDrawer(
     const ImVec2 gridPos = ImGui::GetWindowPos();
     const ImVec2 gridSize = ImGui::GetWindowSize();
     const ImVec2 mousePos = ImGui::GetIO().MousePos;
-    const float mainViewportLeft = ImGui::GetMainViewport()->Pos.x;
-    const auto allTags = TagManager::Get().GetAllKnownTags();
+    const float viewportLeft = ImGui::GetWindowViewport()->Pos.x;
+    const auto& allTags = TagManager::Get().GetAllKnownTags();
 
     constexpr float panelWidth = 242.0f;
     const float desiredHeight = 142.0f +
@@ -71,7 +72,7 @@ void LibraryModule::RenderTagsDrawer(
         gridPos.y + (gridSize.y - panelHeight) * 0.5f);
 
     const bool pointerOnEdge =
-        mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + 15.0f &&
+        mousePos.x >= viewportLeft && mousePos.x <= gridPos.x + 15.0f &&
         mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y;
     const bool pointerOverPanel = m_FilterPanelExpanded &&
         mousePos.x >= panelOrigin.x - 10.0f &&
@@ -92,7 +93,8 @@ void LibraryModule::RenderTagsDrawer(
     m_FilterPanelExpanded = hoveringTagsPanel || m_FilterPanelHoverGrace > 0.0f;
 
     const float targetWidth = m_FilterPanelExpanded ? panelWidth : 0.0f;
-    m_FilterPanelWidthAnim += (targetWidth - m_FilterPanelWidthAnim) *
+    if (Stack::LibraryUi::ReducedMotion()) m_FilterPanelWidthAnim = targetWidth;
+    else m_FilterPanelWidthAnim += (targetWidth - m_FilterPanelWidthAnim) *
         std::min(1.0f, dt * 13.0f);
     if (std::abs(m_FilterPanelWidthAnim - targetWidth) < 0.1f) {
         m_FilterPanelWidthAnim = targetWidth;
@@ -153,7 +155,7 @@ void LibraryModule::RenderTagsDrawer(
 
 void LibraryModule::RenderTagFilters(bool wallpaperSurfaces,
     const StackAppearance::RuntimeSurfacePalette& surfacePalette) {
-    const auto allTags = TagManager::Get().GetAllKnownTags();
+    const auto& allTags = TagManager::Get().GetAllKnownTags();
     ImGui::TextUnformatted("Filters");
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
 

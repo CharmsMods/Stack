@@ -65,7 +65,15 @@ Json Request(const ProcessingRequest& r){
         {"preferGpuRegistration",r.preferGpuRegistration},{"preferGpuCombining",r.preferGpuCombining},{"presentationPass",r.presentationPass},
         {"progress",bool(r.reportProgress)},{"presentation",bool(r.reportPresentation)}};
     j["sources"]=Json::array();for(const auto& s:r.sources)j["sources"].push_back({{"frameId",s.frameId},{"sha256",s.sha256},
-        {"bytes",s.bytes},{"path",PathText(s.path)},{"displayName",s.displayName}});return j;
+        {"bytes",s.bytes},{"path",PathText(s.path)},{"displayName",s.displayName}});
+    if(!r.alignmentProposals.empty())for(const auto& p:r.alignmentProposals) {
+        auto v=AlignmentProposalIdentity(p);v["forwardPath"]=PathText(p.forwardPath);v["reversePath"]=PathText(p.reversePath);
+        j["alignmentProposals"].push_back(std::move(v));
+    }
+    // Older workers ignore unknown optional fields but reject request v2.
+    // Never let a requested proposer silently become ordinary alignment.
+    if(!r.alignmentProposals.empty()&&r.version==1)j["version"]=2;
+    return j;
 }
 ProcessingRequest Request(const Json& j){
     ProcessingRequest r;r.version=j.at("version");std::string error;
@@ -74,7 +82,19 @@ ProcessingRequest Request(const Json& j){
     r.automaticMemoryBudget=j.at("automaticMemoryBudget");r.maximumOutputDimension=j.at("maximumOutputDimension");
     r.preparationOnly=j.at("preparationOnly");r.workerCount=j.at("workerCount");r.preferGpuRegistration=j.at("preferGpuRegistration");r.preferGpuCombining=j.value("preferGpuCombining",true);r.presentationPass=j.at("presentationPass");
     if(j.at("sources").size()>100000)throw std::runtime_error("Too many burst source files.");
-    for(const auto& s:j.at("sources"))r.sources.push_back({s.at("frameId"),s.at("sha256"),s.at("bytes"),TextPath(s.at("path")),s.at("displayName")});return r;
+    for(const auto& s:j.at("sources"))r.sources.push_back({s.at("frameId"),s.at("sha256"),s.at("bytes"),TextPath(s.at("path")),s.at("displayName")});
+    if(j.contains("alignmentProposals")) {
+        const auto& proposals=j.at("alignmentProposals");
+        if(!proposals.is_array()||proposals.size()>r.sources.size())throw std::runtime_error("Invalid burst proposal count.");
+        for(const auto& v:proposals) {
+            AlignmentProposal p;p.referenceFrameId=v.at("referenceFrameId");p.sourceFrameId=v.at("sourceFrameId");
+            p.referenceSha256=v.at("referenceSha256");p.sourceSha256=v.at("sourceSha256");p.modelIdentity=v.at("modelIdentity");
+            p.width=v.at("width");p.height=v.at("height");p.rawWidth=v.at("rawWidth");p.rawHeight=v.at("rawHeight");
+            p.originRaw=v.at("originRaw");p.stepRaw=v.at("stepRaw");p.forwardSha256=v.at("forwardSha256");p.reverseSha256=v.at("reverseSha256");
+            p.forwardPath=TextPath(v.at("forwardPath"));p.reversePath=TextPath(v.at("reversePath"));r.alignmentProposals.push_back(std::move(p));
+        }
+    }
+    return r;
 }
 Json Capture(const CapturePreview& c){return {{"width",c.width},{"height",c.height},{"exposureScale",c.exposureScale},
     {"rgb",Pack(c.rgb)},{"coverage",Pack(c.coverage)},{"clipped",Pack(c.clipped)}};}

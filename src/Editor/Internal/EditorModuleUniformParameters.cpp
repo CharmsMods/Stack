@@ -77,12 +77,22 @@ Stack::NodeMath::UniformParameterFeedback EditorModule::GetUniformParameterState
         !NodeMath::IsToneCurveParameterActive(node->rawOperation.parameters,parameterId)) {
         result.reason="This connected control is inactive in the current curve mode.";return result;
     }
-    const auto* definition=EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node);
+    const auto definition=EditorNodeGraphDefinitions::ResolveNodeDefinition(*graph,*node);
     if (!definition) return result;
-    const auto parameter=std::find_if(definition->parameters.begin(),definition->parameters.end(),
-        [&](const auto& entry) { return entry.id==parameterId && entry.graphInputCapable; });
-    if (parameter==definition->parameters.end()) return result;
-    const auto* binding=graph->FindInputLink(node->id,EditorNodeGraph::ParameterInputSocketId(parameterId));
+    std::optional<NodeMath::UniformParameter> parameter;
+    if (definition.builtin) for (const auto& entry:definition.builtin->parameters)
+        if (entry.id==parameterId && entry.graphInputCapable) {
+            parameter=NodeMath::UniformParameter{entry.id,entry.label,entry.storageKey,
+                entry.minimum,entry.maximum,entry.hasNumericDomain}; break;
+        }
+    if (definition.compound) for (const auto& entry:definition.compound->parameters)
+        if (entry.id==parameterId && entry.type==NodeMath::ParameterType::Scalar) {
+            parameter=NodeMath::UniformParameter{entry.id,entry.label,entry.internalParameterId,
+                entry.hardDomain.minimum,entry.hardDomain.maximum,entry.hardDomain.applicable}; break;
+        }
+    if (!parameter) return result;
+    result.definitionHash=definition.Identity()->contentHash;
+    const auto* binding=graph->FindAnyInputLink(node->id,EditorNodeGraph::ParameterInputSocketId(parameterId));
     const auto* source=binding ? graph->FindNode(binding->fromNodeId) : nullptr;
     if (!source) { result.reason="The uniform parameter has no connected producer."; return result; }
     if (source->kind==EditorNodeGraph::NodeKind::Value) {
@@ -92,8 +102,7 @@ Stack::NodeMath::UniformParameterFeedback EditorModule::GetUniformParameterState
             result.reason="The connected Scalar Value is unavailable."; return result;
         }
         result.value=std::get<double>(value.payload);
-        result.available=NodeMath::ValidateUniformParameter({parameter->id,parameter->label,parameter->storageKey,
-            parameter->minimum,parameter->maximum,parameter->hasNumericDomain},result.value,result.reason);
+        result.available=NodeMath::ValidateUniformParameter(*parameter,result.value,result.reason);
         return result;
     }
     // Reductions may depend on image content. Only the current accepted worker

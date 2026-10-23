@@ -50,6 +50,7 @@ std::vector<NodeCatalogEntry> BuildRegisteredNodeCatalogEntries() {
         entry.value = static_cast<int>(index);
         entry.label = compounds[index].label;
         entry.category = "Compounds";
+        entry.searchAliases = compounds[index].description + " decompile modular";
         entry.previewKey = "compound/" + compounds[index].identity.id;
         entry.previewRecipeVersion = 1;
         entry.previewStrategy = NodeCatalogPreviewStrategy::FallbackOnly;
@@ -67,6 +68,16 @@ const LiveNodeDefinition* FindLiveNodeDefinition(NodeKind kind, int variant) {
 
 const LiveNodeDefinition* FindLiveNodeDefinition(const Node& node) {
     return FindLiveNodeDefinition(node.kind, OperationVariant(node));
+}
+
+ResolvedNodeDefinition ResolveNodeDefinition(const EditorNodeGraph::Graph& graph, const Node& node) {
+    if (!node.definitionResolved) return {};
+    if (node.kind == NodeKind::Compound) {
+        if (node.compound.instance.resolution != Stack::NodeMath::CompoundResolutionStatus::Exact)
+            return {};
+        return {nullptr, graph.FindCompoundDefinition(node.compound.instance.definition)};
+    }
+    return {FindLiveNodeDefinition(node), nullptr};
 }
 
 bool ValidateUnifiedNodeDefinitionRegistry(std::vector<std::string>* errors) {
@@ -87,6 +98,12 @@ bool ValidateUnifiedNodeDefinitionRegistry(std::vector<std::string>* errors) {
         if (!variants.insert({ static_cast<int>(definition.kind), definition.variant }).second) {
             local.push_back("Duplicate node kind/variant: " + definition.identity.id);
         }
+        if (definition.inspectability != Stack::NodeMath::Inspectability::OpaqueSpecialized &&
+            definition.canonicalRecipeId.empty())
+            local.push_back("Inspectable native definition has no canonical recipe: " + definition.identity.id);
+        if (definition.inspectability == Stack::NodeMath::Inspectability::OpaqueSpecialized &&
+            definition.decompositionReason.empty())
+            local.push_back("Native leaf has no decomposition reason: " + definition.identity.id);
         std::set<std::string> portIds;
         for (const auto& socket : definition.sockets) {
             if (socket.id.empty() || !portIds.insert(socket.id + ":" + std::to_string(static_cast<int>(socket.direction))).second) {

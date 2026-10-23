@@ -8,18 +8,24 @@
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/UI/NodeNumericDefaults.h"
 #include "Utils/Utf8Text.h"
+#include "Notifications/NotificationPresenter.h"
 
 #include <algorithm>
 #include <cmath>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <string>
+#include <string_view>
 
 namespace Stack::Editor::NodeGraphUIVisuals {
 
 using EditorNodeGraphUIMetrics::CubicBezierPoint;
 using EditorNodeGraphUIMetrics::NodeUiScaleFromZoom;
 using EditorNodeGraphUIMetrics::PinRadiusForZoom;
+
+bool GraphReducedMotion() {
+    return Stack::Notifications::SystemReducedMotion();
+}
 
 ImGuiExtras::GraphSliderRangePolicy GraphSliderRangePolicyForNodeKind(EditorNodeGraph::NodeKind kind) {
     switch (kind) {
@@ -40,7 +46,11 @@ ImGuiExtras::GraphSliderRangePolicy GraphSliderRangePolicyForNodeKind(EditorNode
     }
 }
 
-NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
+namespace {
+// Keep the existing measured layout profiles independent of semantic colors.
+enum class NodeLayoutFamily { Gray, Layer, Preview, Mask, Scope, Generator, Merge };
+NodeLayoutFamily LayoutFamilyForNode(const EditorNodeGraph::Node& node) {
+
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::Image:
@@ -51,50 +61,109 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
         case EditorNodeGraph::NodeKind::Reformat:
-            return NodeFamily::Gray;
+            return NodeLayoutFamily::Gray;
         case EditorNodeGraph::NodeKind::Layer:
-            return NodeFamily::Layer;
+            return NodeLayoutFamily::Layer;
         case EditorNodeGraph::NodeKind::Lut:
         case EditorNodeGraph::NodeKind::Compound:
-            return NodeFamily::Layer;
+            return NodeLayoutFamily::Layer;
         case EditorNodeGraph::NodeKind::Preview:
-            return NodeFamily::Preview;
+            return NodeLayoutFamily::Preview;
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::DataMath:
-        
+
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
-            return NodeFamily::Mask;
+            return NodeLayoutFamily::Mask;
         case EditorNodeGraph::NodeKind::Scope:
-            return NodeFamily::Scope;
+            return NodeLayoutFamily::Scope;
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::Value:
         case EditorNodeGraph::NodeKind::FieldMean:
         case EditorNodeGraph::NodeKind::ConstantChannel:
-            return NodeFamily::Generator;
+            return NodeLayoutFamily::Generator;
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::ChannelSplit:
         case EditorNodeGraph::NodeKind::ChannelCombine:
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-            return NodeFamily::Merge;
+
+            return NodeLayoutFamily::Merge;
     }
-    return NodeFamily::Gray;
+    return NodeLayoutFamily::Gray;
+}
+
+NodeFamily CompoundFamily(std::string_view id) {
+    // Stable definition identities, never editable labels or executable-body scans.
+    if (id == "stack:compound/add-then-multiply" ||
+        id == "stack:compound/percent" || id == "stack:compound/average-three")
+        return NodeFamily::Math;
+    if (id == "stack:compound/invert-mask") return NodeFamily::Mask;
+    if (id == "stack:compound/exposure-then-premultiply" ||
+        id == "stack:compound/luminance-srgb" ||
+        id == "stack:compound/luminance-rec2020" ||
+        id == "stack:compound/luminance-display-p3" ||
+        id == "stack:compound/smoothstep-curve" ||
+        id == "stack:compound/colorize" || id == "stack:compound/channel-mixer" ||
+        id == "stack:compound/linear-mix" || id == "stack:compound/halation" ||
+        id == "stack:compound/halation-srgb") return NodeFamily::ImageProcessing;
+    return NodeFamily::Utility;
+}
+} // namespace
+
+NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
+    using Kind = EditorNodeGraph::NodeKind;
+    if (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
+        node.role == Stack::GraphModel::NodeRole::LayerResult) return NodeFamily::Utility;
+    switch (node.kind) {
+        case Kind::DataMath:
+        case Kind::Value:
+        case Kind::ConstantChannel:
+            return NodeFamily::Math;
+        case Kind::RawDevelopment:
+        case Kind::RawDecode:
+        case Kind::RawDevelop:
+        case Kind::RawDetailFusion:
+        case Kind::HdrMerge:
+        case Kind::Mfsr:
+        case Kind::Lut:
+        case Kind::Layer:
+        case Kind::Composite:
+        case Kind::Mix:
+        case Kind::ChannelSplit:
+        case Kind::ChannelCombine:
+        case Kind::TechnicalImage:
+        case Kind::Reformat:
+        case Kind::MultiFrameDenoise:
+        case Kind::MultiFrameHdr:
+        case Kind::RawOperation:
+            return NodeFamily::ImageProcessing;
+        case Kind::RawDetailAutoMask:
+        case Kind::MaskGenerator:
+        case Kind::MaskCombine:
+        case Kind::MaskUtility:
+        case Kind::ImageToMask:
+        case Kind::CustomMask:
+        case Kind::MaskTexture:
+            return NodeFamily::Mask;
+        case Kind::Compound:
+            return CompoundFamily(node.compound.instance.definition.id);
+        case Kind::Image:
+        case Kind::RawSource:
+        case Kind::Output:
+        case Kind::Scope:
+        case Kind::Preview:
+        case Kind::ImageGenerator:
+        case Kind::FieldMean:
+        case Kind::RawProjectFrame:
+        case Kind::RawProjectSourceSet:
+        case Kind::Count:
+            return NodeFamily::Utility;
+    }
+    return NodeFamily::Utility;
 }
 
 ImVec4 BlendColor(const ImVec4& a, const ImVec4& b, float t) {
@@ -151,23 +220,20 @@ ImVec4 BrightenedSelectionFill(ImVec4 fill, const ImVec4& accent, const GraphSty
 }
 
 ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens) {
-    const ImVec4 slate = tokens.mutedText;
-    const ImVec4 green = tokens.socketImage;
-    const ImVec4 violet = tokens.socketMask;
-    const ImVec4 amber = tokens.socketAnalysis;
-    const ImVec4 blue = tokens.socketRaw;
-    const ImVec4 cyan = tokens.socketValue;
-
+    // Function colors are independent of socket colors and remain visible on
+    // neutral Dark/Gray themes. Only their luminance adapts to the node surface.
+    const bool light = ColorLuminance(tokens.nodeAppearance.surface) >= 0.52f;
     switch (family) {
-        case NodeFamily::Gray: return slate;
-        case NodeFamily::Layer: return green;
-        case NodeFamily::Preview: return amber;
-        case NodeFamily::Mask: return violet;
-        case NodeFamily::Scope: return amber;
-        case NodeFamily::Generator: return blue;
-        case NodeFamily::Merge: return cyan;
+        case NodeFamily::Math:
+            return light ? ImVec4(.72f,.20f,.22f,1) : ImVec4(.88f,.38f,.39f,1);
+        case NodeFamily::ImageProcessing:
+            return light ? ImVec4(.18f,.38f,.68f,1) : ImVec4(.36f,.61f,.88f,1);
+        case NodeFamily::Mask:
+            return light ? ImVec4(.49f,.28f,.66f,1) : ImVec4(.69f,.49f,.86f,1);
+        case NodeFamily::Utility:
+            return light ? ImVec4(.43f,.43f,.43f,1) : ImVec4(.64f,.64f,.64f,1);
     }
-    return slate;
+    return tokens.mutedText;
 }
 
 GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor) {
@@ -307,25 +373,14 @@ NodePresentationProfile BuildNodePresentationProfile(
 }
 
 NodeFamilyStyle StyleForFamily(NodeFamily family, const GraphStyleTokens& tokens) {
-    const auto& n=tokens.nodeAppearance;
-    return {n.surface,tokens.light ? tokens.groupBorder : ImVec4(0.32f,0.32f,0.32f,1.0f),n.number,n.text,n.mutedText};
-}
-
-const NodeFamilyStyle& StyleForFamily(NodeFamily family) {
-    // Compatibility overload for drawing without an editor. The graph itself
-    // supplies its cached palette through the overload above.
-    static const auto palette=StackAppearance::ResolveCreamPalette(StackAppearance::CreamPalette{});
-    static std::array<NodeFamilyStyle,7> styles;
-    auto& style=styles[static_cast<size_t>(family)];
-    style={palette.surface,palette.border,palette.focus,palette.text,palette.mutedText};
-    if (ImGui::GetCurrentContext()) {
-        style.fill=ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
-        style.text=ImGui::GetStyleColorVec4(ImGuiCol_Text);
-        style.mutedText=ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-        style.border=ImGui::GetStyleColorVec4(ImGuiCol_Border);
-        style.accent=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
-    }
-    return style;
+    const auto& n = tokens.nodeAppearance;
+    const ImVec4 accent = FamilyAccent(family, tokens);
+    const ImVec4 border = tokens.light ? tokens.groupBorder : ImVec4(.32f,.32f,.32f,1);
+    if (family == NodeFamily::Utility)
+        return {n.surface, border, accent, n.text, n.mutedText};
+    ImVec4 fill = BlendColor(n.surface, accent, .13f);
+    fill.w = n.surface.w;
+    return {fill, BlendColor(border, accent, .72f), accent, n.text, n.mutedText};
 }
 
 NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
@@ -351,45 +406,45 @@ NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
         return metrics;
     }
 
-    switch (FamilyForNode(node)) {
-        case NodeFamily::Gray:
+    switch (LayoutFamilyForNode(node)) {
+        case NodeLayoutFamily::Gray:
             metrics.width = 232.0f;
             metrics.contentLaneWidth = 168.0f;
             metrics.previewWidth = 156.0f;
             metrics.previewHeight = 88.0f;
             metrics.minExpandedHeight = 128.0f;
             break;
-        case NodeFamily::Layer:
+        case NodeLayoutFamily::Layer:
             metrics.width = 334.0f;
             metrics.contentLaneWidth = 252.0f;
             metrics.previewWidth = 206.0f;
             metrics.previewHeight = 100.0f;
             metrics.minExpandedHeight = 168.0f;
             break;
-        case NodeFamily::Preview:
+        case NodeLayoutFamily::Preview:
             metrics.width = 266.0f;
             metrics.contentLaneWidth = 194.0f;
             metrics.previewWidth = 194.0f;
             metrics.previewHeight = 114.0f;
             metrics.minExpandedHeight = 196.0f;
             break;
-        case NodeFamily::Mask:
+        case NodeLayoutFamily::Mask:
             metrics.width = 282.0f;
             metrics.contentLaneWidth = 202.0f;
             metrics.minExpandedHeight = 126.0f;
             break;
-        case NodeFamily::Scope:
+        case NodeLayoutFamily::Scope:
             metrics.width = 294.0f;
             metrics.contentLaneWidth = 210.0f;
             metrics.scopeHeight = 186.0f;
             metrics.minExpandedHeight = 256.0f;
             break;
-        case NodeFamily::Generator:
+        case NodeLayoutFamily::Generator:
             metrics.width = 286.0f;
             metrics.contentLaneWidth = 204.0f;
             metrics.minExpandedHeight = 132.0f;
             break;
-        case NodeFamily::Merge:
+        case NodeLayoutFamily::Merge:
             metrics.width = 262.0f;
             metrics.contentLaneWidth = 184.0f;
             metrics.minExpandedHeight = 128.0f;
@@ -611,15 +666,17 @@ ImVec4 ChannelPolicyColor(LayerChannelPolicy policy) {
 void RenderLayerMetadataNotes(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node,
-    float controlWidth) {
+    float controlWidth,
+    EditorModule* editor) {
     const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
     if (!descriptor) {
         return;
     }
 
-    const std::string channel = graph.ResolveSocketChannel(node.id, EditorNodeGraph::kImageOutputSocketId);
+    const auto output = ResolveOutputVisualStyle(graph, node.id, EditorNodeGraph::kImageOutputSocketId, editor);
+    const std::string& channel = output.channel;
     const bool hasChannel = !channel.empty();
-    const bool isScalarStream = !hasChannel && graph.IsScalarSocketStream(node.id, EditorNodeGraph::kImageOutputSocketId);
+    const bool isScalarStream = output.scalarStream;
     const bool lifecycleNeedsNote = descriptor->lifecycleStatus != LayerLifecycleStatus::Stable;
     if (!hasChannel && !isScalarStream && !lifecycleNeedsNote) {
         return;
@@ -672,7 +729,7 @@ ImVec2 NodePreviewSizeForScale(const NodeLayoutMetrics& metrics, float uiScale) 
         metrics.previewHeight * uiScale);
 }
 
-ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& familyStyle) {
+ImU32 TypedSocketColor(EditorNodeGraph::SocketType type) {
     const ImVec4 imageBase(0.60f, 0.69f, 0.79f, 1.0f);
     const ImVec4 maskBase(0.71f, 0.64f, 0.82f, 1.0f);
     const ImVec4 analysisBase(0.76f, 0.68f, 0.57f, 1.0f);
@@ -708,23 +765,25 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
         case EditorNodeGraph::SocketType::Handle: base = valueBase; break;
         case EditorNodeGraph::SocketType::Raw: base = rawBase; break;
     }
-    return ColorToU32(BlendColor(base, familyStyle.accent, 0.38f));
+    return ColorToU32(base);
 }
 
 bool IsChannelSocketId(const std::string& id) {
     return id == "r" || id == "g" || id == "b" || id == "a";
 }
 
-LinkVisualStyle ResolveLinkVisualStyle(
+LinkVisualStyle ResolveOutputVisualStyle(
     const EditorNodeGraph::Graph& graph,
     int fromNodeId,
     const std::string& fromSocketId,
-    int toNodeId,
-    const std::string& toSocketId,
     EditorModule* editor) {
     LinkVisualStyle style;
     EditorNodeGraph::GraphOutputDescription local;
-    const auto* output = editor ? editor->GetGraphOutputDescription(fromNodeId, fromSocketId) : nullptr;
+    const bool owned = editor && &graph == &editor->GetNodeGraph();
+    const auto* output = owned ? editor->GetGraphOutputDescription(fromNodeId, fromSocketId) : nullptr;
+    // A missing description in the current owner's cache is an unavailable
+    // output. Reanalyzing it while drawing cannot make it available.
+    if (owned && !output) return style;
     if (!output) {
         local = EditorNodeGraph::DescribeGraphOutput(graph, fromNodeId, fromSocketId);
         output = &local;
@@ -735,6 +794,16 @@ LinkVisualStyle ResolveLinkVisualStyle(
     if (output->descriptor.logicalType == Stack::NodeMath::LogicalValueType::Raw) style.kind = LinkVisualKind::Raw;
     else if (output->descriptor.logicalType == Stack::NodeMath::LogicalValueType::Analysis) style.kind = LinkVisualKind::Analysis;
     return style;
+}
+
+LinkVisualStyle ResolveLinkVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId,
+    EditorModule* editor) {
+    return ResolveOutputVisualStyle(graph, fromNodeId, fromSocketId, editor);
 }
 
 LinkVisualStyle ResolveLinkVisualStyle(
@@ -772,46 +841,38 @@ EditorNodeGraph::SocketDefinition ResolveSocketDisplayDefinition(
     using Direction = EditorNodeGraph::SocketDirection;
     using LogicalType = Stack::NodeMath::LogicalValueType;
 
-    const bool isMainImageInput =
-        socket.direction == Direction::Input &&
-        socket.id != EditorNodeGraph::kMaskInputSocketId &&
-        (socket.type == Type::Image || socket.type == Type::ImageOrChannel);
-    if (!isMainImageInput) {
-        return socket;
-    }
-
-    const EditorNodeGraph::Link* link = graph.FindInputLink(socket.nodeId, socket.id);
-    if (!link) {
-        return socket;
-    }
+    const bool isOutput=socket.direction==Direction::Output;
+    if(socket.type!=Type::Image && socket.type!=Type::ImageOrChannel && socket.type!=Type::Channel &&
+        socket.type!=Type::Mask && socket.type!=Type::ScalarField)return socket;
+    const EditorNodeGraph::Link* link=isOutput?nullptr:graph.FindAnyInputLink(socket.nodeId,socket.id);
+    if(!isOutput && !link)return socket;
+    const int source=isOutput?socket.nodeId:link->fromNodeId;
+    const std::string& port=isOutput?socket.id:link->fromSocketId;
 
     EditorNodeGraph::GraphOutputDescription localOutput;
     const EditorNodeGraph::GraphOutputDescription* output =
         editor && &graph == &editor->GetNodeGraph()
-            ? editor->GetGraphOutputDescription(link->fromNodeId, link->fromSocketId)
+            ? editor->GetGraphOutputDescription(source,port)
             : nullptr;
+    if (editor && &graph == &editor->GetNodeGraph() && !output) return socket;
     if (!output) {
         localOutput = EditorNodeGraph::DescribeGraphOutput(
-            graph, link->fromNodeId, link->fromSocketId);
+            graph, source,port);
         output = &localOutput;
     }
-    if (output->descriptor.logicalType != LogicalType::Mask) {
-        return socket;
-    }
-
     EditorNodeGraph::SocketDefinition displaySocket = socket;
-    displaySocket.type = Type::Mask;
+    if(output->descriptor.logicalType==LogicalType::Mask)displaySocket.type=Type::Mask;
+    const auto channel=EditorNodeGraph::OutputChannelColor(*output);
+    if(!channel.empty()) {
+        displaySocket.declaredChannels=output->descriptor.channels;
+        displaySocket.semanticRoleKey="component-"+channel;
+    } else if(!IsChannelSocketId(socket.id))
+        displaySocket.declaredChannels=Stack::NodeMath::SemanticField<Stack::NodeMath::ChannelDescriptor>::Unknown();
     return displaySocket;
 }
 
 ImVec4 ChannelColorVec(const std::string& channel, const GraphStyleTokens& tokens) {
     const bool light = tokens.enabled && tokens.light;
-    if (tokens.monochrome) {
-        if (channel == "r") return ImVec4(0.90f,0.90f,0.90f,1.0f);
-        if (channel == "g") return ImVec4(0.75f,0.75f,0.75f,1.0f);
-        if (channel == "b") return ImVec4(0.60f,0.60f,0.60f,1.0f);
-        if (channel == "a") return ImVec4(0.48f,0.48f,0.48f,1.0f);
-    }
     if (channel == "r") return light ? ImVec4(0.82f, 0.12f, 0.12f, 1.0f) : ImVec4(1.0f, 0.24f, 0.24f, 1.0f);
     if (channel == "g") return light ? ImVec4(0.05f, 0.62f, 0.24f, 1.0f) : ImVec4(0.32f, 1.0f, 0.42f, 1.0f);
     if (channel == "b") return light ? ImVec4(0.10f, 0.34f, 0.92f, 1.0f) : ImVec4(0.34f, 0.56f, 1.0f, 1.0f);
@@ -826,8 +887,15 @@ ImVec4 SocketColorVec(
     if (IsChannelSocketId(socket.id)) {
         return ChannelColorVec(socket.id, tokens);
     }
+    if(socket.semanticRoleKey.rfind("component-",0)==0)
+        return ChannelColorVec(socket.semanticRoleKey.substr(10),tokens);
+    if(socket.declaredChannels.state==Stack::NodeMath::KnowledgeState::Known && socket.declaredChannels.value.roles.size()==1) {
+        auto role=socket.declaredChannels.value.roles.front();
+        std::transform(role.begin(),role.end(),role.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+        if(IsChannelSocketId(role))return ChannelColorVec(role,tokens);
+    }
     if (!tokens.enabled) {
-        return ImGui::ColorConvertU32ToFloat4(TypedSocketColor(socket.type, familyStyle));
+        return ImGui::ColorConvertU32ToFloat4(TypedSocketColor(socket.type));
     }
     switch (socket.type) {
         case EditorNodeGraph::SocketType::Image: return tokens.socketImage;
@@ -871,7 +939,7 @@ ImVec4 LinkColorVec(const LinkVisualStyle& style, const GraphStyleTokens& tokens
 }
 
 ImU32 LinkColorClassic(const LinkVisualStyle& style, bool selected) {
-    if (selected) {
+    if (selected && style.channel.empty()) {
         return ApplyStyleAlpha(IM_COL32(255, 255, 255, 255));
     }
     if (!style.channel.empty()) {
@@ -1081,7 +1149,10 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
 
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
-            return std::max(metrics.minExpandedHeight, measuredLayerHeight > 0.0f ? measuredLayerHeight : metrics.minExpandedHeight);
+            // Compact native layers still need their header, control/label
+            // rows and bottom safety space before a live surface is measured.
+            return std::max(metrics.minExpandedHeight, measuredLayerHeight > 0.0f ? measuredLayerHeight :
+                headerBlock+sectionGap+2*(row+gap)+bottomPadding+8.f);
         case EditorNodeGraph::NodeKind::MaskTexture:
         case EditorNodeGraph::NodeKind::Image:
             return headerBlock + sectionGap + metrics.previewHeight + gap + row + gap + row + bottomPadding;
@@ -1123,14 +1194,24 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
         case EditorNodeGraph::NodeKind::ConstantChannel:
             return headerBlock + sectionGap +
                 row * 3.0f + gap * 2.0f + bottomPadding;
-        case EditorNodeGraph::NodeKind::DataMath:
+        case EditorNodeGraph::NodeKind::DataMath: {
+            // Both Domain and Mode are visible, followed by their explanation.
+            // Values may also expose two local fallback sliders. Reserve those
+            // controls before their first draw; measured content replaces this
+            // conservative contract afterward, including connected-input hiding.
+            float height=headerBlock+sectionGap+3*row+2*gap+bottomPadding;
+            if(node.dataMathSettings.domain==Stack::NodeMath::ArithmeticDomain::Values)
+                height+=3*(row+gap);
             if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
-                return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
+                height+=2*(row+gap+sliderRow+gap);
             }
             if (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap) {
-                return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
+                height+=4*(row+gap+sliderRow+gap);
             }
-            return headerBlock + sectionGap + row + gap + row + bottomPadding;
+            if(node.dataMathMode==EditorNodeGraph::DataMathMode::Average || node.dataMathMode==EditorNodeGraph::DataMathMode::ImageAverage)
+                height+=row+gap;
+            return height;
+        }
         case EditorNodeGraph::NodeKind::Value:
             return headerBlock + sectionGap + row * 6.0f + gap * 5.0f + bottomPadding;
         case EditorNodeGraph::NodeKind::FieldMean:

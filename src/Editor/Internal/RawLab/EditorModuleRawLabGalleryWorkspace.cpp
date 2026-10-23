@@ -46,16 +46,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(16.0f, 16.0f));
         ImGui::BeginChild("Grid", ImVec2(imageWidth, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha *
-            m_RawWorkspaceGalleryLayoutAnimation.ContentAlpha());
-        const bool layoutAnimating = m_RawWorkspaceGalleryLayoutAnimation.Active();
-        if (layoutAnimating) ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-        {
-            Stack::Workspace::InputScope transitionInput(layoutAnimating, false);
-            RenderRawWorkspaceLabGalleryContent(false);
-        }
-        if (layoutAnimating) ImGui::PopItemFlag();
-        ImGui::PopStyleVar();
+        RenderRawWorkspaceLabGalleryContent(false);
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
     }

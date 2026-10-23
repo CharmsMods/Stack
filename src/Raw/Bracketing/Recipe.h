@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace Raw::Bracketing {
-inline constexpr int RecipeVersion = 7;
+inline constexpr int RecipeVersion = 8;
 struct DepthSettings {
     bool enabled=false;
     double focus=.5,focusRange=.08,blurRadius=0;
@@ -54,6 +54,7 @@ struct BracketingRecipe {
     std::map<int, int> orientationOverrides;
     bool automatic = true;
     AlignmentMode alignmentMode = AlignmentMode::AutomaticLocal;
+    bool aiAlignment = false;
     ReconstructionMode reconstruction = ReconstructionMode::Standard;
     PanoramaSettings panorama;
     DepthSettings depth;

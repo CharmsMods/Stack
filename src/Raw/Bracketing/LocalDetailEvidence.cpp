@@ -6,6 +6,16 @@
 
 namespace Raw::Bracketing {
 namespace {
+using BandFolds=std::array<std::array<std::vector<unsigned>,3>,9>;
+BandFolds BuildBandFolds(unsigned size) {
+    BandFolds result;
+    for(unsigned band=0;band<result.size();++band) {
+        unsigned ordinal=0;
+        for(unsigned k=1;k<size*size;++k)
+            if(LocalDetailBand(k%size,k/size,size)==band)result[band][ordinal++%3].push_back(k);
+    }
+    return result;
+}
 double Noise(const LocalDetailCapture& capture,unsigned c) {
     return std::max(1e-12,capture.measurementBound[c]+capture.uncertaintyBound[c]);
 }
@@ -30,9 +40,10 @@ LocalDetailDecision Fit(const std::vector<LocalDetailCapture>& captures,
     }
     const double floor=std::sqrt(floorSquared);
     response.assign(f,1/std::sqrt(double(f)));
+    std::vector<double> next(f);
     for(unsigned iteration=0;iteration<16;++iteration) {
         if(canceled&&canceled())return LocalDetailDecision::Canceled;
-        std::vector<double> next(f);double norm=0;
+        std::fill(next.begin(),next.end(),0.);double norm=0;
         for(std::size_t i=0;i<f;++i) {
             for(std::size_t j=0;j<f;++j)next[i]+=gram[i*f+j]*response[j];
             norm+=next[i]*next[i];
@@ -79,17 +90,31 @@ LocalDetailEvidence AnalyzeLocalDetail(const std::vector<LocalDetailCapture>& ca
     for(const auto& capture:captures)for(const auto& c:capture.coefficients)if(c.size()!=count)return out;
     out.selected.assign(count,0);out.weights.assign(f,std::vector<double>(count));
     out.minimumCaptureSupport=double(f);bool contradictory=false,weak=false;
+    static const auto smallFolds=BuildBandFolds(16),largeFolds=BuildBandFolds(32);
+    const auto& bandFolds=size==16?smallFolds:largeFolds;
     for(unsigned band=0;band<9;++band) {
-        std::array<std::vector<unsigned>,3> folds;unsigned ordinal=0;
-        for(unsigned k=1;k<count;++k)if(LocalDetailBand(k%size,k/size,size)==band)folds[ordinal++%3].push_back(k);
+        const auto& folds=bandFolds[band];
+        std::array<std::vector<double>,3> responses;
+        std::array<LocalDetailDecision,3> decisions{};
+        std::array<bool,3> fitted{};
+        const auto fitOnce=[&](unsigned index) {
+            if(canceled&&canceled())return LocalDetailDecision::Canceled;
+            if(!fitted[index]) {
+                decisions[index]=Fit(captures,folds[index],responses[index],canceled);
+                fitted[index]=true;
+            }
+            return decisions[index];
+        };
         for(unsigned fold=0;fold<3;++fold) {
-            const auto& fit=folds[(fold+1)%3];const auto& validate=folds[(fold+2)%3];
-            std::vector<double> response,held;
-            const auto decision=Fit(captures,fit,response,canceled);
+            const auto fit=(fold+1)%3,validation=(fold+2)%3;
+            const auto& validate=folds[validation];
+            const auto decision=fitOnce(fit);
+            const auto& response=responses[fit];
             if(decision==LocalDetailDecision::Canceled){out.canceled=true;return out;}
             if(decision==LocalDetailDecision::Weak){weak=true;continue;}
             if(decision==LocalDetailDecision::Contradictory){contradictory=true;continue;}
-            const auto check=Fit(captures,validate,held,canceled);
+            const auto check=fitOnce(validation);
+            const auto& held=responses[validation];
             if(check==LocalDetailDecision::Canceled){out.canceled=true;return out;}
             if(check==LocalDetailDecision::Weak){weak=true;continue;}
             if(check==LocalDetailDecision::Contradictory||!ValidateColors(captures,validate,response)) {

@@ -118,3 +118,6 @@ Desktop.ini
 
 # Third-party icons and assets
 /phosphor-icons/
+
+# Independent local camera project
+/Camera HDR/

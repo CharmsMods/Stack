@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -13,9 +14,6 @@ ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
     return ImVec2(value.x, value.y);
 }
 
-using EditorNodeGraphUIMetrics::IsPointNearCubicBezier;
-using EditorNodeGraphUIMetrics::DistancePointToSegment;
-using EditorNodeGraphUIMetrics::LinkBezierHandle;
 using EditorNodeGraphUIMetrics::LinkHitRadiusForZoom;
 using Stack::Editor::NodeGraphUIVisuals::ChannelLaneOffset;
 using Stack::Editor::NodeGraphUIVisuals::GraphStraightLinksEnabled;
@@ -30,7 +28,7 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::InputPinScreenPos(const EditorNodeGraph
         }
     }
     const EditorNodeGraph::Vec2 screenSize = NodeScreenSize(node);
-    const EditorNodeGraph::Vec2 pos = GraphToScreen(node.position);
+    const EditorNodeGraph::Vec2 pos = GraphToScreen(DisplayNodePosition(node));
     return EditorNodeGraph::Vec2{ pos.x, pos.y + screenSize.y * 0.5f };
 }
 
@@ -41,7 +39,7 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::OutputPinScreenPos(const EditorNodeGrap
         }
     }
     const EditorNodeGraph::Vec2 screenSize = NodeScreenSize(node);
-    const EditorNodeGraph::Vec2 pos = GraphToScreen(node.position);
+    const EditorNodeGraph::Vec2 pos = GraphToScreen(DisplayNodePosition(node));
     return EditorNodeGraph::Vec2{ pos.x + screenSize.x, pos.y + screenSize.y * 0.5f };
 }
 
@@ -50,8 +48,14 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
         8.0f,
         NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
+    for(const auto& row:m_CompoundEntryRows) {
+        if(!LayoutGroupVisible(row.group))continue;
+        const float dx=row.input.x-screenPos.x,dy=row.input.y-screenPos.y;
+        if(dx*dx+dy*dy<=hitRadiusSq){if(m_DragInputNodeId<=0)m_CompoundEntryDragInput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.target,row.socket};}
+    }
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
+        if(!LayoutNodeInteractive(nodeId))continue;
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         if (!layout) {
             continue;
@@ -69,7 +73,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
             const float dx = anchor.screenPos.x - screenPos.x;
             const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                return SocketHit{ nodeId, anchor.socketId };
+                if(m_DragInputNodeId<=0)m_CompoundEntryDragInput=-1;return SocketHit{ nodeId, anchor.socketId };
             }
         }
     }
@@ -81,8 +85,14 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
         8.0f,
         NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
+    for(const auto& row:m_CompoundEntryRows) {
+        if(!LayoutGroupVisible(row.group))continue;
+        const float dx=row.output.x-screenPos.x,dy=row.output.y-screenPos.y;
+        if(row.source && dx*dx+dy*dy<=hitRadiusSq){if(m_DragOutputNodeId<=0)m_CompoundEntryDragOutput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.source,row.sourceSocket};}
+    }
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
+        if(!LayoutNodeInteractive(nodeId))continue;
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         if (!layout) {
             continue;
@@ -100,7 +110,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
             const float dx = anchor.screenPos.x - screenPos.x;
             const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                return SocketHit{ nodeId, anchor.socketId };
+                if(m_DragOutputNodeId<=0)m_CompoundEntryDragOutput=-1;return SocketHit{ nodeId, anchor.socketId };
             }
         }
     }
@@ -110,6 +120,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
 int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
+        if(!LayoutNodeInteractive(nodeId))continue;
         const EditorNodeGraph::Node* node = FindCachedNode(graph, nodeId);
         if (!node) {
             continue;
@@ -121,7 +132,7 @@ int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const Edi
             continue;
         }
 
-        const EditorNodeGraph::Vec2 pos = GraphToScreen(node->position);
+        const EditorNodeGraph::Vec2 pos = GraphToScreen(DisplayNodePosition(*node));
         const EditorNodeGraph::Vec2 size = NodeScreenSize(*node);
         if (screenPos.x >= pos.x && screenPos.x <= pos.x + size.x &&
             screenPos.y >= pos.y && screenPos.y <= pos.y + size.y) {
@@ -153,8 +164,14 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::LinkHitTest);
 
     const auto& links = graph.GetLinks();
+    EditorNodeGraph::Link nearest;
+    float nearestDistance=LinkHitRadiusForZoom(m_Zoom);
+    float priorDistance=std::numeric_limits<float>::infinity();
+    const auto prior=m_LinkHitTestResult;
+    const bool sameOwner=m_LinkHitTestGraph==&graph && m_LinkHitTestGraphRevision==graph.GetStructureRevision();
     for (auto it = links.rbegin(); it != links.rend(); ++it) {
         const EditorNodeGraph::Link& link = *it;
+        if(ExpansionLinkProgress(link)<1)continue;
         if (!m_LinkLabelHitRects.empty()) {
             const auto labelRect = m_LinkLabelHitRects.find(LinkAnimationKey(link));
             if (labelRect != m_LinkLabelHitRects.end() && labelRect->second.Contains(ToImVec2(screenPos))) {
@@ -168,16 +185,17 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
             continue;
         }
 
-        EditorNodeGraph::Vec2 fromPos = OutputPinScreenPos(*from, link.fromSocketId);
-        EditorNodeGraph::Vec2 toPos = InputPinScreenPos(*to, link.toSocketId);
-
-        if (IsPointNearLink(screenPos, fromPos, toPos)) {
-            CacheLinkHitTest(graph, screenPos, link);
-            return link;
-        }
+        const auto& path=WirePath(graph,link);
+        const float distance=Stack::GraphRouting::DistanceToPath(path.geometry,screenPos);
+        if(sameOwner && link.fromNodeId==prior.fromNodeId && link.toNodeId==prior.toNodeId &&
+            link.fromSocketId==prior.fromSocketId && link.toSocketId==prior.toSocketId)priorDistance=distance;
+        if(distance<nearestDistance) {nearestDistance=distance;nearest=link;}
     }
-    CacheLinkHitTest(graph, screenPos, {});
-    return {};
+    // At a genuine intersection, a subpixel distance tie should not flicker
+    // between signals. Moving clearly nearer another path still selects it.
+    if(priorDistance<LinkHitRadiusForZoom(m_Zoom) && priorDistance<=nearestDistance+1.f)nearest=prior;
+    CacheLinkHitTest(graph, screenPos, nearest);
+    return nearest;
 }
 
 void EditorNodeGraphUI::CacheLinkHitTest(
@@ -194,23 +212,6 @@ void EditorNodeGraphUI::CacheLinkHitTest(
     m_LinkHitTestLabelsHidden = m_LinkLabelRevealAlpha <= 0.001f && m_LinkLabelHitRects.empty();
     m_LinkHitTestScreenPos = screenPos;
     m_LinkHitTestResult = link;
-}
-
-bool EditorNodeGraphUI::IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const {
-    const ImVec2 p0 = ToImVec2(a);
-    const ImVec2 p3 = ToImVec2(b);
-    const bool straightLinks = GraphStraightLinksEnabled(m_ActiveEditor);
-    if (straightLinks) {
-        return DistancePointToSegment(ToImVec2(point), p0, p3) <= LinkHitRadiusForZoom(m_Zoom);
-    }
-    const float handle = LinkBezierHandle(p0, p3);
-    return IsPointNearCubicBezier(
-        ToImVec2(point),
-        p0,
-        ImVec2(p0.x + handle, p0.y),
-        ImVec2(p3.x - handle, p3.y),
-        p3,
-        LinkHitRadiusForZoom(m_Zoom));
 }
 
 void EditorNodeGraphUI::DrawClippedText(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const char* text, ImU32 color) const {

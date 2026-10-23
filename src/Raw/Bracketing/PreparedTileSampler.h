@@ -38,6 +38,15 @@ public:
         Mfd::SameCfaTapInput& sample,
         std::string* error = nullptr);
 
+    // Copy contiguous rows from resident tiles without resolving the cache for
+    // every pixel. The region owns its samples; residency remains bounded.
+    bool ReadRegion(
+        const Mfd::PreparedRawFrame& frame,
+        std::uint64_t left, std::uint64_t top,
+        unsigned width, unsigned height,
+        Mfd::PreparedRawTile& region,
+        std::string* error = nullptr);
+
     bool SampleSameCfa(
         const Mfd::PreparedRawFrame& frame,
         const Mfd::NoiseModel& noiseModel,

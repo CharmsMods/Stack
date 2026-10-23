@@ -88,8 +88,9 @@ GraphExecutionRuntime::GraphExecutionRuntime(
 }
 
 void GraphExecutionRuntime::Execute() {
+    PreparePhysicalSchedule();
     for (const ScheduledGraphOutput& scheduled :
-            evaluationSchedule.outputs) {
+            physicalOutputs) {
         const auto scheduledNode = nodes.find(scheduled.nodeId);
         if (scheduledNode == nodes.end() || !scheduledNode->second) {
             continue;

@@ -134,55 +134,24 @@ void GraphExecutionRuntime::BindImageEvaluation() {
         bool resultOwned = false;
         Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup cleanup(result, resultOwned);
         bool pointwiseFused = false;
-        const bool hasDynamicExposureInput =
-            node.kind == RenderGraphNodeKind::TechnicalImage &&
-            node.technicalImageOperation == Stack::NodeMath::TechnicalImageOperation::Exposure &&
-            findInputLink(node.nodeId, EditorNodeGraph::kExposureValueInputSocketId) != nullptr;
-        if ((node.kind == RenderGraphNodeKind::DataMath ||
-             node.kind == RenderGraphNodeKind::TechnicalImage) &&
-            !hasDynamicExposureInput &&
-            pointwiseFusionDisabledNodes.find(node.nodeId) == pointwiseFusionDisabledNodes.end()) {
-            const RenderPipeline::PointwiseFusionPlan fusionPlan = pipeline.BuildPointwiseFusionPlan(
-                executionContext,
-                node.nodeId,
-                socketId,
-                pointwiseFusionDisabledNodes);
-            if (!fusionPlan.failure.empty()) {
-                pipeline.m_LastGraphExecutionStats.lastPointwiseFailure = fusionPlan.failure;
-                pipeline.m_LastGraphExecutionStats.lastPointwiseFailureNodeIds = fusionPlan.failureNodeIds;
+        if (const auto prepared = pointwiseFusionPlans.find(key);
+            prepared != pointwiseFusionPlans.end() && !pointwiseFusionDisabledNodes.count(node.nodeId)) {
+            const auto& fusionPlan = prepared->second;
+            const unsigned int pointwiseInput = evalImage(
+                fusionPlan.inputNodeId,
+                fusionPlan.inputSocketId);
+            const RenderPipeline::GraphNodeRenderResult fused = pipeline.RenderPointwiseFusionPlan(
+                fusionPlan,
+                pointwiseInput,
+                graph.executionInspectionEnabled);
+            if (fused.texture != 0) {
+                result = fused.texture;
+                resultOwned = fused.owned;
+                pointwiseFused = true;
+            } else {
                 ++pipeline.m_LastGraphExecutionStats.pointwiseFallbacks;
                 pointwiseFusionDisabledNodes.insert(
-                    fusionPlan.failureNodeIds.begin(), fusionPlan.failureNodeIds.end());
-            } else if (fusionPlan.valid) {
-                const unsigned int pointwiseInput = evalImage(
-                    fusionPlan.inputNodeId,
-                    fusionPlan.inputSocketId);
-                const RenderPipeline::GraphNodeRenderResult fused = pipeline.RenderPointwiseFusionPlan(
-                    fusionPlan,
-                    pointwiseInput,
-                    graph.executionInspectionEnabled);
-                if (fused.texture != 0) {
-                    result = fused.texture;
-                    resultOwned = fused.owned;
-                    pointwiseFused = true;
-
-                    std::unordered_set<int> virtualNodeIds(
-                        fusionPlan.authoredNodeIds.begin(),
-                        fusionPlan.authoredNodeIds.end());
-                    virtualNodeIds.erase(node.nodeId);
-                    for (auto cacheIt = pipeline.m_GraphImageCache.begin(); cacheIt != pipeline.m_GraphImageCache.end(); ) {
-                        if (virtualNodeIds.find(ExtractNodeIdFromCacheKey(cacheIt->first)) != virtualNodeIds.end()) {
-                            pipeline.DeleteGraphCacheEntry(cacheIt->second);
-                            cacheIt = pipeline.m_GraphImageCache.erase(cacheIt);
-                        } else {
-                            ++cacheIt;
-                        }
-                    }
-                } else {
-                    ++pipeline.m_LastGraphExecutionStats.pointwiseFallbacks;
-                    pointwiseFusionDisabledNodes.insert(
-                        fusionPlan.authoredNodeIds.begin(), fusionPlan.authoredNodeIds.end());
-                }
+                    fusionPlan.authoredNodeIds.begin(), fusionPlan.authoredNodeIds.end());
             }
         }
         if (pointwiseFused) {
@@ -418,7 +387,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             }
         } else if (node.kind == RenderGraphNodeKind::DataMath) {
             const RenderPipeline::GraphNodeRenderResult dataMathResult =
-                pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
+                pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask, evalScalar);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
         }  else if (node.kind == RenderGraphNodeKind::ChannelCombine) {

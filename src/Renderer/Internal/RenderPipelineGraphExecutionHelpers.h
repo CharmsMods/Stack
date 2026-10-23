@@ -85,6 +85,8 @@ struct DataMathInputLinkInfo {
     std::string socketId;
 };
 
+bool IsUniformRenderSocket(const struct GraphExecutionContext& context, int nodeId, std::string_view socketId);
+
 struct GraphExecutionContext {
     GraphExecutionContext(
         const RenderGraphSnapshot& graphSnapshot,

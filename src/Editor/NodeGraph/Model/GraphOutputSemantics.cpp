@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
@@ -20,7 +21,7 @@ bool IsSingleChannelValue(LogicalValueType type) {
 }
 
 std::string OutputChannelColor(const GraphOutputDescription& output) {
-    if (!IsSingleChannelValue(output.descriptor.logicalType) ||
+    if (output.componentOrigin.empty() || !IsSingleChannelValue(output.descriptor.logicalType) ||
         output.descriptor.channels.state != KnowledgeState::Known ||
         output.descriptor.channels.value.roles.size() != 1) return {};
     std::string role = output.descriptor.channels.value.roles.front();
@@ -39,13 +40,12 @@ namespace {
 // expanded graph directly; only the outer query expands compound boundaries.
 thread_local bool expandingCompounds = false;
 struct ExpansionScope {
+    bool previous = expandingCompounds;
     ExpansionScope() { expandingCompounds = true; }
-    ~ExpansionScope() { expandingCompounds = false; }
+    ~ExpansionScope() { expandingCompounds = previous; }
 };
 bool HasCompounds(const Graph& graph) {
-    return std::any_of(graph.GetNodes().begin(), graph.GetNodes().end(), [](const Node& node) {
-        return node.kind == NodeKind::Compound;
-    });
+    return NeedsOutputLowering(graph);
 }
 std::vector<SocketDefinition> OutputSockets(const Graph& graph, const Node& node) {
     // LUT input visibility consults channel identity. Its output declaration
@@ -55,7 +55,9 @@ std::vector<SocketDefinition> OutputSockets(const Graph& graph, const Node& node
         socket.id = kImageOutputSocketId;
         socket.logicalType = LogicalValueType::ColorImage;
         socket.direction = SocketDirection::Output;
-        return { socket };
+        std::vector<SocketDefinition> outputs{socket};
+        for(const auto& channel:node.channelOutputs)outputs.push_back(ChannelOutputSocket(node.id,channel));
+        return outputs;
     }
     auto sockets = graph.GetSockets(node, false);
     sockets.erase(std::remove_if(sockets.begin(), sockets.end(), [](const auto& socket) {
@@ -89,6 +91,19 @@ public:
                 if (complete.count(key)) { pending.pop_back(); continue; }
                 const Node* node = graph.FindNode(frame.nodeId);
                 if (!node) { pending.pop_back(); continue; }
+                if(const auto* channel=FindChannelOutput(*node,frame.socketId)) {
+                    const auto base=GraphOutputIdentity(node->id,channel->sourceSocket);
+                    if(!frame.expanded) {
+                        pending.back().expanded=true;
+                        if(!complete.count(base))pending.push_back({node->id,channel->sourceSocket});
+                    } else {
+                        const auto found=outputs.find(base);
+                        outputs[key]=OutputRules::ExtractChannel(*node,frame.socketId,channel->component,
+                            found==outputs.end()?nullptr:&found->second,channel->missingAlphaIsOpaque);
+                        complete.insert(key);pending.pop_back();
+                    }
+                    continue;
+                }
                 if (!frame.expanded) {
                     if (context.resolveOutput) {
                         if (auto resolved = context.resolveOutput(*node, frame.socketId)) {
@@ -131,8 +146,57 @@ public:
 };
 }
 
+ScopedCompoundLoweringDescription::ScopedCompoundLoweringDescription() : previous(expandingCompounds) { expandingCompounds = true; }
+ScopedCompoundLoweringDescription::~ScopedCompoundLoweringDescription() { expandingCompounds = previous; }
+
+struct ScopedGraphOutputAnalysis::State {
+    static thread_local State* current;
+    const Graph& graph;
+    State* previous = current;
+    GraphOutputDescriptions outputs;
+    GraphOutputContext context;
+    std::unique_ptr<Analyzer> analyzer;
+    bool ready = false;
+    bool preparing = false;
+    explicit State(const Graph& graph) : graph(graph) { current = this; }
+    ~State() { current = previous; }
+};
+thread_local ScopedGraphOutputAnalysis::State* ScopedGraphOutputAnalysis::State::current = nullptr;
+ScopedGraphOutputAnalysis::ScopedGraphOutputAnalysis(const Graph& graph) {
+    for (auto* existing = State::current; existing; existing = existing->previous)
+        if (&existing->graph == &graph && !existing->preparing) return;
+    state = std::make_unique<State>(graph);
+}
+ScopedGraphOutputAnalysis::ScopedGraphOutputAnalysis(const Graph& graph, GraphOutputContext context)
+    : state(std::make_unique<State>(graph)) {
+    state->context = std::move(context);
+    state->analyzer = std::make_unique<Analyzer>(graph, state->context);
+}
+ScopedGraphOutputAnalysis::~ScopedGraphOutputAnalysis() = default;
+
 GraphOutputDescription DescribeGraphOutput(
     const Graph& graph, int nodeId, const std::string& socketId, const GraphOutputContext& context) {
+    if (!context.resolveOutput && context.sourceDescriptors.empty() &&
+        context.canvasSpatial.state == KnowledgeState::Unknown) {
+        for (auto* scope = ScopedGraphOutputAnalysis::State::current; scope; scope = scope->previous) {
+            if (&scope->graph != &graph || scope->preparing) continue;
+            if (!scope->ready || scope->analyzer) {
+                scope->preparing = true;
+                try {
+                    if (!scope->analyzer && (expandingCompounds || !HasCompounds(graph)))
+                        scope->analyzer = std::make_unique<Analyzer>(graph, scope->context);
+                    if (scope->analyzer) scope->analyzer->Visit(nodeId);
+                    else scope->outputs = DescribeGraphOutputs(graph);
+                }
+                catch (...) { scope->preparing = false; throw; }
+                scope->preparing = false;
+                scope->ready = true;
+            }
+            const auto& outputs = scope->analyzer ? scope->analyzer->outputs : scope->outputs;
+            const auto output = outputs.find(GraphOutputIdentity(nodeId, socketId));
+            return output == outputs.end() ? GraphOutputDescription{} : output->second;
+        }
+    }
     if (!expandingCompounds && HasCompounds(graph)) {
         const auto outputs = DescribeGraphOutputs(graph, context);
         const auto output = outputs.find(GraphOutputIdentity(nodeId, socketId));
@@ -152,18 +216,23 @@ GraphOutputDescriptions DescribeGraphOutputs(const Graph& graph, const GraphOutp
         if (graph.ExpandAllCompoundNodes(expanded, &expansion)) {
             Analyzer analyzer(expanded, context);
             for (const Node& node : expanded.GetNodes()) analyzer.Visit(node.id);
-            for (const auto& binding : expansion.outputBindings) {
-                const auto output = analyzer.outputs.find(GraphOutputIdentity(binding.expandedNodeId, binding.expandedSocketId));
-                if (output != analyzer.outputs.end()) {
-                    const auto description = output->second;
-                    analyzer.outputs[GraphOutputIdentity(binding.authoredNodeId, binding.authoredSocketId)] = description;
-                }
-            }
+            BindCompoundOutputDescriptions(analyzer.outputs, expansion);
             return std::move(analyzer.outputs);
         }
     }
     Analyzer analyzer(graph, context);
     for (const Node& node : graph.GetNodes()) analyzer.Visit(node.id);
     return std::move(analyzer.outputs);
+}
+
+void BindCompoundOutputDescriptions(
+    GraphOutputDescriptions& outputs, const CompoundExpansionResult& expansion) {
+    for (const auto& binding : expansion.outputBindings) {
+        const auto output = outputs.find(GraphOutputIdentity(binding.expandedNodeId, binding.expandedSocketId));
+        if (output == outputs.end()) continue;
+        // Inserting an authored alias can rehash the map.
+        auto description = output->second;
+        outputs[GraphOutputIdentity(binding.authoredNodeId, binding.authoredSocketId)] = std::move(description);
+    }
 }
 } // namespace EditorNodeGraph

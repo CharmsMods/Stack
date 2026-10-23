@@ -94,17 +94,6 @@ void DrawStraightLinkStroke(
     drawList->AddLine(start, end, color, thickness);
 }
 
-ImVec2 SampleCubicBezierPoint(const ImVec2& p0, const ImVec2& p1, const ImVec2& p2, const ImVec2& p3, float t) {
-    const float omt = 1.0f - t;
-    const float omt2 = omt * omt;
-    const float omt3 = omt2 * omt;
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    return ImVec2(
-        (omt3 * p0.x) + (3.0f * omt2 * t * p1.x) + (3.0f * omt * t2 * p2.x) + (t3 * p3.x),
-        (omt3 * p0.y) + (3.0f * omt2 * t * p1.y) + (3.0f * omt * t2 * p2.y) + (t3 * p3.y));
-}
-
 ImU32 ScaleColorAlpha(ImU32 color, float alphaScale) {
     ImVec4 rgba = ImGui::ColorConvertU32ToFloat4(color);
     rgba.w *= std::clamp(alphaScale, 0.0f, 1.0f);
@@ -161,30 +150,6 @@ LinkTextContent BuildLinkTextContent(
     const EditorNodeGraph::WireReadout::Readout readout =
         EditorNodeGraph::WireReadout::Build(input);
     return { readout.primary, readout.secondary, readout.attention };
-}
-
-float ApproximateLinkLength(
-    const ImVec2& p0,
-    const ImVec2& p1,
-    const ImVec2& p2,
-    const ImVec2& p3,
-    bool straight) {
-    if (straight) {
-        const float dx = p3.x - p0.x;
-        const float dy = p3.y - p0.y;
-        return std::sqrt(dx * dx + dy * dy);
-    }
-    float length = 0.0f;
-    ImVec2 previous = p0;
-    for (int index = 1; index <= 32; ++index) {
-        const ImVec2 current = SampleCubicBezierPoint(
-            p0, p1, p2, p3, static_cast<float>(index) / 32.0f);
-        const float dx = current.x - previous.x;
-        const float dy = current.y - previous.y;
-        length += std::sqrt(dx * dx + dy * dy);
-        previous = current;
-    }
-    return length;
 }
 
 void DrawRotatedText(
@@ -332,15 +297,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const float thicknessScale = LinkThicknessScaleFromZoom(m_Zoom);
     const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
-    const bool labelRevealHeld =
-        m_ActiveEditor &&
-        m_ActiveEditor->CanConsumeEditorCommandKeys() &&
-        ImGui::IsKeyDown(ImGuiKey_F);
-    m_LinkLabelRevealAlpha = ImGuiExtras::AnimateTowards(
-        m_LinkLabelRevealAlpha,
-        labelRevealHeld ? 1.0f : 0.0f,
-        deltaTime,
-        labelRevealHeld ? 26.0f : 22.0f);
+    const bool labelRevealHeld = !m_RenderPreviewOnly && !m_RenderCaptureOnly && m_NodeNotes.Revealed();
     const bool labelsVisible =
         EditorNodeGraph::ConnectionPresentation::ConnectionLabelsAreVisible(
             labelRevealHeld,
@@ -361,6 +318,8 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         ? FindLinkAt(graph, ToGraphVec2(ImGui::GetMousePos()))
         : EditorNodeGraph::Link{};
     for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
+        const float trace=ExpansionLinkProgress(link);
+        if(trace<=0)continue;
         const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
         const EditorNodeGraph::Node* to = FindCachedNode(graph, link.toNodeId);
         if (!from || !to) {
@@ -379,29 +338,35 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             hoveredLink.fromSocketId == link.fromSocketId &&
             hoveredLink.toNodeId == link.toNodeId &&
             hoveredLink.toSocketId == link.toSocketId;
-        const float cullHandle = ResolveLinkHandle(p1, p2, straightLinks);
-        const ImVec2 linkMin(
-            std::min({ p1.x, p2.x, p1.x + cullHandle, p2.x - cullHandle }),
-            std::min(p1.y, p2.y));
-        const ImVec2 linkMax(
-            std::max({ p1.x, p2.x, p1.x + cullHandle, p2.x - cullHandle }),
-            std::max(p1.y, p2.y));
+        const auto& wirePath=WirePath(graph,link);
+        const ImVec2 linkMin{wirePath.geometry.bounds.min.x,wirePath.geometry.bounds.min.y};
+        const ImVec2 linkMax{wirePath.geometry.bounds.max.x,wirePath.geometry.bounds.max.y};
         if (!RectOverlapsExpandedCanvas(linkMin, linkMax, fadeMin, fadeMax, linkCullMargin) && !selected && !hovered) {
             continue;
         }
         Stack::UiPerformance::Add(Stack::UiPerformance::Counter::VisibleLinks);
+        if(trace<1)Stack::UiPerformance::Add(Stack::UiPerformance::Counter::LayoutTracingLinks);
         LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
         if (!GraphDottedMaskLinksEnabled(m_ActiveEditor)) visualStyle.dotted = false;
         const std::string& channel = visualStyle.channel;
         const std::string animationKey = LinkAnimationKey(link);
-        const float labelHandle = ResolveLinkHandle(p1, p2, straightLinks);
-        const ImVec2 labelC1(p1.x + labelHandle, p1.y);
-        const ImVec2 labelC2(p2.x - labelHandle, p2.y);
-        const float screenLength = labelsVisible ? ApproximateLinkLength(
-            p1, labelC1, labelC2, p2, straightLinks) : 0.0f;
-        const ImVec2 middle((p1.x+p2.x)*0.5f,(p1.y+p2.y)*0.5f);
-        const auto strokeSamples = SampleLinkCurve(p1, straightLinks ? middle : labelC1,
-            straightLinks ? middle : labelC2, p2);
+        const float screenLength = wirePath.geometry.length;
+        std::vector<CurveSample> tracedSamples;
+        if(trace<1)tracedSamples=wirePath.samples;
+        const auto& strokeSamples=trace<1?tracedSamples:wirePath.samples;
+        if(trace<1) {
+            // Reuse the canonical sampled curve and every existing wire style.
+            // Trim its untraced suffix, preserving joined strokes and dots.
+            const float end=trace;
+            auto boundary=std::lower_bound(tracedSamples.begin(),tracedSamples.end(),end,
+                [](const CurveSample& sample,float t){return sample.t<t;});
+            if(boundary!=tracedSamples.end() && boundary!=tracedSamples.begin()) {
+                const auto prior=*(boundary-1);const float t=(end-prior.t)/(boundary->t-prior.t);
+                const CurveSample cut{{prior.point.x+(boundary->point.x-prior.point.x)*t,
+                    prior.point.y+(boundary->point.y-prior.point.y)*t},end};
+                *boundary=cut;tracedSamples.erase(boundary+1,tracedSamples.end());
+            }
+        }
         const StackAppearance::GraphConnectionTextLayout textLayout = appearance
             ? appearance->GetGraphConnectionTextLayout()
             : StackAppearance::GraphConnectionTextLayout::Floating;
@@ -421,9 +386,8 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         float labelFontScale = labelFontSize / std::max(1.0f, ImGui::GetFontSize());
         ImVec2 primarySize {};
         ImVec2 secondarySize {};
-        ImVec2 labelCenter = straightLinks
-            ? ImVec2((p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f)
-            : SampleCubicBezierPoint(p1, labelC1, labelC2, p2, 0.5f);
+        const auto wireMiddle=Stack::GraphRouting::PointAt(wirePath.geometry,.5f);
+        ImVec2 labelCenter{wireMiddle.x,wireMiddle.y};
         ImVec2 primaryCenter {};
         ImVec2 secondaryCenter {};
         ImVec2 labelTangent(1.0f, 0.0f);
@@ -456,14 +420,10 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                 ImVec2* tangentOut,
                 ImVec2* normalOut,
                 float* angleOut) {
-                ImVec2 center = straightLinks
-                    ? ImVec2(p1.x + (p2.x - p1.x) * t, p1.y + (p2.y - p1.y) * t)
-                    : SampleCubicBezierPoint(p1, labelC1, labelC2, p2, t);
-                const ImVec2 tangent = straightLinks
-                    ? EditorNodeGraph::ConnectionPresentation::NormalizedTangent(
-                        ImVec2(p2.x - p1.x, p2.y - p1.y))
-                    : EditorNodeGraph::ConnectionPresentation::CubicBezierTangent(
-                        p1, labelC1, labelC2, p2, t);
+                Stack::GraphRouting::Vec2 direction;
+                const auto point=Stack::GraphRouting::PointAt(wirePath.geometry,t,&direction);
+                ImVec2 center{point.x,point.y};
+                const ImVec2 tangent{direction.x,direction.y};
                 const ImVec2 normal(-tangent.y, tangent.x);
                 center.x += normal.x * normalOffset;
                 center.y += normal.y * normalOffset;
@@ -576,6 +536,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             18.0f,
             11.0f);
         auto drawConnectionLabels = [&](ImU32 color) {
+            if(trace<1)return;
             if (!drawLabels ||
                 m_LinkLabelRevealAlpha <=
                     EditorNodeGraph::ConnectionPresentation::kConnectionLabelRevealMinimumAlpha) {
@@ -770,8 +731,9 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
     const ImVec2 fadeMax(m_CanvasMax.x, m_CanvasMax.y);
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool hoveredInputConnectable = hoveredInput.IsValid() &&
-        CanConnectInContext(graph, m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId);
-    const float dragPulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
+        CanPreviewConnection(graph, m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId);
+    const float dragPulse = GraphReducedMotion() ? 0.5f :
+        0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
     LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId,
         hoveredInputConnectable ? hoveredInput.nodeId : 0,
         hoveredInputConnectable ? hoveredInput.socketId : std::string{}, editor);
@@ -780,11 +742,19 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
     }
     const bool straightLinks = GraphStraightLinksEnabled(editor);
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
-    const ImVec2 sourcePin = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
+    ImVec2 sourcePin = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
+    if(m_CompoundEntryDragOutput>=0 && std::size_t(m_CompoundEntryDragOutput)<m_CompoundEntryRows.size()) {
+        const auto& row=m_CompoundEntryRows[m_CompoundEntryDragOutput];
+        if(row.source==m_DragOutputNodeId && row.sourceSocket==m_DragOutputSocketId)sourcePin=row.output;
+    }
     ImVec2 p1 = sourcePin;
     ImVec2 p2 = ImGui::GetMousePos();
     if (hoveredInputConnectable) if (const auto* target=graph.FindNode(hoveredInput.nodeId))
         p2=ToImVec2(InputPinScreenPos(*target,hoveredInput.socketId));
+    if(hoveredInputConnectable && m_CompoundEntryDragInput>=0 && std::size_t(m_CompoundEntryDragInput)<m_CompoundEntryRows.size()) {
+        const auto& row=m_CompoundEntryRows[m_CompoundEntryDragInput];
+        if(row.target==hoveredInput.nodeId && row.socket==hoveredInput.socketId)p2=row.input;
+    }
     const float handle = ResolveLinkHandle(p1, p2, straightLinks);
     const ImU32 dragColor = graphStyle.enabled
         ? ColorToU32(LinkColorVec(visualStyle, graphStyle))
@@ -843,8 +813,9 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
     const ImVec2 fadeMax(m_CanvasMax.x, m_CanvasMax.y);
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool hoveredOutputConnectable = hoveredOutput.IsValid() &&
-        CanConnectInContext(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId);
-    const float dragPulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
+        CanPreviewConnection(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId);
+    const float dragPulse = GraphReducedMotion() ? 0.5f :
+        0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.5f);
     LinkVisualStyle visualStyle = hoveredOutputConnectable
         ? ResolveLinkVisualStyle(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, editor)
         : LinkVisualStyle{};
@@ -856,7 +827,11 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
     ImVec2 p1 = ImGui::GetMousePos();
     if (hoveredOutputConnectable) if (const auto* source=graph.FindNode(hoveredOutput.nodeId))
         p1=ToImVec2(OutputPinScreenPos(*source,hoveredOutput.socketId));
-    const ImVec2 targetPin = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
+    ImVec2 targetPin = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
+    if(m_CompoundEntryDragInput>=0 && std::size_t(m_CompoundEntryDragInput)<m_CompoundEntryRows.size()) {
+        const auto& row=m_CompoundEntryRows[m_CompoundEntryDragInput];
+        if(row.target==m_DragInputNodeId && row.socket==m_DragInputSocketId)targetPin=row.input;
+    }
     ImVec2 p2 = targetPin;
     const float handle = ResolveLinkHandle(p1, p2, straightLinks);
     const ImU32 dragColor = graphStyle.enabled
@@ -915,8 +890,10 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
         560.0f);
 
     for (auto& group : groups) {
-        ImVec2 minPos = ToImVec2(GraphToScreen(group.position));
-        ImVec2 maxPos = ToImVec2(GraphToScreen({ group.position.x + group.size.x, group.position.y + group.size.y }));
+        if(!LayoutGroupVisible(group.id))continue;
+        const auto displayed=DisplayGroupRect(group);
+        ImVec2 minPos = ToImVec2(GraphToScreen(displayed.min));
+        ImVec2 maxPos = ToImVec2(GraphToScreen(displayed.max));
 
         float rounding = 8.0f * m_Zoom;
 
@@ -961,17 +938,6 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
             headerColor = ApplyStyleAlpha(IM_COL32(32, 40, 56, 190));
         }
 
-        if (graphStyle.enabled && emphasis > 0.02f) {
-            DrawSoftSpotlightHalo(
-                drawList,
-                minPos,
-                maxPos,
-                ColorWithAlpha(isDragged || isResized ? graphStyle.selected : graphStyle.spotlightHalo, 0.08f + emphasis * 0.16f),
-                (12.0f + emphasis * 6.0f) * m_Zoom,
-                (0.95f + emphasis * 0.70f) * m_Zoom,
-                2.8f);
-        }
-
         drawList->AddRectFilled(minPos, maxPos, bgColor, rounding);
 
         ImVec2 headerMin = minPos;
@@ -986,7 +952,7 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
             0,
             2.0f * m_Zoom);
 
-        if (isHovered || isResized || emphasis > 0.20f) {
+        if (!group.compoundBoundary.is_object() && (isHovered || isResized || emphasis > 0.20f)) {
             drawList->AddTriangleFilled(
                 ImVec2(maxPos.x - 4.0f * m_Zoom, maxPos.y - 12.0f * m_Zoom),
                 ImVec2(maxPos.x - 12.0f * m_Zoom, maxPos.y - 4.0f * m_Zoom),
@@ -997,21 +963,22 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
         if (isEditing) {
             ImGui::PushID(group.id);
 
-            float inputWidth = (group.size.x - 16.0f) * m_Zoom;
+            float inputWidth = std::max(1.f,maxPos.x-minPos.x-16.f*m_Zoom);
 
             ImGui::SetCursorScreenPos(ImVec2(minPos.x + 8.0f * m_Zoom, minPos.y + 4.0f * m_Zoom));
             ImGui::SetNextItemWidth(inputWidth);
 
             ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
             ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text, graphStyle.enabled ? ColorToU32(graphStyle.text) : IM_COL32(255, 255, 255, 255));
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
 
             if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::IsAnyItemActive()) {
                 ImGui::SetKeyboardFocusHere();
             }
 
-            if (ImGui::InputText("##rename", m_GroupRenameBuffer, sizeof(m_GroupRenameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            const bool cancelRename = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+            if (ImGui::InputText("##rename", m_GroupRenameBuffer, sizeof(m_GroupRenameBuffer), ImGuiInputTextFlags_EnterReturnsTrue) && !cancelRename) {
                 if (group.title != m_GroupRenameBuffer) {
                     group.title = m_GroupRenameBuffer;
                     editor->MarkGraphEdited(-1, false);
@@ -1020,12 +987,13 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
             }
 
             if (ImGui::IsItemDeactivated()) {
-                if (ImGui::IsItemDeactivatedAfterEdit() && group.title != m_GroupRenameBuffer) {
+                if (!cancelRename && ImGui::IsItemDeactivatedAfterEdit() && group.title != m_GroupRenameBuffer) {
                     group.title = m_GroupRenameBuffer;
                     editor->MarkGraphEdited(-1, false);
                 }
                 m_EditingGroupId = -1;
             }
+            if (cancelRename) m_EditingGroupId = -1;
 
             ImGui::PopStyleVar();
             ImGui::PopStyleColor(3);
@@ -1033,13 +1001,16 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
         } else {
             ImVec2 textPos = ImVec2(minPos.x + 8.0f * m_Zoom, minPos.y + 6.0f * m_Zoom);
             float titleFontSize = ImGui::GetFontSize() * m_Zoom;
+            const ImVec4 titleClip(minPos.x + 8.0f * m_Zoom, minPos.y,
+                maxPos.x - 8.0f * m_Zoom, headerMax.y);
             drawList->AddText(
                 ImGui::GetFont(),
                 titleFontSize,
                 textPos,
                 graphStyle.enabled ? ColorWithAlpha(graphStyle.text, 0.86f) : ApplyStyleAlpha(IM_COL32(255, 255, 255, 220)),
-                group.title.c_str());
+                group.title.c_str(), nullptr, 0.0f, &titleClip);
         }
     }
     PruneAnimatedState(m_GroupEmphasisAnim, activeGroupIds);
+    PrepareCompoundEntries(graph);
 }

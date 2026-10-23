@@ -81,6 +81,7 @@ private:
     void BindMaskEvaluation();
     void BindScalarEvaluation();
     void BindImageEvaluation();
+    void PreparePhysicalSchedule();
     bool ApplyUniformInputs(const RenderGraphNode& authored, RenderGraphNode& evaluated);
     std::pair<int,int> ProjectMaskCanvasExtent(const RenderGraphNode& node) const;
     void BindViewportEvaluation();
@@ -125,6 +126,8 @@ private:
     std::function<std::size_t(int, const std::string&)> fingerprintScalar;
     std::function<std::string(int, const std::string&)> resolveChannelRole;
     std::unordered_set<int> pointwiseFusionDisabledNodes;
+    std::vector<ScheduledGraphOutput> physicalOutputs;
+    std::unordered_map<std::string, RenderPipeline::PointwiseFusionPlan> pointwiseFusionPlans;
 };
 
 } // namespace Stack::Renderer::GraphExecution

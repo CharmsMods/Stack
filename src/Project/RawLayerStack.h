@@ -7,9 +7,12 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <utility>
 
 namespace Stack::Project {
 inline constexpr int kRawLayerStackSchemaVersion = 8;
@@ -59,6 +62,10 @@ struct RawLayerStackState {
     Assets::Library assets;
     bool explicitRouting = false;
     std::optional<GraphModel::Endpoint> imageOutput;
+    // Canvas-only placements of the synthetic source/output anchors.
+    std::optional<EditorNodeGraph::Vec2> sourceCanvasPosition, outputCanvasPosition;
+    std::string sourceCanvasNotes, outputCanvasNotes;
+    std::vector<EditorNodeGraph::ChannelOutput> sourceChannelOutputs;
 };
 
 inline constexpr const char* kRawPreparedSourceGraph = "$raw-source";
@@ -134,12 +141,50 @@ struct RawLayerSourceHistory {
     // exact source-set identity even if a different set is selected later.
     std::string sourceSetId;
 };
+struct RawProjectGraph;
+using RawGraphGroupOwners = std::unordered_map<int,std::pair<std::string,int>>;
 class RawLayerStackDocument {
 public:
+    // A validated candidate is opaque and belongs to one document revision.
+    // Preparation includes host dependencies; commit cannot mutate the candidate
+    // or silently accept a newer source/dependency document.
+    class PreparedEdit {
+    public:
+        PreparedEdit(PreparedEdit&&) = default;
+        PreparedEdit& operator=(PreparedEdit&&) = default;
+        PreparedEdit(const PreparedEdit&) = delete;
+        PreparedEdit& operator=(const PreparedEdit&) = delete;
+    private:
+        friend class RawLayerStackDocument;
+        PreparedEdit(const RawLayerStackDocument* owner, std::uint64_t revision,
+            RawLayerStackState state, const EditorNodeGraph::Graph* composition,
+            std::uint64_t dependencyRevision);
+        const RawLayerStackDocument* m_Owner;
+        std::uint64_t m_Revision;
+        std::unique_ptr<RawLayerStackState> m_State;
+        const EditorNodeGraph::Graph* m_Composition;
+        std::uint64_t m_CompositionRevision;
+        std::uint64_t m_DependencyRevision;
+    };
     const RawLayerStackState& State() const { return m_State; }
     std::uint64_t Revision() const { return m_Revision; }
     std::uint64_t ProcessingRevision() const { return m_ProcessingRevision; }
     bool Apply(RawLayerStackState candidate, std::string& error, bool affectsPixels = true, bool completesAction = false);
+    std::optional<PreparedEdit> Prepare(RawLayerStackState candidate, std::string& error,
+        const EditorNodeGraph::Graph* composition = nullptr, int sourceNodeId = 0,
+        std::uint64_t dependencyRevision = 0) const;
+    std::optional<PreparedEdit> PrepareGraphEdit(const RawProjectGraph& projection,
+        const EditorNodeGraph::Graph& edited, const nlohmann::json& settings,
+        const std::string& insertionOwner, std::string& error,
+        const EditorNodeGraph::Graph* composition = nullptr, int sourceNodeId = 0,
+        std::uint64_t dependencyRevision = 0, RawGraphGroupOwners* groupOwners = nullptr) const;
+    bool Commit(PreparedEdit prepared, std::string& error, bool affectsPixels = true,
+        bool completesAction = false, std::uint64_t dependencyRevision = 0,
+        const EditorNodeGraph::Graph* composition = nullptr);
+    // Placement changes cannot alter processing contracts. Retain history once
+    // per gesture without rebuilding or validating the executable graph.
+    bool ApplyGraphLayout(const RawProjectGraph& projection, const EditorNodeGraph::Graph& edited,
+        bool gesture, std::string& error, bool notesOnly = false);
     // Source preparation and graph changes share one undo entry. Source data
     // remains owned by the project; history holds only prior setting values.
     bool ApplySourceEdit(RawLayerStackState candidate, RawRecipe::RawDevelopmentRecipe& source,
@@ -153,6 +198,7 @@ public:
     void EndGesture();
     bool CancelGesture(RawRecipe::RawDevelopmentRecipe* source = nullptr);
     const RawLayerSourceHistory* PendingSourceHistory(RawLayerHistoryAction action) const;
+    bool PendingHistoryIsNotesOnly(RawLayerHistoryAction action) const;
     bool Undo(std::string* error = nullptr, const EditorNodeGraph::Graph* composition = nullptr, int sourceNodeId = 0,
         RawRecipe::RawDevelopmentRecipe* source = nullptr);
     bool Redo(std::string* error = nullptr, const EditorNodeGraph::Graph* composition = nullptr, int sourceNodeId = 0,
@@ -166,9 +212,10 @@ private:
         RawLayerStackState state;
         bool affectsPixels = true;
         std::optional<RawLayerSourceHistory> source;
+        bool notesOnly = false;
     };
     void PushUndo(RawLayerStackState state, bool affectsPixels,
-        std::optional<RawLayerSourceHistory> source = std::nullopt);
+        std::optional<RawLayerSourceHistory> source = std::nullopt, bool notesOnly = false);
     RawLayerStackState m_State;
     std::deque<HistoryEntry> m_Undo;
     std::deque<HistoryEntry> m_Redo;

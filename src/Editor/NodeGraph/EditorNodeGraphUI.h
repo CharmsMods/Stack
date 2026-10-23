@@ -4,7 +4,10 @@
 #include "Editor/UI/NodeOpenTransition.h"
 #include "Editor/NodeGraph/GraphEditorContext.h"
 #include "EditorNodeGraph.h"
+#include "GraphRoomLayout.h"
+#include "Editor/NodeGraph/UI/GraphWireRouteCache.h"
 #include "Editor/NodeGraph/UI/NodeSocketIconTexture.h"
+#include "Editor/NodeGraph/UI/NodeNotesView.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 #include "ThirdParty/json.hpp"
 #include "Utils/FloatingSlider.h"
@@ -32,7 +35,7 @@ public:
     void Shutdown();
     void Render(EditorModule* editor);
     Stack::Editor::NodeOpenTransition::Appearance CaptureNodeAppearance(
-        EditorModule* editor, int nodeId, ImVec2 canvasMinimum, ImVec2 canvasMaximum);
+        EditorModule* editor, int nodeId, ImVec2 canvasMinimum, ImVec2 canvasMaximum, bool preserveViewport = false);
     void RenderOperationControls(EditorModule* editor, int nodeId);
     bool RenderRawScalarControl(const char* owner, const char* label, float* value,
         float minimum, float maximum, const char* format);
@@ -54,6 +57,10 @@ public:
     bool IsCatalogDocked() const { return HasCatalogHost() && m_CatalogHostExpanded; }
     void CloseTransientDrawers();
     void ResetProjectInteractionState();
+    bool DecompileNode(EditorModule* editor, int nodeId, std::string* error = nullptr);
+    EditorNodeGraph::GraphRect MeasureNodeForLayout(const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
+    bool HasLayoutMotion() const { return m_ExpansionMotion || !m_LayoutNodeMotion.empty() || !m_LayoutGroupMotion.empty(); }
     void OpenMaskTextureInspector(const EditorNodeGraph::Node& node);
     void RenderNodesPanelDrawer(
         EditorModule* editor,
@@ -67,23 +74,94 @@ public:
     void SetPresetPreviewHoverTarget(const std::shared_ptr<PresetEntry>& preset);
     bool ApplyPresetPayload(EditorModule* editor, const nlohmann::json& graphPayload, std::string* outSummary);
 
-    static bool ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId);
-    static bool ConnectBestOutputToInput(EditorModule* editor, int fromNodeId, int toNodeId, const std::string& toSocketId);
+    bool ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId);
+    bool ConnectBestOutputToInput(EditorModule* editor, int fromNodeId, int toNodeId, const std::string& toSocketId);
     static std::string GetUpstreamChannel(const EditorNodeGraph::Graph& graph, int nodeId, const std::string& socketId, std::unordered_set<int>& visited);
 
 
 private:
+    struct LayoutNodeMotion {
+        std::string uuid;
+        EditorNodeGraph::Vec2 start, target, current;
+        double elapsed = 0, delay = 0, duration = .26;
+    };
+    struct LayoutGroupMotion { EditorNodeGraph::GraphRect start, target, current; double elapsed = 0, delay = 0, duration = .26; };
+    std::unordered_map<int, LayoutNodeMotion> m_LayoutNodeMotion;
+    std::unordered_map<int, LayoutGroupMotion> m_LayoutGroupMotion;
+    std::string m_LayoutDocumentId, m_LayoutGraphId;
+    std::uint64_t m_LayoutDocumentRevision = 0;
+    double m_LayoutLastFrame = 0;
+    // Presentation-owned rest preferences survive consecutive drags, but never
+    // cross documents, undo, external edits or project reset. Saved positions
+    // remain the authoritative settled arrangement.
+    std::unordered_map<std::string,EditorNodeGraph::Vec2> m_LayoutRestingNodes;
+    std::unordered_map<int,EditorNodeGraph::GraphRect> m_LayoutRestingGroups;
+    struct ExpansionMotion {
+        std::unordered_set<int> nodes, groups;
+        std::unordered_map<int,float> columns;
+        Stack::Editor::NodeOpenTransition::Appearance origin;
+        EditorNodeGraph::GraphRect originRect;
+        double elapsed = 0;
+        bool presented = false;
+        bool channelFold = false;
+        EditorNodeGraph::GraphRect foldTarget;
+        std::unordered_map<std::string,EditorNodeGraph::Vec2> socketOrigins;
+    };
+    std::unique_ptr<ExpansionMotion> m_ExpansionMotion;
+    float ExpansionNodeAlpha(int id) const;
+    float ExpansionLinkProgress(const EditorNodeGraph::Link& link) const;
+    bool LayoutNodeInteractive(int id) const;
+    bool LayoutGroupVisible(int id) const;
+    void DrawExpansionOrigin(ImDrawList& draw) const;
+    bool ConnectWithLayout(EditorModule* editor, int from, const std::string& output, int to,
+        const std::string& input, std::string* error);
+    void ExposeChannelSocket(EditorModule* editor, int node, const std::string& output, const std::string& component);
+    struct DragLayoutState {
+        Stack::GraphLayout::RoomGesture room;
+        std::unordered_map<int,EditorNodeGraph::Vec2> displayed;
+        std::unordered_set<int> easedHeld;
+        std::vector<int> held;
+        std::unordered_map<std::string,EditorNodeGraph::Vec2> restingNodesBefore;
+        std::unordered_map<int,EditorNodeGraph::GraphRect> restingGroupsBefore;
+        std::unordered_map<int,EditorNodeGraph::GraphRect> membershipFrames;
+        bool moved = false;
+        std::string documentId, graphId, lastError;
+        std::uint64_t revision = 0;
+        EditorNodeGraph::Vec2 press;
+        double lastFrame = 0;
+    };
+    std::unique_ptr<DragLayoutState> m_DragLayout;
+    bool BeginDragLayout(EditorModule* editor, EditorNodeGraph::Graph& graph);
+    void EndDragLayout(EditorModule* editor, bool cancel);
+    bool ApplyAnimatedPlacement(EditorModule* editor, const Stack::GraphLayout::PlacementEdit& edit,
+        bool heldImmediate, std::string& error);
+    void AnimateNodePlacement(const EditorNodeGraph::Node& node, EditorNodeGraph::Vec2 start, bool immediate = false);
+    void AnimateGroupPlacement(const EditorNodeGraph::NodeGroup& group, EditorNodeGraph::GraphRect start);
+    void AdoptLayoutMotionOwner(const Stack::Editor::GraphEditorContext& context);
+    void ObserveLayoutRevision(const Stack::Editor::GraphEditorContext& context);
+    struct GroupPresentation {
+        std::string title, uuid;
+        EditorNodeGraph::GraphRect rect;
+    };
+    std::unordered_map<int,GroupPresentation> m_LayoutGroupPresentation;
+    EditorNodeGraph::Vec2 DisplayNodePosition(const EditorNodeGraph::Node& node) const;
+    EditorNodeGraph::GraphRect DisplayGroupRect(const EditorNodeGraph::NodeGroup& group) const;
+    void AdvanceLayoutMotion(const Stack::Editor::GraphEditorContext& context);
+    void ClearLayoutMotion();
+    void TakeOverNodeMotion(EditorNodeGraph::Node& node);
+    void TakeOverGroupMotion(EditorNodeGraph::Graph& graph, EditorNodeGraph::NodeGroup& group);
     Stack::Editor::NodeOpenTransition::Appearance m_NodeOpenAppearance;
     void RenderMaskTextureInspector(EditorModule* editor);
     ImGuiExtras::FloatingSliderState m_RawSliderState;
     Stack::Editor::GraphEditorContext m_GraphContext;
     mutable std::unordered_map<std::string,bool> m_ConnectionCapabilityCache;
-    bool CanConnectInContext(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
+    bool CanPreviewConnection(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
         int to, const std::string& input) const;
 
     enum class ContextTarget {
         Canvas,
         Node,
+        Group,
         Link
     };
 
@@ -135,7 +213,9 @@ private:
     };
 
     struct NodeLayoutCache {
+        std::string instanceUuid;
         Stack::Editor::NodeGraphUILayout::NodeLogicalLayout logicalLayout;
+        std::vector<EditorNodeGraph::SocketDefinition> declaredSockets;
         std::uint64_t logicalContentRevision = 0;
         std::uint64_t logicalRevision = 0;
         std::uint64_t logicalInputRevision = 0;
@@ -222,12 +302,29 @@ private:
     void RenderContextMenu(EditorModule* editor);
     void RenderNode(EditorModule* editor, EditorNodeGraph::Node& node,
         std::function<void()>& pendingGraphAction);
+    void RenderNodeNotes(EditorModule* editor, const EditorNodeGraph::Node& node,
+        bool hovered, float selectedAlpha);
     bool RenderSourceNodeContent(NodeContentRenderContext& context);
     bool RenderMaskDataNodeContent(NodeContentRenderContext& context);
 
     bool RenderUtilityNodeContent(NodeContentRenderContext& context);
     void RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph);
     void RenderLinks(const EditorNodeGraph::Graph& graph);
+    struct CompoundEntryRow {
+        int group=0, target=0, source=0;
+        std::string socket, sourceSocket, label, linkKey;
+        ImVec2 input{}, output{};
+    };
+    std::vector<CompoundEntryRow> m_CompoundEntryRows;
+    int m_CompoundEntryDragOutput=-1, m_CompoundEntryDragInput=-1;
+    std::unordered_map<std::string,std::size_t> m_CompoundEntryLinks;
+    const EditorNodeGraph::Graph* m_CompoundEntryGraph=nullptr;
+    std::uint64_t m_CompoundEntryRevision=0;
+    void PrepareCompoundEntries(const EditorNodeGraph::Graph& graph);
+    void RenderCompoundEntries(const EditorNodeGraph::Graph& graph);
+    void PrepareWireRoutes(const EditorNodeGraph::Graph& graph);
+    const Stack::Editor::NodeGraphUIVisuals::ProjectedWire& WirePath(const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Link& link) const;
     void RenderPendingOutputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredInput);
     void RenderPendingInputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredOutput);
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
@@ -286,7 +383,6 @@ private:
         const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Vec2& screenPos,
         const EditorNodeGraph::Link& link);
-    bool IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const;
     unsigned int GetImagePreviewTexture(const EditorNodeGraph::Node& node);
     unsigned int GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node);
     unsigned int GetNodeBrowserThumbnailTexture(
@@ -387,6 +483,7 @@ private:
     EditorNodeGraph::Vec2 m_ContextGraphPos;
     ContextTarget m_ContextTarget = ContextTarget::Canvas;
     int m_ContextNodeId = -1;
+    int m_ContextGroupId = -1;
     EditorNodeGraph::Link m_ContextLink;
     int m_DragOutputNodeId = -1;
     std::string m_DragOutputSocketId;
@@ -444,6 +541,9 @@ private:
     int m_NodeBrowserTextureUploadBudgetFrame = -1;
     int m_NodeBrowserTextureUploadsThisFrame = 0;
     std::uint64_t m_NodeBrowserFilterCacheGraphRevision = 0;
+    std::uint64_t m_NodeBrowserFilterCacheRenderRevision = 0;
+    std::string m_NodeBrowserFilterCacheDocumentId, m_NodeBrowserFilterCacheGraphId;
+    std::unordered_set<std::string> m_NodeBrowserAvailableKeys;
     std::string m_NodeBrowserFilterCacheSearch;
     std::vector<std::size_t> m_NodeBrowserFilteredEntryIndices;
     std::unordered_set<std::string> m_NodeBrowserVisibleKeys;
@@ -468,6 +568,7 @@ private:
     std::unordered_map<int, float> m_NodeHoverAnim;
     std::unordered_map<std::string, float> m_LinkEmphasisAnim;
     float m_LinkLabelRevealAlpha = 0.0f;
+    Stack::Editor::NodeGraphUI::NodeNotesView m_NodeNotes;
     std::unordered_map<std::string, CachedRect> m_LinkLabelHitRects;
     int m_LinkHitTestFrame = -1;
     const EditorNodeGraph::Graph* m_LinkHitTestGraph = nullptr;
@@ -487,6 +588,10 @@ private:
     std::unordered_map<int, std::uint64_t> m_NodeFrontOrder;
     std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
     mutable std::uint64_t m_NodeProjectionRevision = 0;
+    mutable std::uint64_t m_WireWorldRevision = 1;
+    std::uint64_t m_PreparedWireWorldRevision = 0;
+    mutable std::unique_ptr<Stack::Editor::NodeGraphUIVisuals::WireRouteCache> m_WireRoutes;
+    const EditorNodeGraph::Graph* m_WireGraph = nullptr;
     std::vector<CachedRect> m_VisibleNodeFrameRects;
     mutable std::unordered_map<int, float> m_NodeMeasuredBaseHeights;
     mutable std::unordered_map<int, std::uint64_t>

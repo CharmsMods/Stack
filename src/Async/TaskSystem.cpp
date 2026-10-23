@@ -179,25 +179,43 @@ bool TaskSystem::Submit(Task task) {
 }
 
 bool TaskSystem::Submit(std::string activityLabel, Task task) {
-    ActivityMetadata activity = CurrentActivity();
-    activity.id = 0;
-    activity.label = std::move(activityLabel);
-    return Submit(std::move(activity), std::move(task));
+    try {
+        ActivityMetadata activity = CurrentActivity();
+        activity.id = 0;
+        activity.label = std::move(activityLabel);
+        return Submit(std::move(activity), std::move(task));
+    } catch (...) {
+        return false;
+    }
 }
 
 bool TaskSystem::SubmitHighPriority(std::string activityLabel, Task task) {
-    ActivityMetadata activity = CurrentActivity();
-    activity.id = 0;
-    activity.label = std::move(activityLabel);
-    return SubmitHighPriority(std::move(activity), std::move(task));
+    try {
+        ActivityMetadata activity = CurrentActivity();
+        activity.id = 0;
+        activity.label = std::move(activityLabel);
+        return SubmitHighPriority(std::move(activity), std::move(task));
+    } catch (...) {
+        return false;
+    }
 }
 
 bool TaskSystem::Submit(ActivityMetadata activity, Task task) {
-    return Submit(TrackActivity(std::move(activity), std::move(task)));
+    // Activity allocation is part of submission, so it must use the same
+    // rejection path as queue allocation. Callers then release busy state.
+    try {
+        return Submit(TrackActivity(std::move(activity), std::move(task)));
+    } catch (...) {
+        return false;
+    }
 }
 
 bool TaskSystem::SubmitHighPriority(ActivityMetadata activity, Task task) {
-    return SubmitHighPriority(TrackActivity(std::move(activity), std::move(task)));
+    try {
+        return SubmitHighPriority(TrackActivity(std::move(activity), std::move(task)));
+    } catch (...) {
+        return false;
+    }
 }
 
 ActivityMetadata TaskSystem::CurrentActivity() {
@@ -300,7 +318,11 @@ bool TaskSystem::PostToMain(Task task) {
 }
 
 bool TaskSystem::PostToMain(ActivityMetadata activity, Task task) {
-    return PostToMain(TrackActivity(std::move(activity), std::move(task)));
+    try {
+        return PostToMain(TrackActivity(std::move(activity), std::move(task)));
+    } catch (...) {
+        return false;
+    }
 }
 
 void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMilliseconds) {

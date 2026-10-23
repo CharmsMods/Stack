@@ -1,4 +1,5 @@
 #include "LocalDetailTransform.h"
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -33,6 +34,11 @@ unsigned LocalDetailBand(unsigned x,unsigned y,unsigned size) {
 }
 double LocalDetailWindow(unsigned x,unsigned y) {
     const auto raised=[](unsigned p){const double s=std::sin(3.14159265358979323846*(p+.5)/16);return s*s;};
-    return raised(x)*raised(y);
+    static const auto window=[&] {
+        std::array<double,16> values{};
+        for(unsigned p=0;p<values.size();++p)values[p]=raised(p);
+        return values;
+    }();
+    return (x<window.size()?window[x]:raised(x))*(y<window.size()?window[y]:raised(y));
 }
 }

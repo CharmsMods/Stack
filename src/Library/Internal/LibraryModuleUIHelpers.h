@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Library/LibraryModule.h"
+#include "Library/LibraryControls.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -17,10 +18,8 @@ inline constexpr float kCardMotionSpeed = 16.0f;
 inline constexpr float kPreviewMotionSpeed = 18.0f;
 inline constexpr float kStatusMotionSpeed = 12.0f;
 inline constexpr float kDialogAppearDuration = 0.12f;
-inline constexpr double kCardEntranceDurationSeconds = 0.95;
-inline constexpr double kCardEntranceStaggerSeconds = 0.04;
-inline constexpr int kCardEntranceStaggerMaxRank = 22;
-inline constexpr float kCardEntranceOffsetY = 24.0f;
+inline constexpr double kCardEntranceDurationSeconds = 0.18;
+inline constexpr float kCardEntranceOffsetY = 8.0f;
 
 struct LibraryPackedCard {
     std::size_t index = 0;
@@ -35,6 +34,12 @@ LibraryCardMotionState& GetCardMotionState(TMap& states, const std::string& key)
 }
 
 inline float ResolveCardEntranceProgress(LibraryCardMotionState& motion, double now) {
+    if (motion.entranceInitialized && motion.entrance >= 1.0f) return 1.0f;
+    if (Stack::LibraryUi::ReducedMotion()) {
+        motion.entranceInitialized = true;
+        motion.entrance = 1.0f;
+        return 1.0f;
+    }
     if (!motion.entranceInitialized) {
         motion.entranceInitialized = true;
         motion.entrance = 1.0f;
@@ -47,7 +52,7 @@ inline float ResolveCardEntranceProgress(LibraryCardMotionState& motion, double 
         : 1.0;
     const float t = std::clamp(static_cast<float>(raw), 0.0f, 1.0f);
     const float inverse = 1.0f - t;
-    motion.entrance = std::max(motion.entrance, 1.0f - inverse * inverse * inverse);
+    motion.entrance = std::max(motion.entrance, 0.2f + 0.8f * (1.0f - inverse * inverse * inverse));
     return std::clamp(motion.entrance, 0.0f, 1.0f);
 }
 
@@ -66,7 +71,7 @@ unsigned int LoadIconTexture(const std::string& filename);
 unsigned int LoadIconTextureFromMemory(const unsigned char* data, unsigned int size);
 
 void ComputeCoverUv(float sourceWidth, float sourceHeight, const ImRect& targetRect, ImVec2& outUv0, ImVec2& outUv1);
-void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, float selected, bool hovered);
+void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, float selected, bool hovered, float alpha = 1.0f);
 void DrawCardOverlayText(
     ImDrawList* drawList,
     const ImRect& rect,

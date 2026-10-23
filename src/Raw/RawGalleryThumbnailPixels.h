@@ -9,7 +9,9 @@ inline constexpr int kNeutralThumbnailMaxDimension = 512;
 
 // Shared neutral pixel preparation for Gallery thumbnails and scene matching.
 // The standard path averages the same sensor regions before white balance and
-// encoding. No file, catalog or render context is needed.
+// encoding, then applies camera EXIF orientation (including mirrored variants).
+// Returned RGBA rows and dimensions are upright. No file, catalog or render
+// context is needed.
 bool BuildRawGalleryThumbnailPixels(const Raw::RawImageData& raw, int maxDimension,
     std::vector<unsigned char>& pixels, int& width, int& height,
     bool fastPreview = false, const std::function<bool()>& shouldCancel = {});

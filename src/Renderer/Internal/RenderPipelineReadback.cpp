@@ -208,7 +208,9 @@ std::vector<float> ReadTexturePixelsRgbaFloat(
     unsigned int probeFbo = 0;
     bool ready = readFbo != 0;
     if (ready && (outW != sourceWidth || outH != sourceHeight)) {
-        probeTexture = GLHelpers::CreateEmptyTexture(outW, outH);
+        // Float readback feeds measurement and asset consumers. Resizing must
+        // not quantize scene-linear values through the display texture format.
+        probeTexture = GLHelpers::CreateStorageTexture(outW, outH, GL_RGBA32F);
         probeFbo = GLHelpers::CreateFBO(probeTexture);
         ready = probeTexture != 0 && probeFbo != 0;
         if (ready) {

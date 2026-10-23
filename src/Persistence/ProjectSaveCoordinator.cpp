@@ -88,8 +88,9 @@ bool ProjectSaveCoordinator::Enqueue(Request request) {
 
     if (m_Active) {
         const bool replacePending = !m_Pending ||
-            request.editRevision >= m_Pending->editRevision ||
-            request.reason != ProjectSaveReason::Autosave;
+            request.editRevision > m_Pending->editRevision ||
+            (request.editRevision == m_Pending->editRevision &&
+             request.reason != ProjectSaveReason::Autosave);
         if (replacePending) {
             m_Pending = std::move(request);
         }
@@ -103,9 +104,21 @@ bool ProjectSaveCoordinator::Enqueue(Request request) {
 void ProjectSaveCoordinator::Reset(
     std::string projectId,
     std::uint64_t persistedEditRevision) {
+    ProjectSaveResult canceled;
+    canceled.status = ProjectSaveStatus::Canceled;
+    canceled.projectId = m_ProjectId;
+    canceled.persistedEditRevision = m_PersistedEditRevision;
+    canceled.message = "The active project changed.";
+    std::vector<Waiter> waiters = std::move(m_Waiters);
+    m_Waiters.clear();
     Cancel("The active project changed.");
     m_ProjectId = std::move(projectId);
     m_PersistedEditRevision = persistedEditRevision;
+    // Publish the new owner before notifying old requests. A completion may
+    // immediately enqueue a save or reset the coordinator again.
+    for (Waiter& waiter : waiters) {
+        if (waiter.completion) waiter.completion(canceled);
+    }
 }
 
 void ProjectSaveCoordinator::Cancel(const std::string& message) {
@@ -138,6 +151,9 @@ void ProjectSaveCoordinator::StartRequest(Request request) {
             CompleteActive(std::move(result));
         });
     } catch (...) {
+        // A synchronous completion can start another request before its
+        // starter returns. Its exception must not fail that newer request.
+        if (generation != m_Generation || !m_Active) return;
         ProjectSaveResult result;
         result.status = ProjectSaveStatus::Failed;
         result.projectId = m_ProjectId;
@@ -150,9 +166,15 @@ void ProjectSaveCoordinator::CompleteActive(ProjectSaveResult result) {
     if (!m_Active) {
         return;
     }
+    const std::uint64_t generation = m_Generation;
     const std::uint64_t activeRevision = m_Active->editRevision;
     if (result.projectId.empty()) {
         result.projectId = m_ProjectId;
+    } else if (result.projectId != m_ProjectId) {
+        result.status = ProjectSaveStatus::Canceled;
+        result.projectId = m_ProjectId;
+        result.persistedEditRevision = 0;
+        result.message = "The save completed for a different project.";
     }
     if (result.persistedEditRevision == 0 && result) {
         result.persistedEditRevision = activeRevision;
@@ -168,6 +190,9 @@ void ProjectSaveCoordinator::CompleteActive(ProjectSaveResult result) {
         CompleteFailedWaiters(activeRevision, result);
     }
 
+    // Completion callbacks may close/replace the project or start a new save.
+    // Only this request's unchanged generation may drain its pending queue.
+    if (generation != m_Generation) return;
     if (m_Pending) {
         Request pending = std::move(*m_Pending);
         m_Pending.reset();
@@ -182,6 +207,9 @@ void ProjectSaveCoordinator::CompleteActive(ProjectSaveResult result) {
 
 void ProjectSaveCoordinator::CompleteSatisfiedWaiters(
     const ProjectSaveResult& result) {
+    ProjectSaveResult delivered = result;
+    delivered.status = ProjectSaveStatus::Saved;
+    delivered.persistedEditRevision = m_PersistedEditRevision;
     std::vector<Completion> completions;
     std::vector<Waiter> remaining;
     remaining.reserve(m_Waiters.size());
@@ -196,10 +224,7 @@ void ProjectSaveCoordinator::CompleteSatisfiedWaiters(
     }
     m_Waiters = std::move(remaining);
     for (Completion& completion : completions) {
-        ProjectSaveResult delivered = result;
-        delivered.status = ProjectSaveStatus::Saved;
-        delivered.persistedEditRevision = m_PersistedEditRevision;
-        completion(std::move(delivered));
+        completion(delivered);
     }
 }
 

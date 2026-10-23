@@ -3,6 +3,9 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
 #include <cstddef>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <functional>
 #include <string>
 #include <vector>
@@ -14,7 +17,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
     const RenderGraphNode& node,
     const std::string& socketId,
     const std::function<unsigned int(int, const std::string&)>& evalImage,
-    const std::function<unsigned int(int, const std::string&)>& evalMask) {
+    const std::function<unsigned int(int, const std::string&)>& evalMask,
+    const std::function<bool(int, const std::string&, double&)>& evalScalar) {
     GraphNodeRenderResult result;
     EnsureDataMathProgram();
     if (m_DataMathProgram == 0) {
@@ -27,6 +31,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
         struct ResolvedImageInput {
             unsigned int texture = 0;
             bool scalar = false;
+            float uniform = 0;
         };
 
         std::vector<ResolvedImageInput> resolvedInputs;
@@ -34,6 +39,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
         int referenceWidth = 0;
         int referenceHeight = 0;
         for (const DataMathInputLinkInfo& input : CollectDataMathAverageInputs(executionContext, node.nodeId)) {
+            if (IsUniformRenderSocket(executionContext,input.link->fromNodeId,input.link->fromSocketId)) {
+                double value=0;
+                if (!evalScalar(input.link->fromNodeId,input.link->fromSocketId,value) ||
+                    !std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max()) { inputsReady=false; break; }
+                resolvedInputs.push_back({0,true,static_cast<float>(value)});
+                continue;
+            }
             const bool scalarInput = IsScalarRenderSocket(executionContext, input.link->fromNodeId, input.link->fromSocketId);
             const unsigned int texture = scalarInput
                 ? evalMask(input.link->fromNodeId, input.link->fromSocketId)
@@ -45,11 +57,18 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
             if (referenceWidth <= 0) {
                 referenceWidth = m_Width;
                 referenceHeight = m_Height;
+            } else if (referenceWidth != m_Width || referenceHeight != m_Height) {
+                inputsReady = false;
+                break;
             }
             resolvedInputs.push_back(ResolvedImageInput{ texture, scalarInput });
         }
 
-        if (inputsReady && !resolvedInputs.empty()) {
+        if (inputsReady && !resolvedInputs.empty() && referenceWidth > 0 && referenceHeight > 0) {
+            // Start from spatial data. A prefix of uniform inputs must not
+            // materialize a full-size constant image just to accumulate it.
+            std::stable_partition(resolvedInputs.begin(),resolvedInputs.end(),
+                [](const auto& input){return input.texture!=0;});
             m_Width = referenceWidth;
             m_Height = referenceHeight;
             unsigned int averagedTexture = resolvedInputs.front().texture;
@@ -58,7 +77,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
             if (resolvedInputs.size() > 1) {
                 unsigned int runningTexture = resolvedInputs.front().texture;
                 bool runningTransient = false;
+                bool runningScalar = resolvedInputs.front().scalar;
                 for (std::size_t index = 1; index < resolvedInputs.size(); ++index) {
+                    auto sumSettings = node.dataMathSettings;
+                    sumSettings.constantA = resolvedInputs.front().uniform;
+                    sumSettings.constantB = resolvedInputs[index].uniform;
                     unsigned int accumulated = AcquireGraphTransientTarget();
                     bool accumulatedPassExecuted = false;
                     const bool accumulatedRendered =
@@ -66,12 +89,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                             accumulatedPassExecuted = RenderDataMath(
                             runningTexture,
                             resolvedInputs[index].texture,
-                            true,
-                            true,
-                            scalarOutput,
+                            runningTexture != 0,
+                            resolvedInputs[index].texture != 0,
+                            runningScalar,
                             resolvedInputs[index].scalar,
                             RenderDataMathMode::Add,
-                            node.dataMathSettings,
+                            sumSettings,
                             scalarOutput,
                             fbo);
                         }) &&
@@ -81,6 +104,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                     }
                     runningTexture = accumulatedRendered ? accumulated : 0;
                     runningTransient = runningTexture != 0;
+                    runningScalar = scalarOutput;
                     if (!accumulatedRendered && accumulated != 0) {
                         ReleaseGraphTransientTarget(accumulated);
                     }
@@ -115,8 +139,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                         averagedOwned = true;
                     } else {
                         if (divided != 0) glDeleteTextures(1, &divided);
-                        averagedTexture = runningTexture;
-                        averagedOwned = runningTransient && PromoteGraphTransientTarget(runningTexture);
+                        if (runningTransient) ReleaseGraphTransientTarget(runningTexture);
+                        // An allocation/pass failure is not a valid unscaled
+                        // sum. Leave this output unavailable.
+                        averagedTexture = 0;
+                        averagedOwned = false;
                     }
                 } else {
                     averagedTexture = 0;
@@ -210,7 +237,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                         } else {
                             discardOwnedAverage();
                         }
-                    }
+                    } else discardOwnedAverage();
                 }
                 m_Width = outputWidth;
                 m_Height = outputHeight;
@@ -223,6 +250,17 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
 
     const RenderGraphLink* inputA = executionContext.FindInputLink(node.nodeId, "imageA");
     const RenderGraphLink* inputB = executionContext.FindInputLink(node.nodeId, "imageB");
+    RenderDataMathSettings settings = node.dataMathSettings;
+    const auto resolveUniform = [&](const RenderGraphLink*& input, float& value) {
+        if (!input || !IsUniformRenderSocket(executionContext, input->fromNodeId, input->fromSocketId)) return true;
+        double resolved = 0;
+        if (!evalScalar(input->fromNodeId, input->fromSocketId, resolved) ||
+            !std::isfinite(resolved) || std::abs(resolved) > std::numeric_limits<float>::max()) return false;
+        value = static_cast<float>(resolved);
+        input = nullptr;
+        return true;
+    };
+    if (!resolveUniform(inputA, settings.constantA) || !resolveUniform(inputB, settings.constantB)) return result;
     const bool scalarA = inputA && IsScalarRenderSocket(executionContext, inputA->fromNodeId, inputA->fromSocketId);
     const bool scalarB = inputB && IsScalarRenderSocket(executionContext, inputB->fromNodeId, inputB->fromSocketId);
     const unsigned int textureA = inputA
@@ -233,6 +271,16 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
     const unsigned int textureB = inputB
         ? (scalarB ? evalMask(inputB->fromNodeId, inputB->fromSocketId) : evalImage(inputB->fromNodeId, inputB->fromSocketId))
         : 0;
+    if (textureA && textureB && (referenceWidthA != m_Width || referenceHeightA != m_Height)) {
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId=node.nodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure="Math inputs use different dimensions; insert an explicit Reformat.";
+        return result;
+    }
+    if (node.dataMathMode == RenderDataMathMode::Divide &&
+        !inputB && settings.constantB == 0) {
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId=node.nodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure="Divide by zero: returned zero.";
+    }
     if ((!inputA || textureA) && (!inputB || textureB)) {
         if (referenceWidthA > 0 && referenceHeightA > 0) {
             m_Width = referenceWidthA;
@@ -250,7 +298,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                 scalarA,
                 scalarB,
                 node.dataMathMode,
-                node.dataMathSettings,
+                settings,
                 scalarOutput,
                 fbo);
             }) &&
@@ -260,6 +308,26 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
             result.texture = 0;
         }
         result.owned = rendered && result.texture != 0;
+        if (result.texture != 0) {
+            if (const auto* mask = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId)) {
+                const auto maskTexture = evalMask(mask->fromNodeId, mask->fromSocketId);
+                if (!maskTexture || !textureA) {
+                    glDeleteTextures(1, &result.texture);
+                    return {};
+                }
+                m_Width = referenceWidthA; m_Height = referenceHeightA;
+                EnsureMaskPrograms();
+                auto blended = CreateGraphRenderTargetTexture();
+                bool passed = false;
+                const bool ready = blended && RenderIntoGraphTargetTexture(blended, [&](unsigned int fbo) {
+                    passed = RenderMaskBlend(textureA, result.texture, maskTexture, fbo);
+                }) && passed;
+                glDeleteTextures(1, &result.texture);
+                if (!ready && blended) glDeleteTextures(1, &blended);
+                result.texture = ready ? blended : 0;
+                result.owned = ready;
+            }
+        }
     }
 
     return result;

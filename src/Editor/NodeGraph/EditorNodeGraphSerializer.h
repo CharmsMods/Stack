@@ -7,7 +7,7 @@
 
 namespace EditorNodeGraph {
 
-inline constexpr int kEditorNodeGraphSchemaVersion = 14;
+inline constexpr int kEditorNodeGraphSchemaVersion = 16;
 
 nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData);
 bool IsCurrentGraphPayload(const nlohmann::json& pipelineData);

@@ -21,12 +21,16 @@ public:
     void AddTag(const std::string& fileName, const std::string& tag);
     void RemoveTag(const std::string& fileName, const std::string& tag);
     bool HasTag(const std::string& fileName, const std::string& tag) const;
+    bool HasTags(const std::string& fileName) const;
     
-    std::vector<std::string> GetAllKnownTags() const;
+    // Borrowed until the next tag mutation or reload.
+    const std::vector<std::string>& GetAllKnownTags() const;
     void PruneOrphanedEntries(const std::vector<std::string>& validFileNames);
 
 private:
     TagManager() = default;
     std::filesystem::path m_TagFilePath;
     std::unordered_map<std::string, std::vector<std::string>> m_Tags;
+    mutable std::vector<std::string> m_KnownTags;
+    mutable bool m_KnownTagsDirty = true;
 };

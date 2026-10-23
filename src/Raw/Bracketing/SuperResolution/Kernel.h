@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -21,6 +22,9 @@ struct Tile {
     unsigned width=0,height=0;
     float originX=0,originY=0,step=1;
     std::vector<PixelAccumulator> pixels;
+    // CPU-prepared geometry evidence. Resolve uses the same field for all RGB
+    // channels after either CPU or GPU accumulation; it is not sensor noise.
+    std::vector<float> samplingConfidence;
 };
 struct FrameRegion {
     int left=0,top=0,width=0,height=0;
@@ -29,7 +33,7 @@ struct FrameRegion {
     float detailPreference=1;
     std::array<int,4> colors{}; // sensor parity to RGB channel
     // Original, unresampled samples: radiance, shot coefficient, read variance,
-    // headroom. Negative headroom excludes clipped/invalid samples.
+    // headroom. Zero marks clipping; negative values mark absent/defective taps.
     std::vector<Vec4> samples;
     // Reference to source mapping and reliability: x, y, confidence, risk.
     std::vector<Vec4> mapping;
@@ -38,7 +42,8 @@ struct ChannelResult { float value=0,variance=0,support=0; bool valid=false; flo
 bool Validate(const Tile&,const FrameRegion&,std::string&);
 void AccumulatePixel(const Tile&,const FrameRegion&,unsigned x,unsigned y,PixelAccumulator&);
 bool AccumulateCpu(Tile&,const FrameRegion&,const std::function<bool()>& cancel,std::string&,unsigned workers=1);
-ChannelResult Resolve(const PixelAccumulator&,unsigned channel);
+ChannelResult Resolve(const PixelAccumulator&,unsigned channel,float samplingConfidence=1);
+std::array<ChannelResult,3> ResolveChannels(const PixelAccumulator&,float samplingConfidence=1);
 
 // These methods run only on the caller's render-owner context. One tile stays
 // resident across captures; only original source regions are streamed to it.
@@ -50,5 +55,7 @@ public:
     void Release();
 private:
     unsigned program_=0,input_=0,output_=0;
+    std::size_t outputCapacity_=0;
+    std::array<int,7> uniforms_{};
 };
 }

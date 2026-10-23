@@ -34,10 +34,10 @@ void EditorNodeGraphUI::RenderOperationControls(EditorModule* editor, int nodeId
         ImVec2(width,width*.6f),width,width,width,width,1.f,1.f,metrics.itemGap,metrics.sectionGap,
         false,true,[]{},slider,[]{ ImGui::Spacing(); },pendingGraphAction};
     ImGui::PushID(node->instanceUuid.c_str());
-    const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node);
-    std::size_t controls = 0;
-    if (definition) for (const auto& parameter:definition->parameters)
-        if (parameter.id != "layer-settings") ++controls;
+    const auto definition = EditorNodeGraphDefinitions::ResolveNodeDefinition(graph,*node);
+    std::size_t controls = definition.ParameterCount();
+    if (definition.builtin) for (const auto& parameter:definition.builtin->parameters)
+        if (parameter.id == "layer-settings") --controls;
     std::optional<ImGuiExtras::FloatingSliderScope> floatingSliders;
     if (controls == 1 || node->kind == EditorNodeGraph::NodeKind::ConstantChannel ||
         node->kind == EditorNodeGraph::NodeKind::Value ||

@@ -1,6 +1,8 @@
 #include "ProcessingInternal.h"
 #include "PresentationEvidence.h"
 #include "Alignment.h"
+#include "AlignmentProxy.h"
+#include "LearnedAlignment.h"
 #include "CaptureSharpness.h"
 #include "BurstAlignment.h"
 #include "LocalDetail.h"
@@ -10,6 +12,7 @@
 #include "Panorama/Panorama.h"
 #include "Raw/RawCaptureCompatibility.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <unordered_set>
 
@@ -78,28 +81,35 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         const auto captureCount=std::max<std::size_t>(1,request.sources.size());
         unsigned previewStride=2;
         while(static_cast<std::uint64_t>((width+previewStride-1)/previewStride)*((height+previewStride-1)/previewStride)*13*captureCount>8*1024*1024) previewStride+=2;
+        previewStride=std::min(previewStride,std::min(width,height));
+        AlignmentProxyAccumulator proxy(width,height,previewStride);
+        if(static_cast<std::uint64_t>(proxy.width)*proxy.height*13*captureCount>8*1024*1024) {
+            error="The capture overviews exceed the bracketing proxy budget.";return false;
+        }
         s.original=std::make_shared<CapturePreview>();
         s.proxyStride=previewStride;
-        auto& original=*s.original;original.width=(width+previewStride-1)/previewStride;original.height=(height+previewStride-1)/previewStride;
-        original.rgb.resize(static_cast<std::size_t>(original.width)*original.height*3);
-        original.clipped.resize(static_cast<std::size_t>(original.width)*original.height);
+        auto& original=*s.original;original.width=proxy.width;original.height=proxy.height;
         Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(s.frame.activeCfaPattern,layout);
+        std::array<unsigned,4> channelsByOffset{};
+        for(unsigned parity=0;parity<channelsByOffset.size();++parity) {
+            const auto site=layout.SiteAt(parity%2,parity/2);
+            channelsByOffset[parity]=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
+        }
         for(unsigned ty=0;ty<s.frame.tileRows;++ty) for(unsigned tx=0;tx<s.frame.tileColumns;++tx) {
+            if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
             Mfd::PreparedRawTile tile;
             if(Mfd::ReadPreparedTile(s.frame,cache,tx,ty,tile,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
             for(unsigned y=0;y<tile.extent.height;++y) for(unsigned x=0;x<tile.extent.width;++x) {
                 const auto gx=tile.originX+x,gy=tile.originY+y;
-                if(gx%previewStride<=1&&gy%previewStride<=1) {
-                    const auto q=(gy/previewStride)*original.width+gx/previewStride;
-                    const auto sample=y*tile.extent.width+x;
-                    const auto site=layout.SiteAt(gx,gy);
-                    const unsigned channel=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
-                    const auto v=tile.normalizedMosaic[sample]*tile.comparisonGain[sample];
-                    original.rgb[q*3+channel]+=std::isfinite(v)?v*(channel==1?.5f:1.f):0;
-                    original.clipped[q]|=Mfd::HasSampleFlag(tile.sampleFlags[sample],Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(tile.sampleFlags[sample],Mfd::PreparedSampleFlag::ExplicitDecoderClip);
-                }
+                const auto sample=y*tile.extent.width+x;
+                const unsigned channel=channelsByOffset[(gy%2)*2+gx%2];
+                const auto flags=tile.sampleFlags[sample];
+                proxy.Add(gx,gy,channel,double(tile.normalizedMosaic[sample])*tile.comparisonGain[sample],
+                    Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip),
+                    Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired));
             }
         }
+        proxy.Finish(original.rgb,original.clipped);
         if(request.reportPresentation) {
             auto image=std::make_shared<ProcessingThumbnail>();image->frameId=f.id;image->group=static_cast<unsigned>(g);
             const unsigned step=std::max(1u,(std::max(original.width,original.height)+511)/512);
@@ -149,6 +159,7 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
     }
     const bool refineHdr=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&request.recipe.groups.size()>1;
     auto localRequest=request;
+    if(request.recipe.aiAlignment&&!LearnedAlignment::Generate(localRequest,data,diagnostics,error))return false;
     if(refineHdr&&request.reportProgress) localRequest.reportProgress=[&](double progress,const std::string& stage) {
         request.reportProgress(.10+.36*std::clamp((progress-.10)/.42,0.,1.),stage);
     };

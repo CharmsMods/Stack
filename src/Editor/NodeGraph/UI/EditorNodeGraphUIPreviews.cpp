@@ -9,6 +9,7 @@
 #include "Utils/PixelBufferUtils.h"
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <unordered_set>
 
 namespace {
@@ -57,7 +58,7 @@ bool DecodeImagePreviewPixelsFromPng(
     outWidth = 0;
     outHeight = 0;
     outChannels = 4;
-    if (pngBytes.empty()) {
+    if (pngBytes.empty() || pngBytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return false;
     }
 
@@ -108,6 +109,10 @@ EditorNodeGraphUI::~EditorNodeGraphUI() {
 }
 
 void EditorNodeGraphUI::Shutdown() {
+    m_DragLayout.reset();
+    m_LayoutGroupPresentation.clear();
+    m_LayoutRestingNodes.clear();m_LayoutRestingGroups.clear();
+    ClearLayoutMotion();
     m_NodeOpenAppearance = {};
     m_PresetPreviewCurrentRenderer.reset();
     m_PresetPreviewPreviousRenderer.reset();
@@ -116,10 +121,13 @@ void EditorNodeGraphUI::Shutdown() {
 }
 
 void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
+    m_NodeNotes.Reset();
+    m_WireRoutes.reset();m_PreparedWireWorldRevision=0;++m_WireWorldRevision;m_WireGraph=nullptr;
     m_NodeLayoutCache.clear();
     m_NodeOrderCacheGraph = nullptr;
     m_NodeOrderCacheNodes = nullptr;
     m_LinkHitTestFrame = -1;
+    m_LinkLabelHitRects.clear();
     m_LinkLabelRevealAlpha = 0.0f;
     for (auto& item : m_ImagePreviewTextures) {
         unsigned int texture = item.second;
@@ -201,6 +209,14 @@ void EditorNodeGraphUI::SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& g
     pruneKeyedMap(m_NodeContentOverflow);
     pruneKeyedMap(m_NodeFrontOrder);
     pruneKeyedMap(m_NodeLayoutCache);
+    for (auto it = m_RevealedAdvancedInputNodes.begin(); it != m_RevealedAdvancedInputNodes.end();) {
+        if (liveNodeIds.count(*it)) ++it;
+        else it = m_RevealedAdvancedInputNodes.erase(it);
+    }
+    for (auto it = m_RevealedAdvancedOutputNodes.begin(); it != m_RevealedAdvancedOutputNodes.end();) {
+        if (liveNodeIds.count(*it)) ++it;
+        else it = m_RevealedAdvancedOutputNodes.erase(it);
+    }
 }
 
 unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::Node& node) {
@@ -218,10 +234,10 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         return it->second;
     }
 
-    std::vector<unsigned char> decodedPixels;
+    const unsigned int previous = it != m_ImagePreviewTextures.end() ? it->second : 0;
+    const std::vector<unsigned char>* decodedPixels = nullptr;
     int decodedWidth = 0, decodedHeight = 0, decodedChannels = 4;
     if (node.image.previewPixels.empty() && node.image.pixels.empty()) {
-        const unsigned int previous = it != m_ImagePreviewTextures.end() ? it->second : 0;
         auto& pending = m_ImagePreviewDecodes[node.id];
         if (!pending || pending->fingerprint != fingerprint) {
             // Admit at most one cold image per frame, including failed PNGs.
@@ -251,17 +267,9 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
             return previous;
         }
         if (!pending->ready.load(std::memory_order_acquire) || pending->pixels.empty()) return previous;
-        decodedPixels = std::move(pending->pixels);
+        decodedPixels = &pending->pixels;
         decodedWidth = pending->width; decodedHeight = pending->height; decodedChannels = pending->channels;
     } else m_ImagePreviewDecodes.erase(node.id);
-
-    if (it != m_ImagePreviewTextures.end() && it->second != 0) {
-        unsigned int oldTexture = it->second;
-        glDeleteTextures(1, &oldTexture);
-    }
-    m_ImagePreviewTextures.erase(node.id);
-    m_ImagePreviewFingerprints.erase(node.id);
-    m_ImagePreviewSizes.erase(node.id);
 
     const unsigned char* uploadPixels = nullptr;
     int uploadWidth = node.image.width;
@@ -276,16 +284,20 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         uploadWidth = node.image.previewWidth;
         uploadHeight = node.image.previewHeight;
         uploadChannels = std::max(1, node.image.previewChannels);
+        previewSourcePixels = &node.image.previewPixels;
     } else if (!node.image.pixels.empty()) {
         uploadPixels = node.image.pixels.data();
         previewSourcePixels = &node.image.pixels;
-    } else if (!decodedPixels.empty()) {
+    } else if (decodedPixels && !decodedPixels->empty()) {
         uploadWidth = decodedWidth; uploadHeight = decodedHeight; uploadChannels = decodedChannels;
-        uploadPixels = decodedPixels.data();
-        previewSourcePixels = &decodedPixels;
+        uploadPixels = decodedPixels->data();
+        previewSourcePixels = decodedPixels;
     } else {
-        return 0;
+        return previous;
     }
+    if (!previewSourcePixels || !Stack::PixelBuffer::HasCompletePixelBuffer(
+            previewSourcePixels->size(), uploadWidth, uploadHeight, uploadChannels))
+        return previous;
 
     // Non-import image payloads may not carry a runtime thumbnail. Downsample
     // them before any GL upload so a tiny node never allocates a full-resolution
@@ -317,41 +329,38 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         uploadHeight,
         uploadChannels);
     if (texture == 0) {
-        return 0;
+        return previous;
     }
 
+    if (previous != 0) glDeleteTextures(1, &previous);
     m_ImagePreviewTextures[node.id] = texture;
     m_ImagePreviewFingerprints[node.id] = fingerprint;
     m_ImagePreviewSizes[node.id] = ImVec2(static_cast<float>(uploadWidth), static_cast<float>(uploadHeight));
+    m_ImagePreviewDecodes.erase(node.id);
     return texture;
 }
 
 unsigned int EditorNodeGraphUI::UploadPreviewTexture(int nodeId, const std::vector<unsigned char>& pixels, int width, int height) {
-    if (pixels.empty() || width <= 0 || height <= 0) {
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(pixels.size(), width, height, 4)) {
         return 0;
     }
 
-    auto existing = m_GraphPreviewTextures.find(nodeId);
-    if (existing != m_GraphPreviewTextures.end() && existing->second != 0) {
-        unsigned int oldTexture = existing->second;
-        glDeleteTextures(1, &oldTexture);
-        m_GraphPreviewTextures.erase(existing);
-    }
-    m_GraphPreviewSizes.erase(nodeId);
-
     std::vector<unsigned char> flippedPixels = pixels;
-    const int rowStride = width * 4;
-    std::vector<unsigned char> tempRow(static_cast<size_t>(rowStride));
+    const std::size_t rowStride = static_cast<std::size_t>(width) * 4u;
+    std::vector<unsigned char> tempRow(rowStride);
     for (int y = 0; y < height / 2; ++y) {
-        unsigned char* top = flippedPixels.data() + static_cast<size_t>(y * rowStride);
-        unsigned char* bottom = flippedPixels.data() + static_cast<size_t>((height - 1 - y) * rowStride);
-        std::memcpy(tempRow.data(), top, static_cast<size_t>(rowStride));
-        std::memcpy(top, bottom, static_cast<size_t>(rowStride));
-        std::memcpy(bottom, tempRow.data(), static_cast<size_t>(rowStride));
+        unsigned char* top = flippedPixels.data() + static_cast<std::size_t>(y) * rowStride;
+        unsigned char* bottom = flippedPixels.data() + static_cast<std::size_t>(height - 1 - y) * rowStride;
+        std::memcpy(tempRow.data(), top, rowStride);
+        std::memcpy(top, bottom, rowStride);
+        std::memcpy(bottom, tempRow.data(), rowStride);
     }
 
     const unsigned int texture = GLHelpers::CreateTextureFromPixels(flippedPixels.data(), width, height, 4);
     if (texture != 0) {
+        const auto existing = m_GraphPreviewTextures.find(nodeId);
+        if (existing != m_GraphPreviewTextures.end() && existing->second != 0)
+            glDeleteTextures(1, &existing->second);
         m_GraphPreviewTextures[nodeId] = texture;
         m_GraphPreviewSizes[nodeId] = ImVec2(static_cast<float>(width), static_cast<float>(height));
     }
@@ -390,8 +399,10 @@ unsigned int EditorNodeGraphUI::GetGraphPreviewTexture(EditorModule* editor, con
     if (const EditorModule::GraphPreviewPixels* cached = editor->GetCachedPreviewPixelsForNode(node.id)) {
         if (cached->revision >= previewRevision && !cached->pixels.empty() && cached->width > 0 && cached->height > 0) {
             const unsigned int texture = UploadPreviewTexture(node.id, cached->pixels, cached->width, cached->height);
-            m_GraphPreviewRevisions[node.id] = cached->revision;
-            return texture;
+            if (texture != 0) {
+                m_GraphPreviewRevisions[node.id] = cached->revision;
+                return texture;
+            }
         }
     }
 
@@ -480,7 +491,8 @@ unsigned int EditorNodeGraphUI::GetNodeBrowserThumbnailTexture(
     int decodedWidth = view.width;
     int decodedHeight = view.height;
     int decodedChannels = view.channels;
-    if (!pixels || pixels->empty() || decodedWidth <= 0 || decodedHeight <= 0) {
+    if (!pixels || !Stack::PixelBuffer::HasCompletePixelBuffer(
+            pixels->size(), decodedWidth, decodedHeight, decodedChannels)) {
         // GetNodeBrowserThumbnailView schedules the project-owned decoder.
         // Keep the last card (or its placeholder) while those pixels arrive.
         return existingTexture;

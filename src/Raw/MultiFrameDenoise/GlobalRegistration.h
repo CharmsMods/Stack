@@ -168,6 +168,9 @@ struct AffineModel {
     RawCoordinate translationRaw;
 
     RawCoordinate Map(RawCoordinate referenceRaw) const;
+    // Exact mapping check for bypassing resampling; accepted subpixel motion
+    // is evidence and must not be rounded away using a display tolerance.
+    bool IsIdentity() const;
 };
 
 struct AffineReferenceSample {
@@ -230,6 +233,7 @@ struct AffineRefinementResult {
     std::array<double, 36> parameterCovariance {};
     std::uint64_t validSampleCount = 0u;
     std::uint32_t acceptedIterations = 0u;
+    // Seed/final losses on their common support using seed noise scales.
     double initialObjective = 0.0;
     double finalObjective = 0.0;
     double normalCondition = 0.0;

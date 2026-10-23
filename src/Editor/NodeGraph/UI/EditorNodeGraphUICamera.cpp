@@ -61,16 +61,17 @@ EditorNodeGraphUI::NodeGraphBounds(
     if (cached != m_NodeLayoutCache.end() &&
             cached->second.hasLogicalLayout &&
             cached->second.logicalRevision == logicalRevision)
-        return AbsoluteGraphBounds(cached->second.logicalLayout, node.position);
+        return AbsoluteGraphBounds(cached->second.logicalLayout, DisplayNodePosition(node));
     const auto logical = BuildLogicalNodeLayout(graph, node);
-    return AbsoluteGraphBounds(logical, node.position);
+    return AbsoluteGraphBounds(logical, DisplayNodePosition(node));
 }
 
 void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
+    if (!std::isfinite(wheel) || wheel == 0.0f) return;
     const EditorNodeGraph::Vec2 mouseScreen = ToGraphVec2(ImGui::GetMousePos());
     const EditorNodeGraph::Vec2 before = ScreenToGraph(mouseScreen);
     const float baseZoom = m_SmoothZoomActive ? m_ZoomTarget : m_Zoom;
-    const float nextTarget = std::clamp(baseZoom * (wheel > 0.0f ? 1.12f : 1.0f / 1.12f), 0.16f, 4.5f);
+    const float nextTarget = std::clamp(baseZoom * std::pow(1.12f, std::clamp(wheel, -64.0f, 64.0f)), 0.16f, 4.5f);
     if (std::abs(nextTarget - baseZoom) < 0.0001f) {
         return;
     }
@@ -93,7 +94,7 @@ void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
         // those bounds instead of rehashing/copying every socket and title.
         const auto* cache = FindNodeLayoutCache(node.id);
         const auto bounds = cache && cache->hasLogicalLayout
-            ? Stack::Editor::NodeGraphUILayout::AbsoluteGraphBounds(cache->logicalLayout, node.position)
+            ? Stack::Editor::NodeGraphUILayout::AbsoluteGraphBounds(cache->logicalLayout, DisplayNodePosition(node))
             : NodeGraphBounds(graph, node);
         if (first) {
             minX = bounds.min.x;

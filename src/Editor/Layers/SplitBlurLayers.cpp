@@ -72,36 +72,54 @@ void main() {
 } // namespace
 
 SplitBlurLayerBase::~SplitBlurLayerBase() {
-    if (m_KernelTexture) glDeleteTextures(1, &m_KernelTexture);
+    for (auto& kernel : m_Kernels) if (kernel.texture) glDeleteTextures(1, &kernel.texture);
+    if (m_ScratchFramebuffer) glDeleteFramebuffers(1, &m_ScratchFramebuffer);
+    if (m_ScratchTexture) glDeleteTextures(1, &m_ScratchTexture);
     if (m_ShaderProgram) {
         glDeleteProgram(m_ShaderProgram);
     }
 }
 
 void SplitBlurLayerBase::InitializeGL() {
-    if (!m_ShaderProgram) m_ShaderProgram = GLHelpers::CreateShaderProgram(kBlurVert, kBlurFrag);
+    if (m_ShaderProgram) return;
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(kBlurVert, kBlurFrag);
+    if (!m_ShaderProgram) return;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_MaximumTextureSize);
+    const char* names[] = {"uInputTex", "uOriginal", "uKernel", "uRadius", "uVertical",
+        "uScalar", "uPaired", "uKernelSum"};
+    for (std::size_t i = 0; i < std::size(names); ++i)
+        m_UniformLocations[i] = glGetUniformLocation(m_ShaderProgram, names[i]);
 }
 
 void SplitBlurLayerBase::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
     if (!m_ShaderProgram || !inputTexture || width <= 0 || height <= 0)
         throw std::runtime_error("Blur resources are unavailable.");
-    const float amount = std::isfinite(m_Amount) ? std::max(.0001f,m_Amount) : 2.f;
-    GLint maximum = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maximum);
-    if (amount >= maximum) throw std::runtime_error("Blur radius exceeds the supported kernel size.");
-    if (!m_KernelTexture || m_KernelAmount != amount) {
-        const int radius = static_cast<int>(std::max(1.f,amount));
+    if (width > m_MaximumTextureSize || height > m_MaximumTextureSize)
+        throw std::runtime_error("Blur dimensions exceed the supported texture size.");
+    const float amount = std::isfinite(m_Amount) ? std::max(0.f,m_Amount) : 2.f;
+    if ((m_SigmaMode ? std::ceil(3.0 * amount) : std::max(1.0f,amount)) >= m_MaximumTextureSize)
+        throw std::runtime_error("Blur radius exceeds the supported kernel size.");
+    auto found = std::find_if(m_Kernels.begin(), m_Kernels.end(), [&](const Kernel& entry) {
+        return entry.texture && entry.amount == amount && entry.sigmaMode == m_SigmaMode;
+    });
+    if (found == m_Kernels.end()) {
+        const int radius = m_SigmaMode ? static_cast<int>(std::ceil(3.f*amount)) : static_cast<int>(std::max(1.f,amount));
         std::vector<float> weights(radius+1,1.f);
         double sum = 1;
         for(int i=1;i<=radius;++i) {
-            if (GetBlurType()==1) weights[i]=float(std::exp(-double(i)*i/(.5*double(amount)*amount)));
+            if (GetBlurType()==1) weights[i]=float(std::exp(-double(i)*i/((m_SigmaMode ? 2. : .5)*double(amount)*amount)));
             sum += 2*weights[i];
         }
         const auto kernel=GLHelpers::CreateTextureFromData(weights.data(),radius+1,1,GL_R32F,GL_RED,GL_FLOAT);
         if(!kernel) throw std::runtime_error("Could not allocate the blur kernel.");
-        if(m_KernelTexture) glDeleteTextures(1,&m_KernelTexture);
-        m_KernelTexture=kernel;m_KernelAmount=amount;m_KernelRadius=radius;m_KernelSum=float(sum);
+        found = std::min_element(m_Kernels.begin(), m_Kernels.end(), [](const Kernel& a,const Kernel& b) {
+            return a.lastUse < b.lastUse;
+        });
+        if (found->texture) glDeleteTextures(1,&found->texture);
+        *found = {kernel,amount,m_SigmaMode,radius,float(sum),0};
+        ++m_ResourceStats.kernelUploads;
     }
+    found->lastUse = ++m_KernelUseSerial;
     const Stack::Renderer::GLState::FramebufferState destination(true);
     glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,inputTexture);
     GLint redBits=0,greenBits=0;
@@ -115,44 +133,72 @@ void SplitBlurLayerBase::Execute(unsigned int inputTexture, int width, int heigh
     glGetTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,&wrapT);
     const bool pairInput=scalar && minFilter==GL_LINEAR && magFilter==GL_LINEAR &&
         wrapS==GL_CLAMP_TO_EDGE && wrapT==GL_CLAMP_TO_EDGE;
-    Stack::Renderer::ScopedGLTexture intermediate(GLHelpers::CreateStorageTexture(width,height,scalar?GL_R32F:GL_RGBA32F));
-    const auto fbo=intermediate ? GLHelpers::CreateFBO(intermediate.Get()) : 0;
+    const auto scratchBytes = std::uint64_t(width) * std::uint64_t(height) * (scalar ? 4u : 16u);
+    constexpr std::uint64_t retainedScratchLimit = 64ull * 1024 * 1024;
+    const bool retainScratch = scratchBytes <= retainedScratchLimit;
+    if (m_ScratchTexture && (!retainScratch || m_ScratchWidth != width || m_ScratchHeight != height || m_ScratchScalar != scalar)) {
+        glDeleteFramebuffers(1,&m_ScratchFramebuffer);m_ScratchFramebuffer=0;
+        glDeleteTextures(1,&m_ScratchTexture);m_ScratchTexture=0;
+        m_ResourceStats.retainedScratchBytes=0;
+    }
+    Stack::Renderer::ScopedGLTexture temporary;
+    unsigned int intermediate=m_ScratchTexture, fbo=m_ScratchFramebuffer;
+    if (!intermediate) {
+        temporary.Reset(GLHelpers::CreateStorageTexture(width,height,scalar?GL_R32F:GL_RGBA32F));
+        intermediate=temporary.Get();
+        fbo=intermediate ? GLHelpers::CreateFBO(intermediate) : 0;
+        ++m_ResourceStats.scratchAllocations;
+        if (fbo && retainScratch) {
+            m_ScratchTexture=temporary.Release();m_ScratchFramebuffer=fbo;
+            m_ScratchWidth=width;m_ScratchHeight=height;m_ScratchScalar=scalar;
+            m_ResourceStats.retainedScratchBytes=scratchBytes;
+        }
+    } else ++m_ResourceStats.scratchReuses;
     if (!fbo) {destination.Restore(true);throw std::runtime_error("Could not allocate the blur intermediate.");}
     glUseProgram(m_ShaderProgram);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uOriginal"), 1);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uKernel"), 2);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uRadius"), m_KernelRadius);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uScalar"), scalar);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uKernelSum"), m_KernelSum);
+    glUniform1i(m_UniformLocations[0], 0);
+    glUniform1i(m_UniformLocations[1], 1);
+    glUniform1i(m_UniformLocations[2], 2);
+    glUniform1i(m_UniformLocations[3], found->radius);
+    glUniform1i(m_UniformLocations[5], scalar);
+    glUniform1f(m_UniformLocations[7], found->sum);
     glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,inputTexture);
-    glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,m_KernelTexture);
+    glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,found->texture);
     glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,inputTexture);
     glBindFramebuffer(GL_FRAMEBUFFER,fbo);glViewport(0,0,width,height);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uVertical"),0);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uPaired"),pairInput);
+    glUniform1i(m_UniformLocations[4],0);
+    glUniform1i(m_UniformLocations[6],pairInput);
     quad.Draw();
     destination.Restore(true);
-    glBindTexture(GL_TEXTURE_2D,intermediate.Get());
-    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uVertical"),1);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uPaired"),1);
+    glBindTexture(GL_TEXTURE_2D,intermediate);
+    glUniform1i(m_UniformLocations[4],1);
+    glUniform1i(m_UniformLocations[6],1);
     quad.Draw();
     glUseProgram(0);
-    glDeleteFramebuffers(1,&fbo);
+    if (!retainScratch) glDeleteFramebuffers(1,&fbo);
 }
 
 void SplitBlurLayerBase::RenderUI() {
-    ImGuiExtras::NodeSliderFloat("Blur Radius / Amount", "##BlurAmount", &m_Amount, 0.5f, 16.0f, "%.1f");
+    if (m_SigmaMode && m_SigmaFraction>=0) {
+        float percentage=m_SigmaFraction*100.f;
+        if(ImGuiExtras::NodeSliderFloat("Sigma (% of full image shorter side)","##BlurSigmaFraction",&percentage,0.f,25.f,"%.3f%%"))m_SigmaFraction=percentage/100.f;
+        return;
+    }
+    ImGuiExtras::NodeSliderFloat(m_SigmaMode ? "Gaussian sigma (sample pixels)" : "Blur Radius / Amount", "##BlurAmount", &m_Amount, m_SigmaMode ? 0.f : 0.5f, 64.0f, "%.3f");
 }
 
 json SplitBlurLayerBase::Serialize() const {
     json j;
     j["type"] = GetTypeId();
     j["amount"] = m_Amount;
+    if (m_SigmaMode) j["sigmaMode"] = true;
+    if (m_SigmaFraction>=0) j["sigmaFraction"] = m_SigmaFraction;
     return j;
 }
 
 void SplitBlurLayerBase::Deserialize(const json& j) {
+    m_SigmaMode = j.value("sigmaMode", false);
+    m_SigmaFraction = j.value("sigmaFraction", -1.f);
     if (j.contains("amount")) {
         m_Amount = j["amount"];
     }

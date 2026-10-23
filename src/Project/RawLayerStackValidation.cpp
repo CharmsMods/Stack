@@ -1,7 +1,9 @@
 #include "Project/RawLayerStack.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Graph/GraphDocumentRules.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -13,6 +15,8 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
     error.clear();
     if (!Assets::ValidateLibrary(state.assets, error)) return false;
     const auto fail = [&](std::string message) { error = std::move(message); return false; };
+    for(const auto& position:{state.sourceCanvasPosition,state.outputCanvasPosition})
+        if(position && (!std::isfinite(position->x) || !std::isfinite(position->y)))return fail("Invalid RAW canvas anchor position.");
     if (!state.nextId || state.nextId == std::numeric_limits<std::uint64_t>::max())
         return fail("Invalid RAW layer identity counter.");
     if (state.background.id != kRawBackgroundId) return fail("The Background identity is invalid.");
@@ -37,16 +41,41 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
     scene.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float32);
     document.sources.push_back({technical,scene});
     document.sources.push_back({unedited,scene});
+    EditorNodeGraph::Node technicalNode;technicalNode.id=1;technicalNode.channelOutputs=state.sourceChannelOutputs;
+    EditorNodeGraph::SocketDefinition imagePort{"imageOut",1,EditorNodeGraph::SocketDirection::Output,EditorNodeGraph::SocketType::Image,"Image"};
+    imagePort.logicalType=LogicalValueType::ColorImage;
+    std::vector<EditorNodeGraph::SocketDefinition> sourcePorts{imagePort};
+    for(const auto& output:state.sourceChannelOutputs)sourcePorts.push_back(EditorNodeGraph::ChannelOutputSocket(1,output));
+    if(!EditorNodeGraph::ValidateChannelOutputs(technicalNode,sourcePorts,error))return false;
+    EditorNodeGraph::GraphOutputDescription technicalDescription;technicalDescription.descriptor=scene;
+    for(const auto& output:state.sourceChannelOutputs) {
+        auto endpoint=technical;endpoint.portId=output.id;
+        document.sources.push_back({endpoint,EditorNodeGraph::OutputRules::ExtractChannel(technicalNode,output.id,
+            output.component,&technicalDescription,output.missingAlphaIsOpaque).descriptor});
+        document.dependencies.push_back({technical,endpoint});
+    }
     std::unordered_set<std::string> identities;
     const auto validRoute = [&](const std::optional<GraphModel::Endpoint>& route) {
         if (!route || *route == technical) return true;
         if (route->Empty() || route->graphId.empty()) return false;
         const auto* owner = FindRawAdjustmentLayer(state, route->graphId);
-        const auto* end = owner ? FindRawRole(*owner, Role::LayerResult) : nullptr;
-        return end && route->nodeUuid == end->instanceUuid && route->portId == "imageOut";
+        if (!owner) return false;
+        EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(owner->graph);
+        const auto producer = std::find_if(owner->graph.GetNodes().begin(),owner->graph.GetNodes().end(),
+            [&](const auto& node) { return node.instanceUuid == route->nodeUuid; });
+        EditorNodeGraph::SocketDefinition socket;
+        if (producer == owner->graph.GetNodes().end() ||
+            !owner->graph.FindSocket(producer->id,route->portId,&socket) ||
+            socket.direction != EditorNodeGraph::SocketDirection::Output ||
+            socket.type != EditorNodeGraph::SocketType::Image ||
+            owner->graph.IsScalarSocketStream(producer->id,route->portId)) return false;
+        const auto* end = FindRawRole(*owner, Role::LayerResult);
+        std::string contractError;
+        return end && EditorNodeGraphDefinitions::ValidateInputDescriptor(owner->graph,*end,"imageIn",
+            EditorNodeGraph::DescribeGraphOutput(owner->graph,producer->id,route->portId).descriptor,contractError);
     };
     if (state.explicitRouting && !validRoute(state.imageOutput))
-        return fail("The main image output must come from a layer End or the prepared source.");
+        return fail("The main image output requires a scene-linear color image result.");
     for (const auto* layer : RawLayersInOrder(state)) {
         if (layer->id.empty() || !identities.insert(layer->id).second)
             return fail("RAW layers must have distinct stable identities.");
@@ -80,7 +109,7 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
         const auto currentImage = RawLayerEndpoint(*layer, *current);
         const GraphModel::Endpoint blended{layer->id, "$layer-blend", "imageOut"};
         const auto input = RawLayerInputEndpoint(state, layer->id);
-        if (!validRoute(input)) return fail("A layer Start must receive a layer End or the prepared source.");
+        if (!validRoute(input)) return fail("A layer Start requires a scene-linear color image result.");
         if (input) {
             document.dependencies.push_back({*input, currentImage});
             document.valueBindings.push_back({*input,currentImage});

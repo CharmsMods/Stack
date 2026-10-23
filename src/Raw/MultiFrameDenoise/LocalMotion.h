@@ -20,6 +20,9 @@ struct CfaPyramidBasePlane {
     std::vector<double> signal;
     std::vector<double> variance;
     std::vector<std::uint8_t> validMask;
+    // Optional level-zero lower bounds; clipped samples remain invalid for
+    // registration. Reliability may use them only to reject darker matches.
+    std::vector<std::uint8_t> clippedMask;
 };
 
 struct CfaPyramidLevel {
@@ -30,6 +33,7 @@ struct CfaPyramidLevel {
     std::vector<double> signal;
     std::vector<double> variance;
     std::vector<std::uint8_t> validMask;
+    std::vector<std::uint8_t> clippedMask; // optional, level zero only
 };
 
 struct CfaPlanePyramid {
@@ -148,12 +152,17 @@ using GlobalWarpCovarianceEvaluator = std::function<bool(
     RawCoordinate referenceRaw,
     SymmetricRawCovariance& covariance)>;
 
+// Returns a candidate source coordinate in RAW pixels. It has no authority to
+// accept a match or assign confidence. Implementations must be thread-safe.
+using LocalMotionProposalEvaluator = std::function<bool(RawCoordinate,RawCoordinate&)>;
+
 struct LocalMotionDirectionRequest {
     const CfaPlanePyramid* reference = nullptr;
     const CfaPlanePyramid* source = nullptr;
     AffineModel globalWarp;
     double exposureScale = 1.0;
     GlobalWarpCovarianceEvaluator globalCovariance;
+    LocalMotionProposalEvaluator proposal;
     LocalMotionOptions options;
     // Independent nodes inside one wavefront/refinement pass may use these
     // workers. Search dependencies between wavefronts remain ordered.
@@ -218,7 +227,8 @@ bool EvaluateLocalMotionField(
     RawCoordinate referenceRaw,
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    bool includeDiagnostic = true);
 
 bool InvertAffineModel(
     const AffineModel& model,
@@ -232,6 +242,7 @@ struct BidirectionalLocalMotionRequest {
     double exposureScale = 1.0;
     GlobalWarpCovarianceEvaluator forwardGlobalCovariance;
     GlobalWarpCovarianceEvaluator reverseGlobalCovariance;
+    LocalMotionProposalEvaluator forwardProposal, reverseProposal;
     LocalMotionOptions options;
     LocalMotionDiscreteBatchEvaluator evaluateDiscreteCandidates;
     // Forward and reverse grids are independent until closure evaluation.

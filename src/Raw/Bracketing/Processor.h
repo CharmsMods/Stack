@@ -1,6 +1,7 @@
 #pragma once
 #include "Recipe.h"
 #include "Progress.h"
+#include "AlignmentProposal.h"
 #include "Raw/RawImageData.h"
 #include "Raw/ReconstructionDepth.h"
 #include "Raw/OpenGlTask.h"
@@ -129,6 +130,9 @@ struct ProcessingRequest {
     unsigned version=1;
     BracketingRecipe recipe;
     std::vector<Source> sources;
+    // Optional experimental proposer assets. Shared by all hosts; no model
+    // inference or paths are hidden in the editor or in rendered-frame work.
+    std::vector<AlignmentProposal> alignmentProposals;
     std::filesystem::path cacheDirectory;
     std::uint64_t memoryBudgetBytes=1024ull*1024*1024;
     // Explicit budgets stay strict. Interactive/automatic callers allow the
@@ -166,7 +170,8 @@ BracketingResult Process(const ProcessingRequest&);
 // A bounded interactive preview reuses the exact full-resolution evaluator's
 // cached source cells; it never decodes or changes the neutral guide.
 Preview ReblendPreview(const Preview&, const BracketingRecipe&, const BracketingAnalysis&,
-    const Raw::OpenGlTaskExecutor& executor={},std::string* error=nullptr);
+    const Raw::OpenGlTaskExecutor& executor={},std::string* error=nullptr,
+    bool includeSourceMeasurements=true,const std::function<bool()>& shouldCancel={});
 Preview RenderNativeDetail(const ProcessingRequest&, unsigned centerX, unsigned centerY, unsigned size = 192);
 std::string AnalysisIdentity(const ProcessingRequest&);
 std::uint64_t EstimateBracketingPeakResidentBytes(

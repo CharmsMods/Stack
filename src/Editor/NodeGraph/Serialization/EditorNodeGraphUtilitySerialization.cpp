@@ -311,8 +311,8 @@ DataMathMode DataMathModeFromString(const std::string& value) {
 }
 
 nlohmann::json SerializeDataMathSettings(const DataMathSettings& settings) {
-    return {
-        { "domain", settings.domain == Stack::NodeMath::ArithmeticDomain::Values ? "values" : "spatial" },
+    nlohmann::json value = {
+        { "domain", settings.domain == Stack::NodeMath::ArithmeticDomain::Values ? "values" : settings.domain == Stack::NodeMath::ArithmeticDomain::Channel ? "channel" : "spatial" },
         { "constantA", settings.constantA },
         { "constantB", settings.constantB },
         { "minValue", settings.minValue },
@@ -320,14 +320,21 @@ nlohmann::json SerializeDataMathSettings(const DataMathSettings& settings) {
         { "outMin", settings.outMin },
         { "outMax", settings.outMax }
     };
+    if (!settings.requiredLinearBasis.empty()) value["requiredLinearBasis"] = settings.requiredLinearBasis;
+    if (settings.boundedMask) value["boundedMask"] = true;
+    if (settings.percentageInput) value["percentageInput"] = true;
+    return value;
 }
 
 DataMathSettings DeserializeDataMathSettings(const nlohmann::json& value) {
     DataMathSettings settings;
     if (!value.is_object()) return settings;
+    settings.requiredLinearBasis = value.value("requiredLinearBasis", std::string{});
+    settings.boundedMask = value.value("boundedMask", false);
+    settings.percentageInput = value.value("percentageInput", false);
     const auto domain = value.value("domain", std::string("spatial"));
-    if (domain != "values" && domain != "spatial") throw std::runtime_error("Unknown arithmetic domain.");
-    settings.domain = domain == "values" ? Stack::NodeMath::ArithmeticDomain::Values : Stack::NodeMath::ArithmeticDomain::Spatial;
+    if (domain != "values" && domain != "spatial" && domain != "channel") throw std::runtime_error("Unknown arithmetic domain.");
+    settings.domain = domain == "values" ? Stack::NodeMath::ArithmeticDomain::Values : domain == "channel" ? Stack::NodeMath::ArithmeticDomain::Channel : Stack::NodeMath::ArithmeticDomain::Spatial;
     settings.constantA = value.value("constantA", settings.constantA);
     settings.constantB = value.value("constantB", settings.constantB);
     settings.minValue = value.value("minValue", settings.minValue);

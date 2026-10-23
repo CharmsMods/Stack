@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/Definitions/OperationInventory.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Graph/GraphImageRules.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Raw/RawGraphParameters.h"
@@ -123,9 +124,10 @@ bool AcceptsTypedParameterInput(const Node& node, const std::string& socketId, E
 
 bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input) {
-    if (!node.rawLayerOwnerId.empty() &&
-        (node.role == Stack::GraphModel::NodeRole::CurrentImage ||
-         node.role == Stack::GraphModel::NodeRole::LayerResult))
+    if (const auto* channel=EditorNodeGraph::FindChannelOutput(node,output))
+        return OutputDependsOnInput(graph,node,channel->sourceSocket,input);
+    if (node.role == Stack::GraphModel::NodeRole::LayerResult ||
+        (!node.rawLayerOwnerId.empty() && node.role == Stack::GraphModel::NodeRole::CurrentImage))
         return output == "imageOut" && input == "imageIn";
     if (!node.rawLayerOwnerId.empty() && node.role == Stack::GraphModel::NodeRole::Reference)
         return input == "referenceIn";

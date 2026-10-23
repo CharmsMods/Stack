@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Project/GraphSnapshotBuilder.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Project/GraphImagePayload.h"
 #include "Project/GraphImageContracts.h"
@@ -128,12 +129,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
     EditorNodeGraph::Graph stageGraph;
     if (stageOutputNodeId > 0) stageGraph = EditorNodeGraph::BuildNodeDependencyGraph(inputs.graph, stageOutputNodeId);
     const EditorNodeGraph::Graph* renderGraph = stageOutputNodeId > 0 ? &stageGraph : &inputs.graph;
-    const bool hasCompoundNode = std::any_of(
-        renderGraph->GetNodes().begin(),
-        renderGraph->GetNodes().end(),
-        [](const EditorNodeGraph::Node& node) {
-            return node.kind == EditorNodeGraph::NodeKind::Compound;
-        });
+    const bool hasCompoundNode = EditorNodeGraph::NeedsOutputLowering(*renderGraph);
     if (hasCompoundNode) {
         if (!renderGraph->ExpandAllCompoundNodes(expandedGraph, &expansion)) {
             Stack::NodeMath::Diagnostic diagnostic;
@@ -550,6 +546,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 break;
             case EditorNodeGraph::NodeKind::ChannelSplit:
                 renderNode.kind = RenderGraphNodeKind::ChannelSplit;
+                renderNode.splitMissingAlphaIsOpaque = node.splitMissingAlphaIsOpaque;
                 break;
             case EditorNodeGraph::NodeKind::ChannelCombine:
                 renderNode.kind = RenderGraphNodeKind::ChannelCombine;
@@ -571,9 +568,13 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 renderNode.reformatSettings = node.reformatSettings;
                 break;
             case EditorNodeGraph::NodeKind::Value:
-                if (node.value.value.logicalType != NodeMath::LogicalValueType::Scalar) continue;
+                if (node.value.value.logicalType != NodeMath::LogicalValueType::Scalar &&
+                    node.value.value.logicalType != NodeMath::LogicalValueType::Integer) continue;
                 renderNode.kind = RenderGraphNodeKind::Value;
                 if (node.value.value.availability == NodeMath::ValueAvailability::Known &&
+                    std::holds_alternative<std::int64_t>(node.value.value.payload))
+                    renderNode.scalarValue = static_cast<double>(std::get<std::int64_t>(node.value.value.payload));
+                else if (node.value.value.availability == NodeMath::ValueAvailability::Known &&
                     std::holds_alternative<double>(node.value.value.payload))
                     renderNode.scalarValue = std::get<double>(node.value.value.payload);
                 else snapshot.unavailableOutputs[node.id] = node.value.value.message.empty()
@@ -683,6 +684,16 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         if (output != outputs.end()) {
             node.semanticDescriptor = output->second.descriptor;
             node.semanticDescriptorIdentity = Stack::NodeMath::DescriptorContentIdentity(node.semanticDescriptor);
+            if (node.kind==RenderGraphNodeKind::DataMath &&
+                node.semanticDescriptor.logicalType==NodeMath::LogicalValueType::Scalar)
+                node.dataMathSettings.domain=NodeMath::ArithmeticDomain::Values;
+            if (node.kind==RenderGraphNodeKind::DataMath || node.kind==RenderGraphNodeKind::ChannelCombine)
+                for (const auto& diagnostic : output->second.diagnostics)
+                    if (diagnostic.severity==NodeMath::DiagnosticSeverity::HardError ||
+                        diagnostic.severity==NodeMath::DiagnosticSeverity::RuntimeFault) {
+                        snapshot.unavailableOutputs[node.nodeId]=diagnostic.message;
+                        break;
+                    }
         }
     }
     for (RenderGraphLink& link : snapshot.links) {
@@ -715,8 +726,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
     }
     BindGraphImageContracts(snapshot);
     if (stageOutputNodeId > 0) return result;
-    result.outputDescriptions = hasCompoundNode
-        ? EditorNodeGraph::DescribeGraphOutputs(inputs.graph, outputContext) : std::move(outputs);
+    if (hasCompoundNode) EditorNodeGraph::BindCompoundOutputDescriptions(outputs, expansion);
+    result.outputDescriptions = std::move(outputs);
     result.publishSemantics = true;
     return result;
 }

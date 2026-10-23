@@ -205,6 +205,10 @@ struct GraphExecutionStats {
     int fusedPointwiseGroups = 0;
     int fusedPointwiseNodes = 0;
     int avoidedPointwisePasses = 0;
+    // Count real draw submissions, independently of inferred fusion savings.
+    int dataMathDrawSubmissions = 0;
+    int fusedPointwiseDrawSubmissions = 0;
+    int pointwiseOptimizationRuns = 0;
     int pointwiseProgramCacheHits = 0;
     int pointwiseProgramCacheMisses = 0;
     int pointwiseFallbacks = 0;
@@ -581,11 +585,9 @@ private:
         int inputNodeId = -1;
         std::string inputSocketId;
         std::vector<int> authoredNodeIds;
-        Stack::NodeMath::PointwiseOptimizationResult optimized;
-        Stack::NodeMath::GeneratedPointwiseShader shader;
-        Stack::NodeMath::PointwisePhysicalPlan physicalPlan;
-        std::string failure;
-        std::vector<int> failureNodeIds;
+        // Grouping precedes scheduling. Expensive optimization/shader creation
+        // is deferred until the group's output actually misses the image cache.
+        Stack::NodeMath::PointwiseProgram program;
     };
 
     struct AutoGainSceneStats {
@@ -947,7 +949,8 @@ private:
         const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
         int nodeId,
         const std::string& socketId,
-        const std::unordered_set<int>& disabledNodes) const;
+        const std::unordered_set<int>& disabledNodes,
+        const std::unordered_set<std::string>& materializedOutputs) const;
     GraphNodeRenderResult RenderPointwiseFusionPlan(
         const PointwiseFusionPlan& plan,
         unsigned int inputTexture,
@@ -1062,7 +1065,8 @@ private:
         const RenderGraphNode& node,
         const std::string& socketId,
         const std::function<unsigned int(int, const std::string&)>& evalImage,
-        const std::function<unsigned int(int, const std::string&)>& evalMask);
+        const std::function<unsigned int(int, const std::string&)>& evalMask,
+        const std::function<bool(int, const std::string&, double&)>& evalScalar);
 
 
 

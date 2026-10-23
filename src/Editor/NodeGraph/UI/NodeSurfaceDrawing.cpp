@@ -15,7 +15,7 @@ void DrawGraphNodeSpotlightSurface(
     float rounding,
     float borderThickness,
     float selectionAlpha) {
-    drawList->AddRectFilled(min,max,ImGui::GetColorU32(tokens.enabled ? tokens.nodeAppearance.surface : fillColor),rounding);
+    drawList->AddRectFilled(min,max,ImGui::GetColorU32(fillColor),rounding);
     drawList->AddRect(min,max,ImGui::GetColorU32(borderColor),rounding,0,borderThickness);
     ImVec4 outline=tokens.selected; outline.w*=selectionAlpha<0 ? (selected ? 1.0f : 0.0f) : selectionAlpha;
     if (outline.w>0.001f) drawList->AddRect(min,max,ImGui::GetColorU32(outline),rounding,0,2.0f*uiScale);

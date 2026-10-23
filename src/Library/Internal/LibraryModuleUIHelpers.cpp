@@ -152,7 +152,9 @@ void ComputeCoverUv(float sourceWidth, float sourceHeight, const ImRect& targetR
     }
 }
 
-void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, float selected, bool hovered) {
+void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, float selected, bool hovered, float alpha) {
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    if (alpha <= 0.01f) return;
     hover = std::clamp(hover, 0.0f, 1.0f);
     selected = std::clamp(selected, 0.0f, 1.0f);
 
@@ -165,17 +167,17 @@ void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, 
     drawList->AddRectFilled(
         ImVec2(rect.Min.x, rect.Min.y),
         ImVec2(rect.Max.x, rect.Max.y),
-        ScaleColorAlpha(accent, 0.10f * selected),
+        ScaleColorAlpha(accent, 0.10f * selected * alpha),
         rounding);
     drawList->AddRectFilled(
         ImVec2(rect.Min.x, rect.Min.y),
         ImVec2(rect.Max.x, rect.Max.y),
-        ScaleColorAlpha(hoverAccent, 0.6f * hover),
+        ScaleColorAlpha(hoverAccent, 0.6f * hover * alpha),
         rounding);
     drawList->AddRect(
         rect.Min,
         rect.Max,
-        edge,
+        ScaleColorAlpha(edge, alpha),
         rounding,
         0,
         hovered || selected > 0.01f ? 1.1f : 1.0f);
@@ -185,7 +187,7 @@ void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, 
         drawList->AddRect(
             rect.Min,
             rect.Max,
-            selectedOutlineColor,
+            ScaleColorAlpha(selectedOutlineColor, alpha),
             rounding,
             0,
             1.8f);
@@ -272,7 +274,7 @@ void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGu
 
 bool ProjectMatchesFilter(const ProjectEntry& project, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly) {
     if (noTagOnly) {
-        if (!TagManager::Get().GetTags(project.fileName).empty()) return false;
+        if (TagManager::Get().HasTags(project.fileName)) return false;
     } else if (!activeTags.empty()) {
         bool foundAny = false;
         for (const auto& tag : activeTags) {
@@ -297,7 +299,7 @@ bool ProjectMatchesFilter(const ProjectEntry& project, const char* filter, const
 
 bool AssetMatchesFilter(const AssetEntry& asset, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly) {
     if (noTagOnly) {
-        if (!TagManager::Get().GetTags(asset.fileName).empty()) return false;
+        if (TagManager::Get().HasTags(asset.fileName)) return false;
     } else if (!activeTags.empty()) {
         bool foundAny = false;
         for (const auto& tag : activeTags) {

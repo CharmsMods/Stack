@@ -1,4 +1,5 @@
 #include "ProcessingInternal.h"
+#include "AlignmentProposalInput.h"
 #include "HdrColorFusion.h"
 #include "PresentationEvidence.h"
 #include "ProcessingTiles.h"
@@ -20,13 +21,21 @@ std::uint64_t Hash(const std::string& s) {
     std::uint64_t h=14695981039346656037ull;
     for(unsigned char c:s) {h^=c;h*=1099511628211ull;}return h;
 }
-void StoreColor(std::vector<float>& rgb,std::size_t offset,const std::array<double,4>& values,const RawMetadata& metadata) {
+using ColorChannels=std::array<unsigned,4>;
+ColorChannels PrepareColorChannels(const RawMetadata& metadata) {
     Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(metadata.cfaPattern,layout);
-    for(unsigned c=0;c<3;++c) rgb[offset+c]=0;
+    ColorChannels channels{};
     for(unsigned i=0;i<4;++i) {
         const auto site=layout.SiteAt(i%2,i/2);
-        const unsigned c=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
-        rgb[offset+c]+=static_cast<float>(values[i]*(c==1?.5:1));
+        channels[i]=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
+    }
+    return channels;
+}
+void StoreColor(float* rgb,const std::array<double,4>& values,const ColorChannels& channels) {
+    for(unsigned c=0;c<3;++c) rgb[c]=0;
+    for(unsigned i=0;i<4;++i) {
+        const unsigned c=channels[i];
+        rgb[c]+=static_cast<float>(values[i]*(c==1?.5:1));
     }
 }
 
@@ -35,26 +44,48 @@ void StoreColor(std::vector<float>& rgb,std::size_t offset,const std::array<doub
 
 
 Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
-    const Raw::OpenGlTaskExecutor& executor,std::string* failure) {
-    Preview out=source;
-    const auto n=recipe.groups.size(),pixels=static_cast<std::size_t>(out.width)*out.height;
-    if(out.samples.size()!=pixels*4*n) return out;
-    out.resultRgb.assign(pixels*3,0);out.sourceRgb.assign(pixels*3*n,0);
+    const Raw::OpenGlTaskExecutor& executor,std::string* failure,bool includeSourceMeasurements,
+    const std::function<bool()>& shouldCancel) {
+    const auto n=recipe.groups.size(),pixels=static_cast<std::size_t>(source.width)*source.height;
+    if(!n||n>64||pixels>std::numeric_limits<std::size_t>::max()/(4*n)||
+        source.samples.size()!=pixels*4*n||source.guideEv.size()!=pixels) {
+        if(failure)*failure="The retained bracket preview has incomplete source measurements.";
+        return {};
+    }
+    if(shouldCancel&&shouldCancel()) {if(failure)*failure="Canceled";return {};}
+    Preview out;
+    if(includeSourceMeasurements)out=source;
+    else {
+        // Interactive reblends retain these immutable measurements in the
+        // worker. Do not copy/recompute data that the client already owns.
+        out.width=source.width;out.height=source.height;
+        out.sensorOriginX=source.sensorOriginX;out.sensorOriginY=source.sensorOriginY;
+        out.sensorStepX=source.sensorStepX;out.sensorStepY=source.sensorStepY;
+        out.metadata=source.metadata;out.guideEv=source.guideEv;out.coverage=source.coverage;
+    }
+    out.resultRgb.assign(pixels*3,0);
+    if(includeSourceMeasurements)out.sourceRgb.assign(pixels*3*n,0);
     out.contributions.assign(pixels*n,0);out.requested.assign(pixels*n,0);
     out.diagnostics.assign(pixels,0);
-    std::vector<std::array<double,4>> sources(n);
+    const auto colorChannels=PrepareColorChannels(out.metadata);
+    std::vector<std::array<double,4>> sources(includeSourceMeasurements?n:0);
     ColorObservations input;
     for(auto& site:input)site.resize(n);
     std::vector<double> shares;
+    std::size_t nextCancellationRow=0;
     for(std::size_t p=0;p<pixels;++p) {
+        if(shouldCancel&&p==nextCancellationRow) {
+            nextCancellationRow+=source.width;
+            if(shouldCancel()) {if(failure)*failure="Canceled";return {};}
+        }
         Evaluate(recipe.automatic?analysis.suggestion:recipe.knots,out.guideEv[p],shares);
         std::array<double,4> cell{};
         for(unsigned c=0;c<4;++c) {
             for(std::size_t g=0;g<n;++g) {
-                const auto& v=out.samples[(p*4+c)*n+g];
+                const auto& v=source.samples[(p*4+c)*n+g];
                 input[c][g]={v.value,v.variance,v.headroom,v.support,v.fallback,v.exposure,
                     v.finite,v.clipped,v.localRejected,v.fixedReference,v.measurementVariance,v.uncertaintyVariance,v.fallbackClipped};
-                sources[g][c]=v.support>0?v.value:v.fallback;
+                if(includeSourceMeasurements)sources[g][c]=v.support>0?v.value:v.fallback;
             }
         }
         const auto color=BlendColor(input,shares,recipe);
@@ -68,16 +99,16 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
                 (blended.fallbackReason==MeasurementFallbackReason::ShortestExposure?Preview::ShortestExposure:0);
             for(std::size_t g=0;g<n;++g) out.contributions[p*n+g]+=static_cast<float>(blended.actual[g]*.25);
         }
-        StoreColor(out.resultRgb,p*3,cell,out.metadata);
+        StoreColor(out.resultRgb.data()+p*3,cell,colorChannels);
         for(std::size_t g=0;g<n;++g) {
-            StoreColor(out.sourceRgb,(p*n+g)*3,sources[g],out.metadata);
+            if(includeSourceMeasurements)StoreColor(out.sourceRgb.data()+(p*n+g)*3,sources[g],colorChannels);
             out.requested[p*n+g]=static_cast<float>(shares[g]);
         }
     }
     if(recipe.depth.enabled&&recipe.depth.blurRadius>0&&analysis.depth) {
         std::vector<float> blurred;std::string error;
         if(!Depth::RenderDefocusGpu(out.resultRgb,out.width,out.height,*analysis.depth,recipe.depth,
-            out.sensorOriginX,out.sensorOriginY,out.sensorStepX,out.sensorStepY,blurred,executor,{},error)) {
+            out.sensorOriginX,out.sensorOriginY,out.sensorStepX,out.sensorStepY,blurred,executor,shouldCancel,error)) {
             if(failure)*failure=error;return {};
         }
         out.resultRgb=std::move(blurred);
@@ -85,7 +116,7 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
     return out;
 }
 BracketingResult Process(const ProcessingRequest& submittedRequest) {
-    if(submittedRequest.recipe.reconstruction==ReconstructionMode::Panorama)return Panorama::Process(submittedRequest);
+    if(submittedRequest.recipe.reconstruction==ReconstructionMode::Panorama&&submittedRequest.alignmentProposals.empty()&&!submittedRequest.recipe.aiAlignment)return Panorama::Process(submittedRequest);
     ProcessingRequest request=submittedRequest;
     if(request.reportPresentation) {
         try {request.evidenceStream=std::make_shared<ProcessingEvidenceStream>();}
@@ -108,8 +139,21 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
     };
     try {
         std::string error;
-        if(request.version!=1) return fail("Unsupported bracketing processing request version.");
+        if(request.version!=1&&request.version!=2) return fail("Unsupported bracketing processing request version.");
         if(!Validate(request.recipe,error)) return fail(error);
+        if(request.recipe.aiAlignment&&!request.alignmentProposals.empty())
+            return fail("Choose generated AI alignment or external research proposals, not both.");
+        if(!ValidateAlignmentProposals(request,error)) return fail(error);
+        // Generated proposals are bounded to 884736 pixels per direction.
+        // Reserve their pair even though generation occurs after calibration.
+        std::uint64_t proposalBytes=request.recipe.aiAlignment?16ull*1024*1024:0;
+        for(const auto& p:request.alignmentProposals)
+            proposalBytes=std::max(proposalBytes,std::uint64_t(p.width)*p.height*16);
+        // Keep proposer buffers inside the caller's budget, not on top of it.
+        // The remaining preparation/merge policies continue to own their work.
+        if(proposalBytes>=request.memoryBudgetBytes)return fail("Alignment proposals exceed the processing memory allowance.");
+        request.memoryBudgetBytes-=proposalBytes;
+        request.workerCount=ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount);
         auto analysis=std::make_shared<BracketingAnalysis>();analysis->version=2;
         result.analysis=analysis;
         analysis->identity=AnalysisIdentity(request);
@@ -136,9 +180,10 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         const auto& data=*analysis->prepared;
         const auto& origin=data.sources[data.origin];
         auto guideMetadata=origin.metadata;guideMetadata.cfaPattern=origin.frame.activeCfaPattern;
+        const auto guideLuminance=BuildLuminanceTransform(guideMetadata);
         const auto pixels=static_cast<std::size_t>(data.width)*data.height;
         const auto groups=request.recipe.groups.size();
-        analysis->estimatedPeakResidentBytes=EstimateBracketingPeakResidentBytes(data.width,data.height,
+        analysis->estimatedPeakResidentBytes=proposalBytes+EstimateBracketingPeakResidentBytes(data.width,data.height,
             data.sources.size(),groups,request.workerCount,
             request.recipe.alignmentMode==AlignmentMode::AutomaticLocal);
         const std::uint64_t tileBytes=static_cast<std::uint64_t>(origin.frame.tileRawPixels)*origin.frame.tileRawPixels*(groups*(sizeof(Observation)+2*sizeof(double))+80);
@@ -156,6 +201,16 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                     return PrepareGroupTile(request,data,tx,ty,tileError);
                 },error)) return fail(error);
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
+            {
+                const auto& m=data.groupMetrics;std::lock_guard<std::mutex> lock(m.mutex);
+                analysis->stageSeconds["group_temporal_worker_seconds"]=m.temporal;
+                analysis->stageSeconds["group_local_detail_worker_seconds"]=m.detail;
+                analysis->stageSeconds["group_cache_worker_seconds"]=m.cache;
+                analysis->diagnostics.push_back("Group work (overlapping worker intervals): "+std::to_string(m.computedTiles)+
+                    " computed tiles, "+std::to_string(m.cachedTiles)+" cache hits; local patches "+std::to_string(m.patches.attempted)+
+                    ", center rejected "+std::to_string(m.patches.centerRejected)+", sample rejected "+std::to_string(m.patches.sampleRejected)+
+                    ", expanded "+std::to_string(m.patches.expanded)+", accepted "+std::to_string(m.patches.accepted)+".");
+            }
             if(data.combiningGpu)data.combiningGpu->Report(*analysis);
             const auto guideStart=std::chrono::steady_clock::now();
             if(std::count_if(data.sources.begin(),data.sources.end(),[](const auto& source){return source.enabled;})>1)
@@ -174,15 +229,17 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                 auto& localCounts=tileCounts[tileIndex];
                 auto& localHistogram=tileHistograms[tileIndex];
                 ColorObservations colorInput;
+                std::vector<double> weights(groups);
                 for(unsigned y=0;y<tile.extent.height;y+=2) for(unsigned x=0;x<tile.extent.width;x+=2) {
-                    std::array<double,4> cell{};std::vector<double> weights(groups);
+                    std::array<double,4> cell{};
+                    std::fill(weights.begin(),weights.end(),0.0);
                     GatherColorCell(observations,y*tile.extent.width+x,tile.extent.width,colorInput);
                     const auto color=BlendColor(colorInput,{},request.recipe);
                     for(unsigned c=0;c<4;++c) {
                         const auto& b=color[c];cell[c]=b.value;
                         for(std::size_t g=0;g<groups;++g) weights[g]+=b.actual[g]*.25;
                     }
-                    const double ev=std::log2(std::max(1e-9,Luminance(guideMetadata,cell))/.18);
+                    const double ev=std::log2(std::max(1e-9,Luminance(guideLuminance,cell))/.18);
                     analysis->guideEv[((tile.originY+y)/2)*cellWidth+(tile.originX+x)/2]=static_cast<float>(ev);
                     const auto bin=static_cast<std::size_t>(std::clamp((ev+12)/20*255,0.0,255.0));
                     localCounts[bin]+=1;
@@ -234,6 +291,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         auto localRejection=std::make_shared<std::vector<std::uint8_t>>(pixels);
         auto fallbackReason=std::make_shared<std::vector<std::uint8_t>>(pixels);
         Preview preview;preview.metadata=origin.metadata;preview.metadata.cfaPattern=origin.frame.activeCfaPattern;
+        const auto previewColorChannels=PrepareColorChannels(preview.metadata);
         const double maxCells=std::min(640.0*640,16.0*1024*1024/(4*groups*sizeof(Preview::Sample)+16*groups));
         const unsigned stride=std::max(1u,static_cast<unsigned>(std::ceil(std::sqrt(static_cast<double>(cellWidth)*cellHeight/maxCells))));
         preview.width=(cellWidth+stride-1)/stride;preview.height=(cellHeight+stride-1)/stride;
@@ -306,7 +364,8 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                     const auto p=(ry-tile.originY+c/2)*tile.extent.width+rx-tile.originX+c%2;
                     cell[c]=(*mosaic)[std::size_t(ry+c/2)*data.width+rx+c%2]*tile.comparisonGain[p];
                 }
-                std::vector<float> rgb(3);StoreColor(rgb,0,cell,preview.metadata);s.rgb={rgb[0],rgb[1],rgb[2]};
+                std::array<float,3> rgb{};StoreColor(rgb.data(),cell,previewColorChannels);
+                s.rgb={rgb[0],rgb[1],rgb[2]};
                 const auto q=(std::size_t(py)*preview.width+px)*groups;
                 const auto g=PresentationGroup(request);
                 s.first=preview.contributions[q+g];s.second=preview.requested[q+g];return s;
@@ -334,7 +393,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         sidecars->localRejection=localRejection;sidecars->fallbackReason=fallbackReason;
         for(const auto& s:data.sources) if(s.enabled) sidecars->originalFrameIds.push_back(s.id);
         sidecars->evidenceIdentitySha256=raw->metadata.sourceContentSha256;raw->multiFrameMeasurementSidecars=sidecars;
-        result.raw=raw;result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error);
+        result.raw=raw;result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error,true,request.shouldCancel);
         if(!result.preview.width)return fail(error);
         // Reblend owns its copy. Release the construction cells before SR's
         // much larger output is allocated.

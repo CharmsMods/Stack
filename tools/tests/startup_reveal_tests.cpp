@@ -54,6 +54,10 @@ int main() {
     passed &= Expect(interfaceReveal.interfaceOpacity > 0.0f &&
         interfaceReveal.captionButtonOpacity == 0.0f,
         "caption buttons remain hidden during interface reveal");
+    passed &= Expect(!holdSurface.AllowsInput() && !expanding.AllowsInput(),
+        "startup keeps input blocked while the interface is hidden");
+    passed &= Expect(interfaceReveal.AllowsInput() && captionReveal.AllowsInput(),
+        "the visible gallery accepts input before the decorative reveal finishes");
     passed &= Expect(captionReveal.phase == Phase::RevealCaptionButtons,
         "caption buttons reveal after the interface");
     passed &= Expect(captionReveal.interfaceOpacity == 1.0f &&

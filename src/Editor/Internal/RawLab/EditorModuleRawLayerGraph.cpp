@@ -12,6 +12,41 @@ bool EditorModule::IsEditingRawLayerMaskGraph() const {
     return m_GraphEditorUsesRawLayer && m_RawLayerMaskWorkspace.has_value();
 }
 
+void EditorModule::MarkGraphLayoutEdited(bool gestureActive) {
+    if (IsEditingRawLayerMaskGraph() && m_RawLayerMaskWorkspace->projectCanvas) {
+        auto& workspace = *m_RawLayerMaskWorkspace;
+        // A pending content edit must still pass the ordinary commit boundary.
+        if (!workspace.dirty && workspace.revision == m_Project->rawLayers.Revision()) {
+            std::string error;
+            const bool gesture = gestureActive || ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right);
+            if (m_Project->rawLayers.ApplyGraphLayout(*workspace.projectCanvas, workspace.graph, gesture, error)) {
+                workspace.revision = m_Project->rawLayers.Revision();
+                MarkDirty();
+                return;
+            }
+        }
+    }
+    if(gestureActive && !IsEditingRawLayerMaskGraph()) {
+        ObserveProjectGraphEdit(true);MarkDirty();return;
+    }
+    if(gestureActive && IsEditingRawLayerMaskGraph())m_Project->rawLayers.BeginGesture();
+    MarkGraphEdited(-1, false);
+}
+
+void EditorModule::EndGraphLayoutGesture(bool cancelled) {
+    if(IsEditingRawLayerMaskGraph()) {
+        if(CommitRawLayerMaskGraph()) {
+            if(cancelled && m_Project->rawLayers.GestureActive()) {
+                m_Project->rawLayers.CancelGesture();
+                m_RawLayerMaskWorkspace->revision=m_Project->rawLayers.Revision();
+                MarkDirty();
+            } else m_Project->rawLayers.EndGesture();
+        }
+    } else if(cancelled) {
+        if(m_Project->graphHistory.GestureActive())m_Project->graphHistory.AcceptCancel();
+    } else m_Project->graphHistory.EndGesture();
+}
+
 void EditorModule::MarkGraphEdited(int touchedNodeId, bool affectsPixels) {
     if (IsEditingRawLayerMaskGraph()) {
         m_RawLayerMaskWorkspace->dirty = true;
@@ -72,10 +107,14 @@ void EditorModule::OpenRawLayerMaskGraph(const std::string& layerId, bool activa
             // The first card represents the actual source-set editor, while
             // remaining the projection's immutable prepared-image endpoint.
             const auto position=projected->position;
+            const auto notes=projected->notes;
+            const auto channels=projected->channelOutputs;
             const int id=projected->id;
             *projected=*source;
             projected->id=id;
             projected->position=position;
+            projected->notes=notes;
+            projected->channelOutputs=channels;
             projected->role=Stack::GraphModel::NodeRole::OriginalImage;
             projected->rawLayerOwnerId.clear();
         }
@@ -124,19 +163,22 @@ void EditorModule::OpenRawLayerMaskGraph(const std::string& layerId, bool activa
 
 bool EditorModule::CommitRawLayerMaskGraph() {
     if (!m_RawLayerMaskWorkspace || !m_RawLayerMaskWorkspace->dirty) return true;
-    auto candidate = m_Project->rawLayers.State();
     auto& workspace = *m_RawLayerMaskWorkspace;
     if (workspace.revision != m_Project->rawLayers.Revision()) {
         m_RawLayerStatus = "The layer changed while this graph edit was prepared. Reopen its graph before applying the edit.";
         return false;
     }
-    auto* layer = FindRawAdjustmentLayer(candidate, workspace.layerId);
-    if (!layer) { m_RawLayerStatus = "The edited layer no longer exists."; return false; }
+    if (!FindRawAdjustmentLayer(m_Project->rawLayers.State(), workspace.layerId)) {
+        m_RawLayerStatus = "The edited layer no longer exists."; return false;
+    }
     auto settings = nlohmann::json::array();
     for (const auto& node : workspace.layers) settings.push_back(node->Serialize());
+    std::optional<RawLayerStackDocument::PreparedEdit> prepared;
     if (workspace.projectCanvas) {
-        if (!ApplyRawProjectGraph(m_Project->rawLayers.State(),*workspace.projectCanvas,
-                workspace.graph,settings,workspace.layerId,candidate,m_RawLayerStatus)) {
+        prepared = m_Project->rawLayers.PrepareGraphEdit(*workspace.projectCanvas,workspace.graph,
+            settings,workspace.layerId,m_RawLayerStatus,&m_Project->graph,
+            ResolveRawWorkspaceStageOutputNodeId(),m_Project->editRevision);
+        if (!prepared) {
             workspace.dirty = false; workspace.affectsPixels = false;
             const auto message = m_RawLayerStatus;
             OpenRawLayerMaskGraph(workspace.layerId,false);
@@ -144,13 +186,18 @@ bool EditorModule::CommitRawLayerMaskGraph() {
             return false;
         }
     } else {
+        auto candidate = m_Project->rawLayers.State();
+        auto* layer = FindRawAdjustmentLayer(candidate, workspace.layerId);
         layer->graph = workspace.graph;
         layer->animation = workspace.animation;
         RegisterRawMaskOutputs(candidate, workspace.layerId);
+        prepared = m_Project->rawLayers.Prepare(std::move(candidate),m_RawLayerStatus,
+            &m_Project->graph,ResolveRawWorkspaceStageOutputNodeId(),m_Project->editRevision);
     }
     const bool gesture = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right);
     if (gesture) m_Project->rawLayers.BeginGesture();
-    if (!ApplyRawLayerStackEdit(std::move(candidate), workspace.affectsPixels)) {
+    if (!prepared || !m_Project->rawLayers.Commit(std::move(*prepared),m_RawLayerStatus,
+        workspace.affectsPixels,false,m_Project->editRevision,&m_Project->graph)) {
         if (workspace.projectCanvas) {
             workspace.dirty = false; workspace.affectsPixels = false;
             const auto owner = workspace.layerId;
@@ -174,6 +221,12 @@ bool EditorModule::CommitRawLayerMaskGraph() {
         }
         workspace.dirty = false; workspace.affectsPixels = false;
         return false;
+    }
+    ReconcileRawNodeEditorSelection();
+    MarkDirty();
+    if (workspace.affectsPixels) {
+        MarkRenderRefreshDirty();
+        NoteRawWorkspaceRecipePreviewEdit(m_Project->rawLayers.GestureActive());
     }
     workspace.revision = m_Project->rawLayers.Revision();
     for (auto& node : workspace.graph.GetNodes())

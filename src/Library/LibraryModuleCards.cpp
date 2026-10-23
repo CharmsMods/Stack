@@ -15,12 +15,6 @@
 
 using namespace Stack::Library::ModuleUI;
 
-namespace {
-
-constexpr float kCardInputReadyAlpha = 0.18f;
-
-} // namespace
-
 bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule* editor) {
     (void)editor;
 
@@ -32,7 +26,8 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     LibraryCardMotionState& motion = GetCardMotionState(m_ProjectCardMotion, project.fileName);
     motion.lastSeenFrame = frameCount;
     const float entranceProgress = ResolveCardEntranceProgress(motion, ImGui::GetTime());
-    motion.selected = ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
+    motion.selected = Stack::LibraryUi::ReducedMotion() ? (isSelected ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
 
     if (!matchesFilter && motion.reveal <= 0.01f) {
         return false;
@@ -81,36 +76,42 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
                 : "Project";
         const std::string placeholder = project.projectName + "\n" + typeLabel;
         const ImVec2 noPreviewSize = ImGui::CalcTextSize(placeholder.c_str());
+        drawList->PushClipRect(imageRect.Min, imageRect.Max, true);
         drawList->AddText(
             ImVec2(imageRect.Min.x + (imageRect.GetWidth() - noPreviewSize.x) * 0.5f, imageRect.Min.y + (imageRect.GetHeight() - noPreviewSize.y) * 0.5f),
             IM_COL32(220, 228, 236, static_cast<int>(210.0f * cardAlpha)),
             placeholder.c_str());
+        drawList->PopClipRect();
     }
 
-    ImGui::InvisibleButton("##hitbox", ImVec2(cardWidth, totalHeight));
-    const bool isHovered = ImGui::IsItemHovered();
-    const bool inputReady = matchesFilter && cardAlpha > kCardInputReadyAlpha;
+    // A retiring search result is decoration only. A disabled button still
+    // registers an item under the pointer; a Dummy cannot steal another card's input.
+    if (matchesFilter) ImGui::InvisibleButton("##hitbox", ImVec2(cardWidth, totalHeight));
+    else ImGui::Dummy(ImVec2(cardWidth, totalHeight));
+    const bool isHovered = matchesFilter && ImGui::IsItemHovered();
+    const bool inputReady = matchesFilter;
     const bool isLeftClicked = inputReady && ImGui::IsItemClicked(ImGuiMouseButton_Left);
     const bool isRightClicked = inputReady && ImGui::IsItemClicked(ImGuiMouseButton_Right);
     const bool isDoubleClicked = inputReady && isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
-    motion.hover = ImGuiExtras::AnimateTowards(motion.hover, (inputReady && isHovered) ? 1.0f : 0.0f, dt, 24.0f);
+    motion.hover = Stack::LibraryUi::ReducedMotion() ? (isHovered ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(motion.hover, isHovered ? 1.0f : 0.0f, dt, 24.0f);
 
     const ImRect motionRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    const float overlayAlpha = ImGuiExtras::EaseOutCubic(motion.hover);
+    const float overlayAlpha = ImGuiExtras::EaseOutCubic(motion.hover) * cardAlpha;
     drawList->AddRectFilled(
         motionRect.Min,
         motionRect.Max,
         IM_COL32(8, 11, 14, static_cast<int>(124.0f * overlayAlpha)),
         rounding);
-    DrawCardOverlayText(
+    if (overlayAlpha > 0.01f) DrawCardOverlayText(
         drawList,
         motionRect,
         overlayAlpha,
         project.projectName,
         std::to_string(project.sourceWidth) + "x" + std::to_string(project.sourceHeight),
         project.timestamp);
-    DrawCardMotionFrame(drawList, motionRect, motion.hover, motion.selected, isHovered);
+    DrawCardMotionFrame(drawList, motionRect, motion.hover, motion.selected, isHovered, cardAlpha);
 
     if (isLeftClicked) {
         if (ImGui::GetIO().KeyCtrl) {
@@ -248,7 +249,8 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     LibraryCardMotionState& motion = GetCardMotionState(m_AssetCardMotion, asset.fileName);
     motion.lastSeenFrame = frameCount;
     const float entranceProgress = ResolveCardEntranceProgress(motion, ImGui::GetTime());
-    motion.selected = ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
+    motion.selected = Stack::LibraryUi::ReducedMotion() ? (isSelected ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
 
     if (!matchesFilter && motion.reveal <= 0.01f) {
         return false;
@@ -298,29 +300,31 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
             noPreview);
     }
 
-    ImGui::InvisibleButton("##hitbox", ImVec2(cardWidth, totalHeight));
-    const bool isHovered = ImGui::IsItemHovered();
-    const bool inputReady = matchesFilter && cardAlpha > kCardInputReadyAlpha;
+    if (matchesFilter) ImGui::InvisibleButton("##hitbox", ImVec2(cardWidth, totalHeight));
+    else ImGui::Dummy(ImVec2(cardWidth, totalHeight));
+    const bool isHovered = matchesFilter && ImGui::IsItemHovered();
+    const bool inputReady = matchesFilter;
     const bool isLeftClicked = inputReady && ImGui::IsItemClicked(ImGuiMouseButton_Left);
     const bool isRightClicked = inputReady && ImGui::IsItemClicked(ImGuiMouseButton_Right);
     const bool isDoubleClicked = inputReady && isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
-    motion.hover = ImGuiExtras::AnimateTowards(motion.hover, (inputReady && isHovered) ? 1.0f : 0.0f, dt, 24.0f);
+    motion.hover = Stack::LibraryUi::ReducedMotion() ? (isHovered ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(motion.hover, isHovered ? 1.0f : 0.0f, dt, 24.0f);
     const ImRect motionRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    const float overlayAlpha = ImGuiExtras::EaseOutCubic(motion.hover);
+    const float overlayAlpha = ImGuiExtras::EaseOutCubic(motion.hover) * cardAlpha;
     drawList->AddRectFilled(
         motionRect.Min,
         motionRect.Max,
         IM_COL32(8, 11, 14, static_cast<int>(124.0f * overlayAlpha)),
         rounding);
-    DrawCardOverlayText(
+    if (overlayAlpha > 0.01f) DrawCardOverlayText(
         drawList,
         motionRect,
         overlayAlpha,
         asset.displayName,
         std::to_string(asset.width) + "x" + std::to_string(asset.height),
         !asset.projectName.empty() ? ("From: " + asset.projectName) : asset.fileName);
-    DrawCardMotionFrame(drawList, motionRect, motion.hover, motion.selected, isHovered);
+    DrawCardMotionFrame(drawList, motionRect, motion.hover, motion.selected, isHovered, cardAlpha);
 
     if (isLeftClicked) {
         if (ImGui::GetIO().KeyCtrl) {

@@ -50,7 +50,9 @@ bool Visual::ShouldRenderInterface() const {
 }
 
 bool Visual::AllowsInput() const {
-    return phase == Phase::Complete || phase == Phase::Disabled;
+    return phase == Phase::Complete || phase == Phase::Disabled ||
+        phase == Phase::RevealCaptionButtons ||
+        (phase == Phase::RevealInterface && interfaceOpacity >= 0.5f);
 }
 
 void Controller::Enable() {

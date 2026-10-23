@@ -192,7 +192,10 @@ void RenderPipeline::ExecuteGraphImpl(
         });
     // Keep near-black and extended scene values through the same precision
     // path on Background and layers. Display encoding is the final boundary.
-    if (sceneRaw) EnsureGraphFloat32Targets();
+    const bool preciseMath = std::any_of(graph.nodes.begin(), graph.nodes.end(), [](const auto& node) {
+        return node.kind == RenderGraphNodeKind::DataMath;
+    });
+    if (sceneRaw || preciseMath) EnsureGraphFloat32Targets();
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;

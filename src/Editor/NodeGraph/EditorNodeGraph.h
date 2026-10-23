@@ -131,13 +131,18 @@ public:
         const Stack::NodeMath::DefinitionReference& definition,
         std::string* error = nullptr);
     bool UnpackCompoundNode(int nodeId, std::vector<int>* unpackedNodeIds = nullptr, std::string* error = nullptr,
-        std::vector<CompoundOutputBinding>* outputBindings = nullptr);
+        std::vector<CompoundOutputBinding>* outputBindings = nullptr, bool retainBoundary = true);
+    bool RepackCompoundGroup(int groupId, int* compoundNodeId = nullptr, std::string* error = nullptr);
+    // Execution-only lowering: exact immutable compounds, bound instance
+    // values and authored component outputs, with stable output aliases.
+    // Failure leaves expanded unchanged.
+    // Editor one-level decompilation remains UnpackCompoundNode.
     bool ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* result = nullptr) const;
     bool CreateCompoundFromSelection(
         const std::vector<int>& nodeIds,
         const std::string& label,
         int* compoundNodeId = nullptr,
-        std::string* error = nullptr);
+        std::string* error = nullptr, const NodeGroup* retainedBoundary = nullptr);
 
     void SelectNode(int nodeId, bool additive = false);
     int GetSelectedNodeId() const { return m_SelectedNodeId; }

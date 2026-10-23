@@ -132,6 +132,8 @@ bool Validate(const BracketingRecipe& r, std::string& error, bool allowInactiveD
         return fail("Invalid depth-of-field settings.");
     if(r.depth.enabled&&r.reconstruction!=ReconstructionMode::Panorama&&r.alignmentMode!=AlignmentMode::AutomaticLocal)
         return fail("Depth reconstruction needs Automatic local alignment.");
+    if(r.aiAlignment&&(r.alignmentMode!=AlignmentMode::AutomaticLocal||r.reconstruction==ReconstructionMode::Panorama))
+        return fail("AI alignment needs Automatic local alignment and a non-panorama reconstruction.");
     if(std::string(ReconstructionModeName(r.reconstruction))=="invalid") return fail("Invalid reconstruction mode.");
     if(int(r.panorama.projection)<0||int(r.panorama.projection)>2||
        !std::isfinite(r.panorama.outputScale)||r.panorama.outputScale<.01||r.panorama.outputScale>1)
@@ -175,6 +177,7 @@ std::vector<int> ColorSlots(const BracketingRecipe& recipe) {
 nlohmann::json Serialize(const BracketingRecipe& r) {
     nlohmann::json j={{"version",RecipeVersion},{"origin",r.originFrameId},{"automatic",r.automatic},
         {"alignmentMode",AlignmentModeName(r.alignmentMode)},
+        {"aiAlignment",r.aiAlignment},
         {"reconstruction",ReconstructionModeName(r.reconstruction)},
         {"groups",nlohmann::json::array()},{"knots",nlohmann::json::array()}};
     j["panorama"]={{"projection",int(r.panorama.projection)},{"outputScale",r.panorama.outputScale},{"overlapDenoise",r.panorama.overlapDenoise}};
@@ -198,6 +201,7 @@ bool Deserialize(const nlohmann::json& j,BracketingRecipe& output,std::string& e
         if(storedVersion<1||storedVersion>RecipeVersion) {error="Unsupported bracketing recipe version.";return false;}
         r.version=RecipeVersion;r.originFrameId=j.at("origin").get<std::string>();
         r.automatic=j.value("automatic",true);
+        r.aiAlignment=j.value("aiAlignment",false);
         if(j.contains("depth")) {
             const auto& depth=j.at("depth");r.depth.enabled=depth.value("enabled",false);
             r.depth.focus=depth.value("focus",.5);r.depth.focusRange=depth.value("focusRange",.08);

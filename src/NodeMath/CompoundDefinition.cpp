@@ -134,7 +134,7 @@ bool DeserializeReference(const nlohmann::json& value, DefinitionReference& refe
 }
 
 nlohmann::json SerializePort(const CompoundPortDefinition& port) {
-    return {
+    nlohmann::json value = {
         { "id", port.id },
         { "label", port.label },
         { "direction", PortDirectionString(port.direction) },
@@ -143,6 +143,10 @@ nlohmann::json SerializePort(const CompoundPortDefinition& port) {
         { "internalInstanceUuid", port.internalInstanceUuid },
         { "internalSocketId", port.internalSocketId }
     };
+    // Numeric boundaries opt in explicitly; fixed typed ports omit the flag.
+    if (port.numeric) value["numeric"] = true;
+    if (port.advanced) value["advanced"] = true;
+    return value;
 }
 
 bool DeserializePort(const nlohmann::json& value, CompoundPortDefinition& port) {
@@ -158,6 +162,8 @@ bool DeserializePort(const nlohmann::json& value, CompoundPortDefinition& port) 
     port.optional = value.value("optional", false);
     port.internalInstanceUuid = value.value("internalInstanceUuid", std::string());
     port.internalSocketId = value.value("internalSocketId", std::string());
+    port.numeric = value.value("numeric", false);
+    port.advanced = value.value("advanced", false);
     return true;
 }
 
@@ -271,7 +277,9 @@ std::vector<ContractIssue> ValidateCompoundDefinition(const CompoundDefinition& 
 
     std::set<std::string> portIds;
     for (const CompoundPortDefinition& port : definition.ports) {
-        if (!IsValidScopedId(port.id) || !portIds.insert(port.id).second) {
+        const bool validPortId = IsValidScopedId(port.id) ||
+            (port.id.rfind("param:", 0) == 0 && IsValidScopedId(port.id.substr(6)));
+        if (!validPortId || !portIds.insert(port.id).second) {
             issues.push_back({ "ports.id", "compound port IDs must be unique stable tokens" });
         }
         if (port.logicalType == LogicalValueType::Invalid) {

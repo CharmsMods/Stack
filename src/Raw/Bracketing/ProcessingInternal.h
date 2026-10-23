@@ -1,6 +1,7 @@
 #pragma once
 #include "Processor.h"
 #include "CaptureMotion.h"
+#include "GroupProcessingMetrics.h"
 #include "Raw/ReconstructionDepth.h"
 #include "ProcessingTimer.h"
 #include "Raw/MultiFrameDenoise/Preparation.h"
@@ -49,6 +50,7 @@ struct PreparedDataset {
     unsigned width=0,height=0;
     std::map<std::string,double> stageSeconds;
     std::shared_ptr<TemporalGpu> combiningGpu;
+    mutable GroupProcessingMetrics groupMetrics;
 };
 struct Observation {
     double value=0,variance=0,headroom=0,support=0;
@@ -92,5 +94,12 @@ Pixel Blend(const std::vector<Observation>&,const std::vector<double>&,const Bra
 // Callers with bounded scratch arrays can blend without allocating per pixel.
 Pixel BlendWithWeights(const std::vector<Observation>&,const double*,std::size_t,
     const BracketingRecipe&,const std::array<double,64>* colorHeadroom=nullptr);
+struct LuminanceTransform {
+    std::array<unsigned,4> channels{};
+    std::array<float,9> cameraToSrgb{};
+    float redGain=1,blueGain=1;
+};
+LuminanceTransform BuildLuminanceTransform(const RawMetadata&);
+double Luminance(const LuminanceTransform&,const std::array<double,4>&);
 double Luminance(const RawMetadata&,const std::array<double,4>&);
 } // namespace Raw::Bracketing

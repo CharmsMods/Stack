@@ -4,6 +4,7 @@
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Project/RawProjectGraph.h"
+#include "Project/GraphSnapshotLookup.h"
 
 #include <algorithm>
 
@@ -19,9 +20,11 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
     context.animation = &m_RawLayerMaskWorkspace->animation;
     const auto document = context.documentId;
     const auto revision = m_Project->rawLayers.Revision();
-    const auto owned = [this,document,revision] {
+    const auto projectRevision = m_Project->editRevision;
+    const auto owned = [this,document,revision,projectRevision] {
         return GetProjectDocumentId() == document && IsEditingRawLayerMaskGraph() &&
-            m_RawLayerMaskWorkspace->projectCanvas && m_Project->rawLayers.Revision() == revision;
+            m_RawLayerMaskWorkspace->projectCanvas && m_Project->rawLayers.Revision() == revision &&
+            m_Project->editRevision == projectRevision;
     };
     const auto settingsFor = [this] {
         auto settings = nlohmann::json::array();
@@ -33,10 +36,9 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
         auto settings = settingsFor();
         for (const auto& node : graph.GetNodes()) if (node.kind == EditorNodeGraph::NodeKind::Layer && node.layerIndex >= 0)
             while (settings.size() <= static_cast<std::size_t>(node.layerIndex)) settings.push_back({{"type",node.typeId}});
-        RawLayerStackState candidate;
-        return ApplyRawProjectGraph(m_Project->rawLayers.State(),*m_RawLayerMaskWorkspace->projectCanvas,
-            graph,settings,m_RawLayerMaskWorkspace->layerId,candidate,error) &&
-            ValidateRawLayerStack(candidate,error,&m_Project->graph,ResolveRawWorkspaceStageOutputNodeId());
+        return m_Project->rawLayers.PrepareGraphEdit(*m_RawLayerMaskWorkspace->projectCanvas,
+            graph,settings,m_RawLayerMaskWorkspace->layerId,error,&m_Project->graph,
+            ResolveRawWorkspaceStageOutputNodeId(),m_Project->editRevision).has_value();
     };
     context.queryAvailableNodes = [this,owned,accepts](auto endpoint) {
         if (!owned()) return std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>{};
@@ -61,17 +63,16 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
         if (error) *error = std::move(reason);
         return valid;
     };
-    context.applyDocumentEdit = [this,owned](Stack::GraphModel::EditProposal proposal,nlohmann::json settings,
+    const auto commitGraph = [this,owned](EditorNodeGraph::Graph graph,nlohmann::json settings,
         Stack::Timeline::TimelineAnimationState animation,std::string& error) {
         if (!owned()) { error = "The project changed while this edit was prepared."; return false; }
-        EditorNodeGraph::Graph graph;
-        if (!Stack::GraphModel::ApplyEdit(graph,GetNodeGraph().GetStructureRevision(),std::move(proposal),error)) return false;
         Stack::GraphModel::ReindexLayerParameterRecords(graph);
         settings=Stack::GraphModel::LayerParameterRecords(graph);
-        RawLayerStackState candidate;
-        if (!ApplyRawProjectGraph(m_Project->rawLayers.State(),*m_RawLayerMaskWorkspace->projectCanvas,
-                graph,settings,m_RawLayerMaskWorkspace->layerId,candidate,error) ||
-            !ValidateRawLayerStack(candidate,error,&m_Project->graph,ResolveRawWorkspaceStageOutputNodeId())) return false;
+        RawGraphGroupOwners groupOwners;
+        auto prepared = m_Project->rawLayers.PrepareGraphEdit(*m_RawLayerMaskWorkspace->projectCanvas,
+            graph,settings,m_RawLayerMaskWorkspace->layerId,error,&m_Project->graph,
+            ResolveRawWorkspaceStageOutputNodeId(),m_Project->editRevision,&groupOwners);
+        if (!prepared) return false;
         std::vector<std::shared_ptr<LayerBase>> runtime;
         try {
             for (std::size_t i=0;i<settings.size();++i) {
@@ -83,9 +84,11 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
                 item->InitializeGL(); Stack::GraphModel::PrepareLayerParameterDraft(*item,settings[i]); runtime.push_back(std::move(item));
             }
         } catch (const std::exception& failure) { error = failure.what(); return false; }
+        if (!owned()) { error = "The project changed while this edit was prepared."; return false; }
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right)) m_Project->rawLayers.BeginGesture();
-        if (!ApplyRawLayerStackEdit(std::move(candidate))) { error=m_RawLayerStatus; return false; }
+        if (!m_Project->rawLayers.Commit(std::move(*prepared),error,true,false,m_Project->editRevision,&m_Project->graph)) return false;
         auto& workspace = *m_RawLayerMaskWorkspace;
+        workspace.projectCanvas->groupOwners=std::move(groupOwners);
         for (auto& node : graph.GetNodes()) if (node.id != workspace.projectCanvas->preparedSource &&
             node.id != workspace.projectCanvas->output) {
             if (node.rawLayerOwnerId.empty()) node.rawLayerOwnerId = workspace.layerId;
@@ -107,8 +110,30 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
         workspace.animation = std::move(animation);
         workspace.revision = m_Project->rawLayers.Revision();
         workspace.dirty = false; workspace.affectsPixels = false;
+        ReconcileRawNodeEditorSelection();
         MarkDirty(); MarkRenderRefreshDirty();
+        NoteRawWorkspaceRecipePreviewEdit(m_Project->rawLayers.GestureActive());
         return true;
+    };
+    context.applyDocumentEdit = [this,owned,commitGraph](Stack::GraphModel::EditProposal proposal,nlohmann::json settings,
+        Stack::Timeline::TimelineAnimationState animation,std::string& error) {
+        if (!owned() || proposal.sourceRevision != GetNodeGraph().GetStructureRevision()) {
+            error = "The project changed while this edit was prepared."; return false;
+        }
+        if (!proposal.analysis.valid) {
+            error = proposal.analysis.errors.empty() ? "The proposed edit is invalid." : proposal.analysis.errors.front();
+            return false;
+        }
+        // Mutable proposals are not trusted validation tokens. The final owned
+        // RAW document is validated by commitGraph, including composition edges.
+        return commitGraph(std::move(proposal.candidate),std::move(settings),std::move(animation),error);
+    };
+    context.applyCommand = [this,owned,commitGraph](const auto& edit,std::string& error) {
+        if (!owned()) { error = "The project changed while this edit was prepared."; return false; }
+        auto candidate = GetNodeGraph().CloneForAnalysis();
+        try { edit(candidate); }
+        catch (const std::exception& failure) { error=failure.what(); return false; }
+        return commitGraph(std::move(candidate),{},m_RawLayerMaskWorkspace->animation,error);
     };
     const auto apply = context.applyDocumentEdit;
     context.applyEdit = [this,apply](Stack::GraphModel::EditProposal proposal,std::string& error) {
@@ -139,8 +164,9 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
             RequestOpenRawLabTab();
             return true;
         }
-        const auto* definition=node ? EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node) : nullptr;
-        if (!node || !definition || definition->parameters.empty()) return false;
+        const auto definition=node ? EditorNodeGraphDefinitions::ResolveNodeDefinition(m_Project->graph,*node) :
+            EditorNodeGraphDefinitions::ResolvedNodeDefinition{};
+        if (!node || !definition || definition.ParameterCount()==0) return false;
         if (!FinishWorkspaceInteraction()) return true;
         m_Project->nodeEditor=NodeEditTarget{GetProjectDocumentId(),kProjectGraphId,node->instanceUuid};
         const auto& editor = Stack::Editor::FindNodeEditor(*node);
@@ -160,15 +186,19 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
     if (!CommitRawLayerMaskGraph()) return true;
     const auto* layerOwner=FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
     const auto choices=layerOwner ? Stack::Editor::RawLayerToolNodes(layerOwner->graph) : std::vector<const EditorNodeGraph::Node*>{};
-    const bool maskBranch=layerOwner && role==Stack::GraphModel::NodeRole::Ordinary &&
+    const bool hasNoEditableSurface=layerOwner && role==Stack::GraphModel::NodeRole::Ordinary &&
         kind!=EditorNodeGraph::NodeKind::Output && std::none_of(choices.begin(),choices.end(),
             [&](const auto* tool){return tool->instanceUuid==uuid;});
-    if (maskBranch) {
-        // Texture inspection and shape parameters belong to Graph. RAW's
-        // creation gesture may show handles, but masks are not image tools.
+    if (hasNoEditableSurface) {
+        // Connection-only or unresolved instances stay selected in Graph.
+        // Editable coverage and image operations share the same View path.
         SelectGraphNode(nodeId);
-        const auto* definition=EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node);
-        if (!definition || definition->parameters.empty()) return true;
+        const EditorNodeGraph::Node* authored=nullptr;
+        if (layerOwner) for (const auto& candidate:layerOwner->graph.GetNodes())
+            if (candidate.instanceUuid==uuid) { authored=&candidate; break; }
+        const auto definition=authored ? EditorNodeGraphDefinitions::ResolveNodeDefinition(layerOwner->graph,*authored) :
+            EditorNodeGraphDefinitions::ResolvedNodeDefinition{};
+        if (!definition || definition.ParameterCount()==0) return true;
     }
     m_Project->nodeEditor.reset();
     if (nodeId == m_RawLayerMaskWorkspace->projectCanvas->preparedSource) {
@@ -250,19 +280,32 @@ void EditorModule::BindBracketingSourceNodeEditor() {
 }
 
 int EditorModule::ResolveRawCanvasRenderNode(const RenderGraphSnapshot& snapshot,int nodeId) const {
-    if (!m_RawLayerMaskWorkspace) return 0;
+    int compiled = 0; std::string socket;
+    ResolveRawCanvasRenderOutput(snapshot, nodeId, {}, compiled, socket);
+    return compiled;
+}
+
+bool EditorModule::ResolveRawCanvasRenderOutput(const RenderGraphSnapshot& snapshot, int nodeId,
+    const std::string& socketId, int& compiledNodeId, std::string& compiledSocketId) const {
+    compiledNodeId = 0;
+    compiledSocketId.clear();
+    if (!m_RawLayerMaskWorkspace) return false;
     const auto& workspace = *m_RawLayerMaskWorkspace;
-    if (workspace.projectCanvas && nodeId == workspace.projectCanvas->preparedSource) return snapshot.rawLayerBackgroundNodeId;
-    if (workspace.projectCanvas && nodeId == workspace.projectCanvas->output) return snapshot.outputNodeId;
-    const auto* node = workspace.graph.FindNode(nodeId);
-    if (!node) return 0;
-    const auto owner = node->rawLayerOwnerId.empty() ? workspace.layerId : node->rawLayerOwnerId;
-    const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
-    const auto capture = snapshot.rawLayerMaskNodeIds.find(owner);
-    if (!layer || capture == snapshot.rawLayerMaskNodeIds.end()) return 0;
-    for (const auto& authored : layer->graph.GetNodes()) if (authored.instanceUuid == node->instanceUuid) {
-        const auto found = capture->second.find(authored.id);
-        return found == capture->second.end() ? 0 : found->second;
+    if (workspace.projectCanvas && nodeId == workspace.projectCanvas->preparedSource) {
+        compiledNodeId = snapshot.rawLayerBackgroundNodeId; compiledSocketId = "imageOut";
+        return compiledNodeId > 0;
     }
-    return 0;
+    if (workspace.projectCanvas && nodeId == workspace.projectCanvas->output) {
+        compiledNodeId = snapshot.outputNodeId;
+        compiledSocketId = snapshot.outputSocketId.empty() ? "imageOut" : snapshot.outputSocketId;
+        return compiledNodeId > 0;
+    }
+    const auto* node = workspace.graph.FindNode(nodeId);
+    if (!node) return false;
+    const auto owner = node->rawLayerOwnerId.empty() ? workspace.layerId : node->rawLayerOwnerId;
+    const auto port = socketId.empty() ? EditorNodeGraphDefinitions::DefaultOutputSocket(*node) : socketId;
+    const auto resolved = ResolveGraphSnapshotOutput(snapshot, {owner, node->instanceUuid, port});
+    if (!resolved) return false;
+    compiledNodeId = resolved->nodeId; compiledSocketId = resolved->socketId;
+    return compiledNodeId > 0;
 }

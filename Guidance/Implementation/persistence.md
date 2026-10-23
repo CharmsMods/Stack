@@ -14,6 +14,8 @@ For destructive operations, establish what the application owns and resolve the 
 
 The saved representation describes enough data to reconstruct the project. It is not a dump of C++ objects, widget fields, pointers, GPU handles or worker state. Decide whether a new value is authored data, a preference, transient state or a cache before adding it to serialization.
 
+Node notes are saved presentation metadata. Ordinary graphs serialize them beside node titles; RAW layer graphs retain owned-node notes and the projected source/output notes in their document. Commit and history restoration must not invalidate image processing or refresh Gallery image covers. Both history owners distinguish annotation edits and restore text by node identity without replacing accepted source data, pending analysis or active captures. Other non-processing metadata edits are not automatically annotation-only history. Edit buffers, wrapped-line caches, scrolling and the F-key reveal state are transient and are not saved.
+
 Capture a consistent project revision through the established save path. Writers should consume that captured data rather than query whichever editor happens to be active later. Include the assets and metadata required by that revision. Preserve edits and renames made after capture when acknowledging completion.
 
 For Save As, inspect how current live edits, source assets, project identity and destination are captured. Verify that switching the saved baseline to the copy does not overwrite the original or discard a later edit. Do not reuse an old saved snapshot as if it necessarily contains today's graph or timeline.
@@ -26,6 +28,6 @@ Decode and validate a candidate before replacing live state. Keep asynchronous l
 
 Keep catalog discovery and filtering separate from authoritative document storage. Publish catalog changes after successful writes and invalidate derived listings through the established mechanism. A Gallery refresh must not mutate open project data to make its display agree.
 
-A format change needs an explicit compatibility decision based on the current task. The earlier restructuring's permission to break old project formats is not a permanent waiver for future updates. Avoid compatibility machinery with no supported user need, and ask when the choice would affect existing projects and the request leaves it unresolved.
+Only the current project format is supported. The graph reader accepts schema 16 and rejects obsolete generations transactionally, preserving the live project. Do not add old-project migrations or legacy execution modes. Advance the schema when saved semantics change rather than silently reinterpreting obsolete data.
 
 Design paths, file access and capability handling for the supported Windows audience. Use application configuration and platform helpers rather than this machine's folders, hardware or developer-installed dependencies.

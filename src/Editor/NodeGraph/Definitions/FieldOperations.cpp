@@ -43,6 +43,9 @@ void AppendFieldOperations(std::vector<OperationRegistration>& operations) {
     add(MakeOperation(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Intersect), "Intersect Mask", "Mask / Math", "mask-combine:intersect"));
     add(MakeOperation(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Exclude), "Difference Mask", "Mask / Math", "mask-combine:exclude"));
     add(MakeOperation(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Invert), "Invert Mask", "Mask / Math", "mask-utility:invert"));
+    operations.back().definition.inspectability = Stack::NodeMath::Inspectability::GraphDefinedOptimizedEquivalent;
+    operations.back().definition.canonicalRecipeId = "stack:native-recipe/mask-invert";
+    operations.back().definition.decompositionReason.clear();
     add(MakeOperation(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Levels), "Remap Mask", "Mask / Math", "mask-utility:levels"));
     add(MakeOperation(EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Threshold), "Threshold Mask", "Mask / Math", "mask-utility:threshold"));
     add(MakeOperation(EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance), "Luminance Mask", "Mask / Math", "image-to-mask:luminance"));

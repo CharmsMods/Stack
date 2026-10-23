@@ -8,6 +8,7 @@
 #include "NodeMath/StylizeInput.h"
 
 #include <functional>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -64,6 +65,16 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         executionParameters["executionSourceSize"]={native.first,native.second};
     }
     const bool blurLayer=type=="GaussianBlur" || type=="BoxBlur";
+    if (blurLayer && executionParameters.value("sigmaMode", false)) {
+        const auto native = ResolveGraphNativeExtent(executionContext,input->fromNodeId,input->fromSocketId);
+        const double scale = native.first > 0 ? double(inputWidth)/native.first : 1.0;
+        const double sigma = executionParameters.contains("sigmaFraction")
+            ? executionParameters.value("sigmaFraction", 0.0015) * std::min(native.first,native.second)
+            : executionParameters.value("amount", 2.0);
+        if (!std::isfinite(sigma) || sigma < 0) return fail("Gaussian sigma must be finite and nonnegative.");
+        if (sigma == 0) { result.texture=inputTexture; return result; }
+        executionParameters["amount"] = sigma * scale;
+    }
     const bool noiseLayer=type=="Noise";
     Stack::Renderer::FilmGrain::Input noiseInput;
     if(noiseLayer){

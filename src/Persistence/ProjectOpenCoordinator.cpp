@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <system_error>
 
@@ -24,10 +25,7 @@ std::filesystem::path NormalizeProjectPath(const std::filesystem::path& path) {
     std::filesystem::path normalized = std::filesystem::absolute(path, ec);
     if (ec) normalized = path;
     normalized = normalized.lexically_normal();
-    if (normalized.filename() == "project.stack") {
-        normalized = normalized.parent_path();
-    }
-    return normalized;
+    return ResolveProjectStoreRoot(normalized);
 }
 
 bool IsRawProjectDocument(const StackBinaryFormat::ProjectDocument& document) {
@@ -223,7 +221,7 @@ ProjectFormatProbe ProjectOpenCoordinator::Probe(
 }
 
 ProjectOpenResult ProjectOpenCoordinator::Load(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path) try {
     ProjectOpenResult result;
     result.probe = Probe(path);
     if (!result.probe.supported) {
@@ -307,6 +305,17 @@ ProjectOpenResult ProjectOpenCoordinator::Load(
             "The current project generation was damaged, so Stack opened the previous generation read-only. Use Save As to create a repaired project.";
     }
     result.candidate = std::move(candidate);
+    return result;
+} catch (const std::exception& error) {
+    // Callers publish the returned failure through their normal completion
+    // path. Letting malformed metadata or filesystem errors escape a worker
+    // would leave the receiving project waiting for a candidate forever.
+    ProjectOpenResult result;
+    result.error = "The project could not be opened: " + std::string(error.what());
+    return result;
+} catch (...) {
+    ProjectOpenResult result;
+    result.error = "An unexpected error interrupted opening the project.";
     return result;
 }
 

@@ -18,7 +18,7 @@ namespace Stack::BurstEngine {
 namespace {
 constexpr UINT Updated=WM_APP+1;
 enum Control { Title=100, Summary, FormatLabel, Dng, Tiff, Jpeg, Png, LocationLabel,
-    Beside, Folder, Hint, Stage, Progress, Details, Reveal, Start, Close };
+    Beside, Folder, AiAlignment, Hint, Stage, Progress, Details, Reveal, Start, Close };
 enum class Phase { Analyzing, Ready, Processing, Finished };
 std::wstring Count(std::size_t n,const wchar_t* singular,const wchar_t* plural){return std::to_wstring(n)+L" "+(n==1?singular:plural);}
 std::wstring Wide(const std::string& text){return TextPath(text).wstring();}
@@ -69,9 +69,10 @@ struct Window {
         Place(FormatLabel,24,106,560,20);
         Place(Dng,24,134,133,44);Place(Tiff,165,134,133,44);Place(Png,306,134,133,44);Place(Jpeg,447,134,133,44);
         Place(LocationLabel,24,200,560,20);Place(Beside,24,228,274,44);Place(Folder,306,228,274,44);
-        Place(Hint,24,284,556,42);Place(Stage,24,340,556,38);Place(Progress,24,384,556,8);
+        Place(AiAlignment,24,282,556,26);
+        Place(Hint,24,316,556,42);Place(Stage,24,368,556,38);Place(Progress,24,412,556,8);
         RECT client{};GetClientRect(handle,&client);const int footer=MulDiv(client.bottom,96,int(dpi))-58;
-        Place(Details,32,410,540,std::max(40,footer-430));Place(Reveal,24,footer,180,36);Place(Start,286,footer,190,36);Place(Close,484,footer,96,36);
+        Place(Details,32,438,540,std::max(40,footer-458));Place(Reveal,24,footer,180,36);Place(Start,286,footer,190,36);Place(Close,484,footer,96,36);
     }
     void Create(){
         dpi=GetDpiForWindow(handle);session->window=handle;
@@ -84,6 +85,8 @@ struct Window {
         Add(Beside,L"BUTTON",L"Beside originals",BS_AUTORADIOBUTTON|BS_PUSHLIKE|WS_TABSTOP|WS_GROUP);
         Add(Folder,L"BUTTON",L"New subfolder",BS_AUTORADIOBUTTON|BS_PUSHLIKE|WS_TABSTOP);
         SendMessageW(Item(Folder),BM_SETCHECK,BST_CHECKED,0);
+        Add(AiAlignment,L"BUTTON",L"AI-assisted alignment (experimental)",BS_AUTOCHECKBOX|WS_TABSTOP);
+        SendMessageW(Item(AiAlignment),BM_SETCHECK,BST_UNCHECKED,0);
         Add(Hint,L"STATIC",L"Full-resolution outputs in a new Stack Burst folder.\r\nDNG stays editable; TIFF, PNG and JPEG are finished images.");
         Add(Stage,L"STATIC",L"Reading selected images...");Add(Progress,PROGRESS_CLASSW,L"");
         SendMessageW(Item(Progress),PBM_SETRANGE32,0,1000);
@@ -144,8 +147,9 @@ struct Window {
         if(busy||!current.plan||current.plan->bursts.empty())return;
         BatchOptions options;options.formats=Formats();if(options.formats.empty())return;
         options.location=SendMessageW(Item(Beside),BM_GETCHECK,0,0)==BST_CHECKED?OutputLocation::BesideOriginals:OutputLocation::NewFolder;
+        options.aiAlignment=SendMessageW(Item(AiAlignment),BM_GETCHECK,0,0)==BST_CHECKED;
         auto plan=current.plan;auto worker=session;worker->cancel=false;busy=true;current.phase=Phase::Processing;
-        for(int id:{Dng,Tiff,Jpeg,Png,Beside,Folder,Start})EnableWindow(Item(id),FALSE);
+        for(int id:{Dng,Tiff,Jpeg,Png,Beside,Folder,AiAlignment,Start})EnableWindow(Item(id),FALSE);
         Text(Close,L"Cancel");Text(Stage,L"Starting burst processing...");
         std::thread([worker,plan,options]{
             auto batch=std::make_shared<BatchResult>();
@@ -175,6 +179,10 @@ LRESULT CALLBACK Procedure(HWND handle,UINT message,WPARAM wparam,LPARAM lparam)
         case IDOK:case Start:window->Begin();break;
         case IDCANCEL:case Close:window->Cancel(false);break;
         case Dng:case Tiff:case Jpeg:case Png:window->UpdateStart();break;
+        case AiAlignment:
+            window->Text(Hint,SendMessageW(window->Item(AiAlignment),BM_GETCHECK,0,0)==BST_CHECKED?
+                L"SEA-RAFT suggests motion; RAW verification still decides.\r\nRequires the optional model package and may take longer.":
+                L"Standard alignment. DNG stays editable;\r\nTIFF, PNG and JPEG are finished images.");break;
         case Beside:case Folder:
             window->Text(Hint,LOWORD(wparam)==Beside?L"Full-resolution outputs beside each set's originals.\r\nExisting files are kept.":L"Full-resolution outputs in a new Stack Burst folder.\r\nDNG stays editable; TIFF, PNG and JPEG are finished images.");break;
         case Reveal:

@@ -22,6 +22,7 @@ namespace Stack::Renderer::GraphExecution {
 
 void GraphExecutionRuntime::BindMaskFingerprint() {
     fingerprintMask = [this](int nodeId, const std::string& socketId) -> std::size_t {
+        if (IsUniformRenderSocket(executionContext,nodeId,socketId)) return fingerprintScalar(nodeId,socketId);
         std::string key = std::to_string(nodeId) + ":" + socketId;
         auto cached = maskFingerprintCache.find(key);
         if (cached != maskFingerprintCache.end()) {
@@ -186,6 +187,7 @@ void GraphExecutionRuntime::BindMaskFingerprint() {
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
         } else if (node.kind == RenderGraphNodeKind::ChannelSplit) {
+            HashCombine(fingerprint, HashValue(node.splitMissingAlphaIsOpaque));
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
             HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
@@ -204,6 +206,9 @@ void GraphExecutionRuntime::BindMaskFingerprint() {
                 HashCombine(fingerprint, fingerprintMask(maskInput->fromNodeId, maskInput->fromSocketId));
             }
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.requiredLinearBasis));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.boundedMask));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.percentageInput));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.constantA));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.constantB));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.minValue));

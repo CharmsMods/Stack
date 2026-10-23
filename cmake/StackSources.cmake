@@ -33,6 +33,7 @@ if (NOT STACK_BUILD_BURST_DIAGNOSTICS)
 endif()
 # Worker entry points are never linked into the desktop process.
 list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/BurstEngine/.*\\.cpp$")
+list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/GraphRoutingBackend/.*\\.cpp$")
 list(APPEND STACK_APP_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Client.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Protocol.cpp"
@@ -44,6 +45,7 @@ endif()
 
 set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_behavior_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/compound_lowering_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/raw_layer_stack_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Graph/GraphDocumentRules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGraphOperation.cpp"
@@ -69,6 +71,10 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/raw_viewport_timing_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_render_policy_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_output_semantics_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_wire_routing_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_node_notes_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_channel_outputs_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/ChannelOutputs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppPaths.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_scale_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/node_layout_tests.cpp"
@@ -156,8 +162,18 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/Timeline/TimelineParameterEdits.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/EditorCompoundDefinitions.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/CompoundRecipes.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/CompoundRepacking.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/EditorNodeGraphCompound.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/GraphExpansionLayout.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/GraphRoomLayout.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/Layout/GraphFlowLayout.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/GraphWireRouting.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/GraphWireRoutingRuntime.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/GraphConnectionLayout.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/CompoundExecutionLowering.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/UnifiedNodeDefinitionRegistry.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/NativeNodeDecomposition.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/Definitions/OperationInventory.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/Definitions/OperationMetadata.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/NodeGraph/Definitions/OperationParameters.cpp"

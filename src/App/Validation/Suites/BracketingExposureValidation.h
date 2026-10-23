@@ -60,7 +60,7 @@ inline void ValidateBracketingLocalExposure() {
         const auto& expected=resident.Get(source);const auto& actual=evicting.Get(source);
         if(expected.size()!=actual.size()) throw std::runtime_error("Exposure evidence changed with memory budget");
         for(std::size_t p=0;p<expected.size();++p)
-            if(expected[p].valid!=actual[p].valid||expected[p].values!=actual[p].values)
+            if(expected[p].valid!=actual[p].valid||expected[p].values!=actual[p].values||expected[p].color!=actual[p].color)
                 throw std::runtime_error("Evicting exposure evidence changed local correspondence or clipping");
     }
 }

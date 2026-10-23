@@ -26,9 +26,11 @@ struct LibraryCardMotionState {
     float layoutTargetY = 0.0f;
     float layoutScale = 1.0f;
     float layoutTargetScale = 1.0f;
-    float layoutVelocityX = 0.0f;
-    float layoutVelocityY = 0.0f;
-    float layoutScaleVelocity = 0.0f;
+    float layoutStartX = 0.0f;
+    float layoutStartY = 0.0f;
+    float layoutStartScale = 1.0f;
+    double layoutStartedAt = 0.0;
+    bool layoutMoving = false;
     bool layoutInitialized = false;
     int lastSeenFrame = 0;
 };

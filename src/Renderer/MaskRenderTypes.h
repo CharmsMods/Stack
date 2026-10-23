@@ -366,6 +366,7 @@ struct RenderGraphNode {
     Stack::NodeMath::OutputChannelViewMode outputChannelViewMode =
         Stack::NodeMath::OutputChannelViewMode::Neutral;
     float constantChannelValue = 1.0f;
+    bool splitMissingAlphaIsOpaque = false;
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
     RenderGraphRawDevelopmentPayload rawDevelopment;

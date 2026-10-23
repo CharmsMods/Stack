@@ -5,6 +5,9 @@
 
 namespace Raw::Bracketing {
 inline constexpr const char* kLocalDetailRevision="local-temporal-dct-v1";
+inline std::uint64_t LocalDetailPatchCacheBytes(std::uint64_t memoryBudgetBytes) {
+    return std::min<std::uint64_t>(32ull*1024*1024,memoryBudgetBytes/32);
+}
 // Nearby patches revisit every capture. Keep a four-tile interpolation
 // footprint per capture when admitted, plus the reference gradient halo.
 // Both the actual sampler and worker admission use this same bounded plan.
@@ -29,9 +32,10 @@ inline std::uint64_t LocalDetailWorkingBytes(std::size_t captures,unsigned tileP
         captures,tilePixels,memoryBudgetBytes))+1)*
         (static_cast<long double>(tilePixels)*tilePixels*9+1024);
     const long double bytes=frames*640*1024+frames*frames*sizeof(double)+
-        static_cast<long double>(tilePixels)*tilePixels*32+40ull*1024*1024+cacheBytes;
+        static_cast<long double>(tilePixels)*tilePixels*32+40ull*1024*1024+cacheBytes+
+        LocalDetailPatchCacheBytes(memoryBudgetBytes);
     return bytes>=std::numeric_limits<std::uint64_t>::max()?std::numeric_limits<std::uint64_t>::max():std::uint64_t(bytes);
 }
 bool CombineLocalDetail(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,
-    std::vector<std::vector<Observation>>&,std::string&);
+    std::vector<std::vector<Observation>>&,std::string&,LocalDetailStats* stats=nullptr);
 }

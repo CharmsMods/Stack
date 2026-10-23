@@ -26,8 +26,10 @@ void SetExtent(ValueDescriptor& descriptor, int width, int height) {
     descriptor.spatial = SemanticField<SpatialDescriptor>::Known(spatial);
 }
 
-void SetChannel(GraphOutputDescription& output, const std::string& role = "value",
+void SetChannel(GraphOutputDescription& output, const std::string& requestedRole = {},
     LogicalValueType type = LogicalValueType::Invalid) {
+    const std::string role = requestedRole.empty()
+        ? (output.componentRole.empty() ? "value" : output.componentRole) : requestedRole;
     const auto previous = output.descriptor;
     if (type==LogicalValueType::Invalid) type=IsSingleChannelValue(previous.logicalType) ? previous.logicalType : LogicalValueType::Channel;
     output.descriptor = MakeUnknownDescriptor(type);
@@ -36,7 +38,15 @@ void SetChannel(GraphOutputDescription& output, const std::string& role = "value
     output.descriptor.sampling = previous.sampling;
     output.descriptor.precision = previous.precision;
     output.descriptor.range = previous.range;
-    output.descriptor.units = SemanticField<UnitDescriptor>::Known({ UnitKind::Unitless, {} });
+    // A numeric channel has no color transform. Retain separate provenance
+    // for an explicit subsequent RGB assembly without invalid descriptors.
+    if (previous.logicalType == LogicalValueType::ColorImage) {
+        output.channelBasis = previous.color;
+        output.channelTransfer = previous.transfer;
+        output.channelReference = previous.reference;
+    }
+    if (type != LogicalValueType::Mask)
+        output.descriptor.units = SemanticField<UnitDescriptor>::Known({ UnitKind::Unitless, {} });
     output.componentRole = role == "value" ? std::string() : role;
     if (role == "value") output.componentOrigin.clear();
 }
@@ -75,19 +85,39 @@ GraphOutputDescription MergeSignals(const std::vector<const GraphOutputDescripti
     GraphOutputDescription output;
     output.descriptor = MakeUnknownDescriptor(defaultType);
     if (signals.empty()) return output;
+    std::vector<const GraphOutputDescription*> spatial;
+    for (const auto* signal : signals)
+        if (signal->descriptor.logicalType != LogicalValueType::Scalar &&
+            signal->descriptor.logicalType != LogicalValueType::Integer) spatial.push_back(signal);
+    if (spatial.size() != signals.size()) {
+        if (spatial.empty()) {
+            output.descriptor = MakeUnknownDescriptor(LogicalValueType::Scalar);
+            output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless,{}});
+        } else output = MergeSignals(spatial, defaultType, neutral);
+        for (const auto* signal : signals) MergeDiagnostics(output, *signal);
+        return output;
+    }
     const auto image = std::find_if(signals.begin(), signals.end(), [](const auto* signal) {
         return signal->descriptor.logicalType == LogicalValueType::ColorImage;
     });
     // A single channel broadcasts across an RGB operand. The resulting layout
     // belongs to that RGB value regardless of operand order.
-    const auto* prototype = image == signals.end() ? signals.front() : *image;
+    const auto uniform=[](const GraphOutputDescription* input) {
+        const auto& range=input->descriptor.range;
+        return input->componentOrigin.empty() && IsSingleChannelValue(input->descriptor.logicalType) &&
+            range.state==KnowledgeState::Known && range.value.nominalMinimum==range.value.nominalMaximum &&
+            !range.value.allowsBelowNominal && !range.value.allowsAboveNominal &&
+            range.value.nonFinite==NonFinitePolicy::Forbidden;
+    };
+    const auto varying=std::find_if(signals.begin(),signals.end(),[&](const auto* signal){return !uniform(signal);});
+    const auto* prototype = image != signals.end()?*image:varying!=signals.end()?*varying:signals.front();
     output = *prototype;
     bool singleChannel = true;
     bool sameComponent = !output.componentOrigin.empty();
     const auto initialComponents = output.descriptor.presentImageComponents;
     for (const auto* input : signals) {
         singleChannel &= IsSingleChannelValue(input->descriptor.logicalType);
-        sameComponent &= input->componentOrigin == output.componentOrigin &&
+        if(!uniform(input))sameComponent &= input->componentOrigin == output.componentOrigin &&
             input->componentRole == output.componentRole;
         const bool broadcastChannel = image != signals.end() && IsSingleChannelValue(input->descriptor.logicalType);
         if (!broadcastChannel && input->descriptor.presentImageComponents != initialComponents) {
@@ -99,14 +129,17 @@ GraphOutputDescription MergeSignals(const std::vector<const GraphOutputDescripti
         }
         if (!broadcastChannel && input->descriptor.color != prototype->descriptor.color) output.descriptor.color = SemanticField<ColorIdentity>::Unknown();
         if (!broadcastChannel && input->descriptor.transfer != prototype->descriptor.transfer) output.descriptor.transfer = SemanticField<TransferDescriptor>::Unknown();
+        if (!uniform(input) && input->channelBasis != prototype->channelBasis) output.channelBasis = SemanticField<ColorIdentity>::Unknown();
+        if (!uniform(input) && input->channelTransfer != prototype->channelTransfer) output.channelTransfer = SemanticField<TransferDescriptor>::Unknown();
+        if (!uniform(input) && input->channelReference != prototype->channelReference) output.channelReference = SemanticField<ReferenceState>::Unknown();
         MergeDiagnostics(output, *input);
     }
     if (singleChannel) {
-        const std::string role = !neutral && sameComponent && signals.front()->descriptor.channels.state == KnowledgeState::Known
-            ? signals.front()->descriptor.channels.value.roles.front() : "value";
+        const std::string role = sameComponent && prototype->descriptor.channels.state == KnowledgeState::Known &&
+            !prototype->descriptor.channels.value.roles.empty()?prototype->descriptor.channels.value.roles.front():"value";
         SetChannel(output, role);
     }
-    if (neutral || !sameComponent) {
+    if ((!singleChannel && neutral) || !sameComponent) {
         output.componentOrigin.clear();
         output.componentRole.clear();
     }
@@ -115,11 +148,41 @@ GraphOutputDescription MergeSignals(const std::vector<const GraphOutputDescripti
 }
 }
 
+GraphOutputDescription ExtractChannel(const Node& node, const std::string& socketId,
+    const std::string& component, const GraphOutputDescription* input, bool opaqueAlpha) {
+    GraphOutputDescription output;
+    output.descriptor=MakeUnknownDescriptor(LogicalValueType::ColorImage);
+    if(input)output=*input;
+    const auto image=output.descriptor;
+    std::string role=component;
+    std::transform(role.begin(),role.end(),role.begin(),[](unsigned char c){return static_cast<char>(std::toupper(c));});
+    SetChannel(output,role);
+    output.componentOrigin=image.provenance.state==KnowledgeState::Known
+        ? image.provenance.value.operationIdentity+"."+role : GraphOutputIdentity(node.id,socketId);
+    if(input) {
+        const auto selected=ParseImageComponentToken(role);
+        if(image.logicalType!=LogicalValueType::ColorImage) {
+            output.componentOrigin.clear();AddDiagnostic(output,node,socketId,"RGB components require an RGB value");
+        }
+        else if(selected && image.presentImageComponents.state==KnowledgeState::Known &&
+            !HasImageComponent(image.presentImageComponents.value,*selected)) {
+            if(role=="A" && opaqueAlpha) {
+                output.descriptor.range=SemanticField<NumericRange>::Known({1,1,false,false,NonFinitePolicy::Forbidden});
+                output.componentOrigin.clear();
+            } else AddDiagnostic(output,node,socketId,role+" component is absent");
+        }
+    }
+    return output;
+}
+
 GraphOutputDescription Describe(const Node& node, const std::string& socketId, const Inputs& inputs,
     LogicalValueType declaredType, const GraphOutputContext& context) {
     if (node.role == Stack::GraphModel::NodeRole::Reference && node.referenceType != LogicalValueType::Invalid) {
         GraphOutputDescription reference;
         reference.descriptor = MakeUnknownDescriptor(node.referenceType);
+        if (const auto source=context.sourceDescriptors.find(GraphOutputIdentity(node.id,socketId));
+            source!=context.sourceDescriptors.end()) reference.descriptor=source->second;
+        else if (const auto input=inputs.find("referenceIn");input!=inputs.end()) reference=*input->second;
         return reference;
     }
     GraphOutputDescription output;
@@ -131,7 +194,9 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     const auto use = [&](const std::string& id, bool required = true) {
         if (const auto* value = input(id)) { output = *value; return true; }
         if (required) {
-            output.descriptor = MakeUnknownDescriptor(LogicalValueType::Invalid);
+            // A missing connection affects availability, not the declared
+            // value shape. Keep a serializable descriptor for inspection.
+            output.descriptor = MakeUnknownDescriptor(declaredType);
             AddDiagnostic(output, node, socketId, "Missing input " + id, DiagnosticSeverity::Information);
         }
         return false;
@@ -171,22 +236,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
             node.constantChannelSettings.value, false, false, NonFinitePolicy::Forbidden });
         break;
     case NodeKind::ChannelSplit: {
-        const bool connected = use(kImageInputSocketId);
-        const auto image = output.descriptor;
-        std::string role = socketId;
-        std::transform(role.begin(), role.end(), role.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        SetChannel(output, role);
-        output.componentOrigin = image.provenance.state == KnowledgeState::Known
-            ? image.provenance.value.operationIdentity + "." + role
-            : GraphOutputIdentity(node.id, socketId);
-        if (connected) {
-            const auto component = ParseImageComponentToken(role);
-            if (image.logicalType != LogicalValueType::ColorImage) AddDiagnostic(output, node, socketId, "RGB components require an RGB value");
-            else if (component && image.presentImageComponents.state == KnowledgeState::Known &&
-                !HasImageComponent(image.presentImageComponents.value, *component)) {
-                AddDiagnostic(output, node, socketId, role + " component is absent");
-            }
-        }
+        output=ExtractChannel(node,socketId,socketId,input(kImageInputSocketId),node.splitMissingAlphaIsOpaque);
         break;
     }
     case NodeKind::ChannelCombine: {
@@ -204,9 +254,19 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 first = value;
                 output.descriptor.spatial = value->descriptor.spatial;
                 output.descriptor.sampling = value->descriptor.sampling;
+                output.descriptor.color = value->channelBasis;
+                output.descriptor.transfer = value->channelTransfer;
+                output.descriptor.reference = value->channelReference;
             } else if (first->descriptor.spatial != value->descriptor.spatial) {
                 output.descriptor.spatial = SemanticField<SpatialDescriptor>::Unknown();
                 AddDiagnostic(output, node, socketId, "Channel extents do not agree");
+            }
+            if (i < 3 && first && first->channelBasis.state == KnowledgeState::Known &&
+                value->channelBasis.state == KnowledgeState::Known &&
+                (first->channelBasis != value->channelBasis || first->channelTransfer != value->channelTransfer)) {
+                output.descriptor.color = SemanticField<ColorIdentity>::Unknown();
+                output.descriptor.transfer = SemanticField<TransferDescriptor>::Unknown();
+                AddDiagnostic(output, node, socketId, "RGB channels use different color bases or transfers; convert before combining.");
             }
             if (!IsSingleChannelValue(value->descriptor.logicalType)) AddDiagnostic(output, node, socketId, "Assembly requires one channel per component");
         }
@@ -225,10 +285,14 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 const auto* value = input(DataMathInputSocketId(i));
                 if (!value) continue;
                 MergeDiagnostics(output, *value);
-                if (value->descriptor.logicalType != LogicalValueType::Scalar)
+                if (value->descriptor.logicalType != LogicalValueType::Scalar &&
+                    value->descriptor.logicalType != LogicalValueType::Integer)
                     AddDiagnostic(output, node, socketId, "Values require uniform Scalar inputs");
-                else if (value->descriptor.units.state != KnowledgeState::Known ||
-                    value->descriptor.units.value.kind != UnitKind::Unitless)
+                else if (!(value->descriptor.logicalType == LogicalValueType::Integer &&
+                           value->descriptor.units.state == KnowledgeState::NotApplicable) &&
+                    (value->descriptor.units.state != KnowledgeState::Known ||
+                    (value->descriptor.units.value.kind != UnitKind::Unitless &&
+                     !(i==0 && node.dataMathSettings.percentageInput && value->descriptor.units.value.kind==UnitKind::Percent))))
                     AddDiagnostic(output, node, socketId, "Value Math requires unitless inputs");
             }
             rendered = false;
@@ -240,8 +304,47 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         auto values = signals(ports);
         output = MergeSignals(values, node.dataMathMode == DataMathMode::Average ? LogicalValueType::Channel : declaredType,
             node.dataMathMode == DataMathMode::Average);
+        {
+            const GraphOutputDescription* extent = nullptr;
+            const GraphOutputDescription* color = nullptr;
+            for (const auto* value : values) {
+                if ((value->descriptor.logicalType==LogicalValueType::Scalar || value->descriptor.logicalType==LogicalValueType::Integer) &&
+                    value->descriptor.units.state==KnowledgeState::Known && value->descriptor.units.value.kind!=UnitKind::Unitless)
+                    AddDiagnostic(output,node,socketId,"Ordinary arithmetic requires unitless values; use an explicit unit conversion or Percent.");
+                if (value->descriptor.spatial.state == KnowledgeState::Known) {
+                    if (extent && extent->descriptor.spatial != value->descriptor.spatial)
+                        AddDiagnostic(output,node,socketId,"Input dimensions or coordinate grids differ; insert an explicit Reformat.");
+                    else extent = value;
+                }
+                if (value->descriptor.logicalType == LogicalValueType::ColorImage && value->descriptor.color.state == KnowledgeState::Known) {
+                    if (color && (color->descriptor.color != value->descriptor.color || color->descriptor.transfer != value->descriptor.transfer))
+                        AddDiagnostic(output,node,socketId,"RGB operands use different color spaces or transfer functions; convert explicitly.");
+                    else color = value;
+                }
+            }
+            if ((node.dataMathMode == DataMathMode::Remap && node.dataMathSettings.minValue >= node.dataMathSettings.maxValue) ||
+                (node.dataMathMode == DataMathMode::Clamp && node.dataMathSettings.minValue > node.dataMathSettings.maxValue))
+                AddDiagnostic(output,node,socketId,"The input limits must be in increasing order.");
+        }
         if (values.empty()) AddDiagnostic(output, node, socketId, "Connect a data input");
-        if (node.dataMathMode == DataMathMode::Average) SetChannel(output);
+        if (node.dataMathMode == DataMathMode::Average || node.dataMathSettings.domain == ArithmeticDomain::Channel) SetChannel(output);
+        if (!node.dataMathSettings.requiredLinearBasis.empty()) {
+            const auto* source = input(kMixInputASocketId);
+            if (source && (source->descriptor.color.state != KnowledgeState::Known ||
+                source->descriptor.color.value.identity != node.dataMathSettings.requiredLinearBasis ||
+                source->descriptor.transfer.state != KnowledgeState::Known ||
+                source->descriptor.transfer.value.kind != TransferKind::Linear))
+                AddDiagnostic(output, node, socketId, "Requires linear " + node.dataMathSettings.requiredLinearBasis +
+                    "; convert the input or choose the matching Luminance/Halation definition.");
+            if (source && source->descriptor.alpha.state == KnowledgeState::Known &&
+                source->descriptor.alpha.value == AlphaMode::Premultiplied)
+                AddDiagnostic(output,node,socketId,"Requires straight RGB for luminance and emission; insert explicit Unpremultiply before this operation.");
+        }
+        if (node.dataMathSettings.boundedMask && node.dataMathMode == DataMathMode::Clamp &&
+            node.dataMathSettings.minValue == 0 && node.dataMathSettings.maxValue == 1) {
+            SetChannel(output, {}, LogicalValueType::Mask);
+            output.descriptor.range = SemanticField<NumericRange>::Known({0,1,false,false,NonFinitePolicy::Forbidden});
+        }
         if (const auto* mask = input(kMaskInputSocketId)) MergeDiagnostics(output, *mask);
         break;
     }
@@ -427,6 +530,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     if (rendered && IsImageLike(output.descriptor.logicalType)) {
         output.descriptor.precision = SemanticField<LogicalPrecision>::Known(
             node.kind == NodeKind::CustomMask ||
+            (node.kind == NodeKind::DataMath) ||
             (node.kind==NodeKind::RawOperation && (node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
                 node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::Exposure))
             ? LogicalPrecision::Float32 : LogicalPrecision::Float16);

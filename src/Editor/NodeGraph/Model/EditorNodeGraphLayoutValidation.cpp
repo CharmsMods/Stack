@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
@@ -351,6 +352,7 @@ void Graph::AutoLayout() {
 }
 
 ValidationResult Graph::Validate() const {
+    ScopedGraphOutputAnalysis outputAnalysis(*this);
     ValidationResult result;
     std::set<int> ids;
     std::set<std::string> instanceUuids;
@@ -358,6 +360,10 @@ ValidationResult Graph::Validate() const {
     std::set<int> outgoingImages;
 
     for (const Node& node : m_Nodes) {
+        std::string channelError;
+        if (!node.channelOutputs.empty() && !ValidateChannelOutputs(node,GetSockets(node,false),channelError)) {
+            result.valid=false;result.messages.push_back("Node " + std::to_string(node.id) + ": " + channelError);
+        }
         if (node.id <= 0 || !ids.insert(node.id).second) {
             result.valid = false;
             result.messages.push_back("Duplicate or invalid node id.");
@@ -588,16 +594,6 @@ bool Graph::IsRenderLink(const Link& link) const {
     if (fromSocket.type == SocketType::Raw && toSocket.type == SocketType::Raw) {
         return true;
     }
-    if (ConnectionRules::IsChannelProcessingBridge(
-            *this,
-            link.fromNodeId,
-            link.fromSocketId,
-            fromSocket,
-            *to,
-            link.toSocketId,
-            toSocket)) {
-        return true;
-    }
     if ((fromSocket.type == SocketType::Channel) &&
         fromSocket.type == toSocket.type) {
         return true;
@@ -627,8 +623,9 @@ bool Graph::IsRenderLink(const Link& link) const {
     if (fromSocket.type == SocketType::Image && toSocket.type == SocketType::Image) {
         return true;
     }
-
-    return false;
+    return ConnectionRules::IsChannelProcessingBridge(
+        *this, link.fromNodeId, link.fromSocketId, fromSocket,
+        *to, link.toSocketId, toSocket);
 }
 
 const Link* Graph::FindInputLink(int nodeId, const std::string& socketId) const {

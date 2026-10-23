@@ -108,6 +108,14 @@ std::filesystem::path NormalizeDirectoryStorePath(
     const std::filesystem::path& requestedPath) {
     if (LowerAscii(requestedPath.filename().u8string()) ==
         kWorkingProjectManifestName) {
+        // A packed project is allowed to be named project.stack, and a
+        // project directory can have that name too. Only an actual bundle
+        // manifest (or its not-yet-created path) denotes the parent store.
+        std::error_code error;
+        if (std::filesystem::is_directory(requestedPath, error) ||
+            IsPortableV3Project(requestedPath)) {
+            return requestedPath.lexically_normal();
+        }
         return requestedPath.parent_path().lexically_normal();
     }
     return requestedPath.lexically_normal();
@@ -1089,6 +1097,7 @@ public:
             error = "Could not read the complete embedded project asset (expected " +
                 std::to_string(source.byteLength) + " bytes, copied " +
                 std::to_string(copied) + ").";
+            output.close();
             std::error_code cleanupError;
             std::filesystem::remove(temporary, cleanupError);
             return Finish(errorMessage, error, false);
@@ -1146,7 +1155,9 @@ public:
                 }
                 output.close();
                 std::string identityError;
-                if (output.good() && !VerifyFileIdentity(verificationPath, asset, identityError)) {
+                if (!output.good()) {
+                    localErrors.push_back("Could not finish writing asset for verification: " + asset.assetId);
+                } else if (!VerifyFileIdentity(verificationPath, asset, identityError)) {
                     localErrors.push_back(identityError + " " + asset.assetId);
                 }
                 std::error_code cleanupError;
@@ -1414,14 +1425,16 @@ private:
         json manifest;
         if (m_Kind == ProjectStorageKind::DirectoryBundle) {
             if (!ReadJsonFile(CurrentManifestPath(), manifest, error)) return false;
-            if (!m_Snapshot.projectId.empty() && manifest.value("metadata", json::object()).value("projectId", std::string()) != m_Snapshot.projectId) {
-                error = "A different project now occupies the save location.";
-                return false;
-            }
             revision = manifest.value("_store", json::object()).value("generation", 0ull);
-            return revision > 0u;
+        } else if (!FindLastPortableManifest(m_Path, manifest, revision, nullptr, error)) {
+            return false;
         }
-        return FindLastPortableManifest(m_Path, manifest, revision, nullptr, error);
+        if (!m_Snapshot.projectId.empty() &&
+            manifest.value("metadata", json::object()).value("projectId", std::string()) != m_Snapshot.projectId) {
+            error = "A different project now occupies the save location.";
+            return false;
+        }
+        return revision > 0u;
     }
 
     bool LoadCoverThumbnail(std::vector<unsigned char>& bytes, std::string& error) const {

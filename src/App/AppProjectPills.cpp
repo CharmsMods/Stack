@@ -69,8 +69,14 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 3.f * rail.scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 3.f * rail.scale);
-    ImGui::BeginChild("OpenProjectPills", size, ImGuiChildFlags_None,
+    const bool visible = ImGui::BeginChild("OpenProjectPills", size, ImGuiChildFlags_None,
         ImGuiWindowFlags_NoBackground);
+    if (!visible) {
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        UpdateProjectPillPreview(0);
+        return;
+    }
     const bool enabled = CanSwitchProjectWorkspace();
     std::uint64_t hovered = 0;
     bool activationQueued = false;
@@ -84,7 +90,9 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         std::string name = workspace->editor->GetCurrentProjectName();
         if (name.empty()) name = "Untitled project";
         const bool dirty = workspace->editor->NeedsWorkspaceSaveBeforeTransition();
-        const bool clicked = ImGui::InvisibleButton(name.c_str(),
+        // The workspace scope supplies identity; renaming must not replace the
+        // active/navigation item during a press or save completion.
+        const bool clicked = ImGui::InvisibleButton("##ProjectPill",
             ImVec2(size.x - 4.f * rail.scale, 24.f * rail.scale), ImGuiButtonFlags_EnableNav);
         const bool focused = ImGui::IsItemFocused();
         const bool over = ImGui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride);

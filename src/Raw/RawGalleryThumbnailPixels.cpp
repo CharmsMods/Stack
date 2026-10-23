@@ -5,6 +5,39 @@
 
 namespace Stack::RawWorkspace {
 namespace {
+bool OrientThumbnailPixels(std::vector<unsigned char>& pixels, int& width,
+    int& height, int orientation, const std::function<bool()>& shouldCancel) {
+    if (orientation < 2 || orientation > 8) return true;
+
+    const bool swapsDimensions = orientation >= 5;
+    const int outputWidth = swapsDimensions ? height : width;
+    const int outputHeight = swapsDimensions ? width : height;
+    std::vector<unsigned char> upright(pixels.size());
+    for (int y = 0; y < outputHeight; ++y) {
+        if (shouldCancel && shouldCancel()) return false;
+        for (int x = 0; x < outputWidth; ++x) {
+            int sx = x;
+            int sy = y;
+            switch (orientation) {
+                case 2: sx = width - 1 - x; break;
+                case 3: sx = width - 1 - x; sy = height - 1 - y; break;
+                case 4: sy = height - 1 - y; break;
+                case 5: sx = y; sy = x; break;
+                case 6: sx = y; sy = height - 1 - x; break;
+                case 7: sx = width - 1 - y; sy = height - 1 - x; break;
+                case 8: sx = width - 1 - y; sy = x; break;
+            }
+            const std::size_t source = (static_cast<std::size_t>(sy) * width + sx) * 4u;
+            const std::size_t destination = (static_cast<std::size_t>(y) * outputWidth + x) * 4u;
+            std::copy_n(pixels.data() + source, 4, upright.data() + destination);
+        }
+    }
+    pixels.swap(upright);
+    width = outputWidth;
+    height = outputHeight;
+    return true;
+}
+
 float NormalizeRawValue(float value, const Raw::RawMetadata& metadata) {
     const float black = metadata.blackLevel;
     const float white = std::max(black + 1.0f, metadata.whiteLevel);
@@ -393,13 +426,19 @@ bool BuildRawGalleryThumbnailPixels(const Raw::RawImageData& raw, int maxDimensi
     std::vector<unsigned char>& pixels, int& width, int& height,
     bool fastPreview, const std::function<bool()>& shouldCancel) {
     if (maxDimension <= 0 || (shouldCancel && shouldCancel())) return false;
+    bool built = false;
     if (raw.metadata.pixelLayout == Raw::RawPixelLayout::LinearRgb) {
-        return fastPreview
+        built = fastPreview
             ? BuildFastLinearThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel)
             : BuildHighQualityLinearThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel);
+    } else {
+        built = fastPreview
+            ? BuildFastMosaicThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel)
+            : BuildHighQualityMosaicThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel);
     }
-    return fastPreview
-        ? BuildFastMosaicThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel)
-        : BuildHighQualityMosaicThumbnailPixels(raw, maxDimension, pixels, width, height, shouldCancel);
+    // Cache display-oriented pixels once, before PNG encoding and scene matching.
+    // All Gallery consumers then use the same upright image and dimensions.
+    return built && OrientThumbnailPixels(
+        pixels, width, height, raw.metadata.orientation, shouldCancel);
 }
 } // namespace Stack::RawWorkspace

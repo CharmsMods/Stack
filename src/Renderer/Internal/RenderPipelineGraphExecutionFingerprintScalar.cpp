@@ -49,6 +49,7 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
             std::size_t fingerprint = HashValue(node.definitionHash);
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
             const auto& settings = node.dataMathSettings;
+            HashCombine(fingerprint,HashValue(settings.percentageInput));
             for (const auto value : {settings.constantA, settings.constantB, settings.minValue,
                     settings.maxValue, settings.outMin, settings.outMax}) HashCombine(fingerprint, HashValue(value));
             const bool average = node.dataMathMode == RenderDataMathMode::Average;

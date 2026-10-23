@@ -209,10 +209,16 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
                     }
                     const auto point = ImVec2(origin.x + indent + 4 * m_Unit, origin.y + 13 * m_Unit);
                     auto* draw = ImGui::GetWindowDrawList();
+                    auto* storage = ImGui::GetStateStorage();
+                    const auto expansionId = ImGui::GetID("DisclosureExpansion");
+                    float& expansion = *storage->GetFloatRef(expansionId, folder.expanded ? 1.f : 0.f);
+                    const float target = folder.expanded ? 1.f : 0.f;
+                    if (Ui::ReducedMotion()) expansion = target;
+                    else if (expansion != target) Header::ApproachMotion(expansion, target, .18f);
                     // Arrow sits before the folder glyph, within its own rail.
                     draw->AddTriangleFilled(point,
-                        ImVec2(point.x + (folder.expanded ? 6 : 0) * m_Unit, point.y + (folder.expanded ? 0 : 6) * m_Unit),
-                        ImVec2(point.x + (folder.expanded ? 3 : 4) * m_Unit, point.y + (folder.expanded ? 4 : 3) * m_Unit),
+                        ImVec2(point.x + 6.f * expansion * m_Unit, point.y + 6.f * (1.f - expansion) * m_Unit),
+                        ImVec2(point.x + (4.f - expansion) * m_Unit, point.y + (3.f + expansion) * m_Unit),
                         ImGui::GetColorU32(m_Secondary));
                 }
                 ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + folderHeight));

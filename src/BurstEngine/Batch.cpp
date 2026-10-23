@@ -52,6 +52,7 @@ BatchResult RunBatch(const SelectionResult& plan,const BatchOptions& options,
                 const auto budget=Raw::Mfd::ResolveMfdProcessingMemoryBudget(0,Raw::Mfd::QueryPhysicalMemorySnapshot());
                 if(!budget.valid)throw std::runtime_error(budget.message);
                 Raw::Bracketing::ProcessingRequest request;request.sources=set.sources;request.recipe=set.recipe;
+                request.recipe.aiAlignment=options.aiAlignment;
                 request.memoryBudgetBytes=budget.budgetBytes;request.automaticMemoryBudget=true;
                 request.workerCount=Raw::Bracketing::ResolveBracketingWorkerCount(budget.budgetBytes);
                 request.preferGpuCombining=options.preferGpuCombining;

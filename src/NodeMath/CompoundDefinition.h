@@ -30,6 +30,11 @@ struct CompoundPortDefinition {
     bool optional = false;
     std::string internalInstanceUuid;
     std::string internalSocketId;
+    // Arithmetic boundary: accepts RGB, one-channel data or uniform numbers.
+    // The canonical graph determines the concrete output descriptor.
+    bool numeric = false;
+    // Inspection taps and optional control wires use the shared advanced reveal.
+    bool advanced = false;
 };
 
 struct CompoundParameterDefinition {

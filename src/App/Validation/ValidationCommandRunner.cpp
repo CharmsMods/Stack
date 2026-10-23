@@ -33,6 +33,8 @@ namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
 namespace Stack::Validation { bool ValidateRawGraphCanvas(); }
+namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateGraphChannelOutputs(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesystem::path&, bool); }
 
 namespace Stack::Validation { bool ValidateDemosaicing(const std::filesystem::path&,const std::filesystem::path&); }
@@ -50,6 +52,13 @@ void BurstDiagnosticsUnavailable(int& exitCode) {
 }
 
 bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
+    if(argc==3 && std::strcmp(argv[1],"--validate-graph-channel-outputs")==0) {
+        exitCode=Stack::Validation::ValidateGraphChannelOutputs(std::filesystem::u8path(argv[2]))?0:115;return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-graph-node-notes") == 0) {
+        exitCode = Stack::Validation::ValidateGraphNodeNotes(std::filesystem::u8path(argv[2])) ? 0 : 114;
+        return true;
+    }
     if (argc > 1 && std::strcmp(argv[1], "--validate-settings-defaults") == 0) {
         if ((argc != 3 && argc != 4) || (argc == 4 && std::strcmp(argv[3], "--reload") != 0)) {
             std::cerr << "Usage: Stack.exe --validate-settings-defaults <new-output-folder> [--reload]\n";
@@ -100,6 +109,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-raw-gallery-open") == 0) {
         exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3]) ? 0 : 93;
+        return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-raw-gallery-halation") == 0) {
+        exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3], false, false, true) ? 0 : 93;
         return true;
     }
     if(argc==3 && std::strcmp(argv[1],"--validate-shared-curves")==0) {
@@ -539,6 +552,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
 
     if (argc > 1 && std::strcmp(argv[1], "--validate-node-math-phase5") == 0) {
         exitCode = Stack::Validation::ValidateNodeMathPhase5Integration() ? 0 : 25;
+        return true;
+    }
+    if (argc > 2 && std::strcmp(argv[1], "--validate-graph-modularity") == 0) {
+        exitCode = Stack::Validation::ValidateGraphModularity(argv[2]) ? 0 : 25;
         return true;
     }
 

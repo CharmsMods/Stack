@@ -59,7 +59,9 @@ constexpr std::array<const char*, kStages> kStageNames {
 constexpr std::array<const char*, kCounters> kCounterNames {
     "nodes", "visibleNodes", "links", "visibleLinks", "catalogMatches", "catalogCards",
     "logicalReuse", "logicalRebuild", "projectionReuse", "projectionRebuild",
-    "orderReuse", "orderRebuild", "previewCandidates", "previewCandidateRebuild"
+    "orderReuse", "orderRebuild", "previewCandidates", "previewCandidateRebuild", "layoutPrepare", "layoutSolve",
+    "layoutRevealingNodes", "layoutTracingLinks", "layoutOrigin",
+    "wireRouteRequest", "wireRoutePublish", "wireProjection"
 };
 } // namespace
 

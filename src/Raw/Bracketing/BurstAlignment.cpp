@@ -3,10 +3,12 @@
 #include "CaptureMotion.h"
 #include "CaptureReliability.h"
 #include "CaptureCorrespondence.h"
+#include "ParallelProcessing.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
 
 namespace Raw::Bracketing {
 namespace {
@@ -17,9 +19,10 @@ bool NeedsBurstRefinement(const ProcessingRequest& request,const PreparedDataset
 struct RefinementMemoryPlan {
     unsigned width=0,height=0;
     std::size_t cacheTiles=0;
+    std::size_t guideWorkers=1;
     std::uint64_t requiredBytes=0;
 };
-RefinementMemoryPlan PlanRefinementMemory(const PreparedDataset& data,unsigned spacing) {
+RefinementMemoryPlan PlanRefinementMemory(const ProcessingRequest& request,const PreparedDataset& data,unsigned spacing) {
     RefinementMemoryPlan plan;
     plan.width=static_cast<unsigned>((std::uint64_t(data.width)+spacing-1)/spacing+1);
     plan.height=static_cast<unsigned>((std::uint64_t(data.height)+spacing-1)/spacing+1);
@@ -40,7 +43,16 @@ RefinementMemoryPlan PlanRefinementMemory(const PreparedDataset& data,unsigned s
     const long double cacheBytes=(plan.cacheTiles+1)*(tileSide*tileSide*9+1024);
     // Guide tiles are released before pyramids are allocated. Original and
     // pending reliability/inspection payloads are both charged per capture.
-    const long double workspace=std::max(static_cast<long double>(data.width)*data.height*72,cacheBytes);
+    const long double guideWorkerBytes=cacheBytes+256ull*1024+
+        static_cast<long double>(data.sources.size())*4096;
+    const long double workspace=std::max(static_cast<long double>(data.width)*data.height*72,guideWorkerBytes);
+    // Guide points share immutable captures and write disjoint cells. Their
+    // private caches fit inside the already-admitted later pyramid workspace;
+    // this does not multiply the request's peak memory allowance.
+    plan.guideWorkers=std::min<std::size_t>({
+        ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount),
+        std::max(1u,plan.height>2?plan.height-2:0u),
+        static_cast<std::size_t>(workspace/guideWorkerBytes)});
     const long double requiredBytes=workspace+fieldBytes+reliabilityBytes+64ull*1024*1024;
     plan.requiredBytes=requiredBytes>=std::numeric_limits<std::uint64_t>::max()
         ?std::numeric_limits<std::uint64_t>::max():static_cast<std::uint64_t>(requiredBytes);
@@ -66,7 +78,7 @@ bool PreflightBurstRefinement(const ProcessingRequest& request,const PreparedDat
     // samples halfway between them. Global-only fallbacks may be coarser;
     // admit the normal full-quality path before spending time on alignment.
     const auto spacing=std::max(8u,CaptureAlignmentParameters(data).registration.finestStridePlanePixels);
-    const auto plan=PlanRefinementMemory(data,spacing);
+    const auto plan=PlanRefinementMemory(request,data,spacing);
     if(!AdmitRefinement(request,plan,error))return false;
     diagnostics.push_back("Full-quality burst alignment preflight: estimated "+
         MiB(plan.requiredBytes)+" MiB; memory budget "+MiB(request.memoryBudgetBytes)+" MiB.");
@@ -83,7 +95,7 @@ bool RefineBurstAlignment(const ProcessingRequest& request,PreparedDataset& data
         spacing=spacing?std::min(spacing,half):half;
     }
     if(!spacing)return true;
-    const auto plan=PlanRefinementMemory(data,spacing);
+    const auto plan=PlanRefinementMemory(request,data,spacing);
     if(!AdmitRefinement(request,plan,error))return false;
     const auto width=plan.width,height=plan.height;
     const std::uint64_t count=std::uint64_t(width)*height;
@@ -91,15 +103,41 @@ bool RefineBurstAlignment(const ProcessingRequest& request,PreparedDataset& data
     std::vector<BurstGuidePoint> guide(static_cast<std::size_t>(count));
     std::size_t repeatable=0;
     { // The guide is immutable after this phase; its tile cache can retire.
-    PreparedTileSampler sampler(data.directory,plan.cacheTiles);
-    for(unsigned y=1;y+1<height;++y) {
-      if(request.reportProgress&&y%8==1)request.reportProgress(.50,
-          "Checking repeatable burst structure: row "+std::to_string(y)+" of "+std::to_string(height-2));
-      for(unsigned x=1;x+1<width;++x) {
-        if(!MeasureBurstGuide(request,data,sampler,x*spacing,y*spacing,guide[std::size_t(y)*width+x],error))return false;
-        repeatable+=guide[std::size_t(y)*width+x].repeated;
-      }
-    }
+    ProcessingTimer guideTimer(data.stageSeconds,"burst_guide");
+    std::vector<std::size_t> repeated(plan.guideWorkers);
+    std::atomic<bool> stopped{false};
+    std::mutex errorMutex,progressMutex;
+    unsigned completedRows=0;
+    const auto rows=height>2?height-2:0;
+    const bool success=ProcessParallelIndices(plan.guideWorkers,plan.guideWorkers,request.shouldCancel,
+        [&](std::size_t worker) {
+            PreparedTileSampler sampler(data.directory,plan.cacheTiles);
+            std::string workerError;
+            const auto first=1+std::size_t(rows)*worker/plan.guideWorkers;
+            const auto end=1+std::size_t(rows)*(worker+1)/plan.guideWorkers;
+            for(auto y=first;y<end;++y) {
+                for(unsigned x=1;x+1<width;++x) {
+                    if(stopped.load(std::memory_order_relaxed))return false;
+                    auto& point=guide[y*width+x];
+                    if(!MeasureBurstGuide(request,data,sampler,x*spacing,unsigned(y)*spacing,point,workerError)) {
+                        stopped.store(true,std::memory_order_relaxed);
+                        std::lock_guard<std::mutex> lock(errorMutex);
+                        if(error.empty())error=workerError.empty()?"Burst structure measurement failed.":workerError;
+                        return false;
+                    }
+                    repeated[worker]+=point.repeated;
+                }
+                if(request.reportProgress) {
+                    std::lock_guard<std::mutex> lock(progressMutex);
+                    if(++completedRows%8==0||completedRows==rows)
+                        request.reportProgress(.50,"Checking repeatable burst structure: row "+
+                            std::to_string(completedRows)+" of "+std::to_string(rows));
+                }
+            }
+            return true;
+        });
+    if(!success) {if(error.empty())error="Canceled";return false;}
+    for(const auto count:repeated)repeatable+=count;
     }
     if(!repeatable) {
         diagnostics.push_back("Burst subsets supplied no repeatable structure for additional alignment.");return true;
@@ -118,17 +156,21 @@ bool RefineBurstAlignment(const ProcessingRequest& request,PreparedDataset& data
         Mfd::BidirectionalLocalMotionRequest motion;
         motion.reference=&reference;motion.alternate=&alternate;motion.referenceToAlternate=source.alignment;
         motion.exposureScale=source.scale;motion.options.registration=parameters.registration;motion.shouldCancel=request.shouldCancel;
-        auto field=std::make_shared<MotionRefinementField>();field->width=width;field->height=height;field->spacing=spacing;
-        field->cells.resize(static_cast<std::size_t>(count));std::size_t accepted=0;
+        std::shared_ptr<MotionRefinementField> field;std::size_t accepted=0;
         for(unsigned y=1;y+1<height;++y)for(unsigned x=1;x+1<width;++x) {
             if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
             const auto p=std::size_t(y)*width+x;if(!guide[p].repeated)continue;
             const Mfd::RawCoordinate point={double(x*spacing),double(y*spacing)};
-            if(EvaluateCaptureCorrespondence(source,point).confidence<.4)continue;
-            Mfd::LocalMotionFieldSample original;Mfd::LocalMotionOptions options;
-            if(!EvaluateCaptureMotion(source,point,options,original)||original.alignmentConfidence<.4)continue;
+            Mfd::LocalMotionFieldSample original;
+            if(EvaluateCaptureCorrespondence(source,point,false,&original).confidence<.4||
+               original.alignmentConfidence<.4)continue;
             Mfd::MotionNode refined;
             if(!Mfd::RefineBidirectionalMotionPoint(motion,point,original.sourceRaw,refined))continue;
+            if(!field) {
+                field=std::make_shared<MotionRefinementField>();
+                field->width=width;field->height=height;field->spacing=spacing;
+                field->cells.resize(static_cast<std::size_t>(count));
+            }
             auto& correction=field->cells[p];
             correction.delta={refined.residualRaw.x-original.residualRaw.x,refined.residualRaw.y-original.residualRaw.y};
             correction.covariance=refined.covarianceRaw;correction.confidence=float(refined.confidence);++accepted;
@@ -162,7 +204,7 @@ bool RefineBurstAlignment(const ProcessingRequest& request,PreparedDataset& data
     }
     // Only evidence-supported refinements are accepted. Preserve their identity
     // so cached group tiles and final measurements describe the actual warp.
-    if(!identity.empty())data.motionIdentity=Stack::NodeMath::Sha256ContentIdentity(identity);
+    if(!identity.empty())data.motionIdentity=Stack::NodeMath::Sha256ContentIdentity(data.motionIdentity+identity);
     return true;
 }
 }

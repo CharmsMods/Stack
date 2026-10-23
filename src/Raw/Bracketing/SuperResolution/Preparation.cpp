@@ -1,5 +1,6 @@
 #include "Preparation.h"
 #include "../CaptureCorrespondence.h"
+#include "SamplingCoverage.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -16,7 +17,9 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
     const auto& data=*analysis.prepared;
     const int guideWidth=data.width/2,guideHeight=data.height/2;
     const auto signal=[&](int x,int y){return .18*std::exp2(analysis.guideEv[std::size_t(std::clamp(y,0,guideHeight-1))*guideWidth+std::clamp(x,0,guideWidth-1)]);};
-    out={};out.mapOriginX=std::floor(tile.originX/8)*8;out.mapOriginY=std::floor(tile.originY/8)*8;
+    // Reuse this capture scratch region. Every sample and mapping entry below
+    // is overwritten, while capacity remains bounded by the source-region cap.
+    out.mapStep=8;out.mapOriginX=std::floor(tile.originX/8)*8;out.mapOriginY=std::floor(tile.originY/8)*8;
     out.detailPreference=float(std::clamp(source.detailPreference,.1,1.));
     out.mapWidth=unsigned(std::ceil((tile.originX+(tile.width-1)*tile.step-out.mapOriginX)/8))+1;
     out.mapHeight=unsigned(std::ceil((tile.originY+(tile.height-1)*tile.step-out.mapOriginY)/8))+1;
@@ -49,12 +52,14 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
         for(int x=0;x<out.width;++x) {
             Mfd::SameCfaTapInput tap;
             if(!sampler.ReadSample(source.frame,out.left+x,out.top+y,tap,&error))return false;
-            auto& s=out.samples[std::size_t(y)*out.width+x];s.w=-1;
+            auto& s=out.samples[std::size_t(y)*out.width+x];s={0,0,0,-1};
+            if(Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Saturated)||
+               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::ExplicitDecoderClip)) {
+                s.w=0;continue;
+            }
             if(!std::isfinite(tap.normalizedSample)||!std::isfinite(tap.comparisonGain)||tap.comparisonGain<=0||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Defective)||
-               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired)||
-               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Saturated)||
-               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::ExplicitDecoderClip))continue;
+               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired))continue;
             const auto site=layout.SiteAt(out.left+x,out.top+y);const auto i=static_cast<unsigned>(site);
             const auto& noise=source.noise.sites[i];const double gain=tap.comparisonGain*source.scale;
             s.x=float(tap.normalizedSample*gain);s.y=float(noise.shotScale*gain);
@@ -84,17 +89,56 @@ float SamplingDiversity(const PreparedDataset& data) {
     }
     return total/9;
 }
-Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const BracketingAnalysis& analysis,bool diverse) {
+Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const BracketingAnalysis& analysis,std::size_t group) {
     Tile tile;tile.width=w;tile.height=h;tile.step=1.f/scale;
     tile.originX=(x+.5f)/scale-.5f;tile.originY=(y+.5f)/scale-.5f;
     tile.pixels.resize(std::size_t(w)*h);
+    tile.samplingConfidence.resize(std::size_t(w)*h);
     const auto& data=*analysis.prepared;const int gw=data.width/2,gh=data.height/2;
-    auto signal=[&](int xx,int yy) {return float(.18*std::exp2(analysis.guideEv[std::size_t(std::clamp(yy,0,gh-1))*gw+std::clamp(xx,0,gw-1)]));};
+    // Resolve geometry once on a sensor-anchored grid for this exposure group.
+    // This costs O(captures * tile area / 256), not a motion-store lookup or
+    // trigonometric evaluation for every reconstructed sample and tap.
+    constexpr float coverageStep=16;
+    const float coverageX=std::floor(tile.originX/coverageStep)*coverageStep;
+    const float coverageY=std::floor(tile.originY/coverageStep)*coverageStep;
+    const unsigned coverageWidth=std::max(2u,unsigned(std::ceil((tile.originX+(w-1)*tile.step-coverageX)/coverageStep))+1);
+    const unsigned coverageHeight=std::max(2u,unsigned(std::ceil((tile.originY+(h-1)*tile.step-coverageY)/coverageStep))+1);
+    std::vector<float> coverage(std::size_t(coverageWidth)*coverageHeight);
+    for(unsigned yy=0;yy<coverageHeight;++yy)for(unsigned xx=0;xx<coverageWidth;++xx) {
+        const float px=std::clamp(coverageX+xx*coverageStep,0.f,float(data.width-1));
+        const float py=std::clamp(coverageY+yy*coverageStep,0.f,float(data.height-1));
+        SamplingCoverage measured(scale);
+        for(const auto& source:data.sources)if(source.enabled&&source.group==group) {
+            const auto mapped=MapCapture(source,px,py,&source==&data.sources[data.origin]);
+            if(mapped.x<0||mapped.y<0||mapped.x>data.width-1||mapped.y>data.height-1)continue;
+            measured.Add(mapped.x-px,mapped.y-py,mapped.z*source.detailPreference);
+        }
+        coverage[std::size_t(yy)*coverageWidth+xx]=measured.Confidence();
+    }
+    const auto confidenceAt=[&](float px,float py) {
+        const float u=std::clamp((px-coverageX)/coverageStep,0.f,float(coverageWidth-1));
+        const float v=std::clamp((py-coverageY)/coverageStep,0.f,float(coverageHeight-1));
+        const unsigned ix=std::min(unsigned(u),coverageWidth-2),iy=std::min(unsigned(v),coverageHeight-2);
+        const float a=u-ix,b=v-iy;const auto i=std::size_t(iy)*coverageWidth+ix;
+        return (1-b)*((1-a)*coverage[i]+a*coverage[i+1])+b*((1-a)*coverage[i+coverageWidth]+a*coverage[i+coverageWidth+1]);
+    };
     // Average gradient products before choosing a direction. A single noisy
     // gradient is not reliable edge evidence. Interpolate the resulting SPD
     // matrices continuously so CFA-cell boundaries never become seams.
     const int firstX=int(std::floor(tile.originX/2)),firstY=int(std::floor(tile.originY/2));
     const int kw=int(std::ceil(w*tile.step/2))+3,kh=int(std::ceil(h*tile.step/2))+3;
+    // Every 3x3 structure tensor revisits the same signal values. Cache the
+    // exact float conversion once on this tile's two-cell halo, preserving
+    // sensor-edge clamping and the subsequent accumulation order.
+    const int signalWidth=kw+4,signalHeight=kh+4;
+    std::vector<float> signals(std::size_t(signalWidth)*signalHeight);
+    for(int yy=0;yy<signalHeight;++yy)for(int xx=0;xx<signalWidth;++xx) {
+        const int gx=std::clamp(firstX+xx-2,0,gw-1),gy=std::clamp(firstY+yy-2,0,gh-1);
+        signals[std::size_t(yy)*signalWidth+xx]=float(.18*std::exp2(analysis.guideEv[std::size_t(gy)*gw+gx]));
+    }
+    const auto signal=[&](int xx,int yy) {
+        return signals[std::size_t(yy-firstY+2)*signalWidth+xx-firstX+2];
+    };
     std::vector<Vec4> kernels(std::size_t(kw)*kh);
     for(int yy=0;yy<kh;++yy)for(int xx=0;xx<kw;++xx) {
         const int cx=firstX+xx,cy=firstY+yy;const float pilot=signal(cx,cy);
@@ -108,8 +152,9 @@ Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const B
         const float coherence=delta/std::max(1e-12f,jxx+jyy);
         const float theta=.5f*std::atan2(2*jxy,jxx-jyy),nx=std::cos(theta),ny=std::sin(theta);
         const float edge=coherence*std::clamp(std::sqrt((jxx+jyy+delta)*.5f)/std::max(.005f,pilot)*3,0.f,1.f);
-        const float normal=diverse?.55f-.15f*edge:.9f;
-        const float tangent=diverse?.55f+.60f*edge:.9f;
+        const float confidence=confidenceAt((firstX+xx)*2.f,(firstY+yy)*2.f);
+        const float normal=.9f+confidence*(.55f-.15f*edge-.9f);
+        const float tangent=.9f+confidence*(.55f+.60f*edge-.9f);
         const float a=1/(normal*normal),b=1/(tangent*tangent);
         kernels[std::size_t(yy)*kw+xx]={b+(a-b)*nx*nx,(a-b)*nx*ny,b+(a-b)*ny*ny,pilot};
     }
@@ -119,6 +164,7 @@ Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const B
         const int ix=int(cx),iy=int(cy);const float fx=cx-ix,fy=cy-iy;
         const auto i=std::size_t(iy)*kw+ix;
         tile.pixels[std::size_t(yy)*w+xx].kernel=lerp(lerp(kernels[i],kernels[i+1],fx),lerp(kernels[i+kw],kernels[i+kw+1],fx),fy);
+        tile.samplingConfidence[std::size_t(yy)*w+xx]=confidenceAt(tile.originX+xx*tile.step,tile.originY+yy*tile.step);
     }
     return tile;
 }

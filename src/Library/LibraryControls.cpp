@@ -94,15 +94,7 @@ void DrawIcon(Icon icon, ImVec2 origin, float size, ImU32 color) {
 }
 
 bool ReducedMotion() {
-    // The preference is application-wide. Query Windows once for all these
-    // controls in a frame, rather than once per icon or animation channel.
-    static int frame = -1;
-    static bool reduced = false;
-    if (frame != ImGui::GetFrameCount()) {
-        frame = ImGui::GetFrameCount();
-        reduced = Notifications::SystemReducedMotion();
-    }
-    return reduced;
+    return Notifications::SystemReducedMotion();
 }
 
 bool IconButton(const char* label, Icon icon, bool selected, bool enabled) {

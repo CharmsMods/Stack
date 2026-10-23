@@ -8,6 +8,7 @@
 #include "Editor/Bracketing/BracketingSession.h"
 
 #include "Async/TaskSystem.h"
+#include "Notifications/NotificationPresenter.h"
 #include "Layers/ToneLayers.h"
 #include "NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeGraph/EditorNodeGraphSerializer.h"
@@ -651,7 +652,7 @@ EditorModule::~EditorModule() {
     Shutdown();
 }
 
-void EditorModule::MarkDirty() {
+void EditorModule::MarkDirty(bool refreshCover) {
     m_Project->NoteEdit(ImGui::GetCurrentContext() ? ImGui::GetTime() : m_Project->lastEditTime);
     if (!IsRawWorkspaceProjectActive() &&
         m_Project->name.empty() &&
@@ -660,7 +661,7 @@ void EditorModule::MarkDirty() {
         m_ProjectNamingPromptShown = true;
         m_ProjectNamingPromptRequested = true;
     }
-    if (m_Project->snapshot) {
+    if (refreshCover && m_Project->snapshot) {
         if (IsRawWorkspaceProjectActive()) {
             // Covers are cache/presentation data and never gate the save. A
             // settled render opportunistically replaces the original-source
@@ -1085,8 +1086,9 @@ bool EditorModule::SubmitRenderSnapshot(
     if (IsEditingRawLayerMaskGraph()) {
         for (auto& preview : snapshot.previews) {
             if (!preview.rawLayerId.empty()) continue;
-            const int source = ResolveRawCanvasRenderNode(snapshot.graph,preview.sourceNodeId);
-            preview.sourceNodeId = source;
+            int source = 0; std::string socket;
+            ResolveRawCanvasRenderOutput(snapshot.graph,preview.sourceNodeId,preview.sourceSocketId,source,socket);
+            preview.sourceNodeId = source; preview.sourceSocketId = std::move(socket);
         }
         snapshot.previews.erase(std::remove_if(snapshot.previews.begin(),snapshot.previews.end(),
             // Layer thumbnails resolve their output from layer/mask IDs in
@@ -1444,7 +1446,8 @@ void EditorModule::RenderUI() {
     }
 
     if (m_LibraryLoadRevealStartTime >= 0.0) {
-        const double elapsed = ImGui::GetTime() - m_LibraryLoadRevealStartTime;
+        const double elapsed = Stack::Notifications::SystemReducedMotion()
+            ? 1.90 : ImGui::GetTime() - m_LibraryLoadRevealStartTime;
         auto easeOutCubic = [](float value) {
             value = std::clamp(value, 0.0f, 1.0f);
             return 1.0f - std::pow(1.0f - value, 3.0f);
@@ -1461,7 +1464,6 @@ void EditorModule::RenderUI() {
         if (elapsed >= 1.90) {
             m_LibraryLoadRevealStartTime = -1.0;
             m_LibraryLoadRevealPendingFirstFrame = false;
-            m_LibraryLoadRevealLayoutPending = false;
             m_LibraryLoadCanvasRevealAlpha = 1.0f;
             m_LibraryLoadGraphRevealAlpha = 1.0f;
             m_LibraryLoadToolbarRevealAlpha = 1.0f;

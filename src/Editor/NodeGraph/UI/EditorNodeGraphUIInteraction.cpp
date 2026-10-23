@@ -1,6 +1,8 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/CompoundGroupMembership.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 #include "Utils/ImGuiExtras.h"
 #include "Utils/Utf8Text.h"
 
@@ -68,7 +70,7 @@ bool EditorNodeGraphUI::CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph&
     }
 
     if (node->kind == EditorNodeGraph::NodeKind::Layer) {
-        if (!graph.FindInputLink(nodeId, EditorNodeGraph::kImageInputSocketId)) {
+        if (!graph.FindAnyInputLink(nodeId, EditorNodeGraph::kImageInputSocketId)) {
             return false;
         }
         bool hasImageOutput = false;
@@ -87,10 +89,11 @@ bool EditorNodeGraphUI::CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph&
         node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage) {
         int imageInputCount = 0;
         for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
-            const EditorNodeGraph::Link* input = graph.FindInputLink(
+            const EditorNodeGraph::Link* input = graph.FindAnyInputLink(
                 nodeId,
                 EditorNodeGraph::DataMathInputSocketId(inputIndex));
-            if (input && !graph.IsScalarSocketStream(input->fromNodeId, input->fromSocketId)) {
+            if (input && !Stack::Editor::NodeGraphUIVisuals::ResolveOutputVisualStyle(
+                    graph, input->fromNodeId, input->fromSocketId, m_ActiveEditor).scalarStream) {
                 ++imageInputCount;
             }
         }
@@ -356,27 +359,22 @@ bool EditorNodeGraphUI::UpdateMiddlePanCapture(EditorModule* editor, bool graphH
     return true;
 }
 
-void EditorNodeGraphUI::UpdateActiveNodeDrag(EditorModule* editor, EditorNodeGraph::Graph& graph) {
-    if (m_DragNodeId <= 0 || m_EditingGroupId > 0 || m_DragGroupId > 0 || m_ResizingGroupId > 0 ||
-        m_DragOutputNodeId > 0 || m_DragInputNodeId > 0 || m_MiddlePanCaptureActive ||
-        !ImGui::IsMouseDragging(ImGuiMouseButton_Left)) return;
-    const ImVec2 delta = ImGui::GetIO().MouseDelta;
-    if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || m_Zoom <= 0.0001f ||
-        (delta.x == 0.0f && delta.y == 0.0f)) return;
-    bool changed = false;
-    for (int nodeId : graph.GetSelectedNodeIds()) {
-        if (auto* node = graph.FindNode(nodeId)) {
-            const auto position = ClampGraphPosition({node->position.x + delta.x / m_Zoom,
-                node->position.y + delta.y / m_Zoom});
-            changed |= position.x != node->position.x || position.y != node->position.y;
-            node->position = position;
-        }
-    }
-    // One history/document update for the whole selection, before projection.
-    if (changed) editor->MarkGraphEdited(-1, false);
-}
-
 void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph) {
+    // Finish retained group gestures even when a popup or node editor takes
+    // input before the ordinary group branch can observe the release frame.
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        (m_DragGroupId > 0 || m_ResizingGroupId > 0)) {
+        m_DragGroupId = -1;
+        m_ResizingGroupId = -1;
+        editor->EndGraphLayoutGesture(false);
+    }
+    if ((m_NodeNotes.Revealed() || m_LinkLabelRevealAlpha > .001f) &&
+        (m_NodeContentActive || m_NodeContentHovered)) {
+        m_MouseOwner = GraphMouseOwner::NodeContent;
+        m_GraphInteractionBlocked = true;
+        m_BoxSelecting = false;
+        return;
+    }
     if (m_EditingGroupId > 0) {
         StopMiddlePanCapture();
         m_GraphInteractionBlocked = true;
@@ -522,12 +520,14 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         const auto& groups = mutableGraph.GetGroups();
         for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
             const auto& group = *it;
-            EditorNodeGraph::Vec2 groupMin = group.position;
-            EditorNodeGraph::Vec2 groupMax = {group.position.x + group.size.x, group.position.y + group.size.y};
-            EditorNodeGraph::Vec2 headerMax = {group.position.x + group.size.x, group.position.y + 28.0f};
-            EditorNodeGraph::Vec2 resizeMin = {group.position.x + group.size.x - 16.0f, group.position.y + group.size.y - 16.0f};
+            if(!LayoutGroupVisible(group.id) || (m_ExpansionMotion && m_ExpansionMotion->groups.count(group.id)))continue;
+            const auto displayed=DisplayGroupRect(group);
+            EditorNodeGraph::Vec2 groupMin = displayed.min;
+            EditorNodeGraph::Vec2 groupMax = displayed.max;
+            EditorNodeGraph::Vec2 headerMax = {groupMax.x, groupMin.y + 28.0f};
+            EditorNodeGraph::Vec2 resizeMin = {groupMax.x - 16.0f, groupMax.y - 16.0f};
             
-            if (IsPointInRect(mouseGraph, resizeMin, groupMax)) {
+            if (!group.compoundBoundary.is_object() && IsPointInRect(mouseGraph, resizeMin, groupMax)) {
                 hitGroupId = group.id;
                 hitResize = true;
                 break;
@@ -570,18 +570,19 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     if (m_ResizingGroupId > 0) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            if (std::isfinite(delta.x) && std::isfinite(delta.y) && m_Zoom > 0.0001f) {
+            if (std::isfinite(delta.x) && std::isfinite(delta.y) && (delta.x != 0 || delta.y != 0) && m_Zoom > 0.0001f) {
                 if (auto* group = editor->GetNodeGraph().FindGroup(m_ResizingGroupId)) {
-                    group->size.x += delta.x / m_Zoom;
-                    group->size.y += delta.y / m_Zoom;
-                    group->size.x = std::max(100.0f, group->size.x);
-                    group->size.y = std::max(80.0f, group->size.y);
-                    editor->MarkGraphEdited(-1, false);
+                    TakeOverGroupMotion(editor->GetNodeGraph(),*group);
+                    const EditorNodeGraph::Vec2 nextSize {
+                        std::max(100.0f, group->size.x + delta.x / m_Zoom),
+                        std::max(80.0f, group->size.y + delta.y / m_Zoom)
+                    };
+                    if (nextSize.x != group->size.x || nextSize.y != group->size.y) {
+                        group->size = nextSize;
+                        editor->MarkGraphLayoutEdited(true);
+                    }
                 }
             }
-        }
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_ResizingGroupId = -1;
         }
         return;
     }
@@ -589,8 +590,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     if (m_DragGroupId > 0) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            if (std::isfinite(delta.x) && std::isfinite(delta.y) && m_Zoom > 0.0001f) {
+            if (std::isfinite(delta.x) && std::isfinite(delta.y) &&
+                (delta.x != 0.0f || delta.y != 0.0f) && m_Zoom > 0.0001f) {
                 if (auto* group = editor->GetNodeGraph().FindGroup(m_DragGroupId)) {
+                    TakeOverGroupMotion(editor->GetNodeGraph(),*group);
                     float dx = delta.x / m_Zoom;
                     float dy = delta.y / m_Zoom;
                     
@@ -598,8 +601,9 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     for (auto& node : editor->GetNodeGraph().GetNodes()) {
                         const auto nodeBounds =
                             NodeGraphBounds(graph, node);
-                        const bool overlapsGroup =
-                            nodeBounds.min.x < group->position.x + group->size.x &&
+                        const bool overlapsGroup = group->compoundBoundary.is_object()
+                            ? std::find(group->compoundMembers.begin(),group->compoundMembers.end(),node.id)!=group->compoundMembers.end()
+                            : nodeBounds.min.x < group->position.x + group->size.x &&
                             nodeBounds.max.x > group->position.x &&
                             nodeBounds.min.y < group->position.y + group->size.y &&
                             nodeBounds.max.y > group->position.y;
@@ -614,12 +618,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     // Shift group position
                     group->position.x += dx;
                     group->position.y += dy;
-                    editor->MarkGraphEdited(-1, false);
+                    // Nested retained frames follow their owned members too.
+                    EditorNodeGraph::UpdateCompoundGroupMembership(editor->GetNodeGraph(), {}, {},
+                        [&](const auto& g, const auto& n) { return MeasureNodeForLayout(g,n); });
+                    editor->MarkGraphLayoutEdited(true);
                 }
             }
-        }
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_DragGroupId = -1;
         }
         return;
     }
@@ -657,6 +661,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 editor->SelectGraphNode(hoveredNodeId);
             }
         }
+        if (m_ContextTarget == ContextTarget::Canvas && hitGroupId > 0) {
+            m_ContextTarget = ContextTarget::Group;
+            m_ContextGroupId = hitGroupId;
+        }
         m_ContextMenuOpenedAt = ImGui::GetTime();
         m_ContextMenuFadeActive = true;
         ImGui::OpenPopup("EditorNodeGraphContextMenu");
@@ -668,7 +676,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             if (hoveredInput.IsValid()) {
                 std::string error;
-                if (!editor->ConnectGraphSockets(m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId, &error)) {
+                if (!ConnectWithLayout(editor,m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId, &error)) {
                     PostNodeGraphNotification(editor, UiNotificationSeverity::Error, error, "editor-node-graph-connect");
                 }
             } else if (hoveredNodeId > 0) {
@@ -696,7 +704,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             if (hoveredOutput.IsValid()) {
                 std::string error;
-                if (!editor->ConnectGraphSockets(hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, &error)) {
+                if (!ConnectWithLayout(editor,hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, &error)) {
                     PostNodeGraphNotification(editor, UiNotificationSeverity::Error, error, "editor-node-graph-connect");
                 }
             } else if (hoveredNodeId > 0) {
@@ -831,6 +839,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         }
     }
 
+    if (m_BoxSelecting && m_ExpansionMotion) {m_BoxSelecting=false;return;}
     if (m_BoxSelecting) {
         m_BoxSelectCurrent = ScreenToGraph(ToGraphVec2(ImGui::GetMousePos()));
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -852,10 +861,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     const EditorNodeGraph::Vec2 size =
                         NodeSize(node);
                     return EditorNodeGraph::GraphRect {
-                        node.position,
+                        DisplayNodePosition(node),
                         {
-                            node.position.x + size.x,
-                            node.position.y + size.y
+                            DisplayNodePosition(node).x + size.x,
+                            DisplayNodePosition(node).y + size.y
                         }
                     };
                 },
@@ -879,6 +888,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             editor->GetNodeGraph().SelectNode(hoveredNodeId, true);
         }
         m_DragNodeId = editor->GetNodeGraph().IsNodeSelected(hoveredNodeId) ? hoveredNodeId : -1;
+        if(m_DragNodeId>0 && !BeginDragLayout(editor,editor->GetNodeGraph()))m_DragNodeId=-1;
     }
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         m_DragNodeId = -1;

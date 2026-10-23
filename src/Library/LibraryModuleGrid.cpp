@@ -47,7 +47,12 @@ void LibraryModule::RenderLibraryGrid(
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 18.0f));
     ImGuiStyle& style = ImGui::GetStyle();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x + 16.0f, style.ItemSpacing.y + 20.0f));
-    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (!ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        return;
+    }
 
     if (m_ScrollTargetY < 0.0f) {
         m_ScrollTargetY = ImGui::GetScrollY();
@@ -220,44 +225,6 @@ void LibraryModule::RenderLibraryGrid(
     }
 
     const int frameCount = ImGui::GetFrameCount();
-    std::vector<std::pair<std::string, const LibraryCachedPackedCard*>> entranceOrder;
-    entranceOrder.reserve(m_CachedPackedCards.size());
-    for (const LibraryCachedPackedCard& card : m_CachedPackedCards) {
-        if (m_ShowAssets) {
-            if (card.index >= assets.size() || !assets[card.index]) continue;
-            entranceOrder.emplace_back(assets[card.index]->fileName, &card);
-        } else {
-            if (card.index >= projects.size() || !projects[card.index]) continue;
-            entranceOrder.emplace_back(projects[card.index]->fileName, &card);
-        }
-    }
-    std::sort(entranceOrder.begin(), entranceOrder.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.second->y != rhs.second->y) {
-            return lhs.second->y < rhs.second->y;
-        }
-        return lhs.second->x < rhs.second->x;
-    });
-    for (std::size_t orderIndex = 0; orderIndex < entranceOrder.size(); ++orderIndex) {
-        const std::string& key = entranceOrder[orderIndex].first;
-        LibraryCardMotionState& motion = m_ShowAssets
-            ? GetCardMotionState(m_AssetCardMotion, key)
-            : GetCardMotionState(m_ProjectCardMotion, key);
-        std::unordered_set<std::string>& introduced = m_ShowAssets ? m_IntroducedAssetCards : m_IntroducedProjectCards;
-        const bool firstIntroduction = introduced.insert(key).second;
-        motion.lastSeenFrame = frameCount;
-        if (!motion.entranceInitialized) {
-            motion.entranceInitialized = true;
-            if (firstIntroduction) {
-                const int staggerRank = std::min(static_cast<int>(orderIndex), kCardEntranceStaggerMaxRank);
-                motion.entrance = 0.0f;
-                motion.entranceStartTime = now + static_cast<double>(staggerRank) * kCardEntranceStaggerSeconds;
-            } else {
-                motion.entrance = 1.0f;
-                motion.entranceStartTime = now - kCardEntranceDurationSeconds;
-            }
-        }
-    }
-
     m_LastRenderStats.totalCards = m_ShowAssets ? static_cast<int>(assets.size()) : static_cast<int>(projects.size());
     m_LastRenderStats.packedCards = static_cast<int>(m_CachedPackedCards.size());
     m_LastRenderStats.layoutMs =
@@ -272,28 +239,7 @@ void LibraryModule::RenderLibraryGrid(
 
     std::vector<LibraryCachedPackedCard> animatedCards;
     animatedCards.reserve(m_CachedPackedCards.size() + 32);
-    const auto smoothDamp = [dt](float current, float target, float& velocity, float smoothTime) {
-        const float safeTime = std::max(0.05f, smoothTime);
-        const float omega = 2.0f / safeTime;
-        const float step = omega * std::max(0.0f, dt);
-        const float decay = 1.0f /
-            (1.0f + step + 0.48f * step * step + 0.235f * step * step * step);
-        const float change = current - target;
-        const float temporary = (velocity + omega * change) * dt;
-        velocity = (velocity - omega * temporary) * decay;
-        float result = target + (change + temporary) * decay;
-        const bool passedTarget =
-            ((target - current) > 0.0f) == (result > target);
-        if (passedTarget) {
-            result = target;
-            velocity = 0.0f;
-        }
-        if (std::abs(result - target) < 0.01f && std::abs(velocity) < 0.01f) {
-            velocity = 0.0f;
-            return target;
-        }
-        return result;
-    };
+    const bool reducedMotion = Stack::LibraryUi::ReducedMotion();
 
     for (const LibraryCachedPackedCard& targetCard : m_CachedPackedCards) {
         std::string key;
@@ -309,32 +255,45 @@ void LibraryModule::RenderLibraryGrid(
             ? GetCardMotionState(m_AssetCardMotion, key)
             : GetCardMotionState(m_ProjectCardMotion, key);
         motion.lastSeenFrame = frameCount;
-        motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 1.0f, dt, kCardMotionSpeed);
+        if (!motion.entranceInitialized) {
+            auto& introduced = m_ShowAssets ? m_IntroducedAssetCards : m_IntroducedProjectCards;
+            motion.entranceInitialized = true;
+            motion.entrance = introduced.insert(key).second && !reducedMotion ? 0.2f : 1.0f;
+            motion.entranceStartTime = now;
+        }
+        motion.reveal = reducedMotion ? 1.0f :
+            ImGuiExtras::AnimateTowards(motion.reveal, 1.0f, dt, kCardMotionSpeed);
+        const float targetScale = std::clamp(
+            m_LibraryViewScale * searchResultScale * targetCard.scaleMultiplier,
+            kLibraryViewScaleMin, kLibraryViewScaleMax);
+        if (motion.layoutTargetX != targetCard.x || motion.layoutTargetY != targetCard.y ||
+            motion.layoutTargetScale != targetScale) {
+            // Retarget once from the last displayed rectangle. An unchanged
+            // target never restarts the clock as previews finish loading.
+            motion.layoutStartX = motion.layoutX;
+            motion.layoutStartY = motion.layoutY;
+            motion.layoutStartScale = motion.layoutScale;
+            motion.layoutStartedAt = searchMovementReady ? now :
+                m_SearchLayoutQueryChangedAt + 0.10;
+            motion.layoutMoving = true;
+        }
         motion.layoutTargetX = targetCard.x;
         motion.layoutTargetY = targetCard.y;
-        motion.layoutTargetScale = std::clamp(
-            m_LibraryViewScale * searchResultScale * targetCard.scaleMultiplier,
-            kLibraryViewScaleMin,
-            kLibraryViewScaleMax);
-        if (!motion.layoutInitialized) {
+        motion.layoutTargetScale = targetScale;
+        if (!motion.layoutInitialized || reducedMotion) {
             motion.layoutX = motion.layoutTargetX;
             motion.layoutY = motion.layoutTargetY;
             motion.layoutScale = motion.layoutTargetScale;
             motion.layoutInitialized = true;
-        } else {
-            if (searchMovementReady) {
-                motion.layoutX = smoothDamp(
-                    motion.layoutX, motion.layoutTargetX, motion.layoutVelocityX, 0.30f);
-                motion.layoutY = smoothDamp(
-                    motion.layoutY, motion.layoutTargetY, motion.layoutVelocityY, 0.30f);
-                motion.layoutScale = smoothDamp(
-                    motion.layoutScale, motion.layoutTargetScale, motion.layoutScaleVelocity, 0.24f);
-            } else {
-                const float velocityDecay = std::exp(-dt * 24.0f);
-                motion.layoutVelocityX *= velocityDecay;
-                motion.layoutVelocityY *= velocityDecay;
-                motion.layoutScaleVelocity *= velocityDecay;
-            }
+            motion.layoutMoving = false;
+        } else if (motion.layoutMoving && searchMovementReady) {
+            const float progress = std::clamp(static_cast<float>((now - motion.layoutStartedAt) / .20), 0.f, 1.f);
+            const float remaining = 1.f - progress;
+            const float amount = 1.f - remaining * remaining * remaining;
+            motion.layoutX = ImLerp(motion.layoutStartX, motion.layoutTargetX, amount);
+            motion.layoutY = ImLerp(motion.layoutStartY, motion.layoutTargetY, amount);
+            motion.layoutScale = ImLerp(motion.layoutStartScale, motion.layoutTargetScale, amount);
+            if (progress == 1.f) motion.layoutMoving = false;
         }
 
         LibraryCachedPackedCard animated = targetCard;
@@ -360,7 +319,8 @@ void LibraryModule::RenderLibraryGrid(
             if (motionIt == m_AssetCardMotion.end() || !motionIt->second.layoutInitialized) continue;
             LibraryCardMotionState& motion = motionIt->second;
             motion.lastSeenFrame = frameCount;
-            motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
+            motion.reveal = reducedMotion ? 0.0f :
+                ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
             if (motion.reveal <= 0.01f) continue;
             const ImVec2 size = ComputeLibraryCardSize(
                 static_cast<float>(asset->width), static_cast<float>(asset->height),
@@ -375,7 +335,8 @@ void LibraryModule::RenderLibraryGrid(
             if (motionIt == m_ProjectCardMotion.end() || !motionIt->second.layoutInitialized) continue;
             LibraryCardMotionState& motion = motionIt->second;
             motion.lastSeenFrame = frameCount;
-            motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
+            motion.reveal = reducedMotion ? 0.0f :
+                ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
             if (motion.reveal <= 0.01f) continue;
             const ImVec2 size = ComputeLibraryCardSize(
                 static_cast<float>(project->sourceWidth), static_cast<float>(project->sourceHeight),
@@ -436,8 +397,10 @@ void LibraryModule::RenderLibraryGrid(
     const bool transitionCardsGone = animatedCards.empty();
     const bool showLoadingState = noPackedCards && transitionCardsGone && refreshBusy;
     const bool showEmptyState = noPackedCards && transitionCardsGone && !refreshBusy;
-    m_LibraryLoadingStateAlpha = ImGuiExtras::AnimateTowards(m_LibraryLoadingStateAlpha, showLoadingState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
-    m_EmptyStateAlpha = ImGuiExtras::AnimateTowards(m_EmptyStateAlpha, showEmptyState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
+    m_LibraryLoadingStateAlpha = reducedMotion ? (showLoadingState ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(m_LibraryLoadingStateAlpha, showLoadingState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
+    m_EmptyStateAlpha = reducedMotion ? (showEmptyState ? 1.0f : 0.0f) :
+        ImGuiExtras::AnimateTowards(m_EmptyStateAlpha, showEmptyState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
 
     auto renderCenteredGridStatus = [&](const char* text, float alpha, bool spinner) {
         if (text == nullptr || text[0] == '\0' || alpha <= 0.01f) {
@@ -458,7 +421,7 @@ void LibraryModule::RenderLibraryGrid(
         if (spinner) {
             const float radius = 7.0f;
             const ImVec2 center(textPos.x - 18.0f, textPos.y + textSize.y * 0.5f);
-            const float start = static_cast<float>(now * 5.0);
+            const float start = reducedMotion ? 0.0f : static_cast<float>(now * 5.0);
             ImVec4 spinnerColor = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
             spinnerColor.w *= alpha;
             drawList->PathClear();
@@ -468,9 +431,10 @@ void LibraryModule::RenderLibraryGrid(
     };
 
     renderCenteredGridStatus("Scanning library...", m_LibraryLoadingStateAlpha, true);
+    const bool filterActive = m_SearchFilter[0] || !m_ActiveTagFilters.empty() || m_FilterNoTag;
     const char* emptyText = m_ShowAssets
-        ? (m_SearchFilter[0] ? "No assets match the current search filter." : "No rendered assets have been saved to the library yet.")
-        : (m_SearchFilter[0] ? "No projects match the current search filter." : "No projects found in the library.");
+        ? (filterActive ? "No assets match the current filters." : "No rendered assets have been saved to the library yet.")
+        : (filterActive ? "No projects match the current filters." : "No projects found in the library.");
     renderCenteredGridStatus(emptyText, m_EmptyStateAlpha, false);
 
     ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 0.0f), ImVec2(440.0f, ImGui::GetMainViewport()->Size.y * 0.85f));
@@ -641,7 +605,7 @@ void LibraryModule::RenderLibraryGrid(
     const float maxScrollY = ImGui::GetScrollMaxY();
     m_ScrollTargetY = std::clamp(m_ScrollTargetY, 0.0f, maxScrollY);
 
-    if (std::abs(m_ScrollCurrentY - m_ScrollTargetY) > 0.05f) {
+    if (!reducedMotion && std::abs(m_ScrollCurrentY - m_ScrollTargetY) > 0.05f) {
         const float scrollT = 1.0f - std::exp(-dt * 14.0f);
         m_ScrollCurrentY += (m_ScrollTargetY - m_ScrollCurrentY) * scrollT;
         m_ScrollCurrentY = std::clamp(m_ScrollCurrentY, 0.0f, maxScrollY);

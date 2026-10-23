@@ -49,7 +49,9 @@ struct LiveNodeDefinition {
     EditorNodeGraph::NodeKind kind = EditorNodeGraph::NodeKind::Layer;
     int variant = 0;
     Stack::NodeMath::DefinitionReference identity;
-    Stack::NodeMath::Inspectability inspectability = Stack::NodeMath::Inspectability::TransparentGraph;
+    Stack::NodeMath::Inspectability inspectability = Stack::NodeMath::Inspectability::OpaqueSpecialized;
+    std::string canonicalRecipeId;
+    std::string decompositionReason = "No exact lower-level graph is defined for this native operation.";
     std::string label;
     std::string category;
     std::string searchAliases;
@@ -76,6 +78,40 @@ const LiveNodeDefinition* FindLiveNodeDefinition(const EditorNodeGraph::Node& no
 const LiveNodeDefinition* FindLiveNodeDefinition(
     EditorNodeGraph::NodeKind kind,
     int variant);
+
+// A borrowed view of the exact definition owned by this graph instance. Builtin
+// inventory and embedded recipes retain their existing owners and identities.
+// Do not retain this view across a graph edit or document replacement.
+struct ResolvedNodeDefinition {
+    const LiveNodeDefinition* builtin = nullptr;
+    const Stack::NodeMath::CompoundDefinition* compound = nullptr;
+    explicit operator bool() const { return builtin || compound; }
+    std::size_t ParameterCount() const {
+        return builtin ? builtin->parameters.size() : compound ? compound->parameters.size() : 0;
+    }
+    const Stack::NodeMath::DefinitionReference* Identity() const {
+        return builtin ? &builtin->identity : compound ? &compound->identity : nullptr;
+    }
+};
+ResolvedNodeDefinition ResolveNodeDefinition(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node);
+
+struct NodeDecompositionCapability {
+    Stack::NodeMath::Inspectability inspectability = Stack::NodeMath::Inspectability::OpaqueSpecialized;
+    bool canDecompile = false;
+    std::string reason;
+};
+NodeDecompositionCapability GetNodeDecompositionCapability(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node);
+struct NativeDecompositionPortBinding {
+    Stack::NodeMath::PortDirection direction;
+    std::string nativeSocketId;
+    std::string recipePortId;
+};
+bool BuildNativeNodeDecomposition(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node, Stack::NodeMath::CompoundDefinition& definition,
+    std::string* error = nullptr,
+    std::vector<NativeDecompositionPortBinding>* portBindings = nullptr);
 
 void ApplyLiveDefinitionIdentity(EditorNodeGraph::Node& node);
 bool ResolveSavedLiveDefinition(

@@ -1,0 +1,54 @@
+#pragma once
+
+#include <imgui.h>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace EditorNodeGraph { struct Node; }
+namespace Stack::Editor { struct GraphEditorContext; }
+
+namespace Stack::Editor::NodeGraphUI {
+
+// Authored text stays in the graph. This owner holds only wrapping, scrolling
+// and one uncommitted editing session for a single canvas/project.
+class NodeNotesView {
+public:
+    struct Commit {
+        std::string documentId, graphId, instanceUuid, text;
+        int nodeId = -1;
+    };
+    void BeginFrame(bool revealHeld);
+    void Reset();
+    bool Revealed() const { return held_ || edit_.has_value(); }
+    bool Editing() const { return edit_.has_value(); }
+    int EditingNode() const { return edit_ ? edit_->target.nodeId : -1; }
+    bool Draw(const EditorNodeGraph::Node& node, const GraphEditorContext& context,
+        std::uint64_t editRevision, ImVec2 minimum, ImVec2 maximum,
+        float scale, ImVec4 textColor, ImVec4 mutedColor, bool hovered, float opacity);
+    std::optional<Commit> TakeCommit();
+
+private:
+    struct Line { std::size_t start = 0, length = 0; };
+    struct Layout {
+        std::string uuid, text;
+        std::uint64_t revision = ~std::uint64_t{0};
+        ImFont* font = nullptr;
+        float width = 0, fontSize = 0, scroll = 0;
+        std::vector<Line> lines;
+    };
+    struct Edit {
+        Commit target;
+        std::string original;
+        bool focus = true, waitForFRelease = true;
+    };
+    std::unordered_map<int, Layout> layouts_;
+    std::optional<Edit> edit_;
+    std::optional<Commit> commit_;
+    bool held_ = false;
+    int lastFrame_ = -1;
+    void Finish(bool cancel);
+};
+} // namespace Stack::Editor::NodeGraphUI

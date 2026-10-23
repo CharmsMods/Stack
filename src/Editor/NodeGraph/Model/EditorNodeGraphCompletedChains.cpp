@@ -300,9 +300,12 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                             ++inputCount;
                         }
                     }
-                    plan.valid = node->dataMathMode == DataMathMode::ImageAverage
-                        ? inputCount >= 2
-                        : inputCount >= 1;
+                    // Uniform math has authored constant fallbacks for every
+                    // operand. It is executable without a spatial source.
+                    plan.valid = node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+                        node->dataMathMode != DataMathMode::ImageAverage;
+                    plan.valid = plan.valid || (node->dataMathMode == DataMathMode::ImageAverage
+                        ? inputCount >= 2 : inputCount >= 1);
                     break;
                 }
                 case NodeKind::ChannelCombine:

@@ -235,6 +235,10 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                 if (socketId == "g") channelIdx = 1;
                 else if (socketId == "b") channelIdx = 2;
                 else if (socketId == "a") channelIdx = 3;
+                if (channelIdx == 3 && node.splitMissingAlphaIsOpaque && input &&
+                    input->semanticDescriptor.presentImageComponents.state == Stack::NodeMath::KnowledgeState::Known &&
+                    !Stack::NodeMath::HasImageComponent(input->semanticDescriptor.presentImageComponents.value,Stack::NodeMath::ImageComponent::Alpha))
+                    channelIdx = 4;
                 renderPassToTexture(result, [&](unsigned int fbo) {
                     return pipeline.RenderChannelSplit(inputImage, channelIdx, fbo);
                 });
@@ -242,7 +246,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             }
         }   else if (node.kind == RenderGraphNodeKind::DataMath) {
             const RenderPipeline::GraphNodeRenderResult dataMathResult =
-                pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
+                pipeline.RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask, evalScalar);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
         }  else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask ||

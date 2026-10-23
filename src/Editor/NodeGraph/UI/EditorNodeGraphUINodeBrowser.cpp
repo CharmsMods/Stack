@@ -7,6 +7,7 @@
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 #include "Graph/GraphDocumentRules.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Utils/Utf8Text.h"
@@ -78,8 +79,9 @@ std::string EllipsizeText(const std::string& text, float maxWidth) {
 }
 
 float AnimateToward(float current, float target, float rate, float dt) {
-    const float t = 1.0f - std::exp(-std::max(0.0f, rate) * std::max(0.0f, dt));
-    return current + (target - current) * std::clamp(t, 0.0f, 1.0f);
+    if (current == target) return target;
+    if (Stack::Editor::NodeGraphUIVisuals::GraphReducedMotion()) return target;
+    return ImGuiExtras::AnimateTowards(current, target, dt, rate);
 }
 
 ImU32 ScaleAlpha(ImU32 color, float alpha) {
@@ -476,7 +478,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     if (docked || (!isOpen && m_NodeBrowserDrawerAlpha < 0.01f)) {
         m_NodeBrowserDrawerAlpha = 0.0f;
     } else {
-        m_NodeBrowserDrawerAlpha += (targetAlpha - m_NodeBrowserDrawerAlpha) * dt * 15.0f;
+        m_NodeBrowserDrawerAlpha = AnimateToward(m_NodeBrowserDrawerAlpha, targetAlpha, 15.0f, dt);
     }
     const float alpha = docked ? 1.0f : std::clamp(m_NodeBrowserDrawerAlpha, 0.0f, 1.0f);
     if (isOpen && targetPanelWidth > 1.0f) {
@@ -492,16 +494,21 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     const std::string search = m_NodeBrowserSearchBuffer;
     bool filterChanged = false;
     if (isOpen) {
+        const auto context = editor->GetGraphEditorContext();
         const std::uint64_t graphRevision = graph.GetStructureRevision();
-        const bool filterCacheDirty =
+        const auto renderRevision = editor->GetRenderRevision();
+        const bool availabilityChanged =
             !m_NodeBrowserFilterCacheValid ||
             m_NodeBrowserFilterCacheGraphRevision != graphRevision ||
-            m_NodeBrowserFilterCacheSearch != search ||
+            m_NodeBrowserFilterCacheRenderRevision != renderRevision ||
+            m_NodeBrowserFilterCacheDocumentId != context.documentId ||
+            m_NodeBrowserFilterCacheGraphId != context.graphId ||
             m_NodeBrowserFilterCacheMode != m_NodeBrowserMode ||
             m_NodeBrowserFilterCacheDragFromNodeId != m_NodeBrowserDragFromNodeId ||
             m_NodeBrowserFilterCacheDragFromSocketId != m_NodeBrowserDragFromSocketId ||
             m_NodeBrowserFilterCacheDragToNodeId != m_NodeBrowserDragToNodeId ||
             m_NodeBrowserFilterCacheDragToSocketId != m_NodeBrowserDragToSocketId;
+        const bool filterCacheDirty = availabilityChanged || m_NodeBrowserFilterCacheSearch != search;
         if (filterCacheDirty) {
             filterChanged = true;
             m_NodeBrowserFilteredEntryIndices.clear();
@@ -512,9 +519,11 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 endpoint = {{m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId}};
             else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput)
                 endpoint = {{m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId}};
-            const auto available = editor->GetGraphEditorContext().queryAvailableNodes(endpoint);
-            std::unordered_set<std::string> availableKeys;
-            for (const auto& entry : available) availableKeys.insert(EntryKey(entry));
+            if (availabilityChanged) {
+                const auto available = context.queryAvailableNodes(endpoint);
+                m_NodeBrowserAvailableKeys.clear();
+                for (const auto& entry : available) m_NodeBrowserAvailableKeys.insert(EntryKey(entry));
+            }
 
             for (std::size_t index = 0; index < entries.size(); ++index) {
                 const NodeBrowserEntry& entry = entries[index];
@@ -526,13 +535,16 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                     continue;
                 }
 
-                if (!availableKeys.count(entryKeys[index])) continue;
+                if (!m_NodeBrowserAvailableKeys.count(entryKeys[index])) continue;
 
                 m_NodeBrowserFilteredEntryIndices.push_back(index);
             }
 
             m_NodeBrowserFilterCacheValid = true;
             m_NodeBrowserFilterCacheGraphRevision = graphRevision;
+            m_NodeBrowserFilterCacheRenderRevision = renderRevision;
+            m_NodeBrowserFilterCacheDocumentId = context.documentId;
+            m_NodeBrowserFilterCacheGraphId = context.graphId;
             m_NodeBrowserFilterCacheSearch = search;
             m_NodeBrowserFilterCacheMode = m_NodeBrowserMode;
             m_NodeBrowserFilterCacheDragFromNodeId = m_NodeBrowserDragFromNodeId;

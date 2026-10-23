@@ -359,6 +359,7 @@ bool Graph::CanConnectSockets(
     const std::string& toSocketId,
     std::string* normalizedToSocketId,
     std::string* errorMessage) const {
+    ScopedGraphOutputAnalysis outputAnalysis(*this);
     if (normalizedToSocketId) {
         *normalizedToSocketId = toSocketId;
     }
@@ -375,7 +376,7 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "That pin direction is not valid.";
         return false;
     }
-    const bool projectEnd = !from->rawLayerOwnerId.empty();
+    const bool projectEnd = !from->rawLayerOwnerId.empty() || from->role == Stack::GraphModel::NodeRole::LayerResult;
     const bool projectStart = !to->rawLayerOwnerId.empty() &&
         (to->role == Stack::GraphModel::NodeRole::CurrentImage || to->role == Stack::GraphModel::NodeRole::Reference);
     if ((from->kind == NodeKind::Output && !projectEnd) || (to->kind == NodeKind::Image && !projectStart) ||
@@ -988,6 +989,8 @@ bool Graph::RemoveNode(int nodeId) {
     if (wasActiveImage) {
         m_ActiveImageNodeId = -1;
     }
+    for(auto& group:m_Groups)group.compoundMembers.erase(
+        std::remove(group.compoundMembers.begin(),group.compoundMembers.end(),nodeId),group.compoundMembers.end());
     RefreshPrimaryOutputNode();
     TouchStructure();
     return true;

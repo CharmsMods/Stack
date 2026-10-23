@@ -1,4 +1,5 @@
 #include "AppHeaderStyle.h"
+#include "Notifications/NotificationPresenter.h"
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -41,6 +42,8 @@ Palette ResolvePalette(ImVec4 workspace, bool windowFocused) {
 }
 
 void Approach(float& value, float target, float speed, float settleTolerance) {
+    if (value == target) return;
+    if (Stack::Notifications::SystemReducedMotion()) { value = target; return; }
     const float response = 1.0f - std::exp(-std::clamp(ImGui::GetIO().DeltaTime, 0.0f, .05f) * speed);
     value += (target - value) * response;
     if (std::abs(value - target) < settleTolerance) value = target;
@@ -48,6 +51,7 @@ void Approach(float& value, float target, float speed, float settleTolerance) {
 
 void ApproachMotion(float& value, float target, float duration) {
     if (value == target) return;
+    if (Stack::Notifications::SystemReducedMotion()) { value = target; return; }
     const float distance = std::abs(target - value);
     const float remaining = std::max(0.f, std::cbrt(distance) -
         std::max(0.f, ImGui::GetIO().DeltaTime) / std::max(.001f, duration));

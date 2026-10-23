@@ -1,0 +1,64 @@
+{
+  "files": [
+    {
+      "source": "upstream/LICENSE",
+      "target": "LICENSE-SEA-RAFT.txt",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/LICENSE",
+      "sha256": "1786969fe81508ad087053434ebf56e556372156010dbf3039c3b48ae612eeb2"
+    },
+    {
+      "source": "upstream/config/eval/spring-M.json",
+      "target": "config.json",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/config/eval/spring-M.json",
+      "sha256": "32e1413055eecf506c92fe6cdcffcd5179694e22e66f558fa93a766d1a95d1d8"
+    },
+    {
+      "source": "upstream/core/raft.py",
+      "target": "core/raft.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/raft.py",
+      "sha256": "4bb02c831f04b16a27fd016c8bb4ecfcf5834ea88f40e84fac9d2555864d5979"
+    },
+    {
+      "source": "upstream/core/extractor.py",
+      "target": "core/extractor.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/extractor.py",
+      "sha256": "684cfe479ef6cbe5796397749939676c79626f0c3fcbc033c8fb5cab9475bc7a"
+    },
+    {
+      "source": "upstream/core/layer.py",
+      "target": "core/layer.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/layer.py",
+      "sha256": "580f4cced2b5f3551667b4b4b24b8ff7cd024ef4e3f8723bf3c5fbb7baf74563"
+    },
+    {
+      "source": "upstream/core/update.py",
+      "target": "core/update.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/update.py",
+      "sha256": "978dc580e4ebd394b29894f5d5460153a2fe5a7d4c50e5e83823330298133f69"
+    },
+    {
+      "source": "upstream/core/corr.py",
+      "target": "core/corr.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/corr.py",
+      "sha256": "e89bc770f1e6712447d90b8a8c75fd136c98816726d4338972f8ea5d7d6d24fb"
+    },
+    {
+      "source": "upstream/core/utils/utils.py",
+      "target": "core/utils/utils.py",
+      "url": "https://raw.githubusercontent.com/princeton-vl/SEA-RAFT/9137517ba24e628442aec097d3afe71d03503b75/core/utils/utils.py",
+      "sha256": "04d88de0f161db56f856776e05d4337cecaadabdc1decc104b22c6ea642f11ae"
+    },
+    {
+      "source": "model/README.md",
+      "target": "MODEL-CARD.md",
+      "url": "https://huggingface.co/MemorySlices/Tartan-C-T-TSKH-spring540x960-M/resolve/eb97ef34ba5d856c3fa2cdcd073150c057ac8b69/README.md",
+      "sha256": "76dfb05738b57606974a4bf5bebfcce82e294f5ad349a3da82fc2221d3e73415"
+    },
+    {
+      "source": "model/model.safetensors",
+      "target": "model.safetensors",
+      "url": "https://huggingface.co/MemorySlices/Tartan-C-T-TSKH-spring540x960-M/resolve/eb97ef34ba5d856c3fa2cdcd073150c057ac8b69/model.safetensors",
+      "sha256": "cb8cfbf14c5e0f6734b64add383708b7ff68cc6089a0007c67165d4761346102"
+    }
+  ]
+}

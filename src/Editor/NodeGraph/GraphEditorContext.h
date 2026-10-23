@@ -18,6 +18,9 @@ struct GraphEditorContext {
     std::function<std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>(
         std::optional<std::pair<int, std::string>>)> queryAvailableNodes;
     std::function<bool(GraphModel::EditProposal, std::string&)> applyEdit;
+    // Hosts with several owned graphs validate the final document once. The
+    // command edits a private candidate, never the live canvas.
+    std::function<bool(const std::function<void(EditorNodeGraph::Graph&)>&, std::string&)> applyCommand;
     std::function<bool(int, const std::string&, int, const std::string&, std::string*)> canConnect;
     std::function<void(int)> selectNode;
     std::function<void(int)> inspectParameters;

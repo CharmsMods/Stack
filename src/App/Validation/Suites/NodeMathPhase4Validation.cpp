@@ -2,6 +2,7 @@
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "NodeMath/PointwiseIR.h"
+#include "NodeMath/TechnicalImageMath.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/RenderPipeline.h"
@@ -156,12 +157,12 @@ PointwiseProgram BuildArithmeticReference(float addValue, float multiplyValue) {
     const auto input = Stack::NodeMath::AppendPointwiseInput(program, source);
     const PointwiseSourceLocation addSource { 2, "stack:graph/data-math/add", "imageA", "imageOut" };
     const auto add = Stack::NodeMath::AppendPointwiseConstant(
-        program, { addValue, addValue, addValue, addValue }, addSource);
+        program, { addValue, addValue, addValue, 0.0 }, addSource);
     const auto added = Stack::NodeMath::AppendPointwiseOperation(
         program, PointwiseOperation::Add, { input, add }, addSource);
     const PointwiseSourceLocation multiplySource { 3, "stack:graph/data-math/multiply", "imageA", "imageOut" };
     const auto multiply = Stack::NodeMath::AppendPointwiseConstant(
-        program, { multiplyValue, multiplyValue, multiplyValue, multiplyValue }, multiplySource);
+        program, { multiplyValue, multiplyValue, multiplyValue, 1.0 }, multiplySource);
     program.rootId = Stack::NodeMath::AppendPointwiseOperation(
         program, PointwiseOperation::Multiply, { added, multiply }, multiplySource);
     return program;
@@ -174,13 +175,13 @@ PointwiseProgram BuildReverseArithmeticReference(float multiplyValue, float addV
     const PointwiseSourceLocation multiplySource {
         2, "stack:graph/data-math/multiply", "imageA", "imageOut" };
     const auto multiply = Stack::NodeMath::AppendPointwiseConstant(
-        program, { multiplyValue, multiplyValue, multiplyValue, multiplyValue }, multiplySource);
+        program, { multiplyValue, multiplyValue, multiplyValue, 1.0 }, multiplySource);
     const auto multiplied = Stack::NodeMath::AppendPointwiseOperation(
         program, PointwiseOperation::Multiply, { input, multiply }, multiplySource);
     const PointwiseSourceLocation addSource {
         3, "stack:graph/data-math/add", "imageA", "imageOut" };
     const auto add = Stack::NodeMath::AppendPointwiseConstant(
-        program, { addValue, addValue, addValue, addValue }, addSource);
+        program, { addValue, addValue, addValue, 0.0 }, addSource);
     program.rootId = Stack::NodeMath::AppendPointwiseOperation(
         program, PointwiseOperation::Add, { multiplied, add }, addSource);
     return program;
@@ -967,6 +968,123 @@ bool ValidateGraphExceptionBoundary(
     return ok;
 }
 
+bool ValidatePhysicalPointwiseScheduling(const std::vector<unsigned char>& pixels, int width, int height) {
+    const auto makeGraph = [] {
+        auto graph = BuildArithmeticGraph(false, 0.25f, 2.0f);
+        graph.nodes.push_back(DataMathNode(5, RenderDataMathMode::Subtract, 0.125f));
+        graph.links.back() = Link(3, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::kMixInputASocketId);
+        graph.links.push_back(Link(5, EditorNodeGraph::kImageOutputSocketId, 4, EditorNodeGraph::kImageInputSocketId));
+        return graph;
+    };
+    bool ok = true;
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+        auto graph = makeGraph();
+        pipeline.ExecuteGraph(graph);
+        const auto stats = pipeline.GetLastGraphExecutionStats();
+        auto expected = EvaluateArithmeticReference(pixels, BuildArithmeticReference(0.25f, 2.0f));
+        for (std::size_t i = 0; i < expected.size(); ++i) if (i % 4 != 3) expected[i] -= 0.125f;
+        ok &= Check(stats.fusedPointwiseDrawSubmissions == 1 && stats.dataMathDrawSubmissions == 0 &&
+            stats.pointwiseOptimizationRuns == 1 && stats.pointwiseGroups.size() == 1 &&
+            stats.pointwiseGroups.front().authoredNodeIds == std::vector<int>({2, 3, 5}),
+            "cold three-operation chain rendered intermediate prefixes before its fused draw");
+        ok &= Check(MaximumDifference(expected, ReadTextureFloat(pipeline.GetOutputTexture(), width, height)) <= 2.5e-3,
+            "physically scheduled three-operation output changed RGB or alpha");
+        pipeline.ExecuteGraph(graph);
+        const auto warm = pipeline.GetLastGraphExecutionStats();
+        ok &= Check(warm.fusedPointwiseDrawSubmissions == 0 && warm.dataMathDrawSubmissions == 0 &&
+            warm.pointwiseOptimizationRuns == 0 && warm.imageCacheHits > 0,
+            "unchanged fused output repeated GPU work or pointwise optimization");
+    }
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+        pipeline.SetRawDevelopmentGraphScopeReadbackRequest(RawDevelopmentGraphScopeStage::FinishToneInput, 16);
+        auto graph = makeGraph();
+        graph.rawLayerScopeNodeId = 2;
+        graph.rawLayerScopeSocketId = EditorNodeGraph::kImageOutputSocketId;
+        pipeline.ExecuteGraph(graph);
+        const auto stats = pipeline.GetLastGraphExecutionStats();
+        const auto& scope = pipeline.GetRawDevelopmentGraphScopeReadback();
+        ok &= Check(stats.dataMathDrawSubmissions == 1 && stats.fusedPointwiseDrawSubmissions == 1 &&
+            stats.pointwiseGroups.size() == 1 &&
+            stats.pointwiseGroups.front().authoredNodeIds == std::vector<int>({3, 5}),
+            "auxiliary inspection output was inlined or rendered more than once");
+        ok &= Check(scope.valid && scope.pixels.size() == static_cast<std::size_t>(width * height * 3) &&
+            std::abs(scope.pixels.front() - (pixels.front() / 255.0f + 0.25f)) < 2.5e-3,
+            "auxiliary inspection output did not retain its own intermediate pixels");
+    }
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+        auto graph = makeGraph();
+        RenderGraphNode reformat;
+        reformat.nodeId = 6;
+        reformat.kind = RenderGraphNodeKind::Reformat;
+        reformat.reformatSettings.width = 7;
+        reformat.reformatSettings.height = 3;
+        graph.nodes.push_back(reformat);
+        graph.links.front() = Link(6, EditorNodeGraph::kImageOutputSocketId, 2, EditorNodeGraph::kMixInputASocketId);
+        graph.links.push_back(Link(1, EditorNodeGraph::kImageOutputSocketId, 6, EditorNodeGraph::kImageInputSocketId));
+        pipeline.ExecuteGraph(graph);
+        const auto stats = pipeline.GetLastGraphExecutionStats();
+        ok &= Check(pipeline.GetOutputTexture() != 0 && pipeline.GetCanvasWidth() == 7 && pipeline.GetCanvasHeight() == 3 &&
+            stats.fusedPointwiseDrawSubmissions == 1 && stats.dataMathDrawSubmissions == 0 &&
+            stats.pointwiseGroups.size() == 1 && stats.pointwiseGroups.front().targetBytes == 7u * 3u * 16u &&
+            stats.pointwiseGroups.front().targetFormat == "RGBA32F",
+            "fused target planning did not use its reformatted input extent");
+    }
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+        auto graph = makeGraph();
+        graph.unavailableOutputs.emplace(2, "Unavailable pointwise input validation");
+        pipeline.ExecuteGraph(graph);
+        const auto stats = pipeline.GetLastGraphExecutionStats();
+        ok &= Check(pipeline.GetOutputTexture() == 0 && stats.fusedPointwiseDrawSubmissions == 0 &&
+            stats.lastSpecializedFailureNodeId == 2 &&
+            stats.lastSpecializedFailure == "Unavailable pointwise input validation",
+            "fusion concealed an unavailable internal operation and its diagnostic");
+    }
+    for (const bool linkedExposure : {false, true}) {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+        auto graph = makeGraph();
+        graph.nodes[2] = TechnicalNode(3, linkedExposure
+            ? Stack::NodeMath::TechnicalImageOperation::Exposure
+            : Stack::NodeMath::TechnicalImageOperation::SrgbDecode);
+        graph.links[1].toSocketId = EditorNodeGraph::kImageInputSocketId;
+        if (linkedExposure) {
+            RenderGraphNode value;
+            value.nodeId = 6;
+            value.kind = RenderGraphNodeKind::Value;
+            value.scalarValue = 1.0;
+            graph.nodes.push_back(value);
+            graph.links.push_back(Link(6, EditorNodeGraph::kValueOutputSocketId,
+                3, EditorNodeGraph::kExposureValueInputSocketId));
+        }
+        pipeline.ExecuteGraph(graph);
+        const auto stats = pipeline.GetLastGraphExecutionStats();
+        std::vector<float> expected(pixels.size());
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            const float original = pixels[i] / 255.0f;
+            expected[i] = i % 4 == 3 ? original : (linkedExposure ? 2.0f * (original + 0.25f)
+                : Stack::NodeMath::DecodeSrgbExtended(original + 0.25f)) - 0.125f;
+        }
+        ok &= Check(stats.fusedPointwiseDrawSubmissions == 0 && stats.dataMathDrawSubmissions == 2 &&
+            MaximumDifference(expected, ReadTextureFloat(pipeline.GetOutputTexture(), width, height)) <= 2.5e-3,
+            linkedExposure ? "linked exposure value lost its evaluation boundary"
+                           : "color conversion lost its ordered pixel boundary");
+    }
+    return ok;
+}
+
 bool RunValidationWithContext() {
     const std::vector<unsigned char> pixels {
         64, 32, 16, 128,
@@ -987,6 +1105,7 @@ bool RunValidationWithContext() {
     ok &= ValidateTransientTargetPoolBounds(pixels, width, height);
     ok &= ValidateStableSourceExtentAcrossReformat(pixels, width, height);
     ok &= ValidateGraphExceptionBoundary(pixels, width, height);
+    ok &= ValidatePhysicalPointwiseScheduling(pixels, width, height);
     std::vector<float> fusedPixels;
     GraphExecutionStats fusedStats;
     {
@@ -998,6 +1117,8 @@ bool RunValidationWithContext() {
         fusedPixels = ReadTextureFloat(pipeline.GetOutputTexture(), width, height);
         fusedStats = pipeline.GetLastGraphExecutionStats();
         ok &= Check(fusedStats.fusedPointwiseGroups == 1, "linear arithmetic chain did not fuse");
+        ok &= Check(fusedStats.fusedPointwiseDrawSubmissions == 1 && fusedStats.dataMathDrawSubmissions == 0,
+            "two-operation fusion still submitted an intermediate arithmetic draw");
         ok &= Check(fusedStats.fusedPointwiseNodes == 2 && fusedStats.avoidedPointwisePasses == 1,
             "fused pass accounting is incorrect");
         ok &= Check(fusedStats.pointwiseProgramCacheMisses == 1 &&
@@ -1010,6 +1131,8 @@ bool RunValidationWithContext() {
         const GraphExecutionStats editedStats = pipeline.GetLastGraphExecutionStats();
         ok &= Check(editedStats.pointwiseProgramCacheHits == 1,
             "parameter edit did not reuse the structural generated-program cache");
+        ok &= Check(editedStats.fusedPointwiseDrawSubmissions == 1 && editedStats.dataMathDrawSubmissions == 0,
+            "parameter edit materialized a virtual intermediate operation");
 
         graph.outputNodeId = 2;
         graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
@@ -1057,6 +1180,8 @@ bool RunValidationWithContext() {
     }
     ok &= Check(unfusedStats.fusedPointwiseGroups == 0,
         "fan-out did not create the conservative v1 materialization barrier");
+    ok &= Check(unfusedStats.fusedPointwiseDrawSubmissions == 0 && unfusedStats.dataMathDrawSubmissions == 2,
+        "fan-out barrier did not submit exactly its two required arithmetic draws");
     ok &= Check(MaximumDifference(cpuReference, unfusedPixels) <= rgba16fTolerance,
         "CPU reference and unfused live GPU output exceed RGBA16F tolerance");
     ok &= Check(MaximumDifference(fusedPixels, unfusedPixels) <= rgba16fTolerance,
@@ -1104,6 +1229,9 @@ bool RunValidationWithContext() {
         const GraphExecutionStats stats = pipeline.GetLastGraphExecutionStats();
         ok &= Check(stats.pointwiseFallbacks >= 1 && !stats.lastPointwiseFailure.empty(),
             "invalid uniform did not produce a source-mapped fusion fallback");
+        ok &= Check(stats.fusedPointwiseDrawSubmissions == 0 && stats.dataMathDrawSubmissions == 2 &&
+            stats.pointwiseOptimizationRuns == 1,
+            "failed fusion did not materialize its skipped dependencies exactly once");
         ok &= Check(std::find(
                 stats.lastPointwiseFailureNodeIds.begin(),
                 stats.lastPointwiseFailureNodeIds.end(),

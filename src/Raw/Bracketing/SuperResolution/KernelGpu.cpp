@@ -41,13 +41,15 @@ void main() {
     vec4 m=mapped(target.xy+vec2(outp)*target.z);
     if(m.z<=0||any(isnan(m))||any(isinf(m)))return;
     ivec2 center=ivec2(floor(m.xy+.5));
-    float headroom=1;
+    float headroom=1;bvec3 usable=bvec3(false);
     for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x) {
         ivec2 loc=center+ivec2(x,y)-region.xy;
         if(any(lessThan(loc,ivec2(0)))||any(greaterThanEqual(loc,region.zw)))continue;
-        headroom=min(headroom,data[mapSize.x*mapSize.y+loc.y*region.z+loc.x].w);
+        float h=data[mapSize.x*mapSize.y+loc.y*region.z+loc.x].w;
+        if(h>=0)headroom=min(headroom,h);
+        if(h>0) {ivec2 q=center+ivec2(x,y);usable[colors[((q.y&1)<<1)|(q.x&1)]]=true;}
     }
-    if(headroom<=0)return;
+    if(headroom<=0||!all(usable))return;
     vec3 weights=vec3(0),bwts=vec3(0);Pixel p=pixels[outi];
     for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x) {
         ivec2 q=center+ivec2(x,y),loc=q-region.xy;
@@ -87,12 +89,24 @@ bool GpuKernel::Begin(const Tile& t,std::string& error) {
     GLint major=0,minor=0;glGetIntegerv(GL_MAJOR_VERSION,&major);glGetIntegerv(GL_MINOR_VERSION,&minor);
     if(major<4||(major==4&&minor<3)){error="Super-resolution needs OpenGL 4.3 for GPU execution.";return false;}
     Stack::Rendering::ScopedComputeBindings bindings;
-    if(!program_)program_=GLHelpers::CreateComputeProgram(shader);
+    if(!program_) {
+        program_=GLHelpers::CreateComputeProgram(shader);
+        if(program_) {
+            const char* names[]={"outputSize","mapSize","target","mapGeometry","detailPreference","regionValue","colorValue"};
+            for(std::size_t i=0;i<uniforms_.size();++i)uniforms_[i]=glGetUniformLocation(program_,names[i]);
+        }
+    }
     if(!program_){error="Could not compile super-resolution kernel.";return false;}
     if(!input_)glGenBuffers(1,&input_);
     if(!output_)glGenBuffers(1,&output_);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER,output_);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,t.pixels.size()*sizeof(PixelAccumulator),t.pixels.data(),GL_DYNAMIC_DRAW);
+    const auto bytes=t.pixels.size()*sizeof(PixelAccumulator);
+    if(bytes>outputCapacity_) {
+        glBufferData(GL_SHADER_STORAGE_BUFFER,bytes,nullptr,GL_DYNAMIC_DRAW);
+        if(!Check(error))return false;
+        outputCapacity_=bytes;
+    }
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,bytes,t.pixels.data());
     return Check(error);
 }
 bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
@@ -100,19 +114,21 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
     Stack::Rendering::ScopedComputeBindings bindings;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER,input_);
     const auto mapBytes=f.mapping.size()*sizeof(Vec4),sampleBytes=f.samples.size()*sizeof(Vec4);
+    // Keep orphaning streamed input storage: the preceding capture can still
+    // be reading it. In-place reuse here would introduce an implicit GPU wait.
     glBufferData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes,nullptr,GL_DYNAMIC_DRAW);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,mapBytes,f.mapping.data());
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,mapBytes,sampleBytes,f.samples.data());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,input_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,output_);
     glUseProgram(program_);
-    glUniform2i(glGetUniformLocation(program_,"outputSize"),t.width,t.height);
-    glUniform2i(glGetUniformLocation(program_,"mapSize"),f.mapWidth,f.mapHeight);
-    glUniform3f(glGetUniformLocation(program_,"target"),t.originX,t.originY,t.step);
-    glUniform3f(glGetUniformLocation(program_,"mapGeometry"),f.mapOriginX,f.mapOriginY,f.mapStep);
-    glUniform1f(glGetUniformLocation(program_,"detailPreference"),f.detailPreference);
-    glUniform4f(glGetUniformLocation(program_,"regionValue"),float(f.left),float(f.top),float(f.width),float(f.height));
-    glUniform4f(glGetUniformLocation(program_,"colorValue"),float(f.colors[0]),float(f.colors[1]),float(f.colors[2]),float(f.colors[3]));
+    glUniform2i(uniforms_[0],t.width,t.height);
+    glUniform2i(uniforms_[1],f.mapWidth,f.mapHeight);
+    glUniform3f(uniforms_[2],t.originX,t.originY,t.step);
+    glUniform3f(uniforms_[3],f.mapOriginX,f.mapOriginY,f.mapStep);
+    glUniform1f(uniforms_[4],f.detailPreference);
+    glUniform4f(uniforms_[5],float(f.left),float(f.top),float(f.width),float(f.height));
+    glUniform4f(uniforms_[6],float(f.colors[0]),float(f.colors[1]),float(f.colors[2]),float(f.colors[3]));
     glDispatchCompute((t.width+7)/8,(t.height+7)/8,1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
     return Check(error);
@@ -128,5 +144,7 @@ void GpuKernel::Release() {
     if(input_)glDeleteBuffers(1,&input_);
     if(output_)glDeleteBuffers(1,&output_);
     program_=input_=output_=0;
+    outputCapacity_=0;
+    uniforms_={};
 }
 }

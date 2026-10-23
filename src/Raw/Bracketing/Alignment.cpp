@@ -1,4 +1,5 @@
 #include "Alignment.h"
+#include "AlignmentProxy.h"
 #include "PresentationEvidence.h"
 
 #include <algorithm>
@@ -21,11 +22,11 @@ double ProxySiteValue(const CapturePreview& preview,std::size_t index,Mfd::CfaSi
 }
 
 bool SampleProxySource(const PreparedSource& source,Mfd::RawCoordinate sourceRaw,
-    double& value,Mfd::RawSignalGradient* gradient=nullptr) {
+    double& value,Mfd::RawSignalGradient* gradient=nullptr,std::array<double,3>* color=nullptr) {
     if(!source.original||!source.original->width||!source.original->height||!source.proxyStride) return false;
     const auto& preview=*source.original;
-    const double px=(sourceRaw.x-.5)/source.proxyStride;
-    const double py=(sourceRaw.y-.5)/source.proxyStride;
+    const double px=(sourceRaw.x-AlignmentProxyAccumulator::Center(source.proxyStride))/source.proxyStride;
+    const double py=(sourceRaw.y-AlignmentProxyAccumulator::Center(source.proxyStride))/source.proxyStride;
     if(!std::isfinite(px)||!std::isfinite(py)||px<0||py<0||px>=preview.width-1||py>=preview.height-1) return false;
     const auto x0=static_cast<unsigned>(std::floor(px)),y0=static_cast<unsigned>(std::floor(py));
     const double fx=px-x0,fy=py-y0;
@@ -36,10 +37,16 @@ bool SampleProxySource(const PreparedSource& source,Mfd::RawCoordinate sourceRaw
         static_cast<std::size_t>(y0+1)*preview.width+x0+1};
     const std::array<double,4> weights={(1-fx)*(1-fy),fx*(1-fy),(1-fx)*fy,fx*fy};
     std::array<double,4> samples{};
+    if(color)color->fill(0);
     for(std::size_t i=0;i<4;++i) {
         if(weights[i]>1e-12&&preview.clipped[indices[i]]) return false;
         samples[i]=ProxyLuminance(preview,indices[i]);
         if(!std::isfinite(samples[i])) return false;
+        if(color)for(unsigned c=0;c<3;++c) {
+            const double v=preview.rgb[indices[i]*3+c];
+            if(!std::isfinite(v))return false;
+            (*color)[c]+=weights[i]*v;
+        }
     }
     value=0;for(std::size_t i=0;i<4;++i)value+=weights[i]*samples[i];
     if(gradient) {
@@ -68,6 +75,7 @@ std::vector<Mfd::AffineReferenceSample> ReferenceSamples(const PreparedSource& s
     const auto& preview=*source.original;
     const unsigned step=std::max(1u,static_cast<unsigned>(std::ceil(std::sqrt(
         static_cast<double>(preview.width)*preview.height/16000.0))));
+    const double center=AlignmentProxyAccumulator::Center(source.proxyStride);
     result.reserve(static_cast<std::size_t>((preview.width+step-1)/step)*((preview.height+step-1)/step));
     for(unsigned y=1;y+1<preview.height;y+=step) for(unsigned x=1;x+1<preview.width;x+=step) {
         const auto index=static_cast<std::size_t>(y)*preview.width+x;
@@ -75,7 +83,7 @@ std::vector<Mfd::AffineReferenceSample> ReferenceSamples(const PreparedSource& s
         const double value=ProxyLuminance(preview,index);
         if(!std::isfinite(value)||value<=.002) continue;
         Mfd::AffineReferenceSample sample;
-        sample.referenceRaw={x*static_cast<double>(source.proxyStride)+.5,y*static_cast<double>(source.proxyStride)+.5};
+        sample.referenceRaw={x*static_cast<double>(source.proxyStride)+center,y*static_cast<double>(source.proxyStride)+center};
         sample.site=Mfd::CfaSite::Green0;sample.referenceValue=value;
         sample.referenceVariance=1e-5+1e-4*std::max(0.0,value);
         result.push_back(sample);
@@ -109,6 +117,17 @@ bool SampleAlignmentProxy(const PreparedSource& source,Mfd::RawCoordinate refere
     return SampleProxySource(source,source.alignment.Map(referenceRaw),value,nullptr);
 }
 
+bool SampleAlignmentProxyColor(const PreparedSource& source,Mfd::RawCoordinate raw,
+    double& value,std::array<double,3>& color) {
+    if(source.localMotion) {
+        Mfd::LocalMotionFieldSample motion;Mfd::LocalMotionOptions options;
+        if(!EvaluateCaptureMotion(source,raw,options,motion)||motion.alignmentConfidence<.2)return false;
+        return SampleProxySource(source,motion.sourceRaw,value,nullptr,&color);
+    }
+    if(source.alignmentDiagnostic.localApplied&&source.alignmentDiagnostic.backend!="fixed-reference")return false;
+    return SampleProxySource(source,source.alignment.Map(raw),value,nullptr,&color);
+}
+
 bool Align(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     if(data.sources.empty()||data.origin>=data.sources.size()) {error="Bracketing alignment has no reference capture.";return false;}
@@ -127,6 +146,11 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
     if(!reference.original) {error="The alignment reference proxy is unavailable.";return false;}
     std::size_t alternate=0;
     const auto alternateCount=data.sources.size()-1;
+    // The reference proxy is immutable throughout this operation. Keep its
+    // affine evidence and the four phase workspaces for all alternate captures.
+    std::vector<Mfd::AffineReferenceSample> affineSamples;
+    bool affineSamplesPrepared=false;
+    std::vector<Mfd::GlobalPlanePair> pairs(4);
     for(std::size_t i=0;i<data.sources.size();++i) {
         if(i==data.origin) continue;
         auto& source=data.sources[i];
@@ -149,11 +173,20 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
         // Match their exposure and ceiling instead. These bounded values are
         // only a motion initializer; radiometric sampling still rejects clipping.
         const double phaseCeiling=.8*std::min(1.0,source.scale);
-        std::vector<Mfd::GlobalPlanePair> pairs;
+        std::size_t planeIndex=0;
         for(const auto site:{Mfd::CfaSite::Red,Mfd::CfaSite::Green0,Mfd::CfaSite::Green1,Mfd::CfaSite::Blue}) {
-            Mfd::GlobalPlanePair sitePair;sitePair.site=site;
+            auto& sitePair=pairs[planeIndex++];sitePair.site=site;
             sitePair.extent={reference.original->width,reference.original->height};
             sitePair.rawPixelsPerPlanePixel=reference.proxyStride;
+            if(site==Mfd::CfaSite::Green1) {
+                // Both green phase inputs use the same proxy green channel.
+                // Keep both consensus planes while copying the identical
+                // prepared samples instead of rescaling and clamping twice.
+                const auto& green=pairs[1];
+                sitePair.reference=green.reference;sitePair.alternate=green.alternate;
+                sitePair.validMask=green.validMask;
+                continue;
+            }
             sitePair.reference.resize(count);sitePair.alternate.resize(count);sitePair.validMask.resize(count);
             for(std::size_t p=0;p<count;++p) {
                 sitePair.reference[p]=ProxySiteValue(*reference.original,p,site);
@@ -163,7 +196,6 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
                 sitePair.reference[p]=std::clamp(sitePair.reference[p],0.0,phaseCeiling);
                 sitePair.alternate[p]=std::clamp(sitePair.alternate[p],0.0,phaseCeiling);
             }
-            pairs.push_back(std::move(sitePair));
         }
         Mfd::PhaseTranslationResult phase;std::string phaseError;
         if(!Mfd::EstimateMultichannelPhaseTranslation(pairs,options,phase,&phaseError)||!phase.accepted) {
@@ -196,7 +228,10 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
         source.alignmentDiagnostic.message="Global translation accepted.";
         if(request.recipe.alignmentMode==AlignmentMode::AutomaticGlobal||
            request.recipe.alignmentMode==AlignmentMode::AutomaticLocal) {
-            const auto samples=ReferenceSamples(reference);
+            if(!affineSamplesPrepared) {
+                affineSamples=ReferenceSamples(reference);
+                affineSamplesPrepared=true;
+            }
             Mfd::AffineRefinementOptions affineOptions;
             affineOptions.referenceExtent={data.width,data.height};affineOptions.alternateExtent={data.width,data.height};
             affineOptions.exposureScale=source.scale;affineOptions.minimumOverlapFraction=.55;
@@ -210,7 +245,7 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
                 sample.variance=1e-5+1e-4*std::max(0.0,value);return true;
             };
             Mfd::AffineRefinementResult affine;std::string ignored;
-            if(Mfd::RefineGlobalAffine(samples,evaluator,source.alignment,affineOptions,affine,&ignored)&&affine.acceptedAffine) {
+            if(Mfd::RefineGlobalAffine(affineSamples,evaluator,source.alignment,affineOptions,affine,&ignored)&&affine.acceptedAffine) {
                 source.alignment=affine.model;
                 source.alignmentDiagnostic.model=CaptureAlignment::Model::GlobalAffine;
                 source.alignmentDiagnostic.rotationDegrees=affine.rotationDegrees;
@@ -220,13 +255,15 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
                 source.alignmentDiagnostic.message="Translation accepted; rotation refinement had insufficient reliable evidence.";
             }
         }
-        const double linearDelta=std::abs(source.alignment.linear[0]-1)+std::abs(source.alignment.linear[1])+std::abs(source.alignment.linear[2])+std::abs(source.alignment.linear[3]-1);
-        if(std::hypot(source.alignment.translationRaw.x,source.alignment.translationRaw.y)<.08&&linearDelta<1e-4) {
+        // Even a small accepted affine term can move a large sensor's corners
+        // appreciably. Preserve measured subpixel geometry for static detail
+        // and SR; only an exact identity may bypass geometric sampling.
+        if(source.alignment.IsIdentity()) {
             source.alignment={};source.alignment.centerRaw=center;
             source.alignmentDiagnostic.model=CaptureAlignment::Model::Identity;
             source.alignmentDiagnostic.translationX=source.alignmentDiagnostic.translationY=0;
             source.alignmentDiagnostic.rotationDegrees=0;
-            source.alignmentDiagnostic.message="No measurable movement; identity coordinates retained.";
+            source.alignmentDiagnostic.message="Identity transform retained.";
         } else {
             source.alignmentDiagnostic.translationX=source.alignment.translationRaw.x;
             source.alignmentDiagnostic.translationY=source.alignment.translationRaw.y;

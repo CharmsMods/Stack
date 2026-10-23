@@ -1,11 +1,16 @@
 #pragma once
 #include "Alignment.h"
+#include "AlignmentProxy.h"
 #include <array>
 #include <list>
 #include <stdexcept>
 
 namespace Raw::Bracketing {
-struct ExposurePatch {std::array<double,25> values{};std::uint32_t valid=0;};
+struct ExposurePatch {
+    std::array<double,25> values{};
+    std::array<std::array<double,3>,25> color{};
+    std::uint32_t valid=0;
+};
 struct ExposurePoint {Mfd::RawCoordinate coordinate;unsigned spatialBin=0;};
 
 // Correspondence depends on a source and output coordinate, not the other
@@ -17,8 +22,9 @@ public:
         const auto& origin=data.sources[data.origin];const auto& proxy=*origin.original;
         const unsigned step=std::max(1u,static_cast<unsigned>(std::ceil(std::sqrt(
             static_cast<double>(proxy.width)*proxy.height/4096))));
+        const double center=AlignmentProxyAccumulator::Center(origin.proxyStride);
         for(unsigned y=1;y+1<proxy.height;y+=step) for(unsigned x=1;x+1<proxy.width;x+=step)
-            points.push_back({{x*double(origin.proxyStride)+.5,y*double(origin.proxyStride)+.5},
+            points.push_back({{x*double(origin.proxyStride)+center,y*double(origin.proxyStride)+center},
                 std::min(7u,y*8/proxy.height)*8+std::min(7u,x*8/proxy.width)});
         for(const auto& source:data.sources) stride_=std::max(stride_,source.proxyStride);
         const auto perSource=std::max<std::size_t>(1,points.size()*sizeof(ExposurePatch));
@@ -38,7 +44,8 @@ public:
                 const Mfd::RawCoordinate raw={points[p].coordinate.x+dx*double(stride_),
                     points[p].coordinate.y+dy*double(stride_)};
                 double value=0;
-                if(SampleAlignmentProxy(data_.sources[sourceIndex],raw,value)&&value<.8) {
+                if(SampleAlignmentProxyColor(data_.sources[sourceIndex],raw,value,patch.color[sample])&&
+                    *std::max_element(patch.color[sample].begin(),patch.color[sample].end())<.8) {
                     patch.values[sample]=value;patch.valid|=1u<<sample;
                 }
             }

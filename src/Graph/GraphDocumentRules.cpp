@@ -1,4 +1,5 @@
 #include "Graph/GraphDocumentRules.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Graph/GraphImageRules.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
@@ -26,8 +27,7 @@ GraphAnalysis AnalyzeDocument(const DocumentView& document) {
     bool expandedAny = false;
     for (std::size_t i = 0; i < document.graphs.size(); ++i) {
         const auto& view = document.graphs[i];
-        if (!view.graph || std::none_of(view.graph->GetNodes().begin(),view.graph->GetNodes().end(),
-                [](const auto& node) { return node.kind == EditorNodeGraph::NodeKind::Compound; })) continue;
+        if (!view.graph || !EditorNodeGraph::NeedsOutputLowering(*view.graph)) continue;
         expandedGraphs.emplace_back();
         EditorNodeGraph::CompoundExpansionResult expansion;
         if (!view.graph->ExpandAllCompoundNodes(expandedGraphs.back(),&expansion)) {

@@ -4,6 +4,7 @@
 #include "BorderSupport.h"
 #include "CaptureReliability.h"
 #include "ExposureRefinement.h"
+#include "AlignmentProposalInput.h"
 
 #include "Raw/MultiFrameDenoise/GpuLocalMotion.h"
 #include "GpuMotionSession.h"
@@ -36,6 +37,10 @@ bool HardInvalid(std::uint8_t flags) {
 
 std::size_t AddConservativeGlobalFallbackNodes(
     Mfd::LocalMotionGrid& grid,bool globalAccepted,const Mfd::Parameters& parameters) {
+    // A failed phase/affine solve leaves identity as a search seed, not an
+    // observed camera transform. Photometric agreement in a dark, noisy patch
+    // cannot turn that seed into geometric evidence.
+    if(!globalAccepted) return 0;
     std::size_t converted=0;
     const double sigma=std::max(2.0,parameters.registration.flatSafeCovarianceRawPixels);
     for(auto& node:grid.nodes) {
@@ -102,12 +107,15 @@ bool BuildPyramid(const PreparedSource& source,const std::filesystem::path& dire
         error="The local-alignment CFA layout is unsupported.";return false;
     }
     std::array<Mfd::CfaPyramidBasePlane,4> base;
+    const std::array<Mfd::CfaSite,4> sitesByOffset={
+        layout.SiteAt(0,0),layout.SiteAt(1,0),layout.SiteAt(0,1),layout.SiteAt(1,1)};
     try {
         for(const auto site:kSites) {
             auto& plane=base[SiteIndex(site)];plane.site=site;
             plane.extent=layout.PlaneExtent(site,source.frame.activeExtent);
             const auto count=static_cast<std::size_t>(plane.extent.width*plane.extent.height);
             plane.signal.assign(count,0);plane.variance.assign(count,0);plane.validMask.assign(count,0);
+            plane.clippedMask.assign(count,0);
         }
     } catch(const std::bad_alloc&) {error="The local-alignment pyramid base could not be allocated.";return false;}
     Mfd::DirectoryNormalizedTileCache cache(directory);
@@ -118,13 +126,21 @@ bool BuildPyramid(const PreparedSource& source,const std::filesystem::path& dire
         for(std::uint32_t y=0;y<tile.extent.height;++y) for(std::uint32_t x=0;x<tile.extent.width;++x) {
             const auto rawX=tile.originX+x,rawY=tile.originY+y;
             const auto packed=static_cast<std::size_t>(y)*tile.extent.width+x;
-            const auto site=layout.SiteAt(rawX,rawY);auto& plane=base[SiteIndex(site)];
-            const auto coordinate=layout.RawToPlane({static_cast<double>(rawX),static_cast<double>(rawY)},site);
-            const auto index=static_cast<std::size_t>(coordinate.y)*plane.extent.width+static_cast<std::size_t>(coordinate.x);
+            const auto site=sitesByOffset[(rawY%2)*2+rawX%2];auto& plane=base[SiteIndex(site)];
+            // This pixel belongs to its own Bayer parity. RawToPlane therefore
+            // has exact integer coordinates, independent of the CFA pattern.
+            const auto index=static_cast<std::size_t>(rawY/2)*plane.extent.width+rawX/2;
             const double normalized=tile.normalizedMosaic[packed],gain=tile.comparisonGain[packed];
             const bool valid=!HardInvalid(tile.sampleFlags[packed])&&std::isfinite(normalized)&&std::isfinite(gain)&&gain>0;
+            const auto flags=tile.sampleFlags[packed];
+            const bool clipped=std::isfinite(normalized)&&std::isfinite(gain)&&gain>0&&
+                !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)&&
+                !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired)&&
+                (Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||
+                 Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip));
             plane.validMask[index]=valid?1u:0u;
-            if(valid) {plane.signal[index]=normalized*gain;plane.variance[index]=Variance(source,site,normalized,gain);}
+            plane.clippedMask[index]=clipped?1u:0u;
+            if(valid||clipped) {plane.signal[index]=normalized*gain;plane.variance[index]=Variance(source,site,normalized,gain);}
         }
     }
     return Mfd::BuildCfaPlanePyramid(layout,source.frame.activeExtent,std::move(base),
@@ -215,6 +231,10 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         motionRequest.reverseGlobalCovariance=motionRequest.forwardGlobalCovariance;
         motionRequest.options.registration=parameters.registration;motionRequest.workerCount=workers;
         motionRequest.shouldCancel=request.shouldCancel;
+        {
+            ProcessingTimer timer(data.stageSeconds,"alignment_proposal_load");
+            if(!source.localMotion&&!AttachAlignmentProposal(request,source.id,motionRequest,error))return false;
+        }
         if(request.reportPresentation)motionRequest.reportObservation=[&](const Mfd::LocalMotionGrid& grid,bool provisional) {
             ObserveMotion(request,source,grid,provisional);
         };
@@ -251,6 +271,18 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             localError.clear();accepted=Mfd::EstimateBidirectionalLocalMotion(motionRequest,motion,&localError);
             source.alignmentDiagnostic.backend="cpu-reference";
         }
+        if(motionRequest.forwardProposal&&!reuseMotion) {
+            source.alignmentDiagnostic.backend+="/external-proposal-raw-verified";
+            std::array<unsigned,13> rejections{};
+            for(const auto& node:motion.forward.nodes)if(node.state==Mfd::MotionNodeState::Rejected)
+                ++rejections[static_cast<unsigned>(node.rejectReason)];
+            std::string rejected;
+            for(unsigned r=0;r<rejections.size();++r)if(rejections[r])
+                rejected+=" "+std::string(Mfd::MotionNodeRejectReasonName(static_cast<Mfd::MotionNodeRejectReason>(r)))+"="+std::to_string(rejections[r]);
+            diagnostics.push_back(source.id+": proposal-assisted RAW verification before global fallback: structured="+
+                std::to_string(motion.forward.structuredCount)+", flat-safe="+std::to_string(motion.forward.flatSafeCount)+
+                ", rejected="+std::to_string(motion.forward.rejectedCount)+rejected);
+        }
         bool globalFallback=false;
         if(!accepted) {
             // Missing scene evidence may use the guarded global warp. Resource,
@@ -261,7 +293,14 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             }
             globalFallback=true;motion={};
             if(!BuildFixedMotion(source,parameters,motion.forward,error)) return false;
-            diagnostics.push_back(source.id+": local motion was ambiguous; the global warp is guarded by local reliability checks ("+localError+").");
+            if(!source.alignmentDiagnostic.accepted) {
+                for(auto& node:motion.forward.nodes) {
+                    node.state=Mfd::MotionNodeState::Rejected;node.confidence=0;
+                }
+                motion.forward.structuredCount=0;
+                motion.forward.rejectedCount=motion.forward.nodes.size();
+                diagnostics.push_back(source.id+": neither global nor local motion was established; capture correspondence remains rejected.");
+            } else diagnostics.push_back(source.id+": local motion was ambiguous; the global warp is guarded by local reliability checks ("+localError+").");
         }
         const auto globalFallbackNodes=reuseMotion?0:AddConservativeGlobalFallbackNodes(
             motion.forward,source.alignmentDiagnostic.accepted,parameters);

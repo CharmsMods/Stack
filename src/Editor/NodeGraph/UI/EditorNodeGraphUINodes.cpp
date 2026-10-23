@@ -224,7 +224,7 @@ void EditorNodeGraphUI::DrawAdvancedSocketRevealRows(
     float uiScale) {
     int hiddenInputs = 0;
     int hiddenOutputs = 0;
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, false)) {
+    for (const EditorNodeGraph::SocketDefinition& socket : layout.declaredSockets) {
         if (node.kind == EditorNodeGraph::NodeKind::RawOperation && socket.id == "inputImageOut" && !IsSocketConnected(graph,socket)) continue;
         if (node.kind == EditorNodeGraph::NodeKind::MaskGenerator && node.rawCoverage.value("canvas",std::string{}) == "project" &&
             socket.direction == EditorNodeGraph::SocketDirection::Input) continue;
@@ -279,12 +279,12 @@ bool EditorNodeGraphUI::IsSocketVisibleDuringDrag(const EditorNodeGraph::Graph& 
     if (m_DragOutputNodeId > 0) {
         return direction == SocketDirection::Output
             ? nodeId == m_DragOutputNodeId && socketId == m_DragOutputSocketId
-            : CanConnectInContext(graph, m_DragOutputNodeId, m_DragOutputSocketId, nodeId, socketId);
+            : CanPreviewConnection(graph, m_DragOutputNodeId, m_DragOutputSocketId, nodeId, socketId);
     }
     if (m_DragInputNodeId > 0) {
         return direction == SocketDirection::Input
             ? nodeId == m_DragInputNodeId && socketId == m_DragInputSocketId
-            : CanConnectInContext(graph, nodeId, socketId, m_DragInputNodeId, m_DragInputSocketId);
+            : CanPreviewConnection(graph, nodeId, socketId, m_DragInputNodeId, m_DragInputSocketId);
     }
     return true;
 }
@@ -303,7 +303,7 @@ bool EditorNodeGraphUI::ShouldShowSocketContextLabel(
             return node.id == m_DragOutputNodeId &&
                 socket.id == m_DragOutputSocketId;
         }
-        return nodeHovered && CanConnectInContext(graph, 
+        return nodeHovered && CanPreviewConnection(graph,
             m_DragOutputNodeId,
             m_DragOutputSocketId,
             node.id,
@@ -314,7 +314,7 @@ bool EditorNodeGraphUI::ShouldShowSocketContextLabel(
             return node.id == m_DragInputNodeId &&
                 socket.id == m_DragInputSocketId;
         }
-        return nodeHovered && CanConnectInContext(graph, 
+        return nodeHovered && CanPreviewConnection(graph,
             node.id,
             socket.id,
             m_DragInputNodeId,
@@ -410,14 +410,8 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     ApplyCanonicalNodeMetrics(this, editor, node, metrics);
     GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const NodePresentationProfile presentation = BuildNodePresentationProfile(this, editor, node, graphStyle);
-    NodeFamilyStyle familyStyle = StyleForFamily(FamilyForNode(node), graphStyle);
-    if (!node.rawLayerOwnerId.empty() &&
-        (node.role == Stack::GraphModel::NodeRole::CurrentImage || node.role == Stack::GraphModel::NodeRole::LayerResult)) {
-        familyStyle.accent = ImVec4(.86f,.23f,.22f,1.f);
-        familyStyle.border = familyStyle.accent;
-        familyStyle.fill = BlendColor(familyStyle.fill,familyStyle.accent,.13f);
-        graphStyle.nodeAppearance.surface = familyStyle.fill;
-    }
+    const NodeFamilyStyle familyStyle = StyleForFamily(FamilyForNode(node), graphStyle);
+    graphStyle.nodeAppearance.surface = familyStyle.fill;
     if (!FindNodeLayoutCache(node.id)) {
         RefreshNodeLayoutCache(graph, node);
     }
@@ -470,6 +464,12 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         15.0f,
         10.0f);
     const float nodeEmphasis = std::clamp(selectedAnim * 0.90f + hoverAnim * 0.55f, 0.0f, 1.0f);
+    if (!m_RenderPreviewOnly && !m_RenderCaptureOnly &&
+        (m_NodeNotes.Revealed() || m_LinkLabelRevealAlpha > .001f)) {
+        RenderNodeNotes(editor, node, hovered, selectedAnim);
+        numericNodeScope.PreserveCurrentDrawing();
+        return;
+    }
     const float uiScale = NodeContentScale();
     const float pinRadius = NodePinRadius();
     auto socketInteractionEmphasis = [&](EditorNodeGraph::SocketDirection direction, const std::string& socketId, bool hoveredSocket) -> float {
@@ -488,13 +488,13 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         if (direction == EditorNodeGraph::SocketDirection::Input &&
             m_DragOutputNodeId > 0 &&
             hoveredSocket &&
-            CanConnectInContext(graph, m_DragOutputNodeId, m_DragOutputSocketId, node.id, socketId)) {
+            CanPreviewConnection(graph, m_DragOutputNodeId, m_DragOutputSocketId, node.id, socketId)) {
             emphasis = std::max(emphasis, 1.0f);
         } else if (
             direction == EditorNodeGraph::SocketDirection::Output &&
             m_DragInputNodeId > 0 &&
             hoveredSocket &&
-            CanConnectInContext(graph, node.id, socketId, m_DragInputNodeId, m_DragInputSocketId)) {
+            CanPreviewConnection(graph, node.id, socketId, m_DragInputNodeId, m_DragInputSocketId)) {
             emphasis = std::max(emphasis, 1.0f);
         }
 
@@ -554,6 +554,12 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 5.0f * uiScale);
         }
         const float previewRounding = 5.0f * uiScale;
+        if (node.kind == EditorNodeGraph::NodeKind::MaskTexture ||
+            node.kind == EditorNodeGraph::NodeKind::CustomMask) {
+            // Identify mask media without tinting the preview pixels.
+            drawList->AddRect(imageMin, imageMax, ColorToU32(familyStyle.border),
+                previewRounding, 0, 1.15f * uiScale);
+        }
         if (selectedAnim > 0.001f) {
             drawList->AddRectFilled(
                 imageMin,
@@ -659,13 +665,13 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         bool outputUsesChannel = false;
         if (node.kind == EditorNodeGraph::NodeKind::Output) {
             if (const EditorNodeGraph::Link* input =
-                    graph.FindInputLink(
+                    graph.FindAnyInputLink(
                         node.id,
                         EditorNodeGraph::kImageInputSocketId)) {
                 outputUsesChannel =
-                    graph.IsScalarSocketStream(
+                    ResolveOutputVisualStyle(graph,
                         input->fromNodeId,
-                        input->fromSocketId);
+                        input->fromSocketId, editor).scalarStream;
             }
         }
 
@@ -1227,7 +1233,7 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         auto* layers = GetActiveLayers(editor);
         if (layers && node.layerIndex >= 0 && node.layerIndex < static_cast<int>(layers->size()) && (*layers)[node.layerIndex]) {
             auto renderLayerControls = [&](LayerBase& layer) {
-                RenderLayerMetadataNotes(graph, node, controlWidth);
+                RenderLayerMetadataNotes(graph, node, controlWidth, editor);
                 if (richExpandedSurface) {
                     NodeSurfaceContext surfaceContext;
                     surfaceContext.nodeId = node.id;
@@ -1438,13 +1444,13 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
     } else if (node.kind == EditorNodeGraph::NodeKind::Output) {
         bool outputUsesChannel = false;
         if (const EditorNodeGraph::Link* input =
-                graph.FindInputLink(
+                graph.FindAnyInputLink(
                     node.id,
                     EditorNodeGraph::kImageInputSocketId)) {
             outputUsesChannel =
-                graph.IsScalarSocketStream(
+                ResolveOutputVisualStyle(graph,
                     input->fromNodeId,
-                    input->fromSocketId);
+                    input->fromSocketId, editor).scalarStream;
         }
         ImGui::TextDisabled(
             "Value: %s",
@@ -1743,7 +1749,7 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
         }
         }
         captureIfActive();
-        if (!graph.FindInputLink(
+        if (!graph.FindAnyInputLink(
                 node.id,
                 EditorNodeGraph::kMatchExtentInputSocketId)) {
             ImGui::TextDisabled(
@@ -1763,10 +1769,10 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
         }
         if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) {
             ImGui::TextDisabled("Uniform values can drive parameters.");
-            if (!graph.FindInputLink(node.id, EditorNodeGraph::kMixInputASocketId))
+            if (!graph.FindAnyInputLink(node.id, EditorNodeGraph::kMixInputASocketId))
                 changed |= renderSlider("Value A", "##MathA", &node.dataMathSettings.constantA,
                     std::min(-16.f, node.dataMathSettings.constantA), std::max(16.f, node.dataMathSettings.constantA));
-            if (!graph.FindInputLink(node.id, EditorNodeGraph::kMixInputBSocketId) &&
+            if (!graph.FindAnyInputLink(node.id, EditorNodeGraph::kMixInputBSocketId) &&
                 node.dataMathMode != EditorNodeGraph::DataMathMode::Clamp && node.dataMathMode != EditorNodeGraph::DataMathMode::Remap &&
                 node.dataMathMode != EditorNodeGraph::DataMathMode::Average)
                 changed |= renderSlider("Value B", "##MathB", &node.dataMathSettings.constantB,
@@ -2020,6 +2026,8 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
                 const float maximum = parameter.hardDomain.applicable
                     ? static_cast<float>(parameter.hardDomain.maximum) : 16.0f;
                 const std::string widgetId = "##CompoundParameter" + std::to_string(parameterIndex++);
+                const bool linked=graph.FindAnyInputLink(node.id,EditorNodeGraph::ParameterInputSocketId(parameter.id))!=nullptr;
+                ImGui::BeginDisabled(linked);
                 if (const auto* defaultValue = std::get_if<double>(&parameter.defaultValue))
                     ImGuiExtras::SetNextNodeNumericDefault(*defaultValue);
                 if (renderSlider(parameter.label.c_str(), widgetId.c_str(), &value, minimum, maximum)) {
@@ -2027,6 +2035,8 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
                         node.compound.instance, parameter.id, static_cast<double>(value));
                     changed = true;
                 }
+                ImGui::EndDisabled();
+                if(linked)ImGui::TextDisabled("Linked input; local fallback retained");
             }
             if (definition->parameters.empty()) ImGui::TextDisabled("No promoted controls");
             if (changed) editor->MarkGraphEdited(node.id);
@@ -2136,13 +2146,26 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
     return true;
 }
 
-bool EditorNodeGraphUI::CanConnectInContext(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
+bool EditorNodeGraphUI::CanPreviewConnection(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
     int to, const std::string& input) const {
     if (m_GraphContext.graph != &graph || !m_GraphContext.canConnect) return graph.CanConnectSockets(from,output,to,input);
     const auto key = std::to_string(from)+"/"+output+"/"+std::to_string(to)+"/"+input;
     const auto cached = m_ConnectionCapabilityCache.find(key);
     if (cached != m_ConnectionCapabilityCache.end()) return cached->second;
-    const bool accepted = m_GraphContext.canConnect(from,output,to,input,nullptr);
+    // This is pointer feedback, not an edit proposal. Cloning, lowering and
+    // validating the whole RAW document for every visible candidate stalls
+    // the first drag frame. Reuse current owner semantics for local type and
+    // cycle checks; ConnectGraphSockets still validates the full transaction
+    // (including external references and layer boundaries) on release.
+    EditorNodeGraph::GraphOutputContext descriptions;
+    descriptions.resolveOutput = [this](const auto& node, const auto& socket)
+        -> std::optional<EditorNodeGraph::GraphOutputDescription> {
+        if (m_ActiveEditor)
+            if (const auto* output=m_ActiveEditor->GetGraphOutputDescription(node.id,socket)) return *output;
+        return std::nullopt;
+    };
+    EditorNodeGraph::ScopedGraphOutputAnalysis analysis(graph,std::move(descriptions));
+    const bool accepted = graph.CanConnectSockets(from,output,to,input);
     m_ConnectionCapabilityCache.emplace(key,accepted);
     return accepted;
 }

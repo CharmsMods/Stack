@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "components": {
     "application": {
-      "files": ["Stack.exe"],
+      "files": ["Stack.exe", "Stack/App/Runtime/libavoid.dll"],
       "directories": ["Stack/App"],
-      "signedFiles": ["Stack.exe"]
+      "signedFiles": ["Stack.exe", "Stack/App/Runtime/libavoid.dll"]
     },
     "burst": {
       "files": ["StackBurst.exe"],

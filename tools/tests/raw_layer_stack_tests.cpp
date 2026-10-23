@@ -12,6 +12,7 @@
 #include "Graph/GraphDocumentRules.h"
 #include "Project/RawLayerStackSnapshot.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/RawRenderGraphOverlay.h"
 #include "Editor/Internal/RawLab/RawLabImageMapping.h"
 #include "Raw/RawViewportDetail.h"
@@ -362,9 +363,14 @@ void CheckProjectCanvas() {
     Check(!picker.Open() && Stack::Editor::RawLayerToolNodes(toolsLayer.graph).front()->id==tool,
         "Deleting a node left a stale RAW selector choice.");
     const auto cap=[&](const std::string& owner,Role role) {
+        if(role==Role::CurrentImage)for(const auto& hidden:canvas.hiddenStarts)
+            if(hidden.owner==owner && !hidden.destinations.empty())return hidden.destinations.front().first;
         for (const auto& n:canvas.graph.GetNodes()) if(n.rawLayerOwnerId==owner && n.role==role) return n.id;
         return 0;
     };
+    Check(std::none_of(canvas.graph.GetNodes().begin(),canvas.graph.GetNodes().end(),[](const auto& node) {
+        return node.role==Role::CurrentImage;
+    }),"The project canvas still exposes a redundant layer Start.");
     const int bgEnd=cap(kRawBackgroundId,Role::LayerResult), aStart=cap(first.layerId,Role::CurrentImage),
         aEnd=cap(first.layerId,Role::LayerResult),bStart=cap(second.layerId,Role::CurrentImage),bEnd=cap(second.layerId,Role::LayerResult);
     const bool capsConnect=canvas.graph.CanConnectSockets(aEnd,"imageOut",bStart,"imageIn",nullptr,&error);
@@ -400,8 +406,8 @@ void CheckProjectCanvas() {
     auto reordered=canvas.graph;
     // Set all three replacement edges together; intermediate gestures cannot introduce cycles.
     for(auto& edge:reordered.EditLinks()) {
-        if(edge.toNodeId==aStart) edge.fromNodeId=bEnd;
-        if(edge.toNodeId==bStart) edge.fromNodeId=bgEnd;
+        if(edge.toNodeId==aStart && edge.toSocketId=="imageIn") edge.fromNodeId=bEnd;
+        if(edge.toNodeId==bStart && edge.toSocketId=="imageIn") edge.fromNodeId=bgEnd;
         if(edge.toNodeId==canvas.output) edge.fromNodeId=aEnd;
     }
     Check(ApplyRawProjectGraph(state,canvas,reordered,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,accepted,error),error);
@@ -417,20 +423,18 @@ void CheckProjectCanvas() {
     Check(ApplyRawProjectGraph(state,canvas,offCanvas,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,off,error),error);
     Check(!FindRawAdjustmentLayer(off,first.layerId)->enabled,"End cap switch did not turn off its owning layer.");
     auto cycle=reordered;
-    for(auto& edge:cycle.EditLinks()) if(edge.toNodeId==bStart) edge.fromNodeId=aEnd;
+    for(auto& edge:cycle.EditLinks()) if(edge.toNodeId==bStart && edge.toSocketId=="imageIn") edge.fromNodeId=aEnd;
     const auto stable=SerializeRawLayerStack(accepted);
     Check(!ApplyRawProjectGraph(state,canvas,cycle,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,accepted,error),"Cap feedback was accepted.");
     Check(SerializeRawLayerStack(accepted)==stable,"Rejected canvas edit changed the result document.");
-    auto mismatch=canvas.graph;
-    for(auto& edge:mismatch.EditLinks()) if(edge.toNodeId==aEnd) edge.fromNodeId=cap(kRawBackgroundId,Role::CurrentImage);
-    Check(!ApplyRawProjectGraph(state,canvas,mismatch,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,accepted,error),"Mismatched Start/End accepted.");
     auto indirect=canvas.graph;
     int operationId=0;
     for(const auto& n:indirect.GetNodes()) if(n.instanceUuid==first.operationUuid) operationId=n.id;
     for(auto& edge:indirect.EditLinks()) if(edge.toNodeId==operationId && edge.toSocketId=="imageIn")
-        edge.fromNodeId=cap(kRawBackgroundId,Role::CurrentImage);
-    Check(!ApplyRawProjectGraph(state,canvas,indirect,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,accepted,error),
-        "A math operation hid a mismatched layer boundary.");
+        edge.fromNodeId=canvas.preparedSource;
+    Check(ApplyRawProjectGraph(state,canvas,indirect,Stack::GraphModel::LayerParameterRecords(canvas.graph),kRawBackgroundId,accepted,error),error);
+    Check(FindRawAdjustmentLayer(accepted,first.layerId)->imageInput==RawPreparedSourceEndpoint(),
+        "Rewiring the first operation did not update its hidden layer ingress.");
     auto shared=canvas.graph;
     int generator=0,global=0;
     for(const auto& n:shared.GetNodes()) {
@@ -459,7 +463,22 @@ void CheckProjectCanvas() {
     const auto beforeUnsupported=SerializeRawLayerStack(reopened);
     Check(!DeserializeRawLayerStack(legacy,reopened,error) && SerializeRawLayerStack(reopened)==beforeUnsupported,
         "An unsupported layer document changed the current routing draft: "+error);
-    std::cout << "Project canvas defaults, local creation, cap order, cycle rejection and save/reopen passed.\n";
+    RawLayerStackState feedback;
+    feedback.explicitRouting=true;
+    auto& feedbackGraph=feedback.background.graph;
+    const auto currentId=FindRawRole(feedback.background,Role::CurrentImage)->id;
+    const auto feedbackNode=feedbackGraph.AddDataMathNode(EditorNodeGraph::DataMathMode::Multiply,{})->id;
+    Check(feedbackGraph.TryConnectSockets(currentId,"imageOut",feedbackNode,"imageA",&error),error);
+    feedback.background.imageInput=RawLayerEndpoint(feedback.background,*feedbackGraph.FindNode(feedbackNode));
+    feedback.imageOutput=RawLayerEndpoint(feedback.background,*FindRawRole(feedback.background,Role::LayerResult));
+    Check(!ValidateRawLayerStack(feedback,error),"An ordinary image endpoint hid Start feedback.");
+    feedback.background.imageInput=RawPreparedSourceEndpoint();
+    feedbackGraph.FindNode(feedbackNode)->dataMathSettings.domain=Stack::NodeMath::ArithmeticDomain::Values;
+    feedbackGraph.EditLinks().erase(std::remove_if(feedbackGraph.EditLinks().begin(),feedbackGraph.EditLinks().end(),
+        [&](const auto& link){return link.toNodeId==feedbackNode;}),feedbackGraph.EditLinks().end());
+    feedback.imageOutput=RawLayerEndpoint(feedback.background,*feedbackGraph.FindNode(feedbackNode));
+    Check(!ValidateRawLayerStack(feedback,error),"A uniform result was accepted as the main image route.");
+    std::cout << "Project canvas defaults, local creation, cap order, image-route guards, cycle rejection and save/reopen passed.\n";
 }
 
 void CheckViewportContentIdentity() {
@@ -541,6 +560,135 @@ void CheckCompoundReferenceCycle() {
     compound->compound.instance.instanceUuid = compoundUuid;
     Check(!ValidateRawLayerStack(state,error) && error.find("dependency loop") != std::string::npos,
         "Disconnected compound reference feedback was not rejected with its cycle path: " + error);
+}
+
+void CheckCompoundOutputCompleteness() {
+    using namespace Stack;
+    using namespace EditorNodeGraph;
+    const auto checkRawEnd = [&](const NodeMath::CompoundDefinition& definition,
+                                 const std::vector<NodeMath::CompoundDefinition>& catalog,
+                                 const char* label) {
+        RawLayerStackState state;
+        auto& graph=state.background.graph;
+        std::string error;
+        const auto closure=NodeMath::CollectCompoundDependencyClosure(catalog,{definition.identity},&error);
+        Check(!closure.empty(),std::string(label)+": "+error);
+        for (const auto& reference:closure)
+            Check(graph.AddCompoundDefinition(*NodeMath::FindExactCompoundDefinition(catalog,reference),&error),error);
+        const int end=FindRawRole(state.background,GraphModel::NodeRole::LayerResult)->id;
+        const auto incoming=*graph.FindAnyInputLink(end,"imageIn");
+        const int compound=graph.AddCompoundNode(definition.identity,{})->id;
+        GraphOutputContext context;
+        for (const auto& node:graph.GetNodes())
+            if (node.role==GraphModel::NodeRole::OriginalImage || node.role==GraphModel::NodeRole::CurrentImage)
+                context.sourceDescriptors[GraphOutputIdentity(node.id,"imageOut")]=RawLayerSceneDescriptor(Raw::RawWorkingSpace::LinearRec2020D65);
+        ScopedGraphOutputAnalysis semantics(graph,context);
+        Check(graph.TryConnectSockets(incoming.fromNodeId,incoming.fromSocketId,compound,"image-in",&error),error);
+        Check(graph.TryConnectSockets(compound,"image-out",end,"imageIn",&error),error);
+        const auto admitted=[&] {
+            const auto& outputs=graph.GetConnectedOutputNodeIds();
+            return std::find(outputs.begin(),outputs.end(),end)!=outputs.end();
+        };
+        Check(admitted(),std::string(label)+" packed RAW End unavailable: "+graph.GetOutputConnectionDiagnostic());
+        std::vector<int> children;
+        Check(graph.UnpackCompoundNode(compound,&children,&error),error);
+        Check(admitted(),std::string(label)+" decompiled RAW End unavailable: "+graph.GetOutputConnectionDiagnostic());
+    };
+
+    Graph internal;
+    internal.Clear();internal.SetAllowNoOutput(true);
+    auto* difference=internal.AddDataMathNode(DataMathMode::Subtract,{});
+    difference->dataMathSettings.constantA=1.f;
+    NodeMath::CompoundDefinition subtract;
+    subtract.definitionUuid=NodeMath::GenerateCanonicalUuid();
+    subtract.identity.id="project:compound/"+subtract.definitionUuid;
+    subtract.identity.version={1,0,0};subtract.label="One minus input";
+    subtract.ports.push_back({"image-in","Image",NodeMath::PortDirection::Input,
+        NodeMath::LogicalValueType::ColorImage,false,difference->instanceUuid,"imageB"});
+    subtract.ports.push_back({"image-out","Result",NodeMath::PortDirection::Output,
+        NodeMath::LogicalValueType::ColorImage,false,difference->instanceUuid,"imageOut"});
+    subtract.canonicalGraph=SerializeGraphPayload(nlohmann::json::array(),internal);
+    NodeMath::RefreshCompoundDefinitionContentHash(subtract);
+    checkRawEnd(subtract,{subtract},"Constant A / connected B");
+
+    const auto& templates=EditorNodeGraphDefinitions::GetShippedCompoundTemplates();
+    const auto halation=std::find_if(templates.begin(),templates.end(),[](const auto& definition) {
+        return definition.identity.id=="stack:compound/halation";
+    });
+    Check(halation!=templates.end(),"Plain Halation template is missing.");
+    checkRawEnd(*halation,templates,"Halation");
+}
+
+void CheckNativeDecomposition() {
+    using namespace Stack;
+    using namespace EditorNodeGraph;
+    for (const auto& definition:EditorNodeGraphDefinitions::GetUnifiedNodeDefinitionRegistry()) {
+        Check(definition.inspectability==NodeMath::Inspectability::OpaqueSpecialized ||
+            !definition.canonicalRecipeId.empty(),"A native operation claims graph inspectability without a recipe.");
+    }
+    for (bool enabled:{true,false}) {
+        Graph graph;graph.Clear();
+        const int source=graph.AddMaskGeneratorNode(MaskGeneratorKind::Solid,{})->id;
+        const int native=graph.AddMaskUtilityNode(MaskUtilityKind::Invert,{})->id;
+        graph.FindNode(native)->maskUtilitySettings.enabled=enabled;
+        graph.FindNode(native)->rawLayerOwnerId="native-owner";
+        const auto uuid=graph.FindNode(native)->instanceUuid;
+        const int end=graph.AddOutputNode({},true)->id;
+        std::string error;
+        Check(graph.TryConnectSockets(source,"maskOut",native,"maskIn",&error),error);
+        Check(graph.TryConnectSockets(native,"maskOut",end,"imageIn",&error),error);
+        const int maskedGain=graph.AddDataMathNode(DataMathMode::Multiply,{})->id;
+        Check(graph.TryConnectSockets(source,"maskOut",maskedGain,"imageA",&error),error);
+        Check(graph.TryConnectSockets(native,"maskOut",maskedGain,"maskIn",&error),error);
+        const auto nativeType=DescribeGraphOutput(graph,native,"maskOut").descriptor.logicalType;
+        const auto capability=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(graph,*graph.FindNode(native));
+        Check(capability.canDecompile && capability.inspectability==NodeMath::Inspectability::GraphDefinedOptimizedEquivalent,
+            "Native Invert Mask has no exact decomposition capability.");
+        NodeMath::CompoundDefinition first,second;
+        Check(EditorNodeGraphDefinitions::BuildNativeNodeDecomposition(graph,*graph.FindNode(native),first,&error),error);
+        graph.FindNode(native)->title="Renamed inversion";
+        Check(EditorNodeGraphDefinitions::BuildNativeNodeDecomposition(graph,*graph.FindNode(native),second,&error),error);
+        Check(NodeMath::SameDefinitionReference(first.identity,second.identity),"A UI title changed the native recipe identity.");
+        Check(first.ports.size()==2 && first.ports[0].id=="mask-in" && first.ports[1].id=="mask-out",
+            "A native recipe reused noncanonical native socket IDs as compound ports.");
+        std::vector<int> children;
+        std::vector<CompoundOutputBinding> bindings;
+        Check(graph.UnpackCompoundNode(native,&children,&error,&bindings),error);
+        Check(children.size()==1 && graph.FindNode(source),"Native decompilation duplicated its source or extra operations.");
+        Check(bindings.size()==1 && bindings.front().authoredNodeId==native &&
+            bindings.front().authoredSocketId=="maskOut" && bindings.front().expandedNodeId==children.front() &&
+            bindings.front().expandedSocketId=="imageOut",
+            "Native decompilation lost the authored output socket alias.");
+        auto* child=graph.FindNode(children.front());
+        Check(child && child->kind==NodeKind::DataMath && child->rawLayerOwnerId=="native-owner" &&
+            child->dataMathSettings.domain==NodeMath::ArithmeticDomain::Channel &&
+            child->dataMathMode==(enabled ? DataMathMode::Subtract : DataMathMode::Multiply),
+            "Native enabled/bypass setting or graph owner changed during decompilation.");
+        const auto* input=graph.FindAnyInputLink(child->id,enabled ? "imageB" : "imageA");
+        const auto* output=graph.FindAnyInputLink(end,"imageIn");
+        const auto* coverage=graph.FindAnyInputLink(maskedGain,"maskIn");
+        Check(input && output && coverage && input->fromNodeId==source &&
+            output->fromNodeId==child->id && coverage->fromNodeId==child->id,
+            "Native decompilation lost an exact external endpoint.");
+        Check(DescribeGraphOutput(graph,child->id,"imageOut").descriptor.logicalType==nativeType,
+            "A decomposed native Mask changed its logical type at an effect-mask consumer.");
+        const auto leaf=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(graph,*child);
+        Check(!leaf.canDecompile && !leaf.reason.empty(),"An arithmetic primitive is advertised as a fake compound.");
+        graph.EditNodes();
+        child=graph.FindNode(children.front());
+        if (enabled) child->dataMathSettings.constantA=2.f;
+        else child->dataMathSettings.constantB=2.f;
+        int repacked=-1;
+        Check(graph.GetGroups().size()==1 && graph.RepackCompoundGroup(graph.GetGroups().front().id,&repacked,&error),error);
+        Check(graph.FindNode(repacked)->instanceUuid==uuid,"Native repack lost the original instance identity.");
+        Graph restored;
+        DeserializeGraphPayload(SerializeGraphPayload(nlohmann::json::array(),graph),restored,0);
+        children.clear();
+        Check(restored.UnpackCompoundNode(repacked,&children,&error),error);
+        const auto* edited=restored.FindNode(children.front());
+        Check(edited && (enabled ? edited->dataMathSettings.constantA : edited->dataMathSettings.constantB)==2.f,
+            "Repacking/reloading a native decomposition restored the original recipe over an edit.");
+    }
 }
 
 void CheckMergedSourceHistory() {
@@ -776,6 +924,67 @@ void CheckTonalCurvePoints() {
         "Project reopen did not restore the actual tagged point collections.");
     std::cout << "Tonal slider ownership, zero cleanup, collision restoration, amount, persistence and history checks passed.\n";
 }
+void CheckPreparedGraphTransactions() {
+    RawLayerStackDocument document, other;
+    std::string error;
+    const auto original = SerializeRawLayerStack(document.State());
+    const auto projection = BuildRawProjectGraph(document.State());
+    auto edited = projection.graph.CloneForAnalysis();
+    for (auto& node : edited.GetNodes())
+        if (node.role == Stack::GraphModel::NodeRole::LayerResult) node.position.x += 42.f;
+    auto prepared = document.PrepareGraphEdit(projection,edited,
+        Stack::GraphModel::LayerParameterRecords(edited),kRawBackgroundId,error);
+    Check(prepared.has_value(),error);
+    // The draft remains caller-owned. Mutating it after preparation cannot
+    // change the opaque validated candidate installed by the document.
+    edited.EditNodes().clear();
+    Check(document.Commit(std::move(*prepared),error),error);
+    const auto committed = SerializeRawLayerStack(document.State());
+    Check(committed != original && !document.State().background.graph.GetNodes().empty(),
+        "Prepared graph retained mutable caller storage or lost its edit.");
+    Check(document.Undo(&error) && SerializeRawLayerStack(document.State()) == original,
+        "Prepared graph commit did not retain one exact undo state.");
+    Check(document.Redo(&error) && SerializeRawLayerStack(document.State()) == committed,
+        "Prepared graph commit did not retain its exact redo state.");
+
+    auto wrongOwner = document.Prepare(document.State(),error);
+    Check(wrongOwner.has_value(),error);
+    const auto otherBefore = SerializeRawLayerStack(other.State());
+    Check(!other.Commit(std::move(*wrongOwner),error) &&
+        SerializeRawLayerStack(other.State()) == otherBefore,
+        "A prepared edit was accepted by another document.");
+    Check(!document.Commit(std::move(*wrongOwner),error) &&
+        SerializeRawLayerStack(document.State()) == committed,
+        "A consumed prepared edit was accepted again.");
+
+    auto stale = document.Prepare(document.State(),error);
+    Check(stale.has_value(),error);
+    auto newer = document.State(); newer.background.name = "Newer edit";
+    Check(document.Apply(std::move(newer),error),error);
+    const auto newerSaved = SerializeRawLayerStack(document.State());
+    Check(!document.Commit(std::move(*stale),error) &&
+        SerializeRawLayerStack(document.State()) == newerSaved,
+        "A prepared edit replaced a newer document revision.");
+
+    EditorNodeGraph::Graph composition;
+    const int source = composition.AddRawDevelopmentNode({},{})->id;
+    auto dependency = document.Prepare(document.State(),error,&composition,source,7);
+    Check(dependency.has_value(),error);
+    Check(!document.Commit(std::move(*dependency),error,true,false,8,&composition),
+        "A prepared edit accepted a changed dependency revision.");
+    dependency = document.Prepare(document.State(),error,&composition,source,7);
+    Check(dependency.has_value(),error);
+    composition.AddRawDevelopmentNode({},{});
+    Check(!document.Commit(std::move(*dependency),error,true,false,7,&composition) &&
+        SerializeRawLayerStack(document.State()) == newerSaved,
+        "A prepared edit accepted changed composition topology.");
+
+    auto invalid = document.State(); invalid.background.graph.EditNodes().clear();
+    Check(!document.Prepare(std::move(invalid),error).has_value() &&
+        SerializeRawLayerStack(document.State()) == newerSaved,
+        "Invalid preparation changed the live document.");
+    std::cout << "Prepared RAW graph ownership, immutability, stale dependencies, history and rejection checks passed.\n";
+}
 } // namespace
 
 void TestDirectCurvesAndCapture() {
@@ -872,6 +1081,7 @@ void TestSceneToneAndDetailMath() {
 }
 
 void TestRawLayerStackContracts() {
+    CheckPreparedGraphTransactions();
     CheckTonalCurvePoints();
     TestDirectCurvesAndCapture();
     TestSceneToneAndDetailMath();
@@ -880,6 +1090,8 @@ void TestRawLayerStackContracts() {
     CheckProjectCanvas();
     CheckViewportContentIdentity();
     CheckCompoundReferenceCycle();
+    CheckCompoundOutputCompleteness();
+    CheckNativeDecomposition();
     CheckMergedSourceHistory();
     CheckViewportCoordinates();
     const auto offers = Stack::GraphModel::QueryAvailableNodes(RawLayerStackState{}.background.graph);

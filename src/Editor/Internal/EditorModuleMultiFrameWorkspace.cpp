@@ -87,14 +87,14 @@ Stack::Editor::NodeGraphUIVisuals::NodeFamily MeasurementNodeFamily(
     switch (kind) {
     case MultiFrameGraphNodeKind::CaptureSet:
     case MultiFrameGraphNodeKind::CaptureSubset:
-        return NodeFamily::Generator;
+        return NodeFamily::Utility;
     case MultiFrameGraphNodeKind::BurstDenoise:
     case MultiFrameGraphNodeKind::HdrMerge:
-        return NodeFamily::Merge;
+        return NodeFamily::ImageProcessing;
     case MultiFrameGraphNodeKind::Output:
-        return NodeFamily::Gray;
+        return NodeFamily::Utility;
     }
-    return NodeFamily::Gray;
+    return NodeFamily::Utility;
 }
 
 MultiFrameGraphResourceType MeasurementNodeOutputType(

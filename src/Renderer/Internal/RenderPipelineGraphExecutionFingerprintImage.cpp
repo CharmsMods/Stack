@@ -557,7 +557,9 @@ void GraphExecutionRuntime::BindImageFingerprint() {
                 HashCombine(fingerprint, HashValue(input.socketId));
                 HashCombine(
                     fingerprint,
-                    scalarInput
+                    IsUniformRenderSocket(executionContext, input.link->fromNodeId, input.link->fromSocketId)
+                        ? fingerprintScalar(input.link->fromNodeId, input.link->fromSocketId)
+                        : scalarInput
                         ? fingerprintMask(input.link->fromNodeId, input.link->fromSocketId)
                         : fingerprintImage(input.link->fromNodeId, input.link->fromSocketId));
                 HashCombine(fingerprint, HashValue(scalarInput));
@@ -583,6 +585,9 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(IsScalarRenderSocket(executionContext, node.nodeId, socketId)));
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.constantA));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.requiredLinearBasis));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.boundedMask));
+            HashCombine(fingerprint, HashValue(node.dataMathSettings.percentageInput));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.constantB));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.minValue));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.maxValue));

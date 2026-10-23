@@ -33,6 +33,7 @@ BatchOptions ReadOptions(const std::filesystem::path& path){
     const auto combining=json.value("captureCombining",std::string("auto"));
     if(combining!="auto"&&combining!="cpu")throw std::runtime_error("captureCombining must be auto or cpu.");
     result.preferGpuCombining=combining!="cpu";
+    result.aiAlignment=json.value("aiAlignment",false);
     if(destination=="beside")result.location=OutputLocation::BesideOriginals;
     else if(destination!="folder")throw std::runtime_error("Destination must be beside or folder.");
     if(result.formats.empty())throw std::runtime_error("Choose at least one output format.");return result;

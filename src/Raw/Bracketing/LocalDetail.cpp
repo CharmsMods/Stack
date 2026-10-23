@@ -6,7 +6,7 @@
 
 namespace Raw::Bracketing {
 bool CombineLocalDetail(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
-    std::vector<std::vector<Observation>>& groups,std::string& error) {
+    std::vector<std::vector<Observation>>& groups,std::string& error,LocalDetailStats* stats) {
     try {
     const unsigned tile=data.sources[data.origin].frame.tileRawPixels,left=tx*tile,top=ty*tile;
     const unsigned width=std::min(tile,data.width-left),height=std::min(tile,data.height-top);
@@ -15,11 +15,14 @@ bool CombineLocalDetail(const ProcessingRequest& request,const PreparedDataset& 
         data.sources.size(),tile,request.memoryBudgetBytes));
     std::array<double,256> windows{};double windowSum=0,windowSquared=0;
     for(unsigned p=0;p<256;++p){windows[p]=LocalDetailWindow(p%16,p/16);windowSum+=windows[p];windowSquared+=windows[p]*windows[p];}
+    std::array<double,256> rowNorms{};
+    for(unsigned p=0;p<256;++p)rowNorms[p]=std::sqrt(1-2*windows[p]/windowSum+windowSquared/(windowSum*windowSum));
     struct NoiseUpdate {double sensorSd=0,modelSd=0,baselineSensor=0,baselineModel=0;};
     for(std::size_t g=0;g<groups.size();++g) {
         std::vector<std::size_t> sources;
         for(std::size_t f=0;f<data.sources.size();++f)if(data.sources[f].enabled&&data.sources[f].group==g)sources.push_back(f);
         if(sources.size()<3)continue;
+        LocalDetailPatchCache patchCache(request,data,sources);
         std::vector<NoiseUpdate> noise(width*height);
         // A global lattice gives native views and every tile layout the same
         // patches and summation order. Each synthesis footprint is 16 CFA
@@ -29,11 +32,17 @@ bool CombineLocalDetail(const ProcessingRequest& request,const PreparedDataset& 
             for(unsigned cx=firstX;cx<left+width+16&&cx+20<data.width;cx+=16) {
                 if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
                 LocalDetailPatchResult patch;
-                if(!EvaluateLocalDetailPatch(request,data,sources,sampler,cx,cy,small,patch,error))return false;
-                if(!patch.accepted&&patch.mayExpand)
-                    if(!EvaluateLocalDetailPatch(request,data,sources,sampler,cx,cy,large,patch,error))return false;
+                if(stats)++stats->attempted;
+                if(!EvaluateLocalDetailPatch(request,data,sources,sampler,cx,cy,small,patch,error,&patchCache))return false;
+                if(!patch.accepted&&patch.mayExpand) {
+                    if(stats)++stats->expanded;
+                    if(!EvaluateLocalDetailPatch(request,data,sources,sampler,cx,cy,large,patch,error,&patchCache))return false;
+                }
+                if(stats){stats->centerRejected+=patch.centerRejected;stats->sampleRejected+=patch.sampleRejected;stats->accepted+=patch.accepted;}
                 if(!patch.accepted)continue;
-                for(unsigned c=0;c<4;++c)for(unsigned y=0;y<16;++y)for(unsigned x=0;x<16;++x) {
+                for(unsigned c=0;c<4;++c) {
+                const double sensorSd=std::sqrt(patch.measurementBound[c]),modelSd=std::sqrt(patch.uncertaintyBound[c]);
+                for(unsigned y=0;y<16;++y)for(unsigned x=0;x<16;++x) {
                     const unsigned rx=cx-16+2*x+c%2,ry=cy-16+2*y+c/2;
                     if(rx<left||ry<top||rx>=left+width||ry>=top+height)continue;
                     const auto p=std::size_t(ry-top)*width+rx-left;const auto k=y*16+x;auto& sample=groups[g][p];
@@ -43,11 +52,12 @@ bool CombineLocalDetail(const ProcessingRequest& request,const PreparedDataset& 
                     // Mean preservation and overlapping patches share inputs.
                     // Accumulate standard-deviation bounds, never independent
                     // patch variances or fictitious neighboring-frame support.
-                    const double rowNorm=std::sqrt(1-2*w/windowSum+windowSquared/(windowSum*windowSum));
-                    auto& v=noise[p];v.sensorSd+=w*rowNorm*std::sqrt(patch.measurementBound[c]);
-                    v.modelSd+=w*rowNorm*std::sqrt(patch.uncertaintyBound[c]);
+                    const double rowNorm=rowNorms[k];
+                    auto& v=noise[p];v.sensorSd+=w*rowNorm*sensorSd;
+                    v.modelSd+=w*rowNorm*modelSd;
                     v.baselineSensor=std::max(v.baselineSensor,patch.baselineMeasurementBound[c]);
                     v.baselineModel=std::max(v.baselineModel,patch.baselineUncertaintyBound[c]);
+                }
                 }
             }
         for(std::size_t p=0;p<noise.size();++p)if(noise[p].sensorSd>0||noise[p].modelSd>0) {

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Renderer/MaskRenderTypes.h"
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -29,3 +31,18 @@ private:
 };
 
 } // namespace Stack::Project::GraphSnapshotInternal
+
+namespace Stack::Project {
+
+// Resolve the complete endpoint: public compound ports need not lower to an
+// imageOut socket, and authored integer IDs are not execution identities.
+std::optional<RenderGraphSnapshot::OutputAlias> ResolveGraphSnapshotOutput(
+    const RenderGraphSnapshot& snapshot, const GraphModel::Endpoint& authored);
+
+// Composition remaps metadata together with executable node identities. The
+// caller owns node/link routing; this operation preserves aliases and failures.
+void AppendGraphSnapshotMetadata(RenderGraphSnapshot& destination,
+    const RenderGraphSnapshot& source, const std::unordered_map<int, int>& nodeIds,
+    const std::string& graphId);
+
+} // namespace Stack::Project

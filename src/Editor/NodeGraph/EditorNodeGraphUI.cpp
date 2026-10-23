@@ -59,7 +59,8 @@ void EditorNodeGraphUI::BuildNodeLayoutCache(
 
 std::uint64_t EditorNodeGraphUI::LogicalNodeInputRevision(
     const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) const {
-    // Authored socket/schema changes use the graph/document/render revisions.
+    // Socket/schema changes use structural and processing revisions. Placement
+    // advances document history without changing declarations or logical size.
     // Expansion, revealed sockets and connection-preview intent are presentation
     // inputs and can change without authoring a document edit.
     std::uint64_t revision = graph.GetStructureRevision();
@@ -68,11 +69,9 @@ std::uint64_t EditorNodeGraphUI::LogicalNodeInputRevision(
     mix(reinterpret_cast<std::uintptr_t>(&node));
     mix(reinterpret_cast<std::uintptr_t>(m_ActiveEditor));
     mix(m_GraphContext.revision);
-    mix(m_GraphContext.documentRevision);
     if (m_ActiveEditor) {
-        mix(m_ActiveEditor->GetProjectSession().editRevision);
         mix(m_ActiveEditor->GetRenderRevision());
-    }
+    } else mix(m_GraphContext.documentRevision);
     mix(static_cast<std::uint64_t>(node.kind));
     mix(static_cast<std::uint64_t>(node.layerType));
     mix(static_cast<std::uint64_t>(node.layerIndex));
@@ -114,10 +113,14 @@ void EditorNodeGraphUI::RefreshLogicalNodeLayoutCache(
     const bool canReuseInputs = !m_RenderPreviewOnly && !m_RenderCaptureOnly &&
         m_GraphContext.graph == &graph && cache.hasLogicalInputs &&
         cache.logicalInputRevision == inputRevision;
-    const std::uint64_t logicalContentRevision = canReuseInputs
-        ? cache.logicalContentRevision : LogicalNodeContentRevision(graph, node);
+    if (!canReuseInputs) {
+        cache.declaredSockets = graph.GetSockets(node, false);
+        cache.instanceUuid = node.instanceUuid;
+    }
     cache.logicalInputRevision = inputRevision;
     cache.hasLogicalInputs = !m_RenderPreviewOnly && !m_RenderCaptureOnly && m_GraphContext.graph == &graph;
+    const std::uint64_t logicalContentRevision = canReuseInputs
+        ? cache.logicalContentRevision : LogicalNodeContentRevision(graph, node);
     if (canReuseInputs) Stack::UiPerformance::Add(Stack::UiPerformance::Counter::LogicalReuse);
     std::uint64_t logicalRevision = logicalContentRevision;
     const auto measuredIt =
@@ -130,7 +133,17 @@ void EditorNodeGraphUI::RefreshLogicalNodeLayoutCache(
                 : 0.0f));
     if (!cache.hasLogicalLayout ||
         cache.logicalRevision != logicalRevision) {
-        cache.logicalLayout = BuildLogicalNodeLayout(graph, node);
+        auto logical = BuildLogicalNodeLayout(graph, node);
+        const auto& previous=cache.logicalLayout;
+        bool wireGeometryChanged=!cache.hasLogicalLayout || previous.body.min.x!=logical.body.min.x ||
+            previous.body.min.y!=logical.body.min.y || previous.body.max.x!=logical.body.max.x ||
+            previous.body.max.y!=logical.body.max.y || previous.sockets.size()!=logical.sockets.size();
+        for(std::size_t i=0;!wireGeometryChanged && i<logical.sockets.size();++i) {
+            const auto& a=previous.sockets[i];const auto& b=logical.sockets[i];
+            wireGeometryChanged=a.socketId!=b.socketId || a.direction!=b.direction || a.center.x!=b.center.x || a.center.y!=b.center.y;
+        }
+        if(wireGeometryChanged)++m_WireWorldRevision;
+        cache.logicalLayout=std::move(logical);
         cache.logicalContentRevision =
             logicalContentRevision;
         cache.logicalRevision = logicalRevision;
@@ -142,17 +155,21 @@ void EditorNodeGraphUI::RefreshLogicalNodeLayoutCache(
 void EditorNodeGraphUI::ProjectNodeLayoutCache(
     const EditorNodeGraph::Node& node, NodeLayoutCache& cache) const {
     using namespace Stack::Editor::NodeGraphUILayout;
-    const auto position = ClampGraphPosition(node.position);
+    const auto position = ClampGraphPosition(DisplayNodePosition(node));
+    const bool folding=!m_RenderPreviewOnly && !m_RenderCaptureOnly && m_ExpansionMotion &&
+        m_ExpansionMotion->channelFold && m_ExpansionMotion->columns.count(node.id)!=0;
     cache.contentUsedRect = {};
     if (cache.hasProjection && cache.projectedLogicalRevision == cache.logicalRevision &&
         cache.projectedPosition.x == position.x && cache.projectedPosition.y == position.y &&
         cache.projectedOrigin.x == m_CanvasOrigin.x && cache.projectedOrigin.y == m_CanvasOrigin.y &&
-        cache.projectedPan.x == m_Pan.x && cache.projectedPan.y == m_Pan.y && cache.projectedZoom == m_Zoom) {
+        cache.projectedPan.x == m_Pan.x && cache.projectedPan.y == m_Pan.y && cache.projectedZoom == m_Zoom && !folding) {
         cache.overlayRect = cache.baseOverlayRect;
         Stack::UiPerformance::Add(Stack::UiPerformance::Counter::ProjectionReuse);
         return;
     }
     Stack::UiPerformance::Add(Stack::UiPerformance::Counter::ProjectionRebuild);
+    if(!cache.hasProjection ||
+        cache.projectedPosition.x!=position.x || cache.projectedPosition.y!=position.y)++m_WireWorldRevision;
     ++m_NodeProjectionRevision;
     const NodeProjectedLayout projected = ProjectNodeLayout(
         cache.logicalLayout,
@@ -198,13 +215,24 @@ void EditorNodeGraphUI::ProjectNodeLayoutCache(
             logicalSocket.center,
             ImVec2(screenSocket.center.x, screenSocket.center.y)
         });
+        if(folding && screenSocket.direction==EditorNodeGraph::SocketDirection::Output) {
+            const auto start=m_ExpansionMotion->socketOrigins.find(EditorNodeGraph::GraphOutputIdentity(node.id,screenSocket.socketId));
+            if(start!=m_ExpansionMotion->socketOrigins.end()) {
+                const float t=std::clamp(float(m_ExpansionMotion->elapsed/.22),0.f,1.f),ease=t*t*(3-2*t);
+                const auto origin=GraphToScreen(start->second);
+                auto& point=cache.socketAnchors.back().screenPos;
+                point={origin.x+(point.x-origin.x)*ease,origin.y+(point.y-origin.y)*ease};
+            }
+        }
     }
     cache.projectedLogicalRevision = cache.logicalRevision;
     cache.projectedPosition = position;
     cache.projectedOrigin = m_CanvasOrigin;
     cache.projectedPan = m_Pan;
     cache.projectedZoom = m_Zoom;
-    cache.hasProjection = true;
+    // Moving component pins are temporary presentation geometry. Reproject
+    // after completion or interruption, even if the node itself did not move.
+    cache.hasProjection = !folding;
 }
 
 std::uint64_t EditorNodeGraphUI::LogicalNodeContentRevision(
@@ -291,7 +319,20 @@ EditorNodeGraphUI::BuildLogicalNodeLayout(
     const GraphStyleTokens geometryOnlyTokens {};
     const NodePresentationProfile profile = BuildNodePresentationProfile(
         this, m_ActiveEditor, node, geometryOnlyTokens);
-    const EditorNodeGraph::Vec2 nodeSize = NodeSize(node);
+    EditorNodeGraph::Vec2 nodeSize = NodeSize(node);
+    if(node.kind==EditorNodeGraph::NodeKind::Compound && node.expanded && !m_NodeMeasuredBaseHeights.count(node.id)) {
+        if(const auto* definition=graph.FindCompoundDefinition(node.compound.instance.definition)) {
+            float controls=0;
+            for(const auto& parameter:definition->parameters) {
+                if(parameter.type!=Stack::NodeMath::ParameterType::Scalar)continue;
+                controls+=metrics.rowHeight+metrics.sliderHeight+2*metrics.itemGap;
+                if(graph.FindAnyInputLink(node.id,EditorNodeGraph::ParameterInputSocketId(parameter.id)))
+                    controls+=metrics.rowHeight+metrics.itemGap;
+            }
+            nodeSize.y=std::max(nodeSize.y,metrics.headerInsetY+metrics.kindLabelHeight+metrics.titleHeight+
+                metrics.sectionGap+2*metrics.rowHeight+controls+metrics.bodyInsetBottom);
+        }
+    }
     const NodeWidthClass widthClass =
         ResolveNodeWidthClass(this, m_ActiveEditor, node);
     const bool compactTitle =
@@ -372,7 +413,13 @@ std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSocke
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node) const {
     std::vector<EditorNodeGraph::SocketDefinition> presented;
-    for (EditorNodeGraph::SocketDefinition socket : graph.GetSockets(node, false)) {
+    const auto* layout = FindNodeLayoutCache(node.id);
+    const bool current = !m_RenderPreviewOnly && !m_RenderCaptureOnly &&
+        m_GraphContext.graph == &graph && layout && layout->hasLogicalInputs &&
+        layout->logicalInputRevision == LogicalNodeInputRevision(graph, node);
+    const auto uncached = current ? std::vector<EditorNodeGraph::SocketDefinition>{} : graph.GetSockets(node, false);
+    const auto& sockets = current ? layout->declaredSockets : uncached;
+    for (EditorNodeGraph::SocketDefinition socket : sockets) {
         // Retain existing authored tap wires, without advertising a second
         // image output on every adjustment or an input on a canvas-owned shape.
         if (node.kind == EditorNodeGraph::NodeKind::RawOperation && socket.id == "inputImageOut" && !IsSocketConnected(graph,socket))

@@ -224,6 +224,12 @@ Locality ClassifyNode(
             return result;
         case RenderGraphNodeKind::Layer: {
             const std::string type = node.layerJson.value("type", std::string());
+            if ((type=="GaussianBlur" || type=="BoxBlur") && node.layerJson.value("sigmaMode", false)) {
+                result.regionRequirement=Stack::NodeMath::RegionRequirement::FullFrame;
+                result.recognized=false;
+                result.reason="Sigma-mode convolution uses complete input support, including off-viewport light.";
+                return result;
+            }
             if (type=="Halftoning") {
                 result.recognized=false;
                 result.regionRequirement=Stack::NodeMath::RegionRequirement::FullFrame;

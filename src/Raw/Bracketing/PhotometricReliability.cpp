@@ -4,14 +4,19 @@
 
 namespace Raw::Bracketing {
 namespace {
-struct Evidence { std::array<float,4> z{};std::uint8_t valid=0; };
+constexpr unsigned kEvidenceChannels=5; // four CFA sites plus paired-green change
+struct Evidence {
+    std::array<float,kEvidenceChannels> z{};
+    float clippingContradiction=0;
+    std::uint8_t valid=0;
+};
 
 struct PatchMoments {
-    std::array<double,4> sum{},squared{};
-    std::array<unsigned,4> support{};
+    std::array<double,kEvidenceChannels> sum{},squared{};
+    std::array<unsigned,kEvidenceChannels> support{};
 
     void Add(const Evidence& evidence) {
-        for(unsigned s=0;s<4;++s)if(evidence.valid&(1u<<s)) {
+        for(unsigned s=0;s<kEvidenceChannels;++s)if(evidence.valid&(1u<<s)) {
             const double z=evidence.z[s];
             sum[s]+=z;squared[s]+=z*z;++support[s];
         }
@@ -31,12 +36,12 @@ struct CompensatedSum {
 };
 
 struct PatchWindow {
-    std::array<CompensatedSum,4> sum{},squared{};
-    std::array<unsigned,4> support{};
+    std::array<CompensatedSum,kEvidenceChannels> sum{},squared{};
+    std::array<unsigned,kEvidenceChannels> support{};
 
     void Accumulate(const PatchMoments& column,bool remove=false) {
         const double sign=remove?-1.:1.;
-        for(unsigned s=0;s<4;++s) {
+        for(unsigned s=0;s<kEvidenceChannels;++s) {
             sum[s].Add(sign*column.sum[s]);squared[s].Add(sign*column.squared[s]);
             if(remove)support[s]-=column.support[s];
             else support[s]+=column.support[s];
@@ -72,7 +77,7 @@ void VisitPatchStatisticsRow(const std::vector<Evidence>& evidence,unsigned widt
     }
     for(unsigned x=0;x<width;++x) {
         double mismatch=0;unsigned maximumSupport=0;
-        for(const auto* patch:{&small,&large})for(unsigned s=0;s<4;++s) {
+        for(const auto* patch:{&small,&large})for(unsigned s=0;s<kEvidenceChannels;++s) {
             mismatch=std::max(mismatch,NoiseCorrectedMismatch(
                 patch->sum[s].Value(),patch->squared[s].Value(),patch->support[s]));
             maximumSupport=std::max(maximumSupport,patch->support[s]);
@@ -105,6 +110,9 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     result.rawExtent=request.rawExtent;result.cellExtent={width,height};
     result.noiseQuality=request.noiseQuality;result.noiseConfidence=1;
     result.cells.resize(count);std::vector<Evidence> evidence(count);
+    std::array<Mfd::CfaOffset,4> siteOffsets{};
+    for(unsigned s=0;s<siteOffsets.size();++s)
+        siteOffsets[s]=request.layout.OffsetFor(static_cast<Mfd::CfaSite>(s));
     const auto motionAt=[&](Mfd::RawCoordinate point,Mfd::LocalMotionFieldSample& sample) {
         return evaluateMotion?evaluateMotion(point,sample):
             Mfd::EvaluateLocalMotionField(*request.motionGrid,point,request.motionOptions,sample,nullptr);
@@ -114,18 +122,19 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
             [&](std::size_t y) {evaluate(static_cast<unsigned>(y));return true;});
     };
     if(!rows([&](unsigned y) {
+        const auto cy=std::min<std::uint64_t>(rawCellHeight-1,static_cast<std::uint64_t>(y)*stride+stride/2);
         for(unsigned x=0;x<width;++x) {
             const auto index=static_cast<std::size_t>(y)*width+x;
             auto& cell=result.cells[index];cell.cellX=x;cell.cellY=y;
             const auto cx=std::min<std::uint64_t>(rawCellWidth-1,static_cast<std::uint64_t>(x)*stride+stride/2);
-            const auto cy=std::min<std::uint64_t>(rawCellHeight-1,static_cast<std::uint64_t>(y)*stride+stride/2);
             Mfd::LocalMotionFieldSample center;
             if(!motionAt({2.*cx+.5,2.*cy+.5},center)) {
                 cell.rejectionBits=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid);continue;
             }
             cell.alignmentConfidence=std::clamp(center.alignmentConfidence,0.,1.);
+            std::array<double,4> residual{},gateVariance{};
             for(unsigned s=0;s<4;++s) {
-                const auto site=static_cast<Mfd::CfaSite>(s);const auto offset=request.layout.OffsetFor(site);
+                const auto site=static_cast<Mfd::CfaSite>(s);const auto offset=siteOffsets[s];
                 const Mfd::RawCoordinate raw={2.*cx+offset.x,2.*cy+offset.y};
                 Mfd::LocalMotionFieldSample motion;Mfd::ReliabilityResidualSample sample;
                 if(!motionAt(raw,motion)||
@@ -134,8 +143,27 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
                     request.parameters.fusion.numericalVarianceFloor;
                 const double z=(sample.alternateValue-sample.referenceValue)/std::sqrt(variance);
                 if(!(variance>0)||!std::isfinite(z)) continue;
+                if(sample.referenceIsLowerBound) {
+                    // Missing exact radiance is not missing all evidence.
+                    // Reject a contradicted clipping bound across all colors,
+                    // but do not count a satisfied bound as patch support or
+                    // a paired-green equality observation.
+                    evidence[index].clippingContradiction=std::max(evidence[index].clippingContradiction,
+                        static_cast<float>(std::min(1e6,ClippedReferenceContradiction(
+                            sample.referenceValue,sample.alternateValue,variance))));
+                    continue;
+                }
                 evidence[index].z[s]=static_cast<float>(std::clamp(z,-1e6,1e6));
                 evidence[index].valid|=static_cast<std::uint8_t>(1u<<s);
+                residual[s]=sample.alternateValue-sample.referenceValue;gateVariance[s]=variance;
+            }
+            constexpr unsigned g0=unsigned(Mfd::CfaSite::Green0),g1=unsigned(Mfd::CfaSite::Green1);
+            if((evidence[index].valid&((1u<<g0)|(1u<<g1)))==((1u<<g0)|(1u<<g1))) {
+                const double z=GreenDifferenceResidual(residual[g0],gateVariance[g0],residual[g1],gateVariance[g1]);
+                if(std::isfinite(z)) {
+                    evidence[index].z[4]=static_cast<float>(std::clamp(z,-1e6,1e6));
+                    evidence[index].valid|=1u<<4;
+                }
             }
         }
     })) {error="Canceled";return false;}
@@ -150,6 +178,7 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
         VisitPatchStatisticsRow(evidence,width,height,y,[&](unsigned x,double mismatch,unsigned maximumSupport) {
             auto& cell=result.cells[static_cast<std::size_t>(y)*width+x];
             if(cell.rejectionBits)return;
+            mismatch=std::max(mismatch,double(evidence[static_cast<std::size_t>(y)*width+x].clippingContradiction));
             cell.validResidualCount=maximumSupport;cell.patchScale=mismatch;
             cell.patchGate=Mfd::FlatTopQuinticGate(mismatch,3.,7.);
             if(maximumSupport<4) {
@@ -157,8 +186,9 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
                 // highlights, is uncertainty rather than proof of mismatch.
                 // The merge still validates the actual alternate sample.
                 cell.rejectionBits|=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::InsufficientPatchSupport);
-                cell.patchGate=.2;
-            } else if(cell.patchGate<=0) {
+                cell.patchGate=std::min(cell.patchGate,.2);
+            }
+            if(cell.patchGate<=0) {
                 cell.rejectionBits|=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::PatchRejected);
             }
             cell.rawConfidence=cell.erodedConfidence=cell.reliability=cell.alignmentConfidence*cell.patchGate;

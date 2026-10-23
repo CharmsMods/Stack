@@ -7,7 +7,9 @@ namespace Raw::Bracketing {
 bool EvaluateCaptureMotion(const PreparedSource& source,Mfd::RawCoordinate point,
     const Mfd::LocalMotionOptions& options,Mfd::LocalMotionFieldSample& result,double* refinementConfidence) {
     if(refinementConfidence)*refinementConfidence=1;
-    if(!source.localMotion||!Mfd::EvaluateLocalMotionField(*source.localMotion,point,options,result))return false;
+    // Numeric consumers retain rejection reasons without allocating a message
+    // for every sensor pixel. The public evaluator still supplies diagnostics.
+    if(!source.localMotion||!Mfd::EvaluateLocalMotionField(*source.localMotion,point,options,result,nullptr,false))return false;
     const auto* field=source.refinedMotion.get();
     if(!field||field->width<2||field->height<2||field->spacing<=0||
        field->cells.size()!=std::size_t(field->width)*field->height)return true;

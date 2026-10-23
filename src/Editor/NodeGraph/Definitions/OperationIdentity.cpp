@@ -16,6 +16,8 @@ std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition) 
         { "id", definition.identity.id },
         { "version", VersionString(definition.identity.version) },
         { "inspectability", static_cast<int>(definition.inspectability) },
+        { "canonicalRecipeId", definition.canonicalRecipeId },
+        { "decompositionReason", definition.decompositionReason },
         { "kind", static_cast<int>(definition.kind) },
         { "variant", definition.variant },
         { "label", definition.label },

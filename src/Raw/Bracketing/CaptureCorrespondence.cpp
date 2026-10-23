@@ -21,16 +21,20 @@ bool HasCurrentCaptureReliability(const PreparedSource& source) {
         source.reliabilityScale==source.scale&&source.reliabilityScaleVariance==source.scaleVariance;
 }
 CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source,
-    Mfd::RawCoordinate point,bool reference) {
+    Mfd::RawCoordinate point,bool reference,Mfd::LocalMotionFieldSample* evaluatedMotion) {
     if(reference)return {point,{},1};
     const double floor=source.alignmentDiagnostic.model==CaptureAlignment::Model::Identity?0:.0025;
-    CaptureCorrespondence result{source.alignment.Map(point),{floor,0,floor},1};
-    if(!std::isfinite(point.x)||!std::isfinite(point.y)) {result.confidence=0;return result;}
+    const auto global=[&](double confidence) {
+        return CaptureCorrespondence{source.alignment.Map(point),{floor,0,floor},confidence};
+    };
+    if(!std::isfinite(point.x)||!std::isfinite(point.y))return global(0);
+    CaptureCorrespondence result;
     if(source.localMotion) {
         Mfd::LocalMotionFieldSample motion;double refinementConfidence=1;
         if(!EvaluateCaptureMotion(source,point,{},motion,&refinementConfidence)) {
-            result.confidence=0;return result;
+            return global(0);
         }
+        if(evaluatedMotion)*evaluatedMotion=motion;
         result.sourceRaw=motion.sourceRaw;result.covarianceRaw=motion.covarianceRaw;
         result.confidence=0;
         // A photometric map is valid only for the motion and exposure used to
@@ -51,7 +55,7 @@ CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source
         // conservative floor while retaining the measured positional risk.
         result.confidence=std::min(std::clamp(std::max(reliability,
             kUncertainCaptureReliability),0.,1.),refinementConfidence);
-    } else if(source.alignmentDiagnostic.localApplied)result.confidence=0;
+    } else result=global(source.alignmentDiagnostic.localApplied?0:1);
     if(result.confidence>0&&source.depthSupport&&source.depthSupport->width&&source.depthSupport->height&&
        source.frame.activeExtent.width&&source.frame.activeExtent.height) {
         const auto& depth=*source.depthSupport;

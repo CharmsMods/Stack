@@ -40,9 +40,13 @@ struct GraphSnapshotInputs {
 struct GraphSnapshotResult {
     RenderGraphSnapshot snapshot;
     EditorNodeGraph::GraphOutputDescriptions outputDescriptions;
-    // Stage-only requests and failed compound expansion do not replace the
-    // ordinary graph's displayed semantic descriptions.
+    // True after ordinary graph descriptions have been computed. Generic stage
+    // requests and failed expansion leave it false; a presentation owner can
+    // still publish an empty failure result to clear stale descriptions.
     bool publishSemantics = false;
+    // Set only after the editor's complete RAW layer lowering at its technical
+    // background boundary. Generic stage requests remain nonpublishing.
+    bool completeRawLayerSemantics = false;
 };
 
 GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs);

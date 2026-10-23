@@ -1,4 +1,7 @@
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/GraphExpansionLayout.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
+#include "Editor/NodeGraph/GraphRoomLayout.h"
 #include "Editor/RawLayerTools.h"
 #include "Editor/Internal/GraphEditorCommands.h"
 
@@ -1028,15 +1031,26 @@ bool EditorModule::SelectUpstreamDevelopForToneNode(int toneNodeId) {
     return true;
 }
 
-bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage) {
-    auto context = GetGraphEditorContext();
-    bool connected = false;
-    auto proposal = Stack::GraphModel::ProposeEdit(*context.graph, context.revision, [&](auto& candidate) {
-        connected = candidate.TryConnectSockets(fromNodeId, fromSocketId, toNodeId, toSocketId, errorMessage);
-    });
-    if (!connected) return false;
+bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage,
+    const std::function<EditorNodeGraph::GraphRect(const EditorNodeGraph::Graph&,const EditorNodeGraph::Node&)>& measure) {
     std::string error;
-    if (!context.applyEdit(std::move(proposal), error)) {
+    int selectedSource=fromNodeId;
+    if (!ApplyGraphCommand(*this,[&](auto& candidate) {
+            if (!candidate.TryConnectSockets(fromNodeId,fromSocketId,toNodeId,toSocketId,&error))
+                throw std::runtime_error(error);
+            const auto folds=EditorNodeGraph::FoldChannelSplits(candidate,{fromNodeId,toNodeId});
+            int placedFrom=fromNodeId,placedTo=toNodeId;
+            for(const auto& fold:folds) {
+                if(placedFrom==fold.split)placedFrom=fold.producer;
+                if(placedTo==fold.split)placedTo=fold.producer;
+            }
+            selectedSource=placedFrom;
+            // Topology and placement share this candidate/history transaction.
+            // Alignment is a preference: an exhausted placement budget must not
+            // prevent an otherwise valid connection. Room edits are atomic.
+            std::string layoutError;
+            if(placedFrom!=placedTo)Stack::GraphLayout::ArrangeConnection(candidate,placedFrom,placedTo,measure,layoutError);
+        },&error)) {
         if (errorMessage) *errorMessage = std::move(error);
         return false;
     }
@@ -1052,7 +1066,7 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
     }
     const auto* target = GetNodeGraph().FindNode(toNodeId);
     SelectGraphNode(target && (target->kind == EditorNodeGraph::NodeKind::Layer || target->kind == EditorNodeGraph::NodeKind::RawOperation)
-        ? toNodeId : fromNodeId);
+        ? toNodeId : selectedSource);
     return true;
 }
 
@@ -1375,11 +1389,53 @@ bool EditorModule::MakeCompoundNodeUnique(int nodeId, std::string* error) {
     return true;
 }
 
-bool EditorModule::UnpackCompoundNode(int nodeId, std::string* error) {
+bool EditorModule::UnpackCompoundNode(int nodeId, std::string* error,
+    const Stack::GraphLayout::MeasureNode& measure,const Stack::GraphLayout::MeasureSocket& measureSocket) {
+    const auto* source = GetNodeGraph().FindNode(nodeId);
+    if (source && std::any_of(GetGraphAnimation().tracks.begin(), GetGraphAnimation().tracks.end(),
+        [&](const auto& track) { return track.target.nodeUuid == source->instanceUuid; })) {
+        if (error) *error = "This node has animation tracks. Decompiling animated parameter bindings is not supported yet; the graph and tracks were kept unchanged.";
+        return false;
+    }
     return ApplyGraphCommand(*this,[&](auto& graph) {
+        const auto* instance=graph.FindNode(nodeId);
+        if(!instance)throw std::runtime_error("The node to decompile no longer exists.");
+        const auto origin=instance->position;
+        const auto uuid=instance->instanceUuid;
+        std::vector<int> containingGroups;
+        for(const auto& group:graph.GetGroups()) {
+            const bool contains=group.compoundBoundary.is_object()
+                ? std::find(group.compoundMembers.begin(),group.compoundMembers.end(),nodeId)!=group.compoundMembers.end()
+                : origin.x>=group.position.x && origin.y>=group.position.y &&
+                    origin.x<=group.position.x+group.size.x && origin.y<=group.position.y+group.size.y;
+            if(contains)containingGroups.push_back(group.id);
+        }
         std::vector<int> unpacked;
         std::string reason;
         if (!graph.UnpackCompoundNode(nodeId,&unpacked,&reason)) throw std::runtime_error(reason);
+        EditorNodeGraph::FoldChannelSplits(graph,unpacked);
+        unpacked.erase(std::remove_if(unpacked.begin(),unpacked.end(),[&](int id){return !graph.FindNode(id);}),unpacked.end());
+        if(IsRawProjectCanvas())for(int id:unpacked)graph.FindNode(id)->expanded=true;
+        if (!Stack::GraphLayout::ArrangeExpansion(graph,unpacked,origin,uuid,containingGroups,measure,reason,measureSocket))
+            throw std::runtime_error(reason);
+    },error);
+}
+
+bool EditorModule::RepackCompoundGroup(int groupId, std::string* error) {
+    const auto& graph = GetNodeGraph();
+    const auto group = std::find_if(graph.GetGroups().begin(), graph.GetGroups().end(),
+        [&](const auto& item) { return item.id == groupId; });
+    if (group != graph.GetGroups().end()) for (int member : group->compoundMembers) {
+        const auto* node = graph.FindNode(member);
+        if (node && std::any_of(GetGraphAnimation().tracks.begin(), GetGraphAnimation().tracks.end(),
+            [&](const auto& track) { return track.target.nodeUuid == node->instanceUuid; })) {
+            if (error) *error = "This edited compound contains animated nodes. Repacking their animation bindings is not supported yet; the graph and tracks were kept unchanged.";
+            return false;
+        }
+    }
+    return ApplyGraphCommand(*this,[&](auto& graph) {
+        std::string reason;
+        if (!graph.RepackCompoundGroup(groupId,nullptr,&reason)) throw std::runtime_error(reason);
     },error);
 }
 

@@ -520,6 +520,7 @@ elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
 
+include(cmake/StackGraphRouting.cmake)
 add_dependencies(${PROJECT_NAME} StackRuntimePayload)
 include(cmake/StackBurst.cmake)
 include(cmake/StackBurstShell.cmake)
@@ -617,6 +618,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    include(cmake/StackBurstQualityTests.cmake)
     include(cmake/StackGpuUploadTests.cmake)
     include(cmake/StackZoneAreaTests.cmake)
     include(cmake/StackGraphControlTests.cmake)
@@ -993,6 +995,13 @@ if (BUILD_TESTING AND STACK_BUILD_NODE_MATH_TESTS)
         LABELS "node-math;compound;equivalence;gpu;integration"
         RUN_SERIAL TRUE)
 
+    add_test(NAME StackGraphModularity.LiveGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-graph-modularity
+            "${CMAKE_CURRENT_BINARY_DIR}/graph-modularity-validation")
+    set_tests_properties(StackGraphModularity.LiveGpu PROPERTIES
+        LABELS "node-math;compound;halation;gpu;integration"
+        RUN_SERIAL TRUE)
+
     add_test(NAME StackNodeMathRegions.LiveGpu
         COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase6)
     set_tests_properties(StackNodeMathRegions.LiveGpu PROPERTIES
@@ -1009,6 +1018,15 @@ endif()
 option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
 if (STACK_BUILD_GRAPH_TESTS)
     add_executable(StackGraphBehaviorTests ${STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES})
+    target_link_libraries(StackGraphBehaviorTests PRIVATE stack_graph_routing_backend)
+    if(MSVC)
+        target_link_options(StackGraphBehaviorTests PRIVATE "/DELAYLOAD:libavoid.dll")
+        target_link_libraries(StackGraphBehaviorTests PRIVATE delayimp)
+    endif()
+    add_custom_command(TARGET StackGraphBehaviorTests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:StackGraphBehaviorTests>/Stack/App/Runtime"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:stack_graph_routing_backend>"
+            "$<TARGET_FILE_DIR:StackGraphBehaviorTests>/Stack/App/Runtime/libavoid.dll")
     target_include_directories(StackGraphBehaviorTests PRIVATE
         src
         src/ThirdParty
@@ -1077,6 +1095,8 @@ if (STACK_BUILD_GRAPH_TESTS)
             COMMAND StackGraphBehaviorTests)
         set_tests_properties(StackEditor.GraphBehavior PROPERTIES
             LABELS "editor;node-graph;cpu")
+        add_test(NAME StackGraph.Routing COMMAND StackGraphBehaviorTests --routing-only)
+        set_tests_properties(StackGraph.Routing PROPERTIES LABELS "editor;node-graph;routing;cpu" TIMEOUT 30)
 
         add_test(NAME StackRaw.Evidence
             COMMAND StackRawEvidenceTests)
@@ -1112,3 +1132,15 @@ if (STACK_BUILD_GRAPH_TESTS)
             LABELS "raw;integration;cpu")
     endif()
 endif()
+
+# Stage routing source after every common payload refresh, including Burst builds.
+add_custom_command(TARGET StackRuntimePayload POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${STACK_AVOID_DIR}"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibavoidSource/libavoid"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/cmake/LibavoidStandalone.cmake"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibavoidSource/CMakeLists.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/GraphRoutingBackend/LibavoidBridge.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/GraphRoutingBackend/LibavoidBridge.h"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibavoidSource"
+    VERBATIM)

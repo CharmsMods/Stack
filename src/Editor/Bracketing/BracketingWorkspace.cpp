@@ -90,6 +90,7 @@ void EditorModule::RenderBracketingSidePanelUI() {
         int reconstruction=static_cast<int>(ui.recipe.reconstruction);
         ImGui::SetNextItemWidth(-1);
         if(ImGui::Combo("##Reconstruction",&reconstruction,reconstructionItems,4)){ui.recipe.reconstruction=static_cast<Raw::Bracketing::ReconstructionMode>(reconstruction);
+            if(ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama)ui.recipe.aiAlignment=false;
             const auto reference=std::find_if(ui.sources.begin(),ui.sources.end(),[](const auto& source){return source.inspected&&source.metadata.supported;});
             if(reference!=ui.sources.end())for(auto& source:ui.sources)if(source.inspected) {
                 source.error=source.metadata.rejectionReason;
@@ -116,7 +117,14 @@ void EditorModule::RenderBracketingSidePanelUI() {
         int alignment=static_cast<int>(ui.recipe.alignmentMode);
         ImGui::SetNextItemWidth(-1);
         ImGui::BeginDisabled(ui.recipe.depth.enabled);
-        if(ImGui::Combo("##Alignment",&alignment,alignmentItems,4)){ui.recipe.alignmentMode=static_cast<Raw::Bracketing::AlignmentMode>(alignment);changed=true;}
+        if(ImGui::Combo("##Alignment",&alignment,alignmentItems,4)){ui.recipe.alignmentMode=static_cast<Raw::Bracketing::AlignmentMode>(alignment);
+            if(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::AutomaticLocal)ui.recipe.aiAlignment=false;
+            changed=true;}
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::AutomaticLocal);
+        if(ImGui::Checkbox("AI-assisted alignment (experimental)",&ui.recipe.aiAlignment))changed=true;
+        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Uses SEA-RAFT to suggest motion, followed by RAW verification. Requires the optional model package. May take longer; never generates image pixels.");
         ImGui::EndDisabled();
         if(ImGui::Checkbox("Depth-aware reconstruction",&ui.recipe.depth.enabled)) {
             if(ui.recipe.depth.enabled)ui.recipe.alignmentMode=Raw::Bracketing::AlignmentMode::AutomaticLocal;

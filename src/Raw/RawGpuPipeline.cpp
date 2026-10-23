@@ -1770,7 +1770,9 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
         m_LinearTexture = 0;
     }
     m_LinearTexture = GLHelpers::CreateTextureFromData(
-        rgba.data(), width, height, raw.reconstructedCameraRgb?GL_RGBA32F:GL_RGBA16F, GL_RGBA, GL_FLOAT, GL_LINEAR);
+        rgba.data(), width, height,
+        (raw.reconstructedCameraRgb || raw.linearUInt16Buffer.empty()) ? GL_RGBA32F : GL_RGBA16F,
+        GL_RGBA, GL_FLOAT, GL_LINEAR);
 
     if (m_LinearTexture == 0) {
         m_LastError = "Linear DNG upload failed: the GPU could not allocate or upload the RGB texture.";
@@ -1799,13 +1801,17 @@ bool RawGpuPipeline::EnsureOutput(int width, int height) {
         m_OutputTexture = 0;
     }
 
-    m_OutputTexture = GLHelpers::CreateEmptyTexture(width, height);
+    // This is scene-linear data consumed by later RAW/Graph operations, not
+    // a display surface. Preserve fractional merge values and HDR headroom
+    // through the same float32 boundary as the graph's RAW targets.
+    m_OutputTexture = GLHelpers::CreateTextureFromData(
+        nullptr, width, height, GL_RGBA32F, GL_RGBA, GL_FLOAT, GL_LINEAR);
 
     m_OutputFbo = GLHelpers::CreateFBO(m_OutputTexture);
     m_OutputWidth = width;
     m_OutputHeight = height;
     if (m_OutputTexture == 0 || m_OutputFbo == 0) {
-        m_LastError = "RAW output allocation failed: RGBA16F texture or framebuffer was not created.";
+        m_LastError = "RAW output allocation failed: RGBA32F texture or framebuffer was not created.";
         return false;
     }
     return true;

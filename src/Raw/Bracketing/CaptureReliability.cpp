@@ -4,6 +4,7 @@
 #include "PresentationEvidence.h"
 #include "BorderSupport.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace Raw::Bracketing {
@@ -36,11 +37,29 @@ bool BuildReliability(const ProcessingRequest& request,
     if(request.reportPresentation)build.reportObservation=[&](const Mfd::ReliabilityMap& map,bool provisional) {
         ObserveReliability(request,source,map,provisional);
     };
+    // Every residual uses level zero of these immutable pyramids. Resolve the
+    // four site descriptors once, rather than searching them for every cell.
+    std::array<const Mfd::CfaPyramidLevel*,4> referenceLevels{},sourceLevels{};
+    std::array<double,4> gradientNoiseScales{};
+    const double scale=source.scale;
+    const double scaleSquared=scale*scale;
+    for(std::size_t s=0;s<referenceLevels.size();++s) {
+        const auto site=static_cast<Mfd::CfaSite>(s);
+        referenceLevels[s]=Mfd::FindCfaPyramidLevel(referencePyramid,site,0);
+        sourceLevels[s]=Mfd::FindCfaPyramidLevel(sourcePyramid,site,0);
+        if(sourceLevels[s]) {
+            const double rawPixels=sourceLevels[s]->rawPixelsPerLevelPixel;
+            if(std::isfinite(rawPixels)&&rawPixels>0)
+                gradientNoiseScales[s]=scaleSquared/(rawPixels*rawPixels);
+        }
+    }
     build.residualEvaluator=[&](Mfd::RawCoordinate raw,Mfd::CfaSite site,
         const Mfd::LocalMotionFieldSample& local,Mfd::ReliabilityResidualSample& sample) {
         sample={};sample.valid=true;
-        const auto* referenceLevel=Mfd::FindCfaPyramidLevel(referencePyramid,site,0);
-        const auto* sourceLevel=Mfd::FindCfaPyramidLevel(sourcePyramid,site,0);
+        const auto siteIndex=static_cast<std::size_t>(site);
+        if(siteIndex>=referenceLevels.size())return false;
+        const auto* referenceLevel=referenceLevels[siteIndex];
+        const auto* sourceLevel=sourceLevels[siteIndex];
         if(!referenceLevel||!sourceLevel||raw.x<0||raw.y<0) return false;
 
         const auto referencePlane=layout.RawToPlane(raw,site);
@@ -51,7 +70,8 @@ bool BuildReliability(const ProcessingRequest& request,
            referenceY>=static_cast<std::int64_t>(referenceLevel->extent.height)) return true;
         const auto referenceIndex=static_cast<std::size_t>(referenceY)*referenceLevel->extent.width+
             static_cast<std::size_t>(referenceX);
-        if(!referenceLevel->validMask[referenceIndex]) return true;
+        const bool referenceClipped=!referenceLevel->clippedMask.empty()&&referenceLevel->clippedMask[referenceIndex];
+        if(!referenceLevel->validMask[referenceIndex]&&!referenceClipped) return true;
         const double referenceValue=referenceLevel->signal[referenceIndex];
         const double referenceVariance=referenceLevel->variance[referenceIndex];
         if(!std::isfinite(referenceValue)||!std::isfinite(referenceVariance)||referenceVariance<0) return true;
@@ -76,13 +96,12 @@ bool BuildReliability(const ProcessingRequest& request,
             gradientNoiseXY+=footprint.derivativeXPlane[tap]*footprint.derivativeYPlane[tap]*sourceLevel->variance[index];
             gradientNoiseYY+=footprint.derivativeYPlane[tap]*footprint.derivativeYPlane[tap]*sourceLevel->variance[index];
         }
-        const double scale=source.scale;
         const double rawPixelsPerPlanePixel=sourceLevel->rawPixelsPerLevelPixel;
         if(!std::isfinite(scale)||scale<=0||!std::isfinite(rawPixelsPerPlanePixel)||
            rawPixelsPerPlanePixel<=0) return true;
         const double gradientRawX=scale*gradientPlaneX/rawPixelsPerPlanePixel;
         const double gradientRawY=scale*gradientPlaneY/rawPixelsPerPlanePixel;
-        const double gradientNoiseScale=scale*scale/(rawPixelsPerPlanePixel*rawPixelsPerPlanePixel);
+        const double gradientNoiseScale=gradientNoiseScales[siteIndex];
         const double registrationNoise=gradientNoiseScale*(
             gradientNoiseXX*local.covarianceRaw.xxRawPixelsSquared+
             2*gradientNoiseXY*local.covarianceRaw.xyRawPixelsSquared+
@@ -92,12 +111,13 @@ bool BuildReliability(const ProcessingRequest& request,
             2*gradientRawX*gradientRawY*local.covarianceRaw.xyRawPixelsSquared+
             gradientRawY*gradientRawY*local.covarianceRaw.yyRawPixelsSquared-registrationNoise);
         const double exposureVariance=sourceValue*sourceValue*source.scaleVariance;
-        sourceValue*=scale;sourceVariance*=scale*scale;
+        sourceValue*=scale;sourceVariance*=scaleSquared;
         const double alternateVariance=sourceVariance+registrationVariance+exposureVariance+
             parameters.fusion.numericalVarianceFloor;
         if(!std::isfinite(sourceValue)||!std::isfinite(alternateVariance)||alternateVariance<=0)
             return true;
         sample.hardValid=true;sample.referenceValue=referenceValue;
+        sample.referenceIsLowerBound=referenceClipped;
         sample.alternateValue=sourceValue;sample.referenceGateVariance=referenceVariance;
         sample.alternateGateVariance=alternateVariance;return true;
     };
@@ -161,12 +181,17 @@ bool RefreshCaptureReliability(const ProcessingRequest& request,const PreparedSo
     if(!Mfd::BuildReliabilityStore(reliability,Mfd::ReliabilityStorageFormat::Uint16Unorm,
         parameters.reliability.storageTileCells,*store,&error))return false;
     auto inspection=MakeInspection(reliability);
-    source.reliability=std::move(store);source.alignmentInspection=std::move(inspection);
+    source.reliability=std::move(store);source.alignmentInspection=inspection;
     StampCaptureReliability(source);
     std::size_t acceptedCells=0,uncertainCells=0,rejectedCells=0;
-    for(const auto& cell:reliability.cells) {
+    for(std::size_t i=0;i<reliability.cells.size();++i) {
+        const auto& cell=reliability.cells[i];
         if(HardCaptureRejection(cell.rejectionBits)) ++rejectedCells;
-        else if(cell.reliability>=parameters.reliability.frameUsableReliabilityThreshold) ++acceptedCells;
+        // Report the same confidence precision as the published inspection.
+        // Interpolated 0.20-confidence fallback nodes can land a double ULP
+        // below 0.20; classifying before conversion made identical displayed
+        // evidence arbitrarily switch between accepted and uncertain.
+        else if(inspection->confidence[i]>=float(parameters.reliability.frameUsableReliabilityThreshold)) ++acceptedCells;
         else ++uncertainCells;
     }
     source.alignmentDiagnostic.localApplied=true;

@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
+#include "Editor/NodeGraph/CompoundRecipes.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
@@ -39,11 +40,13 @@ Stack::NodeMath::CompoundDefinition BuildAddMultiplyTemplate() {
         EditorNodeGraph::DataMathMode::Add, { 0.0f, 0.0f });
     const int addId = add->id;
     add->instanceUuid = addUuid;
+    add->notes = "Add the chosen offset to each input value before applying gain.";
     add->dataMathSettings.constantB = 0.0f;
     EditorNodeGraph::Node* multiply = graph.AddDataMathNode(
         EditorNodeGraph::DataMathMode::Multiply, { 300.0f, 0.0f });
     const int multiplyId = multiply->id;
     multiply->instanceUuid = multiplyUuid;
+    multiply->notes = "Scale the offset result by the chosen gain. One keeps its current strength.";
     multiply->dataMathSettings.constantB = 1.0f;
     graph.TryConnectSockets(
         addId, EditorNodeGraph::kImageOutputSocketId,
@@ -90,11 +93,13 @@ Stack::NodeMath::CompoundDefinition BuildExposurePremultiplyTemplate() {
         Stack::NodeMath::TechnicalImageOperation::Exposure, { 0.0f, 0.0f });
     const int exposureId = exposure->id;
     exposure->instanceUuid = exposureUuid;
+    exposure->notes = "Adjust image brightness in exposure stops before preparing transparency.";
     exposure->technicalImageSettings.exposureValue = 0.0f;
     EditorNodeGraph::Node* premultiply = graph.AddTechnicalImageNode(
         Stack::NodeMath::TechnicalImageOperation::Premultiply, { 300.0f, 0.0f });
     const int premultiplyId = premultiply->id;
     premultiply->instanceUuid = premultiplyUuid;
+    premultiply->notes = "Multiply RGB by alpha so the image carries its transparency coverage.";
     graph.TryConnectSockets(
         exposureId, EditorNodeGraph::kImageOutputSocketId,
         premultiplyId, EditorNodeGraph::kImageInputSocketId);
@@ -138,10 +143,11 @@ Stack::NodeMath::CompoundDefinition BuildExposurePremultiplyTemplate() {
 } // namespace
 
 const std::vector<Stack::NodeMath::CompoundDefinition>& GetShippedCompoundTemplates() {
-    static const std::vector<Stack::NodeMath::CompoundDefinition> definitions = {
-        BuildAddMultiplyTemplate(),
-        BuildExposurePremultiplyTemplate()
-    };
+    static const std::vector<Stack::NodeMath::CompoundDefinition> definitions = [] {
+        std::vector<Stack::NodeMath::CompoundDefinition> result{BuildAddMultiplyTemplate(),BuildExposurePremultiplyTemplate()};
+        AppendModularCompoundRecipes(result);
+        return result;
+    }();
     return definitions;
 }
 

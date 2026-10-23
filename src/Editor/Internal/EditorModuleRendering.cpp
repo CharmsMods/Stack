@@ -1136,13 +1136,12 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             }
         } else {
             const auto* requested = workspace.graph.FindNode(workspace.previewOutputNodeId);
-            const int compiled = ResolveRawCanvasRenderNode(snapshot.graph,workspace.previewOutputNodeId);
-            if (!requested || compiled <= 0) {
+            int compiled = 0; std::string compiledSocket;
+            if (!requested || !ResolveRawCanvasRenderOutput(snapshot.graph,workspace.previewOutputNodeId,{},compiled,compiledSocket)) {
                 snapshot.graph.outputNodeId = 0;
                 m_RawLayerStatus = "The requested output was deleted.";
             } else {
-                if (!Stack::Project::ConfigureRawLayerOutputPreview(snapshot.graph,compiled,
-                        (requested->kind == EditorNodeGraph::NodeKind::MaskGenerator || requested->kind == EditorNodeGraph::NodeKind::MaskTexture) ? "maskOut" : "imageOut",m_RawLayerStatus))
+                if (!Stack::Project::ConfigureRawLayerOutputPreview(snapshot.graph,compiled,compiledSocket,m_RawLayerStatus))
                     snapshot.graph.outputNodeId = 0;
             }
         }

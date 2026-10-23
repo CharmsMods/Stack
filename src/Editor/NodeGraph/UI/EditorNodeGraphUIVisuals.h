@@ -20,13 +20,10 @@ class EditorNodeGraphUI;
 namespace Stack::Editor::NodeGraphUIVisuals {
 
 enum class NodeFamily {
-    Gray,
-    Layer,
-    Preview,
+    Utility,
+    Math,
+    ImageProcessing,
     Mask,
-    Scope,
-    Generator,
-    Merge
 };
 
 struct NodeFamilyStyle {
@@ -124,6 +121,10 @@ struct LinkVisualStyle {
     bool scalarStream = false;
 };
 
+// Shared by graph transitions only while a displayed value is changing.
+// The platform preference is queried at most once in an active ImGui frame.
+bool GraphReducedMotion();
+
 template <typename TKey>
 float UpdateAnimatedState(
     std::unordered_map<TKey, float>& animationMap,
@@ -133,6 +134,11 @@ float UpdateAnimatedState(
     float onSpeed = 18.0f,
     float offSpeed = 12.0f) {
     float& value = animationMap[key];
+    if (value == target) return value;
+    if (GraphReducedMotion()) {
+        value = target;
+        return value;
+    }
     const float speed = target > value ? onSpeed : offSpeed;
     value = ImGuiExtras::AnimateTowards(value, target, deltaTime, speed);
     if (target <= 0.0f && value <= 0.001f) {
@@ -175,7 +181,6 @@ NodePresentationProfile BuildNodePresentationProfile(
     const EditorNodeGraph::Node& node,
     const GraphStyleTokens& tokens);
 NodeFamilyStyle StyleForFamily(NodeFamily family, const GraphStyleTokens& tokens);
-const NodeFamilyStyle& StyleForFamily(NodeFamily family);
 NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node);
 void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics);
 void ApplyLayerSurfaceMetrics(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics);
@@ -196,11 +201,17 @@ ImVec4 ChannelPolicyColor(LayerChannelPolicy policy);
 void RenderLayerMetadataNotes(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node,
-    float controlWidth);
+    float controlWidth,
+    EditorModule* editor);
 float NodeControlWidthForScale(float logicalWidth, float uiScale);
 ImVec2 NodePreviewSizeForScale(const NodeLayoutMetrics& metrics, float uiScale);
-ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& familyStyle);
+ImU32 TypedSocketColor(EditorNodeGraph::SocketType type);
 bool IsChannelSocketId(const std::string& id);
+LinkVisualStyle ResolveOutputVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    int nodeId,
+    const std::string& socketId,
+    EditorModule* editor);
 LinkVisualStyle ResolveLinkVisualStyle(
     const EditorNodeGraph::Graph& graph,
     int fromNodeId,

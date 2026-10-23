@@ -1,14 +1,31 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/ChannelOutputs.h"
+#include "Notifications/NotificationPresenter.h"
 
 #include <string>
 #include <unordered_set>
+
+namespace {
+EditorNodeGraph::GraphOutputContext CurrentOutputDescriptions(EditorModule& editor) {
+    EditorNodeGraph::GraphOutputContext context;
+    context.resolveOutput = [&editor](const auto& node,const auto& socket)
+        -> std::optional<EditorNodeGraph::GraphOutputDescription> {
+        if (const auto* value=editor.GetGraphOutputDescription(node.id,socket)) return *value;
+        return std::nullopt;
+    };
+    return context;
+}
+}
 
 bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId) {
     if (!editor) {
         return false;
     }
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    // Rank sockets using current local contracts. The selected connection's
+    // command performs the one authoritative whole-document validation.
+    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,CurrentOutputDescriptions(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
     if (!from || !to) {
@@ -39,12 +56,12 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         to->kind == EditorNodeGraph::NodeKind::Layer &&
         !targetImageInputIsConnected) {
         std::string error;
-        if (editor->GetGraphEditorContext().canConnect(
+        if (graph.CanConnectSockets(
                 fromNodeId,
                 fromSocketId,
                 toNodeId,
                 EditorNodeGraph::kImageInputSocketId, nullptr) &&
-            editor->ConnectGraphSockets(
+            ConnectWithLayout(editor,
                 fromNodeId,
                 fromSocketId,
                 toNodeId,
@@ -61,8 +78,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
                 continue;
             }
             std::string error;
-            if (editor->GetGraphEditorContext().canConnect(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
-                editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+                ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
         }
@@ -71,8 +88,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Input && socket.id == channel) {
                 std::string error;
-                if (editor->GetGraphEditorContext().canConnect(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
-                    editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+                if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+                    ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                     return true;
                 }
             }
@@ -81,8 +98,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
 
     if (fromScalarStream && to->kind == EditorNodeGraph::NodeKind::Layer) {
         std::string error;
-        if (editor->GetGraphEditorContext().canConnect(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, nullptr) &&
-            editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, &error)) {
+        if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, nullptr) &&
+            ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, &error)) {
             return true;
         }
     }
@@ -98,8 +115,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (editor->GetGraphEditorContext().canConnect(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
-                editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+                ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
         }
@@ -111,8 +128,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (editor->GetGraphEditorContext().canConnect(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
-                editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+                ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
         }
@@ -126,6 +143,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         return false;
     }
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,CurrentOutputDescriptions(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
     if (!from || !to) {
@@ -141,8 +159,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Output && socket.id == toSocketId) {
                 std::string error;
-                if (editor->GetGraphEditorContext().canConnect(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
-                    editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+                if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+                    ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                     return true;
                 }
             }
@@ -160,8 +178,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (editor->GetGraphEditorContext().canConnect(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
-                editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+                ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
         }
@@ -173,8 +191,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (editor->GetGraphEditorContext().canConnect(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
-                editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+                ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
         }
@@ -186,4 +204,52 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
 std::string EditorNodeGraphUI::GetUpstreamChannel(const EditorNodeGraph::Graph& graph, int nodeId, const std::string& socketId, std::unordered_set<int>& visited) {
     (void)visited;
     return graph.ResolveSocketChannel(nodeId, socketId);
+}
+
+bool EditorNodeGraphUI::ConnectWithLayout(EditorModule* editor,int from,const std::string& output,int to,
+    const std::string& input,std::string* error) {
+    const auto before=editor->GetGraphEditorContext();
+    int splitId=0,producer=0;
+    std::string sourceSocket;
+    std::unordered_set<std::string> previousOutputs;
+    std::unordered_map<std::string,EditorNodeGraph::Vec2> starts;
+    for(int id:{from,to})if(const auto* split=before.graph->FindNode(id);split && split->kind==EditorNodeGraph::NodeKind::ChannelSplit)
+        if(const auto* edge=before.graph->FindInputLink(id,EditorNodeGraph::kImageInputSocketId)) {
+            splitId=id;producer=edge->fromNodeId;sourceSocket=edge->fromSocketId;
+            for(const char* component:{"r","g","b","a"})starts.emplace(component,ScreenToGraph(OutputPinScreenPos(*split,component)));
+            break;
+        }
+    // The input may be connected last, after the split's outputs were wired.
+    if(!splitId)if(const auto* split=before.graph->FindNode(to);split && split->kind==EditorNodeGraph::NodeKind::ChannelSplit && input==EditorNodeGraph::kImageInputSocketId) {
+        splitId=to;producer=from;sourceSocket=output;
+        for(const char* component:{"r","g","b","a"})starts.emplace(component,ScreenToGraph(OutputPinScreenPos(*split,component)));
+    }
+    if(const auto* owner=before.graph->FindNode(producer))for(const auto& channel:owner->channelOutputs)previousOutputs.insert(channel.id);
+    std::unordered_map<std::string,EditorNodeGraph::Vec2> placements;
+    if(splitId)for(const auto& node:before.graph->GetNodes())placements.emplace(node.instanceUuid,DisplayNodePosition(node));
+    auto motion=std::make_unique<ExpansionMotion>();
+    if(splitId && ImGui::GetCurrentContext()->WithinFrameScope && !Stack::Notifications::SystemReducedMotion()) {
+        motion->origin=CaptureNodeAppearance(editor,splitId,{m_CanvasMin.x,m_CanvasMin.y},{m_CanvasMax.x,m_CanvasMax.y},true);
+        motion->originRect={ScreenToGraph({motion->origin.minimum.x,motion->origin.minimum.y}),
+            ScreenToGraph({motion->origin.maximum.x,motion->origin.maximum.y})};
+    }
+    if(!editor->ConnectGraphSockets(from,output,to,input,error,
+        [&](const auto& graph,const auto& node){return MeasureNodeForLayout(graph,node);}))return false;
+    const auto after=editor->GetGraphEditorContext();
+    if(splitId && !after.graph->FindNode(splitId) && !Stack::Notifications::SystemReducedMotion()) {
+        const auto* owner=after.graph->FindNode(producer);
+        if(owner) {
+            motion->channelFold=true;
+            motion->columns.emplace(producer,0.f);
+            for(const auto& channel:owner->channelOutputs)if(!previousOutputs.count(channel.id) && channel.sourceSocket==sourceSocket && starts.count(channel.component))
+                motion->socketOrigins.emplace(EditorNodeGraph::GraphOutputIdentity(producer,channel.id),starts.at(channel.component));
+            const auto target=ScreenToGraph(OutputPinScreenPos(*owner,sourceSocket));
+            motion->foldTarget={{target.x-4,target.y-4},{target.x+4,target.y+4}};
+            m_ExpansionMotion=std::move(motion);
+            for(const auto& node:after.graph->GetNodes())if(const auto start=placements.find(node.instanceUuid);start!=placements.end())
+                AnimateNodePlacement(node,start->second);
+            AdoptLayoutMotionOwner(after);++m_WireWorldRevision;
+        }
+    }
+    return true;
 }

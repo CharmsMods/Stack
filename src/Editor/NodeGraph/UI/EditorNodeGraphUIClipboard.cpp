@@ -599,7 +599,18 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
             position.x += offsetX;
             position.y += offsetY;
         }
-        if (targetGraph.AddGroup(group.title, position, group.size)) {
+        if (auto* imported = targetGraph.AddGroup(group.title, position, group.size)) {
+            if (group.compoundBoundary.is_object() && !group.compoundMembers.empty() &&
+                std::all_of(group.compoundMembers.begin(),group.compoundMembers.end(),
+                    [&](int id){return oldNodeIdToNew.count(id)!=0;})) {
+                imported->compoundBoundary=group.compoundBoundary;
+                imported->compoundBoundary["instanceUuid"]=Stack::NodeMath::GenerateCanonicalUuid();
+                for(int member:group.compoundMembers) imported->compoundMembers.push_back(oldNodeIdToNew.at(member));
+                for(auto& port:imported->compoundBoundary["ports"])
+                    port["internalInstanceUuid"]=uuidMap.at(port["internalInstanceUuid"].get<std::string>());
+                for(auto& parameter:imported->compoundBoundary["parameters"])
+                    parameter["internalInstanceUuid"]=uuidMap.at(parameter["internalInstanceUuid"].get<std::string>());
+            }
             importedGroupCount++;
         }
     }

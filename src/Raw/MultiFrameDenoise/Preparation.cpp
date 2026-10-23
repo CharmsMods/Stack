@@ -1052,6 +1052,28 @@ PreparationResult PrepareRawFrame(
     const std::uint64_t totalTiles =
         static_cast<std::uint64_t>(prepared.tileColumns) *
         static_cast<std::uint64_t>(prepared.tileRows);
+    std::array<CfaSite,4> sitesByParity;
+    std::array<double,4> saturationCutoffs;
+    for (std::size_t parity = 0; parity < sitesByParity.size(); ++parity) {
+        sitesByParity[parity] = layout.SiteAt(parity % 2, parity / 2);
+        const auto siteIndex = SiteIndex(sitesByParity[parity]);
+        const double span = prepared.calibration.usableSpanByCfaSite[siteIndex];
+        // Floating DNG has no integer DN margin. Keep the original subtraction
+        // and noise margin, but calculate these immutable values once per CFA site.
+        saturationCutoffs[siteIndex] = 1.0 - std::max(
+            raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::FloatDngPreGain
+                ? 0.0 : options.saturationDnMargin / span,
+            options.saturationNoiseSigmaMargin * options.saturationStdDevAtWhite[siteIndex]);
+    }
+    const bool hasGainMaps = !metadata.dngGainMaps.empty();
+    const auto* measurementValidity = raw.multiFrameMeasurementSidecars &&
+        raw.multiFrameMeasurementSidecars->validity &&
+        raw.multiFrameMeasurementSidecars->validity->size() == rawPixelCount
+        ? raw.multiFrameMeasurementSidecars->validity.get() : nullptr;
+    const auto* measurementClipping = raw.multiFrameMeasurementSidecars &&
+        raw.multiFrameMeasurementSidecars->clipping &&
+        raw.multiFrameMeasurementSidecars->clipping->size() == rawPixelCount
+        ? raw.multiFrameMeasurementSidecars->clipping.get() : nullptr;
     std::uint64_t completedTiles = 0u;
     if (options.reportProgress) {
         options.reportProgress(completedTiles, totalTiles);
@@ -1115,9 +1137,7 @@ PreparationResult PrepareRawFrame(
                         static_cast<std::size_t>(localY * tileExtent.width + localX);
                     const std::size_t sensorIndex = static_cast<std::size_t>(
                         sensorY * static_cast<std::uint64_t>(metadata.rawWidth) + sensorX);
-                    const CfaSite site = layout.SiteAt(
-                        static_cast<std::int64_t>(activeX),
-                        static_cast<std::int64_t>(activeY));
+                    const CfaSite site = sitesByParity[(activeY % 2) * 2 + activeX % 2];
                     const std::size_t siteIndex = SiteIndex(site);
                     if (!normalizedMeasurement &&
                         !metadata.dngLinearizationTable.empty() &&
@@ -1141,7 +1161,7 @@ PreparationResult PrepareRawFrame(
                     tile.normalizedMosaic[tileIndex] = normalizedFloat;
 
                     float gain = 1.0f;
-                    if (!EvaluateValidatedPointwiseGain(
+                    if (hasGainMaps && !EvaluateValidatedPointwiseGain(
                             metadata,
                             activeExtent,
                             activeX,
@@ -1153,17 +1173,8 @@ PreparationResult PrepareRawFrame(
                     }
                     tile.comparisonGain[tileIndex] = gain;
 
-                    const double span = prepared.calibration.usableSpanByCfaSite[siteIndex];
-                    const double saturationMargin = std::max(
-                        // Floating DNG has no integer DN quantization margin.
-                        // Four DN against WhiteLevel=1 would mark every pixel
-                        // saturated. Preserve the noise-based margin below.
-                        raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::FloatDngPreGain
-                            ? 0.0 : options.saturationDnMargin / span,
-                        options.saturationNoiseSigmaMargin *
-                            options.saturationStdDevAtWhite[siteIndex]);
                     std::uint8_t flags = 0u;
-                    if (normalized >= 1.0 - saturationMargin) {
+                    if (normalized >= saturationCutoffs[siteIndex]) {
                         flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
                     }
                     if (!options.decoderSaturationMask.empty() &&
@@ -1171,20 +1182,12 @@ PreparationResult PrepareRawFrame(
                         flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
                         flags |= SampleFlagMask(PreparedSampleFlag::ExplicitDecoderClip);
                     }
-                    if (raw.multiFrameMeasurementSidecars) {
-                        const auto& sidecars = *raw.multiFrameMeasurementSidecars;
-                        if (sidecars.validity &&
-                            sidecars.validity->size() == rawPixelCount &&
-                            (*sidecars.validity)[sensorIndex] == 0u) {
-                            flags |= SampleFlagMask(PreparedSampleFlag::Defective);
-                        }
-                        if (sidecars.clipping &&
-                            sidecars.clipping->size() == rawPixelCount &&
-                            (*sidecars.clipping)[sensorIndex] != 0u) {
-                            flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
-                            flags |= SampleFlagMask(
-                                PreparedSampleFlag::ExplicitDecoderClip);
-                        }
+                    if (measurementValidity && (*measurementValidity)[sensorIndex] == 0u) {
+                        flags |= SampleFlagMask(PreparedSampleFlag::Defective);
+                    }
+                    if (measurementClipping && (*measurementClipping)[sensorIndex] != 0u) {
+                        flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
+                        flags |= SampleFlagMask(PreparedSampleFlag::ExplicitDecoderClip);
                     }
                     if (!options.decoderDefectMask.empty() &&
                         options.decoderDefectMask[sensorIndex] != 0u) {

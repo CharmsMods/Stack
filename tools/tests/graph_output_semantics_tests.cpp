@@ -29,7 +29,8 @@ void RunGraphOutputSemanticsTests() {
     pixels.width = 16;
     pixels.height = 8;
     pixels.originalChannels = 3;
-    pixels.pixels.resize(16 * 8 * 4, 128);
+    pixels.channels = 3;
+    pixels.pixels.resize(16 * 8 * 3, 128);
     const int image = graph.AddImageNode(std::move(pixels), {})->id;
     const int split = graph.AddChannelSplitNode({})->id;
     const int average = graph.AddDataMathNode(DataMathMode::Average, {})->id;
@@ -97,6 +98,12 @@ void RunGraphOutputSemanticsTests() {
     context.sourceDescriptors[GraphOutputIdentity(image, kImageOutputSocketId)] = hdr;
     const auto hdrChannel = DescribeGraphOutput(graph, split, "r", context);
     Check(hdrChannel.descriptor.range == hdr.range, "splitting HDR data must not invent a normalized range");
+    const int reference=graph.AddImageNode({},{})->id;
+    graph.FindNode(reference)->role=Stack::GraphModel::NodeRole::Reference;
+    graph.FindNode(reference)->referenceType=LogicalValueType::ColorImage;
+    context.sourceDescriptors[GraphOutputIdentity(reference,kImageOutputSocketId)]=hdr;
+    Check(DescribeGraphOutput(graph,reference,kImageOutputSocketId,context).descriptor==hdr,
+        "an explicitly resolved graph reference must preserve its source facts, components and precision");
     const auto before = hdrChannel.descriptor;
     WireReadout::Input inspection;
     inspection.hasDescriptor = true;

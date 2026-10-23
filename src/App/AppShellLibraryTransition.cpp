@@ -27,11 +27,19 @@ void AppShell::BeginLibraryToEditorProjectLoad(const std::string& projectFileNam
         BeginLibraryToEditorProjectLoad(*workspace, projectFileName);
 }
 
-void AppShell::BeginLibraryToEditorProjectLoad(ProjectWorkspace& workspace, const std::string& projectFileName) {
+void AppShell::BeginLibraryToEditorProjectLoad(ProjectWorkspace& workspace, const std::string& projectFileName,
+    bool dispositionApproved) {
     auto& transition = workspace.loadTransition;
     auto* editor = workspace.editor.get();
-    if (editor->RequestAutoBracketForeground("open a project", [this, id = workspace.id, projectFileName] {
-            if (auto* owner = FindProjectWorkspace(id)) BeginLibraryToEditorProjectLoad(*owner, projectFileName);
+    if (!editor) return;
+    const auto files = editor->GetProjectFileOperations();
+    const auto loadGeneration = files->load.generation;
+    if (editor->RequestAutoBracketForeground("open a project", [this, id = workspace.id, projectFileName,
+            dispositionApproved, files, loadGeneration] {
+            if (auto* owner = FindProjectWorkspace(id)) {
+                if (owner->editor->GetProjectFileOperations() == files && files->load.generation == loadGeneration)
+                    BeginLibraryToEditorProjectLoad(*owner, projectFileName, dispositionApproved);
+            }
         })) return;
     if (projectFileName.empty() ||
         m_ProjectLoadSavePending ||
@@ -41,29 +49,32 @@ void AppShell::BeginLibraryToEditorProjectLoad(ProjectWorkspace& workspace, cons
     }
 
     if (!editor->FinishWorkspaceInteraction()) return;
-    if (!m_ProjectLoadCurrentProjectDispositionApproved &&
+    if (!dispositionApproved &&
         (editor->NeedsWorkspaceSaveBeforeTransition() || editor->IsProjectFileSaveBusy() ||
          editor->IsRawWorkspaceProjectSaveBusy())) {
         m_ProjectLoadSavePending = true;
         editor->RequestSaveWorkspaceBeforeClose([this, projectFileName, id = workspace.id](bool success) {
             m_ProjectLoadSavePending = false;
             auto* owner = FindProjectWorkspace(id);
-            if (success && owner) {
-                m_ProjectLoadCurrentProjectDispositionApproved = true;
-                BeginLibraryToEditorProjectLoad(*owner, projectFileName);
+            if (!owner) return;
+            // Saving an unfinished bracket can intentionally adopt its new
+            // project. The save operation owns that transition and its result.
+            if (success) {
+                BeginLibraryToEditorProjectLoad(*owner, projectFileName, true);
             } else {
-                if (owner) ReportSaveFailure(*owner->editor, "The save failed, so the other project was not opened.",
-                    [this, id, projectFileName] {
+                const auto retryFiles = owner->editor->GetProjectFileOperations();
+                const auto retryGeneration = retryFiles->load.generation;
+                ReportSaveFailure(*owner->editor, "The save failed, so the other project was not opened.",
+                    [this, id, projectFileName, retryFiles, retryGeneration] {
                         if (auto* workspace = FindProjectWorkspace(id)) {
-                            m_ProjectLoadCurrentProjectDispositionApproved = true;
-                            BeginLibraryToEditorProjectLoad(*workspace,projectFileName);
+                            if (workspace->editor->GetProjectFileOperations() == retryFiles && retryFiles->load.generation == retryGeneration)
+                                BeginLibraryToEditorProjectLoad(*workspace, projectFileName, true);
                         }
                     });
             }
         });
         return;
     }
-    m_ProjectLoadCurrentProjectDispositionApproved = false;
     transition.Reset();
     transition.ownerLease = editor->ProjectTasks().Retain();
     if (workspace.id == m_ActiveProjectWorkspace) {
@@ -172,6 +183,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
 
     const double now = ImGui::GetTime();
     const double elapsed = now - transition.phaseStartTime;
+    const bool skipPresentationDelay = !foreground || Stack::Notifications::SystemReducedMotion();
     auto finishToLibrary = [&]() {
         SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::None);
         transition.projectFileName.clear();
@@ -200,16 +212,17 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
 
     switch (transition.phase) {
     case LibraryToEditorProjectLoadPhase::LibraryFadeOut:
-        if (elapsed >= kLibraryLoadFadeOutSeconds) {
+        if (skipPresentationDelay || elapsed >= kLibraryLoadFadeOutSeconds) {
             SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeIn);
         }
         break;
     case LibraryToEditorProjectLoadPhase::SpinnerFadeIn: {
-        const bool minimumSpinnerShown = transition.spinnerStartTime > 0.0 &&
+        const bool minimumSpinnerShown = skipPresentationDelay ||
             (now - transition.spinnerStartTime) >= kLibraryLoadSpinnerMinVisibleSeconds;
-        if (transition.decodeReady && !transition.decodeSucceeded && elapsed >= kLibraryLoadSpinnerFadeInSeconds && minimumSpinnerShown) {
+        const bool spinnerReady = skipPresentationDelay || elapsed >= kLibraryLoadSpinnerFadeInSeconds;
+        if (transition.decodeReady && !transition.decodeSucceeded && spinnerReady && minimumSpinnerShown) {
             SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
-        } else if (transition.decodeReady && elapsed >= kLibraryLoadSpinnerFadeInSeconds && minimumSpinnerShown) {
+        } else if (transition.decodeReady && spinnerReady && minimumSpinnerShown) {
             transition.applyStartedAt = ImGui::GetTime();
             TraceLibraryLoadTransition(workspace, "apply start");
             if (!editor->BeginDeferredLoadedProjectApply(transition.decodedProject)) {
@@ -268,7 +281,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
         }
 
         const std::string statusText = editor->GetDeferredLoadedProjectStatusText();
-        if (!statusText.empty()) {
+        if (!statusText.empty() && statusText != editor->GetProjectLoadStatusText()) {
             LibraryManager::Get().SetProjectLoadApplyingStatus(editor, statusText);
         }
 
@@ -289,7 +302,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
         break;
     }
     case LibraryToEditorProjectLoadPhase::SpinnerFadeOut:
-        if (elapsed >= kLibraryLoadSpinnerFadeOutSeconds) {
+        if (skipPresentationDelay || elapsed >= kLibraryLoadSpinnerFadeOutSeconds) {
             if (transition.applySucceeded) {
                 workspace.rootTab = RootTabEditor;
                 if (foreground) {
@@ -305,7 +318,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
         }
         break;
     case LibraryToEditorProjectLoadPhase::EditorReveal:
-        if (elapsed >= kLibraryLoadEditorRevealSeconds) {
+        if (skipPresentationDelay || elapsed >= kLibraryLoadEditorRevealSeconds) {
             SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::None);
             transition.projectFileName.clear();
             transition.decodeReady = false;

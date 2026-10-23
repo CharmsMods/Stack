@@ -2,6 +2,8 @@
 
 #include "Editor/EditorModule.h"
 #include "Utils/ImGuiExtras.h"
+#include "LibraryControls.h"
+#include "App/AppHeaderStyle.h"
 #include "Utils/RawGallerySelectionVisuals.h"
 #include "Utils/Utf8Text.h"
 
@@ -586,12 +588,11 @@ void LibraryModule::RenderRawWorkspaceView(
             anim.expansion = targetVal;
             anim.initialized = true;
         } else {
-            const float dt = ImGui::GetIO().DeltaTime;
             const float delta = targetVal - anim.expansion;
-            if (std::abs(delta) < 0.001f) {
+            if (std::abs(delta) < 0.001f || Stack::LibraryUi::ReducedMotion()) {
                 anim.expansion = targetVal;
             } else {
-                anim.expansion += delta * (1.0f - std::exp(-dt * 16.0f));
+                Stack::Header::ApproachMotion(anim.expansion, targetVal, .18f);
             }
         }
 
@@ -733,7 +734,9 @@ void LibraryModule::RenderRawWorkspaceView(
                 float& hoverAnim = m_MiniThumbHoverAnimations[source->relativePathKey];
                 const float targetHover = miniHovered ? 1.0f : 0.0f;
                 const float dt = ImGui::GetIO().DeltaTime;
-                hoverAnim += (targetHover - hoverAnim) * (1.0f - std::exp(-dt * 18.0f));
+                if (std::abs(targetHover - hoverAnim) < .001f || Stack::LibraryUi::ReducedMotion())
+                    hoverAnim = targetHover;
+                else hoverAnim += (targetHover - hoverAnim) * (1.0f - std::exp(-dt * 24.0f));
 
                 const float scale = 1.0f + 0.15f * hoverAnim;
                 const ImVec2 center(

@@ -129,6 +129,7 @@ GraphEvaluationSchedule BuildGraphEvaluationSchedule(
     // a mask for a later output of the same operation without feedback.
     std::vector<ScheduledGraphOutput> pending{root};
     pending.insert(pending.end(), extraRoots.begin(), extraRoots.end());
+    schedule.requestedOutputs = pending;
     std::unordered_map<NodeSocketKey, std::size_t, NodeSocketKeyHash> indices;
     std::vector<ScheduledGraphOutput> outputs;
     std::vector<std::vector<std::size_t>> dependencies;

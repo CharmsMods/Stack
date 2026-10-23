@@ -1,6 +1,7 @@
 #include "Raw/RawViewportCalibration.h"
 void TestRawViewportTimingLearning();
 void TestRawLayerStackContracts();
+void TestCompoundExecutionLowering();
 void TestClosetWorkspaceStorage();
 void TestProjectStoreOwnership();
 #include "Raw/RawViewportResolutionPolicy.h"
@@ -101,6 +102,7 @@ const std::vector<LayerDescriptor>& TestLayerDescriptors() {
         { LayerType::Saturation, "Saturation", "Saturation", "Saturation", "Color", "Adjust saturation.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
         { LayerType::Warmth, "Warmth", "Warmth", "Warmth", "Color", "Adjust warmth.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
         { LayerType::Sharpen, "Sharpen", "Sharpen", "Sharpen", "Color", "Adjust sharpening.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::ChannelUsefulWithWarning },
+        { LayerType::GaussianBlur, "GaussianBlur", "Gaussian Blur", "Gaussian Blur", "Blur", "Gaussian convolution.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::ChannelSafe },
         { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Display/output transform.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
     };
     return descriptors;
@@ -15525,7 +15527,7 @@ void TestPhase5ExecutableCompoundLifecycle() {
             duplicateCanonicalUuid);
         error.clear();
         Require(!contractGraph.AddCompoundDefinition(duplicateCanonicalUuid, &error) &&
-                error.find("Duplicate or invalid node instance UUID") !=
+                error.find("Duplicate or invalid saved node identity") !=
                     std::string::npos,
             "compound definitions should reject ambiguous canonical node identities");
 
@@ -15807,36 +15809,28 @@ void TestPhase5ExecutableCompoundLifecycle() {
 
     nlohmann::json missingDocument = nestedSaved;
     missingDocument["nodeGraph"]["compoundDefinitions"] = nlohmann::json::array();
-    EditorNodeGraph::Graph missingGraph;
-    EditorNodeGraph::DeserializeGraphPayload(missingDocument, missingGraph, 0);
-    const EditorNodeGraph::Node* missingNode = missingGraph.FindNode(nestedId);
-    Require(missingNode && !missingNode->definitionResolved &&
-            missingNode->compound.instance.interfaceSnapshot.size() ==
-                nested->compound.instance.interfaceSnapshot.size() &&
-            missingGraph.HasLink(sourceId, nestedId) && missingGraph.HasLink(nestedId, outputId),
-        "missing definitions should preserve the unresolved node shell, ports, and connections");
-    EditorNodeGraph::Graph failedExpansion;
-    Require(!missingGraph.ExpandAllCompoundNodes(failedExpansion, &expansion) &&
-            !expansion.error.empty(),
-        "missing compound dependency should block execution rather than substitute behavior");
-    Require(!missingGraph.IsOutputConnected() &&
-            !missingGraph.GetOutputConnectionDiagnostic().empty(),
-        "an unresolved compound should report why its authored output cannot execute");
-
+    EditorNodeGraph::Graph missingGraph = nestedLoaded.CloneForAnalysis();
+    const auto beforeMissingRead = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), missingGraph);
+    bool missingRejected = false;
+    try { EditorNodeGraph::DeserializeGraphPayload(missingDocument, missingGraph, 0); }
+    catch (const std::exception& failure) {
+        missingRejected = std::string(failure.what()).find("unresolved definition") != std::string::npos;
+    }
+    Require(missingRejected && EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), missingGraph) == beforeMissingRead,
+        "the current transactional reader must reject missing exact definitions without replacing the live graph");
     nlohmann::json invalidInstanceDocument = saved;
     for (nlohmann::json& item : invalidInstanceDocument["nodeGraph"]["nodes"]) {
         if (item.value("id", 0) == compoundId) {
             item["compoundInstance"]["instanceUuid"] = "not-a-uuid";
         }
     }
-    EditorNodeGraph::Graph invalidInstanceGraph;
-    EditorNodeGraph::DeserializeGraphPayload(
-        invalidInstanceDocument, invalidInstanceGraph, 0);
-    const EditorNodeGraph::Node* invalidInstance = invalidInstanceGraph.FindNode(compoundId);
-    Require(invalidInstance && !invalidInstance->definitionResolved &&
-            invalidInstance->compound.instance.resolution == CompoundResolutionStatus::InvalidDefinition,
-        "malformed compound instance should remain unresolved even when its referenced definition exists");
-
+    EditorNodeGraph::Graph invalidInstanceGraph = nestedLoaded.CloneForAnalysis();
+    const auto beforeInvalidRead = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), invalidInstanceGraph);
+    bool invalidRejected = false;
+    try { EditorNodeGraph::DeserializeGraphPayload(invalidInstanceDocument, invalidInstanceGraph, 0); }
+    catch (const std::exception&) { invalidRejected = true; }
+    Require(invalidRejected && EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), invalidInstanceGraph) == beforeInvalidRead,
+        "the current transactional reader must reject malformed compound identities without replacing the live graph");
     EditorNodeGraph::Graph optimizedGraph;
     Require(optimizedGraph.AddCompoundDefinition(templates[1], &error),
         "optimized-equivalent reference definition should embed exactly");
@@ -16484,10 +16478,39 @@ void RunNodeLayoutTests();
 void TestGraphRenderPolicyAndNavigation();
 
 void RunGraphOutputSemanticsTests();
+void RunGraphWireRoutingTests();
+void RunGraphNodeNotesTests();
+void RunGraphChannelOutputsTests();
 
 void TestProjectGalleryDiscovery();
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--channels-only") {
+        try { RunGraphChannelOutputsTests(); }
+        catch (const std::exception& e) { std::cerr << "Channel outputs: " << e.what() << '\n'; return 1; }
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--notes-only") {
+        try { RunGraphNodeNotesTests(); }
+        catch (const std::exception& e) { std::cerr << "Node notes: " << e.what() << '\n'; return 1; }
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--routing-only") {
+        try { RunGraphWireRoutingTests(); }
+        catch (const std::exception& e) { std::cerr << "Wire routing: " << e.what() << '\n'; return 1; }
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--semantics-only") {
+        RunGraphOutputSemanticsTests();
+        std::cout << "Focused graph output semantics passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--compounds-only") {
+        try { TestPhase5ExecutableCompoundLifecycle(); TestCompoundExecutionLowering(); }
+        catch (const std::exception& e) { std::cerr << "Compound construction: " << e.what() << '\n'; return 1; }
+        std::cout << "Focused executable compound lifecycle checks passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--project-persistence") {
         TestClosetWorkspaceStorage();
         TestProjectStoreOwnership();
@@ -16569,6 +16592,7 @@ int main(int argc, char** argv) {
     TestPhase6BFieldMeanGraphContract();
     TestPhase6GeometryAndSpecializedGraphContract();
     TestPhase5ExecutableCompoundLifecycle();
+    TestCompoundExecutionLowering();
     TestProjectSaveCoordinatorRevisionQueue();
     TestRenderQueueModelSelectionAndDeduplication();
     TestRawGalleryTrashAndRevertActions();

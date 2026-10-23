@@ -1,6 +1,7 @@
 #include "Project/ProjectSession.h"
 
 #include "Editor/Layers/LayerBase.h"
+#include "Project/GraphSnapshotCache.h"
 
 namespace Stack::Project {
 

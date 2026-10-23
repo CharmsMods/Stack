@@ -88,7 +88,7 @@ int RunWorker(HANDLE input,HANDLE output,HANDLE cancellation,const std::filesyst
                     throw std::runtime_error("Reblend requires the retained overview. Request native detail separately.");
                 std::string error;
                 if(request.shouldCancel())throw std::runtime_error("Canceled");
-                auto preview=Raw::Bracketing::ReblendPreview(source,request.recipe,*request.analysis,request.executeOpenGlTask,&error);
+                auto preview=Raw::Bracketing::ReblendPreview(source,request.recipe,*request.analysis,request.executeOpenGlTask,&error,false,request.shouldCancel);
                 if(!error.empty())throw std::runtime_error(error);
                 // These measurements do not change with contribution edits.
                 // They stay in the worker and the client's accepted result.

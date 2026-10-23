@@ -80,7 +80,80 @@ bool PreparedTileSampler::Write(
     const std::string& cacheKey,
     const Mfd::PreparedRawTile& tile,
     std::string* error) {
-    return m_Backing.Write(cacheKey, tile, error);
+    if (!m_Backing.Write(cacheKey, tile, error)) return false;
+    // The cache interface permits rewriting a tile. Do not serve an older
+    // resident copy after the backing store has accepted its replacement.
+    const auto key = Key(cacheKey, tile.tileX, tile.tileY);
+    const auto found = m_Entries.find(key);
+    if (found != m_Entries.end()) {
+        if (m_LastTile == &found->second.tile) m_LastTile = nullptr;
+        m_Order.erase(found->second.order);
+        m_Entries.erase(found);
+    }
+    return true;
+}
+
+bool PreparedTileSampler::ReadRegion(
+    const Mfd::PreparedRawFrame& frame,
+    std::uint64_t left, std::uint64_t top,
+    unsigned width, unsigned height,
+    Mfd::PreparedRawTile& region,
+    std::string* error) {
+    region = {};
+    if (!frame.tileRawPixels || left > frame.activeExtent.width ||
+        top > frame.activeExtent.height || width > frame.activeExtent.width - left ||
+        height > frame.activeExtent.height - top ||
+        (height && width > std::numeric_limits<std::size_t>::max() / height)) {
+        if (error) *error = "The prepared RAW region is outside its source frame.";
+        return false;
+    }
+    region.originX = left; region.originY = top; region.extent = {width, height};
+    const auto count = static_cast<std::size_t>(width) * height;
+    region.normalizedMosaic.resize(count);
+    region.comparisonGain.resize(count);
+    region.sampleFlags.resize(count);
+    for (unsigned y = 0; y < height;) {
+        const auto rawY = top + y;
+        const auto rows = std::min<std::uint64_t>(height - y,
+            frame.tileRawPixels - rawY % frame.tileRawPixels);
+        for (unsigned x = 0; x < width;) {
+            const auto rawX = left + x;
+            const auto columns = std::min<std::uint64_t>(width - x,
+                frame.tileRawPixels - rawX % frame.tileRawPixels);
+            const Mfd::PreparedRawTile* tile = nullptr;
+            if (GetTile(frame.cacheKey, static_cast<std::uint32_t>(rawX / frame.tileRawPixels),
+                    static_cast<std::uint32_t>(rawY / frame.tileRawPixels), tile, error) !=
+                    Mfd::TileCacheReadStatus::Hit) {
+                if (error && error->empty()) *error = "A prepared RAW region tile is unavailable.";
+                return false;
+            }
+            if (!tile || rawX < tile->originX || rawY < tile->originY ||
+                rawX - tile->originX > tile->extent.width || rawY - tile->originY > tile->extent.height ||
+                columns > tile->extent.width - (rawX - tile->originX) ||
+                rows > tile->extent.height - (rawY - tile->originY)) {
+                if (error) *error = "A prepared RAW tile does not cover its requested region.";
+                return false;
+            }
+            const auto offset = static_cast<std::size_t>(rawY - tile->originY) *
+                tile->extent.width + rawX - tile->originX;
+            const auto end = offset + (rows - 1) * tile->extent.width + columns;
+            if (end > tile->normalizedMosaic.size() || end > tile->comparisonGain.size() ||
+                end > tile->sampleFlags.size()) {
+                if (error) *error = "A prepared RAW tile has incomplete sample data.";
+                return false;
+            }
+            for (std::size_t row = 0; row < rows; ++row) {
+                const auto from = offset + row * tile->extent.width;
+                const auto to = (static_cast<std::size_t>(y) + row) * width + x;
+                std::copy_n(tile->normalizedMosaic.data() + from, columns, region.normalizedMosaic.data() + to);
+                std::copy_n(tile->comparisonGain.data() + from, columns, region.comparisonGain.data() + to);
+                std::copy_n(tile->sampleFlags.data() + from, columns, region.sampleFlags.data() + to);
+            }
+            x += static_cast<unsigned>(columns);
+        }
+        y += static_cast<unsigned>(rows);
+    }
+    return true;
 }
 
 bool PreparedTileSampler::ReadSample(

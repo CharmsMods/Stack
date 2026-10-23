@@ -5,6 +5,7 @@
 #include "DetailFusion.h"
 #include "PreparedRegion.h"
 #include "TemporalGpu.h"
+#include "CaptureFallback.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -21,9 +22,11 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     const auto plane=layout.RawToPlane(mapped,site);const auto extent=layout.PlaneExtent(site,source.frame.activeExtent);
     if(!std::isfinite(plane.x)||!std::isfinite(plane.y)) return result;
     const auto nearestX=static_cast<std::int64_t>(std::llround(plane.x)),nearestY=static_cast<std::int64_t>(std::llround(plane.y));
+    Mfd::SameCfaTapInput nearest;bool hasNearest=false;
     if(nearestX>=0&&nearestY>=0&&static_cast<std::uint64_t>(nearestX)<extent.width&&static_cast<std::uint64_t>(nearestY)<extent.height) {
-        const auto raw=layout.PlanePixelToRaw({nearestX,nearestY,site});Mfd::SameCfaTapInput nearest;
-        if(sampler.ReadSample(source.frame,static_cast<std::uint64_t>(raw.x),static_cast<std::uint64_t>(raw.y),nearest,&error)&&
+        const auto raw=layout.PlanePixelToRaw({nearestX,nearestY,site});
+        hasNearest=sampler.ReadSample(source.frame,static_cast<std::uint64_t>(raw.x),static_cast<std::uint64_t>(raw.y),nearest,&error);
+        if(hasNearest&&
             std::isfinite(nearest.normalizedSample)&&std::isfinite(nearest.comparisonGain)&&nearest.comparisonGain>0&&
             !Mfd::HasSampleFlag(nearest.sampleFlags,Mfd::PreparedSampleFlag::Defective)&&
             !Mfd::HasSampleFlag(nearest.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired)) {
@@ -53,13 +56,8 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     result.fallback=sampled.value;result.finite=true;result.clipped=false;result.fallbackClipped=false;
     if(confidence<=0)return result;
     double headroom=1;
-    if(nearestX>=0&&nearestY>=0&&static_cast<std::uint64_t>(nearestX)<extent.width&&static_cast<std::uint64_t>(nearestY)<extent.height) {
-        const auto raw=layout.PlanePixelToRaw({nearestX,nearestY,site});
-        Mfd::SameCfaTapInput nearest;
-        if(sampler.ReadSample(source.frame,static_cast<std::uint64_t>(raw.x),
-            static_cast<std::uint64_t>(raw.y),nearest,&error)) {
-            headroom=std::clamp((.995-nearest.normalizedSample)/.045,0.0,1.0);headroom=headroom*headroom*(3-2*headroom);
-        }
+    if(hasNearest) {
+        headroom=std::clamp((.995-nearest.normalizedSample)/.045,0.0,1.0);headroom=headroom*headroom*(3-2*headroom);
     }
     result.value=sampled.value;
     // Confidence moderates scene-dependent registration risk, not sensor
@@ -83,9 +81,14 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
         if(!error.empty())return false;
     }
     Mfd::DirectoryNormalizedTileCache cache(data.directory);
-    const auto count=origin.normalizedMosaic.size();groups.assign(request.recipe.groups.size(),std::vector<Observation>(count));
+    const auto count=origin.normalizedMosaic.size();groups.resize(request.recipe.groups.size());
+    for(auto& group:groups)group.assign(count,Observation{});
     std::vector<std::vector<double>> weight(groups.size(),std::vector<double>(count));
     std::vector<std::vector<double>> squared(groups.size(),std::vector<double>(count));
+    // One transient bit per tile sample tracks the selected fallback's own
+    // status. Observation::localRejected aggregates every capture and cannot
+    // identify whether the selected fallback itself had rejected geometry.
+    std::vector<std::vector<bool>> fallbackRejected(groups.size(),std::vector<bool>(count));
     std::vector<std::vector<DetailFusionAccumulator>> bands;
     if(detailFusion) {
         bands.resize(groups.size());
@@ -122,32 +125,36 @@ static bool EvaluateTemporalRegion(const ProcessingRequest& request,const Prepar
             ?0.0:origin.normalizedMosaic[p]*origin.comparisonGain[p];
         stablePilot[p]=std::max(0.0,used?pilot/used:(std::isfinite(point)?point:0.0));
     }
+    std::vector<Observation> samples;
     for(const auto& source:data.sources) {
         if(!source.enabled) continue;
         if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
-        Mfd::PreparedRawTile tile;
+        const bool fixedReference=&source==&data.sources[data.origin];
+        Mfd::PreparedRawTile sourceTile;
+        const auto& tile=fixedReference?origin:sourceTile;
         const bool aligned=source.alignmentDiagnostic.model!=CaptureAlignment::Model::Identity||
-            (&source!=&data.sources[data.origin]&&source.alignmentDiagnostic.localApplied);
-        if(!aligned) {
+            (!fixedReference&&source.alignmentDiagnostic.localApplied);
+        if(!aligned&&!fixedReference) {
             if(detailFusion) {
                 PreparedTileSampler regionSampler(data.directory);
                 if(!ReadPreparedRegion(source.frame,regionSampler,origin.originX,origin.originY,
-                    static_cast<unsigned>(origin.extent.width),static_cast<unsigned>(origin.extent.height),tile,error)) return false;
-            } else if(Mfd::ReadPreparedTile(source.frame,cache,tx,ty,tile,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
+                    static_cast<unsigned>(origin.extent.width),static_cast<unsigned>(origin.extent.height),sourceTile,error)) return false;
+            } else if(Mfd::ReadPreparedTile(source.frame,cache,tx,ty,sourceTile,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
         }
         const auto group=source.group;
-        const bool fixedReference=&source==&data.sources[data.origin];
         Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(source.frame.activeCfaPattern,layout);
         PreparedTileSampler sampler(data.directory);
         const bool useBands=detailFusion&&!bands[group].empty();
-        std::vector<Observation> samples(useBands?count:0);
+        if(useBands)samples.resize(count);
         const auto accumulate=[&](std::size_t p,const Observation& sample) {
             auto& o=groups[group][p];
             o.localRejected|=sample.localRejected;
             if(!sample.finite) return;
-            if(!o.finite||sample.exposure<o.exposure) {
+            if(PreferCaptureFallback(o.finite,fallbackRejected[group][p],o.exposure,
+                sample.localRejected,sample.exposure)) {
                 o.fallback=sample.fallback;o.exposure=sample.exposure;o.clipped=sample.clipped;
                 o.fallbackClipped=sample.fallbackClipped;
+                fallbackRejected[group][p]=sample.localRejected;
             }
             o.finite=true;if(sample.support<=0) return;
             o.fixedReference|=sample.fixedReference;
@@ -226,7 +233,8 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
         static_cast<unsigned>(bottom-top),expanded,error)) return false;
     std::vector<std::vector<Observation>> full;
     if(!EvaluateTemporalRegion(request,data,tx,ty,full,expanded,true,error)) return false;
-    groups.assign(full.size(),std::vector<Observation>(origin.extent.width*origin.extent.height));
+    groups.resize(full.size());
+    for(auto& group:groups)group.resize(origin.extent.width*origin.extent.height);
     for(std::size_t g=0;g<groups.size();++g) for(unsigned y=0;y<origin.extent.height;++y)
         for(unsigned x=0;x<origin.extent.width;++x)
             groups[g][y*origin.extent.width+x]=full[g][(y+origin.originY-top)*expanded.extent.width+x+origin.originX-left];
@@ -285,18 +293,31 @@ Pixel Blend(const std::vector<Observation>& input,const std::vector<double>& req
     const std::array<double,64>* colorHeadroom) {
     return BlendWithWeights(input,requested.empty()?nullptr:requested.data(),requested.size(),recipe,colorHeadroom);
 }
-double Luminance(const RawMetadata& metadata,const std::array<double,4>& cell) {
+LuminanceTransform BuildLuminanceTransform(const RawMetadata& metadata) {
+    LuminanceTransform transform;
     Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(metadata.cfaPattern,layout);
-    std::array<double,3> rgb{};
     for(unsigned i=0;i<4;++i) {
         const auto site=layout.SiteAt(i%2,i/2);
-        const unsigned c=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
-        rgb[c]+=cell[i]*(c==1?.5:1);
+        transform.channels[i]=site==Mfd::CfaSite::Red?0:site==Mfd::CfaSite::Blue?2:1;
     }
     const auto& wb=metadata.cameraWhiteBalance;
-    rgb[0]*=wb[0]/std::max(1e-6f,wb[1]);rgb[2]*=wb[2]/std::max(1e-6f,wb[1]);
+    transform.redGain=wb[0]/std::max(1e-6f,wb[1]);
+    transform.blueGain=wb[2]/std::max(1e-6f,wb[1]);
+    transform.cameraToSrgb=metadata.cameraToSrgb;
+    return transform;
+}
+double Luminance(const LuminanceTransform& transform,const std::array<double,4>& cell) {
+    std::array<double,3> rgb{};
+    for(unsigned i=0;i<4;++i) {
+        const unsigned c=transform.channels[i];
+        rgb[c]+=cell[i]*(c==1?.5:1);
+    }
+    rgb[0]*=transform.redGain;rgb[2]*=transform.blueGain;
     std::array<double,3> working{};
-    for(unsigned c=0;c<3;++c) for(unsigned k=0;k<3;++k) working[c]+=metadata.cameraToSrgb[c*3+k]*rgb[k];
+    for(unsigned c=0;c<3;++c) for(unsigned k=0;k<3;++k) working[c]+=transform.cameraToSrgb[c*3+k]*rgb[k];
     return .2126*working[0]+.7152*working[1]+.0722*working[2];
+}
+double Luminance(const RawMetadata& metadata,const std::array<double,4>& cell) {
+    return Luminance(BuildLuminanceTransform(metadata),cell);
 }
 } // namespace Raw::Bracketing

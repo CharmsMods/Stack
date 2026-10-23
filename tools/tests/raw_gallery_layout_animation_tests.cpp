@@ -1,4 +1,5 @@
 #include "Editor/Internal/RawLab/RawLabGalleryLayoutAnimation.h"
+#include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
 
 #include <cmath>
 #include <iostream>
@@ -38,12 +39,13 @@ bool TestSortTransitions(bool grid) {
         Observe(motion, destination);
         if (!Check(motion.Active() && std::abs(DrawX(motion) - origin) < .01f,
             "sort starts at the displayed position in either view")) return false;
-        motion.BeginFrame("folder", grid, frame++, time + .16, mode, false);
+        motion.BeginFrame("folder", grid, frame++, time + .11, mode, false);
         Observe(motion, destination);
-        if (!Check(std::abs(DrawX(motion) - 220.f) < .01f, "sort passes through its midpoint")) return false;
-        motion.BeginFrame("folder", grid, frame++, time + .33, mode, false);
+        const float halfway = origin + (destination - origin) * .875f;
+        if (!Check(std::abs(DrawX(motion) - halfway) < .01f, "sort responds promptly with eased elapsed-time motion")) return false;
+        motion.BeginFrame("folder", grid, frame++, time + .23, mode, false);
         Observe(motion, destination);
-        if (!Check(!motion.Active() && motion.ContentAlpha() == 1.f && !motion.Protects("image"),
+        if (!Check(!motion.Active() && !motion.Protects("image"),
             "sort settles exactly and releases its texture protection")) return false;
     }
     return true;
@@ -63,7 +65,7 @@ bool TestInterruptions() {
     if (!Check(std::abs(DrawX(motion) - displayed) < .01f,
         "a rapid sort/view reversal starts at the last presented geometry")) return false;
     motion.BeginFrame("folder", false, 5, 1.2, 3, true); Observe(motion, 400);
-    if (!Check(!motion.Active() && motion.ContentAlpha() == 1.f,
+    if (!Check(!motion.Active(),
         "reduced motion cancels an in-flight transition")) return false;
     motion.BeginFrame("folder", true, 6, 1.3, 4, false); Observe(motion, 100);
     motion.BeginFrame("folder", true, 9, 1.4, 5, false); Observe(motion, 500);
@@ -89,7 +91,7 @@ bool TestClippedAndUnloadedImages() {
     motion.BeginFrame("folder",true,2,1.,1,false); slots(1200,20);
     if (!Check(motion.Protects("a") && motion.Protects("b"),
         "clipped source and destination slots participate by identity")) return false;
-    motion.BeginFrame("folder",true,3,1.16,1,false); slots(1200,20);
+    motion.BeginFrame("folder",true,3,1.066,1,false); slots(1200,20);
     ImDrawList draw(ImGui::GetDrawListSharedData()); draw._ResetForNewFrame();
     draw.PushClipRect(clip.Min,clip.Max);
     int resolutions = 0;
@@ -105,6 +107,58 @@ bool TestClippedAndUnloadedImages() {
     return Check(!motion.Active() && resolutions == 0 && !motion.Protects("a"),
         "settled motion performs no texture resolution");
 }
+bool TestStackMotionAndInputGeometry() {
+    GalleryLayoutAnimation motion;
+    const ImRect origin({20, 50}, {140, 130});
+    const ImRect destination({420, 350}, {540, 430});
+    const ImRect hidden({420, 350}, {540, 350});
+    motion.BeginFrame("folder", true, 1, 0., 0, false);
+    motion.SetViewport(clip);
+    motion.ObserveSlot("image", origin, clip);
+    motion.Observe("image", origin, clip);
+    motion.EndFrame();
+    motion.BeginFrame("folder", true, 2, 1., 1, false);
+    motion.ObserveSlot("image", destination, hidden);
+    motion.EndFrame();
+    motion.BeginFrame("folder", true, 3, 1.066, 1, false);
+    motion.ObserveSlot("image", destination, hidden);
+    motion.EndFrame();
+    ImDrawList draw(ImGui::GetDrawListSharedData()); draw._ResetForNewFrame();
+    draw.PushClipRect(clip.Min, clip.Max);
+    motion.Draw(&draw, clip, [](const auto&) { return GalleryLayoutAnimation::Texture{7, 120, 80}; });
+    if (!Check(draw.VtxBuffer.Size == 4, "a photo moving into a stack remains a complete image")) return false;
+    for (const auto& command : draw.CmdBuffer) {
+        if (command.ElemCount && !Check(command.ClipRect.w == clip.Max.y,
+            "the destination's collapsed strip does not crop the moving image")) return false;
+    }
+    const ImVec2 displayed = draw.VtxBuffer[0].pos;
+    ImRect hit;
+    if (!Check(motion.DisplayRect("image", destination, hit) &&
+        std::abs(hit.Min.x - displayed.x) < .01f && std::abs(hit.Min.y - displayed.y) < .01f,
+        "input geometry follows the moving photo")) return false;
+    if (!Check(motion.ImageAt(hit.GetCenter()) == "image" && motion.ImageAt(destination.GetCenter()).empty(),
+        "hit testing uses displayed image identity rather than its destination slot")) return false;
+    ImGui::SetCursorScreenPos(destination.Min);
+    auto* tileDraw = ImGui::GetWindowDrawList();
+    const int firstVertex = tileDraw->VtxBuffer.Size;
+    {
+        Stack::Editor::RawLabInternal::GalleryTileMotion tile(motion, "image", destination);
+        Stack::Editor::RawLabInternal::GalleryThumbnailButton("moving-card", destination.GetSize(),
+            destination.GetHeight(), ImGuiButtonFlags_None, &tile);
+        if (!Check(std::abs(ImGui::GetItemRectMin().x - hit.Min.x) < .01f &&
+            std::abs(ImGui::GetItemRectMin().y - hit.Min.y) < .01f,
+            "the production tile registers its displayed hit rectangle")) return false;
+        tileDraw->AddRectFilled(destination.Min, destination.Max, IM_COL32_WHITE);
+    }
+    if (!Check(tileDraw->VtxBuffer.Size >= firstVertex + 4 &&
+        std::abs(tileDraw->VtxBuffer[firstVertex].pos.x - hit.Min.x) < .01f &&
+        std::abs(tileDraw->VtxBuffer[firstVertex].pos.y - hit.Min.y) < .01f,
+        "tile decoration follows the same pose as its hit rectangle")) return false;
+    // A discovery during sorting must neither disappear into the overlay nor
+    // fly in from an unrelated off-screen location.
+    motion.ObserveSlot("new", origin, clip);
+    return Check(!motion.Observe("new", origin, clip), "new ready thumbnails draw immediately in their actual slot");
+}
 }
 int main() {
     ImGui::CreateContext();
@@ -114,7 +168,7 @@ int main() {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     ImGui::NewFrame();
     const bool passed = TestSortTransitions(true) && TestSortTransitions(false) &&
-        TestInterruptions() && TestClippedAndUnloadedImages();
+        TestInterruptions() && TestClippedAndUnloadedImages() && TestStackMotionAndInputGeometry();
     ImGui::EndFrame(); ImGui::DestroyContext();
     if (!passed) return 1;
     std::cout << "Gallery layout animation tests passed (9 sort changes in each view, interruptions, reduced motion, lifetime).\n";

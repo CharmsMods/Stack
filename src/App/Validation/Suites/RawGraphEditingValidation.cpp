@@ -1,6 +1,7 @@
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
+#include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeEditors/NodeEditorRegistry.h"
 #include "Editor/LayerRegistry.h"
 #include "Project/RawNodeEditing.h"
@@ -19,6 +20,7 @@
 
 namespace Stack::Validation {
 void ValidateSharedCurveInteractions();
+void ValidateRawGraphInsertions(EditorModule& editor);
 namespace {
 void ValidateNodeOpening(EditorModule& editor, int nodeId, int expectedTool, bool checkTransition = false) {
     // Tool selection switches the editor to RAW's render graph. Return to the
@@ -118,6 +120,7 @@ bool ValidateCanvas(EditorModule& editor) {
             "A fresh Background did not select an authored tool for Alt navigation.");
         editor.OpenRawLayerMaskGraph({});
         require(editor.IsRawProjectCanvas(), "The project canvas did not open.");
+        ValidateRawGraphInsertions(editor);
         const auto find = [&](auto predicate) {
             for (const auto& node : editor.GetNodeGraph().GetNodes()) if (predicate(node)) return node.id;
             return 0;
@@ -290,6 +293,67 @@ bool ValidateCanvas(EditorModule& editor) {
         require(Stack::Editor::RawLayerToolLabels(Stack::Editor::RawLayerToolNodes(reopened.background.graph))==authoredChoices &&
             GetRawOperationMask(reopened,*FindRawAdjustmentLayer(reopened,layerId),editUuid).has_value(),
             "Reopening lost mask attachments or editable mask branches from Alt.");
+        {
+            editor.OpenRawLayerMaskGraph({});
+            const auto& catalog=EditorNodeGraphDefinitions::GetShippedCompoundTemplates();
+            const auto recipe=std::find_if(catalog.begin(),catalog.end(),[](const auto& definition) {
+                return definition.identity.id=="stack:compound/halation";
+            });
+            require(recipe!=catalog.end(),"The Halation template is missing.");
+            const auto recipeIndex=static_cast<std::size_t>(recipe-catalog.begin());
+            editor.AddCompoundTemplateNodeAt(recipeIndex,{1000,260});
+            auto& canvas=editor.GetNodeGraph();
+            const int first=canvas.GetSelectedNodeId();
+            const auto firstUuid=canvas.FindNode(first)->instanceUuid;
+            const auto resolved=EditorNodeGraphDefinitions::ResolveNodeDefinition(canvas,*canvas.FindNode(first));
+            require(resolved && resolved.compound && resolved.ParameterCount()==recipe->parameters.size(),
+                "The owning graph did not resolve the embedded compound parameters.");
+            EditorNodeGraph::Graph unrelated;
+            require(!EditorNodeGraphDefinitions::ResolveNodeDefinition(unrelated,*canvas.FindNode(first)),
+                "An unrelated graph supplied an embedded compound definition.");
+            editor.AddCompoundTemplateNodeAt(recipeIndex,{1300,260});
+            const int second=canvas.GetSelectedNodeId();
+            const auto labels=editor.GetRawLayerToolLabels();
+            const auto choice=std::find(labels.begin(),labels.end(),"Halation 2");
+            require(choice!=labels.end(),"Repeated compound instances are absent from Alt navigation.");
+            const int secondIndex=static_cast<int>(choice-labels.begin());
+            editor.ConsumeOpenRawLabTabRequest();
+            require(editor.OpenRawProjectNodeEditor(second) && editor.ConsumeOpenRawLabTabRequest() &&
+                editor.GetRawLayerToolIndex()==secondIndex,
+                "An embedded compound did not open its existing graph controls in View.");
+            const auto& fallback=Stack::Editor::FindNodeEditor(*canvas.FindNode(first));
+            require(!fallback.primary && fallback.reset,
+                "Compounds did not reuse graph controls with a parameter reset.");
+            Stack::Editor::RawWorkspaceEditContext reset;
+            reset.nodeDraft=*canvas.FindNode(first);
+            Stack::NodeMath::SetCompoundParameterOverride(reset.nodeDraft->compound.instance,"r",2.5);
+            Stack::NodeMath::SetCompoundParameterOverride(reset.nodeDraft->compound.instance,"radius",.02);
+            reset.drivenParameters.insert("r");
+            require(fallback.reset(editor,reset) &&
+                Stack::NodeMath::FindCompoundParameterOverride(reset.nodeDraft->compound.instance,"r") &&
+                !Stack::NodeMath::FindCompoundParameterOverride(reset.nodeDraft->compound.instance,"radius"),
+                "Reset overwrote a driven compound fallback or retained an unlinked override.");
+            require(!fallback.reset(editor,reset),"An unchanged compound reset reported an edit.");
+            editor.OpenRawLayerMaskGraph({});
+            editor.AddValueNodeAt(Stack::NodeMath::MakeUniformScalar(2.0),{750,260});
+            const int scalar=editor.GetNodeGraph().GetSelectedNodeId();
+            const auto firstView=std::find_if(editor.GetNodeGraph().GetNodes().begin(),editor.GetNodeGraph().GetNodes().end(),
+                [&](const auto& node) { return node.instanceUuid==firstUuid; });
+            require(firstView!=editor.GetNodeGraph().GetNodes().end(),"The first compound instance was lost.");
+            const int firstViewId=firstView->id;
+            const auto owner=firstView->rawLayerOwnerId;
+            require(editor.ConnectGraphSockets(scalar,"valueOut",firstViewId,"param:r",&error),error);
+            const auto driven=editor.GetUniformParameterState({editor.GetProjectDocumentId(),owner,firstUuid},"r");
+            require(driven.available && driven.value==2.0,
+                "A compound's connected Scalar Value was not resolved through its definition.");
+            const auto compoundSaved=editor.SerializePipeline();
+            editor.DeserializePipeline(compoundSaved);
+            editor.OpenRawLayerMaskGraph({});
+            const auto reloadedTools=Stack::Editor::RawLayerToolLabels(Stack::Editor::RawLayerToolNodes(editor.GetNodeGraph()));
+            require(std::find(reloadedTools.begin(),reloadedTools.end(),"Halation 2")!=reloadedTools.end(),
+                "Reload lost compound instance eligibility or numbering.");
+            std::cout << "Embedded compound definition resolution, View opening, Alt instances, driven fallbacks and reset passed.\n";
+        }
         std::cout << "Layer-aware masks, neutral Background insertion, editable mask branches in the picker and reopen passed.\n";
         std::cout << "RAW canvas commands, connections, compact nodes, body double-click, tool selection and reload passed.\n";
         std::cout << "Custom editor registration, graph-controls fallback and fresh masked legacy effect defaults passed.\n";

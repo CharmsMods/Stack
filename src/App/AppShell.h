@@ -190,7 +190,8 @@ private:
     void BeginMainWindowClose(const std::string& source);
     void CancelWorkForMainWindowClose();
     void BeginLibraryToEditorProjectLoad(const std::string& projectFileName);
-    void BeginLibraryToEditorProjectLoad(ProjectWorkspace& workspace, const std::string& projectFileName);
+    void BeginLibraryToEditorProjectLoad(ProjectWorkspace& workspace, const std::string& projectFileName,
+        bool dispositionApproved = false);
     void RequestDeferredLibraryProjectLoad(ProjectWorkspace& workspace);
     void SetLibraryToEditorProjectLoadPhase(ProjectWorkspace& workspace, LibraryToEditorProjectLoadPhase phase);
     void TickLibraryToEditorProjectLoadTransition();
@@ -327,7 +328,6 @@ private:
     bool m_ShowEditorSavePrompt = false;
     bool m_ShowEditorNamePrompt = false;
     bool m_ProjectLoadSavePending = false;
-    bool m_ProjectLoadCurrentProjectDispositionApproved = false;
     std::string m_PendingProjectLoadFileName;
     bool m_ShowRawWorkspaceSwitchPrompt = false;
     bool m_RawWorkspaceSwitchSavePending = false;

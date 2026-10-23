@@ -19,7 +19,9 @@ enum class Stage : std::size_t {
 enum class Counter : std::size_t {
     Nodes, VisibleNodes, Links, VisibleLinks, CatalogMatches, CatalogCards,
     LogicalReuse, LogicalRebuild, ProjectionReuse, ProjectionRebuild,
-    OrderReuse, OrderRebuild, PreviewCandidates, PreviewCandidateRebuild, Count
+    OrderReuse, OrderRebuild, PreviewCandidates, PreviewCandidateRebuild, LayoutPrepare, LayoutSolve,
+    LayoutRevealingNodes, LayoutTracingLinks, LayoutOrigin,
+    WireRouteRequest, WireRoutePublish, WireProjection, Count
 };
 enum class Workspace { Other, Graph, View, Library, Queue };
 struct FrameSample {

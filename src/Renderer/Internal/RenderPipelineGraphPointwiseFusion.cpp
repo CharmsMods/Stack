@@ -52,9 +52,12 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
     const GraphExecutionContext& executionContext,
     int nodeId,
     const std::string& socketId,
-    const std::unordered_set<int>& disabledNodes) const {
+    const std::unordered_set<int>& disabledNodes,
+    const std::unordered_set<std::string>& materializedOutputs) const {
     PointwiseFusionPlan plan;
-    if (disabledNodes.find(nodeId) != disabledNodes.end() ||
+    if (socketId != EditorNodeGraph::kImageOutputSocketId ||
+        disabledNodes.find(nodeId) != disabledNodes.end() ||
+        executionContext.graph.unavailableOutputs.count(nodeId) ||
         IsScalarRenderSocket(executionContext, nodeId, socketId)) {
         return plan;
     }
@@ -93,6 +96,8 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
     auto mayInlineUpstream = [&](const RenderGraphLink& link) {
         if (lowering.size() >= 48 ||
             disabledNodes.find(link.fromNodeId) != disabledNodes.end() ||
+            executionContext.graph.unavailableOutputs.count(link.fromNodeId) ||
+            materializedOutputs.count(MakeNodeSocketKey(link.fromNodeId, link.fromSocketId)) ||
             executionContext.OutputUseCount(link.fromNodeId, link.fromSocketId) != 1) {
             return false;
         }
@@ -114,6 +119,13 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
             return finish(false);
         }
         const RenderGraphNode& node = *found->second;
+        // Linked uniforms need evaluation and feedback before their value is
+        // known. Keep that boundary in the ordinary evaluator until the
+        // pointwise IR can represent an evaluated uniform source explicitly.
+        for (const auto& parameter : node.uniformParameters)
+            if (executionContext.FindInputLink(node.nodeId,
+                    EditorNodeGraph::ParameterInputSocketId(parameter.id)))
+                return finish(false);
 
         const RenderGraphLink* imageLink = nullptr;
         PointwiseOperation operation = PointwiseOperation::Identity;
@@ -185,10 +197,15 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
                     ? EditorNodeGraph::kMixInputASocketId
                     : EditorNodeGraph::kMixInputBSocketId;
             }
+            if (node.dataMathMode == RenderDataMathMode::Difference ||
+                (node.dataMathMode == RenderDataMathMode::Subtract && !dataMathInputIsA))
+                return finish(false);
         } else {
             return finish(false);
         }
 
+        if (IsScalarRenderSocket(executionContext, imageLink->fromNodeId, imageLink->fromSocketId))
+            return finish(false);
         PointwiseValueId inputValue = -1;
         if (mayInlineUpstream(*imageLink)) {
             if (!lowerNode(imageLink->fromNodeId, imageLink->fromSocketId, inputValue)) {
@@ -210,18 +227,28 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
                     program, operation, { inputValue }, source);
             }
         } else if (operation == PointwiseOperation::Clamp) {
+            auto lowPixel = Splat(std::min(node.dataMathSettings.minValue, node.dataMathSettings.maxValue));
+            auto highPixel = Splat(std::max(node.dataMathSettings.minValue, node.dataMathSettings.maxValue));
+            lowPixel[3] = -3.4028234663852886e38;
+            highPixel[3] = 3.4028234663852886e38;
             const PointwiseValueId low = Stack::NodeMath::AppendPointwiseConstant(
-                program, Splat(node.dataMathSettings.minValue), source);
+                program, lowPixel, source);
             const PointwiseValueId high = Stack::NodeMath::AppendPointwiseConstant(
-                program, Splat(node.dataMathSettings.maxValue), source);
+                program, highPixel, source);
             output = Stack::NodeMath::AppendPointwiseOperation(
                 program, operation, { inputValue, low, high }, source);
         } else {
             const double constantValue = dataMathInputIsA
                 ? node.dataMathSettings.constantB
                 : node.dataMathSettings.constantA;
+            auto constantPixel = Splat(constantValue);
+            // Neutral alpha operands retain the base alpha in the existing
+            // vector IR, while RGB keeps the authored numeric operation.
+            constantPixel[3] = operation == PointwiseOperation::Multiply ? 1.0 :
+                operation == PointwiseOperation::Minimum ? 3.4028234663852886e38 :
+                operation == PointwiseOperation::Maximum ? -3.4028234663852886e38 : 0.0;
             const PointwiseValueId constant = Stack::NodeMath::AppendPointwiseConstant(
-                program, Splat(constantValue), source);
+                program, constantPixel, source);
             const std::vector<PointwiseValueId> operands = dataMathInputIsA
                 ? std::vector<PointwiseValueId>{ inputValue, constant }
                 : std::vector<PointwiseValueId>{ constant, inputValue };
@@ -236,25 +263,7 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
         return plan;
     }
     program.rootId = root;
-    plan.optimized = Stack::NodeMath::OptimizePointwiseProgram(program);
-    if (!plan.optimized.success) {
-        plan.failure = FirstDiagnosticMessage(plan.optimized.diagnostics);
-        plan.failureNodeIds = SourceNodeIds(plan.optimized.diagnostics);
-        return plan;
-    }
-    plan.shader = Stack::NodeMath::GeneratePointwiseShader(plan.optimized);
-    if (!plan.shader.success) {
-        plan.failure = FirstDiagnosticMessage(plan.shader.diagnostics);
-        plan.failureNodeIds = SourceNodeIds(plan.shader.diagnostics);
-        return plan;
-    }
-    plan.physicalPlan = Stack::NodeMath::BuildPointwisePhysicalPlan(
-        plan.optimized.program, m_Width, m_Height);
-    if (!plan.physicalPlan.valid) {
-        plan.failure = FirstDiagnosticMessage(plan.physicalPlan.diagnostics);
-        plan.failureNodeIds = SourceNodeIds(plan.physicalPlan.diagnostics);
-        return plan;
-    }
+    plan.program = std::move(program);
     plan.valid = true;
     return plan;
 }
@@ -264,7 +273,20 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
     unsigned int inputTexture,
     bool executionInspectionEnabled) {
     GraphNodeRenderResult result;
-    if (!plan.valid || inputTexture == 0 || !plan.shader.success) return result;
+    if (!plan.valid || inputTexture == 0) return result;
+    const auto fail = [&](const std::vector<Stack::NodeMath::PointwiseDiagnostic>& diagnostics) {
+        m_LastGraphExecutionStats.lastPointwiseFailure = FirstDiagnosticMessage(diagnostics);
+        m_LastGraphExecutionStats.lastPointwiseFailureNodeIds = SourceNodeIds(diagnostics);
+    };
+    ++m_LastGraphExecutionStats.pointwiseOptimizationRuns;
+    const auto optimized = Stack::NodeMath::OptimizePointwiseProgram(plan.program);
+    if (!optimized.success) { fail(optimized.diagnostics); return result; }
+    const auto shader = Stack::NodeMath::GeneratePointwiseShader(optimized);
+    if (!shader.success) { fail(shader.diagnostics); return result; }
+    // The boundary input has now established the actual sample extent. This
+    // may differ from the source canvas after a Reformat or viewport demand.
+    const auto physicalPlan = Stack::NodeMath::BuildPointwisePhysicalPlan(optimized.program, m_Width, m_Height);
+    if (!physicalPlan.valid) { fail(physicalPlan.diagnostics); return result; }
 
     static const char* vertexSource = R"(
         #version 330 core
@@ -279,7 +301,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
 
     bool programCacheHit = false;
     unsigned int program = 0;
-    auto cached = m_PointwiseProgramCache.find(plan.shader.structureFingerprint);
+    auto cached = m_PointwiseProgramCache.find(shader.structureFingerprint);
     if (cached != m_PointwiseProgramCache.end() && cached->second.program != 0) {
         cached->second.lastUseSerial = ++m_GraphResourceUseSerial;
         program = cached->second.program;
@@ -291,7 +313,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
         Stack::Renderer::ScopedGLProgram compiledProgram(
             GLHelpers::CreateShaderProgram(
                 vertexSource,
-                plan.shader.fragmentSource.c_str(),
+                shader.fragmentSource.c_str(),
                 &compileError));
         if (!compiledProgram) {
             m_LastGraphExecutionStats.lastPointwiseFailure =
@@ -305,11 +327,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
         const std::uint64_t programUseSerial =
             ++m_GraphResourceUseSerial;
         const auto inserted = m_PointwiseProgramCache.try_emplace(
-            plan.shader.structureFingerprint,
+            shader.structureFingerprint,
             CachedPointwiseProgram{
                 compiledProgram.Get(),
                 programUseSerial,
-                plan.shader.fragmentSource.size()
+                shader.fragmentSource.size()
             });
         if (!inserted.second) {
             m_LastGraphExecutionStats.lastPointwiseFailure =
@@ -352,7 +374,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(program, "uInput"), 0);
-        for (const auto& uniform : plan.shader.uniforms) {
+        for (const auto& uniform : shader.uniforms) {
             glUniform4f(
                 glGetUniformLocation(program, uniform.name.c_str()),
                 static_cast<float>(uniform.value[0]),
@@ -360,6 +382,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
                 static_cast<float>(uniform.value[2]),
                 static_cast<float>(uniform.value[3]));
         }
+        ++m_LastGraphExecutionStats.fusedPointwiseDrawSubmissions;
         m_Quad.Draw();
         glActiveTexture(GL_TEXTURE0);
     });
@@ -384,11 +407,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
     group.authoredNodeIds = plan.authoredNodeIds;
     group.operationCount = static_cast<int>(plan.authoredNodeIds.size());
     group.avoidedPassCount = std::max(0, group.operationCount - 1);
-    group.targetBytes = plan.physicalPlan.bytesPerTarget;
+    group.targetBytes = EstimateGraphTargetBytes(m_Width, m_Height);
+    group.targetFormat = m_GraphFloat32Targets ? "RGBA32F" : "RGBA16F";
     group.cpuSubmitMilliseconds = executionInspectionEnabled ? submitMilliseconds : 0.0;
     group.programCacheHit = programCacheHit;
-    group.semanticFingerprint = plan.shader.semanticFingerprint;
-    group.programFingerprint = plan.shader.structureFingerprint;
+    group.semanticFingerprint = shader.semanticFingerprint;
+    group.programFingerprint = shader.structureFingerprint;
     m_LastGraphExecutionStats.pointwiseGroups.push_back(std::move(group));
     result.texture = outputTexture.Release();
     result.owned = true;
