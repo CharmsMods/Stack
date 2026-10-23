@@ -65,13 +65,20 @@ HDR admission checks decoded CFA, active-image size and resolved orientation, no
 camera/lens labels or exposure tags. The alignment initializer uses bounded image
 ranks only; it is not a radiometric calibration. Registered, noise-aware image
 patches and explicit user EV anchors establish relative exposure. Captures without
-observable overlap get a local-alignment retry, then are excluded with diagnostics
-rather than assigned an EXIF gain or causing usable captures to fail. Missing
+observable overlap get a retry after Automatic local alignment, then are excluded
+with diagnostics rather than assigned an EXIF gain or causing usable captures to fail. Missing
 information is not recovered HDR. Decoder black/white levels and CFA calibration
 remain necessary to interpret sensor samples correctly. Temporal noise fitting
 requires calibrated image gain, accepted geometry and compatible measured noise
-profiles; ISO equality alone is not a sensor-noise model. Capture headroom weights
+profiles; ISO equality alone is not a sensor-noise model. The final generic prior
+remains uncalibrated and may use a finite ISO hint when image noise fitting fails;
+its precision must not be represented as measured noise confidence. Capture headroom weights
 apply before group averaging with matching CPU/GPU and detail-band arithmetic.
+Alignment-only exposure cohorts and local-refit decisions use calibrated image
+gains, not saved UI groups. The 0.15 EV full-span convention selects work/anchors,
+not valid evidence; uncertain sources align directly to the origin. This never
+changes saved groups or enables excluded pixels. A disabled origin remains only
+the coordinate/radiometric gauge.
 
 Optional background: [Ward's exposure-resistant registration](https://www.anyhere.com/gward/papers/jgtpap2.pdf)
 informs the separation of search evidence from radiometric samples; [Hanji and

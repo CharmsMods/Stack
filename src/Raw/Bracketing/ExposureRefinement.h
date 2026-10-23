@@ -2,6 +2,7 @@
 #include "ProcessingInternal.h"
 #include "BorderSupport.h"
 #include "BurstNoise.h"
+#include "AlignmentExposureCohorts.h"
 #include <array>
 
 namespace Raw::Bracketing {
@@ -12,7 +13,11 @@ inline void RefineLocallyRegisteredExposure(const ProcessingRequest& request,
     const PreparedSource& reference,PreparedSource& source,const Mfd::CfaPlanePyramid& referencePyramid,
     const Mfd::CfaPlanePyramid& alternatePyramid,const Mfd::LocalMotionGrid& motion,
     const Mfd::LocalMotionOptions& options,std::vector<std::string>& diagnostics) {
-    if(request.recipe.groups.size()<2) return;
+    // Saved UI groups are not evidence of an exposure bracket. Skip only a
+    // measured near-equal gain; unresolved seeds still get a local attempt.
+    if(source.exposureCalibrated&&std::isfinite(source.scale)&&source.scale>0&&
+        std::isfinite(reference.scale)&&reference.scale>0&&
+        std::abs(std::log2(source.scale)-std::log2(reference.scale))<=kImageExposureSpanEv) return;
     for(const auto& group:request.recipe.groups) for(const auto& frame:group.frames)
         if(frame.id==source.id&&frame.manualExposure) return;
     Mfd::CfaLayout layout;
@@ -65,7 +70,7 @@ inline void RefineLocallyRegisteredExposure(const ProcessingRequest& request,
     std::sort(ratios.begin(),ratios.end());
     const double correction=MedianNoiseValue(ratios);
     const double spread=ratios[ratios.size()*3/4]-ratios[ratios.size()/4];
-    // A metadata fallback can legitimately be much farther from the measured
+    // An uncertain image search seed can be much farther from the measured
     // RAW gain than .1 EV. Permit correction in proportion to its declared
     // uncertainty, while preserving the same spatial, colour and noise checks.
     const double priorSigma=source.scale>0&&std::isfinite(source.scaleVariance)

@@ -2,6 +2,7 @@
 #include "PresentationEvidence.h"
 #include "Alignment.h"
 #include "AlignmentProxy.h"
+#include "AlignmentExposureCohorts.h"
 #include "LearnedAlignment.h"
 #include "CaptureSharpness.h"
 #include "BurstAlignment.h"
@@ -85,11 +86,26 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         PreparedSource s;s.id=f.id;s.group=g;s.enabled=enabled;s.metadata=raw.metadata;s.frame=std::move(prepared.frame);
         Mfd::NoiseResolutionOptions noiseOptions;
         noiseOptions.enableGenericLowConfidence=true;
-        const double iso=std::max(100.0,static_cast<double>(raw.metadata.isoSpeed));
-        for(auto& site:noiseOptions.genericLowConfidenceSites) {site.shotScale=1e-4*iso/100;site.offsetVariance=1e-7*iso*iso/10000;}
+        // This final fallback remains an uncalibrated prior, not measured
+        // sensor precision. Preserve existing finite-tag behavior, but never
+        // let NaN/Inf/invalid advisory ISO make a decoded capture unusable.
+        const double taggedIso=static_cast<double>(raw.metadata.isoSpeed);
+        const double iso=std::isfinite(taggedIso)&&taggedIso>0?std::max(100.,taggedIso):100.;
+        for(auto& site:noiseOptions.genericLowConfidenceSites) {
+            site.shotScale=1e-4*iso/100;site.offsetVariance=1e-7*iso*iso/10000;
+        }
         const auto noise=Mfd::ResolveNoiseModel(s.metadata,s.frame,&cache,noiseOptions);
         if(!noise.resolved) {error="Noise estimation failed for "+f.id+": "+noise.message;return false;}
         s.noise=noise.model;
+        if(s.noise.quality==Mfd::NoiseModelQuality::GenericLowConfidence) {
+            // The shared resolver describes MFD's alternate-pool caps, which
+            // are not the HDR merger's policy. Do not advertise absent guards.
+            auto& warnings=s.noise.diagnostics.warnings;
+            warnings.erase(std::remove(warnings.begin(),warnings.end(),
+                "Generic noise profile requires strict gates and alternate-weight caps."),warnings.end());
+            const std::string warning="Insufficient calibrated/image noise evidence: using an uncalibrated generic prior; noise-weight precision is unverified.";
+            warnings.push_back(warning);diagnostics.push_back(f.id+": "+warning);
+        }
         diagnostics.push_back(f.id+": "+Mfd::NoiseModelQualityName(s.noise.quality));
         const auto width=static_cast<unsigned>(s.frame.activeExtent.width),height=static_cast<unsigned>(s.frame.activeExtent.height);
         if(data.sources.empty()) {data.width=width;data.height=height;}
@@ -175,7 +191,20 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         ProcessingTimer timer(data.stageSeconds,"noise_calibration");
         if(!RefineBurstNoise(request,data,diagnostics,error)) return false;
     }
-    const bool refineHdr=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&request.recipe.groups.size()>1;
+    // UI groups are editable hints and can be wrong/missing with EXIF. The
+    // measured gain spread, not those labels, decides whether HDR needs the
+    // post-local joint solve. This tolerance only avoids redundant work; it
+    // never admits or rejects exposure evidence.
+    const auto hasHdrExposureSpread=[&] {
+        double minimumGainEv=0,maximumGainEv=0; // Fixed origin remains the scale gauge, even if disabled.
+        for(const auto& source:data.sources) if(source.enabled&&source.exposureCalibrated&&
+            std::isfinite(source.scale)&&source.scale>0) {
+            const double ev=std::log2(source.scale);
+            minimumGainEv=std::min(minimumGainEv,ev);maximumGainEv=std::max(maximumGainEv,ev);
+        }
+        return maximumGainEv-minimumGainEv>kImageExposureSpanEv;
+    };
+    const bool refineHdr=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&hasHdrExposureSpread();
     auto localRequest=request;
     if(request.recipe.aiAlignment&&!LearnedAlignment::Generate(localRequest,data,diagnostics,error))return false;
     if(refineHdr&&request.reportProgress) localRequest.reportProgress=[&](double progress,const std::string& stage) {
@@ -184,7 +213,10 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
     if(!AlignLocal(localRequest,data,diagnostics,error)) return false;
     const bool unresolvedExposure=std::any_of(data.sources.begin(),data.sources.end(),
         [&](const auto& source){return source.enabled&&!source.exposureCalibrated;});
-    if(refineHdr||unresolvedExposure) {
+    // Local registered evidence can reveal a bracket that the initial global
+    // estimate did not resolve. Re-evaluate without changing the output gauge.
+    const bool localRevealedHdr=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&hasHdrExposureSpread();
+    if(refineHdr||localRevealedHdr||unresolvedExposure) {
         const auto beforeCount=diagnostics.size();std::vector<double> previousScales,previousVariance;
         for(const auto& source:data.sources) {previousScales.push_back(source.scale);previousVariance.push_back(source.scaleVariance);}
         // Revisit the joint solve once correspondence is known. This step is

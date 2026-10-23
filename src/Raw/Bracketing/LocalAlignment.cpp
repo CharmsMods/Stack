@@ -6,6 +6,7 @@
 #include "ExposureRefinement.h"
 #include "AlignmentProposalInput.h"
 #include "GroupAlignment.h"
+#include "AlignmentExposureCohorts.h"
 
 #include "Raw/MultiFrameDenoise/GpuLocalMotion.h"
 #include "GpuMotionSession.h"
@@ -217,33 +218,28 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     const auto alternateCount=std::count_if(data.sources.begin(),data.sources.end(),
         [&](const PreparedSource& source){return source.enabled&&source.id!=reference.id;});
     std::size_t alternateOrdinal=0;
-    std::vector<std::size_t> groupAnchors(request.recipe.groups.size(),data.sources.size());
-    std::vector<std::size_t> alignmentOrder;
+    std::vector<AlignmentExposureCohortInput> cohortInputs;
+    cohortInputs.reserve(data.sources.size());
+    for(const auto& source:data.sources)
+        cohortInputs.push_back({source.enabled,source.exposureCalibrated,source.scale});
+    const auto cohorts=BuildAlignmentExposureCohorts(cohortInputs,data.origin);
     // RefreshCaptureReliability replaces the displayed accepted status with
     // local coverage. Keep the original global evidence for pair fallbacks.
     for(auto& source:data.sources)if(!source.localMotion)
         source.globalAlignmentAccepted=source.alignmentDiagnostic.accepted;
-    for(std::size_t g=0;g<groupAnchors.size();++g) {
-        std::vector<std::size_t> members;
-        for(std::size_t i=0;i<data.sources.size();++i)
-            if(data.sources[i].enabled&&data.sources[i].group==g)members.push_back(i);
-        if(members.empty())continue;
-        // A central capture limits temporal distance within the exposure group.
-        const auto anchor=g==reference.group?data.origin:members[members.size()/2];
-        groupAnchors[g]=anchor;alignmentOrder.push_back(anchor);
-        // A brighter group supplies the shadow structure absent from the
-        // origin. Preserve independent placement for shorter exposures: their
-        // sparse highlight support must not inherit one anchor's missing areas.
-        const bool useGroup=members.size()>1&&anchor!=data.origin&&
+    for(const auto index:cohorts.order) {
+        const auto anchor=cohorts.anchorForSource[index];
+        // A brighter cohort supplies shadow structure absent from the origin.
+        // Keep shorter exposures independent, and retain existing composed
+        // motion on reliability refresh even if refined gains change cohorts.
+        const bool useGroup=cohorts.memberCount[index]>1&&anchor!=data.origin&&
             data.sources[anchor].scale<reference.scale&&!request.recipe.aiAlignment&&
             request.alignmentProposals.empty();
-        for(auto i:members)if(!data.sources[i].localMotion)data.sources[i].exposureGroupMotion=useGroup;
-        for(auto i:members)if(i!=anchor)alignmentOrder.push_back(i);
+        if(!data.sources[index].localMotion)data.sources[index].exposureGroupMotion=useGroup;
     }
-    groupAnchors[reference.group]=data.origin;
     std::size_t pyramidReference=data.origin;
     std::size_t gpuPyramidReference=data.origin;
-    for(const auto index:alignmentOrder) {
+    for(const auto index:cohorts.order) {
         if(index==data.origin||!data.sources[index].enabled) continue;
         auto& source=data.sources[index];
         const double captureStart=.12+.40*alternateOrdinal/std::max<std::size_t>(1,alternateCount);
@@ -258,7 +254,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             if(!BuildPyramid(source,data.directory,pyramidParameters,request.shouldCancel,alternatePyramid,error)) return false;
         }
         Mfd::BidirectionalLocalMotionRequest motionRequest;
-        const auto anchorIndex=groupAnchors[source.group];
+        const auto anchorIndex=cohorts.anchorForSource[index];
         const bool reuseGroup=source.localMotion!=nullptr;
         bool groupPair=!reuseGroup&&source.exposureGroupMotion&&
             anchorIndex<data.sources.size()&&anchorIndex!=index&&anchorIndex!=data.origin&&data.sources[anchorIndex].localMotion&&
@@ -362,7 +358,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         if(!reuseMotion) ExtendMotionBoundary(motion.forward);
         if(groupPair) {
             motion.forward=ComposeGroupMotion(data.sources[anchorIndex],source,motion.forward,motionRequest.options);
-            diagnostics.push_back(source.id+": aligned within exposure group against "+data.sources[anchorIndex].id+
+            diagnostics.push_back(source.id+": aligned within calibrated exposure cohort against "+data.sources[anchorIndex].id+
                 "; composed with its verified mapping to the output reference.");
         }
         if(pyramidReference!=data.origin) {
@@ -396,7 +392,6 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         }
         data.stageSeconds["local_reliability"]+=std::chrono::duration<double>(
             std::chrono::steady_clock::now()-reliabilityStart).count();
-        if(groupAnchors[source.group]==data.sources.size())groupAnchors[source.group]=index;
         if(globalFallback&&source.alignmentDiagnostic.accepted&&source.alignmentDiagnostic.uncertainCoverage<=.25)
             source.alignmentDiagnostic.message="Global alignment retained with local reliability protection.";
         ReportPresentation(request,ProcessingStage::LocalAlignment,alternateOrdinal,alternateCount,source.id,
