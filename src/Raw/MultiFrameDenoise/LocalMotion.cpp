@@ -751,7 +751,11 @@ bool EvaluatePatch(
     bool calculateFlatPhotometricCost,
     PatchStatistics& statistics,
     const PatchReferenceGeometry* geometry = nullptr) {
+    // Reset every statistic to its default without discarding patch scratch.
+    auto residuals = std::move(statistics.residuals);
     statistics = {};
+    statistics.residuals = std::move(residuals);
+    statistics.residuals.clear();
     if (!request.reference || !request.source || patchLevelPixels == 0u ||
         !Finite(centerRaw) || !Finite(residualRaw) ||
         !Finite(request.exposureScale) || request.exposureScale <= 0.0) {
@@ -1300,69 +1304,56 @@ bool RefineTileSubpixel(
             request.options.registration.minimumStructuredSamples)) {
         return false;
     }
-    std::uint32_t costIncreases = 0u;
-    PatchReferenceGeometry referenceGeometry;
-    const PatchReferenceGeometry* geometry = nullptr;
-    bool preparedGeometry = false;
-    for (std::uint32_t iteration = 0u;
-         iteration < request.options.registration.subpixelIterations;
-         ++iteration) {
-        const double diagonalScale = std::max(
-            { current.hessianXX, current.hessianYY, 1.0 });
-        RawCoordinate stepPlane;
-        if (!SolveNormalStep(
-                current,
-                request.options.registration.localHessianAbsoluteDamping *
-                    diagonalScale,
-                stepPlane)) {
-            break;
-        }
-        const double stepLength = std::sqrt(SquaredNorm(stepPlane));
-        if (stepLength >
-            request.options.registration.maximumSubpixelStepPlanePixels) {
-            stepPlane = Scale(
-                stepPlane,
-                request.options.registration.maximumSubpixelStepPlanePixels /
-                    stepLength);
-        }
-        if (std::sqrt(SquaredNorm(stepPlane)) <
-            request.options.registration.subpixelConvergencePlanePixels) {
-            break;
-        }
-        RawCoordinate proposedRaw = Add(currentRaw, Scale(stepPlane, 2.0));
-        if (std::sqrt(SquaredNorm(Subtract(
-                proposedRaw, discreteResidualRaw))) >
-            2.0 * request.options.registration.
-                maximumDistanceFromDiscreteSeedPlanePixels) {
-            break;
-        }
-        // Keep rejected/fully converged nodes allocation-free. Only proposals
-        // that actually need another patch evaluation prepare reusable data.
-        if (!preparedGeometry) {
-            preparedGeometry = true;
-            if (referenceGeometry.Prepare(request, centerRaw, 0u,
-                    request.options.registration.finestPatchPlanePixels)) {
-                geometry = &referenceGeometry;
-            }
-        }
+    // Retain two residual buffers across proposals, then release the spare
+    // and reference geometry before allocating covariance/median scratch.
+    {
+        std::uint32_t costIncreases = 0u;
         PatchStatistics proposed;
-        bool proposedValid = EvaluatePatch(
-                request,
-                centerRaw,
-                0u,
-                proposedRaw,
-                request.options.registration.finestPatchPlanePixels,
-                true,
-                false,
-                proposed, geometry) &&
-            proposed.valid &&
-            proposed.validFraction >=
-                request.options.registration.minimumTileValidFraction;
-        if (!proposedValid ||
-            proposed.robustCost > current.robustCost +
-                request.options.registration.candidateTieTolerance) {
-            proposedRaw = Add(currentRaw, Scale(stepPlane, 1.0));
-            proposedValid = EvaluatePatch(
+        PatchReferenceGeometry referenceGeometry;
+        const PatchReferenceGeometry* geometry = nullptr;
+        bool preparedGeometry = false;
+        for (std::uint32_t iteration = 0u;
+             iteration < request.options.registration.subpixelIterations;
+             ++iteration) {
+            const double diagonalScale = std::max(
+                { current.hessianXX, current.hessianYY, 1.0 });
+            RawCoordinate stepPlane;
+            if (!SolveNormalStep(
+                    current,
+                    request.options.registration.localHessianAbsoluteDamping *
+                        diagonalScale,
+                    stepPlane)) {
+                break;
+            }
+            const double stepLength = std::sqrt(SquaredNorm(stepPlane));
+            if (stepLength >
+                request.options.registration.maximumSubpixelStepPlanePixels) {
+                stepPlane = Scale(
+                    stepPlane,
+                    request.options.registration.maximumSubpixelStepPlanePixels /
+                        stepLength);
+            }
+            if (std::sqrt(SquaredNorm(stepPlane)) <
+                request.options.registration.subpixelConvergencePlanePixels) {
+                break;
+            }
+            RawCoordinate proposedRaw = Add(currentRaw, Scale(stepPlane, 2.0));
+            if (std::sqrt(SquaredNorm(Subtract(
+                    proposedRaw, discreteResidualRaw))) >
+                2.0 * request.options.registration.
+                    maximumDistanceFromDiscreteSeedPlanePixels) {
+                break;
+            }
+            // Keep rejected/fully converged nodes allocation-free. Only proposals
+            // that actually need another patch evaluation prepare reusable data.
+            if (!preparedGeometry) {
+                preparedGeometry = true;
+                if (referenceGeometry.Prepare(request, centerRaw, 0u,
+                        request.options.registration.finestPatchPlanePixels)) {
+                    geometry = &referenceGeometry;
+                }
+            }
+            bool proposedValid = EvaluatePatch(
                     request,
                     centerRaw,
                     0u,
@@ -1374,19 +1365,36 @@ bool RefineTileSubpixel(
                 proposed.valid &&
                 proposed.validFraction >=
                     request.options.registration.minimumTileValidFraction;
-        }
-        if (!proposedValid ||
-            proposed.robustCost > current.robustCost +
-                request.options.registration.candidateTieTolerance) {
-            ++costIncreases;
-            if (costIncreases >= request.options.registration.
-                    maximumSubpixelCostIncreases) {
-                break;
+            if (!proposedValid ||
+                proposed.robustCost > current.robustCost +
+                    request.options.registration.candidateTieTolerance) {
+                proposedRaw = Add(currentRaw, Scale(stepPlane, 1.0));
+                proposedValid = EvaluatePatch(
+                        request,
+                        centerRaw,
+                        0u,
+                        proposedRaw,
+                        request.options.registration.finestPatchPlanePixels,
+                        true,
+                        false,
+                        proposed, geometry) &&
+                    proposed.valid &&
+                    proposed.validFraction >=
+                        request.options.registration.minimumTileValidFraction;
             }
-            continue;
+            if (!proposedValid ||
+                proposed.robustCost > current.robustCost +
+                    request.options.registration.candidateTieTolerance) {
+                ++costIncreases;
+                if (costIncreases >= request.options.registration.
+                        maximumSubpixelCostIncreases) {
+                    break;
+                }
+                continue;
+            }
+            currentRaw = proposedRaw;
+            std::swap(current, proposed);
         }
-        currentRaw = proposedRaw;
-        current = std::move(proposed);
     }
 
     if (std::sqrt(SquaredNorm(Subtract(currentRaw, discreteResidualRaw))) >

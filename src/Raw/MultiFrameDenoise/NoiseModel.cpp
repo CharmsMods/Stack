@@ -1041,10 +1041,6 @@ bool EstimateNoiseModelFromPreparedFrame(
             estimated.diagnostics.sites[siteIndex];
         siteDiagnostics.candidateBlockCount = candidateBlocks[siteIndex];
         siteDiagnostics.acceptedBlockCount = blockSamples[siteIndex].size();
-        if (blockSamples[siteIndex].size() < options.minimumBlocksPerSite) {
-            siteDiagnostics.reason = "insufficient-flat-blocks";
-            return SetError(error, "MFD burst noise estimate has too few accepted flat blocks.");
-        }
         std::vector<std::vector<BlockNoiseSample>> bins(options.signalBinCount);
         for (const BlockNoiseSample& sample : blockSamples[siteIndex]) {
             const double normalized = std::clamp(
@@ -1075,35 +1071,57 @@ bool EstimateNoiseModelFromPreparedFrame(
             });
         }
         siteDiagnostics.populatedSignalBins = observations.size();
+        if (!observations.empty()) {
+            const auto minmax = std::minmax_element(
+                observations.begin(), observations.end(),
+                [](const NoiseCalibrationObservation& a,
+                   const NoiseCalibrationObservation& b) {
+                    return a.meanSignal < b.meanSignal;
+                });
+            siteDiagnostics.signalMinimum = minmax.first->meanSignal;
+            siteDiagnostics.signalMaximum = minmax.second->meanSignal;
+            siteDiagnostics.signalCoverage =
+                siteDiagnostics.signalMaximum - siteDiagnostics.signalMinimum;
+        }
+        // Keep rejected-fit evidence in the existing warning path without
+        // publishing partial coefficients or changing the selected model.
+        const auto rejectSite = [&](const std::string& message) {
+            std::string detail = message + " [site=" + CfaSiteName(site) +
+                ", candidateBlocks=" + std::to_string(siteDiagnostics.candidateBlockCount) +
+                ", acceptedBlocks=" + std::to_string(siteDiagnostics.acceptedBlockCount) +
+                ", populatedSignalBins=" + std::to_string(siteDiagnostics.populatedSignalBins);
+            if (!observations.empty() &&
+                Finite(siteDiagnostics.signalMinimum) &&
+                Finite(siteDiagnostics.signalMaximum)) {
+                detail += ", binnedSignalRange=" + std::to_string(siteDiagnostics.signalMinimum) +
+                    ".." + std::to_string(siteDiagnostics.signalMaximum);
+            }
+            return SetError(error, detail + "]");
+        };
+        if (blockSamples[siteIndex].size() < options.minimumBlocksPerSite) {
+            siteDiagnostics.reason = "insufficient-flat-blocks";
+            return rejectSite("MFD burst noise estimate has too few accepted flat blocks.");
+        }
         if (observations.size() < options.minimumPopulatedBins) {
             siteDiagnostics.reason = "insufficient-signal-bins";
-            return SetError(error, "MFD burst noise estimate lacks broad signal-bin support.");
+            return rejectSite("MFD burst noise estimate lacks broad signal-bin support.");
         }
-        const auto minmax = std::minmax_element(
-            observations.begin(), observations.end(),
-            [](const NoiseCalibrationObservation& a,
-               const NoiseCalibrationObservation& b) {
-                return a.meanSignal < b.meanSignal;
-            });
-        siteDiagnostics.signalMinimum = minmax.first->meanSignal;
-        siteDiagnostics.signalMaximum = minmax.second->meanSignal;
-        siteDiagnostics.signalCoverage =
-            siteDiagnostics.signalMaximum - siteDiagnostics.signalMinimum;
         if (siteDiagnostics.signalCoverage < options.minimumSignalCoverage) {
             siteDiagnostics.reason = "insufficient-signal-coverage";
-            return SetError(error, "MFD burst noise estimate has insufficient signal coverage.");
+            return rejectSite("MFD burst noise estimate has insufficient signal coverage.");
         }
         NoiseFitDiagnostics fit;
         const double quantization = QuantizationVariance(
             preparedFrame.calibration.usableSpanByCfaSite[siteIndex]);
+        std::string fitError;
         if (!FitPoissonGaussianProfile(
                 observations,
                 quantization,
                 estimated.sites[siteIndex],
                 fit,
-                error)) {
+                &fitError)) {
             siteDiagnostics.reason = "fit-failed";
-            return false;
+            return rejectSite(fitError);
         }
         siteDiagnostics.fitRootMeanSquareError = fit.rootMeanSquareError;
         siteDiagnostics.quantizationAdded = fit.constrainedOffsetVariance;

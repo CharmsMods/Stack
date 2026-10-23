@@ -97,6 +97,11 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         const auto noise=Mfd::ResolveNoiseModel(s.metadata,s.frame,&cache,noiseOptions);
         if(!noise.resolved) {error="Noise estimation failed for "+f.id+": "+noise.message;return false;}
         s.noise=noise.model;
+        // Preserve why image-based estimation could not constrain the model,
+        // not just the final fallback label. These are diagnostics only.
+        for(const auto& warning:s.noise.diagnostics.warnings)
+            if(warning.rfind("Reference burst estimate rejected: ",0)==0)
+                diagnostics.push_back(f.id+": "+warning);
         if(s.noise.quality==Mfd::NoiseModelQuality::GenericLowConfidence) {
             // The shared resolver describes MFD's alternate-pool caps, which
             // are not the HDR merger's policy. Do not advertise absent guards.
