@@ -64,3 +64,8 @@ artifacts merely because their setup tools exist in the repository.
 privacy notice and acceptance plumbing. Those archived files are historical,
 not active package terms, and are not reinstated by the GPL transition.
 Earlier published versions retain the terms applicable to those versions.
+
+[Matching-source release checklist and helper](SOURCE_RELEASE.md) explains the
+source bundle, immutable revision checks and explicit maintainer review required
+before public packaging. These checks do not replace a Windows build or prove
+complete corresponding source automatically.

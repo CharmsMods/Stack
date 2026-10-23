@@ -8,7 +8,10 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipInstaller,
     [switch]$SkipPortableZip,
-    [switch]$SkipHashes
+    [switch]$SkipHashes,
+    [string]$PythonExecutable = "python",
+    [string]$ReviewedBuildCommit = "",
+    [switch]$CorrespondingSourceReviewed
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,6 +119,25 @@ function Sign-StackPayload {
 }
 
 Invoke-StackEnvironmentRepair -Root $Root
+
+# A source revision is not proof of binary provenance. Public packaging requires
+# the maintainer to review the matching build and all corresponding-source inputs.
+if ($PublicRelease -and (-not $CorrespondingSourceReviewed -or
+    [string]::IsNullOrWhiteSpace($ReviewedBuildCommit))) {
+    throw "Public packaging requires -ReviewedBuildCommit <full SHA> and -CorrespondingSourceReviewed after the checks in legal/SOURCE_RELEASE.md. These are maintainer attestations, not automatic build proof."
+}
+$sourceHelper = Join-Path $PSScriptRoot "source_bundle.py"
+$sourceRevision = $null
+if (-not $LocalTestPackage) {
+    $sourceCheckArgs = @($sourceHelper, "--root", $Root, "--check-only")
+    if ($ReviewedBuildCommit) { $sourceCheckArgs += @("--reviewed-build-commit", $ReviewedBuildCommit) }
+    if ($CorrespondingSourceReviewed) { $sourceCheckArgs += "--corresponding-source-reviewed" }
+    if ($PublicRelease) { $sourceCheckArgs += "--public" }
+    $sourceCheck = & $PythonExecutable @sourceCheckArgs
+    if ($LASTEXITCODE -ne 0) { throw "Source preflight failed. Commit intended inputs, or use -LocalTestPackage for a non-distributable test." }
+    $sourceRevision = ([string]($sourceCheck -join "`n") | ConvertFrom-Json).commit
+    if ([string]::IsNullOrWhiteSpace($sourceRevision)) { throw "Source preflight did not return a commit." }
+}
 
 if (-not $SkipBuild) {
     & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $BuildDir -Product $Product
@@ -225,6 +247,28 @@ if ($PublicRelease) {
     Sign-StackPayload -Configuration $signingConfiguration -StageDir $stageDir -Definition $productDefinition
 }
 
+# Capture final signed payload hashes, not pre-signing bytes. The helper checks
+# the same revision and clean tree again after the build/staging steps.
+$sourceBundleDir = $null
+$sourceBundleZipPath = $null
+if (-not $LocalTestPackage) {
+    $sourceBundleDir = Join-Path $OutputDir ($productDefinition.artifactName + "-source")
+    $sourceArgs = @($sourceHelper, "--root", $Root, "--output", $sourceBundleDir,
+        "--revision", $sourceRevision, "--stage", $stageDir)
+    if ($ReviewedBuildCommit) { $sourceArgs += @("--reviewed-build-commit", $ReviewedBuildCommit) }
+    if ($CorrespondingSourceReviewed) { $sourceArgs += "--corresponding-source-reviewed" }
+    if ($PublicRelease) { $sourceArgs += "--public" }
+    if ($libRawSourceArchive) { $sourceArgs += @("--dependency-artifact", $libRawSourceArchive) }
+    $libavoidSource = Join-Path $stageDir "Stack\App\Legal\ThirdParty\LibavoidSource"
+    if (Test-Path -LiteralPath $libavoidSource -PathType Container) {
+        $sourceArgs += @("--dependency-artifact", $libavoidSource)
+    }
+    & $PythonExecutable @sourceArgs
+    if ($LASTEXITCODE -ne 0) { throw "Source bundle generation failed; do not distribute this package." }
+    $sourceBundleZipPath = Join-Path $OutputDir ("{0}-{1}-source-bundle.zip" -f $productDefinition.artifactName, $versionInfo.Tag)
+    Compress-Archive -Path (Join-Path $sourceBundleDir '*') -DestinationPath $sourceBundleZipPath -CompressionLevel Optimal -Force
+}
+
 $sbomStagePath = Join-Path $stageDir ("Stack\App\Legal\" + $productDefinition.artifactName + ".spdx.json")
 Write-StackSpdxSbom `
     -Root $Root `
@@ -281,6 +325,7 @@ if ($PublicRelease) {
 
 if (-not $SkipHashes) {
     $releaseFiles = @($installerPath, $portableZipPath, $sbomOutputPath)
+    if ($sourceBundleZipPath) { $releaseFiles += $sourceBundleZipPath }
     if ($libRawSourceArchive) {
         $releaseFiles += $libRawSourceArchive
     }
@@ -289,13 +334,13 @@ if (-not $SkipHashes) {
 
 Write-Host ""
 if ($PublicRelease) {
-    Write-Host "PUBLIC release packaging complete. Third-party payload and Authenticode checks passed."
+    Write-Host "PUBLIC packaging checks completed; source correspondence and completeness rely on the maintainer review. Publish the source bundle alongside the binaries."
 }
 elseif ($LocalTestPackage) {
     Write-Host "LOCAL TEST packaging complete. This package is unsigned, uses an isolated profile, and must not be published."
 }
 else {
-    Write-Host "Standard packaging complete. This installer is unsigned. Third-party payload checks passed."
+    Write-Host "Standard packaging complete. Unsigned; source bundle produced, but binary correspondence and complete corresponding source still require review."
 }
 Write-Host "Output folder: $OutputDir"
 Write-Host "Stage directory: $stageDir"
@@ -304,3 +349,6 @@ if (Test-Path -LiteralPath $installerPath) { Write-Host "Installer: $installerPa
 if ($libRawSourceArchive) { Write-Host "LibRaw source: $libRawSourceArchive" }
 if (Test-Path -LiteralPath $sbomOutputPath) { Write-Host "SPDX SBOM: $sbomOutputPath" }
 if (Test-Path -LiteralPath $hashesPath) { Write-Host "Hashes: $hashesPath" }
+
+if ($sourceBundleDir) { Write-Host "Source bundle and provenance: $sourceBundleDir" }
+if ($sourceBundleZipPath) { Write-Host "Source bundle ZIP: $sourceBundleZipPath" }
