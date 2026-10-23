@@ -80,6 +80,14 @@ not valid evidence; uncertain sources align directly to the origin. This never
 changes saved groups or enables excluded pixels. A disabled origin remains only
 the coordinate/radiometric gauge.
 
+Photometrically compatible flat regions are not independent registration evidence.
+Exposure fitting tracks the provenance of the current motion field before synthetic
+fallback nodes, boundary extension or cohort composition. A direct field needs
+accepted global registration or genuine structured local-search support; a composed
+field needs that evidence for both the anchor and relative link. Refresh preserves
+this provenance. Flat pixels remain useful with independently established geometry;
+explicit fixed coordinates and manual EV anchors retain their separate meanings.
+
 Optional background: [Ward's exposure-resistant registration](https://www.anyhere.com/gward/papers/jgtpap2.pdf)
 informs the separation of search evidence from radiometric samples; [Hanji and
 Mantiuk's image-based exposure estimation](https://arxiv.org/abs/2308.02968) informs

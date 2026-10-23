@@ -31,6 +31,8 @@ struct PreparedSource {
     std::shared_ptr<Mfd::LocalMotionGrid> localMotion;
     bool exposureGroupMotion=false;
     bool globalAlignmentAccepted=false;
+    // Provenance of the current field, before synthetic nodes/composition.
+    bool localMotionHasRegisteredGeometry=false;
     std::shared_ptr<const MotionRefinementField> refinedMotion;
     std::shared_ptr<Mfd::ReliabilityStore> reliability;
     // Reliability is measured after calibration against this motion revision.

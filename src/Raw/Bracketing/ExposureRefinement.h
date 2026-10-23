@@ -13,6 +13,9 @@ inline void RefineLocallyRegisteredExposure(const ProcessingRequest& request,
     const PreparedSource& reference,PreparedSource& source,const Mfd::CfaPlanePyramid& referencePyramid,
     const Mfd::CfaPlanePyramid& alternatePyramid,const Mfd::LocalMotionGrid& motion,
     const Mfd::LocalMotionOptions& options,std::vector<std::string>& diagnostics) {
+    // AlignLocal latches this from the fresh search before this field is stored.
+    // Flat photometric agreement alone cannot establish exposure correspondence.
+    if(!source.localMotionHasRegisteredGeometry) return;
     // Saved UI groups are not evidence of an exposure bracket. Skip only a
     // measured near-equal gain; unresolved seeds still get a local attempt.
     if(source.exposureCalibrated&&std::isfinite(source.scale)&&source.scale>0&&

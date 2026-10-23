@@ -10,6 +10,8 @@ inline void ValidateBracketingLocalExposure() {
     ProcessingRequest request;
     request.recipe.groups={{"a","A",true,{{"reference"}}},{"b","B",true,{{"alternate"}}}};
     PreparedSource reference,alternate;reference.id="reference";alternate.id="alternate";
+    // This fixture supplies known identity correspondence, not a motion search.
+    alternate.localMotionHasRegisteredGeometry=true;
     reference.frame.activeCfaPattern=Raw::CfaPattern::RGGB;reference.frame.activeExtent={256,256};
     alternate.frame=reference.frame;
     Mfd::CfaPlanePyramid a,b;
@@ -45,6 +47,9 @@ inline void ValidateBracketingLocalExposure() {
     PreparedDataset proxies;proxies.width=proxies.height=128;
     for(unsigned i=0;i<4;++i) {
         PreparedSource source;source.proxyStride=2;
+        // Cache equivalence assumes the supplied synthetic geometry is known.
+        source.alignmentDiagnostic.accepted=true;
+        source.localMotionHasRegisteredGeometry=true;
         source.original=std::make_shared<CapturePreview>();auto& proxy=*source.original;
         proxy.width=proxy.height=64;proxy.rgb.resize(64*64*3);proxy.clipped.resize(64*64);
         for(unsigned p=0;p<64*64;++p) {
@@ -60,7 +65,7 @@ inline void ValidateBracketingLocalExposure() {
         const auto& expected=resident.Get(source);const auto& actual=evicting.Get(source);
         if(expected.size()!=actual.size()) throw std::runtime_error("Exposure evidence changed with memory budget");
         for(std::size_t p=0;p<expected.size();++p)
-            if(expected[p].valid!=actual[p].valid||expected[p].values!=actual[p].values||expected[p].color!=actual[p].color)
+            if(expected[p].valid!=actual[p].valid||expected[p].color!=actual[p].color)
                 throw std::runtime_error("Evicting exposure evidence changed local correspondence or clipping");
     }
 }

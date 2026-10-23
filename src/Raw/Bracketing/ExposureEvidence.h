@@ -32,11 +32,12 @@ public:
     }
     bool HasRegisteredGeometry(std::size_t sourceIndex) const {
         const auto& source=data_.sources[sourceIndex];
-        // Identity after failed global search is only an initializer, not
-        // correspondence. Local fields still pass the per-point confidence
-        // check in SampleAlignmentProxyColor below.
-        return sourceIndex==data_.origin||request_.recipe.alignmentMode==AlignmentMode::FixedCoordinates||
-            source.alignmentDiagnostic.accepted||bool(source.localMotion);
+        // Photometrically safe flat fields are not proof of correspondence.
+        // The current field's provenance survives synthetic Structured nodes
+        // and coverage diagnostics; per-point confidence is still checked below.
+        if(sourceIndex==data_.origin||request_.recipe.alignmentMode==AlignmentMode::FixedCoordinates)return true;
+        return source.localMotion?source.localMotionHasRegisteredGeometry:
+            source.alignmentDiagnostic.accepted;
     }
     const std::vector<ExposurePatch>& Get(std::size_t sourceIndex) {
         const auto found=std::find_if(entries_.begin(),entries_.end(),

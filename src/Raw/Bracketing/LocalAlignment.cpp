@@ -258,6 +258,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         const bool reuseGroup=source.localMotion!=nullptr;
         bool groupPair=!reuseGroup&&source.exposureGroupMotion&&
             anchorIndex<data.sources.size()&&anchorIndex!=index&&anchorIndex!=data.origin&&data.sources[anchorIndex].localMotion&&
+            data.sources[anchorIndex].localMotionHasRegisteredGeometry&&
             data.sources[anchorIndex].localMotion->structuredCount+data.sources[anchorIndex].localMotion->flatSafeCount>0;
         Mfd::AffineModel pairWarp;
         if(groupPair&&!GroupRelativeWarp(data.sources[anchorIndex],source,pairWarp))groupPair=false;
@@ -330,6 +331,20 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
                 std::to_string(motion.forward.structuredCount)+", flat-safe="+std::to_string(motion.forward.flatSafeCount)+
                 ", rejected="+std::to_string(motion.forward.rejectedCount)+rejected);
         }
+        // Latch genuine registration evidence before fallback nodes, boundary
+        // extension or composition can manufacture Structured node labels.
+        // Reliability refresh reuses the field and its original provenance.
+        if(!reuseMotion) {
+            const bool rawStructured=accepted&&motion.forward.structuredCount>0;
+            const bool pairGlobal=source.globalAlignmentAccepted&&
+                (!groupPair||data.sources[anchorIndex].globalAlignmentAccepted);
+            source.localMotionHasRegisteredGeometry=!accepted?source.globalAlignmentAccepted:
+                groupPair?(data.sources[anchorIndex].localMotionHasRegisteredGeometry&&
+                    (rawStructured||pairGlobal)):
+                (source.globalAlignmentAccepted||rawStructured);
+            if(accepted&&!source.localMotionHasRegisteredGeometry)
+                diagnostics.push_back(source.id+": photometric-only local support has no independently established geometry; excluded from exposure calibration evidence.");
+        }
         bool globalFallback=false;
         if(!accepted) {
             // Missing scene evidence may use the guarded global warp. Resource,
@@ -341,7 +356,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             globalFallback=true;motion={};
             groupPair=false;
             if(!BuildFixedMotion(source,parameters,motion.forward,error)) return false;
-            if(!source.alignmentDiagnostic.accepted) {
+            if(!source.globalAlignmentAccepted) {
                 for(auto& node:motion.forward.nodes) {
                     node.state=Mfd::MotionNodeState::Rejected;node.confidence=0;
                 }
