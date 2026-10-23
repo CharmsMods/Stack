@@ -249,7 +249,10 @@ Pixel BlendWithWeights(const std::vector<Observation>& input,const double* reque
     for(std::size_t i=0;i<input.size();++i)
         if(recipe.groups[i].enabled) p.localRejected|=input[i].localRejected;
     for(std::size_t i=0;i<input.size();++i) if(recipe.groups[i].enabled&&input[i].support>0) {
-        const auto headroom=colorHeadroom?std::min(input[i].headroom,(*colorHeadroom)[i]):input[i].headroom;
+        // BlendColor owns the shared safety mask, including its coordinated
+        // near-saturation fallback. Reapplying individual tapers here would
+        // split that fallback into different exposure choices per channel.
+        const auto headroom=colorHeadroom?(*colorHeadroom)[i]:input[i].headroom;
         p.actual[i]=(requested?requested[i]:1/std::max(1e-12,input[i].variance))*headroom;
         total+=p.actual[i];
     }

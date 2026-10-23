@@ -1,5 +1,5 @@
 #include "Processor.h"
-#include "ProcessingTiles.h"
+#include "GroupMemory.h"
 #include <algorithm>
 #include <limits>
 #include <thread>

@@ -7,6 +7,7 @@
 #include "BurstAlignment.h"
 #include "LocalDetail.h"
 #include "HdrColorFusion.h"
+#include "GroupMemory.h"
 #include "Depth/Depth.h"
 #include "Raw/RawLoader.h"
 #include "Panorama/Panorama.h"
@@ -60,8 +61,25 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         }
         Mfd::PreparationOptions options;options.shouldCancel=request.shouldCancel;
         const auto bytesPerTilePixel=request.recipe.groups.size()*(sizeof(Observation)+2*sizeof(double))+48;
-        while(options.tileRawPixels>64&&static_cast<std::uint64_t>(options.tileRawPixels)*options.tileRawPixels*bytesPerTilePixel>request.memoryBudgetBytes/8)
-            options.tileRawPixels/=2;
+        // Preparation and group execution must admit the same tile size. The
+        // old preparation-only estimate could select 512-pixel tiles that the
+        // complete group worker rejected later, despite smaller tiles fitting.
+        // Sensor extent is a conservative bound on the prepared active extent.
+        const auto reserve=GroupOutputReserveBytes(pixels);
+        const auto tileFits=[&] {
+            return static_cast<std::uint64_t>(options.tileRawPixels)*options.tileRawPixels*bytesPerTilePixel<=request.memoryBudgetBytes/8&&
+                GroupWorkerFits(request.memoryBudgetBytes,reserve,GroupWorkerBytes(
+                    request.recipe.groups.size(),options.tileRawPixels,captureTotal,request.memoryBudgetBytes));
+        };
+        if(data.sources.empty()) {
+            while(options.tileRawPixels>64&&!tileFits())options.tileRawPixels/=2;
+        } else {
+            // Tile readers address all compatible captures on one grid, even
+            // when their sensor margins differ outside the active image.
+            options.tileRawPixels=data.sources.front().frame.tileRawPixels;
+        }
+        if(data.sources.empty())diagnostics.push_back("Prepared RAW tile size: "+
+            std::to_string(options.tileRawPixels)+" pixels; selected using the full group-worker memory plan.");
         auto prepared=Mfd::PrepareRawFrame(raw,options,cache);
         if(!prepared.success) {error=prepared.message;return false;}
         PreparedSource s;s.id=f.id;s.group=g;s.enabled=enabled;s.metadata=raw.metadata;s.frame=std::move(prepared.frame);
@@ -168,13 +186,13 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         const auto beforeCount=diagnostics.size();std::vector<double> previousScales,previousVariance;
         for(const auto& source:data.sources) {previousScales.push_back(source.scale);previousVariance.push_back(source.scaleVariance);}
         // Revisit the joint solve once correspondence is known. This step is
-        // bounded and retains the earlier calibrated solve if local overlap
-        // is inadequate. It never publishes metadata-only HDR calibration.
+        // bounded and retains the earlier solve if local overlap is inadequate.
+        // A local retry must not replace an image estimate with a new fallback.
         ReportPresentation(request,ProcessingStage::Exposure);
-        if(!Calibrate(request,data,diagnostics,error)) {
+        if(!Calibrate(request,data,diagnostics,error,false)) {
             if(request.shouldCancel&&request.shouldCancel()) return false;
             diagnostics.resize(beforeCount);error.clear();
-            diagnostics.push_back("Local overlap could not connect every exposure; retained the calibrated global-overlap scales.");
+            diagnostics.push_back("Local overlap could not connect every exposure; retained the initial exposure estimates and their uncertainty.");
         } else {
             bool changed=false;
             for(std::size_t i=0;i<data.sources.size();++i)

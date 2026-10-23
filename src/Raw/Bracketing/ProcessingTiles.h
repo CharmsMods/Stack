@@ -5,19 +5,11 @@
 #include "LocalDetail.h"
 #include "ParallelProcessing.h"
 #include "PresentationEvidence.h"
+#include "GroupMemory.h"
 #include <algorithm>
 #include <mutex>
 
 namespace Raw::Bracketing {
-inline std::uint64_t GroupWorkerBytes(std::size_t groups,unsigned tilePixels,std::size_t captures,
-    std::uint64_t memoryBudgetBytes=std::numeric_limits<std::uint64_t>::max()) {
-    // Include the temporal detail halo, band accumulators, a source observation
-    // buffer, output/canonicalization copies, and the two live tile samplers.
-    const std::uint64_t side=static_cast<std::uint64_t>(tilePixels)+8;
-    return side*side*(groups*(4*sizeof(Observation)+sizeof(DetailFusionAccumulator))+224)+
-        std::max<std::uint64_t>(64ull*1024*1024,LocalDetailWorkingBytes(captures,tilePixels,memoryBudgetBytes));
-}
-
 template<class Task>
 bool ProcessTiles(const ProcessingRequest& request,const PreparedDataset& data,
     double progressStart,double progressSpan,const char* progressLabel,ProcessingStage stage,
@@ -29,9 +21,12 @@ bool ProcessTiles(const ProcessingRequest& request,const PreparedDataset& data,
     if(!total) {error="The prepared bracket contains no output tiles.";return false;}
     const std::uint64_t perWorker=GroupWorkerBytes(request.recipe.groups.size(),origin.tileRawPixels,
         data.sources.size(),request.memoryBudgetBytes);
-    const std::uint64_t reserve=static_cast<std::uint64_t>(data.width)*data.height*36+64ull*1024*1024;
-    if(request.memoryBudgetBytes<=reserve||request.memoryBudgetBytes-reserve<perWorker) {
-        error="The output and group-processing buffers exceed the available memory budget.";return false;
+    const auto reserve=GroupOutputReserveBytes(static_cast<std::uint64_t>(data.width)*data.height);
+    if(!GroupWorkerFits(request.memoryBudgetBytes,reserve,perWorker)) {
+        constexpr std::uint64_t mib=1024ull*1024;
+        error="Full-resolution output and one group-processing worker need approximately "+
+            std::to_string((reserve+perWorker+mib-1)/mib)+" MiB; the processing budget is "+
+            std::to_string(request.memoryBudgetBytes/mib)+" MiB.";return false;
     }
     const auto workers=std::min<std::size_t>({total,
         ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount),

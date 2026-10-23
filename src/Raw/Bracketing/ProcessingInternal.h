@@ -28,6 +28,8 @@ struct PreparedSource {
     Mfd::AffineModel alignment;
     CaptureAlignment alignmentDiagnostic;
     std::shared_ptr<Mfd::LocalMotionGrid> localMotion;
+    bool exposureGroupMotion=false;
+    bool globalAlignmentAccepted=false;
     std::shared_ptr<const MotionRefinementField> refinedMotion;
     std::shared_ptr<Mfd::ReliabilityStore> reliability;
     // Reliability is measured after calibration against this motion revision.
@@ -81,7 +83,7 @@ bool Prepare(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&
 bool PrepareSources(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool Align(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool AlignLocal(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
-bool Calibrate(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
+bool Calibrate(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&,bool allowFallback=true);
 bool RefineBurstNoise(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 bool ReadGroups(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,
     std::vector<std::vector<Observation>>&,Mfd::PreparedRawTile&,std::string&);

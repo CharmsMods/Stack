@@ -2,7 +2,7 @@
 #include "ProcessingInternal.h"
 
 namespace Raw::Bracketing {
-inline constexpr const char* kHdrColorFusionRevision = "color-supported-hdr-v5-clipped-capture-fallback";
+inline constexpr const char* kHdrColorFusionRevision = "color-supported-hdr-v6-accepted-contributions";
 using ColorObservations = std::array<std::vector<Observation>,4>;
 
 // Bayer cells use four sites; reconstructed RGB uses three. Source validity and

@@ -77,17 +77,34 @@ void main(){
     double point=(uint(center.z)&4u)!=0u?0.LF:double(product);
     pilot=max(0.LF,used>0?pilot/double(used):(finiteValue(point)?point:0.LF));
     double gx=0.LF,gy=0.LF,mean=0.LF;int count=0;
+    bool border=any(lessThan(p,ivec2(4)))||any(greaterThanEqual(p+ivec2(4),sensor));
+    double sx=0.LF,sy=0.LF,sxx=0.LF,sxy=0.LF,syy=0.LF;int available=0;
     if(localGuide!=0)for(int dy=-4;dy<=4;dy+=2)for(int dx=-4;dx<=4;dx+=2){
         ivec2 r=p+ivec2(dx,dy);if(!inside(r))continue;
+        if(border)++available;
         vec4 t=tapAt(r);double v=double(t.x)*double(t.y);
         if(!finiteValue(v)||uint(t.z)!=0u)continue;
         gx+=double(dx)*v;gy+=double(dy)*v;mean+=v;++count;
+        if(border){sx+=double(dx);sy+=double(dy);sxx+=double(dx*dx);sxy+=double(dx*dy);syy+=double(dy*dy);}
     }
+    double gradientNoiseFactor=0.LF;bool gradientValid=false;
     if(count==25){
         gx/=200.LF;gy/=200.LF;mean/=25.LF;
+        gradientValid=true;
+    }else if(border&&count==available&&count>=6){
+        mean/=double(count);sxx-=sx*sx/double(count);sxy-=sx*sy/double(count);syy-=sy*sy/double(count);
+        double determinant=sxx*syy-sxy*sxy;
+        if(determinant>1e-12LF){
+            double bx=gx-sx*mean,by=gy-sy*mean;
+            gx=(syy*bx-sxy*by)/determinant;gy=(sxx*by-sxy*bx)/determinant;
+            gradientNoiseFactor=(sxx+syy)/determinant;gradientValid=true;
+        }
+    }
+    if(gradientValid){
         double variance=noiseVariance(siteAt(p),double(center.y),max(0.LF,mean));
         double energy=gx*gx+gy*gy;
-        double retained=energy>0.LF?sqrt(max(0.LF,energy-2.LF*variance/200.LF)/energy):0.LF;
+        double noiseEnergy=count==25?2.LF*variance/200.LF:gradientNoiseFactor*variance;
+        double retained=energy>0.LF?sqrt(max(0.LF,energy-noiseEnergy)/energy):0.LF;
         guides[i]=dvec4(pilot,gx*retained,gy*retained,1.LF);
     }else guides[i]=dvec4(pilot,0.LF,0.LF,0.LF);
     }

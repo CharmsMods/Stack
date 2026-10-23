@@ -37,7 +37,9 @@ public:
         std::string& error);
 
     const GpuLocalMotionDiagnostics& Diagnostics() const;
-    void BeginPair(const CfaPlanePyramid& reference,const CfaPlanePyramid& alternate);
+    // Set referenceChanged when rebuilding the reference at the same address.
+    void BeginPair(const CfaPlanePyramid& reference,const CfaPlanePyramid& alternate,
+        bool referenceChanged=false);
     // Only after the owner context has become unavailable. Its teardown owns
     // the remaining driver resources; never issue GL deletion on a CPU worker.
     void AbandonContextResources();

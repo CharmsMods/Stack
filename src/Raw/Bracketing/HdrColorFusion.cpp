@@ -26,25 +26,28 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
     }
     std::array<double,64> headroom{};
     std::array<double,64> weights{};
+    std::array<double,64> precision{};
     bool completeSupport=false;
     const bool automatic=requested.empty()||recipe.automatic;
     for(std::size_t g=0;g<groups;++g) {
         if(!recipe.groups[g].enabled)continue;
-        double safety=1,variance=0;
+        double safety=1,variance=0;bool complete=true;
         for(unsigned s=0;s<sites;++s) {
             const auto& v=samples[s][g];
-            if(!(v.support>0)||!v.finite||!std::isfinite(v.value)||!std::isfinite(v.variance)||!std::isfinite(v.headroom)) {
-                safety=0;break;
+            if(!(v.support>0)||!v.finite||v.clipped||!std::isfinite(v.value)||
+                !std::isfinite(v.variance)||v.variance<0||!std::isfinite(v.headroom)) {
+                safety=0;complete=false;break;
             }
             safety=std::min(safety,std::clamp(v.headroom,0.0,1.0));
             variance+=std::max(1e-12,v.variance)/sites;
         }
         headroom[g]=safety;
-        completeSupport|=safety>0;
+        completeSupport|=complete;
         // Trace precision minimizes the sum of channel errors subject to one
         // shared exposure weight. Model/alignment risk belongs in this decision,
         // but Blend still propagates sensor and model variances separately.
-        weights[g]=automatic?1/std::max(1e-12,variance):requested[g];
+        precision[g]=complete?1/std::max(1e-12,variance):0;
+        weights[g]=automatic?precision[g]:(complete?requested[g]:0);
     }
     if(!completeSupport) {
         // Different exposures can supply different unclipped colors. Never
@@ -56,10 +59,10 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
         // If a color has no accepted measurement, independent fallback can
         // pair clipped-reference red/blue with a dark, displaced green from
         // another exposure. Prefer one complete, unclipped exposure instead.
-        // Even individually supported colors can describe different edges
-        // when the complete exposures were rejected for registration mismatch.
-        // Pure partial clipping can still recover independent color channels.
-        if(std::any_of(result.begin(),result.begin()+sites,[](const Pixel& p){return !p.valid||p.localRejected;})) {
+        // localRejected records ANY discarded input, including captures that
+        // contribute no weight. It must not veto accepted measurements from
+        // the other captures. Replace colors together only when one is missing.
+        if(std::any_of(result.begin(),result.begin()+sites,[](const Pixel& p){return !p.valid;})) {
             const bool needsClippedFallback=std::any_of(result.begin(),result.begin()+sites,
                 [](const Pixel& p){return !p.valid||p.fallback;});
             std::size_t selected=groups;double exposure=std::numeric_limits<double>::infinity();
@@ -102,11 +105,14 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
     if(fallback) {
         // Authored sources may all be clipped. Choose among complete usable
         // colors before falling back to independently assembled channels.
-        for(std::size_t g=0;g<groups;++g) {
-            double variance=0;
-            for(unsigned s=0;s<sites;++s)variance+=std::max(1e-12,samples[s][g].variance)/sites;
-            weights[g]=1/std::max(1e-12,variance);
-        }
+        weights=precision;
+        total=0;
+        for(std::size_t g=0;g<groups;++g)total+=weights[g]*headroom[g];
+        // All complete measurements can be valid yet inside the headroom
+        // taper's zero band. Keep their shared colour weights instead of
+        // independently choosing an exposure for each colour at that boundary.
+        if(total<=1e-20)for(std::size_t g=0;g<groups;++g)
+            headroom[g]=precision[g]>0?1.:0.;
     }
     for(unsigned s=0;s<sites;++s) {
         result[s]=BlendWithWeights(samples[s],weights.data(),groups,recipe,&headroom);

@@ -820,9 +820,9 @@ bool GpuLocalMotionDiscreteEvaluator::Evaluate(
 }
 
 void GpuLocalMotionDiscreteEvaluator::BeginPair(const CfaPlanePyramid& reference,
-    const CfaPlanePyramid& alternate) {
+    const CfaPlanePyramid& alternate,bool referenceChanged) {
     if(!m_Impl) return;
-    if(m_Impl->firstPyramid!=&reference) {
+    if(referenceChanged||m_Impl->firstPyramid!=&reference) {
         for(auto& level:m_Impl->levelTextures) Impl::DeleteTextures(level);
         m_Impl->levelTextures.clear();
     }

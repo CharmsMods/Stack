@@ -65,7 +65,13 @@ inline void RefineLocallyRegisteredExposure(const ProcessingRequest& request,
     std::sort(ratios.begin(),ratios.end());
     const double correction=MedianNoiseValue(ratios);
     const double spread=ratios[ratios.size()*3/4]-ratios[ratios.size()/4];
-    if(std::abs(correction)>.1||spread>.03) {
+    // A metadata fallback can legitimately be much farther from the measured
+    // RAW gain than .1 EV. Permit correction in proportion to its declared
+    // uncertainty, while preserving the same spatial, colour and noise checks.
+    const double priorSigma=source.scale>0&&std::isfinite(source.scaleVariance)
+        ?std::sqrt(std::max(0.,source.scaleVariance))/(std::log(2.)*source.scale):0;
+    const double maximumCorrection=std::clamp(3*priorSigma,.1,3.);
+    if(std::abs(correction)>maximumCorrection||spread>.03) {
         diagnostics.push_back(source.id+": local exposure evidence was inconsistent; retained the joint exposure estimate.");return;
     }
     const double sigma=std::max(.0001,1.58*spread/std::sqrt(double(ratios.size())));

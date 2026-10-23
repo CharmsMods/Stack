@@ -3,6 +3,7 @@
 #include "Alignment.h"
 #include "ExposureGraph.h"
 #include "ExposureEvidence.h"
+#include "ExposureFallback.h"
 #include "BurstNoise.h"
 #include "RadiometricConsistency.h"
 #include <array>
@@ -64,7 +65,7 @@ bool MatchingDenoiseScale(const PreparedSource& a,const PreparedSource& b,double
 }
 }
 bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
-    std::vector<std::string>& diagnostics,std::string& error) {
+    std::vector<std::string>& diagnostics,std::string& error,bool allowFallback) {
     const auto n=data.sources.size();
     if(n==0||data.origin>=n) {error="Exposure calibration has no reference capture.";return false;}
     std::vector<bool> fixed(n,false);
@@ -77,6 +78,7 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             if(frame.id==data.sources[i].id&&frame.manualExposure) {fixed[i]=true;gains[i]=-frame.relativeEv;}
     }
     std::vector<ExposureEdge> edges;
+    std::vector<ExposureEdge> imageFallbacks,metadataFallbacks;
     std::vector<std::string> overlapEvidence;
     // Spatial bins prevent a dense textured object from dominating all of the
     // exposure evidence. Cost is bounded per pair even for very large sensors.
@@ -104,13 +106,19 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
             measurementVariance+=MedianNoiseValue(std::move(tileVariance[bin]));
         }
         bool measured=false;
-        if(tileRatios.size()>=4) {
+        if(tileRatios.size()>=2) {
             std::sort(tileRatios.begin(),tileRatios.end());
             const double median=MedianNoiseValue(tileRatios);
             const double spread=tileRatios[tileRatios.size()*3/4]-tileRatios[tileRatios.size()/4];
             const double sigma=std::max({.0001,1.58*spread/std::sqrt(static_cast<double>(tileRatios.size())),
                 std::sqrt(measurementVariance)/tileRatios.size()});
-            if(spread<.5&&sigma<.04) {edges.push_back({a,b,median,sigma*sigma});measured=true;}
+            if(tileRatios.size()>=4&&spread<.5&&sigma<.04) {
+                edges.push_back({a,b,median,sigma*sigma});measured=true;
+            } else if(allowFallback&&spread<.5&&sigma<.25) {
+                // Keep colour/noise/clipping checks, but distinguish a usable
+                // coarse estimate from a high-precision calibration.
+                imageFallbacks.push_back({a,b,median,std::max(.1*.1,sigma*sigma)});
+            }
             overlapEvidence.push_back(data.sources[a].id+" / "+data.sources[b].id+": bins="+
                 std::to_string(tileRatios.size())+", EV="+std::to_string(median)+", spread="+
                 std::to_string(spread)+", sigma="+std::to_string(sigma));
@@ -118,6 +126,14 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
         double metadataEv=0;
         if(!measured&&MatchingDenoiseScale(data.sources[a],data.sources[b],metadataEv))
             edges.push_back({a,b,metadataEv,.03*.03});
+        if(allowFallback&&MetadataExposureRatio(data.sources[a],data.sources[b],metadataEv))
+            metadataFallbacks.push_back({a,b,metadataEv,1.0});
+    }
+    if(allowFallback) {
+        ConnectExposureFallbacks(edges,std::move(imageFallbacks),fixed,data,
+            "Limited image-overlap estimate",diagnostics);
+        ConnectExposureFallbacks(edges,std::move(metadataFallbacks),fixed,data,
+            "Camera-settings exposure fallback (not image calibrated)",diagnostics);
     }
     if(!SolveExposureGraph(edges,fixed,gains,variance)) {
         diagnostics.insert(diagnostics.end(),overlapEvidence.begin(),overlapEvidence.end());
@@ -132,8 +148,8 @@ bool Calibrate(const ProcessingRequest& request,PreparedDataset& data,
                 std::filesystem::path(data.sources[i].metadata.sourcePath).filename().string();
             if(!missing.empty()) missing+=", ";missing+=name.empty()?data.sources[i].id:name;
         }
-        error="Exposure overlap could not connect "+(missing.empty()?std::string("every capture"):missing)+
-            " to the fixed origin. Enter relative EV for those inputs in the capture controls.";
+        error="Exposure calibration could not connect "+(missing.empty()?std::string("every capture"):missing)+
+            " to the reference capture using image overlap or available exposure settings. Enter relative EV for those inputs in the capture controls.";
         return false;
     }
     for(std::size_t i=0;i<n;++i) {

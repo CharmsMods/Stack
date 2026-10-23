@@ -36,27 +36,47 @@ inline bool BuildSceneGradients(const ProcessingRequest& request,const PreparedD
       if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
       for(int x=0;x<width;++x) {
         double gx=0,gy=0,mean=0;unsigned count=0;
+        const auto rx=static_cast<std::int64_t>(tile.originX)+x,ry=static_cast<std::int64_t>(tile.originY)+y;
+        const bool border=rx<4||ry<4||rx+4>=source.frame.activeExtent.width||ry+4>=source.frame.activeExtent.height;
+        double sx=0,sy=0,sxx=0,sxy=0,syy=0;unsigned available=0;
         for(int dy=-4;dy<=4;dy+=2) for(int dx=-4;dx<=4;dx+=2) {
+            if(border&&rx+dx>=0&&ry+dy>=0&&rx+dx<source.frame.activeExtent.width&&ry+dy<source.frame.activeExtent.height)
+                ++available;
             const auto i=static_cast<std::size_t>(y+dy+4)*stride+x+dx+4;
             if(!valid[i]) continue;
             gx+=dx*signal[i];gy+=dy*signal[i];mean+=signal[i];++count;
+            if(border){sx+=dx;sy+=dy;sxx+=dx*dx;sxy+=dx*dy;syy+=dy*dy;}
         }
-        // Incomplete footprints use a conservative unknown gradient. Their
-        // risk is handled by the original sampler instead of inventing detail.
+        // Interior arithmetic stays unchanged. At a physical image boundary,
+        // fit a plane to the available real same-CFA samples and propagate the
+        // larger slope-noise variance. Missing/clipped interior evidence still
+        // uses the original unknown-gradient fallback.
         auto& out=gradients[static_cast<std::size_t>(y)*width+x];
         out={std::numeric_limits<double>::quiet_NaN(),0};
-        if(count!=25) continue;
-        gx/=200.;gy/=200.;mean/=25.;
+        double gradientNoiseFactor=2./200.;
+        if(count==25){gx/=200.;gy/=200.;mean/=25.;}
+        else {
+            if(!border||count!=available||count<6)continue;
+            mean/=count;
+            sxx-=sx*sx/count;sxy-=sx*sy/count;syy-=sy*sy/count;
+            const double determinant=sxx*syy-sxy*sxy;
+            if(!(determinant>1e-12))continue;
+            const double bx=gx-sx*mean,by=gy-sy*mean;
+            gx=(syy*bx-sxy*by)/determinant;gy=(sxx*by-sxy*bx)/determinant;
+            gradientNoiseFactor=(sxx+syy)/determinant;
+        }
         const auto site=static_cast<std::size_t>(layout.SiteAt(tile.originX+x,tile.originY+y));
         const auto& profile=source.noise.sites[site];
         const auto center=static_cast<std::size_t>(y)*width+x;
         Mfd::GainPropagatedVariance variance;
         if(!Mfd::PropagateKnownGainVariance(profile,tile.comparisonGain[center],
             std::max(0.0,mean),source.frame.calibration.usableSpanByCfaSite[site],variance)) continue;
-        // Each fitted slope has noise variance V / sum(dx^2) = V/200.
+        // Interior slope variance is V/200 per axis; the one-sided fit uses
+        // the trace of its inverse coordinate-moment matrix instead.
         // Subtract that expected noise energy before charging alignment risk.
         const double energy=gx*gx+gy*gy;
-        const double retained=energy>0?std::sqrt(std::max(0.0,energy-2*variance.variance/200.)/energy):0;
+        const double noiseEnergy=count==25?2*variance.variance/200.:gradientNoiseFactor*variance.variance;
+        const double retained=energy>0?std::sqrt(std::max(0.0,energy-noiseEnergy)/energy):0;
         out={gx*retained,gy*retained};
       }
     }

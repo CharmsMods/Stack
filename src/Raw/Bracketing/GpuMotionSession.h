@@ -19,10 +19,10 @@ public:
         if(evaluator_) {evaluator_->AbandonContextResources();evaluator_.reset();}
     }
     bool BeginPair(const Mfd::CfaPlanePyramid& reference,const Mfd::CfaPlanePyramid& alternate,
-        std::string& error) {
+        std::string& error,bool referenceChanged=false) {
         return request_.executeOpenGlTask&&request_.executeOpenGlTask([&](std::string&) {
             if(!evaluator_) evaluator_=std::make_unique<Mfd::GpuLocalMotionDiscreteEvaluator>();
-            evaluator_->BeginPair(reference,alternate);return true;
+            evaluator_->BeginPair(reference,alternate,referenceChanged);return true;
         },error);
     }
     bool Evaluate(const Mfd::LocalMotionDirectionRequest& direction,

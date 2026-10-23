@@ -149,6 +149,9 @@ bool RefineBurstAlignment(const ProcessingRequest& request,PreparedDataset& data
     // All candidates see the same frozen initial fields and subset guide.
     for(std::size_t index=0;index<data.sources.size();++index) {
         const auto& source=data.sources[index];if(index==data.origin||!source.enabled||!source.localMotion)continue;
+        // Do not independently pull a brighter group's anchor or repeats back
+        // toward a reference that cannot observe their shadow structure.
+        if(source.exposureGroupMotion)continue;
         if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
         if(request.reportProgress)request.reportProgress(.50+.02*double(index)/data.sources.size(),"Refining supported burst alignment");
         Mfd::CfaPlanePyramid alternate;
