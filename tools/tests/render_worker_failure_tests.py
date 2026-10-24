@@ -72,7 +72,7 @@ namespace ViewportGpuTiming { void Release(int&) {} }
 }
 struct FakeDenoise { void RequestCancellation() {} void CancelAndWait() { ++drainedModels; } };
 struct RenderPipeline {};
-struct ViewportRequest { bool enabled=false; std::uint64_t generation=0; };
+struct ViewportRequest { bool enabled=false,empty=false; std::uint64_t generation=0; };
 struct ViewportTilingSettings {};
 struct PreviewRequest { std::optional<int> assetCapture; bool assetCaptureInput=false; std::string rawLayerId,rawMaskId; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
 struct PreviewResult { bool assetCapture=false,assetCaptureInput=false,assetCaptureSuperseded=false,success=false; std::shared_ptr<int> assetFeedback;std::optional<int> capturedAsset; std::string rawLayerId,rawMaskId,error; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
@@ -219,7 +219,7 @@ adoption = (root / 'src/Editor/Internal/EditorModuleRenderAdoption.cpp').read_te
 first_start = adoption.index('        const bool awaitedFirstPresentationFailed =')
 first_end = adoption.index('        if (result.graphRequest.enabled)', first_start)
 first_failure = adoption[first_start:first_end]
-diagnostic_start = adoption.index('            if (result.workerFailed && result.graphRequest.enabled &&')
+diagnostic_start = adoption.index('            if (!result.success && result.graphRequest.enabled &&')
 diagnostic_end = adoption.index('            FinishViewportPreviewRequest(result, false);', diagnostic_start)
 diagnostic = adoption[diagnostic_start:diagnostic_end]
 persistence = (root / 'src/Editor/Internal/EditorModulePersistence.cpp').read_text()
@@ -382,10 +382,13 @@ public:
     Async::TaskState m_ExportTaskState=Async::TaskState::Failed;
     DeferredLoadedProjectApplyState m_DeferredLoadedProjectApply;
     std::unordered_map<std::uint64_t,int> m_HdrMergeSubmittedNodesByGeneration;
-    bool failedLoad=false,currentViewport=true; int notices=0;
+    bool failedLoad=false,currentViewport=true,graphViewport=true,m_RawWorkspaceRootTabActive=true; int notices=0;
+    struct PreviewState { ViewportRequest request; std::size_t contentIdentity=0; } currentView;
     std::uint64_t m_RawRenderClientId=15,m_RenderGeneration=150,m_GraphAcceptedResultGeneration=150;
     Stack::GraphRendering::RequestTag currentTag;
     bool IsViewportPreviewResultCurrent(const Result&) { return currentViewport; }
+    bool UsesGraphViewportPreview() const { return graphViewport; }
+    const PreviewState& ActiveViewportPreviewState() const { return currentView; }
     Stack::GraphRendering::RequestTag CurrentGraphRenderTag() { return currentTag; }
     void ReportGraphRenderFailure(const Result&) { ++notices; }
     void DiagnoseStaleFailure(const Result& result);
@@ -401,17 +404,39 @@ public:
     } }
 };
 ''' + asset_failure + preview_retry + 'void EditorModule::SchedulerGate() {\n' + scheduler_gate + '++preparationCount; }\n' + 'void EditorModule::AdoptPreciseFailure(const SolveResult& result) { auto& precise=m_RawWorkspaceAutoBaseUi.preciseStartingPoint;struct Decision { bool allowed=false;std::string reason; } decision; bool source=false;\n' + precise_failure + '}\n' + export_failure + 'void EditorModule::DiagnoseStaleFailure(const Result& result) { const bool rawResult=!result.rawWorkspace.sourceKey.empty();\n' + diagnostic + '}\n' + r'''
-void FatalContinuationDiagnostic() {
+void ContinuationFailureDiagnostic() {
     auto request=Request(15,150,RawRenderPurpose::DenoiseCompletion);request.graphRequest.enabled=true;request.graphRequest.sourceIdentity=77;request.graphRequest.outputNodeId=9;request.graphRequest.revision=123;
+    request.viewportPreview.enabled=true;request.viewportPreview.generation=901;
     auto result=EditorRenderWorker::MakeFailedResult(request,"fatal");EditorModule editor;editor.currentTag=request.graphRequest;
+    editor.currentView.request.generation=result.viewportPreview.generation;editor.currentView.contentIdentity=result.viewportContentIdentity;
     editor.DiagnoseStaleFailure(result);Require(editor.notices==1 && editor.m_GraphAcceptedResultGeneration==150,"accepted provisional failure emits diagnostic only");
     editor.notices=0;result.ownerId=99;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"other owner fatal suppressed");result.ownerId=15;
     result.graphRequest.sourceIdentity=78;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"replaced graph source suppressed");result.graphRequest.sourceIdentity=77;
     result.graphRequest.revision=122;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"old graph edit suppressed");result.graphRequest.revision=123;
     result.generation=149;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"old generation suppressed");result.generation=150;
     result.telemetry.superseded=true;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"superseded failure suppressed");result.telemetry.superseded=false;
-    editor.currentViewport=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"old viewport suppressed");editor.currentViewport=true;
-    result.workerFailed=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"ordinary failure uses existing diagnostic path");
+    ++editor.currentView.request.generation;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"old fatal viewport suppressed");--editor.currentView.request.generation;
+    result.workerFailed=false;result.error="AI denoise inference failed";
+    Require(!Stack::GraphRendering::MayAdopt(result.graphRequest,editor.currentTag,result.generation,editor.m_GraphAcceptedResultGeneration),"same-generation continuation pixels remain inadmissible");
+    editor.DiagnoseStaleFailure(result);Require(editor.notices==1 && editor.m_GraphAcceptedResultGeneration==150,"ordinary denoise continuation reports without adopting pixels");editor.notices=0;
+    // RenderSnapshot disables generic viewport rendering for DenoiseCompletion,
+    // but retains the original view ID, camera generation and content identity.
+    result.viewportPreview.enabled=false;
+    editor.DiagnoseStaleFailure(result);Require(editor.notices==1,"current nonfatal continuation reports with production disabled viewport flag");editor.notices=0;
+    ++editor.currentView.request.generation;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"disabled viewport flag cannot hide obsolete camera");--editor.currentView.request.generation;
+    ++editor.currentView.contentIdentity;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"disabled viewport flag cannot hide obsolete content");--editor.currentView.contentIdentity;
+    editor.m_RawWorkspaceRootTabActive=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"other view suppressed");editor.m_RawWorkspaceRootTabActive=true;
+    editor.currentView.request.empty=true;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"empty viewport suppressed");editor.currentView.request.empty=false;
+    editor.graphViewport=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"disabled graph viewport suppressed");editor.graphViewport=true;
+    result.viewportViewId=9;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"unknown view suppressed");result.viewportViewId=1;
+    result.success=true;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"successful continuation never reported as failure");result.success=false;
+    result.rawRenderPurpose=RawRenderPurpose::InteractivePresentation;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"unrelated ordinary stale failure stays discarded");result.rawRenderPurpose=RawRenderPurpose::DenoiseCompletion;
+    result.error="Render superseded by a newer snapshot.";editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"cancellation error remains silent even without telemetry flag");result.error="AI denoise inference failed";
+    result.telemetry.superseded=true;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"superseded nonfatal continuation stays silent");result.telemetry.superseded=false;
+    editor.m_RenderGeneration=151;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"newer requested generation suppresses continuation failure");editor.m_RenderGeneration=150;
+    editor.m_GraphAcceptedResultGeneration=151;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"newer accepted generation suppresses continuation failure");editor.m_GraphAcceptedResultGeneration=150;
+    result.viewportViewId=0;result.ownerId=0;result.rawWorkspace.sourceKey.clear();editor.DiagnoseStaleFailure(result);Require(editor.notices==1,"dedicated full-image graph failure reports without viewport identity");editor.notices=0;
+    editor.currentViewport=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"existing non-view currentness gate retained");
 }
 void FatalIdleGuard() {
     auto& service=Service::Get();GLFWwindow window;auto owner=service.Acquire(&window);service.m_Worker.HandleThreadFailure("fatal",nullptr);
@@ -445,7 +470,7 @@ void AdoptionTerminalState() {
 '''
 main = r'''
 int main() {
-    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();AdoptionTerminalState();FatalContinuationDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
+    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();AdoptionTerminalState();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''

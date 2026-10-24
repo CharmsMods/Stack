@@ -273,17 +273,35 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         if (staleResult) {
             // A provisional graph frame can already own this generation when
-            // its denoise continuation loses the worker. Its pixels remain
-            // stale for adoption, but its current request still needs a fatal
-            // diagnostic. Never report another owner, newer edit or old view.
-            if (result.workerFailed && result.graphRequest.enabled &&
+            // its denoise continuation fails. Its pixels remain stale for
+            // adoption, but its current request still needs a diagnostic.
+            // Never report another owner, newer edit or old view.
+            if (!result.success && result.graphRequest.enabled &&
+                (result.workerFailed ||
+                 result.rawRenderPurpose == RawRenderPurpose::DenoiseCompletion) &&
                 !result.telemetry.superseded &&
+                result.error != "Render superseded by a newer snapshot." &&
                 result.ownerId == (rawResult ? m_RawRenderClientId : 0) &&
                 result.generation == m_RenderGeneration &&
-                result.generation == m_GraphAcceptedResultGeneration &&
-                IsViewportPreviewResultCurrent(result)) {
+                result.generation == m_GraphAcceptedResultGeneration) {
+                bool currentFailureView = IsViewportPreviewResultCurrent(result);
+                if (result.viewportViewId != 0) {
+                    // Denoise continuations render a complete image and clear
+                    // viewportPreview.enabled. Their originating view identity
+                    // remains intact, and failure has no new pixel coverage
+                    // with which to justify an obsolete camera request.
+                    currentFailureView = UsesGraphViewportPreview() &&
+                        result.viewportViewId == (m_RawWorkspaceRootTabActive ? 1 : 2);
+                    if (currentFailureView) {
+                        const auto& view = ActiveViewportPreviewState();
+                        currentFailureView = !view.request.empty &&
+                            result.viewportPreview.generation == view.request.generation &&
+                            result.viewportContentIdentity == view.contentIdentity;
+                    }
+                }
                 const auto currentTag = CurrentGraphRenderTag();
-                if (Stack::GraphRendering::SameContext(result.graphRequest, currentTag) &&
+                if (currentFailureView &&
+                    Stack::GraphRendering::SameContext(result.graphRequest, currentTag) &&
                     result.graphRequest.revision == currentTag.revision)
                     ReportGraphRenderFailure(result);
             }
