@@ -645,6 +645,10 @@ if(BUILD_TESTING)
     include(cmake/StackGraphImageImportHistoryTests.cmake)
     include(cmake/StackProjectPresentationTests.cmake)
     include(cmake/StackLayerParameterPreflightTests.cmake)
+    add_executable(StackImagePreviewIdentityTests tools/tests/image_preview_identity_tests.cpp)
+    target_include_directories(StackImagePreviewIdentityTests PRIVATE src)
+    add_test(NAME StackEditor.ImagePreviewIdentity COMMAND StackImagePreviewIdentityTests)
+    set_tests_properties(StackEditor.ImagePreviewIdentity PROPERTIES LABELS "editor;preview;cpu" TIMEOUT 30)
     add_executable(StackLibraryStorageWriteTests
         tools/tests/library_storage_write_tests.cpp
         src/Library/Internal/LibraryAssetFileWrite.cpp

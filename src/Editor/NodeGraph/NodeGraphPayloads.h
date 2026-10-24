@@ -52,11 +52,15 @@ struct ImagePayload {
     std::uint64_t embeddingRequestId = 0;
     mutable std::shared_ptr<const std::vector<unsigned char>> sharedPixels;
     mutable std::size_t pixelsFingerprint = 0;
+    // Complete preview-content identity, computed once after pixel mutation.
+    // Metadata-only history/analysis clones deliberately start without it.
+    mutable std::size_t previewContentFingerprint = 0;
 };
 
 inline void InvalidateImagePayloadRuntime(ImagePayload& payload) {
     payload.sharedPixels.reset();
     payload.pixelsFingerprint = 0;
+    payload.previewContentFingerprint = 0;
     payload.previewPixels.clear();
     payload.previewWidth = 0;
     payload.previewHeight = 0;

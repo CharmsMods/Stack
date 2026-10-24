@@ -164,6 +164,7 @@ bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, Imag
     if (!copied) {
         return false;
     }
+    InvalidateImagePayloadRuntime(payload);
     payload.width = width;
     payload.height = height;
     payload.channels = 4;

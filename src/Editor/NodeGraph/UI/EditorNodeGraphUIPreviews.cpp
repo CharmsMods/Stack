@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/ImagePreviewIdentity.h"
 #include "Async/TaskSystem.h"
 #include <atomic>
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
@@ -13,40 +14,6 @@
 #include <unordered_set>
 
 namespace {
-
-size_t HashImagePayload(const EditorNodeGraph::Node& node) {
-    size_t hash = 1469598103934665603ull;
-    auto mix = [&](size_t value) {
-        hash ^= value;
-        hash *= 1099511628211ull;
-    };
-
-    mix(static_cast<size_t>(node.image.width));
-    mix(static_cast<size_t>(node.image.height));
-    mix(static_cast<size_t>(std::max(1, node.image.channels)));
-    mix(static_cast<size_t>(node.image.previewWidth));
-    mix(static_cast<size_t>(node.image.previewHeight));
-    mix(node.image.previewPixels.size());
-    if (!node.image.previewPixels.empty()) {
-        mix(node.image.previewPixels.front());
-        mix(node.image.previewPixels[node.image.previewPixels.size() / 2]);
-        mix(node.image.previewPixels.back());
-    }
-    mix(node.image.pixels.size());
-    if (!node.image.pixels.empty()) {
-        mix(node.image.pixels.front());
-        mix(node.image.pixels[node.image.pixels.size() / 2]);
-        mix(node.image.pixels.back());
-    } else {
-        mix(node.image.pngBytes.size());
-        if (!node.image.pngBytes.empty()) {
-            mix(node.image.pngBytes.front());
-            mix(node.image.pngBytes[node.image.pngBytes.size() / 2]);
-            mix(node.image.pngBytes.back());
-        }
-    }
-    return hash;
-}
 
 bool DecodeImagePreviewPixelsFromPng(
     const std::vector<unsigned char>& pngBytes,
@@ -224,7 +191,7 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         return 0;
     }
 
-    const size_t fingerprint = HashImagePayload(node);
+    const size_t fingerprint = EditorNodeGraph::ImagePreviewFingerprint(node.image);
     auto it = m_ImagePreviewTextures.find(node.id);
     auto fingerprintIt = m_ImagePreviewFingerprints.find(node.id);
     if (it != m_ImagePreviewTextures.end() &&
