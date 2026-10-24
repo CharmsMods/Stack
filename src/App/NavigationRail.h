@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imgui.h"
+#include "Animation/ControlMotion.h"
 #include "Library/LibraryControls.h"
 #include <cstdint>
 
@@ -8,6 +9,8 @@ namespace Stack::Navigation {
 
 // Shell presentation only. Project documents and jobs keep their existing owners.
 struct RailState {
+    Stack::Animation::ControlMotion stackMenuMotion, libraryMotion, queueMotion;
+    Stack::Animation::ControlMotion panelToggleMotion, activityMotion;
     bool panelOpen = true;
     bool galleryView = true;
     LibraryUi::ViewSwitchMotion libraryViewMotion;

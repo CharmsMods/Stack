@@ -90,11 +90,12 @@ float AppShell::RenderActivityIndicator(float width, float height, bool openDeta
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.pressed);
     auto context=NotificationContext();
     const bool glass=m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    if (!glass) m_NavigationRail.activityMotion.Reset();
     bool adaptiveInk=false;
     if (glass) {
         context.customIndicatorFocus=true;
         context.beginIndicator=[&](ImDrawList* draw,ImVec2 min,ImVec2 max,bool selected) {
-            const auto glassState=Stack::Navigation::UpdateGlassControlState(selected);
+            const auto glassState=Stack::Navigation::UpdateGlassControlState(m_NavigationRail.activityMotion,selected);
             Stack::Navigation::GlassObjectBacking(draw,min,max,std::min(max.x-min.x,max.y-min.y)*.5f,palette);
             m_RailGlass.AddObject(draw,min,max,palette.caption,std::min(max.x-min.x,max.y-min.y)*.5f,glassState.Elevation(),
                 Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);

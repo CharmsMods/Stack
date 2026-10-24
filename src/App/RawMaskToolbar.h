@@ -3,10 +3,12 @@
 #include "Editor/RawOperationMaskTarget.h"
 #include "Raw/RawAssetCapture.h"
 #include "imgui.h"
+#include "Animation/ControlMotion.h"
 
 namespace Stack::Navigation {
 
 struct RawMaskToolbarState {
+    Stack::Animation::ControlMotion maskButtonMotion;
     bool enabled = false;
     bool maskButtonEnabled = false; // Preserve styling while the disabled bar exits.
     float revealAmount = 0.f;

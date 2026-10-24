@@ -141,7 +141,7 @@ void AppShell::RenderRawMaskToolbar() {
     ImGui::SetCursorScreenPos(toolbar.maskButtonPosition);
     toolbar.maskButtonEnabled = available.target.has_value();
     if (Stack::Navigation::IconButton("Create mask", Stack::Navigation::Glyph::Mask,
-            ImGui::IsPopupOpen("OperationMaskMenu"), available.target.has_value(), scale, palette, available.disabledReason.c_str())) {
+            ImGui::IsPopupOpen("OperationMaskMenu"), available.target.has_value(), scale, palette, toolbar.maskButtonMotion, available.disabledReason.c_str())) {
         CancelProjectPillPreview();
         toolbar.target = available.target;
         toolbar.targetWorkspace = m_ActiveProjectWorkspace;
@@ -212,7 +212,7 @@ void AppShell::RenderSharedPanelToggle() {
         (amount <= .001f || m_Editor->IsReturningToGraph() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
-            Stack::Navigation::Glyph::Panel, false, true, scale, palette, nullptr,
+            Stack::Navigation::Glyph::Panel, false, true, scale, palette, m_NavigationRail.panelToggleMotion, nullptr,
             glassLeft, &m_RailGlass, glassLeft))
         ToggleWorkspaceSectionPanel();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());

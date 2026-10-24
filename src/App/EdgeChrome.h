@@ -38,7 +38,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,
-    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr, bool objectOutsideWindow = false) {
+    float scale, const Stack::Header::Palette& palette, Stack::Animation::ControlMotion& motion, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr, bool objectOutsideWindow = false) {
     const float size = ButtonExtent * scale;
     ImGui::BeginDisabled(!enabled);
     if (glass) ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(0,0,0,0));
@@ -58,7 +58,8 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (!glass && ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
-    const auto glassState=glass ? UpdateGlassControlState(selected) : GlassControlState{};
+    if (!glass) motion.Reset();
+    const auto glassState=glass ? UpdateGlassControlState(motion,selected) : GlassControlState{};
     if (glass) GlassObjectBacking(draw,rect.Min,rect.Max,19.f*scale,palette);
     if (glass && material) {
         // A small sibling toggle window clips its glyphs/hit target tightly,

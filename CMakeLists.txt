@@ -632,6 +632,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    include(cmake/StackAnimationTests.cmake)
     add_executable(StackProjectGraphHistoryTests tools/tests/project_graph_history_tests.cpp)
     target_include_directories(StackProjectGraphHistoryTests PRIVATE src)
     add_test(NAME StackProject.GraphHistory COMMAND StackProjectGraphHistoryTests)

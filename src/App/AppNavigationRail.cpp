@@ -153,14 +153,14 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
             ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
     }
-    const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, bool enabled = true) {
-        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, nullptr,
+    const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, Stack::Animation::ControlMotion& motion, bool enabled = true) {
+        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion, nullptr,
             m_Appearance && m_Appearance->GetGlassChromeEnabled(), &m_RailGlass);
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.
     ImGui::Dummy(ImVec2(targetSize, targetSize));
-    if (button("Stack menu", Glyph::Stack, false) || openFileMenu) {
+    if (button("Stack menu", Glyph::Stack, false, rail.stackMenuMotion) || openFileMenu) {
         CancelProjectPillPreview();
         ImGui::OpenPopup("GlobalFileMenu");
     }
@@ -183,7 +183,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         const char* name = item.first == RawTab ? "RAW" : item.first == Graph ? "Graph" : item.first == Library ? "Library" : "Queue";
         const bool selected = item.first == Library ? m_CurrentTabId == Library || gallery
             : item.first == RawTab ? IsRaw(m_CurrentTabId) && !gallery : m_CurrentTabId == item.first;
-        if (button(name, item.second, selected, available)) {
+        if (button(name, item.second, selected, item.first == Library ? rail.libraryMotion : rail.queueMotion, available)) {
             rail.requestedDestination = item.first;
             CancelProjectPillPreview();
         }

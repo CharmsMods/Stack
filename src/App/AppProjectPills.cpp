@@ -114,8 +114,9 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const ImVec2 pillMin(min.x + 4.f * rail.scale, min.y + 5.f * rail.scale);
         const ImVec2 pillMax(max.x - 4.f * rail.scale, max.y - 5.f * rail.scale);
         auto* draw = ImGui::GetWindowDrawList();
+        if (!glass) workspace->pillMotion.Reset();
         if (glass) {
-            const auto glassState=Stack::Navigation::UpdateGlassControlState(selected);
+            const auto glassState=Stack::Navigation::UpdateGlassControlState(workspace->pillMotion,selected);
             Stack::Navigation::GlassObjectBacking(draw,pillMin,pillMax,7.f*rail.scale,palette);
             m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale,glassState.Elevation(),
                 Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);

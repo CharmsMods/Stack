@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/ProjectLoadTransition.h"
+#include "Animation/ControlMotion.h"
 
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,7 @@ struct ProjectWorkspace {
     ProjectWorkspace& operator=(const ProjectWorkspace&) = delete;
 
     std::uint64_t id;
+    Stack::Animation::ControlMotion pillMotion;
     std::shared_ptr<Stack::Project::ProjectSession> project;
     std::unique_ptr<EditorModule> editor;
     int rootTab = 5;
