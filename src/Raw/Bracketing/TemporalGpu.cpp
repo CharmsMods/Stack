@@ -58,11 +58,25 @@ bool ValidSource(const PreparedSource& s){
 // Copy rows directly from immutable prepared tiles. Source samples are neither
 // filtered nor converted; the only padding is outside the physical sensor.
 bool Region(const PreparedSource& source,const PreparedDataset& data,int left,int top,int width,int height,
-    const ProcessingRequest& request,std::vector<Tap>& out,std::string& error){
+    const ProcessingRequest& request,std::vector<Tap>& out,std::string& error,
+    const Mfd::PreparedRawTile* resident=nullptr){
     out.assign(std::size_t(width)*height,{0,1,2,0});
     const auto side=source.frame.tileRawPixels;
+    if(!side){error="A prepared RAW source has no tile extent.";return false;}
     const int x0=std::max(0,left),y0=std::max(0,top),x1=std::min(int(data.width),left+width),y1=std::min(int(data.height),top+height);
     if(x0>=x1||y0>=y1)return true;
+    // Whole-region borrowing leaves the ordinary source-tile copy kernel
+    // unchanged. Partial guide halos still require their backing tiles.
+    if(resident&&resident->originX<=unsigned(x0)&&resident->originY<=unsigned(y0)&&
+        unsigned(x1)-resident->originX<=resident->extent.width&&unsigned(y1)-resident->originY<=resident->extent.height) {
+        if(Canceled(request)){error="Canceled";return false;}
+        const auto& t=*resident;
+        for(int y=y0;y<y1;++y)for(int x=x0;x<x1;++x) {
+            const auto q=std::size_t(y-t.originY)*t.extent.width+x-t.originX;
+            out[std::size_t(y-top)*width+x-left]={t.normalizedMosaic[q],t.comparisonGain[q],float(t.sampleFlags[q]),0};
+        }
+        return true;
+    }
     Mfd::DirectoryNormalizedTileCache cache(data.directory);
     for(unsigned ty=unsigned(y0)/side;ty<=unsigned(y1-1)/side;++ty)for(unsigned tx=unsigned(x0)/side;tx<=unsigned(x1-1)/side;++tx){
         if(Canceled(request)){error="Canceled";return false;}
@@ -222,7 +236,14 @@ public:
         if(!request.preferGpuCombining)return fail("GPU capture combining is required but disabled by the processing request.");
         for(const auto& s:data.sources)if(s.enabled&&!ValidSource(s))
             return fail("GPU capture combining cannot use a source with invalid or unsupported noise, exposure, or calibration data.");
+        if(!origin.extent.width||!origin.extent.height||origin.originX>data.width||origin.originY>data.height||
+            origin.extent.width>data.width-origin.originX||origin.extent.height>data.height-origin.originY||
+            data.width>unsigned(std::numeric_limits<int>::max()-16)||data.height>unsigned(std::numeric_limits<int>::max()-16))
+            return fail("GPU capture combining received an invalid reference region.");
         const int left=int(origin.originX),top=int(origin.originY),width=int(origin.extent.width),height=int(origin.extent.height);
+        const auto originCount=std::size_t(width)*height;
+        if(origin.normalizedMosaic.size()!=originCount||origin.comparisonGain.size()!=originCount||origin.sampleFlags.size()!=originCount)
+            return fail("GPU capture combining received incomplete reference samples.");
         const auto count=std::size_t(width)*height,maxSource=std::size_t(width+16)*(height+16)*4;
         const auto required=count*(sizeof(Mapping)+32+sizeof(GpuObservation)+accumulatorBytes)+maxSource*sizeof(Tap)+sizeof(Parameters);
         const auto admissionLimit=std::min(budget,request.memoryBudgetBytes/4);
@@ -241,8 +262,17 @@ public:
             std::lock_guard<std::mutex> lock(mutex);++allocations;
         }
         const auto& reference=data.sources[data.origin];std::vector<Tap> referenceTaps,taps;
-        if(!Region(reference,data,left-4,top-4,width+8,height+8,request,referenceTaps,error))return false;
-        std::vector<Mapping> mapping(count);std::vector<GpuObservation> output(count);
+        // Non-local Prepare samples only target-bounded pilot taps. Only
+        // its local scene-gradient stencil needs the four-pixel halo.
+        const bool localGuide=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal;
+        const int guideHalo=localGuide?4:0;
+        // Keep ordinary local alignment's original staging/read order. Reuse
+        // benefits non-local guides and expanded detail regions without
+        // changing that hot path's allocation behavior.
+        const bool reuseReference=!localGuide||detailFusion;
+        if(!Region(reference,data,left-guideHalo,top-guideHalo,width+2*guideHalo,height+2*guideHalo,
+            request,referenceTaps,error,reuseReference?&origin:nullptr))return false;
+        std::vector<Mapping> mapping(localGuide?count:0);std::vector<GpuObservation> output(count);
         // Publish only after every group and final cancellation check succeed.
         std::vector<std::vector<Observation>> pendingGroups(request.recipe.groups.size());
         const auto referenceParameters=SourceParameters(reference);
@@ -251,8 +281,8 @@ public:
             // exposure group. Later prepares only clear the group's sums.
             if(!tile.Run([&](std::string& e){if(g==0)tile.Upload(0,referenceTaps.size()*sizeof(Tap),referenceTaps.data());
                 tile.Upload(5,sizeof(Parameters),&referenceParameters);
-                tile.Dispatch(0,left,top,width,height,data,left-4,top-4,width+8,height+8,reference,false,false,
-                    request.recipe.alignmentMode==AlignmentMode::AutomaticLocal,g==0);
+                tile.Dispatch(0,left,top,width,height,data,left-guideHalo,top-guideHalo,width+2*guideHalo,height+2*guideHalo,
+                    reference,false,false,localGuide,g==0);
                 // Later groups only clear sums; Prepare cannot sample or set
                 // failed when initializeGuide is false. Avoid a blocking flag
                 // readback here. The final Status still checks every Sample.
@@ -269,6 +299,7 @@ public:
                     (&source!=&reference&&source.alignmentDiagnostic.localApplied);
                 int sx=left,sy=top,sw=width,sh=height;
                 if(aligned){
+                    if(mapping.empty())mapping.resize(count);
                     double minX=double(data.width),minY=double(data.height),maxX=0,maxY=0;
                     for(int y=0;y<height;++y){if(Canceled(request)){error="Canceled";return false;}
                         for(int x=0;x<width;++x){
@@ -295,7 +326,7 @@ public:
                     sw=std::max(1,right-sx);sh=std::max(1,bottom-sy);
                 }
                 if(std::size_t(sw)*sh>maxSource)return fail("GPU capture combining warp exceeds the source-region workspace allowance.");
-                if(!Region(source,data,sx,sy,sw,sh,request,taps,error))return false;
+                if(!Region(source,data,sx,sy,sw,sh,request,taps,error,reuseReference&&(&source==&reference)?&origin:nullptr))return false;
                 const auto parameters=SourceParameters(source);
                 if(!tile.Run([&](std::string&){tile.Upload(0,taps.size()*sizeof(Tap),taps.data());
                     if(aligned)tile.Upload(1,count*sizeof(Mapping),mapping.data());tile.Upload(5,192,&parameters);

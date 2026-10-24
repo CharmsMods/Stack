@@ -13,7 +13,7 @@ import subprocess
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
-PROFILE = 'sea-raft-m-cb8cfbf14c5e-4iters-fp32-rgb-area-p95-v1'
+PROFILE = 'sea-raft-m-cb8cfbf14c5e-4iters-fp32-rgb-area-p95-cuda-v2'
 
 
 def main():

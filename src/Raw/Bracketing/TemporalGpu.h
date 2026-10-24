@@ -31,6 +31,9 @@ public:
     bool Ready(std::string& error) const;
     // GPU-only: failure returns an error and leaves groups unchanged.
     // Original-frame selection within fusion is not a backend fallback.
+    // The reference region must own the exact prepared-origin sample arrays.
+    // They are borrowed only during this synchronous call; uncovered halo
+    // regions still come from the prepared cache.
     bool Combine(const ProcessingRequest&,const PreparedDataset&,const Mfd::PreparedRawTile&,
         bool detailFusion,std::vector<std::vector<Observation>>&,std::string&);
     void Report(BracketingAnalysis&) const;

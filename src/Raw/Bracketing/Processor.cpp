@@ -45,7 +45,9 @@ void StoreColor(float* rgb,const std::array<double,4>& values,const ColorChannel
 
 
 
-Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
+namespace {
+template<class SourcePreview>
+Preview ReblendPreviewImpl(SourcePreview&& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
     const Raw::OpenGlTaskExecutor& executor,std::string* failure,bool includeSourceMeasurements,
     const std::function<bool()>& shouldCancel) {
     const auto n=recipe.groups.size(),pixels=static_cast<std::size_t>(source.width)*source.height;
@@ -56,7 +58,7 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
     }
     if(shouldCancel&&shouldCancel()) {if(failure)*failure="Canceled";return {};}
     Preview out;
-    if(includeSourceMeasurements)out=source;
+    if(includeSourceMeasurements)out=std::forward<SourcePreview>(source);
     else {
         // Interactive reblends retain these immutable measurements in the
         // worker. Do not copy/recompute data that the client already owns.
@@ -65,6 +67,9 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
         out.sensorStepX=source.sensorStepX;out.sensorStepY=source.sensorStepY;
         out.metadata=source.metadata;out.guideEv=source.guideEv;out.coverage=source.coverage;
     }
+    // The owning path transferred samples into out. Interactive reblends still
+    // borrow the unchanged source and omit its large measurement payload.
+    const auto& samples=includeSourceMeasurements?out.samples:source.samples;
     out.resultRgb.assign(pixels*3,0);
     if(includeSourceMeasurements)out.sourceRgb.assign(pixels*3*n,0);
     out.contributions.assign(pixels*n,0);out.requested.assign(pixels*n,0);
@@ -77,14 +82,14 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
     std::size_t nextCancellationRow=0;
     for(std::size_t p=0;p<pixels;++p) {
         if(shouldCancel&&p==nextCancellationRow) {
-            nextCancellationRow+=source.width;
+            nextCancellationRow+=out.width;
             if(shouldCancel()) {if(failure)*failure="Canceled";return {};}
         }
         Evaluate(recipe.automatic?analysis.suggestion:recipe.knots,out.guideEv[p],shares);
         std::array<double,4> cell{};
         for(unsigned c=0;c<4;++c) {
             for(std::size_t g=0;g<n;++g) {
-                const auto& v=source.samples[(p*4+c)*n+g];
+                const auto& v=samples[(p*4+c)*n+g];
                 input[c][g]={v.value,v.variance,v.headroom,v.support,v.fallback,v.exposure,
                     v.finite,v.clipped,v.localRejected,v.fixedReference,v.measurementVariance,v.uncertaintyVariance,v.fallbackClipped};
                 if(includeSourceMeasurements)sources[g][c]=v.support>0?v.value:v.fallback;
@@ -117,6 +122,20 @@ Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,cons
     }
     return out;
 }
+} // namespace
+
+Preview ReblendPreview(const Preview& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
+    const Raw::OpenGlTaskExecutor& executor,std::string* failure,bool includeSourceMeasurements,
+    const std::function<bool()>& shouldCancel) {
+    return ReblendPreviewImpl(source,recipe,analysis,executor,failure,includeSourceMeasurements,shouldCancel);
+}
+
+Preview ReblendPreview(Preview&& source,const BracketingRecipe& recipe,const BracketingAnalysis& analysis,
+    const Raw::OpenGlTaskExecutor& executor,std::string* failure,bool includeSourceMeasurements,
+    const std::function<bool()>& shouldCancel) {
+    return ReblendPreviewImpl(std::move(source),recipe,analysis,executor,failure,includeSourceMeasurements,shouldCancel);
+}
+
 BracketingResult Process(const ProcessingRequest& submittedRequest) {
     if(submittedRequest.recipe.reconstruction==ReconstructionMode::Panorama&&submittedRequest.alignmentProposals.empty()&&!submittedRequest.recipe.aiAlignment)return Panorama::Process(submittedRequest);
     ProcessingRequest request=submittedRequest;
@@ -405,11 +424,8 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         sidecars->evidenceIdentitySha256=raw->metadata.sourceContentSha256;raw->multiFrameMeasurementSidecars=std::move(sidecars);
         // No local aliases should pin the native output after reconstruction
         // replaces result.raw, especially while depth rendering allocates RGB.
-        result.raw=std::move(raw);result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error,true,request.shouldCancel);
+        result.raw=std::move(raw);result.analysis=analysis;result.preview=ReblendPreview(std::move(preview),request.recipe,*analysis,request.executeOpenGlTask,&error,true,request.shouldCancel);
         if(!result.preview.width)return fail(error);
-        // Reblend owns its copy. Release the construction cells before SR's
-        // much larger output is allocated.
-        preview={};
         result.status=BracketingResult::Status::Completed;
         analysis->stageSeconds["hdr_output_and_preview"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-mergeStart).count();
         const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});

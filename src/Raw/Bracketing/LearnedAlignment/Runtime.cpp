@@ -35,7 +35,7 @@ bool RunModel(const ProcessingRequest& request,const std::filesystem::path& jobP
         error="The optional SEA-RAFT model package is not installed for this copy of Stack Burst. Install the package or turn AI-assisted alignment off.";return false;
     }
     std::ifstream input(manifest);const auto config=nlohmann::json::parse(input);
-    if(config.value("version",0)!=1||config.value("profile",std::string())!=Profile){error="The SEA-RAFT runtime package is incompatible.";return false;}
+    if(config.value("version",0)!=1||config.value("profile",std::string())!=Profile){error="The SEA-RAFT runtime package is incompatible. Rebuild the optional package for the CUDA-only runtime or turn AI-assisted alignment off.";return false;}
     auto python=std::filesystem::u8path(config.value("python",std::string("python/python.exe")));
     if(python.is_relative())python=root/python;
     const auto script=root/"worker.py";

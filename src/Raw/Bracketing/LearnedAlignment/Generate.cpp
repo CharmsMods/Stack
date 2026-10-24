@@ -44,6 +44,9 @@ bool Generate(ProcessingRequest& request,PreparedDataset& data,std::vector<std::
     std::ifstream stream(response);const auto result=nlohmann::json::parse(stream);
     if(!result.value("success",false)){error="AI alignment: "+result.value("error",std::string("model execution failed"));return false;}
     if(result.at("profile")!=Profile||result.at("modelSha256")!=ModelSha256){error="AI alignment model identity differs.";return false;}
+    if(result.value("device",std::string())!="cuda") {
+        error="AI alignment requires CUDA inference; repair the optional SEA-RAFT runtime.";return false;
+    }
     const auto& proposals=result.at("proposals");
     if(!proposals.is_array()||proposals.size()+1!=job["sources"].size()){error="AI alignment returned incomplete capture pairs.";return false;}
     for(const auto& value:proposals) {

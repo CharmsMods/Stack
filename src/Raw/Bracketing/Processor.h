@@ -173,6 +173,11 @@ BracketingResult Process(const ProcessingRequest&);
 Preview ReblendPreview(const Preview&, const BracketingRecipe&, const BracketingAnalysis&,
     const Raw::OpenGlTaskExecutor& executor={},std::string* error=nullptr,
     bool includeSourceMeasurements=true,const std::function<bool()>& shouldCancel={});
+// Transfers disposable construction measurements without a deep copy when
+// included. With includeSourceMeasurements=false, even an rvalue is borrowed.
+Preview ReblendPreview(Preview&&, const BracketingRecipe&, const BracketingAnalysis&,
+    const Raw::OpenGlTaskExecutor& executor={},std::string* error=nullptr,
+    bool includeSourceMeasurements=true,const std::function<bool()>& shouldCancel={});
 Preview RenderNativeDetail(const ProcessingRequest&, unsigned centerX, unsigned centerY, unsigned size = 192);
 std::string AnalysisIdentity(const ProcessingRequest&);
 std::uint64_t EstimateBracketingPeakResidentBytes(

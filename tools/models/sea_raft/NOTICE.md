@@ -1,5 +1,10 @@
 # Optional SEA-RAFT alignment package
 
+Inference requires an available CUDA GPU and a CUDA-enabled PyTorch runtime.
+Unavailable CUDA or a failed CUDA operation is an explicit job failure; the
+adapter never substitutes CPU inference. Checkpoint loading on the CPU and
+copying completed motion fields back to host memory are intentional staging.
+
 SEA-RAFT was developed by its upstream authors, not by Stack. Code is from
 princeton-vl/SEA-RAFT, commit 9137517ba24e628442aec097d3afe71d03503b75.
 Retain `LICENSE-SEA-RAFT.txt` with this package. The checkpoint is

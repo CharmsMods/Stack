@@ -1,6 +1,7 @@
 """Optional SEA-RAFT motion proposer. RAW reconstruction stays in StackBurst.
 
-No network access or model downloads. One bounded job, then process exit.
+No network access or model downloads. CUDA inference is required; no CPU
+substitution. One bounded job, then process exit.
 """
 import argparse
 import hashlib
@@ -11,7 +12,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
-PROFILE = 'sea-raft-m-cb8cfbf14c5e-4iters-fp32-rgb-area-p95-v1'
+PROFILE = 'sea-raft-m-cb8cfbf14c5e-4iters-fp32-rgb-area-p95-cuda-v2'
 MODEL_SHA = 'cb8cfbf14c5e0f6734b64add383708b7ff68cc6089a0007c67165d4761346102'
 
 
@@ -20,12 +21,21 @@ def sha(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def require_cuda(torch):
+    if not torch.cuda.is_available():
+        raise RuntimeError('SEA-RAFT AI alignment requires an available CUDA GPU '
+                           'and CUDA-enabled PyTorch. CPU inference is not supported; '
+                           'repair the optional runtime or turn AI-assisted alignment off.')
+    return 'cuda'
+
+
 def execute(job_path):
     os.environ['HF_HUB_OFFLINE'] = '1'
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     sys.path[:0] = [str(ROOT / 'packages'), str(ROOT / 'core')]
-    import numpy as np
     import torch
+    device = require_cuda(torch)
+    import numpy as np
     from safetensors.torch import load_file
     from raft import RAFT
 
@@ -47,8 +57,8 @@ def execute(job_path):
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = RAFT(config)
+    # Host checkpoint staging is intentional, not a CPU inference backend.
     weights = load_file(str(checkpoint), device='cpu')
     # Safetensors omits duplicate BN tensor aliases. Restore only aliases
     # demonstrated by this model's own storage, then demand a strict load.
@@ -100,8 +110,7 @@ def execute(job_path):
     del reference_rgb
     proposals = []
     inference_seconds = 0.
-    if device == 'cuda':
-        torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_peak_memory_stats()
     for index, source in enumerate(sources):
         if source['frameId'] == reference['frameId']:
             continue
@@ -127,7 +136,7 @@ def execute(job_path):
     return dict(success=True, profile=PROFILE, modelSha256=MODEL_SHA, device=device,
                 commonGain=gain, torchVersion=torch.__version__, proposals=proposals,
                 inferenceSeconds=inference_seconds, calls=2*len(proposals),
-                peakAllocatedMiB=torch.cuda.max_memory_allocated()/1024**2 if device=='cuda' else None)
+                peakAllocatedMiB=torch.cuda.max_memory_allocated()/1024**2)
 
 
 if __name__ == '__main__':

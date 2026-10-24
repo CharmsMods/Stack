@@ -89,6 +89,9 @@ for comparison, and keep the original RAW inputs unchanged.
   return failure without publishing a CPU replacement; cancellation stays canceled.
   RAW display preprocessing also reports GPU failure instead of CPU retry. Explicit
   CPU reference/interactive algorithms remain distinct primary paths, not recovery.
+  Optional SEA-RAFT inference now requires CUDA and rejects older runtime profiles
+  before launch. Mocked availability/error policy and syntax checks passed; actual
+  CUDA inference and Windows subprocess launch remain unverified.
 - A measured pyramid-index optimization regression was removed. Residual-buffer
   reuse reduced allocation calls in one controlled fixture, but timing overlapped.
   Redundant later-group GPU status readbacks and reference staging were removed.
@@ -114,6 +117,18 @@ for comparison, and keep the original RAW inputs unchanged.
   512-square, four-group check reduced tracked peak allocation by exactly 20 MiB.
   Decoded source ownership is released before noise/overview scans, and native
   output aliases no longer pin replaced buffers through later depth work.
+  Fixed-coordinate and detail-region combining reuse the already loaded origin
+  samples when they cover the complete requested region; otherwise cache reads
+  remain. Non-local guides avoid an unused halo, and unaligned fixed jobs avoid
+  the CPU mapping array. Actual old/new GPU component outputs matched across
+  borders, disabled origins and detail cases, with fewer prepared-cache reads.
+  Ordinary local alignment retains its original staging: an attempted change
+  there regressed bounded timings and was not retained. GPU workspace allocation
+  sizes are unchanged, so this does not claim lower VRAM residency.
+  Initial preview reblending transfers its disposable measurement vectors instead
+  of deep-copying them; interactive reblends still borrow their retained source.
+  Exact old/new component and cancellation checks plus UBSan passed. One bounded
+  fixture reduced allocation requests from 17 to 11, without a timing claim.
   A noise-scratch reuse experiment was removed because paired timings showed no
   useful speed gain despite fewer allocations.
   No end-to-end speedup or real-camera image-quality improvement is established.
@@ -173,7 +188,7 @@ normal shipping executable. Follow the agreed validation scope before running it
 
 Stack's Bracketing reconstruction controls and the standalone Burst window expose **AI-assisted alignment (experimental)**, off by default. The standalone batch manifest accepts `"aiAlignment": true`. The saved recipe keeps the choice; AI requires Automatic local alignment and is not used for panorama. It proposes motion with SEA-RAFT-M, then keeps the shared native RAW refinement, verification and reconstruction rules. Turning it off starts no model process.
 
-The optional package lives at `Stack/Models/SeaRaft` beside the owning `StackBurst.exe`. It is not included by ordinary product builds or release manifests. `tools/models/prepare_sea_raft.py --deployment <executable-folder> --python <python.exe>` prepares the pinned, checksum-verified code and checkpoint with notices. The explicitly supplied interpreter needs compatible PyTorch, NumPy and safetensors; the tool does not install globally. `--source-pack <folder>` reuses a retained artifact pack instead of downloading. The adapter runs offline, uses CUDA when available or CPU otherwise, and exits before native registration. A missing/incomplete package or inference failure is reported rather than silently disabling the requested setting.
+The optional package lives at `Stack/Models/SeaRaft` beside the owning `StackBurst.exe`. It is not included by ordinary product builds or release manifests. `tools/models/prepare_sea_raft.py --deployment <executable-folder> --python <python.exe>` prepares the pinned, checksum-verified code and checkpoint with notices. The explicitly supplied interpreter needs compatible PyTorch, NumPy and safetensors; the tool does not install globally. `--source-pack <folder>` reuses a retained artifact pack instead of downloading. The adapter runs offline, requires CUDA-enabled PyTorch and an available CUDA GPU, and exits before native registration. It fails explicitly rather than running inference on CPU. Older optional packages must be regenerated with the current preparation script: the CUDA-only runtime profile is checked before launch. Model weight loading and output serialization still use CPU memory; these are not CPU inference substitutes. A missing/incomplete package or inference failure is reported rather than silently disabling the requested setting.
 
 A development `runtime.json` can point to an existing interpreter. A distributable optional package must supply its own compatible runtime, preserve dependency notices, and use the relative `python/python.exe` location or another package-relative interpreter path. Copying a development manifest with an absolute interpreter path does not create a portable package. Both hosts resolve the same package relative to their own worker; no research-folder path is compiled into the application. Packaging/clean-machine runtime validation is separate from a developer build.
 
