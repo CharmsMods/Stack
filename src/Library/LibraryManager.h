@@ -298,8 +298,8 @@ private:
         std::uint64_t revision) const;
 
     bool WriteLibraryBundle(const std::string& destinationPath);
-    bool ImportLibraryBundle(const std::string& sourcePath);
-    bool FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices);
+    bool ImportLibraryBundle(const std::string& sourcePath, std::string* errorMessage = nullptr);
+    bool FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices, std::string* errorMessage = nullptr);
 
     std::uintmax_t BuildLibrarySignature() const;
     void RequestLibrarySignatureAsync();

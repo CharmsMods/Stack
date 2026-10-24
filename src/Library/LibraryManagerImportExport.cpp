@@ -4,6 +4,7 @@
 #include "Editor/EditorModule.h"
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Library/Internal/LibraryStorageHelpers.h"
+#include "Library/Internal/LibraryImportPlan.h"
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
@@ -285,57 +286,71 @@ ConflictResolutionResult LibraryManager::ResolveConflict(std::uint64_t id, Confl
     try {
     if (action == ConflictAction::Ignore) {
         resolved = true;
-    } else if (action == ConflictAction::Replace) {
-        targetFileName = EnsureProjectFileNameForKind(
-            conflict.localProjectFileName,
-            SanitizeFileStem(importedBundledProject.project.metadata.projectName),
-            importedBundledProject.project.metadata.projectKind);
-        if (StackFormat::WriteProjectFile(m_LibraryPath / targetFileName, importedBundledProject.project)) {
-            resolved = true;
-        }
-    } else if (action == ConflictAction::KeepBoth) {
-        std::string targetName = newName.empty() ? importedBundledProject.project.metadata.projectName + " (Imported)" : newName;
-        const std::string baseName = EnsureProjectFileNameForKind(
-            std::string(),
-            SanitizeFileStem(targetName) + "_" + std::to_string(std::time(nullptr)),
-            importedBundledProject.project.metadata.projectKind);
-        targetFileName = conflict.pendingCopyFileName;
-        if (targetFileName.empty()) {
-            targetFileName = baseName;
-            unsigned int suffix = 1;
-            while (std::filesystem::exists(m_LibraryPath / targetFileName)) {
-                targetFileName = baseName + "_" + std::to_string(suffix++);
-            }
-            m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopyFileName = targetFileName;
-        }
-
+    } else {
         StackFormat::ProjectDocument doc = importedBundledProject.project;
-        doc.metadata.projectName = targetName;
-        doc.metadata.timestamp = BuildTimestampString();
+        const bool keepBoth = action == ConflictAction::KeepBoth;
+        if (keepBoth) {
+            const std::string targetName = newName.empty()
+                ? doc.metadata.projectName + " (Imported)" : newName;
+            const std::string baseName = EnsureProjectFileNameForKind({},
+                SanitizeFileStem(targetName) + "_" + std::to_string(std::time(nullptr)),
+                doc.metadata.projectKind);
+            targetFileName = conflict.pendingCopyFileName;
+            if (targetFileName.empty()) {
+                targetFileName = baseName;
+                unsigned int suffix = 1;
+                // A free project name does not imply its preview name is free.
+                while (std::filesystem::exists(m_LibraryPath / targetFileName) ||
+                    std::filesystem::exists(BuildAssetPathForProjectFile(targetFileName)))
+                    targetFileName = baseName + "_" + std::to_string(suffix++);
+                m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopyFileName = targetFileName;
+            }
+            doc.metadata.projectName = targetName;
+            doc.metadata.timestamp = BuildTimestampString();
+        } else {
+            targetFileName = EnsureProjectFileNameForKind(conflict.localProjectFileName,
+                SanitizeFileStem(doc.metadata.projectName), doc.metadata.projectKind);
+        }
+        const auto targetProject = m_LibraryPath / targetFileName;
+        const auto ownPreview = BuildAssetPathForProjectFile(targetFileName);
+        std::vector<Stack::Library::ImportAssetDestination> destinations;
+        for (const auto& asset : m_ActiveImportBundle.assets) {
+            if (asset.projectFileName != importedBundledProject.fileName) continue;
+            const auto path = keepBoth ? ownPreview : m_AssetsPath /
+                std::filesystem::path(EnsureAssetFileName(asset.fileName,
+                    std::filesystem::path(targetFileName).stem().string() + ".png")).filename();
+            destinations.push_back({path, &asset.imageBytes, true,
+                !keepBoth && path.lexically_normal() == ownPreview.lexically_normal()});
+        }
+        Stack::Library::LibraryImportPlan plan;
+        std::string error;
+        // Recheck actual destinations when the user makes the choice. Only
+        // Replace grants replacement of this project's own preview; imported
+        // loose images and Keep Both destinations never gain that permission.
+        if (!Stack::Library::PrepareLibraryImportPlan(
+                {{targetProject, !keepBoth || conflict.pendingCopySaved}}, destinations, plan, error))
+            return {ConflictResolutionState::Failed, std::move(error)};
 
-        if (conflict.pendingCopySaved && std::filesystem::exists(m_LibraryPath / targetFileName)) {
+        if (keepBoth && conflict.pendingCopySaved && std::filesystem::exists(targetProject)) {
             StackFormat::ProjectDocument savedCopy;
             StackFormat::ProjectLoadOptions fullLoad {true, true, true};
             if (!LoadProjectDocument(targetFileName, savedCopy, fullLoad) ||
-                !StackFormat::AreProjectsIdentical(savedCopy, doc)) {
-                return {ConflictResolutionState::Failed, "The imported copy changed while waiting. Abort this import and start again."};
-            }
+                !StackFormat::AreProjectsIdentical(savedCopy, doc))
+                return {ConflictResolutionState::Failed,
+                    "The imported copy changed while waiting. Abort this import and start again."};
             resolved = true;
-        } else if (StackFormat::WriteProjectFile(m_LibraryPath / targetFileName, doc, true)) {
-            m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopySaved = true;
+        } else if (StackFormat::WriteProjectFile(targetProject, doc, keepBoth)) {
+            if (keepBoth) m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopySaved = true;
             resolved = true;
         }
-    }
-    if (resolved && action != ConflictAction::Ignore) {
-        for (const auto& asset : m_ActiveImportBundle.assets) {
-            if (asset.projectFileName != importedBundledProject.fileName) continue;
-            const auto assetTarget = action == ConflictAction::KeepBoth
-                ? BuildAssetPathForProjectFile(targetFileName)
-                : m_AssetsPath / std::filesystem::path(EnsureAssetFileName(asset.fileName,
-                    std::filesystem::path(targetFileName).stem().string() + ".png")).filename();
-            if (!WriteFileBytes(assetTarget, asset.imageBytes)) {
-                return { ConflictResolutionState::Failed,
-                    "The project was saved, but its Library preview could not be copied. Check folder access and try again." };
+        if (resolved) {
+            for (const auto& asset : plan.assets) {
+                if (asset.reuse) continue;
+                if (!Stack::FileSave::WriteExportFileAtomically(asset.target,
+                        *destinations[asset.index].bytes, error))
+                    return {ConflictResolutionState::Failed,
+                        "The project was saved, but its Library image could not be copied: " +
+                        error + " Existing unrelated images were kept. Retry or abort this import."};
             }
         }
     }
@@ -376,8 +391,9 @@ void LibraryManager::RequestImportLibraryBundle(const std::string& sourcePath) {
     const auto notifier = m_Notifier;
 
     const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Importing"),[this, generation, sourcePath, activity, notifier]() {
-        const bool success = ImportLibraryBundle(sourcePath);
-        Async::TaskSystem::Get().PostToMain([this, generation, success, activity, notifier]() {
+        std::string importError;
+        const bool success = ImportLibraryBundle(sourcePath, &importError);
+        Async::TaskSystem::Get().PostToMain([this, generation, success, activity, notifier, importError = std::move(importError)]() {
             if (generation != m_ImportGeneration) {
                 return;
             }
@@ -395,8 +411,8 @@ void LibraryManager::RequestImportLibraryBundle(const std::string& sourcePath) {
                 RequestRefreshLibraryAsync();
             } else {
                 m_ImportTaskState = Async::TaskState::Failed;
-                m_ImportStatusText = "Failed to import the library bundle.";
-                notifier.FailActivity(activity, "Could not import the library.");
+                m_ImportStatusText = importError.empty() ? "Failed to import the library bundle." : importError;
+                notifier.FailActivity(activity, "Could not import the library.", m_ImportStatusText);
             }
         });
     });
@@ -483,7 +499,8 @@ bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
     }
 }
 
-bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
+bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath, std::string* errorMessage) {
+    if (errorMessage) errorMessage->clear();
     if (sourcePath.empty()) return false;
 
     try {
@@ -537,12 +554,12 @@ bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
         }
 
         if (conflicts.empty()) {
-            return FinalizeImport(bundle, {});
+            return FinalizeImport(bundle, {}, errorMessage);
         } else {
             // Import unrelated entries now; conflicted project entries wait for a decision.
             std::vector<int> skipped;
             for (const auto& conflict : conflicts) skipped.push_back(conflict.importedProjectIndex);
-            if (!FinalizeImport(bundle, skipped)) return false;
+            if (!FinalizeImport(bundle, skipped, errorMessage)) return false;
             Async::TaskSystem::Get().PostToMain([this, bundle = std::move(bundle), conflicts = std::move(conflicts)]() mutable {
                 ClearConflicts();
                 m_ActiveImportBundle = std::move(bundle);
@@ -558,41 +575,68 @@ bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
     }
 }
 
-bool LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices) {
-    std::error_code ec;
-    std::filesystem::create_directories(m_LibraryPath, ec);
-    if (ec) return false;
-    ec.clear();
-    std::filesystem::create_directories(m_AssetsPath, ec);
-    if (ec) return false;
-
-    for (int i = 0; i < (int)bundle.projects.size(); ++i) {
-        bool skip = false;
-        for (int skipIdx : skippedProjectIndices) {
-            if (i == skipIdx) {
-                skip = true;
-                break;
-            }
-        }
-        if (skip) continue;
-
+bool LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bundle,
+    const std::vector<int>& skippedProjectIndices, std::string* errorMessage) {
+    const auto skipped = [&](std::size_t index) {
+        return std::find(skippedProjectIndices.begin(), skippedProjectIndices.end(),
+            static_cast<int>(index)) != skippedProjectIndices.end();
+    };
+    std::vector<Stack::Library::ImportProjectDestination> projects;
+    for (std::size_t i = 0; i < bundle.projects.size(); ++i) {
         const auto& project = bundle.projects[i];
-        const std::string fileName = EnsureProjectFileNameForKind(
-            project.fileName,
-            SanitizeFileStem(project.project.metadata.projectName),
-            project.project.metadata.projectKind);
-
-        if (!StackFormat::WriteProjectFile(m_LibraryPath / fileName, project.project)) return false;
+        projects.push_back({m_LibraryPath / EnsureProjectFileNameForKind(project.fileName,
+            SanitizeFileStem(project.project.metadata.projectName), project.project.metadata.projectKind), skipped(i)});
+    }
+    std::vector<Stack::Library::ImportAssetDestination> assets;
+    for (const auto& asset : bundle.assets) {
+        const std::string fallback = std::filesystem::path(asset.projectFileName.empty()
+            ? "imported_asset" : asset.projectFileName).stem().string() + ".png";
+        Stack::Library::ImportAssetDestination destination;
+        destination.path = m_AssetsPath /
+            std::filesystem::path(EnsureAssetFileName(asset.fileName, fallback)).filename();
+        destination.bytes = &asset.imageBytes;
+        for (std::size_t i = 0; i < bundle.projects.size(); ++i) {
+            if (!skipped(i) || bundle.projects[i].fileName != asset.projectFileName) continue;
+            destination.deferred = true;
+            // A project Replace decision may replace only its own preview,
+            // never an unrelated loose image named by a bundle entry.
+            destination.projectPreviewReplacement = destination.path.lexically_normal() ==
+                BuildAssetPathForProjectFile(projects[i].path.filename().string()).lexically_normal();
+            break;
+        }
+        assets.push_back(std::move(destination));
+    }
+    Stack::Library::LibraryImportPlan plan;
+    std::string error;
+    if (!Stack::Library::PrepareLibraryImportPlan(projects, assets, plan, error)) {
+        if (errorMessage) *errorMessage = std::move(error);
+        return false;
     }
 
-    for (const auto& asset : bundle.assets) {
-        const bool waitingForProject = std::any_of(skippedProjectIndices.begin(), skippedProjectIndices.end(),
-            [&](int index) { return index >= 0 && index < static_cast<int>(bundle.projects.size()) &&
-                bundle.projects[static_cast<std::size_t>(index)].fileName == asset.projectFileName; });
-        if (waitingForProject) continue;
-        const std::string fallbackName = std::filesystem::path(asset.projectFileName.empty() ? "imported_asset" : asset.projectFileName).stem().string() + ".png";
-        const std::string fileName = EnsureAssetFileName(asset.fileName, fallbackName);
-        if (!WriteFileBytes(m_AssetsPath / std::filesystem::path(fileName).filename(), asset.imageBytes)) return false;
+    // Collision decisions above are read-only. Failures from this point can
+    // leave successfully imported entries; do not describe a bundle transaction.
+    const auto writeFailure = [&](const std::filesystem::path& path, const std::string& reason) {
+        if (errorMessage) *errorMessage = "Import could not finish writing " + path.filename().u8string() +
+            ": " + reason + " Earlier successfully imported entries remain in the Library.";
+        return false;
+    };
+    std::error_code ec;
+    std::filesystem::create_directories(m_LibraryPath, ec);
+    if (ec) return writeFailure(m_LibraryPath, ec.message());
+    std::filesystem::create_directories(m_AssetsPath, ec);
+    if (ec) return writeFailure(m_AssetsPath, ec.message());
+    for (std::size_t i = 0; i < projects.size(); ++i) {
+        if (projects[i].deferred) continue;
+        // A new project created since preflight is not implicit replacement
+        // permission. Existing projects still use the conflict decision flow.
+        if (!StackFormat::WriteProjectFile(projects[i].path, bundle.projects[i].project, true))
+            return writeFailure(projects[i].path, "The new project destination could not be claimed.");
+    }
+    for (const auto& asset : plan.assets) {
+        if (asset.deferred || asset.reuse) continue;
+        if (!Stack::FileSave::WriteExportFileAtomically(asset.target,
+                bundle.assets[asset.index].imageBytes, error))
+            return writeFailure(asset.target.approval.path, error);
     }
     return true;
 }

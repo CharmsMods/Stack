@@ -652,6 +652,14 @@ if(BUILD_TESTING)
     target_link_libraries(StackLibraryStorageWriteTests PRIVATE Threads::Threads)
     add_test(NAME StackPersistence.LibraryWrites COMMAND StackLibraryStorageWriteTests)
     set_tests_properties(StackPersistence.LibraryWrites PROPERTIES LABELS "persistence;library;cpu" TIMEOUT 30)
+    add_executable(StackLibraryImportPlanTests
+        tools/tests/library_import_plan_tests.cpp
+        src/Library/Internal/LibraryImportPlan.cpp
+        src/Utils/AtomicExportFile.cpp)
+    target_include_directories(StackLibraryImportPlanTests PRIVATE src)
+    target_link_libraries(StackLibraryImportPlanTests PRIVATE Threads::Threads)
+    add_test(NAME StackPersistence.LibraryImportPlan COMMAND StackLibraryImportPlanTests)
+    set_tests_properties(StackPersistence.LibraryImportPlan PROPERTIES LABELS "persistence;library;cpu" TIMEOUT 30)
     add_executable(StackAtomicExportFileTests
         tools/tests/atomic_export_file_tests.cpp
         src/Utils/AtomicExportFile.cpp)
