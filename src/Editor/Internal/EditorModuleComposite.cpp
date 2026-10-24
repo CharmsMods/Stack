@@ -1,5 +1,6 @@
 #include "Editor/CompositePersistence.h"
 #include "Editor/CompositeExportPolicy.h"
+#include "Editor/CompositeRasterSafety.h"
 #include "Editor/EditorModule.h"
 
 #include "Library/LibraryManager.h"
@@ -188,10 +189,11 @@ void AlphaBlendPixel(
     int dstX,
     int dstY,
     const unsigned char* srcPixel) {
-    if (!srcPixel || dstX < 0 || dstY < 0 || dstW <= 0) {
+    if (!srcPixel || dstX < 0 || dstY < 0 || dstW <= 0 || dstX >= dstW) {
         return;
     }
-    const size_t dstIndex = static_cast<size_t>((dstY * dstW + dstX) * 4);
+    const size_t dstIndex = Stack::EditorRendering::CompositeRgbaOffset(dstW, dstX, dstY);
+    if (dstIndex > dstPixels.size() || dstPixels.size() - dstIndex < 4u) return;
     const float srcA = static_cast<float>(srcPixel[3]) / 255.0f;
     if (srcA <= 0.0f) {
         return;
@@ -1336,17 +1338,21 @@ void EditorModule::UpdateCompositeCustomExportAspectFromBounds() {
 void EditorModule::SyncCompositeExportResolutionFromWidth() {
     m_CompositeExportSettings.outputWidth = std::max(1, m_CompositeExportSettings.outputWidth);
     const float ratio = GetCurrentCompositeExportAspectRatio();
-    m_CompositeExportSettings.outputHeight = std::max(
-        1,
-        static_cast<int>(std::round(static_cast<float>(m_CompositeExportSettings.outputWidth) / std::max(0.0001f, ratio))));
+    int height = 0;
+    if (Stack::EditorRendering::TryResolveCompositePairedDimension(
+            m_CompositeExportSettings.outputWidth, ratio, true, height)) {
+        m_CompositeExportSettings.outputHeight = height;
+    }
 }
 
 void EditorModule::SyncCompositeExportResolutionFromHeight() {
     m_CompositeExportSettings.outputHeight = std::max(1, m_CompositeExportSettings.outputHeight);
     const float ratio = GetCurrentCompositeExportAspectRatio();
-    m_CompositeExportSettings.outputWidth = std::max(
-        1,
-        static_cast<int>(std::round(static_cast<float>(m_CompositeExportSettings.outputHeight) * std::max(0.0001f, ratio))));
+    int width = 0;
+    if (Stack::EditorRendering::TryResolveCompositePairedDimension(
+            m_CompositeExportSettings.outputHeight, ratio, false, width)) {
+        m_CompositeExportSettings.outputWidth = width;
+    }
 }
 
 EditorModule::CompositeFloatRect EditorModule::GetCompositeViewWorldRect(const ImVec2& canvasSize) const {
@@ -1369,7 +1375,10 @@ void EditorModule::UseCompositeViewAsExportBounds(const ImVec2& canvasSize) {
     m_CompositeExportSettings.customHeight = viewRect.height;
     m_CompositeExportSettings.aspectPreset = CompositeExportAspectPreset::Custom;
     UpdateCompositeCustomExportAspectFromBounds();
-    m_CompositeExportSettings.outputWidth = std::max(1, static_cast<int>(std::round(std::max(1.0f, canvasSize.x))));
+    int width = 0;
+    if (Stack::EditorRendering::TryRoundCompositeDimension(canvasSize.x, width)) {
+        m_CompositeExportSettings.outputWidth = width;
+    }
     SyncCompositeExportResolutionFromWidth();
 }
 
@@ -1410,7 +1419,7 @@ bool EditorModule::ValidateCompositePngExport(std::string& error) {
     return true;
 }
 
-bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) {
+bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) try {
     outPixels.clear();
     outW = 0;
     outH = 0;
@@ -1432,12 +1441,11 @@ bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPix
         return false;
     }
 
-    outW = std::max(1, m_CompositeExportSettings.outputWidth);
-    outH = std::max(
-        1,
-        static_cast<int>(std::round(static_cast<float>(outW) / std::max(0.0001f, RectAspectRatio(worldBounds)))));
-
-    outPixels.assign(static_cast<size_t>(outW * outH * 4), 0);
+    Stack::EditorRendering::CompositeRasterSize size;
+    if (!IsValidRect(worldBounds) ||
+        !Stack::EditorRendering::TryPlanCompositeRaster(
+            m_CompositeExportSettings.outputWidth, worldBounds.width, worldBounds.height, size) ||
+        !Stack::EditorRendering::TryAllocateCompositeRaster(size, outPixels, outW, outH)) return false;
     if (m_CompositeExportSettings.backgroundMode == CompositeExportBackgroundMode::Solid) {
         const unsigned char bgR = static_cast<unsigned char>(std::round(Clamp01(m_CompositeExportSettings.backgroundColor[0]) * 255.0f));
         const unsigned char bgG = static_cast<unsigned char>(std::round(Clamp01(m_CompositeExportSettings.backgroundColor[1]) * 255.0f));
@@ -1445,7 +1453,7 @@ bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPix
         const unsigned char bgA = static_cast<unsigned char>(std::round(Clamp01(m_CompositeExportSettings.backgroundColor[3]) * 255.0f));
         for (int y = 0; y < outH; ++y) {
             for (int x = 0; x < outW; ++x) {
-                const size_t index = static_cast<size_t>((y * outW + x) * 4);
+                const size_t index = Stack::EditorRendering::CompositeRgbaOffset(outW, x, y);
                 outPixels[index + 0] = bgR;
                 outPixels[index + 1] = bgG;
                 outPixels[index + 2] = bgB;
@@ -1462,34 +1470,52 @@ bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPix
             continue;
         }
 
+        if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+                item->rgbaPixels.size(), item->textureWidth, item->textureHeight, 4)) {
+            outPixels.clear();
+            outW = outH = 0;
+            return false;
+        }
         const AffineTransform2D inverse = Inverse(BuildSceneTransform(*item));
         const CompositeFloatRect itemBounds = QuadBounds(ComputeSceneQuadWorld(*item));
-        const int minX = std::max(0, static_cast<int>(std::floor(((itemBounds.x - worldBounds.x) / std::max(0.0001f, worldBounds.width)) * outW)));
-        const int maxX = std::min(outW - 1, static_cast<int>(std::ceil((((itemBounds.x + itemBounds.width) - worldBounds.x) / std::max(0.0001f, worldBounds.width)) * outW)));
-        const int minY = std::max(0, static_cast<int>(std::floor(((itemBounds.y - worldBounds.y) / std::max(0.0001f, worldBounds.height)) * outH)));
-        const int maxY = std::min(outH - 1, static_cast<int>(std::ceil((((itemBounds.y + itemBounds.height) - worldBounds.y) / std::max(0.0001f, worldBounds.height)) * outH)));
+        int minX = 0, maxX = -1, minY = 0, maxY = -1;
+        if (!Stack::EditorRendering::TryCompositeRasterSpan(itemBounds.x,
+                static_cast<double>(itemBounds.x) + itemBounds.width, worldBounds.x, worldBounds.width,
+                outW, minX, maxX) ||
+            !Stack::EditorRendering::TryCompositeRasterSpan(itemBounds.y,
+                static_cast<double>(itemBounds.y) + itemBounds.height, worldBounds.y, worldBounds.height,
+                outH, minY, maxY)) continue;
 
         for (int dstY = minY; dstY <= maxY; ++dstY) {
             const float worldY = worldBounds.y + (static_cast<float>(dstY) + 0.5f) * worldStepY;
             for (int dstX = minX; dstX <= maxX; ++dstX) {
                 const float worldX = worldBounds.x + (static_cast<float>(dstX) + 0.5f) * worldStepX;
                 const ImVec2 local = TransformPoint(inverse, ImVec2(worldX, worldY));
-                if (local.x < 0.0f ||
+                if (!std::isfinite(local.x) || !std::isfinite(local.y) ||
+                    local.x < 0.0f ||
                     local.y < 0.0f ||
-                    local.x >= static_cast<float>(item->textureWidth) ||
-                    local.y >= static_cast<float>(item->textureHeight)) {
+                    static_cast<double>(local.x) >= item->textureWidth ||
+                    static_cast<double>(local.y) >= item->textureHeight) {
                     continue;
                 }
 
                 const int srcX = std::clamp(static_cast<int>(std::floor(local.x)), 0, item->textureWidth - 1);
                 const int srcY = std::clamp(static_cast<int>(std::floor(local.y)), 0, item->textureHeight - 1);
-                const size_t srcIndex = static_cast<size_t>((srcY * item->textureWidth + srcX) * 4);
+                const size_t srcIndex = Stack::EditorRendering::CompositeRgbaOffset(item->textureWidth, srcX, srcY);
                 AlphaBlendPixel(outPixels, outW, dstX, dstY, item->rgbaPixels.data() + srcIndex);
             }
         }
     }
 
     return !outPixels.empty();
+} catch (const std::bad_alloc&) {
+    outPixels.clear();
+    outW = outH = 0;
+    return false;
+} catch (const std::length_error&) {
+    outPixels.clear();
+    outW = outH = 0;
+    return false;
 }
 
 EditorModule::CompositeSnapModePreset EditorModule::GetCompositeSnapModePreset() const {
