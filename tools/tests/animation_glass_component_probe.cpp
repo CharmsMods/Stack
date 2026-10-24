@@ -35,6 +35,86 @@ extern "C" {void (*eglGetProcAddress(const char*))(void);
     unsigned eglTerminate(void*);
     GLFWglproc glfwGetProcAddress(const char* name){return eglGetProcAddress(name);
 }}
+namespace {
+// One immutable pre-object capture must not recursively include either neighbor.
+// This isolated case reuses the existing ImGui/EGL context and framebuffer.
+void CheckSharedBackdropCapture(GLuint framebuffer) {
+    constexpr int width=640, height=360;
+    Stack::Renderer::GlassChrome renderer;
+    const ImVec4 tint(.09f,.12f,.15f,1.f);
+    const auto palette=Stack::Header::ResolvePalette(tint);
+    enum class Feature { None, Near, Far };
+    auto render=[&](bool reverse, Feature feature) {
+        renderer.BeginFrame(true);
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        auto* background=ImGui::GetBackgroundDrawList();
+        background->AddRectFilled({0,0},{width,height},IM_COL32(245,245,247,255));
+        if (feature!=Feature::None) {
+            // Near is outside the left silhouette but inside its16px capture
+            // apron. Far is outside the shared padded capture entirely.
+            const float x=feature==Feature::Near ? 247.f : 210.f;
+            background->AddRectFilled({x,90},{x+2,128},IM_COL32(255,32,200,255));
+        }
+        ImGui::SetNextWindowPos({0,0});
+        ImGui::SetNextWindowSize({width,height});
+        ImGui::Begin("Shared capture regression",nullptr,
+            ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
+            ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoInputs);
+        auto* draw=ImGui::GetWindowDrawList();
+        draw->PushClipRect({0,0},{width,height},false);
+        assert(renderer.AddBackdrop(draw,{250,90},{332,128},tint));
+        for (int i=0;i<2;++i) {
+            const int object=reverse ? 1-i : i;
+            const ImVec2 min(250.f+44.f*object,90),max(288.f+44.f*object,128);
+            Stack::Navigation::GlassObjectBacking(draw,min,max,19,palette);
+            assert(renderer.AddObject(draw,min,max,tint,19,1.f,
+                Stack::Renderer::GlassChrome::MaterialRole::NavigationControl));
+        }
+        draw->PopClipRect();
+        ImGui::End();
+        ImGui::Render();
+        glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);
+        glViewport(0,0,width,height);
+        glClearColor(0,0,0,1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        std::vector<unsigned char> pixels(width*height*4);
+        glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+        assert(renderer.Error().empty()&&glGetError()==GL_NO_ERROR);
+        for (std::size_t i=3;i<pixels.size();i+=4) assert(pixels[i]==255);
+        return pixels;
+    };
+    render(false,Feature::None); // Establish the fixed window before comparisons.
+    const auto forward=render(false,Feature::None);
+    const auto reverse=render(true,Feature::None);
+    const auto near=render(false,Feature::Near);
+    const auto far=render(false,Feature::Far);
+    std::size_t nearChangedBodyPixels=0;
+    for (int y=75;y<145;++y) for (int x=234;x<348;++x) {
+        const std::size_t offset=((height-1-y)*width+x)*4;
+        // Exactness is scoped to this six-pixel-gap fixture, not arbitrary
+        // overlapping optical objects or differently colored shadows.
+        for (int c=0;c<4;++c) assert(forward[offset+c]==reverse[offset+c]);
+        const float dx=std::min(std::abs(x+.5f-269.f),std::abs(x+.5f-313.f));
+        const float dy=y+.5f-109.f;
+        if (dx*dx+dy*dy<18.f*18.f) { // Exclude the silhouette's antialias fringe.
+            bool changed=false;
+            for (int c=0;c<3;++c) {
+                assert(forward[offset+c]==far[offset+c]);
+                changed|=forward[offset+c]!=near[offset+c];
+            }
+            nearChangedBodyPixels+=changed ? 1 : 0;
+        }
+    }
+    assert(nearChangedBodyPixels>0);
+    renderer.Shutdown();
+    assert(glGetError()==GL_NO_ERROR);
+    std::cout<<"PASS shared capture: reversed pair crop exact, near apron feature changes "
+        <<nearChangedBodyPixels<<" body pixels, far feature leaves body unchanged\n";
+}
+} // namespace
+
 int main(int argc,char** argv){assert(argc==2);
     std::string folder=argv[1];
     setenv("LIBGL_ALWAYS_SOFTWARE","true",1);
@@ -392,6 +472,8 @@ int main(int argc,char** argv){assert(argc==2);
     assert(visualWidth.Value()==40&&visualElevation.Value()==1&&sliderValue==1);
     save("velocity-reduced-motion");
     std::cout<<"PASS opt-in glass width/elevation velocity handoff, regrab/cancel, reduced motion; native slider value/position/hitbox unchanged\n";
+
+    CheckSharedBackdropCapture(fbo);
 
     sliderGlass.Shutdown();
     glass.Shutdown();
