@@ -86,7 +86,13 @@ void main() {
         float sum=q.x+q.y;
         float smoothing=-2.0*q.x*q.y/sum;
         vec2 smoothingGradient=-2.0*vec2(q.y*q.y,q.x*q.x)/(sum*sum);
-        if (smoothing>bevel*.4) { smoothing=bevel*.4; smoothingGradient=vec2(0.0); }
+        // C1 saturation: the old hard cap jumped the normal derivative at
+        // 0.4*bevel, causing a subpixel refraction snap during rail reveal.
+        if (smoothing>bevel*.3) {
+            float t=clamp((smoothing-bevel*.3)/(bevel*.2),0.0,1.0);
+            smoothing=bevel*(.3+.2*(t-.5*t*t));
+            smoothingGradient*=1.0-t;
+        }
         float blend=clamp(.5+.5*(q.x-q.y)/smoothing,0.0,1.0);
         distance=mix(q.y,q.x,blend)+smoothing*blend*(1.0-blend)-r;
         gradient=vec2(blend,1.0-blend)+smoothingGradient*blend*(1.0-blend);
