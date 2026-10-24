@@ -649,6 +649,11 @@ if(BUILD_TESTING)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
     include(cmake/StackLibraryProjectExportTests.cmake)
+    add_executable(StackLibraryFileReadTests tools/tests/library_file_read_tests.cpp
+        src/Library/Internal/LibraryFileRead.cpp)
+    target_include_directories(StackLibraryFileReadTests PRIVATE src)
+    add_test(NAME StackLibrary.FileRead COMMAND StackLibraryFileReadTests)
+    set_tests_properties(StackLibrary.FileRead PROPERTIES LABELS "library;io;cpu" TIMEOUT 30)
     add_executable(StackLibraryAssetExportTests tools/tests/library_asset_export_tests.cpp
         src/Library/Internal/LibraryAssetExport.cpp src/Utils/AtomicExportFile.cpp)
     target_include_directories(StackLibraryAssetExportTests PRIVATE src)

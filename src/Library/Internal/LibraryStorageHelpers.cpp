@@ -253,24 +253,6 @@ bool ShouldQueueAssetConflict(
     return hashDistance <= 4 || (hashDistance <= 8 && nameScore >= 0.55f);
 }
 
-bool ReadFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& outBytes) {
-    outBytes.clear();
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) return false;
-
-    file.seekg(0, std::ios::end);
-    const std::streamoff size = file.tellg();
-    if (size < 0) return false;
-    file.seekg(0, std::ios::beg);
-
-    outBytes.resize(static_cast<std::size_t>(size));
-    if (!outBytes.empty()) {
-        file.read(reinterpret_cast<char*>(outBytes.data()), size);
-    }
-
-    return file.good() || file.eof();
-}
-
 std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl) {
     if (dataUrl.empty()) return {};
     size_t commaPos = dataUrl.find(',');
