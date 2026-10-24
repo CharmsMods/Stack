@@ -63,12 +63,10 @@ inline void DrawGlassControlFeedback(const ImRect& rect, const GlassControlState
     // Quiet feedback sits above each independent optical object.
     const float neutral = palette.text.x*.2126f + palette.text.y*.7152f + palette.text.z*.0722f;
     ImVec4 wash(neutral,neutral,neutral,palette.text.w);
-    wash.w *= .09f*hover + .12f*selection + .065f*press;
-    // A low-opacity outer shoulder softens the hover without another material
-    // pass. The visual compresses on press; the original item rectangle does not.
-    ImVec4 shoulder = wash; shoulder.w *= .25f;
-    draw->AddRectFilled(ImVec2(min.x-scale,min.y-scale),
-        ImVec2(max.x+scale,max.y+scale),ImGui::GetColorU32(shoulder),.5f*std::min(max.x-min.x+2.f*scale,max.y-min.y+2.f*scale));
+    // One restrained response layer preserves the optical surface underneath.
+    // Hover remains visible on selected controls; pressure already changes the
+    // shared optical elevation and glyph, so it needs only a small ink response.
+    wash.w *= std::min(.125f,.06f*hover + .04f*selection + .025f*press);
     draw->AddRectFilled(min,max,ImGui::GetColorU32(wash),.5f*std::min(max.x-min.x,max.y-min.y));
     if (selection > .001f) {
         ImVec4 mark(neutral,neutral,neutral,palette.text.w*.8f*selection);
