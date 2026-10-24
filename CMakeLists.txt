@@ -649,6 +649,12 @@ if(BUILD_TESTING)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
     include(cmake/StackLibraryProjectExportTests.cmake)
+    add_executable(StackLibraryNewAssetWriteTests tools/tests/library_new_asset_write_tests.cpp
+        src/Library/Internal/LibraryNewAssetWrite.cpp src/Utils/AtomicExportFile.cpp)
+    target_include_directories(StackLibraryNewAssetWriteTests PRIVATE src)
+    target_link_libraries(StackLibraryNewAssetWriteTests PRIVATE Threads::Threads)
+    add_test(NAME StackLibrary.NewAssetWrite COMMAND StackLibraryNewAssetWriteTests)
+    set_tests_properties(StackLibrary.NewAssetWrite PROPERTIES LABELS "library;import;cpu" TIMEOUT 30)
     include(cmake/StackGraphClipboardImageTests.cmake)
     add_executable(StackLutGridOrderTests tools/tests/lut_grid_order_tests.cpp
         src/Color/LutImporter.cpp src/Color/LutCreator.cpp src/ThirdParty/stb_image_impl.cpp)

@@ -6,6 +6,7 @@
 #include "Library/Internal/LibraryStorageHelpers.h"
 #include "Library/Internal/LibraryImportPlan.h"
 #include "Library/Internal/LibraryProjectExport.h"
+#include "Library/Internal/LibraryNewAssetWrite.h"
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
@@ -765,11 +766,19 @@ void LibraryManager::RequestImportAndLoad(
     }
 
     if (IsSupportedAssetExtension(path)) {
-        const std::string fileName = EnsureAssetFileName(path.filename().string(), path.filename().string());
-        std::error_code ec;
-        std::filesystem::copy_file(path, m_AssetsPath / fileName, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            m_ImportStatusText = "Failed to copy image to library: " + ec.message();
+        const std::string fileName = path.filename().u8string();
+        std::filesystem::path published;
+        std::string error;
+        bool imported = false;
+        try {
+            std::vector<unsigned char> bytes;
+            if (!ReadFileBytes(path, bytes)) error = "The dropped image could not be read.";
+            else imported = Stack::Library::WriteNewLibraryAsset(m_AssetsPath, fileName, bytes, published, error);
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        if (!imported) {
+            m_ImportStatusText = "Failed to import image to Library: " + error;
             m_ImportTaskState = Async::TaskState::Failed;
             PostNotification(UiNotificationSeverity::Error, m_ImportStatusText, "library-import-asset");
             return;
@@ -777,10 +786,13 @@ void LibraryManager::RequestImportAndLoad(
 
         m_LastLibrarySignature = 0;
         RequestRefreshLibraryAsync();
-
+        if (published.filename() != std::filesystem::u8path(fileName)) {
+            PostNotification(UiNotificationSeverity::Info,
+                "Existing image kept. Imported as " + published.filename().u8string(), "library-import-asset");
+        }
         if (editor) {
             if (onTabSwitchRequested) onTabSwitchRequested(1);
-            editor->RequestLoadSourceImage((m_AssetsPath / fileName).string());
+            editor->RequestLoadSourceImage(published.string());
         }
         return;
     }

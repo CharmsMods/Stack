@@ -3,6 +3,7 @@
 #include "Async/TaskSystem.h"
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Library/Internal/LibraryStorageHelpers.h"
+#include "Library/Internal/LibraryNewAssetWrite.h"
 #include "Library/TagManager.h"
 #include "Renderer/GLHelpers.h"
 
@@ -78,16 +79,6 @@ ConflictResolutionResult LibraryManager::ResolveAssetConflict(std::uint64_t id, 
     auto conflict = m_PendingAssetConflicts[static_cast<std::size_t>(index)];
     bool resolved = false;
 
-    auto buildUniqueAssetFileName = [this](const std::string& preferredStem) {
-        const std::string safeStem = SanitizeFileStem(preferredStem.empty() ? "imported_asset" : preferredStem);
-        std::string candidate = safeStem + ".png";
-        int suffix = 1;
-        while (std::filesystem::exists(m_AssetsPath / candidate)) {
-            candidate = safeStem + "_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(suffix++) + ".png";
-        }
-        return candidate;
-    };
-
     try {
     if (action == AssetConflictAction::UseExisting) {
         resolved = true;
@@ -96,8 +87,12 @@ ConflictResolutionResult LibraryManager::ResolveAssetConflict(std::uint64_t id, 
     } else if (action == AssetConflictAction::KeepBoth) {
         const std::string baseStem = std::filesystem::path(
             conflict.importedAssetFileName.empty() ? conflict.importedDisplayName : conflict.importedAssetFileName).stem().string();
-        const std::string targetFileName = buildUniqueAssetFileName(baseStem);
-        resolved = WriteFileBytes(m_AssetsPath / targetFileName, conflict.importedImageBytes);
+        std::filesystem::path published;
+        std::string error;
+        resolved = Stack::Library::WriteNewLibraryAsset(m_AssetsPath,
+            SanitizeFileStem(baseStem.empty() ? "imported_asset" : baseStem) + ".png",
+            conflict.importedImageBytes, published, error);
+        if (!resolved) return { ConflictResolutionState::Failed, error };
     }
     } catch (const std::exception& error) {
         return { ConflictResolutionState::Failed, std::string("Could not save the imported asset. ") + error.what() };
@@ -438,15 +433,11 @@ void LibraryManager::QueueLooseAssetSave(
             return;
         }
 
-        std::string targetFileName = resolvedPreferredFileName;
-        int suffix = 1;
-        while (std::filesystem::exists(m_AssetsPath / targetFileName)) {
-            targetFileName = SanitizeFileStem(std::filesystem::path(resolvedPreferredFileName).stem().string())
-                + "_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(suffix++) + ".png";
-        }
-
-        if (!WriteFileBytes(m_AssetsPath / targetFileName, imageBytes)) {
-            notifier.FailActivity(activity, "Could not save the imported image.");
+        std::filesystem::path published;
+        std::string error;
+        if (!Stack::Library::WriteNewLibraryAsset(m_AssetsPath, resolvedPreferredFileName,
+                imageBytes, published, error)) {
+            notifier.FailActivity(activity, "Could not save the imported image.", error);
             return;
         }
 
