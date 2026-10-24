@@ -3022,6 +3022,15 @@ void AppShell::RenderUI() {
                 m_WorkspaceCompositor.KeepChrome(headerWindow->DrawList);
             }
     }
+    // Keep shared glass capture ahead of its sibling toggle even while a popup
+    // suppresses front-raising. This changes only their relative display order,
+    // so menus remain above both and first-frame popup ordering is safe too.
+    if (m_Appearance && m_Appearance->GetGlassChromeEnabled()) {
+        auto* railWindow=ImGui::FindWindowByName("StackNavigationRail");
+        auto* toggleWindow=ImGui::FindWindowByName("StackPanelToggle");
+        if (railWindow && toggleWindow)
+            ImGui::BringWindowToDisplayBehind(railWindow,toggleWindow);
+    }
     if(bracketPresentation) {
         if(glfwGetWindowAttrib(m_Window,GLFW_ICONIFIED)!=GLFW_TRUE)
             m_Editor->RenderBracketingPresentation(

@@ -137,6 +137,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     ImGui::Begin("StackNavigationRail", nullptr, ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground |
+        (glassRail ? ImGuiWindowFlags_NoBringToFrontOnFocus : ImGuiWindowFlags_None) |
         (rail.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     auto* draw = ImGui::GetWindowDrawList();
     if (glassRail) {
