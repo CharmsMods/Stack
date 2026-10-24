@@ -151,8 +151,14 @@ void main() {
     // directional rather than drawing a constant white perimeter stroke.
     float upper=max(normal.y,0.0);
     float upper2=upper*upper;
-    float upperReflection=upper2*upper2*(.10+.22*grazing);
-    material+=vec3(.94,.97,1.0)*(glint+upperReflection);
+    float upperReflection=.08*upper2*upper2*(1.0-grazing);
+    // A distant broad light reflected at a grazing angle produces a curved
+    // edge crest, not a painted perimeter. The lower arc catches more of this
+    // environment than the top; the key light still illuminates the upper face.
+    float reflectedBand=1.0-smoothstep(.08,.28,abs(reflected.z+.88));
+    float edgeReflection=reflectedBand*grazing*(.035+.10*max(normal.x,0.0)
+        +.14*max(-normal.y,0.0));
+    material+=vec3(.94,.97,1.0)*(glint+upperReflection+edgeReflection);
     // Keep upstream's static dither at sub-code-value strength, not visible frost.
     material+=vec3((rand(gl_FragCoord.xy)-.5)/255.0);
     float alpha=coverage+(1.0-coverage)*shadow;
