@@ -135,6 +135,15 @@ ExportResult BuildExport(
         }
 
         EditorNodeGraph::Node nodeCopy = includeState ? *sourceNode : MakeTreeOnlyNode(*sourceNode);
+        // Clipboard/export data must travel without the source project's asset
+        // store. Only detach references when the existing copy owns image data;
+        // a reference-only source stays identifiable so paste can reject it.
+        if (includeState && nodeCopy.kind == EditorNodeGraph::NodeKind::Image &&
+            (!nodeCopy.image.pngBytes.empty() || !nodeCopy.image.pixels.empty() ||
+             (nodeCopy.image.sharedPixels && !nodeCopy.image.sharedPixels->empty()))) {
+            nodeCopy.image.managedAssetId.clear();
+            nodeCopy.image.projectAssetPath.clear();
+        }
         if (nodeCopy.kind == EditorNodeGraph::NodeKind::Layer) {
             nodeCopy.layerIndex = static_cast<int>(layerArray.size());
             layerArray.push_back(nodeCopy.layerParameters);

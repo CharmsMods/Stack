@@ -424,6 +424,22 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
     EditorNodeGraph::Graph tempGraph;
     EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(layerArray.size()));
 
+    // A clipboard has no project asset store to hydrate references from. Reject
+    // missing/undecodable managed data before constructing any document edit.
+    // Empty tree-only images and async placeholders retain their prior behavior.
+    for (auto& node : tempGraph.EditNodes()) {
+        if (node.kind != EditorNodeGraph::NodeKind::Image) continue;
+        if ((!node.image.managedAssetId.empty() || !node.image.projectAssetPath.empty()) &&
+            (node.image.width <= 0 || node.image.height <= 0 || node.image.pixels.empty())) {
+            if (outSummary) *outSummary = "An image references a project asset without embedded image data. Copy it again from the source project after the image has loaded.";
+            return false;
+        }
+        // Even older clipboard data with both bytes and references must become
+        // an independent image in the destination project.
+        node.image.managedAssetId.clear();
+        node.image.projectAssetPath.clear();
+    }
+
     std::vector<int> syntheticOutputNodeIds;
     for (const EditorNodeGraph::Node& node : tempGraph.GetNodes()) {
         if (node.kind == EditorNodeGraph::NodeKind::Output &&
