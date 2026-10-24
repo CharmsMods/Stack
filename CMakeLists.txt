@@ -648,6 +648,7 @@ if(BUILD_TESTING)
     include(cmake/StackOutputTextureStatsCacheTests.cmake)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
+    include(cmake/StackLibraryProjectExportTests.cmake)
     include(cmake/StackGraphClipboardImageTests.cmake)
     add_executable(StackLutGridOrderTests tools/tests/lut_grid_order_tests.cpp
         src/Color/LutImporter.cpp src/Color/LutCreator.cpp src/ThirdParty/stb_image_impl.cpp)

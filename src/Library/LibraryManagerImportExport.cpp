@@ -5,6 +5,7 @@
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Library/Internal/LibraryStorageHelpers.h"
 #include "Library/Internal/LibraryImportPlan.h"
+#include "Library/Internal/LibraryProjectExport.h"
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
@@ -186,26 +187,15 @@ void LibraryManager::ResetConflictPreview(int index) {
 
 bool LibraryManager::ExportProject(const std::string& fileName, const std::string& destinationPath) {
     if (fileName.empty() || destinationPath.empty()) return false;
-
-    try {
-        const std::filesystem::path sourcePath = m_LibraryPath / fileName;
-        if (!std::filesystem::exists(sourcePath)) {
-            PostNotification(UiNotificationSeverity::Error, "The project to export is no longer available.", "library-export-project");
-            return false;
-        }
-
-        const std::filesystem::path destination = destinationPath;
-        if (destination.has_parent_path()) {
-            std::filesystem::create_directories(destination.parent_path());
-        }
-
-        std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::overwrite_existing);
-        PostNotification(UiNotificationSeverity::Success, "Project exported.", "library-export-project");
-        return true;
-    } catch (...) {
-        PostNotification(UiNotificationSeverity::Error, "Failed to export the project.", "library-export-project");
+    std::string error;
+    if (!Stack::Library::ExportPortableProject(m_LibraryPath / fileName,
+            std::filesystem::u8path(destinationPath), error)) {
+        PostNotification(UiNotificationSeverity::Error,
+            error.empty() ? "Failed to export the project." : error, "library-export-project");
         return false;
     }
+    PostNotification(UiNotificationSeverity::Success, "Project exported.", "library-export-project");
+    return true;
 }
 
 void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPath) {
