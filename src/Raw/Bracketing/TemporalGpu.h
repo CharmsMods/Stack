@@ -4,9 +4,27 @@
 
 namespace Raw::Bracketing {
 // Prepared-session owner. CPU correspondence is authoritative; GPU buffers
-// exist only while combining a tile and retire through the context executor.
+// are leased per tile and may be reused only within an active operation.
 class TemporalGpu {
 public:
+    // The owner must outlive the scope. Finish joins no workers: callers must
+    // finish their tile work first. Destruction drains on exceptional exits.
+    class Operation {
+    public:
+        explicit Operation(TemporalGpu&);
+        ~Operation();
+        Operation(const Operation&)=delete;
+        Operation& operator=(const Operation&)=delete;
+        bool Finish(std::string& error);
+    private:
+        TemporalGpu* owner_;
+    };
+    struct WorkspaceStats {
+        std::uint64_t residentBytes=0,peakBytes=0,allocations=0,reuses=0;
+        std::size_t activeOperations=0;
+        bool idle=false;
+    };
+    WorkspaceStats Workspaces() const;
     explicit TemporalGpu(const ProcessingRequest&);
     ~TemporalGpu();
     bool Available() const;

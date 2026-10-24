@@ -72,6 +72,9 @@ for comparison, and keep the original RAW inputs unchanged.
 - A measured pyramid-index optimization regression was removed. Residual-buffer
   reuse reduced allocation calls in one controlled fixture, but timing overlapped.
   Redundant later-group GPU status readbacks and reference staging were removed.
+  Operation-scoped exact-layout GPU buffer reuse passed fresh-data, bounded-memory,
+  concurrent-worker, cancellation and cleanup-failure checks on software Mesa.
+  It reduces allocation calls, not intermediate image transfers or disk caching.
   No end-to-end speedup or real-camera image-quality improvement is established.
 - Full Windows build and user-selected capture testing remain outstanding. The
   full `Process` integration check was blocked by unavailable OpenCV development

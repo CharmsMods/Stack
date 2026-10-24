@@ -117,7 +117,11 @@ persistence and analysis invalidation.
 Capture combining uses the prepared-session [TemporalGpu](../../src/Raw/Bracketing/TemporalGpu.h)
 owner for double-precision sampling, uncertainty propagation and ordered temporal/detail
 fusion. CPU correspondence and local-detail evidence remain authoritative. Tile buffers
-are bounded, reused across captures and retired through the engine context executor;
+are bounded and reused across captures. The joined group-processing stage may retain
+one idle exact-layout workspace for reuse between tiles; its final operation scope
+drains that storage, so retained prepared results do not retain bulk GPU buffers.
+Leased, idle and retiring bytes remain budgeted until confirmed cleanup through
+the context executor; uncertain cleanup stops further admission. In particular,
 unavailable compute, allocation, verification or execution failures stop the job
 with diagnostics, never a production CPU substitute. CPU orchestration, decoding
 and scalar verification remain explicit algorithm responsibilities. Keep

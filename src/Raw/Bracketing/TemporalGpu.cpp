@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <limits>
+#include <utility>
 
 #ifndef GL_BUFFER_UPDATE_BARRIER_BIT
 #define GL_BUFFER_UPDATE_BARRIER_BIT 0x00000200
@@ -100,13 +101,87 @@ public:
         catch(...){error="GPU capture combining initialization failed with an unknown error.";}
         if(!available)reason=error.empty()?"GPU capture combining is unavailable.":error;
     }
-    ~Impl(){if(!execute)return;std::string ignored;try{execute([&](std::string&){for(auto p:programs)if(p)glDeleteProgram(p);return true;},ignored);}catch(...) {}}
-    struct Tile {
-        Impl& owner;const ProcessingRequest& request;std::array<GLuint,6> buffers{};std::uint64_t reserved=0;
+    struct Workspace {
+        std::array<GLuint,6> buffers{};
+        std::array<std::size_t,6> sizes{};
+        std::uint64_t reserved=0;
+    };
+    bool Retire(Workspace work,std::string& error){
+        if(!work.reserved)return true;
+        bool ok=true;
+        if(std::any_of(work.buffers.begin(),work.buffers.end(),[](GLuint b){return b!=0;})){
+            try{ok=execute([&](std::string& e){Bindings restore;
+                glDeleteBuffers(GLsizei(work.buffers.size()),work.buffers.data());return Check(e);},error);}
+            catch(const std::exception& e){ok=false;error=e.what();}
+            catch(...){ok=false;error="Unknown GPU workspace cleanup error.";}
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(ok)resident-=work.reserved;
+            else {
+                // Unknown deletion outcome must not create fictitious capacity.
+                if(poolError.empty())poolError="GPU workspace cleanup failed: "+
+                    (error.empty()?std::string("context executor refused cleanup."):error);
+                error=poolError;
+            }
+        }
+        wake.notify_all();return ok;
+    }
+    bool Release(Workspace& work,bool reusable,std::string& error){
+        Workspace retiring=std::exchange(work,Workspace{});
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(reusable&&operations>0&&poolError.empty()&&!idle.reserved){
+                idle=std::move(retiring);wake.notify_all();return true;
+            }
+        }
+        return Retire(std::move(retiring),error);
+    }
+    bool Acquire(Workspace& work,const std::array<std::size_t,6>& sizes,
+        const ProcessingRequest& request,std::uint64_t limit,std::string& error){
+        std::uint64_t required=0;for(auto bytes:sizes)required+=bytes;
+        for(;;){
+            if(Canceled(request)){error="Canceled";return false;}
+            Workspace retiring;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                if(!poolError.empty()){error=poolError;return false;}
+                if(operations>0&&idle.reserved&&idle.sizes==sizes&&resident<=limit){
+                    work=std::exchange(idle,Workspace{});++reuses;return true;
+                }
+                // A different-sized idle lease must never pin admission capacity.
+                if(idle.reserved)retiring=std::exchange(idle,Workspace{});
+                else if(resident+required<=limit){
+                    work.sizes=sizes;work.reserved=required;
+                    resident+=required;peak=std::max(peak,resident);return true;
+                }else {wake.wait_for(lock,std::chrono::milliseconds(20));continue;}
+            }
+            if(!Retire(std::move(retiring),error))return false;
+        }
+    }
+    void BeginOperation(){std::lock_guard<std::mutex> lock(mutex);++operations;}
+    bool EndOperation(std::string& error){
+        Workspace retiring;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(--operations==0)retiring=std::exchange(idle,Workspace{});
+        }
+        const bool retired=Retire(std::move(retiring),error);
+        std::lock_guard<std::mutex> lock(mutex);
+        if(!poolError.empty()){error=poolError;return false;}
+        return retired;
+    }
+    ~Impl(){
+        std::string ignored;
+        try{Retire(std::exchange(idle,Workspace{}),ignored);}catch(...){}
+        if(!execute)return;
+        try{execute([&](std::string&){for(auto p:programs)if(p)glDeleteProgram(p);return true;},ignored);}catch(...){}
+    }
+    struct Tile : Workspace {
+        Impl& owner;const ProcessingRequest& request;
         Tile(Impl& o,const ProcessingRequest& r):owner(o),request(r){}
-        ~Tile(){if(buffers[0]){std::string ignored;try{owner.execute([&](std::string&){Bindings restore;
-                glDeleteBuffers(GLsizei(buffers.size()),buffers.data());return true;},ignored);}catch(...) {}}
-            if(reserved){std::lock_guard<std::mutex> lock(owner.mutex);owner.resident-=reserved;owner.wake.notify_all();}}
+        ~Tile(){std::string ignored;try{owner.Release(*this,false,ignored);}catch(...) {}}
+        bool Finish(std::string& error){return owner.Release(*this,true,error);}
         bool Run(const Raw::OpenGlTask& task,std::string& error){
             if(Canceled(request)){error="Canceled";return false;}
             const bool ok=owner.execute([&](std::string& e){Bindings restore;return task(e)&&Check(e);},error);
@@ -148,18 +223,21 @@ public:
         const int left=int(origin.originX),top=int(origin.originY),width=int(origin.extent.width),height=int(origin.extent.height);
         const auto count=std::size_t(width)*height,maxSource=std::size_t(width+16)*(height+16)*4;
         const auto required=count*(sizeof(Mapping)+32+sizeof(GpuObservation)+accumulatorBytes)+maxSource*sizeof(Tap)+sizeof(Parameters);
-        if(required>budget||count*accumulatorBytes>blockLimit||maxSource*sizeof(Tap)>blockLimit)
+        const auto admissionLimit=std::min(budget,request.memoryBudgetBytes/4);
+        if(required>admissionLimit||count*accumulatorBytes>blockLimit||maxSource*sizeof(Tap)>blockLimit)
             return fail("GPU capture combining tile exceeds the available workspace or device buffer limit.");
         Tile tile(*this,request);
-        {std::unique_lock<std::mutex> lock(mutex);while(resident+required>budget){
-                if(Canceled(request)){error="Canceled";return false;}wake.wait_for(lock,std::chrono::milliseconds(20));}
-            resident+=required;tile.reserved=required;peak=std::max(peak,resident);}
+        const std::array<std::size_t,6> sizes={maxSource*sizeof(Tap),count*sizeof(Mapping),
+            count*32,count*sizeof(GpuObservation),count*accumulatorBytes,sizeof(Parameters)};
+        if(!Acquire(tile,sizes,request,admissionLimit,error))return false;
         std::string gpuError;
-        if(!tile.Run([&](std::string&){glGenBuffers(GLsizei(tile.buffers.size()),tile.buffers.data());
-            tile.Allocate(0,maxSource*sizeof(Tap));tile.Allocate(1,count*sizeof(Mapping));
-            tile.Allocate(2,count*32);tile.Allocate(3,count*sizeof(GpuObservation));
-            tile.Allocate(4,count*accumulatorBytes);tile.Allocate(5,sizeof(Parameters));return true;},gpuError)){
-            if(Canceled(request)){error="Canceled";return false;}return fail(gpuError);}
+        if(!tile.buffers[0]){
+            if(!tile.Run([&](std::string&){glGenBuffers(GLsizei(tile.buffers.size()),tile.buffers.data());
+                for(unsigned slot=0;slot<sizes.size();++slot)tile.Allocate(slot,sizes[slot]);
+                return true;},gpuError)){
+                if(Canceled(request)){error="Canceled";return false;}return fail(gpuError);}
+            std::lock_guard<std::mutex> lock(mutex);++allocations;
+        }
         const auto& reference=data.sources[data.origin];std::vector<Tap> referenceTaps,taps;
         if(!Region(reference,data,left-4,top-4,width+8,height+8,request,referenceTaps,error))return false;
         std::vector<Mapping> mapping(count);std::vector<GpuObservation> output(count);
@@ -220,24 +298,41 @@ public:
         }
         if(Canceled(request)){error="Canceled";return false;}
         if(!gpuError.empty())return fail(gpuError);
+        if(!tile.Finish(error))return false;
+        if(Canceled(request)){error="Canceled";return false;}
         {std::lock_guard<std::mutex> lock(mutex);++gpuTiles;}
         groups.swap(pendingGroups);
         return true;
     }
     void Report(BracketingAnalysis& analysis)const{
         std::lock_guard<std::mutex> lock(mutex);
-        analysis.diagnostics.push_back("Capture combining: "+std::to_string(gpuTiles)+" GPU tiles; GPU-only double-precision resampling, uncertainty and temporal/detail fusion; GPU peak reservation "+std::to_string(peak/(1024*1024))+" MiB."+
+        analysis.diagnostics.push_back("Capture combining: "+std::to_string(gpuTiles)+" GPU tiles; GPU-only double-precision resampling, uncertainty and temporal/detail fusion; GPU peak reservation "+std::to_string(peak/(1024*1024))+" MiB; current reservation "+std::to_string(resident/(1024*1024))+
+            " MiB; workspace allocations "+std::to_string(allocations)+", reuses "+std::to_string(reuses)+"."+
             (reason.empty()?"":" "+reason));
     }
     Raw::OpenGlTaskExecutor execute;std::array<GLuint,4> programs{};
     std::array<std::array<GLint,11>,4> uniformLocations{};bool available=false;
     std::uint64_t budget=0,blockLimit=0,resident=0,peak=0,gpuTiles=0;
-    mutable std::mutex mutex;std::condition_variable wake;std::string reason;
+    Workspace idle;std::size_t operations=0;
+    std::uint64_t allocations=0,reuses=0;
+    mutable std::mutex mutex;std::condition_variable wake;std::string reason,poolError;
 };
 TemporalGpu::TemporalGpu(const ProcessingRequest& r):impl_(std::make_unique<Impl>(r)){}
 TemporalGpu::~TemporalGpu()=default;
-bool TemporalGpu::Available()const{return impl_->available;}
+TemporalGpu::Operation::Operation(TemporalGpu& owner):owner_(&owner){owner_->impl_->BeginOperation();}
+TemporalGpu::Operation::~Operation(){std::string ignored;try{Finish(ignored);}catch(...) {}}
+bool TemporalGpu::Operation::Finish(std::string& error){
+    if(!owner_)return true;
+    auto* owner=std::exchange(owner_,nullptr);return owner->impl_->EndOperation(error);
+}
+TemporalGpu::WorkspaceStats TemporalGpu::Workspaces()const{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return {impl_->resident,impl_->peak,impl_->allocations,impl_->reuses,impl_->operations,impl_->idle.reserved!=0};
+}
+bool TemporalGpu::Available()const{std::string error;return Ready(error);}
 bool TemporalGpu::Ready(std::string& error)const{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if(!impl_->poolError.empty()){error=impl_->poolError;return false;}
     if(impl_->available)return true;
     error=impl_->reason.empty()?"GPU capture combining is unavailable.":impl_->reason;
     return false;

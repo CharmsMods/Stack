@@ -205,10 +205,12 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             analysis->diagnostics.erase(std::remove_if(analysis->diagnostics.begin(),analysis->diagnostics.end(),
                 [](const std::string& message){return message.rfind("Temporal merge.",0)==0;}),analysis->diagnostics.end());
             const auto groupStart=std::chrono::steady_clock::now();
+            TemporalGpu::Operation workspaceOperation(*data.combiningGpu);
             if(!ProcessTiles(request,data,.52,.33,"Combining exposure groups",ProcessingStage::Groups,
                 [&](unsigned tx,unsigned ty,std::string& tileError) {
                     return PrepareGroupTile(request,data,tx,ty,tileError);
                 },error)) return fail(error);
+            if(!workspaceOperation.Finish(error))return fail(error);
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
             {
                 const auto& m=data.groupMetrics;std::lock_guard<std::mutex> lock(m.mutex);
