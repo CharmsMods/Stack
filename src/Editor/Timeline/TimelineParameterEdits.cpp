@@ -3,7 +3,8 @@
 
 namespace Stack::Timeline {
 namespace {
-bool ReadValue(const nlohmann::json& values, const std::string& key, float& value) {
+bool ReadValue(const nlohmann::json& values, const AnimatableParameterDefinition& parameter, float& value) {
+    const auto& key = parameter.storageKey;
     const nlohmann::json* found=nullptr;
     if (!key.empty() && key.front()=='/') {
         const nlohmann::json::json_pointer path(key);
@@ -13,6 +14,11 @@ bool ReadValue(const nlohmann::json& values, const std::string& key, float& valu
         if (field!=values.end()) found=&*field;
     }
     if (!found) return false;
+    if (parameter.storageArrayIndex >= 0) {
+        const auto index = static_cast<std::size_t>(parameter.storageArrayIndex);
+        if (!found->is_array() || index >= found->size()) return false;
+        found = &(*found)[index];
+    }
     if (found->is_boolean()) value=found->get<bool>() ? 1.f : 0.f;
     else if (found->is_number()) value=found->get<float>();
     else return false;
@@ -26,8 +32,8 @@ ParameterEditAnimation PrepareParameterEditAnimation(const TimelineAnimationStat
     for (const auto& parameter:CollectAnimatableParametersForNode(node,nullptr,graphId)) {
         if (parameter.storageKey.empty()) continue;
         float previous=parameter.defaultValue, current=parameter.defaultValue;
-        const bool knownBefore=ReadValue(before,parameter.storageKey,previous);
-        if (!ReadValue(after,parameter.storageKey,current) ||
+        const bool knownBefore=ReadValue(before,parameter,previous);
+        if (!ReadValue(after,parameter,current) ||
             (knownBefore && std::abs(previous-current)<=.000001f)) continue;
         if (!UpdateExistingKeyframeValue(result.animation,parameter.target,frame,current))
             result.livePreviewTargets.push_back(parameter.target);

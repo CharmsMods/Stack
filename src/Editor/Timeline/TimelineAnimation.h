@@ -36,6 +36,8 @@ struct AnimatableParameterDefinition {
     std::string nodeLabel;
     std::string parameterLabel;
     std::string storageKey;
+    // Component within array-valued layer settings; -1 denotes a scalar.
+    int storageArrayIndex = -1;
     AnimatableValueType valueType = AnimatableValueType::Float;
     float defaultValue = 0.0f;
     float minValue = 0.0f;

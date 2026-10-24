@@ -311,6 +311,7 @@ std::vector<AnimatableParameterDefinition> CollectAnimatableParametersForNode(
         definition.nodeLabel = nodeLabel;
         definition.parameterLabel = spec.label;
         definition.storageKey = spec.storageKey;
+        definition.storageArrayIndex = spec.arrayIndex;
         definition.valueType = spec.valueType;
         definition.defaultValue = spec.defaultValue;
         definition.minValue = spec.minValue;
