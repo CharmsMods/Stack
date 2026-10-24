@@ -151,7 +151,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     if (glassRail) draw->PopClipRect();
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, bool enabled = true) {
         return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, nullptr,
-            m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty());
+            m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty(), &m_RailGlass);
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.

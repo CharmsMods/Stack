@@ -5,10 +5,12 @@
 #include "GLStateGuards.h"
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <cstdint>
 
 namespace Stack::Renderer {
 void GlassChrome::BeginFrame(bool requested) {
-    surfaces.clear();
+    surfaces.clear(); inks.clear(); captureValid=false; inkReady=false;
     if (!requested && enabled) { Shutdown(); }
     enabled = requested;
 }
@@ -26,7 +28,95 @@ void GlassChrome::Callback(const ImDrawList*, const ImDrawCmd* command) {
     const auto* surface = static_cast<const Surface*>(command->UserCallbackData);
     if (surface) surface->owner->Draw(*surface);
 }
+bool GlassChrome::BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id) {
+    if (!enabled || !error.empty() || !draw || max.x<=min.x || max.y<=min.y ||
+        ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
+    if (inks.size()>=MaxInkItems) {
+        error="Glass navigation exceeded its foreground GPU budget. Turn the mode off to use standard navigation.";
+        return false;
+    }
+    const ImVec2 clipMin=draw->GetClipRectMin(), clipMax=draw->GetClipRectMax();
+    inks.push_back({this,min,max,id,static_cast<unsigned int>(inks.size()),
+        ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),false});
+    draw->AddCallback(InkCallback,&inks.back());
+    return true;
+}
+void GlassChrome::EndInk(ImDrawList* draw) {
+    draw->AddCallback(EndInkCallback,nullptr);
+    draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
+}
+void GlassChrome::InkCallback(const ImDrawList*, const ImDrawCmd* command) {
+    const auto* ink=static_cast<const Ink*>(command->UserCallbackData);
+    if (ink) ink->owner->DrawInk(*ink);
+}
+void GlassChrome::EndInkCallback(const ImDrawList*, const ImDrawCmd*) {
+    // This UI pass owns texture unit 1. Never leave it active: the backend
+    // binds each following draw command's atlas on the current texture unit.
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,0); glBindSampler(1,0);
+    glActiveTexture(GL_TEXTURE0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,0);
+}
+void GlassChrome::DrawInk(const Ink& ink) {
+    // Draw order supplies a fresh successful material capture first. A hidden
+    // rail or failed material must not reuse last frame's unrelated backdrop.
+    if (!captureValid || !inkReady || !ink.usable || !error.empty() || !programs[2]) return;
+    const float left=captureDisplayPos.x, right=left+captureDisplaySize.x;
+    const float top=captureDisplayPos.y, bottom=top+captureDisplaySize.y;
+    const float projection[16]={2.f/(right-left),0,0,0, 0,2.f/(top-bottom),0,0,
+        0,0,-1,0, (right+left)/(left-right),(top+bottom)/(bottom-top),0,1};
+    glUseProgram(programs[2]);
+    glUniformMatrix4fv(0,1,GL_FALSE,projection);
+    glUniform1i(4,int(ink.slot));
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,inkBuffers[1]);
+    glActiveTexture(GL_TEXTURE0);
+    // Keep the ImGui backend's VAO, VBO/EBO, clip and blend state. Stack pins
+    // its GLSL430 backend layout to Position/UV/Color locations 0/1/2.
+}
+void GlassChrome::PrepareInk() {
+    inkReady=false;
+    if (!captureValid || inks.empty()) return;
+    struct Item { float region[4]; std::uint32_t identity[4]; };
+    static_assert(sizeof(Item)==32,"std430 ink item layout");
+    std::array<Item,MaxInkItems> items{};
+    const float softW=float((width+1)/2), softH=float((height+1)/2);
+    const float uScale=captureSoftSize.x/(captureSize.x*softW);
+    const float vScale=captureSoftSize.y/(captureSize.y*softH);
+    for (Ink& ink : inks) {
+        const ImVec2 min(std::max(ink.min.x,ink.clip.x),std::max(ink.min.y,ink.clip.y));
+        const ImVec2 max(std::min(ink.max.x,ink.clip.z),std::min(ink.max.y,ink.clip.w));
+        const float leftPx=(min.x-captureDisplayPos.x)*captureScale.x;
+        const float rightPx=(max.x-captureDisplayPos.x)*captureScale.x;
+        const float topPx=(captureDisplaySize.y-(min.y-captureDisplayPos.y))*captureScale.y;
+        const float bottomPx=(captureDisplaySize.y-(max.y-captureDisplayPos.y))*captureScale.y;
+        ink.usable=max.x>min.x && max.y>min.y && leftPx>=captureOrigin.x &&
+            rightPx<=captureOrigin.x+captureSize.x && bottomPx>=captureOrigin.y &&
+            topPx<=captureOrigin.y+captureSize.y;
+        if (!ink.usable) continue; // Never infer off-capture ink from its edge.
+        const float centerX=((min.x+max.x)*.5f-captureDisplayPos.x)*captureScale.x;
+        const float centerY=(captureDisplaySize.y-((min.y+max.y)*.5f-captureDisplayPos.y))*captureScale.y;
+        items[ink.slot]={{(centerX-captureOrigin.x)*uScale,(centerY-captureOrigin.y)*vScale,
+            (max.x-min.x)*captureScale.x*.3f*uScale,
+            (max.y-min.y)*captureScale.y*.3f*vScale},{ink.id,1,0,0}};
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER,inkBuffers[0]);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,inks.size()*sizeof(Item),items.data());
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,inkBuffers[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,inkBuffers[1]);
+    glActiveTexture(GL_TEXTURE1); glBindSampler(1,0); glBindTexture(GL_TEXTURE_2D,textures[2]);
+    glUseProgram(programs[3]);
+    glUniform1i(0,int(inks.size()));
+    glUniform2f(1,captureSoftSize.x/softW,captureSoftSize.y/softH);
+    // Finish prior foreground buffer accesses before updating history, then
+    // publish this dispatch to the following fragment-shader reads.
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glDispatchCompute((static_cast<unsigned int>(inks.size())+63)/64,1,1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,0);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);
+    glBindTexture(GL_TEXTURE_2D,0); glActiveTexture(GL_TEXTURE0); glUseProgram(0);
+    inkReady=true;
+}
 void GlassChrome::ReleaseTargets() {
+    captureValid=false; inkReady=false;
     glDeleteFramebuffers(3,framebuffers); glDeleteTextures(3,textures);
     for (auto& f : framebuffers) f = 0;
     for (auto& t : textures) t = 0;
@@ -37,8 +127,17 @@ bool GlassChrome::Ensure(int w, int h) {
     if (!programs[0]) {
         programs[0] = GLHelpers::CreateShaderProgram(GlassChromeShaders::Vertex,GlassChromeShaders::Blur);
         programs[1] = GLHelpers::CreateShaderProgram(GlassChromeShaders::Vertex,GlassChromeShaders::Material);
+        programs[2] = GLHelpers::CreateShaderProgram(GlassChromeShaders::InkVertex,GlassChromeShaders::InkFragment);
+        programs[3] = GLHelpers::CreateComputeProgram(GlassChromeShaders::InkMeasure);
+        glGenBuffers(2,inkBuffers);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER,inkBuffers[0]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,MaxInkItems*32,nullptr,GL_DYNAMIC_DRAW);
+        std::array<std::uint32_t,MaxInkItems*4> emptyHistory{};
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER,inkBuffers[1]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,sizeof(emptyHistory),emptyHistory.data(),GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);
         glGenVertexArrays(1,&vao);
-        if (!programs[0] || !programs[1] || !vao) {
+        if (!programs[0] || !programs[1] || !programs[2] || !programs[3] || !inkBuffers[0] || !inkBuffers[1] || !vao) {
             error = "Glass navigation could not initialize its GPU shaders. Turn the mode off to use standard navigation.";
             return false;
         }
@@ -164,12 +263,25 @@ void GlassChrome::Draw(const Surface& s) {
         error = "OpenGL reported error " + std::to_string(reportedError) +
             " during glass navigation. Turn the mode off to use standard navigation.";
     }
+    captureValid=error.empty();
+    if (captureValid) {
+        captureOrigin=ImVec2(float(captureX),float(captureY));
+        captureSize=ImVec2(float(captureW),float(captureH));
+        captureSoftSize=ImVec2(float((captureW+1)/2),float((captureH+1)/2));
+        captureDisplayPos=s.displayPos; captureDisplaySize=s.displaySize; captureScale=s.scale;
+        PrepareInk();
+        if (glGetError()!=GL_NO_ERROR) {
+            inkReady=false; captureValid=false;
+            error="Glass navigation could not prepare its GPU foreground contrast. Turn the mode off to use standard navigation.";
+        }
+    }
     // The following ImDrawCallback_ResetRenderState reestablishes ImGui state.
 }
 void GlassChrome::Shutdown() {
     ReleaseTargets();
     for (auto& program : programs) { if (program) glDeleteProgram(program); program=0; }
     if (vao) glDeleteVertexArrays(1,&vao);
-    vao=0; surfaces.clear(); error.clear(); enabled=false;
+    glDeleteBuffers(2,inkBuffers); inkBuffers[0]=inkBuffers[1]=0;
+    vao=0; surfaces.clear(); inks.clear(); captureValid=false; inkReady=false; error.clear(); enabled=false;
 }
 }

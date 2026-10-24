@@ -3,6 +3,7 @@
 #include "AppHeaderStyle.h"
 #include "NavigationRail.h"
 #include "GlassNavigationFeedback.h"
+#include "Renderer/GlassChrome.h"
 #include "imgui_internal.h"
 #include <cstring>
 
@@ -37,7 +38,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,
-    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false) {
+    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr) {
     const float size = ButtonExtent * scale;
     ImGui::BeginDisabled(!enabled);
     const bool clicked = ImGui::InvisibleButton(label, ImVec2(size, size), ImGuiButtonFlags_EnableNav);
@@ -55,12 +56,19 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
+    // Neutral feedback and ink share one contrast choice; the colored keyboard
+    // focus ring above stays outside this bracket.
+    const bool adaptiveInk = glass && material && material->BeginInk(draw,rect.Min,rect.Max,ImGui::GetItemID());
     const float press = glass ? GlassControlFeedback(rect,selected,scale,palette) : 0.f;
     const float glyphSize = (glyph == Glyph::Stack ? (glass ? 25.f : 24.f) :
         (glass ? 23.f : 21.f)) * scale * (1.f - .045f*press);
     const ImVec2 glyphMin(rect.Min.x + (size - glyphSize) * .5f,
         rect.Min.y + (size - glyphSize) * .5f);
-    if (glass) {
+    if (adaptiveInk) {
+        ImVec4 ink=palette.text; ink.w *= selected || ImGui::IsItemHovered() ? 1.f : .92f;
+        DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(ink));
+        material->EndInk(draw);
+    } else if (glass) {
         // Preserve the existing vectors, with a quiet opposing halo so their
         // strokes stay legible over either bright or dark refracted detail.
         const float luminance = palette.text.x*.2126f + palette.text.y*.7152f + palette.text.z*.0722f;
