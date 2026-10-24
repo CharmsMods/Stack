@@ -167,8 +167,19 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
         lamp=t>0.0 ? 1.0-smoothstep(-softness,softness,d) : 0.0;
     }
     // A low-frequency local-scene environment is an explicit screen-space
-    // approximation. Only the rectangle is the modeled overhead light source.
-    return ambient*.94+vec3(.006)+vec3(2.5,2.45,2.35)*lamp;
+    // approximation, separate from the finite overhead strip and distant window.
+    // A distant panoramic studio window contributes a broad lower reflection.
+    // Its 20.49 degree elevation center and 8-to-18 degree vertical fade keep
+    // the entire light above the opaque backdrop plane.
+    // Wide azimuth follows the lower curved shoulder: full within +/-50 degrees
+    // of negative Y, fading to zero at +/-75. Center +Z and side/top rays miss it.
+    float horizontal=length(direction.xy);
+    float elevationAlignment=.9367496998*horizontal+.35*direction.z;
+    float elevationWindow=smoothstep(.9510565163,.9902680687,elevationAlignment);
+    float azimuthAlignment=-direction.y/max(horizontal,1e-6);
+    float azimuthWindow=smoothstep(.2588190451,.6427876097,azimuthAlignment);
+    return ambient*.94+vec3(.006)+vec3(2.5,2.45,2.35)*lamp+
+        vec3(.55)*elevationWindow*azimuthWindow;
 }
 void main() {
     vec2 point=uv*drawMapping.xy-drawMapping.zw;
