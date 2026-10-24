@@ -2304,7 +2304,7 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
         }
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
-            RetainDenoiseContinuationLocked(snapshot);
+            RetainDenoiseContinuationLocked(snapshot, result.denoisePending);
             m_Rendering = false;
             if (result.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && result.calibration.renderMs > 0.0 &&
                 (result.telemetry.superseded || IsOwnerResultStaleLocked(result))) {
@@ -2636,7 +2636,8 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 if (cached[i]) result.firstMeasuredStage = i + 1;
         }
         const bool viewportPurpose = snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation ||
-            snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement;
+            snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement ||
+            snapshot.rawRenderPurpose == RawRenderPurpose::DenoiseCompletion;
         const bool viewportHasAuxiliary = !snapshot.compositeOutputs.empty() ||
             snapshot.rawWorkspace.graphScopeStage != RawDevelopmentGraphScopeStage::None ||
             snapshot.rawWorkspace.gradingScopeSource != RawDevelopmentGradingScopeSource::None ||
@@ -3258,6 +3259,8 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         pipeline.ExecuteGraph(
                             tileGraphBatch.Graph(),
                             tileGraphBatch.Topology());
+                        result.denoisePending = result.denoisePending ||
+                            pipeline.IsOutputDenoisePending();
                         int tileTextureW = 0;
                         int tileTextureH = 0;
                         const unsigned int tileTexture =
@@ -3338,6 +3341,9 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 }
             }
             pipeline.ExecuteGraph(snapshot.graph);
+            // Keep the main image's completion state immutable: previews,
+            // candidates and overview coverage may execute other graphs.
+            result.denoisePending = pipeline.IsOutputDenoisePending();
             pipeline.m_RawViewportGpuTiming.Finish();
             result.viewportPreviewGeometry = pipeline.GetGraphViewportGeometry();
             if (result.viewportPreviewGeometry.Valid()) {

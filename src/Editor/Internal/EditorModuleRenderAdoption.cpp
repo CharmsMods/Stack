@@ -45,6 +45,10 @@ void EditorModule::ConsumeRenderWorkerResults() {
     PumpViewportOutputTileTextureDeletes();
 
     auto releaseDeferredResultResources = [this](EditorRenderWorker::Result& result) {
+        // A discarded explicit completion is terminal too. Merely retaining a
+        // result behind an unsignaled fence does not call this cleanup path.
+        // Diagnostic allocation must not prevent releasing result resources.
+        try { CompleteFullQualityRenderRequest(result, false); } catch (...) {}
         FinishViewportPreviewRequest(result, false);
         QueueViewportOutputTextureRelease(result.outputTexture);
         QueueViewportOutputTextureRelease(result.viewportOverview);
@@ -246,6 +250,9 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 ? !currentRawGeneration || !currentRawRecipe || obsoleteViewport ||
                     (!m_RawWorkspaceRootTabActive && result.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)
                 : !IsCurrentGraphResult(result)));
+        ObserveRenderPresentationFailure(result);
+        if (staleResult || !result.success || !result.error.empty())
+            CompleteFullQualityRenderRequest(result, false);
         const bool ownedRawNativeRefinementResult =
             Stack::EditorRenderScheduling::
                 RawRenderResultOwnsTrackedRequest(
@@ -562,6 +569,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                           m_ViewportOutputExpectedNativeWidth,
                           m_ViewportOutputExpectedNativeHeight);
             m_ViewportOutputRenderGeneration = result.generation;
+            AdoptRenderPresentationState(result);
             if (result.viewportPreview.enabled) {
                 m_ViewportOutputExpectedNativeWidth = result.viewportPreviewGeometry.logicalWidth;
                 m_ViewportOutputExpectedNativeHeight = result.viewportPreviewGeometry.logicalHeight;
@@ -1035,6 +1043,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
         }
         FinishViewportPreviewRequest(result, result.success && result.error.empty());
+        CompleteFullQualityRenderRequest(result, acceptedMainFrame);
         if (result.success && result.error.empty() && rawWorkspaceResultMatchesActive &&
             result.rawWorkspace.analysisCaptured &&
             (acceptedMainFrame || result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes))
@@ -1179,6 +1188,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
         // resources.
         releaseDeferredResultResources(result);
         } catch (...) {
+            CompleteFullQualityRenderRequest(result, false);
             releaseDeferredResultResources(result);
             ResetIncompleteCompositeOutputRequestsForRetry();
             ResetIncompletePreviewRequestsForRetry();

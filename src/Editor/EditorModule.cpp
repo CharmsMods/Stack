@@ -682,6 +682,8 @@ bool EditorModule::ClearDirtyIfRevision(std::uint64_t expectedRevision) {
 }
 
 void EditorModule::RequestWorkerShutdownForAppClose() {
+    CancelFullQualityRenderRequest("Full-quality rendering was canceled because the project is closing.");
+    m_RenderPresentation = {};
     m_Project->tasks.Stop();
     if(m_Bracketing) {
         if(m_Bracketing->job)m_Bracketing->job->canceled=true;
@@ -911,6 +913,7 @@ EditorModule::GetActiveRenderBackendProgress() const {
 
 bool EditorModule::RequestFullQualityRender(std::string* errorMessage) {
     if (errorMessage) errorMessage->clear();
+    CancelFullQualityRenderRequest("Full-quality rendering was replaced by a new explicit request.");
     if (!m_Project->graph.IsOutputConnected()) {
         // A project may intentionally leave its only Output deactivated while
         // RAW Lab remains the visible editing surface. Queue/inspection still
@@ -948,7 +951,20 @@ bool EditorModule::RequestFullQualityRender(std::string* errorMessage) {
             return false;
         }
     }
-    if (IsRenderSettledForFullQualityExport()) return true;
+    if (IsRenderSettledForFullQualityExport()) {
+        Stack::EditorRendering::FullQualityRenderRequestState ready;
+        ready.phase =
+            Stack::EditorRendering::FullQualityRenderRequestState::Phase::Ready;
+        ready.ownerId = m_RenderPresentation.ownerId;
+        ready.generation = m_RenderPresentation.generation;
+        ready.graphRequest = CurrentGraphRenderTag();
+        ready.emittedGraphRequest = m_RenderPresentation.graphRequest;
+        ready.sourceKey = m_RenderPresentation.sourceKey;
+        ready.sourceHash = m_RenderPresentation.sourceHash;
+        ready.recipeRevision = m_RenderPresentation.recipeRevision;
+        m_FullQualityRenderRequest = std::move(ready);
+        return true;
+    }
 
     if (IsRawWorkspaceProjectActive()) {
         const std::string identity = GetActiveRawWorkspacePreviewIdentity();
@@ -978,12 +994,18 @@ bool EditorModule::RequestFullQualityRender(std::string* errorMessage) {
     // autosave revision, but it does fence out any display-sized render that
     // was still queued for the project-open reveal.
     MarkRenderRefreshDirty();
+    // Bind the fresh request after its new revision is established, and retain
+    // failed presentation state until actual pixels are replaced.
+    m_FullQualityRenderRequest = {};
+    m_FullQualityRenderRequest.phase =
+        Stack::EditorRendering::FullQualityRenderRequestState::Phase::Requested;
     return true;
 }
 
 float EditorModule::GetFullQualityRenderProgress(
     std::string* statusText) const {
     if (statusText) statusText->clear();
+    if (DidFullQualityRenderFail(statusText)) return 0.0f;
     if (IsRenderSettledForFullQualityExport()) {
         if (statusText) *statusText = "Full-quality render complete";
         return 1.0f;
@@ -992,7 +1014,9 @@ float EditorModule::GetFullQualityRenderProgress(
     const EditorRenderWorker::RenderProgress progress =
         GetActiveRenderBackendProgress();
     if (statusText) {
-        if (!progress.label.empty()) {
+        if (!m_FullQualityRenderRequest.Pending() && m_RenderPresentation.failed) {
+            *statusText = m_RenderPresentation.error;
+        } else if (!progress.label.empty()) {
             *statusText = progress.label;
         } else if (progress.busy) {
             *statusText = "Rendering full quality";
@@ -1110,11 +1134,17 @@ bool EditorModule::SubmitRenderSnapshot(
         snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)) {
         snapshot.graphRequest = CurrentGraphRenderTag();
     }
+    TrackFullQualityRenderSnapshot(snapshot);
     const std::uint64_t generation = snapshot.generation;
     const RawRenderPurpose purpose = snapshot.rawRenderPurpose;
     const bool proxyRender = snapshot.previewMaxDimension > 0;
     const std::size_t rawRecipeRevision =
         snapshot.rawWorkspace.recipeRevision;
+    const auto submissionFailed = [&]() {
+        if (purpose == RawRenderPurpose::ExplicitInspection)
+            FailFullQualityRenderRequest("The full-quality render could not be submitted.");
+        return false;
+    };
     if (!snapshot.rawWorkspace.sourceKey.empty() &&
         m_RawRenderClientId != 0) {
         Stack::EditorRendering::RawRenderService& service =
@@ -1147,12 +1177,12 @@ bool EditorModule::SubmitRenderSnapshot(
                         std::make_shared<const EditorRenderWorker::Snapshot>(
                             snapshot);
                 } catch (...) {
-                    return false;
+                    return submissionFailed();
                 }
                 if (!service.ConfigureSession(
                         m_RawRenderClientId,
                         std::move(config))) {
-                    return false;
+                    return submissionFailed();
                 }
                 m_RawRenderSessionSourceIdentity =
                     snapshot.rawWorkspace.sourceKey;
@@ -1205,7 +1235,7 @@ bool EditorModule::SubmitRenderSnapshot(
         if (submitted && purpose == RawRenderPurpose::ExplicitExport) {
             m_RawWorkspaceExportRenderGeneration = generation;
         }
-        return submitted;
+        return submitted || submissionFailed();
     }
     const bool submitted = m_RenderWorker.Submit(std::move(snapshot));
     if (submitted) m_ActivityRawRenderIsProxy = proxyRender;
@@ -1233,7 +1263,7 @@ bool EditorModule::SubmitRenderSnapshot(
             m_RawWorkspaceExportRenderGeneration = generation;
         }
     }
-    return submitted;
+    return submitted || submissionFailed();
 }
 
 void EditorModule::InvalidateRenderSnapshotsBefore(

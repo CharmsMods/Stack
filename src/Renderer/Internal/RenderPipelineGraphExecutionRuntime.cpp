@@ -56,6 +56,9 @@ GraphExecutionRuntime::GraphExecutionRuntime(
     const std::size_t executionEntryCapacity =
         std::max<std::size_t>(1u, evaluationSchedule.outputs.size());
     scalarCache.reserve(executionEntryCapacity);
+    imageDenoisePending.reserve(executionEntryCapacity);
+    maskDenoisePending.reserve(executionEntryCapacity);
+    scalarDenoisePending.reserve(executionEntryCapacity);
     localTextureExtents.reserve(executionEntryCapacity);
     scalarSampleCounts.reserve(executionEntryCapacity);
     scalarFingerprintCache.reserve(executionEntryCapacity);
@@ -154,6 +157,7 @@ void GraphExecutionRuntime::Execute() {
         finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);
     }
     const auto finalRegion = pipeline.m_RawViewportAppliedRegion;
+    const bool finalDenoisePending = finalTexture != 0 && denoiseProvenance.pending;
     const auto finalGeometry = pipeline.m_CurrentGraphImageGeometry;
     const int finalWidth = pipeline.m_Width;
     const int finalHeight = pipeline.m_Height;
@@ -182,6 +186,7 @@ void GraphExecutionRuntime::Execute() {
         }
     }
     pipeline.m_OutputTexture = finalTexture ? finalTexture : 0;
+    pipeline.m_OutputDenoisePending = finalDenoisePending;
     pipeline.m_GraphSourceTexture = 0;
     const int referenceSourceNodeId = pipeline.FindReferenceSourceNode(executionContext, graph.outputNodeId);
     if (referenceSourceNodeId > 0) {

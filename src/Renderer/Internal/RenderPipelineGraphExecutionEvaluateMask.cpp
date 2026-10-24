@@ -29,13 +29,16 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=unavailable->second;return 0;
         }
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
+        bool& outputDenoisePending = maskDenoisePending[key];
+        DenoiseProvenance::Scope provenanceScope(denoiseProvenance, outputDenoisePending);
         if (const auto cached = maskCache.find(key); cached != maskCache.end()) {
+            denoiseProvenance.pending = outputDenoisePending;
             if (const auto extent = localTextureExtents.find(key);
                 extent != localTextureExtents.end()) {
                 pipeline.m_Width = extent->second.first;
                 pipeline.m_Height = extent->second.second;
             }
-            return cached->second;
+            return provenanceScope.Return(cached->second);
         }
         if (visitingMasks.count(key)) {
             return 0;
@@ -69,7 +72,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             node.kind == RenderGraphNodeKind::Output) {
             unsigned int imgTex = evalImage(nodeId, socketId);
             visitingMasks.erase(key);
-            return imgTex;
+            return provenanceScope.Return(imgTex);
         }
         if (node.kind == RenderGraphNodeKind::MaskGenerator || node.kind == RenderGraphNodeKind::CustomMask) {
             // The saved project association supplies geometry, not image pixels.
@@ -84,14 +87,20 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                 pipeline.m_Height = extent.second;
             }
             if (const auto* extent = findInputLink(nodeId, EditorNodeGraph::kMatchExtentInputSocketId)) {
+                const bool inputDenoisePending = denoiseProvenance.pending;
                 if (!evalImage(extent->fromNodeId, extent->fromSocketId)) {
                     visitingMasks.erase(key);
                     return 0;
                 }
+                // Extent alone does not make generated mask samples depend
+                // on a denoised image. Sample-dependent masks evaluate their
+                // reference again below and retain that provenance normally.
+                denoiseProvenance.pending = inputDenoisePending;
             }
         }
         const std::size_t fingerprint = fingerprintMask(nodeId, socketId);
         if (auto* cached = pipeline.FindGraphCacheEntry(pipeline.m_GraphMaskCache,key,fingerprint)) {
+            denoiseProvenance.pending = cached->denoisePending;
             ++pipeline.m_LastGraphExecutionStats.maskCacheHits;
             pipeline.TouchGraphCacheEntry(*cached);
             if (cached->graphGeometry.Valid()) {
@@ -105,7 +114,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             maskCache[key] = cached->texture;
             localTextureExtents[key] = { pipeline.m_Width, pipeline.m_Height };
             visitingMasks.erase(key);
-            return cached->texture;
+            return provenanceScope.Return(cached->texture);
         }
         ++pipeline.m_LastGraphExecutionStats.maskCacheMisses;
 
@@ -149,11 +158,13 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                 findInputLink(
                     node.nodeId,
                     EditorNodeGraph::kMatchExtentInputSocketId);
+            const bool inputDenoisePending = denoiseProvenance.pending;
             const unsigned int extentTexture = extentInput
                 ? evalMask(
                     extentInput->fromNodeId,
                     extentInput->fromSocketId)
                 : 0;
+            denoiseProvenance.pending = inputDenoisePending;
             const int extentWidth = pipeline.m_Width;
             const int extentHeight = pipeline.m_Height;
             if (extentTexture != 0 &&
@@ -228,6 +239,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             }
         } else if (node.kind == RenderGraphNodeKind::ChannelSplit) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            const bool inputDenoisePending = denoiseProvenance.pending;
             const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
             if (inputImage) {
                 result = createTarget();
@@ -239,6 +251,9 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                     input->semanticDescriptor.presentImageComponents.state == Stack::NodeMath::KnowledgeState::Known &&
                     !Stack::NodeMath::HasImageComponent(input->semanticDescriptor.presentImageComponents.value,Stack::NodeMath::ImageComponent::Alpha))
                     channelIdx = 4;
+                // Missing alpha is synthesized as opaque; only the input's
+                // dimensions, not its provisional RGB samples, are used.
+                if (channelIdx == 4) denoiseProvenance.pending = inputDenoisePending;
                 renderPassToTexture(result, [&](unsigned int fbo) {
                     return pipeline.RenderChannelSplit(inputImage, channelIdx, fbo);
                 });
@@ -270,7 +285,8 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                     key,
                     result,
                     fingerprint,
-                    true)) {
+                    true,
+                    denoiseProvenance.pending)) {
                 glDeleteTextures(1, &result);
                 result = 0;
             } else if (!resultOwned) {
@@ -295,7 +311,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             pipeline.ReleaseGraphCacheEntry(pipeline.m_GraphMaskCache, key);
         }
         visitingMasks.erase(key);
-        return result;
+        return provenanceScope.Return(result);
     };
 
 }

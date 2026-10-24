@@ -40,6 +40,9 @@ void EditorModule::SubmitRenderIfReady() noexcept {
     try {
         SubmitRenderIfReadyImpl();
     } catch (...) {
+        try {
+            FailFullQualityRenderRequest("The full-quality render could not be prepared or submitted safely.");
+        } catch (...) { /* The terminal phase is recorded before its diagnostic. */ }
         ResetIncompleteCompositeOutputRequestsForRetry();
         ResetIncompletePreviewRequestsForRetry();
         const auto submitted =
@@ -71,7 +74,10 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         (m_RawAssetCapture.armed && m_RawAssetCapture.feedbackNeeded);
     if (rawWorkspaceActive && !m_RenderDirty && !explicitCaptureRequested &&
         Stack::EditorRendering::RawRenderService::Get().HasWorkerFailure(m_RawRenderClientId)) return;
-    if ((!m_RawWorkspaceRootTabActive || !rawWorkspaceActive) && !GraphRenderBackendReady()) return;
+    if ((!m_RawWorkspaceRootTabActive || !rawWorkspaceActive) && !GraphRenderBackendReady()) {
+        FailFullQualityRenderRequest("The render worker is unavailable for full-quality rendering.");
+        return;
+    }
     const bool compositeMode = Stack::EditorRenderScheduling::
         ShouldUseCompositeRenderPath(
             GetViewportMode() == ViewportMode::CompositeCanvas,
@@ -239,6 +245,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             return false;
         }
 
+        FailFullQualityRenderRequest("Full-quality rendering is blocked by incompatible or missing HDR inputs.");
         m_RenderDirty = false;
         m_RenderPending = false;
         m_HdrMergeRenderingNodeIds.clear();
@@ -247,6 +254,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     };
 
     if (compositeMode) {
+        FailFullQualityRenderRequest("Full-quality rendering requires a connected single image output.");
         const auto compositeBuildBegin = std::chrono::steady_clock::now();
         std::vector<EditorRenderWorker::CompositeOutputRequest> requests;
         try {
@@ -345,11 +353,13 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     }
     if (rawStage && activeOutputNodeId <= 0) {
         m_RawWorkspaceStaleRenderStatusText = "The project's RAW development stage is unavailable.";
+        FailFullQualityRenderRequest(m_RawWorkspaceStaleRenderStatusText);
         m_RenderDirty = false;
         m_RenderPending = false;
         return;
     }
     if (!rawStage && !m_Project->graph.IsOutputConnected()) {
+        FailFullQualityRenderRequest("The project's output is no longer connected.");
         InvalidateRenderSnapshotsBefore(m_RenderGeneration + 1);
         const std::string outputDiagnostic = m_Project->graph.GetOutputConnectionDiagnostic();
         if (!outputDiagnostic.empty() && outputDiagnostic != m_LastOutputConnectionDiagnostic) {
@@ -391,6 +401,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         rawWorkspaceActive &&
         m_RawWorkspaceRootTabActive &&
         !UsesGraphViewportPreview() &&
+        !m_RawWorkspaceExplicitFullQualityRenderRequested &&
         TrySubmitRawRenderCommand(
             m_RenderGeneration,
             previewRequests)) {
@@ -465,6 +476,14 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             m_RawWorkspaceFullResolutionPreviewRequestGeneration =
                 snapshot.generation;
         }
+        // Direct execution publishes this exact local context; worker RAW
+        // snapshots may intentionally use a different (non-regional) mode.
+        snapshot.graphRequest = CurrentGraphRenderTag();
+        TrackFullQualityRenderSnapshot(snapshot);
+        const bool authoritativeOutput =
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport ||
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitInspection;
+        m_Pipeline.SetRawRgbDenoiseAsyncEnabled(rawWorkspaceActive && !authoritativeOutput);
         m_GraphPerformanceStats.lastSnapshotBuildMs =
             MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
         m_Pipeline.SetPreviewMaxDimension(snapshot.previewMaxDimension);
@@ -743,6 +762,18 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         m_GraphPerformanceStats.lastMainRegionPlanHaloY = 0;
         m_GraphPerformanceStats.lastMainRegionPlanReason.clear();
         m_RenderPending = false;
+        EditorRenderWorker::Result synchronousResult;
+        synchronousResult.ownerId = snapshot.rawWorkspace.sourceKey.empty() ? 0 : m_RawRenderClientId;
+        synchronousResult.generation = snapshot.generation;
+        synchronousResult.graphRequest = CurrentGraphRenderTag();
+        synchronousResult.rawRenderPurpose = snapshot.rawRenderPurpose;
+        synchronousResult.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
+        synchronousResult.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
+        synchronousResult.rawWorkspace.recipeRevision = snapshot.rawWorkspace.recipeRevision;
+        synchronousResult.previewMaxDimension = snapshot.previewMaxDimension;
+        synchronousResult.denoisePending = m_Pipeline.IsOutputDenoisePending();
+        synchronousResult.success = rawWorkspaceActive ? publishedRawPresentation : m_Pipeline.GetOutputTexture() != 0;
+        synchronousResult.error = !rawRgbDenoiseError.empty() ? rawRgbDenoiseError : graphExecutionStats.lastSpecializedFailure;
         if (rawWorkspaceActive) {
             if (publishedRawPresentation) {
                 m_RawWorkspacePreviewOutputKind =
@@ -873,6 +904,23 @@ void EditorModule::SubmitRenderIfReadyImpl() {
                 RefreshPendingMultiFrameProjectCover();
             }
         }
+        if (synchronousResult.success && synchronousResult.error.empty()) {
+            if (rawWorkspaceActive) {
+                m_LatestRawPresentationGeneration = snapshot.generation;
+                m_LatestRawPresentationRecipeRevision = snapshot.rawWorkspace.recipeRevision;
+            }
+            if (!rawWorkspaceActive) {
+                m_ViewportOutputRenderGeneration = snapshot.generation;
+                m_ViewportOutputPreviewMaxDimension = snapshot.previewMaxDimension;
+                m_ViewportOutputExpectedNativeWidth = m_Pipeline.GetCanvasWidth();
+                m_ViewportOutputExpectedNativeHeight = m_Pipeline.GetCanvasHeight();
+            }
+            synchronousResult.rawWorkspace.expectedNativeOutputWidth = m_ViewportOutputExpectedNativeWidth;
+            synchronousResult.rawWorkspace.expectedNativeOutputHeight = m_ViewportOutputExpectedNativeHeight;
+            AdoptViewportPreviewState(synchronousResult);
+            AdoptRenderPresentationState(synchronousResult);
+        }
+        CompleteFullQualityRenderRequest(synchronousResult, synchronousResult.success && synchronousResult.error.empty());
         if (m_Pipeline.GetOutputTexture()!=0 && m_Pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty())
             ApplyToneCurveAutoRewriteFeedback(m_Pipeline.GetToneCurveAutoRewriteFeedback());
         for (int nodeId : activeHdrMergeNodeIds) {

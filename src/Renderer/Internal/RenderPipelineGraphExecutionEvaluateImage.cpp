@@ -30,13 +30,16 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=unavailable->second;return 0;
         }
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
+        bool& outputDenoisePending = imageDenoisePending[key];
+        DenoiseProvenance::Scope provenanceScope(denoiseProvenance, outputDenoisePending);
         if (const auto cached = imageCache.find(key); cached != imageCache.end()) {
+            denoiseProvenance.pending = outputDenoisePending;
             if (const auto extent = localTextureExtents.find(key);
                 extent != localTextureExtents.end()) {
                 pipeline.m_Width = extent->second.first;
                 pipeline.m_Height = extent->second.second;
             }
-            return cached->second;
+            return provenanceScope.Return(cached->second);
         }
         if (visitingImages.count(key)) {
             return 0;
@@ -52,7 +55,8 @@ void GraphExecutionRuntime::BindImageEvaluation() {
         const RenderGraphNode& authored = *it->second;
         std::optional<RenderGraphNode> evaluated;
         const bool operationActive = authored.kind == RenderGraphNodeKind::RawOperation ? authored.rawOperation.enabled :
-            authored.kind == RenderGraphNodeKind::Layer ? authored.layerJson.value("enabled",true) : true;
+            authored.kind == RenderGraphNodeKind::Layer
+                ? authored.layerJson.value("enabled",true) && authored.layerJson.value("visible",true) : true;
         const bool hasUniformBindings = operationActive && socketId != "inputImageOut" &&
             std::any_of(authored.uniformParameters.begin(),authored.uniformParameters.end(),
             [&](const auto& parameter) { return findInputLink(nodeId,EditorNodeGraph::ParameterInputSocketId(parameter.id)) != nullptr; });
@@ -68,7 +72,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             visitingImages.erase(key);
             imageCache[key] = value;
             localTextureExtents[key] = {pipeline.m_Width, pipeline.m_Height};
-            return value;
+            return provenanceScope.Return(value);
         }
         if (node.kind == RenderGraphNodeKind::MaskGenerator ||
             node.kind == RenderGraphNodeKind::MaskCombine ||
@@ -81,7 +85,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             unsigned int maskTex = evalMask(nodeId, socketId);
             visitingImages.erase(key);
-            return maskTex;
+            return provenanceScope.Return(maskTex);
         }
         const std::size_t fingerprint = fingerprintImage(nodeId, socketId);
         const bool rawDevelopStageSocket =
@@ -110,6 +114,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             !rawDevelopmentSideEffectsActive &&
             !passThroughOutput) {
             if (auto* cached = pipeline.FindGraphCacheEntry(pipeline.m_GraphImageCache,key,fingerprint)) {
+                denoiseProvenance.pending = cached->denoisePending;
                 ++pipeline.m_LastGraphExecutionStats.imageCacheHits;
                 pipeline.TouchGraphCacheEntry(*cached);
                 pipeline.m_RawViewportAppliedRegion = cached->viewportRegion;
@@ -125,7 +130,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                 localTextureExtents[key] = { pipeline.m_Width, pipeline.m_Height };
                 pipeline.m_LastGraphImageCacheHits.insert(key);
                 visitingImages.erase(key);
-                return cached->texture;
+                return provenanceScope.Return(cached->texture);
             }
         }
         ++pipeline.m_LastGraphExecutionStats.imageCacheMisses;
@@ -133,6 +138,27 @@ void GraphExecutionRuntime::BindImageEvaluation() {
         unsigned int result = 0;
         bool resultOwned = false;
         Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup cleanup(result, resultOwned);
+        const auto withBorrowedInputProvenance = [&](const auto& render) {
+            unsigned int inputTexture = 0;
+            bool inputDenoisePending = false;
+            const auto trackImageInput = [&](int inputNodeId, const std::string& inputSocketId) {
+                const auto texture = evalImage(inputNodeId, inputSocketId);
+                if (inputTexture == 0 && texture != 0) {
+                    inputTexture = texture;
+                    // Includes uniforms evaluated before this node's input.
+                    inputDenoisePending = denoiseProvenance.pending;
+                }
+                return texture;
+            };
+            const auto rendered = render(trackImageInput);
+            if (!rendered.owned && inputTexture != 0 && rendered.texture == inputTexture) {
+                // These executors may inspect a mask before deciding to
+                // return their untouched image input. Unused mask pixels do
+                // not make that borrowed output provisional.
+                denoiseProvenance.pending = inputDenoisePending;
+            }
+            return rendered;
+        };
         bool pointwiseFused = false;
         if (const auto prepared = pointwiseFusionPlans.find(key);
             prepared != pointwiseFusionPlans.end() && !pointwiseFusionDisabledNodes.count(node.nodeId)) {
@@ -178,6 +204,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                 pipeline.RenderRawDevelopmentGraphNode(node, fingerprint);
             result = rawDevelopmentResult.texture;
             resultOwned = rawDevelopmentResult.owned;
+            denoiseProvenance.pending |= rawDevelopmentResult.denoisePending;
         } else if (node.kind == RenderGraphNodeKind::RawDecode) {
             const std::string rawBaseKey = std::to_string(node.nodeId) + ":__rawDecodeBase";
             const std::size_t rawBaseFingerprint = fingerprintImage(node.nodeId, "__rawDecodeBase");
@@ -186,15 +213,17 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             result = rawBaseStage.texture;
             resultOwned = false;
         } else if (node.kind == RenderGraphNodeKind::RawDevelop) {
-            const RenderPipeline::GraphNodeRenderResult rawDevelopResult = pipeline.RenderRawDevelopGraphNode(
-                executionContext,
-                node,
-                socketId,
-                fingerprint,
-                imageCache,
-                evalImage,
-                evalMask,
-                fingerprintImage);
+            const auto rawDevelopResult = withBorrowedInputProvenance([&](const auto& imageInput) {
+                return pipeline.RenderRawDevelopGraphNode(
+                    executionContext,
+                    node,
+                    socketId,
+                    fingerprint,
+                    imageCache,
+                    imageInput,
+                    evalMask,
+                    fingerprintImage);
+            });
             result = rawDevelopResult.texture;
             resultOwned = rawDevelopResult.owned;
         } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
@@ -261,6 +290,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                         developedNode, fingerprint);
                 result = developedResult.texture;
                 resultOwned = developedResult.owned;
+                denoiseProvenance.pending |= developedResult.denoisePending;
             } else {
                 // Never substitute the reference frame for a missing, stale,
                 // or failed fused result.
@@ -280,7 +310,9 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             result = pipeline.GenerateImageTexture(node);
             resultOwned = result != 0;
         } else if (node.kind == RenderGraphNodeKind::RawOperation) {
-            const auto operationResult = pipeline.RenderRawOperation(executionContext, node, evalImage, evalMask);
+            const auto operationResult = withBorrowedInputProvenance([&](const auto& imageInput) {
+                return pipeline.RenderRawOperation(executionContext, node, imageInput, evalMask);
+            });
             result = operationResult.texture;
             resultOwned = operationResult.owned;
         } else if (node.kind == RenderGraphNodeKind::Layer) {
@@ -523,7 +555,8 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                     key,
                     result,
                     fingerprint,
-                    true)) {
+                    true,
+                    denoiseProvenance.pending)) {
                 glDeleteTextures(1, &result);
                 result = borrowedRawFallback;
                 resultOwned = false;
@@ -544,7 +577,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             pipeline.ReleaseGraphCacheEntry(pipeline.m_GraphImageCache, key);
         }
         visitingImages.erase(key);
-        return result;
+        return provenanceScope.Return(result);
     };
 
 }

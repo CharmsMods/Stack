@@ -206,7 +206,8 @@ bool EditorRenderWorker::TryConsumeReadyDenoiseSnapshot(Snapshot& snapshot) {
     return false;
 }
 
-void EditorRenderWorker::RetainDenoiseContinuationLocked(Snapshot& snapshot) {
+void EditorRenderWorker::RetainDenoiseContinuationLocked(
+    Snapshot& snapshot, bool mainDenoisePending) {
     auto& owner = m_OwnerStates[snapshot.ownerId];
     owner.denoiseInFlight = owner.denoise && owner.denoise->pending;
     const bool current = !IsOwnerSnapshotInvalidLocked(snapshot.ownerId, snapshot.generation,
@@ -216,6 +217,12 @@ void EditorRenderWorker::RetainDenoiseContinuationLocked(Snapshot& snapshot) {
         snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitInspection &&
         snapshot.rawRenderPurpose != RawRenderPurpose::ViewportCalibration &&
         !(snapshot.rawRenderPurpose == RawRenderPurpose::ViewportOverview && snapshot.rawWorkspace.viewportDependencyEdge >= 0);
+    if (continuationAllowed && mainDenoisePending && owner.denoise && !owner.denoise->pending) {
+        // Auxiliary graphs can clear deferred after the main image was
+        // published. Preserve that image's unmet demand, not a fictitious
+        // in-flight model. Admission will invalidate its provisional caches.
+        owner.denoise->deferred = true;
+    }
     if (continuationAllowed && owner.denoise && (owner.denoise->pending || owner.denoise->deferred)) {
         owner.denoisePurpose = snapshot.rawRenderPurpose;
         owner.continuation = std::move(snapshot);

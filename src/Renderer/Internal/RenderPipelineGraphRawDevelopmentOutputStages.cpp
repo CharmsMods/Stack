@@ -840,6 +840,7 @@ void RenderPipeline::RenderRawDevelopmentOutputCropStage(
         }
         result.texture = cached.texture;
         result.owned = false;
+        result.denoisePending = cached.denoisePending;
         m_Width = cached.width;
         m_Height = cached.height;
         ++m_LastGraphExecutionStats.rawStageCacheHits;
@@ -905,7 +906,8 @@ void RenderPipeline::RenderRawDevelopmentOutputCropStage(
                 cacheKey,
                 result.texture,
                 fingerprint,
-                true)) {
+                true,
+                result.denoisePending)) {
             result.owned = false;
         }
         return;

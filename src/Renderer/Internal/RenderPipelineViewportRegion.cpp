@@ -24,6 +24,7 @@ void RenderPipeline::ApplyRawViewportRegion(GraphNodeRenderResult& result,
         if (result.owned && result.texture != cached.texture) glDeleteTextures(1, &result.texture);
         result.texture = cached.texture;
         result.owned = false;
+        result.denoisePending = cached.denoisePending;
         m_Width = cached.width;
         m_Height = cached.height;
         m_RawViewportAppliedRegion = region;
@@ -55,6 +56,7 @@ void RenderPipeline::ApplyRawViewportRegion(GraphNodeRenderResult& result,
     }
     if (result.owned) glDeleteTextures(1, &result.texture);
     result.texture = target.Release();
-    result.owned = !StoreRawDevelopStageCacheEntry(cacheKey, result.texture, upstreamFingerprint, true);
+    result.owned = !StoreRawDevelopStageCacheEntry(cacheKey, result.texture, upstreamFingerprint, true,
+        result.denoisePending);
     m_RawViewportAppliedRegion = region;
 }

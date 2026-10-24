@@ -1003,6 +1003,13 @@ bool RenderPipeline::ValidateRawRgbDenoiseProgramsForTesting() {
         diagnosticsValid;
 }
 
+unsigned int RenderPipeline::RenderProvisionalRawRgbDenoiseOutput(unsigned int inputTexture) {
+    const unsigned int output = RenderRawDevelopmentExposure(inputTexture, 0.0f);
+    m_LastRawRgbDenoiseOutputPending = output != 0;
+    m_HasProvisionalRawRgbDenoiseOutput |= m_LastRawRgbDenoiseOutputPending;
+    return output;
+}
+
 unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawRgbDenoiseRecipe& requestedSettings,
@@ -1015,6 +1022,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
     const Stack::RawRecipe::RawDevelopmentRecipe* viewportRecipe) {
     const Stack::RawRecipe::RawRgbDenoiseRecipe settings =
         Stack::RawRecipe::SanitizeRgbDenoiseRecipe(requestedSettings);
+    m_LastRawRgbDenoiseOutputPending = false;
     m_RawRgbDenoiseState->error.clear();
     m_RawRgbDenoiseState->deferred = false;
     const bool diagnosticRequested =
@@ -1104,8 +1112,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
                 // Preserve a responsive, truthful before-state until the
                 // external model and adapter finish. Completion or owner
                 // changes invalidate any caches populated by these pixels.
-                m_HasProvisionalRawRgbDenoiseOutput = true;
-                return RenderRawDevelopmentExposure(inputTexture, 0.0f);
+                return RenderProvisionalRawRgbDenoiseOutput(inputTexture);
             }
 
             if (m_RawRgbDenoiseState->lastCompletedModelFingerprint ==
@@ -1122,8 +1129,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
                 m_RawRgbDenoiseState->deferred = true;
                 m_RawRgbDenoiseState->status =
                     "AI denoise queued; another project is processing.";
-                m_HasProvisionalRawRgbDenoiseOutput = true;
-                return RenderRawDevelopmentExposure(inputTexture, 0.0f);
+                return RenderProvisionalRawRgbDenoiseOutput(inputTexture);
             }
         }
 
@@ -1289,10 +1295,14 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
                 SetStringNoThrow(
                     m_RawRgbDenoiseState->lastCompletedError,
                     "Could not start asynchronous AI denoise.");
+                SetStringNoThrow(
+                    m_RawRgbDenoiseState->error,
+                    "Could not start asynchronous AI denoise.");
                 std::cerr
                     << "[RAW] Could not start asynchronous AI denoise: "
                     << error.what() << "\n";
                 m_RawRgbDenoiseState->status.clear();
+                return 0;
             } catch (...) {
                 m_RawRgbDenoiseState->pending = false;
                 m_RawRgbDenoiseState->modelFingerprint = 0;
@@ -1303,11 +1313,14 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
                 SetStringNoThrow(
                     m_RawRgbDenoiseState->lastCompletedError,
                     "Could not start asynchronous AI denoise.");
+                SetStringNoThrow(
+                    m_RawRgbDenoiseState->error,
+                    "Could not start asynchronous AI denoise.");
                 m_RawRgbDenoiseState->status.clear();
+                return 0;
             }
 
-            m_HasProvisionalRawRgbDenoiseOutput = true;
-            return RenderRawDevelopmentExposure(inputTexture, 0.0f);
+            return RenderProvisionalRawRgbDenoiseOutput(inputTexture);
         }
 
         if (!modelCacheHit) {
@@ -1356,6 +1369,11 @@ unsigned int RenderPipeline::RenderRawDevelopmentRgbDenoise(
         if (outputTexture == 0) {
             m_RawRgbDenoiseState->error =
                 "Stack could not upload the Restormer scene-linear result.";
+        } else if (m_RawRgbDenoiseState->lastCompletedModelFingerprint == modelFingerprint) {
+            // A verified synchronous retry supersedes this model's previous
+            // async failure; later interactive work may use it normally.
+            m_RawRgbDenoiseState->lastCompletedModelFingerprint = 0;
+            m_RawRgbDenoiseState->lastCompletedError.clear();
         }
         return outputTexture;
     }

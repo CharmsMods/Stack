@@ -476,8 +476,13 @@ void QueueRenderCoordinator::TickInspection() {
         }
         return;
     }
-    case InspectionPhase::WaitForRender:
-        if (m_RenderEditor->IsRenderSettledForFullQualityExport()) {
+    case InspectionPhase::WaitForRender: {
+        std::string error;
+        if (m_RenderEditor->DidFullQualityRenderFail(&error)) {
+            FailInspection(error.empty()
+                ? "The full-quality inspection render failed."
+                : std::move(error));
+        } else if (m_RenderEditor->IsRenderSettledForFullQualityExport()) {
             CompleteInspection();
         } else if (timedOut(std::chrono::minutes(15))) {
             FailInspection(
@@ -485,6 +490,7 @@ void QueueRenderCoordinator::TickInspection() {
                 m_RenderEditor->GetFullQualityRenderDiagnostic());
         }
         return;
+    }
     case InspectionPhase::Idle:
     default:
         if (m_PendingInspection) {
@@ -811,8 +817,13 @@ void QueueRenderCoordinator::Tick() {
         }
         return;
     }
-    case Phase::WaitForRender:
-        if (m_RenderEditor->IsRenderSettledForFullQualityExport()) {
+    case Phase::WaitForRender: {
+        std::string error;
+        if (m_RenderEditor->DidFullQualityRenderFail(&error)) {
+            FailCurrent(error.empty()
+                ? "The full-quality render failed."
+                : std::move(error));
+        } else if (m_RenderEditor->IsRenderSettledForFullQualityExport()) {
             BeginOutputWrite();
         } else if (PhaseTimedOut(std::chrono::minutes(15))) {
             FailCurrent(
@@ -832,6 +843,7 @@ void QueueRenderCoordinator::Tick() {
                 std::move(renderStatus));
         }
         return;
+    }
     case Phase::WriteOutput:
         if (m_RenderEditor->GetExportTaskState() ==
             Async::TaskState::Failed) {

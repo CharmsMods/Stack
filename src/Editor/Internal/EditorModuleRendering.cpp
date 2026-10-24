@@ -458,6 +458,7 @@ void EditorModule::RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, in
 }
 
 void EditorModule::MarkRenderDirty(int touchedNodeId) {
+    CancelFullQualityRenderRequest("Full-quality rendering was canceled by a document edit.");
     // A real edit replaces optional native refinement with an interactive
     // request. Camera demand no longer comes through this invalidation path.
     for (auto& view : m_ViewportPreviewStates) view.refinement = false;
@@ -504,6 +505,12 @@ void EditorModule::MarkRenderDirty(int touchedNodeId) {
 }
 
 void EditorModule::MarkRenderRefreshDirty() {
+    // Some authored RAW edits use this presentation refresh path. Once the
+    // explicit attempt is submitted its revision is immutable; before submit,
+    // an internal denoise-completion refresh may still prepare the same request.
+    if (m_FullQualityRenderRequest.phase ==
+        Stack::EditorRendering::FullQualityRenderRequestState::Phase::Submitted)
+        CancelFullQualityRenderRequest("Full-quality rendering was superseded by a render refresh.");
     for (auto& view : m_ViewportPreviewStates) view.refinement = false;
     Stack::UiPerformance::Probe::Invalidated("refresh",this);
     CancelRawViewportCalibration();
@@ -709,6 +716,7 @@ void EditorModule::ReleaseViewportPresentationResources() {
     m_ViewportOutputExpectedNativeHeight = 0;
     m_ViewportOutputNativeExtentVerified = false;
     m_ViewportOutputRenderGeneration = 0;
+    m_RenderPresentation = {};
 }
 
 void EditorModule::RefreshPendingMultiFrameProjectCover() {

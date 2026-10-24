@@ -23,10 +23,13 @@ namespace Stack::Renderer::GraphExecution {
 void GraphExecutionRuntime::BindScalarEvaluation() {
     evalScalar = [&](int nodeId, const std::string& socketId, double& value) -> bool {
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
+        bool& outputDenoisePending = scalarDenoisePending[key];
+        DenoiseProvenance::Scope provenanceScope(denoiseProvenance, outputDenoisePending);
         if (const auto local = scalarCache.find(key); local != scalarCache.end()) {
+            denoiseProvenance.pending = outputDenoisePending;
             value = local->second;
             ++pipeline.m_LastGraphExecutionStats.reductionCacheHits;
-            return true;
+            return provenanceScope.Return(true);
         }
         if (!visitingScalars.insert(key).second) {
             pipeline.m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
@@ -51,7 +54,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
             value = node.scalarValue;
             scalarCache[key] = value;
             visitingScalars.erase(key);
-            return true;
+            return provenanceScope.Return(true);
         }
         
         if (node.kind == RenderGraphNodeKind::DataMath &&
@@ -77,7 +80,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
             }
             scalarCache[key] = value;
             visitingScalars.erase(key);
-            return true;
+            return provenanceScope.Return(true);
         }
         if (node.kind != RenderGraphNodeKind::FieldMean ||
             socketId != EditorNodeGraph::kValueOutputSocketId) {
@@ -88,6 +91,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         if (const auto persistent = pipeline.m_GraphScalarCache.find(key);
             persistent != pipeline.m_GraphScalarCache.end() &&
             persistent->second.fingerprint == fingerprint) {
+            denoiseProvenance.pending = persistent->second.denoisePending;
             persistent->second.lastUseSerial = ++pipeline.m_GraphResourceUseSerial;
             value = persistent->second.value;
             scalarCache[key] = value;
@@ -96,7 +100,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
             pipeline.m_LastGraphExecutionStats.reductions.push_back({
                 nodeId, value, persistent->second.sampleCount, true, node.definitionId });
             visitingScalars.erase(key);
-            return true;
+            return provenanceScope.Return(true);
         }
         ++pipeline.m_LastGraphExecutionStats.reductionCacheMisses;
         const RenderGraphLink* input = findInputLink(
@@ -176,6 +180,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         RenderPipeline::CachedGraphScalar cached;
         cached.fingerprint = fingerprint;
         cached.value = mean.value;
+        cached.denoisePending = denoiseProvenance.pending;
         cached.sampleCount = static_cast<std::uint64_t>(mean.sampleCount);
         cached.lastUseSerial = ++pipeline.m_GraphResourceUseSerial;
         pipeline.m_GraphScalarCache[key] = cached;
@@ -183,7 +188,7 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         pipeline.m_LastGraphExecutionStats.reductions.push_back({
             nodeId, value, cached.sampleCount, false, node.definitionId });
         visitingScalars.erase(key);
-        return true;
+        return provenanceScope.Return(true);
     };
 
 }

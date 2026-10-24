@@ -419,10 +419,10 @@ void ContinuationFailureDiagnostic() {
     result.workerFailed=false;result.error="AI denoise inference failed";
     Require(!Stack::GraphRendering::MayAdopt(result.graphRequest,editor.currentTag,result.generation,editor.m_GraphAcceptedResultGeneration),"same-generation continuation pixels remain inadmissible");
     editor.DiagnoseStaleFailure(result);Require(editor.notices==1 && editor.m_GraphAcceptedResultGeneration==150,"ordinary denoise continuation reports without adopting pixels");editor.notices=0;
-    // RenderSnapshot disables generic viewport rendering for DenoiseCompletion,
-    // but retains the original view ID, camera generation and content identity.
+    // Failures without a regional payload still retain the original view ID,
+    // camera generation and content identity. The flag cannot erase that owner.
     result.viewportPreview.enabled=false;
-    editor.DiagnoseStaleFailure(result);Require(editor.notices==1,"current nonfatal continuation reports with production disabled viewport flag");editor.notices=0;
+    editor.DiagnoseStaleFailure(result);Require(editor.notices==1,"current nonfatal continuation reports without a regional payload");editor.notices=0;
     ++editor.currentView.request.generation;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"disabled viewport flag cannot hide obsolete camera");--editor.currentView.request.generation;
     ++editor.currentView.contentIdentity;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"disabled viewport flag cannot hide obsolete content");--editor.currentView.contentIdentity;
     editor.m_RawWorkspaceRootTabActive=false;editor.DiagnoseStaleFailure(result);Require(editor.notices==0,"other view suppressed");editor.m_RawWorkspaceRootTabActive=true;

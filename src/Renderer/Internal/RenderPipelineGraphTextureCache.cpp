@@ -92,7 +92,8 @@ bool RenderPipeline::StoreGraphCacheEntry(
     const std::string& key,
     unsigned int texture,
     std::size_t fingerprint,
-    bool owned) {
+    bool owned,
+    bool denoisePending) {
     CachedGraphTexture replacement;
     replacement.viewportRegion = m_RawViewportAppliedRegion;
     replacement.graphGeometry = m_CurrentGraphImageGeometry;
@@ -101,6 +102,7 @@ bool RenderPipeline::StoreGraphCacheEntry(
     replacement.width = m_Width;
     replacement.height = m_Height;
     replacement.owned = owned;
+    replacement.denoisePending = denoisePending;
     replacement.bytes = owned
         ? EstimateGraphTargetBytes(m_Width, m_Height)
         : 0;

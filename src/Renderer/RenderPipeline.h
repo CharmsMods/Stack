@@ -392,6 +392,9 @@ public:
         return m_RawViewportGpuTiming.Collect(canceled);
     }
     unsigned int GetOutputTexture() const { return m_OutputTexture; }
+    // Provenance of the selected graph output, independent of other jobs or
+    // auxiliary outputs that happen to share this pipeline.
+    bool IsOutputDenoisePending() const { return m_OutputTexture != 0 && m_OutputDenoisePending; }
     unsigned int GetSourceTexture() const { return m_SourceTexture; }
     unsigned int GetCompareSourceTexture() const { return m_GraphSourceTexture != 0 ? m_GraphSourceTexture : m_SourceTexture; }
     int GetCanvasWidth() const { return m_Width; }
@@ -546,6 +549,7 @@ private:
         int width = 0;
         int height = 0;
         bool owned = false;
+        bool denoisePending = false;
         bool viewportNativeDependency = false;
         bool requiresFloat32Seed = false;
         bool viewportNativeDerived = false;
@@ -556,6 +560,7 @@ private:
     struct CachedGraphScalar {
         std::size_t fingerprint = 0;
         double value = 0.0;
+        bool denoisePending = false;
         std::uint64_t sampleCount = 0;
         std::uint64_t lastUseSerial = 0;
     };
@@ -643,6 +648,7 @@ private:
     struct GraphNodeRenderResult {
         unsigned int texture = 0;
         bool owned = false;
+        bool denoisePending = false;
     };
 
     FullscreenQuad m_Quad;
@@ -684,6 +690,7 @@ private:
     unsigned int m_PingFBO;
     unsigned int m_PongFBO;
     unsigned int m_OutputTexture;   // Points to whichever is the final result
+    bool m_OutputDenoisePending = false;
     unsigned int m_ExternalOutputTexture;
     unsigned int m_GraphSourceTexture;
     int m_GraphSourceWidth = 0;
@@ -845,6 +852,7 @@ private:
     bool m_RawRgbDenoiseAsyncEnabled = false;
     bool m_RawRgbDenoiseAsyncStartAllowed = true;
     bool m_HasProvisionalRawRgbDenoiseOutput = false;
+    bool m_LastRawRgbDenoiseOutputPending = false;
     std::shared_ptr<RawRgbDenoiseState> m_DefaultRawRgbDenoiseState =
         std::make_shared<RawRgbDenoiseState>();
     std::shared_ptr<RawRgbDenoiseState> m_RawRgbDenoiseState =
@@ -900,7 +908,7 @@ private:
     void DestroyGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache);
     void ReleaseGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key);
     unsigned int CloneTextureForGraphCache(unsigned int sourceTexture, int width, int height);
-    bool StoreGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key, unsigned int texture, std::size_t fingerprint, bool owned);
+    bool StoreGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key, unsigned int texture, std::size_t fingerprint, bool owned, bool denoisePending = false);
     void TouchGraphCacheEntry(CachedGraphTexture& entry);
     CachedGraphTexture* FindGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache,
         const std::string& key, std::size_t fingerprint);
@@ -939,7 +947,8 @@ private:
         const std::string& key,
         unsigned int texture,
         std::size_t fingerprint,
-        bool takeTextureOwnership = false);
+        bool takeTextureOwnership = false,
+        bool denoisePending = false);
     void InvalidateGraphCaches(bool preserveRawDevelopStages = false);
     unsigned int AcquireGraphTransientTarget();
     void ReleaseGraphTransientTarget(unsigned int texture);
@@ -1217,6 +1226,7 @@ private:
     unsigned int RenderRawDetailAutoMask(unsigned int inputTexture, const RenderGraphNode& node, unsigned int manualMaskTexture = 0, bool debugPreview = false);
     unsigned int RenderRawDetailFusion(unsigned int inputTexture, unsigned int maskTexture, const Raw::RawDetailFusionSettings& settings);
     unsigned int RenderRawDevelopmentToneCurve(unsigned int inputTexture, const std::vector<Raw::RawToneCurvePoint>& points);
+    unsigned int RenderProvisionalRawRgbDenoiseOutput(unsigned int inputTexture);
     unsigned int RenderRawDevelopmentRgbDenoise(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawRgbDenoiseRecipe& settings,

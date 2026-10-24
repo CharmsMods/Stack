@@ -186,6 +186,7 @@ void RenderPipeline::SetGraphCacheBudget(
 void RenderPipeline::ExecuteGraphImpl(
     const RenderGraphSnapshot& graph,
     const GraphTopologyIndex& topology) {
+    m_OutputDenoisePending = false;
     const bool sceneRaw = graph.rawLayerBackgroundNodeId > 0 ||
         std::any_of(graph.nodes.begin(),graph.nodes.end(),[](const auto& node) {
             return node.kind == RenderGraphNodeKind::RawDevelopment;

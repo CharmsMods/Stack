@@ -618,6 +618,10 @@ public:
         std::array<std::size_t, Raw::kViewportStageCount> workloadKeys {};
         Raw::ViewportStage editStage = Raw::ViewportStage::RawBase;
         bool success = false;
+        // Captured with the main image, before auxiliary renders can change
+        // the pipeline output. Such pixels are not settled output even
+        // when the worker is idle or a later continuation fails.
+        bool denoisePending = false;
         std::vector<unsigned char> pixels;
         int width = 0;
         int height = 0;
@@ -788,7 +792,8 @@ private:
     void PollDenoiseContinuationsLocked();
     bool CanStartAuthoritativeRenderLocked(std::uint64_t ownerId) const;
     bool DeferAuthoritativeRenderLocked(Snapshot& snapshot);
-    void RetainDenoiseContinuationLocked(Snapshot& snapshot);
+    void RetainDenoiseContinuationLocked(Snapshot& snapshot,
+        bool mainDenoisePending = false);
     void DrainDenoiseForShutdown() noexcept;
 
     GLFWwindow* m_WorkerWindow = nullptr;

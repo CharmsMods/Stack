@@ -300,7 +300,8 @@ bool RenderPipeline::StoreRawDevelopStageCacheEntry(
     const std::string& key,
     unsigned int texture,
     std::size_t fingerprint,
-    bool takeTextureOwnership) {
+    bool takeTextureOwnership,
+    bool denoisePending) {
     if (key.empty() || texture == 0 || fingerprint == 0 || m_Width <= 0 || m_Height <= 0) {
         return false;
     }
@@ -367,6 +368,7 @@ bool RenderPipeline::StoreRawDevelopStageCacheEntry(
     newEntry.width = m_Width;
     newEntry.height = m_Height;
     newEntry.owned = true;
+    newEntry.denoisePending = denoisePending;
 
     decltype(m_RawDevelopStageImageCache)::iterator cacheLocation;
     bool insertedCacheKey = false;

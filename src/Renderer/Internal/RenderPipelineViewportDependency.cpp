@@ -17,7 +17,7 @@ RenderPipeline::CachedGraphTexture RenderPipeline::FindRawViewportDenoiseInput(
             if (entry.fingerprint != nativeFingerprint) entry.viewportNativeDependency = false;
     const auto native = FindRawDevelopStageCacheEntry(key, nativeFingerprint);
     auto requested = FindRawDevelopStageCacheEntry(key, requestedFingerprint);
-    if (!native.texture || !native.viewportNativeDependency) return requested;
+    if (!native.texture || !native.viewportNativeDependency || native.denoisePending) return requested;
     ++m_LastGraphExecutionStats.rawNativeDenoiseReuses;
     if (m_PreviewMaxDimension == 0 || requested.viewportNativeDerived) return requested;
     // A preview produced before native preparation is replaced by a sample of
@@ -31,7 +31,7 @@ RenderPipeline::CachedGraphTexture RenderPipeline::FindRawViewportDenoiseInput(
     m_Width = width;
     m_Height = height;
     InvalidateRawDevelopStageCacheEntry(key, requestedFingerprint);
-    if (StoreRawDevelopStageCacheEntry(key, copy.Get(), requestedFingerprint, true)) {
+    if (StoreRawDevelopStageCacheEntry(key, copy.Get(), requestedFingerprint, true, native.denoisePending)) {
         copy.Release();
         auto& entry = m_RawDevelopStageImageCache.at(key).front();
         entry.viewportNativeDerived = true;
@@ -41,6 +41,7 @@ RenderPipeline::CachedGraphTexture RenderPipeline::FindRawViewportDenoiseInput(
     requested.texture = copy.Release();
     requested.width = width;
     requested.height = height;
+    requested.denoisePending = native.denoisePending;
     temporary = true;
     return requested;
 }

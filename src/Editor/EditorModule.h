@@ -52,6 +52,7 @@ namespace StackAppearance {
 #include "RawRenderService.h"
 #include "NodeGraph/EditorNodeGraph.h"
 #include "Editor/ViewportPreviewState.h"
+#include "Editor/RenderPresentationState.h"
 #include "NodeMath/PngMetadataWriter.h"
 #include "UI/EditorSidebar.h"
 #include "UI/EditorViewport.h"
@@ -829,6 +830,7 @@ public:
         int& outH,
         int maxDimension = 2048);
     bool RequestFullQualityRender(std::string* errorMessage = nullptr);
+    bool DidFullQualityRenderFail(std::string* errorMessage = nullptr) const;
     float GetFullQualityRenderProgress(
         std::string* statusText = nullptr) const;
     std::string GetFullQualityRenderDiagnostic() const;
@@ -836,6 +838,7 @@ public:
         return m_Project->graph.IsOutputConnected() &&
             !m_RenderDirty && !m_RenderPending &&
             !IsAnyRenderBackendBusy() &&
+            IsPresentedRenderComplete() &&
             HasCompleteNativeViewportOutput();
     }
     bool RequestExportProject(const std::string& path);
@@ -2380,6 +2383,8 @@ private:
     int m_ViewportOutputExpectedNativeHeight = 0;
     bool m_ViewportOutputNativeExtentVerified = false;
     std::uint64_t m_ViewportOutputRenderGeneration = 0;
+    Stack::EditorRendering::RenderPresentationState m_RenderPresentation;
+    Stack::EditorRendering::FullQualityRenderRequestState m_FullQualityRenderRequest;
     bool m_MultiFrameProjectCoverRefreshPending = false;
     bool m_ProjectCoverEncodeInFlight = false;
     std::uint64_t m_RenderGeneration = 0;
@@ -2580,6 +2585,15 @@ private:
         const std::vector<EditorRenderWorker::DevelopCandidateRenderResult>& results);
     Stack::GraphRendering::RequestTag CurrentGraphRenderTag() const;
     bool IsCurrentGraphResult(const EditorRenderWorker::Result& result) const;
+    bool IsCurrentGraphDenoiseContinuation(const EditorRenderWorker::Result& result) const;
+    bool IsGraphContinuationViewCurrent(const EditorRenderWorker::Result& result) const;
+    bool IsPresentedRenderComplete() const;
+    void AdoptRenderPresentationState(const EditorRenderWorker::Result& result);
+    void ObserveRenderPresentationFailure(const EditorRenderWorker::Result& result);
+    void TrackFullQualityRenderSnapshot(const EditorRenderWorker::Snapshot& snapshot);
+    void CompleteFullQualityRenderRequest(const EditorRenderWorker::Result& result, bool adopted);
+    void FailFullQualityRenderRequest(const std::string& reason, bool canceled = false);
+    void CancelFullQualityRenderRequest(const std::string& reason);
     void ReportGraphRenderFailure(const EditorRenderWorker::Result& result);
     bool GraphRenderBackendReady();
     void SubmitRenderIfReady() noexcept;

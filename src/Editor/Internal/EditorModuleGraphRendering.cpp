@@ -45,7 +45,9 @@ Stack::GraphRendering::RequestTag EditorModule::CurrentGraphRenderTag() const {
 bool EditorModule::IsCurrentGraphResult(const EditorRenderWorker::Result& result) const {
     if (!result.graphRequest.enabled) return result.generation >= m_RenderGeneration;
     return Stack::GraphRendering::MayAdopt(result.graphRequest, CurrentGraphRenderTag(),
-        result.generation, m_GraphAcceptedResultGeneration);
+        result.generation, m_GraphAcceptedResultGeneration) ||
+        (result.success && result.error.empty() && !result.denoisePending &&
+         IsCurrentGraphDenoiseContinuation(result) && IsGraphContinuationViewCurrent(result));
 }
 
 bool EditorModule::GraphRenderBackendReady() {

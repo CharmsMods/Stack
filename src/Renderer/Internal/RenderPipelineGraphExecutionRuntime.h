@@ -29,6 +29,42 @@ public:
     ~GraphExecutionRuntime();
 
 private:
+    // A scope describes one value, not the whole execution. Nested values
+    // contribute to their consumer; independent scheduled roots do not. The
+    // endpoint slot remains valid across unordered_map rehashes and requires
+    // no allocation when the scope unwinds.
+    struct DenoiseProvenance {
+        bool pending = false;
+        std::size_t depth = 0;
+
+        class Scope {
+        public:
+            Scope(DenoiseProvenance& state, bool& endpoint)
+                : m_State(state), m_Endpoint(endpoint),
+                  m_ParentPending(std::exchange(state.pending, false)) {
+                ++m_State.depth;
+            }
+            ~Scope() {
+                m_Endpoint = m_Succeeded && m_State.pending;
+                m_State.pending = m_Endpoint;
+                if (--m_State.depth != 0) m_State.pending |= m_ParentPending;
+            }
+            template <typename Value>
+            Value Return(Value value) {
+                m_Succeeded = static_cast<bool>(value);
+                return value;
+            }
+            Scope(const Scope&) = delete;
+            Scope& operator=(const Scope&) = delete;
+
+        private:
+            DenoiseProvenance& m_State;
+            bool& m_Endpoint;
+            bool m_ParentPending;
+            bool m_Succeeded = false;
+        };
+    };
+
     const RenderGraphLink* findInputLink(
         int nodeId,
         const std::string& socketId) const {
@@ -113,6 +149,10 @@ private:
     std::unordered_set<std::string>& fingerprintingImages;
     std::unordered_set<std::string>& fingerprintingMasks;
     std::unordered_map<std::string, double> scalarCache;
+    DenoiseProvenance denoiseProvenance;
+    std::unordered_map<std::string, bool> imageDenoisePending;
+    std::unordered_map<std::string, bool> maskDenoisePending;
+    std::unordered_map<std::string, bool> scalarDenoisePending;
     std::unordered_map<std::string, std::pair<int, int>> localTextureExtents;
     std::unordered_map<std::string, std::size_t> scalarSampleCounts;
     std::unordered_map<std::string, std::size_t> scalarFingerprintCache;

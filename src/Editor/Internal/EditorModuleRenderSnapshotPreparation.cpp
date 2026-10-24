@@ -21,6 +21,7 @@ bool EditorModule::TryBuildRenderSnapshot(
 
     ResetIncompleteCompositeOutputRequestsForRetry();
     ResetIncompletePreviewRequestsForRetry();
+    FailFullQualityRenderRequest("The full-quality render snapshot could not be prepared safely.");
     Stack::PreciseIntegration::IntegrationState& precise =
         m_RawWorkspaceAutoBaseUi.preciseStartingPoint;
     if (precise.active &&

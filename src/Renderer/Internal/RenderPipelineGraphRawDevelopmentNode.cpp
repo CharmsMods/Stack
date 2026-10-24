@@ -680,7 +680,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 key,
                 result.texture,
                 fingerprint,
-                transferOwnership) &&
+                transferOwnership,
+                result.denoisePending) &&
             transferOwnership) {
             result.owned = false;
         }
@@ -718,6 +719,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 clearOwnedPrewarmResult();
                 result.texture = cached.texture;
                 result.owned = false;
+                result.denoisePending = cached.denoisePending;
                 m_Width = cached.width;
                 m_Height = cached.height;
                 m_RawDevelopmentCachePrewarmCompleted = true;
@@ -730,6 +732,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 clearOwnedPrewarmResult();
                 result.texture = neutralPlacementAlias.texture;
                 result.owned = false;
+                result.denoisePending = neutralPlacementAlias.denoisePending;
                 m_Width = neutralPlacementAlias.width;
                 m_Height = neutralPlacementAlias.height;
                 m_RawDevelopmentCachePrewarmCompleted = true;
@@ -760,6 +763,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         if (ready.texture != 0 && ready.width > 0 && ready.height > 0) {
             result.texture = ready.texture;
             result.owned = false;
+            result.denoisePending = ready.denoisePending;
             m_Width = ready.width;
             m_Height = ready.height;
             m_RawDevelopmentCachePrewarmCompleted = true;
@@ -779,6 +783,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 neutralReady.height > 0) {
                 result.texture = neutralReady.texture;
                 result.owned = false;
+                result.denoisePending = neutralReady.denoisePending;
                 m_Width = neutralReady.width;
                 m_Height = neutralReady.height;
                 m_RawDevelopmentCachePrewarmCompleted = true;
@@ -795,18 +800,22 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     }
     Stack::Renderer::ScopedGLTexture regionalNeutralOwner;
     Stack::Renderer::ScopedGLTexture zoneAreaReference;
+    bool zoneAreaReferencePending = false;
     m_RawZoneAreasFloatOutput = !recipe.localRange.areas.empty();
     std::vector<Stack::RawRecipe::RawZoneAreaStatistics> zoneAreaStatistics;
-    const auto selectNeutralRegion = [&](unsigned int& texture, int& width, int& height) {
+    const auto selectNeutralRegion = [&](unsigned int& texture, int& width, int& height,
+                                         bool& denoisePending) {
         GraphNodeRenderResult regionInput;
         regionInput.texture = texture;
         regionInput.owned = false;
+        regionInput.denoisePending = denoisePending;
         m_Width = width;
         m_Height = height;
         ApplyRawViewportRegion(regionInput, recipe, Raw::ViewportStage::RawPlacement, neutralPlacementFingerprint, node.nodeId);
         texture = regionInput.texture;
         width = m_Width;
         height = m_Height;
+        denoisePending = regionInput.denoisePending;
         if (regionInput.owned) regionalNeutralOwner.Reset(texture);
     };
     if (!rgbDenoiseStageRequested) {
@@ -815,6 +824,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 neutralPlacementCacheKey,
                 neutralPlacementFingerprint);
         unsigned int neutralTexture = cachedNeutral.texture;
+        bool neutralDenoisePending = cachedNeutral.denoisePending;
         int neutralWidth = cachedNeutral.width;
         int neutralHeight = cachedNeutral.height;
         if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
@@ -873,6 +883,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         }
         result.texture = neutralTexture;
         result.owned = false;
+        result.denoisePending = neutralDenoisePending;
         m_Width = neutralWidth;
         m_Height = neutralHeight;
         if (finishCachePrewarmStage(
@@ -882,10 +893,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             return result;
         }
 
-        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight);
+        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight, neutralDenoisePending);
         if (m_RawZoneAreasFloatOutput && neutralTexture != 0) {
             zoneAreaReference.Reset(RenderRawDevelopmentExposure(neutralTexture, 0.0f, &calibration));
             if (!zoneAreaReference) throw std::runtime_error("Zones reference image unavailable");
+            zoneAreaReferencePending = neutralDenoisePending;
         }
         const CachedGraphTexture cachedRawPlacement =
             FindRawDevelopStageCacheEntry(rawPlacementCacheKey, rawPlacementFingerprint);
@@ -895,6 +907,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             ++m_LastGraphExecutionStats.rawStageCacheHits;
             result.texture = cachedRawPlacement.texture;
             result.owned = false;
+            result.denoisePending = cachedRawPlacement.denoisePending;
             m_Width = cachedRawPlacement.width;
             m_Height = cachedRawPlacement.height;
         } else if (neutralTexture != 0 &&
@@ -906,6 +919,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             // stage keys.
             result.texture = neutralTexture;
             result.owned = false;
+            result.denoisePending = neutralDenoisePending;
             m_Width = neutralWidth;
             m_Height = neutralHeight;
         } else {
@@ -924,6 +938,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 neutralTexture,
                 recipe.preToneExposureEv, &calibration);
             result.owned = result.texture != 0;
+            result.denoisePending = neutralDenoisePending;
             if (result.texture != 0) {
                 cacheResultStage(
                     rawPlacementCacheKey,
@@ -964,6 +979,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         const CachedGraphTexture cachedDenoise = FindRawViewportDenoiseInput(
             rgbDenoiseCacheKey, recipe, temporaryDenoise);
         unsigned int neutralTexture = cachedDenoise.texture;
+        bool neutralDenoisePending = cachedDenoise.denoisePending;
         Stack::Renderer::ScopedGLTexture neutralTextureOwner;
         if (temporaryDenoise) neutralTextureOwner.Reset(neutralTexture);
         int neutralWidth = cachedDenoise.width;
@@ -1025,6 +1041,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         ? renderRawData.metadata.visibleHeight
                         : renderRawData.metadata.rawHeight,
                     &recipe);
+                neutralDenoisePending = m_LastRawRgbDenoiseOutputPending;
                 if (neutralTexture != 0) {
                     neutralTextureOwner.Reset(neutralTexture);
                     neutralWidth = m_Width;
@@ -1032,9 +1049,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                     const bool storedDenoise = StoreRawDevelopStageCacheEntry(
                         rgbDenoiseCacheKey,
                         neutralTexture,
-                        neutralPlacementFingerprint);
+                        neutralPlacementFingerprint,
+                        false,
+                        neutralDenoisePending);
                     if (storedDenoise && m_PreviewMaxDimension == 0 &&
-                        !rgbDenoiseDiagnosticRequested && !IsRawRgbDenoiseAsyncPending())
+                        !rgbDenoiseDiagnosticRequested && !neutralDenoisePending)
                         m_RawDevelopStageImageCache.at(rgbDenoiseCacheKey).front().viewportNativeDependency = true;
                 } else {
                     const bool aiMethod =
@@ -1084,6 +1103,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             neutralHeight > 0) {
             result.texture = neutralTexture;
             result.owned = false;
+            result.denoisePending = neutralDenoisePending;
             m_Width = neutralWidth;
             m_Height = neutralHeight;
             if (neutralTextureOwner.Get() == neutralTexture) {
@@ -1137,6 +1157,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 RawCacheStage::NeutralPlacement) {
             result.texture = neutralTexture;
             result.owned = false;
+            result.denoisePending = neutralDenoisePending;
             m_Width = neutralWidth;
             m_Height = neutralHeight;
             if (finishCachePrewarmStage(
@@ -1147,10 +1168,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             }
         }
 
-        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight);
+        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight, neutralDenoisePending);
         if (m_RawZoneAreasFloatOutput && neutralTexture != 0) {
             zoneAreaReference.Reset(RenderRawDevelopmentExposure(neutralTexture, 0.0f, &calibration));
             if (!zoneAreaReference) throw std::runtime_error("Zones reference image unavailable");
+            zoneAreaReferencePending = neutralDenoisePending;
         }
         const CachedGraphTexture cachedRawPlacement =
             FindRawDevelopStageCacheEntry(
@@ -1162,6 +1184,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             ++m_LastGraphExecutionStats.rawStageCacheHits;
             result.texture = cachedRawPlacement.texture;
             result.owned = false;
+            result.denoisePending = cachedRawPlacement.denoisePending;
             m_Width = cachedRawPlacement.width;
             m_Height = cachedRawPlacement.height;
         } else if (neutralTexture != 0) {
@@ -1173,6 +1196,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 neutralTexture,
                 recipe.preToneExposureEv, &calibration);
             result.owned = result.texture != 0;
+            result.denoisePending = neutralDenoisePending;
             if (result.texture != 0) {
                 cacheResultStage(
                     rawPlacementCacheKey,
@@ -1239,6 +1263,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         }
         result.texture = cached.texture;
         result.owned = false;
+        result.denoisePending = cached.denoisePending;
         m_Width = cached.width;
         m_Height = cached.height;
         ++m_LastGraphExecutionStats.rawStageCacheHits;
@@ -1409,6 +1434,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 adoptedPostLocalRange = true;
             } else {
                 ++m_LastGraphExecutionStats.rawStageCacheMisses;
+                bool localRangeDenoisePending = result.denoisePending;
                 Stack::Renderer::ScopedGLTexture localRangeResult(
                     RenderRawDevelopmentLocalRange(
                         preLocalRangeTexture,
@@ -1427,6 +1453,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         throw std::runtime_error("Zones area rendering failed");
                     }
                     localRangeResult.Reset(adjusted);
+                    localRangeDenoisePending |= zoneAreaReferencePending;
                 }
                 if (localRangeResult) {
                     QuickTextureStats inputStats;
@@ -1457,6 +1484,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         }
                         result.texture = localRangeResult.Release();
                         result.owned = true;
+                        result.denoisePending = localRangeDenoisePending;
                         localRangeApplied = true;
                     }
                 }

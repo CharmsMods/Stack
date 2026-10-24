@@ -638,6 +638,7 @@ bool EditorModule::HasRawWorkspaceCurrentPresentationForSource(const std::string
 }
 
 bool EditorModule::HasRawWorkspaceFullResolutionPreviewForSource(const std::string& sourceKey) const {
+    if (!IsPresentedRenderComplete()) return false;
     if (!HasRawWorkspaceCurrentPresentationForSource(sourceKey)) return false;
     if (ActiveViewportPreviewState().acceptedInteractive) return false;
     if (m_RawWorkspacePreviewOutputKind == RawWorkspacePreviewOutputKind::Tiled ||
@@ -1632,6 +1633,7 @@ void EditorModule::ClearRawWorkspaceLivePreviewState() {
     outputTexture.height = outputHeight;
     QueueViewportOutputTextureRelease(outputTexture);
     m_RawWorkspacePreviewSourceKey.clear();
+    CancelFullQualityRenderRequest("Full-quality rendering was canceled because the source or project changed.");
     m_RawWorkspaceFastPreviewUntilTime = -1.0;
     m_RawWorkspaceFullResolutionPreviewPending = false;
     m_RawWorkspaceFullResolutionPreviewRequested = false;

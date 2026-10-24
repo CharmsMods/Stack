@@ -454,7 +454,10 @@ void EditorModule::UpdateViewportPreviewRefinement(double now) {
     if (state.request.empty || !state.geometry.Valid() || state.refinement || m_RenderDirty || m_RenderPending || IsAnyRenderBackendBusy() ||
         !m_DeferredRenderResults.empty() || IsRawWorkspaceImageEditActive() ||
         now-state.contentChangedAt<.10) return;
-    if (!state.acceptedInteractive && state.geometry.NativeSamples() && ContainsImageRegion(state.geometry.resident,state.request.visible) &&
+    if (!m_FullQualityRenderRequest.Pending() &&
+        ((m_RenderPresentation.failed && m_RenderPresentation.graphRequest.revision == m_RenderRevision) ||
+         (DidFullQualityRenderFail() && m_FullQualityRenderRequest.graphRequest.revision == m_RenderRevision))) return;
+    if (IsPresentedRenderComplete() && !state.acceptedInteractive && state.geometry.NativeSamples() && ContainsImageRegion(state.geometry.resident,state.request.visible) &&
         state.acceptedContentIdentity == state.contentIdentity) return;
     // Reuse the accepted detail and matching overview throughout navigation.
     // Missing coverage can wait for release; settling an actual edit still runs.
