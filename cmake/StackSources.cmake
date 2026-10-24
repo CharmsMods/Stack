@@ -79,6 +79,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/graph_scale_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/node_layout_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/GraphCapture.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Utils/AtomicExportFile.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/RawAttributeTargetProject.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Editor/MultiFrameResultCache.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/GraphSnapshotLookup.cpp"

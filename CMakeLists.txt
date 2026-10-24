@@ -632,6 +632,14 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(StackAtomicExportFileTests
+        tools/tests/atomic_export_file_tests.cpp
+        src/Utils/AtomicExportFile.cpp)
+    target_include_directories(StackAtomicExportFileTests PRIVATE src)
+    target_link_libraries(StackAtomicExportFileTests PRIVATE Threads::Threads)
+    add_test(NAME StackPersistence.AtomicExport COMMAND StackAtomicExportFileTests)
+    set_tests_properties(StackPersistence.AtomicExport PROPERTIES LABELS "persistence;export;cpu" TIMEOUT 30)
     include(cmake/StackBurstQualityTests.cmake)
     include(cmake/StackGpuUploadTests.cmake)
     include(cmake/StackZoneAreaTests.cmake)

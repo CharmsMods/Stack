@@ -1,3 +1,5 @@
+#include "Utils/AtomicExportFile.h"
+#include "Utils/PngEncodingUtils.h"
 #include "Composite/Internal/CompositeModuleInternal.h"
 
 #include "Composite/CompositeModule.h"
@@ -93,6 +95,11 @@ bool CompositeModule::ExportCurrentPng(const std::string& path) const {
         return false;
     }
 
+    Stack::FileSave::ExportFileTarget target;
+    std::string error;
+    if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(path),
+            {}, {".png"}, target, error)) return false;
+
     std::vector<uint8_t> rgba;
     int width = 0;
     int height = 0;
@@ -100,7 +107,8 @@ bool CompositeModule::ExportCurrentPng(const std::string& path) const {
         return false;
     }
 
-    return stbi_write_png(path.c_str(), width, height, 4, rgba.data(), width * 4) != 0;
+    const auto encoded = Stack::PngEncoding::EncodeInterleaved(rgba, width, height, 4);
+    return Stack::FileSave::WriteExportFileAtomically(target, encoded, error);
 }
 
 bool CompositeModule::ApplyLibraryProject(const StackBinaryFormat::ProjectDocument& document) {

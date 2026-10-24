@@ -3,6 +3,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "ThirdParty/stb_image_write.h"
 #include "Utils/PngEncodingUtils.h"
+#include "Utils/AtomicExportFile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -253,45 +254,25 @@ bool EncodeBmp(
 bool WriteEncodedFile(
     const std::string& path,
     const std::vector<unsigned char>& encoded,
-    std::string* errorMessage) {
-    if (path.empty() || encoded.empty()) {
-        if (errorMessage) {
-            *errorMessage = "The encoded graph image is empty.";
+    std::string* errorMessage,
+    const Stack::FileSave::ExportFileTarget* preparedTarget,
+    const std::function<bool()>& isCanceled) {
+    Stack::FileSave::ExportFileTarget target;
+    std::string error;
+    bool success = true;
+    if (preparedTarget) {
+        target = *preparedTarget;
+        if (std::filesystem::u8path(path) != target.approval.path) {
+            success = false;
+            error = "The export approval belongs to a different path.";
         }
-        return false;
+    } else {
+        success = Stack::FileSave::PrepareExportFileTarget(
+            std::filesystem::u8path(path), {}, {".png", ".bmp"}, target, error);
     }
-
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        if (errorMessage) {
-            *errorMessage = "Could not open the selected graph image path for writing.";
-        }
-        return false;
-    }
-    output.write(
-        reinterpret_cast<const char*>(encoded.data()),
-        static_cast<std::streamsize>(encoded.size()));
-    output.flush();
-    if (!output.good()) {
-        if (errorMessage) {
-            *errorMessage = "Writing the graph image did not complete successfully.";
-        }
-        return false;
-    }
-    output.close();
-
-    std::error_code ec;
-    const std::uintmax_t writtenSize = std::filesystem::file_size(path, ec);
-    if (ec || writtenSize != encoded.size()) {
-        if (errorMessage) {
-            *errorMessage = "The saved graph image could not be verified.";
-        }
-        return false;
-    }
-    if (errorMessage) {
-        errorMessage->clear();
-    }
-    return true;
+    if (success) success = Stack::FileSave::WriteExportFileAtomically(target, encoded, error, isCanceled);
+    if (errorMessage) *errorMessage = std::move(error);
+    return success;
 }
 
 } // namespace Stack::EditorGraphCapture

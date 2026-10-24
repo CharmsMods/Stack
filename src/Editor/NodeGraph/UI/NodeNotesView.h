@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,9 @@ public:
         std::uint64_t editRevision, ImVec2 minimum, ImVec2 maximum,
         float scale, ImVec4 textColor, ImVec4 mutedColor, bool hovered, float opacity);
     std::optional<Commit> TakeCommit();
+    // Explicit owner transitions flush this canvas only. A rejected commit
+    // keeps the draft, and finishing a background owner never steals focus.
+    bool FinishEditing(const std::function<bool(const Commit&)>& commit);
 
 private:
     struct Line { std::size_t start = 0, length = 0; };

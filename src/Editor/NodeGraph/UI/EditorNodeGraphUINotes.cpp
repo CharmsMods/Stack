@@ -2,6 +2,13 @@
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 
+bool EditorNodeGraphUI::FinishPendingNodeNotes(EditorModule* editor, std::string* error) {
+    return m_NodeNotes.FinishEditing([&](const auto& note) {
+        return editor->SetGraphNodeNotes(note.documentId, note.graphId, note.nodeId,
+            note.instanceUuid, note.text, error);
+    });
+}
+
 void EditorNodeGraphUI::RenderNodeNotes(EditorModule* editor, const EditorNodeGraph::Node& node,
     bool hovered, float selectedAlpha) {
     using namespace Stack::Editor::NodeGraphUIVisuals;

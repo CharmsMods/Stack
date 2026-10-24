@@ -1,9 +1,10 @@
 #pragma once
 
 #include "App/settings/AppearanceTheme.h"
-#include "Utils/SavePathConfirmation.h"
+#include "Utils/AtomicExportFile.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -81,7 +82,7 @@ struct Request {
     Settings settings;
     GraphViewportSnapshot viewport;
     std::string targetPath;
-    Stack::FileSave::TargetApproval targetApproval;
+    Stack::FileSave::ExportFileTarget exportTarget;
     StackAppearance::ThemeDefinition theme;
 };
 
@@ -162,6 +163,8 @@ bool EncodeBmp(
 bool WriteEncodedFile(
     const std::string& path,
     const std::vector<unsigned char>& encoded,
-    std::string* errorMessage = nullptr);
+    std::string* errorMessage = nullptr,
+    const Stack::FileSave::ExportFileTarget* preparedTarget = nullptr,
+    const std::function<bool()>& isCanceled = {});
 
 } // namespace Stack::EditorGraphCapture

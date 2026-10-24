@@ -3,6 +3,11 @@ add_executable(StackGraphControlTests
     tools/tests/graph_cursor_tests.cpp
     tools/tests/floating_slider_tests.cpp
     tools/tests/floating_surface_tests.cpp
+    tools/tests/node_notes_interaction_tests.cpp
+    src/Editor/NodeGraph/UI/NodeNotesView.cpp
+    src/NodeMath/FirstClassValue.cpp
+    src/NodeMath/DescriptorSerialization.cpp
+    src/NodeMath/ContractTypes.cpp
     src/Utils/FloatingSurfaceInput.cpp
     src/Editor/Internal/RawLab/RawCalibrationEditor.cpp
     src/Raw/RawColorCalibration.cpp
@@ -25,3 +30,5 @@ if(WIN32)
 endif()
 add_test(NAME StackEditor.GraphControls COMMAND StackGraphControlTests)
 set_tests_properties(StackEditor.GraphControls PROPERTIES LABELS "editor;node-graph;interaction")
+add_test(NAME StackEditor.NodeNotesTransitions COMMAND StackGraphControlTests --node-notes)
+set_tests_properties(StackEditor.NodeNotesTransitions PROPERTIES LABELS "editor;node-graph;interaction")

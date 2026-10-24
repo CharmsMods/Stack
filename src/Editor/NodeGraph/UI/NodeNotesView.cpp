@@ -38,6 +38,22 @@ std::optional<NodeNotesView::Commit> NodeNotesView::TakeCommit() {
     auto result = std::move(commit_); commit_.reset(); return result;
 }
 
+bool NodeNotesView::FinishEditing(const std::function<bool(const Commit&)>& commit) {
+    // Validation can rebuild a rejected RAW canvas, resetting this view. Keep
+    // callback arguments alive and recover its draft even in that case.
+    const auto queued = commit_;
+    if (queued && !commit(*queued)) { commit_ = queued; return false; }
+    commit_.reset();
+    if (!edit_) return true;
+    const auto editing = *edit_;
+    if (editing.target.text != editing.original && !commit(editing.target)) {
+        edit_ = editing;
+        return false;
+    }
+    edit_.reset();
+    return true;
+}
+
 bool NodeNotesView::Draw(const EditorNodeGraph::Node& node, const GraphEditorContext& context,
     std::uint64_t editRevision, ImVec2 minimum, ImVec2 maximum, float scale,
     ImVec4 textColor, ImVec4 mutedColor, bool hovered, float opacity) {

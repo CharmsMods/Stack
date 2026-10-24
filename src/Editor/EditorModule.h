@@ -1,4 +1,5 @@
 #pragma once
+#include "Utils/AtomicExportFile.h"
 #include "Editor/NodeGraph/GraphEditorContext.h"
 #include "Editor/ProjectInteractionState.h"
 #include "Editor/NodeEditors/NodeEditorRegistry.h"
@@ -1367,7 +1368,8 @@ public:
         int width,
         int height,
         Stack::NodeMath::PngColorMetadataChunks colorChunks,
-        std::uint64_t generation);
+        std::uint64_t generation,
+        Stack::FileSave::ExportFileTarget target);
     void CompleteRawWorkspaceExportRender(
         EditorRenderWorker::Result& result,
         bool sourceMatchesActive);
@@ -2314,6 +2316,7 @@ private:
     bool m_RawWorkspaceExportRenderRequested = false;
     std::uint64_t m_RawWorkspaceExportRenderGeneration = 0;
     std::string m_RawWorkspaceExportPath;
+    Stack::FileSave::ExportFileTarget m_RawWorkspaceExportFileTarget;
     Stack::NodeMath::PngColorMetadataChunks m_RawWorkspaceExportColorChunks;
     bool m_SuppressExportProjectCheckpoint = false;
     std::uint64_t m_ProjectFileSaveGeneration = 0;

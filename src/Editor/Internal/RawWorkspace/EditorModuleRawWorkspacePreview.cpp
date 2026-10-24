@@ -1587,6 +1587,7 @@ void EditorModule::ClearRawWorkspaceLivePreviewState() {
         m_RawWorkspaceExportRenderRequested = false;
         m_RawWorkspaceExportRenderGeneration = 0;
         m_RawWorkspaceExportPath.clear();
+        m_RawWorkspaceExportFileTarget = {};
         m_RawWorkspaceExportColorChunks = {};
         ++m_ExportGeneration;
         m_ExportTaskState = Async::TaskState::Failed;

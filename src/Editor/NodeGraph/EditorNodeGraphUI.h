@@ -57,6 +57,7 @@ public:
     bool IsCatalogDocked() const { return HasCatalogHost() && m_CatalogHostExpanded; }
     void CloseTransientDrawers();
     void ResetProjectInteractionState();
+    bool FinishPendingNodeNotes(EditorModule* editor, std::string* error = nullptr);
     bool DecompileNode(EditorModule* editor, int nodeId, std::string* error = nullptr);
     EditorNodeGraph::GraphRect MeasureNodeForLayout(const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Node& node) const;

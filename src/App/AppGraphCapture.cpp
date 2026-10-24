@@ -396,9 +396,9 @@ void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
 
         std::string saveError;
         std::error_code targetError;
-        const bool targetUnchanged = request.targetApproval.path.lexically_normal() ==
+        const bool targetUnchanged = request.exportTarget.approval.path.lexically_normal() ==
             std::filesystem::u8path(request.targetPath).lexically_normal() &&
-            Stack::FileSave::TargetApprovalStillMatches(request.targetApproval, targetError);
+            Stack::FileSave::TargetApprovalStillMatches(request.exportTarget.approval, targetError);
         if (!targetUnchanged) {
             saveError = targetError
                 ? "The graph image destination could not be checked: " + targetError.message()
@@ -407,7 +407,8 @@ void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
         const bool operationCurrent = !activity || notifier.IsOperationCurrent(activity.operationId);
         if (!operationCurrent) saveError = "The graph capture was cancelled before saving.";
         const bool fileSaved = diskEncoded && targetUnchanged && operationCurrent &&
-            GraphCapture::WriteEncodedFile(request.targetPath, diskBytes, &saveError);
+            GraphCapture::WriteEncodedFile(request.targetPath, diskBytes, &saveError, &request.exportTarget,
+                [&] { return activity && !notifier.IsOperationCurrent(activity.operationId); });
         if (!diskEncoded && saveError.empty()) {
             saveError = request.settings.format == GraphCapture::Format::Bmp
                 ? "BMP encoding failed."

@@ -90,14 +90,10 @@ void EditorModule::SetGraphCaptureProgress(std::string statusText) {
 }
 
 bool EditorModule::BeginGraphCaptureSave(GraphCapture::Request request, std::string& error) {
-    std::error_code checkError;
-    const auto approval = Stack::FileSave::CaptureTargetApproval(
-        std::filesystem::u8path(request.targetPath), checkError);
-    if (!approval) {
-        error = "The graph image destination could not be checked: " + checkError.message();
-        return false;
-    }
-    request.targetApproval = *approval;
+    if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(request.targetPath),
+            {}, {".png", ".bmp"}, request.exportTarget, error)) return false;
+    // Keep the resolved destination stable across rendering and encoding.
+    request.targetPath = request.exportTarget.approval.path.u8string();
     m_GraphCaptureActivity = GetNotifier().BeginActivity("Capturing graph");
     if (m_GraphCaptureActivity) m_NotificationDecisionOwners.push_back({m_GraphCaptureActivity.operationId,
         GetProjectDocumentId(), m_Project->files, m_Project->files->load.generation});

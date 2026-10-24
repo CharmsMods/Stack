@@ -21,6 +21,7 @@
 void ValidateGraphCursor(const char* output);
 void ValidateFloatingSlider(const char* output);
 void ValidateFloatingSurfaces();
+void ValidateNodeNotesInteractions();
 
 namespace {
 void Require(bool pass, const char* message) {
@@ -238,6 +239,10 @@ void Key(ImGuiKey key) {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--node-notes") == 0) {
+        try { ValidateNodeNotesInteractions(); return 0; }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (!glfwInit()) return 2;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     auto* window = glfwCreateWindow(600, 360, "Graph controls validation", nullptr, nullptr);

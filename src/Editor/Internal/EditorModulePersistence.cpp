@@ -16,6 +16,7 @@
 #include "ThirdParty/stb_image.h"
 #include "Utils/PixelBufferUtils.h"
 #include "Utils/PngEncodingUtils.h"
+#include "Utils/AtomicExportFile.h"
 
 #include <algorithm>
 #include <chrono>
@@ -117,112 +118,6 @@ std::vector<unsigned char> EncodePngBytesForImageStorageOwned(
 
     LibraryManager::FlipImageRowsInPlace(bottomLeftPixels, width, height, std::max(1, channels));
     return EncodePngBytes(bottomLeftPixels, width, height, channels);
-}
-
-bool ReplaceExportFileAtomically(
-    const std::filesystem::path& temporary,
-    const std::filesystem::path& destination,
-    std::string& error) {
-#if defined(_WIN32)
-    if (MoveFileExW(
-            temporary.c_str(),
-            destination.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE) {
-        return true;
-    }
-    error = "Windows could not publish the completed PNG: " +
-        std::system_category().message(static_cast<int>(GetLastError()));
-    return false;
-#else
-    std::error_code filesystemError;
-    std::filesystem::rename(temporary, destination, filesystemError);
-    if (!filesystemError) return true;
-    error = "Could not publish the completed PNG: " +
-        filesystemError.message();
-    return false;
-#endif
-}
-
-bool WriteExportFileAtomically(
-    const std::filesystem::path& destination,
-    const std::vector<unsigned char>& bytes,
-    std::string& error) {
-    if (bytes.empty()) {
-        error = "PNG encoding produced no data.";
-        return false;
-    }
-    if (destination.empty() || destination.filename().empty()) {
-        error = "The export destination does not name a file.";
-        return false;
-    }
-
-    std::error_code filesystemError;
-    if (destination.has_parent_path()) {
-        std::filesystem::create_directories(
-            destination.parent_path(), filesystemError);
-        if (filesystemError) {
-            error = "Could not create the export folder: " +
-                filesystemError.message();
-            return false;
-        }
-    }
-
-    std::filesystem::path temporary = destination;
-    temporary += ".stack-exporting";
-    filesystemError.clear();
-    std::filesystem::remove(temporary, filesystemError);
-    if (filesystemError) {
-        error = "Could not clear an incomplete prior export: " +
-            filesystemError.message();
-        return false;
-    }
-
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        error = "The temporary export file could not be opened for writing.";
-        return false;
-    }
-    output.write(
-        reinterpret_cast<const char*>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size()));
-    output.close();
-    if (!output.good()) {
-        error = "The PNG bytes could not be completely written to disk.";
-        filesystemError.clear();
-        std::filesystem::remove(temporary, filesystemError);
-        return false;
-    }
-
-    filesystemError.clear();
-    const std::uintmax_t temporarySize =
-        std::filesystem::file_size(temporary, filesystemError);
-    if (filesystemError || temporarySize != bytes.size()) {
-        error = filesystemError
-            ? "The completed PNG could not be verified: " +
-                filesystemError.message()
-            : "The completed PNG size did not match the encoded image.";
-        filesystemError.clear();
-        std::filesystem::remove(temporary, filesystemError);
-        return false;
-    }
-
-    if (!ReplaceExportFileAtomically(temporary, destination, error)) {
-        filesystemError.clear();
-        std::filesystem::remove(temporary, filesystemError);
-        return false;
-    }
-
-    filesystemError.clear();
-    const std::uintmax_t publishedSize =
-        std::filesystem::file_size(destination, filesystemError);
-    if (filesystemError || publishedSize != bytes.size()) {
-        error = filesystemError
-            ? "The published PNG could not be verified: " +
-                filesystemError.message()
-            : "The published PNG size did not match the encoded image.";
-        return false;
-    }
-    return true;
 }
 
 std::string FileNameFromPath(const std::string& path) {
@@ -664,6 +559,11 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
 }
 
 bool EditorModule::FinishWorkspaceInteraction() {
+    std::string noteError;
+    if (!m_Sidebar.GetNodeGraphUI().FinishPendingNodeNotes(this, &noteError)) {
+        ShowUiNotification(UiNotificationSeverity::Warning, noteError, "graph-node-notes");
+        return false;
+    }
     if (!CommitRawLayerMaskGraph()) return false;
     m_Project->rawLayers.EndGesture();
     m_Project->graphHistory.EndGesture();
@@ -1719,7 +1619,8 @@ void EditorModule::BeginPngExportWrite(
     int width,
     int height,
     Stack::NodeMath::PngColorMetadataChunks colorChunks,
-    std::uint64_t generation) {
+    std::uint64_t generation,
+    Stack::FileSave::ExportFileTarget target) {
     m_ExportTaskState = Async::TaskState::Running;
     m_ExportStatusText = "Writing PNG export in the background...";
 
@@ -1729,6 +1630,7 @@ void EditorModule::BeginPngExportWrite(
             this,
             generation,
             path = std::move(path),
+            target = std::move(target),
             width,
             height,
             colorChunks = std::move(colorChunks),
@@ -1738,8 +1640,6 @@ void EditorModule::BeginPngExportWrite(
             std::string errorMsg;
 
             try {
-                const std::filesystem::path destination =
-                    std::filesystem::u8path(path);
                 const std::vector<unsigned char> basePng =
                     EncodePngBytes(pixels, width, height, 4);
                 std::vector<Stack::NodeMath::ContractIssue> metadataIssues;
@@ -1751,8 +1651,8 @@ void EditorModule::BeginPngExportWrite(
                         ? "PNG encoding produced no data."
                         : metadataIssues.front().message;
                 } else {
-                    success = WriteExportFileAtomically(
-                        destination, outputPng, errorMsg);
+                    success = Stack::FileSave::WriteExportFileAtomically(
+                        target, outputPng, errorMsg);
                 }
             } catch (const std::exception& e) {
                 errorMsg = std::string("Exception: ") + e.what();
@@ -1828,6 +1728,7 @@ void EditorModule::CompleteRawWorkspaceExportRender(
     if (!rasterValid) {
         m_RawWorkspaceExportPath.clear();
         m_RawWorkspaceExportColorChunks = {};
+        m_RawWorkspaceExportFileTarget = {};
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = result.error.empty()
             ? "The authoritative RAW export render failed."
@@ -1850,7 +1751,9 @@ void EditorModule::CompleteRawWorkspaceExportRender(
         result.width,
         result.height,
         std::move(colorChunks),
-        m_ExportGeneration);
+        m_ExportGeneration,
+        std::move(m_RawWorkspaceExportFileTarget));
+    m_RawWorkspaceExportFileTarget = {};
 }
 
 bool EditorModule::RequestExportImage(const std::string& path) {
@@ -1872,6 +1775,40 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     }
 
     if (Async::IsBusy(m_ExportTaskState)) {
+        return false;
+    }
+    std::vector<std::filesystem::path> protectedSources;
+    const auto protect = [&](const std::string& source) {
+        // Reconstructed RAW sources use identities such as hdr:// and
+        // bracketing://; they are not paths to original camera files.
+        if (!source.empty() && source.find("://") == std::string::npos)
+            protectedSources.push_back(std::filesystem::u8path(source));
+    };
+    protect(m_Project->rawRecipe.source.sourcePath);
+    for (const auto& node : m_Project->graph.GetNodes()) {
+        protect(node.rawSource.sourcePath);
+        protect(node.rawSource.metadata.sourcePath);
+        protect(node.rawDevelopment.recipe.source.sourcePath);
+    }
+    if (m_Project->snapshot) {
+        for (const auto& asset : m_Project->snapshot->embeddedAssets) {
+            if (asset.inputFamily == Stack::Project::MultiFrameInputFamily::Raw)
+                protect(asset.originalSourcePath);
+        }
+    }
+    Stack::FileSave::ExportFileTarget target;
+    std::string targetError;
+    if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(path),
+            protectedSources, {".png"}, target, targetError)) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = targetError;
+        PostNotification(UiNotificationSeverity::Error, targetError, "editor-export-image");
+        return false;
+    }
+    if (m_SuppressExportProjectCheckpoint && target.approval.existed) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = "The Queue output filename is already occupied. Retry to choose a new name.";
+        PostNotification(UiNotificationSeverity::Error, m_ExportStatusText, "editor-export-image");
         return false;
     }
     if (m_Project->rawInteractionDraft.active &&
@@ -1970,6 +1907,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         m_RawWorkspaceExportRenderRequested = true;
         m_RawWorkspaceExportRenderGeneration = 0;
         m_RawWorkspaceExportPath = path;
+        m_RawWorkspaceExportFileTarget = std::move(target);
         m_RawWorkspaceExportColorChunks = std::move(colorChunks);
         m_ExportTaskState = Async::TaskState::Running;
         m_ExportStatusText = "Rendering the authoritative RAW export...";
@@ -2027,7 +1965,8 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         width,
         height,
         std::move(colorChunks),
-        generation);
+        generation,
+        std::move(target));
     return Async::IsBusy(m_ExportTaskState);
 }
 
