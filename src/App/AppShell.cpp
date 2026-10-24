@@ -1834,6 +1834,15 @@ void AppShell::Run() {
         ImGui::NewFrame();
         ImGuiExtras::BeginFrameInputRouting();
         m_WorkspaceCompositor.BeginFrame();
+        const bool glassEnabled = m_Appearance && m_Appearance->GetGlassChromeEnabled();
+        m_RailGlass.BeginFrame(glassEnabled);
+        if (!glassEnabled) m_GlassErrorReported = false;
+        const std::string glassError = m_RailGlass.Error();
+        if (!glassError.empty() && !m_GlassErrorReported) {
+            PostUiNotification(m_AppNotifier, Stack::Notifications::Severity::Error,
+                glassError, "glass-navigation-gpu-failure");
+            m_GlassErrorReported = true;
+        }
         m_NotificationPresenter.BeginFrame(*m_NotificationStore);
         TickToolSwitcher();
 #if defined(_WIN32)
@@ -3547,6 +3556,7 @@ void AppShell::Shutdown() {
 #endif
     runPhase("imgui-shutdown", [&]() {
         GraphNativeCursor::Shutdown(m_Window);
+        m_RailGlass.Shutdown();
         m_WorkspaceCompositor.Shutdown();
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();

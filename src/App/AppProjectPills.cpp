@@ -1,5 +1,6 @@
 #include "AppShell.h"
 #include "AppHeaderStyle.h"
+#include "GlassNavigationFeedback.h"
 #include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -112,6 +113,8 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         auto* draw = ImGui::GetWindowDrawList();
         Stack::Header::DrawProjectPill(draw,pillMin,pillMax,rail.scale,palette,
             {selected,over,focused,dirty,automatic});
+        if (m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty())
+            Stack::Navigation::GlassControlFeedback(ImRect(pillMin,pillMax),selected,rail.scale,palette);
         if (over || focused) ImGui::SetTooltip("%s%s%s\nClick to activate. Middle-click to close.",
             name.c_str(), dirty ? " (unsaved changes)" : "",
             automatic ? "\nAutomatic bursts - background priority" : "");

@@ -123,6 +123,7 @@ struct AppearanceLibrary {
         GraphConnectionTextSizing::Fixed;
     bool graphConnectionTextOutline = false;
     bool experimentalIslandEnabled = false;
+    bool glassChromeEnabled = false;
     ViewportTilingSettings viewportTiling;
     bool backgroundImageEnabled = false;
     std::string backgroundImagePath;
@@ -217,6 +218,7 @@ public:
     GraphConnectionTextSizing GetGraphConnectionTextSizing() const;
     bool GetGraphConnectionTextOutline() const;
     bool GetExperimentalIslandEnabled() const;
+    bool GetGlassChromeEnabled() const;
     const ViewportTilingSettings& GetViewportTilingSettings() const;
     bool GetBackgroundImageEnabled() const;
     bool GetSeamlessSurfaceStylingEnabled() const;
@@ -250,6 +252,7 @@ public:
     bool SetGraphConnectionTextSizing(GraphConnectionTextSizing sizing);
     bool SetGraphConnectionTextOutline(bool enabled);
     bool SetExperimentalIslandEnabled(bool enabled);
+    [[nodiscard]] PreferenceMutationResult SetGlassChromeEnabled(bool enabled);
     bool SetViewportTilingSettings(const ViewportTilingSettings& settings);
     bool SetBackgroundImageEnabled(bool enabled);
     bool SetBackgroundImageStrength(float strength);

@@ -135,10 +135,13 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         (rail.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     auto* draw = ImGui::GetWindowDrawList();
     // The top bar owns the overlap's tint. Paint the rail below it once.
-    draw->AddRectFilled(ImVec2(rail.position.x, viewport->Pos.y + m_RawMaskToolbar.visibleHeight),
-        ImVec2(rail.position.x + width, viewport->Pos.y + viewport->Size.y), ImGui::GetColorU32(railTint));
+    const ImVec2 glassMin(rail.position.x, viewport->Pos.y + m_RawMaskToolbar.visibleHeight);
+    const ImVec2 glassMax(rail.position.x + width, viewport->Pos.y + viewport->Size.y);
+    if (!m_RailGlass.AddSurface(draw, glassMin, glassMax, railTint))
+        draw->AddRectFilled(glassMin, glassMax, ImGui::GetColorU32(railTint));
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, bool enabled = true) {
-        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette);
+        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, nullptr,
+            m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty());
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.

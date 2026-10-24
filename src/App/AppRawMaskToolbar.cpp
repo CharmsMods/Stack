@@ -205,7 +205,9 @@ void AppShell::RenderSharedPanelToggle() {
         (amount <= .001f || m_Editor->IsReturningToGraph() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
-            Stack::Navigation::Glyph::Panel, false, true, scale, palette))
+            Stack::Navigation::Glyph::Panel, false, true, scale, palette, nullptr,
+            !TopBarOwnsPanelToggle() && m_Appearance && m_Appearance->GetGlassChromeEnabled() &&
+                m_RailGlass.Error().empty()))
         ToggleWorkspaceSectionPanel();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::End();

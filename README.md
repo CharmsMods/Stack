@@ -26,6 +26,7 @@ Stack's original program source, build scripts, documentation and program assets
 
 - [Repository layout](Guidance/REPOSITORY.md)
 - [Implementation guidance](Guidance/Implementation/README.md)
+- [Optional glass navigation](Guidance/GlassNavigation.html)
 - [Build and packaging instructions](Guidance/BUILDING.md)
 
 ## Licensing and third-party components

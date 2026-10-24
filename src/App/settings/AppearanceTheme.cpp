@@ -44,6 +44,7 @@ constexpr const char* kGraphConnectionTextSizeKey = "graphConnectionTextSize";
 constexpr const char* kGraphConnectionTextSizingKey = "graphConnectionTextSizing";
 constexpr const char* kGraphConnectionTextOutlineKey = "graphConnectionTextOutline";
 constexpr const char* kExperimentalIslandEnabledKey = "experimentalIslandEnabled";
+constexpr const char* kGlassChromeEnabledKey = "glassChromeEnabled";
 constexpr const char* kGraphNodeSizePresetKey = "graphNodeSizePreset";
 constexpr const char* kGraphNodeWidthScaleKey = "graphNodeWidthScale";
 constexpr const char* kGraphNodeUiScaleKey = "graphNodeUiScale";
@@ -1588,6 +1589,7 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
         library.graphConnectionTextOutline;
     root[kAppearanceKey][kExperimentalIslandEnabledKey] =
         library.experimentalIslandEnabled;
+    root[kAppearanceKey][kGlassChromeEnabledKey] = library.glassChromeEnabled;
     root[kAppearanceKey][kViewportTilingKey] = json::object();
     root[kAppearanceKey][kViewportTilingKey][kViewportTilingModeKey] =
         RenderTiling::ViewportTilingModeToString(viewportTiling.mode);
@@ -1689,6 +1691,7 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     outLibrary.experimentalIslandEnabled = appearance.value(
         kExperimentalIslandEnabledKey,
         false);
+    outLibrary.glassChromeEnabled = appearance.value(kGlassChromeEnabledKey, false);
     ViewportTilingSettings viewportTiling;
     const json viewportTilingJson = appearance.value(kViewportTilingKey, json::object());
     if (viewportTilingJson.is_object()) {
@@ -2522,6 +2525,10 @@ bool AppearanceManager::GetExperimentalIslandEnabled() const {
     return m_Library.experimentalIslandEnabled;
 }
 
+bool AppearanceManager::GetGlassChromeEnabled() const {
+    return m_Library.glassChromeEnabled;
+}
+
 const ViewportTilingSettings& AppearanceManager::GetViewportTilingSettings() const {
     return m_Library.viewportTiling;
 }
@@ -2722,6 +2729,18 @@ bool AppearanceManager::SetGraphConnectionTextOutline(bool enabled) {
     m_Library.graphConnectionTextOutline = enabled;
     TouchRevision();
     return Save();
+}
+
+PreferenceMutationResult AppearanceManager::SetGlassChromeEnabled(bool enabled) {
+    if (m_Library.glassChromeEnabled != enabled) {
+        m_Library.glassChromeEnabled = enabled;
+        TouchRevision();
+    }
+    PreferenceMutationResult result;
+    result.applied = true;
+    // Retry persistence even when the selected runtime value is unchanged.
+    result.persisted = Save(&result.error);
+    return result;
 }
 
 bool AppearanceManager::SetExperimentalIslandEnabled(bool enabled) {

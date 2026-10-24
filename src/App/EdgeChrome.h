@@ -2,6 +2,7 @@
 
 #include "AppHeaderStyle.h"
 #include "NavigationRail.h"
+#include "GlassNavigationFeedback.h"
 #include "imgui_internal.h"
 #include <cstring>
 
@@ -36,7 +37,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,
-    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr) {
+    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false) {
     const float size = ButtonExtent * scale;
     ImGui::BeginDisabled(!enabled);
     const bool clicked = ImGui::InvisibleButton(label, ImVec2(size, size), ImGuiButtonFlags_EnableNav);
@@ -54,6 +55,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
+    if (glass) GlassControlFeedback(rect,selected,scale,palette);
     const float glyphSize = (glyph == Glyph::Stack ? 24.f : 21.f) * scale;
     DrawGlyph(draw, glyph, ImVec2(rect.Min.x + (size - glyphSize) * .5f,
         rect.Min.y + (size - glyphSize) * .5f), glyphSize,
