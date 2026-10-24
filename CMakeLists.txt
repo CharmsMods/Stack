@@ -644,6 +644,7 @@ if(BUILD_TESTING)
     set_tests_properties(StackPersistence.SavedResultCacheDescriptor PROPERTIES LABELS "persistence;cache;cpu" TIMEOUT 30)
     include(cmake/StackGraphImageImportHistoryTests.cmake)
     include(cmake/StackProjectPresentationTests.cmake)
+    include(cmake/StackLayerParameterPreflightTests.cmake)
     add_executable(StackLibraryStorageWriteTests
         tools/tests/library_storage_write_tests.cpp
         src/Library/Internal/LibraryAssetFileWrite.cpp

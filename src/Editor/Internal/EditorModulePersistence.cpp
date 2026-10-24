@@ -1,4 +1,5 @@
 #include "Editor/CompositePersistence.h"
+#include "Editor/LayerParameterPreflight.h"
 #include "Editor/Timeline/TimelinePersistence.h"
 #include "App/WorkspacePresentation.h"
 #include "App/UiFrameBudget.h"
@@ -66,6 +67,10 @@ bool ValidateWorkspacePayload(const nlohmann::json& payload, std::string& error,
         EditorNodeGraph::DeserializeGraphPayload(payload,candidate,
             installedLayerCount >= 0 ? installedLayerCount :
                 static_cast<int>(layerRecords.size()));
+        // Graph validation owns effect identity; the actual CPU-only adapter
+        // decoder also checks its field types before any live runtime reset.
+        Stack::EditorPersistence::PreflightLayerParameters(layerRecords,
+            [](const std::string& type) { return LayerRegistry::CreateLayerFromTypeId(type); });
         Stack::Project::RawLayerStackState layers;
         if (!Stack::Project::ReadRawLayersFromPipeline(payload,layers,error,false)) return false;
         if (validatedGraph) *validatedGraph = std::move(candidate);
