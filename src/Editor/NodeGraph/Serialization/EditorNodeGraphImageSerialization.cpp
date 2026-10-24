@@ -8,8 +8,12 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <memory>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace EditorNodeGraph {
 namespace {
@@ -140,7 +144,8 @@ void BuildImagePayloadPreview(
 }
 
 bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& payload) {
-    if (pngBytes.empty()) {
+    if (pngBytes.empty() ||
+        pngBytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return false;
     }
 
@@ -151,28 +156,45 @@ bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, Imag
     int width = 0;
     int height = 0;
     int channels = 0;
-    unsigned char* pixels = stbi_load_from_memory(pngBytes.data(), static_cast<int>(pngBytes.size()), &width, &height, &channels, 4);
+    std::unique_ptr<unsigned char, decltype(&stbi_image_free)> pixels(
+        stbi_load_from_memory(pngBytes.data(), static_cast<int>(pngBytes.size()),
+            &width, &height, &channels, 4),
+        stbi_image_free);
     if (!pixels || width <= 0 || height <= 0) {
-        if (pixels) stbi_image_free(pixels);
         return false;
     }
 
-    payload.pngBytes = pngBytes;
-    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
-        pixels, width, height, 4, payload.pixels);
-    stbi_image_free(pixels);
-    if (!copied) {
+    try {
+        // Do not expose a half-decoded payload if copying bytes or inspecting
+        // metadata fails. The input may also alias one of payload's vectors.
+        std::vector<unsigned char> decodedPixels;
+        if (!Stack::PixelBuffer::CopyInterleavedPixels(
+                pixels.get(), width, height, 4, decodedPixels)) {
+            return false;
+        }
+        pixels.reset();
+        std::vector<unsigned char> encodedBytes(pngBytes);
+        auto metadata = Stack::NodeMath::InspectSourceColorMetadata(
+            encodedBytes, width, height, channels, Stack::NodeMath::LogicalPrecision::UInt8,
+            payload.sourcePath.empty() ? payload.label : payload.sourcePath);
+
+        // Every potentially throwing operation precedes publication. Leave the
+        // payload's source/managed identity and pending-operation fields intact.
+        static_assert(std::is_nothrow_move_assignable_v<Stack::NodeMath::SourceColorMetadata>);
+        payload.pngBytes.swap(encodedBytes);
+        payload.pixels.swap(decodedPixels);
+        payload.sourceColorMetadata = std::move(metadata);
+        payload.width = width;
+        payload.height = height;
+        payload.channels = 4;
+        payload.originalChannels = channels;
+        InvalidateImagePayloadRuntime(payload);
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
         return false;
     }
-    InvalidateImagePayloadRuntime(payload);
-    payload.width = width;
-    payload.height = height;
-    payload.channels = 4;
-    payload.originalChannels = channels;
-    payload.sourceColorMetadata = Stack::NodeMath::InspectSourceColorMetadata(
-        pngBytes, width, height, channels, Stack::NodeMath::LogicalPrecision::UInt8,
-        payload.sourcePath.empty() ? payload.label : payload.sourcePath);
-    return true;
 }
 
 Stack::NodeMath::SourceColorMetadata InspectImageFileColorMetadata(
