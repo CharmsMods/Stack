@@ -28,6 +28,7 @@ void main() {
     if(index>=uint(itemCount)) return;
     Item item=items[index];
     if(item.identity.y==0u) return; // Off-capture/clipped items keep no new evidence.
+    uint slot=item.identity.z;
     vec2 halfTexel=.5/vec2(textureSize(backdrop,0));
     float luminance=0.0;
     for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
@@ -36,13 +37,13 @@ void main() {
     }
     luminance/=9.0;
     uint dark=luminance>.19 ? 1u : 0u;
-    if(states[index].x==item.identity.x) {
+    if(states[slot].x==item.identity.x) {
         // Hysteresis avoids rapid black/white flips as fine detail moves.
-        dark=states[index].y;
+        dark=states[slot].y;
         if(luminance>.22) dark=1u;
         else if(luminance<.16) dark=0u;
     }
-    states[index]=uvec4(item.identity.x,dark,0u,0u);
+    states[slot]=uvec4(item.identity.x,dark,0u,0u);
 })";
 inline constexpr const char* InkVertex = R"(#version 430 core
 layout(location=0) in vec2 Position;

@@ -113,14 +113,19 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         auto* draw = ImGui::GetWindowDrawList();
         const bool glass = m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty();
         if (glass) {
+            const bool adaptiveInk=m_RailGlass.BeginInk(draw,pillMin,pillMax,ImGui::GetItemID());
             Stack::Navigation::GlassControlFeedback(ImRect(pillMin,pillMax),selected,rail.scale,palette);
             ImVec4 ink = palette.text; ink.w *= automatic ? .40f : .65f;
             draw->AddLine(ImVec2(pillMin.x+7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),
                 ImVec2(pillMax.x-7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),ImGui::GetColorU32(ink),1.5f*rail.scale);
-            if (dirty || focused) draw->AddRect(pillMin,pillMax,
-                ImGui::GetColorU32(focused ? palette.focus : palette.mutedText),6.f*rail.scale,0,rail.scale);
+            if (dirty && !focused) draw->AddRect(pillMin,pillMax,
+                ImGui::GetColorU32(palette.mutedText),6.f*rail.scale,0,rail.scale);
             if (automatic) draw->AddCircleFilled(ImVec2(pillMax.x-3.f*rail.scale,pillMax.y-3.f*rail.scale),
                 1.5f*rail.scale,ImGui::GetColorU32(ink));
+            if (adaptiveInk) m_RailGlass.EndInk(draw);
+            // Keep semantic keyboard focus colored, outside neutral contrast.
+            if (focused) draw->AddRect(pillMin,pillMax,ImGui::GetColorU32(palette.focus),
+                6.f*rail.scale,0,rail.scale);
         } else {
             Stack::Header::DrawProjectPill(draw,pillMin,pillMax,rail.scale,palette,
                 {selected,over,focused,dirty,automatic});

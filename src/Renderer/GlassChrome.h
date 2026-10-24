@@ -3,6 +3,8 @@
 #include "imgui.h"
 #include <deque>
 #include <string>
+#include <array>
+#include <cstdint>
 
 namespace Stack::Renderer {
 // Presentation-only material. Main-window draw callbacks capture the pixels
@@ -34,6 +36,9 @@ private:
     std::deque<Surface> surfaces;
     std::deque<Ink> inks;
     static constexpr unsigned int MaxInkItems=128;
+    std::array<ImGuiID,MaxInkItems> inkIdentity{};
+    std::array<std::uint64_t,MaxInkItems> inkLastUsed{};
+    std::uint64_t inkEpoch=0;
     bool captureValid = false, inkReady=false;
     ImVec2 captureOrigin{}, captureSize{}, captureDisplayPos{}, captureDisplaySize{}, captureScale{};
     ImVec2 captureSoftSize{};

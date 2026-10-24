@@ -31,12 +31,15 @@ void GlassChrome::Callback(const ImDrawList*, const ImDrawCmd* command) {
 bool GlassChrome::BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id) {
     if (!enabled || !error.empty() || !draw || max.x<=min.x || max.y<=min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
+    const ImVec2 clipMin=draw->GetClipRectMin(), clipMax=draw->GetClipRectMax();
+    // Offscreen project controls do not consume foreground slots. Identity
+    // guards reset recycled slots without shifting other visible controls.
+    if (max.x<=clipMin.x || min.x>=clipMax.x || max.y<=clipMin.y || min.y>=clipMax.y) return false;
     if (inks.size()>=MaxInkItems) {
         error="Glass navigation exceeded its foreground GPU budget. Turn the mode off to use standard navigation.";
         return false;
     }
-    const ImVec2 clipMin=draw->GetClipRectMin(), clipMax=draw->GetClipRectMax();
-    inks.push_back({this,min,max,id,static_cast<unsigned int>(inks.size()),
+    inks.push_back({this,min,max,id,MaxInkItems,
         ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),false});
     draw->AddCallback(InkCallback,&inks.back());
     return true;
@@ -80,7 +83,12 @@ void GlassChrome::PrepareInk() {
     const float softW=float((width+1)/2), softH=float((height+1)/2);
     const float uScale=captureSoftSize.x/(captureSize.x*softW);
     const float vScale=captureSoftSize.y/(captureSize.y*softH);
+    std::array<bool,MaxInkItems> reserved{};
+    ++inkEpoch;
+    // Reserve every surviving current identity before assigning new ones. A
+    // newly exposed project must not evict the later-registered panel toggle.
     for (Ink& ink : inks) {
+        ink.slot=MaxInkItems;
         const ImVec2 min(std::max(ink.min.x,ink.clip.x),std::max(ink.min.y,ink.clip.y));
         const ImVec2 max(std::min(ink.max.x,ink.clip.z),std::min(ink.max.y,ink.clip.w));
         const float leftPx=(min.x-captureDisplayPos.x)*captureScale.x;
@@ -90,12 +98,40 @@ void GlassChrome::PrepareInk() {
         ink.usable=max.x>min.x && max.y>min.y && leftPx>=captureOrigin.x &&
             rightPx<=captureOrigin.x+captureSize.x && bottomPx>=captureOrigin.y &&
             topPx<=captureOrigin.y+captureSize.y;
-        if (!ink.usable) continue; // Never infer off-capture ink from its edge.
+        if (!ink.usable) continue;
+        for (unsigned int slot=0;slot<MaxInkItems;++slot) if (inkIdentity[slot]==ink.id) {
+            ink.slot=slot; reserved[slot]=true; break;
+        }
+    }
+    std::array<bool,MaxInkItems> measured{};
+    unsigned int itemIndex=0;
+    for (Ink& ink : inks) {
+        Item& item=items[itemIndex++];
+        if (!ink.usable) continue;
+        if (ink.slot==MaxInkItems) {
+            // A duplicate identity, if supplied, shares its first assignment.
+            for (unsigned int slot=0;slot<MaxInkItems;++slot) if (inkIdentity[slot]==ink.id) {
+                ink.slot=slot; break;
+            }
+            if (ink.slot==MaxInkItems) {
+                unsigned int oldest=MaxInkItems;
+                for (unsigned int slot=0;slot<MaxInkItems;++slot)
+                    if (!reserved[slot] && (oldest==MaxInkItems || inkLastUsed[slot]<inkLastUsed[oldest])) oldest=slot;
+                if (oldest==MaxInkItems) { ink.usable=false; continue; }
+                ink.slot=oldest; inkIdentity[oldest]=ink.id;
+            }
+            reserved[ink.slot]=true;
+        }
+        inkLastUsed[ink.slot]=inkEpoch;
+        if (measured[ink.slot]) continue; // Exactly one GPU writer per slot.
+        measured[ink.slot]=true;
+        const ImVec2 min(std::max(ink.min.x,ink.clip.x),std::max(ink.min.y,ink.clip.y));
+        const ImVec2 max(std::min(ink.max.x,ink.clip.z),std::min(ink.max.y,ink.clip.w));
         const float centerX=((min.x+max.x)*.5f-captureDisplayPos.x)*captureScale.x;
         const float centerY=(captureDisplaySize.y-((min.y+max.y)*.5f-captureDisplayPos.y))*captureScale.y;
-        items[ink.slot]={{(centerX-captureOrigin.x)*uScale,(centerY-captureOrigin.y)*vScale,
+        item={{(centerX-captureOrigin.x)*uScale,(centerY-captureOrigin.y)*vScale,
             (max.x-min.x)*captureScale.x*.3f*uScale,
-            (max.y-min.y)*captureScale.y*.3f*vScale},{ink.id,1,0,0}};
+            (max.y-min.y)*captureScale.y*.3f*vScale},{ink.id,1,ink.slot,0}};
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER,inkBuffers[0]);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,inks.size()*sizeof(Item),items.data());
@@ -282,6 +318,7 @@ void GlassChrome::Shutdown() {
     for (auto& program : programs) { if (program) glDeleteProgram(program); program=0; }
     if (vao) glDeleteVertexArrays(1,&vao);
     glDeleteBuffers(2,inkBuffers); inkBuffers[0]=inkBuffers[1]=0;
+    inkIdentity.fill(0); inkLastUsed.fill(0); inkEpoch=0;
     vao=0; surfaces.clear(); inks.clear(); captureValid=false; inkReady=false; error.clear(); enabled=false;
 }
 }
