@@ -30,10 +30,14 @@ class ColorWarpFeedback {
         std::size_t key = 0;
         std::atomic<bool> cancelled { false };
         std::atomic<bool> done { false };
+        std::atomic<bool> failed { false };
         std::mutex mutex;
         std::shared_ptr<const ColorWarpFeedbackData> data;
     };
     std::size_t m_DesiredKey = 0;
+    // Preparation/rejected submission has no Request to retain its failure.
+    // Keep the input identity before allocating or copying job inputs.
+    std::size_t m_FailedKey = 0;
     std::shared_ptr<Request> m_Request;
 public:
     ~ColorWarpFeedback() { if (m_Request) m_Request->cancelled = true; }
@@ -42,6 +46,8 @@ public:
         const RawRecipe::RawColorWarpRecipe& recipe, Raw::RawWorkingSpace workingSpace,
         const std::function<bool(std::function<void()>)>& submit);
     std::shared_ptr<const ColorWarpFeedbackData> Current() const;
+    bool Failed() const;
+    void RetryFailed();
     std::size_t Key() const { return m_DesiredKey; }
 };
 

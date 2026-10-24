@@ -1000,6 +1000,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         args.ui.colorWarpInspectionActive = false;
         args.ui.colorWarpInspectedRegionId.clear();
         if (!args.ui.colorWarpDiagnosticLocked) {
+            if (args.feedback) args.feedback->RetryFailed();
             args.ui.ResetColorWarpDiagnosticRequest();
         }
     }
@@ -2033,7 +2034,9 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         drawList->AddText(
             ImVec2(canvasMin.x + 10.0f, canvasMax.y - 24.0f),
             ImGui::GetColorU32(ImGuiCol_TextDisabled),
-            "Spatial selection is refining.");
+            args.feedback && args.feedback->Failed()
+                ? "Color analysis unavailable. Point at the image and press H to retry."
+                : "Spatial selection is refining.");
     }
 
     if (args.ui.colorWarpPhotoHoverValid) {

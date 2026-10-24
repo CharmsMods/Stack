@@ -58,6 +58,9 @@ def main():
     assert reset_call in resolution_reset
     assert 'colorUi.ResetColorWarpDiagnosticRequest();' in preview.split(
         'const bool colorWarpDiagnosticHeld', 1)[0]
+    preview_escape = 'if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&' + between(
+        preview, 'if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&',
+        '\n        if(currentRawPreview && !ImGui::GetIO().WantTextInput')
     text = r'''
 #include "Async/TaskGroup.h"
 #include <algorithm>
@@ -69,6 +72,7 @@ def main():
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -103,20 +107,20 @@ struct Rect {
     bool Contains(ImVec2 p) const { return p.x>=Min.x && p.x<=Max.x && p.y>=Min.y && p.y<=Max.y; }
 };
 using ImTextureID = void*;
-constexpr int ImGuiKey_H=1, ImGuiPopupFlags_AnyPopupId=1;
+constexpr int ImGuiKey_H=1, ImGuiKey_Escape=2, ImGuiPopupFlags_AnyPopupId=1;
 #define IM_COL32(r,g,b,a) 0u
 namespace ImGui {
 struct Io { bool AppFocusLost=false,WantTextInput=false,KeyCtrl=false,KeyAlt=false,KeySuper=false; ImVec2 MousePos{50,50}; } io;
 int frame=1;
-bool freshH=false, repeatedH=false, hovered=true, active=false, popup=false;
+bool freshH=false, repeatedH=false, escape=false, hovered=true, active=false, popup=false;
 int GetFrameCount() { return frame; }
-bool IsKeyPressed(int, bool repeat=true) { return freshH || (repeat && repeatedH); }
+bool IsKeyPressed(int key, bool repeat=true) { return key==ImGuiKey_Escape ? escape : freshH || (repeat && repeatedH); }
 Io& GetIO() { return io; }
 bool IsWindowHovered() { return hovered; }
 bool IsAnyItemActive() { return active; }
 bool IsPopupOpen(const char*,int) { return popup; }
 ImVec2 CalcTextSize(const char*) { return {300,16}; }
-void Reset() { io={}; freshH=false; repeatedH=false; hovered=true; active=false; popup=false; ++frame; }
+void Reset() { io={}; freshH=false; repeatedH=false; escape=false; hovered=true; active=false; popup=false; ++frame; }
 }
 struct DrawList {
     int images=0, failures=0;
@@ -177,6 +181,7 @@ std::vector<unsigned char> BuildColorWarpFeedbackOverlay(const Feedback&,
     return recipe.value==control.emptyValue ? std::vector<unsigned char>{} : std::vector<unsigned char>{1,2,3,4};
 }
 }
+enum class RawLabTool { Color };
 namespace Stack::EditorModuleTypes {
 struct RawWorkspaceColorWarpDiagnosticState {''' + state + r'''
 };
@@ -184,6 +189,13 @@ struct Ui {
 ''' + request_fields + texture_fields + r'''
     bool colorWarpDiagnosticIsolateSelected=false, colorWarpPendingCircleDrawing=false;
     int colorWarpGestureOwner=0;
+    bool colorWarpInspectionActive=false,colorWarpPendingCircleActive=false,colorWarpDiagnosticLocked=false;
+    std::string colorWarpInspectedRegionId;
+    RawLabTool activeTool=RawLabTool::Color;
+    bool colorWarpPendingCircleRefining=false,colorWarpPendingCircleCommitRequested=false,colorWarpPendingCircleAppend=false;
+    std::string colorWarpPendingReplaceRegionId,colorWarpPendingReplaceCircleId;
+    std::uint64_t colorWarpAreaAnalysisGeneration=0;
+    std::shared_ptr<int> colorWarpAreaAnalysisState;
 };
 }
 struct Tasks {
@@ -201,7 +213,19 @@ struct Tasks {
             });
     }
 };
+struct FeedbackCache {
+    bool failed=false;
+    int retries=0;
+    bool Failed() const { return failed; }
+    void RetryFailed() { if(failed) { failed=false; ++retries; } }
+};
+namespace Stack::Editor { using ColorWarpFeedback=FeedbackCache; }
 struct Fixture {
+    FeedbackCache cache;
+    struct NodeState {
+        FeedbackCache& cache;
+        template<class T> T& Get(int) { return cache; }
+    } m_NodeEditorState{cache};
     Stack::EditorModuleTypes::Ui m_RawWorkspaceLabUi;
     Tasks tasks;
     DrawList draws;
@@ -221,13 +245,22 @@ struct Fixture {
         if(advance) ++ImGui::frame;
         draws.images=draws.failures=0;
         auto* drawList=&draws;
-        const auto feedback=feedbackData;
+        auto* feedbackCache=&cache;
+        const auto feedback=cache.failed ? nullptr : feedbackData;
         std::size_t overlayFingerprint=fingerprint;
 ''' + pin_selection + lifecycle + r'''
         tasks.frameFinished->store(true);
     }
     void Teardown() {
 ''' + teardown_entry + texture_teardown + r'''
+    }
+    void PreviewEscape() {
+        struct { struct { std::optional<int> nodeTarget=1; } edit; } preview;
+''' + preview_escape + r'''
+    }
+    void SurfaceEscape() {
+        struct Args { Stack::EditorModuleTypes::Ui& ui;FeedbackCache* feedback; } args{m_RawWorkspaceLabUi,&cache};
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)''' + escape_reset + r'''
     }
     void Reset() { m_RawWorkspaceLabUi.ResetColorWarpDiagnosticRequest(); }
     void Drain(bool poll=true) {
@@ -267,6 +300,43 @@ void TestSuccessAndKeyRepeat() {
     ImGui::freshH=true; f.Step(); ImGui::freshH=false; ImGui::repeatedH=true; f.Step();
     Require(f.tasks.submissions==submits && GLHelpers::uploads==uploads && f.draws.images==1,
         "H/repeat rebuilt a successful matching overlay");
+}
+void TestUpstreamFailureUsesRetryGate() {
+    Fixture f; f.cache.failed=true; f.Step(); f.Failed();
+    Require(f.tasks.submissions==0,"Failed prerequisite submitted an overlay");
+    for(int frame=0;frame<100;++frame) f.Step();
+    Require(f.cache.retries==0 && f.tasks.submissions==0,"Upstream failure retried on idle frames");
+    ImGui::repeatedH=true; f.Step(); ImGui::repeatedH=false;
+    ImGui::freshH=true; ImGui::io.WantTextInput=true; f.Step(); ImGui::io.WantTextInput=false;
+    Require(f.cache.retries==0,"Ineligible H retried upstream feedback");
+    f.Step(); ImGui::freshH=false;
+    Require(f.cache.retries==1 && !f.m_RawWorkspaceLabUi.colorWarpDiagnosticFailed,
+        "Eligible H did not clear the same upstream/overlay failure");
+    f.Step(); f.Drain(); Require(f.draws.images==1,"Feedback recovery did not allow overlay publication");
+}
+void TestUpstreamEscapeReset() {
+    Fixture f; f.cache.failed=true; f.Step(); f.Failed();
+    const auto generation=f.m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration;
+    ImGui::escape=true;f.m_RawWorkspaceLabUi.colorWarpPendingCircleActive=true;f.SurfaceEscape();
+    Require(f.cache.retries==0 && f.m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration==generation,
+        "Pending circle Escape improperly reset feedback");
+    f.m_RawWorkspaceLabUi.colorWarpPendingCircleActive=false;f.m_RawWorkspaceLabUi.colorWarpDiagnosticLocked=true;f.SurfaceEscape();
+    Require(f.cache.retries==0,"Locked diagnostic Escape improperly reset feedback");
+    f.m_RawWorkspaceLabUi.colorWarpDiagnosticLocked=false;f.SurfaceEscape();ImGui::escape=false;
+    Require(f.cache.retries==1 && !f.m_RawWorkspaceLabUi.colorWarpDiagnosticFailed &&
+        f.m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration==generation+1,
+        "Explicit Escape reset did not rearm upstream and overlay together");
+}
+void TestUpstreamPreviewEscape() {
+    Fixture f; f.cache.failed=true; f.Step(); f.Failed();
+    const auto generation=f.m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration;
+    f.PreviewEscape();Require(f.cache.retries==0,"Preview reset without Escape");
+    ImGui::escape=true;f.m_RawWorkspaceLabUi.colorWarpPendingCircleActive=true;
+    f.m_RawWorkspaceLabUi.colorWarpDiagnosticLocked=true;f.PreviewEscape();ImGui::escape=false;
+    Require(f.cache.retries==1 && !f.m_RawWorkspaceLabUi.colorWarpDiagnosticFailed &&
+        !f.m_RawWorkspaceLabUi.colorWarpPendingCircleActive && !f.m_RawWorkspaceLabUi.colorWarpDiagnosticLocked &&
+        f.m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration==generation+1,
+        "Image Escape did not reset failed upstream when floating surface is absent");
 }
 void TestZeroFingerprint() { Fixture f; f.fingerprint=0; f.Success(); Require(f.m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint==1,"Zero key collided with no attempt sentinel"); }
 void TestAllocationFailure() {
@@ -394,6 +464,9 @@ int main() {
         catch(const std::exception& error) { ReleaseBlocked(); ++failures; std::cerr<<"FAIL "<<name<<": "<<error.what()<<'\n'; }
     };
     run("success and H repeat",TestSuccessAndKeyRepeat);
+    run("upstream failure shares retry gate",TestUpstreamFailureUsesRetryGate);
+    run("upstream Escape reset",TestUpstreamEscapeReset);
+    run("upstream image Escape reset",TestUpstreamPreviewEscape);
     run("zero fingerprint",TestZeroFingerprint);
     run("request allocation failure",TestAllocationFailure);
     run("preparation copy failure",TestPreparationFailure);

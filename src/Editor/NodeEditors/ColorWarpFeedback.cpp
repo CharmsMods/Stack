@@ -58,6 +58,7 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
     if (!scope.valid || scope.stage != RawDevelopmentGraphScopeStage::ColorWarpInput ||
         count == 0 || scope.pixels.size() < count * 3u) {
         m_DesiredKey = 0;
+        m_FailedKey = 0;
         if (m_Request) m_Request->cancelled = true;
         return;
     }
@@ -72,6 +73,7 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
         for (const float pixel : scope.pixels) Hash(key, pixel);
     }
     m_DesiredKey = key == 0 ? 1u : key;
+    if (m_FailedKey == m_DesiredKey) return;
     if (m_Request && m_Request->key == m_DesiredKey && !m_Request->cancelled) return;
     // One job at a time; a superseded request cancels cooperatively before
     // the latest request is submitted on a subsequent drawing frame.
@@ -79,54 +81,79 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
         m_Request->cancelled = true;
         return;
     }
-    auto request = std::make_shared<Request>();
-    request->key = m_DesiredKey;
-    const bool submitted = submit([request, scope, recipe, workingSpace, count]() {
-        const auto cancelled = [&]() { return request->cancelled.load(); };
-        try {
-            if (!cancelled()) {
-                auto data = std::make_shared<ColorWarpFeedbackData>();
-                data->selectionFingerprint = RawRecipe::ColorWarpSelectionFingerprint(recipe);
-                auto& guide = data->guide;
-                guide.width = scope.width; guide.height = scope.height;
-                guide.sourceWidth = scope.sourceWidth > 0 ? scope.sourceWidth : scope.width;
-                guide.sourceHeight = scope.sourceHeight > 0 ? scope.sourceHeight : scope.height;
-                guide.pixels.resize(count);
-                for (std::size_t index = 0; index < count; ++index) {
-                    if ((index & 4095u) == 0u && cancelled()) break;
-                    const auto offset = index * 3u;
-                    guide.pixels[index] = RawRecipe::WorkingRgbToColorWarpCoordinate(
-                        {scope.pixels[offset], scope.pixels[offset + 1u], scope.pixels[offset + 2u]},
-                        workingSpace);
-                }
-                data->fields.resize(recipe.pins.size());
-                for (std::size_t index = 0; index < recipe.pins.size() && !cancelled(); ++index) {
-                    const auto& pin = recipe.pins[index];
-                    if (!pin.enabled) continue;
-                    const auto region = std::find_if(recipe.regions.begin(), recipe.regions.end(),
-                        [&](const auto& candidate) { return candidate.id == pin.regionId; });
-                    data->fields[index] = RawRecipe::BuildRawColorWarpMaskFields(guide, pin,
-                        region == recipe.regions.end() ? nullptr : &*region, cancelled);
-                }
+    m_FailedKey = m_DesiredKey;
+    try {
+        auto request = std::make_shared<Request>();
+        request->key = m_DesiredKey;
+        const bool submitted = submit([request, scope, recipe, workingSpace, count]() {
+            const auto cancelled = [&]() { return request->cancelled.load(); };
+            try {
                 if (!cancelled()) {
-                    std::lock_guard<std::mutex> lock(request->mutex);
-                    request->data = std::move(data);
+                    auto data = std::make_shared<ColorWarpFeedbackData>();
+                    data->selectionFingerprint = RawRecipe::ColorWarpSelectionFingerprint(recipe);
+                    auto& guide = data->guide;
+                    guide.width = scope.width; guide.height = scope.height;
+                    guide.sourceWidth = scope.sourceWidth > 0 ? scope.sourceWidth : scope.width;
+                    guide.sourceHeight = scope.sourceHeight > 0 ? scope.sourceHeight : scope.height;
+                    guide.pixels.resize(count);
+                    for (std::size_t index = 0; index < count; ++index) {
+                        if ((index & 4095u) == 0u && cancelled()) break;
+                        const auto offset = index * 3u;
+                        guide.pixels[index] = RawRecipe::WorkingRgbToColorWarpCoordinate(
+                            {scope.pixels[offset], scope.pixels[offset + 1u], scope.pixels[offset + 2u]},
+                            workingSpace);
+                    }
+                    data->fields.resize(recipe.pins.size());
+                    for (std::size_t index = 0; index < recipe.pins.size() && !cancelled(); ++index) {
+                        const auto& pin = recipe.pins[index];
+                        if (!pin.enabled) continue;
+                        const auto region = std::find_if(recipe.regions.begin(), recipe.regions.end(),
+                            [&](const auto& candidate) { return candidate.id == pin.regionId; });
+                        data->fields[index] = RawRecipe::BuildRawColorWarpMaskFields(guide, pin,
+                            region == recipe.regions.end() ? nullptr : &*region, cancelled);
+                    }
+                    if (!cancelled()) {
+                        std::lock_guard<std::mutex> lock(request->mutex);
+                        request->data = std::move(data);
+                    }
                 }
+            } catch (...) {
+                // A failed diagnostic must not publish unrestricted membership.
+                // Failure is terminal for this input; supersession alone may
+                // schedule an automatic replacement on the next drawing frame.
+                request->failed = true;
             }
-        } catch (...) {
-            // A failed diagnostic must not publish unrestricted membership.
-            request->cancelled = true;
+            request->done = true;
+        });
+        if (submitted) {
+            m_Request = std::move(request);
+            m_FailedKey = 0;
         }
-        request->done = true;
-    });
-    if (submitted) m_Request = std::move(request);
+    } catch (...) {
+        // m_FailedKey also owns allocation, input-copy and submit exceptions.
+    }
 }
 
 std::shared_ptr<const ColorWarpFeedbackData> ColorWarpFeedback::Current() const {
     if (!m_Request || m_DesiredKey == 0 || m_Request->key != m_DesiredKey ||
-        m_Request->cancelled || !m_Request->done) return {};
+        m_Request->cancelled || m_Request->failed || !m_Request->done) return {};
     std::lock_guard<std::mutex> lock(m_Request->mutex);
     return m_Request->data;
+}
+
+bool ColorWarpFeedback::Failed() const {
+    return m_DesiredKey != 0 && (m_FailedKey == m_DesiredKey ||
+        (m_Request && m_Request->key == m_DesiredKey &&
+         !m_Request->cancelled && m_Request->failed));
+}
+
+void ColorWarpFeedback::RetryFailed() {
+    if (!Failed()) return;
+    m_FailedKey = 0;
+    if (m_Request && m_Request->key == m_DesiredKey) {
+        m_Request->cancelled = true;
+        m_Request.reset();
+    }
 }
 
 std::vector<unsigned char> BuildColorWarpFeedbackOverlay(const ColorWarpFeedbackData& data,

@@ -845,6 +845,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             colorUi.colorWarpInspectionActive = false;
             colorUi.colorWarpDiagnosticLocked = false;
             colorUi.ResetColorWarpDiagnosticRequest();
+            if (preview.edit.nodeTarget) {
+                m_NodeEditorState.Get<Stack::Editor::ColorWarpFeedback>(
+                    *preview.edit.nodeTarget).RetryFailed();
+            }
             colorUi.colorWarpInspectedRegionId.clear();
         }
         if(currentRawPreview && !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt &&
@@ -988,6 +992,17 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 overlayFingerprint ^= isolate ? 0xa531u : 0x5ca1u;
                 if (overlayFingerprint == 0u) overlayFingerprint = 1u;
                 auto& diagnosticUi = m_RawWorkspaceLabUi;
+                // Feedback is a separate prerequisite of the overlay job.
+                // Surface its terminal failure through the same bounded UI
+                // state and retry gesture rather than silently resubmitting.
+                if (feedbackCache && feedbackCache->Failed() &&
+                    (!diagnosticUi.colorWarpDiagnosticFailed ||
+                     diagnosticUi.colorWarpDiagnosticRequestedFingerprint != overlayFingerprint)) {
+                    diagnosticUi.ResetColorWarpDiagnosticRequest();
+                    diagnosticUi.colorWarpDiagnosticRequestedFingerprint = overlayFingerprint;
+                    diagnosticUi.colorWarpDiagnosticAttemptFrame = ImGui::GetFrameCount();
+                    diagnosticUi.colorWarpDiagnosticFailed = true;
+                }
                 if (diagnosticUi.colorWarpDiagnosticFailed &&
                     diagnosticUi.colorWarpDiagnosticRequestedFingerprint == overlayFingerprint &&
                     diagnosticUi.colorWarpDiagnosticAttemptFrame != ImGui::GetFrameCount() &&
@@ -1001,6 +1016,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     !diagnosticUi.colorWarpPendingCircleDrawing &&
                     diagnosticUi.colorWarpGestureOwner == 0 &&
                     !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+                    if (feedbackCache) feedbackCache->RetryFailed();
                     diagnosticUi.ResetColorWarpDiagnosticRequest();
                 }
                 const bool rebuildOverlay =
