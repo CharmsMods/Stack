@@ -168,7 +168,10 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
             EditorNodeGraphDefinitions::ResolvedNodeDefinition{};
         if (!node || !definition || definition.ParameterCount()==0) return false;
         if (!FinishWorkspaceInteraction()) return true;
-        m_Project->nodeEditor=NodeEditTarget{GetProjectDocumentId(),kProjectGraphId,node->instanceUuid};
+        const NodeEditTarget target{GetProjectDocumentId(),kProjectGraphId,node->instanceUuid};
+        if (!m_Project->nodeEditor || *m_Project->nodeEditor != target)
+            m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+        m_Project->nodeEditor=target;
         const auto& editor = Stack::Editor::FindNodeEditor(*node);
         m_RawWorkspaceLabUi.activeTool=editor.legacyTool.value_or(RawLabTool::GraphNode);
         if (editor.toneView >= 0) m_RawWorkspaceLabUi.sceneToneView=editor.toneView;
@@ -200,6 +203,7 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
             EditorNodeGraphDefinitions::ResolvedNodeDefinition{};
         if (!definition || definition.ParameterCount()==0) return true;
     }
+    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
     m_Project->nodeEditor.reset();
     if (nodeId == m_RawLayerMaskWorkspace->projectCanvas->preparedSource) {
         SelectRawAdjustmentLayer({});
@@ -270,6 +274,7 @@ void EditorModule::BindBracketingSourceNodeEditor() {
             (!set->graphBindingNodeId.empty() && node.instanceUuid!=set->graphBindingNodeId)) continue;
         const NodeEditTarget target{GetProjectDocumentId(),kProjectGraphId,node.instanceUuid};
         const bool changed=!m_Project->nodeEditor || *m_Project->nodeEditor!=target;
+        if (changed) m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
         m_Project->nodeEditor=target;
         m_RawWorkspaceLabUi.activeTool=RawLabTool::MultiFrame;
         m_SelectedRawAdjustmentLayer.clear();

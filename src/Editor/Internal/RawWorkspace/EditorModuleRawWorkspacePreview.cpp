@@ -1577,6 +1577,7 @@ void EditorModule::HandleRawWorkspaceLocalRangeTargetInteraction(
 }
 
 void EditorModule::ClearRawWorkspaceLivePreviewState() {
+    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
     m_RawWorkspaceLabUi.ResetColorWarpDiagnosticRequest();
     ClearRawWorkspaceLabGradingScope();
     ClearRawRenderSession();

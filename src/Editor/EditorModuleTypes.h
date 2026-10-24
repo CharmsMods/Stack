@@ -27,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -351,9 +352,25 @@ enum class RawGalleryNavigationMode {
 
 using RawWorkspaceColorCloudPoint = Raw::RawColorCloudSample;
 
+struct RawWorkspaceColorWarpAreaOwner {
+    std::optional<Stack::Project::NodeEditTarget> nodeTarget;
+    std::string sourceKey;
+    std::uint64_t sourceHash = 0;
+    bool Valid() const {
+        return nodeTarget && !nodeTarget->documentId.empty() &&
+            !nodeTarget->nodeUuid.empty() && !sourceKey.empty();
+    }
+    bool operator==(const RawWorkspaceColorWarpAreaOwner& other) const {
+        return nodeTarget == other.nodeTarget && sourceKey == other.sourceKey &&
+            sourceHash == other.sourceHash;
+    }
+    bool operator!=(const RawWorkspaceColorWarpAreaOwner& other) const { return !(*this == other); }
+};
+
 struct RawWorkspaceColorWarpAreaAnalysisState {
     std::mutex mutex;
     std::uint64_t generation = 0;
+    RawWorkspaceColorWarpAreaOwner owner;
     bool ready = false;
     bool failed = false;
     Stack::RawRecipe::RawColorWarpAreaAnalysisResult result;
@@ -594,6 +611,22 @@ struct RawWorkspaceLabUiState {
     std::string colorWarpPendingReplaceRegionId;
     std::string colorWarpPendingReplaceCircleId;
     bool colorWarpPendingCircleAppend = false;
+    RawWorkspaceColorWarpAreaOwner colorWarpAreaOwner;
+    void ResetColorWarpAreaRequest() {
+        ++colorWarpAreaAnalysisGeneration;
+        colorWarpAreaAnalysisState.reset();
+        colorWarpAreaAnalysisResult = {};
+        colorWarpAreaOwner = {};
+        colorWarpPendingCircleActive = false;
+        colorWarpPendingCircleDrawing = false;
+        colorWarpPendingCircleRefining = false;
+        colorWarpPendingCircleCommitRequested = false;
+        colorWarpPendingCircleAppend = false;
+        colorWarpPendingCircleEditKind = 0;
+        colorWarpPendingReplaceRegionId.clear();
+        colorWarpPendingReplaceCircleId.clear();
+        colorWarpAreaStatus.clear();
+    }
     bool colorWarpDiagnosticLocked = false;
     bool colorWarpInspectionActive = false;
     bool colorWarpDiagnosticIsolateSelected = false;

@@ -22,6 +22,8 @@ struct RawLabColorSurfaceArgs {
     std::function<void()> saveAppState;
     bool strengthDriven = false;
     ColorWarpFeedback* feedback = nullptr;
+    EditorModuleTypes::RawWorkspaceColorWarpAreaOwner areaOwner;
+    bool areaEditingAllowed = false;
 };
 
 bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args);

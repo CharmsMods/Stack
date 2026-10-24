@@ -32,8 +32,12 @@ def main():
     commit = textwrap.dedent(source[start:end] + '}')
     types = (root / 'src/Editor/EditorModuleTypes.h').read_text()
     state = types.split('struct RawWorkspaceColorWarpAreaAnalysisState {', 1)[1].split('\n};', 1)[0]
+    owner = 'struct RawWorkspaceColorWarpAreaOwner {' + types.split('struct RawWorkspaceColorWarpAreaOwner {', 1)[1].split('\n};', 1)[0] + '\n};\n'
+    area_fields = 'bool colorWarpPendingCircleActive' + types.split('bool colorWarpPendingCircleActive', 1)[1].split('    bool colorWarpDiagnosticLocked', 1)[0]
     text = r'''
 #include "Async/TaskGroup.h"
+#include "Project/NodeEditTarget.h"
+#include <optional>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -45,12 +49,14 @@ def main():
 #include <string>
 #include <thread>
 #include <vector>
+struct ImVec2 { float x=0,y=0; ImVec2(float xValue,float yValue):x(xValue),y(yValue){} };
 using namespace std::chrono_literals;
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 namespace Stack::RawRecipe {
 struct Coordinate { float a=0, b=0, sceneEv=0; };
 struct RawColorWarpAnalysisSample { float sourceU=0, sourceV=0; Coordinate color; bool valid=true; };
 struct Circle { int value=1; };
+using RawColorWarpSampleCircle=Circle;
 struct RawColorWarpAreaAnalysisResult { std::vector<int> proposals; bool capacityLimited=false; };
 constexpr std::size_t kMaxRawColorWarpPins = 32;
 struct Control {
@@ -74,18 +80,14 @@ RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
 }
 }
 namespace Stack::EditorModuleTypes {
+''' + owner + r'''
 struct RawWorkspaceColorWarpAreaAnalysisState {''' + state + r'''
 };
 }
+using Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner;
+using Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState;
 struct Ui {
-    std::uint64_t colorWarpAreaAnalysisGeneration=0;
-    std::shared_ptr<Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState> colorWarpAreaAnalysisState;
-    Stack::RawRecipe::RawColorWarpAreaAnalysisResult colorWarpAreaAnalysisResult;
-    Stack::RawRecipe::Circle colorWarpPendingCircle;
-    bool colorWarpPendingCircleRefining=false, colorWarpPendingCircleCommitRequested=false;
-    bool colorWarpPendingCircleAppend=false;
-    int colorWarpPendingCircleEditKind=1;
-    std::string colorWarpPendingReplaceRegionId, colorWarpAreaStatus;
+''' + area_fields + r'''
 };
 struct Tasks {
     Async::TaskGroup group;
@@ -97,6 +99,8 @@ struct Tasks {
 };
 struct Fixture {
     Ui colorUi;
+    Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner areaOwner{Stack::Project::NodeEditTarget{"document","layer","node"},"source",42};
+    Fixture() {colorUi.colorWarpAreaOwner=areaOwner;colorUi.colorWarpPendingCircleActive=true;colorUi.colorWarpPendingCircleEditKind=1;}
     Tasks tasks;
     struct Scope { int width=1, height=1; std::vector<float> pixels{0,0,0}; } colorScope;
     std::size_t colorScopePixelCount=1;

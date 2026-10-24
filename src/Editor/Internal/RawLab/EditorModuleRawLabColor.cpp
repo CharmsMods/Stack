@@ -63,6 +63,9 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         [this]() { SaveRawWorkspaceAppState(); }
     };
     args.strengthDriven = context.IsParameterDriven("strength");
+    args.areaOwner = {context.nodeTarget, previewIdentity,
+        RawViewportSourceHash()};
+    args.areaEditingAllowed = context.canEdit;
     if (context.nodeTarget && context.editorState) {
         args.feedback = &context.State<Stack::Editor::ColorWarpFeedback>();
         args.feedback->Update(scope, previewIdentity + context.nodeTarget->Key(),

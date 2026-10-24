@@ -42,7 +42,8 @@ def main():
     reset_call = 'm_RawWorkspaceLabUi.ResetColorWarpDiagnosticRequest();'
     teardown_entry = between(teardown, 'void EditorModule::ClearRawWorkspaceLivePreviewState() {',
                              '    ClearRawWorkspaceLabGradingScope();')
-    assert teardown_entry.strip() == reset_call
+    assert reset_call in teardown_entry
+    assert "m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();" in teardown_entry
     texture_teardown = 'if (m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0) {' + between(
         teardown, 'if (m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0) {',
         '\n    int outputWidth = 0;')
@@ -196,6 +197,12 @@ struct Ui {
     std::string colorWarpPendingReplaceRegionId,colorWarpPendingReplaceCircleId;
     std::uint64_t colorWarpAreaAnalysisGeneration=0;
     std::shared_ptr<int> colorWarpAreaAnalysisState;
+    void ResetColorWarpAreaRequest() {
+        ++colorWarpAreaAnalysisGeneration;colorWarpAreaAnalysisState.reset();
+        colorWarpPendingCircleActive=colorWarpPendingCircleDrawing=colorWarpPendingCircleRefining=false;
+        colorWarpPendingCircleCommitRequested=colorWarpPendingCircleAppend=false;
+        colorWarpPendingReplaceRegionId.clear();colorWarpPendingReplaceCircleId.clear();
+    }
 };
 }
 struct Tasks {

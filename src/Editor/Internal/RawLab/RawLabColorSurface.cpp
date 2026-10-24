@@ -724,6 +724,10 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     args.colorWarp = Stack::RawRecipe::SanitizeColorWarpRecipe(
         std::move(args.colorWarp));
     auto& colorWarp = args.colorWarp;
+    // Several graph cards may draw in one frame. Drawing a different node
+    // must neither consume nor cancel the image gesture owned by this node.
+    const bool ownsPendingArea = args.areaEditingAllowed && args.areaOwner.Valid() &&
+        args.ui.colorWarpAreaOwner == args.areaOwner;
     if ((!std::isfinite(args.ui.colorWarpRegionReachWheelDelta) ||
          std::abs(args.ui.colorWarpRegionReachWheelDelta) > 0.0001f) ||
         (!std::isfinite(args.ui.colorWarpRegionFeatherWheelDelta) ||
@@ -754,7 +758,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         args.ui.colorWarpRegionFeatherWheelDelta = 0.0f;
         args.ui.colorWarpDiagnosticTargetLongEdge = 192;
     }
-    if (args.ui.colorWarpPendingCircleCommitRequested &&
+    if (ownsPendingArea && args.ui.colorWarpPendingCircleCommitRequested &&
         args.ui.colorWarpPendingCircleActive &&
         args.ui.colorWarpPendingCircleAppend) {
         const auto region = std::find_if(
@@ -773,14 +777,9 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             args.ui.colorWarpInspectedRegionId = region->id;
             changed = true;
         }
-        args.ui.colorWarpPendingCircleActive = false;
-        args.ui.colorWarpPendingCircleCommitRequested = false;
-        args.ui.colorWarpPendingCircleAppend = false;
-        args.ui.colorWarpPendingReplaceRegionId.clear();
-        args.ui.colorWarpPendingReplaceCircleId.clear();
-        args.ui.colorWarpAreaAnalysisResult = {};
+        args.ui.ResetColorWarpAreaRequest();
     }
-    if (args.ui.colorWarpPendingCircleCommitRequested &&
+    if (ownsPendingArea && args.ui.colorWarpPendingCircleCommitRequested &&
         args.ui.colorWarpPendingCircleActive &&
         !args.ui.colorWarpPendingCircleAppend &&
         !args.ui.colorWarpPendingCircleRefining &&
@@ -881,11 +880,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         } else if (!replacing) {
             colorWarp.regions.pop_back();
         }
-        args.ui.colorWarpPendingCircleActive = false;
-        args.ui.colorWarpPendingCircleCommitRequested = false;
-        args.ui.colorWarpPendingReplaceRegionId.clear();
-        args.ui.colorWarpPendingReplaceCircleId.clear();
-        args.ui.colorWarpAreaAnalysisResult = {};
+        args.ui.ResetColorWarpAreaRequest();
     }
     constexpr float fullWheelExtent = 0.45f;
     constexpr float coordinateLimit = 1.0f;
@@ -967,17 +962,11 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         args.ui.colorWarpProvisionalSceneEvValid = false;
         args.ui.colorWarpDraggingProvisional = false;
         args.ui.colorWarpPhotoHoverValid = false;
-        args.ui.colorWarpPendingCircleActive = false;
-        args.ui.colorWarpPendingCircleDrawing = false;
-        args.ui.colorWarpPendingCircleRefining = false;
-        args.ui.colorWarpPendingCircleCommitRequested = false;
-        args.ui.colorWarpPendingCircleAppend = false;
-        args.ui.colorWarpPendingReplaceRegionId.clear();
-        args.ui.colorWarpPendingReplaceCircleId.clear();
+        // AREA cancellation belongs to the selected image/selection lifecycle.
+        // Another graph card can draw a different source here without owning
+        // the pending image gesture; the commit guards above keep it isolated.
         args.ui.colorWarpRegionReachWheelDelta = 0.0f;
         args.ui.colorWarpRegionFeatherWheelDelta = 0.0f;
-        ++args.ui.colorWarpAreaAnalysisGeneration;
-        args.ui.colorWarpAreaAnalysisState.reset();
         args.ui.ResetColorWarpDiagnosticRequest();
         args.ui.colorWarpInspectionActive = false;
         args.ui.colorWarpInspectedRegionId.clear();
@@ -2299,7 +2288,10 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
                 [&](const auto& region) { return region.id == selected.regionId; });
             if (sampledRegion != colorWarp.regions.end() &&
                 !sampledRegion->circles.empty()) {
-                if (ImGui::MenuItem("Edit sampled area")) {
+                if (ImGui::MenuItem("Edit sampled area", nullptr, false,
+                        args.areaEditingAllowed && args.areaOwner.Valid())) {
+                    args.ui.ResetColorWarpAreaRequest();
+                    args.ui.colorWarpAreaOwner = args.areaOwner;
                     args.ui.colorWarpPendingCircle = sampledRegion->circles.front();
                     args.ui.colorWarpPendingCircleActive = true;
                     args.ui.colorWarpPendingCircleDrawing = false;

@@ -58,6 +58,7 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
     if(!node || node->role!=Stack::GraphModel::NodeRole::Ordinary) return;
     const bool changed=!m_Project->nodeEditor || *m_Project->nodeEditor!=target;
     if(changed) {
+        m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
         if(m_Project->nodeEditor) {
             auto& curve=m_NodeEditorState.Get<Stack::Editor::RawLabInternal::CurveCanvasState>(*m_Project->nodeEditor);
             if(curve.activeTonalSlider && ImGui::GetActiveID()==curve.activeTonalSlider) ImGui::ClearActiveID();
@@ -101,6 +102,7 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
 }
 
 void EditorModule::BindRequestedRawNodeEditor() {
+    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
     m_Project->nodeEditor.reset();
     const auto* node=SelectedEditingNode();
     const auto* layer=FindRawAdjustmentLayer(m_Project->rawLayers.State(),m_SelectedRawAdjustmentLayer);
@@ -112,7 +114,10 @@ void EditorModule::ReconcileRawNodeEditorSelection() {
     // target. A graph edit must not replace those surfaces with an image tool.
     if (!m_Project->nodeEditor) return;
     if (m_Project->nodeEditor->layerId == kProjectGraphId) {
-        if (!SelectedEditingNode()) m_Project->nodeEditor.reset();
+        if (!SelectedEditingNode()) {
+            m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+            m_Project->nodeEditor.reset();
+        }
         return;
     }
     const auto* current = SelectedEditingNode();
@@ -141,6 +146,7 @@ void EditorModule::ReconcileRawNodeEditorSelection() {
     }
     m_Project->rawLayers.EndGesture();
     if (m_RawWorkspaceAdaptiveGestureActive) NoteRawWorkspaceRecipePreviewEdit(false);
+    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
     m_SelectedRawAdjustmentLayer = layer->id == kRawBackgroundId ? std::string{} : layer->id;
     m_Project->nodeEditor.reset();
     m_Project->layerNodeSelection.erase(layer->id);

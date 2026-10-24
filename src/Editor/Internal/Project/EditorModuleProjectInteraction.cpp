@@ -66,10 +66,7 @@ void EditorModule::ResetProjectInteractionState() {
     ui.colorWarpDraggingSource = false;
     ui.colorWarpQualifierDragHandle = 0;
     ui.colorWarpDraggingProvisional = false;
-    ui.colorWarpPendingCircleActive = false;
-    ui.colorWarpPendingCircleDrawing = false;
-    ui.colorWarpPendingCircleRefining = false;
-    ui.colorWarpPendingCircleCommitRequested = false;
+    ui.ResetColorWarpAreaRequest();
     ui.previewPanning = false;
     ui.clearConfirmationRequested = false;
     ui.toneGraphFittedRangeValid = {};

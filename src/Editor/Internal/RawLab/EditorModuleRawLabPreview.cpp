@@ -312,6 +312,12 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         !IsRawWorkspaceProjectActive() && !IsMultiFrameRawProjectActive();
     const RawWorkspacePreviewContext preview = bracketDraft ? RawWorkspacePreviewContext{}
         : ResolveRawWorkspacePreviewContext(selectedSource);
+    const Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner areaOwner {
+        preview.edit.nodeTarget, preview.identity, RawViewportSourceHash()};
+    if (m_RawWorkspaceLabUi.colorWarpAreaOwner.Valid() &&
+        (m_RawWorkspaceLabUi.colorWarpAreaOwner != areaOwner || !preview.edit.canEdit)) {
+        m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+    }
     if (preview.identity.empty()) {
         // Draft capture sets have no image until Process completes. Explain
         // the next action in the ordinary canvas; keep their controls in Source.
@@ -832,15 +838,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             auto& colorUi = m_RawWorkspaceLabUi;
             if (colorUi.colorWarpPendingCircleActive) {
-                colorUi.colorWarpPendingCircleActive = false;
-                colorUi.colorWarpPendingCircleDrawing = false;
-                colorUi.colorWarpPendingCircleRefining = false;
-                colorUi.colorWarpPendingCircleCommitRequested = false;
-                colorUi.colorWarpPendingCircleAppend = false;
-                colorUi.colorWarpPendingReplaceRegionId.clear();
-                colorUi.colorWarpPendingReplaceCircleId.clear();
-                ++colorUi.colorWarpAreaAnalysisGeneration;
-                colorUi.colorWarpAreaAnalysisState.reset();
+                colorUi.ResetColorWarpAreaRequest();
             }
             colorUi.colorWarpInspectionActive = false;
             colorUi.colorWarpDiagnosticLocked = false;
@@ -1186,7 +1184,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 kWorkingLabel);
         }
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
-            currentRawPreview && !m_EditingRawLayerMask && !capturingAsset && !IsRawImageNavigationActive()) {
+            currentRawPreview && areaOwner.Valid() && preview.edit.canEdit &&
+            !m_EditingRawLayerMask && !capturingAsset && !IsRawImageNavigationActive()) {
             const std::string previewIdentity =
                 GetActiveRawWorkspacePreviewIdentity();
             const RawDevelopmentGraphScopeReadback& cachedColorScope =
@@ -1231,6 +1230,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                             : sourceV);
                 };
                 const auto submitAreaAnalysis = [&]() {
+                    if (colorUi.colorWarpAreaOwner != areaOwner) {
+                        colorUi.ResetColorWarpAreaRequest();
+                        return;
+                    }
                     // A changed circle owns a new request even when preparing
                     // or submitting it fails. Never commit the previous
                     // circle's colors against the replacement geometry.
@@ -1289,6 +1292,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         auto state = std::make_shared<
                             Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
                         state->generation = generation;
+                        state->owner = colorUi.colorWarpAreaOwner;
                         colorUi.colorWarpAreaAnalysisState = state;
                         colorUi.colorWarpPendingCircleRefining = true;
                         colorUi.colorWarpAreaStatus = "Refining";
@@ -1323,9 +1327,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 if (colorUi.colorWarpAreaAnalysisState) {
                     const auto completedState = colorUi.colorWarpAreaAnalysisState;
                     std::lock_guard<std::mutex> lock(completedState->mutex);
-                    if (completedState->ready &&
-                        completedState->generation ==
-                            colorUi.colorWarpAreaAnalysisGeneration) {
+                    if (completedState->generation != colorUi.colorWarpAreaAnalysisGeneration ||
+                        completedState->owner != areaOwner || colorUi.colorWarpAreaOwner != areaOwner) {
+                        colorUi.ResetColorWarpAreaRequest();
+                    } else if (completedState->ready) {
                         colorUi.colorWarpAreaAnalysisResult =
                             std::move(completedState->result);
                         colorUi.colorWarpPendingCircleRefining = false;
@@ -1404,14 +1409,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
 
                     if (ImGui::IsKeyPressed(ImGuiKey_Escape) &&
                         colorUi.colorWarpPendingCircleActive) {
-                        colorUi.colorWarpPendingCircleActive = false;
-                        colorUi.colorWarpPendingCircleDrawing = false;
-                        colorUi.colorWarpPendingCircleCommitRequested = false;
-                        colorUi.colorWarpPendingCircleAppend = false;
-                        colorUi.colorWarpPendingReplaceRegionId.clear();
-                        colorUi.colorWarpPendingReplaceCircleId.clear();
-                        ++colorUi.colorWarpAreaAnalysisGeneration;
-                        colorUi.colorWarpAreaAnalysisState.reset();
+                        colorUi.ResetColorWarpAreaRequest();
                     }
                     if (!colorUi.colorWarpPendingCircleActive &&
                         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1444,6 +1442,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                                     if (std::hypot(mouse.x - recalledCenter.x,
                                                    mouse.y - recalledCenter.y) <=
                                         recalledRadius + 6.0f) {
+                                        colorUi.ResetColorWarpAreaRequest();
+                                        colorUi.colorWarpAreaOwner = areaOwner;
                                         colorUi.colorWarpPendingCircle = circle;
                                         colorUi.colorWarpPendingCircleActive = true;
                                         colorUi.colorWarpPendingCircleDrawing = false;
@@ -1474,6 +1474,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                             colorUi.colorWarpInspectionActive = false;
                             colorUi.colorWarpInspectedRegionId.clear();
                         } else {
+                        colorUi.ResetColorWarpAreaRequest();
+                        colorUi.colorWarpAreaOwner = areaOwner;
                         colorUi.colorWarpPendingCircleActive = true;
                         colorUi.colorWarpPendingCircleDrawing = true;
                         colorUi.colorWarpPendingCircleEditKind = 2;
@@ -1516,12 +1518,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         } else if (pendingDistance <= pendingRadius) {
                             colorUi.colorWarpPendingCircleEditKind = 1;
                         } else {
-                            colorUi.colorWarpPendingCircleActive = false;
-                            colorUi.colorWarpPendingCircleAppend = false;
-                            colorUi.colorWarpPendingReplaceRegionId.clear();
-                            colorUi.colorWarpPendingReplaceCircleId.clear();
-                            ++colorUi.colorWarpAreaAnalysisGeneration;
-                            colorUi.colorWarpAreaAnalysisState.reset();
+                            colorUi.ResetColorWarpAreaRequest();
                         }
                         colorUi.colorWarpPendingCirclePressPosition = mouse;
                         colorUi.colorWarpPendingCirclePressCenterU =
@@ -1576,6 +1573,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         colorUi.colorWarpPendingCircleDrawing = false;
                         if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1 &&
                             dragDistance <= 2.0f && !colorUi.colorWarpPendingCircleRefining &&
+                            colorUi.colorWarpAreaOwner == areaOwner &&
                             (colorUi.colorWarpPendingCircleAppend ||
                              !colorUi.colorWarpAreaAnalysisResult.proposals.empty())) {
                             colorUi.colorWarpPendingCircleCommitRequested = true;
