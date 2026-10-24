@@ -68,7 +68,7 @@ unsigned int GetArrowIconTexture() {
         int width = 0;
         int height = 0;
         int channels = 0;
-        stbi_set_flip_vertically_on_load(0);
+        stbi_set_flip_vertically_on_load_thread(0);
         unsigned char* pixels = stbi_load_from_memory(
             EmbeddedTabIcons::Arrow_png_data,
             static_cast<int>(EmbeddedTabIcons::Arrow_png_size),

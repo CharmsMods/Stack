@@ -246,7 +246,7 @@ bool RenderPipeline::Resize(int width, int height) {
 
 bool RenderPipeline::LoadSourceImage(const std::string& filepath) {
     int w, h, ch;
-    stbi_set_flip_vertically_on_load(1);
+    stbi_set_flip_vertically_on_load_thread(1);
     unsigned char* data = stbi_load(filepath.c_str(), &w, &h, &ch, 4);
     if (!data) {
         std::cerr << "[RenderPipeline] Failed to load image: " << filepath

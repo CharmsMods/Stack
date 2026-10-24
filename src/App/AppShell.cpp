@@ -1233,6 +1233,7 @@ unsigned int LoadEmbeddedPngTexture(const unsigned char* data, unsigned int size
     int width = 0;
     int height = 0;
     int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(0);
     unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
     if (!pixels) {
         std::cerr << "[AppShell] Failed to decode embedded " << debugName << " icon.\n";
@@ -1251,7 +1252,7 @@ void SetWindowIconFromEmbeddedPng(GLFWwindow* window, const unsigned char* data,
     int width = 0;
     int height = 0;
     int channels = 0;
-    stbi_set_flip_vertically_on_load(0);
+    stbi_set_flip_vertically_on_load_thread(0);
     unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
     if (!pixels) {
         std::cerr << "[AppShell] Failed to decode embedded window icon.\n";
@@ -1454,7 +1455,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     const std::filesystem::path sourceIconPath = std::filesystem::path("Assets") / "Icons" / "Stack.png";
     if (std::filesystem::exists(sourceIconPath)) {
         int w = 0, h = 0, ch = 0;
-        stbi_set_flip_vertically_on_load(0);
+        stbi_set_flip_vertically_on_load_thread(0);
         unsigned char* pixels = stbi_load(sourceIconPath.string().c_str(), &w, &h, &ch, 4);
         if (pixels) {
             m_ProgramIconTexture = GLHelpers::CreateTextureFromPixels(pixels, w, h, 4);
@@ -3703,7 +3704,7 @@ void AppShell::ShowSplashScreen() {
 
     // 1. Peek at image dimensions to set window size
     int texW = 0, texH = 0, texCh = 0;
-    stbi_set_flip_vertically_on_load(0);
+    stbi_set_flip_vertically_on_load_thread(0);
     
     // We try to load just the info first if possible, or just load the whole thing if it's small.
     // stbi_info_from_memory is better.
