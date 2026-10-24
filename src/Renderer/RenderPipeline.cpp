@@ -49,6 +49,7 @@ struct OwnedMaskTextureList {
 } // namespace
 
 void RenderPipeline::Execute(const std::vector<std::shared_ptr<LayerBase>>& layers) {
+    InvalidateOutputTextureStats();
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;
@@ -116,6 +117,7 @@ void RenderPipeline::HandleGraphExecutionFailure(
     const RenderGraphSnapshot& graph,
     bool allocationFailed,
     const char* message) noexcept {
+    InvalidateOutputTextureStats();
     m_LastGraphExecutionStats.allocationFailed = allocationFailed;
     m_LastGraphExecutionStats.lastSpecializedFailureNodeId =
         graph.outputNodeId;
@@ -152,6 +154,7 @@ void RenderPipeline::HandleGraphExecutionFailure(
 }
 
 void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
+    InvalidateOutputTextureStats();
     try {
         const Stack::Renderer::GraphExecution::GraphTopologyIndex topology =
             Stack::Renderer::GraphExecution::BuildGraphTopologyIndex(graph);
@@ -179,6 +182,7 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
 void RenderPipeline::ExecuteGraph(
     const RenderGraphSnapshot& graph,
     const Stack::Renderer::GraphExecution::GraphTopologyIndex& topology) {
+    InvalidateOutputTextureStats();
     try {
         ExecuteGraphImpl(graph, topology);
     } catch (const std::bad_alloc&) {
@@ -202,6 +206,7 @@ void RenderPipeline::ExecuteGraph(
 }
 
 void RenderPipeline::ExecuteMasked(const std::vector<RenderLayerStep>& steps, const std::vector<RenderMaskSource>& masks) {
+    InvalidateOutputTextureStats();
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;

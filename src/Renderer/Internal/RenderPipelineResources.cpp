@@ -61,6 +61,7 @@ RenderPipeline::~RenderPipeline() {
 }
 
 void RenderPipeline::Shutdown() {
+    InvalidateOutputTextureStats();
     if (m_Shutdown) {
         return;
     }
@@ -183,6 +184,7 @@ void RenderPipeline::CleanupFBOs() {
 }
 
 void RenderPipeline::InvalidateGraphCaches(bool preserveRawDevelopStages) {
+    InvalidateOutputTextureStats();
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
     m_GraphScalarCache.clear();
@@ -207,6 +209,7 @@ void RenderPipeline::InvalidateGraphCaches(bool preserveRawDevelopStages) {
 }
 
 bool RenderPipeline::Resize(int width, int height) {
+    InvalidateOutputTextureStats();
     if (width == m_BaseCanvasWidth && height == m_BaseCanvasHeight &&
         m_PingTexture != 0 && m_PongTexture != 0 &&
         m_PingFBO != 0 && m_PongFBO != 0) {
@@ -477,6 +480,7 @@ SharedPixelBuffer RenderPipeline::ShareSourcePixels(
 }
 
 void RenderPipeline::Clear() {
+    InvalidateOutputTextureStats();
     if (m_SourceTexture) {
         glDeleteTextures(1, &m_SourceTexture);
         m_SourceTexture = 0;
@@ -614,6 +618,7 @@ void RenderPipeline::ClearRawDevelopmentLocalRangeTargetSample() {
 }
 
 void RenderPipeline::ClearOutput() {
+    InvalidateOutputTextureStats();
     ClearRawDevelopmentStageStatsReadbacks();
     m_RawDevelopmentLocalSuggestionImage = {};
     if (m_ExternalOutputTexture) {
@@ -625,6 +630,7 @@ void RenderPipeline::ClearOutput() {
 }
 
 unsigned int RenderPipeline::TakeExternalOutputTexture(int& outW, int& outH, bool preserveCompareSource) {
+    InvalidateOutputTextureStats();
     outW = 0;
     outH = 0;
     const unsigned int texture = m_ExternalOutputTexture;
@@ -681,6 +687,7 @@ bool RenderPipeline::UploadOutputFromPixels(
     if (m_ExternalOutputTexture) {
         glDeleteTextures(1, &m_ExternalOutputTexture);
     }
+    InvalidateOutputTextureStats();
     m_ExternalOutputTexture = replacement.Release();
     m_OutputTexture = m_ExternalOutputTexture;
     m_Width = w;
@@ -689,6 +696,7 @@ bool RenderPipeline::UploadOutputFromPixels(
 }
 
 void RenderPipeline::AdoptExternalOutputTexture(unsigned int texture, int w, int h) {
+    InvalidateOutputTextureStats();
     if (m_ExternalOutputTexture && m_ExternalOutputTexture != texture) {
         glDeleteTextures(1, &m_ExternalOutputTexture);
     }

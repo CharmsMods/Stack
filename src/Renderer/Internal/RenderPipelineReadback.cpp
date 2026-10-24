@@ -1144,7 +1144,8 @@ void RenderPipeline::CaptureRawDevelopmentGraphScopeReadback(
 }
 
 RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int width, int height, const char* context,
-    bool linearRec2020) {
+    bool linearRec2020, bool* completed) {
+    if (completed) *completed=false;
     RenderTextureStats stats;
     if (texture == 0 || width <= 0 || height <= 0) {
         return stats;
@@ -1224,6 +1225,7 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
 
     if (validPixels <= 0 || lumas.empty()) {
         stats.valid = false;
+        if (completed) *completed=true;
         return stats;
     }
 
@@ -1256,6 +1258,7 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
         100.0f * static_cast<float>(displayHighEdgePixels) / static_cast<float>(validPixels);
     stats.displayClipLowPercent =
         100.0f * static_cast<float>(displayLowEdgePixels) / static_cast<float>(validPixels);
+    if (completed) *completed=true;
     return stats;
 }
 
@@ -1329,7 +1332,9 @@ Stack::RawAutoBase::LocalSuggestionAnalysisImage RenderPipeline::ReadLocalSugges
 }
 
 RenderTextureStats RenderPipeline::GetOutputTextureStats() {
-    return ReadTextureStats(m_OutputTexture, m_Width, m_Height, "GetOutputTextureStats");
+    return m_OutputTextureStatsCache.Get(m_OutputTexture,m_Width,m_Height,[&](bool& completed) {
+        return ReadTextureStats(m_OutputTexture,m_Width,m_Height,"GetOutputTextureStats",false,&completed);
+    });
 }
 
 std::vector<unsigned char> RenderPipeline::GetScopesPixels(int& outW, int& outH) {

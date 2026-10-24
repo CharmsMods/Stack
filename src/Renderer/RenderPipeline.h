@@ -1,4 +1,5 @@
 #pragma once
+#include "Renderer/OutputTextureStatsCache.h"
 #include "Renderer/Internal/RawZoneAreaRenderer.h"
 
 #include "Raw/RawGradingScope.h"
@@ -1157,8 +1158,10 @@ private:
         int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight);
     void ClearRawDevelopmentLocalRangeOverlay();
     void ClearRawDevelopmentLocalRangeTargetSample();
+    Stack::Renderer::OutputTextureStatsCache<RenderTextureStats> m_OutputTextureStatsCache;
+    void InvalidateOutputTextureStats() noexcept { m_OutputTextureStatsCache.Invalidate(); }
     RenderTextureStats ReadTextureStats(unsigned int texture, int width, int height, const char* context,
-        bool linearRec2020 = false);
+        bool linearRec2020 = false, bool* completed = nullptr);
     Stack::RawAutoBase::LocalSuggestionAnalysisImage ReadLocalSuggestionAnalysisImage(
         unsigned int texture,
         int width,
