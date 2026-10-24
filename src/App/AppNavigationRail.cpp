@@ -71,7 +71,7 @@ void AppShell::LayoutNavigationRail() {
     };
     const bool railActive = (context->ActiveId && (belongsToRail(context->ActiveIdWindow) || belongsToToggle(context->ActiveIdWindow))) ||
         (Stack::Navigation::NavigationInputActive() && (belongsToRail(context->NavWindow) || belongsToToggle(context->NavWindow)));
-    const bool railPopup = rail.menuOpen || m_NotificationPresenter.PanelOpen();
+    const bool railPopup = rail.menuOpen || rail.projectMenuOpen || m_NotificationPresenter.PanelOpen();
     Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
         atEdge, overRail, railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;

@@ -34,6 +34,7 @@ struct RailState {
     double hoverStarted = 0.0;
     float previewAmount = 0.0f;
     bool menuOpen = false;
+    bool projectMenuOpen = false;
 };
 
 enum class Glyph { Panel, Stack, Raw, Graph, Library, Queue, Mask, Capture };

@@ -63,6 +63,9 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
 }
 
 void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
+    // Layout consumes the preceding frame's popup state to keep its anchor
+    // visible while the pointer or keyboard is operating the project menu.
+    m_NavigationRail.projectMenuOpen = false;
     const auto& rail = m_NavigationRail;
     const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
@@ -137,6 +140,9 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
             name.c_str(), dirty ? " (unsaved changes)" : "",
             automatic ? "\nAutomatic bursts - background priority" : "");
         if (ImGui::BeginPopupContextItem("ProjectActions")) {
+            m_NavigationRail.projectMenuOpen = true;
+            // The popup must remain above live chrome and outside its capture.
+            m_WorkspaceCompositor.KeepFixed(ImGui::GetWindowDrawList());
             ImGui::TextUnformatted(name.c_str());
             if (dirty) ImGui::TextDisabled("Unsaved changes");
             if (ImGui::MenuItem("Open workspace")) QueueWorkspaceTabAction(WorkspaceTabAction::Select, id);
