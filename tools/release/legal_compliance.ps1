@@ -156,6 +156,8 @@ function Get-SpdxLicenseExpression {
         "press-start-2p-font" { return "OFL-1.1" }
         "silkscreen-font" { return "OFL-1.1" }
         "phosphor-icons" { return "MIT" }
+        "liquidglass" { return "MIT" }
+        "glsl-fast-gaussian-blur" { return "MIT" }
         default { return "NOASSERTION" }
     }
 }

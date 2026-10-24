@@ -1,0 +1,54 @@
+LiquidGlass shader adaptation in Stack
+=====================================
+
+Upstream: https://github.com/OverShifted/LiquidGlass
+Pinned revision: 3797fa541c1f026c521a75885ee271f03bdf9f0f
+Copyright (c) 2026 Sepehr Kalanaki
+License: MIT; the complete original notice is in LiquidGlass-MIT.txt.
+
+Source scope:
+- assets/shaders/BatchRenderer2D.glsl: glass refraction profile, glow and noise.
+- assets/shaders/Blur.glsl: separable Gaussian blur.
+- src/BlurPass.h: horizontal/vertical blur-pass arrangement.
+- src/LiquidGlass.h and src/LiquidGlass.cpp: material and blur settings.
+
+Stack adapts this material for its independent OpenGL renderer and existing
+framebuffer/compositor, rather than importing the demo engine. Adaptations
+include Stack shader interfaces and bounded scene sampling, a flush-left rail
+with only exposed right corners rounded, and rail-specific visual tuning.
+The adapted shader source is in src/ThirdParty/LiquidGlass/LiquidGlassShaders.h;
+the original Stack wrapper is src/Renderer/GlassChromeShaders.h. Stack retains
+the upstream material equations and application defaults while replacing the
+full squircle mapping with a cropped, one-sided rail silhouette. The upstream
+reversed-edge smoothstep is expressed as 1 - smoothstep with ascending edges
+to avoid undefined GLSL behavior.
+The upstream OverEngine submodule, demo application, photographs, fonts and
+showcase assets are not included by this adaptation.
+
+Embedded blur provenance
+------------------------
+The blur13 function in the pinned LiquidGlass shaders matches the function in
+13.glsl from glsl-fast-gaussian-blur, apart from texture/texture2D spelling and
+formatting. The same project also provides blur5 and blur9. The LiquidGlass
+files do not identify that origin inline. Stack retains the matching upstream
+MIT notice separately rather than assuming the top-level notice replaces it:
+
+Project: https://github.com/Experience-Monks/glsl-fast-gaussian-blur
+(formerly Jam3/glsl-fast-gaussian-blur)
+Verified revision: 5dbb6e97aa43d4be9369bdd88e835f47023c5e2a
+Source: 13.glsl
+Copyright (c) 2015 Jam3
+License: MIT; see GLSL-Fast-Gaussian-Blur-MIT.txt.
+
+Stack's original code and modifications remain GPL-3.0-only. These retained
+MIT notices apply to the upstream portions; they do not relicense the whole
+Stack application or imply endorsement by upstream authors or Apple.
+
+Verified upstream source checksums (SHA-256)
+-------------------------------------------
+ae3c70d17d2b0c5648d1bbd90b9cfa820b947bf3a079319a1d14fb06ec15c862  BatchRenderer2D.glsl
+6b7444f7213fdb022786c065108d2b2b06370089e361d9f324b471cdc7280ea3  Blur.glsl
+38ba757e3f4e31a5c9df8ef7cec786abfb611d2632954a7d06c983aaa30dcc5b  BlurPass.h
+986f28c9354112df596ed71634fdd1443074eae6f659be4d5b10f7b525f3f1f9  LiquidGlass.h
+d88f3f5ca2ad70aae73bd79f5748804e5b2add1309b6aad749a85e99a11e1e56  LiquidGlass.cpp
+1bcd19301f5ff287d357000baaabd375874134e6c42ad377ea155434d501d036  13.glsl

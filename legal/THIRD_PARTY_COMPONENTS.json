@@ -234,6 +234,34 @@
         "Phosphor-Icons-MIT.txt",
         "Phosphor-Icons-NOTICE.txt"
       ]
+    },
+    {
+      "id": "liquidglass",
+      "name": "LiquidGlass shader adaptation",
+      "version": "3797fa541c1f026c521a75885ee271f03bdf9f0f",
+      "homepage": "https://github.com/OverShifted/LiquidGlass",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 Sepehr Kalanaki",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "LiquidGlass-MIT.txt",
+        "LiquidGlass-NOTICE.txt"
+      ]
+    },
+    {
+      "id": "glsl-fast-gaussian-blur",
+      "name": "glsl-fast-gaussian-blur shader",
+      "version": "5dbb6e97aa43d4be9369bdd88e835f47023c5e2a",
+      "homepage": "https://github.com/Experience-Monks/glsl-fast-gaussian-blur",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2015 Jam3",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "GLSL-Fast-Gaussian-Blur-MIT.txt",
+        "LiquidGlass-NOTICE.txt"
+      ]
     }
   ]
 }

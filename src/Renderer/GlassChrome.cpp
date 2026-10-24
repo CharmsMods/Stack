@@ -125,9 +125,7 @@ void GlassChrome::Draw(const Surface& s) {
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,textures[2]);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,textures[0]);
         glUniform2f(0,float(w),float(h));
-        glUniform4f(1,s.tint.x,s.tint.y,s.tint.z,s.tint.w);
-        glUniform1f(2,s.radius*s.scale.x); glUniform1f(3,std::max(.5f,s.scale.x*s.dpi));
-        glUniform2f(4,float(captureW)/width,float(captureH)/height);
+        glUniform1f(2,s.radius*s.scale.x);
         glUniform2f(5,float(lw)/((width+1)/2),float(lh)/((height+1)/2));
         glUniform2f(6,float(x-captureX)/captureW,float(y-captureY)/captureH);
         glUniform2f(7,float(w)/captureW,float(h)/captureH);

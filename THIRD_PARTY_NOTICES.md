@@ -111,3 +111,19 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 - License: MIT
 - Copyright: Copyright (c) 2023 Phosphor Icons
 - Included license files: `Phosphor-Icons-MIT.txt`, `Phosphor-Icons-NOTICE.txt`
+
+## LiquidGlass shader adaptation
+
+- Version: 3797fa541c1f026c521a75885ee271f03bdf9f0f
+- Upstream: https://github.com/OverShifted/LiquidGlass
+- License: MIT
+- Copyright: Copyright (c) 2026 Sepehr Kalanaki
+- Included license files: `LiquidGlass-MIT.txt`, `LiquidGlass-NOTICE.txt`
+
+## glsl-fast-gaussian-blur shader
+
+- Version: 5dbb6e97aa43d4be9369bdd88e835f47023c5e2a
+- Upstream: https://github.com/Experience-Monks/glsl-fast-gaussian-blur
+- License: MIT
+- Copyright: Copyright (c) 2015 Jam3
+- Included license files: `GLSL-Fast-Gaussian-Blur-MIT.txt`, `LiquidGlass-NOTICE.txt`

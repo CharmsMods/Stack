@@ -19,8 +19,8 @@ or claim ownership of those materials. Names and logos do not imply endorsement.
 
 Binary packages keep licensing documents under `Stack/App/Legal`, available
 through Settings > Legal. Dependency documents are in its `ThirdParty/`
-subdirectory. The adaptation record there is
-`ThirdParty/LibRaw-Demosaic-NOTICE.txt`.
+subdirectory. The adaptation records there include
+`ThirdParty/LibRaw-Demosaic-NOTICE.txt` and `ThirdParty/LiquidGlass-NOTICE.txt`.
 
 [Original replacement icon provenance and regeneration](ORIGINAL_ICONS.md)
 records the six newly authored UI assets and their editable SVG sources.
