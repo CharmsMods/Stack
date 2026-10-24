@@ -360,6 +360,23 @@ bool EditorNodeGraphUI::UpdateMiddlePanCapture(EditorModule* editor, bool graphH
 }
 
 void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph) {
+    // A hidden canvas or another pointer owner can consume the release frame.
+    // Cancel abandoned gestures, rather than dropping at a later cursor position.
+    // A new press can also arrive while hidden. Match its stored identity, not
+    // just this frame's click edge; repeated drawing of one press stays valid.
+    const bool pointerGestureActive =
+        m_DragOutputNodeId > 0 || m_DragInputNodeId > 0 || m_BoxSelecting;
+    if (pointerGestureActive &&
+        (ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left] != m_LeftPointerGestureStartedAt ||
+         (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+          !ImGui::IsMouseReleased(ImGuiMouseButton_Left)))) {
+        m_DragOutputNodeId = -1;
+        m_DragOutputSocketId.clear();
+        m_DragInputNodeId = -1;
+        m_DragInputSocketId.clear();
+        m_BoxSelecting = false;
+        m_LeftPointerGestureStartedAt = -1.0;
+    }
     // Finish retained group gestures even when a popup or node editor takes
     // input before the ordinary group branch can observe the release frame.
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
@@ -636,11 +653,13 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         TouchNodeFront(m_HoveredOutputNodeId);
         m_DragOutputNodeId = m_HoveredOutputNodeId;
         m_DragOutputSocketId = m_HoveredOutputSocketId;
+        m_LeftPointerGestureStartedAt = ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left];
     }
     if (m_MouseOwner == GraphMouseOwner::InputPin && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         TouchNodeFront(m_HoveredInputNodeId);
         m_DragInputNodeId = m_HoveredInputNodeId;
         m_DragInputSocketId = m_HoveredInputSocketId;
+        m_LeftPointerGestureStartedAt = ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left];
     }
 
     if (!anyPopupOpen && ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
@@ -832,6 +851,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
 
     if (m_MouseOwner == GraphMouseOwner::Canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         m_BoxSelecting = true;
+        m_LeftPointerGestureStartedAt = ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left];
         m_BoxSelectStart = ScreenToGraph(ToGraphVec2(ImGui::GetMousePos()));
         m_BoxSelectCurrent = m_BoxSelectStart;
         if (!additiveSelect) {

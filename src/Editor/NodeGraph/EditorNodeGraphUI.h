@@ -490,6 +490,7 @@ private:
     std::string m_DragOutputSocketId;
     int m_DragInputNodeId = -1;
     std::string m_DragInputSocketId;
+    double m_LeftPointerGestureStartedAt = -1.0;
     int m_DragNodeId = -1;
     int m_HoveredInputNodeId = -1;
     std::string m_HoveredInputSocketId;
