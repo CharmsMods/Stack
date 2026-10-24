@@ -2,6 +2,7 @@
 #include "Utils/AtomicExportFile.h"
 #include "Editor/NodeGraph/GraphEditorContext.h"
 #include "Editor/ProjectInteractionState.h"
+#include "Editor/ToneCurveProbeCache.h"
 #include "Editor/NodeEditors/NodeEditorRegistry.h"
 #include "Editor/NodeEditors/NodeEditorState.h"
 #include "Editor/NodeEditors/RawWorkspaceEditContext.h"
@@ -2349,6 +2350,7 @@ private:
     bool m_CanvasColorPickSamplesNodeInput = false;
     std::function<void(float, float, float)> m_ColorPickerCallback;
     int m_LastToneCurveProbeNodeId = -1;
+    mutable Stack::Editor::ToneCurveProbeCache m_ToneCurveProbeCache;
     bool m_RenderWorkerAvailable = false;
     bool m_NodeBrowserRenderWorkerAvailable = false;
     bool m_ShutdownComplete = false;

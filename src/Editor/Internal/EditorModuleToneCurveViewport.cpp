@@ -248,6 +248,7 @@ bool EditorModule::HasFocusedToneCurveViewportInteraction() const {
 }
 
 void EditorModule::ClearTrackedToneCurveProbe() {
+    m_ToneCurveProbeCache.Clear();
     if (m_LastToneCurveProbeNodeId <= 0) {
         m_LastToneCurveProbeNodeId = -1;
         return;
@@ -325,7 +326,10 @@ bool EditorModule::SampleToneCurveViewportPixel(
     const auto* selected=SelectedEditingNode();
     const EditorNodeGraph::Node* node = selected && selected->id==toneCurveNodeId &&
         selected->kind==EditorNodeGraph::NodeKind::RawOperation ? selected : GetNodeGraph().FindNode(toneCurveNodeId);
-    if (!node) return false;
+    if (!node) {
+        m_ToneCurveProbeCache.Clear();
+        return false;
+    }
     if (node->kind==EditorNodeGraph::NodeKind::RawOperation && basis==ToneCurveSamplingBasis::CurveInput) {
         RawWorkspaceEditContext context;BindRawOperationContext(context);
         if (!context.nodeTarget || !m_RawWorkspaceGraphScopeReadback.valid ||
@@ -348,7 +352,44 @@ bool EditorModule::SampleToneCurveViewportPixel(
     }
 
     if (!CanRefreshPreviewLikeNodes()) {
+        m_ToneCurveProbeCache.Clear();
         return false;
+    }
+
+    // RAW scope and FinalPreview returned above. Only settled raster graphs
+    // have a revisioned, immutable source contract suitable for this tiny cache.
+    const bool rasterNodesOnly = std::all_of(GetNodeGraph().GetNodes().begin(),
+        GetNodeGraph().GetNodes().end(), [](const auto& candidate) {
+            return Stack::Editor::IsRasterToneProbeCacheNode(candidate.kind);
+        });
+    const bool cacheable = basis == ToneCurveSamplingBasis::CurveInput &&
+        Stack::Editor::CanCacheRasterToneProbe(
+            IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive(),
+            IsEditingRawLayerMaskGraph(), !m_TimelineUi.liveEditPreviewTargets.empty(),
+            rasterNodesOnly);
+    Stack::Editor::ToneCurveProbeKey probeKey;
+    if (cacheable) {
+        probeKey.owner = m_Project;
+        probeKey.documentId = GetProjectDocumentId();
+        probeKey.nodeInstance = node->instanceUuid;
+        probeKey.nodeId = node->id;
+        probeKey.editRevision = m_Project->editRevision;
+        probeKey.renderRevision = m_RenderRevision;
+        probeKey.structureRevision = GetNodeGraph().GetStructureRevision();
+        probeKey.dirtyGeneration = m_NodeDirtyGenerationCounter;
+        probeKey.sourceLoadGeneration = m_SourceLoadGeneration;
+        probeKey.acceptedRenderGeneration = m_LastCompletedRenderGeneration;
+        // EnsureSharedImagePixels reuses the established immutable fingerprint.
+        probeKey.sourceIdentity = CurrentUniformSourceIdentity();
+        probeKey.frame = m_TimelineUi.currentFrame;
+        probeKey.duration = m_TimelineUi.durationFrames;
+        probeKey.fps = m_TimelineUi.framesPerSecond;
+        probeKey.livePreviewFrame = m_TimelineUi.liveEditPreviewFrame;
+        probeKey.u = u;
+        probeKey.v = v;
+        if (m_ToneCurveProbeCache.Find(probeKey, outRgba)) return true;
+    } else {
+        m_ToneCurveProbeCache.Clear();
     }
 
     std::vector<unsigned char> sourcePixels;
@@ -439,7 +480,9 @@ bool EditorModule::SampleToneCurveViewportPixel(
         sourceH,
         std::max(1, sourceCh));
     probePipeline.ExecuteGraph(snapshot);
-    return probePipeline.SampleOutputPixel(u, v, outRgba);
+    const bool sampled = probePipeline.SampleOutputPixel(u, v, outRgba);
+    if (sampled && cacheable) m_ToneCurveProbeCache.StoreSuccess(probeKey, outRgba);
+    return sampled;
 }
 
 void EditorModule::UpdateToneCurveViewportProbe(float u, float v) {
