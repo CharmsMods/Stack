@@ -3,10 +3,12 @@
 
 Production scope, evaluator cache/control-flow shells, borrowed-result wrappers,
 cache ownership methods, and output publication are extracted at generation time.
-Only graph kernel dispatch, scalar readback, GL/resource services, and unrelated
-scope diagnostics are substituted. RAW cache-hit/publication blocks are exercised
-as extracted blocks, not a replacement denoise lifecycle. These tests establish
-metadata propagation, not shader/model output, real cache fingerprints, or GL.
+Only unrelated graph kernel dispatch, scalar readback, GL/resource services, and
+scope diagnostics are substituted. Constant Channel dispatch and RAW Zone Reference
+capture/local-range/cache-publication blocks are retained. RAW blocks are exercised
+as extracted blocks, not a complete RAW render or replacement denoise lifecycle.
+These tests establish metadata propagation, not shader/model output, real cache
+fingerprints, or GL.
 """
 import argparse
 from pathlib import Path
@@ -62,8 +64,10 @@ image = replace_between(image, '        Stack::Renderer::ScopedOwnedGLTextureExc
 mask = block(read('RenderPipelineGraphExecutionEvaluateMask.cpp'),
              'void GraphExecutionRuntime::BindMaskEvaluation()')
 channel_split = block(mask, 'if (node.kind == RenderGraphNodeKind::ChannelSplit)')
+constant_channel = block(mask, 'if (node.kind ==\n                   RenderGraphNodeKind::ConstantChannel)')
 mask = replace_between(mask, '        Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup',
-                       '        if (pipeline.m_ShouldCancelRender && pipeline.m_ShouldCancelRender()) {', channel_split + r'''
+                       '        if (pipeline.m_ShouldCancelRender && pipeline.m_ShouldCancelRender()) {',
+                       channel_split + '\n        else ' + constant_channel + r'''
         else {
             const auto generated = RunKernel(node);
             result = generated.texture;
@@ -105,7 +109,15 @@ provisional = block(read('RenderPipelineRawRgbDenoise.cpp'),
 # Real metadata adoption/publication fragments. Outer GPU/crop orchestration is
 # deliberately absent; the exercise names distinguish this from a full render.
 raw_node = read('RenderPipelineGraphRawDevelopmentNode.cpp')
-raw_hit = block(raw_node, '    const auto adoptCachedStage =') + ';\n        (void)adoptCachedStage(cached);'
+raw_adopt = block(raw_node, '    const auto adoptCachedStage =') + ';'
+raw_hit = raw_adopt + '\n        (void)adoptCachedStage(cached);'
+zone_capture_marker = '        if (m_RawZoneAreasFloatOutput && neutralTexture != 0)'
+assert raw_node.count(zone_capture_marker) == 2
+zone_capture_first = block(raw_node, zone_capture_marker)
+zone_capture_second = block(raw_node, raw_node.index(zone_capture_marker, raw_node.index(zone_capture_marker) + 1))
+zone_local_range = block(raw_node, '        if (globalLocalRangeActive)')
+zone_cache = block(raw_node, '    const auto cacheResultStage =') + ';'
+zone_publish = block(raw_node, '        if (localRangeApplied || (appliedGradient && !gradientFailure))')
 crop_source = read('RenderPipelineGraphRawDevelopmentOutputStages.cpp')
 crop_method = block(crop_source, 'void RenderPipeline::RenderRawDevelopmentOutputCropStage(')
 crop_hit = block(crop_method, '    if (cached.texture != 0 && cached.width > 0 && cached.height > 0)')
@@ -121,6 +133,7 @@ pre = r'''
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -134,10 +147,16 @@ void Require(bool condition, const char* message) {
 }
 using GLuint = unsigned int;
 using GLint = int;
+using GLfloat = float;
 constexpr int GL_TRUE=1, GL_TEXTURE_2D=1, GL_TEXTURE_BINDING_2D=2,
     GL_TEXTURE_RED_SIZE=3, GL_TEXTURE_GREEN_SIZE=4, GL_TEXTURE_BLUE_SIZE=5,
-    GL_TEXTURE_ALPHA_SIZE=6;
+    GL_TEXTURE_ALPHA_SIZE=6, GL_COLOR_CLEAR_VALUE=7, GL_COLOR_BUFFER_BIT=8;
 unsigned int nextTexture = 100;
+int clearCalls=0;
+float lastClearValue=0,clearedValue=0;
+void glGetFloatv(int, float* values) { std::fill(values,values+4,0.0f); }
+void glClearColor(float value,float,float,float) { lastClearValue=value; }
+void glClear(int) { ++clearCalls; clearedValue=lastClearValue; }
 void glDeleteTextures(int, const unsigned int*) {}
 void glBindTexture(int, unsigned int) {}
 void glGetTexLevelParameteriv(int, int, int, int* result) { *result = 16; }
@@ -147,10 +166,25 @@ struct ViewportRegion { int identity=0; bool Valid() const { return identity!=0;
 }
 namespace Stack::RawRecipe {
 enum class RawDenoiseDiagnosticMode { None, Other };
+struct LocalRange { bool zoneGain=false; };
 struct RawDevelopmentRecipe {
     struct { RawDenoiseDiagnosticMode diagnosticMode=RawDenoiseDiagnosticMode::None; } rgbDenoise;
+    struct { int workingSpace=0,processingVersion=0; } technical;
+    LocalRange localRange;
 };
+bool HasZoneAreaGain(const LocalRange& range) { return range.zoneGain; }
 }
+enum class RawDevelopmentGraphScopeStage { None, LocalRangeInput };
+struct QuickTextureStats { float p99Luma=1; };
+struct FakeZoneRenderer {
+    bool succeeds=true;
+    int calls=0;
+    template<class Cancel>
+    unsigned int Render(unsigned int,unsigned int,int,int,const Stack::RawRecipe::RawDevelopmentRecipe&,
+        bool,bool,std::vector<int>&,const Cancel&,std::size_t) {
+        ++calls; return succeeds ? ++nextTexture : 0;
+    }
+};
 namespace Stack::Renderer {
 namespace RawDevelopmentCache {
 struct Fingerprints { std::size_t neutralPlacement; };
@@ -214,6 +248,7 @@ struct RenderGraphNode {
     int maskCanvasSourceNodeId=0;
     struct { Stack::NodeMath::ArithmeticDomain domain=Stack::NodeMath::ArithmeticDomain::Images; } dataMathSettings;
     double scalarValue=0.5;
+    float constantChannelValue=1.0f;
     std::string definitionId="fixture";
     std::size_t revision=1;
     bool pending=false, owned=true, fails=false, borrowed=false, splitMissingAlphaIsOpaque=true, repeatInput=false;
@@ -249,7 +284,8 @@ struct FakeMean { double value; std::size_t sampleCount; };
 struct Stats {
     int imageCacheHits=0,imageCacheMisses=0,maskCacheHits=0,maskCacheMisses=0,
         reductionCacheHits=0,reductionCacheMisses=0,reductionPasses=0,
-        lastSpecializedFailureNodeId=0,lastReductionFailureNodeId=0,rawStageCacheHits=0,rawNativeDenoiseReuses=0;
+        lastSpecializedFailureNodeId=0,lastReductionFailureNodeId=0,rawStageCacheHits=0,
+        rawStageCacheMisses=0,rawNativeDenoiseReuses=0;
     std::string lastSpecializedFailure,lastReductionFailure;
     struct Reduction { int id; double value; std::uint64_t samples; bool cached; std::string definition; };
     std::vector<Reduction> reductions;
@@ -272,6 +308,10 @@ pipeline = r'''
         m_RawDevelopmentGlobalExposureInteraction=false, exposureSucceeds=true;
     // Simulate a still-running shared owner without consulting it for metadata.
     struct OwnerState { bool pending=true, deferred=true; } owner;
+    bool m_RawZoneAreasFloatOutput=true,localRangeSucceeds=true,damagedLocalRange=false;
+    int localRangeCalls=0;
+    FakeZoneRenderer m_RawZoneAreaRenderer;
+    RawDevelopmentGraphScopeStage m_RawDevelopmentGraphScopeStage=RawDevelopmentGraphScopeStage::None;
     Raw::ViewportRegion m_RawViewportAppliedRegion;
     Stack::Renderer::ViewportPreviewGeometry m_CurrentGraphImageGeometry,m_GraphViewportGeometry;
     std::function<bool()> m_ShouldCancelRender;
@@ -304,7 +344,17 @@ pipeline = r'''
     std::uint64_t TrimRawDevelopStageCacheToBudget(std::uint64_t current,std::uint64_t,unsigned int) { return current; }
     void TrimRawDevelopStageCacheVector(std::vector<CachedGraphTexture>&,std::size_t) {}
     int FindReferenceSourceNode(const GraphExecutionContext&,int) const { return referenceSource; }
-    unsigned int RenderRawDevelopmentExposure(unsigned int input,float) { return input && exposureSucceeds ? ++nextTexture:0; }
+    unsigned int RenderRawDevelopmentExposure(unsigned int input,float,const int* =nullptr) {
+        return input && exposureSucceeds ? ++nextTexture:0;
+    }
+    unsigned int RenderRawDevelopmentLocalRange(unsigned int,const Stack::RawRecipe::LocalRange&,
+        int,int,std::size_t,int,int) {
+        ++localRangeCalls; return localRangeSucceeds ? ++nextTexture:0;
+    }
+    QuickTextureStats ProbeTextureStats(unsigned int,int,int) { return {}; }
+    bool IsImplausiblyDamagedTextureOutput(const QuickTextureStats&,const QuickTextureStats&) {
+        return damagedLocalRange;
+    }
     unsigned int RenderProvisionalRawRgbDenoiseOutput(unsigned int);
     bool RenderChannelSplit(unsigned int,int,unsigned int) { return true; }
     GraphNodeRenderResult RenderRawDevelopmentGraphNode(const RenderGraphNode& node,std::size_t) {
@@ -333,6 +383,35 @@ pipeline = r'''
         RAW_HIT
         return result;
     }
+    // Exercise actual reference capture and local-range branch. The enclosing
+    // RAW decode/region/overlay/gradient orchestration is intentionally absent.
+    GraphNodeRenderResult ExerciseZoneReference(GraphNodeRenderResult result,
+        bool neutralDenoisePending,bool secondNeutralPath,bool gain=true,bool active=true) {
+        const unsigned int neutralTexture=10;
+        const int calibration=0;
+        Stack::Renderer::ScopedGLTexture zoneAreaReference;
+        bool zoneAreaReferencePending=false;
+        if (secondNeutralPath) { ZONE_CAPTURE_SECOND } else { ZONE_CAPTURE_FIRST }
+        Stack::RawRecipe::RawDevelopmentRecipe recipe;
+        recipe.localRange.zoneGain=gain;
+        const bool globalLocalRangeActive=active,detailedDamageValidation=true;
+        const auto cancellationRequested=[this] { return m_ShouldCancelRender && m_ShouldCancelRender(); };
+        const unsigned int preLocalRangeTexture=result.texture;
+        const std::string postLocalRangeCacheKey="zone-local-range";
+        const std::size_t postLocalRangeFingerprint=700,rawPlacementFingerprint=701,calibratedNeutralFingerprint=702;
+        const int spatialSourceWidth=4,spatialSourceHeight=4;
+        std::vector<int> zoneAreaStatistics;
+        const RenderGraphNode node;
+        bool localRangeApplied=false,adoptedPostLocalRange=false;
+        RAW_ADOPT
+        ZONE_CACHE
+        ZONE_LOCAL_RANGE
+        if (!adoptedPostLocalRange && result.texture != 0) {
+            const bool appliedGradient=false,gradientFailure=false;
+            ZONE_PUBLISH
+        }
+        return result;
+    }
     void AdoptCropCached(GraphNodeRenderResult& result,const CachedGraphTexture& cached) {
         CROP_HIT
     }
@@ -353,7 +432,10 @@ pipeline = r'''
     }
 };
 '''
-for marker, code in [('PRODUCTION_GETTER',block(header,'bool IsOutputDenoisePending()')),('RAW_HIT',raw_hit),('CROP_HIT',crop_hit),('CROP_PUBLISH',crop_publish),
+for marker, code in [('PRODUCTION_GETTER',block(header,'bool IsOutputDenoisePending()')),('RAW_HIT',raw_hit),
+                     ('RAW_ADOPT',raw_adopt),('ZONE_CAPTURE_FIRST',zone_capture_first),('ZONE_CAPTURE_SECOND',zone_capture_second),
+                     ('ZONE_CACHE',zone_cache),('ZONE_LOCAL_RANGE',zone_local_range),('ZONE_PUBLISH',zone_publish),
+                     ('CROP_HIT',crop_hit),('CROP_PUBLISH',crop_publish),
                      ('REGION_HIT',region_hit),('REGION_PUBLISH',region_publish)]:
     pipeline = pipeline.replace(marker,code)
 runtime = r'''
@@ -405,6 +487,7 @@ public:
     void PreparePhysicalSchedule() {}
     unsigned int createTarget() { return ++nextTexture; }
     template<class Callback> bool renderPassToTexture(unsigned int&,Callback&& callback) { return callback(1u); }
+    template<class Callback> bool renderToTexture(unsigned int&,Callback&& callback) { callback(1u); return true; }
     RenderPipeline::GraphNodeRenderResult RunKernel(const RenderGraphNode& node) {
         for(int id:node.images) (void)evalImage(id,"imageOut");
         for(int id:node.masks) (void)evalMask(id,"maskOut");
@@ -570,6 +653,116 @@ void CheckSynthesizedAlpha() {
             "Synthesized opaque alpha must be settled; real RGB and alpha samples retain input provenance.");
     }
 }
+void CheckConstantChannel() {
+    for(bool maskExtent:{false,true}) for(bool extentPending:{false,true}) {
+        RenderPipeline pipeline;
+        for(int pass=0;pass<2;++pass) {
+            GraphExecutionRuntime runtime(pipeline);
+            runtime.Add(1,RenderGraphNodeKind::RawDevelopment).pending=extentPending;
+            runtime.Add(2,RenderGraphNodeKind::ImageToMask).images={1};
+            auto& constant=runtime.Add(3,RenderGraphNodeKind::ConstantChannel);
+            constant.links["extent"]={maskExtent ? 2 : 1,maskExtent ? "maskOut" : "imageOut",{}};
+            constant.constantChannelValue=maskExtent ? std::numeric_limits<float>::quiet_NaN() : 0.25f;
+            const int clearsBefore=clearCalls;
+            runtime.graph.outputNodeId=3; runtime.graph.outputSocketId="maskOut";
+            runtime.Execute();
+            Require(pipeline.m_OutputTexture && !pipeline.IsOutputDenoisePending(),
+                "Constant Channel selected output uses extent, not pending image/mask samples.");
+            Require(!pipeline.m_GraphMaskCache.at("3:maskOut").denoisePending,
+                "Constant Channel persistent cache must remain settled.");
+            if(pass==0) {
+                Require(runtime.imageDenoisePending.at("1:imageOut")==extentPending &&
+                    (!maskExtent || runtime.maskDenoisePending.at("2:maskOut")==extentPending),
+                    "The constant's extent must really evaluate the pending dependency before discarding its provenance.");
+                Require(clearCalls==clearsBefore+1 && clearedValue==(maskExtent ? 1.0f : 0.25f),
+                    "The exact Constant Channel render dispatch must run on a cold miss.");
+            } else {
+                Require(clearCalls==clearsBefore && pipeline.m_LastGraphExecutionStats.maskCacheHits>0,
+                    "Warm Constant Channel output must actually reuse its persistent cache.");
+            }
+            Require(runtime.evalMask(3,"maskOut") && !runtime.denoiseProvenance.pending,
+                "Constant Channel local cache must restore settled provenance.");
+            runtime.Add(4,RenderGraphNodeKind::FieldMean).links["field"]={3,"maskOut",{}};
+            double value=0;
+            Require(runtime.evalScalar(4,"valueOut",value) && !runtime.denoiseProvenance.pending,
+                "A reduction consuming only constant samples must remain settled.");
+            // Another consumed input remains pending even after the constant
+            // branch discards its own extent dependency. Unconnected nodes do not.
+            AddMaskAndScalar(runtime,6,7,8);
+            runtime.Add(5).images={3}; Uniform(runtime,5,8);
+            Require(runtime.evalImage(5,"imageOut") && runtime.denoiseProvenance.pending,
+                "Constant dispatch must not erase a consuming image's pending scalar input.");
+            runtime.Add(9).images={1,3};
+            Require(runtime.evalImage(9,"imageOut") && runtime.denoiseProvenance.pending==extentPending,
+                "A real image sample dependency survives a later constant/extent evaluation.");
+            runtime.Add(10).images={3}; runtime.authored.at(10).masks={2};
+            Require(runtime.evalImage(10,"imageOut") && runtime.denoiseProvenance.pending==extentPending,
+                "A consumed mask contributes pending, unlike a constant's extent-only mask.");
+        }
+    }
+    for(bool missing:{false,true}) {
+        RenderPipeline pipeline;
+        GraphExecutionRuntime runtime(pipeline);
+        runtime.Add(1).fails=true;
+        auto& constant=runtime.Add(2,RenderGraphNodeKind::ConstantChannel);
+        if(!missing) constant.links["extent"]={1,"imageOut",{}};
+        runtime.graph.outputNodeId=2;
+        runtime.Execute();
+        Require(!pipeline.m_OutputTexture && !pipeline.IsOutputDenoisePending() &&
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId==2,
+            "Missing or failed Constant Channel extent must fail without publishing pixels or pending metadata.");
+    }
+}
+void CheckZoneReferenceUnion() {
+    for(bool secondNeutralPath:{false,true}) for(bool inputPending:{false,true})
+    for(bool referencePending:{false,true}) for(bool gain:{false,true})
+    for(bool referencePresent:{false,true}) for(bool active:{false,true}) {
+        RenderPipeline pipeline;
+        pipeline.m_RawZoneAreasFloatOutput=referencePresent;
+        const bool consumed=active && referencePresent && gain;
+        const bool expected=inputPending || (consumed && referencePending);
+        auto result=pipeline.ExerciseZoneReference({15,true,inputPending},referencePending,secondNeutralPath,gain,active);
+        Require(result.texture && result.denoisePending==expected &&
+            pipeline.m_RawZoneAreaRenderer.calls==static_cast<int>(consumed) &&
+            pipeline.localRangeCalls==static_cast<int>(active),
+            "Zone Reference must union only a successfully consumed neutral reference, preserving the input bit.");
+        if(active) {
+            Require(pipeline.m_RawDevelopStageImageCache.at("zone-local-range").front().denoisePending==expected,
+                "Actual local-range cache publication must retain the union with its pixels.");
+            const auto firstTexture=result.texture;
+            // A warm result's metadata replaces a deliberately opposite caller
+            // bit and a newly evaluated reference which the cache hit ignores.
+            result=pipeline.ExerciseZoneReference({16,true,!expected},!referencePending,secondNeutralPath,gain,active);
+            Require(result.texture==firstTexture && result.denoisePending==expected &&
+                pipeline.localRangeCalls==1 && pipeline.m_RawZoneAreaRenderer.calls==static_cast<int>(consumed),
+                "A warm local-range result restores cached provenance without reusing unrelated reference metadata.");
+        }
+    }
+    for(bool inputPending:{false,true}) for(int failure=0;failure<4;++failure) {
+        RenderPipeline pipeline;
+        pipeline.localRangeSucceeds=failure!=0;
+        pipeline.m_RawZoneAreaRenderer.succeeds=failure!=1 && failure!=2;
+        pipeline.m_ShouldCancelRender=[failure] { return failure==2; };
+        pipeline.damagedLocalRange=failure==3;
+        bool threw=false;
+        RenderPipeline::GraphNodeRenderResult result{15,true,inputPending};
+        try {
+            result=pipeline.ExerciseZoneReference(result,true,false,failure!=3);
+        } catch(const std::runtime_error& error) {
+            threw=std::string(error.what())=="Zones area rendering failed";
+        }
+        Require(threw==(failure==1) && result.texture==15 && result.denoisePending==inputPending &&
+            pipeline.m_RawDevelopStageImageCache.empty(),
+            "Absent, failed, canceled, or rejected area output cannot publish a speculative reference union.");
+    }
+    RenderPipeline pipeline;
+    pipeline.exposureSucceeds=false;
+    bool threw=false;
+    try { (void)pipeline.ExerciseZoneReference({15,true,false},true,true); }
+    catch(const std::runtime_error& error) { threw=std::string(error.what())=="Zones reference image unavailable"; }
+    Require(threw && pipeline.localRangeCalls==0 && pipeline.m_RawZoneAreaRenderer.calls==0,
+        "Reference capture failure stops before local-range/area output or provenance publication.");
+}
 void CheckBorrowedResults() {
     for(auto kind:{RenderGraphNodeKind::RawOperation,RenderGraphNodeKind::RawDevelop})
     for(bool borrowed:{false,true}) for(bool uniform:{false,true}) for(bool inputPending:{false,true}) {
@@ -681,6 +874,7 @@ int main() {
     try {
         CheckOutputIsolation(); CheckCachePropagation(); CheckFailureAndExtent(); CheckSourceSetResults();
         CheckBorrowedResults(); CheckRawStageAndGeometry(); CheckSynthesizedAlpha(); CheckNativeProjection();
+        CheckConstantChannel(); CheckZoneReferenceUnion();
         std::cout << "Denoise output provenance checks passed (CPU extraction; no GL/model execution).\n";
         return 0;
     } catch(const std::exception& error) {
