@@ -79,6 +79,7 @@ public:
         EditorRenderWorker::Result& result);
     bool TryConsumeViewportTiming(ClientId clientId, EditorRenderWorker::Result& result);
     bool IsBusyFor(ClientId clientId) const;
+    bool HasWorkerFailure(ClientId clientId) const;
     bool HasSnapshotWorkFor(ClientId clientId) const;
     bool HasPendingOrBusyForShutdown(ClientId clientId) const;
     EditorRenderWorker::RenderProgress GetProgressFor(
@@ -102,6 +103,7 @@ private:
     void QueueSyntheticSuperseded(
         const EditorRenderWorker::Snapshot& snapshot,
         bool workerStarted, bool overload = false, RawPreviewSkipReason reason = RawPreviewSkipReason::None);
+    void QueueWorkerFailure(const EditorRenderWorker::Snapshot& snapshot, const std::string& error);
     static void ReleaseResultResources(EditorRenderWorker::Result& result);
 
     mutable std::mutex m_Mutex;

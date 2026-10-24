@@ -640,6 +640,7 @@ public:
         std::string mainRegionPlanReason;
         GraphExecutionStats mainGraphStats;
         Raw::ViewportCalibrationSample calibration;
+        bool workerFailed = false;
     };
 
     struct RenderProgress {
@@ -678,6 +679,10 @@ public:
     bool TryConsumeViewportTiming(Result& result);
     bool IsBusy() const { return m_Busy.load(); }
     bool IsAvailable() const;
+    // Fatal termination is distinct from cancellation/requested shutdown.
+    // The bool remains authoritative if allocating the diagnostic fails.
+    bool GetThreadFailure(std::string* error = nullptr) const noexcept;
+    static Result MakeFailedResult(const Snapshot& snapshot, const std::string& error);
     void UpdateGraphContext(const Stack::GraphRendering::RequestTag& context);
     bool IsWaitingForRawDenoiseCompletion() const;
     bool HasPendingOrBusyForShutdown() const;
@@ -752,7 +757,7 @@ private:
         std::vector<std::shared_ptr<OpenGlTaskState>>, OpenGlTaskOrder>;
 
     void PrepareGraphResourceBudget(const Snapshot& snapshot, RenderPipeline& pipeline, Result& result);
-    void ThreadMain();
+    void ThreadMain(Snapshot& currentRequest);
     void CaptureViewportTiming(const Snapshot& snapshot, Result& result);
     void CompleteViewportTiming(const Result& result);
     void FinishViewportTiming(const Result& result);
@@ -764,7 +769,7 @@ private:
         Result evidence;
     };
     std::deque<PendingViewportTiming> m_PendingViewportTimings;
-    void HandleThreadFailure(const char* message) noexcept;
+    void HandleThreadFailure(const char* message, const Snapshot* currentRequest) noexcept;
     Result RenderSnapshot(const Snapshot& snapshot);
     void RenderDevelopCandidateRequests(
         const Snapshot& snapshot,
@@ -794,6 +799,8 @@ private:
     bool m_InitComplete = false;
     bool m_InitSucceeded = false;
     std::string m_InitError;
+    bool m_ThreadFailed = false;
+    std::string m_ThreadFailure;
     bool m_HasPending = false;
     Stack::GraphRendering::RequestTag m_LatestGraphRequest;
     Snapshot m_Pending;

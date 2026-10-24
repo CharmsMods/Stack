@@ -64,6 +64,13 @@ void EditorModule::SubmitRenderIfReady() noexcept {
 
 void EditorModule::SubmitRenderIfReadyImpl() {
     const bool rawWorkspaceActive = IsRawWorkspaceProjectActive();
+    // A dead worker cannot satisfy automatic preview/refinement retries.
+    // Explicit dirty requests and captures still pass through once so their
+    // ordinary failed result releases the caller's expected-completion state.
+    const bool explicitCaptureRequested = m_RawAssetCapture.pending ||
+        (m_RawAssetCapture.armed && m_RawAssetCapture.feedbackNeeded);
+    if (rawWorkspaceActive && !m_RenderDirty && !explicitCaptureRequested &&
+        Stack::EditorRendering::RawRenderService::Get().HasWorkerFailure(m_RawRenderClientId)) return;
     if ((!m_RawWorkspaceRootTabActive || !rawWorkspaceActive) && !GraphRenderBackendReady()) return;
     const bool compositeMode = Stack::EditorRenderScheduling::
         ShouldUseCompositeRenderPath(

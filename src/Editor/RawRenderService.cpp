@@ -247,6 +247,8 @@ void RawRenderService::Pump() {
 
     EditorRenderWorker::Snapshot next;
     ClientId nextOwner = 0;
+    std::string workerError;
+    const bool workerFailed = m_Worker.GetThreadFailure(&workerError);
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         for (EditorRenderWorker::Result& value : completed) {
@@ -261,7 +263,7 @@ void RawRenderService::Pump() {
                 continue;
             }
             auto& queue = m_Completed[value.ownerId];
-            if (value.graphRequest.enabled) {
+            if (value.graphRequest.enabled && !workerFailed) {
                 for (auto it = queue.begin(); it != queue.end();) {
                     if (!it->graphRequest.enabled) { ++it; continue; }
                     ReleaseResultResources(*it);
@@ -288,6 +290,17 @@ void RawRenderService::Pump() {
             if (pending != m_Pending.end() && pending->second.generation >= ready.generation) continue;
             ready.telemetry.queuedAt = std::chrono::steady_clock::now();
             m_Pending[ready.ownerId] = std::move(ready);
+        }
+        if (workerFailed) {
+            // The worker reports accepted active/parked requests itself. The
+            // service owns requests that never reached it, and must finish
+            // those for their original project rather than call them canceled.
+            for (const auto& [owner, pending] : m_Pending)
+                QueueWorkerFailure(pending, workerError);
+            m_Pending.clear();
+            m_ActiveOwner = 0;
+            m_ActiveSnapshot = {};
+            return;
         }
         // A compute batch owns the GL context, not the next image slot.
         // Admit pending foreground images now so the worker selects them at
@@ -321,10 +334,20 @@ void RawRenderService::Pump() {
     }
     if (nextOwner != 0 && !m_Worker.Submit(std::move(next))) {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        QueueSyntheticSuperseded(m_ActiveSnapshot, false);
+        if (m_Worker.GetThreadFailure(&workerError))
+            QueueWorkerFailure(m_ActiveSnapshot, workerError);
+        else
+            QueueSyntheticSuperseded(m_ActiveSnapshot, false);
         m_ActiveOwner = 0;
         m_ActiveSnapshot = {};
     }
+}
+
+void RawRenderService::QueueWorkerFailure(
+    const EditorRenderWorker::Snapshot& snapshot, const std::string& error) {
+    if (!snapshot.ownerId || m_Clients.find(snapshot.ownerId) == m_Clients.end()) return;
+    m_Completed[snapshot.ownerId].push_back(
+        EditorRenderWorker::MakeFailedResult(snapshot, error));
 }
 
 bool RawRenderService::Submit(
@@ -347,6 +370,13 @@ bool RawRenderService::Submit(
         if (!m_Initialized ||
             m_Clients.find(clientId) == m_Clients.end()) {
             return false;
+        }
+        std::string workerError;
+        if (m_Worker.GetThreadFailure(&workerError)) {
+            QueueWorkerFailure(snapshot, workerError);
+            // Accept a terminal failure, not new GPU work. The caller commits
+            // this request's identity and consumes its ordinary failed result.
+            return true;
         }
         if (m_ActiveOwner == 0) {
             // A compute task may own the worker without owning a RAW session.
@@ -417,10 +447,15 @@ bool RawRenderService::Submit(
     if (submitNow && m_Worker.Submit(std::move(snapshot))) return true;
 
     std::lock_guard<std::mutex> lock(m_Mutex);
-    QueueSyntheticSuperseded(m_ActiveSnapshot, false);
+    std::string workerError;
+    const bool workerFailed = m_Worker.GetThreadFailure(&workerError);
+    if (workerFailed)
+        QueueWorkerFailure(m_ActiveSnapshot, workerError);
+    else
+        QueueSyntheticSuperseded(m_ActiveSnapshot, false);
     m_ActiveOwner = 0;
     m_ActiveSnapshot = {};
-    return false;
+    return workerFailed;
 }
 
 bool RawRenderService::TryConsumeCompleted(
@@ -449,13 +484,24 @@ bool RawRenderService::TryConsumeViewportTiming(ClientId clientId, EditorRenderW
 bool RawRenderService::IsBusyFor(ClientId clientId) const {
     if (clientId == 0) return false;
     std::lock_guard<std::mutex> lock(m_Mutex);
+    // Fatal cleanup can still be draining canceled denoise resources, but no
+    // request can finish there. A terminal result must not re-latch UI busy.
+    if (m_Worker.GetThreadFailure()) return false;
     return m_ActiveOwner == clientId ||
         m_Pending.find(clientId) != m_Pending.end() || m_Worker.HasPendingForOwner(clientId);
+}
+
+bool RawRenderService::HasWorkerFailure(ClientId clientId) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return clientId != 0 && m_Initialized &&
+        m_Clients.find(clientId) != m_Clients.end() &&
+        m_Worker.GetThreadFailure();
 }
 
 bool RawRenderService::HasSnapshotWorkFor(ClientId clientId) const {
     if (clientId == 0) return false;
     std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_Worker.GetThreadFailure()) return false;
     return m_Pending.find(clientId) != m_Pending.end() ||
         m_Worker.HasSnapshotWorkFor(clientId);
 }
@@ -468,6 +514,7 @@ bool RawRenderService::HasPendingOrBusyForShutdown(
 EditorRenderWorker::RenderProgress RawRenderService::GetProgressFor(
     ClientId clientId) const {
     std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_Worker.GetThreadFailure()) return {};
     if (m_ActiveOwner == clientId) return m_Worker.GetProgress();
     EditorRenderWorker::RenderProgress progress;
     if (m_Pending.find(clientId) != m_Pending.end() || m_Worker.HasPendingForOwner(clientId)) {

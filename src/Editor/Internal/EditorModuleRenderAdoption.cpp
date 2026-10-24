@@ -272,6 +272,21 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 : -1.0;
         }
         if (staleResult) {
+            // A provisional graph frame can already own this generation when
+            // its denoise continuation loses the worker. Its pixels remain
+            // stale for adoption, but its current request still needs a fatal
+            // diagnostic. Never report another owner, newer edit or old view.
+            if (result.workerFailed && result.graphRequest.enabled &&
+                !result.telemetry.superseded &&
+                result.ownerId == (rawResult ? m_RawRenderClientId : 0) &&
+                result.generation == m_RenderGeneration &&
+                result.generation == m_GraphAcceptedResultGeneration &&
+                IsViewportPreviewResultCurrent(result)) {
+                const auto currentTag = CurrentGraphRenderTag();
+                if (Stack::GraphRendering::SameContext(result.graphRequest, currentTag) &&
+                    result.graphRequest.revision == currentTag.revision)
+                    ReportGraphRenderFailure(result);
+            }
             FinishViewportPreviewRequest(result, false);
             // Discarding the pixels still completes this worker request.
             // A stale last result must not leave RAW permanently busy.
