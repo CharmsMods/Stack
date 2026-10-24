@@ -2,6 +2,12 @@
 #include "Renderer/GLLoader.h"
 
 void EditorModule::ResetProjectInteractionState() {
+    // A close or workspace replacement cancels source imports too, including
+    // reopening the same document with the same saved node identities.
+    ++m_SourceLoadGeneration;
+    ++m_SourceLoadProjectGeneration;
+    m_SourceLoadTaskState = Async::TaskState::Idle;
+    m_SourceLoadStatusText.clear();
     m_PreviewRequestCandidates = {};
     m_PreviewCachePruneGeneration = 0;
     // Node IDs and source identities can be reused by a replacement document.

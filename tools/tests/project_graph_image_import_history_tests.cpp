@@ -15,8 +15,50 @@ EditorNodeGraph::ImagePayload Decoded(){EditorNodeGraph::ImagePayload p;p.label=
 const EditorNodeGraph::Node& Node(const ProjectGraphState* s){Require(s && s->graph.GetNodes().size()==1,"missing image");return s->graph.GetNodes()[0];}
 void CheckReady(const ProjectGraphState* s,float x){const auto& n=Node(s);Require(!n.image.isLoading&&!n.image.isEmbedding,"completed request resurrected pending flags");Require(n.position.x==x&&n.notes=="authored note"&&n.title=="authored title","resolution changed authored fields");const auto& bytes=s->images.at("image");Require(bytes.pixels.bytes&&*bytes.pixels.bytes==std::vector<unsigned char>({1,2,3,4}),"lost decoded pixels");Require(bytes.png&&*bytes.png==std::vector<unsigned char>({9,8}),"lost storage bytes");}
 void Finish(ProjectGraphHistory& h){auto p=Decoded();ResolveImageImportDecode(h,"image",7,p);ResolveImageImportEmbedding(h,"image",7,{9,8});}
+// Source-image loading starts history after decode, while embedding is still
+// pending. Unlike Add Slice it has no earlier placeholder/import undo action.
+ProjectGraphState SourceBaseline() {
+    ProjectGraphHistory history;history.Reset(Pending());
+    const auto decoded=Decoded();ResolveImageImportDecode(history,"image",7,decoded);
+    history.Observe(Pending(1),false);
+    return *history.Candidate(false);
+}
+void CheckSourceHistory() {
+    const auto baseline=SourceBaseline();
+    for(const bool failed:{false,true}) {
+        ProjectGraphHistory history;history.Reset(baseline);
+        const std::vector<unsigned char> encoded=failed?std::vector<unsigned char>{}:std::vector<unsigned char>{9,8};
+        // Completion before any authored edit must update the initial baseline.
+        ResolveImageImportEmbedding(history,"image",7,encoded);
+        auto edited=baseline;edited.graph.EditNodes()[0].position.x=12;
+        history.Observe(std::move(edited),false);
+        // An edit made during encoding is reconciled along with earlier state.
+        ResolveImageImportEmbedding(history,"image",7,encoded);
+        const auto ready=[&](const ProjectGraphState* state,float x) {
+            const auto& node=Node(state);
+            Require(!node.image.isEmbedding && node.image.embeddingRequestId==0,"source undo restored pending embedding");
+            Require(node.position.x==x && node.title=="authored title" && node.notes=="authored note","source embedding changed authored metadata");
+            const auto& image=state->images.at("image");
+            Require(image.pixels.bytes && *image.pixels.bytes==std::vector<unsigned char>({1,2,3,4}),"source embedding lost decoded pixels");
+            Require(failed?!image.png:(image.png && *image.png==encoded),"source embedding stored the wrong success/failure payload");
+        };
+        ready(history.Candidate(false),0);history.AcceptRestore(false);
+        ready(history.Candidate(true),12);history.AcceptRestore(true);
+    }
+    // Deletion/undo does not cancel owned completion in retained snapshots.
+    ProjectGraphHistory absent;absent.Reset(baseline);absent.Observe({},false);
+    ResolveImageImportEmbedding(absent,"image",7,{9,8});CheckReady(absent.Candidate(false),0);
+    absent.AcceptRestore(false);Require(absent.CanRedo(),"source completion erased deletion redo");
+    // Different generation or UUID remains pending and preserves all bytes.
+    ProjectGraphHistory replacement;auto newer=baseline;
+    newer.graph.EditNodes()[0].image.embeddingRequestId=8;
+    replacement.Reset(newer);replacement.Observe(newer,false);
+    ResolveImageImportEmbedding(replacement,"image",7,{9,8});
+    Require(Node(replacement.Candidate(false)).image.isEmbedding && !replacement.Candidate(false)->images.at("image").png,"stale source request changed replacement history");
+}
 }
 int main() try {
+    CheckSourceHistory();
     ProjectGraphHistory h;h.Begin({});h.Observe(Pending(),false);h.Observe(Pending(10),true);h.EndGesture();h.Observe(Pending(20),true);h.EndGesture();
     Finish(h);CheckReady(h.Candidate(false),10);h.AcceptRestore(false);CheckReady(h.Candidate(true),20);h.AcceptRestore(true);
     // Result arrives while node is absent (undo import or delete node).

@@ -1700,6 +1700,7 @@ private:
     GraphAutoFocusState m_GraphAutoFocus;
 
     std::uint64_t m_SourceLoadGeneration = 0;
+    std::uint64_t m_SourceLoadProjectGeneration = 0;
     Async::TaskState m_SourceLoadTaskState = Async::TaskState::Idle;
     std::string m_SourceLoadStatusText;
     std::uint64_t m_GraphDropImportGeneration = 0;

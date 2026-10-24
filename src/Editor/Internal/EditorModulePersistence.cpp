@@ -6,6 +6,7 @@
 #include "Utils/DisplayRefreshRate.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/EditorModule.h"
+#include "Project/ProjectGraphImageImportHistory.h"
 
 #include "Async/TaskSystem.h"
 #include "Library/LibraryManager.h"
@@ -1436,12 +1437,53 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
 
     ++m_SourceLoadGeneration;
     const std::uint64_t generation = m_SourceLoadGeneration;
+    const std::uint64_t projectGeneration = m_SourceLoadProjectGeneration;
     m_SourceLoadTaskState = Async::TaskState::Queued;
     m_SourceLoadStatusText = "Loading source image in the background...";
 
+    // Written and read only by this request's ordered main-thread callbacks.
+    // Selection may change while storage is prepared.
+    struct PublishedImage {
+        int nodeId = -1;
+        std::string uuid;
+    };
     bool submitted = false;
     try {
-        submitted = ProjectTasks().SubmitHighPriority("Preparing image", [this, generation, path]() {
+        const auto published = std::make_shared<PublishedImage>();
+        submitted = ProjectTasks().SubmitHighPriority("Preparing image", [this, generation, projectGeneration, path, published]() {
+            const auto completeEmbedding = [this, generation, projectGeneration, published](std::vector<unsigned char> pngBytes) {
+                if (projectGeneration != m_SourceLoadProjectGeneration || published->uuid.empty()) {
+                    return;
+                }
+                // A newer source may fail to decode, leaving this accepted
+                // image in place. Only project replacement cancels its owned
+                // embedding; UUID/request checks reject a successful replacement.
+                // Resolve retained snapshots even when the live node is absent.
+                Stack::Project::ResolveImageImportEmbedding(
+                    m_Project->graphHistory, published->uuid, generation, pngBytes);
+                EditorNodeGraph::Node* imageNode = m_Project->graph.FindNode(published->nodeId);
+                if (!imageNode || !Stack::Project::OwnsPendingImageImport(
+                        *imageNode, published->uuid, generation, false)) {
+                    return;
+                }
+                if (pngBytes.empty()) {
+                    imageNode->image.isEmbedding = false;
+                    imageNode->image.embeddingRequestId = 0;
+                    if (generation == m_SourceLoadGeneration) {
+                        m_SourceLoadStatusText = "Source image loaded, but portable storage could not be prepared.";
+                        PostNotification(
+                            UiNotificationSeverity::Error,
+                            "The source image loaded, but Stack could not embed it for project storage.",
+                            "editor-source-load-embed");
+                    }
+                    return;
+                }
+                imageNode->image.pngStorage.Invalidate();
+                imageNode->image.pngBytes = std::move(pngBytes);
+                imageNode->image.isEmbedding = false;
+                imageNode->image.embeddingRequestId = 0;
+                if (generation == m_SourceLoadGeneration) m_SourceLoadStatusText = "Source image loaded.";
+            };
             auto postLoadFailure = [this, generation]() {
                 return ProjectTasks().PostToMain([this, generation]() {
                     if (generation != m_SourceLoadGeneration) {
@@ -1455,26 +1497,9 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                         "editor-source-load");
                 });
             };
-            auto postEmbeddingFailure = [this, generation]() {
-                return ProjectTasks().PostToMain([this, generation]() {
-                    if (generation != m_SourceLoadGeneration) {
-                        return;
-                    }
-                    EditorNodeGraph::Node* imageNode =
-                        m_Project->graph.FindNode(m_Project->graph.GetActiveImageNodeId());
-                    if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
-                        !imageNode->image.isEmbedding ||
-                        imageNode->image.embeddingRequestId != generation) {
-                        return;
-                    }
-                    imageNode->image.isEmbedding = false;
-                    imageNode->image.embeddingRequestId = 0;
-                    m_SourceLoadStatusText =
-                        "Source image loaded, but portable storage could not be prepared.";
-                    PostNotification(
-                        UiNotificationSeverity::Error,
-                        "The source image loaded, but Stack could not embed it for project storage.",
-                        "editor-source-load-embed");
+            auto postEmbeddingFailure = [this, completeEmbedding]() {
+                return ProjectTasks().PostToMain([completeEmbedding]() {
+                    completeEmbedding({});
                 });
             };
             bool payloadQueued = false;
@@ -1517,7 +1542,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 channels = payload.channels;
             }
 
-            payloadQueued = ProjectTasks().PostToMain([this, generation, path, payload = std::move(payload), success]() mutable {
+            payloadQueued = ProjectTasks().PostToMain([this, generation, path, published, payload = std::move(payload), success]() mutable {
                 if (generation != m_SourceLoadGeneration) {
                     return;
                 }
@@ -1543,6 +1568,8 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 }
 
                 if (imageNode) {
+                    published->nodeId = imageNode->id;
+                    published->uuid = imageNode->instanceUuid;
                     imageNode->title = payload.label.empty() ? "Image" : payload.label;
                     imageNode->image = std::move(payload);
                     m_Project->graph.SetActiveImageNodeId(imageNode->id);
@@ -1568,35 +1595,10 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             std::vector<unsigned char> pngBytes =
                 EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
             ProjectTasks().PostToMain([
-                this,
-                generation,
+                completeEmbedding,
                 pngBytes = std::move(pngBytes)
             ]() mutable {
-                if (generation != m_SourceLoadGeneration) {
-                    return;
-                }
-                EditorNodeGraph::Node* imageNode = m_Project->graph.FindNode(m_Project->graph.GetActiveImageNodeId());
-                if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
-                    !imageNode->image.isEmbedding || imageNode->image.embeddingRequestId != generation) {
-                    return;
-                }
-
-                if (pngBytes.empty()) {
-                    imageNode->image.isEmbedding = false;
-                    imageNode->image.embeddingRequestId = 0;
-                    m_SourceLoadStatusText = "Source image loaded, but portable storage could not be prepared.";
-                    PostNotification(
-                        UiNotificationSeverity::Error,
-                        "The source image loaded, but Stack could not embed it for project storage.",
-                        "editor-source-load-embed");
-                    return;
-                }
-
-                imageNode->image.pngStorage.Invalidate();
-                imageNode->image.pngBytes = std::move(pngBytes);
-                imageNode->image.isEmbedding = false;
-                imageNode->image.embeddingRequestId = 0;
-                m_SourceLoadStatusText = "Source image loaded.";
+                completeEmbedding(std::move(pngBytes));
             });
             } catch (...) {
                 if (payloadQueued) {
