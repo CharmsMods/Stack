@@ -12,6 +12,7 @@
 #include "Async/TaskSystem.h"
 #include "Notifications/AsyncActivity.h"
 #include "Editor/GraphCapture.h"
+#include "Editor/GraphCaptureSaveJob.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLStateGuards.h"
@@ -373,7 +374,9 @@ void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
     EditorModule* const owner = captureOwner;
     owner->SetGraphCaptureProgress("Encoding and saving graph image...");
 
-    const bool submitted = owner->ProjectTasks().SubmitHighPriority(
+    bool submitted = false;
+    try {
+    submitted = owner->ProjectTasks().SubmitHighPriority(
         Stack::Notifications::ForAsyncActivity(notifier, activity, "Capturing graph"), [
         this,
         owner,
@@ -382,38 +385,29 @@ void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
         pixels = std::move(pixels),
         outputWidth,
         outputHeight]() mutable {
-        std::vector<unsigned char> pngBytes;
-        const bool pngEncoded = GraphCapture::EncodePng(pixels, outputWidth, outputHeight, pngBytes);
-
-        std::vector<unsigned char> diskBytes;
-        bool diskEncoded = false;
-        if (request.settings.format == GraphCapture::Format::Bmp) {
-            diskEncoded = GraphCapture::EncodeBmp(pixels, outputWidth, outputHeight, diskBytes);
-        } else if (pngEncoded) {
-            diskBytes = pngBytes;
-            diskEncoded = true;
-        }
-
-        std::string saveError;
-        std::error_code targetError;
-        const bool targetUnchanged = request.exportTarget.approval.path.lexically_normal() ==
-            std::filesystem::u8path(request.targetPath).lexically_normal() &&
-            Stack::FileSave::TargetApprovalStillMatches(request.exportTarget.approval, targetError);
-        if (!targetUnchanged) {
-            saveError = targetError
-                ? "The graph image destination could not be checked: " + targetError.message()
-                : "The destination changed after confirmation. Choose the image path again to save.";
-        }
-        const bool operationCurrent = !activity || notifier.IsOperationCurrent(activity.operationId);
-        if (!operationCurrent) saveError = "The graph capture was cancelled before saving.";
-        const bool fileSaved = diskEncoded && targetUnchanged && operationCurrent &&
-            GraphCapture::WriteEncodedFile(request.targetPath, diskBytes, &saveError, &request.exportTarget,
-                [&] { return activity && !notifier.IsOperationCurrent(activity.operationId); });
-        if (!diskEncoded && saveError.empty()) {
-            saveError = request.settings.format == GraphCapture::Format::Bmp
-                ? "BMP encoding failed."
-                : "PNG encoding failed.";
-        }
+        auto encoded = GraphCapture::RunCaptureSaveJob(
+            request.settings.format == GraphCapture::Format::Bmp,
+            [&](auto& bytes) { return GraphCapture::EncodePng(pixels, outputWidth, outputHeight, bytes); },
+            [&](auto& bytes) { return GraphCapture::EncodeBmp(pixels, outputWidth, outputHeight, bytes); },
+            [&](const auto& diskBytes, std::string& saveError) {
+                std::error_code targetError;
+                const bool targetUnchanged = request.exportTarget.approval.path.lexically_normal() ==
+                    std::filesystem::u8path(request.targetPath).lexically_normal() &&
+                    Stack::FileSave::TargetApprovalStillMatches(request.exportTarget.approval, targetError);
+                if (!targetUnchanged) {
+                    saveError = targetError
+                        ? "The graph image destination could not be checked: " + targetError.message()
+                        : "The destination changed after confirmation. Choose the image path again to save.";
+                }
+                const bool operationCurrent = !activity || notifier.IsOperationCurrent(activity.operationId);
+                if (!operationCurrent) saveError = "The graph capture was cancelled before saving.";
+                return targetUnchanged && operationCurrent &&
+                    GraphCapture::WriteEncodedFile(request.targetPath, diskBytes, &saveError, &request.exportTarget,
+                        [&] { return activity && !notifier.IsOperationCurrent(activity.operationId); });
+            });
+        auto pngBytes = std::move(encoded.pngBytes);
+        auto saveError = std::move(encoded.error);
+        const bool fileSaved = encoded.fileSaved;
 
         owner->ProjectTasks().PostToMain([
             this,
@@ -461,6 +455,9 @@ void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
             owner->CompleteGraphCapture(std::move(result));
         });
     });
+    } catch (...) {
+        submitted = false;
+    }
     if (!submitted) {
         GraphCapture::Result result;
         result.message = "The graph image could not be queued for saving.";
