@@ -8,32 +8,44 @@
 
 namespace Stack::Renderer {
 // Presentation-only material. Main-window draw callbacks capture the pixels
-// already behind each bar; never reads or mutates an image-processing texture.
+// behind the layout column once; independent objects reuse that capture.
+// Never reads or mutates an image-processing texture.
 // Owner must keep this object alive through RenderDrawData and shut it down on
 // its owning GL context before that context is destroyed.
 class GlassChrome {
 public:
     void BeginFrame(bool enabled);
-    bool AddSurface(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius = 0.f);
+    // Queue once before the column's objects/foreground. Captures and blurs only: no
+    // visible background, edge or shadow. Bounds also limit all object output.
+    bool AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint);
+    // Uses the latest queued backdrop, without copying or blurring again.
+    bool AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius);
     // Bracket only neutral foreground geometry. Does not create a hit target.
     bool BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id);
     void EndInk(ImDrawList* draw);
     const std::string& Error() const { return error; }
     void Shutdown();
 private:
-    struct Surface { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float radius, dpi; };
-    struct Ink { GlassChrome* owner; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
+    struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; };
+    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImVec4 tint, clip; float radius; };
+    struct Ink { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
     static void InkCallback(const ImDrawList*, const ImDrawCmd*);
     static void EndInkCallback(const ImDrawList*, const ImDrawCmd*);
     void DrawInk(const Ink&);
     void PrepareInk();
-    static void Callback(const ImDrawList*, const ImDrawCmd*);
-    void Draw(const Surface&);
+    static void BackdropCallback(const ImDrawList*, const ImDrawCmd*);
+    static void ObjectCallback(const ImDrawList*, const ImDrawCmd*);
+    void CaptureBackdrop(const Backdrop&);
+    void DrawObject(const Object&);
     bool Ensure(int w, int h);
     void ReleaseTargets();
     bool enabled = false;
     std::string error;
-    std::deque<Surface> surfaces;
+    // deque keeps callback payloads and object-to-backdrop pointers stable
+    // until the next BeginFrame, after ImGui has consumed this frame.
+    std::deque<Backdrop> backdrops;
+    std::deque<Object> objects;
+    const Backdrop* activeBackdrop = nullptr;
     std::deque<Ink> inks;
     static constexpr unsigned int MaxInkItems=128;
     std::array<ImGuiID,MaxInkItems> inkIdentity{};

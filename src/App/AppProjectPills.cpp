@@ -93,8 +93,11 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const bool dirty = workspace->editor->NeedsWorkspaceSaveBeforeTransition();
         // The workspace scope supplies identity; renaming must not replace the
         // active/navigation item during a press or save completion.
+        const bool glass = m_Appearance && m_Appearance->GetGlassChromeEnabled();
+        if (glass) ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(0,0,0,0));
         const bool clicked = ImGui::InvisibleButton("##ProjectPill",
             ImVec2(size.x - 4.f * rail.scale, 24.f * rail.scale), ImGuiButtonFlags_EnableNav);
+        if (glass) ImGui::PopStyleColor();
         const bool focused = ImGui::IsItemFocused();
         const bool over = ImGui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride);
         // Preview follows pointer hover only. Navigation focus can persist
@@ -111,21 +114,20 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const ImVec2 pillMin(min.x + 4.f * rail.scale, min.y + 5.f * rail.scale);
         const ImVec2 pillMax(max.x - 4.f * rail.scale, max.y - 5.f * rail.scale);
         auto* draw = ImGui::GetWindowDrawList();
-        const bool glass = m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty();
         if (glass) {
+            Stack::Navigation::GlassObjectBacking(draw,pillMin,pillMax,7.f*rail.scale,palette);
+            m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale);
             const bool adaptiveInk=m_RailGlass.BeginInk(draw,pillMin,pillMax,ImGui::GetItemID());
             Stack::Navigation::GlassControlFeedback(ImRect(pillMin,pillMax),selected,rail.scale,palette);
             ImVec4 ink = palette.text; ink.w *= automatic ? .40f : .65f;
             draw->AddLine(ImVec2(pillMin.x+7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),
                 ImVec2(pillMax.x-7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),ImGui::GetColorU32(ink),1.5f*rail.scale);
-            if (dirty && !focused) draw->AddRect(pillMin,pillMax,
+            if (dirty) draw->AddRect(pillMin,pillMax,
                 ImGui::GetColorU32(palette.mutedText),6.f*rail.scale,0,rail.scale);
             if (automatic) draw->AddCircleFilled(ImVec2(pillMax.x-3.f*rail.scale,pillMax.y-3.f*rail.scale),
                 1.5f*rail.scale,ImGui::GetColorU32(ink));
+            Stack::Navigation::GlassKeyboardFocus(ImRect(pillMin,pillMax),rail.scale,palette);
             if (adaptiveInk) m_RailGlass.EndInk(draw);
-            // Keep semantic keyboard focus colored, outside neutral contrast.
-            if (focused) draw->AddRect(pillMin,pillMax,ImGui::GetColorU32(palette.focus),
-                6.f*rail.scale,0,rail.scale);
         } else {
             Stack::Header::DrawProjectPill(draw,pillMin,pillMax,rail.scale,palette,
                 {selected,over,focused,dirty,automatic});

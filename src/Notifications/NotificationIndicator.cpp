@@ -18,13 +18,16 @@ float Presenter::RenderIndicator(NotificationStore& store,
     const float hitWidth=snapshot.Busy()||activity.busyBlend>.001f||attention||m_PanelOpen||m_IndicatorLabel.Visible()?width:36.f;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+width-hitWidth);
     const ImVec2 pos=ImGui::GetCursorScreenPos();
+    if (context.customIndicatorFocus) ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(0,0,0,0));
     if (ImGui::InvisibleButton("##Activity",ImVec2(hitWidth,height),ImGuiButtonFlags_EnableNav)||openPanel)
         m_PanelOpen=!m_PanelOpen;
+    if (context.customIndicatorFocus) ImGui::PopStyleColor();
     m_Anchor=ImVec2(pos.x+hitWidth,pos.y+height);
     m_HasAnchor=true;
     auto* draw=ImGui::GetWindowDrawList();
     if (context.keepFixed) context.keepFixed(draw);
-    if (m_PanelOpen||ImGui::IsItemHovered())
+    if (context.beginIndicator) context.beginIndicator(draw,pos,ImVec2(pos.x+hitWidth,pos.y+height),m_PanelOpen);
+    if (!context.beginIndicator && (m_PanelOpen||ImGui::IsItemHovered()))
         draw->AddRectFilled(pos,ImVec2(pos.x+hitWidth,pos.y+height),
             ImGui::GetColorU32(ImGuiCol_ButtonHovered),6.f);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
@@ -46,16 +49,17 @@ float Presenter::RenderIndicator(NotificationStore& store,
         // Resting is idle, not a claim that an operation succeeded.
         draw->AddCircle(center,5.f,color,24,1.4f);
     }
+    const float fontSize=ImGui::GetFontSize();
+    draw->PushClipRect(pos,ImVec2(center.x-13.f,pos.y+height),true);
+    m_IndicatorLabel.Draw(*draw,ImVec2(pos.x+6.f,pos.y+(height-fontSize)*.5f),center.x-13.f,color);
+    draw->PopClipRect();
+    if (context.endIndicator) context.endIndicator(draw);
     if(attention) {
         const ImVec4 bg=ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
         const bool light=bg.x+bg.y+bg.z>1.5f;
         draw->AddCircleFilled(ImVec2(center.x+9.f,center.y-8.f),2.6f,
             ImGui::GetColorU32(light?ImVec4(.53f,.33f,.1f,1):ImVec4(.90f,.73f,.46f,1)));
     }
-    const float fontSize=ImGui::GetFontSize();
-    draw->PushClipRect(pos,ImVec2(center.x-13.f,pos.y+height),true);
-    m_IndicatorLabel.Draw(*draw,ImVec2(pos.x+6.f,pos.y+(height-fontSize)*.5f),center.x-13.f,color);
-    draw->PopClipRect();
     return hitWidth;
 }
 

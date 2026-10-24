@@ -1,5 +1,6 @@
 #include "AppShell.h"
 #include "AppHeaderStyle.h"
+#include "GlassNavigationFeedback.h"
 #include "Async/TaskSystem.h"
 #include "Library/LibraryManager.h"
 #include <algorithm>
@@ -87,8 +88,22 @@ float AppShell::RenderActivityIndicator(float width, float height, bool openDeta
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.pressed);
+    auto context=NotificationContext();
+    const bool glass=m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    bool adaptiveInk=false;
+    if (glass) {
+        context.customIndicatorFocus=true;
+        context.beginIndicator=[&](ImDrawList* draw,ImVec2 min,ImVec2 max,bool selected) {
+            Stack::Navigation::GlassObjectBacking(draw,min,max,10.f*m_NavigationRail.scale,palette);
+            m_RailGlass.AddObject(draw,min,max,palette.caption,10.f*m_NavigationRail.scale);
+            adaptiveInk=m_RailGlass.BeginInk(draw,min,max,ImGui::GetItemID());
+            Stack::Navigation::GlassControlFeedback(ImRect(min,max),selected,m_NavigationRail.scale,palette);
+            Stack::Navigation::GlassKeyboardFocus(ImRect(min,max),m_NavigationRail.scale,palette);
+        };
+        context.endIndicator=[&](ImDrawList* draw) { if (adaptiveInk) m_RailGlass.EndInk(draw); };
+    }
     const float result = m_NotificationPresenter.RenderIndicator(*m_NotificationStore, CollectActivity(),
-        m_ActivityPresentation, width, height, openDetails && !m_NotificationPresenter.BlocksInput(), NotificationContext());
+        m_ActivityPresentation, width, height, openDetails && !m_NotificationPresenter.BlocksInput(), context);
     ImGui::PopStyleColor(2);
     return result;
 }

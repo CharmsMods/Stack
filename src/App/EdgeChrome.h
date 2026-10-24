@@ -38,10 +38,12 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,
-    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr) {
+    float scale, const Stack::Header::Palette& palette, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr, bool objectOutsideWindow = false) {
     const float size = ButtonExtent * scale;
     ImGui::BeginDisabled(!enabled);
+    if (glass) ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(0,0,0,0));
     const bool clicked = ImGui::InvisibleButton(label, ImVec2(size, size), ImGuiButtonFlags_EnableNav);
+    if (glass) ImGui::PopStyleColor();
     const ImRect rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     const auto key = ImGui::GetItemID();
     auto* storage = ImGui::GetStateStorage();
@@ -54,12 +56,24 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
         fill.w *= amount;
         draw->AddRectFilled(rect.Min, rect.Max, ImGui::GetColorU32(fill), 9.f * scale);
     }
-    if (ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
+    if (!glass && ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
-    // Neutral feedback and ink share one contrast choice; the colored keyboard
-    // focus ring above stays outside this bracket.
+    if (glass) GlassObjectBacking(draw,rect.Min,rect.Max,12.f*scale,palette);
+    if (glass && material) {
+        // A small sibling toggle window clips its glyphs/hit target tightly,
+        // but the material may cast its shadow inside the approved column.
+        if (objectOutsideWindow) {
+            const auto* viewport=ImGui::GetWindowViewport();
+            draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
+                viewport->Pos.y+viewport->Size.y),false);
+        }
+        material->AddObject(draw,rect.Min,rect.Max,palette.caption,12.f*scale);
+        if (objectOutsideWindow) draw->PopClipRect();
+    }
+    // Feedback, keyboard focus and the single sharp glyph share adaptive ink.
     const bool adaptiveInk = glass && material && material->BeginInk(draw,rect.Min,rect.Max,ImGui::GetItemID());
     const float press = glass ? GlassControlFeedback(rect,selected,scale,palette) : 0.f;
+    if (glass) GlassKeyboardFocus(rect,scale,palette);
     const float glyphSize = (glyph == Glyph::Stack ? (glass ? 25.f : 24.f) :
         (glass ? 23.f : 21.f)) * scale * (1.f - .045f*press);
     const ImVec2 glyphMin(rect.Min.x + (size - glyphSize) * .5f,
@@ -69,20 +83,9 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
         DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(ink));
         material->EndInk(draw);
     } else if (glass) {
-        // Preserve the existing vectors, with a quiet opposing halo so their
-        // strokes stay legible over either bright or dark refracted detail.
-        const float luminance = palette.text.x*.2126f + palette.text.y*.7152f + palette.text.z*.0722f;
-        const float haloInk = luminance > .5f ? 0.f : 1.f;
-        const ImVec4 halo(haloInk,haloInk,haloInk,.13f*palette.text.w);
-        const float offset = .65f*scale;
-        const ImU32 haloColor = ImGui::GetColorU32(halo);
-        DrawGlyph(draw,glyph,ImVec2(glyphMin.x-offset,glyphMin.y),glyphSize,haloColor);
-        DrawGlyph(draw,glyph,ImVec2(glyphMin.x+offset,glyphMin.y),glyphSize,haloColor);
-        DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y-offset),glyphSize,haloColor);
-        DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y+offset),glyphSize,haloColor);
-        ImVec4 ink(luminance,luminance,luminance,palette.text.w);
-        ink.w *= selected || ImGui::IsItemHovered() ? 1.f : .92f;
-        DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(ink));
+        // On an unavailable material, the solid core supplies known contrast.
+        // Keep the original glyph sharp rather than adding an outlined halo.
+        DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(palette.text));
     } else {
         DrawGlyph(draw,glyph,glyphMin,glyphSize,
             ImGui::GetColorU32(selected ? palette.text : palette.mutedText));

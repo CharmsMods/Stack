@@ -14,11 +14,11 @@ Source scope:
 
 Stack adapts this material for its independent OpenGL renderer and existing
 framebuffer/compositor, rather than importing the demo engine. Adaptations
-include Stack shader interfaces and bounded scene sampling, a flush-left rail
-with only exposed right corners rounded, and rail-specific visual tuning.
+include Stack shader interfaces and bounded scene sampling, independent rounded
+floating controls with shared backdrop capture, and navigation-specific visual tuning.
 The adapted shader source is in src/ThirdParty/LiquidGlass/LiquidGlassShaders.h;
 the original Stack wrapper is src/Renderer/GlassChromeShaders.h. Stack retains
-the upstream blur arrangement/kernel and static noise function. The rail uses
+the upstream blur arrangement/kernel and static noise function. Each object uses
 a Stack-specific convex bevel in physical pixels, with shared coverage and
 surface normals, Snell refraction, Fresnel-weighted nearby scene reflection
 and directional lighting, with a bounded display-only soft shadow. This

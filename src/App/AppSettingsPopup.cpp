@@ -203,11 +203,11 @@ void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, Sta
     }
 
     bool glassChromeEnabled = appearance->GetGlassChromeEnabled();
-    if (ImGui::Checkbox("Glass left navigation bar (experimental)", &glassChromeEnabled)) {
-        ReportPreferenceResult(state, "glass-chrome", "Glass left navigation bar (experimental)",
+    if (ImGui::Checkbox("Floating glass navigation (experimental)", &glassChromeEnabled)) {
+        ReportPreferenceResult(state, "glass-chrome", "Floating glass navigation (experimental)",
             appearance->SetGlassChromeEnabled(glassChromeEnabled));
     }
-    ImGui::TextWrapped("Experimental glass styling on the left navigation bar only; photos and exports unchanged.");
+    ImGui::TextWrapped("Separate floating glass controls in the left navigation column; photos and exports unchanged.");
     ImGui::Spacing();
 
     StackAppearance::RenderPaletteWorkshop(*appearance, state.paletteWorkshop, state.notifier);

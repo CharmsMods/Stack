@@ -16,6 +16,11 @@ struct PresentationContext {
     bool reducedMotion = false;
     std::function<void(ImDrawList*)> keepFixed;
     std::function<void(OwnerId)> viewProject;
+    // Optional presentation hooks decorate the existing indicator item without
+    // giving this presenter a dependency on a particular material renderer.
+    std::function<void(ImDrawList*,ImVec2,ImVec2,bool)> beginIndicator;
+    std::function<void(ImDrawList*)> endIndicator;
+    bool customIndicatorFocus = false;
 };
 
 // Owns display state only. Operation state and actions stay with their feature.

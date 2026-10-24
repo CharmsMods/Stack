@@ -10,26 +10,57 @@
 
 namespace Stack::Renderer {
 void GlassChrome::BeginFrame(bool requested) {
-    surfaces.clear(); inks.clear(); captureValid=false; inkReady=false;
+    backdrops.clear(); objects.clear(); inks.clear();
+    activeBackdrop=nullptr; captureValid=false; inkReady=false;
     if (!requested && enabled) { Shutdown(); }
     enabled = requested;
 }
-bool GlassChrome::AddSurface(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius) {
-    if (!enabled || !error.empty() || !draw || max.x <= min.x || max.y <= min.y) return false;
+bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint) {
+    if (!enabled || !error.empty() || !draw || max.x <= min.x || max.y <= min.y ||
+        ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     auto* viewport = ImGui::GetMainViewport();
     const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
-    surfaces.push_back({this,min,max,viewport->Pos,viewport->Size,ImGui::GetIO().DisplayFramebufferScale,
-        tint,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,viewport->DpiScale});
-    draw->AddCallback(Callback,&surfaces.back());
+    backdrops.push_back({this,min,max,viewport->Pos,viewport->Size,ImGui::GetIO().DisplayFramebufferScale,
+        tint,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),viewport->DpiScale});
+    draw->AddCallback(BackdropCallback,&backdrops.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
 }
-void GlassChrome::Callback(const ImDrawList*, const ImDrawCmd* command) {
-    const auto* surface = static_cast<const Surface*>(command->UserCallbackData);
-    if (surface) surface->owner->Draw(*surface);
+bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius) {
+    if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
+        ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
+    const Backdrop& backdrop=backdrops.back();
+    if (backdrop.scale.x<=0.f || backdrop.scale.y<=0.f) return false;
+    const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
+    // Cull before allocating callback payloads. Include the same bounded
+    // physical shadow apron as DrawObject, so a just-offclip object's shadow
+    // is retained but hidden project rows incur no GL callback/reset work.
+    const float r=std::min(std::max(0.f,radius)*std::min(backdrop.scale.x,backdrop.scale.y),
+        .5f*std::min((max.x-min.x)*backdrop.scale.x,(max.y-min.y)*backdrop.scale.y));
+    const float apron=std::ceil(3.f*std::max(.75f,r*.2f)+std::max(.75f,r*.22f));
+    const float left=std::max({clipMin.x,backdrop.min.x,backdrop.clip.x,backdrop.displayPos.x});
+    const float right=std::min({clipMax.x,backdrop.max.x,backdrop.clip.z,backdrop.displayPos.x+backdrop.displaySize.x});
+    const float top=std::max({clipMin.y,backdrop.min.y,backdrop.clip.y,backdrop.displayPos.y});
+    const float bottom=std::min({clipMax.y,backdrop.max.y,backdrop.clip.w,backdrop.displayPos.y+backdrop.displaySize.y});
+    if (right<=left || bottom<=top || max.x+apron/backdrop.scale.x<=left ||
+        min.x-apron/backdrop.scale.x>=right || max.y+apron/backdrop.scale.y<=top ||
+        min.y-apron/backdrop.scale.y>=bottom) return false;
+    objects.push_back({this,&backdrop,min,max,tint,
+        ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),std::max(0.f,radius)});
+    draw->AddCallback(ObjectCallback,&objects.back());
+    draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
+    return true;
+}
+void GlassChrome::BackdropCallback(const ImDrawList*, const ImDrawCmd* command) {
+    const auto* backdrop = static_cast<const Backdrop*>(command->UserCallbackData);
+    if (backdrop) backdrop->owner->CaptureBackdrop(*backdrop);
+}
+void GlassChrome::ObjectCallback(const ImDrawList*, const ImDrawCmd* command) {
+    const auto* object = static_cast<const Object*>(command->UserCallbackData);
+    if (object) object->owner->DrawObject(*object);
 }
 bool GlassChrome::BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id) {
-    if (!enabled || !error.empty() || !draw || max.x<=min.x || max.y<=min.y ||
+    if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x<=min.x || max.y<=min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const ImVec2 clipMin=draw->GetClipRectMin(), clipMax=draw->GetClipRectMax();
     // Offscreen project controls do not consume foreground slots. Identity
@@ -39,7 +70,7 @@ bool GlassChrome::BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id)
         error="Glass navigation exceeded its foreground GPU budget. Turn the mode off to use standard navigation.";
         return false;
     }
-    inks.push_back({this,min,max,id,MaxInkItems,
+    inks.push_back({this,&backdrops.back(),min,max,id,MaxInkItems,
         ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),false});
     draw->AddCallback(InkCallback,&inks.back());
     return true;
@@ -59,9 +90,10 @@ void GlassChrome::EndInkCallback(const ImDrawList*, const ImDrawCmd*) {
     glActiveTexture(GL_TEXTURE0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,0);
 }
 void GlassChrome::DrawInk(const Ink& ink) {
-    // Draw order supplies a fresh successful material capture first. A hidden
-    // rail or failed material must not reuse last frame's unrelated backdrop.
-    if (!captureValid || !inkReady || !ink.usable || !error.empty() || !programs[2]) return;
+    // Draw order supplies a fresh matching capture first. A hidden column or
+    // failed capture must not reuse another column's or last frame's pixels.
+    if (!captureValid || activeBackdrop!=ink.backdrop || !inkReady || !ink.usable ||
+        !error.empty() || !programs[2]) return;
     const float left=captureDisplayPos.x, right=left+captureDisplaySize.x;
     const float top=captureDisplayPos.y, bottom=top+captureDisplaySize.y;
     const float projection[16]={2.f/(right-left),0,0,0, 0,2.f/(top-bottom),0,0,
@@ -81,6 +113,7 @@ void GlassChrome::PrepareInk() {
     static_assert(sizeof(Item)==32,"std430 ink item layout");
     std::array<Item,MaxInkItems> items{};
     const float softW=float((width+1)/2), softH=float((height+1)/2);
+    const float framebufferH=float(int(captureDisplaySize.y*captureScale.y));
     const float uScale=captureSoftSize.x/(captureSize.x*softW);
     const float vScale=captureSoftSize.y/(captureSize.y*softH);
     std::array<bool,MaxInkItems> reserved{};
@@ -93,9 +126,9 @@ void GlassChrome::PrepareInk() {
         const ImVec2 max(std::min(ink.max.x,ink.clip.z),std::min(ink.max.y,ink.clip.w));
         const float leftPx=(min.x-captureDisplayPos.x)*captureScale.x;
         const float rightPx=(max.x-captureDisplayPos.x)*captureScale.x;
-        const float topPx=(captureDisplaySize.y-(min.y-captureDisplayPos.y))*captureScale.y;
-        const float bottomPx=(captureDisplaySize.y-(max.y-captureDisplayPos.y))*captureScale.y;
-        ink.usable=max.x>min.x && max.y>min.y && leftPx>=captureOrigin.x &&
+        const float topPx=framebufferH-(min.y-captureDisplayPos.y)*captureScale.y;
+        const float bottomPx=framebufferH-(max.y-captureDisplayPos.y)*captureScale.y;
+        ink.usable=ink.backdrop==activeBackdrop && max.x>min.x && max.y>min.y && leftPx>=captureOrigin.x &&
             rightPx<=captureOrigin.x+captureSize.x && bottomPx>=captureOrigin.y &&
             topPx<=captureOrigin.y+captureSize.y;
         if (!ink.usable) continue;
@@ -128,7 +161,7 @@ void GlassChrome::PrepareInk() {
         const ImVec2 min(std::max(ink.min.x,ink.clip.x),std::max(ink.min.y,ink.clip.y));
         const ImVec2 max(std::min(ink.max.x,ink.clip.z),std::min(ink.max.y,ink.clip.w));
         const float centerX=((min.x+max.x)*.5f-captureDisplayPos.x)*captureScale.x;
-        const float centerY=(captureDisplaySize.y-((min.y+max.y)*.5f-captureDisplayPos.y))*captureScale.y;
+        const float centerY=framebufferH-((min.y+max.y)*.5f-captureDisplayPos.y)*captureScale.y;
         item={{(centerX-captureOrigin.x)*uScale,(centerY-captureOrigin.y)*vScale,
             (max.x-min.x)*captureScale.x*.3f*uScale,
             (max.y-min.y)*captureScale.y*.3f*vScale},{ink.id,1,ink.slot,0}};
@@ -152,7 +185,7 @@ void GlassChrome::PrepareInk() {
     inkReady=true;
 }
 void GlassChrome::ReleaseTargets() {
-    captureValid=false; inkReady=false;
+    activeBackdrop=nullptr; captureValid=false; inkReady=false;
     glDeleteFramebuffers(3,framebuffers); glDeleteTextures(3,textures);
     for (auto& f : framebuffers) f = 0;
     for (auto& t : textures) t = 0;
@@ -211,7 +244,8 @@ bool GlassChrome::Ensure(int w, int h) {
     }
     unpack.Restore(); width = w; height = h; return true;
 }
-void GlassChrome::Draw(const Surface& s) {
+void GlassChrome::CaptureBackdrop(const Backdrop& s) {
+    activeBackdrop=nullptr; captureValid=false; inkReady=false;
     if (!error.empty()) return;
     const int fw = int(s.displaySize.x*s.scale.x), fh = int(s.displaySize.y*s.scale.y);
     if (fw <= 0 || fh <= 0) return;
@@ -220,15 +254,14 @@ void GlassChrome::Draw(const Surface& s) {
     const float top = std::max({s.min.y,s.clip.y,s.displayPos.y});
     const float bottom = std::min({s.max.y,s.clip.w,s.displayPos.y+s.displaySize.y});
     if (right <= left || bottom <= top) return;
-    const int x = std::clamp(int(std::ceil((left-s.displayPos.x)*s.scale.x)),0,fw);
-    const int y = std::clamp(int(std::ceil(fh-(bottom-s.displayPos.y)*s.scale.y)),0,fh);
-    const int w = std::clamp(int(std::floor((right-s.displayPos.x)*s.scale.x)),0,fw)-x;
-    const int h = std::clamp(int(std::floor(fh-(top-s.displayPos.y)*s.scale.y)),0,fh)-y;
+    const int x = std::clamp(int(std::floor((left-s.displayPos.x)*s.scale.x)),0,fw);
+    const int y = std::clamp(int(std::floor(fh-(bottom-s.displayPos.y)*s.scale.y)),0,fh);
+    const int w = std::clamp(int(std::ceil((right-s.displayPos.x)*s.scale.x)),0,fw)-x;
+    const int h = std::clamp(int(std::ceil(fh-(top-s.displayPos.y)*s.scale.y)),0,fh)-y;
     if (w <= 0 || h <= 0) return;
-    // Include a bounded blur/refraction neighborhood, not just pixels inside
-    // the material. A separate bounded output apron holds the soft UI shadow;
-    // it never changes image-processing data or the rail's hit/layout bounds.
-    const int padding = int(std::ceil(16.f*std::max(.5f,s.scale.x*s.dpi)));
+    // The column's common neighborhood is captured before any objects, shadows
+    // or foreground. Padding is sampling-only; it never becomes visible chrome.
+    const int padding = int(std::ceil(16.f*std::max(.5f,std::max(s.scale.x,s.scale.y)*s.dpi)));
     const int captureX = std::max(0,x-padding), captureY = std::max(0,y-padding);
     const int captureW = std::min(fw,x+w+padding)-captureX;
     const int captureH = std::min(fh,y+h+padding)-captureY;
@@ -256,60 +289,85 @@ void GlassChrome::Draw(const Surface& s) {
         glBindTexture(GL_TEXTURE_2D,textures[1]);
         glUniform2f(0,0.f,1.f/((height+1)/2));
         glUniform2f(1,float(lw)/((width+1)/2),float(lh)/((height+1)/2)); glDrawArrays(GL_TRIANGLES,0,3);
-        // Keep the light/shadow in physical pixels at every display scale.
-        // Respect caller clipping and the screen edge; no shadow to the left.
-        const int shadowPad=int(std::ceil(s.radius*s.scale.x*.8f));
-        const int outputRight=std::min({fw,x+w+shadowPad,
-            int(std::floor((s.clip.z-s.displayPos.x)*s.scale.x))});
-        const int outputBottom=std::max({0,y-shadowPad,
-            int(std::ceil(fh-(s.clip.w-s.displayPos.y)*s.scale.y))});
-        // The top toolbar owns the pixels above the rail. Do not cast a
-        // decorative shadow into that separately styled control surface.
-        const int outputTop=y+h;
-        target.Restore(); glViewport(x,outputBottom,outputRight-x,outputTop-outputBottom);
-        glUseProgram(programs[1]);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,textures[2]);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,textures[0]);
-        glUniform2f(0,float(w),float(h));
-        glUniform1f(2,s.radius*s.scale.x);
-        glUniform2f(5,float(lw)/((width+1)/2),float(lh)/((height+1)/2));
-        glUniform2f(6,float(x-captureX)/captureW,float(y-captureY)/captureH);
-        glUniform2f(7,float(w)/captureW,float(h)/captureH);
-        glUniform2f(8,float(captureW)/width,float(captureH)/height);
-        glUniform4f(9,float(outputRight-x),float(outputTop-outputBottom),0.f,float(y-outputBottom));
-        glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
-        glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
-        glDrawArrays(GL_TRIANGLES,0,3);
-    } else {
-        // Failed glass is not CPU-emulated. Keep an opaque emergency navigation
-        // surface readable this frame; the shell presents the latched error.
-        target.Restore();
-        GLfloat previousClear[4]; glGetFloatv(GL_COLOR_CLEAR_VALUE,previousClear);
-        glEnable(GL_SCISSOR_TEST); glScissor(x,y,w,h);
-        glClearColor(s.tint.x,s.tint.y,s.tint.z,1.f); glClear(GL_COLOR_BUFFER_BIT);
-        glClearColor(previousClear[0],previousClear[1],previousClear[2],previousClear[3]);
+        if (glGetError()==GL_NO_ERROR) {
+            activeBackdrop=&s; captureValid=true;
+            captureOrigin=ImVec2(float(captureX),float(captureY));
+            captureSize=ImVec2(float(captureW),float(captureH));
+            captureSoftSize=ImVec2(float(lw),float(lh));
+            captureDisplayPos=s.displayPos; captureDisplaySize=s.displaySize; captureScale=s.scale;
+            PrepareInk();
+            if (glGetError()!=GL_NO_ERROR) {
+                inkReady=false; captureValid=false; activeBackdrop=nullptr;
+                error="Glass navigation could not prepare its GPU foreground contrast. Turn the mode off to use standard navigation.";
+            }
+        } else {
+            error="Glass navigation could not capture its GPU backdrop. Turn the mode off to use standard navigation.";
+        }
     }
+    // Even allocation failure must leave this invisible column untouched. The
+    // shell displays the latched GPU failure; there is no CPU material fallback.
     target.Restore(true);
     if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
     glUseProgram(0); glBindVertexArray(0);
     for (int i=0;i<2;++i) { glActiveTexture(GL_TEXTURE0+i); glBindTexture(GL_TEXTURE_2D,0); }
     glActiveTexture(GL_TEXTURE0);
-    const GLenum reportedError = glGetError();
-    if (reportedError != GL_NO_ERROR && error.empty()) {
-        error = "OpenGL reported error " + std::to_string(reportedError) +
+    // The following ImDrawCallback_ResetRenderState reestablishes ImGui state.
+}
+void GlassChrome::DrawObject(const Object& object) {
+    if (!captureValid || activeBackdrop!=object.backdrop || !error.empty()) return;
+    const Backdrop& s=*object.backdrop;
+    const int fh=int(s.displaySize.y*s.scale.y);
+    // Full, unclipped bounds define the lens. Cropping a revealing button must
+    // not resize its shape, move its center or change its optical curvature.
+    const float x=(object.min.x-s.displayPos.x)*s.scale.x;
+    const float y=fh-(object.max.y-s.displayPos.y)*s.scale.y;
+    const float w=(object.max.x-object.min.x)*s.scale.x;
+    const float h=(object.max.y-object.min.y)*s.scale.y;
+    const float radius=std::min(object.radius*std::min(s.scale.x,s.scale.y),.5f*std::min(w,h));
+    const float sigma=std::max(.75f,radius*.2f);
+    const float shadowOffset=std::max(.75f,radius*.22f);
+    const float shadowPad=std::ceil(3.f*sigma+shadowOffset);
+    // The layout column and caller clip own output, not the padded capture.
+    // This bounds every side of each local shadow, including toolbar overlap.
+    const float clipLeft=std::max({s.min.x,s.clip.x,object.clip.x,s.displayPos.x});
+    const float clipRight=std::min({s.max.x,s.clip.z,object.clip.z,s.displayPos.x+s.displaySize.x});
+    const float clipTop=std::max({s.min.y,s.clip.y,object.clip.y,s.displayPos.y});
+    const float clipBottom=std::min({s.max.y,s.clip.w,object.clip.w,s.displayPos.y+s.displaySize.y});
+    if (clipRight<=clipLeft || clipBottom<=clipTop) return;
+    const int outputLeft=std::max(int(std::floor(x-shadowPad)),int(std::ceil((clipLeft-s.displayPos.x)*s.scale.x)));
+    const int outputRight=std::min(int(std::ceil(x+w+shadowPad)),int(std::floor((clipRight-s.displayPos.x)*s.scale.x)));
+    const int outputBottom=std::max(int(std::floor(y-shadowPad)),int(std::ceil(fh-(clipBottom-s.displayPos.y)*s.scale.y)));
+    const int outputTop=std::min(int(std::ceil(y+h+shadowPad)),int(std::floor(fh-(clipTop-s.displayPos.y)*s.scale.y)));
+    if (outputRight<=outputLeft || outputTop<=outputBottom) return;
+    // No framebuffer switch or copy per object. ImGui's queued reset restores
+    // the full viewport after this local draw, avoiding per-button GL queries.
+    const bool srgb=glIsEnabled(GL_FRAMEBUFFER_SRGB)!=GL_FALSE;
+    glDisable(GL_FRAMEBUFFER_SRGB); glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    glViewport(outputLeft,outputBottom,outputRight-outputLeft,outputTop-outputBottom);
+    glUseProgram(programs[1]); glBindVertexArray(vao);
+    glActiveTexture(GL_TEXTURE0); glBindSampler(0,0); glBindTexture(GL_TEXTURE_2D,textures[2]);
+    glActiveTexture(GL_TEXTURE1); glBindSampler(1,0); glBindTexture(GL_TEXTURE_2D,textures[0]);
+    glUniform2f(0,w,h);
+    glUniform1f(2,radius);
+    glUniform4f(3,object.tint.x,object.tint.y,object.tint.z,object.tint.w);
+    glUniform2f(5,captureSoftSize.x/((width+1)/2),captureSoftSize.y/((height+1)/2));
+    glUniform2f(6,(x-captureOrigin.x)/captureSize.x,(y-captureOrigin.y)/captureSize.y);
+    glUniform2f(7,w/captureSize.x,h/captureSize.y);
+    glUniform2f(8,captureSize.x/width,captureSize.y/height);
+    glUniform4f(9,float(outputRight-outputLeft),float(outputTop-outputBottom),x-outputLeft,y-outputBottom);
+    glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
+    glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES,0,3);
+    if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+    glUseProgram(0); glBindVertexArray(0);
+    for (int i=0;i<2;++i) { glActiveTexture(GL_TEXTURE0+i); glBindTexture(GL_TEXTURE_2D,0); }
+    glActiveTexture(GL_TEXTURE0);
+    const GLenum reportedError=glGetError();
+    if (reportedError!=GL_NO_ERROR) {
+        captureValid=false; inkReady=false; activeBackdrop=nullptr;
+        error="OpenGL reported error " + std::to_string(reportedError) +
             " during glass navigation. Turn the mode off to use standard navigation.";
-    }
-    captureValid=error.empty();
-    if (captureValid) {
-        captureOrigin=ImVec2(float(captureX),float(captureY));
-        captureSize=ImVec2(float(captureW),float(captureH));
-        captureSoftSize=ImVec2(float((captureW+1)/2),float((captureH+1)/2));
-        captureDisplayPos=s.displayPos; captureDisplaySize=s.displaySize; captureScale=s.scale;
-        PrepareInk();
-        if (glGetError()!=GL_NO_ERROR) {
-            inkReady=false; captureValid=false;
-            error="Glass navigation could not prepare its GPU foreground contrast. Turn the mode off to use standard navigation.";
-        }
     }
     // The following ImDrawCallback_ResetRenderState reestablishes ImGui state.
 }
@@ -319,6 +377,7 @@ void GlassChrome::Shutdown() {
     if (vao) glDeleteVertexArrays(1,&vao);
     glDeleteBuffers(2,inkBuffers); inkBuffers[0]=inkBuffers[1]=0;
     inkIdentity.fill(0); inkLastUsed.fill(0); inkEpoch=0;
-    vao=0; surfaces.clear(); inks.clear(); captureValid=false; inkReady=false; error.clear(); enabled=false;
+    vao=0; backdrops.clear(); objects.clear(); inks.clear(); activeBackdrop=nullptr;
+    captureValid=false; inkReady=false; error.clear(); enabled=false;
 }
 }

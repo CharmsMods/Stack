@@ -139,19 +139,22 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground |
         (rail.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     auto* draw = ImGui::GetWindowDrawList();
-    // The top bar owns the overlap's tint. Paint the rail below it once.
-    const ImVec2 glassMin(rail.position.x, viewport->Pos.y + m_RawMaskToolbar.visibleHeight);
-    const ImVec2 glassMax(rail.position.x + drawnWidth, viewport->Pos.y + viewport->Size.y);
-    // Material is a window background, not content: include the screen's left
-    // edge instead of inheriting ImGui's inset content clip rectangle.
-    if (glassRail) draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
-        viewport->Pos.y+viewport->Size.y),false);
-    if (!m_RailGlass.AddSurface(draw, glassMin, glassMax, railTint,16.f*s))
-        draw->AddRectFilled(glassMin, glassMax, ImGui::GetColorU32(railTint));
-    if (glassRail) draw->PopClipRect();
+    if (glassRail) {
+        // The column only organizes controls. Capture once before any objects,
+        // including the shared top toggle, without painting a sidebar surface.
+        draw->PushClipRect(viewport->Pos, ImVec2(viewport->Pos.x+viewport->Size.x,
+            viewport->Pos.y+viewport->Size.y), false);
+        m_RailGlass.AddBackdrop(draw, ImVec2(rail.position.x,viewport->Pos.y),
+            ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),railTint);
+        draw->PopClipRect();
+    } else {
+        // The normal sidebar retains its original tint below the top bar.
+        draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
+            ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
+    }
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, bool enabled = true) {
         return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, nullptr,
-            m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty(), &m_RailGlass);
+            m_Appearance && m_Appearance->GetGlassChromeEnabled(), &m_RailGlass);
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.
