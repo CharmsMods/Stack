@@ -179,7 +179,12 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
     float elevationWindow=smoothstep(.9510565163,.9902680687,elevationAlignment);
     float azimuthAlignment=-direction.y/max(horizontal,1e-6);
     float azimuthWindow=smoothstep(.2588190451,.6427876097,azimuthAlignment);
-    return ambient+vec3(2.5,2.45,2.35)*lamp+
+    // Broad distant studio illumination is reflected through the same surface
+    // normal/Fresnel path, not composited as a gray fill. It has no support
+    // below the opaque backdrop horizon and a smooth, upward-facing maximum.
+    float domeAlignment=max(0.0,dot(direction,vec3(0.0,.35,.9367496998)));
+    float dome=.10*domeAlignment*domeAlignment*smoothstep(0.0,.25,direction.z);
+    return ambient+vec3(dome)+vec3(2.5,2.45,2.35)*lamp+
         vec3(.55*studioWindowStrength)*elevationWindow*azimuthWindow;
 }
 void main() {
