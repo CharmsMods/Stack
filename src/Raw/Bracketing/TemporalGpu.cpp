@@ -92,7 +92,8 @@ public:
         try {available=execute([&](std::string& e){
             if(!glDispatchCompute||!glGetBufferSubData||!glBindBufferBase||!glMemoryBarrier){e="OpenGL compute is unavailable.";return false;}
             Bindings restore;GLint limit=0;glGetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE,&limit);blockLimit=std::max(0,limit);
-            const char* kernels[]={TemporalShaders::Prepare,TemporalShaders::Sample,TemporalShaders::Accumulate,TemporalShaders::Finish};
+            const char* kernels[]={TemporalShaders::Prepare,TemporalShaders::Sample.c_str(),TemporalShaders::Accumulate.c_str(),
+                TemporalShaders::Finish,TemporalShaders::SampleAccumulate.c_str()};
             const char* uniforms[]={"target","region","sensor","sites","aligned","reference","useBands","localGuide","groupIndex","groupCount","initializeGuide"};
             for(unsigned i=0;i<programs.size();++i){const std::string shader=std::string(TemporalShaders::Common)+kernels[i];
                 programs[i]=GLHelpers::CreateComputeProgram(shader.c_str());if(!programs[i]){e="Capture combining shader could not compile.";return false;}
@@ -298,8 +299,10 @@ public:
                 const auto parameters=SourceParameters(source);
                 if(!tile.Run([&](std::string&){tile.Upload(0,taps.size()*sizeof(Tap),taps.data());
                     if(aligned)tile.Upload(1,count*sizeof(Mapping),mapping.data());tile.Upload(5,192,&parameters);
-                    tile.Dispatch(1,left,top,width,height,data,sx,sy,sw,sh,source,aligned,bands,false);
-                    tile.Dispatch(2,left,top,width,height,data,sx,sy,sw,sh,source,aligned,bands,false);
+                    if(bands){
+                        tile.Dispatch(1,left,top,width,height,data,sx,sy,sw,sh,source,aligned,true,false);
+                        tile.Dispatch(2,left,top,width,height,data,sx,sy,sw,sh,source,aligned,true,false);
+                    }else tile.Dispatch(4,left,top,width,height,data,sx,sy,sw,sh,source,aligned,false,false);
                     return true;},gpuError))break;
             }
             if(!gpuError.empty())break;
@@ -321,8 +324,8 @@ public:
             " MiB; workspace allocations "+std::to_string(allocations)+", reuses "+std::to_string(reuses)+"."+
             (reason.empty()?"":" "+reason));
     }
-    Raw::OpenGlTaskExecutor execute;std::array<GLuint,4> programs{};
-    std::array<std::array<GLint,11>,4> uniformLocations{};bool available=false;
+    Raw::OpenGlTaskExecutor execute;std::array<GLuint,5> programs{};
+    std::array<std::array<GLint,11>,5> uniformLocations{};bool available=false;
     std::uint64_t budget=0,blockLimit=0,resident=0,peak=0,gpuTiles=0;
     Workspace idle;std::size_t operations=0;
     std::uint64_t allocations=0,reuses=0;

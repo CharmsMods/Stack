@@ -60,7 +60,7 @@ for comparison, and keep the original RAW inputs unchanged.
   behavior, noise cancellation and precedence, detail fusion and starting-look math.
   Scalar/noise AddressSanitizer and UndefinedBehaviorSanitizer runs passed; leak
   checking was unavailable in that execution environment.
-- All four temporal compute shaders compiled and linked on software Mesa. Actual
+- All five temporal compute shaders compiled and linked on software Mesa. Actual
   Accumulate/Finish dispatch passed 26 small arithmetic/flag cases. Later-group
   Prepare reset and failure propagation were checked separately. The actual
   temporal GPU wrapper also passed bounded multi-group success, weighted-output,
@@ -82,6 +82,12 @@ for comparison, and keep the original RAW inputs unchanged.
   Operation-scoped exact-layout GPU buffer reuse passed fresh-data, bounded-memory,
   concurrent-worker, cancellation and cleanup-failure checks on software Mesa.
   It reduces allocation calls, not intermediate image transfers or disk caching.
+  Non-detail-band sampling and accumulation now share one GPU dispatch, avoiding
+  an intermediate observation-buffer write/read. Detail-band neighborhood work
+  retains separate dispatches. Original/split/fused synthetic outputs matched on
+  software Mesa; bounded dispatch microcases showed no clear regression, but
+  exclude uploads, initialization and final readback. The added shader increases
+  initialization work; hardware startup and full-pipeline timing remain unmeasured.
   No end-to-end speedup or real-camera image-quality improvement is established.
 - Full Windows build and user-selected capture testing remain outstanding. The
   full `Process` integration check was blocked by unavailable OpenCV development

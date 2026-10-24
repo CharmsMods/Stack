@@ -117,7 +117,7 @@ void main(){
 }
 )GLSL";
 
-inline const char* Sample=R"GLSL(
+inline const char* SamplingFunctions=R"GLSL(
 double kernel(double d){double t=abs(d);if(t<=1.LF)return 1.5LF*t*t*t-2.5LF*t*t+1.LF;if(t<2.LF)return -.5LF*t*t*t+2.5LF*t*t-4.LF*t+2.LF;return 0.LF;}
 double derivative(double d){double t=abs(d);if(t==0.LF||t>=2.LF)return 0.LF;return sign(d)*(t<=1.LF?4.5LF*t*t-5.LF*t:-1.5LF*t*t+5.LF*t-4.LF);}
 Observation sampleAt(int i,ivec2 p){
@@ -192,14 +192,15 @@ Observation sampleAt(int i,ivec2 p){
     o.variance=o.measurement+o.uncertainty;o.headroom=nearestInside?headroom(nearestValue):1.LF;o.support=1.LF;
     return o;
 }
+)GLSL";
+inline const std::string Sample=std::string(SamplingFunctions)+R"GLSL(
 void main(){int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
     samples[i]=sampleAt(i,target.xy+ivec2(i%target.z,i/target.z));}
 )GLSL";
 
-inline const char* Accumulate=R"GLSL(
-void main(){
-    int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
-    int index=groupIndex*target.z*target.w+i;Accumulator a=sums[index];Observation s=samples[i];
+inline const char* AccumulationFunctions=R"GLSL(
+void accumulateAt(int i,Observation s,bool bands){
+    int index=groupIndex*target.z*target.w+i;Accumulator a=sums[index];
     a.o.flags|=s.flags&REJECTED;double contribution=0.LF;
     if((s.flags&FINITE)!=0u){
         bool oldRejected=(a.o.flags&FALLBACK_REJECTED)!=0u,newRejected=(s.flags&REJECTED)!=0u;
@@ -227,7 +228,7 @@ void main(){
             }
         }
     }
-    if(useBands!=0&&contribution>0.LF&&s.support>0.LF&&(s.flags&(FINITE|CLIPPED))==FINITE){
+    if(bands&&contribution>0.LF&&s.support>0.LF&&(s.flags&(FINITE|CLIPPED))==FINITE){
         ivec2 p=ivec2(i%target.z,i/target.z);double coarse=0.LF,cv=0.LF,total=0.LF,cw=0.LF;
         for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx){
             ivec2 q=p+2*ivec2(dx,dy);if(any(lessThan(q,ivec2(0)))||any(greaterThanEqual(q,target.zw)))continue;
@@ -246,6 +247,18 @@ void main(){
     }
     sums[index]=a;
 }
+)GLSL";
+
+inline const std::string Accumulate=std::string(AccumulationFunctions)+R"GLSL(
+void main(){int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
+    accumulateAt(i,samples[i],useBands!=0);}
+)GLSL";
+
+// No neighborhood reads: keep each sampled observation in this invocation.
+// Detail bands retain separate dispatches so every neighboring sample exists.
+inline const std::string SampleAccumulate=std::string(SamplingFunctions)+AccumulationFunctions+R"GLSL(
+void main(){int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
+    accumulateAt(i,sampleAt(i,target.xy+ivec2(i%target.z,i/target.z)),false);}
 )GLSL";
 
 inline const char* Finish=R"GLSL(
