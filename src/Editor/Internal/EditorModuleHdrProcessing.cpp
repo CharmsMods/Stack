@@ -426,41 +426,49 @@ void EditorModule::RestoreHdrResultCacheAfterProjectLoad() {
         burstCachePath
     ]() mutable {
         RestoreOutcome outcome;
-        if (hdrResult) {
-            Raw::Hdr::Result cached;
-            if (!metadataJson.is_object() || metadataJson.empty()) {
-                outcome.error = "HDR cache metadata is unavailable.";
-            } else if (!Raw::Hdr::ReadResultCache(
-                    hdrCacheDirectory,
-                    cacheKey,
-                    cached,
-                    &outcome.error)) {
-                // ReadResultCache supplies the concrete verification failure.
-            } else {
-                cached.referenceMetadata =
-                    EditorNodeGraph::DeserializeRawMetadata(metadataJson);
-                outcome.hdr =
-                    std::make_shared<const Raw::Hdr::Result>(
-                        std::move(cached));
-                outcome.raw = BuildHdrRawData(
-                    outcome.hdr,
-                    outcome.hdr->referenceMetadata,
-                    projectId,
-                    sourceSetId);
-                if (!outcome.raw) {
-                    outcome.error =
-                        "The verified HDR cache could not be rebuilt as RAW data.";
+        try {
+            if (hdrResult) {
+                Raw::Hdr::Result cached;
+                if (!metadataJson.is_object() || metadataJson.empty()) {
+                    outcome.error = "HDR cache metadata is unavailable.";
+                } else if (!Raw::Hdr::ReadResultCache(
+                        hdrCacheDirectory,
+                        cacheKey,
+                        cached,
+                        &outcome.error)) {
+                    // ReadResultCache supplies the concrete verification failure.
+                } else {
+                    cached.referenceMetadata =
+                        EditorNodeGraph::DeserializeRawMetadata(metadataJson);
+                    outcome.hdr =
+                        std::make_shared<const Raw::Hdr::Result>(
+                            std::move(cached));
+                    outcome.raw = BuildHdrRawData(
+                        outcome.hdr,
+                        outcome.hdr->referenceMetadata,
+                        projectId,
+                        sourceSetId);
+                    if (!outcome.raw) {
+                        outcome.error =
+                            "The verified HDR cache could not be rebuilt as RAW data.";
+                    }
                 }
+            } else if (burstCachePath.empty()) {
+                outcome.error = "The saved Burst result has no cache path.";
+            } else {
+                Stack::EditorMultiFrameCache::ReadBurstResult(
+                    burstCachePath,
+                    graphIdentity,
+                    inputRevision,
+                    outcome.raw,
+                    &outcome.error);
             }
-        } else if (burstCachePath.empty()) {
-            outcome.error = "The saved Burst result has no cache path.";
-        } else {
-            Stack::EditorMultiFrameCache::ReadBurstResult(
-                burstCachePath,
-                graphIdentity,
-                inputRevision,
-                outcome.raw,
-                &outcome.error);
+        } catch (const std::exception& exception) {
+            outcome = {};
+            outcome.error = "The saved result could not be restored: " + std::string(exception.what());
+        } catch (...) {
+            outcome = {};
+            outcome.error = "The saved result could not be restored.";
         }
 
         ProjectTasks().PostToMain([

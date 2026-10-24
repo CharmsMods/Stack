@@ -28,6 +28,8 @@ Use the storage transaction and revision rules already in place. Preserve the la
 
 Decode and validate a candidate before replacing live state. Keep asynchronous load completion attached to the receiving project and operation. Define what happens if another load starts, the project closes or the candidate fails after partial application. Rejection must not silently discard another operation's completion. Recovery should retain the old document's identity, dirty state and storage relationship.
 
+Rebuildable MultiFrame cache readers turn malformed metadata, truncated payloads and restoration exceptions into diagnostic failures, not a permanently busy processing state. Readers validate payload lengths before allocating decoded planes, and HDR cache verification hashes the existing header/payload spans without duplicating the complete payload. A failed HDR read leaves the caller's previously accepted result intact.
+
 Keep catalog discovery and filtering separate from authoritative document storage. Publish catalog changes after successful writes and invalidate derived listings through the established mechanism. A Gallery refresh must not mutate open project data to make its display agree.
 
 Only the current project format is supported. The graph reader accepts schema 16 and rejects obsolete generations transactionally, preserving the live project. Do not add old-project migrations or legacy execution modes. Advance the schema when saved semantics change rather than silently reinterpreting obsolete data.

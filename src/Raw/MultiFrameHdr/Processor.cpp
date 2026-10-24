@@ -2852,7 +2852,7 @@ bool ReadResultCache(
     const std::filesystem::path& directory,
     const std::string& cacheKey,
     Result& result,
-    std::string* error) {
+    std::string* error) try {
     if (!LooksLikeSha256(cacheKey)) {
         if (error) *error = "HDR cache key is invalid.";
         return false;
@@ -2874,13 +2874,23 @@ bool ReadResultCache(
     std::string expectedHash(64u, '\0');
     stream.read(headerText.data(), static_cast<std::streamsize>(headerText.size()));
     stream.read(expectedHash.data(), static_cast<std::streamsize>(expectedHash.size()));
-    std::vector<char> payload {
-        std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>() };
-    std::string verifiedBytes = headerText;
-    verifiedBytes.append(payload.data(), payload.size());
-    // istreambuf_iterator may consume the complete stream without setting
-    // eofbit. A hard I/O failure is meaningful here; eofbit itself is not.
-    if (stream.bad() || Sha256Digest(verifiedBytes) != expectedHash) {
+    const auto payloadStart = stream.tellg();
+    stream.seekg(0, std::ios::end);
+    const auto payloadEnd = stream.tellg();
+    if (!stream || payloadStart < 0 || payloadEnd < payloadStart ||
+        static_cast<std::uintmax_t>(payloadEnd - payloadStart) > std::numeric_limits<std::size_t>::max() ||
+        payloadEnd - payloadStart > std::numeric_limits<std::streamsize>::max()) {
+        if (error) *error = "The HDR cache payload length is invalid.";
+        return false;
+    }
+    // Allocate once and hash existing spans. Copying the entire payload into
+    // a second string doubled peak cache-read memory before decoding vectors.
+    std::vector<char> payload(static_cast<std::size_t>(payloadEnd - payloadStart));
+    stream.seekg(payloadStart);
+    if (!payload.empty()) stream.read(payload.data(), static_cast<std::streamsize>(payload.size()));
+    const std::vector<std::string_view> hashChunks {headerText,
+        payload.empty() ? std::string_view{} : std::string_view(payload.data(), payload.size())};
+    if (!stream || Sha256Digest(hashChunks) != expectedHash) {
         if (error) *error = "The HDR cache payload failed content verification.";
         return false;
     }
@@ -3043,6 +3053,12 @@ bool ReadResultCache(
     result = std::move(decoded);
     if (error) error->clear();
     return true;
+} catch (const std::exception& exception) {
+    if (error) *error = "The HDR cache could not be restored: " + std::string(exception.what());
+    return false;
+} catch (...) {
+    if (error) *error = "The HDR cache could not be restored.";
+    return false;
 }
 
 } // namespace Raw::Hdr

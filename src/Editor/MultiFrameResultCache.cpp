@@ -147,7 +147,7 @@ bool ReadBurstResult(
     const std::string& expectedGraphIdentity,
     std::uint64_t expectedInputRevision,
     std::shared_ptr<Raw::RawImageData>& raw,
-    std::string* errorMessage) {
+    std::string* errorMessage) try {
     raw.reset();
     std::ifstream checksumStream(ChecksumPath(path), std::ios::binary);
     std::string expectedChecksum;
@@ -205,6 +205,14 @@ bool ReadBurstResult(
         return Fail(errorMessage, "The MultiFrame result cache dimensions are corrupt.");
     }
 
+    const std::uint64_t prefixBytes = kMagic.size() + sizeof(headerSize) + headerSize + sizeof(pixelCount);
+    if (identity.byteSize < prefixBytes ||
+        pixelCount > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(float) ||
+        pixelCount != (identity.byteSize - prefixBytes) / sizeof(float) ||
+        (identity.byteSize - prefixBytes) % sizeof(float) != 0) {
+        return Fail(errorMessage, "The MultiFrame result cache payload length is corrupt.");
+    }
+
     auto pixels = std::make_shared<std::vector<float>>();
     try {
         pixels->resize(static_cast<std::size_t>(pixelCount));
@@ -233,6 +241,12 @@ bool ReadBurstResult(
     raw = std::move(decoded);
     if (errorMessage) errorMessage->clear();
     return true;
+} catch (const std::exception& exception) {
+    raw.reset();
+    return Fail(errorMessage, "The MultiFrame result cache could not be restored: " + std::string(exception.what()));
+} catch (...) {
+    raw.reset();
+    return Fail(errorMessage, "The MultiFrame result cache could not be restored.");
 }
 
 } // namespace Stack::EditorMultiFrameCache

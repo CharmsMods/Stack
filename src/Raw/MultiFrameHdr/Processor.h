@@ -67,8 +67,8 @@ using OpenGlTaskExecutor = Raw::OpenGlTaskExecutor;
 
 struct Services {
     RawFrameLoader loadRawFrame;
-    // Optional host-owned OpenGL 4.3 context executor. Absence or failure
-    // selects the normative CPU implementation automatically.
+    // Host-owned OpenGL 4.3 executor for GPU-selected fusion. A missing or
+    // failed executor reports a failure, never a silent CPU retry.
     OpenGlTaskExecutor executeOpenGlTask;
 };
 
