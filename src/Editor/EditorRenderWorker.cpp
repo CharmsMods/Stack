@@ -1706,7 +1706,8 @@ void EditorRenderWorker::HandleThreadFailure(
                     parked.ownerId == currentRequest->ownerId &&
                     parked.generation == currentRequest->generation &&
                     parked.schedulingSerial == currentRequest->schedulingSerial;
-                failSnapshot(parked, owner.resumeOriginalPurpose
+                failSnapshot(parked, owner.resumeOriginalPurpose ||
+                    !RawRenderPurposeMayPublishPresentation(parked.rawRenderPurpose)
                     ? parked.rawRenderPurpose : RawRenderPurpose::DenoiseCompletion);
                 // Transfer terminal ownership before Pump can take a ready
                 // continuation and report the same failure a second time.
@@ -2176,7 +2177,8 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
                 snapshot = std::move(*owner.continuation);
                 owner.continuation.reset();
                 owner.continuationReady = false;
-                if (!owner.resumeOriginalPurpose)
+                if (!owner.resumeOriginalPurpose &&
+                    RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose))
                     snapshot.rawRenderPurpose = RawRenderPurpose::DenoiseCompletion;
                 owner.resumeOriginalPurpose = false;
                 snapshot.schedulingSerial = m_NextSchedulingSerial++;

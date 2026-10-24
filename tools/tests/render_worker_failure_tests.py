@@ -5,7 +5,9 @@ The request/result payloads are reduced to lifecycle identity; platform, GPU and
 model operations are fakes. Worker failure/publication, owner validation, drain,
 service scheduling/routing and explicit shutdown are production method bodies.
 Selected failure consumers and the fatal-idle scheduling gate are also copied
-unchanged. This checks lifecycle decisions, not the full worker/UI render loop.
+unchanged. Shared/dedicated continuation purpose, polling and auxiliary-only
+dispatch branches are exercised with promise-backed model readiness. This checks
+lifecycle decisions, not the full worker/UI render loop.
 A single queue-push failure exercises the existing allocation-free fallback; this
 is not a process-wide OOM proof. No private-state hook is added to production.
 """
@@ -42,6 +44,7 @@ pre = r'''
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -70,7 +73,13 @@ namespace Raw {
 enum class OpenGlTaskPriority { Foreground, Background };
 namespace ViewportGpuTiming { void Release(int&) {} }
 }
-struct FakeDenoise { void RequestCancellation() {} void CancelAndWait() { ++drainedModels; } };
+struct FakeDenoise {
+    bool pending=false,deferred=false,canceled=false;
+    std::future<int> future;
+    bool IsCompletionReady() const { return pending && future.valid() && future.wait_for(std::chrono::milliseconds(0))==std::future_status::ready; }
+    void RequestCancellation() { canceled=true;deferred=false; }
+    void CancelAndWait() { ++drainedModels;pending=false; }
+};
 struct RenderPipeline {};
 struct ViewportRequest { bool enabled=false,empty=false; std::uint64_t generation=0; };
 struct ViewportTilingSettings {};
@@ -112,7 +121,7 @@ public:
         RawRenderTelemetry telemetry; int previewMaxDimension=0;
         RawWorkspaceSnapshot rawWorkspace; ViewportRequest viewportPreview;
         int viewportViewId=0; std::size_t viewportExecutionIdentity=0,viewportContentIdentity=0;
-        bool prepareViewportOverview=false; int graph=0; ViewportTilingSettings viewportTiling;
+        bool prepareViewportOverview=false,outputConnected=false; int graph=0; ViewportTilingSettings viewportTiling;
         std::vector<PreviewRequest> previews;
         std::shared_ptr<const Snapshot> rawSessionTemplate;
         std::uint64_t rawSessionContractRevision=0; bool rawSessionCommand=false;
@@ -131,7 +140,7 @@ public:
     struct RenderProgress { bool busy=false; int completedSteps=0,totalSteps=0; std::string label; };
     struct OwnerRenderState {
         std::shared_ptr<FakeDenoise> denoise; std::optional<Snapshot> continuation;
-        bool continuationReady=false,resumeOriginalPurpose=false,denoiseInFlight=false,released=false;
+        bool continuationReady=false,resumeOriginalPurpose=false,denoiseInFlight=false,released=false,resetDenoiseRequested=false;
         RawRenderPurpose denoisePurpose=RawRenderPurpose::InteractivePresentation;
         std::uint64_t invalidBeforeGeneration=0,invalidBeforeSerial=0,latestGeneration=0,latestSerial=0;
         std::unordered_map<RawRenderPurpose,std::uint64_t> canceledPurposeBeforeSerial;
@@ -155,9 +164,9 @@ public:
     struct Timing { int batch=0; };std::vector<Timing> m_PendingViewportTimings;
     bool Initialize(GLFWwindow* window) { m_WorkerWindow=window;return true; }
     bool ExecuteOpenGlTaskBlocking(OpenGlTask,std::string&,Raw::OpenGlTaskPriority) { return false; }
-    void CancelOwnerSnapshots(std::uint64_t,std::optional<RawRenderPurpose> = {}) {}
-    void InvalidateOwnerSnapshotsBefore(std::uint64_t,std::uint64_t) {}
-    void ReleaseOwner(std::uint64_t owner) { m_OwnerStates[owner].released=true; }
+    void CancelOwnerSnapshots(std::uint64_t,std::optional<RawRenderPurpose> = {});
+    void InvalidateOwnerSnapshotsBefore(std::uint64_t,std::uint64_t);
+    void ReleaseOwner(std::uint64_t);
     void PublishForTest(Snapshot&,Result);
     void HandleThreadFailure(const char*,const Snapshot*) noexcept;
     bool GetThreadFailure(std::string* = nullptr) const noexcept;
@@ -168,6 +177,11 @@ public:
     bool HasPendingSnapshotOrRender() const;bool HasDenoiseWorkLocked() const;
     bool IsWaitingForRawDenoiseCompletion() const;bool IsAvailable() const;
     bool TryConsumeReadyDenoiseSnapshot(Snapshot&);RenderProgress GetProgress() const;
+    bool TakeDedicatedContinuationForTest(Snapshot&);
+    bool CanStartAuthoritativeRenderLocked(std::uint64_t) const;
+    void PollDenoiseContinuationsLocked();
+    Result RenderAuxiliaryForTest(const Snapshot&);
+    int mainRenderCalls=0,previewRenderCalls=0;
     void DrainDenoiseForShutdown() noexcept;void RequestStopForShutdown();void Shutdown();
 };
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot&) { return 1; }
@@ -196,6 +210,11 @@ for signature in [
     'EditorRenderWorker::RenderProgress EditorRenderWorker::GetProgress()']:
     methods += method(worker, signature)
 for signature in [
+    'void EditorRenderWorker::CancelOwnerSnapshots(',
+    'void EditorRenderWorker::InvalidateOwnerSnapshotsBefore(',
+    'void EditorRenderWorker::ReleaseOwner(',
+    'void EditorRenderWorker::PollDenoiseContinuationsLocked()',
+    'bool EditorRenderWorker::CanStartAuthoritativeRenderLocked(',
     'bool EditorRenderWorker::IsOwnerSnapshotInvalidLocked(',
     'bool EditorRenderWorker::HasDenoiseWorkLocked()',
     'bool EditorRenderWorker::HasPendingForOwner(',
@@ -203,6 +222,21 @@ for signature in [
     'bool EditorRenderWorker::TryConsumeReadyDenoiseSnapshot(',
     'void EditorRenderWorker::DrainDenoiseForShutdown()']:
     methods += method(sessions, signature)
+dedicated_start = worker.index('                auto& owner = dedicated->second;', worker.index('} else if (denoiseCompletionReady) {'))
+dedicated_end = worker.index('            } else {', dedicated_start)
+dedicated = worker[dedicated_start:dedicated_end]
+methods += '''bool EditorRenderWorker::TakeDedicatedContinuationForTest(Snapshot& snapshot) {
+    auto dedicated=m_OwnerStates.find(0);
+    if(dedicated==m_OwnerStates.end() || !dedicated->second.continuationReady || !dedicated->second.continuation) return false;
+''' + dedicated + '    return true;\n}\n'
+auxiliary_start = worker.index('        if (!snapshot.outputConnected) {', worker.index('EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot('))
+auxiliary = method(worker[auxiliary_start:], '        if (!snapshot.outputConnected) {')
+methods += '''EditorRenderWorker::Result EditorRenderWorker::RenderAuxiliaryForTest(const Snapshot& snapshot) {
+    Result result;
+    result.rawRenderPurpose=snapshot.rawRenderPurpose;
+    const auto renderDevelopCandidateRequests=[]{};
+    const auto renderPreviewRequests=[&]{++previewRenderCalls;};
+''' + auxiliary + '    ++mainRenderCalls;return result;\n}\n'
 methods += method(timing, 'bool EditorRenderWorker::TryConsumeViewportTiming(')
 header = (root / 'src/Editor/RawRenderService.h').read_text()
 header = '\n'.join(line for line in header.splitlines() if not line.startswith('#include') and line != '#pragma once')
@@ -350,6 +384,72 @@ void AuxiliaryIdentity() {
     Require(result.previews.size()==1 && result.previews[0].assetCapture && result.previews[0].assetCaptureInput && result.previews[0].dirtyGeneration==654,"capture terminal identity retained");
     Require(result.rawWorkspace.preciseSolveResult && result.rawWorkspace.preciseSolveResult->failed && result.rawWorkspace.preciseSolveResult->candidate.identity==987,"precise solve terminal identity retained");
 }
+void ContinuationPurposeOwnership() {
+    for(bool dedicated:{false,true}) for(auto purpose:{RawRenderPurpose::Thumbnail,
+            RawRenderPurpose::AnalysisScopes,RawRenderPurpose::InteractiveSample,
+            RawRenderPurpose::CachePrewarm,RawRenderPurpose::ViewportOverview,
+            RawRenderPurpose::InteractivePresentation,RawRenderPurpose::ViewportRefinement,
+            RawRenderPurpose::DenoiseCompletion}) {
+        EditorRenderWorker worker;auto request=Request(dedicated?0:7,77,purpose);
+        request.rawSessionCommand=RawRenderPurposeMayPublishPresentation(purpose);
+        if(request.rawSessionCommand) {
+            auto mainTemplate=std::make_shared<Snapshot>();mainTemplate->outputConnected=true;
+            request.rawSessionTemplate=mainTemplate;
+        }
+        Require(!request.outputConnected,"compact main and auxiliary payloads both default disconnected before expansion");
+        PreviewRequest preview;preview.previewNodeId=123;preview.dirtyGeneration=456;request.previews.push_back(preview);
+        auto& owner=worker.m_OwnerStates[request.ownerId];owner.continuation=request;
+        owner.denoise=std::make_shared<FakeDenoise>();owner.denoise->pending=true;owner.latestSerial=request.schedulingSerial;
+        std::promise<int> promise;owner.denoise->future=promise.get_future();worker.m_NextSchedulingSerial=100;
+        const auto take=[&](Snapshot& next){return dedicated?worker.TakeDedicatedContinuationForTest(next):worker.TryConsumeReadyDenoiseSnapshot(next);};
+        Snapshot next;
+        for(int tick=0;tick<4;++tick) {
+            worker.PollDenoiseContinuationsLocked();
+            Require(!owner.continuationReady && !owner.resumeOriginalPurpose && !take(next),"pending auxiliary model must not hot-replay or bypass its future");
+        }
+        Require(worker.HasPendingForOwner(request.ownerId) && worker.IsWaitingForRawDenoiseCompletion(),"parked auxiliary continuation remains visible as busy work");
+        promise.set_value(1);worker.PollDenoiseContinuationsLocked();
+        Require(take(next) && !take(next),"ready continuation dequeues exactly once");
+        const auto expected=RawRenderPurposeMayPublishPresentation(purpose)?RawRenderPurpose::DenoiseCompletion:purpose;
+        Require(next.rawRenderPurpose==expected && owner.denoisePurpose==expected && !owner.resumeOriginalPurpose,"effective continuation purpose preserves the original consumer");
+        Require(next.ownerId==request.ownerId && next.generation==request.generation && next.rawWorkspace.sourceKey==request.rawWorkspace.sourceKey && next.previews.size()==1 && next.previews[0].dirtyGeneration==456,"continuation retains owner/source/generation and preview ownership");
+        Require(next.schedulingSerial==(dedicated?100:request.schedulingSerial),"dedicated replay renews serial and shared replay leaves renewal to service");
+        if(!RawRenderPurposeMayPublishPresentation(purpose)) {
+            auto result=worker.RenderAuxiliaryForTest(next);
+            Require(result.success && result.error.empty() && worker.previewRenderCalls==1 && worker.mainRenderCalls==0,"ready RAW auxiliary branch renders feedback without inventing a missing-main failure or rerendering main");
+        } else {
+            Require(next.rawSessionCommand && next.rawSessionTemplate && next.rawSessionTemplate->outputConnected,"compact main command still becomes presentation completion before template expansion");
+        }
+    }
+    for(bool dedicated:{false,true}) for(auto purpose:{RawRenderPurpose::ExplicitExport,RawRenderPurpose::ExplicitInspection}) {
+        EditorRenderWorker worker;auto request=Request(dedicated?0:7,78,purpose);
+        auto& owner=worker.m_OwnerStates[request.ownerId];owner.continuation=request;owner.resumeOriginalPurpose=true;
+        worker.PollDenoiseContinuationsLocked();Snapshot next;
+        Require((dedicated?worker.TakeDedicatedContinuationForTest(next):worker.TryConsumeReadyDenoiseSnapshot(next)) && next.rawRenderPurpose==purpose,"authoritative deferred resume retains original purpose");
+    }
+    for(int invalid=0;invalid<3;++invalid) {
+        EditorRenderWorker worker;auto request=Request(9,79,RawRenderPurpose::Thumbnail);
+        auto& owner=worker.m_OwnerStates[9];owner.continuation=request;owner.denoisePurpose=request.rawRenderPurpose;owner.denoise=std::make_shared<FakeDenoise>();owner.denoise->pending=true;
+        std::promise<int> promise;owner.denoise->future=promise.get_future();
+        worker.m_NextSchedulingSerial=request.schedulingSerial+1;
+        if(invalid==0)worker.CancelOwnerSnapshots(9,RawRenderPurpose::Thumbnail);
+        if(invalid==1)worker.InvalidateOwnerSnapshotsBefore(9,request.generation+1);
+        if(invalid==2)worker.ReleaseOwner(9);
+        promise.set_value(1);worker.PollDenoiseContinuationsLocked();Snapshot next;
+        Require(!worker.TryConsumeReadyDenoiseSnapshot(next) && !worker.HasDenoiseWorkLocked(),"canceled, newer-generation or released auxiliary ownership cannot revive after readiness");
+    }
+    for(auto purpose:{RawRenderPurpose::Thumbnail,RawRenderPurpose::AnalysisScopes,
+            RawRenderPurpose::InteractiveSample,RawRenderPurpose::CachePrewarm,RawRenderPurpose::ViewportOverview}) {
+        EditorRenderWorker worker;auto request=Request(10,80,purpose);worker.m_OwnerStates[10].continuation=request;
+        worker.HandleThreadFailure("model worker unavailable",nullptr);Result result;
+        Require(worker.TryConsumeCompleted(result),"parked auxiliary gets its terminal failure");CheckFailure(result,request,purpose);
+        Require(!worker.TryConsumeCompleted(result),"parked auxiliary terminal failure reports once");
+        EditorRenderWorker canceled;canceled.m_OwnerStates[10].continuation=request;
+        canceled.m_OwnerStates[10].canceledPurposeBeforeSerial[purpose]=request.schedulingSerial+1;
+        canceled.HandleThreadFailure("model worker unavailable",nullptr);
+        Require(canceled.m_Completed.empty(),"fatal reporting honors original auxiliary purpose cancellation");
+    }
+}
 '''
 consumer = r'''
 namespace Async { enum class TaskState { Failed }; }
@@ -470,7 +570,7 @@ void AdoptionTerminalState() {
 '''
 main = r'''
 int main() {
-    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();AdoptionTerminalState();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
+    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''

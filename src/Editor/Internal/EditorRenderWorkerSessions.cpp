@@ -198,7 +198,12 @@ bool EditorRenderWorker::TryConsumeReadyDenoiseSnapshot(Snapshot& snapshot) {
         snapshot = std::move(*owner.continuation);
         owner.continuation.reset();
         owner.continuationReady = false;
-        if (!owner.resumeOriginalPurpose) snapshot.rawRenderPurpose = RawRenderPurpose::DenoiseCompletion;
+        // Model readiness does not turn auxiliary work into a main-image
+        // request. Compact main commands may have outputConnected=false until
+        // expansion, so preserve ownership using purpose, not payload shape.
+        if (!owner.resumeOriginalPurpose &&
+            RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose))
+            snapshot.rawRenderPurpose = RawRenderPurpose::DenoiseCompletion;
         owner.resumeOriginalPurpose = false;
         owner.denoisePurpose = snapshot.rawRenderPurpose;
         return true;
