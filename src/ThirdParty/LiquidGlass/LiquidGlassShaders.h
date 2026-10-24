@@ -178,7 +178,7 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
     float elevationWindow=smoothstep(.9510565163,.9902680687,elevationAlignment);
     float azimuthAlignment=-direction.y/max(horizontal,1e-6);
     float azimuthWindow=smoothstep(.2588190451,.6427876097,azimuthAlignment);
-    return ambient*.94+vec3(.006)+vec3(2.5,2.45,2.35)*lamp+
+    return ambient+vec3(2.5,2.45,2.35)*lamp+
         vec3(.55)*elevationWindow*azimuthWindow;
 }
 void main() {
