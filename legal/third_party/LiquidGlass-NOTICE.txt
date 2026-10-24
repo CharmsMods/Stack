@@ -18,10 +18,13 @@ include Stack shader interfaces and bounded scene sampling, a flush-left rail
 with only exposed right corners rounded, and rail-specific visual tuning.
 The adapted shader source is in src/ThirdParty/LiquidGlass/LiquidGlassShaders.h;
 the original Stack wrapper is src/Renderer/GlassChromeShaders.h. Stack retains
-the upstream material equations and application defaults while replacing the
-full squircle mapping with a cropped, one-sided rail silhouette. The upstream
-reversed-edge smoothstep is expressed as 1 - smoothstep with ascending edges
-to avoid undefined GLSL behavior.
+the upstream blur arrangement/kernel and static noise function. The rail uses
+a Stack-specific convex bevel in physical pixels, with shared coverage and
+surface normals, Snell refraction, Fresnel-weighted nearby scene reflection
+and directional lighting. This replaces the demo's stretched radial lens/glow
+equations; it does not claim matched upstream material defaults or Apple's
+private implementation. Noise is reduced to sub-code-value dither. Valid scene
+extents clamp both the sharp and blurred samples to the bounded capture.
 The upstream OverEngine submodule, demo application, photographs, fonts and
 showcase assets are not included by this adaptation.
 

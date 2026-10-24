@@ -268,6 +268,12 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_SYNC_FLUSH_COMMANDS_BIT
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
 #endif
+#ifndef GL_FUNC_ADD
+#define GL_FUNC_ADD 0x8006
+#endif
+
+// Blending
+extern void(APIENTRY* glBlendEquation_)(GLenum mode);
 
 // Shaders
 extern GLuint(APIENTRY* glCreateShader_)(GLenum type);
@@ -364,6 +370,7 @@ extern GLsync(APIENTRY* glFenceSync_)(GLenum condition, GLbitfield flags);
 extern GLenum(APIENTRY* glClientWaitSync_)(GLsync sync, GLbitfield flags, GLuint64 timeout);
 extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 
+#define glBlendEquation glBlendEquation_
 #define glCreateShader glCreateShader_
 #define glDeleteShader glDeleteShader_
 #define glShaderSource glShaderSource_

@@ -2,6 +2,8 @@
 
 #include <iostream>
 
+void(APIENTRY* glBlendEquation_)(GLenum) = nullptr;
+
 GLuint(APIENTRY* glCreateShader_)(GLenum) = nullptr;
 void(APIENTRY* glDeleteShader_)(GLuint) = nullptr;
 void(APIENTRY* glShaderSource_)(GLuint, GLsizei, const GLchar* const*, const GLint*) = nullptr;
@@ -85,6 +87,8 @@ bool LoadGLFunctions() {
                       << "\n";                                                      \
             ok = false;                                                             \
         }
+
+    LOAD(glBlendEquation_, "glBlendEquation");
 
     LOAD(glCreateShader_, "glCreateShader");
     LOAD(glDeleteShader_, "glDeleteShader");

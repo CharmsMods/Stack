@@ -129,6 +129,7 @@ void GlassChrome::Draw(const Surface& s) {
         glUniform2f(5,float(lw)/((width+1)/2),float(lh)/((height+1)/2));
         glUniform2f(6,float(x-captureX)/captureW,float(y-captureY)/captureH);
         glUniform2f(7,float(w)/captureW,float(h)/captureH);
+        glUniform2f(8,float(captureW)/width,float(captureH)/height);
         glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
         glDrawArrays(GL_TRIANGLES,0,3);
     } else {

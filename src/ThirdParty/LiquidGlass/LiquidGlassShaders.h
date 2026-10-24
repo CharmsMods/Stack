@@ -6,8 +6,8 @@
 // Gaussian blur kernel: Copyright (c) 2015 Jam3, glsl-fast-gaussian-blur (MIT).
 // Full notices: legal/third_party/LiquidGlass-MIT.txt,
 // legal/third_party/GLSL-Fast-Gaussian-Blur-MIT.txt and LiquidGlass-NOTICE.txt.
-// Stack modifications: GLSL4.3 bindings, bounded texture crops, a left-attached
-// silhouette, half-lens coordinate mapping and defined descending smoothstep.
+// Stack modifications: GLSL4.3 bindings, bounded texture crops and a pixel-space
+// rail bevel shared by refraction, coverage and directional environment lighting.
 #pragma once
 namespace Stack::ThirdParty::LiquidGlass {
 inline constexpr const char* Blur = R"(#version 430 core
@@ -42,76 +42,91 @@ void main() {
 inline constexpr const char* Material = R"(#version 430 core
 in vec2 uv; out vec4 color;
 layout(binding=0) uniform sampler2D softScene;
+layout(binding=1) uniform sampler2D sharpScene;
 layout(location=0) uniform vec2 sizePx;
 layout(location=2) uniform float radiusPx;
 layout(location=5) uniform vec2 softExtent;
 layout(location=6) uniform vec2 sceneOrigin;
 layout(location=7) uniform vec2 sceneScale;
+layout(location=8) uniform vec2 sharpExtent;
 vec4 sampleValid(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel));
 }
-float sdSuperellipse(vec2 p, float n, float r) {
-    // Take the absolute value of the coordinates, as the formula uses |x| and |y|.
-    // This makes the shape symmetrical in all quadrants.
-    vec2 p_abs = abs(p);
-
-    // Numerator of the distance formula: |x|^n + |y|^n - r^n
-    // This is the implicit equation of the superellipse. Its value is 0 on the
-    // boundary, negative inside, and positive outside.
-    float numerator = pow(p_abs.x, n) + pow(p_abs.y, n) - pow(r, n);
-
-    // Denominator: n * sqrt(|x|^(2n-2) + |y|^(2n-2))
-    // This is the magnitude of the gradient of the implicit function. Dividing by it
-    // normalizes the result, making it a better approximation of true Euclidean distance.
-    // Note: The pow() function can be computationally expensive. For a fixed, integer 'n'
-    // (like n=4), you would get better performance by using direct multiplication.
-    float den_x = pow(p_abs.x, 2.0 * n - 2.0);
-    float den_y = pow(p_abs.y, 2.0 * n - 2.0);
-
-    // Add a small epsilon to prevent division by zero at the origin (0,0).
-    float denominator = n * sqrt(den_x + den_y) + 0.00001;
-
-    // The final signed distance
-    return numerator / denominator;
-}
-
-
-const float M_E=2.718281828459045;
-// Application defaults from upstream src/LiquidGlass.h, not shader fallback values.
-const float u_powerFactor=3.0;
-const float u_a=.7, u_b=2.3, u_c=5.2, u_d=6.9;
-const float u_fPower=1.0, u_noise=.06;
-const float u_glowWeight=.25, u_glowBias=0.0;
-const float u_glowEdge0=.5, u_glowEdge1=-.5;
-float f(float x) {
-    return 1.0-u_b*pow(u_c*M_E,-u_d*x-u_a);
+vec3 sampleSharp(vec2 p) {
+    vec2 halfTexel=.5/vec2(textureSize(sharpScene,0));
+    return texture(sharpScene,clamp(p*sharpExtent,halfTexel,sharpExtent-halfTexel)).rgb;
 }
 float rand(vec2 co) {
     return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);
 }
 void main() {
-    // Show the right half of the source lens; its left half continues outside
-    // the viewport, preventing an exposed left rim while retaining radial math.
-    vec2 p=vec2(uv.x,uv.y*2.0-1.0);
-    float d=sdSuperellipse(p,u_powerFactor,1.0);
-    float dist=max(0.0,-d);
-    vec2 sampleP=p*pow(f(dist),u_fPower);
-    vec2 coord=sceneOrigin+vec2(sampleP.x,sampleP.y*.5+.5)*sceneScale;
-    vec4 noise=vec4(vec3(rand(gl_FragCoord.xy*1e-3)-.5),0.0);
-    vec4 transmitted=sampleValid(coord)+noise*u_noise;
-    float glow=sin(atan(p.y,p.x)-.5);
-    // GLSL smoothstep with reversed endpoints is undefined. This expresses
-    // upstream's intended descending ramp with defined endpoint ordering.
-    float edge=1.0-smoothstep(u_glowEdge1,u_glowEdge0,dist);
-    float mul=glow*u_glowWeight*edge+1.0+u_glowBias;
-
-    // Stack's requested flush-left, right-corners-only silhouette is separate
-    // from the upstream superellipse used for lensing and angular glow.
+    // One pixel-space shape for both the silhouette and its optical surface.
+    // Its left side continues offscreen. Stretching the straight middle never
+    // stretches the corner/bevel profile or pulls distant content vertically.
     float r=min(radiusPx,.5*min(sizePx.x,sizePx.y));
     vec2 q=vec2(uv.x*sizePx.x,abs((uv.y-.5)*sizePx.y))-vec2(sizePx.x,.5*sizePx.y)+r;
-    float maskDistance=length(max(q,0.0))+min(max(q.x,q.y),0.0)-r;
-    float coverage=1.0-smoothstep(-1.0,0.0,maskDistance);
-    color=vec4(transmitted.rgb*mul,coverage);
+    vec2 corner=max(q,0.0);
+    float cornerLength=length(corner);
+    float distance=cornerLength+min(max(q.x,q.y),0.0)-r;
+    vec2 gradient=cornerLength>0.0 ? corner/cornerLength
+        : (q.x>q.y ? vec2(1.0,0.0) : vec2(0.0,1.0));
+    float bevel=max(sizePx.x,.75);
+    // Soften the nearest-edge junction inside the solid only. The boundary
+    // stays exact, while a broad bead-like front has no diagonal normal crease.
+    if (max(q.x,q.y)<-.0001) {
+        float sum=q.x+q.y;
+        float smoothing=-2.0*q.x*q.y/sum;
+        vec2 smoothingGradient=-2.0*vec2(q.y*q.y,q.x*q.x)/(sum*sum);
+        if (smoothing>bevel*.4) { smoothing=bevel*.4; smoothingGradient=vec2(0.0); }
+        float blend=clamp(.5+.5*(q.x-q.y)/smoothing,0.0,1.0);
+        distance=mix(q.y,q.x,blend)+smoothing*blend*(1.0-blend)-r;
+        gradient=vec2(blend,1.0-blend)+smoothingGradient*blend*(1.0-blend);
+    }
+    float coverage=1.0-smoothstep(-.5,.5,distance);
+    if (coverage<=0.0) { color=vec4(0.0); return; }
+    gradient.y*=uv.y<.5 ? -1.0 : 1.0;
+    vec2 edgeNormal=normalize(gradient);
+
+    // Rounded convex cross-section with a soft squircle shoulder. A rounder
+    // front spreads the lighting across the bevel instead of drawing a hairline.
+    // Its width follows the rail, so curvature reads across its front rather
+    // than only in a narrow stroke. End effects remain local in physical pixels.
+    float depth=max(0.0,-distance);
+    float shoulder=clamp(1.0-depth/bevel,0.0,.9999);
+    float shoulder3=shoulder*shoulder*shoulder;
+    float roundHeight=sqrt(max(1.0-shoulder*shoulder,.0001));
+    float softHeight=sqrt(sqrt(max(1.0-shoulder3*shoulder,.0001)));
+    float height=mix(roundHeight,softHeight,.25);
+    float slope=.8*(.75*shoulder/max(roundHeight,.001)
+        +.25*shoulder3/max(softHeight*softHeight*softHeight,.001));
+    vec3 normal=normalize(vec3(gradient*slope,1.0));
+    vec3 ray=refract(vec3(0.0,0.0,-1.0),normal,1.0/1.45);
+    vec2 offset=ray.xy/max(-ray.z,.1)*bevel*(.35+.65*height);
+    vec2 coord=sceneOrigin+(uv+offset/sizePx)*sceneScale;
+    vec3 transmitted=mix(sampleSharp(coord),sampleValid(coord).rgb,.18);
+
+    // Nearby scene color and a quiet directional environment give even a plain
+    // backdrop a curved glass surface. This is a screen-space approximation,
+    // not a ray-traced room reflection or a constant outline around the bar.
+    // Stay inside the renderer's existing 16-logical-pixel capture neighborhood.
+    float environmentReach=min(bevel*.3,r*.85);
+    vec2 outside=uv+edgeNormal*(depth+environmentReach)/sizePx;
+    vec3 environment=sampleValid(sceneOrigin+outside*sceneScale).rgb;
+    vec3 reflected=reflect(vec3(0.0,0.0,-1.0),normal);
+    float environmentLight=.32+.62*smoothstep(-.55,.7,reflected.z);
+    environment=mix(environment,vec3(.14,.16,.18),.12)*environmentLight;
+    float grazing=1.0-normal.z;
+    float grazing2=grazing*grazing;
+    float fresnel=.035+.965*grazing2*grazing2*grazing;
+    vec3 material=mix(transmitted,environment,.5*(fresnel-.035)+.12*grazing2);
+    vec3 halfLight=normalize(normalize(vec3(.35,-.65,.7))+vec3(0.0,0.0,1.0));
+    float light=max(dot(normal,halfLight),0.0);
+    float light2=light*light, light4=light2*light2, light8=light4*light4;
+    float glint=(.16*light8+.32*light8*light8*light8*light8)*grazing;
+    material+=vec3(.94,.97,1.0)*glint;
+    // Keep upstream's static dither at sub-code-value strength, not visible frost.
+    material+=vec3((rand(gl_FragCoord.xy)-.5)/255.0);
+    color=vec4(material,coverage);
 })";
 }
