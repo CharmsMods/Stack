@@ -53,8 +53,10 @@ public:
             if (!m_Gesture) {m_Gesture = *m_Current;m_GestureAffectsPixels=false;}
             m_GestureAffectsPixels |= affectsPixels;
         } else if (m_Gesture) EndGesture();
-        else PushUndo(*m_Current,affectsPixels);
-        m_Current = std::move(state); m_Redo.clear();
+        else { PushUndo(*m_Current,affectsPixels); m_Redo.clear(); }
+        // A live gesture is provisional. Preserve the redo branch until it
+        // commits, so Escape can restore both the document and its history.
+        m_Current = std::move(state);
         PruneImageBytes();
     }
     // A result completing the current owned request replaces its pending
@@ -64,15 +66,21 @@ public:
         m_Current=std::move(state);m_Redo.clear();PruneImageBytes();
     }
     void EndGesture() {
-        if (m_Gesture) { PushUndo(std::move(*m_Gesture),m_GestureAffectsPixels); m_Gesture.reset(); }
+        if (m_Gesture) {
+            PushUndo(std::move(*m_Gesture),m_GestureAffectsPixels);
+            m_Gesture.reset(); m_Redo.clear();
+        }
     }
     bool CanUndo() const { return m_Gesture.has_value() || !m_Undo.empty(); }
-    bool CanRedo() const { return !m_Redo.empty(); }
+    bool CanRedo() const { return !m_Gesture && !m_Redo.empty(); }
     bool GestureActive() const { return m_Gesture.has_value(); }
     const ProjectGraphState* CancelCandidate() const { return m_Gesture ? &*m_Gesture : nullptr; }
     bool CancelAffectsPixels() const { return m_GestureAffectsPixels; }
-    void AcceptCancel() { m_Current = std::move(m_Gesture); m_Gesture.reset(); }
+    void AcceptCancel() {
+        if (m_Gesture) { m_Current = std::move(m_Gesture); m_Gesture.reset(); }
+    }
     const ProjectGraphState* Candidate(bool redo) {
+        if (redo && m_Gesture) return nullptr;
         EndGesture();
         const auto& stack = redo ? m_Redo : m_Undo;
         return stack.empty() ? nullptr : &stack.back().state;

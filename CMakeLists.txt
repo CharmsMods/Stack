@@ -632,6 +632,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(StackProjectGraphHistoryTests tools/tests/project_graph_history_tests.cpp)
+    target_include_directories(StackProjectGraphHistoryTests PRIVATE src)
+    add_test(NAME StackProject.GraphHistory COMMAND StackProjectGraphHistoryTests)
+    set_tests_properties(StackProject.GraphHistory PROPERTIES LABELS "project;history;cpu" TIMEOUT 30)
     find_package(Threads REQUIRED)
     add_executable(StackAtomicExportFileTests
         tools/tests/atomic_export_file_tests.cpp
