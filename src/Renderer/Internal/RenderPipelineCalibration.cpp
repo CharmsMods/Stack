@@ -55,10 +55,23 @@ bool RenderPipeline::SeedViewportDependency(const RenderPipeline& source,
                     entry.texture,entry.width,entry.height,m_Width,m_Height));
                 if (!copy || !StoreRawDevelopStageCacheEntry(key,copy.Get(),expected,true)) return false;
                 copy.Release();
+                if (source.m_GraphFloat32Targets) MarkSeededGraphPrecision(key, expected);
                 return true;
             }
-            return StoreRawDevelopStageCacheEntry(key, entry.texture, expected);
+            const bool stored = StoreRawDevelopStageCacheEntry(key, entry.texture, expected);
+            if (stored && source.m_GraphFloat32Targets) MarkSeededGraphPrecision(key, expected);
+            return stored;
         }
     }
     return false;
+}
+
+void RenderPipeline::MarkSeededGraphPrecision(const std::string& key, std::size_t fingerprint) {
+    const auto found = m_RawDevelopStageImageCache.find(key);
+    if (found == m_RawDevelopStageImageCache.end()) return;
+    for (auto& entry : found->second) {
+        if (entry.texture && entry.fingerprint == fingerprint &&
+            entry.width == m_Width && entry.height == m_Height)
+            entry.requiresFloat32Seed = true;
+    }
 }

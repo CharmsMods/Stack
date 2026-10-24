@@ -169,6 +169,7 @@ void RenderPipeline::Shutdown() {
     m_SourcePixels.clear();
     m_SourcePixelsShared.reset();
     m_SourceFingerprint = 0;
+    m_GraphFloat32Targets = false;
 }
 
 void RenderPipeline::Initialize() {
@@ -517,6 +518,7 @@ void RenderPipeline::Clear() {
     ClearRawDevelopmentLocalRangeTargetSample();
     ReleaseRawDevelopmentGradingScopeReadbackResources();
     m_RawDevelopmentLocalSuggestionImage = {};
+    m_GraphFloat32Targets = false;
 }
 
 void RenderPipeline::ClearRawDevelopmentLocalRangeOverlay() {

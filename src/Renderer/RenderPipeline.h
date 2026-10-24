@@ -547,6 +547,7 @@ private:
         int height = 0;
         bool owned = false;
         bool viewportNativeDependency = false;
+        bool requiresFloat32Seed = false;
         bool viewportNativeDerived = false;
         std::uint64_t bytes = 0;
         std::uint64_t lastUseSerial = 0;
@@ -960,9 +961,11 @@ private:
     unsigned int CreateGraphRenderTargetTexture() const;
     std::uint64_t EstimateGraphTargetBytes(int width, int height) const;
     void EnsureGraphFloat32Targets();
-    // Once a pipeline executes a layered RAW document, retain full float
-    // targets for its lifetime, including previews and cached copies.
+    void ConfigureGraphTargetPrecision(bool requiredFloat32);
+    // Match the current graph, except while a retained seeded dependency needs
+    // full precision even if its consumer snapshot has no explicit RAW node.
     bool m_GraphFloat32Targets = false;
+    void MarkSeededGraphPrecision(const std::string& key, std::size_t fingerprint);
     bool RenderIntoGraphTargetTextureImpl(
         unsigned int texture,
         const void* renderContext,

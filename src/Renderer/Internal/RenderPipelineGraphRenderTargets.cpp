@@ -1,6 +1,7 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Renderer/GraphTargetPrecision.h"
 
 #include <algorithm>
 #include <exception>
@@ -10,12 +11,40 @@
 #include <stdexcept>
 
 void RenderPipeline::EnsureGraphFloat32Targets() {
-    if (m_GraphFloat32Targets) return;
-    DestroyGraphCache(m_GraphImageCache);
-    DestroyGraphCache(m_GraphMaskCache);
-    DestroyGraphTransientTargets();
-    DestroyRawDevelopStageCache();
-    m_GraphFloat32Targets = true;
+    ConfigureGraphTargetPrecision(true);
+}
+
+void RenderPipeline::ConfigureGraphTargetPrecision(bool requiredFloat32) {
+    bool seededFloat32 = false;
+    for (const auto& [key, entries] : m_RawDevelopStageImageCache) {
+        (void)key;
+        seededFloat32 = seededFloat32 || std::any_of(entries.begin(), entries.end(),
+            [](const auto& entry) { return entry.texture && entry.requiresFloat32Seed; });
+    }
+    Stack::Renderer::ReconfigureGraphTargetPrecision(m_GraphFloat32Targets,
+        requiredFloat32, seededFloat32, [&] {
+            // These caches do not all include target format in their key.
+            // Clear borrowed handles before releasing the resources they name;
+            // separately owned source/external output textures remain owned.
+            m_OutputTexture = 0;
+            m_GraphSourceTexture = 0;
+            m_GraphSourceWidth = m_GraphSourceHeight = 0;
+            InvalidateGraphCaches();
+            DestroyGraphTransientTargets();
+            ClearRawDevelopmentStageStatsReadbacks();
+            ClearRawDevelopmentLocalRangeOverlay();
+            ClearRawDevelopmentLocalRangeSelectionBits();
+            ClearRawDevelopmentLocalRangeTargetPreviewSelection();
+            ClearRawDevelopmentLocalRangeTargetSample();
+            m_RawDevelopmentLocalSuggestionImage = {};
+            m_PreLocalExposureSummaries.clear();
+            m_RawZoneAreaRenderer.Clear();
+            // Retire old-precision scope results without disabling the request
+            // that the worker configured for this graph before execution.
+            ++m_RawDevelopmentGradingScopeRequestRevision;
+            m_RawDevelopmentGradingScopeReadback = {};
+            m_RawDevelopmentGradingScopeLastIssueTime = {};
+        });
 }
 
 unsigned int RenderPipeline::CreateGraphRenderTargetTexture() const {

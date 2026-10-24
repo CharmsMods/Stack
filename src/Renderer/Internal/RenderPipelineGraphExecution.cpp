@@ -195,7 +195,7 @@ void RenderPipeline::ExecuteGraphImpl(
     const bool preciseMath = std::any_of(graph.nodes.begin(), graph.nodes.end(), [](const auto& node) {
         return node.kind == RenderGraphNodeKind::DataMath;
     });
-    if (sceneRaw || preciseMath) EnsureGraphFloat32Targets();
+    ConfigureGraphTargetPrecision(sceneRaw || preciseMath);
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;
