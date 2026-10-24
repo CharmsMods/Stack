@@ -447,7 +447,8 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         presentation.kind==NodePresentationKind::FramelessMedia ? graphStyle.canvas : numericColors.surface);
     const ImVec2 cursorAnchor((min.x+max.x)*0.5f,min.y-18.0f*ImGui::GetWindowViewport()->DpiScale);
     ImGuiExtras::GraphNumericNodeScope numericNodeScope(&graph, node.id, hovered && IsGraphCanvasHovered(),
-        SharesIdentityWithParameter(node), &numericColors, &cursorAnchor);
+        SharesIdentityWithParameter(node), &numericColors, &cursorAnchor,
+        m_GraphContext.documentId.c_str(), node.instanceUuid.c_str());
     const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
     const float selectedAnim = UpdateAnimatedState(
         m_NodeSelectionAnim,

@@ -22,6 +22,7 @@ void ValidateGraphCursor(const char* output);
 void ValidateFloatingSlider(const char* output);
 void ValidateFloatingSurfaces();
 void ValidateNodeNotesInteractions();
+void ValidateGraphNumericOwnership();
 
 namespace {
 void Require(bool pass, const char* message) {
@@ -239,6 +240,10 @@ void Key(ImGuiKey key) {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--numeric-ownership") == 0) {
+        try { ValidateGraphNumericOwnership(); return 0; }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (argc > 1 && std::strcmp(argv[1], "--node-notes") == 0) {
         try { ValidateNodeNotesInteractions(); return 0; }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

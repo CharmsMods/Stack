@@ -30,6 +30,8 @@ struct NodeScopeState {
     int valueEnd = -1;
     GraphNumericNodeColors colors;
     ImVec2 cursorAnchor{};
+    const char* ownerIdentity = nullptr;
+    const char* nodeIdentity = nullptr;
 } nodeScope;
 bool wheelFrameInteractive = false;
 
@@ -132,6 +134,15 @@ template <typename T>
 bool Numeric(const char* label, const char* id, T* value, T minimum, T maximum,
     const char* format, float width, const GraphNodeControlScopeConfig& config,
     std::optional<double> defaultValue, GraphNumericCapture capture) {
+    // Project canvases reuse their window and integer node IDs. Namespace both
+    // ImGui input and retained numeric drafts by the live owner and authored
+    // identities, so one project's deactivation cannot write into another.
+    const bool owned = nodeScope.graph != nullptr;
+    if (owned) {
+        ImGui::PushID(nodeScope.graph);
+        ImGui::PushID(nodeScope.ownerIdentity ? nodeScope.ownerIdentity : "");
+        ImGui::PushID(nodeScope.nodeIdentity ? nodeScope.nodeIdentity : "");
+    }
     ImGui::PushID(id);
     const ImGuiID controlId = ImGui::GetID("##value");
     const int frame = ImGui::GetFrameCount();
@@ -360,6 +371,7 @@ bool Numeric(const char* label, const char* id, T* value, T minimum, T maximum,
     ImGui::Dummy(ImVec2(available, 0.0f));
     ImGui::EndGroup();
     ImGui::PopID();
+    if (owned) { ImGui::PopID(); ImGui::PopID(); ImGui::PopID(); }
     return changed;
 }
 
@@ -382,9 +394,13 @@ int GraphWheelTargetNode(const void* graph) {
     return wheelFrameInteractive && wheelTarget.graph == graph ? wheelTarget.node : -1;
 }
 
-GraphNumericNodeScope::GraphNumericNodeScope(const void* graph, int node, bool hovered, bool stacked, const GraphNumericNodeColors* colors, const ImVec2* cursorAnchor)
+GraphNumericNodeScope::GraphNumericNodeScope(const void* graph, int node, bool hovered, bool stacked,
+    const GraphNumericNodeColors* colors, const ImVec2* cursorAnchor,
+    const char* ownerIdentity, const char* nodeIdentity)
     : draw_(ImGui::GetWindowDrawList()), start_(draw_->VtxBuffer.Size), preserveUntil_(start_) {
     nodeScope = {graph, node, hovered, stacked};
+    nodeScope.ownerIdentity = ownerIdentity;
+    nodeScope.nodeIdentity = nodeIdentity;
     static const auto fallback=StackAppearance::ResolveCreamPalette(StackAppearance::CreamPalette{});
     nodeScope.colors=colors ? *colors : fallback.nodeAppearance;
     surface_=nodeScope.colors.surface;

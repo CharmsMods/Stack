@@ -4,6 +4,7 @@ add_executable(StackGraphControlTests
     tools/tests/floating_slider_tests.cpp
     tools/tests/floating_surface_tests.cpp
     tools/tests/node_notes_interaction_tests.cpp
+    tools/tests/graph_numeric_ownership_tests.cpp
     src/Editor/NodeGraph/UI/NodeNotesView.cpp
     src/NodeMath/FirstClassValue.cpp
     src/NodeMath/DescriptorSerialization.cpp
@@ -32,3 +33,5 @@ add_test(NAME StackEditor.GraphControls COMMAND StackGraphControlTests)
 set_tests_properties(StackEditor.GraphControls PROPERTIES LABELS "editor;node-graph;interaction")
 add_test(NAME StackEditor.NodeNotesTransitions COMMAND StackGraphControlTests --node-notes)
 set_tests_properties(StackEditor.NodeNotesTransitions PROPERTIES LABELS "editor;node-graph;interaction")
+add_test(NAME StackEditor.GraphNumericOwnership COMMAND StackGraphControlTests --numeric-ownership)
+set_tests_properties(StackEditor.GraphNumericOwnership PROPERTIES LABELS "editor;node-graph;interaction")

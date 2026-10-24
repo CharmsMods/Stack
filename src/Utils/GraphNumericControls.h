@@ -6,14 +6,18 @@
 
 namespace ImGuiExtras {
 
-// A node scope owns the Ctrl-wheel target and the drawing ranges used to dim
-// everything except its primary value. No parameter pointers survive a frame.
+// A node scope owns numeric input identity, the Ctrl-wheel target and the
+// drawing ranges used to dim everything except its primary value. Optional
+// identity strings are borrowed for this scope only; no parameter pointers
+// survive a frame.
 void BeginGraphWheelFrame(const void* graph, bool interactive);
 int GraphWheelTargetNode(const void* graph);
 using GraphNumericNodeColors = StackAppearance::NodeAppearance;
 class GraphNumericNodeScope {
 public:
-    GraphNumericNodeScope(const void* graph, int node, bool hovered, bool stacked, const GraphNumericNodeColors* colors = nullptr, const ImVec2* cursorAnchor = nullptr);
+    GraphNumericNodeScope(const void* graph, int node, bool hovered, bool stacked,
+        const GraphNumericNodeColors* colors = nullptr, const ImVec2* cursorAnchor = nullptr,
+        const char* ownerIdentity = nullptr, const char* nodeIdentity = nullptr);
     ~GraphNumericNodeScope();
     void PreserveCurrentDrawing();
 private:
