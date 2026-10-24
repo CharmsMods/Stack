@@ -1361,6 +1361,7 @@ public:
     bool TryGetCompositeAutoExportBounds(CompositeFloatRect& outBounds) const;
     CompositeFloatRect GetCompositeViewWorldRect(const ImVec2& canvasSize) const;
     void UseCompositeViewAsExportBounds(const ImVec2& canvasSize);
+    bool ValidateCompositePngExport(std::string& error);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     bool BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     void BeginPngExportWrite(

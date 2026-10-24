@@ -1,4 +1,5 @@
 #include "Editor/CompositePersistence.h"
+#include "Editor/CompositeExportPolicy.h"
 #include "Editor/EditorModule.h"
 
 #include "Library/LibraryManager.h"
@@ -1370,6 +1371,43 @@ void EditorModule::UseCompositeViewAsExportBounds(const ImVec2& canvasSize) {
     UpdateCompositeCustomExportAspectFromBounds();
     m_CompositeExportSettings.outputWidth = std::max(1, static_cast<int>(std::round(std::max(1.0f, canvasSize.x))));
     SyncCompositeExportResolutionFromWidth();
+}
+
+bool EditorModule::ValidateCompositePngExport(std::string& error) {
+    error.clear();
+    EnsureCompositeSceneState(ImVec2(0.0f, 0.0f));
+    if (!RefreshCompositeMetadataCacheIfNeeded()) {
+        error = "The composite outputs could not be validated for PNG export.";
+        return false;
+    }
+    const RenderGraphSnapshot snapshot = BuildGraphSnapshot();
+    for (const int outputNodeId : m_CompositeZOrder) {
+        const CompositeSceneItem* item = FindCompositeSceneItem(outputNodeId);
+        // Match the raster's contributing items exactly. Scene synchronization
+        // already removes disabled/deleted outputs; hidden inputs do not export.
+        if (!item || !item->visible || item->rgbaPixels.empty() ||
+            item->textureWidth <= 0 || item->textureHeight <= 0) {
+            continue;
+        }
+        const auto rendered = std::find_if(snapshot.nodes.begin(), snapshot.nodes.end(),
+            [outputNodeId](const RenderGraphNode& node) {
+                return node.nodeId == outputNodeId && node.kind == RenderGraphNodeKind::Output;
+            });
+        // The current descriptor must describe the accepted pixels, not an edit
+        // whose replacement raster is still queued or rendering.
+        const auto dirty = m_CompositeOutputDirtyGenerations.find(outputNodeId);
+        const auto fingerprint = m_CachedCompositeFingerprints.find(outputNodeId);
+        const bool pixelsCurrent = dirty != m_CompositeOutputDirtyGenerations.end() &&
+            fingerprint != m_CachedCompositeFingerprints.end() &&
+            item->cachedRenderRevision >= dirty->second &&
+            item->cachedChainFingerprint == fingerprint->second;
+        if (!Stack::EditorRendering::ValidateCompositePngInput(outputNodeId,
+                rendered == snapshot.nodes.end() ? nullptr : &rendered->semanticDescriptor,
+                pixelsCurrent, error)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool EditorModule::BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) {

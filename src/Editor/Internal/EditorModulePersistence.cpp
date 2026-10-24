@@ -69,8 +69,10 @@ bool ValidateWorkspacePayload(const nlohmann::json& payload, std::string& error,
                 static_cast<int>(layerRecords.size()));
         // Graph validation owns effect identity; the actual CPU-only adapter
         // decoder also checks its field types before any live runtime reset.
-        Stack::EditorPersistence::PreflightLayerParameters(layerRecords,
-            [](const std::string& type) { return LayerRegistry::CreateLayerFromTypeId(type); });
+        if (installedLayerCount < 0) {
+            Stack::EditorPersistence::PreflightLayerParameters(layerRecords,
+                [](const std::string& type) { return LayerRegistry::CreateLayerFromTypeId(type); });
+        }
         Stack::Project::RawLayerStackState layers;
         if (!Stack::Project::ReadRawLayersFromPipeline(payload,layers,error,false)) return false;
         if (validatedGraph) *validatedGraph = std::move(candidate);
@@ -1838,7 +1840,16 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     }
 
     Stack::NodeMath::PngColorMetadataChunks colorChunks;
-    if (!IsCompositeViewportMode()) {
+    if (IsCompositeViewportMode()) {
+        std::string policyError;
+        if (!ValidateCompositePngExport(policyError)) {
+            m_ExportTaskState = Async::TaskState::Failed;
+            m_ExportStatusText = std::move(policyError);
+            PostNotification(UiNotificationSeverity::Error, m_ExportStatusText,
+                "editor-export-semantic-policy");
+            return false;
+        }
+    } else {
         const RenderGraphSnapshot semanticSnapshot = BuildGraphSnapshot();
         if (m_Project->graph.IsOutputChannelInspection(
                 semanticSnapshot.outputNodeId)) {
