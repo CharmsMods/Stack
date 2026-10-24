@@ -26,7 +26,7 @@ Use the storage transaction and revision rules already in place. Preserve the la
 
 ## Load and publish deliberately
 
-Decode and validate a candidate before replacing live state. Keep asynchronous load completion attached to the receiving project and operation. Define what happens if another load starts, the project closes or the candidate fails after partial application. Rejection must not silently discard another operation's completion. Recovery should retain the old document's identity, dirty state and storage relationship.
+Decode and validate a candidate before replacing live state. Workspace preflight reads the saved composite presentation and timeline through their production readers before resetting the current project; composite state is published only after its isolated candidate parses successfully. Keep asynchronous load completion attached to the receiving project and operation. Define what happens if another load starts, the project closes or the candidate fails after partial application. Rejection must not silently discard another operation's completion. Recovery should retain the old document's identity, dirty state and storage relationship.
 
 Rebuildable MultiFrame cache readers turn malformed metadata, truncated payloads and restoration exceptions into diagnostic failures, not a permanently busy processing state. Readers validate payload lengths before allocating decoded planes, and HDR cache verification hashes the existing header/payload spans without duplicating the complete payload. A failed HDR read leaves the caller's previously accepted result intact.
 

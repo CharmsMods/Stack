@@ -1,3 +1,5 @@
+#include "Editor/CompositePersistence.h"
+#include "Editor/Timeline/TimelinePersistence.h"
 #include "App/WorkspacePresentation.h"
 #include "App/UiFrameBudget.h"
 #include "Utils/DisplayRefreshRate.h"
@@ -43,28 +45,34 @@ namespace StackFormat = StackBinaryFormat;
 
 bool ValidateWorkspacePayload(const nlohmann::json& payload, std::string& error,
     EditorNodeGraph::Graph* validatedGraph = nullptr,
-    Stack::Project::RawLayerStackState* validatedLayers = nullptr, int installedLayerCount = -1) {
-    Stack::Project::WorkspaceMode mode;
-    if (!payload.contains("nodeGraph") || !EditorNodeGraph::IsCurrentGraphPayload(payload)) {
-        error = "Unsupported project version: this project uses a different graph model generation.";
-        return false;
-    }
-    const auto setting = payload.find("workspaceMode");
-    if (setting != payload.end() && (!setting->is_string() ||
-        !Stack::Project::ParseWorkspaceMode(setting->get<std::string>(),mode))) {
-        error = "The project has an invalid workspace mode."; return false;
-    }
+    Stack::Project::RawLayerStackState* validatedLayers = nullptr, int installedLayerCount = -1,
+    nlohmann::json* validatedLayerRecords = nullptr) {
     try {
+        Stack::Project::WorkspaceMode mode;
+        if (!payload.contains("nodeGraph") || !EditorNodeGraph::IsCurrentGraphPayload(payload)) {
+            error = "Unsupported project version: this project uses a different graph model generation.";
+            return false;
+        }
+        const auto setting = payload.find("workspaceMode");
+        if (setting != payload.end() && (!setting->is_string() ||
+            !Stack::Project::ParseWorkspaceMode(setting->get<std::string>(),mode))) {
+            error = "The project has an invalid workspace mode."; return false;
+        }
+        auto layerRecords = EditorNodeGraph::ExtractLayerArray(payload);
+        Stack::EditorPersistence::ReadCompositePersistence(payload);
+        Stack::Timeline::DeserializeTimelineDocument(
+            payload.value("editorTimeline", nlohmann::json::object()));
         EditorNodeGraph::Graph candidate;
         EditorNodeGraph::DeserializeGraphPayload(payload,candidate,
             installedLayerCount >= 0 ? installedLayerCount :
-                static_cast<int>(EditorNodeGraph::ExtractLayerArray(payload).size()));
+                static_cast<int>(layerRecords.size()));
         Stack::Project::RawLayerStackState layers;
         if (!Stack::Project::ReadRawLayersFromPipeline(payload,layers,error,false)) return false;
         if (validatedGraph) *validatedGraph = std::move(candidate);
         if (validatedLayers) *validatedLayers = std::move(layers);
+        if (validatedLayerRecords) *validatedLayerRecords = std::move(layerRecords);
     } catch (const std::exception& exception) {
-        error = std::string("Cannot read current graph: ") + exception.what(); return false;
+        error = std::string("Cannot read project workspace: ") + exception.what(); return false;
     }
     return true;
 }
@@ -765,10 +773,10 @@ bool EditorModule::BeginDeferredLoadedProjectApply(
             "The project does not use the current managed project model.");
     }
 
-    const nlohmann::json layerArray =
-        EditorNodeGraph::ExtractLayerArray(projectData->pipelineData);
+    nlohmann::json layerArray;
     std::string workspaceError;
-    if (!ValidateWorkspacePayload(projectData->pipelineData,workspaceError))
+    if (!ValidateWorkspacePayload(projectData->pipelineData, workspaceError,
+            nullptr, nullptr, -1, &layerArray))
         return rejectCandidate(workspaceError);
     if (!layerArray.is_array()) {
         return rejectCandidate("Failed to read the project's editor state.");

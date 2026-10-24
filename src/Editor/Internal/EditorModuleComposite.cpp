@@ -1,3 +1,4 @@
+#include "Editor/CompositePersistence.h"
 #include "Editor/EditorModule.h"
 
 #include "Library/LibraryManager.h"
@@ -212,21 +213,13 @@ const char* ExportBoundsModeToToken(const EditorModule::CompositeExportBoundsMod
     return mode == EditorModule::CompositeExportBoundsMode::Custom ? "custom" : "auto";
 }
 
-EditorModule::CompositeExportBoundsMode ExportBoundsModeFromToken(const std::string& token) {
-    return token == "custom"
-        ? EditorModule::CompositeExportBoundsMode::Custom
-        : EditorModule::CompositeExportBoundsMode::Auto;
-}
+
 
 const char* ExportBackgroundModeToToken(const EditorModule::CompositeExportBackgroundMode mode) {
     return mode == EditorModule::CompositeExportBackgroundMode::Solid ? "solid" : "transparent";
 }
 
-EditorModule::CompositeExportBackgroundMode ExportBackgroundModeFromToken(const std::string& token) {
-    return token == "solid"
-        ? EditorModule::CompositeExportBackgroundMode::Solid
-        : EditorModule::CompositeExportBackgroundMode::Transparent;
-}
+
 
 const char* ExportAspectPresetToToken(const EditorModule::CompositeExportAspectPreset preset) {
     switch (preset) {
@@ -244,17 +237,7 @@ const char* ExportAspectPresetToToken(const EditorModule::CompositeExportAspectP
     }
 }
 
-EditorModule::CompositeExportAspectPreset ExportAspectPresetFromToken(const std::string& token) {
-    if (token == "4:3") return EditorModule::CompositeExportAspectPreset::Ratio4x3;
-    if (token == "3:2") return EditorModule::CompositeExportAspectPreset::Ratio3x2;
-    if (token == "16:9") return EditorModule::CompositeExportAspectPreset::Ratio16x9;
-    if (token == "9:16") return EditorModule::CompositeExportAspectPreset::Ratio9x16;
-    if (token == "2:3") return EditorModule::CompositeExportAspectPreset::Ratio2x3;
-    if (token == "5:4") return EditorModule::CompositeExportAspectPreset::Ratio5x4;
-    if (token == "21:9") return EditorModule::CompositeExportAspectPreset::Ratio21x9;
-    if (token == "custom") return EditorModule::CompositeExportAspectPreset::Custom;
-    return EditorModule::CompositeExportAspectPreset::Ratio1x1;
-}
+
 
 EditorModule::CompositeSnapModePreset DetermineCompositeSnapModePreset(const EditorModule::CompositeSnapSettings& settings) {
     if (!settings.enabled) {
@@ -816,71 +799,10 @@ nlohmann::json EditorModule::SerializeCompositePersistence() const {
 }
 
 void EditorModule::DeserializeCompositePersistence(const nlohmann::json& pipelineData) {
-    ClearPersistedCompositeState();
-    if (!pipelineData.is_object()) {
-        return;
-    }
-
-    const nlohmann::json composite = pipelineData.value("editorComposite", nlohmann::json::object());
-    if (!composite.is_object()) {
-        return;
-    }
-
-    const nlohmann::json sceneItems = composite.value("sceneItems", nlohmann::json::array());
-    if (sceneItems.is_array()) {
-        for (const auto& item : sceneItems) {
-            if (!item.is_object()) {
-                continue;
-            }
-            PersistedCompositeSceneEntry entry;
-            entry.outputNodeId = item.value("outputNodeId", -1);
-            const nlohmann::json position = item.value("position", nlohmann::json::array());
-            const nlohmann::json scale = item.value("scale", nlohmann::json::array());
-            if (position.is_array() && position.size() >= 2) {
-                entry.position.x = position[0].get<float>();
-                entry.position.y = position[1].get<float>();
-            }
-            if (scale.is_array() && scale.size() >= 2) {
-                entry.scale.x = scale[0].get<float>();
-                entry.scale.y = scale[1].get<float>();
-            }
-            entry.rotation = item.value("rotation", 0.0f);
-            entry.visible = item.value("visible", true);
-            entry.locked = item.value("locked", false);
-            if (entry.outputNodeId > 0) {
-                m_PersistedCompositeSceneEntries.push_back(std::move(entry));
-            }
-        }
-    }
-
-    const nlohmann::json zOrder = composite.value("zOrder", nlohmann::json::array());
-    if (zOrder.is_array()) {
-        for (const auto& value : zOrder) {
-            if (value.is_number_integer()) {
-                m_CompositeZOrder.push_back(value.get<int>());
-            }
-        }
-    }
-
-    const nlohmann::json exportSettings = composite.value("exportSettings", nlohmann::json::object());
-    if (exportSettings.is_object()) {
-        m_CompositeExportSettings.boundsMode = ExportBoundsModeFromToken(exportSettings.value("boundsMode", std::string("auto")));
-        m_CompositeExportSettings.backgroundMode = ExportBackgroundModeFromToken(exportSettings.value("backgroundMode", std::string("transparent")));
-        const nlohmann::json backgroundColor = exportSettings.value("backgroundColor", nlohmann::json::array());
-        for (int i = 0; i < 4; ++i) {
-            if (backgroundColor.is_array() && backgroundColor.size() > static_cast<size_t>(i)) {
-                m_CompositeExportSettings.backgroundColor[i] = backgroundColor[i].get<float>();
-            }
-        }
-        m_CompositeExportSettings.customX = exportSettings.value("customX", m_CompositeExportSettings.customX);
-        m_CompositeExportSettings.customY = exportSettings.value("customY", m_CompositeExportSettings.customY);
-        m_CompositeExportSettings.customWidth = exportSettings.value("customWidth", m_CompositeExportSettings.customWidth);
-        m_CompositeExportSettings.customHeight = exportSettings.value("customHeight", m_CompositeExportSettings.customHeight);
-        m_CompositeExportSettings.aspectPreset = ExportAspectPresetFromToken(exportSettings.value("aspectPreset", std::string("1:1")));
-        m_CompositeExportSettings.customAspectRatio = exportSettings.value("customAspectRatio", m_CompositeExportSettings.customAspectRatio);
-        m_CompositeExportSettings.outputWidth = exportSettings.value("outputWidth", m_CompositeExportSettings.outputWidth);
-        m_CompositeExportSettings.outputHeight = exportSettings.value("outputHeight", m_CompositeExportSettings.outputHeight);
-    }
+    auto candidate = Stack::EditorPersistence::ReadCompositePersistence(pipelineData);
+    m_PersistedCompositeSceneEntries = std::move(candidate.entries);
+    m_CompositeZOrder = std::move(candidate.zOrder);
+    m_CompositeExportSettings = candidate.exportSettings;
 }
 
 void EditorModule::ClearCompositeTransientInteractionState() {
