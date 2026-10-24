@@ -1506,6 +1506,8 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                     payload.previewHeight,
                     payload.previewChannels);
                 payload.pixels = std::move(decoded.pixels);
+                payload.pngStorage.Invalidate();
+                payload.previewStorage.Invalidate();
                 payload.isEmbedding = true;
                 payload.importRequestId = generation;
                 payload.embeddingRequestId = generation;
@@ -1590,6 +1592,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                     return;
                 }
 
+                imageNode->image.pngStorage.Invalidate();
                 imageNode->image.pngBytes = std::move(pngBytes);
                 imageNode->image.isEmbedding = false;
                 imageNode->image.embeddingRequestId = 0;

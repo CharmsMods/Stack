@@ -15,7 +15,7 @@ inline void ResolveImageImportDecode(ProjectGraphHistory& history, const std::st
     std::uint64_t request, const EditorNodeGraph::ImagePayload& payload) {
     ProjectGraphState::ImageStorage storage;
     storage.pixels=EnsureSharedImagePixels(payload);
-    storage.preview=history.RetainImageBytes(uuid+"/preview",payload.previewPixels);
+    storage.preview=history.RetainImageBytes(uuid+"/preview",payload.previewPixels,payload.previewStorage);
     storage.previewWidth=payload.previewWidth; storage.previewHeight=payload.previewHeight;
     storage.previewChannels=payload.previewChannels;
     // Copy metadata only. Full bytes have one immutable owner shared by every

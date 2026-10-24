@@ -167,6 +167,8 @@ EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
         payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
     }
     payload.pixels = std::move(decoded.pixels);
+    payload.pngStorage.Invalidate();
+    payload.previewStorage.Invalidate();
     return payload;
 }
 
@@ -395,6 +397,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
                 return;
             }
 
+            node->image.pngStorage.Invalidate();
             node->image.pngBytes = std::move(pngBytes);
             node->image.isEmbedding = false;
             node->image.embeddingRequestId = 0;
@@ -772,6 +775,8 @@ bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
     node->image.height = rotatedHeight;
     node->image.pixels = std::move(rotatedPixels);
     // PNG compression can be expensive for large slices; rebuild storage bytes lazily on save/export.
+    node->image.pngStorage.Invalidate();
+    node->image.previewStorage.Invalidate();
     node->image.pngBytes.clear();
     node->image.managedAssetId.clear();
     node->image.projectAssetPath.clear();

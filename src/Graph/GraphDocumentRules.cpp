@@ -291,7 +291,11 @@ void RetainImageStorage(EditorNodeGraph::Graph& candidate, EditorNodeGraph::Grap
     for (auto& node : candidate.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Image) continue;
         const auto found = images.find(node.instanceUuid);
-        if (found == images.end()) continue;
+        if (found == images.end()) {
+            node.image.pngStorage.Revalidate(node.image.pngBytes);
+            node.image.previewStorage.Revalidate(node.image.previewPixels);
+            continue;
+        }
         auto& old = *found->second;
         auto& image = node.image;
         if (image.width == old.width && image.height == old.height && image.channels == old.channels && image.pixels == old.pixels) {
@@ -299,8 +303,16 @@ void RetainImageStorage(EditorNodeGraph::Graph& candidate, EditorNodeGraph::Grap
             image.sharedPixels = old.sharedPixels;
             image.pixelsFingerprint = old.pixelsFingerprint;
         }
-        if (image.pngBytes == old.pngBytes) image.pngBytes.swap(old.pngBytes);
-        if (image.previewPixels == old.previewPixels) image.previewPixels.swap(old.previewPixels);
+        // A candidate may have changed bytes on a copied payload. Never trust
+        // its copied cache until content equality proves the owner still fits.
+        if (image.pngBytes == old.pngBytes) {
+            image.pngBytes.swap(old.pngBytes);
+            image.pngStorage = old.pngStorage;
+        } else image.pngStorage.Revalidate(image.pngBytes);
+        if (image.previewPixels == old.previewPixels) {
+            image.previewPixels.swap(old.previewPixels);
+            image.previewStorage = old.previewStorage;
+        } else image.previewStorage.Revalidate(image.previewPixels);
     }
 }
 

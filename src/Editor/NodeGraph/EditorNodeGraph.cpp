@@ -172,6 +172,9 @@ void Graph::SyncLayerNodes(int layerCount) {
 }
 
 Node* Graph::AddImageNode(ImagePayload payload, Vec2 position) {
+    // Insertion accepts a caller-owned value, including modified copies.
+    payload.pngStorage.Revalidate(payload.pngBytes);
+    payload.previewStorage.Revalidate(payload.previewPixels);
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::Image;

@@ -11,8 +11,8 @@ Stack::Project::ProjectGraphState EditorModule::CaptureProjectGraphState() const
     for (const auto& node:m_Project->graph.GetNodes()) if (node.kind==EditorNodeGraph::NodeKind::Image) {
         auto& storage=state.images[node.instanceUuid];
         storage.pixels=Stack::Project::EnsureSharedImagePixels(node.image);
-        storage.png=m_Project->graphHistory.RetainImageBytes(node.instanceUuid+"/png",node.image.pngBytes);
-        storage.preview=m_Project->graphHistory.RetainImageBytes(node.instanceUuid+"/preview",node.image.previewPixels);
+        storage.png=m_Project->graphHistory.RetainImageBytes(node.instanceUuid+"/png",node.image.pngBytes,node.image.pngStorage);
+        storage.preview=m_Project->graphHistory.RetainImageBytes(node.instanceUuid+"/preview",node.image.previewPixels,node.image.previewStorage);
         storage.previewWidth=node.image.previewWidth; storage.previewHeight=node.image.previewHeight;
         storage.previewChannels=node.image.previewChannels;
         auto* retained=state.graph.FindNode(node.id);
@@ -60,8 +60,12 @@ bool EditorModule::RestoreProjectGraphHistory(bool redo, bool cancel) {
         if (found==state.images.end()) return false;
         const auto& storage=found->second;
         if (!storage.pixels.empty()) node.image.pixels=*storage.pixels.bytes;
+        node.image.pngStorage.Invalidate();
+        node.image.previewStorage.Invalidate();
         if (storage.png) node.image.pngBytes=*storage.png;
         if (storage.preview) node.image.previewPixels=*storage.preview;
+        node.image.pngStorage.Seed(storage.png);
+        node.image.previewStorage.Seed(storage.preview);
         node.image.previewWidth=storage.previewWidth; node.image.previewHeight=storage.previewHeight;
         node.image.previewChannels=storage.previewChannels;
     }

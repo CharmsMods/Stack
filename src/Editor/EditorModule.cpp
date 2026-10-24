@@ -206,6 +206,8 @@ EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
     payload.originalChannels = decoded.originalChannels;
     payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
     payload.pixels = std::move(decoded.pixels);
+    payload.pngStorage.Invalidate();
+    payload.previewStorage.Invalidate();
     return payload;
 }
 

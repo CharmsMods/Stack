@@ -47,6 +47,10 @@ public:
         }
         return retained;
     }
+    std::shared_ptr<const std::vector<unsigned char>> RetainImageBytes(const std::string& key,
+        const std::vector<unsigned char>& bytes, const EditorNodeGraph::ImagePayloadByteStorage& storage) {
+        return storage.Get(bytes, [&] { return RetainImageBytes(key, bytes); });
+    }
     void Observe(ProjectGraphState state, bool gesture, bool affectsPixels = true) {
         if (!m_Current) { Reset(std::move(state)); return; }
         if (gesture) {

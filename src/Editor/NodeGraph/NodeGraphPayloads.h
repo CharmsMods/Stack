@@ -12,6 +12,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
 #include "Assets/MaskRaster.h"
+#include "Editor/NodeGraph/ImagePayloadByteStorage.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,8 @@ struct ImagePayload {
     std::string label;
     std::string sourcePath;
     std::vector<unsigned char> pngBytes;
+    ImagePayloadByteStorage pngStorage;
+    ImagePayloadByteStorage previewStorage;
     // Immutable project-store identity for the current PNG payload. When
     // present, ordinary saves can reuse the managed asset without re-encoding
     // or hashing the full image. Pixel-changing edits clear these fields.
@@ -58,6 +61,8 @@ struct ImagePayload {
 };
 
 inline void InvalidateImagePayloadRuntime(ImagePayload& payload) {
+    payload.pngStorage.Invalidate();
+    payload.previewStorage.Invalidate();
     payload.sharedPixels.reset();
     payload.pixelsFingerprint = 0;
     payload.previewContentFingerprint = 0;
