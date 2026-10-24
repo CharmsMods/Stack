@@ -9,6 +9,7 @@
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 #include "Editor/NodeGraph/UI/NodeNumericDefaults.h"
+#include "Editor/NodeGraph/UI/OutputCardPresentation.h"
 #include "NodeMath/SemanticSpine.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
@@ -1481,16 +1482,21 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
                 "Inspection mapping affects only the viewport. "
                 "The Channel samples and descriptor are unchanged.");
         }
+        const auto outputCard = Stack::Editor::NodeGraphUI::DescribeOutputCard(
+            node.id, node.outputEnabled, graph.GetCompletedChains(),
+            !editor->IsEditingRawLayerMaskGraph() && !editor->IsCompositeViewportMode() &&
+                !editor->IsAutoGainMaskPreviewActive());
         if (!node.outputEnabled) {
             ImGui::TextDisabled("This output is deactivated.");
         } else {
-            ImGui::TextDisabled("%s", graph.IsOutputConnected() ? "Connected to output chain" : "Output is not connected");
+            ImGui::TextDisabled("%s", outputCard.connected ? "Connected to output chain" : "Output is not connected");
         }
-        Stack::NodeMath::ValueDescriptor outputDescriptor;
-        if (editor->TryGetGraphOutputSemanticDescriptor(outputDescriptor)) {
+        const auto* outputDescription = editor->GetGraphOutputDescription(
+            node.id, EditorNodeGraph::kImageOutputSocketId);
+        if (outputDescription) {
             ImGui::TextWrapped(
                 "Direct result: %s",
-                Stack::NodeMath::CompactDescriptorLabel(outputDescriptor).c_str());
+                Stack::NodeMath::CompactDescriptorLabel(outputDescription->descriptor).c_str());
         }
         const std::string affectedOutput = "node-" + std::to_string(node.id);
         for (const Stack::NodeMath::Diagnostic& diagnostic : editor->GetGraphSemanticDiagnostics()) {
@@ -1505,7 +1511,9 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         if (node.outputEnabled && editor->OutputPathNeedsViewTransform(node.id)) {
             ImGui::TextWrapped("Scene-referred HDR input may clip at Output. Add or reconnect through View Transform for display compression.");
         }
-        if (node.outputEnabled && graph.IsOutputConnected()) {
+        // Pipeline statistics belong to the accepted main image, not merely to
+        // any connected output. Never borrow another card's or stale pixels.
+        if (outputCard.projectExportTargetsNode && editor->IsRenderSettledForFullQualityExport()) {
             RenderTextureStats outputStats = editor->GetPipeline().GetOutputTextureStats();
             if (outputStats.valid) {
                 ImGui::TextDisabled("Rendered RGB %.3f to %.3f", outputStats.minRgb, outputStats.maxRgb);
@@ -1513,11 +1521,12 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
                     outputStats.hdrPixelPercent,
                     outputStats.displayClipPercent);
             }
+        } else if (outputCard.connected) {
+            ImGui::TextDisabled("Current output statistics unavailable.");
         }
         ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
         ImGui::BeginDisabled(
-            !node.outputEnabled ||
-            !graph.IsOutputConnected() ||
+            !outputCard.projectExportTargetsNode ||
             outputUsesChannel ||
             editor->IsExportBusy());
         if (ImGui::Button("Export", ImVec2(controlWidth, 0.0f))) {
@@ -1531,6 +1540,12 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
             ImGui::SetTooltip(
                 "PNG export requires an Image. Connect this Channel to "
                 "Image Combine first.");
+        } else if (outputCard.connected && !outputCard.projectExportTargetsNode &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "This button exports the sole project output. Use the workspace "
+                "Export controls for RAW graphs or composite outputs, and leave "
+                "diagnostic mask preview before exporting an output card.");
         }
         ImGui::EndDisabled();
         if (ImGui::Button(node.outputEnabled ? "Deactivate Output" : "Activate Output", ImVec2(controlWidth, 0.0f))) {
