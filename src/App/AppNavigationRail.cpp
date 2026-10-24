@@ -75,7 +75,9 @@ void AppShell::LayoutNavigationRail() {
     Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
         atEdge, overRail, railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
-    rail.position = ImVec2(viewport->Pos.x - width + rail.visibleWidth, viewport->Pos.y);
+    const bool glassRail = m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    rail.position = ImVec2(glassRail ? viewport->Pos.x : viewport->Pos.x - width + rail.visibleWidth,
+        viewport->Pos.y);
     const float available = std::max(0.f, viewport->Size.x - rail.visibleWidth);
     const bool gallery = m_ActiveProjectWorkspace == m_GalleryWorkspaceId && IsRaw(m_CurrentTabId);
     const bool queue = m_CurrentTabId == Queue;
@@ -106,7 +108,7 @@ void AppShell::LayoutNavigationRail() {
     const float hidden = width * (1.f - std::max(left, topReveal));
     const float leftWeight = total > 0.f ? left / total : 1.f;
     m_RawMaskToolbar.panelTogglePosition = ImVec2(
-        viewport->Pos.x - hidden * leftWeight + Stack::Navigation::BarPadding * rail.scale,
+        viewport->Pos.x - (glassRail ? 0.f : hidden * leftWeight) + Stack::Navigation::BarPadding * rail.scale,
         viewport->Pos.y - hidden * (1.f - leftWeight) + Stack::Navigation::BarPadding * rail.scale);
 }
 
@@ -120,7 +122,9 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(rail.position);
-    ImGui::SetNextWindowSize(ImVec2(width, viewport->Size.y));
+    const bool glassRail = m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    const float drawnWidth = glassRail ? rail.visibleWidth : width;
+    ImGui::SetNextWindowSize(ImVec2(std::max(1.f,drawnWidth), viewport->Size.y));
     ImGui::SetNextWindowViewport(viewport->ID);
     ImVec4 railTint = palette.caption;
     railTint.w = Stack::Header::ResolveSectionTintOpacity(rail.panelAmount);
@@ -129,6 +133,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 6.f * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.f,1.f));
     ImGui::Begin("StackNavigationRail", nullptr, ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground |
@@ -136,9 +141,14 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     auto* draw = ImGui::GetWindowDrawList();
     // The top bar owns the overlap's tint. Paint the rail below it once.
     const ImVec2 glassMin(rail.position.x, viewport->Pos.y + m_RawMaskToolbar.visibleHeight);
-    const ImVec2 glassMax(rail.position.x + width, viewport->Pos.y + viewport->Size.y);
-    if (!m_RailGlass.AddSurface(draw, glassMin, glassMax, railTint))
+    const ImVec2 glassMax(rail.position.x + drawnWidth, viewport->Pos.y + viewport->Size.y);
+    // Material is a window background, not content: include the screen's left
+    // edge instead of inheriting ImGui's inset content clip rectangle.
+    if (glassRail) draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
+        viewport->Pos.y+viewport->Size.y),false);
+    if (!m_RailGlass.AddSurface(draw, glassMin, glassMax, railTint,16.f*s))
         draw->AddRectFilled(glassMin, glassMax, ImGui::GetColorU32(railTint));
+    if (glassRail) draw->PopClipRect();
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, bool enabled = true) {
         return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, nullptr,
             m_Appearance && m_Appearance->GetGlassChromeEnabled() && m_RailGlass.Error().empty());
@@ -184,7 +194,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     RenderActivityIndicator(targetSize, 32.f * s, openActivity);
     m_WorkspaceCompositor.KeepChrome(draw);
     ImGui::End();
-    ImGui::PopStyleVar(4);
+    ImGui::PopStyleVar(5);
     ImGui::PopStyleColor();
 }
 

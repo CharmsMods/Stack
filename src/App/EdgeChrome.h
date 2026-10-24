@@ -48,7 +48,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     Stack::Header::Approach(amount, selected ? 1.f : ImGui::IsItemHovered() ? .6f : 0.f, 24.f);
     storage->SetFloat(key, amount);
     auto* draw = ImGui::GetWindowDrawList();
-    if (amount > .001f) {
+    if (!glass && amount > .001f) {
         ImVec4 fill = ImGui::IsItemActive() ? palette.pressed : palette.selected;
         fill.w *= amount;
         draw->AddRectFilled(rect.Min, rect.Max, ImGui::GetColorU32(fill), 9.f * scale);
@@ -56,10 +56,29 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     if (ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
     if (glass) GlassControlFeedback(rect,selected,scale,palette);
-    const float glyphSize = (glyph == Glyph::Stack ? 24.f : 21.f) * scale;
-    DrawGlyph(draw, glyph, ImVec2(rect.Min.x + (size - glyphSize) * .5f,
-        rect.Min.y + (size - glyphSize) * .5f), glyphSize,
-        ImGui::GetColorU32(selected ? palette.text : palette.mutedText));
+    const float glyphSize = (glyph == Glyph::Stack ? (glass ? 25.f : 24.f) :
+        (glass ? 23.f : 21.f)) * scale;
+    const ImVec2 glyphMin(rect.Min.x + (size - glyphSize) * .5f,
+        rect.Min.y + (size - glyphSize) * .5f);
+    if (glass) {
+        // Preserve the existing vectors, with a quiet opposing halo so their
+        // strokes stay legible over either bright or dark refracted detail.
+        const float luminance = palette.text.x*.2126f + palette.text.y*.7152f + palette.text.z*.0722f;
+        const float haloInk = luminance > .5f ? 0.f : 1.f;
+        const ImVec4 halo(haloInk,haloInk,haloInk,.13f*palette.text.w);
+        const float offset = .65f*scale;
+        const ImU32 haloColor = ImGui::GetColorU32(halo);
+        DrawGlyph(draw,glyph,ImVec2(glyphMin.x-offset,glyphMin.y),glyphSize,haloColor);
+        DrawGlyph(draw,glyph,ImVec2(glyphMin.x+offset,glyphMin.y),glyphSize,haloColor);
+        DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y-offset),glyphSize,haloColor);
+        DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y+offset),glyphSize,haloColor);
+        ImVec4 ink = palette.text;
+        ink.w *= selected || ImGui::IsItemHovered() ? 1.f : .92f;
+        DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(ink));
+    } else {
+        DrawGlyph(draw,glyph,glyphMin,glyphSize,
+            ImGui::GetColorU32(selected ? palette.text : palette.mutedText));
+    }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
         if (!enabled && disabledReason && *disabledReason) ImGui::SetTooltip("%s", disabledReason);
         else {

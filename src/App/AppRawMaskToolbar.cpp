@@ -192,10 +192,16 @@ void AppShell::RenderSharedPanelToggle() {
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const float amount = std::max(m_NavigationRail.revealAmount, m_RawMaskToolbar.revealAmount);
     const float scale = m_NavigationRail.scale;
+    const bool glassLeft = !TopBarOwnsPanelToggle() && m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    const float toggleWidth = glassLeft ? std::min(Stack::Navigation::ButtonExtent*scale,
+        m_NavigationRail.visibleWidth-Stack::Navigation::BarPadding*scale) : Stack::Navigation::ButtonExtent*scale;
+    // This sibling window must reveal with the rail, not float outside its
+    // clipped width or remain visible when both edge bars are fully hidden.
+    if (glassLeft && toggleWidth <= 0.f) return;
     const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(m_RawMaskToolbar.panelTogglePosition);
-    ImGui::SetNextWindowSize(ImVec2(Stack::Navigation::ButtonExtent * scale, Stack::Navigation::ButtonExtent * scale));
+    ImGui::SetNextWindowSize(ImVec2(std::max(1.f,toggleWidth), Stack::Navigation::ButtonExtent * scale));
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1, 1));
@@ -206,8 +212,7 @@ void AppShell::RenderSharedPanelToggle() {
     Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
             Stack::Navigation::Glyph::Panel, false, true, scale, palette, nullptr,
-            !TopBarOwnsPanelToggle() && m_Appearance && m_Appearance->GetGlassChromeEnabled() &&
-                m_RailGlass.Error().empty()))
+            glassLeft && m_RailGlass.Error().empty()))
         ToggleWorkspaceSectionPanel();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::End();

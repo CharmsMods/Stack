@@ -28,10 +28,16 @@ inline void GlassControlFeedback(const ImRect& rect, bool selected, float scale,
     const float inset = (1.f + press * 1.25f) * scale;
     ImVec2 min(rect.Min.x+inset,rect.Min.y+inset), max(rect.Max.x-inset,rect.Max.y-inset);
     auto* draw = ImGui::GetWindowDrawList();
-    ImVec4 rim = palette.text; rim.w *= (.12f*hover+.22f*selection+.12f*press);
-    draw->AddRect(min,max,ImGui::GetColorU32(rim),7.f*scale,0,scale);
-    ImVec4 sheen = palette.text; sheen.w *= .20f*hover*(1.f-.6f*press);
-    draw->AddLine(ImVec2(min.x+7.f*scale,min.y),ImVec2(max.x-7.f*scale,min.y),
-        ImGui::GetColorU32(sheen),scale);
+    // A light control wash sits above the one continuous glass surface.
+    // No bevel or enclosing rim: controls are not little glass plaques.
+    ImVec4 wash = palette.text;
+    wash.w *= .075f*hover + .12f*selection + .055f*press;
+    draw->AddRectFilled(min,max,ImGui::GetColorU32(wash),8.f*scale);
+    if (selection > .001f) {
+        ImVec4 mark = palette.text; mark.w *= .75f*selection;
+        const float centerY = (min.y+max.y)*.5f;
+        draw->AddLine(ImVec2(rect.Min.x+scale,centerY-5.f*scale),
+            ImVec2(rect.Min.x+scale,centerY+5.f*scale),ImGui::GetColorU32(mark),1.5f*scale);
+    }
 }
 }

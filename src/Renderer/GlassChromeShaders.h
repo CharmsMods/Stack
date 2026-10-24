@@ -42,22 +42,47 @@ vec3 sampleValid(sampler2D image, vec2 p, vec2 extent) {
     return texture(image,clamp(p*extent,halfTexel,extent-halfTexel)).rgb;
 }
 void main() {
-    vec2 p = (uv - .5) * sizePx;
+    // The shape extends off-screen to the left. Only its exposed right-hand
+    // corners have curvature; there is no artificial left bevel or shadow.
+    vec2 p = vec2(uv.x * sizePx.x, (uv.y - .5) * sizePx.y);
     float r = min(radiusPx, .5 * min(sizePx.x,sizePx.y));
-    vec2 q = abs(p) - .5 * sizePx + r;
+    vec2 q = vec2(p.x,abs(p.y)) - vec2(sizePx.x,.5*sizePx.y) + r;
     float sd = length(max(q,0.0)) + min(max(q.x,q.y),0.0) - r;
     float coverage = 1.0 - smoothstep(-1.0,0.0,sd);
-    vec2 n = normalize(max(q,vec2(.001))) * sign(p);
-    if (q.x < 0.0 || q.y < 0.0) n = q.x > q.y ? vec2(sign(p.x),0) : vec2(0,sign(p.y));
-    float rim = exp(-abs(sd + 1.5 * pixelScale) / max(1.0,1.2 * pixelScale));
-    float bend = exp(-max(0.0,-sd) / max(1.0,9.0 * pixelScale));
-    vec2 refracted = sceneOrigin + (uv + n * bend * 3.5 * pixelScale / sizePx) * sceneScale;
-    vec3 scene = mix(sampleValid(softScene,refracted,softExtent),sampleValid(sharpScene,refracted,sharpExtent),.10);
-    // Strong neutral tint protects the legibility of small navigation glyphs.
-    vec3 c = mix(scene,tint.rgb,mix(.62,.84,clamp(tint.a,0.0,1.0)));
-    float light = dot(n,normalize(vec2(-.6,1.0)));
-    c += vec3(.13) * rim * max(light,0.0);
-    c -= vec3(.06) * rim * max(-light,0.0);
+    vec2 outward = normalize(max(q,vec2(.0001))) * vec2(1.0,sign(p.y));
+    if (q.x < 0.0 || q.y < 0.0)
+        outward = q.x > q.y ? vec2(1,0) : vec2(0,sign(p.y));
+
+    // A rounded thickness profile supplies a surface normal. Snell refraction
+    // and Schlick reflectance motivate this screen-space approximation; there
+    // is no claim of tracing a real three-dimensional glass object.
+    float depth = max(0.0,-sd);
+    float bevel = 13.0 * pixelScale;
+    float t = clamp(depth / bevel,0.0,1.0);
+    float cap = sqrt(max(.025,1.0-(1.0-t)*(1.0-t)));
+    float slope = (1.0-t) / cap;
+    vec3 normal = normalize(vec3(outward*slope,1.0));
+    vec3 ray = refract(vec3(0,0,-1),normal,1.0/1.46);
+    vec2 displacement = -ray.xy / max(.2,-ray.z) * 16.0 * pixelScale;
+    vec2 sceneUv = sceneOrigin + (uv + displacement / sizePx) * sceneScale;
+    vec3 clear = sampleValid(sharpScene,sceneUv,sharpExtent);
+    vec3 scattered = sampleValid(softScene,sceneUv,softExtent);
+    vec3 transmitted = mix(clear,scattered,.38 + .16*t);
+
+    float luminance = dot(tint.rgb,vec3(.2126,.7152,.0722));
+    vec3 neutral = luminance < .45 ? vec3(.12,.14,.16) : vec3(.94,.96,.98);
+    // Keep the backdrop visible. Theme tint is only a light contrast veil,
+    // unlike the former opaque dark panel treatment.
+    transmitted = mix(transmitted,neutral,.12);
+    float fresnel = .035 + .965*pow(1.0-normal.z,5.0);
+    vec3 light = normalize(vec3(-.35,.65,.70));
+    float specular = pow(max(0.0,dot(normal,light)),18.0);
+    float rim = exp(-pow((depth-1.25*pixelScale)/max(.65,pixelScale),2.0));
+    float edgeLight = .35 + .65*max(0.0,dot(outward,normalize(vec2(-.4,1.0))));
+    vec3 c = transmitted*(1.0-fresnel*.35);
+    c += vec3(.88,.94,1.0)*(fresnel*.35 + specular*.18 + rim*edgeLight*.30);
+    // A restrained dark underside separates transparent glass from content.
+    c *= 1.0 - rim*.12*max(0.0,-outward.y);
     color = vec4(clamp(c,0.0,1.0),coverage);
 })";
 }
