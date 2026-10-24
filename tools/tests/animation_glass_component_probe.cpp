@@ -84,6 +84,10 @@ int main(int argc,char** argv){assert(argc==2);
     float sliderValue=.5f;
     Stack::Animation::SliderMotion sliderMotion;
     bool sliderChanged=false,sliderActive=false,sliderFocused=false;
+    // Opt-in illustrative Stack demo parameters, NOT measured Apple motion.
+    // These channels never write the native slider value or its hit rectangle.
+    bool velocityDemo=false;
+    Stack::Animation::ScalarChannel visualWidth(40.f), visualElevation(1.f);
 
     struct Result{bool click,active,hover,focus;
         float press,amount;
@@ -157,9 +161,24 @@ int main(int argc,char** argv){assert(argc==2);
             sd->AddLine({140,210},{380,210},IM_COL32(48,134,246,255),6);
             sliderGlass.AddBackdrop(sd,{120,180},{410,240},pal.caption);
             const float thumbX=160+200*ss.position;
-            const ImVec2 thumbLo(thumbX-20,198),thumbHi(thumbX+20,222);
+            float thumbWidth=40.f, thumbElevation=ss.control.Elevation();
+            if (velocityDemo) {
+                if (input.held) {
+                    // Direct manipulation replaces any previous visual spring.
+                    visualWidth.Reset(52.f);
+                    visualElevation.Reset(.2f);
+                } else {
+                    visualWidth.Advance(input.deltaSeconds,input.reducedMotion);
+                    visualElevation.Advance(input.deltaSeconds,input.reducedMotion);
+                }
+                assert(std::isfinite(visualWidth.Value())&&std::isfinite(visualElevation.Value()));
+                thumbWidth=std::clamp(visualWidth.Value(),24.f,64.f);
+                thumbElevation=std::clamp(visualElevation.Value(),0.f,1.f);
+                assert(sliderValue==authoritative&&ss.position==sliderValue);
+            }
+            const ImVec2 thumbLo(thumbX-thumbWidth*.5f,198),thumbHi(thumbX+thumbWidth*.5f,222);
             Stack::Navigation::GlassObjectBacking(sd,thumbLo,thumbHi,12,pal);
-            assert(sliderGlass.AddObject(sd,thumbLo,thumbHi,pal.caption,12,ss.control.Elevation()));
+            assert(sliderGlass.AddObject(sd,thumbLo,thumbHi,pal.caption,12,thumbElevation));
             ImGui::End();
         }
         ImGui::Render();
@@ -332,6 +351,47 @@ int main(int argc,char** argv){assert(argc==2);
     frame(500,300,false,true);
     save("slider-keyboard-endpoint");
     std::cout<<"PASS actual native slider pointer/keyboard endpoints, disabled, held Escape, reduced motion, unchanged value/ID/rect and same-frame snapshot\n";
+
+    // Explicit velocity handoff affects presentation geometry only.
+    // Width velocity is px/s; elevation velocity is normalized units/s.
+    velocityDemo=true;
+    auto releaseVisual=[&] {
+        assert(visualWidth.SpringTo(40.f,-80.f,Stack::Animation::MotionSpec::Spring(4.f,.55f,.01f)));
+        assert(visualElevation.SpringTo(1.f,1.5f,Stack::Animation::MotionSpec::Spring(4.f,.75f,.001f)));
+    };
+    frame(375,110,false,true);
+    frame(375,110,true,false);
+    assert(sliderValue==1&&visualWidth.Value()==52&&visualElevation.Value()==.2f);
+    save("velocity-held");
+    releaseVisual();
+    for(int k=0;k<48;++k) {
+        frame(375,110,false,false);
+        assert(sliderValue==1&&sliderMotion.Snapshot().position==1&&!sliderChanged);
+        save("velocity-release-"+std::to_string(k));
+    }
+    assert(!visualWidth.IsActive()&&!visualElevation.IsActive());
+    assert(visualWidth.Value()==40&&visualElevation.Value()==1);
+    frame(375,110,true,false);
+    releaseVisual();
+    frame(375,110,false,false);
+    frame(375,110,true,false); // Regrab overrides the incomplete visual release.
+    assert(!visualWidth.IsActive()&&!visualElevation.IsActive());
+    assert(visualWidth.Value()==52&&visualElevation.Value()==.2f&&sliderValue==1);
+    save("velocity-regrab");
+    releaseVisual();
+    frame(375,110,false,false);
+    visualWidth.Cancel(); visualElevation.Cancel();
+    const float cancelledWidth=visualWidth.Value(), cancelledElevation=visualElevation.Value();
+    frame(375,110,false,false);
+    assert(visualWidth.Value()==cancelledWidth&&visualElevation.Value()==cancelledElevation);
+    assert(sliderValue==1&&!sliderChanged);
+    save("velocity-cancelled");
+    releaseVisual();
+    frame(375,110,false,true);
+    assert(!visualWidth.IsActive()&&!visualElevation.IsActive());
+    assert(visualWidth.Value()==40&&visualElevation.Value()==1&&sliderValue==1);
+    save("velocity-reduced-motion");
+    std::cout<<"PASS opt-in glass width/elevation velocity handoff, regrab/cancel, reduced motion; native slider value/position/hitbox unchanged\n";
 
     sliderGlass.Shutdown();
     glass.Shutdown();

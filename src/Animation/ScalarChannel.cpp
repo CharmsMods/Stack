@@ -77,6 +77,10 @@ bool ScalarChannel::Retarget(float target, const MotionSpec& spec, const Playbac
 bool ScalarChannel::Replay(float target, const MotionSpec& spec, const Playback& playback) {
     return RetargetImpl(target, spec, playback, true, nullptr);
 }
+bool ScalarChannel::SpringTo(float target, float initialVelocity, const MotionSpec& spec,
+    const Playback& playback) {
+    return SpringToImpl(target, initialVelocity, spec, playback, nullptr);
+}
 bool ScalarChannel::Reverse() { return ReverseImpl(nullptr); }
 void ScalarChannel::Cancel() { CancelImpl(CancelReason::Requested, nullptr); }
 void ScalarChannel::Finish() { FinishImpl(nullptr); }
@@ -97,11 +101,21 @@ void ScalarChannel::Emit(EventKind kind, Detail::EventBatch* events, CancelReaso
 }
 bool ScalarChannel::RetargetImpl(float target, const MotionSpec& spec,
     const Playback& playback, bool replay, Detail::EventBatch* events) {
-    if (!std::isfinite(target) || (!replay && target == target_) ||
-        generation_ == std::numeric_limits<std::uint64_t>::max()) return false;
+    if (!std::isfinite(target) || (!replay && target == target_)) return false;
     const auto sanitized = Sanitize(spec);
     const double retainedVelocity = active_ && spec_.kind == MotionKind::Spring &&
         sanitized.kind == MotionKind::Spring ? velocity_ : 0.f;
+    return BeginTransition(target, sanitized, playback, retainedVelocity, events);
+}
+bool ScalarChannel::SpringToImpl(float target, float initialVelocity, const MotionSpec& spec,
+    const Playback& playback, Detail::EventBatch* events) {
+    if (!std::isfinite(target) || !std::isfinite(initialVelocity) || spec.kind != MotionKind::Spring)
+        return false;
+    return BeginTransition(target, Sanitize(spec), playback, initialVelocity, events);
+}
+bool ScalarChannel::BeginTransition(float target, const MotionSpec& sanitized,
+    const Playback& playback, double initialVelocity, Detail::EventBatch* events) {
+    if (generation_ == std::numeric_limits<std::uint64_t>::max()) return false;
     CancelImpl(CancelReason::Retargeted, events);
     ++generation_;
     spec_ = sanitized;
@@ -110,7 +124,7 @@ bool ScalarChannel::RetargetImpl(float target, const MotionSpec& spec,
     if (playback_.repeatMode != RepeatMode::PingPong) playback_.repeatMode = RepeatMode::Restart;
     runStart_ = segmentStart_ = value_;
     runEnd_ = target_ = target;
-    velocity_ = retainedVelocity;
+    velocity_ = initialVelocity;
     springDisplacement_ = value_ - target_;
     elapsed_ = 0.;
     traversal_ = 0;

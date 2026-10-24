@@ -28,6 +28,12 @@ public:
     // Replay explicitly restarts and applies changed settings.
     bool Retarget(float target, const MotionSpec& spec, const Playback& playback = {});
     bool Replay(float target, const MotionSpec& spec, const Playback& playback = {});
+    // Explicit gesture handoff: signed value-units/second, never divided by
+    // distance. Always starts a new generation, even at the same target. Value
+    // stays continuous. Rejects nonfinite inputs and non-Spring specs. Supplied
+    // velocity applies to the first traversal; repeated traversals start at rest.
+    bool SpringTo(float target, float initialVelocity,
+        const MotionSpec& spec = MotionSpec::Spring(), const Playback& playback = {});
     // Reverse current/settled direction toward the opposite original endpoint,
     // cancelling the old generation and restarting the full repeat policy.
     bool Reverse();
@@ -43,6 +49,10 @@ private:
     friend class AnimationController;
     bool RetargetImpl(float target, const MotionSpec& spec, const Playback& playback,
         bool replay, Detail::EventBatch* events);
+    bool SpringToImpl(float target, float initialVelocity, const MotionSpec& spec,
+        const Playback& playback, Detail::EventBatch* events);
+    bool BeginTransition(float target, const MotionSpec& sanitized, const Playback& playback,
+        double initialVelocity, Detail::EventBatch* events);
     bool ReverseImpl(Detail::EventBatch* events);
     void CancelImpl(CancelReason reason, Detail::EventBatch* events);
     void SnapImpl(float value, Detail::EventBatch* events);

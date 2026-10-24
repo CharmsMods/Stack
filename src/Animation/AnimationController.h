@@ -45,6 +45,10 @@ public:
         const MotionSpec& spec, const Playback& playback = {});
     RequestResult Replay(OwnerId owner, TrackId track, float target,
         const MotionSpec& spec, const Playback& playback = {});
+    // Explicit, opt-in signed-velocity handoff. InvalidValue includes non-Spring
+    // specs. Queue rejection preserves the old run and supplied input unchanged.
+    RequestResult SpringTo(OwnerId owner, TrackId track, float target, float initialVelocity,
+        const MotionSpec& spec = MotionSpec::Spring(), const Playback& playback = {});
     RequestResult Reverse(OwnerId owner, TrackId track);
     RequestResult Snap(OwnerId owner, TrackId track, float value);
     RequestResult Cancel(OwnerId owner, TrackId track);

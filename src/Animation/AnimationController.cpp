@@ -130,6 +130,17 @@ RequestResult AnimationController::Replay(OwnerId owner, TrackId track, float ta
     const MotionSpec& spec, const Playback& playback) {
     return Start(owner, track, target, spec, playback, true);
 }
+RequestResult AnimationController::SpringTo(OwnerId owner, TrackId track, float target,
+    float initialVelocity, const MotionSpec& spec, const Playback& playback) {
+    auto* found = Find(owner, track);
+    if (!found) return RequestResult::InvalidHandle;
+    if (!std::isfinite(target) || !std::isfinite(initialVelocity) || spec.kind != MotionKind::Spring)
+        return RequestResult::InvalidValue;
+    auto candidate = found->channel;
+    Detail::EventBatch batch;
+    if (!candidate.SpringToImpl(target, initialVelocity, spec, playback, &batch)) return RequestResult::Unchanged;
+    return Commit(*found, candidate, batch);
+}
 RequestResult AnimationController::Reverse(OwnerId owner, TrackId track) {
     auto* found = Find(owner, track);
     if (!found) return RequestResult::InvalidHandle;
