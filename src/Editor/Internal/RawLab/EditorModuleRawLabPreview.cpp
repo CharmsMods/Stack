@@ -1159,71 +1159,92 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                             : sourceV);
                 };
                 const auto submitAreaAnalysis = [&]() {
-                    std::vector<Stack::RawRecipe::RawColorWarpAnalysisSample> samples;
-                    samples.reserve(colorScopePixelCount);
-                    for (int y = 0; y < colorScope.height; ++y) {
-                        for (int x = 0; x < colorScope.width; ++x) {
-                            const std::size_t index =
-                                static_cast<std::size_t>(y) * colorScope.width + x;
-                            const std::size_t offset = index * 3u;
-                            Stack::RawRecipe::RawColorWarpAnalysisSample sample;
-                            sample.sourceU = (static_cast<float>(x) + 0.5f) /
-                                colorScope.width;
-                            sample.sourceV = (static_cast<float>(y) + 0.5f) /
-                                colorScope.height;
-                            sample.color = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
-                                { colorScope.pixels[offset + 0u],
-                                  colorScope.pixels[offset + 1u],
-                                  colorScope.pixels[offset + 2u] },
-                                previewRecipe.technical.workingSpace);
-                            sample.valid = std::isfinite(sample.color.a) &&
-                                std::isfinite(sample.color.b) &&
-                                std::isfinite(sample.color.sceneEv);
-                            samples.push_back(sample);
-                        }
-                    }
+                    // A changed circle owns a new request even when preparing
+                    // or submitting it fails. Never commit the previous
+                    // circle's colors against the replacement geometry.
                     const std::uint64_t generation =
                         ++colorUi.colorWarpAreaAnalysisGeneration;
-                    const auto circle = colorUi.colorWarpPendingCircle;
-                    std::size_t reclaimedSlots = 0u;
-                    if (!colorUi.colorWarpPendingReplaceRegionId.empty()) {
-                        reclaimedSlots = static_cast<std::size_t>(std::count_if(
-                            previewRecipe.colorWarp.pins.begin(),
-                            previewRecipe.colorWarp.pins.end(),
-                            [&](const auto& pin) {
-                                return pin.regionId ==
-                                    colorUi.colorWarpPendingReplaceRegionId;
-                            }));
-                    }
-                    const std::size_t occupiedSlots =
-                        previewRecipe.colorWarp.pins.size() - reclaimedSlots;
-                    const std::size_t availableSlots =
-                        Stack::RawRecipe::kMaxRawColorWarpPins > occupiedSlots
-                            ? Stack::RawRecipe::kMaxRawColorWarpPins - occupiedSlots
-                            : 0u;
-                    auto state = std::make_shared<
-                        Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
-                    state->generation = generation;
-                    colorUi.colorWarpAreaAnalysisState = state;
-                    colorUi.colorWarpPendingCircleRefining = true;
-                    colorUi.colorWarpAreaStatus = "Refining";
-                    const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
-                        [state, generation, samples = std::move(samples), circle,
-                         availableSlots]() mutable {
-                            auto analysis = Stack::RawRecipe::AnalyzeRawColorWarpArea(
-                                samples,
-                                circle,
-                                availableSlots);
-                            std::lock_guard<std::mutex> lock(state->mutex);
-                            if (state->generation == generation) {
-                                state->result = std::move(analysis);
-                                state->ready = true;
-                            }
-                        });
-                    if (!submitted) {
+                    colorUi.colorWarpAreaAnalysisState.reset();
+                    colorUi.colorWarpAreaAnalysisResult = {};
+                    colorUi.colorWarpPendingCircleCommitRequested = false;
+                    colorUi.colorWarpPendingCircleRefining = false;
+                    const auto failAnalysis = [&]() {
                         colorUi.colorWarpAreaAnalysisState.reset();
                         colorUi.colorWarpPendingCircleRefining = false;
                         colorUi.colorWarpAreaStatus = "Analysis unavailable";
+                    };
+                    try {
+                        std::vector<Stack::RawRecipe::RawColorWarpAnalysisSample> samples;
+                        samples.reserve(colorScopePixelCount);
+                        for (int y = 0; y < colorScope.height; ++y) {
+                            for (int x = 0; x < colorScope.width; ++x) {
+                                const std::size_t index =
+                                    static_cast<std::size_t>(y) * colorScope.width + x;
+                                const std::size_t offset = index * 3u;
+                                Stack::RawRecipe::RawColorWarpAnalysisSample sample;
+                                sample.sourceU = (static_cast<float>(x) + 0.5f) /
+                                    colorScope.width;
+                                sample.sourceV = (static_cast<float>(y) + 0.5f) /
+                                    colorScope.height;
+                                sample.color = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
+                                    { colorScope.pixels[offset + 0u],
+                                      colorScope.pixels[offset + 1u],
+                                      colorScope.pixels[offset + 2u] },
+                                    previewRecipe.technical.workingSpace);
+                                sample.valid = std::isfinite(sample.color.a) &&
+                                    std::isfinite(sample.color.b) &&
+                                    std::isfinite(sample.color.sceneEv);
+                                samples.push_back(sample);
+                            }
+                        }
+                        const auto circle = colorUi.colorWarpPendingCircle;
+                        std::size_t reclaimedSlots = 0u;
+                        if (!colorUi.colorWarpPendingReplaceRegionId.empty()) {
+                            reclaimedSlots = static_cast<std::size_t>(std::count_if(
+                                previewRecipe.colorWarp.pins.begin(),
+                                previewRecipe.colorWarp.pins.end(),
+                                [&](const auto& pin) {
+                                    return pin.regionId ==
+                                        colorUi.colorWarpPendingReplaceRegionId;
+                                }));
+                        }
+                        const std::size_t occupiedSlots =
+                            previewRecipe.colorWarp.pins.size() - reclaimedSlots;
+                        const std::size_t availableSlots =
+                            Stack::RawRecipe::kMaxRawColorWarpPins > occupiedSlots
+                                ? Stack::RawRecipe::kMaxRawColorWarpPins - occupiedSlots
+                                : 0u;
+                        auto state = std::make_shared<
+                            Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
+                        state->generation = generation;
+                        colorUi.colorWarpAreaAnalysisState = state;
+                        colorUi.colorWarpPendingCircleRefining = true;
+                        colorUi.colorWarpAreaStatus = "Refining";
+                        const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
+                            [state, generation, samples = std::move(samples), circle,
+                             availableSlots]() mutable {
+                                Stack::RawRecipe::RawColorWarpAreaAnalysisResult analysis;
+                                bool failed = false;
+                                try {
+                                    analysis = Stack::RawRecipe::AnalyzeRawColorWarpArea(
+                                        samples,
+                                        circle,
+                                        availableSlots);
+                                } catch (...) {
+                                    // Pool exception handling releases task
+                                    // ownership, not this request's UI state.
+                                    failed = true;
+                                }
+                                std::lock_guard<std::mutex> lock(state->mutex);
+                                if (state->generation == generation) {
+                                    state->result = std::move(analysis);
+                                    state->failed = failed;
+                                    state->ready = true;
+                                }
+                            });
+                        if (!submitted) failAnalysis();
+                    } catch (...) {
+                        failAnalysis();
                     }
                 };
 
@@ -1234,9 +1255,12 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         completedState->generation ==
                             colorUi.colorWarpAreaAnalysisGeneration) {
                         colorUi.colorWarpAreaAnalysisResult =
-                            completedState->result;
+                            std::move(completedState->result);
                         colorUi.colorWarpPendingCircleRefining = false;
-                        if (colorUi.colorWarpAreaAnalysisResult.proposals.empty()) {
+                        if (completedState->failed) {
+                            colorUi.colorWarpAreaAnalysisResult = {};
+                            colorUi.colorWarpAreaStatus = "Analysis unavailable";
+                        } else if (colorUi.colorWarpAreaAnalysisResult.proposals.empty()) {
                             colorUi.colorWarpAreaStatus =
                                 colorUi.colorWarpAreaAnalysisResult.capacityLimited
                                 ? "No pin slots available"

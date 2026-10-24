@@ -355,6 +355,7 @@ struct RawWorkspaceColorWarpAreaAnalysisState {
     std::mutex mutex;
     std::uint64_t generation = 0;
     bool ready = false;
+    bool failed = false;
     Stack::RawRecipe::RawColorWarpAreaAnalysisResult result;
 };
 
