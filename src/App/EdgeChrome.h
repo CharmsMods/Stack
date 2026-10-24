@@ -68,7 +68,8 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
             draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
                 viewport->Pos.y+viewport->Size.y),false);
         }
-        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale,glassState.Elevation());
+        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale,glassState.Elevation(),
+            Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);
         if (objectOutsideWindow) draw->PopClipRect();
     }
     // Feedback, keyboard focus and the single sharp glyph share adaptive ink.

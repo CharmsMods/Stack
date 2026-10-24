@@ -96,7 +96,8 @@ float AppShell::RenderActivityIndicator(float width, float height, bool openDeta
         context.beginIndicator=[&](ImDrawList* draw,ImVec2 min,ImVec2 max,bool selected) {
             const auto glassState=Stack::Navigation::UpdateGlassControlState(selected);
             Stack::Navigation::GlassObjectBacking(draw,min,max,std::min(max.x-min.x,max.y-min.y)*.5f,palette);
-            m_RailGlass.AddObject(draw,min,max,palette.caption,std::min(max.x-min.x,max.y-min.y)*.5f,glassState.Elevation());
+            m_RailGlass.AddObject(draw,min,max,palette.caption,std::min(max.x-min.x,max.y-min.y)*.5f,glassState.Elevation(),
+                Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);
             adaptiveInk=m_RailGlass.BeginInk(draw,min,max,ImGui::GetItemID());
             Stack::Navigation::DrawGlassControlFeedback(ImRect(min,max),glassState,m_NavigationRail.scale,palette);
             Stack::Navigation::GlassKeyboardFocus(ImRect(min,max),m_NavigationRail.scale,palette);

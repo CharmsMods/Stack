@@ -27,7 +27,7 @@ bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 t
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
 }
-bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation) {
+bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation, MaterialRole role) {
     if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const Backdrop& backdrop=backdrops.back();
@@ -36,7 +36,7 @@ bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tin
     // This same immutable layout is drawn later. Hidden project rows allocate
     // no callback/reset, while a just-offclip object's visible shadow survives.
     if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,elevation,layout)) return false;
-    objects.push_back({this,&backdrop,tint,layout});
+    objects.push_back({this,&backdrop,tint,layout,role});
     draw->AddCallback(ObjectCallback,&objects.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
@@ -375,6 +375,7 @@ void GlassChrome::DrawObject(const Object& object) {
     glUniform2f(8,captureSize.x/width,captureSize.y/height);
     glUniform4f(9,float(layout.width),float(layout.height),x-layout.left,y-layout.bottom);
     glUniform4f(10,layout.shadow.x,layout.shadow.y,layout.shadow.z,layout.shadow.w);
+    glUniform1f(11,object.role==MaterialRole::NavigationControl ? .65f : 1.f);
     glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES,0,3);

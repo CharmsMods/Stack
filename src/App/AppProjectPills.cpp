@@ -117,7 +117,8 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         if (glass) {
             const auto glassState=Stack::Navigation::UpdateGlassControlState(selected);
             Stack::Navigation::GlassObjectBacking(draw,pillMin,pillMax,7.f*rail.scale,palette);
-            m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale,glassState.Elevation());
+            m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale,glassState.Elevation(),
+                Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);
             const bool adaptiveInk=m_RailGlass.BeginInk(draw,pillMin,pillMax,ImGui::GetItemID());
             Stack::Navigation::DrawGlassControlFeedback(ImRect(pillMin,pillMax),glassState,rail.scale,palette);
             ImVec4 ink = palette.text; ink.w *= automatic ? .40f : .65f;

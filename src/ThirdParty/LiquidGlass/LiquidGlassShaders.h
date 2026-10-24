@@ -58,6 +58,7 @@ layout(location=7) uniform vec2 sceneScale;
 layout(location=8) uniform vec2 sharpExtent;
 layout(location=9) uniform vec4 drawMapping;
 layout(location=10) uniform vec4 shadowLayout; // Offset XY, projected scale, sigma.
+layout(location=11) uniform float studioWindowStrength; // Renderer-owned material-role emphasis.
 vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
@@ -179,7 +180,7 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
     float azimuthAlignment=-direction.y/max(horizontal,1e-6);
     float azimuthWindow=smoothstep(.2588190451,.6427876097,azimuthAlignment);
     return ambient+vec3(2.5,2.45,2.35)*lamp+
-        vec3(.55)*elevationWindow*azimuthWindow;
+        vec3(.55*studioWindowStrength)*elevationWindow*azimuthWindow;
 }
 void main() {
     vec2 point=uv*drawMapping.xy-drawMapping.zw;
