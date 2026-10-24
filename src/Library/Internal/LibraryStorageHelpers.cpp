@@ -271,17 +271,6 @@ bool ReadFileBytes(const std::filesystem::path& path, std::vector<unsigned char>
     return file.good() || file.eof();
 }
 
-bool WriteFileBytes(const std::filesystem::path& path, const std::vector<unsigned char>& bytes) {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) return false;
-
-    if (!bytes.empty()) {
-        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    }
-
-    return file.good();
-}
-
 std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl) {
     if (dataUrl.empty()) return {};
     size_t commaPos = dataUrl.find(',');

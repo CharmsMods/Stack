@@ -639,6 +639,14 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     include(cmake/StackCacheReaderTests.cmake)
     include(cmake/StackGraphImageImportHistoryTests.cmake)
+    add_executable(StackLibraryStorageWriteTests
+        tools/tests/library_storage_write_tests.cpp
+        src/Library/Internal/LibraryAssetFileWrite.cpp
+        src/Utils/AtomicExportFile.cpp)
+    target_include_directories(StackLibraryStorageWriteTests PRIVATE src)
+    target_link_libraries(StackLibraryStorageWriteTests PRIVATE Threads::Threads)
+    add_test(NAME StackPersistence.LibraryWrites COMMAND StackLibraryStorageWriteTests)
+    set_tests_properties(StackPersistence.LibraryWrites PROPERTIES LABELS "persistence;library;cpu" TIMEOUT 30)
     add_executable(StackAtomicExportFileTests
         tools/tests/atomic_export_file_tests.cpp
         src/Utils/AtomicExportFile.cpp)
