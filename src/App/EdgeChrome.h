@@ -55,9 +55,9 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
-    if (glass) GlassControlFeedback(rect,selected,scale,palette);
+    const float press = glass ? GlassControlFeedback(rect,selected,scale,palette) : 0.f;
     const float glyphSize = (glyph == Glyph::Stack ? (glass ? 25.f : 24.f) :
-        (glass ? 23.f : 21.f)) * scale;
+        (glass ? 23.f : 21.f)) * scale * (1.f - .045f*press);
     const ImVec2 glyphMin(rect.Min.x + (size - glyphSize) * .5f,
         rect.Min.y + (size - glyphSize) * .5f);
     if (glass) {
@@ -72,7 +72,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
         DrawGlyph(draw,glyph,ImVec2(glyphMin.x+offset,glyphMin.y),glyphSize,haloColor);
         DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y-offset),glyphSize,haloColor);
         DrawGlyph(draw,glyph,ImVec2(glyphMin.x,glyphMin.y+offset),glyphSize,haloColor);
-        ImVec4 ink = palette.text;
+        ImVec4 ink(luminance,luminance,luminance,palette.text.w);
         ink.w *= selected || ImGui::IsItemHovered() ? 1.f : .92f;
         DrawGlyph(draw,glyph,glyphMin,glyphSize,ImGui::GetColorU32(ink));
     } else {
