@@ -27,16 +27,26 @@ bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 t
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
 }
+GlassChrome::MaterialProfile GlassChrome::ResolveMaterial(MaterialRole role) {
+    MaterialProfile material;
+    if (role==MaterialRole::NavigationControl || role==MaterialRole::SliderThumb) {
+        material.studioWindow=ImVec4(.5735764364f,.8191520443f,.8191520443f,.9781476007f);
+    }
+    if (role==MaterialRole::NavigationControl) material.studioStrength=.65f;
+    if (role==MaterialRole::SliderThumb) material.flatCapFraction=.25f;
+    return material;
+}
 bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation, MaterialRole role) {
     if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const Backdrop& backdrop=backdrops.back();
     const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
+    const MaterialProfile material=ResolveMaterial(role);
     ObjectLayout layout;
     // This same immutable layout is drawn later. Hidden project rows allocate
     // no callback/reset, while a just-offclip object's visible shadow survives.
-    if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,elevation,layout)) return false;
-    objects.push_back({this,&backdrop,tint,layout,role});
+    if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,elevation,material,layout)) return false;
+    objects.push_back({this,&backdrop,tint,layout,material});
     draw->AddCallback(ObjectCallback,&objects.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
@@ -66,7 +76,7 @@ void GlassChrome::BuildLayout(Backdrop& s) {
     layout.reserveHeight=std::max(layout.height,std::min(fh,int(std::ceil((s.max.y-s.min.y)*s.scale.y))+2*padding));
 }
 bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 clip,
-    float radius,float elevation,ObjectLayout& layout) {
+    float radius,float elevation,const MaterialProfile& material,ObjectLayout& layout) {
     const auto& capture=s.layout;
     if (s.scale.x<=0.f || s.scale.y<=0.f || capture.width<=0 || capture.height<=0) return false;
     // Full unclipped geometry defines the lens, even during column reveal.
@@ -78,7 +88,7 @@ bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 cli
     // Pressing lowers the rigid optical volume without resizing/deforming it.
     // The same finite gap drives both optical shading and shadow projection.
     const float lift=std::isfinite(elevation) ? std::clamp(elevation,0.f,1.f) : 1.f;
-    layout.volume=ImVec2(std::max(.25f,.32f*std::min(w,h)),.05f*std::min(w,h)*lift);
+    layout.volume=ImVec2(std::max(.25f,material.halfDepthRatio*std::min(w,h)),material.airGapRatio*std::min(w,h)*lift);
     const float centerZ=layout.volume.x+layout.volume.y;
     const ImVec2 objectCenter(x-capture.x+.5f*w,y-capture.y+.5f*h);
     // A broad near-overhead studio fill approximates underside occlusion.
@@ -375,12 +385,11 @@ void GlassChrome::DrawObject(const Object& object) {
     glUniform2f(8,captureSize.x/width,captureSize.y/height);
     glUniform4f(9,float(layout.width),float(layout.height),x-layout.left,y-layout.bottom);
     glUniform4f(10,layout.shadow.x,layout.shadow.y,layout.shadow.z,layout.shadow.w);
-    glUniform1f(11,object.role==MaterialRole::NavigationControl ? .65f : 1.f);
-    // Compact controls use a broader lower-face source; showcase lenses retain
-    // their accepted lower-shoulder light. Values are axis H/Z, cos outer/inner.
-    if (object.role!=MaterialRole::Lens) glUniform4f(12,.5735764364f,.8191520443f,.8191520443f,.9781476007f);
-    else glUniform4f(12,.9367496998f,.35f,.9510565163f,.9902680687f);
-    glUniform1f(13,object.role==MaterialRole::SliderThumb ? .25f : 0.f);
+    const auto& material=object.material;
+    glUniform1f(11,material.studioStrength);
+    const auto& window=material.studioWindow;
+    glUniform4f(12,window.x,window.y,window.z,window.w);
+    glUniform1f(13,material.flatCapFraction);
     glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES,0,3);

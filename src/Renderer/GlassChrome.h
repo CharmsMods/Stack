@@ -33,6 +33,14 @@ public:
     const std::string& Error() const { return error; }
     void Shutdown();
 private:
+    // Resolve once when queued: layout, optics and lighting consume the same
+    // immutable preset even when callback execution happens later.
+    struct MaterialProfile {
+        float halfDepthRatio=.32f, airGapRatio=.05f, flatCapFraction=0.f;
+        float studioStrength=1.f;
+        ImVec4 studioWindow{.9367496998f,.35f,.9510565163f,.9902680687f};
+    };
+    static MaterialProfile ResolveMaterial(MaterialRole);
     struct CaptureLayout {
         int framebufferWidth=0, framebufferHeight=0;
         int x=0, y=0, width=0, height=0, reserveWidth=0, reserveHeight=0;
@@ -45,7 +53,7 @@ private:
         int left=0, bottom=0, width=0, height=0;
     };
     struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; CaptureLayout layout{}; };
-    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; MaterialRole role; };
+    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; MaterialProfile material; };
     struct Ink { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
     static void InkCallback(const ImDrawList*, const ImDrawCmd*);
     static void EndInkCallback(const ImDrawList*, const ImDrawCmd*);
@@ -59,7 +67,7 @@ private:
     // early culling and draw bounds before any GL callbacks are executed.
     static void BuildLayout(Backdrop&);
     static bool BuildLayout(const Backdrop&, ImVec2 min, ImVec2 max, ImVec4 clip,
-        float radius, float elevation, ObjectLayout&);
+        float radius, float elevation, const MaterialProfile&, ObjectLayout&);
     bool Ensure(int w, int h);
     void ReleaseTargets();
     bool enabled = false;
