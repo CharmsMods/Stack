@@ -1,5 +1,6 @@
 #include "Notifications/NotificationPresenter.h"
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 namespace Stack::Notifications {
@@ -50,9 +51,18 @@ float Presenter::RenderIndicator(NotificationStore& store,
         draw->AddCircle(center,5.f,color,24,1.4f);
     }
     const float fontSize=ImGui::GetFontSize();
-    draw->PushClipRect(pos,ImVec2(center.x-13.f,pos.y+height),true);
-    m_IndicatorLabel.Draw(*draw,ImVec2(pos.x+6.f,pos.y+(height-fontSize)*.5f),center.x-13.f,color);
-    draw->PopClipRect();
+    const float labelLeft=pos.x+6.f, labelRight=center.x-13.f;
+    const float labelRoom=labelRight-labelLeft;
+    // Compact indicators must not expose a few clipped pixels of a label.
+    // A fitting short label is still useful below one em. Account for both
+    // its target and animated advance instead of checking the new text alone.
+    const bool fitsLabel=!label.empty() && m_IndicatorLabel.Width()<=labelRoom &&
+        ImGui::GetFont()->CalcTextSizeA(fontSize,FLT_MAX,0.f,label.c_str()).x<=labelRoom;
+    if (labelRoom>=fontSize || fitsLabel) {
+        draw->PushClipRect(pos,ImVec2(labelRight,pos.y+height),true);
+        m_IndicatorLabel.Draw(*draw,ImVec2(labelLeft,pos.y+(height-fontSize)*.5f),labelRight,color);
+        draw->PopClipRect();
+    }
     if (context.endIndicator) context.endIndicator(draw);
     if(attention) {
         const ImVec4 bg=ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
