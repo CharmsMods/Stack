@@ -59,6 +59,8 @@ layout(location=8) uniform vec2 sharpExtent;
 layout(location=9) uniform vec4 drawMapping;
 layout(location=10) uniform vec4 shadowLayout; // Offset XY, projected scale, sigma.
 layout(location=11) uniform float studioWindowStrength; // Renderer-owned material-role emphasis.
+layout(location=12) uniform vec4 studioWindowShape; // axis H/Z and outer/inner angular cosines.
+layout(location=13) uniform float flatCapFraction;
 vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
@@ -97,6 +99,36 @@ vec3 volumeNormal(vec3 p,vec2 core,float r,float h) {
     vec2 radial=p.xy-clamp(p.xy,-core,core);
     // Inverse-transpose of the ellipsoid scaling, not a sphere normal.
     return normalize(vec3(radial/(r*r),p.z/(h*h)));
+}
+// Slider-only closed convex profile: sweep an ellipsoid over a rounded
+// planar core. A small flat cap keeps central track rays straight; the outer
+// shoulder still has the full accepted silhouette and true refraction.
+float profileField(vec3 p,vec2 core,float r,float h,float flatRadius) {
+    vec2 radial=p.xy-clamp(p.xy,-core,core);
+    float q=max(length(radial)-flatRadius,0.0)/(r-flatRadius);
+    return q*q+(p.z/h)*(p.z/h)-1.0;
+}
+vec3 profileNormal(vec3 p,vec2 core,float r,float h,float flatRadius) {
+    vec2 radial=p.xy-clamp(p.xy,-core,core);
+    float distance=length(radial), shoulder=(r-flatRadius);
+    float q=max(distance-flatRadius,0.0)/shoulder;
+    vec2 gradient=distance>1e-8 ? radial*(q/(shoulder*distance)) : vec2(0.0);
+    return normalize(vec3(gradient,p.z/(h*h)));
+}
+bool exitProfile(vec3 origin,vec3 direction,vec2 core,float r,float h,float flatRadius,
+    out vec3 point,out vec3 normal,out float lengthInside) {
+    // Incoming view rays refract downward. The lower cap plane brackets the
+    // unique exit of this convex volume, so no unbounded marching is needed.
+    if (direction.z>=-1e-5) return false;
+    float low=0.0, high=(origin.z+h)/(-direction.z);
+    for (int i=0;i<15;++i) {
+        float middle=.5*(low+high);
+        if (profileField(origin+middle*direction,core,r,h,flatRadius)>0.0) high=middle;
+        else low=middle;
+    }
+    lengthInside=high; point=origin+high*direction;
+    normal=profileNormal(point,core,r,h,flatRadius);
+    return true;
 }
 bool inRegion(float coordinate,float extent,int region,float tolerance) {
     return region==0 ? abs(coordinate)<=extent+tolerance
@@ -170,20 +202,21 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
     // A low-frequency local-scene environment is an explicit screen-space
     // approximation, separate from the finite overhead strip and distant window.
     // A distant panoramic studio window contributes a broad lower reflection.
-    // Its 20.49 degree elevation center and 8-to-18 degree vertical fade keep
+    // The Lens elevation center and fade keep
     // the entire light above the opaque backdrop plane.
+    // Role-specific elevation shapes the lower face/shoulder reflection.
     // Wide azimuth follows the lower curved shoulder: full within +/-50 degrees
     // of negative Y, fading to zero at +/-75. Center +Z and side/top rays miss it.
     float horizontal=length(direction.xy);
-    float elevationAlignment=.9367496998*horizontal+.35*direction.z;
-    float elevationWindow=smoothstep(.9510565163,.9902680687,elevationAlignment);
+    float elevationAlignment=studioWindowShape.x*horizontal+studioWindowShape.y*direction.z;
+    float elevationWindow=smoothstep(studioWindowShape.z,studioWindowShape.w,elevationAlignment);
     float azimuthAlignment=-direction.y/max(horizontal,1e-6);
     float azimuthWindow=smoothstep(.2588190451,.6427876097,azimuthAlignment);
     // Broad distant studio illumination is reflected through the same surface
     // normal/Fresnel path, not composited as a gray fill. It has no support
     // below the opaque backdrop horizon and a smooth, upward-facing maximum.
     float domeAlignment=max(0.0,dot(direction,vec3(0.0,.35,.9367496998)));
-    float dome=.10*domeAlignment*domeAlignment*smoothstep(0.0,.25,direction.z);
+    float dome=.25*domeAlignment*domeAlignment*smoothstep(0.0,.25,direction.z);
     return ambient+vec3(dome)+vec3(2.5,2.45,2.35)*lamp+
         vec3(.55*studioWindowStrength)*elevationWindow*azimuthWindow;
 }
@@ -217,9 +250,14 @@ void main() {
     // Clamp only the half-pixel AA fringe to its true geometric entry point.
     radial/=max(1.0,length(radial)/r);
     local=closest+radial;
+    float flatRadius=clamp(flatCapFraction,0.0,.6)*r;
     float cap=sqrt(max(0.0,1.0-dot(radial,radial)/(r*r)));
+    if (flatRadius>0.0) {
+        float q=max(length(radial)-flatRadius,0.0)/(r-flatRadius);
+        cap=sqrt(max(0.0,1.0-q*q));
+    }
     vec3 entry=vec3(local,h*cap);
-    vec3 entryNormal=volumeNormal(entry,core,r,h);
+    vec3 entryNormal=flatRadius>0.0 ? profileNormal(entry,core,r,h,flatRadius) : volumeNormal(entry,core,r,h);
     vec3 incoming=vec3(0.0,0.0,-1.0);
     const float ior=1.45;
     vec3 inside=refract(incoming,entryNormal,1.0/ior);
@@ -231,7 +269,9 @@ void main() {
     vec3 reflection=environment(entryWorld,reflect(incoming,entryNormal),ambient,capturePixels);
     vec3 exitPoint,exitNormal;
     float pathLength=0.0;
-    bool found=exitVolume(entry,inside,core,r,h,exitPoint,exitNormal,pathLength);
+    bool found=flatRadius>0.0
+        ? exitProfile(entry,inside,core,r,h,flatRadius,exitPoint,exitNormal,pathLength)
+        : exitVolume(entry,inside,core,r,h,exitPoint,exitNormal,pathLength);
     vec3 transmitted=reflection;
     float transmission=0.0;
     bool internallyReflected=false;

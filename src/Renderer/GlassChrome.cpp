@@ -376,6 +376,11 @@ void GlassChrome::DrawObject(const Object& object) {
     glUniform4f(9,float(layout.width),float(layout.height),x-layout.left,y-layout.bottom);
     glUniform4f(10,layout.shadow.x,layout.shadow.y,layout.shadow.z,layout.shadow.w);
     glUniform1f(11,object.role==MaterialRole::NavigationControl ? .65f : 1.f);
+    // Compact controls use a broader lower-face source; showcase lenses retain
+    // their accepted lower-shoulder light. Values are axis H/Z, cos outer/inner.
+    if (object.role!=MaterialRole::Lens) glUniform4f(12,.5735764364f,.8191520443f,.8191520443f,.9781476007f);
+    else glUniform4f(12,.9367496998f,.35f,.9510565163f,.9902680687f);
+    glUniform1f(13,object.role==MaterialRole::SliderThumb ? .25f : 0.f);
     glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES,0,3);

@@ -113,6 +113,84 @@ void CheckSharedBackdropCapture(GLuint framebuffer) {
     std::cout<<"PASS shared capture: reversed pair crop exact, near apron feature changes "
         <<nearChangedBodyPixels<<" body pixels, far feature leaves body unchanged\n";
 }
+// Public material roles must reset their uniforms between adjacent objects.
+// This checks an optical thumbnail only, not a second native slider hit target.
+void CheckSliderMaterialRoles(GLuint framebuffer) {
+    constexpr int width=640, height=360;
+    using Role=Stack::Renderer::GlassChrome::MaterialRole;
+    Stack::Renderer::GlassChrome renderer;
+    const ImVec4 tint(.09f,.12f,.15f,1.f);
+    const auto palette=Stack::Header::ResolvePalette(tint);
+    auto render=[&](bool slider, bool reverse) {
+        renderer.BeginFrame(true);
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        auto* background=ImGui::GetBackgroundDrawList();
+        background->AddRectFilled({0,0},{width,height},IM_COL32(245,245,247,255));
+        background->AddRectFilled({130,198},{390,202},IM_COL32(48,134,246,255));
+        ImGui::SetNextWindowPos({0,0});
+        ImGui::SetNextWindowSize({width,height});
+        ImGui::Begin("Slider material roles",nullptr,
+            ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
+            ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoInputs);
+        auto* draw=ImGui::GetWindowDrawList();
+        draw->PushClipRect({0,0},{width,height},false);
+        assert(renderer.AddBackdrop(draw,{130,170},{390,240},tint));
+        for (int i=0;i<3;++i) {
+            const int object=reverse ? 2-i : i;
+            const ImVec2 min(150.f+80.f*object,188),max(202.f+80.f*object,212);
+            const Role role=object==0&&slider ? Role::SliderThumb
+                : object==2 ? Role::NavigationControl : Role::Lens;
+            Stack::Navigation::GlassObjectBacking(draw,min,max,12,palette);
+            assert(renderer.AddObject(draw,min,max,tint,12,1.f,role));
+        }
+        draw->PopClipRect();
+        ImGui::End();
+        ImGui::Render();
+        glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);
+        glViewport(0,0,width,height);
+        glClearColor(0,0,0,1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        std::vector<unsigned char> pixels(width*height*4);
+        glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+        assert(renderer.Error().empty()&&glGetError()==GL_NO_ERROR);
+        for (std::size_t i=3;i<pixels.size();i+=4) assert(pixels[i]==255);
+        return pixels;
+    };
+    render(false,false); // Establish the window before exact comparisons.
+    const auto rounded=render(false,false);
+    const auto interleaved=render(true,false); // SliderThumb -> Lens -> NavigationControl.
+    const auto reversed=render(true,true);
+    auto blueRows=[&](const std::vector<unsigned char>& pixels, int x) {
+        int count=0;
+        for (int y=180;y<220;++y) {
+            const auto offset=((height-1-y)*width+x)*4;
+            // Wide color margins tolerate one-code display dithering. This is
+            // a source-track width probe, not a claimed Apple measurement.
+            count+=int(pixels[offset+2])-int(pixels[offset])>50&&
+                int(pixels[offset+2])-int(pixels[offset+1])>40 ? 1 : 0;
+        }
+        return count;
+    };
+    const int sourceRows=blueRows(interleaved,135);
+    assert(sourceRows==4);
+    assert(blueRows(interleaved,176)==sourceRows);
+    assert(blueRows(rounded,176)>sourceRows);
+    assert(blueRows(interleaved,152)>sourceRows); // Curved shoulder still bends the track.
+    for (int y=170;y<240;++y) for (int x=130;x<390;++x) {
+        const auto offset=((height-1-y)*width+x)*4;
+        for (int c=0;c<4;++c) {
+            assert(interleaved[offset+c]==reversed[offset+c]);
+            // Other roles retain their original output after a SliderThumb.
+            if (x>=215) assert(interleaved[offset+c]==rounded[offset+c]);
+        }
+    }
+    renderer.Shutdown();
+    assert(glGetError()==GL_NO_ERROR);
+    std::cout<<"PASS slider material: source-width center, refracted shoulder, "
+        "interleaved Lens/NavigationControl reset, exact reverse order, alpha255\n";
+}
 } // namespace
 
 int main(int argc,char** argv){assert(argc==2);
@@ -258,7 +336,8 @@ int main(int argc,char** argv){assert(argc==2);
             }
             const ImVec2 thumbLo(thumbX-thumbWidth*.5f,198),thumbHi(thumbX+thumbWidth*.5f,222);
             Stack::Navigation::GlassObjectBacking(sd,thumbLo,thumbHi,12,pal);
-            assert(sliderGlass.AddObject(sd,thumbLo,thumbHi,pal.caption,12,thumbElevation));
+            assert(sliderGlass.AddObject(sd,thumbLo,thumbHi,pal.caption,12,thumbElevation,
+                Stack::Renderer::GlassChrome::MaterialRole::SliderThumb));
             ImGui::End();
         }
         ImGui::Render();
@@ -474,6 +553,7 @@ int main(int argc,char** argv){assert(argc==2);
     std::cout<<"PASS opt-in glass width/elevation velocity handoff, regrab/cancel, reduced motion; native slider value/position/hitbox unchanged\n";
 
     CheckSharedBackdropCapture(fbo);
+    CheckSliderMaterialRoles(fbo);
 
     sliderGlass.Shutdown();
     glass.Shutdown();

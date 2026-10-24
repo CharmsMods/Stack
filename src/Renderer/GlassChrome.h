@@ -14,7 +14,8 @@ namespace Stack::Renderer {
 // its owning GL context before that context is destroyed.
 class GlassChrome {
 public:
-    enum class MaterialRole { Lens, NavigationControl };
+    // SliderThumb preserves a flat central track with refracting shoulders.
+    enum class MaterialRole { Lens, NavigationControl, SliderThumb };
     void BeginFrame(bool enabled);
     // Queue once before the column's objects/foreground. Captures and blurs only: no
     // visible background, edge or shadow. Bounds also limit all object output.
@@ -22,7 +23,8 @@ public:
     // Uses the latest queued backdrop, without copying or blurring again.
     // Elevation scales only the air gap: 0 is contact, 1 is the resting height.
     // Values are clamped to [0,1]; non-finite inputs use the resting height.
-    // Material role changes optical emphasis only, independently of size/DPI.
+    // Material role selects profile and illumination independently of size/DPI.
+    // Outer bounds, layout and input hit targets are unchanged.
     bool AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint,
         float radius, float elevation = 1.f, MaterialRole role = MaterialRole::Lens);
     // Bracket only neutral foreground geometry. Does not create a hit target.
