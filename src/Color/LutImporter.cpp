@@ -594,9 +594,12 @@ bool ParseSpi3d(std::istream& input, LutImportResult& result) {
             result.message = "The .spi3d file referenced a sample outside its declared grid.";
             return false;
         }
+        // Canonical LUT data is red-fastest, matching .cube, SampleLut3D and
+        // the renderer's x=red, y=green, z=blue texture upload. SPI3D row order
+        // is irrelevant because each sample declares its grid coordinates.
         const std::size_t offset =
-            ((static_cast<std::size_t>(r) * static_cast<std::size_t>(size) + static_cast<std::size_t>(g)) * static_cast<std::size_t>(size) +
-                static_cast<std::size_t>(b)) * 3u;
+            ((static_cast<std::size_t>(b) * static_cast<std::size_t>(size) + static_cast<std::size_t>(g)) * static_cast<std::size_t>(size) +
+                static_cast<std::size_t>(r)) * 3u;
         const std::size_t sampleIndex = offset / 3u;
         if (populated[sampleIndex] != 0u) {
             result.message =
