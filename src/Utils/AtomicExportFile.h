@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,16 @@ bool PrepareExportFileTarget(
 // Stages beside the destination in an exclusively claimed directory. Failed
 // writes never truncate the existing destination or remove another export's
 // staging file. Concurrent in-process publishers recheck under one lock.
+// Stream large exports without concatenating another full encoded buffer.
+// The callback runs synchronously against the exclusively owned staged file;
+// false, exceptions, close failures or a byte-count mismatch never publish it.
+bool WriteExportStreamAtomically(
+    const ExportFileTarget& target,
+    std::uint64_t expectedBytes,
+    const std::function<bool(std::ostream&)>& write,
+    std::string& error,
+    const std::function<bool()>& isCanceled = {});
+
 bool WriteExportFileAtomically(
     const ExportFileTarget& target,
     const std::vector<unsigned char>& bytes,

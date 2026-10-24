@@ -187,7 +187,7 @@ void TestPresetInputValidation(const std::filesystem::path& sandbox) {
 }
 
 void TestLibraryInputValidation(const std::filesystem::path& sandbox) {
-    const auto path = sandbox / "fixture.stacklibrary";
+    const auto path = sandbox / "fixture.stacklib";
     Format::LibraryBundleDocument original;
     original.bundleName = "Fixture Library";
     original.projects.push_back({ "example", {} });

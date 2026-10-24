@@ -447,91 +447,76 @@ bool DeserializeJson(const std::vector<unsigned char>& bytes, json& value) {
     return DecodeJsonValue(reader, value) && reader.Remaining() == 0;
 }
 
-bool ReplaceFileAtomically(
-    const std::filesystem::path& temporaryPath,
-    const std::filesystem::path& destinationPath) {
-#if defined(_WIN32)
-    return MoveFileExW(
-               temporaryPath.c_str(),
-               destinationPath.c_str(),
-               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-#else
-    std::error_code ec;
-    std::filesystem::rename(temporaryPath, destinationPath, ec);
-    return !ec;
-#endif
-}
-
-bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const std::vector<SectionData>& sections) {
-    std::filesystem::path tempPath = path;
-    tempPath += ".tmp";
-
-    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) return false;
-
-    const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size());
-    const std::uint64_t headerSize =
-        static_cast<std::uint64_t>(kMagic.size()) +
-        sizeof(kFormatVersion) +
-        sizeof(kind) +
-        sizeof(sectionCount) +
-        sectionCount * (4 + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t));
-
-    std::uint64_t dataOffset = headerSize;
-
-    std::uint32_t currentCrc = 0;
-    auto writeAndCrc = [&](const void* data, std::size_t size) {
-        file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-        currentCrc = ComputeCRC32(reinterpret_cast<const unsigned char*>(data), size, currentCrc);
-    };
-
-    writeAndCrc(kMagic.data(), kMagic.size());
-    writeAndCrc(&kFormatVersion, sizeof(kFormatVersion));
-    writeAndCrc(&kind, sizeof(kind));
-    writeAndCrc(&sectionCount, sizeof(sectionCount));
-
-    for (const auto& section : sections) {
-        writeAndCrc(section.id.data(), section.id.size());
-        const std::uint64_t sectionOffset = dataOffset;
-        const std::uint64_t storedSize = static_cast<std::uint64_t>(section.bytes.size());
-        const std::uint64_t uncompressedSize = section.uncompressedSize;
-        const std::uint8_t compression = static_cast<std::uint8_t>(section.compression);
-        writeAndCrc(&sectionOffset, sizeof(sectionOffset));
-        writeAndCrc(&storedSize, sizeof(storedSize));
-        writeAndCrc(&uncompressedSize, sizeof(uncompressedSize));
-        writeAndCrc(&compression, sizeof(compression));
-        dataOffset += storedSize;
+bool WriteSectionedFile(const Stack::FileSave::ExportFileTarget& target, FileKind kind,
+    const std::vector<SectionData>& sections, std::string& error) {
+    const auto extension = kind == FileKind::LibraryBundle ? ".stacklib" : ".stackpreset";
+    std::string actualExtension = target.approval.path.extension().string();
+    std::transform(actualExtension.begin(), actualExtension.end(), actualExtension.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if ((kind != FileKind::LibraryBundle && kind != FileKind::NodePreset) ||
+        actualExtension != extension || sections.size() > std::numeric_limits<std::uint32_t>::max()) {
+        error = "Unsupported archive destination or section count.";
+        return false;
     }
-
+    std::uint64_t expectedBytes = kMagic.size() + sizeof(kFormatVersion) + sizeof(kind) +
+        sizeof(std::uint32_t) + sections.size() * (4u + 3u * sizeof(std::uint64_t) + sizeof(std::uint8_t)) + 8u;
     for (const auto& section : sections) {
-        if (!section.bytes.empty()) {
-            writeAndCrc(section.bytes.data(), section.bytes.size());
+        if (section.bytes.size() > std::numeric_limits<std::uint64_t>::max() - expectedBytes ||
+            section.bytes.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+            error = "Archive size exceeds supported limits.";
+            return false;
         }
+        expectedBytes += section.bytes.size();
     }
+    return Stack::FileSave::WriteExportStreamAtomically(target, expectedBytes,
+        [&](std::ostream& file) {
+            const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size());
+            const std::uint64_t headerSize =
+                static_cast<std::uint64_t>(kMagic.size()) +
+                sizeof(kFormatVersion) +
+                sizeof(kind) +
+                sizeof(sectionCount) +
+                sectionCount * (4 + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t));
 
-    // Write CRC32 footer
-    const std::array<char, 4> kCksmTag = { 'C', 'K', 'S', 'M' };
-    file.write(kCksmTag.data(), kCksmTag.size());
-    file.write(reinterpret_cast<const char*>(&currentCrc), sizeof(currentCrc));
+            std::uint64_t dataOffset = headerSize;
 
-    file.close();
-    if (!file.good()) {
-        std::error_code ec;
-        std::filesystem::remove(tempPath, ec);
-        return false;
-    }
+            std::uint32_t currentCrc = 0;
+            auto writeAndCrc = [&](const void* data, std::size_t size) {
+                file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+                currentCrc = ComputeCRC32(reinterpret_cast<const unsigned char*>(data), size, currentCrc);
+            };
 
-    if (!ReplaceFileAtomically(tempPath, path)) {
-        // The temporary file lives beside the destination, so replacement
-        // should be one filesystem operation. Never fall back to copying over
-        // a valid project in place: a crash during that copy would corrupt
-        // both the previous save and the attempted replacement.
-        std::error_code cleanupError;
-        std::filesystem::remove(tempPath, cleanupError);
-        return false;
-    }
+            writeAndCrc(kMagic.data(), kMagic.size());
+            writeAndCrc(&kFormatVersion, sizeof(kFormatVersion));
+            writeAndCrc(&kind, sizeof(kind));
+            writeAndCrc(&sectionCount, sizeof(sectionCount));
 
-    return true;
+            for (const auto& section : sections) {
+                writeAndCrc(section.id.data(), section.id.size());
+                const std::uint64_t sectionOffset = dataOffset;
+                const std::uint64_t storedSize = static_cast<std::uint64_t>(section.bytes.size());
+                const std::uint64_t uncompressedSize = section.uncompressedSize;
+                const std::uint8_t compression = static_cast<std::uint8_t>(section.compression);
+                writeAndCrc(&sectionOffset, sizeof(sectionOffset));
+                writeAndCrc(&storedSize, sizeof(storedSize));
+                writeAndCrc(&uncompressedSize, sizeof(uncompressedSize));
+                writeAndCrc(&compression, sizeof(compression));
+                dataOffset += storedSize;
+            }
+
+            for (const auto& section : sections) {
+                if (!section.bytes.empty()) {
+                    writeAndCrc(section.bytes.data(), section.bytes.size());
+                }
+            }
+
+            // Write CRC32 footer
+            const std::array<char, 4> kCksmTag = { 'C', 'K', 'S', 'M' };
+            file.write(kCksmTag.data(), kCksmTag.size());
+            file.write(reinterpret_cast<const char*>(&currentCrc), sizeof(currentCrc));
+
+            return file.good();
+        }, error);
 }
 
 bool ReadSectionTable(
@@ -1553,12 +1538,15 @@ bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& documen
 }
 
 bool WriteNodePresetFile(const std::filesystem::path& path, const NodePresetDocument& document) try {
+    Stack::FileSave::ExportFileTarget target;
+    std::string error;
+    if (!Stack::FileSave::PrepareExportFileTarget(path, {}, {".stackpreset"}, target, error)) return false;
     std::vector<SectionData> sections;
     sections.push_back(MakeSectionData(FileKind::NodePreset, kMetaSection, SerializeJson(NodePresetMetadataToJson(document.metadata))));
     sections.push_back(MakeSectionData(FileKind::NodePreset, kThumbnailSection, document.thumbnailBytes));
     sections.push_back(MakeSectionData(FileKind::NodePreset, kPipelineSection, SerializeJson(document.graphPayload.is_null() ? json::object() : document.graphPayload)));
     sections.push_back(MakeSectionData(FileKind::NodePreset, kPresetBoundarySection, SerializeJson(NodePresetBoundarySocketsToJson(document.boundarySockets))));
-    return WriteSectionedFile(path, FileKind::NodePreset, sections);
+    return WriteSectionedFile(target, FileKind::NodePreset, sections, error);
 } catch (const std::exception&) {
     return false;
 }
@@ -1627,6 +1615,41 @@ bool ReadNodePresetFile(const std::filesystem::path& path, NodePresetDocument& o
 }
 
 bool WriteLibraryBundle(const std::filesystem::path& path, const LibraryBundleDocument& document) try {
+    Stack::FileSave::ExportFileTarget target;
+    std::string error;
+    return Stack::FileSave::PrepareExportFileTarget(path, {}, {".stacklib"}, target, error) &&
+        WriteLibraryBundle(target, document, error);
+} catch (const std::exception&) {
+    return false;
+}
+
+bool WriteLibraryBundle(const Stack::FileSave::ExportFileTarget& approvedTarget,
+    const LibraryBundleDocument& document, std::string& error) try {
+    // Extend source protection, never recapture overwrite approval after queuing.
+    auto target = approvedTarget;
+    const auto protect = [&](const std::string& source) {
+        if (!source.empty() && source.find("://") == std::string::npos)
+            target.protectedSources.push_back(std::filesystem::u8path(source));
+    };
+    for (const auto& project : document.projects) {
+        if (project.project.rawProjectSnapshot) {
+            for (const auto& asset : project.project.rawProjectSnapshot->embeddedAssets)
+                protect(asset.originalSourcePath);
+        }
+        std::vector<const json*> pending{&project.project.pipelineData, &project.project.rawWorkspaceData};
+        while (!pending.empty()) {
+            const auto* value = pending.back(); pending.pop_back();
+            if (value->is_object()) {
+                for (auto it = value->begin(); it != value->end(); ++it) {
+                    if ((it.key() == "sourcePath" || it.key() == "originalSourcePath") && it->is_string())
+                        protect(it->get<std::string>());
+                    else if (it->is_structured()) pending.push_back(&*it);
+                }
+            } else if (value->is_array()) {
+                for (const auto& child : *value) if (child.is_structured()) pending.push_back(&child);
+            }
+        }
+    }
     json meta = json::object();
     meta["bundleName"] = document.bundleName;
     meta["timestamp"] = document.timestamp;
@@ -1645,8 +1668,9 @@ bool WriteLibraryBundle(const std::filesystem::path& path, const LibraryBundleDo
     sections.push_back(MakeSectionData(FileKind::LibraryBundle, kMetaSection, SerializeJson(meta)));
     sections.push_back(MakeSectionData(FileKind::LibraryBundle, kProjectsSection, SerializeJson(projects)));
     sections.push_back(MakeSectionData(FileKind::LibraryBundle, kAssetsSection, SerializeJson(assets)));
-    return WriteSectionedFile(path, FileKind::LibraryBundle, sections);
+    return WriteSectionedFile(target, FileKind::LibraryBundle, sections, error);
 } catch (const std::exception&) {
+    error = "Could not serialize the Library archive.";
     return false;
 }
 

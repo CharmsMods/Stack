@@ -211,6 +211,16 @@ bool LibraryManager::ExportProject(const std::string& fileName, const std::strin
 void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPath) {
     if (destinationPath.empty() || Async::IsBusy(m_ExportTaskState)) return;
 
+    Stack::FileSave::ExportFileTarget target;
+    std::string targetError;
+    if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(destinationPath),
+            {}, {".stacklib"}, target, targetError)) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = targetError;
+        PostNotification(UiNotificationSeverity::Error, targetError, "library-export");
+        return;
+    }
+
     ++m_ExportGeneration;
     const std::uint64_t generation = m_ExportGeneration;
     m_ExportTaskState = Async::TaskState::Running;
@@ -219,9 +229,10 @@ void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPa
     const auto activity = m_ExportActivity;
     const auto notifier = m_Notifier;
 
-    const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Exporting"),[this, generation, destinationPath, activity, notifier]() {
-        const bool success = WriteLibraryBundle(destinationPath);
-        Async::TaskSystem::Get().PostToMain([this, generation, success, activity, notifier]() {
+    const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Exporting"),[this, generation, target = std::move(target), activity, notifier]() {
+        std::string error;
+        const bool success = WriteLibraryBundle(target, error);
+        Async::TaskSystem::Get().PostToMain([this, generation, success, error, activity, notifier]() {
             if (generation != m_ExportGeneration) {
                 return;
             }
@@ -232,8 +243,8 @@ void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPa
                 notifier.CompleteActivity(activity, "Library exported.");
             } else {
                 m_ExportTaskState = Async::TaskState::Failed;
-                m_ExportStatusText = "Failed to export the library bundle.";
-                notifier.FailActivity(activity, "Could not export the library.");
+                m_ExportStatusText = error.empty() ? "Failed to export the library bundle." : error;
+                notifier.FailActivity(activity, m_ExportStatusText);
             }
         });
     });
@@ -423,8 +434,9 @@ void LibraryManager::RequestImportLibraryBundle(const std::string& sourcePath) {
     }
 }
 
-bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
-    if (destinationPath.empty()) return false;
+bool LibraryManager::WriteLibraryBundle(const Stack::FileSave::ExportFileTarget& target,
+    std::string& error) {
+    if (target.approval.path.empty()) return false;
 
     try {
         StackFormat::LibraryBundleDocument bundle;
@@ -493,8 +505,9 @@ bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
             bundle.assets.push_back(std::move(asset));
         }
 
-        return StackFormat::WriteLibraryBundle(destinationPath, bundle);
+        return StackFormat::WriteLibraryBundle(target, bundle, error);
     } catch (...) {
+        error = "Could not collect files for the Library archive.";
         return false;
     }
 }

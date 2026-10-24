@@ -78,6 +78,23 @@ int main() try {
   Require(WriteExportFileAtomically(target,bytes,error),"resolved parent export failed");
   Require(Read(parentA/"resolved.png")=="PNG" && !std::filesystem::exists(parentB/"resolved.png"),"retargeted parent changed export destination");
  }
+ auto streamed=f.root/"streamed.png"; Write(streamed,"KEEP");
+ Require(PrepareExportFileTarget(streamed,{}, {".png"},target,error),"stream target preparation");
+ const auto failedStream=[&](std::uint64_t size, const std::function<bool(std::ostream&)>& writer) {
+  Require(!WriteExportStreamAtomically(target,size,writer,error),"invalid stream published");
+  Require(Read(streamed)=="KEEP","failed stream changed existing output");
+ };
+ failedStream(4,[](std::ostream& out){out<<"PART";return false;});
+ failedStream(4,[](std::ostream& out)->bool{out<<"PART";throw std::runtime_error("injected writer failure");});
+ failedStream(4,[](std::ostream& out){out<<"P";return true;});
+ failedStream(4,[](std::ostream& out){out<<"TOO-LONG";return true;});
+ failedStream(4,[](std::ostream& out){out.setstate(std::ios::badbit);return true;});
+ failedStream(0,[](std::ostream&){return true;});
+ failedStream(4,{});
+ Require(!WriteExportStreamAtomically(target,4,[](std::ostream& out){out<<"DATA";return true;},error,[]{return true;}),"canceled stream published");
+ Require(Read(streamed)=="KEEP","canceled stream changed output");
+ Require(WriteExportStreamAtomically(target,6,[](std::ostream& out){out<<"ABC";out<<"DEF";return out.good();},error),"chunked stream failed");
+ Require(Read(streamed)=="ABCDEF","chunked stream differs");
  auto race=f.root/"race.png";ExportFileTarget a,b;
  Require(PrepareExportFileTarget(race,{}, {".png"},a,error),"race preparation A");
  Require(PrepareExportFileTarget(race,{}, {".png"},b,error),"race preparation B");

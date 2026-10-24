@@ -297,7 +297,7 @@ private:
         const std::filesystem::path& projectPath,
         std::uint64_t revision) const;
 
-    bool WriteLibraryBundle(const std::string& destinationPath);
+    bool WriteLibraryBundle(const Stack::FileSave::ExportFileTarget& target, std::string& error);
     bool ImportLibraryBundle(const std::string& sourcePath, std::string* errorMessage = nullptr);
     bool FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices, std::string* errorMessage = nullptr);
 

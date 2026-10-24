@@ -174,12 +174,12 @@ bool PrepareExportFileTarget(const std::filesystem::path& destination,
         target.approval.path, target.deviceId, target.fileId, error);
 }
 
-bool WriteExportFileAtomically(const ExportFileTarget& target,
-    const std::vector<unsigned char>& bytes, std::string& error,
-    const std::function<bool()>& isCanceled) {
+bool WriteExportStreamAtomically(const ExportFileTarget& target,
+    std::uint64_t expectedBytes, const std::function<bool(std::ostream&)>& write,
+    std::string& error, const std::function<bool()>& isCanceled) try {
     error.clear();
-    if (bytes.empty() || bytes.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
-        error = "The encoded export is empty or too large to write."; return false;
+    if (expectedBytes == 0 || !write) {
+        error = "The export writer or encoded size is missing."; return false;
     }
     if (target.approval.path.empty() || !CheckSourceProtection(target, error)) {
         if (error.empty()) error = "The export destination was not prepared.";
@@ -201,10 +201,10 @@ bool WriteExportFileAtomically(const ExportFileTarget& target,
     const auto temporary = staging.path / "image";
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) { error = "The temporary export file could not be opened."; return false; }
-    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    const bool wrote = write(output);
     output.close();
-    if (!output.good()) { error = "The export bytes could not be completely written."; return false; }
-    if (std::filesystem::file_size(temporary, ec) != bytes.size() || ec) {
+    if (!wrote || !output.good()) { error = "The export bytes could not be completely written."; return false; }
+    if (std::filesystem::file_size(temporary, ec) != expectedBytes || ec) {
         error = "The staged export size could not be verified."; return false;
     }
     std::lock_guard<std::mutex> lock(publicationMutex);
@@ -225,5 +225,24 @@ bool WriteExportFileAtomically(const ExportFileTarget& target,
         }
     }
     return ReplaceFile(temporary, target.approval.path, target.approval.existed, error);
+} catch (const std::exception& exception) {
+    error = "The export writer failed: " + std::string(exception.what());
+    return false;
+} catch (...) {
+    error = "The export writer failed.";
+    return false;
+}
+
+bool WriteExportFileAtomically(const ExportFileTarget& target,
+    const std::vector<unsigned char>& bytes, std::string& error,
+    const std::function<bool()>& isCanceled) {
+    error.clear();
+    if (bytes.empty() || bytes.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+        error = "The encoded export is empty or too large to write."; return false;
+    }
+    return WriteExportStreamAtomically(target, bytes.size(), [&](std::ostream& output) {
+        output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return output.good();
+    }, error, isCanceled);
 }
 } // namespace Stack::FileSave

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "Persistence/ProjectStore.h"
+#include "Utils/AtomicExportFile.h"
 #include "ThirdParty/json.hpp"
 
 namespace StackBinaryFormat {
@@ -153,6 +154,9 @@ bool WriteNodePresetFile(const std::filesystem::path& path, const NodePresetDocu
 bool ReadNodePresetFile(const std::filesystem::path& path, NodePresetDocument& document, const NodePresetLoadOptions& options = {});
 
 bool WriteLibraryBundle(const std::filesystem::path& path, const LibraryBundleDocument& document);
+// Carries the initiating caller's overwrite approval through queued serialization.
+bool WriteLibraryBundle(const Stack::FileSave::ExportFileTarget& target,
+    const LibraryBundleDocument& document, std::string& error);
 bool ReadLibraryBundle(const std::filesystem::path& path, LibraryBundleDocument& document);
 
 bool AreProjectsIdentical(const ProjectDocument& a, const ProjectDocument& b);
