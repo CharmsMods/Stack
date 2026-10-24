@@ -20,7 +20,6 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -845,6 +844,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             }
             colorUi.colorWarpInspectionActive = false;
             colorUi.colorWarpDiagnosticLocked = false;
+            colorUi.ResetColorWarpDiagnosticRequest();
             colorUi.colorWarpInspectedRegionId.clear();
         }
         if(currentRawPreview && !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt &&
@@ -903,9 +903,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     requestedLongEdge;
                 m_RawWorkspaceColorWarpInputGraphScopeCache = {};
                 m_RawWorkspaceGraphScopeReadback = {};
-                m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint = 0;
-                ++m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration;
-                m_RawWorkspaceLabUi.colorWarpDiagnosticState.reset();
+                m_RawWorkspaceLabUi.ResetColorWarpDiagnosticRequest();
                 MarkRenderRefreshDirty();
             }
         }
@@ -942,25 +940,24 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 const Stack::RawRecipe::RawColorWarpPin& selectedPin =
                     previewRecipe.colorWarp.pins[
                         static_cast<std::size_t>(colorWarpDisplayedPin)];
-                std::vector<Stack::RawRecipe::RawColorWarpPin> diagnosticPins;
                 const bool isolate =
                     m_RawWorkspaceLabUi.colorWarpDiagnosticIsolateSelected ||
                     colorWarpSelectionViewMode == 2;
-                std::unordered_set<std::string> groupPinIds;
+                const std::vector<std::string>* groupPinIds = nullptr;
                 if (!isolate) {
                     for (const auto& group : previewRecipe.colorWarp.linkGroups) {
                         if (std::find(group.pinIds.begin(), group.pinIds.end(), selectedPin.id) !=
                             group.pinIds.end()) {
-                            groupPinIds.insert(group.pinIds.begin(), group.pinIds.end());
+                            groupPinIds = &group.pinIds;
                             break;
                         }
                     }
                 }
-                for (const auto& pin : previewRecipe.colorWarp.pins) {
-                    if (pin.id == selectedPin.id || groupPinIds.find(pin.id) != groupPinIds.end()) {
-                        diagnosticPins.push_back(pin);
-                    }
-                }
+                const auto inspectPin = [&](const auto& pin) {
+                    return pin.id == selectedPin.id || (groupPinIds &&
+                        std::find(groupPinIds->begin(), groupPinIds->end(), pin.id) !=
+                            groupPinIds->end());
+                };
                 Stack::Editor::ColorWarpFeedback* feedbackCache = preview.edit.nodeTarget
                     ? &m_NodeEditorState.Get<Stack::Editor::ColorWarpFeedback>(*preview.edit.nodeTarget)
                     : nullptr;
@@ -983,12 +980,29 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 hashFeedback(std::hash<float>{}(previewRecipe.colorWarp.strength));
                 for (const auto& pin : previewRecipe.colorWarp.pins)
                     hashFeedback(std::hash<float>{}(pin.strength));
-                for (const auto& pin : diagnosticPins)
-                    hashFeedback(std::hash<std::string>{}(pin.id));
+                for (const auto& pin : previewRecipe.colorWarp.pins)
+                    if (inspectPin(pin)) hashFeedback(std::hash<std::string>{}(pin.id));
                 overlayFingerprint ^= std::hash<std::string> {}(selectedPin.id) +
                     0x9e3779b97f4a7c15ull + (overlayFingerprint << 6u) +
                     (overlayFingerprint >> 2u);
                 overlayFingerprint ^= isolate ? 0xa531u : 0x5ca1u;
+                if (overlayFingerprint == 0u) overlayFingerprint = 1u;
+                auto& diagnosticUi = m_RawWorkspaceLabUi;
+                if (diagnosticUi.colorWarpDiagnosticFailed &&
+                    diagnosticUi.colorWarpDiagnosticRequestedFingerprint == overlayFingerprint &&
+                    diagnosticUi.colorWarpDiagnosticAttemptFrame != ImGui::GetFrameCount() &&
+                    ImGui::IsKeyPressed(ImGuiKey_H, false) &&
+                    !ImGui::GetIO().AppFocusLost && !ImGui::GetIO().WantTextInput &&
+                    !ImGui::GetIO().KeyCtrl &&
+                    !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeySuper &&
+                    ImGui::IsWindowHovered() && imageRect.Contains(ImGui::GetIO().MousePos) &&
+                    !ImGui::IsAnyItemActive() && !RawFloatingSurfaceOwnsPointer() &&
+                    !IsRawImageNavigationActive() && !m_EditingRawLayerMask &&
+                    !diagnosticUi.colorWarpPendingCircleDrawing &&
+                    diagnosticUi.colorWarpGestureOwner == 0 &&
+                    !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+                    diagnosticUi.ResetColorWarpDiagnosticRequest();
+                }
                 const bool rebuildOverlay =
                     m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture == 0 ||
                     m_RawWorkspaceLabUi.colorWarpAffectedOverlaySourceKey !=
@@ -1000,31 +1014,48 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     m_RawWorkspaceLabUi.colorWarpAffectedOverlayHeight !=
                         colorScope.height;
                 if (feedback && rebuildOverlay &&
-                    m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint !=
+                    diagnosticUi.colorWarpDiagnosticRequestedFingerprint !=
                         overlayFingerprint) {
-                    auto state = std::make_shared<
-                        Stack::EditorModuleTypes::RawWorkspaceColorWarpDiagnosticState>();
-                    state->generation = ++m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration;
-                    state->fingerprint = overlayFingerprint;
-                    state->width = colorScope.width;
-                    state->height = colorScope.height;
-                    m_RawWorkspaceLabUi.colorWarpDiagnosticState = state;
-                    m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint =
-                        overlayFingerprint;
-                    const auto colorWarp = previewRecipe.colorWarp;
-                    const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
-                        [state, feedback, colorWarp, diagnosticPins]() {
-                            auto pixels = Stack::Editor::BuildColorWarpFeedbackOverlay(
-                                *feedback, colorWarp, diagnosticPins);
-                            std::lock_guard<std::mutex> lock(state->mutex);
-                            state->pixels = std::move(pixels);
-                            state->spatialAvailable = std::any_of(feedback->fields.begin(),
-                                feedback->fields.end(), [](const auto& field) { return field.spatialAvailable; });
-                            state->ready = true;
-                        });
-                    if (!submitted) {
-                        m_RawWorkspaceLabUi.colorWarpDiagnosticState.reset();
-                        m_RawWorkspaceLabUi.colorWarpDiagnosticRequestedFingerprint = 0;
+                    diagnosticUi.ResetColorWarpDiagnosticRequest();
+                    diagnosticUi.colorWarpDiagnosticRequestedFingerprint = overlayFingerprint;
+                    diagnosticUi.colorWarpDiagnosticAttemptFrame = ImGui::GetFrameCount();
+                    diagnosticUi.colorWarpDiagnosticFailed = true;
+                    try {
+                        auto state = std::make_shared<
+                            Stack::EditorModuleTypes::RawWorkspaceColorWarpDiagnosticState>();
+                        state->generation = diagnosticUi.colorWarpDiagnosticGeneration;
+                        state->fingerprint = overlayFingerprint;
+                        state->sourceKey = previewIdentity;
+                        state->width = colorScope.width;
+                        state->height = colorScope.height;
+                        diagnosticUi.colorWarpDiagnosticState = state;
+                        const auto colorWarp = previewRecipe.colorWarp;
+                        std::vector<Stack::RawRecipe::RawColorWarpPin> diagnosticPins;
+                        for (const auto& pin : colorWarp.pins)
+                            if (inspectPin(pin)) diagnosticPins.push_back(pin);
+                        const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
+                            [state, feedback, colorWarp, diagnosticPins]() {
+                                std::vector<unsigned char> pixels;
+                                bool failed = false;
+                                try {
+                                    pixels = Stack::Editor::BuildColorWarpFeedbackOverlay(
+                                        *feedback, colorWarp, diagnosticPins);
+                                    failed = pixels.size() != static_cast<std::size_t>(state->width) *
+                                        static_cast<std::size_t>(state->height) * 4u;
+                                } catch (...) {
+                                    failed = true;
+                                }
+                                std::lock_guard<std::mutex> lock(state->mutex);
+                                state->pixels = std::move(pixels);
+                                state->spatialAvailable = std::any_of(feedback->fields.begin(),
+                                    feedback->fields.end(), [](const auto& field) { return field.spatialAvailable; });
+                                state->failed = failed;
+                                state->ready = true;
+                            });
+                        if (submitted) diagnosticUi.colorWarpDiagnosticFailed = false;
+                        else diagnosticUi.colorWarpDiagnosticState.reset();
+                    } catch (...) {
+                        diagnosticUi.colorWarpDiagnosticState.reset();
                     }
                 }
                 if (m_RawWorkspaceLabUi.colorWarpDiagnosticState) {
@@ -1032,27 +1063,52 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         m_RawWorkspaceLabUi.colorWarpDiagnosticState;
                     std::lock_guard<std::mutex> lock(completedState->mutex);
                     auto& state = *completedState;
-                    if (feedback && state.ready && state.generation ==
-                            m_RawWorkspaceLabUi.colorWarpDiagnosticGeneration &&
-                        state.fingerprint == overlayFingerprint) {
-                        const unsigned int replacement = GLHelpers::CreateTextureFromPixels(
-                            state.pixels.data(), state.width, state.height, 4);
-                        if (replacement != 0u) {
-                            if (m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0u) {
-                                glDeleteTextures(1, &m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture);
+                    if (feedback && state.ready) {
+                        if (state.generation != diagnosticUi.colorWarpDiagnosticGeneration ||
+                            state.fingerprint != overlayFingerprint || state.sourceKey != previewIdentity ||
+                            state.width != colorScope.width || state.height != colorScope.height) {
+                            diagnosticUi.ResetColorWarpDiagnosticRequest();
+                        } else {
+                            unsigned int replacement = 0u;
+                            if (!state.failed) {
+                                try {
+                                    replacement = GLHelpers::CreateTextureFromPixels(
+                                        state.pixels.data(), state.width, state.height, 4);
+                                } catch (...) {
+                                    // Keep the same bounded failure path as a rejected upload.
+                                }
                             }
-                            m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture = replacement;
-                            m_RawWorkspaceLabUi.colorWarpAffectedOverlayWidth = state.width;
-                            m_RawWorkspaceLabUi.colorWarpAffectedOverlayHeight = state.height;
-                            m_RawWorkspaceLabUi.colorWarpAffectedOverlayFingerprint = state.fingerprint;
-                            m_RawWorkspaceLabUi.colorWarpAffectedOverlaySourceKey = previewIdentity;
+                            diagnosticUi.colorWarpDiagnosticFailed = replacement == 0u;
+                            if (replacement != 0u) {
+                                if (diagnosticUi.colorWarpAffectedOverlayTexture != 0u) {
+                                    glDeleteTextures(1, &diagnosticUi.colorWarpAffectedOverlayTexture);
+                                }
+                                diagnosticUi.colorWarpAffectedOverlayTexture = replacement;
+                                diagnosticUi.colorWarpAffectedOverlayWidth = state.width;
+                                diagnosticUi.colorWarpAffectedOverlayHeight = state.height;
+                                diagnosticUi.colorWarpAffectedOverlayFingerprint = state.fingerprint;
+                                diagnosticUi.colorWarpAffectedOverlaySourceKey.swap(state.sourceKey);
+                            }
+                            diagnosticUi.colorWarpDiagnosticState.reset();
                         }
-                        m_RawWorkspaceLabUi.colorWarpDiagnosticState.reset();
                     }
+                }
+                if (diagnosticUi.colorWarpDiagnosticFailed &&
+                    diagnosticUi.colorWarpDiagnosticRequestedFingerprint == overlayFingerprint) {
+                    const char* message = "Color overlay unavailable. Point here and press H to retry.";
+                    const ImVec2 textMin(imageRect.Min.x + 18.0f, imageRect.Min.y + 16.0f);
+                    const ImVec2 textSize = ImGui::CalcTextSize(message);
+                    drawList->AddRectFilled(
+                        ImVec2(textMin.x - 8.0f, textMin.y - 6.0f),
+                        ImVec2(textMin.x + textSize.x + 8.0f, textMin.y + textSize.y + 6.0f),
+                        IM_COL32(12, 14, 18, 205), 5.0f);
+                    drawList->AddText(textMin, IM_COL32(245, 245, 245, 235), message);
                 }
                 if (feedback && m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0 &&
                     m_RawWorkspaceLabUi.colorWarpAffectedOverlaySourceKey == previewIdentity &&
-                    m_RawWorkspaceLabUi.colorWarpAffectedOverlayFingerprint == overlayFingerprint) {
+                    m_RawWorkspaceLabUi.colorWarpAffectedOverlayFingerprint == overlayFingerprint &&
+                    m_RawWorkspaceLabUi.colorWarpAffectedOverlayWidth == colorScope.width &&
+                    m_RawWorkspaceLabUi.colorWarpAffectedOverlayHeight == colorScope.height) {
                     const float uInset =
                         m_RawWorkspaceLabUi.colorWarpAffectedOverlayWidth > 1
                         ? 0.5f / static_cast<float>(

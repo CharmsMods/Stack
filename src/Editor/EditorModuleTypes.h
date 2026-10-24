@@ -363,9 +363,11 @@ struct RawWorkspaceColorWarpDiagnosticState {
     std::mutex mutex;
     std::uint64_t generation = 0;
     std::size_t fingerprint = 0;
+    std::string sourceKey;
     int width = 0;
     int height = 0;
     bool ready = false;
+    bool failed = false;
     bool spatialAvailable = false;
     std::vector<unsigned char> pixels;
 };
@@ -604,8 +606,18 @@ struct RawWorkspaceLabUiState {
     int colorWarpDiagnosticTargetLongEdge = 192;
     std::uint64_t colorWarpDiagnosticGeneration = 0;
     std::size_t colorWarpDiagnosticRequestedFingerprint = 0;
+    // Latch the attempt before allocating its shared request. Even a failed
+    // request allocation must wait for a new input or explicit retry gesture.
+    bool colorWarpDiagnosticFailed = false;
+    int colorWarpDiagnosticAttemptFrame = -1;
     std::shared_ptr<RawWorkspaceColorWarpDiagnosticState>
         colorWarpDiagnosticState;
+    void ResetColorWarpDiagnosticRequest() {
+        ++colorWarpDiagnosticGeneration;
+        colorWarpDiagnosticRequestedFingerprint = 0;
+        colorWarpDiagnosticFailed = false;
+        colorWarpDiagnosticState.reset();
+    }
     // Captured on pointer-down so pin, qualifier, pan, and zoom gestures
     // cannot steal one another until every pressed pointer is released.
     int colorWarpGestureOwner = 0;

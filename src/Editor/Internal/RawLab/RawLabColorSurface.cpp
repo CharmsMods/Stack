@@ -978,8 +978,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         args.ui.colorWarpRegionFeatherWheelDelta = 0.0f;
         ++args.ui.colorWarpAreaAnalysisGeneration;
         args.ui.colorWarpAreaAnalysisState.reset();
-        ++args.ui.colorWarpDiagnosticGeneration;
-        args.ui.colorWarpDiagnosticState.reset();
+        args.ui.ResetColorWarpDiagnosticRequest();
         args.ui.colorWarpInspectionActive = false;
         args.ui.colorWarpInspectedRegionId.clear();
         args.ui.colorWarpEvGesture = 0;
@@ -1001,7 +1000,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         args.ui.colorWarpInspectionActive = false;
         args.ui.colorWarpInspectedRegionId.clear();
         if (!args.ui.colorWarpDiagnosticLocked) {
-            args.ui.colorWarpDiagnosticRequestedFingerprint = 0;
+            args.ui.ResetColorWarpDiagnosticRequest();
         }
     }
     if (!colorWarp.pins.empty() &&
