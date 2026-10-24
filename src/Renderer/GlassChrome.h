@@ -26,8 +26,19 @@ public:
     const std::string& Error() const { return error; }
     void Shutdown();
 private:
-    struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; };
-    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImVec4 tint, clip; float radius; };
+    struct CaptureLayout {
+        int framebufferWidth=0, framebufferHeight=0;
+        int x=0, y=0, width=0, height=0, reserveWidth=0, reserveHeight=0;
+    };
+    struct ObjectLayout {
+        ImVec2 origin{}, size{}, volume{}; // Framebuffer pixels; volume is half-depth/gap.
+        ImVec4 shadow{}; // Offset X/Y, projected scale and penumbra sigma.
+        ImVec2 apron{};
+        float radius=0.f;
+        int left=0, bottom=0, width=0, height=0;
+    };
+    struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; CaptureLayout layout{}; };
+    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; };
     struct Ink { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
     static void InkCallback(const ImDrawList*, const ImDrawCmd*);
     static void EndInkCallback(const ImDrawList*, const ImDrawCmd*);
@@ -37,6 +48,11 @@ private:
     static void ObjectCallback(const ImDrawList*, const ImDrawCmd*);
     void CaptureBackdrop(const Backdrop&);
     void DrawObject(const Object&);
+    // One renderer-owned layout contract supplies capture, shader parameters,
+    // early culling and draw bounds before any GL callbacks are executed.
+    static void BuildLayout(Backdrop&);
+    static bool BuildLayout(const Backdrop&, ImVec2 min, ImVec2 max, ImVec4 clip,
+        float radius, ObjectLayout&);
     bool Ensure(int w, int h);
     void ReleaseTargets();
     bool enabled = false;

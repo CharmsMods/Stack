@@ -22,6 +22,7 @@ bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 t
     const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
     backdrops.push_back({this,min,max,viewport->Pos,viewport->Size,ImGui::GetIO().DisplayFramebufferScale,
         tint,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),viewport->DpiScale});
+    BuildLayout(backdrops.back());
     draw->AddCallback(BackdropCallback,&backdrops.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
@@ -30,26 +31,78 @@ bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tin
     if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const Backdrop& backdrop=backdrops.back();
-    if (backdrop.scale.x<=0.f || backdrop.scale.y<=0.f) return false;
     const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
-    // Cull before allocating callback payloads. Include the same bounded
-    // physical shadow apron as DrawObject, so a just-offclip object's shadow
-    // is retained but hidden project rows incur no GL callback/reset work.
-    const float r=std::min(std::max(0.f,radius)*std::min(backdrop.scale.x,backdrop.scale.y),
-        .5f*std::min((max.x-min.x)*backdrop.scale.x,(max.y-min.y)*backdrop.scale.y));
-    const float apron=std::ceil(3.f*std::max(.75f,r*.2f)+std::max(.75f,r*.22f));
-    const float left=std::max({clipMin.x,backdrop.min.x,backdrop.clip.x,backdrop.displayPos.x});
-    const float right=std::min({clipMax.x,backdrop.max.x,backdrop.clip.z,backdrop.displayPos.x+backdrop.displaySize.x});
-    const float top=std::max({clipMin.y,backdrop.min.y,backdrop.clip.y,backdrop.displayPos.y});
-    const float bottom=std::min({clipMax.y,backdrop.max.y,backdrop.clip.w,backdrop.displayPos.y+backdrop.displaySize.y});
-    if (right<=left || bottom<=top || max.x+apron/backdrop.scale.x<=left ||
-        min.x-apron/backdrop.scale.x>=right || max.y+apron/backdrop.scale.y<=top ||
-        min.y-apron/backdrop.scale.y>=bottom) return false;
-    objects.push_back({this,&backdrop,min,max,tint,
-        ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),std::max(0.f,radius)});
+    ObjectLayout layout;
+    // This same immutable layout is drawn later. Hidden project rows allocate
+    // no callback/reset, while a just-offclip object's visible shadow survives.
+    if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,layout)) return false;
+    objects.push_back({this,&backdrop,tint,layout});
     draw->AddCallback(ObjectCallback,&objects.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
+}
+void GlassChrome::BuildLayout(Backdrop& s) {
+    auto& layout=s.layout;
+    layout.framebufferWidth=int(s.displaySize.x*s.scale.x);
+    layout.framebufferHeight=int(s.displaySize.y*s.scale.y);
+    const int fw=layout.framebufferWidth, fh=layout.framebufferHeight;
+    if (fw<=0 || fh<=0) return;
+    const float left=std::max({s.min.x,s.clip.x,s.displayPos.x});
+    const float right=std::min({s.max.x,s.clip.z,s.displayPos.x+s.displaySize.x});
+    const float top=std::max({s.min.y,s.clip.y,s.displayPos.y});
+    const float bottom=std::min({s.max.y,s.clip.w,s.displayPos.y+s.displaySize.y});
+    if (right<=left || bottom<=top) return;
+    const int x=std::clamp(int(std::floor((left-s.displayPos.x)*s.scale.x)),0,fw);
+    const int y=std::clamp(int(std::floor(fh-(bottom-s.displayPos.y)*s.scale.y)),0,fh);
+    const int w=std::clamp(int(std::ceil((right-s.displayPos.x)*s.scale.x)),0,fw)-x;
+    const int h=std::clamp(int(std::ceil(fh-(top-s.displayPos.y)*s.scale.y)),0,fh)-y;
+    if (w<=0 || h<=0) return;
+    // Sampling-only neighborhood: no part of this padded crop paints chrome.
+    const int padding=int(std::ceil(16.f*std::max(.5f,std::max(s.scale.x,s.scale.y)*s.dpi)));
+    layout.x=std::max(0,x-padding); layout.y=std::max(0,y-padding);
+    layout.width=std::min(fw,x+w+padding)-layout.x;
+    layout.height=std::min(fh,y+h+padding)-layout.y;
+    layout.reserveWidth=std::max(layout.width,std::min(fw,int(std::ceil((s.max.x-s.min.x)*s.scale.x))+2*padding));
+    layout.reserveHeight=std::max(layout.height,std::min(fh,int(std::ceil((s.max.y-s.min.y)*s.scale.y))+2*padding));
+}
+bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 clip,
+    float radius,ObjectLayout& layout) {
+    const auto& capture=s.layout;
+    if (s.scale.x<=0.f || s.scale.y<=0.f || capture.width<=0 || capture.height<=0) return false;
+    // Full unclipped geometry defines the lens, even during column reveal.
+    const float x=(min.x-s.displayPos.x)*s.scale.x;
+    const float y=capture.framebufferHeight-(max.y-s.displayPos.y)*s.scale.y;
+    const float w=(max.x-min.x)*s.scale.x, h=(max.y-min.y)*s.scale.y;
+    layout.origin=ImVec2(x,y); layout.size=ImVec2(w,h);
+    layout.radius=std::min(std::max(0.f,radius)*std::min(s.scale.x,s.scale.y),.5f*std::min(w,h));
+    // Volume geometry is owned here and supplied unchanged to optical shading.
+    layout.volume=ImVec2(std::max(.25f,.32f*std::min(w,h)),.05f*std::min(w,h));
+    const float centerZ=layout.volume.x+layout.volume.y;
+    const ImVec2 objectCenter(x-capture.x+.5f*w,y-capture.y+.5f*h);
+    // A broad near-overhead studio fill approximates underside occlusion.
+    // It is separate from the grazing reflection strip, not a traced caustic.
+    const float fillHeight=8.f*std::max({float(capture.height),64.f,centerZ});
+    const ImVec2 fillCenter(.5f*capture.width-.08f*fillHeight,.5f*capture.height+.45f*fillHeight);
+    const float ratio=centerZ/(fillHeight-centerZ);
+    layout.shadow=ImVec4((objectCenter.x-fillCenter.x)*ratio,(objectCenter.y-fillCenter.y)*ratio,
+        1.f+ratio,std::max(.75f,.25f*fillHeight*ratio*.57735026919f));
+    // The shader's signed penumbra has zero support beyond three sigma.
+    // Include projection expansion and displacement independently per axis;
+    // a radius-only apron is not sufficient for arbitrary object proportions.
+    const float expansion=layout.shadow.z-1.f; // Use the exact scale sent to GLSL.
+    layout.apron=ImVec2(std::ceil(std::max(.5f,std::abs(layout.shadow.x)+.5f*w*expansion+3.f*layout.shadow.w)),
+        std::ceil(std::max(.5f,std::abs(layout.shadow.y)+.5f*h*expansion+3.f*layout.shadow.w)));
+    const float left=std::max({s.min.x,s.clip.x,clip.x,s.displayPos.x});
+    const float right=std::min({s.max.x,s.clip.z,clip.z,s.displayPos.x+s.displaySize.x});
+    const float top=std::max({s.min.y,s.clip.y,clip.y,s.displayPos.y});
+    const float bottom=std::min({s.max.y,s.clip.w,clip.w,s.displayPos.y+s.displaySize.y});
+    if (right<=left || bottom<=top) return false;
+    layout.left=std::max(int(std::floor(x-layout.apron.x)),int(std::ceil((left-s.displayPos.x)*s.scale.x)));
+    const int outputRight=std::min(int(std::ceil(x+w+layout.apron.x)),int(std::floor((right-s.displayPos.x)*s.scale.x)));
+    layout.bottom=std::max(int(std::floor(y-layout.apron.y)),int(std::ceil(capture.framebufferHeight-(bottom-s.displayPos.y)*s.scale.y)));
+    const int outputTop=std::min(int(std::ceil(y+h+layout.apron.y)),int(std::floor(capture.framebufferHeight-(top-s.displayPos.y)*s.scale.y)));
+    layout.width=outputRight-layout.left; layout.height=outputTop-layout.bottom;
+    return layout.width>0 && layout.height>0;
 }
 void GlassChrome::BackdropCallback(const ImDrawList*, const ImDrawCmd* command) {
     const auto* backdrop = static_cast<const Backdrop*>(command->UserCallbackData);
@@ -246,32 +299,15 @@ bool GlassChrome::Ensure(int w, int h) {
 }
 void GlassChrome::CaptureBackdrop(const Backdrop& s) {
     activeBackdrop=nullptr; captureValid=false; inkReady=false;
-    if (!error.empty()) return;
-    const int fw = int(s.displaySize.x*s.scale.x), fh = int(s.displaySize.y*s.scale.y);
-    if (fw <= 0 || fh <= 0) return;
-    const float left = std::max({s.min.x,s.clip.x,s.displayPos.x});
-    const float right = std::min({s.max.x,s.clip.z,s.displayPos.x+s.displaySize.x});
-    const float top = std::max({s.min.y,s.clip.y,s.displayPos.y});
-    const float bottom = std::min({s.max.y,s.clip.w,s.displayPos.y+s.displaySize.y});
-    if (right <= left || bottom <= top) return;
-    const int x = std::clamp(int(std::floor((left-s.displayPos.x)*s.scale.x)),0,fw);
-    const int y = std::clamp(int(std::floor(fh-(bottom-s.displayPos.y)*s.scale.y)),0,fh);
-    const int w = std::clamp(int(std::ceil((right-s.displayPos.x)*s.scale.x)),0,fw)-x;
-    const int h = std::clamp(int(std::ceil(fh-(top-s.displayPos.y)*s.scale.y)),0,fh)-y;
-    if (w <= 0 || h <= 0) return;
-    // The column's common neighborhood is captured before any objects, shadows
-    // or foreground. Padding is sampling-only; it never becomes visible chrome.
-    const int padding = int(std::ceil(16.f*std::max(.5f,std::max(s.scale.x,s.scale.y)*s.dpi)));
-    const int captureX = std::max(0,x-padding), captureY = std::max(0,y-padding);
-    const int captureW = std::min(fw,x+w+padding)-captureX;
-    const int captureH = std::min(fh,y+h+padding)-captureY;
+    if (!error.empty() || s.layout.width<=0 || s.layout.height<=0) return;
+    const auto& layout=s.layout;
+    const int captureX=layout.x, captureY=layout.y;
+    const int captureW=layout.width, captureH=layout.height;
     const GLState::FramebufferState target(true);
     const bool srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB) != GL_FALSE;
     glDisable(GL_FRAMEBUFFER_SRGB);
     glActiveTexture(GL_TEXTURE0); glBindSampler(0,0); glBindSampler(1,0);
-    const int reserveW = std::max(captureW,std::min(fw,int(std::ceil((s.max.x-s.min.x)*s.scale.x))+2*padding));
-    const int reserveH = std::max(captureH,std::min(fh,int(std::ceil((s.max.y-s.min.y)*s.scale.y))+2*padding));
-    if (Ensure(reserveW,reserveH)) {
+    if (Ensure(layout.reserveWidth,layout.reserveHeight)) {
         glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,target.drawFramebuffer);
         glReadBuffer(target.drawBuffer);
@@ -315,47 +351,28 @@ void GlassChrome::CaptureBackdrop(const Backdrop& s) {
 }
 void GlassChrome::DrawObject(const Object& object) {
     if (!captureValid || activeBackdrop!=object.backdrop || !error.empty()) return;
-    const Backdrop& s=*object.backdrop;
-    const int fh=int(s.displaySize.y*s.scale.y);
-    // Full, unclipped bounds define the lens. Cropping a revealing button must
-    // not resize its shape, move its center or change its optical curvature.
-    const float x=(object.min.x-s.displayPos.x)*s.scale.x;
-    const float y=fh-(object.max.y-s.displayPos.y)*s.scale.y;
-    const float w=(object.max.x-object.min.x)*s.scale.x;
-    const float h=(object.max.y-object.min.y)*s.scale.y;
-    const float radius=std::min(object.radius*std::min(s.scale.x,s.scale.y),.5f*std::min(w,h));
-    const float sigma=std::max(.75f,radius*.2f);
-    const float shadowOffset=std::max(.75f,radius*.22f);
-    const float shadowPad=std::ceil(3.f*sigma+shadowOffset);
-    // The layout column and caller clip own output, not the padded capture.
-    // This bounds every side of each local shadow, including toolbar overlap.
-    const float clipLeft=std::max({s.min.x,s.clip.x,object.clip.x,s.displayPos.x});
-    const float clipRight=std::min({s.max.x,s.clip.z,object.clip.z,s.displayPos.x+s.displaySize.x});
-    const float clipTop=std::max({s.min.y,s.clip.y,object.clip.y,s.displayPos.y});
-    const float clipBottom=std::min({s.max.y,s.clip.w,object.clip.w,s.displayPos.y+s.displaySize.y});
-    if (clipRight<=clipLeft || clipBottom<=clipTop) return;
-    const int outputLeft=std::max(int(std::floor(x-shadowPad)),int(std::ceil((clipLeft-s.displayPos.x)*s.scale.x)));
-    const int outputRight=std::min(int(std::ceil(x+w+shadowPad)),int(std::floor((clipRight-s.displayPos.x)*s.scale.x)));
-    const int outputBottom=std::max(int(std::floor(y-shadowPad)),int(std::ceil(fh-(clipBottom-s.displayPos.y)*s.scale.y)));
-    const int outputTop=std::min(int(std::ceil(y+h+shadowPad)),int(std::floor(fh-(clipTop-s.displayPos.y)*s.scale.y)));
-    if (outputRight<=outputLeft || outputTop<=outputBottom) return;
+    const auto& layout=object.layout;
+    const float x=layout.origin.x, y=layout.origin.y;
+    const float w=layout.size.x, h=layout.size.y;
     // No framebuffer switch or copy per object. ImGui's queued reset restores
     // the full viewport after this local draw, avoiding per-button GL queries.
     const bool srgb=glIsEnabled(GL_FRAMEBUFFER_SRGB)!=GL_FALSE;
     glDisable(GL_FRAMEBUFFER_SRGB); glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
-    glViewport(outputLeft,outputBottom,outputRight-outputLeft,outputTop-outputBottom);
+    glViewport(layout.left,layout.bottom,layout.width,layout.height);
     glUseProgram(programs[1]); glBindVertexArray(vao);
     glActiveTexture(GL_TEXTURE0); glBindSampler(0,0); glBindTexture(GL_TEXTURE_2D,textures[2]);
     glActiveTexture(GL_TEXTURE1); glBindSampler(1,0); glBindTexture(GL_TEXTURE_2D,textures[0]);
     glUniform2f(0,w,h);
-    glUniform1f(2,radius);
+    glUniform1f(2,layout.radius);
     glUniform4f(3,object.tint.x,object.tint.y,object.tint.z,object.tint.w);
+    glUniform2f(4,layout.volume.x,layout.volume.y);
     glUniform2f(5,captureSoftSize.x/((width+1)/2),captureSoftSize.y/((height+1)/2));
     glUniform2f(6,(x-captureOrigin.x)/captureSize.x,(y-captureOrigin.y)/captureSize.y);
     glUniform2f(7,w/captureSize.x,h/captureSize.y);
     glUniform2f(8,captureSize.x/width,captureSize.y/height);
-    glUniform4f(9,float(outputRight-outputLeft),float(outputTop-outputBottom),x-outputLeft,y-outputBottom);
+    glUniform4f(9,float(layout.width),float(layout.height),x-layout.left,y-layout.bottom);
+    glUniform4f(10,layout.shadow.x,layout.shadow.y,layout.shadow.z,layout.shadow.w);
     glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES,0,3);

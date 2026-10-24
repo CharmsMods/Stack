@@ -41,8 +41,9 @@ void main() {
 })";
 // Original Stack optics: exact rounded-rectangle swept-ellipsoid
 // volume, two dielectric interfaces and a finite reflected rectangular emitter.
-// This is not Apple's implementation. The small elevation shadow is the
-// existing stylized screen-space approximation, not a traced area-light shadow.
+// This is not Apple's implementation. Underside occlusion approximates a broad
+// near-overhead studio fill, separate from the grazing reflection strip.
+// It is not a traced refractive caustic.
 inline constexpr const char* Material = R"(#version 430 core
 in vec2 uv; out vec4 color;
 layout(binding=0) uniform sampler2D softScene;
@@ -50,11 +51,13 @@ layout(binding=1) uniform sampler2D sharpScene;
 layout(location=0) uniform vec2 sizePx;
 layout(location=2) uniform float radiusPx;
 layout(location=3) uniform vec4 tint;
+layout(location=4) uniform vec2 volume; // Renderer-owned half-depth and gap.
 layout(location=5) uniform vec2 softExtent;
 layout(location=6) uniform vec2 sceneOrigin;
 layout(location=7) uniform vec2 sceneScale;
 layout(location=8) uniform vec2 sharpExtent;
 layout(location=9) uniform vec4 drawMapping;
+layout(location=10) uniform vec4 shadowLayout; // Offset XY, projected scale, sigma.
 vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
@@ -172,20 +175,23 @@ void main() {
     float r=max(.01,min(radiusPx,.5*min(sizePx.x,sizePx.y)));
     float silhouette=objectDistance(point,r);
     float coverage=1.0-smoothstep(-.5,.5,silhouette);
-    // Unchanged bounded stylized shadow, for an isolated material comparison.
-    // The whole-curved icon comparison changes the footprint, not shadow
-    // strength/spread: retain the prior 12/38 radius-based sigma and offset.
-    float shadowRadius=abs(sizePx.x-sizePx.y)<.001*min(sizePx.x,sizePx.y)
-        ? min(r,(12.0/38.0)*min(sizePx.x,sizePx.y)) : r;
-    float sigma=max(.75,shadowRadius*.2);
-    float shadowOffset=max(.75,shadowRadius*.22);
-    float shadowDistance=max(0.0,objectDistance(point+vec2(0.0,shadowOffset),r));
-    float shadow=.10*exp(-.5*shadowDistance*shadowDistance/(sigma*sigma));
+    // The renderer supplies this same projected footprint and three-sigma
+    // support to early culling and the final draw viewport. No visible rail.
+    vec2 shadowPoint=(point-.5*sizePx-shadowLayout.xy)/shadowLayout.z+.5*sizePx;
+    float shadowDistance=objectDistance(shadowPoint,r)*shadowLayout.z;
+    float sigma=shadowLayout.w;
+    // Signed Gaussian-CDF approximation: half occlusion at the footprint edge,
+    // softening inward as well as outward rather than painting a dense crescent.
+    // Tanh CDF approximation: Hendrycks/Gimpel, arXiv:1606.08415, section2.
+    float standardized=shadowDistance/sigma;
+    float occlusion=.5*(1.0-tanh(.7978845608*(standardized+
+        .044715*standardized*standardized*standardized)));
+    float shadow=.10*occlusion;
     shadow*=1.0-smoothstep(2.5*sigma,3.0*sigma,shadowDistance);
     if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
 
-    float h=max(.25,.32*min(sizePx.x,sizePx.y));
-    float gap=.05*min(sizePx.x,sizePx.y);
+    float h=volume.x;
+    float gap=volume.y;
     float centerZ=h+gap;
     vec2 core=max(.5*sizePx-vec2(r),vec2(0.0));
     vec2 local=point-.5*sizePx;
