@@ -71,11 +71,13 @@ bool Validate(ScratchGraph& tempGraph, std::string* outSummary) {
     return true;
 }
 bool Paste(const nlohmann::json& item, std::vector<Node>& destination, std::string& error) {
+    try {
     ScratchGraph graph; graph.nodes.push_back(ReadImage(item));
     if (!Validate(graph, &error)) return false;
     Node nodeCopy = graph.nodes.front();
     nodeCopy.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
     destination.push_back(std::move(nodeCopy)); return true;
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
 }
 int main() {
     Node source; source.kind = NodeKind::Image; source.instanceUuid = "source-uuid";
@@ -120,6 +122,16 @@ int main() {
     Check(!Paste(WriteImage(PrepareCopy(referenceOnly)), otherProject, error), "unhydrated export remains rejectable");
     auto corrupt = olderPayload; corrupt["pngBytes"] = nlohmann::json::binary({1,2,3});
     Check(!Paste(corrupt, otherProject, error), "undecodable reference rejected");
+    Node corruptManaged = source; corruptManaged.image.pngBytes = {1,2,3};
+    const auto corruptManagedPayload = WriteImage(PrepareCopy(corruptManaged));
+    Check(!corruptManagedPayload.contains("managedAssetId"), "corrupt fixture must pass detachment");
+    const auto beforeCorrupt = otherProject.size();
+    Check(!Paste(corruptManagedPayload, otherProject, error) && otherProject.size() == beforeCorrupt,
+        "corrupt exported managed bytes rejected before mutation");
+    auto plainCorrupt = payload; plainCorrupt["pngBytes"] = nlohmann::json::binary({1,2,3});
+    Check(!Paste(plainCorrupt, otherProject, error) && otherProject.size() == beforeCorrupt,
+        "plain corrupt encoded image rejected before mutation");
+    Check(error.find("could not be decoded") != std::string::npos, "decode rejection is actionable");
     Node placeholder; placeholder.kind = NodeKind::Image; placeholder.image.isLoading = true;
     Check(Paste(WriteImage(PrepareCopy(placeholder)), otherProject, error), "async placeholder unchanged");
     Node tree = source; tree.image = {};

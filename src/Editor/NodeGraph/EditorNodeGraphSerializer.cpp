@@ -646,7 +646,11 @@ void Serialization::ReadCurrentGraphPayload(
                 item.value("managedAssetId", std::string());
             node.image.projectAssetPath =
                 item.value("projectAssetPath", std::string());
-            DecodeImagePayloadPngBytes(ReadBinaryJsonBytes(item.value("pngBytes", nlohmann::json())), node.image);
+            const auto encodedImage = ReadBinaryJsonBytes(item.value("pngBytes", nlohmann::json()));
+            // Missing bytes can be hydrated from a project asset store, but
+            // supplied bytes must never silently become an empty image.
+            if (!encodedImage.empty() && !DecodeImagePayloadPngBytes(encodedImage, node.image))
+                throw std::runtime_error("Embedded image data could not be decoded. Copy or import the image again.");
             node.image.originalChannels = item.value("originalChannels", node.image.originalChannels);
             if (item.contains("sourceColorMetadata")) {
                 std::vector<Stack::NodeMath::ContractIssue> issues;
