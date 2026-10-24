@@ -58,7 +58,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (!glass && ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
-    if (glass) GlassObjectBacking(draw,rect.Min,rect.Max,12.f*scale,palette);
+    if (glass) GlassObjectBacking(draw,rect.Min,rect.Max,19.f*scale,palette);
     if (glass && material) {
         // A small sibling toggle window clips its glyphs/hit target tightly,
         // but the material may cast its shadow inside the approved column.
@@ -67,7 +67,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
             draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
                 viewport->Pos.y+viewport->Size.y),false);
         }
-        material->AddObject(draw,rect.Min,rect.Max,palette.caption,12.f*scale);
+        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale);
         if (objectOutsideWindow) draw->PopClipRect();
     }
     // Feedback, keyboard focus and the single sharp glyph share adaptive ink.

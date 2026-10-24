@@ -18,14 +18,15 @@ include Stack shader interfaces and bounded scene sampling, independent rounded
 floating controls with shared backdrop capture, and navigation-specific visual tuning.
 The adapted shader source is in src/ThirdParty/LiquidGlass/LiquidGlassShaders.h;
 the original Stack wrapper is src/Renderer/GlassChromeShaders.h. Stack retains
-the upstream blur arrangement/kernel and static noise function. Each object uses
-a Stack-specific convex bevel in physical pixels, with shared coverage and
-surface normals, Snell refraction, Fresnel-weighted nearby scene reflection
-and directional lighting, with a bounded display-only soft shadow. This
-replaces the demo's stretched radial lens/glow
+the upstream blur arrangement/kernel and static noise function. The optical
+volume is original Stack code: analytic convex patch intersections, entry and
+exit Snell refraction, Fresnel composition and reflected rays intersecting a
+finite overhead emitter. The single transmitted-ray budget approximates untraced
+exit-reflection energy using the front reflected environment. This replaces the demo's stretched radial lens/glow
 equations; it does not claim matched upstream material defaults or Apple's
-private implementation. Noise is reduced to sub-code-value dither. Valid scene
-extents clamp both the sharp and blurred samples to the bounded capture.
+private implementation. A bounded display-only soft shadow remains a
+presentation approximation. Noise is reduced to sub-code-value dither. Valid
+scene extents bound both the sharp and blurred samples to the shared capture.
 The upstream OverEngine submodule, demo application, photographs, fonts and
 showcase assets are not included by this adaptation.
 

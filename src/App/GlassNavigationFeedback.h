@@ -52,8 +52,8 @@ inline float GlassControlFeedback(const ImRect& rect, bool selected, float scale
     // pass. The visual compresses on press; the original item rectangle does not.
     ImVec4 shoulder = wash; shoulder.w *= .25f;
     draw->AddRectFilled(ImVec2(min.x-scale,min.y-scale),
-        ImVec2(max.x+scale,max.y+scale),ImGui::GetColorU32(shoulder),10.f*scale);
-    draw->AddRectFilled(min,max,ImGui::GetColorU32(wash),9.f*scale);
+        ImVec2(max.x+scale,max.y+scale),ImGui::GetColorU32(shoulder),.5f*std::min(max.x-min.x+2.f*scale,max.y-min.y+2.f*scale));
+    draw->AddRectFilled(min,max,ImGui::GetColorU32(wash),.5f*std::min(max.x-min.x,max.y-min.y));
     if (selection > .001f) {
         ImVec4 mark(neutral,neutral,neutral,palette.text.w*.8f*selection);
         const float centerY = (min.y+max.y)*.5f;

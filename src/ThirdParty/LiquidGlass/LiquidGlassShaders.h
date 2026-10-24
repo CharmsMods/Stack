@@ -39,6 +39,10 @@ void main() {
     // stepUv is upstream direction * radius / resolution.
     color=blur13(source,uv*extent,vec2(1.0),stepUv);
 })";
+// Original Stack optics: exact rounded-rectangle swept-ellipsoid
+// volume, two dielectric interfaces and a finite reflected rectangular emitter.
+// This is not Apple's implementation. The small elevation shadow is the
+// existing stylized screen-space approximation, not a traced area-light shadow.
 inline constexpr const char* Material = R"(#version 430 core
 in vec2 uv; out vec4 color;
 layout(binding=0) uniform sampler2D softScene;
@@ -50,127 +54,193 @@ layout(location=5) uniform vec2 softExtent;
 layout(location=6) uniform vec2 sceneOrigin;
 layout(location=7) uniform vec2 sceneScale;
 layout(location=8) uniform vec2 sharpExtent;
-// Output rectangle size and the glass origin within it, in framebuffer pixels.
 layout(location=9) uniform vec4 drawMapping;
-vec4 sampleValid(vec2 p) {
+vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
-    return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel));
+    return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
 }
 vec3 sampleSharp(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(sharpScene,0));
     return texture(sharpScene,clamp(p*sharpExtent,halfTexel,sharpExtent-halfTexel)).rgb;
 }
-float rand(vec2 co) {
-    return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);
+vec3 toLinear(vec3 v) {
+    return mix(v/12.92,pow((v+.055)/1.055,vec3(2.4)),step(vec3(.04045),v));
 }
-float objectDistance(vec2 point, float r) {
+vec3 toDisplay(vec3 v) {
+    v=max(v,vec3(0.0));
+    return mix(v*12.92,1.055*pow(v,vec3(1.0/2.4))-.055,step(vec3(.0031308),v));
+}
+float rand(vec2 co) { return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453); }
+float objectDistance(vec2 point,float r) {
     vec2 q=abs(point-.5*sizePx)-.5*sizePx+r;
     return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r;
 }
+float farRoot(vec3 origin,vec3 direction) {
+    float a=dot(direction,direction);
+    if (a<1e-14) return -1.0; // Parallel to this infinite patch's generator.
+    float b=dot(origin,direction);
+    float c=dot(origin,origin)-1.0;
+    float disc=b*b-a*c;
+    float tolerance=1e-6*max(b*b+abs(a*c),1e-12);
+    if (disc < -tolerance) return -1.0;
+    float root=sqrt(max(0.0,disc));
+    // Stable quadratic roots; the greater root has outward-facing derivative.
+    float q=-b-(b>=0.0 ? root : -root);
+    if (abs(q)<1e-12) return -b/a;
+    return max(q/a,c/q);
+}
+vec3 volumeNormal(vec3 p,vec2 core,float r,float h) {
+    vec2 radial=p.xy-clamp(p.xy,-core,core);
+    // Inverse-transpose of the ellipsoid scaling, not a sphere normal.
+    return normalize(vec3(radial/(r*r),p.z/(h*h)));
+}
+bool inRegion(float coordinate,float extent,int region,float tolerance) {
+    return region==0 ? abs(coordinate)<=extent+tolerance
+        : float(region)*coordinate>=extent-tolerance;
+}
+void offerHit(float t,vec3 origin,vec3 direction,vec2 core,float r,float h,
+    int regionX,int regionY,inout float best,inout vec3 normal) {
+    float tolerance=1e-4*max(r,h);
+    if (t<=tolerance || t>=best || isnan(t) || isinf(t)) return;
+    vec3 p=origin+t*direction;
+    if (!inRegion(p.x,core.x,regionX,tolerance) ||
+        !inRegion(p.y,core.y,regionY,tolerance)) return;
+    vec3 n=volumeNormal(p,core,r,h);
+    if (dot(direction,n)<=1e-7) return;
+    best=t; normal=n;
+}
+bool exitVolume(vec3 origin,vec3 direction,vec2 core,float r,float h,
+    out vec3 point,out vec3 normal,out float lengthInside) {
+    float best=1e20;
+    normal=vec3(0.0,0.0,-1.0);
+    // Eight exact patches: four elliptical cylinders and four ellipsoids.
+    // A degenerate core extent naturally produces the capsule/sphere cases.
+    for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) {
+        if (x==0 && y==0) continue;
+        vec3 o=vec3(x==0 ? 0.0 : (origin.x-float(x)*core.x)/r,
+                    y==0 ? 0.0 : (origin.y-float(y)*core.y)/r,origin.z/h);
+        vec3 d=vec3(x==0 ? 0.0 : direction.x/r,
+                    y==0 ? 0.0 : direction.y/r,direction.z/h);
+        offerHit(farRoot(o,d),origin,direction,core,r,h,x,y,best,normal);
+    }
+    // Both flat caps close the volume; the positive-facing candidate is rejected
+    // naturally when it is behind the refracted downward ray.
+    if (abs(direction.z)>1e-8) {
+        offerHit(( h-origin.z)/direction.z,origin,direction,core,r,h,0,0,best,normal);
+        offerHit((-h-origin.z)/direction.z,origin,direction,core,r,h,0,0,best,normal);
+    }
+    lengthInside=best;
+    point=origin+min(best,1e6)*direction;
+    return best<1e19;
+}
+float fresnel(float cosine,float incidentIndex,float transmittedIndex) {
+    cosine=clamp(cosine,0.0,1.0);
+    float eta=incidentIndex/transmittedIndex;
+    float sin2=eta*eta*max(0.0,1.0-cosine*cosine);
+    if (sin2>=1.0) return 1.0;
+    float transmittedCosine=sqrt(max(0.0,1.0-sin2));
+    float rs=(incidentIndex*cosine-transmittedIndex*transmittedCosine)/
+        max(incidentIndex*cosine+transmittedIndex*transmittedCosine,1e-8);
+    float rp=(transmittedIndex*cosine-incidentIndex*transmittedCosine)/
+        max(transmittedIndex*cosine+incidentIndex*transmittedCosine,1e-8);
+    return .5*(rs*rs+rp*rp);
+}
+vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
+    // One shared finite overhead emitter in capture/world coordinates, not a
+    // stripe painted in object UV. Its footprint follows the reflected ray.
+    float unit=max(capturePixels.y,64.0);
+    float lightZ=.9*unit;
+    vec2 lightCenter=vec2(-.35,2.4)*unit;
+    vec2 lightHalfSize=vec2(.65,.45)*unit;
+    float lamp=0.0;
+    if (direction.z>1e-5) {
+        float t=(lightZ-point.z)/direction.z;
+        vec2 p=point.xy+t*direction.xy;
+        vec2 outside=abs(p-lightCenter)-lightHalfSize;
+        float d=max(outside.x,outside.y);
+        // Bounded angular roughness approximation. No screen derivatives inside
+        // direction/TIR branches, where neighboring rays may be divergent.
+        float softness=.015*unit;
+        lamp=t>0.0 ? 1.0-smoothstep(-softness,softness,d) : 0.0;
+    }
+    // A low-frequency local-scene environment is an explicit screen-space
+    // approximation. Only the rectangle is the modeled overhead light source.
+    return ambient*.94+vec3(.006)+vec3(2.5,2.45,2.35)*lamp;
+}
 void main() {
     vec2 point=uv*drawMapping.xy-drawMapping.zw;
-    vec2 objectUv=point/sizePx;
-    // One symmetric, four-corner rounded rectangle per object. Its uncut
-    // silhouette is independent of the output clip and the invisible column.
-    float r=min(radiusPx,.5*min(sizePx.x,sizePx.y));
+    float r=max(.01,min(radiusPx,.5*min(sizePx.x,sizePx.y)));
     float silhouette=objectDistance(point,r);
     float coverage=1.0-smoothstep(-.5,.5,silhouette);
-    float sigma=max(.75,r*.2);
-    float shadowOffset=max(.75,r*.22);
+    // Unchanged bounded stylized shadow, for an isolated material comparison.
+    // The whole-curved icon comparison changes the footprint, not shadow
+    // strength/spread: retain the prior 12/38 radius-based sigma and offset.
+    float shadowRadius=abs(sizePx.x-sizePx.y)<.001*min(sizePx.x,sizePx.y)
+        ? min(r,(12.0/38.0)*min(sizePx.x,sizePx.y)) : r;
+    float sigma=max(.75,shadowRadius*.2);
+    float shadowOffset=max(.75,shadowRadius*.22);
     float shadowDistance=max(0.0,objectDistance(point+vec2(0.0,shadowOffset),r));
     float shadow=.10*exp(-.5*shadowDistance*shadowDistance/(sigma*sigma));
     shadow*=1.0-smoothstep(2.5*sigma,3.0*sigma,shadowDistance);
     if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
 
-    float bevel=max(.5*min(sizePx.x,sizePx.y),.75);
-    vec2 centered=point-.5*sizePx;
-    // C1 absolute coordinates prevent the symmetric dome from acquiring a
-    // center-axis crease. Outside this small interior band they are exact;
-    // coverage and the shadow always use the exact rounded-rectangle SDF.
-    vec2 absolute=abs(centered);
-    float axisWidth=max(.001,bevel*.15);
-    vec2 axisGradient=sign(centered)*min(absolute/axisWidth,vec2(1.0));
-    vec2 smoothAbsolute=mix(.5*(absolute*absolute/axisWidth+axisWidth),absolute,
-        step(vec2(axisWidth),absolute));
-    vec2 q=smoothAbsolute-.5*sizePx+r;
-    vec2 corner=max(q,0.0);
-    float cornerLength=length(corner);
-    float distance=cornerLength+min(max(q.x,q.y),0.0)-r;
-    vec2 gradient=cornerLength>0.0 ? corner/cornerLength
-        : (q.x>q.y ? vec2(1.0,0.0) : vec2(0.0,1.0));
-    // Smooth the nearest-edge junction inside the solid only. This broad
-    // bead has a continuous optical normal instead of diagonal edge seams.
-    if (max(q.x,q.y)<-.0001) {
-        float sum=q.x+q.y;
-        float smoothing=-2.0*q.x*q.y/sum;
-        vec2 smoothingGradient=-2.0*vec2(q.y*q.y,q.x*q.x)/(sum*sum);
-        if (smoothing>bevel*.3) {
-            float t=clamp((smoothing-bevel*.3)/(bevel*.2),0.0,1.0);
-            smoothing=bevel*(.3+.2*(t-.5*t*t));
-            smoothingGradient*=1.0-t;
+    float h=max(.25,.32*min(sizePx.x,sizePx.y));
+    float gap=.05*min(sizePx.x,sizePx.y);
+    float centerZ=h+gap;
+    vec2 core=max(.5*sizePx-vec2(r),vec2(0.0));
+    vec2 local=point-.5*sizePx;
+    vec2 closest=clamp(local,-core,core);
+    vec2 radial=local-closest;
+    // Clamp only the half-pixel AA fringe to its true geometric entry point.
+    radial/=max(1.0,length(radial)/r);
+    local=closest+radial;
+    float cap=sqrt(max(0.0,1.0-dot(radial,radial)/(r*r)));
+    vec3 entry=vec3(local,h*cap);
+    vec3 entryNormal=volumeNormal(entry,core,r,h);
+    vec3 incoming=vec3(0.0,0.0,-1.0);
+    const float ior=1.45;
+    vec3 inside=refract(incoming,entryNormal,1.0/ior);
+    float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
+    vec2 capturePixels=sharpExtent*vec2(textureSize(sharpScene,0));
+    vec2 objectCenter=sceneOrigin*capturePixels+.5*sizePx;
+    vec3 entryWorld=vec3(objectCenter+entry.xy,centerZ+entry.z);
+    vec3 ambient=toLinear(sampleSoft(sceneOrigin+point/sizePx*sceneScale));
+    vec3 reflection=environment(entryWorld,reflect(incoming,entryNormal),ambient,capturePixels);
+    vec3 exitPoint,exitNormal;
+    float pathLength=0.0;
+    bool found=exitVolume(entry,inside,core,r,h,exitPoint,exitNormal,pathLength);
+    vec3 transmitted=reflection;
+    float transmission=0.0;
+    bool internallyReflected=false;
+    if (found) {
+        float exitFresnel=fresnel(dot(inside,exitNormal),ior,1.0);
+        // Outward normal is negated at the glass-to-air interface.
+        vec3 outgoing=refract(inside,-exitNormal,ior);
+        // A single transmitted ray is the deliberate budget. All untraced
+        // exit-reflection energy uses the same environment on BOTH sides of
+        // the critical angle. No new high-energy bounce appears only at TIR.
+        internallyReflected=dot(outgoing,outgoing)<1e-10;
+        if (!internallyReflected) {
+            transmission=(1.0-entryFresnel)*(1.0-exitFresnel);
+            vec3 exitWorld=vec3(objectCenter+exitPoint.xy,centerZ+exitPoint.z);
+            transmitted=environment(exitWorld,outgoing,ambient,capturePixels);
+            if (outgoing.z < -1e-5) {
+                float t=-exitWorld.z/outgoing.z;
+                vec2 scenePoint=exitWorld.xy+t*outgoing.xy;
+                vec2 margin=min(scenePoint,capturePixels-scenePoint);
+                float available=smoothstep(0.0,1.5,min(margin.x,margin.y));
+                // No uninitialized capacity samples or long clamped streaks:
+                // rays outside the captured plane fall back to environment.
+                if (available>0.0) transmitted=mix(transmitted,
+                    toLinear(sampleSharp(scenePoint/capturePixels)),available);
+            }
+            float absorption=.006*clamp(tint.a,0.0,1.0)*min(pathLength/(2.0*h),2.0);
+            transmitted*=mix(vec3(1.0),clamp(tint.rgb,vec3(0.0),vec3(1.0)),absorption);
         }
-        float blend=clamp(.5+.5*(q.x-q.y)/smoothing,0.0,1.0);
-        distance=mix(q.y,q.x,blend)+smoothing*blend*(1.0-blend)-r;
-        gradient=vec2(blend,1.0-blend)+smoothingGradient*blend*(1.0-blend);
     }
-    gradient*=axisGradient;
-    vec2 edgeNormal=gradient*inversesqrt(max(dot(gradient,gradient),.000001));
+    vec3 material=toDisplay(mix(reflection,transmitted,transmission));
 
-    // Rounded convex cross-section with a soft squircle shoulder. A rounder
-    // front spreads the lighting across the bevel instead of drawing a hairline.
-    // The half-minimum object extent sets its curvature, not the column
-    // width, so every button reads as a separate raised bead.
-    float depth=max(0.0,-distance);
-    float shoulder=clamp(1.0-depth/bevel,0.0,.9999);
-    float shoulder3=shoulder*shoulder*shoulder;
-    float roundHeight=sqrt(max(1.0-shoulder*shoulder,.0001));
-    float softHeight=sqrt(sqrt(max(1.0-shoulder3*shoulder,.0001)));
-    float height=mix(roundHeight,softHeight,.25);
-    float slope=.9*(.75*shoulder/max(roundHeight,.001)
-        +.25*shoulder3/max(softHeight*softHeight*softHeight,.001));
-    vec3 normal=normalize(vec3(gradient*slope,1.0));
-    vec3 ray=refract(vec3(0.0,0.0,-1.0),normal,1.0/1.45);
-    vec2 offset=ray.xy/max(-ray.z,.1)*bevel*(.35+.65*height);
-    vec2 coord=sceneOrigin+(objectUv+offset/sizePx)*sceneScale;
-    vec3 transmitted=mix(sampleSharp(coord),sampleValid(coord).rgb,.14);
-
-    // Nearby scene color and a quiet directional environment give even a plain
-    // backdrop a curved glass surface. This is a screen-space approximation,
-    // not a ray-traced room reflection or a constant outline around the object.
-    // Stay inside the renderer's existing 16-logical-pixel capture neighborhood.
-    float environmentReach=min(bevel*.3,r*.85);
-    vec2 outside=objectUv+edgeNormal*(depth+environmentReach)/sizePx;
-    vec3 environment=sampleValid(sceneOrigin+outside*sceneScale).rgb;
-    vec3 reflected=reflect(vec3(0.0,0.0,-1.0),normal);
-    float environmentLight=.72+.26*smoothstep(-.55,.7,reflected.z);
-    environment=mix(environment,vec3(.14,.16,.18),.12)*environmentLight;
-    float grazing=1.0-normal.z;
-    float grazing2=grazing*grazing;
-    float fresnel=.035+.965*grazing2*grazing2*grazing;
-    vec3 material=mix(transmitted,environment,.36*(fresnel-.035)+.08*grazing2);
-    // A restrained face-light gradient makes the convex body legible even
-    // over a plain scene, without a flat wash or fixed opaque perimeter.
-    material*=1.0+.065*normal.y;
-    material=mix(material,tint.rgb,.025*clamp(tint.a,0.0,1.0));
-    // Framebuffer UV and this normal use positive Y upward, unlike ImGui.
-    // Keep the key light above the material rather than lighting its underside.
-    vec3 halfLight=normalize(normalize(vec3(-.25,.75,.65))+vec3(0.0,0.0,1.0));
-    float light=max(dot(normal,halfLight),0.0);
-    float light2=light*light, light4=light2*light2, light8=light4*light4;
-    float glint=(.20*light8+.36*light8*light8*light8*light8)*grazing;
-    // A broad overhead source catches the upper shoulder. Keep its crest
-    // directional rather than drawing a constant white perimeter stroke.
-    float upper=max(normal.y,0.0);
-    float upper2=upper*upper;
-    float upperReflection=.11*upper2*upper2*(1.0-grazing);
-    // A distant broad light reflected at a grazing angle produces a curved
-    // edge crest, not a painted perimeter. The lower arc catches more of this
-    // environment than the top; the key light still illuminates the upper face.
-    float reflectedBand=1.0-smoothstep(.08,.28,abs(reflected.z+.88));
-    float edgeReflection=reflectedBand*grazing*(.035+.10*max(normal.x,0.0)
-        +.14*max(-normal.y,0.0));
-    material+=vec3(.94,.97,1.0)*(glint+upperReflection+edgeReflection);
-    // Keep upstream's static dither at sub-code-value strength, not visible frost.
+    // Preserve the upstream static, sub-code-value dithering convention.
     material+=vec3((rand(gl_FragCoord.xy)-.5)/255.0);
     float alpha=coverage+(1.0-coverage)*shadow;
     color=vec4(material*coverage/max(alpha,.0001),alpha);
