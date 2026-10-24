@@ -39,7 +39,7 @@ std::string LowerAscii(std::string value) {
 constexpr const char* kWorkingProjectManifestName = "project.stack";
 constexpr const char* kWorkingProjectPreviousManifestName = "project.stack.previous";
 constexpr const char* kWorkingProjectAssetsDirectoryName = "assets";
-constexpr const char* kWorkingProjectPreviewName = "preview.png";
+constexpr const char* kWorkingProjectPreviewsDirectoryName = "previews";
 constexpr const char* kBundleStagingDirectoryName = ".staging";
 constexpr std::array<char, 8> kPortableHeader = { 'S', 'T', 'K', 'R', 'A', 'W', '3', '\0' };
 constexpr std::array<char, 4> kRecordMagic = { 'S', 'R', '3', 'R' };
@@ -737,7 +737,7 @@ public:
                 std::string coverError;
                 if (!LoadCoverThumbnail(
                         snapshot.coverThumbnailBytes, coverError)) {
-                    // preview.png is a rebuildable Library/UI artifact. A
+                    // The cover is a rebuildable Library/UI artifact. A
                     // missing or stale preview must never reject an otherwise
                     // valid authoritative project generation.
                     snapshot.coverThumbnailBytes.clear();
@@ -1535,36 +1535,53 @@ private:
             const RawEvidence::SourceIdentity identity = RawEvidence::ComputeSourceIdentity(
                 std::vector<std::uint8_t>(snapshot.coverThumbnailBytes.begin(),
                                           snapshot.coverThumbnailBytes.end()));
+            // Covers must remain immutable until both the current and previous
+            // manifests stop referring to them. In particular, do not replace a
+            // legacy preview.png before the new manifest commits. Unreferenced
+            // covers from failed commits are retained, like managed assets.
             const std::filesystem::path relative =
-                std::filesystem::path(kWorkingProjectPreviewName);
+                std::filesystem::path(kWorkingProjectPreviewsDirectoryName) /
+                (identity.sha256 + "-" + std::to_string(identity.byteSize) + ".png");
             const std::filesystem::path coverPath = m_Path / relative;
-            bool coverPublished = true;
+            const auto matchesCover = [&]() {
+                std::error_code statusError;
+                if (!std::filesystem::is_regular_file(
+                        std::filesystem::symlink_status(coverPath, statusError)) ||
+                    statusError) return false;
+                const RawEvidence::SourceIdentity stored =
+                    RawEvidence::ComputeSourceIdentity(coverPath);
+                return stored.valid && stored.byteSize == identity.byteSize &&
+                    stored.sha256 == identity.sha256;
+            };
+            bool coverPublished = false;
             filesystemError.clear();
             std::filesystem::create_directories(coverPath.parent_path(), filesystemError);
-            if (filesystemError) {
-                coverPublished = false;
-            }
-            std::filesystem::path temporary = coverPath;
-            temporary += ".tmp-" + state.stagingDirectory.filename().u8string();
-            if (coverPublished) {
-                std::ofstream output(
-                    temporary, std::ios::binary | std::ios::trunc);
-                if (!output) {
-                    coverPublished = false;
-                } else {
-                    output.write(
-                        reinterpret_cast<const char*>(
-                            snapshot.coverThumbnailBytes.data()),
-                        static_cast<std::streamsize>(
-                            snapshot.coverThumbnailBytes.size()));
-                    output.close();
-                    coverPublished = output.good() &&
-                        ReplaceFileAtomically(temporary, coverPath);
+            // Keep the staging name short for deeply nested Windows projects.
+            const std::filesystem::path temporary = state.stagingDirectory / "cover.stage";
+            if (!filesystemError) {
+                const auto status = std::filesystem::symlink_status(coverPath, filesystemError);
+                if (!filesystemError && std::filesystem::exists(status)) {
+                    coverPublished = matchesCover();
+                } else if (!filesystemError ||
+                           filesystemError == std::errc::no_such_file_or_directory) {
+                    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+                    if (output) {
+                        output.write(
+                            reinterpret_cast<const char*>(snapshot.coverThumbnailBytes.data()),
+                            static_cast<std::streamsize>(snapshot.coverThumbnailBytes.size()));
+                        output.close();
+                        if (output.good() && FlushOwnedFile(temporary)) {
+                            // Another publisher may have claimed the same content
+                            // name. Never clobber it; only reuse verified bytes.
+                            coverPublished = MoveFileWithoutOverwrite(temporary, coverPath) ||
+                                matchesCover();
+                        }
+                    }
                 }
             }
+            std::error_code cleanupError;
+            std::filesystem::remove(temporary, cleanupError);
             if (!coverPublished) {
-                std::error_code cleanupError;
-                std::filesystem::remove(temporary, cleanupError);
                 if (std::any_of(snapshot.sourceSets.begin(),snapshot.sourceSets.end(),[](const auto& set) {
                     return set.settings.contains("bracketingResult");
                 })) {

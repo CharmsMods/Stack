@@ -1250,7 +1250,7 @@ bool ValidateStores(const std::filesystem::path& root) {
                     !replacedPreview.recoveredPreviousManifest &&
                     replacedPreview.snapshot.coverThumbnailBytes ==
                         previewSnapshot.coverThumbnailBytes,
-                "replacing preview.png made the latest authoritative manifest unreadable: " +
+                "replacing the cover made the latest authoritative manifest unreadable: " +
                     replacedPreview.message + " (loaded bytes=" +
                     std::to_string(
                         replacedPreview.snapshot.coverThumbnailBytes.size()) +
@@ -1261,8 +1261,23 @@ bool ValidateStores(const std::filesystem::path& root) {
             const std::vector<unsigned char> corruptedPreview {
                 0xdeu, 0xadu, 0xbeu, 0xefu
             };
-            ok &= Check(WriteBytes(
-                    previewResiliencePath / "preview.png",
+            const nlohmann::json previewManifest = nlohmann::json::parse(
+                ReadBytes(WorkingProjectDocumentPath(previewResiliencePath)), nullptr, false);
+            std::string previewRelativePath;
+            if (previewManifest.is_object() && previewManifest.contains("_store")) {
+                const auto& storage = previewManifest["_store"];
+                if (storage.is_object() && storage.contains("coverThumbnail")) {
+                    const auto& cover = storage["coverThumbnail"];
+                    if (cover.is_object() && cover.contains("relativePath") &&
+                        cover["relativePath"].is_string()) {
+                        previewRelativePath = cover["relativePath"].get<std::string>();
+                    }
+                }
+            }
+            ok &= Check(!previewRelativePath.empty(),
+                "preview corruption fixture could not resolve the committed cover path");
+            ok &= Check(!previewRelativePath.empty() && WriteBytes(
+                    previewResiliencePath / std::filesystem::u8path(previewRelativePath),
                     corruptedPreview),
                 "preview corruption fixture could not be written");
             ProjectStoreOpenResult missingPreview = OpenProjectStore(
