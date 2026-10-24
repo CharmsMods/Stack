@@ -1016,7 +1016,7 @@ float EditorModule::GetFullQualityRenderProgress(
     if (statusText) {
         if (!m_FullQualityRenderRequest.Pending() && m_RenderPresentation.failed) {
             *statusText = m_RenderPresentation.error;
-        } else if (!progress.label.empty()) {
+        } else if (progress.busy && !progress.label.empty()) {
             *statusText = progress.label;
         } else if (progress.busy) {
             *statusText = "Rendering full quality";

@@ -82,6 +82,7 @@ using namespace Stack::Renderer;
 void Require(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
 class EditorRenderWorker {
 public:
+    struct RenderProgress { bool busy=false;int completedSteps=0,totalSteps=0;std::string label; };
     struct Texture { int texture=0,width=64,height=48; };
     struct Workspace { std::string sourceKey;std::uint64_t sourceHash=0;std::size_t recipeRevision=0;Texture localRangeOverlayTexture; };
     struct Snapshot {
@@ -122,6 +123,8 @@ public:
     std::uint64_t m_RawRenderClientId=9,m_RenderGeneration=100,m_GraphAcceptedResultGeneration=0,m_ViewportOutputRenderGeneration=0,m_LatestRawPresentationGeneration=100;
     std::size_t m_LatestRawPresentationRecipeRevision=4;
     bool m_RenderDirty=false,m_RenderPending=false,busy=false,graphViewport=true,m_RawWorkspaceRootTabActive=true,rawActive=true;
+    EditorRenderWorker::RenderProgress backendProgress;
+    EditorRenderWorker::RenderProgress GetActiveRenderBackendProgress() const { return backendProgress; }
     bool m_ViewportOutputNativeExtentVerified=true;
     int m_ViewportOutputPreviewMaxDimension=0;
     int m_ViewportOutputExpectedNativeWidth=64,m_ViewportOutputExpectedNativeHeight=48;
@@ -168,7 +171,7 @@ public:
     void FailFullQualityRenderRequest(const std::string&,bool=false);
     void CancelFullQualityRenderRequest(const std::string&);
     std::string GetFullQualityRenderDiagnostic() const { return "still pending"; }
-    float GetFullQualityRenderProgress(std::string* text) const { if(text)*text="pending";return 0; }
+    float GetFullQualityRenderProgress(std::string*) const;
     bool Consume(Result result);
     void Discard(Result result);
     void ConfigureSynchronous(const Snapshot& snapshot);
@@ -187,6 +190,7 @@ methods = state + '\n' + method(graph, 'bool EditorModule::IsCurrentGraphResult(
 methods += method(viewport, 'bool EditorModule::IsViewportPreviewResultCurrent(')
 methods += method(viewport, 'bool EditorModule::TryGetViewportPreviewGeometry(')
 methods += method(editor, 'bool EditorModule::RequestFullQualityRender(')
+methods += method(editor, 'float EditorModule::GetFullQualityRenderProgress(')
 methods += method(rendering, 'bool EditorModule::HasCompleteNativeViewportOutput() const')
 methods += method(header, 'bool IsRenderSettledForFullQualityExport() const').replace('bool IsRenderSettledForFullQualityExport()', 'bool EditorModule::IsRenderSettledForFullQualityExport()', 1)
 consumer = r'''
@@ -236,7 +240,7 @@ void EditorModule::BlockHdrOutput() {
 ''' + blocked_terminal + r'''
 }
 enum class ItemState { Rendering };
-struct Model { void UpdateState(int,ItemState,float,std::string) {} };
+struct Model { std::string lastStatus;void UpdateState(int,ItemState,float,std::string status) { lastStatus=std::move(status); } };
 class QueueRenderCoordinator {
 public:
     explicit QueueRenderCoordinator(EditorModule* editor) : m_RenderEditor(editor) {}
@@ -453,8 +457,32 @@ void NativeAndSynchronousContracts() {
         Require(editor.m_Pipeline.async==(purpose==RawRenderPurpose::InteractivePresentation),"direct explicit execution disables asynchronous denoise for a real retry");
     }
 }
+void ProgressFeedbackContracts() {
+    auto editor=Editor();editor.m_Project=&editor.project;SeedProvisional(editor);
+    editor.backendProgress={false,4,4,"Render ready."};editor.RequestFullQualityRender();std::string text;
+    Require(editor.GetFullQualityRenderProgress(&text)==0 && text=="Preparing full-quality render","idle old terminal label cannot override preparing a fresh request");
+    SubmitExplicit(editor,101);editor.m_RenderPending=true;
+    Require(!editor.IsRenderSettledForFullQualityExport() && editor.GetFullQualityRenderProgress(&text)==.98f && text=="Finalizing full-quality render","idle queued success behind an adoption fence remains finalizing, not render ready");
+    Model model;QueueRenderCoordinator queue{&editor};queue.m_Model=&model;queue.Tick();
+    Require(!queue.writes && !queue.failures && model.lastStatus=="Finalizing full-quality render","actual Queue consumer exposes finalizing text while unadopted output cannot be written");
+    editor.backendProgress={true,1,4,"Running AI denoise"};editor.busy=true;
+    Require(editor.GetFullQualityRenderProgress(&text)==.25f && text=="Running AI denoise","active backend detail and fractional progress remain unchanged");
+    editor.backendProgress={false,4,4,"Render ready."};editor.busy=false;editor.m_RenderPending=false;
+    Require(editor.GetFullQualityRenderProgress(&text)==0 && text=="Waiting for full-quality output","idle incomplete output does not reuse backend terminal success wording");
+    auto final=ExplicitResult(editor,101);final.texture=66;Require(editor.Consume(final),"verified final result adopts");
+    Require(editor.GetFullQualityRenderProgress(&text)==1 && text=="Full-quality render complete","complete is reported only after actual accepted native final output");
+    queue.Tick();Require(queue.writes==1,"Queue proceeds after readiness rather than backend wording");
+    auto failed=Editor();failed.m_Project=&failed.project;SeedProvisional(failed);failed.RequestFullQualityRender();SubmitExplicit(failed,101);
+    auto result=ExplicitResult(failed,101);result.success=false;result.texture=0;result.error="AI model request failed";failed.Consume(result);
+    failed.backendProgress={true,1,4,"Rendering a different task"};
+    Require(failed.GetFullQualityRenderProgress(&text)==0 && text==result.error,"terminal failure diagnostic takes precedence over unrelated active labels");
+    failed.RequestFullQualityRender();failed.CancelFullQualityRenderRequest("Canceled by document edit");
+    Require(failed.GetFullQualityRenderProgress(&text)==0 && text=="Canceled by document edit","canceled request retains truthful terminal reason");
+    failed.backendProgress={false,4,4,"Render ready."};failed.RequestFullQualityRender();
+    Require(failed.GetFullQualityRenderProgress(&text)==0 && text=="Preparing full-quality render","explicit retry clears old terminal outcome without borrowing old backend success");
+}
 int main() {
-    try { SuccessfulCompletion();FailureAndIdentity();ExplicitConsumers();OwnedTerminalRejection();EmittedModesAndSourceIdentity();NativeAndSynchronousContracts();std::cout<<"render presentation consumers: PASS\n"; }
+    try { SuccessfulCompletion();FailureAndIdentity();ExplicitConsumers();OwnedTerminalRejection();EmittedModesAndSourceIdentity();NativeAndSynchronousContracts();ProgressFeedbackContracts();std::cout<<"render presentation consumers: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''

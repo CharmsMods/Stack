@@ -998,13 +998,24 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
             if (rawWorkspaceResultMatchesActive &&
                 result.error != "Render superseded by a newer snapshot.") {
-                m_RawWorkspaceStaleRenderStatusText =
-                    result.error.empty() ? "RAW render failed." : result.error;
-                PostNotification(
-                    UiNotificationSeverity::Error,
-                    "Preview retained as stale: " +
-                        m_RawWorkspaceStaleRenderStatusText,
-                    "raw-workspace-render-stale");
+                if (resultMayPublishPresentation) {
+                    m_RawWorkspaceStaleRenderStatusText =
+                        result.error.empty() ? "RAW render failed." : result.error;
+                    PostNotification(
+                        UiNotificationSeverity::Error,
+                        "Preview retained as stale: " +
+                            m_RawWorkspaceStaleRenderStatusText,
+                        "raw-workspace-render-stale");
+                } else {
+                    // A failed thumbnail/sample/scope did not replace the
+                    // main image. Report its failure without marking those
+                    // accepted pixels stale or erasing an earlier main error.
+                    PostNotification(
+                        UiNotificationSeverity::Error,
+                        result.error.empty() ? "RAW feedback render failed." :
+                            "RAW feedback render failed: " + result.error,
+                        "raw-workspace-feedback-failed");
+                }
             }
             if (Stack::EditorModuleTypes::ShouldClearRawStartingPointCandidateRenderQueueForFailedResult(
                     m_RawWorkspaceStartPointCandidateRenderQueue,

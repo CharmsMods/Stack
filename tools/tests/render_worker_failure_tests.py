@@ -256,6 +256,7 @@ first_failure = adoption[first_start:first_end]
 diagnostic_start = adoption.index('            if (!result.success && result.graphRequest.enabled &&')
 diagnostic_end = adoption.index('            FinishViewportPreviewRequest(result, false);', diagnostic_start)
 diagnostic = adoption[diagnostic_start:diagnostic_end]
+raw_failure_feedback = method(adoption, 'if (!result.success && !result.rawWorkspace.sourceKey.empty()) {')
 persistence = (root / 'src/Editor/Internal/EditorModulePersistence.cpp').read_text()
 export_start = persistence.index('void EditorModule::CompleteRawWorkspaceExportRender(')
 export_end = persistence.index('    std::string path =', export_start)
@@ -460,6 +461,12 @@ void MarkTerminal(State& state,LifecycleState result,const std::string&) { state
 }
 enum class UiNotificationSeverity { Error };
 namespace Stack::PixelBuffer { bool HasCompletePixelBuffer(std::size_t,int,int,int) { return false; } }
+namespace Stack::EditorModuleTypes {
+struct StartingPointQueueProbe { int checks=0,clears=0; };
+bool ShouldClearRawStartingPointCandidateRenderQueueForFailedResult(StartingPointQueueProbe& queue,const std::string&,const std::string&,std::uint64_t,std::uint64_t) { ++queue.checks;return true; }
+void ClearRawStartingPointCandidateRenderQueue(StartingPointQueueProbe& queue) { ++queue.clears; }
+template<class T> bool MarkRawStartingPointRenderFailure(T& ui,const std::string&) { ++ui.failureChecks;return false; }
+}
 struct DeferredLoadedProjectApplyState { enum class Step { WaitForFirstRender }; bool active=true; Step step=Step::WaitForFirstRender; std::uint64_t acceptedRenderGenerationAtStart=0; };
 class EditorModule {
 public:
@@ -469,7 +476,11 @@ public:
     bool RawAssetCaptureInputMatches() { return true; }
     bool IsRawWorkspaceProjectActive() { return true; }
     std::unordered_map<int,std::uint64_t> m_PreviewRequestedGenerations,m_PreviewCompletedGenerations;
-    struct AutoUi { std::string summary;Stack::PreciseIntegration::State preciseStartingPoint; } m_RawWorkspaceAutoBaseUi;
+    struct AutoUi { std::string summary;Stack::PreciseIntegration::State preciseStartingPoint;int failureChecks=0; } m_RawWorkspaceAutoBaseUi;
+    Stack::EditorModuleTypes::StartingPointQueueProbe m_RawWorkspaceStartPointCandidateRenderQueue;
+    std::vector<int> m_RawWorkspaceStartPointCandidateRenderResults;
+    std::string m_RawWorkspaceStaleRenderStatusText,lastNotice,lastNoticeId;
+    std::uint64_t m_RenderRevision=9,m_LastSubmittedRenderRevision=9;
     template<class... T> void SetStartingPointUiResult(T&&...) {}
     int preparationCount=0;
     void SchedulerGate();
@@ -497,13 +508,39 @@ public:
     void QueueViewportOutputTileSetRelease(EditorRenderWorker::Tiles&) {}
     void ResetIncompleteCompositeOutputRequestsForRetry() {}
     void FailDeferredLoadedProjectApply(const std::string&) { failedLoad=true;m_DeferredLoadedProjectApply.active=false; }
-    void PostNotification(UiNotificationSeverity,const std::string&,const char*) { ++notices; }
+    void PostNotification(UiNotificationSeverity,const std::string& text,const char* id) { ++notices;lastNotice=text;lastNoticeId=id; }
+    void RawFailureFeedback(const Result&,bool);
     void CompleteRawWorkspaceExportRender(EditorRenderWorker::Result&,bool);
     void AdoptFirstFailure(Result result) { for(int once=0;once<1;++once) {
 ''' + first_failure + r'''
     } }
 };
-''' + asset_failure + preview_retry + 'void EditorModule::SchedulerGate() {\n' + scheduler_gate + '++preparationCount; }\n' + 'void EditorModule::AdoptPreciseFailure(const SolveResult& result) { auto& precise=m_RawWorkspaceAutoBaseUi.preciseStartingPoint;struct Decision { bool allowed=false;std::string reason; } decision; bool source=false;\n' + precise_failure + '}\n' + export_failure + 'void EditorModule::DiagnoseStaleFailure(const Result& result) { const bool rawResult=!result.rawWorkspace.sourceKey.empty();\n' + diagnostic + '}\n' + r'''
+''' + asset_failure + preview_retry + 'void EditorModule::SchedulerGate() {\n' + scheduler_gate + '++preparationCount; }\n' + 'void EditorModule::AdoptPreciseFailure(const SolveResult& result) { auto& precise=m_RawWorkspaceAutoBaseUi.preciseStartingPoint;struct Decision { bool allowed=false;std::string reason; } decision; bool source=false;\n' + precise_failure + '}\n' + export_failure + 'void EditorModule::DiagnoseStaleFailure(const Result& result) { const bool rawResult=!result.rawWorkspace.sourceKey.empty();\n' + diagnostic + '}\n' + '''void EditorModule::RawFailureFeedback(const Result& result,bool rawWorkspaceResultMatchesActive) {
+    const bool resultMayPublishPresentation=RawRenderPurposeMayPublishPresentation(result.rawRenderPurpose);
+    const std::string activePreviewIdentity="source-15";
+    const std::uint64_t activeRawWorkspaceSourceHash=115;
+''' + raw_failure_feedback + '\n}\n' + r'''
+void AuxiliaryFailureFeedback() {
+    auto request=Request(15,150);auto result=EditorRenderWorker::MakeFailedResult(request,"main render failed");
+    EditorModule main;main.RawFailureFeedback(result,true);
+    Require(main.m_RawWorkspaceStaleRenderStatusText==result.error && main.lastNotice=="Preview retained as stale: main render failed" && main.lastNoticeId=="raw-workspace-render-stale","presentation failure retains existing stale-main diagnostic");
+    Require(main.m_RawWorkspaceStartPointCandidateRenderQueue.clears==1 && main.m_RawWorkspaceAutoBaseUi.failureChecks==1,"presentation failure keeps existing matching starting-point cleanup");
+    for(auto purpose:{RawRenderPurpose::Thumbnail,RawRenderPurpose::AnalysisScopes,RawRenderPurpose::InteractiveSample}) {
+        result.rawRenderPurpose=purpose;result.error="auxiliary compute failed";
+        EditorModule auxiliary;auxiliary.RawFailureFeedback(result,true);
+        Require(auxiliary.m_RawWorkspaceStaleRenderStatusText.empty() && auxiliary.lastNotice=="RAW feedback render failed: auxiliary compute failed" && auxiliary.lastNoticeId=="raw-workspace-feedback-failed","matching failed auxiliary reports without falsely marking main image stale");
+        Require(auxiliary.m_RawWorkspaceStartPointCandidateRenderQueue.clears==1 && auxiliary.m_RawWorkspaceAutoBaseUi.failureChecks==1,"auxiliary diagnostic classification does not bypass existing matching consumer cleanup");
+        auxiliary.m_RawWorkspaceStaleRenderStatusText="earlier main failure";result.error.clear();auxiliary.RawFailureFeedback(result,true);
+        Require(auxiliary.m_RawWorkspaceStaleRenderStatusText=="earlier main failure" && auxiliary.lastNotice=="RAW feedback render failed.","auxiliary default diagnostic preserves an existing main failure instead of erasing it");
+        EditorModule superseded;result.error="Render superseded by a newer snapshot.";superseded.RawFailureFeedback(result,true);
+        Require(!superseded.notices && superseded.m_RawWorkspaceStaleRenderStatusText.empty() && superseded.m_RenderDirty && superseded.m_LastSubmittedRenderRevision==8,"normal supersession keeps silent status and existing retry bookkeeping");
+        Require(superseded.m_RawWorkspaceStartPointCandidateRenderQueue.clears==1 && superseded.m_RawWorkspaceAutoBaseUi.failureChecks==1,"superseded starting-point cleanup remains unchanged");
+        EditorModule mismatch;result.error="other source failed";mismatch.RawFailureFeedback(result,false);
+        Require(!mismatch.notices && mismatch.m_RawWorkspaceStaleRenderStatusText.empty() && mismatch.m_RawWorkspaceStartPointCandidateRenderQueue.clears==1 && !mismatch.m_RawWorkspaceAutoBaseUi.failureChecks,"source mismatch remains silent and retains original cleanup gates");
+        EditorModule success;result.success=true;result.error.clear();success.RawFailureFeedback(result,true);
+        Require(!success.notices && success.m_RawWorkspaceStaleRenderStatusText.empty() && !success.m_RawWorkspaceStartPointCandidateRenderQueue.checks && !success.m_RawWorkspaceAutoBaseUi.failureChecks,"successful auxiliary baseline bypasses failure feedback and cleanup");result.success=false;
+    }
+}
 void ContinuationFailureDiagnostic() {
     auto request=Request(15,150,RawRenderPurpose::DenoiseCompletion);request.graphRequest.enabled=true;request.graphRequest.sourceIdentity=77;request.graphRequest.outputNodeId=9;request.graphRequest.revision=123;
     request.viewportPreview.enabled=true;request.viewportPreview.generation=901;
@@ -570,7 +607,7 @@ void AdoptionTerminalState() {
 '''
 main = r'''
 int main() {
-    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
+    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''
