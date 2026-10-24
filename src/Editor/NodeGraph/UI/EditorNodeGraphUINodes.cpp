@@ -1997,14 +1997,9 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
             ImGui::TextDisabled("%s interpolation / %s extrapolation", curve->interpolation.c_str(), curve->extrapolation.c_str());
         }
         if (changed) {
-            editor->GetNodeGraph().ForEachOutgoingLink(
-                node.id,
-                [&](const EditorNodeGraph::Link& link) {
-                if (link.fromSocketId ==
-                    EditorNodeGraph::kValueOutputSocketId) {
-                    editor->MarkGraphEdited(link.toNodeId);
-                }
-            });
+            // The Value owns this edit even when disconnected. Downstream
+            // invalidation already follows its uniform links from this root.
+            editor->MarkGraphEdited(node.id);
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::Compound) {
         const Stack::NodeMath::CompoundDefinition* definition =
