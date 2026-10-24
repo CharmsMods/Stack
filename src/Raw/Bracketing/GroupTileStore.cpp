@@ -67,7 +67,10 @@ bool ReadGroupTile(const ProcessingRequest& request,const PreparedDataset& data,
     if(!stream.read(reinterpret_cast<char*>(packed.data()),packed.size()*sizeof(PackedObservation))||
         Checksum(packed)!=header.checksum) return false;
     const std::size_t pixels=static_cast<std::size_t>(width)*height;
-    groups.assign(header.groups,std::vector<Observation>(pixels));
+    // Initialize each destination directly: a template vector would add a
+    // whole Observation tile to the transient decode working set.
+    groups.resize(header.groups);
+    for(auto& group:groups)group.assign(pixels,Observation{});
     for(std::size_t i=0;i<count;++i) {
         const auto& p=packed[i];
         if(!std::isfinite(p.value)||!std::isfinite(p.variance)||p.variance<0||

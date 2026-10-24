@@ -12,6 +12,7 @@
 #include "BracketingGuideCoordinatesValidation.h"
 #include "BracketingAnchorEvidenceValidation.h"
 #include "BracketingAnchorIntegrationValidation.h"
+#include "BracketingNeutralGuideValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSharpnessValidation.h"
 #include "Raw/RawProcessingMath.h"
@@ -133,6 +134,8 @@ bool ValidateBracketing() {
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();
         ValidateBracketingGuideCoordinates();
+        ValidateBracketingNeutralGuide();
+        ValidateBracketingNeutralGuideCache(directory/"neutral-guide-cache");
         ValidateBracketingAnchorEvidence(directory/"anchor-evidence");
         // Backend faults must fail before decoding, never become CPU work.
         for(unsigned failure=0;failure<3;++failure) {

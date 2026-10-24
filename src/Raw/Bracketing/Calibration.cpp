@@ -85,6 +85,9 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         auto prepared=Mfd::PrepareRawFrame(raw,options,cache);
         if(!prepared.success) {error=prepared.message;return false;}
         PreparedSource s;s.id=f.id;s.group=g;s.enabled=enabled;s.metadata=raw.metadata;s.frame=std::move(prepared.frame);
+        // Prepared tiles and copied metadata now own everything needed below.
+        // Retire decoded sensor buffers before noise estimation and overview reads.
+        raw={};
         Mfd::NoiseResolutionOptions noiseOptions;
         noiseOptions.enableGenericLowConfidence=true;
         // The estimate is synchronous. Abort through the processor's existing
@@ -96,7 +99,7 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         // This final fallback remains an uncalibrated prior, not measured
         // sensor precision. Preserve existing finite-tag behavior, but never
         // let NaN/Inf/invalid advisory ISO make a decoded capture unusable.
-        const double taggedIso=static_cast<double>(raw.metadata.isoSpeed);
+        const double taggedIso=static_cast<double>(s.metadata.isoSpeed);
         const double iso=std::isfinite(taggedIso)&&taggedIso>0?std::max(100.,taggedIso):100.;
         for(auto& site:noiseOptions.genericLowConfidenceSites) {
             site.shotScale=1e-4*iso/100;site.offsetVariance=1e-7*iso*iso/10000;

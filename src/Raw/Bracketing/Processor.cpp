@@ -1,6 +1,7 @@
 #include "ProcessingInternal.h"
 #include "AlignmentProposalInput.h"
 #include "HdrColorFusion.h"
+#include "NeutralGuide.h"
 #include "PresentationEvidence.h"
 #include "ProcessingTiles.h"
 #include "TemporalGpu.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Raw::Bracketing {
@@ -205,10 +207,28 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             analysis->diagnostics.erase(std::remove_if(analysis->diagnostics.begin(),analysis->diagnostics.end(),
                 [](const std::string& message){return message.rfind("Temporal merge.",0)==0;}),analysis->diagnostics.end());
             const auto groupStart=std::chrono::steady_clock::now();
+            analysis->guideEv.resize(static_cast<std::size_t>(cellWidth)*cellHeight);
+            std::vector<std::vector<double>> histogram(256,std::vector<double>(groups));
+            const auto tileCount=static_cast<std::size_t>(origin.frame.tileColumns)*origin.frame.tileRows;
+            std::vector<std::array<float,256>> tileCounts(tileCount);
+            std::vector<std::vector<double>> tileHistograms(tileCount);
+            std::vector<double> tileGuideSeconds(tileCount);
+            const auto bounds=[&](unsigned tx,unsigned ty) {
+                const auto side=origin.frame.tileRawPixels;
+                const unsigned left=tx*side,top=ty*side;
+                return NeutralGuideTile{left,top,std::min(side,data.width-left),std::min(side,data.height-top)};
+            };
             TemporalGpu::Operation workspaceOperation(*data.combiningGpu);
-            if(!ProcessTiles(request,data,.52,.33,"Combining exposure groups",ProcessingStage::Groups,
+            if(!ProcessTiles(request,data,.52,.33,"Combining groups and neutral guide",ProcessingStage::Groups,
                 [&](unsigned tx,unsigned ty,std::string& tileError) {
-                    return PrepareGroupTile(request,data,tx,ty,tileError);
+                    std::vector<std::vector<Observation>> observations;
+                    if(!PrepareGroupTile(request,data,tx,ty,observations,tileError))return false;
+                    const auto index=static_cast<std::size_t>(ty)*origin.frame.tileColumns+tx;
+                    const auto start=std::chrono::steady_clock::now();
+                    const bool success=BuildNeutralGuideTile(request.recipe,guideLuminance,bounds(tx,ty),cellWidth,
+                        observations,analysis->guideEv,tileCounts[index],tileHistograms[index],tileError);
+                    tileGuideSeconds[index]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+                    return success;
                 },error)) return fail(error);
             if(!workspaceOperation.Finish(error))return fail(error);
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
@@ -223,43 +243,21 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                     ", expanded "+std::to_string(m.patches.expanded)+", accepted "+std::to_string(m.patches.accepted)+".");
             }
             if(data.combiningGpu)data.combiningGpu->Report(*analysis);
+            double guideWorkerSeconds=0;
+            for(const auto seconds:tileGuideSeconds)guideWorkerSeconds+=seconds;
+            analysis->stageSeconds["group_neutral_guide_worker_seconds"]=guideWorkerSeconds;
             const auto guideStart=std::chrono::steady_clock::now();
             if(std::count_if(data.sources.begin(),data.sources.end(),[](const auto& source){return source.enabled;})>1)
                 analysis->diagnostics.push_back("Temporal merge. Local detail uses agreement across at least three captures. Additional spatial denoising is controlled in RAW.");
-            analysis->guideEv.resize(static_cast<std::size_t>(cellWidth)*cellHeight);
-            std::vector<std::vector<double>> histogram(256,std::vector<double>(groups));
-            const auto tileCount=static_cast<std::size_t>(origin.frame.tileColumns)*origin.frame.tileRows;
-            std::vector<std::array<float,256>> tileCounts(tileCount);
-            std::vector<std::vector<double>> tileHistograms(
-                tileCount,std::vector<double>(256*groups));
-            if(!ProcessTiles(request,data,.85,.07,"Building neutral guide",ProcessingStage::Guide,
-                [&](unsigned tx,unsigned ty,std::string& tileError) {
-                std::vector<std::vector<Observation>> observations;Mfd::PreparedRawTile tile;
-                if(!ReadGroups(request,data,tx,ty,observations,tile,tileError)) return false;
-                const auto tileIndex=static_cast<std::size_t>(ty)*origin.frame.tileColumns+tx;
-                auto& localCounts=tileCounts[tileIndex];
-                auto& localHistogram=tileHistograms[tileIndex];
-                ColorObservations colorInput;
-                std::vector<double> weights(groups);
-                for(unsigned y=0;y<tile.extent.height;y+=2) for(unsigned x=0;x<tile.extent.width;x+=2) {
-                    std::array<double,4> cell{};
-                    std::fill(weights.begin(),weights.end(),0.0);
-                    GatherColorCell(observations,y*tile.extent.width+x,tile.extent.width,colorInput);
-                    const auto color=BlendColor(colorInput,{},request.recipe);
-                    for(unsigned c=0;c<4;++c) {
-                        const auto& b=color[c];cell[c]=b.value;
-                        for(std::size_t g=0;g<groups;++g) weights[g]+=b.actual[g]*.25;
-                    }
-                    const double ev=std::log2(std::max(1e-9,Luminance(guideLuminance,cell))/.18);
-                    analysis->guideEv[((tile.originY+y)/2)*cellWidth+(tile.originX+x)/2]=static_cast<float>(ev);
-                    const auto bin=static_cast<std::size_t>(std::clamp((ev+12)/20*255,0.0,255.0));
-                    localCounts[bin]+=1;
-                    for(std::size_t g=0;g<groups;++g) localHistogram[bin*groups+g]+=weights[g];
-                }
+            // Keep the existing ordered presentation stages, but do not reread
+            // group/RAW cache payloads merely to display the completed guide.
+            if(!ProcessTiles(request,data,.85,.07,"Finalizing neutral guide",ProcessingStage::Guide,
+                [&](unsigned tx,unsigned ty,std::string&) {
+                const auto tile=bounds(tx,ty);
                 if(request.evidenceStream)request.evidenceStream->Tile(request,ProcessingStage::Guide,
-                    tile.originX,tile.originY,unsigned(tile.extent.width),unsigned(tile.extent.height),[&](unsigned sx,unsigned sy) {
-                    PresentationSample s;const auto ev=analysis->guideEv[(sy/2)*cellWidth+sx/2];
-                    const double y=.18*std::exp2(ev);s.rgb={y,y,y};s.first=ev;return s;
+                    tile.left,tile.top,tile.width,tile.height,[&](unsigned sx,unsigned sy) {
+                    PresentationSample sample;const auto ev=analysis->guideEv[(sy/2)*cellWidth+sx/2];
+                    const double y=.18*std::exp2(ev);sample.rgb={y,y,y};sample.first=ev;return sample;
                 });
                 return true;
             },error)) return fail(error);
@@ -395,16 +393,19 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         raw->metadata.dngActiveArea={0,0,static_cast<int>(data.height),static_cast<int>(data.width)};
         raw->metadata.hasDngActiveArea=true;raw->metadata.dngMaskedAreas.clear();
         raw->metadata.hasDngBaselineExposure=false;raw->metadata.dngBaselineExposure=0;
-        raw->normalizedMosaicBuffer=mosaic;raw->normalizedMosaicContentHash=Hash(result.identity);
+        raw->normalizedMosaicBuffer=std::move(mosaic);raw->normalizedMosaicContentHash=Hash(result.identity);
         raw->normalizedMosaicInputContract=NormalizedMosaicInputContract::BracketingPreGain;
         raw->contentIdentity=result.identity;raw->contentIdentityHash=raw->normalizedMosaicContentHash;
         auto sidecars=std::make_shared<RawImageData::MultiFrameMeasurementSidecars>();
-        sidecars->variance=variance;sidecars->effectiveSupport=support;sidecars->validity=validity;sidecars->clipping=clipping;
-        sidecars->fusionUncertaintyVariance=uncertainty;
-        sidecars->localRejection=localRejection;sidecars->fallbackReason=fallbackReason;
+        sidecars->variance=std::move(variance);sidecars->effectiveSupport=std::move(support);
+        sidecars->validity=std::move(validity);sidecars->clipping=std::move(clipping);
+        sidecars->fusionUncertaintyVariance=std::move(uncertainty);
+        sidecars->localRejection=std::move(localRejection);sidecars->fallbackReason=std::move(fallbackReason);
         for(const auto& s:data.sources) if(s.enabled) sidecars->originalFrameIds.push_back(s.id);
-        sidecars->evidenceIdentitySha256=raw->metadata.sourceContentSha256;raw->multiFrameMeasurementSidecars=sidecars;
-        result.raw=raw;result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error,true,request.shouldCancel);
+        sidecars->evidenceIdentitySha256=raw->metadata.sourceContentSha256;raw->multiFrameMeasurementSidecars=std::move(sidecars);
+        // No local aliases should pin the native output after reconstruction
+        // replaces result.raw, especially while depth rendering allocates RGB.
+        result.raw=std::move(raw);result.analysis=analysis;result.preview=ReblendPreview(preview,request.recipe,*analysis,request.executeOpenGlTask,&error,true,request.shouldCancel);
         if(!result.preview.width)return fail(error);
         // Reblend owns its copy. Release the construction cells before SR's
         // much larger output is allocated.

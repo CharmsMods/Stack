@@ -30,10 +30,16 @@ bool TemporalGroups(const ProcessingRequest& request,const PreparedDataset& data
 }
 
 }
-bool PrepareGroupTile(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,std::string& error) {
-    if(!MultipleInputs(data)) return true;
-    std::vector<std::vector<Observation>> groups;
-    if(!TemporalGroups(request,data,tx,ty,groups,error))return false;
+bool PrepareGroupTile(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
+    std::vector<std::vector<Observation>>& groups,std::string& error) {
+    if(MultipleInputs(data)) {
+        if(!TemporalGroups(request,data,tx,ty,groups,error))return false;
+    } else {
+        // The old guide pass obtained these uncached GPU doubles directly.
+        // Do not introduce float canonicalization for a single contribution.
+        Mfd::PreparedRawTile origin;
+        if(!ReadTemporalGroups(request,data,tx,ty,groups,origin,error))return false;
+    }
     if(request.evidenceStream&&!groups.empty()) {
         const auto side=data.sources[data.origin].frame.tileRawPixels;
         const unsigned left=tx*side,top=ty*side,w=std::min(side,data.width-left),h=std::min(side,data.height-top);

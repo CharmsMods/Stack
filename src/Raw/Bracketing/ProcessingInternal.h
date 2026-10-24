@@ -92,7 +92,10 @@ bool ReadGroups(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigne
     std::vector<std::vector<Observation>>&,Mfd::PreparedRawTile&,std::string&);
 bool ReadTemporalGroups(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,
     std::vector<std::vector<Observation>>&,Mfd::PreparedRawTile&,std::string&);
-bool PrepareGroupTile(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,std::string&);
+// Retain the completed tile for immediate consumers before its bounded storage
+// is released. Multi-input values already match the canonical group-cache form.
+bool PrepareGroupTile(const ProcessingRequest&,const PreparedDataset&,unsigned,unsigned,
+    std::vector<std::vector<Observation>>&,std::string&);
 Pixel Blend(const std::vector<Observation>&,const std::vector<double>&,const BracketingRecipe&,
     const std::array<double,64>* colorHeadroom=nullptr);
 // A null weight pointer with count zero requests automatic precision weights.

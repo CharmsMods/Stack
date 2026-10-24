@@ -135,6 +135,14 @@ and scalar verification remain explicit algorithm responsibilities. Keep
 measurement selection for occlusion/deghosting separate from backend failure.
 Report actual GPU tile counts rather than inferring success from context availability.
 
+Consume completed group tiles for neutral-guide statistics before releasing them,
+using the same canonical float representation as the group cache. Single-input
+uncached measurements retain their GPU double representation. Guide and histogram
+writes belong to disjoint tiles, with reduction in stable tile order. Keep Groups
+and Guide presentation ordered after worker joins without rereading cache payloads
+only to display an already computed guide. Timing must distinguish combined group/
+guide work from final guide presentation and reduction.
+
 Motion covariance describes source-pixel displacement. Shared origin-guide gradients
 use origin-pixel coordinates, so their registration risk uses covariance transported
 through the inverse actual-map Jacobian, including local/composed/refined motion.

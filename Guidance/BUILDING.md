@@ -103,11 +103,50 @@ for comparison, and keep the original RAW inputs unchanged.
   initialization work: a cache-disabled software-Mesa compile/link comparison
   measured about 20 ms extra (38 ms to 58 ms), excluding context creation. Hardware
   startup and full-pipeline timing remain unmeasured.
+  Completed canonicalized group tiles now feed neutral-guide math immediately,
+  avoiding one group-cache and one origin-cache read pass. Exact old-loop/cache
+  parity and actual tile-driver cancellation/publication checks passed; single
+  inputs keep their original GPU doubles. The later guide stage only finalizes
+  presentation and ordered histogram reduction. `temporal_groups` now includes
+  this guide computation; `group_neutral_guide_worker_seconds` records overlapping
+  worker time, while `neutral_guide` measures finalization.
+  Group-cache decoding no longer creates a full template Observation tile: a
+  512-square, four-group check reduced tracked peak allocation by exactly 20 MiB.
+  Decoded source ownership is released before noise/overview scans, and native
+  output aliases no longer pin replaced buffers through later depth work.
+  A noise-scratch reuse experiment was removed because paired timings showed no
+  useful speed gain despite fewer allocations.
   No end-to-end speedup or real-camera image-quality improvement is established.
 - Full Windows build and user-selected capture testing remain outstanding. The
   full `Process` integration check was blocked by unavailable OpenCV development
   headers; component checks do not replace it. Shared exposure-error correlations and very dark reference-guide observability remain
   modeling limitations; reported uncertainty is not a complete covariance model.
+
+### Current memory and transfer flow
+
+These are code-derived payload sizes, not physical-disk or GPU timing claims.
+Let N be sensor pixels and G the recipe's exposure-group count; halos and repeated
+passes add traffic beyond nominal full-coverage figures.
+
+- Decoding owns sensor buffers in RAM. Prepared sample, comparison-gain and flag
+  tiles occupy 9N bytes on disk, plus headers. Image-noise estimation (when used),
+  overview generation and alignment pyramids read those prepared tiles separately.
+- Temporal processing uploads 16-byte source taps and, when aligned, 72-byte
+  per-output-pixel mappings. Each group returns 72-byte GPU observations to CPU;
+  the checked 64-bit CPU Observation representation is 80 bytes. Local detail and
+  later consumers still prevent a wholly GPU-resident pipeline.
+- Canonical group-cache payload is 36GN bytes. A fresh multi-input run writes it
+  once, builds its guide from the resident tile, and reads it for final blending.
+  At 24 MP and three groups, removing the former guide reread avoids 2.592 GB of
+  group payload plus 216 MB of origin payload. Header/checksum safety remains.
+- Native output and measurement sidecars total 20N bytes; the cell guide adds N
+  bytes. Prepared analysis also retains motion/reliability and bounded overviews.
+  Replacing native output during SR no longer leaves redundant local owners alive
+  into depth processing; required native data still remains alive during SR.
+- GPU workspaces remain bounded and operation-scoped, not whole-frame allocations.
+  CPU/GPU budgets are admission estimates, not a measured universal peak: the
+  two-capture local-alignment pyramid/scratch preflight remains a known accounting
+  gap near the minimum memory allowance. Full Windows/hardware profiling is pending.
 
 ### First checks after pulling and building
 
