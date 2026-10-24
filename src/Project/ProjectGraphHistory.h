@@ -65,6 +65,16 @@ public:
         if (!m_Current) { Reset(std::move(state)); return; }
         m_Current=std::move(state);m_Redo.clear();PruneImageBytes();
     }
+    // Async source resolution belongs to the existing import action, including
+    // snapshots made while it was pending. Never create an undo step or erase
+    // a redo branch merely because its owned source finished loading.
+    template<class Reconcile> void ReconcileImageImport(Reconcile reconcile) {
+        if (m_Current) reconcile(*m_Current);
+        if (m_Gesture) reconcile(*m_Gesture);
+        for (auto& entry:m_Undo) reconcile(entry.state);
+        for (auto& entry:m_Redo) reconcile(entry.state);
+        PruneImageBytes();
+    }
     void EndGesture() {
         if (m_Gesture) {
             PushUndo(std::move(*m_Gesture),m_GestureAffectsPixels);

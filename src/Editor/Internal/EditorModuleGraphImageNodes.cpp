@@ -2,6 +2,7 @@
 #include "Editor/Internal/GraphEditorCommands.h"
 
 #include "Async/TaskSystem.h"
+#include "Project/ProjectGraphImageImportHistory.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Library/LibraryManager.h"
 #include "Raw/LibRawRuntime.h"
@@ -248,22 +249,27 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
     pendingPayload.isLoading = true;
     pendingPayload.importRequestId = requestId;
 
+    BeginProjectGraphHistory();
+    m_Project->graphHistory.EndGesture();
     EditorNodeGraph::Node* pendingNode = m_Project->graph.AddImageNode(std::move(pendingPayload), graphPosition);
     if (!pendingNode) {
         return false;
     }
     const int nodeId = pendingNode->id;
+    const std::string nodeUuid = pendingNode->instanceUuid;
     SelectGraphNode(nodeId);
+    ObserveProjectGraphEdit(false);
     MarkDirty();
 
     const auto queuedAt = std::chrono::steady_clock::now();
     bool submitted = false;
     try {
-        submitted = ProjectTasks().SubmitHighPriority("Importing image", [this, path, nodeId, requestId, queuedAt]() {
-        auto postImportFailure = [this, nodeId, requestId]() {
-            return ProjectTasks().PostToMain([this, nodeId, requestId]() {
+        submitted = ProjectTasks().SubmitHighPriority("Importing image", [this, path, nodeId, nodeUuid, requestId, queuedAt]() {
+        auto postImportFailure = [this, nodeId, nodeUuid, requestId]() {
+            return ProjectTasks().PostToMain([this, nodeId, nodeUuid, requestId]() {
+                Stack::Project::ResolveImageImportFailure(m_Project->graphHistory,nodeUuid,requestId);
                 EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-                if (node && node->kind == EditorNodeGraph::NodeKind::Image &&
+                if (node && node->instanceUuid == nodeUuid && node->kind == EditorNodeGraph::NodeKind::Image &&
                     node->image.isLoading && node->image.importRequestId == requestId) {
                     m_Project->graph.RemoveNode(nodeId);
                     MarkDirty();
@@ -274,10 +280,11 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
                     "editor-graph-image-import");
             });
         };
-        auto postEmbeddingFailure = [this, nodeId, requestId]() {
-            return ProjectTasks().PostToMain([this, nodeId, requestId]() {
+        auto postEmbeddingFailure = [this, nodeId, nodeUuid, requestId]() {
+            return ProjectTasks().PostToMain([this, nodeId, nodeUuid, requestId]() {
+                Stack::Project::ResolveImageImportEmbedding(m_Project->graphHistory,nodeUuid,requestId,{});
                 EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-                if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+                if (!node || node->instanceUuid != nodeUuid || node->kind != EditorNodeGraph::NodeKind::Image ||
                     !node->image.isEmbedding ||
                     node->image.embeddingRequestId != requestId) {
                     return;
@@ -324,6 +331,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         payloadQueued = ProjectTasks().PostToMain([
             this,
             nodeId,
+            nodeUuid,
             requestId,
             queueMs,
             decodeMs,
@@ -332,13 +340,15 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             pixelBytes,
             payload = std::move(payload)
         ]() mutable {
+            Stack::Project::ResolveImageImportDecode(m_Project->graphHistory,nodeUuid,requestId,payload);
             EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-            if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+            if (!node || node->instanceUuid != nodeUuid || node->kind != EditorNodeGraph::NodeKind::Image ||
                 !node->image.isLoading || node->image.importRequestId != requestId) {
                 return;
             }
 
-            node->title = payload.label.empty() ? "Slice" : payload.label;
+            // The placeholder already has the source label; preserve any title
+            // authored while decoding was in flight.
             node->image = std::move(payload);
             m_GraphPerformanceStats.lastSliceImportQueueMs = queueMs;
             m_GraphPerformanceStats.lastSliceImportDecodeMs = decodeMs;
@@ -360,14 +370,16 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         ProjectTasks().PostToMain([
             this,
             nodeId,
+            nodeUuid,
             requestId,
             embedMs,
             pngBytes = std::move(pngBytes)
         ]() mutable {
+            Stack::Project::ResolveImageImportEmbedding(m_Project->graphHistory,nodeUuid,requestId,pngBytes);
             m_GraphPerformanceStats.lastSliceImportEmbedMs = embedMs;
             m_GraphPerformanceStats.lastSliceImportEmbeddedBytes = pngBytes.size();
             EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-            if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+            if (!node || node->instanceUuid != nodeUuid || node->kind != EditorNodeGraph::NodeKind::Image ||
                 !node->image.isEmbedding || node->image.embeddingRequestId != requestId) {
                 return;
             }
@@ -406,6 +418,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         submitted = false;
     }
     if (!submitted) {
+        Stack::Project::ResolveImageImportFailure(m_Project->graphHistory,nodeUuid,requestId);
         m_Project->graph.RemoveNode(nodeId);
         m_Project->graph.ClearSelection();
         for (const int selectedNodeId : selectionBefore) {

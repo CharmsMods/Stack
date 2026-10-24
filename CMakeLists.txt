@@ -638,6 +638,7 @@ if(BUILD_TESTING)
     set_tests_properties(StackProject.GraphHistory PROPERTIES LABELS "project;history;cpu" TIMEOUT 30)
     find_package(Threads REQUIRED)
     include(cmake/StackCacheReaderTests.cmake)
+    include(cmake/StackGraphImageImportHistoryTests.cmake)
     add_executable(StackAtomicExportFileTests
         tools/tests/atomic_export_file_tests.cpp
         src/Utils/AtomicExportFile.cpp)
