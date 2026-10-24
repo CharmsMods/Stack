@@ -1,11 +1,8 @@
 #include "ProcessingInternal.h"
 #include "CaptureCorrespondence.h"
 #include "PreparedTileSampler.h"
-#include "SceneGradient.h"
-#include "DetailFusion.h"
 #include "PreparedRegion.h"
 #include "TemporalGpu.h"
-#include "CaptureFallback.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -74,164 +71,16 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     result.headroom=headroom;result.support=1;result.clipped=false;return result;
 }
 
-static bool EvaluateTemporalRegion(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
+static bool EvaluateTemporalRegion(const ProcessingRequest& request,const PreparedDataset& data,
     std::vector<std::vector<Observation>>& groups,const Mfd::PreparedRawTile& origin,bool detailFusion,std::string& error) {
-    if(data.combiningGpu) {
-        if(data.combiningGpu->Combine(request,data,origin,detailFusion,groups,error))return true;
-        if(!error.empty())return false;
+    if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
+    if(!data.combiningGpu) {
+        error="GPU capture combining is required, but no compute backend was initialized.";
+        return false;
     }
-    Mfd::DirectoryNormalizedTileCache cache(data.directory);
-    const auto count=origin.normalizedMosaic.size();groups.resize(request.recipe.groups.size());
-    for(auto& group:groups)group.assign(count,Observation{});
-    std::vector<std::vector<double>> weight(groups.size(),std::vector<double>(count));
-    std::vector<std::vector<double>> squared(groups.size(),std::vector<double>(count));
-    // One transient bit per tile sample tracks the selected fallback's own
-    // status. Observation::localRejected aggregates every capture and cannot
-    // identify whether the selected fallback itself had rejected geometry.
-    std::vector<std::vector<bool>> fallbackRejected(groups.size(),std::vector<bool>(count));
-    std::vector<std::vector<DetailFusionAccumulator>> bands;
-    if(detailFusion) {
-        bands.resize(groups.size());
-        for(const auto& source:data.sources)
-            if(source.enabled&&source.detailPreference<.999) bands[source.group].resize(count);
-    }
-    std::vector<Mfd::RawSignalGradient> sceneGradients(count,
-        {std::numeric_limits<double>::quiet_NaN(),0});
-    if(request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&
-       !BuildSceneGradients(request,data,origin,sceneGradients,error)) return false;
-    // Estimate the signal once in the reference exposure domain. Deriving a
-    // different variance pilot from every noisy frame makes the sample and its
-    // inverse-variance weight correlated. The effect is most visible as bias
-    // and contouring when a large, very dark fixed-coordinate burst is lifted.
-    std::vector<double> stablePilot(count);
-    for(std::size_t p=0;p<count;++p) {
-        const auto x=p%origin.extent.width,y=p/origin.extent.width;
-        double pilot=0;unsigned used=0;
-        for(unsigned dy=0;dy<4;dy+=2) for(unsigned dx=0;dx<4;dx+=2) {
-            const auto xx=static_cast<std::int64_t>(((origin.originX+x)/4)*4+x%2+dx)-static_cast<std::int64_t>(origin.originX);
-            const auto yy=static_cast<std::int64_t>(((origin.originY+y)/4)*4+y%2+dy)-static_cast<std::int64_t>(origin.originY);
-            if(xx<0||yy<0||xx>=static_cast<std::int64_t>(origin.extent.width)||
-                yy>=static_cast<std::int64_t>(origin.extent.height)) continue;
-            const auto q=static_cast<std::size_t>(yy)*origin.extent.width+xx;
-            const auto flags=origin.sampleFlags[q];
-            if(Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||
-                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip)||
-                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)||
-                Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired)) continue;
-            const double value=origin.normalizedMosaic[q]*origin.comparisonGain[q];
-            if(std::isfinite(value)) {pilot+=value;++used;}
-        }
-        const double point=Mfd::HasSampleFlag(origin.sampleFlags[p],Mfd::PreparedSampleFlag::DecoderRepaired)
-            ?0.0:origin.normalizedMosaic[p]*origin.comparisonGain[p];
-        stablePilot[p]=std::max(0.0,used?pilot/used:(std::isfinite(point)?point:0.0));
-    }
-    std::vector<Observation> samples;
-    for(const auto& source:data.sources) {
-        if(!source.enabled) continue;
-        if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
-        const bool fixedReference=&source==&data.sources[data.origin];
-        Mfd::PreparedRawTile sourceTile;
-        const auto& tile=fixedReference?origin:sourceTile;
-        const bool aligned=source.alignmentDiagnostic.model!=CaptureAlignment::Model::Identity||
-            (!fixedReference&&source.alignmentDiagnostic.localApplied);
-        if(!aligned&&!fixedReference) {
-            if(detailFusion) {
-                PreparedTileSampler regionSampler(data.directory);
-                if(!ReadPreparedRegion(source.frame,regionSampler,origin.originX,origin.originY,
-                    static_cast<unsigned>(origin.extent.width),static_cast<unsigned>(origin.extent.height),sourceTile,error)) return false;
-            } else if(Mfd::ReadPreparedTile(source.frame,cache,tx,ty,sourceTile,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
-        }
-        const auto group=source.group;
-        Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(source.frame.activeCfaPattern,layout);
-        PreparedTileSampler sampler(data.directory);
-        const bool useBands=detailFusion&&!bands[group].empty();
-        if(useBands)samples.resize(count);
-        const auto accumulate=[&](std::size_t p,const Observation& sample) {
-            auto& o=groups[group][p];
-            o.localRejected|=sample.localRejected;
-            if(!sample.finite) return;
-            if(PreferCaptureFallback(o.finite,fallbackRejected[group][p],o.exposure,
-                sample.localRejected,sample.exposure)) {
-                o.fallback=sample.fallback;o.exposure=sample.exposure;o.clipped=sample.clipped;
-                o.fallbackClipped=sample.fallbackClipped;
-                fallbackRejected[group][p]=sample.localRejected;
-            }
-            o.finite=true;if(sample.support<=0) return;
-            const double h=std::isfinite(sample.headroom)?std::clamp(sample.headroom,0.,1.):0.;
-            // Keep untapered, valid measurements only while every capture has
-            // zero headroom. The first positive taper replaces that fallback;
-            // it must not retain near-clipped contributions from earlier frames.
-            if(h>0&&o.headroom<=0&&weight[group][p]>0) {
-                o.value=o.variance=o.measurementVariance=o.uncertaintyVariance=0;
-                o.fixedReference=false;weight[group][p]=squared[group][p]=0;
-                if(useBands)bands[group][p]={};
-            }
-            if(h<=0&&o.headroom>0)return;
-            o.fixedReference|=sample.fixedReference;
-            const double w=(h>0?h:1.)/sample.variance;
-            if(weight[group][p]==0) o.measurementVariance=0;
-            o.value+=w*sample.value;o.variance+=w*w*sample.variance;o.headroom+=w*h;
-            o.measurementVariance+=w*w*sample.measurementVariance;
-            o.uncertaintyVariance+=w*w*sample.uncertaintyVariance;
-            weight[group][p]+=w;squared[group][p]+=w*w;
-        };
-        for(std::size_t p=0;p<count;++p) {
-            Observation sample;
-            if(aligned) {
-                sample=SampleAlignedCapture(source,layout,sampler,origin.originX+p%origin.extent.width,
-                    origin.originY+p/origin.extent.width,stablePilot[p],sceneGradients[p],error);
-                if(!error.empty()) return false;
-            }
-            else {
-                const auto flags=tile.sampleFlags[p];const double normalized=tile.normalizedMosaic[p];const double gain=tile.comparisonGain[p]*source.scale;
-                sample.value=normalized*gain;sample.fallback=sample.value;sample.exposure=1/source.scale;
-                sample.finite=std::isfinite(sample.value)&&std::isfinite(gain)&&gain>0&&
-                    !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)&&
-                    !Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired);
-                sample.clipped=Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip);
-                sample.fallbackClipped=sample.clipped;
-                if(sample.finite&&!sample.clipped) {
-                    const auto site=static_cast<std::size_t>(layout.SiteAt(
-                        tile.originX+p%tile.extent.width,tile.originY+p/tile.extent.width));
-                    const auto& profile=source.noise.sites[site];
-                    // Convert the shared comparison-domain pilot back to this
-                    // capture's normalized domain before propagating its own
-                    // calibrated noise profile through the known gain.
-                    Mfd::GainPropagatedVariance variance;
-                    if(!Mfd::PropagateKnownGainVariance(profile,gain,stablePilot[p],
-                        source.frame.calibration.usableSpanByCfaSite[site],variance,&error)) return false;
-                    sample.measurementVariance=std::max(1e-12,variance.variance);
-                    sample.uncertaintyVariance=Mfd::ResidualModelVariance(profile,stablePilot[p]);
-                    sample.uncertaintyVariance+=stablePilot[p]*stablePilot[p]*source.scaleVariance/(source.scale*source.scale);
-                    sample.variance=sample.measurementVariance+sample.uncertaintyVariance;
-                    sample.headroom=std::clamp((.995-normalized)/.045,0.0,1.0);sample.headroom=sample.headroom*sample.headroom*(3-2*sample.headroom);sample.support=1;
-                }
-            }
-            sample.fixedReference=fixedReference&&sample.support>0;
-            accumulate(p,sample);
-            if(useBands) samples[p]=sample;
-        }
-        if(useBands) for(std::size_t p=0;p<count;++p) {
-            const auto coarse=CoarseSample(samples,static_cast<unsigned>(origin.extent.width),
-                static_cast<unsigned>(origin.extent.height),static_cast<unsigned>(p%origin.extent.width),
-                static_cast<unsigned>(p/origin.extent.width),aligned?2.5:1.);
-            const double h=std::isfinite(samples[p].headroom)?std::clamp(samples[p].headroom,0.,1.):0.;
-            const double contribution=h>0?h:(groups[group][p].headroom>0?0.:1.);
-            bands[group][p].Add(samples[p],coarse,source.detailPreference,contribution);
-        }
-    }
-    for(std::size_t g=0;g<groups.size();++g) for(std::size_t p=0;p<count;++p) {
-        auto& o=groups[g][p];const double w=weight[g][p];
-        if(w>0) {o.value/=w;o.variance/=w*w;o.measurementVariance/=w*w;
-            // Retain weighted headroom for inter-group precision. Before any
-            // two-band/color-coherence adjustment, w_i=h_i/v_i gives
-            // headroom/groupVariance=sum(h_i/v_i), not a squared taper.
-            o.uncertaintyVariance/=w*w;o.headroom/=w;o.support=w*w/squared[g][p];o.clipped=false;
-            if(detailFusion&&!bands[g].empty()) bands[g][p].Finish(o);
-        }
-    }
-    return true;
+    return data.combiningGpu->Combine(request,data,origin,detailFusion,groups,error);
 }
+
 bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& data,unsigned tx,unsigned ty,
     std::vector<std::vector<Observation>>& groups,Mfd::PreparedRawTile& origin,std::string& error) {
     Mfd::DirectoryNormalizedTileCache cache(data.directory);
@@ -239,7 +88,7 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
     if(Mfd::ReadPreparedTile(frame,cache,tx,ty,origin,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
     const bool detailFusion=std::any_of(data.sources.begin(),data.sources.end(),
         [](const auto& source){return source.enabled&&source.detailPreference<.999;});
-    if(!detailFusion) return EvaluateTemporalRegion(request,data,tx,ty,groups,origin,false,error);
+    if(!detailFusion) return EvaluateTemporalRegion(request,data,groups,origin,false,error);
     const auto left=origin.originX>=4?origin.originX-4:0,top=origin.originY>=4?origin.originY-4:0;
     const auto right=std::min<std::uint64_t>(data.width,origin.originX+origin.extent.width+4);
     const auto bottom=std::min<std::uint64_t>(data.height,origin.originY+origin.extent.height+4);
@@ -247,7 +96,7 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
     if(!ReadPreparedRegion(frame,sampler,left,top,static_cast<unsigned>(right-left),
         static_cast<unsigned>(bottom-top),expanded,error)) return false;
     std::vector<std::vector<Observation>> full;
-    if(!EvaluateTemporalRegion(request,data,tx,ty,full,expanded,true,error)) return false;
+    if(!EvaluateTemporalRegion(request,data,full,expanded,true,error)) return false;
     groups.resize(full.size());
     for(auto& group:groups)group.resize(origin.extent.width*origin.extent.height);
     for(std::size_t g=0;g<groups.size();++g) for(unsigned y=0;y<origin.extent.height;++y)

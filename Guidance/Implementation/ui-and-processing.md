@@ -118,9 +118,11 @@ Capture combining uses the prepared-session [TemporalGpu](../../src/Raw/Bracketi
 owner for double-precision sampling, uncertainty propagation and ordered temporal/detail
 fusion. CPU correspondence and local-detail evidence remain authoritative. Tile buffers
 are bounded, reused across captures and retired through the engine context executor;
-unavailable compute or allocation failure reruns the complete CPU calculation. Backend
-selection is an execution setting, not a different reconstruction recipe. Report actual
-GPU/CPU tile counts rather than inferring acceleration from context availability.
+unavailable compute, allocation, verification or execution failures stop the job
+with diagnostics, never a production CPU substitute. CPU orchestration, decoding
+and scalar verification remain explicit algorithm responsibilities. Keep
+measurement selection for occlusion/deghosting separate from backend failure.
+Report actual GPU tile counts rather than inferring success from context availability.
 
 Use the [shared notifications subsystem](../../src/Notifications/README.md) for program-wide notices, activity and substantive decisions. Capture the initiating owner's notifier through asynchronous work and retain the feature's lifetime and generation checks. Report outcomes at accepted state transitions, rather than repeated drawing code. Keep messages short, put longer explanations in details, and leave settings forms and useful diagnostics beside their controls. Dismissing feedback does not resolve its cause, and notification history does not determine processing busy state.
 

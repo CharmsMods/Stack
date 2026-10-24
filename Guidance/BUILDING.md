@@ -12,7 +12,7 @@ The optional graph-routing backend uses the pinned native dependency in `cmake/S
 
 Private in-process Bracketing algorithm diagnostics require a separate CMake tree configured with `-DSTACK_BUILD_BURST_DIAGNOSTICS=ON`. Building its `Stack` target produces `diagnostics/StackBurstDiagnostics.exe` inside that tree, outside the packageable deployment. Normal build scripts explicitly disable this option. The shipping application's `--validate-burst-worker <inputs-folder> <new-output-folder>` is a bounded check of the real process client using two to eight existing RAW captures; it does not need internal algorithm linkage. Follow the repository's validation-scope agreement before running it. `Stack.exe --validate-burst-parity <inputs-folder> <standalone.dng> <new-output-folder> [standalone-report.json]` compares a known burst through the shipping client against every calibrated CFA sample in a standalone DNG. Supply the `measurement` JSON emitted by `StackBurst.exe --batch` to verify source order/settings and retain stage timing/resource evidence. It runs one complete processing job; use only within the agreed validation scope.
 
-Capture combining selects the GPU automatically when available. `--self-check` reports `gpuCombiningAvailable` after compiling its kernels. A scripted `--batch` manifest can set `"captureCombining":"cpu"` to exercise the equivalent CPU fallback; omit it or use `"auto"` for normal operation. The measurement report records actual GPU/CPU tile counts and bounded GPU memory reservation. `Stack.exe --validate-burst-combining-cancellation <inputs-folder> <new-output-folder>` uses two to eight real captures and cancels through the normal client after the first combining tile completes, without running the larger worker-validation suite.
+Burst reconstruction requires a working OpenGL compute backend. `--self-check` reports `gpuRequired`, `gpuAvailable`, `gpuCombiningAvailable` and `gpuMessage`; failure to initialize the required backend makes the check fail. A `--batch` manifest may omit `captureCombining` or set it to `"auto"`/`"gpu"`; legacy `"cpu"` requests are rejected rather than silently substituted. GPU initialization, shader, verification, resource and execution failures stop the job with diagnostics. CPU decoding, orchestration and scalar verification are still parts of the hybrid algorithm, not replacement GPU backends. Evidence-based selection of original-frame pixels for moving/unsupported regions remains distinct from backend failure. The measurement report records actual GPU tile counts and bounded GPU memory reservation. `Stack.exe --validate-burst-combining-cancellation <inputs-folder> <new-output-folder>` uses two to eight real captures and cancels through the normal client after the first combining tile completes, without running the larger worker-validation suite.
 
 For focused Color Calibration checks, run `.\build\Stack.exe --validate-color-calibration`. Optional RAW paths add real-image checks and write comparison previews to `outputs/validation/color-calibration/`. The first RAW also checks native preview against Editor export. The command uses a hidden graphics context and does not open or edit a user project.
 
@@ -35,7 +35,8 @@ admission and exposure fitting to use decoded layout and registered image eviden
 rather than camera/exposure labels. Unresolved captures get a local-alignment retry,
 then a documented exclusion instead of an invented metadata gain. It also improves
 per-capture highlight-headroom weighting, registration provenance, noise-failure
-reporting and cancellation. Decoder CFA, orientation and black/white calibration
+reporting and cancellation. GPU stages now fail explicitly rather than silently
+switching to CPU processing. Decoder CFA, orientation and black/white calibration
 are still required; missing information does not create recovered dynamic range.
 
 New, untouched Bracketing imports can initialize their default Local EV and Tone
@@ -59,8 +60,15 @@ for comparison, and keep the original RAW inputs unchanged.
   checking was unavailable in that execution environment.
 - All four temporal compute shaders compiled and linked on software Mesa. Actual
   Accumulate/Finish dispatch passed 26 small arithmetic/flag cases. Later-group
-  Prepare reset and failure propagation were checked separately. This is not a
-  complete GPU-wrapper, spatial-detail, Windows or hardware-driver validation.
+  Prepare reset and failure propagation were checked separately. The actual
+  temporal GPU wrapper also passed bounded multi-group success, weighted-output,
+  disabled-source and late-failure publication checks. GPU executor refusal,
+  cancellation and malformed-score checks passed. These are component checks,
+  not full spatial-detail, Windows or hardware-driver validation.
+- Legacy MFD/HDR processor checks confirmed GPU failures and missing executors
+  return failure without publishing a CPU replacement; cancellation stays canceled.
+  RAW display preprocessing also reports GPU failure instead of CPU retry. Explicit
+  CPU reference/interactive algorithms remain distinct primary paths, not recovery.
 - A measured pyramid-index optimization regression was removed. Residual-buffer
   reuse reduced allocation calls in one controlled fixture, but timing overlapped.
   Redundant later-group GPU status readbacks and reference staging were removed.
@@ -83,8 +91,8 @@ for comparison, and keep the original RAW inputs unchanged.
    Check its editable Local EV/Tone Curve settings and undo. An older project is
    expected to retain its authored look rather than automatically change.
 4. Confirm that an older finished project only gains the new reconstruction after
-   explicit processing. If investigating backend differences, use the CPU/auto
-   manifest option described above and retain the actual tile-count diagnostics.
+   explicit processing. Retain the actual GPU tile-count and failure diagnostics;
+   there is no production CPU fallback to hide an unavailable GPU backend.
 
 The durable scalar, noise and exposure regressions are part of the existing
 `--validate-bracketing` suite in the optional diagnostics build described above.

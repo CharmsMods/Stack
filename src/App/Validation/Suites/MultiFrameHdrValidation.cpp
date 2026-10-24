@@ -225,6 +225,8 @@ Raw::Hdr::Request HdrRequest(
     const std::filesystem::path& directory,
     Raw::Hdr::AlignmentMode alignment = Raw::Hdr::AlignmentMode::Identity) {
     Raw::Hdr::Request request;
+    // Reference fixtures select CPU deliberately; GPU fixtures opt in below.
+    request.preferGpuFusion = false;
     request.frames = {
         HdrInput("short.dng", 'a'),
         HdrInput("anchor.dng", 'b'),
@@ -1123,6 +1125,7 @@ bool ValidateHdrGpuFusion() {
                     scenario.translationY));
         Raw::Hdr::Result cpu = Raw::Hdr::ProcessBurst(cpuRequest, cpuServices);
         Raw::Hdr::Request gpuRequest = HdrRequest(gpuDirectory, scenario.alignment);
+        gpuRequest.preferGpuFusion = true;
         Raw::Hdr::Services gpuServices = HdrServices(
             scenario.allRejectedPixel
                 ? AllRejectedPixelBracket(scenario.pattern)
@@ -1201,6 +1204,7 @@ bool ValidateHdrGpuFusion() {
         TemporaryDirectory("gpu-forced-fallback");
     TemporaryCleanup fallbackCleanup { fallbackDirectory };
     Raw::Hdr::Request fallbackRequest = HdrRequest(fallbackDirectory);
+    fallbackRequest.preferGpuFusion = true;
     Raw::Hdr::Services fallbackServices = HdrServices(
         ExactBracket(Raw::CfaPattern::RGGB));
     fallbackServices.executeOpenGlTask = [](
@@ -1211,15 +1215,25 @@ bool ValidateHdrGpuFusion() {
     };
     Raw::Hdr::Result fallback = Raw::Hdr::ProcessBurst(
         fallbackRequest, fallbackServices);
-    ok &= ValidatePublishedShape(fallback);
-    ok &= Check(fallback.diagnostics.executionBackend == "cpu-reference" &&
+    ok &= Check(fallback.status == Raw::Hdr::ProcessingStatus::Failed &&
+            fallback.virtualAnchorMosaic.empty() && fallback.varianceProxy.empty() &&
+            fallback.message == "forced validation failure" &&
             fallback.diagnostics.gpuFallbackReason == "forced validation failure",
-        "a GPU failure did not fall back to the CPU reference path cleanly");
+        "a GPU failure was hidden by CPU retry or partial HDR publication");
+    auto missingExecutorRequest = fallbackRequest;
+    missingExecutorRequest.workingDirectory = fallbackDirectory / "no-executor";
+    const auto missingExecutor = Raw::Hdr::ProcessBurst(missingExecutorRequest,
+        HdrServices(ExactBracket(Raw::CfaPattern::RGGB)));
+    ok &= Check(missingExecutor.status == Raw::Hdr::ProcessingStatus::Failed &&
+            missingExecutor.virtualAnchorMosaic.empty() &&
+            missingExecutor.message == "No OpenGL compute executor is available.",
+        "GPU HDR without an executor silently selected CPU fusion");
 
     const std::filesystem::path cancelDirectory =
         TemporaryDirectory("gpu-tile-cancel");
     TemporaryCleanup cancelCleanup { cancelDirectory };
     Raw::Hdr::Request cancelRequest = HdrRequest(cancelDirectory);
+    cancelRequest.preferGpuFusion = true;
     std::atomic<bool> gpuTaskActive { false };
     std::atomic<std::uint32_t> gpuCancelChecks { 0u };
     cancelRequest.shouldCancel = [&]() {
@@ -1248,6 +1262,7 @@ bool ValidateHdrGpuFusion() {
             TemporaryDirectory("gpu-render-worker");
         TemporaryCleanup workerCleanup { workerDirectory };
         Raw::Hdr::Request workerRequest = HdrRequest(workerDirectory);
+        workerRequest.preferGpuFusion = true;
         Raw::Hdr::Services workerServices = HdrServices(
             ExactBracket(Raw::CfaPattern::RGGB));
         workerServices.executeOpenGlTask = [&](

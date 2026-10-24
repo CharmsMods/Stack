@@ -1707,15 +1707,19 @@ Result ProcessBurst(const Request& request, const Services& services) {
             result.diagnostics.gpuFallbackReason = gpuError.empty()
                 ? "The GPU result did not satisfy the HDR output contract."
                 : gpuError;
+            return fail(Canceled(request) ? ProcessingStatus::Canceled : ProcessingStatus::Failed,
+                result.diagnostics.gpuFallbackReason);
         }
-    } else if (request.preferGpuFusion) {
-        result.diagnostics.gpuFallbackReason = request.interactiveFusion || !IsNeutralFusion(request.fusion)
-            ? "Interactive Fusion uses the CPU measurement estimator."
-            : services.executeOpenGlTask
+    } else if (request.preferGpuFusion && !request.interactiveFusion) {
+        result.diagnostics.gpuFallbackReason = services.executeOpenGlTask
             ? "The frame dimensions exceed the OpenGL compute contract."
             : "No OpenGL compute executor is available.";
+        return fail(Canceled(request) ? ProcessingStatus::Canceled : ProcessingStatus::Failed,
+            result.diagnostics.gpuFallbackReason);
     }
 
+    // Explicit CPU selection or the distinct interactive measurement estimator,
+    // never a retry after accelerated execution or publication failed.
     if (!gpuSucceeded && !allocateCpuOutput()) {
         return fail(ProcessingStatus::Failed, "The HDR output exceeds the memory budget.");
     }

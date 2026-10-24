@@ -10,7 +10,9 @@ public:
     explicit TemporalGpu(const ProcessingRequest&);
     ~TemporalGpu();
     bool Available() const;
-    // False with no error requests the complete equivalent CPU calculation.
+    bool Ready(std::string& error) const;
+    // GPU-only: failure returns an error and leaves groups unchanged.
+    // Original-frame selection within fusion is not a backend fallback.
     bool Combine(const ProcessingRequest&,const PreparedDataset&,const Mfd::PreparedRawTile&,
         bool detailFusion,std::vector<std::vector<Observation>>&,std::string&);
     void Report(BracketingAnalysis&) const;

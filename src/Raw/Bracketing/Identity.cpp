@@ -15,7 +15,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     auto j=Serialize(recipe);
     // Sampling and clipping decisions feed reliability, the guide and cached
     // group tiles. Keep their revisions together when these decisions change.
-    j["alignmentProfile"]="automatic-local-v33-registered-field-provenance";
+    j["alignmentProfile"]="automatic-local-v34-required-gpu-search";
     if(recipe.aiAlignment)j["learnedAlignmentProfile"]=LearnedAlignment::Profile;
     if(!request.alignmentProposals.empty()) {
         j["alignmentProposalProfile"]="external-flow-seed-raw-verification-v1";
@@ -27,7 +27,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     j["noiseProfile"]="temporal-burst-haar-v3-finite-generic-prior";
     j["groupMemoryProfile"]="adaptive-prepared-tiles-v1";
     j["detailProfile"]=kLocalDetailRevision;
-    j["temporalProfile"]="double-precision-gpu-temporal-v4-capture-headroom";
+    j["temporalProfile"]="double-precision-gpu-temporal-v5-required-backend";
     j["hdrProfile"]=kHdrColorFusionRevision;
     if(recipe.depth.enabled)j["depthProfile"]="handheld-parallax-v6-gpu-guided-depth";
     for(const auto& s:request.sources) j["sources"].push_back({s.frameId,s.sha256,s.bytes});

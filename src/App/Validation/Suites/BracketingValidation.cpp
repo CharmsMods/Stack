@@ -17,6 +17,7 @@
 #include "Persistence/ProjectStore.h"
 #include "Raw/MultiFrame/PublicationFence.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -104,7 +105,7 @@ Raw::RawImageData CfaDisagreementCapture(char id) {
     }
     return raw;
 }
-Raw::Bracketing::ProcessingRequest Request(const std::vector<Raw::RawImageData>& raws,const std::filesystem::path& path,bool grouped=false) {
+Raw::Bracketing::ProcessingRequest MakeRequest(const std::vector<Raw::RawImageData>& raws,const std::filesystem::path& path,bool grouped=false) {
     using namespace Raw::Bracketing;
     ProcessingRequest r;r.cacheDirectory=path;r.recipe.originFrameId="f0";r.recipe.alignmentMode=AlignmentMode::FixedCoordinates;
     for(std::size_t i=0;i<raws.size();++i) {
@@ -126,9 +127,29 @@ bool ValidateBracketing() {
         ValidateBracketingBurstAlignment();
         ValidateBracketingNoiseEvidence();
         ValidateBracketingLocalDetailEvidence();
-        ValidateBracketingLocalDetailPipeline(directory/"local-detail",Capture,Request);
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();
+        // Backend faults must fail before decoding, never become CPU work.
+        for(unsigned failure=0;failure<3;++failure) {
+            auto required=MakeRequest({Capture('g',1)},directory/"gpu-required");
+            bool decoded=false;
+            required.decode=[&](const auto&,auto&,const auto&){decoded=true;return false;};
+            if(failure>0)required.executeOpenGlTask=[](Raw::OpenGlTask,std::string& error) {
+                error="Deliberate validation executor refusal";return false;
+            };
+            if(failure==1)required.preferGpuCombining=false;
+            const auto rejected=Process(required);
+            Check(rejected.status==BracketingResult::Status::Failed&&!decoded&&
+                !rejected.message.empty(),"GPU failure silently decoded or substituted CPU processing");
+        }
+        BracketingValidationGl gl;
+        const auto Request=[&gl](const std::vector<Raw::RawImageData>& raws,
+            const std::filesystem::path& path,bool grouped=false) {
+            auto request=MakeRequest(raws,path,grouped);
+            request.executeOpenGlTask=gl.Executor();
+            return request;
+        };
+        ValidateBracketingLocalDetailPipeline(directory/"local-detail",Capture,Request);
         ValidateBracketingCaptureSharpness(directory/"sharpness",Capture,Request);
         auto curves=EqualCurves(4);InsertKnot(curves,-2);Redistribute(curves[1].share,2,.7);Redistribute(curves[1].left,2,.9);Redistribute(curves[1].right,2,.4);
         for(int i=0;i<2000;++i) {double total=0;for(auto w:Evaluate(curves,-14+i*.012)) {Check(w>=0&&w<=1,"Curve bounds");total+=w;}Check(std::abs(total-1)<1e-10,"Bezier sum");}
@@ -373,12 +394,7 @@ bool ValidateBracketing() {
         depthAnalysis->depth=outputDepth;defocused.analysis=depthAnalysis;
         auto defocusRequest=hdrRequest;defocusRequest.recipe.depth.enabled=true;
         defocusRequest.recipe.depth.focus=1;defocusRequest.recipe.depth.blurRadius=8;
-        {
-            BracketingValidationGl gl;
-            defocusRequest.executeOpenGlTask=gl.Executor();
-            Check(Depth::Finish(defocusRequest,defocused,error),error);
-            defocusRequest.executeOpenGlTask={};
-        }
+        Check(Depth::Finish(defocusRequest,defocused,error),error);
         Check(defocused.raw->reconstructedCameraRgb&&!defocused.raw->normalizedMosaicBuffer&&
             !defocused.raw->multiFrameMeasurementSidecars&&defocused.raw->reconstructionDepth==outputDepth,
             "Defocus did not publish the camera RGB contract with depth evidence");

@@ -4,7 +4,7 @@
 
 namespace Stack::BurstEngine {
 // The standalone batch and IPC host share one GPU owner implementation.
-// Construct and retire off the UI thread. Missing GL keeps the CPU fallback.
+// Construct and retire off the UI thread. Missing GL is reported as a processing failure, never CPU substitution.
 class GpuContext {
 public:
     GpuContext();

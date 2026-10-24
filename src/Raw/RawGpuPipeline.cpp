@@ -1555,11 +1555,8 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(
         return true;
     }
 
-    // Keep the established CPU implementation as a parity-preserving escape
-    // hatch for old drivers and metadata that cannot be represented safely by
-    // the compact GPU atlas. Ordinary supported RAWs never enter this path.
-    m_LastPreprocessTelemetry.cpuFallback = true;
-    m_LastPreprocessTelemetry.fallbackReason = gpuPreprocessError;
+    // A failed GPU operation must not silently select a different backend.
+    // Discard partial outputs so a later request cannot reuse them as a hit.
     m_Preprocessor->InvalidateOutputs();
     if (m_CorrectedRawTexture != 0) {
         glDeleteTextures(1, &m_CorrectedRawTexture);
@@ -1569,89 +1566,12 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(
         glDeleteTextures(1, &m_RawNoiseVarianceTexture);
         m_RawNoiseVarianceTexture = 0;
     }
-
-    try {
-        std::vector<float> corrected;
-        std::string normalizationError;
-        const auto normalizeBegin = std::chrono::steady_clock::now();
-        if (!Processing::BuildTruthfulNormalizedMosaic(
-                raw,
-                settings,
-                corrected,
-                &normalizationError)) {
-            m_LastError = normalizationError;
-            return false;
-        }
-        m_LastPreprocessTelemetry.cpuNormalizationMs =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - normalizeBegin).count();
-
-        const auto correctedUploadBegin = std::chrono::steady_clock::now();
-        m_CorrectedRawTexture = GLHelpers::CreateTextureFromData(
-            corrected.data(), width, height, GL_R32F, GL_RED, GL_FLOAT);
-        m_LastPreprocessTelemetry.correctedUploadMs =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - correctedUploadBegin).count();
-        m_LastPreprocessTelemetry.correctedUploadBytes =
-            corrected.size() * sizeof(float);
-    } catch (const std::bad_alloc&) {
-        m_LastError =
-            "CPU RAW preprocessing fallback could not allocate the normalized mosaic.";
-        return false;
-    }
-    if (m_CorrectedRawTexture == 0) {
-        m_LastError =
-            "CPU RAW preprocessing fallback could not upload the normalized mosaic.";
-        return false;
-    }
-
-    if (wantsNoiseVariance) {
-        try {
-            std::vector<float> variance;
-            std::string varianceError;
-            const auto varianceBegin = std::chrono::steady_clock::now();
-            if (!Processing::BuildTruthfulNoiseVarianceMosaic(
-                    raw,
-                    settings,
-                    variance,
-                    &varianceError)) {
-                m_LastError = varianceError;
-                return false;
-            }
-            m_LastPreprocessTelemetry.cpuVarianceMs =
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - varianceBegin).count();
-
-            const auto varianceUploadBegin =
-                std::chrono::steady_clock::now();
-            m_RawNoiseVarianceTexture = GLHelpers::CreateTextureFromData(
-                variance.data(), width, height, GL_R32F, GL_RED, GL_FLOAT);
-            m_LastPreprocessTelemetry.varianceUploadMs =
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - varianceUploadBegin).count();
-            m_LastPreprocessTelemetry.varianceUploadBytes =
-                variance.size() * sizeof(float);
-        } catch (const std::bad_alloc&) {
-            m_LastError =
-                "CPU RAW preprocessing fallback could not allocate the variance mosaic.";
-            return false;
-        }
-        if (m_RawNoiseVarianceTexture == 0) {
-            m_LastError =
-                "CPU RAW preprocessing fallback could not upload the variance mosaic.";
-            return false;
-        }
-    }
-
-    m_RawWidth = width;
-    m_RawHeight = height;
-    m_CorrectedRawFingerprint = fingerprint;
-    m_RawNoiseVarianceFingerprint =
-        wantsNoiseVariance ? fingerprint : 0;
-    m_LastPreprocessTelemetry.varianceGenerated = wantsNoiseVariance;
-    outHasCorrectedRaw = true;
-    outHasNoiseVariance = wantsNoiseVariance;
-    return true;
+    m_CorrectedRawFingerprint = 0;
+    m_RawNoiseVarianceFingerprint = 0;
+    m_LastError = gpuPreprocessError.empty()
+        ? "GPU RAW preprocessing failed; CPU substitution is not supported."
+        : "GPU RAW preprocessing failed: " + gpuPreprocessError;
+    return false;
 }
 
 bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevelopSettings& settings) {

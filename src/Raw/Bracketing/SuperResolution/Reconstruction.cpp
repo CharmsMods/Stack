@@ -16,19 +16,62 @@ namespace {
 struct GpuSession {
     const ProcessingRequest& request;
     Sr::GpuKernel kernel;
-    bool enabled=false,used=false,verified=false;
-    std::string fallback;
-    explicit GpuSession(const ProcessingRequest& r):request(r),enabled(bool(r.executeOpenGlTask)){}
+    bool verified=false;
+    explicit GpuSession(const ProcessingRequest& r):request(r){}
     ~GpuSession(){if(request.executeOpenGlTask){std::string e;try {
         request.executeOpenGlTask([&](std::string&){kernel.Release();return true;},e);
     }catch(...) { /* Context teardown must not terminate failure unwinding. */ }}}
-    bool Call(const Raw::OpenGlTask& task) {
-        if(!enabled)return false;
-        std::string error;
-        if(request.executeOpenGlTask(task,error))return true;
-        enabled=false;fallback=error;return false;
+    bool Call(const Raw::OpenGlTask& task,const char* stage,std::string& error) {
+        if(request.shouldCancel&&request.shouldCancel()) {
+            error="Canceled";return false;
+        }
+        if(!request.executeOpenGlTask) {
+            error="Super-resolution requires an available GPU compute context; CPU execution is not supported.";
+            return false;
+        }
+        std::string failure;
+        try {
+            if(request.executeOpenGlTask(task,failure))return true;
+        }catch(const std::exception& exception) {
+            failure=exception.what();
+        }catch(...) {
+            failure="Unknown GPU executor failure.";
+        }
+        if(request.shouldCancel&&request.shouldCancel()) {
+            error="Canceled";return false;
+        }
+        error=std::string("Super-resolution GPU ")+stage+" failed"+
+            (failure.empty()?std::string("."):std::string(": ")+failure);
+        return false;
     }
 };
+constexpr unsigned kGpuVerificationProbes=17;
+bool FiniteGpuProbe(const Sr::ChannelResult& channel) {
+    return std::isfinite(channel.value)&&std::isfinite(channel.support)&&
+        std::isfinite(channel.variance)&&std::isfinite(channel.uncertainty);
+}
+bool VerifyGpuProbes(const Sr::Tile& tile,
+    const std::array<std::size_t,kGpuVerificationProbes>& indices,
+    const std::array<Sr::PixelAccumulator,kGpuVerificationProbes>& expected,
+    bool accumulated,bool& verified,std::string& error) {
+    // An empty group only verifies buffer initialization, not GPU accumulation.
+    if(verified||!accumulated)return true;
+    for(unsigned i=0;i<kGpuVerificationProbes;++i) {
+        const auto actual=Sr::ResolveChannels(tile.pixels[indices[i]]);
+        const auto reference=Sr::ResolveChannels(expected[i]);
+        for(unsigned c=0;c<3;++c) {
+            const auto& a=actual[c];const auto& b=reference[c];
+            if(a.valid!=b.valid||!FiniteGpuProbe(a)||!FiniteGpuProbe(b)||
+               std::abs(a.value-b.value)>2e-5f*std::max(1.f,std::abs(b.value))||
+               std::abs(a.support-b.support)>1e-3f*std::max(1.f,b.support)) {
+                error="Super-resolution GPU verification failed: reconstructed samples differ from scalar reference probes or contain nonfinite statistics.";
+                return false;
+            }
+        }
+    }
+    verified=true;
+    return true;
+}
 // A missing reconstructed color uses the nearest temporal CFA measurement of
 // that color, including its actual group weights and clipping reason. Avoid a
 // demosaic fallback whose neighboring contributions cannot be accounted for.
@@ -79,57 +122,36 @@ bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysi
         request.evidenceStream->Details(e);
         }catch(...) { /* Observation must not change reconstruction. */ }
     };
-    bool accelerated=gpu.Call([&](std::string& e){return gpu.kernel.Begin(tile,e);});
-    // MakeTile supplies zero accumulators. Only the kernels need retaining if
-    // a failed/partially-read GPU tile has to restart the complete CPU pass.
-    std::vector<Sr::Vec4> initialKernels;
-    if(accelerated) {
-        initialKernels.reserve(tile.pixels.size());
-        for(const auto& pixel:tile.pixels)initialKernels.push_back(pixel.kernel);
-    }
-    constexpr unsigned probes=17;
+    if(!gpu.Call([&](std::string& e){return gpu.kernel.Begin(tile,e);},"initialization",error))return false;
+    constexpr unsigned probes=kGpuVerificationProbes;
     std::array<std::size_t,probes> indices{};std::array<Sr::PixelAccumulator,probes> expected{};
     for(unsigned i=0;i<probes;++i){indices[i]=i*(tile.pixels.size()-1)/(probes-1);expected[i]=tile.pixels[indices[i]];}
     Sr::FrameRegion frame;
-    const auto run=[&](bool useGpu)->bool {
-        for(const auto& source:data.sources)if(source.enabled&&source.group==group) {
-            if(!Sr::BuildFrameRegion(analysis,source,tile,sampler,frame,request.shouldCancel,error))return false;
-            if(useGpu) {
-                if(!gpu.verified)for(unsigned i=0;i<probes;++i)
-                    Sr::AccumulatePixel(tile,frame,unsigned(indices[i]%tile.width),unsigned(indices[i]/tile.width),expected[i]);
-                if(!gpu.Call([&](std::string& e){return gpu.kernel.Add(tile,frame,e);} ))return false;
-            } else if(!Sr::AccumulateCpu(tile,frame,request.shouldCancel,error,request.workerCount))return false;
-        }
-        return true;
-    };
-    if(accelerated) {
-        accelerated=run(true)&&gpu.Call([&](std::string& e){return gpu.kernel.Read(tile,e);});
-        if(accelerated&&!gpu.verified) {
-            for(unsigned i=0;i<probes;++i) {
-                const auto actual=Sr::ResolveChannels(tile.pixels[indices[i]]),expectedChannels=Sr::ResolveChannels(expected[i]);
-                for(unsigned c=0;c<3;++c) {
-                    const auto& a=actual[c];const auto& b=expectedChannels[c];
-                    if(a.valid!=b.valid||!std::isfinite(a.value)||std::abs(a.value-b.value)>2e-5f*std::max(1.f,std::abs(b.value))||
-                       std::abs(a.support-b.support)>1e-3f*std::max(1.f,b.support))accelerated=false;
-                }
-            }
-            if(!accelerated){gpu.enabled=false;gpu.fallback="CPU verification rejected GPU reconstruction.";}
-            else gpu.verified=true;
-        }
-        if(accelerated){gpu.used=true;observe();return true;}
-        if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
-        if(!error.empty())return false;
-        for(std::size_t i=0;i<tile.pixels.size();++i) {
-            tile.pixels[i]={};tile.pixels[i].kernel=initialKernels[i];
-        }
+    bool accumulated=false;
+    for(const auto& source:data.sources)if(source.enabled&&source.group==group) {
+        if(!Sr::BuildFrameRegion(analysis,source,tile,sampler,frame,request.shouldCancel,error))return false;
+        // The scalar probes verify the GPU result; they never supply output
+        // pixels or provide a CPU reconstruction path after a GPU failure.
+        if(!gpu.verified)for(unsigned i=0;i<probes;++i)
+            Sr::AccumulatePixel(tile,frame,unsigned(indices[i]%tile.width),unsigned(indices[i]/tile.width),expected[i]);
+        if(!gpu.Call([&](std::string& e){return gpu.kernel.Add(tile,frame,e);},"accumulation",error))return false;
+        accumulated=true;
     }
-    const bool complete=run(false);if(complete)observe();return complete;
+    if(!gpu.Call([&](std::string& e){return gpu.kernel.Read(tile,e);},"readback",error))return false;
+    if(!VerifyGpuProbes(tile,indices,expected,accumulated,gpu.verified,error))return false;
+    if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
+    observe();return true;
 }
 }
 bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResult& result,std::string& error) {
     if(request.recipe.reconstruction!=ReconstructionMode::SuperResolution1x&&
        request.recipe.reconstruction!=ReconstructionMode::SuperResolution2x)return true;
     if(!result.raw||!result.analysis||!result.analysis->prepared){error="Super-resolution requires prepared captures.";return false;}
+    if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
+    if(!request.executeOpenGlTask) {
+        error="Super-resolution requires an available GPU compute context; CPU execution is not supported.";
+        return false;
+    }
     const auto start=std::chrono::steady_clock::now();
     const auto& data=*result.analysis->prepared;const auto& native=*result.raw;
     const unsigned scale=request.recipe.reconstruction==ReconstructionMode::SuperResolution2x?2:1;
@@ -304,9 +326,8 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     analysis->estimatedPeakResidentBytes=std::max(analysis->estimatedPeakResidentBytes,memoryPlan.peakBytes);
     analysis->diagnostics.push_back(memoryPlan.message);
     analysis->stageSeconds["super_resolution"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-    analysis->diagnostics.push_back("Super-resolution "+std::to_string(scale)+"x / "+(gpu.used?"GPU verified against CPU":"CPU")+" / measured Bayer phase bins "+std::to_string(diversity)+" of 16.");
+    analysis->diagnostics.push_back("Super-resolution "+std::to_string(scale)+"x / GPU verified against scalar probes / measured Bayer phase bins "+std::to_string(diversity)+" of 16.");
     if(!diverse)analysis->diagnostics.push_back("Limited sampling diversity. Noise reduction is supported; additional resolved detail is limited.");
-    if(!gpu.fallback.empty())analysis->diagnostics.push_back("Super-resolution CPU fallback: "+gpu.fallback);
     result.analysis=analysis;result.raw=raw;result.preview=std::move(preview);result.reconstructionInspection=inspection;
     result.message="Super-resolution "+std::to_string(scale)+"x ready. "+std::to_string(width)+" x "+std::to_string(height)+". "+(!diverse?"Limited sampling diversity.":"Additional spatial cleanup is controlled in RAW.");
     return true;

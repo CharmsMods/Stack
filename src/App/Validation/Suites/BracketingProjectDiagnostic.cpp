@@ -1,7 +1,7 @@
 #include "Persistence/ProjectStore.h"
 #include "Raw/Bracketing/Processor.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
-#include "Renderer/GLLoader.h"
+#include "BracketingValidationGl.h"
 #include "ThirdParty/stb_image_write.h"
 #include "BracketingInspectionOutput.h"
 #include "BracketingDiagnosticInputs.h"
@@ -20,25 +20,6 @@
 
 namespace Stack::Validation {
 namespace {
-
-struct HiddenOpenGlContext {
-    GLFWwindow* window=nullptr;
-    ~HiddenOpenGlContext() {
-        if(window) glfwDestroyWindow(window);
-        if(window) glfwTerminate();
-    }
-    bool Initialize(std::string& error) {
-        if(!glfwInit()) {error="GLFW could not initialize the diagnostic GPU context.";return false;}
-        glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
-        window=glfwCreateWindow(32,32,"Bracket diagnostic",nullptr,nullptr);
-        if(!window) {glfwTerminate();error="OpenGL 4.3 is unavailable for the diagnostic.";return false;}
-        glfwMakeContextCurrent(window);
-        if(!LoadGLFunctions()) {error="The diagnostic could not load OpenGL functions.";return false;}
-        return true;
-    }
-};
 
 double Quantile(const std::vector<float>& sorted,double fraction) {
     if(sorted.empty()) return 0;
@@ -124,13 +105,12 @@ bool DiagnoseBracketingProject(int argc,char** argv) {
         request.memoryBudgetBytes=memory.budgetBytes;
         request.automaticMemoryBudget=true;
         request.workerCount=Raw::Bracketing::ResolveBracketingWorkerCount(request.memoryBudgetBytes);
-        HiddenOpenGlContext openGl;
-        bool useGpu=false,checkReuse=false,inspectStages=false,exportEvidence=false,inspectQuality=false;
+        bool checkReuse=false,inspectStages=false,exportEvidence=false,inspectQuality=false;
         bool compareUpgrade=false;
         std::vector<std::array<unsigned,2>> requestedRegions;
         for(int i=2;i<argc;++i) {
             const std::string option=argv[i];
-            if(option=="--gpu") useGpu=true;
+            if(option=="--gpu") {} // Compatibility spelling: GPU is always required.
             else if(option=="--check-reuse") checkReuse=true;
             else if(option=="--inspect-stages") inspectStages=true;
             else if(option=="--export-evidence") exportEvidence=true;
@@ -148,16 +128,12 @@ bool DiagnoseBracketingProject(int argc,char** argv) {
             else if(option=="--local") request.recipe.alignmentMode=Raw::Bracketing::AlignmentMode::AutomaticLocal;
             else throw std::runtime_error("Unknown bracket diagnostic option: "+option);
         }
-        request.preferGpuRegistration=useGpu;
+        request.preferGpuRegistration=true;
         if(request.recipe.reconstruction!=Raw::Bracketing::ReconstructionMode::Standard&&
             (inspectStages||compareUpgrade))
             throw std::runtime_error("Temporal mosaic inspection requires --standard. RGB reconstruction supports native result crops.");
-        if(useGpu||inspectStages) {
-            if(!openGl.Initialize(error)) throw std::runtime_error(error);
-            request.executeOpenGlTask=[](Raw::OpenGlTask task,std::string& taskError) {
-                return task&&task(taskError);
-            };
-        }
+        BracketingValidationGl openGl;
+        request.executeOpenGlTask=openGl.Executor();
         request.cacheDirectory=output/"cache";
         request.removeCacheOnRelease=true;
         int lastProgress=-1;
@@ -196,7 +172,7 @@ bool DiagnoseBracketingProject(int argc,char** argv) {
         report["alignmentMode"]=Raw::Bracketing::AlignmentModeName(request.recipe.alignmentMode);
         report["sourceCount"]=request.sources.size();
         report["workerCount"]=request.workerCount;
-        report["backendPreference"]=useGpu?"gpu-with-cpu-fallback":"cpu-reference";
+        report["backendPreference"]="gpu-required";
         report["estimatedPeakResidentBytes"]=result.analysis->estimatedPeakResidentBytes;
         report["fallbackSamples"]=result.fallbackSamples;
         report["unrecoverableSamples"]=result.unrecoverableSamples;
@@ -239,7 +215,11 @@ bool DiagnoseBracketingProject(int argc,char** argv) {
         if(compareUpgrade) WriteBracketUpgradeComparison(request,result,output/"upgrade",requestedRegions);
         if(inspectStages) {
             WriteBracketStageInspection(request,result,output,report,requestedRegions);
-            try {InspectBracketRawHandoff(result.raw,report);}
+            try {
+                if(!request.executeOpenGlTask([&](std::string&) {
+                    InspectBracketRawHandoff(result.raw,report);return true;
+                },error)) throw std::runtime_error(error);
+            }
             catch(...) {std::ofstream(output/"bracketing-diagnostic.json")<<report.dump(2);throw;}
         }
         std::ofstream(output/"bracketing-diagnostic.json")<<report.dump(2);

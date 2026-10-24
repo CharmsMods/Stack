@@ -157,6 +157,7 @@ struct AcceptedAlternate {
 struct LocalMotionExecutionEvidence {
     bool gpuAttempted = false;
     bool gpuUsed = false;
+    bool executionFailed = false;
     bool globalFallbackUsed = false;
     GpuLocalMotionDiagnostics gpu;
     std::string gpuFallbackReason;
@@ -211,18 +212,6 @@ bool CompactAcceptedReliability(
     compact.usableCellCount = source.usableCellCount;
     error.clear();
     return true;
-}
-
-bool IsAuthoritativeAcceleratedMotionRejection(
-    const std::string& message,
-    const GpuLocalMotionDiagnostics& diagnostics) {
-    if (diagnostics.dispatchCount == 0u ||
-        diagnostics.scoredCandidateCount == 0u) {
-        return false;
-    }
-    return message.find("found no usable motion nodes") != std::string::npos ||
-        message.find("closure rejected every forward node") !=
-            std::string::npos;
 }
 
 std::string GiBText(std::uint64_t bytes) {
@@ -1428,7 +1417,6 @@ bool RegisterAlternate(
                 }
             };
             bool motionAccepted = false;
-            bool acceleratedMotionRejectedAuthoritatively = false;
             if (preferGpuRegistration && executeOpenGlTask) {
                 motionExecution.gpuAttempted = true;
                 BidirectionalLocalMotionResult acceleratedMotion;
@@ -1468,27 +1456,29 @@ bool RegisterAlternate(
                     motionExecution.gpuFallbackReason = gpuError.empty()
                         ? "The OpenGL local-motion task did not complete."
                         : gpuError;
-                    acceleratedMotionRejectedAuthoritatively =
-                        IsAuthoritativeAcceleratedMotionRejection(
-                            motionExecution.gpuFallbackReason,
-                            motionExecution.gpu);
-                    if (canceled()) {
+                    // Missing image evidence may use the accepted global warp;
+                    // execution/numerical failures must never retry on the CPU.
+                    motion = std::move(acceleratedMotion);
+                    if (canceled() || motion.failure != LocalMotionFailure::NoUsableNodes) {
+                        motionExecution.executionFailed = true;
                         error = motionExecution.gpuFallbackReason;
                         return false;
                     }
                 }
             } else if (preferGpuRegistration) {
+                motionExecution.executionFailed = true;
                 motionExecution.gpuFallbackReason =
                     "No OpenGL compute executor is available for local registration.";
-            }
-            if (!motionAccepted &&
-                !acceleratedMotionRejectedAuthoritatively) {
-                std::string cpuMotionError;
-                if (EstimateBidirectionalLocalMotion(
-                        motionRequest, motion, &cpuMotionError)) {
-                    motionAccepted = true;
-                } else {
-                    error = std::move(cpuMotionError);
+                error = motionExecution.gpuFallbackReason;
+                return false;
+            } else {
+                // An explicitly selected CPU implementation is a primary path,
+                // not recovery from a failed accelerated operation.
+                motionAccepted = EstimateBidirectionalLocalMotion(
+                    motionRequest, motion, &error);
+                if (!motionAccepted && motion.failure != LocalMotionFailure::NoUsableNodes) {
+                    motionExecution.executionFailed = true;
+                    return false;
                 }
             }
             if (!motionAccepted) {
@@ -2491,14 +2481,10 @@ MfdProcessingResult ProcessMfdBurst(
                 motionExecution,
                 error);
         if (motionExecution.gpu.dispatchCount > 0u) {
-            const bool alreadyFellBack =
-                !result.diagnostics.registrationGpuFallbackReason.empty();
             result.diagnostics.registrationBackend =
                 motionExecution.globalFallbackUsed
                 ? "opengl-4.3-discrete-search+global-warp-reliability-fallback"
-                : alreadyFellBack || !motionExecution.gpuUsed
-                    ? "mixed-opengl-cpu-local-registration"
-                    : "opengl-4.3-discrete-search-fp32+cpu-refinement-fp64";
+                : "opengl-4.3-discrete-search-fp32+cpu-refinement-fp64";
             result.diagnostics.registrationGpuDeviceIdentity =
                 motionExecution.gpu.deviceIdentity;
             result.diagnostics.registrationGpuDispatchCount +=
@@ -2512,11 +2498,6 @@ MfdProcessingResult ProcessMfdBurst(
             }
             result.diagnostics.registrationGpuFallbackReason +=
                 motionExecution.gpuFallbackReason;
-            if (!motionExecution.globalFallbackUsed &&
-                result.diagnostics.registrationBackend != "cpu-reference") {
-                result.diagnostics.registrationBackend =
-                    "mixed-opengl-cpu-local-registration";
-            }
         }
         if (motionExecution.globalFallbackUsed &&
             motionExecution.gpu.dispatchCount == 0u) {
@@ -2537,6 +2518,11 @@ MfdProcessingResult ProcessMfdBurst(
                     ? DecisionReason::LocalRegistrationFailed
                     : DecisionReason::GlobalRegistrationFailed;
             diagnostic.message = error;
+            if (motionExecution.executionFailed) {
+                result.status = MfdProcessingStatus::Failed;
+                result.message = error;
+                return result;
+            }
             continue;
         }
         const double exposureDriftEv =
@@ -2726,18 +2712,25 @@ MfdProcessingResult ProcessMfdBurst(
             result.diagnostics.gpuFallbackReason = gpuError.empty()
                 ? "Shared Burst OpenGL compute was unavailable."
                 : gpuError;
+            result.status = MfdProcessingStatus::Failed;
+            result.message = result.diagnostics.gpuFallbackReason;
+            return result;
         }
     } else if (request.preferGpuFusion &&
                request.fusionBackend == MfdFusionBackend::SharedBurstV1) {
         result.diagnostics.gpuFallbackReason = !services.executeOpenGlTask
             ? "No OpenGL compute executor is available."
             : referenceNeedsDefectReconstruction
-                ? "Reference defect reconstruction remains on the CPU reference path."
+                ? "The requested GPU fusion does not support reference defect reconstruction."
                 : hasExplicitVariance
-                    ? "Virtual-measurement explicit variance remains on the CPU reference path."
+                    ? "The requested GPU fusion does not support virtual-measurement explicit variance."
                     : "The frame dimensions exceed the OpenGL compute contract.";
+        result.status = MfdProcessingStatus::Failed;
+        result.message = result.diagnostics.gpuFallbackReason;
+        return result;
     }
 
+    // This branch is only an explicitly selected primary CPU backend.
     if (!gpuSucceeded) {
         StreamingFusionRequest streaming;
         streaming.rawExtent = reference.prepared.activeExtent;

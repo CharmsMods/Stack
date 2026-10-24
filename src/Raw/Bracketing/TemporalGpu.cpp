@@ -84,7 +84,8 @@ class TemporalGpu::Impl {
 public:
     explicit Impl(const ProcessingRequest& request):execute(request.executeOpenGlTask){
         budget=std::min<std::uint64_t>(512ull*1024*1024,request.memoryBudgetBytes/4);
-        if(!request.preferGpuCombining||!execute){reason="CPU capture combining selected or compute context unavailable.";return;}
+        if(!request.preferGpuCombining){reason="GPU capture combining is required but disabled by the processing request.";return;}
+        if(!execute){reason="GPU capture combining is required, but the compute context is unavailable.";return;}
         std::string error;
         try {available=execute([&](std::string& e){
             if(!glDispatchCompute||!glGetBufferSubData||!glBindBufferBase||!glMemoryBarrier){e="OpenGL compute is unavailable.";return false;}
@@ -96,6 +97,7 @@ public:
                 for(unsigned j=0;j<uniformLocations[i].size();++j)uniformLocations[i][j]=glGetUniformLocation(programs[i],uniforms[j]);}
             return Check(e);
         },error);}catch(const std::exception& e){error=e.what();}
+        catch(...){error="GPU capture combining initialization failed with an unknown error.";}
         if(!available)reason=error.empty()?"GPU capture combining is unavailable.":error;
     }
     ~Impl(){if(!execute)return;std::string ignored;try{execute([&](std::string&){for(auto p:programs)if(p)glDeleteProgram(p);return true;},ignored);}catch(...) {}}
@@ -136,15 +138,18 @@ public:
     };
     bool Combine(const ProcessingRequest& request,const PreparedDataset& data,const Mfd::PreparedRawTile& origin,
         bool detailFusion,std::vector<std::vector<Observation>>& groups,std::string& error){
-        const auto fallback=[&](const std::string& why){std::lock_guard<std::mutex> lock(mutex);++cpuTiles;
-            if(reason.empty())reason=why;return false;};
-        if(!available||!request.preferGpuCombining)return fallback(reason);
-        for(const auto& s:data.sources)if(s.enabled&&!ValidSource(s))return fallback("A source needs the scalar contract validator.");
+        const auto fail=[&](const std::string& why){
+            error=why.empty()?"GPU capture combining failed.":why;return false;};
+        if(Canceled(request))return fail("Canceled");
+        if(!available)return fail(reason);
+        if(!request.preferGpuCombining)return fail("GPU capture combining is required but disabled by the processing request.");
+        for(const auto& s:data.sources)if(s.enabled&&!ValidSource(s))
+            return fail("GPU capture combining cannot use a source with invalid or unsupported noise, exposure, or calibration data.");
         const int left=int(origin.originX),top=int(origin.originY),width=int(origin.extent.width),height=int(origin.extent.height);
         const auto count=std::size_t(width)*height,maxSource=std::size_t(width+16)*(height+16)*4;
         const auto required=count*(sizeof(Mapping)+32+sizeof(GpuObservation)+accumulatorBytes)+maxSource*sizeof(Tap)+sizeof(Parameters);
         if(required>budget||count*accumulatorBytes>blockLimit||maxSource*sizeof(Tap)>blockLimit)
-            return fallback("Tile exceeds the bounded GPU workspace; full CPU calculation retained.");
+            return fail("GPU capture combining tile exceeds the available workspace or device buffer limit.");
         Tile tile(*this,request);
         {std::unique_lock<std::mutex> lock(mutex);while(resident+required>budget){
                 if(Canceled(request)){error="Canceled";return false;}wake.wait_for(lock,std::chrono::milliseconds(20));}
@@ -154,13 +159,14 @@ public:
             tile.Allocate(0,maxSource*sizeof(Tap));tile.Allocate(1,count*sizeof(Mapping));
             tile.Allocate(2,count*32);tile.Allocate(3,count*sizeof(GpuObservation));
             tile.Allocate(4,count*accumulatorBytes);tile.Allocate(5,sizeof(Parameters));return true;},gpuError)){
-            if(Canceled(request)){error="Canceled";return false;}return fallback(gpuError);}
+            if(Canceled(request)){error="Canceled";return false;}return fail(gpuError);}
         const auto& reference=data.sources[data.origin];std::vector<Tap> referenceTaps,taps;
         if(!Region(reference,data,left-4,top-4,width+8,height+8,request,referenceTaps,error))return false;
         std::vector<Mapping> mapping(count);std::vector<GpuObservation> output(count);
-        groups.resize(request.recipe.groups.size());
+        // Publish only after every group and final cancellation check succeed.
+        std::vector<std::vector<Observation>> pendingGroups(request.recipe.groups.size());
         const auto referenceParameters=SourceParameters(reference);
-        for(std::size_t g=0;g<groups.size();++g){
+        for(std::size_t g=0;g<pendingGroups.size();++g){
             // The reference pilot and scene gradient are identical for every
             // exposure group. Later prepares only clear the group's sums.
             if(!tile.Run([&](std::string& e){if(g==0)tile.Upload(0,referenceTaps.size()*sizeof(Tap),referenceTaps.data());
@@ -198,7 +204,7 @@ public:
                     const auto right=std::min(int(data.width),int(std::ceil(maxX))+7),bottom=std::min(int(data.height),int(std::ceil(maxY))+7);
                     sw=std::max(1,right-sx);sh=std::max(1,bottom-sy);
                 }
-                if(std::size_t(sw)*sh>maxSource)return fallback("Warp needs a larger source region than the GPU tile allowance.");
+                if(std::size_t(sw)*sh>maxSource)return fail("GPU capture combining warp exceeds the source-region workspace allowance.");
                 if(!Region(source,data,sx,sy,sw,sh,request,taps,error))return false;
                 const auto parameters=SourceParameters(source);
                 if(!tile.Run([&](std::string&){tile.Upload(0,taps.size()*sizeof(Tap),taps.data());
@@ -210,28 +216,41 @@ public:
             if(!gpuError.empty())break;
             if(!tile.Run([&](std::string& e){tile.Dispatch(3,left,top,width,height,data,0,0,1,1,reference,false,bands,false);
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER,tile.buffers[3]);glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,count*sizeof(GpuObservation),output.data());return tile.Status(e);},gpuError))break;
-            auto& group=groups[g];group.resize(count);for(std::size_t i=0;i<count;++i)group[i]=Unpack(output[i]);
+            auto& group=pendingGroups[g];group.resize(count);for(std::size_t i=0;i<count;++i)group[i]=Unpack(output[i]);
         }
         if(Canceled(request)){error="Canceled";return false;}
-        if(!gpuError.empty())return fallback(gpuError);
+        if(!gpuError.empty())return fail(gpuError);
         {std::lock_guard<std::mutex> lock(mutex);++gpuTiles;}
+        groups.swap(pendingGroups);
         return true;
     }
     void Report(BracketingAnalysis& analysis)const{
         std::lock_guard<std::mutex> lock(mutex);
-        analysis.diagnostics.push_back("Capture combining: "+std::to_string(gpuTiles)+" GPU tiles, "+std::to_string(cpuTiles)+
-            " CPU tiles; double-precision resampling, uncertainty and temporal/detail fusion; GPU peak reservation "+std::to_string(peak/(1024*1024))+" MiB."+
+        analysis.diagnostics.push_back("Capture combining: "+std::to_string(gpuTiles)+" GPU tiles; GPU-only double-precision resampling, uncertainty and temporal/detail fusion; GPU peak reservation "+std::to_string(peak/(1024*1024))+" MiB."+
             (reason.empty()?"":" "+reason));
     }
     Raw::OpenGlTaskExecutor execute;std::array<GLuint,4> programs{};
     std::array<std::array<GLint,11>,4> uniformLocations{};bool available=false;
-    std::uint64_t budget=0,blockLimit=0,resident=0,peak=0,gpuTiles=0,cpuTiles=0;
+    std::uint64_t budget=0,blockLimit=0,resident=0,peak=0,gpuTiles=0;
     mutable std::mutex mutex;std::condition_variable wake;std::string reason;
 };
 TemporalGpu::TemporalGpu(const ProcessingRequest& r):impl_(std::make_unique<Impl>(r)){}
 TemporalGpu::~TemporalGpu()=default;
 bool TemporalGpu::Available()const{return impl_->available;}
+bool TemporalGpu::Ready(std::string& error)const{
+    if(impl_->available)return true;
+    error=impl_->reason.empty()?"GPU capture combining is unavailable.":impl_->reason;
+    return false;
+}
 bool TemporalGpu::Combine(const ProcessingRequest& r,const PreparedDataset& d,const Mfd::PreparedRawTile& t,
-    bool detail,std::vector<std::vector<Observation>>& groups,std::string& e){return impl_->Combine(r,d,t,detail,groups,e);}
+    bool detail,std::vector<std::vector<Observation>>& groups,std::string& e){
+    try{
+        if(impl_->Combine(r,d,t,detail,groups,e))return true;
+        if(e.empty())e="GPU capture combining failed while reading prepared source data.";
+    }
+    catch(const std::exception& failure){e="GPU capture combining failed: "+std::string(failure.what());}
+    catch(...){e="GPU capture combining failed with an unknown error.";}
+    return false;
+}
 void TemporalGpu::Report(BracketingAnalysis& a)const{impl_->Report(a);}
 }

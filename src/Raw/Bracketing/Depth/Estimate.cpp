@@ -15,9 +15,9 @@ bool Estimate(const ProcessingRequest& request,PreparedDataset& data,std::vector
     map->sensorWidth=data.width;map->sensorHeight=data.height;
     const auto unavailable=[&](const std::string& reason){map->message="Depth unavailable: "+reason;
         diagnostics.push_back(map->message);return true;};
-    if(!request.executeOpenGlTask)return unavailable("an OpenGL compute context is required.");
+    if(!request.executeOpenGlTask){error="Depth requires an available OpenGL compute context.";return false;}
     // Includes nine guide pyramids, tracking, evidence and shader workspaces.
-    if(request.memoryBudgetBytes<256ull*1024*1024)return unavailable("the GPU tracking workspace exceeds the processing budget.");
+    if(request.memoryBudgetBytes<256ull*1024*1024){error="Depth GPU tracking workspace exceeds the processing budget.";return false;}
     diagnostics.push_back("GPU depth: area-filtered RAW guides, normalized pyramidal feature tracking and image-only camera geometry. No lens or motion metadata.");
     GpuRuntime gpu(request);GpuGuide reference;
     if(!BuildGuide(gpu,data,data.origin,reference,error))return false;

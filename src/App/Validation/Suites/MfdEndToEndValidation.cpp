@@ -210,6 +210,10 @@ Raw::Mfd::MfdProcessingRequest BaselineRequest(
     const std::filesystem::path& working) {
     Raw::Mfd::MfdProcessingRequest request;
     request.fusionBackend = Raw::Mfd::MfdFusionBackend::LegacyRaCfaV1;
+    // These fixtures intentionally exercise the CPU reference implementation.
+    // GPU fixtures opt in explicitly; unavailable GPU work must never retry it.
+    request.preferGpuRegistration = false;
+    request.preferGpuFusion = false;
     request.frames = { Input("reference.dng", 'a'), Input("alternate.dng", 'b') };
     request.referenceFrameIndex = 0u;
     request.workingDirectory = working;
@@ -1112,6 +1116,7 @@ bool ValidateSharedBurstGpuFusion() {
     std::unordered_map<std::string, Raw::RawImageData> frames;
     Raw::Mfd::MfdProcessingRequest base =
         BaselineRequest(temporary / "gpu-base");
+    base.preferGpuFusion = true;
     base.fusionBackend = Raw::Mfd::MfdFusionBackend::SharedBurstV1;
     base.alignmentMode = Raw::Mfd::MfdAlignmentMode::Identity;
     base.memoryBudgetBytes = 2ull * 1024ull * 1024ull * 1024ull;
@@ -1213,6 +1218,7 @@ bool ValidateSharedBurstGpuFusion() {
     Raw::Mfd::MfdProcessingRequest registrationBase =
         BaselineRequest(temporary / "registration-base");
     registrationBase.preferGpuFusion = false;
+    registrationBase.preferGpuRegistration = true;
     registrationBase.alignmentMode = Raw::Mfd::MfdAlignmentMode::Full;
     Raw::Mfd::MfdProcessingRequest registrationCpuRequest = registrationBase;
     registrationCpuRequest.workingDirectory =
@@ -1292,15 +1298,21 @@ bool ValidateSharedBurstGpuFusion() {
         Raw::Mfd::ProcessMfdBurst(
             registrationFallbackRequest, registrationFallbackServices);
     ok &= Check(
-        registrationFallback.published.result &&
-            registrationFallback.diagnostics.registrationBackend ==
-                "cpu-reference" &&
+        registrationFallback.status == Raw::Mfd::MfdProcessingStatus::Failed &&
+            !registrationFallback.published.result &&
+            registrationFallback.message == "forced registration validation failure" &&
             registrationFallback.diagnostics.registrationGpuFallbackReason ==
-                "forced registration validation failure" &&
-            registrationCpu.published.result &&
-            registrationFallback.published.result->normalizedMosaic ==
-                registrationCpu.published.result->normalizedMosaic,
-        "a local-registration GPU failure did not recover through the exact CPU path");
+                "forced registration validation failure",
+        "a local-registration GPU failure was hidden by CPU retry or reference publication");
+    auto missingRegistrationExecutor = registrationFallbackRequest;
+    missingRegistrationExecutor.workingDirectory = temporary / "registration-no-executor";
+    const auto missingRegistration = Raw::Mfd::ProcessMfdBurst(
+        missingRegistrationExecutor, Services(registrationFrames));
+    ok &= Check(missingRegistration.status == Raw::Mfd::MfdProcessingStatus::Failed &&
+            !missingRegistration.published.result &&
+            missingRegistration.message ==
+                "No OpenGL compute executor is available for local registration.",
+        "GPU registration without an executor silently selected CPU work");
 
     const std::array<Raw::CfaPattern, 3> additionalPatterns {
         Raw::CfaPattern::BGGR,
@@ -1384,14 +1396,19 @@ bool ValidateSharedBurstGpuFusion() {
     };
     const Raw::Mfd::MfdProcessingResult fallback =
         Raw::Mfd::ProcessMfdBurst(fallbackRequest, fallbackServices);
-    ok &= Check(fallback.published.result &&
-            fallback.diagnostics.executionBackend == "cpu-reference" &&
-            fallback.diagnostics.gpuFallbackReason ==
-                "forced validation failure" &&
-            cpu.published.result &&
-            fallback.published.result->normalizedMosaic ==
-                cpu.published.result->normalizedMosaic,
-        "a Shared Burst GPU failure did not recover through the CPU reference path");
+    ok &= Check(fallback.status == Raw::Mfd::MfdProcessingStatus::Failed &&
+            !fallback.published.result &&
+            fallback.message == "forced validation failure" &&
+            fallback.diagnostics.gpuFallbackReason == "forced validation failure",
+        "a Shared Burst GPU failure was hidden by CPU retry or reference publication");
+    auto missingFusionExecutor = base;
+    missingFusionExecutor.workingDirectory = temporary / "fusion-no-executor";
+    const auto missingFusion = Raw::Mfd::ProcessMfdBurst(
+        missingFusionExecutor, Services(frames));
+    ok &= Check(missingFusion.status == Raw::Mfd::MfdProcessingStatus::Failed &&
+            !missingFusion.published.result &&
+            missingFusion.message == "No OpenGL compute executor is available.",
+        "GPU fusion without an executor silently selected CPU work");
 
     Raw::Mfd::MfdProcessingRequest cancelRequest = base;
     cancelRequest.workingDirectory = temporary / "cancel";

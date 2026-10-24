@@ -145,14 +145,17 @@ int WorkerMain(int argc,wchar_t** argv){
         if(argc==2&&std::wstring(argv[1])==L"--self-check"){
             GpuContext gpu;const auto& raw=Raw::GetLibRawRuntimeStatus();auto response=Version();
             ProcessingRequest combineRequest;combineRequest.executeOpenGlTask=gpu.Executor();
-            TemporalGpu combining(combineRequest);response["gpuCombiningAvailable"]=combining.Available();
+            TemporalGpu combining(combineRequest);std::string gpuError;
+            const bool combiningReady=combining.Ready(gpuError);
+            response["gpuCombiningAvailable"]=combiningReady;response["gpuRequired"]=true;
+            response["gpuMessage"]=gpuError;
             response["rawAvailable"]=raw.runtimeAvailable;response["gpuAvailable"]=gpu.Available();response["message"]=raw.message;
             // Exercise the actual framed CBOR transport over an inherited-handle
             // compatible pipe without manufacturing image data.
             SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};HANDLE read=nullptr,write=nullptr;
             if(!CreatePipe(&read,&write,&security,0))throw std::runtime_error(WindowsError("Could not check burst transport"));
             Handle input(read),output(write);WriteMessage(output.Get(),Version());const auto roundtrip=ReadMessage(input.Get());
-            response["protocolRoundTrip"]=roundtrip==Version();response["ok"]=raw.runtimeAvailable&&roundtrip==Version();
+            response["protocolRoundTrip"]=roundtrip==Version();response["ok"]=raw.runtimeAvailable&&gpu.Available()&&combiningReady&&roundtrip==Version();
             std::cout<<response.dump()<<std::endl;return response["ok"].get<bool>()?0:1;
         }
         if(argc>=2&&std::wstring(argv[1])==L"--process")return ProcessFiles(argc,argv);

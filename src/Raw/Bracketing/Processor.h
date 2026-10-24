@@ -144,7 +144,8 @@ struct ProcessingRequest {
     bool preparationOnly=false;
     std::uint32_t workerCount=1;
     bool preferGpuRegistration=true;
-    // Backend selection never changes the reconstruction recipe or alignment.
+    // Legacy wire flags remain readable, but false is rejected by production
+    // Burst processing. CPU reference calculations are diagnostics, not fallback.
     bool preferGpuCombining=true;
     Raw::OpenGlTaskExecutor executeOpenGlTask;
     // Only enable for a private, caller-created generation directory.

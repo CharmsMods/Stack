@@ -141,6 +141,12 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         std::string error;
         if(request.version!=1&&request.version!=2) return fail("Unsupported bracketing processing request version.");
         if(!Validate(request.recipe,error)) return fail(error);
+        if(!request.executeOpenGlTask)
+            return fail("Burst reconstruction requires an available OpenGL compute context; CPU substitution is not supported.");
+        if(!request.preferGpuCombining)
+            return fail("Burst reconstruction requires GPU capture combining; CPU mode is no longer supported.");
+        if(request.recipe.alignmentMode==AlignmentMode::AutomaticLocal&&!request.preferGpuRegistration)
+            return fail("Automatic local alignment requires GPU candidate search; CPU mode is no longer supported.");
         if(request.recipe.aiAlignment&&!request.alignmentProposals.empty())
             return fail("Choose generated AI alignment or external research proposals, not both.");
         if(!ValidateAlignmentProposals(request,error)) return fail(error);
@@ -162,8 +168,9 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         if(reusePrepared) *analysis=*request.analysis;
         else {
             auto prepared=std::make_shared<PreparedDataset>();
-            if(!Prepare(request,*prepared,analysis->diagnostics,error)) return fail(error);
             prepared->combiningGpu=std::make_shared<TemporalGpu>(request);
+            if(!prepared->combiningGpu->Ready(error))return fail(error);
+            if(!Prepare(request,*prepared,analysis->diagnostics,error)) return fail(error);
             analysis->prepared=prepared;
             analysis->depth=prepared->depth;
             analysis->stageSeconds=prepared->stageSeconds;
@@ -178,6 +185,8 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             }
         }
         const auto& data=*analysis->prepared;
+        if(!data.combiningGpu||!data.combiningGpu->Ready(error))
+            return fail(error.empty()?"Prepared Burst GPU backend is unavailable.":error);
         const auto& origin=data.sources[data.origin];
         auto guideMetadata=origin.metadata;guideMetadata.cfaPattern=origin.frame.activeCfaPattern;
         const auto guideLuminance=BuildLuminanceTransform(guideMetadata);

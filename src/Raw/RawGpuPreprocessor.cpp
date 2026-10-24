@@ -458,7 +458,7 @@ bool RawGpuPreprocessor::EnsureMetadataTexture(
     for (const DngGainMapOpcode& map : metadata.dngGainMaps) {
         if (!IsGpuGainMap(map)) continue;
         if (HasNonFiniteGain(map)) {
-            error = "DNG GainMap contains a non-finite value; using the CPU parity fallback.";
+            error = "GPU RAW preprocessing cannot use a DNG GainMap containing a non-finite value.";
             return false;
         }
         gainMaps.push_back(&map);

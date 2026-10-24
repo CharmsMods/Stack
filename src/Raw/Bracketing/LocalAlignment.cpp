@@ -188,7 +188,6 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     if(request.recipe.alignmentMode!=AlignmentMode::AutomaticLocal) return true;
     if(data.sources.empty()||data.origin>=data.sources.size()) {error="Local alignment has no fixed reference.";return false;}
     const auto parameters=CaptureAlignmentParameters(data);
-    const auto sensorPixels=static_cast<std::uint64_t>(data.width)*data.height;
     const auto workers=ResolveBracketingWorkerCount(
         request.memoryBudgetBytes,request.workerCount);
     auto& reference=data.sources[data.origin];
@@ -197,6 +196,10 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     // original registration parameters for motion/reliability evaluation.
     const bool reliabilityOnly=std::all_of(data.sources.begin(),data.sources.end(),
         [&](const PreparedSource& source){return !source.enabled||&source==&reference||source.localMotion;});
+    if(!reliabilityOnly&&(!request.preferGpuRegistration||!request.executeOpenGlTask)) {
+        error="GPU local search is required but disabled or unavailable.";
+        return false;
+    }
     auto pyramidParameters=parameters;
     if(reliabilityOnly)pyramidParameters.registration.pyramidLevels=1;
     auto originInspection=std::make_shared<AlignmentInspection>();
@@ -292,32 +295,28 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         Mfd::BidirectionalLocalMotionResult motion;const bool reuseMotion=bool(source.localMotion);
         bool accepted=reuseMotion;std::string localError;
         if(reuseMotion) motion.forward=*source.localMotion;
-        // A high logical-core count does not imply that the dependency-heavy
-        // bidirectional wavefront search keeps every core busy. Large RAWs
-        // benefit from GPU candidate scoring even on a wide CPU, while tiny
-        // images avoid the context-dispatch and upload overhead.
-        const bool useGpu=request.preferGpuRegistration&&request.executeOpenGlTask&&
-            sensorPixels>=2'000'000;
-        if(useGpu&&!accepted) {
-            ProcessingTimer timer(data.stageSeconds,"local_search_gpu_and_cpu_verification");
-            if(gpuSession.BeginPair(referencePyramid,alternatePyramid,localError,
-                gpuPyramidReference!=pyramidReference)) {
-                gpuPyramidReference=pyramidReference;
-                auto accelerated=motionRequest;
-                accelerated.evaluateDiscreteCandidates=[&](const Mfd::LocalMotionDirectionRequest& direction,
-                    const std::vector<Mfd::LocalMotionDiscreteCandidate>& candidates,
-                    std::vector<Mfd::LocalMotionDiscreteScore>& scores,std::string& evaluationError) {
-                    return gpuSession.Evaluate(direction,candidates,scores,evaluationError);
-                };
-                accepted=Mfd::EstimateBidirectionalLocalMotion(accelerated,motion,&localError);
+        if(!reuseMotion) {
+            // CPU orchestration and verification remain part of this hybrid
+            // algorithm, but discrete search must never silently switch backend.
+            if(!request.preferGpuRegistration||!request.executeOpenGlTask) {
+                error=source.id+": GPU local search is required but disabled or unavailable.";
+                return false;
             }
-            if(accepted) source.alignmentDiagnostic.backend="gpu-search/cpu-verified";
-        }
-        if(!accepted) {
-            ProcessingTimer timer(data.stageSeconds,"local_search_cpu");
-            if(request.shouldCancel&&request.shouldCancel()) {error="Canceled";return false;}
-            localError.clear();accepted=Mfd::EstimateBidirectionalLocalMotion(motionRequest,motion,&localError);
-            source.alignmentDiagnostic.backend="cpu-reference";
+            ProcessingTimer timer(data.stageSeconds,"local_search_gpu_and_cpu_verification");
+            if(!gpuSession.BeginPair(referencePyramid,alternatePyramid,localError,
+                gpuPyramidReference!=pyramidReference)) {
+                error=source.id+": GPU local search could not initialize: "+localError;
+                return false;
+            }
+            gpuPyramidReference=pyramidReference;
+            auto accelerated=motionRequest;
+            accelerated.evaluateDiscreteCandidates=[&](const Mfd::LocalMotionDirectionRequest& direction,
+                const std::vector<Mfd::LocalMotionDiscreteCandidate>& candidates,
+                std::vector<Mfd::LocalMotionDiscreteScore>& scores,std::string& evaluationError) {
+                return gpuSession.Evaluate(direction,candidates,scores,evaluationError);
+            };
+            accepted=Mfd::EstimateBidirectionalLocalMotion(accelerated,motion,&localError);
+            source.alignmentDiagnostic.backend="gpu-search/cpu-verified";
         }
         if(motionRequest.forwardProposal&&!reuseMotion) {
             source.alignmentDiagnostic.backend+="/external-proposal-raw-verified";

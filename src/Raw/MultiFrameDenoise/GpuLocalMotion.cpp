@@ -45,6 +45,45 @@ struct alignas(16) PackedCandidate {
 
 static_assert(sizeof(PackedCandidate) == 16u);
 
+// Keep the shader's signed patch-area and unsigned four-site sample count
+// representable before dispatch or decoding a returned count.
+constexpr std::uint32_t kMaximumScorePatch = 32767u;
+
+bool DecodeGpuScore(
+    const std::array<float, 4>& packed,
+    std::uint32_t patch,
+    LocalMotionDiscreteScore& score,
+    std::string& error) {
+    score = {};
+    if (patch == 0u || patch > kMaximumScorePatch) {
+        error = "The local-motion GPU score patch size is invalid.";
+        return false;
+    }
+    if (!std::all_of(packed.begin(), packed.end(),
+            [](float value) { return std::isfinite(value); })) {
+        error = "Local-motion GPU scoring returned nonfinite numerical results.";
+        return false;
+    }
+    const std::uint64_t maximumCount = 4ull * patch * patch;
+    const double validCount = packed[3];
+    // The shader stores an integer count as float. Allow its final float
+    // rounding at the patch bound; this bound is also safely below LLONG_MAX.
+    if (validCount < 0.0 ||
+        validCount > static_cast<double>(static_cast<float>(maximumCount))) {
+        error = "Local-motion GPU scoring returned an out-of-range sample count.";
+        return false;
+    }
+    if (validCount >= 1.0) {
+        score.valid = true;
+        score.validCount = static_cast<std::uint64_t>(std::llround(validCount));
+        score.robustCost = packed[0];
+        score.cappedChiSquared = packed[1];
+        score.validFraction = packed[2];
+    }
+    error.clear();
+    return true;
+}
+
 const char* kDiscreteSearchShader = R"GLSL(
 #version 430 core
 
@@ -673,6 +712,7 @@ struct GpuLocalMotionDiscreteEvaluator::Impl {
         const std::uint32_t level = candidates.front().level;
         const std::uint32_t patch = candidates.front().patchLevelPixels;
         if (!request.reference || !request.source || patch == 0u ||
+            patch > kMaximumScorePatch ||
             !Finite(request.exposureScale) || request.exposureScale <= 0.0 ||
             std::any_of(
                 candidates.begin(), candidates.end(),
@@ -780,20 +820,10 @@ struct GpuLocalMotionDiscreteEvaluator::Impl {
             return false;
         }
         for (std::size_t index = 0u; index < scores.size(); ++index) {
-            const auto& packedScore = packedScores[index];
-            const double validCount = packedScore[3];
-            LocalMotionDiscreteScore score;
-            score.valid = Finite(validCount) && validCount >= 1.0 &&
-                Finite(packedScore[0]) && Finite(packedScore[1]) &&
-                Finite(packedScore[2]);
-            if (score.valid) {
-                score.validCount = static_cast<std::uint64_t>(
-                    std::llround(validCount));
-                score.robustCost = packedScore[0];
-                score.cappedChiSquared = packedScore[1];
-                score.validFraction = packedScore[2];
+            if (!DecodeGpuScore(packedScores[index], patch, scores[index], error)) {
+                scores.clear();
+                return false;
             }
-            scores[index] = score;
         }
         error.clear();
         return true;
