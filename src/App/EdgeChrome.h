@@ -58,6 +58,7 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
     }
     if (!glass && ImGui::IsItemFocused()) draw->AddRect(rect.Min, rect.Max,
         ImGui::GetColorU32(palette.focus), 9.f * scale, 0, 1.25f * scale);
+    const auto glassState=glass ? UpdateGlassControlState(selected) : GlassControlState{};
     if (glass) GlassObjectBacking(draw,rect.Min,rect.Max,19.f*scale,palette);
     if (glass && material) {
         // A small sibling toggle window clips its glyphs/hit target tightly,
@@ -67,12 +68,13 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
             draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
                 viewport->Pos.y+viewport->Size.y),false);
         }
-        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale);
+        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale,glassState.Elevation());
         if (objectOutsideWindow) draw->PopClipRect();
     }
     // Feedback, keyboard focus and the single sharp glyph share adaptive ink.
     const bool adaptiveInk = glass && material && material->BeginInk(draw,rect.Min,rect.Max,ImGui::GetItemID());
-    const float press = glass ? GlassControlFeedback(rect,selected,scale,palette) : 0.f;
+    const float press = glassState.press;
+    if (glass) DrawGlassControlFeedback(rect,glassState,scale,palette);
     if (glass) GlassKeyboardFocus(rect,scale,palette);
     const float glyphSize = (glyph == Glyph::Stack ? (glass ? 25.f : 24.f) :
         (glass ? 23.f : 21.f)) * scale * (1.f - .045f*press);

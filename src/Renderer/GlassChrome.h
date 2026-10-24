@@ -19,7 +19,10 @@ public:
     // visible background, edge or shadow. Bounds also limit all object output.
     bool AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint);
     // Uses the latest queued backdrop, without copying or blurring again.
-    bool AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius);
+    // Elevation scales only the air gap: 0 is contact, 1 is the resting height.
+    // Values are clamped to [0,1]; non-finite inputs use the resting height.
+    bool AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint,
+        float radius, float elevation = 1.f);
     // Bracket only neutral foreground geometry. Does not create a hit target.
     bool BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id);
     void EndInk(ImDrawList* draw);
@@ -52,7 +55,7 @@ private:
     // early culling and draw bounds before any GL callbacks are executed.
     static void BuildLayout(Backdrop&);
     static bool BuildLayout(const Backdrop&, ImVec2 min, ImVec2 max, ImVec4 clip,
-        float radius, ObjectLayout&);
+        float radius, float elevation, ObjectLayout&);
     bool Ensure(int w, int h);
     void ReleaseTargets();
     bool enabled = false;

@@ -115,10 +115,11 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const ImVec2 pillMax(max.x - 4.f * rail.scale, max.y - 5.f * rail.scale);
         auto* draw = ImGui::GetWindowDrawList();
         if (glass) {
+            const auto glassState=Stack::Navigation::UpdateGlassControlState(selected);
             Stack::Navigation::GlassObjectBacking(draw,pillMin,pillMax,7.f*rail.scale,palette);
-            m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale);
+            m_RailGlass.AddObject(draw,pillMin,pillMax,palette.caption,7.f*rail.scale,glassState.Elevation());
             const bool adaptiveInk=m_RailGlass.BeginInk(draw,pillMin,pillMax,ImGui::GetItemID());
-            Stack::Navigation::GlassControlFeedback(ImRect(pillMin,pillMax),selected,rail.scale,palette);
+            Stack::Navigation::DrawGlassControlFeedback(ImRect(pillMin,pillMax),glassState,rail.scale,palette);
             ImVec4 ink = palette.text; ink.w *= automatic ? .40f : .65f;
             draw->AddLine(ImVec2(pillMin.x+7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),
                 ImVec2(pillMax.x-7.f*rail.scale,(pillMin.y+pillMax.y)*.5f),ImGui::GetColorU32(ink),1.5f*rail.scale);

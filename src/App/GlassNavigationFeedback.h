@@ -18,29 +18,45 @@ inline void GlassObjectBacking(ImDrawList* draw, ImVec2 min, ImVec2 max,
 }
 // Decorates the existing item, never adds a hit target or delays its action.
 // Window-local ImGui storage keeps animation attached to the item's stable ID.
-// Returns the press amount for optional foreground-only compression.
-inline float GlassControlFeedback(const ImRect& rect, bool selected, float scale,
-    const Stack::Header::Palette& palette) {
+struct GlassControlState {
+    float hover=0.f, press=0.f, selection=0.f;
+    // Lower the same optical body on press, without changing its hitbox or shape.
+    float Elevation() const { return 1.f-.8f*press; }
+};
+// Evaluate once after the item, before queuing its material. Drawing the ink
+// later consumes this snapshot rather than advancing animation a second time.
+inline GlassControlState UpdateGlassControlState(bool selected) {
     const ImGuiID id = ImGui::GetItemID();
     auto* storage = ImGui::GetStateStorage();
     const auto hoverKey = ImHashStr("glass-hover",0,id);
     const auto pressKey = ImHashStr("glass-press",0,id);
     const auto selectKey = ImHashStr("glass-selected",0,id);
     const auto frameKey = ImHashStr("glass-frame",0,id);
-    const bool continuous = storage->GetInt(frameKey,-2) == ImGui::GetFrameCount()-1;
+    const int previousFrame=storage->GetInt(frameKey,-2);
+    if (previousFrame==ImGui::GetFrameCount())
+        return {storage->GetFloat(hoverKey),storage->GetFloat(pressKey),storage->GetFloat(selectKey)};
+    const bool continuous = previousFrame == ImGui::GetFrameCount()-1;
     storage->SetInt(frameKey,ImGui::GetFrameCount());
     float hover = continuous ? storage->GetFloat(hoverKey) : 0.f;
     float press = continuous ? storage->GetFloat(pressKey) : 0.f;
     float selection = continuous ? storage->GetFloat(selectKey) : (selected ? 1.f : 0.f);
     Stack::Header::Approach(hover,ImGui::IsItemHovered() ? 1.f : 0.f,26.f);
     // Press feedback starts immediately; only its release is eased.
-    if (ImGui::IsItemActive()) press = 1.f;
+    const bool mouseActive=ImGui::GetCurrentContext()->ActiveIdSource==ImGuiInputSource_Mouse;
+    const bool held=ImGui::IsItemActive() && (!mouseActive ||
+        ImGui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride));
+    if (held) press = 1.f;
     else Stack::Header::Approach(press,0.f,30.f);
     Stack::Header::Approach(selection,selected ? 1.f : 0.f,22.f);
     storage->SetFloat(hoverKey,hover); storage->SetFloat(pressKey,press);
     storage->SetFloat(selectKey,selection);
+    return {hover,press,selection};
+}
+inline void DrawGlassControlFeedback(const ImRect& rect, const GlassControlState& state,
+    float scale, const Stack::Header::Palette& palette) {
+    const float hover=state.hover, press=state.press, selection=state.selection;
     const float intensity = std::max(hover,selection);
-    if (intensity <= .001f && press <= .001f) return press;
+    if (intensity <= .001f && press <= .001f) return;
     const float inset = (1.f + press * 1.25f) * scale;
     ImVec2 min(rect.Min.x+inset,rect.Min.y+inset), max(rect.Max.x-inset,rect.Max.y-inset);
     auto* draw = ImGui::GetWindowDrawList();
@@ -60,7 +76,13 @@ inline float GlassControlFeedback(const ImRect& rect, bool selected, float scale
         draw->AddLine(ImVec2(rect.Min.x+scale,centerY-5.f*scale),
             ImVec2(rect.Min.x+scale,centerY+5.f*scale),ImGui::GetColorU32(mark),1.5f*scale);
     }
-    return press;
+}
+// Compatibility helper for consumers needing foreground feedback only.
+inline float GlassControlFeedback(const ImRect& rect, bool selected, float scale,
+    const Stack::Header::Palette& palette) {
+    const auto state=UpdateGlassControlState(selected);
+    DrawGlassControlFeedback(rect,state,scale,palette);
+    return state.press;
 }
 // Keyboard focus is separate from the persistent left-side selection mark.
 // A neutral bottom dash avoids a colored outline after mouse use or Escape.

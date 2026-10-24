@@ -27,7 +27,7 @@ bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 t
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
 }
-bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius) {
+bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation) {
     if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const Backdrop& backdrop=backdrops.back();
@@ -35,7 +35,7 @@ bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tin
     ObjectLayout layout;
     // This same immutable layout is drawn later. Hidden project rows allocate
     // no callback/reset, while a just-offclip object's visible shadow survives.
-    if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,layout)) return false;
+    if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,elevation,layout)) return false;
     objects.push_back({this,&backdrop,tint,layout});
     draw->AddCallback(ObjectCallback,&objects.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
@@ -66,7 +66,7 @@ void GlassChrome::BuildLayout(Backdrop& s) {
     layout.reserveHeight=std::max(layout.height,std::min(fh,int(std::ceil((s.max.y-s.min.y)*s.scale.y))+2*padding));
 }
 bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 clip,
-    float radius,ObjectLayout& layout) {
+    float radius,float elevation,ObjectLayout& layout) {
     const auto& capture=s.layout;
     if (s.scale.x<=0.f || s.scale.y<=0.f || capture.width<=0 || capture.height<=0) return false;
     // Full unclipped geometry defines the lens, even during column reveal.
@@ -75,8 +75,10 @@ bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 cli
     const float w=(max.x-min.x)*s.scale.x, h=(max.y-min.y)*s.scale.y;
     layout.origin=ImVec2(x,y); layout.size=ImVec2(w,h);
     layout.radius=std::min(std::max(0.f,radius)*std::min(s.scale.x,s.scale.y),.5f*std::min(w,h));
-    // Volume geometry is owned here and supplied unchanged to optical shading.
-    layout.volume=ImVec2(std::max(.25f,.32f*std::min(w,h)),.05f*std::min(w,h));
+    // Pressing lowers the rigid optical volume without resizing/deforming it.
+    // The same finite gap drives both optical shading and shadow projection.
+    const float lift=std::isfinite(elevation) ? std::clamp(elevation,0.f,1.f) : 1.f;
+    layout.volume=ImVec2(std::max(.25f,.32f*std::min(w,h)),.05f*std::min(w,h)*lift);
     const float centerZ=layout.volume.x+layout.volume.y;
     const ImVec2 objectCenter(x-capture.x+.5f*w,y-capture.y+.5f*h);
     // A broad near-overhead studio fill approximates underside occlusion.
