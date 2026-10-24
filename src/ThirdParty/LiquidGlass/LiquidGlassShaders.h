@@ -49,6 +49,8 @@ layout(location=5) uniform vec2 softExtent;
 layout(location=6) uniform vec2 sceneOrigin;
 layout(location=7) uniform vec2 sceneScale;
 layout(location=8) uniform vec2 sharpExtent;
+// Output rectangle size and the glass origin within it, in framebuffer pixels.
+layout(location=9) uniform vec4 drawMapping;
 vec4 sampleValid(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel));
@@ -60,12 +62,18 @@ vec3 sampleSharp(vec2 p) {
 float rand(vec2 co) {
     return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453);
 }
+float railDistance(vec2 point, float r) {
+    vec2 q=vec2(point.x,abs(point.y-.5*sizePx.y))-vec2(sizePx.x,.5*sizePx.y)+r;
+    return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r;
+}
 void main() {
+    vec2 point=uv*drawMapping.xy-drawMapping.zw;
+    vec2 railUv=point/sizePx;
     // One pixel-space shape for both the silhouette and its optical surface.
     // Its left side continues offscreen. Stretching the straight middle never
     // stretches the corner/bevel profile or pulls distant content vertically.
     float r=min(radiusPx,.5*min(sizePx.x,sizePx.y));
-    vec2 q=vec2(uv.x*sizePx.x,abs((uv.y-.5)*sizePx.y))-vec2(sizePx.x,.5*sizePx.y)+r;
+    vec2 q=vec2(point.x,abs(point.y-.5*sizePx.y))-vec2(sizePx.x,.5*sizePx.y)+r;
     vec2 corner=max(q,0.0);
     float cornerLength=length(corner);
     float distance=cornerLength+min(max(q.x,q.y),0.0)-r;
@@ -84,8 +92,15 @@ void main() {
         gradient=vec2(blend,1.0-blend)+smoothingGradient*blend*(1.0-blend);
     }
     float coverage=1.0-smoothstep(-.5,.5,distance);
-    if (coverage<=0.0) { color=vec4(0.0); return; }
-    gradient.y*=uv.y<.5 ? -1.0 : 1.0;
+    // A small displaced shadow belongs only to this display overlay. The
+    // backdrop was captured before this draw, so glass never samples its own
+    // shadow. The shape continues left offscreen, without a left-side rim.
+    float sigma=max(.75,r*.18);
+    float shadowDistance=max(0.0,railDistance(point+vec2(0.0,r*.2),r));
+    float shadow=.08*exp(-.5*shadowDistance*shadowDistance/(sigma*sigma));
+    shadow*=1.0-smoothstep(2.5*sigma,3.0*sigma,shadowDistance);
+    if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
+    gradient.y*=railUv.y<.5 ? -1.0 : 1.0;
     vec2 edgeNormal=normalize(gradient);
 
     // Rounded convex cross-section with a soft squircle shoulder. A rounder
@@ -103,7 +118,7 @@ void main() {
     vec3 normal=normalize(vec3(gradient*slope,1.0));
     vec3 ray=refract(vec3(0.0,0.0,-1.0),normal,1.0/1.45);
     vec2 offset=ray.xy/max(-ray.z,.1)*bevel*(.35+.65*height);
-    vec2 coord=sceneOrigin+(uv+offset/sizePx)*sceneScale;
+    vec2 coord=sceneOrigin+(railUv+offset/sizePx)*sceneScale;
     vec3 transmitted=mix(sampleSharp(coord),sampleValid(coord).rgb,.18);
 
     // Nearby scene color and a quiet directional environment give even a plain
@@ -111,22 +126,30 @@ void main() {
     // not a ray-traced room reflection or a constant outline around the bar.
     // Stay inside the renderer's existing 16-logical-pixel capture neighborhood.
     float environmentReach=min(bevel*.3,r*.85);
-    vec2 outside=uv+edgeNormal*(depth+environmentReach)/sizePx;
+    vec2 outside=railUv+edgeNormal*(depth+environmentReach)/sizePx;
     vec3 environment=sampleValid(sceneOrigin+outside*sceneScale).rgb;
     vec3 reflected=reflect(vec3(0.0,0.0,-1.0),normal);
-    float environmentLight=.32+.62*smoothstep(-.55,.7,reflected.z);
+    float environmentLight=.72+.26*smoothstep(-.55,.7,reflected.z);
     environment=mix(environment,vec3(.14,.16,.18),.12)*environmentLight;
     float grazing=1.0-normal.z;
     float grazing2=grazing*grazing;
     float fresnel=.035+.965*grazing2*grazing2*grazing;
-    vec3 material=mix(transmitted,environment,.5*(fresnel-.035)+.12*grazing2);
-    vec3 halfLight=normalize(normalize(vec3(.35,-.65,.7))+vec3(0.0,0.0,1.0));
+    vec3 material=mix(transmitted,environment,.28*(fresnel-.035)+.06*grazing2);
+    // Framebuffer UV and this normal use positive Y upward, unlike ImGui.
+    // Keep the key light above the material rather than lighting its underside.
+    vec3 halfLight=normalize(normalize(vec3(-.25,.75,.65))+vec3(0.0,0.0,1.0));
     float light=max(dot(normal,halfLight),0.0);
     float light2=light*light, light4=light2*light2, light8=light4*light4;
     float glint=(.16*light8+.32*light8*light8*light8*light8)*grazing;
-    material+=vec3(.94,.97,1.0)*glint;
+    // A broad overhead source catches the upper shoulder. Keep its crest
+    // directional rather than drawing a constant white perimeter stroke.
+    float upper=max(normal.y,0.0);
+    float upper2=upper*upper;
+    float upperReflection=upper2*upper2*(.10+.22*grazing);
+    material+=vec3(.94,.97,1.0)*(glint+upperReflection);
     // Keep upstream's static dither at sub-code-value strength, not visible frost.
     material+=vec3((rand(gl_FragCoord.xy)-.5)/255.0);
-    color=vec4(material,coverage);
+    float alpha=coverage+(1.0-coverage)*shadow;
+    color=vec4(material*coverage/max(alpha,.0001),alpha);
 })";
 }

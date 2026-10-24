@@ -91,7 +91,8 @@ void GlassChrome::Draw(const Surface& s) {
     const int h = std::clamp(int(std::floor(fh-(top-s.displayPos.y)*s.scale.y)),0,fh)-y;
     if (w <= 0 || h <= 0) return;
     // Include a bounded blur/refraction neighborhood, not just pixels inside
-    // the material. Only the final rail rectangle is written to the destination.
+    // the material. A separate bounded output apron holds the soft UI shadow;
+    // it never changes image-processing data or the rail's hit/layout bounds.
     const int padding = int(std::ceil(16.f*std::max(.5f,s.scale.x*s.dpi)));
     const int captureX = std::max(0,x-padding), captureY = std::max(0,y-padding);
     const int captureW = std::min(fw,x+w+padding)-captureX;
@@ -120,7 +121,17 @@ void GlassChrome::Draw(const Surface& s) {
         glBindTexture(GL_TEXTURE_2D,textures[1]);
         glUniform2f(0,0.f,1.f/((height+1)/2));
         glUniform2f(1,float(lw)/((width+1)/2),float(lh)/((height+1)/2)); glDrawArrays(GL_TRIANGLES,0,3);
-        target.Restore(); glViewport(x,y,w,h);
+        // Keep the light/shadow in physical pixels at every display scale.
+        // Respect caller clipping and the screen edge; no shadow to the left.
+        const int shadowPad=int(std::ceil(s.radius*s.scale.x*.8f));
+        const int outputRight=std::min({fw,x+w+shadowPad,
+            int(std::floor((s.clip.z-s.displayPos.x)*s.scale.x))});
+        const int outputBottom=std::max({0,y-shadowPad,
+            int(std::ceil(fh-(s.clip.w-s.displayPos.y)*s.scale.y))});
+        // The top toolbar owns the pixels above the rail. Do not cast a
+        // decorative shadow into that separately styled control surface.
+        const int outputTop=y+h;
+        target.Restore(); glViewport(x,outputBottom,outputRight-x,outputTop-outputBottom);
         glUseProgram(programs[1]);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,textures[2]);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,textures[0]);
@@ -130,7 +141,9 @@ void GlassChrome::Draw(const Surface& s) {
         glUniform2f(6,float(x-captureX)/captureW,float(y-captureY)/captureH);
         glUniform2f(7,float(w)/captureW,float(h)/captureH);
         glUniform2f(8,float(captureW)/width,float(captureH)/height);
-        glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        glUniform4f(9,float(outputRight-x),float(outputTop-outputBottom),0.f,float(y-outputBottom));
+        glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
+        glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
         glDrawArrays(GL_TRIANGLES,0,3);
     } else {
         // Failed glass is not CPU-emulated. Keep an opaque emergency navigation

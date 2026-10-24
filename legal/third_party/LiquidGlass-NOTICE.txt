@@ -21,7 +21,8 @@ the original Stack wrapper is src/Renderer/GlassChromeShaders.h. Stack retains
 the upstream blur arrangement/kernel and static noise function. The rail uses
 a Stack-specific convex bevel in physical pixels, with shared coverage and
 surface normals, Snell refraction, Fresnel-weighted nearby scene reflection
-and directional lighting. This replaces the demo's stretched radial lens/glow
+and directional lighting, with a bounded display-only soft shadow. This
+replaces the demo's stretched radial lens/glow
 equations; it does not claim matched upstream material defaults or Apple's
 private implementation. Noise is reduced to sub-code-value dither. Valid scene
 extents clamp both the sharp and blurred samples to the bounded capture.
