@@ -9,6 +9,7 @@
 #include "BracketingLocalDetailValidation.h"
 #include "BracketingExposureValidation.h"
 #include "BracketingScalarValidation.h"
+#include "BracketingGuideCoordinatesValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSharpnessValidation.h"
 #include "Raw/RawProcessingMath.h"
@@ -129,6 +130,7 @@ bool ValidateBracketing() {
         ValidateBracketingLocalDetailEvidence();
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();
+        ValidateBracketingGuideCoordinates();
         // Backend faults must fail before decoding, never become CPU work.
         for(unsigned failure=0;failure<3;++failure) {
             auto required=MakeRequest({Capture('g',1)},directory/"gpu-required");

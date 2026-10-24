@@ -16,7 +16,7 @@ struct Accumulator {
     double weight,squared;
     double bw,dw,bs,ds,base,detail,bv,dv,cv,bu,du;
 };
-struct Mapping {double x,y,xx,xy,yy,confidence;};
+struct Mapping {double x,y,xx,xy,yy,confidence;double guideXX,guideXY,guideYY;};
 layout(std430,binding=0) readonly buffer Source {vec4 taps[];};
 layout(std430,binding=1) readonly buffer Motion {Mapping maps[];};
 layout(std430,binding=2) buffer Guides {dvec4 guides[];};
@@ -182,7 +182,12 @@ Observation sampleAt(int i,ivec2 p){
             if(clippedFallback)o.flags|=CLIPPED|FALLBACK_CLIP;}return o;}
     o.fallback=value;o.flags|=FINITE;o.flags&=~(CLIPPED|FALLBACK_CLIP);
     if(m.confidence<=0.LF)return o;
-    if(guides[i].w>0.LF){double sceneRisk=risk(guides[i].yz,m);if(sceneRisk>=0.LF)reg=sceneRisk;}
+    // Shared-guide gradients use fixed-origin coordinates. Native gradients
+    // above retain source covariance. Missing transport only skips this guide.
+    if(guides[i].w>0.LF&&m.guideXX>=0.LF){
+        Mapping guideMap=m;guideMap.xx=m.guideXX;guideMap.xy=m.guideXY;guideMap.yy=m.guideYY;
+        double sceneRisk=risk(guides[i].yz,guideMap);if(sceneRisk>=0.LF)reg=sceneRisk;
+    }
     o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+scaleRisk+reg/max(.20LF,m.confidence);
     o.variance=o.measurement+o.uncertainty;o.headroom=nearestInside?headroom(nearestValue):1.LF;o.support=1.LF;
     return o;

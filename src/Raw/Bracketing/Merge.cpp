@@ -1,5 +1,6 @@
 #include "ProcessingInternal.h"
 #include "CaptureCorrespondence.h"
+#include "GuideCovariance.h"
 #include "PreparedTileSampler.h"
 #include "PreparedRegion.h"
 #include "TemporalGpu.h"
@@ -12,7 +13,9 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     double referenceX,double referenceY,double referencePilot,
     const Mfd::RawSignalGradient& sceneGradient,std::string& error) {
     Observation result;const auto site=layout.SiteAt(static_cast<std::int64_t>(referenceX),static_cast<std::int64_t>(referenceY));
-    const auto correspondence=EvaluateCaptureCorrespondence(source,{referenceX,referenceY});
+    Mfd::RawMappingJacobian jacobian;
+    const bool hasGuide=std::isfinite(sceneGradient.dxPerRawPixel)&&std::isfinite(sceneGradient.dyPerRawPixel);
+    const auto correspondence=EvaluateCaptureCorrespondence(source,{referenceX,referenceY},false,nullptr,hasGuide?&jacobian:nullptr);
     const auto mapped=correspondence.sourceRaw;
     const auto covariance=correspondence.covarianceRaw;
     const double confidence=correspondence.confidence;
@@ -60,8 +63,9 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     // Confidence moderates scene-dependent registration risk, not sensor
     // noise. An uncertain location on a flat surface remains useful evidence.
     double registrationRisk=sampled.registrationVariance;
-    if(std::isfinite(sceneGradient.dxPerRawPixel)) {
-        if(!Mfd::RegistrationUncertaintyVariance(sceneGradient,covariance,
+    Mfd::SymmetricRawCovariance guideCovariance;
+    if(hasGuide&&TryGuideCovariance(covariance,jacobian,guideCovariance)) {
+        if(!Mfd::RegistrationUncertaintyVariance(sceneGradient,guideCovariance,
             registrationRisk,nullptr)) registrationRisk=sampled.registrationVariance;
     }
     result.measurementVariance=std::max(1e-12,sampled.interpolationVariance);

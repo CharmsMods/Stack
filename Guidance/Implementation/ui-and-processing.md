@@ -128,6 +128,14 @@ and scalar verification remain explicit algorithm responsibilities. Keep
 measurement selection for occlusion/deghosting separate from backend failure.
 Report actual GPU tile counts rather than inferring success from context availability.
 
+Motion covariance describes source-pixel displacement. Shared origin-guide gradients
+use origin-pixel coordinates, so their registration risk uses covariance transported
+through the inverse actual-map Jacobian, including local/composed/refined motion.
+Keep source covariance for native interpolation. A singular or discontinuous
+derivative disables only guide substitution, not source support or GPU execution.
+The CPU scalar consumer and GPU Mapping layout must retain the same convention;
+update memory accounting and measurement cache identity with layout/semantic changes.
+
 Use the [shared notifications subsystem](../../src/Notifications/README.md) for program-wide notices, activity and substantive decisions. Capture the initiating owner's notifier through asynchronous work and retain the feature's lifetime and generation checks. Report outcomes at accepted state transitions, rather than repeated drawing code. Keep messages short, put longer explanations in details, and leave settings forms and useful diagnostics beside their controls. Dismissing feedback does not resolve its cause, and notification history does not determine processing busy state.
 
 ## Account for the cost of the boundary

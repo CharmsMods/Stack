@@ -1,3 +1,4 @@
+#include "MotionJacobian.h"
 #include "Raw/MultiFrameDenoise/LocalMotion.h"
 
 #include "Raw/MultiFrameDenoise/SameCfaSampler.h"
@@ -2237,7 +2238,8 @@ bool EvaluateLocalMotionField(
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
     std::string* error,
-    bool includeDiagnostic) {
+    bool includeDiagnostic, RawMappingJacobian* jacobian) {
+    if(jacobian)*jacobian={};
     result = {};
     result.referenceRaw = referenceRaw;
     if (!grid.valid || grid.width == 0u || grid.height == 0u ||
@@ -2360,6 +2362,45 @@ bool EvaluateLocalMotionField(
         result.rejectReason = MotionNodeRejectReason::SourceBorder;
         if (includeDiagnostic || error) result.message = "MFD local-motion warp leaves the source active area.";
         return Fail(error, result.message);
+    }
+    if(jacobian) {
+        // Differentiate the same confidence-normalized bilinear residual, not
+        // just its global initializer. Composed fields already contain the
+        // final source-coordinate residual and use this same calculation.
+        const auto derivative=[&](std::uint32_t ix,std::uint32_t iy) {
+            RawMappingJacobian j;j.linear=grid.globalWarp.linear;
+            const double u=grid.width==1?0:gridX-ix,v=grid.height==1?0:gridY-iy;
+            const double wx[2]={1-u,u},wy[2]={1-v,v};
+            const double dx[2]={grid.width==1?0:-1/grid.spacingRawX,grid.width==1?0:1/grid.spacingRawX};
+            const double dy[2]={grid.height==1?0:-1/grid.spacingRawY,grid.height==1?0:1/grid.spacingRawY};
+            double mass=0,mx=0,my=0;RawCoordinate n{},nx{},ny{};
+            for(unsigned c=0;c<4;++c) {
+                const auto& node=grid.nodes[std::size_t(std::min(iy+c/2,grid.height-1))*grid.width+std::min(ix+c%2,grid.width-1)];
+                const double confidence=node.state==MotionNodeState::Rejected?0:Clamp01(node.confidence);
+                if(confidence<=0)continue;
+                const double w=wx[c%2]*wy[c/2]*confidence;
+                const double x=dx[c%2]*wy[c/2]*confidence,y=wx[c%2]*dy[c/2]*confidence;
+                mass+=w;mx+=x;my+=y;n.x+=w*node.residualRaw.x;n.y+=w*node.residualRaw.y;
+                nx.x+=x*node.residualRaw.x;nx.y+=x*node.residualRaw.y;
+                ny.x+=y*node.residualRaw.x;ny.y+=y*node.residualRaw.y;
+            }
+            if(!Finite(mass)||mass<=options.registration.interpolationWeightEpsilon)return j;
+            j.linear[0]+=(nx.x-n.x/mass*mx)/mass;j.linear[1]+=(ny.x-n.x/mass*my)/mass;
+            j.linear[2]+=(nx.y-n.y/mass*mx)/mass;j.linear[3]+=(ny.y-n.y/mass*my)/mass;
+            j.valid=FiniteMappingJacobian(j);return j;
+        };
+        auto j=derivative(x0,y0);
+        j.valid=j.valid&&gridX>=0&&gridY>=0&&gridX<=grid.width-1&&gridY<=grid.height-1;
+        // Physical/grid edges use their inside derivative. At internal knots
+        // both one-sided derivatives must agree; otherwise the guide cannot
+        // claim a unique differential there. The underlying motion is kept.
+        const bool left=x0>0&&gridX==double(x0),above=y0>0&&gridY==double(y0);
+        for(unsigned c=1;c<4&&j.valid;++c) {
+            if((c&1)&&!left)continue;if((c&2)&&!above)continue;
+            const auto other=derivative(x0-((c&1)?1:0),y0-((c&2)?1:0));
+            j.valid=other.valid&&SameMappingJacobian(j,other);
+        }
+        *jacobian=j;
     }
     result.valid = true;
     result.rejectReason = MotionNodeRejectReason::None;

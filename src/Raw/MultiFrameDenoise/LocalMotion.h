@@ -222,13 +222,21 @@ struct LocalMotionFieldSample {
     double alignmentConfidence = 0.0;
 };
 
+// Differential of the actual reference-raw -> source-raw map, row major.
+// Optional evidence: unavailable derivatives never invalidate a motion sample.
+struct RawMappingJacobian {
+    std::array<double,4> linear {1,0,0,1};
+    bool valid=false;
+};
+
 bool EvaluateLocalMotionField(
     const LocalMotionGrid& grid,
     RawCoordinate referenceRaw,
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
     std::string* error = nullptr,
-    bool includeDiagnostic = true);
+    bool includeDiagnostic = true,
+    RawMappingJacobian* jacobian = nullptr);
 
 bool InvertAffineModel(
     const AffineModel& model,

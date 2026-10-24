@@ -35,8 +35,10 @@ admission and exposure fitting to use decoded layout and registered image eviden
 rather than camera/exposure labels. Unresolved captures get a local-alignment retry,
 then a documented exclusion instead of an invented metadata gain. It also improves
 per-capture highlight-headroom weighting, registration provenance, noise-failure
-reporting and cancellation. GPU stages now fail explicitly rather than silently
-switching to CPU processing. Decoder CFA, orientation and black/white calibration
+reporting and cancellation. Shared-guide registration risk now transports motion
+covariance into the guide coordinate system, including composed/refined motion;
+unavailable derivatives retain source-native risk without rejecting the capture.
+GPU stages now fail explicitly rather than silently switching to CPU processing. Decoder CFA, orientation and black/white calibration
 are still required; missing information does not create recovered dynamic range.
 
 New, untouched Bracketing imports can initialize their default Local EV and Tone
@@ -65,6 +67,11 @@ for comparison, and keep the original RAW inputs unchanged.
   disabled-source and late-failure publication checks. GPU executor refusal,
   cancellation and malformed-score checks passed. These are component checks,
   not full spatial-detail, Windows or hardware-driver validation.
+  Independent affine-guide GPU fixtures pass at two tile sizes, including border
+  and seam probes; singular/missing-guide cases retain valid source support.
+  Analytic derivative tests preserve original motion fields bit-for-bit. The
+  optional derivative has a measured mapping-only CPU cost; an attempted fused
+  reduction that regressed existing evaluation was removed.
 - Legacy MFD/HDR processor checks confirmed GPU failures and missing executors
   return failure without publishing a CPU replacement; cancellation stays canceled.
   RAW display preprocessing also reports GPU failure instead of CPU retry. Explicit

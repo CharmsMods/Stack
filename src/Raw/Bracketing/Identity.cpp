@@ -27,7 +27,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     j["noiseProfile"]="temporal-burst-haar-v3-finite-generic-prior";
     j["groupMemoryProfile"]="adaptive-prepared-tiles-v1";
     j["detailProfile"]=kLocalDetailRevision;
-    j["temporalProfile"]="double-precision-gpu-temporal-v5-required-backend";
+    j["temporalProfile"]="double-precision-gpu-temporal-v6-guide-coordinate-covariance";
     j["hdrProfile"]=kHdrColorFusionRevision;
     if(recipe.depth.enabled)j["depthProfile"]="handheld-parallax-v6-gpu-guided-depth";
     for(const auto& s:request.sources) j["sources"].push_back({s.frameId,s.sha256,s.bytes});

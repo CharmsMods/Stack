@@ -17,5 +17,6 @@ struct MotionRefinementField {
     std::vector<MotionCorrection> cells;
 };
 bool EvaluateCaptureMotion(const PreparedSource&,Mfd::RawCoordinate,
-    const Mfd::LocalMotionOptions&,Mfd::LocalMotionFieldSample&,double* refinementConfidence=nullptr);
+    const Mfd::LocalMotionOptions&,Mfd::LocalMotionFieldSample&,double* refinementConfidence=nullptr,
+    Mfd::RawMappingJacobian* jacobian=nullptr);
 }

@@ -1,5 +1,6 @@
 #include "CaptureCorrespondence.h"
 #include "ProcessingInternal.h"
+#include "Raw/MultiFrameDenoise/MotionJacobian.h"
 #include <algorithm>
 #include <cmath>
 
@@ -21,17 +22,19 @@ bool HasCurrentCaptureReliability(const PreparedSource& source) {
         source.reliabilityScale==source.scale&&source.reliabilityScaleVariance==source.scaleVariance;
 }
 CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source,
-    Mfd::RawCoordinate point,bool reference,Mfd::LocalMotionFieldSample* evaluatedMotion) {
-    if(reference)return {point,{},1};
+    Mfd::RawCoordinate point,bool reference,Mfd::LocalMotionFieldSample* evaluatedMotion,Mfd::RawMappingJacobian* jacobian) {
+    if(jacobian)*jacobian={};
+    if(reference){if(jacobian)jacobian->valid=true;return {point,{},1};}
     const double floor=source.alignmentDiagnostic.model==CaptureAlignment::Model::Identity?0:.0025;
     const auto global=[&](double confidence) {
+        if(jacobian){jacobian->linear=source.alignment.linear;jacobian->valid=Mfd::FiniteMappingJacobian(*jacobian);}
         return CaptureCorrespondence{source.alignment.Map(point),{floor,0,floor},confidence};
     };
     if(!std::isfinite(point.x)||!std::isfinite(point.y))return global(0);
     CaptureCorrespondence result;
     if(source.localMotion) {
         Mfd::LocalMotionFieldSample motion;double refinementConfidence=1;
-        if(!EvaluateCaptureMotion(source,point,{},motion,&refinementConfidence)) {
+        if(!EvaluateCaptureMotion(source,point,{},motion,&refinementConfidence,jacobian)) {
             return global(0);
         }
         if(evaluatedMotion)*evaluatedMotion=motion;
