@@ -773,7 +773,7 @@ void LibraryManager::RequestImportAndLoad(
         try {
             std::vector<unsigned char> bytes;
             if (!ReadFileBytes(path, bytes)) error = "The dropped image could not be read.";
-            else imported = Stack::Library::WriteNewLibraryAsset(m_AssetsPath, fileName, bytes, published, error);
+            else imported = Stack::Library::WriteNewLibraryAsset(m_AssetsPath, std::filesystem::u8path(fileName), bytes, published, error);
         } catch (const std::exception& exception) {
             error = exception.what();
         }

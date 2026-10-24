@@ -28,6 +28,9 @@ std::string OpenRasterImageFileDialog(const char* title = "Load Image");
 std::string OpenLutFileDialog(const char* title = "Load LUT");
 std::string SaveLutFileDialog(const char* title = "Save LUT", const char* defaultFileName = "generated_lut.cube");
 std::string SavePngFileDialog(const char* title = "Save PNG Image", const char* defaultFileName = "image.png");
+// Byte-preserving asset copy: one detected format, no post-selection renaming.
+std::string SaveImageCopyFileDialog(const char* title, const char* defaultFileName,
+    const std::string& encodedExtension);
 // Pick only. The caller reviews the normalized target and obtains any extra
 // replacement decision before starting a save.
 RasterImageSaveResult SaveGraphImageFileDialog(

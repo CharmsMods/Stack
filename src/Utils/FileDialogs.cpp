@@ -366,6 +366,34 @@ std::string SavePngFileDialog(const char* title, const char* defaultFileName) {
     return "";
 }
 
+std::string SaveImageCopyFileDialog(const char* title, const char* defaultFileName,
+    const std::string& encodedExtension) {
+#ifdef _WIN32
+    const char* filter = nullptr;
+    const char* defaultExtension = nullptr;
+    if (encodedExtension == ".png") { filter = "PNG Image\0*.png\0"; defaultExtension = "png"; }
+    else if (encodedExtension == ".jpg" || encodedExtension == ".jpeg") { filter = "JPEG Image\0*.jpg;*.jpeg\0"; defaultExtension = "jpg"; }
+    else if (encodedExtension == ".bmp") { filter = "BMP Image\0*.bmp\0"; defaultExtension = "bmp"; }
+    else if (encodedExtension == ".tga") { filter = "TGA Image\0*.tga\0"; defaultExtension = "tga"; }
+    if (!filter) return {};
+    char filename[MAX_PATH] = "";
+    strncpy_s(filename, defaultFileName && defaultFileName[0] ? defaultFileName : "image", _TRUNCATE);
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+    ofn.lpstrDefExt = defaultExtension;
+    if (RunSaveFileDialog(ofn, "SaveImageCopyFileDialog", title)) return std::string(filename);
+#else
+    (void)title; (void)defaultFileName; (void)encodedExtension;
+#endif
+    return {};
+}
+
 RasterImageSaveResult SaveGraphImageFileDialog(
     const char* title,
     const char* defaultFileName,

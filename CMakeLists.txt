@@ -649,6 +649,12 @@ if(BUILD_TESTING)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
     include(cmake/StackLibraryProjectExportTests.cmake)
+    add_executable(StackLibraryAssetExportTests tools/tests/library_asset_export_tests.cpp
+        src/Library/Internal/LibraryAssetExport.cpp src/Utils/AtomicExportFile.cpp)
+    target_include_directories(StackLibraryAssetExportTests PRIVATE src)
+    target_link_libraries(StackLibraryAssetExportTests PRIVATE Threads::Threads)
+    add_test(NAME StackLibrary.AssetExport COMMAND StackLibraryAssetExportTests)
+    set_tests_properties(StackLibrary.AssetExport PROPERTIES LABELS "library;export;cpu" TIMEOUT 30)
     add_executable(StackCompositeExportPolicyTests tools/tests/composite_export_policy_tests.cpp
         src/NodeMath/TechnicalImageMath.cpp src/NodeMath/DescriptorSerialization.cpp src/NodeMath/ContractTypes.cpp)
     target_include_directories(StackCompositeExportPolicyTests PRIVATE src)

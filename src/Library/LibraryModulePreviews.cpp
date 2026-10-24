@@ -5,6 +5,7 @@
 #include "Composite/CompositeModule.h"
 #include "Editor/EditorModule.h"
 #include "Library/Internal/LibraryModuleUIHelpers.h"
+#include "Library/Internal/LibraryAssetExport.h"
 #include "LibraryManager.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Utils/FileDialogs.h"
@@ -544,9 +545,17 @@ void LibraryModule::RenderAssetPreviewPopup(
     const float actionWidth = std::max(108.0f, (contentWidth - 12.0f) * 0.5f);
     const ImVec2 actionSize(actionWidth, 34.0f);
     if (ImGui::Button("Download Asset", actionSize)) {
-        std::string exportPath = FileDialogs::SavePngFileDialog("Download Library Asset", m_PreviewAsset->fileName.c_str());
-        if (!exportPath.empty()) {
-            LibraryManager::Get().ExportAsset(m_PreviewAsset->fileName, exportPath);
+        auto& library = LibraryManager::Get();
+        std::string error;
+        const auto source = library.GetAssetsPath() / m_PreviewAsset->fileName;
+        const auto extension = Stack::Library::LibraryAssetEncodedExtension(source, error);
+        if (extension.empty()) {
+            library.GetNotifier().Error(error);
+        } else {
+            const auto suggested = Stack::Library::LibraryAssetExportSuggestedName(source, extension).string();
+            const auto exportPath = FileDialogs::SaveImageCopyFileDialog(
+                "Download Library Asset", suggested.c_str(), extension);
+            if (!exportPath.empty()) library.ExportAsset(m_PreviewAsset->fileName, exportPath);
         }
     }
     ImGui::SameLine(0.0f, 10.0f);

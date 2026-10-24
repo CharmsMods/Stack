@@ -4,6 +4,7 @@
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Library/Internal/LibraryStorageHelpers.h"
 #include "Library/Internal/LibraryNewAssetWrite.h"
+#include "Library/Internal/LibraryAssetExport.h"
 #include "Library/TagManager.h"
 #include "Renderer/GLHelpers.h"
 
@@ -490,26 +491,14 @@ void LibraryManager::MirrorCompositeEmbeddedAssets(const StackFormat::ProjectDoc
 
 bool LibraryManager::ExportAsset(const std::string& fileName, const std::string& destinationPath) {
     if (fileName.empty() || destinationPath.empty()) return false;
-
-    try {
-        const std::filesystem::path sourcePath = m_AssetsPath / fileName;
-        if (!std::filesystem::exists(sourcePath)) {
-            PostNotification(UiNotificationSeverity::Error, "The image to export is no longer available.", "library-export-asset");
-            return false;
-        }
-
-        const std::filesystem::path destination = destinationPath;
-        if (destination.has_parent_path()) {
-            std::filesystem::create_directories(destination.parent_path());
-        }
-
-        std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::overwrite_existing);
-        PostNotification(UiNotificationSeverity::Success, "Asset exported.", "library-export-asset");
-        return true;
-    } catch (...) {
-        PostNotification(UiNotificationSeverity::Error, "Failed to export the asset.", "library-export-asset");
+    std::string error;
+    if (!Stack::Library::ExportLibraryAsset(m_AssetsPath / fileName,
+            std::filesystem::u8path(destinationPath), error)) {
+        PostNotification(UiNotificationSeverity::Error, error, "library-export-asset");
         return false;
     }
+    PostNotification(UiNotificationSeverity::Success, "Asset exported.", "library-export-asset");
+    return true;
 }
 
 bool LibraryManager::DeleteAsset(const std::string& fileName) {
