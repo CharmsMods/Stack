@@ -1658,12 +1658,6 @@ void EditorModule::RenderUI() {
         TogglePresetsSubWindow();
     }
 
-    if (CanConsumeEditorCommandKeys() &&
-        ImGui::GetIO().KeyCtrl &&
-        ImGui::IsKeyPressed(ImGuiKey_S, false)) {
-        RequestSaveCurrentProject(m_Project->name.empty() ? "Untitled Project" : m_Project->name);
-    }
-
     const float timelineHeight = 0.0f;
     const float paneHeight = std::max(0.0f, workspaceSize.y - timelineHeight);
     const ImVec2 mousePos = ImGui::GetIO().MousePos;

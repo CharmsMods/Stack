@@ -32,8 +32,5 @@ void EditorModule::RenderGraphWorkspace() {
     m_NodesPanelWidthAnim += (target - m_NodesPanelWidthAnim) * response;
     canvas.RenderNodesPanelDrawer(this, m_NodesPanelWidthAnim, target, available.y, position);
     FinishRawLayerGraphFrame();
-    if (CanConsumeEditorCommandKeys() && ImGui::GetIO().KeyCtrl &&
-        ImGui::IsKeyPressed(ImGuiKey_S, false))
-        RequestSaveCurrentProject(m_Project->name.empty() ? "Untitled Project" : m_Project->name);
     SubmitRenderIfReady();
 }
