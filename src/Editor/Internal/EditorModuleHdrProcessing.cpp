@@ -5,6 +5,7 @@
 #include "Async/TaskSystem.h"
 #include "Notifications/AsyncActivity.h"
 #include "Editor/MultiFrameResultCache.h"
+#include "Editor/SavedResultCacheDescriptor.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphRawSerialization.h"
 #include "Persistence/RawProjectEditPipeline.h"
 #include "Raw/MultiFrame/GraphExecution.h"
@@ -348,29 +349,42 @@ void EditorModule::RestoreHdrResultCacheAfterProjectLoad() {
     const Stack::Project::MultiFrameSourceSet* sourceSet =
         Stack::Project::FindSourceSet(snapshot, binding.sourceSetId);
     if (!sourceSet) return;
-    const nlohmann::json resultState = sourceSet->settings.value(
-        "result", nlohmann::json::object());
-    if (!resultState.is_object() ||
-        resultState.value("state", std::string()) != "ready") {
-        return;
-    }
-
     const Raw::MultiFrame::GraphExecutionPlan plan =
         Raw::MultiFrame::BuildMultiFrameGraphExecutionPlan(snapshot);
     if (!plan.valid || plan.contentIdentitySha256.empty()) return;
-    const std::string savedGraphIdentity = resultState.value(
-        "graphIdentity", std::string());
-    if (!savedGraphIdentity.empty() &&
-        savedGraphIdentity != plan.contentIdentitySha256) {
-        return;
-    }
     const std::uint64_t inputRevision = binding.hdrResult
         ? snapshot.hdrInputRevision
         : snapshot.mfdInputRevision;
-    if (resultState.value("inputRevision", std::uint64_t { 0 }) !=
-        inputRevision) {
+    const auto rejectCache = [&](const std::string& error) {
+        m_MultiFrameGraphProcessingTaskState = Async::TaskState::Failed;
+        m_MultiFrameGraphProcessingStatusText = error;
+        m_RawWorkspaceStaleRenderStatusText = error + " Reprocess the connected Output.";
+        PostNotification(UiNotificationSeverity::Warning,
+            m_RawWorkspaceStaleRenderStatusText, "saved-result-cache");
+    };
+    Stack::EditorMultiFrameCache::SavedResultCacheDescriptor descriptor;
+    std::string descriptorError;
+    const auto descriptorState = Stack::EditorMultiFrameCache::ReadSavedResultCacheDescriptor(
+        sourceSet->settings, plan.contentIdentitySha256, inputRevision, descriptor, descriptorError);
+    if (descriptorState == Stack::EditorMultiFrameCache::SavedResultCacheState::Ignored) return;
+    if (descriptorState == Stack::EditorMultiFrameCache::SavedResultCacheState::Invalid) {
+        rejectCache(descriptorError);
         return;
     }
+    // Resolve persisted paths before publishing any queued state or activity.
+    std::filesystem::path hdrCacheDirectory, burstCachePath;
+    try {
+        hdrCacheDirectory = descriptor.cacheDirectory.empty()
+            ? AppPaths::GetCacheDirectory() / "MultiFrameHdr" /
+                snapshot.projectId / sourceSet->sourceSetId / "processor" / "results"
+            : std::filesystem::path(descriptor.cacheDirectory);
+        burstCachePath = std::filesystem::path(descriptor.cachePath);
+    } catch (const std::exception& exception) {
+        rejectCache("The saved result cache path could not be read: " + std::string(exception.what()));
+        return;
+    }
+    const std::string cacheKey = std::move(descriptor.cacheKey);
+    const nlohmann::json metadataJson = std::move(descriptor.referenceMetadata);
 
     const std::string projectId = snapshot.projectId;
     const std::string sourceSetId = sourceSet->sourceSetId;
@@ -397,20 +411,6 @@ void EditorModule::RestoreHdrResultCacheAfterProjectLoad() {
         std::shared_ptr<Raw::RawImageData> raw;
         std::shared_ptr<const Raw::Hdr::Result> hdr;
     };
-    const std::string cacheKey = resultState.value(
-        "cacheKey", std::string());
-    const nlohmann::json metadataJson = resultState.value(
-        "referenceMetadata", nlohmann::json::object());
-    const std::string persistedCacheDirectory = resultState.value(
-        "cacheDirectory", std::string());
-    const std::filesystem::path hdrCacheDirectory =
-        persistedCacheDirectory.empty()
-        ? AppPaths::GetCacheDirectory() / "MultiFrameHdr" /
-            projectId / sourceSetId / "processor" / "results"
-        : std::filesystem::path(persistedCacheDirectory);
-    const std::filesystem::path burstCachePath =
-        std::filesystem::path(resultState.value(
-            "cachePath", std::string()));
     const bool submitted = ProjectTasks().Submit(activityMetadata, [
         this,
         notifier, activity, completionLease,

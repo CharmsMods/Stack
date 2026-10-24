@@ -638,6 +638,10 @@ if(BUILD_TESTING)
     set_tests_properties(StackProject.GraphHistory PROPERTIES LABELS "project;history;cpu" TIMEOUT 30)
     find_package(Threads REQUIRED)
     include(cmake/StackCacheReaderTests.cmake)
+    add_executable(StackSavedResultCacheDescriptorTests tools/tests/saved_result_cache_descriptor_tests.cpp)
+    target_include_directories(StackSavedResultCacheDescriptorTests PRIVATE src)
+    add_test(NAME StackPersistence.SavedResultCacheDescriptor COMMAND StackSavedResultCacheDescriptorTests)
+    set_tests_properties(StackPersistence.SavedResultCacheDescriptor PROPERTIES LABELS "persistence;cache;cpu" TIMEOUT 30)
     include(cmake/StackGraphImageImportHistoryTests.cmake)
     add_executable(StackLibraryStorageWriteTests
         tools/tests/library_storage_write_tests.cpp
