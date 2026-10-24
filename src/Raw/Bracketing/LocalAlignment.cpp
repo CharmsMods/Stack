@@ -7,6 +7,7 @@
 #include "AlignmentProposalInput.h"
 #include "GroupAlignment.h"
 #include "AlignmentExposureCohorts.h"
+#include "AlignmentAnchorEvidence.h"
 
 #include "Raw/MultiFrameDenoise/GpuLocalMotion.h"
 #include "GpuMotionSession.h"
@@ -225,7 +226,11 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     cohortInputs.reserve(data.sources.size());
     for(const auto& source:data.sources)
         cohortInputs.push_back({source.enabled,source.exposureCalibrated,source.scale});
-    const auto cohorts=BuildAlignmentExposureCohorts(cohortInputs,data.origin);
+    auto cohorts=BuildAlignmentExposureCohorts(cohortInputs,data.origin);
+    {
+        ProcessingTimer timer(data.stageSeconds,"alignment_anchor_ranking");
+        if(!RankAlignmentAnchors(request,data,cohorts,diagnostics,error))return false;
+    }
     // RefreshCaptureReliability replaces the displayed accepted status with
     // local coverage. Keep the original global evidence for pair fallbacks.
     for(auto& source:data.sources)if(!source.localMotion)

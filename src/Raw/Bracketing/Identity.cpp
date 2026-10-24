@@ -15,7 +15,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     auto j=Serialize(recipe);
     // Sampling and clipping decisions feed reliability, the guide and cached
     // group tiles. Keep their revisions together when these decisions change.
-    j["alignmentProfile"]="automatic-local-v34-required-gpu-search";
+    j["alignmentProfile"]="automatic-local-v35-image-anchor-evidence";
     if(recipe.aiAlignment)j["learnedAlignmentProfile"]=LearnedAlignment::Profile;
     if(!request.alignmentProposals.empty()) {
         j["alignmentProposalProfile"]="external-flow-seed-raw-verification-v1";

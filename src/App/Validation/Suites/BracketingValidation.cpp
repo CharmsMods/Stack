@@ -10,6 +10,8 @@
 #include "BracketingExposureValidation.h"
 #include "BracketingScalarValidation.h"
 #include "BracketingGuideCoordinatesValidation.h"
+#include "BracketingAnchorEvidenceValidation.h"
+#include "BracketingAnchorIntegrationValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSharpnessValidation.h"
 #include "Raw/RawProcessingMath.h"
@@ -131,6 +133,7 @@ bool ValidateBracketing() {
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();
         ValidateBracketingGuideCoordinates();
+        ValidateBracketingAnchorEvidence(directory/"anchor-evidence");
         // Backend faults must fail before decoding, never become CPU work.
         for(unsigned failure=0;failure<3;++failure) {
             auto required=MakeRequest({Capture('g',1)},directory/"gpu-required");
@@ -145,6 +148,7 @@ bool ValidateBracketing() {
                 !rejected.message.empty(),"GPU failure silently decoded or substituted CPU processing");
         }
         BracketingValidationGl gl;
+        ValidateBracketingAnchorIntegration(gl.Executor(),directory/"anchor-integration");
         const auto Request=[&gl](const std::vector<Raw::RawImageData>& raws,
             const std::filesystem::path& path,bool grouped=false) {
             auto request=MakeRequest(raws,path,grouped);

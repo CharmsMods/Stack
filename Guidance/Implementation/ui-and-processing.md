@@ -78,7 +78,14 @@ Alignment-only exposure cohorts and local-refit decisions use calibrated image
 gains, not saved UI groups. The 0.15 EV full-span convention selects work/anchors,
 not valid evidence; uncertain sources align directly to the origin. This never
 changes saved groups or enables excluded pixels. A disabled origin remains only
-the coordinate/radiometric gauge.
+the coordinate/radiometric gauge. Eligible brighter, non-origin cohorts can choose
+an anchor from common native image patches using noise-corrected directional
+structure. This ranks existing members only; it neither changes output framing
+nor removes weak captures. Missing comparable noise/geometry, insufficient common
+spatial coverage, tied scores and reused motion retain the median anchor. The
+ranking is a heuristic with added prepared-tile reads, measured separately as
+`alignment_anchor_ranking`; it is not a new confidence or admission test. Native
+sampling phase, noise-model error and dominant moving foreground remain limits.
 
 Photometrically compatible flat regions are not independent registration evidence.
 Exposure fitting tracks the provenance of the current motion field before synthetic

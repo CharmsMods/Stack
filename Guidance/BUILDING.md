@@ -38,6 +38,10 @@ per-capture highlight-headroom weighting, registration provenance, noise-failure
 reporting and cancellation. Shared-guide registration risk now transports motion
 covariance into the guide coordinate system, including composed/refined motion;
 unavailable derivatives retain source-native risk without rejecting the capture.
+Eligible brighter repeated exposures now choose their auxiliary alignment anchor
+from comparable native image structure instead of input-order median alone. The
+user's output reference and capture membership stay unchanged. Weak/incomparable
+evidence retains the median; this is not per-pixel multi-source guide fusion.
 GPU stages now fail explicitly rather than silently switching to CPU processing. Decoder CFA, orientation and black/white calibration
 are still required; missing information does not create recovered dynamic range.
 
@@ -72,6 +76,15 @@ for comparison, and keep the original RAW inputs unchanged.
   Analytic derivative tests preserve original motion fields bit-for-bit. The
   optional derivative has a measured mapping-only CPU cost; an attempted fused
   reduction that regressed existing evaluation was removed.
+- Anchor-ranking checks cover blur/noise, translation/rotation, sparse clipping,
+  localized foreground, unavailable evidence and transactional read/cancel errors.
+  A real image-calibration/local-alignment/GPU-combining component chain improved
+  synthetic strong/modest-blur error, with less averaging in the strong case;
+  equal-sharpness controls were unchanged. Sparse optional exposure refits retained
+  initial measured gains without new exclusions. This is not full `Process` or
+  real-camera validation. Ranking adds I/O: one OS-cache-warm 24 MP, three-candidate
+  fixture took about 0.72 s and read about 460 MiB of prepared tiles. Cold-disk cost
+  and broad image-quality benefit remain unmeasured.
 - Legacy MFD/HDR processor checks confirmed GPU failures and missing executors
   return failure without publishing a CPU replacement; cancellation stays canceled.
   RAW display preprocessing also reports GPU failure instead of CPU retry. Explicit
@@ -87,7 +100,9 @@ for comparison, and keep the original RAW inputs unchanged.
   retains separate dispatches. Original/split/fused synthetic outputs matched on
   software Mesa; bounded dispatch microcases showed no clear regression, but
   exclude uploads, initialization and final readback. The added shader increases
-  initialization work; hardware startup and full-pipeline timing remain unmeasured.
+  initialization work: a cache-disabled software-Mesa compile/link comparison
+  measured about 20 ms extra (38 ms to 58 ms), excluding context creation. Hardware
+  startup and full-pipeline timing remain unmeasured.
   No end-to-end speedup or real-camera image-quality improvement is established.
 - Full Windows build and user-selected capture testing remain outstanding. The
   full `Process` integration check was blocked by unavailable OpenCV development

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace Raw::Bracketing {
@@ -17,6 +18,21 @@ struct AlignmentExposureCohortInput {
 struct AlignmentExposureCohorts {
     std::vector<std::size_t> order,anchorForSource,memberCount;
 };
+
+// Scores describe comparable common image patches, not capture confidence.
+// An exact/roundoff tie or absent positive information preserves the original
+// median rather than introducing a new preference or removing a capture.
+inline std::size_t SelectMeasuredAlignmentAnchor(const std::vector<std::size_t>& members,
+    const std::vector<double>& scores,std::size_t median) {
+    if(members.empty()||members.size()!=scores.size())return median;
+    for(double score:scores)if(!std::isfinite(score))return median;
+    const auto best=std::max_element(scores.begin(),scores.end());
+    if(!(*best>0))return median;
+    std::size_t tied=0;
+    for(double score:scores)if(std::abs(score-*best)<=64*std::numeric_limits<double>::epsilon()*
+        std::max({1.,std::abs(score),std::abs(*best)}))++tied;
+    return tied==1?members[std::size_t(best-scores.begin())]:median;
+}
 
 // Indices are stable input order, not presumed capture timestamps. This plan
 // neither changes persisted groups/contribution curves nor enables a source.
