@@ -15,14 +15,29 @@ void GlassChrome::BeginFrame(bool requested) {
     if (!requested && enabled) { Shutdown(); }
     enabled = requested;
 }
-bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint) {
+bool GlassChrome::AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, const LightingFrame* lighting) {
     if (!enabled || !error.empty() || !draw || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     auto* viewport = ImGui::GetMainViewport();
+    if (lighting && (!std::isfinite(lighting->min.x) || !std::isfinite(lighting->min.y) ||
+        !std::isfinite(lighting->max.x) || !std::isfinite(lighting->max.y) ||
+        lighting->max.x<=lighting->min.x || lighting->max.y<=lighting->min.y ||
+        lighting->min.x<viewport->Pos.x || lighting->min.y<viewport->Pos.y ||
+        lighting->max.x>viewport->Pos.x+viewport->Size.x ||
+        lighting->max.y>viewport->Pos.y+viewport->Size.y)) return false;
     const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
     backdrops.push_back({this,min,max,viewport->Pos,viewport->Size,ImGui::GetIO().DisplayFramebufferScale,
         tint,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),viewport->DpiScale});
-    BuildLayout(backdrops.back());
+    auto& backdrop=backdrops.back();
+    BuildLayout(backdrop);
+    backdrop.lightOrigin=ImVec2(float(backdrop.layout.x),float(backdrop.layout.y));
+    backdrop.lightSize=ImVec2(float(backdrop.layout.width),float(backdrop.layout.height));
+    if (lighting) {
+        backdrop.lightOrigin=ImVec2((lighting->min.x-viewport->Pos.x)*backdrop.scale.x,
+            backdrop.layout.framebufferHeight-(lighting->max.y-viewport->Pos.y)*backdrop.scale.y);
+        backdrop.lightSize=ImVec2((lighting->max.x-lighting->min.x)*backdrop.scale.x,
+            (lighting->max.y-lighting->min.y)*backdrop.scale.y);
+    }
     draw->AddCallback(BackdropCallback,&backdrops.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
@@ -90,11 +105,11 @@ bool GlassChrome::BuildLayout(const Backdrop& s,ImVec2 min,ImVec2 max,ImVec4 cli
     const float lift=std::isfinite(elevation) ? std::clamp(elevation,0.f,1.f) : 1.f;
     layout.volume=ImVec2(std::max(.25f,material.halfDepthRatio*std::min(w,h)),material.airGapRatio*std::min(w,h)*lift);
     const float centerZ=layout.volume.x+layout.volume.y;
-    const ImVec2 objectCenter(x-capture.x+.5f*w,y-capture.y+.5f*h);
+    const ImVec2 objectCenter(x-s.lightOrigin.x+.5f*w,y-s.lightOrigin.y+.5f*h);
     // A broad near-overhead studio fill approximates underside occlusion.
     // It is separate from the grazing reflection strip, not a traced caustic.
-    const float fillHeight=8.f*std::max({float(capture.height),64.f,centerZ});
-    const ImVec2 fillCenter(.5f*capture.width-.08f*fillHeight,.5f*capture.height+.45f*fillHeight);
+    const float fillHeight=8.f*std::max({s.lightSize.y,64.f,centerZ});
+    const ImVec2 fillCenter(.5f*s.lightSize.x-.08f*fillHeight,.5f*s.lightSize.y+.45f*fillHeight);
     const float ratio=centerZ/(fillHeight-centerZ);
     layout.shadow=ImVec4((objectCenter.x-fillCenter.x)*ratio,(objectCenter.y-fillCenter.y)*ratio,
         1.f+ratio,std::max(.75f,.25f*fillHeight*ratio*.57735026919f));
@@ -390,6 +405,9 @@ void GlassChrome::DrawObject(const Object& object) {
     const auto& window=material.studioWindow;
     glUniform4f(12,window.x,window.y,window.z,window.w);
     glUniform1f(13,material.flatCapFraction);
+    const auto& backdrop=*object.backdrop;
+    glUniform4f(14,captureOrigin.x-backdrop.lightOrigin.x,captureOrigin.y-backdrop.lightOrigin.y,
+        backdrop.lightSize.x,backdrop.lightSize.y);
     glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES,0,3);

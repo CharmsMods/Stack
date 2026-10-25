@@ -16,10 +16,17 @@ class GlassChrome {
 public:
     // SliderThumb preserves a flat central track with refracting shoulders.
     enum class MaterialRole { Lens, NavigationControl, SliderThumb };
+    // Optional stable studio coordinates in main-viewport logical screen space.
+    // Bounds must be finite, positive and inside the main viewport. They affect
+    // light/shadow geometry only, never capture/output clipping or hit targets.
+    // Invalid supplied bounds return false before queueing. Omission preserves
+    // the legacy capture-local studio frame.
+    struct LightingFrame { ImVec2 min, max; };
     void BeginFrame(bool enabled);
     // Queue once before the column's objects/foreground. Captures and blurs only: no
     // visible background, edge or shadow. Bounds also limit all object output.
-    bool AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint);
+    bool AddBackdrop(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint,
+        const LightingFrame* lighting = nullptr);
     // Uses the latest queued backdrop, without copying or blurring again.
     // Elevation scales only the air gap: 0 is contact, 1 is the resting height.
     // Values are clamped to [0,1]; non-finite inputs use the resting height.
@@ -52,7 +59,7 @@ private:
         float radius=0.f;
         int left=0, bottom=0, width=0, height=0;
     };
-    struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; CaptureLayout layout{}; };
+    struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; CaptureLayout layout{}; ImVec2 lightOrigin{}, lightSize{}; };
     struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; MaterialProfile material; };
     struct Ink { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
     static void InkCallback(const ImDrawList*, const ImDrawCmd*);

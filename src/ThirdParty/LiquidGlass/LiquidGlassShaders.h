@@ -61,6 +61,7 @@ layout(location=10) uniform vec4 shadowLayout; // Offset XY, projected scale, si
 layout(location=11) uniform float studioWindowStrength; // Renderer-owned material-role emphasis.
 layout(location=12) uniform vec4 studioWindowShape; // axis H/Z and outer/inner angular cosines.
 layout(location=13) uniform float flatCapFraction;
+layout(location=14) uniform vec4 lightingFrame; // Capture-to-studio XY, studio size ZW.
 vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
@@ -190,17 +191,19 @@ float fresnel(float cosine,float incidentIndex,float transmittedIndex) {
         max(transmittedIndex*cosine+incidentIndex*transmittedCosine,1e-8);
     return .5*(rs*rs+rp*rp);
 }
-float emitterDistance(vec3 point,vec3 direction,vec2 capturePixels) {
-    float unit=max(capturePixels.y,64.0);
+float emitterDistance(vec3 point,vec3 direction) {
+    point.xy+=lightingFrame.xy;
+    float unit=max(lightingFrame.w,64.0);
     float t=(.9*unit-point.z)/max(direction.z,1e-5);
     vec2 p=point.xy+t*direction.xy;
     vec2 outside=abs(p-vec2(-.35,2.4)*unit)-vec2(.65,.45)*unit;
     return max(outside.x,outside.y);
 }
-vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels,float footprint) {
-    // One shared finite overhead emitter in capture/world coordinates, not a
+vec3 environment(vec3 point,vec3 direction,vec3 ambient,float footprint) {
+    // One shared finite overhead emitter in studio coordinates, not a
     // stripe painted in object UV. Its footprint follows the reflected ray.
-    float unit=max(capturePixels.y,64.0);
+    point.xy+=lightingFrame.xy;
+    float unit=max(lightingFrame.w,64.0);
     float lightZ=.9*unit;
     vec2 lightCenter=vec2(-.35,2.4)*unit;
     vec2 lightHalfSize=vec2(.65,.45)*unit;
@@ -281,15 +284,15 @@ void main() {
     vec2 objectCenter=sceneOrigin*capturePixels+.5*sizePx;
     vec3 entryWorld=vec3(objectCenter+entry.xy,centerZ+entry.z);
     vec3 reflectedDirection=reflect(incoming,entryNormal);
-    float emitterD=emitterDistance(entryWorld,reflectedDirection,capturePixels);
+    float emitterD=emitterDistance(entryWorld,reflectedDirection);
     // First-order screen-space source footprint, not extra material roughness.
     // All fragments execute this before coverage/TIR branches.
-    float emitterWidth=min(.5*fwidth(emitterD),.25*max(capturePixels.y,64.0));
+    float emitterWidth=min(.5*fwidth(emitterD),.25*max(lightingFrame.w,64.0));
     if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
     vec3 inside=refract(incoming,entryNormal,1.0/ior);
     float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
     vec3 ambient=toLinear(sampleSoft(sceneOrigin+point/sizePx*sceneScale));
-    vec3 reflection=environment(entryWorld,reflectedDirection,ambient,capturePixels,emitterWidth);
+    vec3 reflection=environment(entryWorld,reflectedDirection,ambient,emitterWidth);
     vec3 exitPoint,exitNormal;
     float pathLength=0.0;
     bool found=flatRadius>0.0
@@ -309,7 +312,7 @@ void main() {
         if (!internallyReflected) {
             transmission=(1.0-entryFresnel)*(1.0-exitFresnel);
             vec3 exitWorld=vec3(objectCenter+exitPoint.xy,centerZ+exitPoint.z);
-            transmitted=environment(exitWorld,outgoing,ambient,capturePixels,0.0);
+            transmitted=environment(exitWorld,outgoing,ambient,0.0);
             if (outgoing.z < -1e-5) {
                 float t=-exitWorld.z/outgoing.z;
                 vec2 scenePoint=exitWorld.xy+t*outgoing.xy;

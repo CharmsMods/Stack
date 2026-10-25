@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <limits>
 static bool reduced=false;
 
 namespace Stack::Notifications { bool SystemReducedMotion(){return reduced;
@@ -121,13 +122,15 @@ void CheckSliderMaterialRoles(GLuint framebuffer) {
     Stack::Renderer::GlassChrome renderer;
     const ImVec4 tint(.09f,.12f,.15f,1.f);
     const auto palette=Stack::Header::ResolvePalette(tint);
-    auto render=[&](bool slider, bool reverse) {
+    auto render=[&](bool slider, bool reverse,
+        const Stack::Renderer::GlassChrome::LightingFrame* lighting=nullptr,
+        bool wide=false, bool track=true) {
         renderer.BeginFrame(true);
         ImGui_ImplOpenGL3_NewFrame();
         ImGui::NewFrame();
         auto* background=ImGui::GetBackgroundDrawList();
         background->AddRectFilled({0,0},{width,height},IM_COL32(245,245,247,255));
-        background->AddRectFilled({130,198},{390,202},IM_COL32(48,134,246,255));
+        if (track) background->AddRectFilled({130,198},{390,202},IM_COL32(48,134,246,255));
         ImGui::SetNextWindowPos({0,0});
         ImGui::SetNextWindowSize({width,height});
         ImGui::Begin("Slider material roles",nullptr,
@@ -135,7 +138,8 @@ void CheckSliderMaterialRoles(GLuint framebuffer) {
             ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoInputs);
         auto* draw=ImGui::GetWindowDrawList();
         draw->PushClipRect({0,0},{width,height},false);
-        assert(renderer.AddBackdrop(draw,{130,170},{390,240},tint));
+        assert(renderer.AddBackdrop(draw,wide ? ImVec2(100,140) : ImVec2(130,170),
+            wide ? ImVec2(420,270) : ImVec2(390,240),tint,lighting));
         for (int i=0;i<3;++i) {
             const int object=reverse ? 2-i : i;
             const ImVec2 min(150.f+80.f*object,188),max(202.f+80.f*object,212);
@@ -186,6 +190,41 @@ void CheckSliderMaterialRoles(GLuint framebuffer) {
             if (x>=215) assert(interleaved[offset+c]==rounded[offset+c]);
         }
     }
+    // On this uniform near-white source, both crops supply identical valid
+    // scene samples. This proves fixed-rig parity here, not arbitrary crop
+    // invariance when refraction/blur support or output clipping changes.
+    using LightingFrame=Stack::Renderer::GlassChrome::LightingFrame;
+    const LightingFrame fixedStudio{{114,154},{406,256}}; // Narrow padded crop at1x.
+    const auto defaultStudio=render(true,false,nullptr,false,false);
+    const auto narrowStudio=render(true,false,&fixedStudio,false,false);
+    const auto wideStudio=render(true,false,&fixedStudio,true,false);
+    assert(defaultStudio==narrowStudio&&narrowStudio==wideStudio);
+    renderer.BeginFrame(true);
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos({0,0});
+    ImGui::SetNextWindowSize({width,height});
+    ImGui::Begin("Invalid studio bounds",nullptr,
+        ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
+        ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoInputs);
+    auto* invalidDraw=ImGui::GetWindowDrawList();
+    const float nan=std::numeric_limits<float>::quiet_NaN();
+    const float infinity=std::numeric_limits<float>::infinity();
+    const LightingFrame invalid[] = {
+        {{nan,154},{406,256}}, {{114,154},{infinity,256}},
+        {{406,256},{114,154}}, {{-1,154},{406,256}}
+    };
+    for (const auto& frame:invalid) {
+        const int commands=invalidDraw->CmdBuffer.Size;
+        assert(!renderer.AddBackdrop(invalidDraw,{130,170},{390,240},tint,&frame));
+        assert(invalidDraw->CmdBuffer.Size==commands);
+    }
+    // Failed frames must not leave a stale capture available to an object.
+    assert(!renderer.AddObject(invalidDraw,{150,188},{202,212},tint,12,1.f,Role::SliderThumb));
+    ImGui::End();
+    ImGui::Render();
+    std::cout<<"PASS lighting frame: controlled near-white crop/shadow parity; "
+        "nonfinite/reversed/outside bounds reject without queued commands\n";
     renderer.Shutdown();
     assert(glGetError()==GL_NO_ERROR);
     std::cout<<"PASS slider material: source-width center, refracted shoulder, "
