@@ -191,33 +191,28 @@ float fresnel(float cosine,float incidentIndex,float transmittedIndex) {
         max(transmittedIndex*cosine+incidentIndex*transmittedCosine,1e-8);
     return .5*(rs*rs+rp*rp);
 }
-float emitterDistance(vec3 point,vec3 direction) {
+// Projection is shared by the uniform footprint estimate and source response.
+// Result X is source-edge distance; Y is clamped projection t.
+// The response validates forward support before using this finite record.
+vec2 projectEmitter(vec3 point,vec3 direction) {
     point.xy+=lightingFrame.xy;
     float unit=max(lightingFrame.w,64.0);
     float t=(.9*unit-point.z)/max(direction.z,1e-5);
     vec2 p=point.xy+t*direction.xy;
     vec2 outside=abs(p-vec2(-.35,2.4)*unit)-vec2(.65,.45)*unit;
-    return max(outside.x,outside.y);
+    return vec2(max(outside.x,outside.y),t);
 }
-vec3 environment(vec3 point,vec3 direction,vec3 ambient,float footprint) {
-    // One shared finite overhead emitter in studio coordinates, not a
-    // stripe painted in object UV. Its footprint follows the reflected ray.
-    point.xy+=lightingFrame.xy;
-    float unit=max(lightingFrame.w,64.0);
-    float lightZ=.9*unit;
-    vec2 lightCenter=vec2(-.35,2.4)*unit;
-    vec2 lightHalfSize=vec2(.65,.45)*unit;
-    float lamp=0.0;
-    if (direction.z>1e-5) {
-        float t=(lightZ-point.z)/direction.z;
-        vec2 p=point.xy+t*direction.xy;
-        vec2 outside=abs(p-lightCenter)-lightHalfSize;
-        float d=max(outside.x,outside.y);
-        // Fixed artistic source feather plus the caller's bounded screen-space
-        // sampling width. Derivatives are never evaluated in these branches.
-        float softness=max(.015*unit,footprint);
-        lamp=t>0.0 ? 1.0-smoothstep(-softness,softness,d) : 0.0;
-    }
+float emitterResponse(vec2 projected,float directionZ,float footprint) {
+    float softness=max(.015*max(lightingFrame.w,64.0),footprint);
+    return directionZ>1e-5 && projected.y>0.0
+        ? 1.0-smoothstep(-softness,softness,projected.x) : 0.0;
+}
+float fixedEmitter(vec3 point,vec3 direction) {
+    // This fallback has no derivatives; skip its unused below-plane projection.
+    if (direction.z<=1e-5) return 0.0;
+    return emitterResponse(projectEmitter(point,direction),direction.z,0.0);
+}
+vec3 environment(vec3 direction,vec3 ambient,float lamp) {
     // A low-frequency local-scene environment is an explicit screen-space
     // approximation, separate from the finite overhead strip and distant window.
     // A distant panoramic studio window contributes a broad lower reflection.
@@ -284,15 +279,16 @@ void main() {
     vec2 objectCenter=sceneOrigin*capturePixels+.5*sizePx;
     vec3 entryWorld=vec3(objectCenter+entry.xy,centerZ+entry.z);
     vec3 reflectedDirection=reflect(incoming,entryNormal);
-    float emitterD=emitterDistance(entryWorld,reflectedDirection);
+    vec2 projectedEmitter=projectEmitter(entryWorld,reflectedDirection);
     // First-order screen-space source footprint, not extra material roughness.
     // All fragments execute this before coverage/TIR branches.
-    float emitterWidth=min(.5*fwidth(emitterD),.25*max(lightingFrame.w,64.0));
+    float emitterWidth=min(.5*fwidth(projectedEmitter.x),.25*max(lightingFrame.w,64.0));
     if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
     vec3 inside=refract(incoming,entryNormal,1.0/ior);
     float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
     vec3 ambient=toLinear(sampleSoft(sceneOrigin+point/sizePx*sceneScale));
-    vec3 reflection=environment(entryWorld,reflectedDirection,ambient,emitterWidth);
+    vec3 reflection=environment(reflectedDirection,ambient,
+        emitterResponse(projectedEmitter,reflectedDirection.z,emitterWidth));
     vec3 exitPoint,exitNormal;
     float pathLength=0.0;
     bool found=flatRadius>0.0
@@ -312,7 +308,7 @@ void main() {
         if (!internallyReflected) {
             transmission=(1.0-entryFresnel)*(1.0-exitFresnel);
             vec3 exitWorld=vec3(objectCenter+exitPoint.xy,centerZ+exitPoint.z);
-            transmitted=environment(exitWorld,outgoing,ambient,0.0);
+            transmitted=environment(outgoing,ambient,fixedEmitter(exitWorld,outgoing));
             if (outgoing.z < -1e-5) {
                 float t=-exitWorld.z/outgoing.z;
                 vec2 scenePoint=exitWorld.xy+t*outgoing.xy;
