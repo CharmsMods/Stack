@@ -1,5 +1,7 @@
 #include "Editor/EditorModule.h"
 #include "App/AppHeaderStyle.h"
+#include "App/settings/AppearanceTheme.h"
+#include "Utils/SidePanelSlider.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/WorkspacePresentation.h"
 #include "App/WorkspaceInputScope.h"
@@ -19,6 +21,14 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
     const std::function<void()>& libraryNavigation) {
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewPanel);
     m_RawSectionPanelFrame = ImGui::GetFrameCount();
+    const bool glassSliders=!m_PermanentGalleryWorkspace && visibleWidth>.5f && size.x>0.f && size.y>0.f &&
+        m_Appearance && m_Appearance->GetGlassChromeEnabled();
+    const auto* sliderNode=glassSliders && m_RawWorkspaceLabUi.settingsTabActive ? SelectedEditingNode() : nullptr;
+    m_SidePanelSliders->BeginFrame(glassSliders,sliderNode?sliderNode->instanceUuid:m_SelectedRawAdjustmentLayer);
+    if (!m_SidePanelSliders->material.Error().empty() && !m_SidePanelSliders->errorReported) {
+        PostNotification(UiNotificationSeverity::Error,m_SidePanelSliders->material.Error(),"side-panel-glass-slider");
+        m_SidePanelSliders->errorReported=true;
+    }
     if (visibleWidth <= 0.5f || size.x <= 0.0f || size.y <= 0.0f) return;
     EnsureRawWorkspaceLoaded();
     if (!m_PermanentGalleryWorkspace) LoadResourceTextures();
@@ -76,22 +86,25 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
             const bool bodyVisible=ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoBackground);
-            if (bodyVisible && m_RawAssetCapture.assetsTab) {
-                RenderRawAssetsPanel();
-            } else if (bodyVisible && bracketSource) {
-                RenderBracketingSidePanelUI();
-            } else if (bodyVisible && settings) {
-                RenderRawWorkspaceToolSettings();
-            } else if (bodyVisible && IsRawWorkspaceProjectActive() &&
-                m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
-                m_RawLayerPanel.Prune(ImGui::GetFrameCount());
-                // This is a permanent section host. The old floating/docked
-                // presentation flag does not move it out of the section panel.
-                RenderRawLayerPanelContents();
-            } else if (bodyVisible && IsMultiFrameRawProjectActive()) {
-                ImGui::TextWrapped("Layers become available on a developed RAW image. Capture controls remain beside the viewport.");
-            } else if (bodyVisible) {
-                ImGui::TextWrapped("Open an image from Gallery to work with its layers and masks.");
+            {
+                ImGuiExtras::SidePanelSliderScope sliderPresentation(*m_SidePanelSliders,contentAlpha);
+                if (bodyVisible && m_RawAssetCapture.assetsTab) {
+                    RenderRawAssetsPanel();
+                } else if (bodyVisible && bracketSource) {
+                    RenderBracketingSidePanelUI();
+                } else if (bodyVisible && settings) {
+                    RenderRawWorkspaceToolSettings();
+                } else if (bodyVisible && IsRawWorkspaceProjectActive() &&
+                    m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
+                    m_RawLayerPanel.Prune(ImGui::GetFrameCount());
+                    // This is a permanent section host. The old floating/docked
+                    // presentation flag does not move it out of the section panel.
+                    RenderRawLayerPanelContents();
+                } else if (bodyVisible && IsMultiFrameRawProjectActive()) {
+                    ImGui::TextWrapped("Layers become available on a developed RAW image. Capture controls remain beside the viewport.");
+                } else if (bodyVisible) {
+                    ImGui::TextWrapped("Open an image from Gallery to work with its layers and masks.");
+                }
             }
             ImGui::EndChild();
             if (settings) ImGui::PopID();

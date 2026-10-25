@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Editor/Internal/RawLab/CurveTonalSliders.h"
 #include "Editor/Internal/RawLab/CurveCanvas.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
@@ -63,7 +64,7 @@ bool DrawCurveTonalSliders(std::vector<RawBezierCurvePoint>& points,
         for (const auto color : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered,
                  ImGuiCol_FrameBgActive, ImGuiCol_SliderGrab, ImGuiCol_SliderGrabActive})
             ImGui::PushStyleColor(color, ImVec4(0,0,0,0));
-        bool edited = ImGui::SliderFloat("##tonal", &value, -100.f, 100.f, "",
+        bool edited = ImGuiExtras::SidePanelSliderFloat("##tonal", &value, -100.f, 100.f, "",
             ImGuiSliderFlags_NoInput | ImGuiSliderFlags_NoRoundToFormat);
         ImGui::PopStyleColor(5);
         const ImRect track(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());

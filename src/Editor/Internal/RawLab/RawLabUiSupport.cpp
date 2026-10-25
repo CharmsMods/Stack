@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Library/LibraryControls.h"
 
@@ -158,7 +159,7 @@ bool BareSliderFloat(
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
     const bool changed =
-        ImGui::SliderFloat("##value", value, minimum, maximum, format);
+        ImGuiExtras::SidePanelSliderFloat("##value", value, minimum, maximum, format);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(3);
     ImGui::PopID();
@@ -189,7 +190,7 @@ bool BareSliderInt(
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
     const bool changed =
-        ImGui::SliderInt("##value", value, minimum, maximum, format);
+        ImGuiExtras::SidePanelSliderInt("##value", value, minimum, maximum, format);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(3);
     ImGui::PopID();

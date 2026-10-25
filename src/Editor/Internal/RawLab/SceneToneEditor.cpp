@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Editor/Internal/RawLab/SceneToneEditor.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include <imgui_internal.h>
@@ -18,7 +19,7 @@ bool DrawSceneToneEditor(RawRecipe::SceneTone& tone, bool contrastView,
             ImGui::SetNextItemWidth(-1);
         }
         const std::string widget = section == RawLabControlSection::Settings ? std::string("##") + id : label;
-        const bool edited = ImGui::SliderFloat(widget.c_str(), value, minimum, maximum, format, flags);
+        const bool edited = ImGuiExtras::SidePanelSliderFloat(widget.c_str(), value, minimum, maximum, format, flags);
         ImGui::EndDisabled();
         if (connected && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Driven by a graph input. This is the stored fallback value.");
         return edited;

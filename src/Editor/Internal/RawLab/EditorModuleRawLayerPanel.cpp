@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "App/WorkspacePresentation.h"
@@ -33,7 +34,7 @@ void EditorModule::RenderRawLayerPanelContents() {
     ImGui::BeginDisabled(!selected);
     float opacity = selected ? selected->opacity * 100 : 100;
     ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - 60));
-    const bool opacityChanged = ImGui::SliderFloat("Opacity", &opacity, 0, 100, "%.0f%%");
+    const bool opacityChanged = ImGuiExtras::SidePanelSliderFloat("Opacity", &opacity, 0, 100, "%.0f%%");
     if (ImGui::IsItemActivated()) m_Project->rawLayers.BeginGesture();
     if (opacityChanged) {
         auto candidate = m_Project->rawLayers.State();

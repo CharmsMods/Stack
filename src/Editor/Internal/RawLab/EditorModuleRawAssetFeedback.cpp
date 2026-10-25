@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabImageMapping.h"
 #include "Project/GraphImageContracts.h"
@@ -123,7 +124,7 @@ void EditorModule::RenderRawAssetCaptureOverlay(const ImVec2& minimum,const ImVe
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        ImGui::SliderFloat("Match tolerance",&capture.selection.outerFeather,0.f,2.f,"%.2f");
+        ImGuiExtras::SidePanelSliderFloat("Match tolerance",&capture.selection.outerFeather,0.f,2.f,"%.2f");
         ImGui::Checkbox("Repeat this capture action",&capture.repeat);
         if(ImGui::MenuItem("Cancel")) {cancel("Capture canceled.");ImGui::CloseCurrentPopup();}
         ImGui::EndPopup();

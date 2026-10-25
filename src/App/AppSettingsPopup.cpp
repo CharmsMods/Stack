@@ -207,7 +207,7 @@ void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, Sta
         ReportPreferenceResult(state, "glass-chrome", "Floating glass navigation (experimental)",
             appearance->SetGlassChromeEnabled(glassChromeEnabled));
     }
-    ImGui::TextWrapped("Separate floating glass controls in the left navigation column; photos and exports unchanged.");
+    ImGui::TextWrapped("Floating glass navigation and slider thumbs in the View side panel; photos and exports unchanged.");
     ImGui::Spacing();
 
     StackAppearance::RenderPaletteWorkshop(*appearance, state.paletteWorkshop, state.notifier);

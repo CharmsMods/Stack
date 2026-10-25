@@ -10,6 +10,7 @@
 namespace StackAppearance {
     class AppearanceManager;
 }
+namespace ImGuiExtras { struct SidePanelSliderState; }
 
 #include "Raw/RawViewportTransition.h"
 #include "Renderer/RawImageBackdrop.h"
@@ -3088,6 +3089,7 @@ private:
     void AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorker::PreviewRequest>& requests);
     void AdoptRawLayerThumbnail(const EditorRenderWorker::PreviewResult& result);
     Stack::Editor::RawLayerPanelState m_RawLayerPanel;
+    std::unique_ptr<ImGuiExtras::SidePanelSliderState> m_SidePanelSliders;
     bool ApplyRawLayerStackEdit(Stack::Project::RawLayerStackState candidate, bool affectsPixels = true, bool completesAction = false);
     Stack::Editor::RawAssetCaptureState m_RawAssetCapture;
     Stack::Editor::RawAssetPreviewCache m_RawAssetPreviews;

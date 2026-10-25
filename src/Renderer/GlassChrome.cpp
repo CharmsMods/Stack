@@ -51,7 +51,7 @@ GlassChrome::MaterialProfile GlassChrome::ResolveMaterial(MaterialRole role) {
     if (role==MaterialRole::SliderThumb) material.flatCapFraction=.25f;
     return material;
 }
-bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation, MaterialRole role) {
+bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint, float radius, float elevation, MaterialRole role, float opacity) {
     if (!enabled || !error.empty() || !draw || backdrops.empty() || max.x <= min.x || max.y <= min.y ||
         ImGui::GetWindowViewport()!=ImGui::GetMainViewport()) return false;
     const Backdrop& backdrop=backdrops.back();
@@ -61,7 +61,7 @@ bool GlassChrome::AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tin
     // This same immutable layout is drawn later. Hidden project rows allocate
     // no callback/reset, while a just-offclip object's visible shadow survives.
     if (!BuildLayout(backdrop,min,max,ImVec4(clipMin.x,clipMin.y,clipMax.x,clipMax.y),radius,elevation,material,layout)) return false;
-    objects.push_back({this,&backdrop,tint,layout,material});
+    objects.push_back({this,&backdrop,tint,layout,material,std::isfinite(opacity)?std::clamp(opacity,0.f,1.f):1.f});
     draw->AddCallback(ObjectCallback,&objects.back());
     draw->AddCallback(ImDrawCallback_ResetRenderState,nullptr);
     return true;
@@ -405,6 +405,7 @@ void GlassChrome::DrawObject(const Object& object) {
     const auto& window=material.studioWindow;
     glUniform4f(12,window.x,window.y,window.z,window.w);
     glUniform1f(13,material.flatCapFraction);
+    glUniform1f(15,object.opacity);
     const auto& backdrop=*object.backdrop;
     glUniform4f(14,captureOrigin.x-backdrop.lightOrigin.x,captureOrigin.y-backdrop.lightOrigin.y,
         backdrop.lightSize.x,backdrop.lightSize.y);

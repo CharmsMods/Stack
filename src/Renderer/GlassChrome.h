@@ -32,8 +32,10 @@ public:
     // Values are clamped to [0,1]; non-finite inputs use the resting height.
     // Material role selects profile and illumination independently of size/DPI.
     // Outer bounds, layout and input hit targets are unchanged.
+    // Opacity fades both the optical body and its shadow; legacy callers use one.
     bool AddObject(ImDrawList* draw, ImVec2 min, ImVec2 max, ImVec4 tint,
-        float radius, float elevation = 1.f, MaterialRole role = MaterialRole::Lens);
+        float radius, float elevation = 1.f, MaterialRole role = MaterialRole::Lens,
+        float opacity = 1.f);
     // Bracket only neutral foreground geometry. Does not create a hit target.
     bool BeginInk(ImDrawList* draw, ImVec2 min, ImVec2 max, ImGuiID id);
     void EndInk(ImDrawList* draw);
@@ -60,7 +62,7 @@ private:
         int left=0, bottom=0, width=0, height=0;
     };
     struct Backdrop { GlassChrome* owner; ImVec2 min, max, displayPos, displaySize, scale; ImVec4 tint, clip; float dpi; CaptureLayout layout{}; ImVec2 lightOrigin{}, lightSize{}; };
-    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; MaterialProfile material; };
+    struct Object { GlassChrome* owner; const Backdrop* backdrop; ImVec4 tint; ObjectLayout layout; MaterialProfile material; float opacity; };
     struct Ink { GlassChrome* owner; const Backdrop* backdrop; ImVec2 min, max; ImGuiID id; unsigned int slot; ImVec4 clip; bool usable=false; };
     static void InkCallback(const ImDrawList*, const ImDrawCmd*);
     static void EndInkCallback(const ImDrawList*, const ImDrawCmd*);

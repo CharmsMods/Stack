@@ -62,6 +62,7 @@ layout(location=11) uniform float studioWindowStrength; // Renderer-owned materi
 layout(location=12) uniform vec4 studioWindowShape; // axis H/Z and outer/inner angular cosines.
 layout(location=13) uniform float flatCapFraction;
 layout(location=14) uniform vec4 lightingFrame; // Capture-to-studio XY, studio size ZW.
+layout(location=15) uniform float objectOpacity;
 vec3 sampleSoft(vec2 p) {
     vec2 halfTexel=.5/vec2(textureSize(softScene,0));
     return texture(softScene,clamp(p*softExtent,halfTexel,softExtent-halfTexel)).rgb;
@@ -283,7 +284,7 @@ void main() {
     // First-order screen-space source footprint, not extra material roughness.
     // All fragments execute this before coverage/TIR branches.
     float emitterWidth=min(.5*fwidth(projectedEmitter.x),.25*max(lightingFrame.w,64.0));
-    if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
+    if (coverage<=0.0) { color=vec4(vec3(0.0),shadow*objectOpacity); return; }
     vec3 inside=refract(incoming,entryNormal,1.0/ior);
     float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
     vec3 ambient=toLinear(sampleSoft(sceneOrigin+point/sizePx*sceneScale));
@@ -328,6 +329,6 @@ void main() {
     // Preserve the upstream static, sub-code-value dithering convention.
     material+=vec3((rand(gl_FragCoord.xy)-.5)/255.0);
     float alpha=coverage+(1.0-coverage)*shadow;
-    color=vec4(material*coverage/max(alpha,.0001),alpha);
+    color=vec4(material*coverage/max(alpha,.0001),alpha*objectOpacity);
 })";
 }

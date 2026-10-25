@@ -1,3 +1,4 @@
+#include "Utils/SidePanelSlider.h"
 #include "Raw/Bracketing/Panorama/Compatibility.h"
 #include "Editor/EditorModule.h"
 #include "BracketingSession.h"
@@ -108,7 +109,7 @@ void EditorModule::RenderBracketingSidePanelUI() {
             if(ImGui::Combo("##PanoramaProjection",&projection,projections,3)){ui.recipe.panorama.projection=static_cast<Raw::Bracketing::PanoramaProjection>(projection);changed=true;}
             float percent=float(ui.recipe.panorama.outputScale*100);
             ImGui::TextUnformatted("Output size");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##OutputSize",&percent,1,100,"%.0f%%")){ui.recipe.panorama.outputScale=percent/100.;changed=true;}
+            if(ImGuiExtras::SidePanelSliderFloat("##OutputSize",&percent,1,100,"%.0f%%")){ui.recipe.panorama.outputScale=percent/100.;changed=true;}
             int denoise=ui.recipe.panorama.overlapDenoise?0:1;const char* noiseItems[]={"Overlap denoise: Auto","Overlap denoise: Off"};ImGui::SetNextItemWidth(-1);
             if(ImGui::Combo("##PanoramaDenoise",&denoise,noiseItems,2)){ui.recipe.panorama.overlapDenoise=denoise==0;changed=true;}
             ImGui::TextWrapped("Stitch overlapping captures in any direction. Uncovered borders remain transparent.");
@@ -133,11 +134,11 @@ void EditorModule::RenderBracketingSidePanelUI() {
         if(ui.recipe.depth.enabled) {
             float focus=float(ui.recipe.depth.focus),range=float(ui.recipe.depth.focusRange),radius=float(ui.recipe.depth.blurRadius);
             ImGui::TextUnformatted("Focus: far to near");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthFocus",&focus,0,1,"%.2f")){ui.recipe.depth.focus=focus;changed=true;}
+            if(ImGuiExtras::SidePanelSliderFloat("##DepthFocus",&focus,0,1,"%.2f")){ui.recipe.depth.focus=focus;changed=true;}
             ImGui::TextUnformatted("Focus range");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthRange",&range,0,1,"%.2f")){ui.recipe.depth.focusRange=range;changed=true;}
+            if(ImGuiExtras::SidePanelSliderFloat("##DepthRange",&range,0,1,"%.2f")){ui.recipe.depth.focusRange=range;changed=true;}
             ImGui::TextUnformatted("Blur radius");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthBlurRadius",&radius,0,64,"%.1f px")){ui.recipe.depth.blurRadius=radius;changed=true;}
+            if(ImGuiExtras::SidePanelSliderFloat("##DepthBlurRadius",&radius,0,64,"%.1f px")){ui.recipe.depth.blurRadius=radius;changed=true;}
             ImGui::TextWrapped("Relative depth from handheld parallax. Blur 0 keeps the sharp reconstruction. Uncertain regions stay sharp.");
             const auto depth=ui.result&&ui.result->raw?ui.result->raw->reconstructionDepth:nullptr;
             if(depth)ImGui::TextWrapped("%s",depth->message.c_str());

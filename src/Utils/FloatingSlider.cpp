@@ -1,5 +1,6 @@
 #include "Utils/FloatingSlider.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/SidePanelSlider.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -39,11 +40,11 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
         ImGui::PushStyleColor(color, ImVec4(0,0,0,0));
     bool changed;
     if constexpr (std::is_same_v<T, int>)
-        changed = ImGui::SliderInt("##value", value, minimum, maximum, "", flags);
+        changed = SidePanelSliderInt("##value", value, minimum, maximum, "", flags);
     else if constexpr (std::is_same_v<T, float>)
-        changed = ImGui::SliderFloat("##value", value, minimum, maximum, "", flags);
+        changed = SidePanelSliderFloat("##value", value, minimum, maximum, "", flags);
     else
-        changed = ImGui::SliderScalar("##value", std::is_integral_v<T> ? ImGuiDataType_S64 : ImGuiDataType_Double,
+        changed = SidePanelSliderScalar("##value", std::is_integral_v<T> ? ImGuiDataType_S64 : ImGuiDataType_Double,
             value, &minimum, &maximum, "", flags);
     ImGui::PopStyleColor(6);
     ImGui::PopStyleVar(2);
@@ -82,9 +83,11 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
         draw->AddCircleFilled(ImVec2(b,center.y),thickness*.5f,ink,16);
     };
     // Leave the circle's interior transparent even over the image background.
-    line(left,center.x-radius-2.f*scale);
-    line(center.x+radius+2.f*scale,right);
-    draw->AddCircle(center,radius,ink,32,2.f*scale);
+    if (!HasSidePanelSliderScope()) {
+        line(left,center.x-radius-2.f*scale);
+        line(center.x+radius+2.f*scale,right);
+        draw->AddCircle(center,radius,ink,32,2.f*scale);
+    }
 
     char text[96];
     const char* numericFormat = format ? format : std::is_same_v<T,int> ? "%d" :
