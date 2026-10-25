@@ -121,6 +121,15 @@ bool exitProfile(vec3 origin,vec3 direction,vec2 core,float r,float h,float flat
     // unique exit of this convex volume, so no unbounded marching is needed.
     if (direction.z>=-1e-5) return false;
     float low=0.0, high=(origin.z+h)/(-direction.z);
+    vec2 radial=origin.xy-clamp(origin.xy,-core,core);
+    // Exactly vertical rays in the planar center hit its lower plane directly.
+    // Do not approximate nearly vertical shoulder rays with this shortcut.
+    if (all(equal(direction.xy,vec2(0.0))) && length(radial)<=flatRadius) {
+        lengthInside=high;
+        point=origin+high*direction;
+        normal=vec3(0.0,0.0,-1.0);
+        return true;
+    }
     for (int i=0;i<15;++i) {
         float middle=.5*(low+high);
         if (profileField(origin+middle*direction,core,r,h,flatRadius)>0.0) high=middle;
@@ -181,7 +190,14 @@ float fresnel(float cosine,float incidentIndex,float transmittedIndex) {
         max(transmittedIndex*cosine+incidentIndex*transmittedCosine,1e-8);
     return .5*(rs*rs+rp*rp);
 }
-vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
+float emitterDistance(vec3 point,vec3 direction,vec2 capturePixels) {
+    float unit=max(capturePixels.y,64.0);
+    float t=(.9*unit-point.z)/max(direction.z,1e-5);
+    vec2 p=point.xy+t*direction.xy;
+    vec2 outside=abs(p-vec2(-.35,2.4)*unit)-vec2(.65,.45)*unit;
+    return max(outside.x,outside.y);
+}
+vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels,float footprint) {
     // One shared finite overhead emitter in capture/world coordinates, not a
     // stripe painted in object UV. Its footprint follows the reflected ray.
     float unit=max(capturePixels.y,64.0);
@@ -194,9 +210,9 @@ vec3 environment(vec3 point,vec3 direction,vec3 ambient,vec2 capturePixels) {
         vec2 p=point.xy+t*direction.xy;
         vec2 outside=abs(p-lightCenter)-lightHalfSize;
         float d=max(outside.x,outside.y);
-        // Bounded angular roughness approximation. No screen derivatives inside
-        // direction/TIR branches, where neighboring rays may be divergent.
-        float softness=.015*unit;
+        // Fixed artistic source feather plus the caller's bounded screen-space
+        // sampling width. Derivatives are never evaluated in these branches.
+        float softness=max(.015*unit,footprint);
         lamp=t>0.0 ? 1.0-smoothstep(-softness,softness,d) : 0.0;
     }
     // A low-frequency local-scene environment is an explicit screen-space
@@ -238,7 +254,7 @@ void main() {
         .044715*standardized*standardized*standardized)));
     float shadow=.10*occlusion;
     shadow*=1.0-smoothstep(2.5*sigma,3.0*sigma,shadowDistance);
-    if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
+    // Delay shadow-only exit until the emitter derivative is evaluated uniformly.
 
     float h=volume.x;
     float gap=volume.y;
@@ -260,13 +276,20 @@ void main() {
     vec3 entryNormal=flatRadius>0.0 ? profileNormal(entry,core,r,h,flatRadius) : volumeNormal(entry,core,r,h);
     vec3 incoming=vec3(0.0,0.0,-1.0);
     const float ior=1.45;
-    vec3 inside=refract(incoming,entryNormal,1.0/ior);
-    float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
+
     vec2 capturePixels=sharpExtent*vec2(textureSize(sharpScene,0));
     vec2 objectCenter=sceneOrigin*capturePixels+.5*sizePx;
     vec3 entryWorld=vec3(objectCenter+entry.xy,centerZ+entry.z);
+    vec3 reflectedDirection=reflect(incoming,entryNormal);
+    float emitterD=emitterDistance(entryWorld,reflectedDirection,capturePixels);
+    // First-order screen-space source footprint, not extra material roughness.
+    // All fragments execute this before coverage/TIR branches.
+    float emitterWidth=min(.5*fwidth(emitterD),.25*max(capturePixels.y,64.0));
+    if (coverage<=0.0) { color=vec4(vec3(0.0),shadow); return; }
+    vec3 inside=refract(incoming,entryNormal,1.0/ior);
+    float entryFresnel=fresnel(-dot(incoming,entryNormal),1.0,ior);
     vec3 ambient=toLinear(sampleSoft(sceneOrigin+point/sizePx*sceneScale));
-    vec3 reflection=environment(entryWorld,reflect(incoming,entryNormal),ambient,capturePixels);
+    vec3 reflection=environment(entryWorld,reflectedDirection,ambient,capturePixels,emitterWidth);
     vec3 exitPoint,exitNormal;
     float pathLength=0.0;
     bool found=flatRadius>0.0
@@ -286,7 +309,7 @@ void main() {
         if (!internallyReflected) {
             transmission=(1.0-entryFresnel)*(1.0-exitFresnel);
             vec3 exitWorld=vec3(objectCenter+exitPoint.xy,centerZ+exitPoint.z);
-            transmitted=environment(exitWorld,outgoing,ambient,capturePixels);
+            transmitted=environment(exitWorld,outgoing,ambient,capturePixels,0.0);
             if (outgoing.z < -1e-5) {
                 float t=-exitWorld.z/outgoing.z;
                 vec2 scenePoint=exitWorld.xy+t*outgoing.xy;

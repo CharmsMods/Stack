@@ -191,6 +191,89 @@ void CheckSliderMaterialRoles(GLuint framebuffer) {
     std::cout<<"PASS slider material: source-width center, refracted shoulder, "
         "interleaved Lens/NavigationControl reset, exact reverse order, alpha255\n";
 }
+// Reproducible optical observation, not a universal visual-quality threshold.
+// Fractional translation moves a real production button and its glyph together;
+// it is a test stimulus, not a new application animation or authored value.
+void ObserveEmitterMotion(GLuint framebuffer, const std::string& folder) {
+    constexpr int width=640, height=360;
+    Stack::Renderer::GlassChrome renderer;
+    Stack::Animation::ControlMotion motion;
+    const ImVec4 tint(.09f,.12f,.15f,1.f);
+    const auto palette=Stack::Header::ResolvePalette(tint);
+    std::vector<unsigned char> previous;
+    int maximumGlintStep=0;
+    auto render=[&](int phase, bool save) {
+        auto& io=ImGui::GetIO();
+        io.AddMousePosEvent(600,330);
+        io.AddMouseButtonEvent(0,false);
+        renderer.BeginFrame(true);
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        auto* background=ImGui::GetBackgroundDrawList();
+        background->AddRectFilled({0,0},{width,height},IM_COL32(0,0,0,255));
+        background->AddText({12,18},IM_COL32_WHITE,"Cloud emitter observation: synthetic translation, not app animation");
+        ImGui::SetNextWindowPos({0,52});
+        ImGui::SetNextWindowSize({width,308});
+        ImGui::Begin("Emitter observation",nullptr,
+            ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
+            ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoInputs);
+        auto* draw=ImGui::GetWindowDrawList();
+        draw->PushClipRect({0,0},{width,height},false);
+        assert(renderer.AddBackdrop(draw,{0,52},{width,height},tint));
+        const ImVec2 origin(7.f+.125f*phase,101.f+.0625f*phase);
+        ImGui::SetCursorScreenPos(origin);
+        const bool activated=Stack::Navigation::IconButton("Observed Library",
+            Stack::Navigation::Glyph::Library,false,true,1.f,palette,motion,
+            nullptr,true,&renderer);
+        const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
+        assert(min.x==origin.x&&min.y==origin.y&&max.x-min.x==38&&max.y-min.y==38);
+        assert(!activated&&!ImGui::IsItemActive()&&motion.Snapshot().press==0);
+        draw->PopClipRect();
+        ImGui::End();
+        ImGui::Render();
+        glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);
+        glViewport(0,0,width,height);
+        glClearColor(0,0,0,1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        std::vector<unsigned char> pixels(width*height*4);
+        glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+        assert(renderer.Error().empty()&&glGetError()==GL_NO_ERROR);
+        for (std::size_t i=3;i<pixels.size();i+=4) assert(pixels[i]==255);
+        if (!save) return;
+        if (!previous.empty()) {
+            for (int y=0;y<height;++y) for (int x=0;x<width;++x) {
+                const auto offset=((height-1-y)*width+x)*4;
+                for (int c=0;c<3;++c) {
+                    if (x>=80||y<80||y>=160) assert(pixels[offset+c]==previous[offset+c]);
+                    // Fixed upper-glint ROI for this controlled black scene.
+                    // Report its change; do not assert a hardware-independent
+                    // antialiasing score or mistake it for all-body smoothness.
+                    if (x>=10&&x<45&&y>=99&&y<109)
+                        maximumGlintStep=std::max(maximumGlintStep,
+                            std::abs(int(pixels[offset+c])-int(previous[offset+c])));
+                }
+            }
+        }
+        char name[48];
+        std::snprintf(name,sizeof(name),"/emitter-motion-%02d.ppm",phase);
+        std::ofstream out(folder+name,std::ios::binary);
+        assert(out.is_open());
+        out<<"P6\n"<<width<<" "<<height<<"\n255\n";
+        for (int y=height-1;y>=0;--y) for (int x=0;x<width;++x)
+            out.write(reinterpret_cast<const char*>(pixels.data()+(y*width+x)*4),3);
+        out.flush();
+        assert(out.good());
+        previous=std::move(pixels);
+    };
+    render(0,false); // Establish the fixed window and first ink measurement.
+    for (int phase=0;phase<12;++phase) render(phase,true);
+    renderer.Shutdown();
+    assert(glGetError()==GL_NO_ERROR);
+    std::cout<<"PASS emitter observation: 12 fractional button frames, fixed38px size, "
+        "alpha255/exterior/GL checks; observed upper-glint max RGB step="
+        <<maximumGlintStep<<" (not a universal quality assertion)\n";
+}
 } // namespace
 
 int main(int argc,char** argv){assert(argc==2);
@@ -554,6 +637,7 @@ int main(int argc,char** argv){assert(argc==2);
 
     CheckSharedBackdropCapture(fbo);
     CheckSliderMaterialRoles(fbo);
+    ObserveEmitterMotion(fbo,folder);
 
     sliderGlass.Shutdown();
     glass.Shutdown();
