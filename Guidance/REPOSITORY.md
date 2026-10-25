@@ -19,7 +19,7 @@ Keep the root for the CMake entry point, command launchers, Git configuration an
 | `legal/` | Active third-party component metadata, notices and dependency licenses; `archive/stack-agreement/` holds the inactive custom agreement packet and former integration |
 | `website/` | Local website source and images, ignored by Git |
 | `Guidance/` | Current repository instructions |
-| `RESEARCH/` | Local topic-specific designs, findings and prior work records, ignored by Git |
+| `RESEARCH/` | Topic-specific designs, findings and prior work records; local and ignored by Git except for the tracked glass/motion HTML handoff |
 
 ## Generated and local files
 
@@ -27,7 +27,7 @@ Keep the root for the CMake entry point, command launchers, Git configuration an
 
 The splash, tab-icon, RAW-sidebar-icon and composite-font headers are generated and ignored. The normal build recreates them before compiling Stack. Keep their source assets and bake scripts in Git. `Embedded8BitFont.h` remains a source dependency because the build has no generator for it.
 
-The whole `RESEARCH/` and `website/` folders stay local. This includes downloaded papers, validation results and website drafts. The app's source icon is `Assets/Icons/Stack.png`; its bake script and source-image loading path do not require `website/`.
+`RESEARCH/` stays local except for the tracked [glass/motion handoff](../RESEARCH/glass-navigation/GlassNavigation.html#resume). Its supporting reference images, captures, logs and historical review remain ignored, as do other downloaded papers and validation results. The whole `website/` folder stays local, including website drafts. The app's source icon is `Assets/Icons/Stack.png`; its bake script and source-image loading path do not require `website/`.
 
 Original RAW inputs in the local `bike test set/`, `denoise sets/` and `depth sets/` directories stay where they are. Those directories and project backup files are ignored. Follow the original-source safeguards in [Implementation/README.md](Implementation/README.md) before changing any image-data location.
 

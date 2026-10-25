@@ -26,7 +26,7 @@ Stack's original program source, build scripts, documentation and program assets
 
 - [Repository layout](Guidance/REPOSITORY.md)
 - [Implementation guidance](Guidance/Implementation/README.md)
-- [Glass navigation, motion API and Codex handoff](Guidance/GlassNavigation.html#resume)
+- [Glass navigation, motion API and Codex handoff](RESEARCH/glass-navigation/GlassNavigation.html#resume)
 - [Build and packaging instructions](Guidance/BUILDING.md)
 
 ## Licensing and third-party components

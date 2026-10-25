@@ -99,8 +99,12 @@ Desktop.ini
 # Local build and validation scratch files
 /_tmp/
 
-# Local research records, downloaded papers, validation results, and website work
-/RESEARCH/
+# Local research records, downloaded papers, validation results, and website work.
+# Preserve the existing tracked glass/motion handoff at its research location.
+/RESEARCH/*
+!/RESEARCH/glass-navigation/
+/RESEARCH/glass-navigation/*
+!/RESEARCH/glass-navigation/GlassNavigation.html
 /website/
 
 # AI training, model inputs/outputs, and validation tools
