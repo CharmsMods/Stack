@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace {
 void Require(bool condition, const char* message) {
@@ -112,6 +114,93 @@ void CheckActivityIdentityQueries() {
     Require(CheckRunningActivities(*store, copies, previewLifetime).empty(),
         "Resolved activities must not suppress collector entries");
 }
+
+void CheckPresentationSelection(const Stack::Notifications::NotificationStore& store, int& copies) {
+    using namespace Stack::Notifications;
+    const auto records = store.Snapshot();
+    std::vector<EventId> currentDialogs{0, std::numeric_limits<EventId>::max()};
+    std::vector<std::uint64_t> seenRevisions{0, std::numeric_limits<std::uint64_t>::max()};
+    std::unordered_set<std::uint64_t> previewRevisions;
+    for (const auto& record : records) {
+        currentDialogs.push_back(record.id);
+        seenRevisions.push_back(record.previewRevision);
+        Require(!record.previewRevision || previewRevisions.insert(record.previewRevision).second,
+            "Nonzero preview revisions must be unique, independent of presentation sort order");
+    }
+    copies = 0;
+    for (const auto current : currentDialogs) {
+        EventId expected = 0;
+        for (const auto& record : records) {
+            if (!record.ownerValid || !record.centerRequested || record.Terminal()) continue;
+            if (!expected) expected = record.id;
+            if (record.id == current) { expected = current; break; }
+        }
+        Require(store.FindRequestedDialog(current) == expected, "Dialog selection changed record order or eligibility");
+    }
+    for (const auto seen : seenRevisions) {
+        const Record* expected = nullptr;
+        for (const auto& record : records) {
+            if (record.previewRevision > seen && record.content.preview &&
+                !record.dismissed && record.state != RecordState::Running &&
+                (!expected || record.previewRevision > expected->previewRevision)) expected = &record;
+        }
+        const auto selected = store.FindLatestPreview(seen);
+        Require(selected.has_value() == (expected != nullptr), "Preview selection changed eligibility");
+        if (expected) Require(selected->eventId == expected->id && selected->revision == expected->previewRevision,
+            "Preview selection changed newest-unseen ordering");
+    }
+    Require(copies == 0, "Presentation selection copied feature callback payloads");
+}
+
+void CheckPresentationQueries() {
+    using namespace Stack::Notifications;
+    auto store = std::make_shared<NotificationStore>();
+    auto owner = store->ForOwner(1, "Owner");
+    int copies = 0;
+    CheckPresentationSelection(*store, copies);
+    NoticeSpec decision;
+    decision.title = "First decision";
+    decision.foreground = true;
+    decision.customBody = CountCopies(copies);
+    const auto first = owner.RequestDecision(decision);
+    decision.title = "Second decision";
+    const auto second = owner.RequestDecision(decision);
+    Require(first && second, "Presentation fixture creation failed");
+    CheckPresentationSelection(*store, copies);
+    Require(store->FindRequestedDialog() == first && store->FindRequestedDialog(second) == second,
+        "A retained eligible dialog must take priority over an earlier queued record");
+    store->CloseDialog(first);
+    CheckPresentationSelection(*store, copies);
+    store->RequestCenter(first);
+    store->Resolve(first);
+    CheckPresentationSelection(*store, copies);
+    store->Dismiss(second);
+    CheckPresentationSelection(*store, copies);
+    Require(!store->FindRequestedDialog() && store->FindLatestPreview(0)->eventId == first,
+        "Resolved records remain preview-eligible while dismissed records do not");
+
+    NoticeSpec work;
+    work.title = "Running work";
+    work.customBody = CountCopies(copies);
+    const auto activity = owner.BeginActivity(std::move(work));
+    Require(static_cast<bool>(activity), "Presentation activity fixture failed");
+    CheckPresentationSelection(*store, copies);
+    owner.CompleteActivity(activity, "Finished");
+    CheckPresentationSelection(*store, copies);
+    Require(store->FindLatestPreview(0)->eventId == activity.eventId, "Completion must publish the newest preview");
+    NoticeSpec silent;
+    silent.title = "No preview";
+    silent.preview = false;
+    silent.customBody = CountCopies(copies);
+    Require(owner.Post(std::move(silent)) != 0, "Silent fixture creation failed");
+    CheckPresentationSelection(*store, copies);
+    store->InvalidateOwner(1);
+    CheckPresentationSelection(*store, copies);
+    store->Show(activity.eventId);
+    CheckPresentationSelection(*store, copies);
+    Require(store->FindLatestPreview(0)->eventId == activity.eventId,
+        "An explicitly shown invalid-owner record must retain existing preview eligibility");
+}
 }
 
 int main() try {
@@ -147,7 +236,8 @@ int main() try {
     Check(*store, copies);
     Require(store->CountNeedsAttention() == 0, "Invalid owner retained attention");
     CheckActivityIdentityQueries();
-    std::cout << "Notification attention and activity identities match record semantics with zero callback copies.\n";
+    CheckPresentationQueries();
+    std::cout << "Notification attention, activity identities and presentation selection match record semantics with zero callback copies.\n";
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

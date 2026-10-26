@@ -98,31 +98,14 @@ void Presenter::BeginFrame(NotificationStore& store) {
         const auto* modal = ImGui::GetTopMostPopupModal();
         if (modal && std::strcmp(modal->Name,"##StackNotificationDialog") != 0) { m_Dialog = 0; return; }
     }
-    if (m_Dialog) {
-        const auto current = store.Find(m_Dialog);
-        if (!current || !current->ownerValid || !current->centerRequested || current->Terminal())
-            m_Dialog = 0;
-    }
-    if (!m_Dialog) {
-        for (const auto& record : store.Snapshot()) {
-            if (record.ownerValid && record.centerRequested && !record.Terminal()) {
-                m_Dialog = record.id;
-                break;
-            }
-        }
-    }
+    m_Dialog = store.FindRequestedDialog(m_Dialog);
 }
 
-void Presenter::UpdatePreview(const std::vector<Record>& records) {
-    const Record* next = nullptr;
-    for (const auto& record : records) {
-        if (record.previewRevision > m_SeenPreviewRevision && record.content.preview &&
-            !record.dismissed && !IsRunning(record))
-            if (!next || record.previewRevision > next->previewRevision) next = &record;
-    }
-    if (next && !BlocksInput()) {
-        m_SeenPreviewRevision = next->previewRevision;
-        m_Preview = next->id;
+void Presenter::UpdatePreview(NotificationStore& store) {
+    if (BlocksInput()) return;
+    if (const auto next = store.FindLatestPreview(m_SeenPreviewRevision)) {
+        m_SeenPreviewRevision = next->revision;
+        m_Preview = next->eventId;
         m_PreviewRemaining = 4.0;
     }
 }
@@ -254,21 +237,21 @@ void Presenter::RenderActions(NotificationStore& store, const Record& record, bo
 }
 
 void Presenter::RenderActivity(NotificationStore& store, const PresentationContext& context) {
-    auto records = store.Snapshot();
-    std::stable_sort(records.begin(),records.end(),[&](const Record& a,const Record& b) {
-        const auto section = [](const Record& r) { return IsRunning(r) ? 0 : r.NeedsAttention() ? 1 : 2; };
-        if (section(a) != section(b)) return section(a) < section(b);
-        const auto priority = [&](const Record& r) { return r.content.maintenance ? 2 : r.owner.id == context.currentOwner ? 0 : 1; };
-        if (IsRunning(a) && IsRunning(b) && priority(a) != priority(b)) return priority(a) < priority(b);
-        return a.updatedAt > b.updatedAt;
-    });
-    UpdatePreview(records);
+    UpdatePreview(store);
     if (!m_HasAnchor || BlocksInput()) return;
     const float unit = ImGui::GetFontSize() / 13.0f;
     const auto* viewport = ImGui::GetMainViewport();
     const float width = std::min(420.0f * unit, viewport->WorkSize.x - 24.0f * unit);
     const ImVec2 anchor(std::min(m_Anchor.x, viewport->WorkPos.x + viewport->WorkSize.x - 12 * unit), m_Anchor.y + 6 * unit);
     if (m_PanelOpen) {
+        auto records = store.Snapshot();
+        std::stable_sort(records.begin(),records.end(),[&](const Record& a,const Record& b) {
+            const auto section = [](const Record& r) { return IsRunning(r) ? 0 : r.NeedsAttention() ? 1 : 2; };
+            if (section(a) != section(b)) return section(a) < section(b);
+            const auto priority = [&](const Record& r) { return r.content.maintenance ? 2 : r.owner.id == context.currentOwner ? 0 : 1; };
+            if (IsRunning(a) && IsRunning(b) && priority(a) != priority(b)) return priority(a) < priority(b);
+            return a.updatedAt > b.updatedAt;
+        });
         ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1,0));
         ImGui::SetNextWindowSize(ImVec2(width, std::min(560.0f * unit, viewport->WorkSize.y - 76 * unit)), ImGuiCond_Always);
         ImGui::SetNextWindowViewport(viewport->ID);

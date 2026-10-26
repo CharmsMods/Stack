@@ -19,6 +19,13 @@ void Require(bool condition, const char* message) {
 namespace {
 using namespace Stack::Notifications;
 
+struct CountPayloadCopies {
+    int* copies;
+    explicit CountPayloadCopies(int& count) : copies(&count) {}
+    CountPayloadCopies(const CountPayloadCopies& other) : copies(other.copies) { ++*copies; }
+    void operator()() const {}
+};
+
 void CheckActivity() {
     using namespace Stack::UiActivity;
     Presentation view;
@@ -305,11 +312,22 @@ void CheckNativePresenters() {
     context.workspacePosition = ImVec2(0,50);
     context.workspaceSize = ImVec2(800,550);
     context.reducedMotion = true;
+    int payloadCopies = 0;
+    NoticeSpec quiet;
+    quiet.title = "Retained history payload";
+    quiet.details = std::string(4096, 'x');
+    quiet.preview = false;
+    quiet.customBody = CountPayloadCopies(payloadCopies);
+    Require(coast.Post(std::move(quiet)) != 0, "Presenter payload fixture failed");
+    payloadCopies = 0;
+    presenter.BeginFrame(*store);
+    presenter.RenderActivity(*store, context);
+    Require(payloadCopies == 0, "Presenter discovery without an anchor must not copy record payloads");
     bool showForm = false;
     bool closeForm = false;
-    const auto frame = [&](const Stack::UiActivity::Snapshot& snapshot) {
+    const auto frame = [&](const Stack::UiActivity::Snapshot& snapshot, float delta = 1.f/60.f) {
         presenter.BeginFrame(*store);
-        io.DeltaTime = 1.f/60.f;
+        io.DeltaTime = delta;
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(520,0));
         ImGui::SetNextWindowSize(ImVec2(260,48));
@@ -331,9 +349,27 @@ void CheckNativePresenters() {
         Require(ImGui::GetDrawData()->TotalVtxCount > 0,"Native presenters must produce geometry");
     };
     const auto failure = forest.Error("An export could not be written");
+    payloadCopies = 0;
     frame(idle);
     Require(!presenter.BlocksInput() && !store->Find(failure)->centerRequested,
         "Background failures must not open a center dialog");
+    Require(payloadCopies == 0, "Closed activity panel must not copy unrelated notification payloads");
+    auto* preview = ImGui::FindWindowByName("##StackNotificationPreview");
+    Require(preview && preview->Active, "A new unseen result must show a preview");
+    presenter.TogglePanel();
+    frame(idle, 4.1f);
+    Require(payloadCopies > 0, "An open activity panel must still snapshot its displayed records");
+    presenter.TogglePanel();
+    payloadCopies = 0;
+    frame(idle);
+    Require(preview->Active && payloadCopies == 0, "The panel must pause the preview timer without retaining history copies");
+    ImGui::SetWindowFocus("Activity test");
+    io.AddMousePosEvent(5, 580);
+    frame(idle, 4.1f);
+    frame(idle);
+    Require(!preview->Active, "Preview timer must expire after four unpaused seconds");
+    frame(idle);
+    Require(!preview->Active, "An already seen preview revision must not restart its timer");
     NoticeSpec decision;
     decision.title = "Replace this project?";
     decision.message = "The target already contains a project.";
@@ -386,6 +422,15 @@ void CheckNativePresenters() {
         Require(store->Find(first)->centerRequested && store->Find(second)->centerRequested,
             "Outside clicks must not dismiss queued decisions");
     }
+    int blockedPreviewCopies = 0;
+    NoticeSpec blockedPreview;
+    blockedPreview.title = "Completed while a decision was open";
+    blockedPreview.customBody = CountPayloadCopies(blockedPreviewCopies);
+    Require(forest.Post(std::move(blockedPreview)) != 0, "Blocked preview fixture failed");
+    blockedPreviewCopies = 0;
+    frame(idle);
+    Require(!preview->Active && blockedPreviewCopies == 0,
+        "A blocking decision must suppress preview presentation and payload copies");
     io.AddKeyEvent(ImGuiKey_Escape,true);
     frame(idle);
     io.AddKeyEvent(ImGuiKey_Escape,false);
@@ -395,6 +440,8 @@ void CheckNativePresenters() {
     store->Resolve(second);
     frame(idle);
     Require(!presenter.BlocksInput(),"Resolved decisions must release application input");
+    Require(preview->Active && blockedPreviewCopies > 0,
+        "A preview queued while blocked must remain unseen until decisions close");
     decision.dedupeKey = "external-resolution-first";
     const auto externallyResolved = coast.RequestDecision(decision);
     decision.dedupeKey = "external-resolution-next";

@@ -141,6 +141,32 @@ std::vector<RunningActivityIdentity> NotificationStore::SnapshotOwnedRunningActi
     return activities;
 }
 
+EventId NotificationStore::FindRequestedDialog(EventId current) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    EventId first = 0;
+    for (const auto& record : m_Records) {
+        if (!record.ownerValid || !record.centerRequested || record.Terminal()) continue;
+        if (!current || record.id == current) return record.id;
+        if (!first) first = record.id;
+    }
+    return first;
+}
+
+std::optional<PreviewIdentity> NotificationStore::FindLatestPreview(std::uint64_t afterRevision) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::optional<PreviewIdentity> latest;
+    for (const auto& record : m_Records) {
+        if (record.previewRevision > afterRevision && record.content.preview &&
+            !record.dismissed && record.state != RecordState::Running) {
+            // Preview revisions come from the store's unique increasing revision
+            // sequence, so presentation sorting cannot change the newest record.
+            latest = PreviewIdentity{record.id, record.previewRevision};
+            afterRevision = record.previewRevision;
+        }
+    }
+    return latest;
+}
+
 std::size_t NotificationStore::CountNeedsAttention() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     return static_cast<std::size_t>(std::count_if(m_Records.begin(), m_Records.end(),

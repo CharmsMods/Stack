@@ -42,7 +42,7 @@ private:
         const PresentationContext& context, bool dialog);
     void RenderActions(NotificationStore& store, const Record& record, bool dialog,
         bool appearing = false);
-    void UpdatePreview(const std::vector<Record>& records);
+    void UpdatePreview(NotificationStore& store);
     bool m_PanelOpen = false;
     EventId m_Selected = 0;
     EventId m_Dialog = 0;

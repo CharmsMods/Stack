@@ -19,6 +19,11 @@ struct RunningActivityIdentity {
     std::string title;
 };
 
+struct PreviewIdentity {
+    EventId eventId = 0;
+    std::uint64_t revision = 0;
+};
+
 // Application-owned, session-only records. Posting and activity updates are
 // thread safe. Action handlers and their feature guards run on the main thread.
 class NotificationStore : public std::enable_shared_from_this<NotificationStore> {
@@ -36,6 +41,12 @@ public:
     // Excludes collected-activity records, but preserves dismissed and invalid
     // owners' records while Running, matching the collector's existing rule.
     std::vector<RunningActivityIdentity> SnapshotOwnedRunningActivities() const;
+    // Retain an eligible current dialog; otherwise use the first requested
+    // nonterminal record in store order. Neither query copies feature payloads.
+    EventId FindRequestedDialog(EventId current = 0) const;
+    // Preview eligibility deliberately does not require a valid owner or a
+    // nonterminal state; only unseen, enabled, undismissed, non-Running records.
+    std::optional<PreviewIdentity> FindLatestPreview(std::uint64_t afterRevision) const;
     // Aggregate queries must not copy callback captures or preview leases just
     // to draw the per-frame indicator. Uses the same rule as Record rendering.
     std::size_t CountNeedsAttention() const;
