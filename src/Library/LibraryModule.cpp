@@ -283,6 +283,7 @@ void LibraryModule::RenderUI(
     const StackAppearance::RuntimeSurfacePalette surfacePalette =
         appearance ? appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
     m_LastRenderStats = {};
+    ReconcileRefreshedPreviews();
 
     // The Library is the saved-project index. Unedited RAW sources live only
     // in RAW Lab's Gallery and are never presented as a competing Library tab.

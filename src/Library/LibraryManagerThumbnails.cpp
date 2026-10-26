@@ -136,20 +136,27 @@ bool PixelsDifferMeaningfully(
 
 } // namespace
 
-void LibraryManager::ReleaseProjectTextures(std::shared_ptr<ProjectEntry> project) {
+void LibraryManager::ReleaseLibraryTexture(unsigned int& texture, bool defer) {
+    if (texture == 0) return;
+    if (defer) {
+        try {
+            m_DeferredTextureDeletions.push_back(texture);
+            texture = 0;
+            return;
+        } catch (...) {
+            // Keep ownership explicit if the small retirement queue cannot grow.
+            // This fallback is called outside the catalog mutex on the UI context.
+        }
+    }
+    glDeleteTextures(1, &texture);
+    texture = 0;
+}
+
+void LibraryManager::ReleaseProjectTextures(std::shared_ptr<ProjectEntry> project, bool defer) {
     if (!project) return;
-    if (project->thumbnailTex) {
-        glDeleteTextures(1, &project->thumbnailTex);
-        project->thumbnailTex = 0;
-    }
-    if (project->sourcePreviewTex) {
-        glDeleteTextures(1, &project->sourcePreviewTex);
-        project->sourcePreviewTex = 0;
-    }
-    if (project->fullPreviewTex) {
-        glDeleteTextures(1, &project->fullPreviewTex);
-        project->fullPreviewTex = 0;
-    }
+    ReleaseLibraryTexture(project->thumbnailTex, defer);
+    ReleaseLibraryTexture(project->sourcePreviewTex, defer);
+    ReleaseLibraryTexture(project->fullPreviewTex, defer);
     project->thumbnailPixels.clear();
     project->thumbnailPixelWidth = 0;
     project->thumbnailPixelHeight = 0;
@@ -157,16 +164,10 @@ void LibraryManager::ReleaseProjectTextures(std::shared_ptr<ProjectEntry> projec
     project->thumbnailDecodeAttempted = false;
 }
 
-void LibraryManager::ReleaseAssetTextures(std::shared_ptr<AssetEntry> asset) {
+void LibraryManager::ReleaseAssetTextures(std::shared_ptr<AssetEntry> asset, bool defer) {
     if (!asset) return;
-    if (asset->thumbnailTex) {
-        glDeleteTextures(1, &asset->thumbnailTex);
-        asset->thumbnailTex = 0;
-    }
-    if (asset->fullPreviewTex) {
-        glDeleteTextures(1, &asset->fullPreviewTex);
-        asset->fullPreviewTex = 0;
-    }
+    ReleaseLibraryTexture(asset->thumbnailTex, defer);
+    ReleaseLibraryTexture(asset->fullPreviewTex, defer);
     asset->thumbnailPixels.clear();
     asset->thumbnailPixelWidth = 0;
     asset->thumbnailPixelHeight = 0;
@@ -212,6 +213,11 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     std::lock_guard<std::mutex> lock(m_ProjectsMutex);
     stats.projectCount = static_cast<int>(m_Projects.size());
     stats.assetCount = static_cast<int>(m_Assets.size());
+    if (!m_DeferredTextureDeletions.empty()) {
+        stats.budgetHit = true;
+        stats.elapsedMs = elapsedMs();
+        return stats;
+    }
 
     std::vector<std::shared_ptr<ProjectEntry>> projectCandidates;
     std::vector<std::shared_ptr<AssetEntry>> assetCandidates;
@@ -261,7 +267,7 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     }
 
     auto uploadProjectIfReady = [&](const std::shared_ptr<ProjectEntry>& project) {
-        if (!project || project->thumbnailTex != 0) {
+        if (!project || project->retiredFromCatalog || project->thumbnailTex != 0) {
             return;
         }
         if (project->thumbnailDecodeState == Async::TaskState::Ready) {
@@ -283,7 +289,7 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     };
 
     auto uploadAssetIfReady = [&](const std::shared_ptr<AssetEntry>& asset) {
-        if (!asset || asset->thumbnailTex != 0) {
+        if (!asset || asset->retiredFromCatalog || asset->thumbnailTex != 0) {
             return;
         }
         if (asset->thumbnailDecodeState == Async::TaskState::Ready) {
@@ -323,7 +329,7 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     int queuedProjectDecodes = 0;
     if (!stats.budgetHit) {
         for (const auto& project : projectCandidates) {
-            if (!project ||
+            if (!project || project->retiredFromCatalog ||
                 project->thumbnailTex != 0 ||
                 project->thumbnailBytes.empty() ||
                 project->thumbnailDecodeAttempted ||
@@ -343,7 +349,7 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     int queuedAssetDecodes = 0;
     if (!stats.budgetHit) {
         for (const auto& asset : assetCandidates) {
-            if (!asset ||
+            if (!asset || asset->retiredFromCatalog ||
                 asset->thumbnailTex != 0 ||
                 asset->thumbnailLoadAttempted ||
                 asset->thumbnailDecodeState == Async::TaskState::Ready ||
@@ -375,7 +381,7 @@ bool LibraryManager::HasPendingThumbnailWarmup() const {
     }
 
     for (const auto& asset : m_Assets) {
-        if (!asset || asset->thumbnailTex != 0) {
+        if (!asset || asset->retiredFromCatalog || asset->thumbnailTex != 0) {
             continue;
         }
         if (!asset->thumbnailLoadAttempted ||
@@ -393,7 +399,7 @@ std::vector<unsigned char> LibraryManager::GenerateThumbnailBytes(const std::vec
 }
 
 void LibraryManager::InitializeThumbnail(std::shared_ptr<ProjectEntry> project) {
-    if (!project ||
+    if (!project || project->retiredFromCatalog ||
         project->thumbnailDecodeState != Async::TaskState::Ready ||
         project->thumbnailPixels.empty() ||
         project->thumbnailPixelWidth <= 0 ||
@@ -418,7 +424,7 @@ void LibraryManager::InitializeThumbnail(std::shared_ptr<ProjectEntry> project) 
 }
 
 void LibraryManager::InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset) {
-    if (!asset ||
+    if (!asset || asset->retiredFromCatalog ||
         asset->thumbnailDecodeState != Async::TaskState::Ready ||
         asset->thumbnailPixels.empty() ||
         asset->thumbnailPixelWidth <= 0 ||
@@ -443,7 +449,7 @@ void LibraryManager::InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset)
 }
 
 void LibraryManager::QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEntry>& project) {
-    if (!project ||
+    if (!project || project->retiredFromCatalog ||
         project->thumbnailTex != 0 ||
         project->thumbnailBytes.empty() ||
         project->thumbnailDecodeAttempted ||
@@ -481,7 +487,7 @@ void LibraryManager::QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEn
                     pixels = std::move(pixels),
                     width,
                     height]() mutable {
-                    if (!project || project->thumbnailTex != 0) {
+                    if (!project || project->retiredFromCatalog || project->thumbnailTex != 0) {
                         return;
                     }
 
@@ -509,7 +515,7 @@ void LibraryManager::QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEn
 }
 
 void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>& asset) {
-    if (!asset ||
+    if (!asset || asset->retiredFromCatalog ||
         asset->thumbnailTex != 0 ||
         asset->thumbnailLoadAttempted ||
         Async::IsBusy(asset->thumbnailDecodeState)) {
@@ -548,7 +554,7 @@ void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>
             thumbPixels = std::move(thumbPixels),
             thumbW,
             thumbH]() mutable {
-            if (!asset || asset->thumbnailTex != 0) {
+            if (!asset || asset->retiredFromCatalog || asset->thumbnailTex != 0) {
                 return;
             }
 
@@ -578,7 +584,7 @@ void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>
 }
 
 void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& project) {
-    if (!project) return;
+    if (!project || project->retiredFromCatalog) return;
 
     if (project->sourcePreviewTex != 0 && project->fullPreviewTex != 0 && !project->pipelineData.is_null()) {
         project->previewTaskState = Async::TaskState::Idle;
@@ -651,7 +657,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
         }
 
         Async::TaskSystem::Get().PostToMain([this, generation, cancelGeneration, project, preview = std::move(preview)]() mutable {
-            if (!project ||
+            if (!project || project->retiredFromCatalog ||
                 cancelGeneration != m_ProjectPreviewGeneration ||
                 project->previewRequestGeneration != generation) {
                 if (project &&
@@ -826,7 +832,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
 }
 
 void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asset) {
-    if (!asset) return;
+    if (!asset || asset->retiredFromCatalog) return;
 
     if (asset->fullPreviewTex != 0) {
         asset->previewTaskState = Async::TaskState::Idle;
@@ -855,7 +861,7 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
         }
 
         Async::TaskSystem::Get().PostToMain([this, generation, cancelGeneration, asset, preview = std::move(preview)]() mutable {
-            if (!asset ||
+            if (!asset || asset->retiredFromCatalog ||
                 cancelGeneration != m_AssetPreviewGeneration ||
                 asset->previewRequestGeneration != generation) {
                 if (asset &&

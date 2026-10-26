@@ -98,6 +98,7 @@ public:
     const char* GetName() override { return "Library"; }
 
 private:
+    void ReconcileRefreshedPreviews();
     void RequestOpenEditorProject(const std::string& projectFileName);
     bool RenderProjectCard(const struct ProjectEntry& project, class EditorModule* editor);
     bool RenderAssetCard(const struct AssetEntry& asset, class EditorModule* editor);

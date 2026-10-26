@@ -20,6 +20,38 @@
 
 using namespace Stack::Library::ModuleUI;
 
+void LibraryModule::ReconcileRefreshedPreviews() {
+    auto& library = LibraryManager::Get();
+    if (m_PreviewProject && m_PreviewProject->retiredFromCatalog) {
+        const auto& projects = library.GetProjects();
+        const auto current = std::find_if(projects.begin(), projects.end(), [&](const auto& project) {
+            return project && project->fileName == m_PreviewProject->fileName &&
+                project->projectId == m_PreviewProject->projectId;
+        });
+        if (current == projects.end()) {
+            m_PreviewProject.reset();
+            m_ProjectPreviewClosing = true;
+            m_RenameTargetFileName.clear();
+        } else {
+            m_PreviewProject = *current;
+            if (!m_ProjectPreviewClosing) library.RequestProjectPreview(m_PreviewProject);
+        }
+    }
+    if (m_PreviewAsset && m_PreviewAsset->retiredFromCatalog) {
+        const auto& assets = library.GetAssets();
+        const auto current = std::find_if(assets.begin(), assets.end(), [&](const auto& asset) {
+            return asset && asset->fileName == m_PreviewAsset->fileName;
+        });
+        if (current == assets.end()) {
+            m_PreviewAsset.reset();
+            m_AssetPreviewClosing = true;
+        } else {
+            m_PreviewAsset = *current;
+            if (!m_AssetPreviewClosing) library.RequestAssetPreview(m_PreviewAsset);
+        }
+    }
+}
+
 void LibraryModule::RenderPreviewPopup(
     EditorModule* editor,
     CompositeModule* composite,

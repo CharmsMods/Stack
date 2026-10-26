@@ -1859,6 +1859,7 @@ void AppShell::Run() {
             renderedClosingFrame = true;
         } else {
             const auto pumpStarted = std::chrono::steady_clock::now();
+            LibraryManager::Get().ProcessDeferredDeletions();
             Async::TaskSystem::Get().PumpMainThreadTasks(4,
                 Stack::App::MainThreadCompletionBudgetMs(displayRefreshRate));
             pumpMs =

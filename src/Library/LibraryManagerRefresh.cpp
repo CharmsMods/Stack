@@ -19,6 +19,7 @@
 #include <string>
 #include <system_error>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -267,6 +268,56 @@ bool LibraryManager::IsRefreshBusy() const {
     return Async::IsBusy(GetRefreshSnapshot().state);
 }
 
+void LibraryManager::ApplyLibraryScanEntries(
+    std::vector<std::shared_ptr<ProjectEntry>>& projects,
+    std::vector<std::shared_ptr<AssetEntry>>& assets,
+    std::uintmax_t signature) {
+    {
+        std::lock_guard<std::mutex> lock(m_ProjectsMutex);
+        std::unordered_map<std::string, std::shared_ptr<ProjectEntry>> previousByPath;
+        previousByPath.reserve(m_Projects.size());
+        for (const auto& project : m_Projects)
+            if (project) previousByPath.emplace(project->fileName, project);
+        for (const auto& project : projects) {
+            if (!project) continue;
+            const auto previous = previousByPath.find(project->fileName);
+            if (previous == previousByPath.end()) continue;
+            auto& old = *previous->second;
+            // Only the encoded cover is this texture's source. Full previews
+            // depend on the project/linked assets and are not reused here.
+            if (!old.retiredFromCatalog && old.projectId == project->projectId &&
+                old.thumbnailBytes == project->thumbnailBytes) {
+                project->thumbnailTex = std::exchange(old.thumbnailTex, 0);
+            }
+        }
+        m_Projects.swap(projects);
+        m_Assets.swap(assets);
+        m_LastLibrarySignature = signature;
+        m_ProjectThumbnailWarmupCursor = 0;
+        m_AssetThumbnailWarmupCursor = 0;
+        m_ProjectThumbnailPriority.clear();
+        m_AssetThumbnailPriority.clear();
+    }
+
+    // The swapped-out entries can be retained by fullscreen UI or workers.
+    // Invalidate their publication before releasing handles or CPU buffers.
+    // No GL operation or payload destruction occurs under m_ProjectsMutex.
+    for (const auto& project : projects) {
+        if (!project) continue;
+        project->retiredFromCatalog = true;
+        ++project->previewRequestGeneration;
+        project->previewTaskState = Async::TaskState::Idle;
+        ReleaseProjectTextures(project, true);
+    }
+    for (const auto& asset : assets) {
+        if (!asset) continue;
+        asset->retiredFromCatalog = true;
+        ++asset->previewRequestGeneration;
+        asset->previewTaskState = Async::TaskState::Idle;
+        ReleaseAssetTextures(asset, true);
+    }
+}
+
 void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) {
     std::uint64_t generation = 0;
     {
@@ -415,6 +466,18 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
                 m_LibraryRefreshSnapshot.statusText = "Applying library scan...";
             }
 
+            if (result.success) {
+                try {
+                    ApplyLibraryScanEntries(result.projects, result.assets, result.signature);
+                } catch (const std::exception& error) {
+                    result.success = false;
+                    result.errorMessage = error.what();
+                } catch (...) {
+                    result.success = false;
+                    result.errorMessage = "The library scan could not be applied.";
+                }
+            }
+
             if (!result.success) {
                 std::lock_guard<std::mutex> lock(m_RefreshMutex);
                 m_LibraryRefreshSnapshot.state = Async::TaskState::Failed;
@@ -438,23 +501,6 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
                 notice.actions.push_back(std::move(retry));
                 m_RefreshProblem = m_Notifier.Post(std::move(notice));
                 return;
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(m_ProjectsMutex);
-                for (auto& project : m_Projects) {
-                    ReleaseProjectTextures(project);
-                }
-                for (auto& asset : m_Assets) {
-                    ReleaseAssetTextures(asset);
-                }
-                m_Projects = std::move(result.projects);
-                m_Assets = std::move(result.assets);
-                m_LastLibrarySignature = result.signature;
-                m_ProjectThumbnailWarmupCursor = 0;
-                m_AssetThumbnailWarmupCursor = 0;
-                m_ProjectThumbnailPriority.clear();
-                m_AssetThumbnailPriority.clear();
             }
 
             std::lock_guard<std::mutex> lock(m_RefreshMutex);
@@ -481,6 +527,8 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
 }
 
 void LibraryManager::CancelLibraryRefreshRequests() {
+    // Main-window close calls this before TaskSystem shutdown/context teardown.
+    ProcessDeferredDeletions(true);
     {
         std::lock_guard<std::mutex> lock(m_RefreshMutex);
         ++m_LibraryRefreshGeneration;
@@ -499,7 +547,6 @@ void LibraryManager::CancelLibraryRefreshRequests() {
 LibraryAutoRefreshStats LibraryManager::TickAutoRefresh() {
     LibraryAutoRefreshStats stats;
     const auto startedAt = std::chrono::steady_clock::now();
-    ProcessDeferredDeletions();
     if (IsRefreshBusy() ||
         Async::IsBusy(m_ProjectLoadTaskState) ||
         Async::IsBusy(m_SaveTaskState) ||

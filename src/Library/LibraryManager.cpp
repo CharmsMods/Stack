@@ -5,6 +5,7 @@
 #include "Renderer/GLHelpers.h"
 
 #include <filesystem>
+#include <chrono>
 #include <utility>
 
 LibraryManager::LibraryManager() {
@@ -38,10 +39,26 @@ LibraryManager::~LibraryManager() {
     }
 }
 
-void LibraryManager::ProcessDeferredDeletions() {
+void LibraryManager::ProcessDeferredDeletions(bool drainAll) {
     if (m_DeferredTextureDeletions.empty()) return;
-    glDeleteTextures(static_cast<GLsizei>(m_DeferredTextureDeletions.size()), m_DeferredTextureDeletions.data());
-    m_DeferredTextureDeletions.clear();
+    constexpr std::size_t kTextureNamesPerFrame = 8;
+    constexpr double kRetirementBudgetMs = 0.35;
+    const auto started = std::chrono::steady_clock::now();
+    std::size_t deleted = 0;
+    while (!m_DeferredTextureDeletions.empty() &&
+        (drainAll || deleted < kTextureNamesPerFrame)) {
+        const unsigned int texture = m_DeferredTextureDeletions.back();
+        m_DeferredTextureDeletions.pop_back();
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+            ++deleted;
+        }
+        // A GL deletion itself cannot be preempted; this bounds subsequent
+        // names, not the driver's service time for one call.
+        if (!drainAll && std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count() >= kRetirementBudgetMs)
+            break;
+    }
 }
 
 bool LibraryManager::ConsumeSavedProjectEvent(std::string& outFileName, std::string& outProjectKind) {

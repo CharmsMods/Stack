@@ -7,6 +7,9 @@
 #include <filesystem>
 
 struct ProjectEntry {
+    // Main-thread catalog lifetime; queued preview work may still retain this
+    // entry after a refresh replaces the displayed catalog.
+    bool retiredFromCatalog = false;
     std::string projectId;
     std::string fileName;
     std::filesystem::path absolutePath;
@@ -43,6 +46,7 @@ struct ProjectEntry {
 };
 
 struct AssetEntry {
+    bool retiredFromCatalog = false;
     std::string fileName;
     std::string displayName;
     std::string timestamp;

@@ -234,7 +234,7 @@ public:
     int FindAssetConflictIndex(std::uint64_t id) const;
     void ClearAssetConflicts();
     void PrepareAssetConflictPreview(int index);
-    void ProcessDeferredDeletions();
+    void ProcessDeferredDeletions(bool drainAll = false);
 
     const StackBinaryFormat::LibraryBundleDocument& GetActiveImportBundle() const { return m_ActiveImportBundle; }
 
@@ -283,8 +283,13 @@ private:
     void QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>& asset);
     bool HasPendingThumbnailWarmup() const;
     std::vector<unsigned char> GenerateThumbnailBytes(const std::vector<unsigned char>& pixels, int width, int height);
-    void ReleaseProjectTextures(std::shared_ptr<ProjectEntry> project);
-    void ReleaseAssetTextures(std::shared_ptr<AssetEntry> asset);
+    void ReleaseProjectTextures(std::shared_ptr<ProjectEntry> project, bool defer = false);
+    void ReleaseAssetTextures(std::shared_ptr<AssetEntry> asset, bool defer = false);
+    void ReleaseLibraryTexture(unsigned int& texture, bool defer);
+    void ApplyLibraryScanEntries(
+        std::vector<std::shared_ptr<ProjectEntry>>& projects,
+        std::vector<std::shared_ptr<AssetEntry>>& assets,
+        std::uintmax_t signature);
 
     bool LoadProjectDocument(
         const std::string& fileName,
