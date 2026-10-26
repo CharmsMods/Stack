@@ -7,10 +7,12 @@
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <ctime>
 #include <filesystem>
+#include <utility>
 
 namespace {
 
@@ -115,6 +117,7 @@ PresetManager::PresetManager() {
 }
 
 PresetManager::~PresetManager() {
+    CancelPresetRefresh();
     for (auto& preset : m_UserPresets) {
         ReleaseTexture(preset);
     }
@@ -140,62 +143,71 @@ void PresetManager::ReleaseTexture(std::shared_ptr<PresetEntry> entry) {
     }
 }
 
-std::uintmax_t PresetManager::BuildPresetSignature() const {
-    std::uintmax_t signature = 1469598103934665603ull;
+namespace {
+
+struct PresetCatalogScan {
+    bool success = false;
+    bool changed = false;
+    std::uintmax_t signature = 0;
+    std::vector<std::shared_ptr<PresetEntry>> entries;
+};
+
+bool PresetScanCanceled(const std::atomic<bool>* canceled) {
+    return canceled && canceled->load(std::memory_order_relaxed);
+}
+
+bool BuildPresetSignature(const std::filesystem::path& path,
+    std::uintmax_t& signature, const std::atomic<bool>* canceled) {
+    signature = 1469598103934665603ull;
     auto mix = [&](std::uintmax_t value) {
         signature ^= value;
         signature *= 1099511628211ull;
     };
 
     std::error_code ec;
-    if (!std::filesystem::exists(m_PresetsPath, ec)) {
-        return signature;
-    }
-
-    for (std::filesystem::directory_iterator it(m_PresetsPath, ec), end;
+    for (std::filesystem::directory_iterator it(path, ec), end;
          !ec && it != end; it.increment(ec)) {
+        if (PresetScanCanceled(canceled)) return false;
         const auto& entry = *it;
         std::error_code entryError;
-        if (!entry.is_regular_file(entryError) || entryError) {
-            continue;
-        }
+        const bool regular = entry.is_regular_file(entryError);
+        if (entryError) return false;
+        if (!regular) continue;
         if (entry.path().extension() != ".stackpreset") {
             continue;
         }
         for (unsigned char ch : entry.path().filename().u8string()) mix(ch);
         const auto size = entry.file_size(entryError);
-        if (!entryError) mix(static_cast<std::uintmax_t>(size));
+        if (entryError) return false;
+        mix(static_cast<std::uintmax_t>(size));
         const auto writeTime = entry.last_write_time(entryError);
-        if (!entryError) {
-            mix(static_cast<std::uintmax_t>(writeTime.time_since_epoch().count()));
-        }
+        if (entryError) return false;
+        mix(static_cast<std::uintmax_t>(writeTime.time_since_epoch().count()));
     }
-    return signature;
+    return !ec && !PresetScanCanceled(canceled);
 }
 
-void PresetManager::RefreshPresets() {
-    EnsureDirectories();
-
-    const std::uintmax_t signature = BuildPresetSignature();
-    if (signature == m_LastPresetSignature && !m_UserPresets.empty()) {
-        return;
-    }
-
-    std::vector<std::shared_ptr<PresetEntry>> oldPresets;
-    {
-        std::lock_guard<std::mutex> lock(m_Mutex);
-        oldPresets = std::move(m_UserPresets);
-        m_UserPresets.clear();
-    }
-
-    std::vector<std::shared_ptr<PresetEntry>> loaded;
+PresetCatalogScan ScanPresetCatalog(const std::filesystem::path& path,
+    bool hasSignature, std::uintmax_t acceptedSignature,
+    const std::atomic<bool>* canceled = nullptr) {
+    PresetCatalogScan result;
+    if (PresetScanCanceled(canceled)) return result;
     std::error_code ec;
-    if (std::filesystem::exists(m_PresetsPath, ec)) {
-        for (std::filesystem::directory_iterator it(m_PresetsPath, ec), end;
+    std::filesystem::create_directories(path, ec);
+    if (ec || !BuildPresetSignature(path, result.signature, canceled)) return result;
+    if (hasSignature && result.signature == acceptedSignature) {
+        result.success = true;
+        return result;
+    }
+    {
+        for (std::filesystem::directory_iterator it(path, ec), end;
              !ec && it != end; it.increment(ec)) {
+            if (PresetScanCanceled(canceled)) return result;
             const auto& fileEntry = *it;
             std::error_code entryError;
-            if (!fileEntry.is_regular_file(entryError) || entryError || fileEntry.path().extension() != ".stackpreset") {
+            const bool regular = fileEntry.is_regular_file(entryError);
+            if (entryError) return result;
+            if (!regular || fileEntry.path().extension() != ".stackpreset") {
                 continue;
             }
 
@@ -204,6 +216,9 @@ void PresetManager::RefreshPresets() {
             options.includeGraphPayload = false;
             options.includeBoundarySockets = true;
             if (!StackBinaryFormat::ReadNodePresetFile(fileEntry.path(), document, options)) {
+                // The reader cannot distinguish malformed content from a
+                // transient individual-file failure. Preserve skip-unreadable
+                // semantics rather than let one bad file block the catalog.
                 continue;
             }
 
@@ -219,13 +234,79 @@ void PresetManager::RefreshPresets() {
             preset->thumbnailBytes = std::move(document.thumbnailBytes);
             preset->thumbnailWidth = 0;
             preset->thumbnailHeight = 0;
-            loaded.push_back(std::move(preset));
+            result.entries.push_back(std::move(preset));
         }
     }
-
-    std::sort(loaded.begin(), loaded.end(), [](const std::shared_ptr<PresetEntry>& a, const std::shared_ptr<PresetEntry>& b) {
+    if (ec || PresetScanCanceled(canceled)) return result;
+    std::sort(result.entries.begin(), result.entries.end(), [](const std::shared_ptr<PresetEntry>& a, const std::shared_ptr<PresetEntry>& b) {
         return a && b ? a->timestamp > b->timestamp : static_cast<bool>(a);
     });
+    result.changed = result.success = true;
+    return result;
+}
+
+} // namespace
+
+struct PresetManager::RefreshRequest {
+    std::atomic<bool> ready { false };
+    std::atomic<bool> canceled { false };
+    PresetCatalogScan result;
+};
+
+void PresetManager::CancelPresetRefresh() {
+    if (m_RefreshRequest) m_RefreshRequest->canceled.store(true, std::memory_order_relaxed);
+    m_RefreshRequest.reset();
+}
+
+void PresetManager::RefreshPresets() {
+    // An explicit save/rename/delete must supersede any older background scan.
+    CancelPresetRefresh();
+    auto result = ScanPresetCatalog(m_PresetsPath, m_HasPresetSignature, m_LastPresetSignature);
+    if (result.success && result.changed)
+        ApplyPresetCatalog(std::move(result.entries), result.signature);
+    m_NextPresetRefresh = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+}
+
+void PresetManager::RequestPresetRefresh() {
+    const auto now = std::chrono::steady_clock::now();
+    if (m_RefreshRequest) {
+        if (!m_RefreshRequest->ready.load(std::memory_order_acquire)) return;
+        auto request = std::move(m_RefreshRequest);
+        m_NextPresetRefresh = now + std::chrono::seconds(1);
+        if (request->result.success && request->result.changed)
+            ApplyPresetCatalog(std::move(request->result.entries), request->result.signature);
+        // Publish a completion before considering another scan, even if slow.
+        return;
+    }
+    if (now < m_NextPresetRefresh) return;
+    m_NextPresetRefresh = now + std::chrono::seconds(1);
+    try {
+        auto request = std::make_shared<RefreshRequest>();
+        const auto path = m_PresetsPath;
+        const auto signature = m_LastPresetSignature;
+        const bool hasSignature = m_HasPresetSignature;
+        m_RefreshRequest = request;
+        Async::ActivityMetadata activity;
+        activity.label = "Refreshing presets";
+        activity.maintenance = true;
+        const bool submitted = Async::TaskSystem::Get().Submit(std::move(activity),
+            [request, path, signature, hasSignature]() {
+                try {
+                    request->result = ScanPresetCatalog(path, hasSignature, signature, &request->canceled);
+                } catch (...) {
+                    request->result.success = false;
+                }
+                request->ready.store(true, std::memory_order_release);
+            });
+        if (!submitted) CancelPresetRefresh();
+    } catch (...) {
+        CancelPresetRefresh();
+    }
+}
+
+void PresetManager::ApplyPresetCatalog(
+    std::vector<std::shared_ptr<PresetEntry>> loaded, std::uintmax_t signature) {
+    std::vector<std::shared_ptr<PresetEntry>> oldPresets;
 
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
@@ -233,8 +314,10 @@ void PresetManager::RefreshPresets() {
         for (auto& preset : loaded) {
             preset->previewContentRevision = catalogRevision;
         }
+        oldPresets = std::move(m_UserPresets);
         m_UserPresets = std::move(loaded);
         m_LastPresetSignature = signature;
+        m_HasPresetSignature = true;
         ++m_PreviewDataState->revision;
     }
 

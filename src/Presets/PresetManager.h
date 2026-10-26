@@ -2,6 +2,7 @@
 
 #include "Persistence/StackBinaryFormat.h"
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,9 @@ public:
     static PresetManager& Get();
 
     void RefreshPresets();
+    // Drawing only polls a completed scan or requests one at a bounded cadence.
+    // Explicit mutations keep the synchronous RefreshPresets publication path.
+    void RequestPresetRefresh();
     void UploadPresetTextures(int budget = 4);
 
     bool SaveUserPreset(
@@ -76,7 +80,9 @@ private:
     void RequestBackgroundGraphPayloadPreload(const std::shared_ptr<PresetEntry>& entry);
     bool ReadUserPresetDocument(const PresetEntry& entry, StackBinaryFormat::NodePresetDocument& document, std::string* outError = nullptr) const;
     bool WriteUserPresetDocument(const PresetEntry& entry, const StackBinaryFormat::NodePresetDocument& document, std::string* outError = nullptr);
-    std::uintmax_t BuildPresetSignature() const;
+    void ApplyPresetCatalog(std::vector<std::shared_ptr<PresetEntry>> loaded, std::uintmax_t signature);
+    void CancelPresetRefresh();
+    struct RefreshRequest;
 
     struct PreviewDataState {
         std::uint64_t revision = 1;
@@ -87,6 +93,9 @@ private:
     std::vector<std::shared_ptr<PresetEntry>> m_BuiltInPresets;
     std::vector<std::shared_ptr<PresetEntry>> m_UserPresets;
     std::uintmax_t m_LastPresetSignature = 0;
+    bool m_HasPresetSignature = false;
+    std::shared_ptr<RefreshRequest> m_RefreshRequest;
+    std::chrono::steady_clock::time_point m_NextPresetRefresh {};
     // Async preload completions hold only a weak reference to this owner.
     std::shared_ptr<PreviewDataState> m_PreviewDataState = std::make_shared<PreviewDataState>();
     mutable std::mutex m_Mutex;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded CPU checks of production preset publication/warmup method bodies.
+"""Bounded CPU checks of production preset refresh/publication/warmup bodies.
 
 Uses the real PresetManager declaration and public operations, temporary files,
 and deterministic task/clock/graph-decoder stand-ins. No UI, GPU, user files, or
@@ -30,6 +30,7 @@ def method(source, signature):
 pre = r'''
 #include "Presets/PresetManager.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <deque>
@@ -41,12 +42,21 @@ pre = r'''
 #include <utility>
 void Require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 std::filesystem::path testRoot;
+bool onWorker=false;
+int catalogReads=0,payloadReads=0,textureDeletes=0;
+struct RefreshClock {
+    static std::chrono::steady_clock::time_point value;
+    static auto now(){return value;}
+    static void Advance(){value+=std::chrono::seconds(2);}
+};
+std::chrono::steady_clock::time_point RefreshClock::value{};
 namespace AppPaths { std::filesystem::path GetPresetsDirectory(){return testRoot;} }
 namespace AppVersion { constexpr const char* kVersionString="test-version"; }
-void glDeleteTextures(int,const unsigned*){}
+void glDeleteTextures(int count,const unsigned*){Require(!onWorker,"texture retirement must remain on main thread");textureDeletes+=count;}
 std::string BuildTimestampString(){return "same-second";}
 std::string BuildPresetId(){static int next=0;return "preset-"+std::to_string(++next);}
 namespace Async {
+struct ActivityMetadata {std::string label;bool maintenance=false;};
 class TaskSystem {
 public:
     using Task=std::function<void()>;
@@ -54,8 +64,9 @@ public:
     std::deque<Task> workers,main;
     bool rejectNext=false;
     bool Submit(const char*,Task task){if(std::exchange(rejectNext,false))return false;workers.push_back(std::move(task));return true;}
+    bool Submit(ActivityMetadata activity,Task task){Require(activity.maintenance,"refresh must use maintenance priority");return Submit(activity.label.c_str(),std::move(task));}
     bool PostToMain(Task task){main.push_back(std::move(task));return true;}
-    void Workers(){while(!workers.empty()){auto task=std::move(workers.front());workers.pop_front();task();}}
+    void Workers(){onWorker=true;while(!workers.empty()){auto task=std::move(workers.front());workers.pop_front();task();}onWorker=false;}
     void Main(){while(!main.empty()){auto task=std::move(main.front());main.pop_front();task();}}
     void Drain(){Workers();Main();}
 };
@@ -72,28 +83,45 @@ bool WriteNodePresetFile(const std::filesystem::path& path,const NodePresetDocum
     return bool(out);
 }
 bool ReadNodePresetFile(const std::filesystem::path& path,NodePresetDocument& document,const NodePresetLoadOptions& options){
+    if(options.includeGraphPayload)++payloadReads;else ++catalogReads;
     if(failPayloadRead&&options.includeGraphPayload)return false;
+    try {
     std::ifstream in(path);if(!in)return false;json value;in>>value;
     auto& m=document.metadata;m.id=value["id"];m.displayName=value["name"];m.timestamp=value["timestamp"];m.savedWithVersion=value["version"];
     m.nodeCount=value["nodes"];m.inputCount=value["inputs"];m.outputCount=value["outputs"];
     if(options.includeGraphPayload)document.graphPayload=value["graph"];
     return true;
+    }catch(...){return false;}
 }
 }
 '''
-methods = ''
+methods = method(manager, 'struct PresetCatalogScan {') + ';\n'
+for signature in ['bool PresetScanCanceled(', 'bool BuildPresetSignature(', 'PresetCatalogScan ScanPresetCatalog(']:
+    methods += method(manager, signature)
+methods += method(manager, 'struct PresetManager::RefreshRequest {') + ';\n'
 for signature in [
     'std::string TrimWhitespace(', 'std::string SanitizeFileStem(',
     'void ScrubPresetImageNodePayload(', 'bool SanitizePresetGraphPayload(',
     'PresetManager& PresetManager::Get()', 'PresetManager::PresetManager()',
     'PresetManager::~PresetManager()', 'void PresetManager::EnsureDirectories()',
-    'void PresetManager::ReleaseTexture(', 'std::uintmax_t PresetManager::BuildPresetSignature()',
-    'void PresetManager::RefreshPresets()', 'void PresetManager::RequestBackgroundGraphPayloadPreload(',
+    'void PresetManager::ReleaseTexture(', 'void PresetManager::CancelPresetRefresh()',
+    'void PresetManager::RefreshPresets()', 'void PresetManager::RequestPresetRefresh()',
+    'void PresetManager::ApplyPresetCatalog(', 'void PresetManager::RequestBackgroundGraphPayloadPreload(',
     'bool PresetManager::SaveUserPreset(', 'bool PresetManager::TryGetPreloadedPresetPayload(',
     'bool PresetManager::ReadUserPresetDocument(', 'bool PresetManager::WriteUserPresetDocument(',
     'bool PresetManager::RenameUserPreset(', 'bool PresetManager::DeleteUserPreset(',
     'bool PresetManager::OverwriteUserPreset(']:
-    methods += method(manager, signature)
+    body = method(manager, signature)
+    if signature in ('void PresetManager::RefreshPresets()', 'void PresetManager::RequestPresetRefresh()'):
+        body = body.replace('std::chrono::steady_clock::now()', 'RefreshClock::now()')
+    methods += body
+
+# Check the real synchronization and lifetime boundary, not a fixture rewrite.
+assert 'ready.load(std::memory_order_acquire)' in method(manager, 'void PresetManager::RequestPresetRefresh()')
+assert 'ready.store(true, std::memory_order_release)' in method(manager, 'void PresetManager::RequestPresetRefresh()')
+assert '[request, path, signature, hasSignature]' in method(manager, 'void PresetManager::RequestPresetRefresh()')
+assert 'CancelPresetRefresh();' in method(manager, 'PresetManager::~PresetManager()')
+assert 'RefreshPresets();' not in method(drawer, 'void EditorNodeGraphUI::RenderPresetsPanel(')
 
 ui = r'''
 int tokenBuilds=0,graphBuilds=0;
@@ -228,11 +256,96 @@ void Tests(){
     Require(manager.SaveUserPreset("Invalid graph",invalid,{},{},1),"add malformed graph");tasks.Drain();Finish(ui,editor);Idle(ui,editor);
     Require(!ui.m_PresetPreviewGraphCache[Named("Invalid graph")->id].error.empty(),"graph decode error is terminal");
 }
+void RefreshTests(){
+    auto& manager=PresetManager::Get();auto& tasks=Async::TaskSystem::Get();tasks.Drain();
+    auto before=Named("Renamed");before->thumbnailTex=91;
+    StackBinaryFormat::NodePresetDocument document;
+    const auto path=testRoot/std::filesystem::u8path(before->fileName);
+    Require(StackBinaryFormat::ReadNodePresetFile(path,document,{}),"read external source");
+    document.metadata.displayName="External rename";document.graphPayload=Payload(52);
+    Require(StackBinaryFormat::WriteNodePresetFile(path,document),"external mutation");
+    const auto revision=manager.GetPreviewDataRevision();const auto reads=catalogReads;
+    RefreshClock::Advance();manager.RequestPresetRefresh();
+    Require(tasks.workers.size()==1&&catalogReads==reads,"frame only enqueues, never reads catalog documents");
+    manager.RequestPresetRefresh();manager.RequestPresetRefresh();
+    Require(tasks.workers.size()==1&&manager.GetPreviewDataRevision()==revision,"in-flight scan is coalesced without premature publication");
+    tasks.Workers();
+    Require(catalogReads>reads&&manager.GetPreviewDataRevision()==revision&&before->thumbnailTex==91,
+        "worker reads candidate but cannot publish or release GL resources");
+    RefreshClock::Advance(); // A long scan still publishes before scheduling another.
+    manager.RequestPresetRefresh();
+    Require(Named("External rename")->id==before->id&&manager.GetPreviewDataRevision()>revision,
+        "ready scan publishes on main thread");
+    Require(before->thumbnailTex==0&&textureDeletes==1,"old texture retires only with main publication");
+    tasks.Drain();const auto count=tasks.workers.size();manager.RequestPresetRefresh();
+    Require(tasks.workers.size()==count,"completed result is not followed immediately by another scan");
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();
+    const auto unchanged=manager.GetPreviewDataRevision();manager.RequestPresetRefresh();
+    Require(manager.GetPreviewDataRevision()==unchanged,"unchanged async signature does not rewarm catalog");
+
+    // Finish a scan, then mutate through the app before its result is polled.
+    Require(StackBinaryFormat::ReadNodePresetFile(path,document,{}),"read stale source");
+    document.metadata.displayName="Stale external";
+    Require(StackBinaryFormat::WriteNodePresetFile(path,document),"stale disk change");
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();
+    auto current=Named("External rename");
+    Require(manager.RenameUserPreset(*current,"Immediate app rename"),"app rename supersedes background result");
+    Require(Named("Immediate app rename")->id==before->id,"explicit rename publishes immediately");
+    const auto explicitRevision=manager.GetPreviewDataRevision();manager.RequestPresetRefresh();
+    Require(manager.GetPreviewDataRevision()==explicitRevision,"stale completed result cannot overwrite explicit publication");
+    tasks.Drain();
+
+    // Cancel a queued scan before it starts: same cancellation used at teardown.
+    RefreshClock::Advance();manager.RequestPresetRefresh();const auto queuedReads=catalogReads;
+    manager.RefreshPresets();tasks.Workers();
+    Require(catalogReads==queuedReads,"canceled queued worker does no catalog document work");
+    tasks.Main();
+
+    // Individual corrupt documents keep skip-unreadable semantics.
+    std::ofstream(testRoot/"bad.stackpreset")<<"not a preset";
+    Require(StackBinaryFormat::ReadNodePresetFile(path,document,{}),"read valid neighbor");
+    document.metadata.displayName="Valid beside corrupt";
+    Require(StackBinaryFormat::WriteNodePresetFile(path,document),"valid neighboring edit");
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();manager.RequestPresetRefresh();tasks.Drain();
+    Require(Named("Valid beside corrupt")->id==before->id,"corrupt file does not block valid catalog changes");
+
+    // Replace the directory with a file: identifiable directory failure retains
+    // the exact old entries and signature, then a later successful scan recovers.
+    const auto backup=testRoot.string()+"-backup";std::filesystem::rename(testRoot,backup);
+    std::ofstream(testRoot)<<"not a directory";
+    const auto retained=Named("Valid beside corrupt");const auto failedRevision=manager.GetPreviewDataRevision();
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();manager.RequestPresetRefresh();
+    Require(manager.GetPreviewDataRevision()==failedRevision&&Named("Valid beside corrupt")==retained,
+        "directory failure retains prior catalog and does not accept failure signature");
+    std::filesystem::remove(testRoot);std::filesystem::rename(backup,testRoot);
+    Require(StackBinaryFormat::ReadNodePresetFile(path,document,{}),"read recovered entry");
+    document.metadata.displayName="Recovered";Require(StackBinaryFormat::WriteNodePresetFile(path,document),"recover disk update");
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();manager.RequestPresetRefresh();tasks.Drain();
+    Require(Named("Recovered")->id==before->id,"next successful scan recovers after directory failure");
+
+    tasks.rejectNext=true;RefreshClock::Advance();manager.RequestPresetRefresh();
+    Require(tasks.workers.empty(),"submission failure is terminal");manager.RequestPresetRefresh();
+    Require(tasks.workers.empty(),"submission failure is cadence-limited");
+    RefreshClock::Advance();manager.RequestPresetRefresh();Require(tasks.workers.size()==1,"submission failure retries later");
+    tasks.Workers();manager.RequestPresetRefresh();
+
+    // No request calls while the panel is closed means no self-rescheduling.
+    RefreshClock::Advance();RefreshClock::Advance();tasks.Drain();
+    Require(tasks.workers.empty(),"closed panel creates no additional scans");
+    std::filesystem::remove_all(testRoot);
+    RefreshClock::Advance();manager.RequestPresetRefresh();
+    Require(!std::filesystem::exists(testRoot),"missing-directory recovery does not create it from drawing");
+    tasks.Workers();Require(std::filesystem::is_directory(testRoot),"worker recreates missing preset directory");
+    manager.RequestPresetRefresh();Require(manager.GetUserPresets().empty(),"successful empty catalog publishes");
+    const auto emptyRevision=manager.GetPreviewDataRevision();
+    RefreshClock::Advance();manager.RequestPresetRefresh();tasks.Workers();manager.RequestPresetRefresh();
+    Require(manager.GetPreviewDataRevision()==emptyRevision,"stable empty catalog is not republished");
+}
 int main(){
     testRoot=std::filesystem::temp_directory_path()/std::filesystem::path("stack-preset-warmup-"+
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(testRoot);
-    try{Tests();std::filesystem::remove_all(testRoot);std::cout<<"Preset preview warmup checks passed\n";return 0;}
+    try{Tests();RefreshTests();std::filesystem::remove_all(testRoot);std::cout<<"Preset refresh and preview warmup checks passed\n";return 0;}
     catch(const std::exception& e){std::filesystem::remove_all(testRoot);std::cerr<<e.what()<<'\n';return 1;}
 }
 '''

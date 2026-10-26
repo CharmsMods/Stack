@@ -527,7 +527,7 @@ void EditorNodeGraphUI::RenderPresetsPanel(EditorModule* editor, float available
     }
 
     PresetManager& presetManager = PresetManager::Get();
-    presetManager.RefreshPresets();
+    presetManager.RequestPresetRefresh();
     const float rowWidth = std::max(180.0f, availableWidth - 8.0f);
     const auto userPresets = presetManager.GetUserPresets();
 
