@@ -33,6 +33,8 @@ For C-drag capture checks on an existing RAW image, run `Stack.exe --validate-ra
 
 For the existing RAW graph editing checks without the separate shared-curve interaction preflight, run `Stack.exe --validate-raw-graph-canvas`. This hidden-context check disables document saving and covers connection eligibility, creation, deletion, cycle rejection, node opening, and document reload. The full `--validate-raw-graph-editing` command retains the shared-curve preflight.
 
+For focused graph interaction/cache checks with `BUILD_TESTING` enabled, build the `StackRawNodeResourceLifetimeTests`, `StackColorWarpCachePolicyTests`, `StackGraphTechnicalFingerprintTests` and `StackGraphViewportAnalysisTests` targets, then run `ctest --test-dir _workspace/build-tree/stack -C Release -R "StackRenderer\.(RawNodeResourceLifetime|ColorWarpCachePolicy|GraphTechnicalFingerprint)|StackEditor\.GraphViewportAnalysis" --output-on-failure`. These CPU checks cover resource-owner release/reuse, policy-sensitive cache keys, unrelated-branch cache stability, and auxiliary scope scheduling/acceptance. The generated lifetime/fingerprint tests use extracted production methods with resource stand-ins; they do not verify actual GPU deletion, full application interactions, image equivalence or frame-time improvements. Full Windows build and real-GPU interaction checks remain separate.
+
 ## Current Burst engine changes and verification
 
 The October 23, 2026 source update is not a published release. It changes HDR

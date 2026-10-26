@@ -2632,11 +2632,6 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         const int nativeEdge = std::max(snapshot.rawWorkspace.fullFrameWidth, snapshot.rawWorkspace.fullFrameHeight);
         const int processingEdge = nativeEdge > 0 && snapshot.previewMaxDimension >= nativeEdge ? 0 : snapshot.previewMaxDimension;
         pipeline.SetPreviewMaxDimension(processingEdge);
-        if (!calibration && snapshot.rawWorkspace.hasRecipe) {
-            const auto cached = pipeline.RawViewportCachedStages(snapshot.rawWorkspace.recipe,processingEdge);
-            for (std::size_t i = 0; i < cached.size(); ++i)
-                if (cached[i]) result.firstMeasuredStage = i + 1;
-        }
         const bool viewportPurpose = snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation ||
             snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement ||
             snapshot.rawRenderPurpose == RawRenderPurpose::DenoiseCompletion;
@@ -2665,6 +2660,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 ? 2048
                 : ((snapshot.telemetry.interactionActive || calibration) ? 384 : 1024),
             snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport);
+        if (!calibration && snapshot.rawWorkspace.hasRecipe) {
+            const auto cached = pipeline.RawViewportCachedStages(snapshot.rawWorkspace.recipe,processingEdge);
+            for (std::size_t i = 0; i < cached.size(); ++i)
+                if (cached[i]) result.firstMeasuredStage = i + 1;
+        }
         pipeline.SetRawDevelopmentViewportValidationEnabled(
             authoritativeOutput || snapshot.rawWorkspace.analysisRequested);
         pipeline.SetRawDevelopmentPreferredCacheInputStage(

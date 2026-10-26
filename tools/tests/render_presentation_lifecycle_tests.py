@@ -69,6 +69,7 @@ exported = queue[export_start:export_end]
 
 pre = r'''
 #include "Editor/RenderPresentationState.h"
+#include "Editor/GraphViewportAnalysisPolicy.h"
 #include "Editor/RawRenderPurpose.h"
 #include "Renderer/ViewportPreviewPolicy.h"
 #include <algorithm>

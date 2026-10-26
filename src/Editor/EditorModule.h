@@ -2773,6 +2773,7 @@ private:
     const Stack::EditorRendering::ViewportPreviewState& ActiveViewportPreviewState() const;
     void ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapshot);
     void UpdateViewportPreviewRefinement(double now);
+    bool TrySubmitGraphViewportAnalysis(double now);
     void ClearRawCurveDragState();
     bool m_RawCurveDragCleanupPending = true;
     void ObserveViewportPreviewTiming(const EditorRenderWorker::Result& result);

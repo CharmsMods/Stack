@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/Internal/RenderPipelineGraphSchedule.h"
 #include "Renderer/ScopedGLObjects.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/PixelBufferUtils.h"
@@ -175,6 +176,43 @@ void RenderPipeline::Shutdown() {
 void RenderPipeline::Initialize() {
     m_Shutdown = false;
     m_Quad.Initialize();
+}
+
+void RenderPipeline::PruneObsoleteRawNodeResources(
+    const RenderGraphSnapshot& graph,
+    const Stack::Renderer::GraphExecution::GraphTopologyIndex& topology) {
+    const auto prune = [&](auto& cache, const auto& supportsKind) {
+        for (auto it = cache.begin(); it != cache.end();) {
+            const auto node = topology.nodes.find(it->first);
+            const bool obsolete = node == topology.nodes.end()
+                ? graph.completeNodeSet
+                : node->second != nullptr && !supportsKind(node->second->kind);
+            if (obsolete) it = cache.erase(it);
+            else ++it;
+        }
+    };
+    const auto rawConsumer = [](RenderGraphNodeKind kind) {
+        return kind == RenderGraphNodeKind::RawDevelopment ||
+            kind == RenderGraphNodeKind::RawProjectSourceSet ||
+            kind == RenderGraphNodeKind::RawDecode ||
+            kind == RenderGraphNodeKind::RawDevelop;
+    };
+    const auto decodedSource = [](RenderGraphNodeKind kind) {
+        return kind == RenderGraphNodeKind::RawSource;
+    };
+    const auto previewSource = [](RenderGraphNodeKind kind) {
+        return kind == RenderGraphNodeKind::RawSource ||
+            kind == RenderGraphNodeKind::RawDevelopment ||
+            kind == RenderGraphNodeKind::RawProjectSourceSet;
+    };
+    // Erasing RawGpuPipeline releases its sensor, reconstruction and output
+    // textures on this execution's GL context. Immutable source leases and
+    // separately owned stage/publication textures are unaffected.
+    prune(m_RawPipelines, rawConsumer);
+    prune(m_RawDataCache, decodedSource);
+    prune(m_RawDataCachePaths, decodedSource);
+    prune(m_RawPreviewDataCache, previewSource);
+    prune(m_RawPreviewDataCacheKeys, previewSource);
 }
 
 void RenderPipeline::CleanupFBOs() {

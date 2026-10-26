@@ -568,7 +568,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         stageFingerprints =
             Stack::Renderer::RawDevelopmentCache::BuildStageFingerprints(
                 recipe,
-                m_PreviewMaxDimension);
+                m_PreviewMaxDimension,
+                {m_RawDevelopmentColorWarpMaskQualityLongEdge,
+                 m_RawDevelopmentInteractivePreview,
+                 m_RawDevelopmentColorWarpRequireSpatialResult});
     const bool regionalOutput = m_RawViewportRequest.visible.Partial() &&
         !captureAnalysis && m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::None &&
         !m_RawDevelopmentViewportValidationEnabled;

@@ -22,7 +22,10 @@ void RenderPipeline::PrepareRawCalibrationPass(std::optional<Raw::ViewportStage>
 std::array<std::size_t, Raw::kViewportStageCount> RenderPipeline::RawViewportCachedStages(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe, int edge) const {
     std::array<std::size_t, Raw::kViewportStageCount> result {};
-    const auto expected = Stack::Renderer::RawDevelopmentCache::BuildStageFingerprints(recipe, edge);
+    const auto expected = Stack::Renderer::RawDevelopmentCache::BuildStageFingerprints(recipe, edge,
+        {m_RawDevelopmentColorWarpMaskQualityLongEdge,
+         m_RawDevelopmentInteractivePreview,
+         m_RawDevelopmentColorWarpRequireSpatialResult});
     for (const auto& [key, entries] : m_RawDevelopStageImageCache) {
         for (const auto& entry : entries) if (entry.texture && entry.width > 0 && entry.height > 0) {
             for (std::size_t i = 0; i < result.size(); ++i)

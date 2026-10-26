@@ -1382,9 +1382,9 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     planInput.explicitInspectionRequested =
         m_RawWorkspaceExplicitFullQualityRenderRequested;
     // Visible native detail has priority over optional scopes after release.
-    planInput.fullResolutionPreviewRequested =
-        m_RawWorkspaceFullResolutionPreviewRequested ||
-        (UsesGraphViewportPreview() && ActiveViewportPreviewState().refinement);
+    planInput.fullResolutionPreviewRequested = UsesGraphViewportPreview()
+        ? ActiveViewportPreviewState().refinement
+        : m_RawWorkspaceFullResolutionPreviewRequested;
     const bool denoiseDiagnosticRequested =
         snapshot.rawWorkspace.hasRecipe &&
         snapshot.rawWorkspace.recipe.rgbDenoise.diagnosticMode !=

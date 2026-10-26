@@ -20,6 +20,7 @@ struct ViewportPreviewState {
     std::uint64_t acceptedGeneration = 0;
     std::uint64_t submittedViewGeneration = 0;
     std::uint64_t refinementGeneration = 0;
+    std::uint64_t analysisGeneration = 0;
     std::uint64_t blockedBudget = 0;
     int physicalWidth = 1, physicalHeight = 1, interactiveEdge = 0;
     int mainDemandFrame = -10;

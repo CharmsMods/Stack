@@ -272,6 +272,11 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             hashRawMetadata(node.rawSource.metadata);
         } else if (node.kind == RenderGraphNodeKind::RawDevelopment) {
             HashCombine(fingerprint, HashValue(Stack::RawRecipe::SerializeRecipe(node.rawDevelopment.recipe).dump()));
+            RawDevelopmentCache::HashColorWarpMaskRenderPolicy(fingerprint,
+                node.rawDevelopment.recipe.colorWarp,
+                {pipeline.m_RawDevelopmentColorWarpMaskQualityLongEdge,
+                 pipeline.m_RawDevelopmentInteractivePreview,
+                 pipeline.m_RawDevelopmentColorWarpRequireSpatialResult});
             HashCombine(fingerprint, pipeline.m_RawViewportRequest.visible.Fingerprint());
             HashCombine(fingerprint, static_cast<std::size_t>(pipeline.m_RawViewportRequest.generation));
             HashCombine(fingerprint, HashValue(pipeline.m_PreviewMaxDimension));
@@ -442,6 +447,11 @@ void GraphExecutionRuntime::BindImageFingerprint() {
                     fingerprint,
                     HashValue(Stack::RawRecipe::SerializeRecipe(
                         node.rawDevelopment.recipe).dump()));
+                RawDevelopmentCache::HashColorWarpMaskRenderPolicy(fingerprint,
+                    node.rawDevelopment.recipe.colorWarp,
+                    {pipeline.m_RawDevelopmentColorWarpMaskQualityLongEdge,
+                     pipeline.m_RawDevelopmentInteractivePreview,
+                     pipeline.m_RawDevelopmentColorWarpRequireSpatialResult});
                 HashCombine(fingerprint, HashValue(pipeline.m_PreviewMaxDimension));
                 HashCombine(
                     fingerprint,
@@ -493,6 +503,19 @@ void GraphExecutionRuntime::BindImageFingerprint() {
                 if (input) { HashCombine(fingerprint, HashValue(parameter.id)); HashCombine(fingerprint, fingerprintScalar(input->fromNodeId, input->fromSocketId)); }
             }
             HashCombine(fingerprint, HashJson(Stack::RawRecipe::SerializeGraphOperation(node.rawOperation)));
+            if (node.rawOperation.enabled && node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::ColorWarp) {
+                auto colorWarp = Stack::RawRecipe::DeserializeColorWarpRecipe(node.rawOperation.parameters);
+                // A connected strength may enable an authored zero-strength
+                // operation. Its scalar fingerprint above describes the value;
+                // retain the policy dependency while that binding exists.
+                if (findInputLink(nodeId, EditorNodeGraph::ParameterInputSocketId("strength")))
+                    colorWarp.strength = 1.f;
+                RawDevelopmentCache::HashColorWarpMaskRenderPolicy(fingerprint,
+                    colorWarp,
+                    {pipeline.m_RawDevelopmentColorWarpMaskQualityLongEdge,
+                     pipeline.m_RawDevelopmentInteractivePreview,
+                     pipeline.m_RawDevelopmentColorWarpRequireSpatialResult});
+            }
             HashCombine(fingerprint, HashValue(static_cast<int>(node.rawWorkingSpace)));
             HashCombine(fingerprint, HashValue(node.nativeWidth));
             HashCombine(fingerprint, HashValue(node.nativeHeight));
@@ -520,8 +543,12 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, exposureInput
                 ? fingerprintScalar(exposureInput->fromNodeId, exposureInput->fromSocketId)
                 : HashValue(node.technicalExposureValue));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
+            // imageIn identifies this operation's raster. The mutable pipeline
+            // extent can still belong to an independent scheduled branch.
+            if (!input) {
+                HashCombine(fingerprint, HashValue(pipeline.m_Width));
+                HashCombine(fingerprint, HashValue(pipeline.m_Height));
+            }
         } else if (node.kind == RenderGraphNodeKind::Reformat) {
             const RenderGraphLink* input = findInputLink(
                 node.nodeId, EditorNodeGraph::kImageInputSocketId);

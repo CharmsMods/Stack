@@ -4,6 +4,7 @@ add_custom_command(OUTPUT "${render_presentation_test}"
         --output "${render_presentation_test}"
     DEPENDS tools/tests/render_presentation_lifecycle_tests.py
         src/Editor/RenderPresentationState.h
+        src/Editor/GraphViewportAnalysisPolicy.h
         src/Editor/EditorModule.h
         src/Editor/EditorModule.cpp
         src/Editor/Internal/EditorModuleRenderPresentationState.cpp

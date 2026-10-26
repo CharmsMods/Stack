@@ -493,6 +493,7 @@ nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& colorWarp);
 RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value);
 RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp);
 bool IsColorWarpEnabled(const RawColorWarpRecipe& colorWarp);
+bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& colorWarp);
 RawColorWarpEvCurve MakeUniformColorWarpEvCurve(float qualification = 1.0f);
 RawColorWarpEvCurve MakeColorWarpEvCurveHump(
     float centerEv,

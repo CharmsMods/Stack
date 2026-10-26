@@ -454,6 +454,10 @@ struct RenderGraphSnapshot {
     std::string rawWorkspaceLocalRangeOverlayMode;
     bool rawWorkspaceLocalRangeTargetSampleRequested = false;
     bool executionInspectionEnabled = false;
+    // Only a complete compiled graph can prove that an absent node was
+    // removed. Stage/dependency snapshots and ad-hoc callers stay conservative
+    // so auxiliary renders do not evict still-live RAW uploads/decoder data.
+    bool completeNodeSet = false;
     float rawWorkspaceLocalRangeTargetSampleU = 0.0f;
     float rawWorkspaceLocalRangeTargetSampleV = 0.0f;
     RawLocalRangeTargetPreviewRequest rawWorkspaceLocalRangeTargetPreview;

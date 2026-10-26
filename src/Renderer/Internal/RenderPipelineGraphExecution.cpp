@@ -256,6 +256,11 @@ void RenderPipeline::ExecuteGraphImpl(
             "The selected graph output is missing from the render snapshot.";
         return;
     }
+    // The preceding output may borrow a RAW pipeline's texture. Retire that
+    // handle before pruning removed/retyped node owners, not after evaluating
+    // the new graph whose output may legitimately borrow one of those owners.
+    m_OutputTexture = 0;
+    PruneObsoleteRawNodeResources(graph, topology);
     if (m_Width <= 0 || m_Height <= 0) {
         int intrinsicWidth = 0;
         int intrinsicHeight = 0;

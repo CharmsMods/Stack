@@ -1829,6 +1829,20 @@ bool IsColorWarpEnabled(const RawColorWarpRecipe& input) {
     return HasPreparedColorWarpEffect(colorWarp);
 }
 
+bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& input) {
+    if (!input.enabled || input.pins.empty() || input.regions.empty()) return false;
+    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
+    if (!HasPreparedColorWarpEffect(colorWarp)) return false;
+    return std::any_of(colorWarp.pins.begin(), colorWarp.pins.end(),
+        [&](const RawColorWarpPin& pin) {
+            if (!pin.enabled) return false;
+            const auto region = std::find_if(colorWarp.regions.begin(), colorWarp.regions.end(),
+                [&](const RawColorWarpRegion& candidate) { return candidate.id == pin.regionId; });
+            return region != colorWarp.regions.end() &&
+                region->spatialMode != RawColorWarpSpatialMode::AllMatches;
+        });
+}
+
 float EvaluateColorWarpPinShapeDistance(
     const RawColorWarpPin& pin,
     float a,

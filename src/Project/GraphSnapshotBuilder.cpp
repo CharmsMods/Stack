@@ -124,6 +124,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
     GraphSnapshotResult result;
     auto& snapshot = result.snapshot;
     const int stageOutputNodeId = inputs.stageOutputNodeId;
+    snapshot.completeNodeSet = stageOutputNodeId <= 0;
     EditorNodeGraph::Graph expandedGraph;
     EditorNodeGraph::CompoundExpansionResult expansion;
     EditorNodeGraph::Graph stageGraph;

@@ -307,6 +307,25 @@ inline void HashColorWarp(
     // the Post-Color-Warp fingerprint.
 }
 
+// Spatial Color Warp pixels also depend on this runtime rendering policy,
+// independently of the authored recipe and the image's sample resolution.
+struct ColorWarpMaskRenderPolicy {
+    int qualityLongEdge = 1024;
+    bool interactivePreview = false;
+    bool requireSpatialResult = false;
+};
+
+inline void HashColorWarpMaskRenderPolicy(std::size_t& fingerprint,
+    const Stack::RawRecipe::RawColorWarpRecipe& colorWarp,
+    const ColorWarpMaskRenderPolicy& policy) {
+    if (!Stack::RawRecipe::UsesColorWarpSpatialMasks(colorWarp)) return;
+    HashTypedValue(fingerprint, std::clamp(policy.qualityLongEdge, 384, 2048));
+    // An interactive failure may retain the previous coherent selection;
+    // optional settled rendering may fall back, while export forbids that.
+    HashTypedValue(fingerprint, policy.interactivePreview);
+    HashTypedValue(fingerprint, policy.requireSpatialResult);
+}
+
 struct StageFingerprints {
     std::size_t rawBase = 0;
     std::size_t neutralPlacement = 0;
@@ -336,7 +355,8 @@ struct StageFingerprints {
 
 inline StageFingerprints BuildStageFingerprints(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
-    int previewMaxDimension) {
+    int previewMaxDimension,
+    const ColorWarpMaskRenderPolicy& colorWarpMaskPolicy = {}) {
     constexpr int kTypedFingerprintContractVersion = 10;
     std::size_t fingerprint =
         static_cast<std::size_t>(1469598103934665603ull);
@@ -428,6 +448,7 @@ inline StageFingerprints BuildStageFingerprints(
     stages.postFinishTone = fingerprint == 0 ? 1 : fingerprint;
 
     HashColorWarp(fingerprint, recipe.colorWarp);
+    HashColorWarpMaskRenderPolicy(fingerprint, recipe.colorWarp, colorWarpMaskPolicy);
     // Color and detail share a cache boundary but execute in that order.
     HashTypedJson(fingerprint, Stack::RawRecipe::SerializeDetailContrast(recipe.detailContrast));
     stages.postColorWarp = fingerprint == 0 ? 1 : fingerprint;
@@ -448,8 +469,9 @@ inline StageFingerprints BuildStageFingerprints(
 inline std::size_t BuildStageFingerprint(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     int previewMaxDimension,
-    Stage stage) {
-    return BuildStageFingerprints(recipe, previewMaxDimension).For(stage);
+    Stage stage,
+    const ColorWarpMaskRenderPolicy& colorWarpMaskPolicy = {}) {
+    return BuildStageFingerprints(recipe, previewMaxDimension, colorWarpMaskPolicy).For(stage);
 }
 
 template <typename T>

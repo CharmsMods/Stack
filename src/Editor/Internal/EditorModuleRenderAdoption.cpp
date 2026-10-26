@@ -1060,13 +1060,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             (acceptedMainFrame || result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes))
             TryApplyBracketingStartingLook(result.rawWorkspace.viewTransformInputStats,
                 result.rawWorkspace.sourceHash);
-        if (result.success && result.error.empty() && result.viewportPreview.enabled &&
-            result.viewportPreviewGeometry.NativeSamples() && !result.telemetry.interactionActive &&
-            m_RawWorkspaceAnalysisRequested && !result.rawWorkspace.analysisCaptured) {
-            // The primary image took priority over pending RAW analysis. Give
-            // that independent auxiliary request a turn after native delivery.
-            MarkRenderRefreshDirty();
-        }
         QueueViewportOutputTextureRelease(result.viewportOverview);
         // A worker can finish successfully while the UI cannot adopt/upload its
         // texture. That is a terminal first-frame failure too, not a reason to

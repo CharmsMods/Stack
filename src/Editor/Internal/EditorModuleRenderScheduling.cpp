@@ -103,7 +103,10 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive()) {
         return;
     }
-    if (UsesGraphViewportPreview()) UpdateViewportPreviewRefinement(now);
+    if (UsesGraphViewportPreview()) {
+        UpdateViewportPreviewRefinement(now);
+        if (TrySubmitGraphViewportAnalysis(now)) return;
+    }
     else if (m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
     if (rawWorkspaceActive &&
         allowBackgroundRenderWorker &&

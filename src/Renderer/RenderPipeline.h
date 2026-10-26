@@ -902,6 +902,8 @@ private:
     std::unordered_map<int, std::string> m_RawDataCachePaths;
     std::unordered_map<int, Raw::RawImageData> m_RawPreviewDataCache;
     std::unordered_map<int, std::string> m_RawPreviewDataCacheKeys;
+    void PruneObsoleteRawNodeResources(const RenderGraphSnapshot& graph,
+        const Stack::Renderer::GraphExecution::GraphTopologyIndex& topology);
 
     void CleanupFBOs();
     void DeleteGraphCacheEntry(CachedGraphTexture& entry);

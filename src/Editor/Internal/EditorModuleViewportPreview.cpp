@@ -1,6 +1,8 @@
 #include "Editor/EditorModule.h"
 #include "App/UiPerformanceProbe.h"
 #include "Editor/RawRenderGraphOverlay.h"
+#include "Editor/GraphViewportAnalysisPolicy.h"
+#include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GraphViewportPlanner.h"
 #include "Utils/HashUtils.h"
@@ -482,6 +484,75 @@ void EditorModule::UpdateViewportPreviewRefinement(double now) {
     MarkRenderRefreshDirty();
     state.refinement = true;
 }
+bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
+    if (!m_RawWorkspaceAnalysisPending || !m_RawWorkspaceRootTabActive || !IsRawWorkspaceProjectActive() ||
+        !UsesGraphViewportPreview() || GetViewportMode() == ViewportMode::CompositeCanvas ||
+        m_RawAssetCapture.pending || m_RawAssetCapture.armed || IsExportBusy() ||
+        IsRawWorkspaceProjectLoadBusy() || m_FullQualityRenderRequest.Pending() ||
+        m_RawWorkspaceExportRenderRequested || m_RawWorkspaceExplicitFullQualityRenderRequested) return false;
+    auto& state = ActiveViewportPreviewState();
+    const int frame = ImGui::GetFrameCount();
+    // A legacy view may have queued analysis without submitting it before
+    // switching to this scheduler. Requested means in flight here; only adopt
+    // that old intent after every worker/deferred owner has released it.
+    if (Stack::EditorRendering::ShouldRequeueGraphViewportAnalysis(m_RawWorkspaceAnalysisPending,
+            m_RawWorkspaceAnalysisRequested, state.analysisGeneration,
+            m_RenderPending || IsAnyRenderBackendBusy() || !m_DeferredRenderResults.empty())) {
+        m_RawWorkspaceAnalysisRequested = false;
+    }
+    const bool workOutstanding = m_RenderDirty || m_RenderPending || IsAnyRenderBackendBusy() ||
+        state.refinement || !m_DeferredRenderResults.empty() || state.analysisGeneration != 0;
+    // Pending edits can span many UI frames. Do not rescan graph/source tags
+    // for optional work until the foreground request actually becomes idle.
+    if (workOutstanding || m_RawWorkspaceAnalysisRequested || IsRawWorkspaceImageEditActive()) return false;
+    const bool currentPresentation = state.acceptedGeneration &&
+        state.acceptedGeneration == m_ViewportOutputRenderGeneration && state.geometry.Valid() &&
+        state.acceptedContentIdentity == state.contentIdentity &&
+        Stack::EditorRendering::IsCurrentGraphViewportAnalysis(state.acceptedTag, CurrentGraphRenderTag());
+    const bool nativeReady = state.geometry.NativeSamples() &&
+        ContainsImageRegion(state.geometry.resident, state.request.visible);
+    const Stack::EditorRendering::GraphViewportAnalysisDemand demand{
+        m_RawWorkspaceAnalysisPending, m_RawWorkspaceAnalysisRequested,
+        currentPresentation, !state.acceptedInteractive && IsPresentedRenderComplete(),
+        nativeReady || state.refinementBlocked,
+        workOutstanding, false,
+        (m_RawWorkspaceAnalysisQuietUntilTime <= 0 || now >= m_RawWorkspaceAnalysisQuietUntilTime) &&
+            state.request.enabled && !state.request.empty &&
+            (state.mainDemandFrame >= frame-1 || state.backdropDemandFrame >= frame-1)};
+    if (!Stack::EditorRendering::ShouldSubmitGraphViewportAnalysis(demand)) return false;
+
+    // This is an independent, complete-demand packet, not another main-image
+    // revision. Advancing that revision would make the accepted native frame
+    // appear incomplete and cause an unnecessary main render after every scope.
+    const auto generation = Stack::EditorRenderScheduling::NextGlobalGeneration();
+    m_RawWorkspaceAnalysisRequested = true;
+    EditorRenderWorker::Snapshot snapshot;
+    bool submitted = false;
+    if (TryBuildRenderSnapshot(generation, snapshot) && snapshot.outputConnected &&
+        ContentIdentity(snapshot) == state.acceptedContentIdentity) {
+        snapshot.rawRenderPurpose = RawRenderPurpose::AnalysisScopes;
+        snapshot.rawWorkspace.analysisRequested = true;
+        snapshot.telemetry.interactionActive = false;
+        snapshot.rawWorkspace.viewport = {};
+        snapshot.viewportViewId = 1;
+        snapshot.viewportContentIdentity = state.contentIdentity;
+        snapshot.graphRequest = CurrentGraphRenderTag();
+        m_RenderGeneration = generation;
+        try { submitted = SubmitRenderSnapshot(std::move(snapshot)); }
+        catch (...) { /* Release this optional request below; retain the main image. */ }
+    }
+    if (submitted) {
+        state.analysisGeneration = generation;
+        state.submittedPurpose = RawRenderPurpose::AnalysisScopes;
+        m_RenderPending = true;
+    } else {
+        m_RawWorkspaceAnalysisRequested = false;
+        m_RawWorkspaceAnalysisPending = m_RawWorkspaceAnalysisScopeRetryCount++ == 0;
+        m_RawWorkspaceAnalysisQuietUntilTime = m_RawWorkspaceAnalysisPending ? now + .25 : -1;
+    }
+    return true;
+}
+
 void EditorModule::ObserveViewportPreviewTiming(const EditorRenderWorker::Result& result) {
     if (!result.viewportPreview.enabled || result.telemetry.superseded || !result.timingOnly) return;
     const int edge = result.previewMaxDimension > 0 ? result.previewMaxDimension :
@@ -510,6 +581,11 @@ void EditorModule::ObserveViewportPreviewTiming(const EditorRenderWorker::Result
         edge,result.telemetry.completedServiceMs,false,completedAt);
 }
 bool EditorModule::IsViewportPreviewResultCurrent(const EditorRenderWorker::Result& result) const {
+    if (result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes && result.viewportViewId) {
+        return result.viewportViewId == (m_RawWorkspaceRootTabActive ? 1 : 2) && UsesGraphViewportPreview() &&
+            Stack::EditorRendering::IsCurrentGraphViewportAnalysis(result.graphRequest, CurrentGraphRenderTag()) &&
+            result.viewportContentIdentity == ActiveViewportPreviewState().contentIdentity;
+    }
     if (!result.viewportPreview.enabled) return true;
     if (result.viewportViewId != (m_RawWorkspaceRootTabActive ? 1 : 2)) return false;
     if (!UsesGraphViewportPreview()) return false;
@@ -570,6 +646,22 @@ void EditorModule::AdoptViewportPreviewState(EditorRenderWorker::Result& result)
     state.refinement = false;
 }
 void EditorModule::FinishViewportPreviewRequest(const EditorRenderWorker::Result& result, bool adopted) {
+    if (result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes && result.viewportViewId == 1) {
+        auto& state = m_ViewportPreviewStates[0];
+        const bool owns = Stack::EditorRendering::OwnsGraphViewportAnalysisCompletion(result.generation,
+            state.analysisGeneration, m_LatestRawAuxiliaryGeneration);
+        if (result.generation == state.analysisGeneration) state.analysisGeneration = 0;
+        // Successful auxiliary adoption already resolves Pending/Requested.
+        // Discarding/canceling an owned packet must also release its request,
+        // but an older result cannot clear a newer auxiliary consumer's state.
+        if (owns && m_RawWorkspaceAnalysisRequested && (!adopted || !result.rawWorkspace.analysisCaptured)) {
+            m_RawWorkspaceAnalysisRequested = false;
+            const bool superseded = result.telemetry.superseded || result.error == "Render superseded by a newer snapshot.";
+            m_RawWorkspaceAnalysisPending = superseded || m_RawWorkspaceAnalysisScopeRetryCount++ == 0;
+            m_RawWorkspaceAnalysisQuietUntilTime = m_RawWorkspaceAnalysisPending ? ImGui::GetTime() + .25 : -1;
+        }
+        return;
+    }
     if (!result.viewportPreview.enabled || result.rawRenderPurpose != RawRenderPurpose::ViewportRefinement) return;
     if (result.viewportViewId != 1 && result.viewportViewId != 2) return;
     auto& state = m_ViewportPreviewStates[result.viewportViewId - 1];

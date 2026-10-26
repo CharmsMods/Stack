@@ -28,6 +28,8 @@ Cancellation may require cooperative work to drain. Define when the owner is saf
 
 Shared GPU execution may serialize access for correctness or memory limits. That does not justify sharing one project's mutable continuation or busy flag with another. Closing A should wait for A's necessary cleanup, not unrelated work in B, unless a documented shared-resource dependency makes that unavoidable.
 
+For node-owned RAW resources, absence proves removal only in an explicitly complete compiled graph snapshot. Stage/dependency snapshots retain absent owners so auxiliary views do not repeatedly discard live sensor uploads or decoded data. A present incompatible node kind can release its obsolete resources. Retire borrowed output handles before releasing those owners on their execution context; publication leases remain independent. Stage-only absence may therefore retain resources until a complete request or teardown.
+
 ## Review isolation concretely
 
 Use an A/B scenario appropriate to the change: start work in A, interact with B, then let A finish or close A. Check the affected data, result, dirty state, history, progress or focus. A hidden animation must not take focus from B; a save completion must not clear edits made after its capture.

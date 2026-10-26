@@ -116,7 +116,10 @@ void EditorModule::SelectRawAdjustmentLayer(const std::string& id) {
         }
     }
     ClearRawWorkspaceGraphScopeReadbackCaches();
-    m_RawWorkspaceAnalysisRequested = true;
+    m_RawWorkspaceAnalysisPending = true;
+    m_RawWorkspaceAnalysisRequested = false;
+    m_RawWorkspaceAnalysisScopeRetryCount = 0;
+    m_RawWorkspaceAnalysisQuietUntilTime = ImGui::GetTime() + .25;
     MarkRenderRefreshDirty();
 }
 
