@@ -1,4 +1,5 @@
 #include "EditorScopes.h"
+#include "ScopeRectBatch.h"
 #include "Editor/EditorModule.h"
 #include <imgui.h>
 #include <cmath>
@@ -69,12 +70,16 @@ void EditorScopes::DrawVectorscope() {
     draw->AddLine(ImVec2(center.x - side/2, center.y), ImVec2(center.x + side/2, center.y), IM_COL32(50, 50, 50, 255));
     draw->AddLine(ImVec2(center.x, center.y - side/2), ImVec2(center.x, center.y + side/2), IM_COL32(50, 50, 50, 255));
 
-    // Plot points
-    for (auto& p : m_Data->VectorPoints) {
-        // Map U, V (-0.5 to 0.5 approx) to pixels
-        float px = center.x + p.u * (side * 0.8f);
-        float py = center.y - p.v * (side * 0.8f);
-        draw->AddRectFilled(ImVec2(px, py), ImVec2(px+1.5f, py+1.5f), IM_COL32(255, 255, 255, 40));
+    // Preserve every sample and its accumulation order, but reserve geometry
+    // in bounded groups instead of resizing draw buffers for every point.
+    {
+        Stack::Editor::ScopeRectBatch marks(*draw);
+        for (auto& p : m_Data->VectorPoints) {
+            // Map U, V (-0.5 to 0.5 approx) to pixels
+            float px = center.x + p.u * (side * 0.8f);
+            float py = center.y - p.v * (side * 0.8f);
+            marks.Add(ImVec2(px, py), ImVec2(px+1.5f, py+1.5f), IM_COL32(255, 255, 255, 40));
+        }
     }
     
     ImGui::Dummy(ImVec2(side, side));
@@ -90,21 +95,27 @@ void EditorScopes::DrawRGBParade() {
     float colWidth = canvas_size.x / m_Data->ParadeData.size();
     float rowHeight = canvas_size.y / 256.0f;
 
-    for (size_t x = 0; x < m_Data->ParadeData.size(); x++) {
-        for (int i = 0; i < 256; i++) {
-            float r = m_Data->ParadeData[x].r[i];
-            float g = m_Data->ParadeData[x].g[i];
-            float b = m_Data->ParadeData[x].b[i];
+    {
+        Stack::Editor::ScopeRectBatch marks(*draw);
+        for (size_t x = 0; x < m_Data->ParadeData.size(); x++) {
+            for (int i = 0; i < 256; i++) {
+                float r = m_Data->ParadeData[x].r[i];
+                float g = m_Data->ParadeData[x].g[i];
+                float b = m_Data->ParadeData[x].b[i];
 
-            if (r > 0) draw->AddRectFilled(ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight), 
-                                        ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight), 
-                                        IM_COL32(255, 0, 0, (int)std::min(255.0f, r * 50)));
-            if (g > 0) draw->AddRectFilled(ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight), 
-                                        ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight), 
-                                        IM_COL32(0, 255, 0, (int)std::min(255.0f, g * 50)));
-            if (b > 0) draw->AddRectFilled(ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight), 
-                                        ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight), 
-                                        IM_COL32(0, 0, 255, (int)std::min(255.0f, b * 50)));
+                if (r > 0) marks.Add(
+                    ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight),
+                    ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight),
+                    IM_COL32(255, 0, 0, (int)std::min(255.0f, r * 50)));
+                if (g > 0) marks.Add(
+                    ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight),
+                    ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight),
+                    IM_COL32(0, 255, 0, (int)std::min(255.0f, g * 50)));
+                if (b > 0) marks.Add(
+                    ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight),
+                    ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight),
+                    IM_COL32(0, 0, 255, (int)std::min(255.0f, b * 50)));
+            }
         }
     }
     
