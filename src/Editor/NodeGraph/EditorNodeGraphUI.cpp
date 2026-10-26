@@ -90,6 +90,8 @@ std::uint64_t EditorNodeGraphUI::LogicalNodeInputRevision(
     mix(std::hash<std::string>{}(node.title));
     mix(std::hash<std::string>{}(node.typeId));
     mix(static_cast<std::uint64_t>(graph.GetSocketPreviewIntent(node.id)));
+    mix(node.kind == EditorNodeGraph::NodeKind::MaskGenerator &&
+        node.rawCoverage.value("canvas", std::string{}) == "project");
     mix(m_RevealedAdvancedInputNodes.count(node.id));
     mix(m_RevealedAdvancedOutputNodes.count(node.id));
     mix(reinterpret_cast<std::uintptr_t>(ImGui::GetFont()));
@@ -376,7 +378,7 @@ EditorNodeGraphUI::BuildLogicalNodeLayout(
     spec.showKindLabel = profile.showKindLabel;
     spec.titleLines = titleLines;
     spec.titleEllipsized = titleEllipsized;
-    const std::vector<EditorNodeGraph::SocketDefinition> sockets =
+    const auto& sockets =
         PresentedSockets(graph, node);
     spec.sockets.reserve(sockets.size());
     for (const EditorNodeGraph::SocketDefinition& socket : sockets) {
@@ -409,16 +411,23 @@ bool EditorNodeGraphUI::IsSocketConnected(
     return connected;
 }
 
-std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSockets(
+const std::vector<EditorNodeGraph::SocketDefinition>& EditorNodeGraphUI::PresentedSockets(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node) const {
+    auto& layout = m_NodeLayoutCache[node.id];
+    const auto inputRevision = LogicalNodeInputRevision(graph, node);
+    const bool reusable = !m_RenderPreviewOnly && !m_RenderCaptureOnly &&
+        m_GraphContext.graph == &graph;
+    if (reusable && layout.hasPresentedSockets &&
+        layout.presentedInputRevision == inputRevision)
+        return layout.presentedSockets;
+
     std::vector<EditorNodeGraph::SocketDefinition> presented;
-    const auto* layout = FindNodeLayoutCache(node.id);
-    const bool current = !m_RenderPreviewOnly && !m_RenderCaptureOnly &&
-        m_GraphContext.graph == &graph && layout && layout->hasLogicalInputs &&
-        layout->logicalInputRevision == LogicalNodeInputRevision(graph, node);
+    const bool current = reusable && layout.hasLogicalInputs &&
+        layout.logicalInputRevision == inputRevision;
     const auto uncached = current ? std::vector<EditorNodeGraph::SocketDefinition>{} : graph.GetSockets(node, false);
-    const auto& sockets = current ? layout->declaredSockets : uncached;
+    const auto& sockets = current ? layout.declaredSockets : uncached;
+    presented.reserve(sockets.size());
     for (EditorNodeGraph::SocketDefinition socket : sockets) {
         // Retain existing authored tap wires, without advertising a second
         // image output on every adjustment or an input on a canvas-owned shape.
@@ -436,7 +445,12 @@ std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSocke
             presented.push_back(std::move(socket));
         }
     }
-    return presented;
+    // Borrow this node's immutable presentation until a real schema, connection
+    // or reveal change. Preview/capture graphs deliberately keep fresh inputs.
+    layout.presentedSockets = std::move(presented);
+    layout.presentedInputRevision = inputRevision;
+    layout.hasPresentedSockets = reusable;
+    return layout.presentedSockets;
 }
 
 void EditorNodeGraphUI::ResetDetailCardHover() {

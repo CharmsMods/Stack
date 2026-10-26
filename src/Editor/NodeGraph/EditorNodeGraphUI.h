@@ -217,6 +217,9 @@ private:
         std::string instanceUuid;
         Stack::Editor::NodeGraphUILayout::NodeLogicalLayout logicalLayout;
         std::vector<EditorNodeGraph::SocketDefinition> declaredSockets;
+        std::vector<EditorNodeGraph::SocketDefinition> presentedSockets;
+        std::uint64_t presentedInputRevision = 0;
+        bool hasPresentedSockets = false;
         std::uint64_t logicalContentRevision = 0;
         std::uint64_t logicalRevision = 0;
         std::uint64_t logicalInputRevision = 0;
@@ -425,7 +428,9 @@ private:
         const NodeLayoutCache& cache,
         const std::string& socketId,
         EditorNodeGraph::SocketDirection direction) const;
-    std::vector<EditorNodeGraph::SocketDefinition> PresentedSockets(
+    // Borrowed for the current read-only drawing pass. Graph commands and
+    // advanced-socket reveal changes run after its socket loops finish.
+    const std::vector<EditorNodeGraph::SocketDefinition>& PresentedSockets(
         const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Node& node) const;
     bool IsSocketConnected(
@@ -588,7 +593,7 @@ private:
     bool m_DetailCardInteractionAllowed = false;
     std::unordered_map<int, float> m_GroupEmphasisAnim;
     std::unordered_map<int, std::uint64_t> m_NodeFrontOrder;
-    std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
+    mutable std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
     mutable std::uint64_t m_NodeProjectionRevision = 0;
     mutable std::uint64_t m_WireWorldRevision = 1;
     std::uint64_t m_PreparedWireWorldRevision = 0;

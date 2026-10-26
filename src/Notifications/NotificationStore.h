@@ -2,6 +2,7 @@
 
 #include "NotificationModel.h"
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -25,6 +26,9 @@ public:
     bool IsOwnerValid(const Owner& owner) const;
     bool IsOperationCurrent(const Owner& owner, OperationId operation) const;
     std::vector<Record> Snapshot() const;
+    // Aggregate queries must not copy callback captures or preview leases just
+    // to draw the per-frame indicator. Uses the same rule as Record rendering.
+    std::size_t CountNeedsAttention() const;
     std::optional<Record> Find(EventId id) const;
     bool CanInvokeAction(EventId event, std::size_t action) const;
     ActionResult InvokeAction(EventId event, std::size_t action);

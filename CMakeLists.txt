@@ -653,6 +653,7 @@ if(BUILD_TESTING)
     include(cmake/StackColorWarpCachePolicyTests.cmake)
     include(cmake/StackGraphTechnicalFingerprintTests.cmake)
     include(cmake/StackGraphViewportAnalysisTests.cmake)
+    include(cmake/StackUiFrameDataCacheTests.cmake)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
     include(cmake/StackLibraryProjectExportTests.cmake)
@@ -787,6 +788,12 @@ if (BUILD_TESTING)
     target_link_libraries(StackUiActivityTests PRIVATE imgui_core)
     add_test(NAME StackUi.Activity COMMAND StackUiActivityTests)
     set_tests_properties(StackUi.Activity PROPERTIES LABELS "ui;notifications;async;cpu" TIMEOUT 30)
+
+    add_executable(StackNotificationAttentionTests tools/tests/notification_attention_tests.cpp
+        src/Notifications/NotificationStore.cpp src/Notifications/Notifier.cpp)
+    target_include_directories(StackNotificationAttentionTests PRIVATE src)
+    add_test(NAME StackUi.NotificationAttention COMMAND StackNotificationAttentionTests)
+    set_tests_properties(StackUi.NotificationAttention PROPERTIES LABELS "ui;notifications;cpu" TIMEOUT 30)
 
     add_executable(StackAsyncReliabilityTests
         tools/tests/async_reliability_tests.cpp

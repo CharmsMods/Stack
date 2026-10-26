@@ -131,6 +131,12 @@ std::vector<Record> NotificationStore::Snapshot() const {
     return m_Records;
 }
 
+std::size_t NotificationStore::CountNeedsAttention() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return static_cast<std::size_t>(std::count_if(m_Records.begin(), m_Records.end(),
+        [](const Record& record) { return record.NeedsAttention(); }));
+}
+
 std::optional<Record> NotificationStore::Find(EventId id) const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     const auto found = std::find_if(m_Records.begin(), m_Records.end(),

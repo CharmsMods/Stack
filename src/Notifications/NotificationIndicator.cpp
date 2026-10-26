@@ -9,9 +9,7 @@ float Presenter::RenderIndicator(NotificationStore& store,
     const UiActivity::Snapshot& snapshot, UiActivity::Presentation& activity,
     float width, float height, bool openPanel, const PresentationContext& context) {
     activity.Update(snapshot,ImGui::GetTime(),ImGui::GetIO().DeltaTime);
-    const auto records=store.Snapshot();
-    int attention=0;
-    for (const auto& record:records) attention+=record.NeedsAttention()?1:0;
+    const auto attention=store.CountNeedsAttention();
     std::string label=activity.busyBlend>.001f?activity.label:attention?"Activity":"";
     if(snapshot.entries.size()>1)label+=" +"+std::to_string(snapshot.entries.size()-1);
     if(attention)label+=" · "+std::to_string(attention);

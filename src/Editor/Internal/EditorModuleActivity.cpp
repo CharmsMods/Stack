@@ -69,15 +69,20 @@ void EditorModule::CollectActivity(Stack::UiActivity::Snapshot& snapshot) const 
 
     int quickAvailable = 0;
     int standardAvailable = 0;
-    for (const auto& source : m_RawWorkspace.sources) {
-        const bool standard = source.thumbnail.status ==
-                Stack::RawWorkspace::ThumbnailStatus::Valid ||
-            source.thumbnail.status ==
+    // Readiness is displayed only while scanning or making previews. Inactive
+    // Gallery owners still participate in the shell's activity collection, but
+    // must not rescan their entire unchanged source library every UI frame.
+    if (scanBusy || thumbnailBusy) {
+        for (const auto& source : m_RawWorkspace.sources) {
+            const bool standard = source.thumbnail.status ==
+                    Stack::RawWorkspace::ThumbnailStatus::Valid ||
+                source.thumbnail.status ==
+                    Stack::RawWorkspace::ThumbnailStatus::Ready;
+            const bool quick = standard || source.transientThumbnail.status ==
                 Stack::RawWorkspace::ThumbnailStatus::Ready;
-        const bool quick = standard || source.transientThumbnail.status ==
-            Stack::RawWorkspace::ThumbnailStatus::Ready;
-        quickAvailable += quick ? 1 : 0;
-        standardAvailable += standard ? 1 : 0;
+            quickAvailable += quick ? 1 : 0;
+            standardAvailable += standard ? 1 : 0;
+        }
     }
     const int sourceCount = std::max(
         scan.progress.discoveredRawCount,
