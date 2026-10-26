@@ -7,6 +7,7 @@
 #include "settings/AppearanceTheme.h"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <memory>
@@ -14,6 +15,8 @@
 #include <vector>
 
 namespace {
+
+constexpr auto kBackgroundImageMissingRetryInterval = std::chrono::seconds(1);
 
 unsigned char* LoadImagePixelsWithExplicitFlip(
     const std::filesystem::path& path,
@@ -54,6 +57,7 @@ void AppShell::ResetBackgroundImageDecodeState() {
     m_BackgroundImageDecodedWidth = 0;
     m_BackgroundImageDecodedHeight = 0;
     m_BackgroundImageDecodeError.clear();
+    m_BackgroundImageMissingRetryAt = {};
 }
 
 void AppShell::ReportBackgroundImageFailure(const std::string& path,
@@ -125,9 +129,12 @@ void AppShell::SyncBackgroundImageTexture() {
     const std::uint64_t revision = m_Appearance->GetBackgroundImageRevision();
 
     if (!enabled || normalizedPath.empty()) {
+        // Cancel pending publication immediately, even while the old texture fades out.
+        if (m_BackgroundImageDecodeState != BackgroundImageDecodeState::Idle) {
+            ResetBackgroundImageDecodeState();
+        }
         if (m_BackgroundImageTextureVisibleAlpha <= 0.001f) {
             ReleaseBackgroundImageTexture();
-            ResetBackgroundImageDecodeState();
             m_BackgroundImageTextureRevision = revision;
             m_Appearance->SetBackgroundImageRuntimeStatus("");
             ResolveBackgroundImageFailure();
@@ -207,13 +214,12 @@ void AppShell::SyncBackgroundImageTexture() {
         return;
     }
 
-    std::error_code ec;
-    if (!std::filesystem::exists(resolvedPath, ec) || ec) {
-        ReleaseBackgroundImageTexture();
-        ResetBackgroundImageDecodeState();
-        m_BackgroundImageTextureRevision = revision;
-        m_Appearance->SetBackgroundImageRuntimeStatus("Managed background image file is missing.");
-        ReportBackgroundImageFailure(normalizedPath, revision, "Managed background image file is missing.");
+    const bool retryingMissing = m_BackgroundImageDecodeState == BackgroundImageDecodeState::Missing &&
+        m_BackgroundImageDecodePath == normalizedPath &&
+        m_BackgroundImageDecodeRevision == revision;
+    // A restored file recovers automatically, without filesystem calls or repeated
+    // failure publication while drawing. New selections/revisions bypass this wait.
+    if (retryingMissing && std::chrono::steady_clock::now() < m_BackgroundImageMissingRetryAt) {
         return;
     }
 
@@ -226,7 +232,9 @@ void AppShell::SyncBackgroundImageTexture() {
     m_BackgroundImageDecodedWidth = 0;
     m_BackgroundImageDecodedHeight = 0;
     m_BackgroundImageDecodeError.clear();
-    m_Appearance->SetBackgroundImageRuntimeStatus("Loading background image...");
+    if (!retryingMissing) {
+        m_Appearance->SetBackgroundImageRuntimeStatus("Loading background image...");
+    }
 
     const auto scope = m_AppNotifier;
     Async::ActivityMetadata metadata;
@@ -235,21 +243,28 @@ void AppShell::SyncBackgroundImageTexture() {
     metadata.label = "Loading background";
     metadata.maintenance = true;
     const bool submitted = Async::TaskSystem::Get().Submit(std::move(metadata),
-        [this, scope, generation, resolvedPath, normalizedPath, revision]() {
+        [this, scope, generation, resolvedPath, normalizedPath, revision, retryingMissing]() {
         int width = 0;
         int height = 0;
         int channels = 0;
         std::vector<unsigned char> decodedPixels;
         std::string errorMessage;
+        bool missingFile = false;
 
         try {
-            const std::unique_ptr<unsigned char, decltype(&stbi_image_free)> pixels(
-                LoadImagePixelsWithExplicitFlip(resolvedPath, false, &width, &height, &channels), stbi_image_free);
-            if (pixels && width > 0 && height > 0) {
-                decodedPixels.assign(pixels.get(), pixels.get() +
-                    (static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u));
+            std::error_code ec;
+            missingFile = !std::filesystem::exists(resolvedPath, ec) || ec;
+            if (missingFile) {
+                errorMessage = "Managed background image file is missing.";
             } else {
-                errorMessage = "Failed to decode the background image.";
+                const std::unique_ptr<unsigned char, decltype(&stbi_image_free)> pixels(
+                    LoadImagePixelsWithExplicitFlip(resolvedPath, false, &width, &height, &channels), stbi_image_free);
+                if (pixels && width > 0 && height > 0) {
+                    decodedPixels.assign(pixels.get(), pixels.get() +
+                        (static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u));
+                } else {
+                    errorMessage = "Failed to decode the background image.";
+                }
             }
         } catch (const std::exception& exception) {
             decodedPixels.clear();
@@ -265,6 +280,8 @@ void AppShell::SyncBackgroundImageTexture() {
             generation,
             normalizedPath,
             revision,
+            retryingMissing,
+            missingFile,
             decodedPixels = std::move(decodedPixels),
             width,
             height,
@@ -272,6 +289,28 @@ void AppShell::SyncBackgroundImageTexture() {
             if (m_CloseRequested || !scope.Valid() || generation != m_BackgroundImageDecodeGeneration ||
                 normalizedPath != m_BackgroundImageDecodePath ||
                 revision != m_BackgroundImageDecodeRevision) {
+                return;
+            }
+            if (!m_Appearance || !m_Appearance->GetBackgroundImageEnabled() ||
+                revision != m_Appearance->GetBackgroundImageRevision() ||
+                normalizedPath != m_Appearance->GetResolvedBackgroundImagePath().lexically_normal().string()) {
+                // This request has finished. Do not leave a phantom in-flight job
+                // if the user restores this selection before the next Sync.
+                ResetBackgroundImageDecodeState();
+                return;
+            }
+
+            if (missingFile) {
+                m_BackgroundImageDecodeState = BackgroundImageDecodeState::Missing;
+                m_BackgroundImageDecodeError = std::move(errorMessage);
+                m_BackgroundImageMissingRetryAt = std::chrono::steady_clock::now() +
+                    kBackgroundImageMissingRetryInterval;
+                if (!retryingMissing) {
+                    ReleaseBackgroundImageTexture();
+                    m_BackgroundImageTextureRevision = revision;
+                    m_Appearance->SetBackgroundImageRuntimeStatus(m_BackgroundImageDecodeError);
+                    ReportBackgroundImageFailure(normalizedPath, revision, m_BackgroundImageDecodeError);
+                }
                 return;
             }
 

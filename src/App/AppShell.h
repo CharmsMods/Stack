@@ -24,6 +24,7 @@
 #include "RawMaskToolbar.h"
 #include "ProjectWorkspace.h"
 #include "Renderer/WorkspaceCompositor.h"
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -263,6 +264,7 @@ private:
         Queued,
         Decoding,
         Ready,
+        Missing,
         Failed
     };
 
@@ -296,6 +298,7 @@ private:
     int m_BackgroundImageDecodedWidth = 0;
     int m_BackgroundImageDecodedHeight = 0;
     std::string m_BackgroundImageDecodeError;
+    std::chrono::steady_clock::time_point m_BackgroundImageMissingRetryAt{};
     Stack::Notifications::EventId m_BackgroundImageFailureEvent = 0;
     std::string m_BackgroundImageReportedFailure;
     bool m_IsRunning;
