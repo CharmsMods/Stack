@@ -13,6 +13,12 @@ namespace Stack::Notifications {
 
 class Notifier;
 
+struct RunningActivityIdentity {
+    OwnerId ownerId = 0;
+    OperationId operationId = 0;
+    std::string title;
+};
+
 // Application-owned, session-only records. Posting and activity updates are
 // thread safe. Action handlers and their feature guards run on the main thread.
 class NotificationStore : public std::enable_shared_from_this<NotificationStore> {
@@ -26,6 +32,10 @@ public:
     bool IsOwnerValid(const Owner& owner) const;
     bool IsOperationCurrent(const Owner& owner, OperationId operation) const;
     std::vector<Record> Snapshot() const;
+    // Collector deduplication only needs identity, not callback/preview payloads.
+    // Excludes collected-activity records, but preserves dismissed and invalid
+    // owners' records while Running, matching the collector's existing rule.
+    std::vector<RunningActivityIdentity> SnapshotOwnedRunningActivities() const;
     // Aggregate queries must not copy callback captures or preview leases just
     // to draw the per-frame indicator. Uses the same rule as Record rendering.
     std::size_t CountNeedsAttention() const;

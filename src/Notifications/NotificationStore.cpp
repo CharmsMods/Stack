@@ -131,6 +131,16 @@ std::vector<Record> NotificationStore::Snapshot() const {
     return m_Records;
 }
 
+std::vector<RunningActivityIdentity> NotificationStore::SnapshotOwnedRunningActivities() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<RunningActivityIdentity> activities;
+    for (const auto& record : m_Records) {
+        if (record.state == RecordState::Running && record.content.dedupeKey != "collected-activity")
+            activities.push_back({record.owner.id, record.operationId, record.content.title});
+    }
+    return activities;
+}
+
 std::size_t NotificationStore::CountNeedsAttention() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     return static_cast<std::size_t>(std::count_if(m_Records.begin(), m_Records.end(),

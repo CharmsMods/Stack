@@ -45,7 +45,7 @@ void AppShell::UpdateNotifications() {
     AppSettingsPopup::UpdateNotifications(m_UpdateManager.get(), m_SettingsPopupState);
     const auto snapshot = CollectActivity();
     std::unordered_map<std::string, bool> live;
-    const auto records = m_NotificationStore->Snapshot();
+    const auto ownedActivities = m_NotificationStore->SnapshotOwnedRunningActivities();
     std::vector<Stack::UiActivity::Entry> grouped;
     for (const auto& entry : snapshot.entries) {
         const auto existing = std::find_if(grouped.begin(),grouped.end(),[&](const auto& group) {
@@ -64,10 +64,9 @@ void AppShell::UpdateNotifications() {
             (entry.operationId ? "operation:" + std::to_string(entry.operationId) : "collector:" + entry.key);
         // Owned activities report their own result. Collector records are only
         // a view of execution and are removed without inventing completion.
-        if (std::any_of(records.begin(), records.end(), [&](const auto& record) {
-            return record.owner.id == entry.ownerId && record.state == Stack::Notifications::RecordState::Running &&
-                (entry.operationId ? record.operationId == entry.operationId : record.content.title == entry.label) &&
-                record.content.dedupeKey != "collected-activity";
+        if (std::any_of(ownedActivities.begin(), ownedActivities.end(), [&](const auto& activity) {
+            return activity.ownerId == entry.ownerId &&
+                (entry.operationId ? activity.operationId == entry.operationId : activity.title == entry.label);
         })) continue;
         live[key] = true;
         auto found = m_LiveActivities.find(key);
