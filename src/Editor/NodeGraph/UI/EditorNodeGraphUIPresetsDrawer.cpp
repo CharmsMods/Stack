@@ -37,6 +37,10 @@ std::string BuildPresetRevisionToken(const PresetEntry& preset) {
     return preset.id + "|" + preset.timestamp + "|" + preset.savedWithVersion + "|" + std::to_string(preset.nodeCount);
 }
 
+std::string BuildPresetPreviewRevisionToken(const PresetEntry& preset) {
+    return BuildPresetRevisionToken(preset) + "|" + std::to_string(preset.previewContentRevision);
+}
+
 bool BuildPreviewGraphFromPayload(
     const StackBinaryFormat::json& graphPayload,
     EditorNodeGraph::Graph& outGraph,
@@ -337,7 +341,7 @@ void RenderUserPresetSection(
 
 bool EditorNodeGraphUI::EnsurePresetPreviewGraphLoaded(const PresetEntry& preset) {
     PreviewGraphCacheEntry& cache = m_PresetPreviewGraphCache[preset.id];
-    const std::string revisionToken = BuildPresetRevisionToken(preset);
+    const std::string revisionToken = BuildPresetPreviewRevisionToken(preset);
     if (cache.loadAttempted && cache.revisionToken == revisionToken) {
         return cache.error.empty();
     }
@@ -369,36 +373,34 @@ void EditorNodeGraphUI::WarmPresetPreviewCache(EditorModule* editor, double budg
     }
 
     PresetManager& presetManager = PresetManager::Get();
-    const auto& userPresets = presetManager.GetUserPresets();
-    if (userPresets.empty()) {
+    const auto revision = presetManager.GetPreviewDataRevision();
+    if (m_PresetPreviewWarmupRevision != revision) {
+        m_PresetPreviewWarmupRevision = revision;
         m_PresetPreviewWarmupCursor = 0;
-        return;
     }
+    const auto& userPresets = presetManager.GetUserPresets();
+    // The cursor is a finite pass, not a round-robin scan. An unfinished
+    // payload wakes another pass when its manager-owned completion publishes.
+    if (m_PresetPreviewWarmupCursor >= userPresets.size()) return;
 
     using Clock = std::chrono::steady_clock;
     const auto startTime = Clock::now();
     const double clampedBudgetMs = std::max(0.0, budgetMs);
     const std::size_t presetCount = userPresets.size();
-    std::size_t processedCount = 0;
-
-    while (processedCount < presetCount) {
-        const std::size_t presetIndex = (m_PresetPreviewWarmupCursor + processedCount) % presetCount;
-        const auto& preset = userPresets[presetIndex];
+    while (m_PresetPreviewWarmupCursor < presetCount) {
+        const auto& preset = userPresets[m_PresetPreviewWarmupCursor];
         if (preset) {
             EnsurePresetPreviewGraphLoaded(*preset);
         }
 
-        ++processedCount;
-        if (processedCount < presetCount && clampedBudgetMs > 0.0) {
+        ++m_PresetPreviewWarmupCursor;
+        if (m_PresetPreviewWarmupCursor < presetCount && clampedBudgetMs > 0.0) {
             const double elapsedMs = std::chrono::duration<double, std::milli>(Clock::now() - startTime).count();
             if (elapsedMs >= clampedBudgetMs) {
-                m_PresetPreviewWarmupCursor = (presetIndex + 1) % presetCount;
                 return;
             }
         }
     }
-
-    m_PresetPreviewWarmupCursor = (m_PresetPreviewWarmupCursor + processedCount) % presetCount;
 }
 
 void EditorNodeGraphUI::SetPresetPreviewHoverTarget(const std::shared_ptr<PresetEntry>& preset) {
@@ -412,7 +414,7 @@ void EditorNodeGraphUI::SetPresetPreviewHoverTarget(const std::shared_ptr<Preset
     }
 
     PreviewGraphCacheEntry& cache = m_PresetPreviewGraphCache[presetId];
-    const std::string revisionToken = BuildPresetRevisionToken(*preset);
+    const std::string revisionToken = BuildPresetPreviewRevisionToken(*preset);
     if (!cache.revisionToken.empty() && cache.revisionToken != revisionToken) {
         cache = {};
     }

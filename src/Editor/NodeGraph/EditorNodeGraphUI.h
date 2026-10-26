@@ -642,6 +642,7 @@ private:
     std::string m_PreviousPresetPreviewId;
     double m_PresetPreviewFadeStartedAt = 0.0;
     std::size_t m_PresetPreviewWarmupCursor = 0;
+    std::uint64_t m_PresetPreviewWarmupRevision = 0;
 
     void CopySelectedNodes(EditorModule* editor, bool writeSystemClipboard = false);
     void PasteNodes(EditorModule* editor, bool preferSystemClipboard = false);

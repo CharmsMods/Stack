@@ -18,6 +18,9 @@ struct PresetEntry {
     std::uint32_t nodeCount = 0;
     std::uint32_t inputCount = 0;
     std::uint32_t outputCount = 0;
+    // Runtime-only incarnation of this catalog entry. Saved timestamps can
+    // collide when an overwrite preserves the node count within one second.
+    std::uint64_t previewContentRevision = 0;
     std::vector<unsigned char> thumbnailBytes;
     unsigned int thumbnailTex = 0;
     int thumbnailWidth = 0;
@@ -60,6 +63,8 @@ public:
 
     const std::vector<std::shared_ptr<PresetEntry>>& GetBuiltInPresets() const { return m_BuiltInPresets; }
     const std::vector<std::shared_ptr<PresetEntry>>& GetUserPresets() const { return m_UserPresets; }
+    // Main-thread publication revision, including payload success/failure.
+    std::uint64_t GetPreviewDataRevision() const { return m_PreviewDataState->revision; }
 
 private:
     PresetManager();
@@ -73,9 +78,16 @@ private:
     bool WriteUserPresetDocument(const PresetEntry& entry, const StackBinaryFormat::NodePresetDocument& document, std::string* outError = nullptr);
     std::uintmax_t BuildPresetSignature() const;
 
+    struct PreviewDataState {
+        std::uint64_t revision = 1;
+        std::uint64_t catalogRevision = 0;
+    };
+
     std::filesystem::path m_PresetsPath;
     std::vector<std::shared_ptr<PresetEntry>> m_BuiltInPresets;
     std::vector<std::shared_ptr<PresetEntry>> m_UserPresets;
     std::uintmax_t m_LastPresetSignature = 0;
+    // Async preload completions hold only a weak reference to this owner.
+    std::shared_ptr<PreviewDataState> m_PreviewDataState = std::make_shared<PreviewDataState>();
     mutable std::mutex m_Mutex;
 };

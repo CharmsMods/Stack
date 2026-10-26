@@ -229,8 +229,13 @@ void PresetManager::RefreshPresets() {
 
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto catalogRevision = ++m_PreviewDataState->catalogRevision;
+        for (auto& preset : loaded) {
+            preset->previewContentRevision = catalogRevision;
+        }
         m_UserPresets = std::move(loaded);
         m_LastPresetSignature = signature;
+        ++m_PreviewDataState->revision;
     }
 
     for (const auto& preset : m_UserPresets) {
@@ -256,7 +261,9 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
 
     const std::filesystem::path path = m_PresetsPath / std::filesystem::u8path(entry->fileName);
     const std::weak_ptr<PresetEntry> weakEntry = entry;
-    const bool queued = Async::TaskSystem::Get().Submit("Loading presets", [path, weakEntry]() {
+    const std::weak_ptr<PreviewDataState> weakPreviewState = m_PreviewDataState;
+    const auto catalogRevision = m_PreviewDataState->catalogRevision;
+    const bool queued = Async::TaskSystem::Get().Submit("Loading presets", [path, weakEntry, weakPreviewState, catalogRevision]() {
         StackBinaryFormat::json graphPayload = StackBinaryFormat::json::object();
         std::string error;
         bool success = false;
@@ -280,7 +287,8 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
             error = "Stack could not read the preset graph.";
         }
 
-        Async::TaskSystem::Get().PostToMain([weakEntry, graphPayload = std::move(graphPayload), error = std::move(error), success]() mutable {
+        Async::TaskSystem::Get().PostToMain([weakEntry, weakPreviewState, catalogRevision,
+            graphPayload = std::move(graphPayload), error = std::move(error), success]() mutable {
             if (const std::shared_ptr<PresetEntry> entry = weakEntry.lock()) {
                 entry->graphPayloadLoadRequested = false;
                 if (success) {
@@ -292,12 +300,19 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
                     entry->graphPayloadLoaded = false;
                     entry->graphPayloadLoadError = error;
                 }
+                // Complete retained old entries as before, but only current
+                // catalog payloads can wake another preview warmup pass.
+                if (const auto previewState = weakPreviewState.lock()) {
+                    if (previewState->catalogRevision == catalogRevision)
+                        ++previewState->revision;
+                }
             }
         });
     });
     if (!queued) {
         entry->graphPayloadLoadRequested = false;
         entry->graphPayloadLoadError = "Stack could not schedule the preset graph load.";
+        ++m_PreviewDataState->revision;
     }
 }
 
