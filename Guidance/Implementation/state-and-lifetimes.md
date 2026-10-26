@@ -30,6 +30,8 @@ Shared GPU execution may serialize access for correctness or memory limits. That
 
 For node-owned RAW resources, absence proves removal only in an explicitly complete compiled graph snapshot. Stage/dependency snapshots retain absent owners so auxiliary views do not repeatedly discard live sensor uploads or decoded data. A present incompatible node kind can release its obsolete resources. Retire borrowed output handles before releasing those owners on their execution context; publication leases remain independent. Stage-only absence may therefore retain resources until a complete request or teardown.
 
+Render worker and service completion queues detach discarded results while locked, then release their GPU resources and large payloads after unlocking on the same valid GL context. Keep retirement scopes inside context lifetime, preserve other owners and terminal cancellation acknowledgements, and clear transferred raw tile fence handles explicitly. Moving cleanup out of a scheduling lock must not create an unbounded retirement backlog.
+
 ## Review isolation concretely
 
 Use an A/B scenario appropriate to the change: start work in A, interact with B, then let A finish or close A. Check the affected data, result, dirty state, history, progress or focus. A hidden animation must not take focus from B; a save completion must not clear edits made after its capture.

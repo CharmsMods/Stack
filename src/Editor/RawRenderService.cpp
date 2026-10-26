@@ -1,11 +1,15 @@
 #include "Editor/RawRenderService.h"
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
+#include "Editor/Internal/EditorRenderResultRetirement.h"
 
 #include <algorithm>
 #include <limits>
 #include <utility>
 
 namespace Stack::EditorRendering {
+
+using Internal::RenderResultRetirement;
+using Internal::RenderResultResourceGuard;
 
 RawRenderService& RawRenderService::Get() {
     static RawRenderService service;
@@ -38,43 +42,26 @@ RawRenderService::ClientId RawRenderService::Acquire(
     return clientId;
 }
 
-void RawRenderService::ReleaseResultResources(
-    EditorRenderWorker::Result& result) {
-    auto releaseTexture = [](EditorRenderWorker::SharedTextureResult& texture) {
-        texture.Reset();
-    };
-    releaseTexture(result.outputTexture);
-    releaseTexture(result.viewportOverview);
-    releaseTexture(result.rawWorkspace.localRangeOverlayTexture);
-    if (result.outputTiles.readyFence != nullptr) {
-        glDeleteSync(result.outputTiles.readyFence);
-        result.outputTiles.readyFence = nullptr;
-    }
-    for (EditorRenderWorker::SharedTextureTile& tile :
-         result.outputTiles.tiles) {
-        if (tile.texture != 0) glDeleteTextures(1, &tile.texture);
-        tile.texture = 0;
-    }
-    result.outputTiles.tiles.clear();
-}
-
 void RawRenderService::Release(ClientId clientId) {
     if (clientId == 0) return;
     std::shared_lock<std::shared_mutex> lifetime(m_WorkerLifetimeMutex);
     bool shutdown = false;
     {
+        RenderResultRetirement retired;
         std::lock_guard<std::mutex> lock(m_Mutex);
         if (m_Clients.erase(clientId) == 0) return;
         m_Sessions.erase(clientId);
         m_Pending.erase(clientId);
         const auto completed = m_Completed.find(clientId);
         if (completed != m_Completed.end()) {
-            for (EditorRenderWorker::Result& result : completed->second) {
-                ReleaseResultResources(result);
-            }
+            retired.results.splice(retired.results.end(), completed->second);
             m_Completed.erase(completed);
         }
-        m_Timings.erase(clientId);
+        const auto timings = m_Timings.find(clientId);
+        if (timings != m_Timings.end()) {
+            retired.results.splice(retired.results.end(), timings->second);
+            m_Timings.erase(timings);
+        }
         if (m_ActiveOwner == clientId) {
             m_ActiveOwner = 0;
             m_ActiveSnapshot = {};
@@ -95,15 +82,15 @@ void RawRenderService::Release(ClientId clientId) {
     }
     m_Worker.RequestStopForShutdown();
     m_Worker.Shutdown();
+    RenderResultRetirement retired;
     std::lock_guard<std::mutex> lock(m_Mutex);
-    for (auto& [owner, results] : m_Completed) {
-        (void)owner;
-        for (EditorRenderWorker::Result& result : results) {
-            ReleaseResultResources(result);
+    for (auto* completed : {&m_Completed, &m_Timings}) {
+        for (auto& [owner, results] : *completed) {
+            (void)owner;
+            retired.results.splice(retired.results.end(), results);
         }
+        completed->clear();
     }
-    m_Completed.clear();
-    m_Timings.clear();
     m_Pending.clear();
     m_Sessions.clear();
     m_ActiveOwner = 0;
@@ -233,12 +220,17 @@ void RawRenderService::QueueSyntheticSuperseded(
 }
 
 void RawRenderService::Pump() {
-    std::vector<EditorRenderWorker::Result> completed;
+    RenderResultRetirement completed, retired;
     EditorRenderWorker::Result result;
+    RenderResultResourceGuard resultResources(result);
     while (m_Worker.TryConsumeCompleted(result)) {
-        completed.push_back(std::move(result));
+        completed.results.push_back(std::move(result));
+        result.outputTiles = {};
     }
-    while (m_Worker.TryConsumeViewportTiming(result)) completed.push_back(std::move(result));
+    while (m_Worker.TryConsumeViewportTiming(result)) {
+        completed.results.push_back(std::move(result));
+        result.outputTiles = {};
+    }
     std::vector<EditorRenderWorker::Snapshot> readyDenoise;
     EditorRenderWorker::Snapshot continuation;
     while (m_Worker.TryConsumeReadyDenoiseSnapshot(continuation)) {
@@ -251,26 +243,24 @@ void RawRenderService::Pump() {
     const bool workerFailed = m_Worker.GetThreadFailure(&workerError);
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        for (EditorRenderWorker::Result& value : completed) {
-            if (m_Clients.find(value.ownerId) == m_Clients.end()) {
-                ReleaseResultResources(value);
-                continue;
-            }
+        for (auto it = completed.results.begin(); it != completed.results.end();) {
+            const auto current = it++;
+            auto& value = *current;
+            if (m_Clients.find(value.ownerId) == m_Clients.end()) continue;
             if (value.timingOnly) {
-                auto& timings=m_Timings[value.ownerId];
-                if (timings.size()>=32) timings.pop_front();
-                timings.push_back(std::move(value));
+                auto& timings = m_Timings[value.ownerId];
+                if (timings.size() >= 32) retired.Take(timings, timings.begin());
+                timings.splice(timings.end(), completed.results, current);
                 continue;
             }
             auto& queue = m_Completed[value.ownerId];
             if (value.graphRequest.enabled && !workerFailed) {
-                for (auto it = queue.begin(); it != queue.end();) {
-                    if (!it->graphRequest.enabled) { ++it; continue; }
-                    ReleaseResultResources(*it);
-                    it = queue.erase(it);
+                for (auto stale = queue.begin(); stale != queue.end();) {
+                    if (!stale->graphRequest.enabled) { ++stale; continue; }
+                    retired.Take(queue, stale++);
                 }
             }
-            queue.push_back(std::move(value));
+            queue.splice(queue.end(), completed.results, current);
         }
         for (auto& ready : readyDenoise) {
             if (m_Clients.find(ready.ownerId) == m_Clients.end()) continue;
@@ -462,22 +452,31 @@ bool RawRenderService::TryConsumeCompleted(
     ClientId clientId,
     EditorRenderWorker::Result& result) {
     Pump();
-    std::lock_guard<std::mutex> lock(m_Mutex);
-    const auto found = m_Completed.find(clientId);
-    if (found == m_Completed.end() || found->second.empty()) return false;
-    result = std::move(found->second.front());
-    found->second.pop_front();
-    if (found->second.empty()) m_Completed.erase(found);
+    EditorRenderWorker::Result completed;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto found = m_Completed.find(clientId);
+        if (found == m_Completed.end() || found->second.empty()) return false;
+        completed = std::move(found->second.front());
+        found->second.pop_front();
+        if (found->second.empty()) m_Completed.erase(found);
+    }
+    result = std::move(completed);
     return true;
 }
 
 bool RawRenderService::TryConsumeViewportTiming(ClientId clientId, EditorRenderWorker::Result& result) {
     Pump();
-    std::lock_guard<std::mutex> lock(m_Mutex);
-    const auto found=m_Timings.find(clientId);
-    if (found==m_Timings.end() || found->second.empty()) return false;
-    result=std::move(found->second.front()); found->second.pop_front();
-    if (found->second.empty()) m_Timings.erase(found);
+    EditorRenderWorker::Result completed;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto found = m_Timings.find(clientId);
+        if (found == m_Timings.end() || found->second.empty()) return false;
+        completed = std::move(found->second.front());
+        found->second.pop_front();
+        if (found->second.empty()) m_Timings.erase(found);
+    }
+    result = std::move(completed);
     return true;
 }
 

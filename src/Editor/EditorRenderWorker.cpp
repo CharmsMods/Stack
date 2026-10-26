@@ -3,6 +3,7 @@
 #include "EditorRenderWorker.h"
 
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
+#include "Editor/Internal/EditorRenderResultRetirement.h"
 #include "Editor/Internal/EditorRenderWorkerTileGraph.h"
 #include "Editor/Internal/EditorRenderWorkerViewportDemand.h"
 #include "Editor/LayerRegistry.h"
@@ -30,6 +31,9 @@
 #include <stdexcept>
 
 namespace {
+
+using Stack::EditorRendering::Internal::RenderResultRetirement;
+using Stack::EditorRendering::Internal::RenderResultResourceGuard;
 
 constexpr int kRawWorkspaceGraphScopeMaxDimension = 192;
 constexpr int kRawWorkspaceGradingScopeMaxDimension = 192;
@@ -103,23 +107,6 @@ GLsync CreateSharedTextureFence() {
         glFlush();
     }
     return fence;
-}
-
-void ReleaseResultResources(EditorRenderWorker::Result& result) {
-    ReleaseSharedTexture(result.outputTexture);
-    ReleaseSharedTexture(result.viewportOverview);
-    ReleaseSharedTexture(result.rawWorkspace.localRangeOverlayTexture);
-    if (result.outputTiles.readyFence) {
-        glDeleteSync(result.outputTiles.readyFence);
-        result.outputTiles.readyFence = nullptr;
-    }
-    for (EditorRenderWorker::SharedTextureTile& tile : result.outputTiles.tiles) {
-        if (tile.texture != 0) {
-            glDeleteTextures(1, &tile.texture);
-            tile.texture = 0;
-        }
-    }
-    result.outputTiles.tiles.clear();
 }
 
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot) {
@@ -1627,104 +1614,107 @@ void EditorRenderWorker::HandleThreadFailure(
     const char* message, const Snapshot* currentRequest) noexcept {
     OpenGlTaskQueue abandonedTasks;
     std::shared_ptr<OpenGlTaskState> activeTask;
-    try {
-        std::lock_guard<std::mutex> lock(m_Mutex);
-        const bool unexpectedFailure = !m_StopRequested;
-        const bool hadPending = m_HasPending;
-        // Retire the dead executor and release blocking task ownership before
-        // any diagnostic/result/default-Snapshot allocation can throw.
-        m_StopRequested = true;
-        m_HasPending = false;
-        m_Rendering = false;
-        m_Busy = false;
-        abandonedTasks.swap(m_OpenGlTasks);
-        activeTask = std::move(m_ActiveOpenGlTask);
-        if (unexpectedFailure) {
-            m_ThreadFailed = true;
-            try {
-                m_ThreadFailure = std::string("The render worker failed: ") +
-                    (message ? message : "unknown worker-thread exception") +
-                    ". Restart Stack to resume rendering.";
-            } catch (...) {
-                m_ThreadFailure.clear();
-            }
-        }
-        if (!m_InitComplete) {
-            m_InitSucceeded = false;
-            try {
-                m_InitError =
-                    message != nullptr
-                    ? message
-                    : "render worker failed";
-            } catch (...) {
-                m_InitError.clear();
-            }
-            m_InitComplete = true;
-        }
-        while (!m_CompletedTimings.empty()) m_CompletedTimings.pop();
-        while (!m_CompletedViewportTimings.empty()) m_CompletedViewportTimings.pop();
-        // Completed outputs own detached shared textures and flushed fences.
-        // Pipeline teardown does not own those resources; the UI must still
-        // consume them, including any completion already queued for another
-        // project. Only unfinished requests need a new terminal result.
-        const auto failSnapshot = [&](const Snapshot& snapshot, RawRenderPurpose purpose) noexcept {
-            try {
-                if (!snapshot.generation || IsOwnerSnapshotInvalidLocked(
-                        snapshot.ownerId, snapshot.generation,
-                        snapshot.schedulingSerial, snapshot.rawRenderPurpose) ||
-                    (purpose != snapshot.rawRenderPurpose && IsOwnerSnapshotInvalidLocked(
-                        snapshot.ownerId, snapshot.generation,
-                        snapshot.schedulingSerial, purpose))) return;
-                const auto sameRequest = [&](const Result& result) {
-                    return result.ownerId == snapshot.ownerId &&
-                        result.generation == snapshot.generation &&
-                        result.schedulingSerial == snapshot.schedulingSerial &&
-                        result.rawRenderPurpose == purpose;
-                };
-                if (std::any_of(m_Completed.begin(), m_Completed.end(), sameRequest) ||
-                    (m_FallbackCompleted && sameRequest(*m_FallbackCompleted))) return;
-                Result failed = MakeFailedResult(snapshot, m_ThreadFailure);
-                failed.rawRenderPurpose = purpose;
-                failed.telemetry.workerStarted = true;
+    {
+        RenderResultRetirement retired;
+        try {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            const bool unexpectedFailure = !m_StopRequested;
+            const bool hadPending = m_HasPending;
+            // Retire the dead executor and release blocking task ownership before
+            // any diagnostic/result/default-Snapshot allocation can throw.
+            m_StopRequested = true;
+            m_HasPending = false;
+            m_Rendering = false;
+            m_Busy = false;
+            abandonedTasks.swap(m_OpenGlTasks);
+            activeTask = std::move(m_ActiveOpenGlTask);
+            if (unexpectedFailure) {
+                m_ThreadFailed = true;
                 try {
-                    m_Completed.push_back(std::move(failed));
+                    m_ThreadFailure = std::string("The render worker failed: ") +
+                        (message ? message : "unknown worker-thread exception") +
+                        ". Restart Stack to resume rendering.";
                 } catch (...) {
-                    if (!m_FallbackCompleted) m_FallbackCompleted.emplace(std::move(failed));
+                    m_ThreadFailure.clear();
                 }
-            } catch (...) {
-                // Fatal status survives even when host memory cannot hold an
-                // owner-specific completion. Do not promise recovery from OOM.
             }
-        };
-        if (unexpectedFailure) {
-            bool currentParked = false;
-            for (auto& [ownerId, owner] : m_OwnerStates) {
-                (void)ownerId;
-                if (!owner.continuation) continue;
-                const Snapshot& parked = *owner.continuation;
-                currentParked |= currentRequest &&
-                    parked.ownerId == currentRequest->ownerId &&
-                    parked.generation == currentRequest->generation &&
-                    parked.schedulingSerial == currentRequest->schedulingSerial;
-                failSnapshot(parked, owner.resumeOriginalPurpose ||
-                    !RawRenderPurposeMayPublishPresentation(parked.rawRenderPurpose)
-                    ? parked.rawRenderPurpose : RawRenderPurpose::DenoiseCompletion);
-                // Transfer terminal ownership before Pump can take a ready
-                // continuation and report the same failure a second time.
-                owner.continuation.reset();
-                owner.continuationReady = false;
-                owner.resumeOriginalPurpose = false;
+            if (!m_InitComplete) {
+                m_InitSucceeded = false;
+                try {
+                    m_InitError =
+                        message != nullptr
+                        ? message
+                        : "render worker failed";
+                } catch (...) {
+                    m_InitError.clear();
+                }
+                m_InitComplete = true;
             }
-            if (currentRequest && !currentParked)
-                failSnapshot(*currentRequest, currentRequest->rawRenderPurpose);
-            if (hadPending) failSnapshot(m_Pending, m_Pending.rawRenderPurpose);
+            retired.results.splice(retired.results.end(), m_CompletedTimings);
+            retired.results.splice(retired.results.end(), m_CompletedViewportTimings);
+            // Completed outputs own detached shared textures and flushed fences.
+            // Pipeline teardown does not own those resources; the UI must still
+            // consume them, including any completion already queued for another
+            // project. Only unfinished requests need a new terminal result.
+            const auto failSnapshot = [&](const Snapshot& snapshot, RawRenderPurpose purpose) noexcept {
+                try {
+                    if (!snapshot.generation || IsOwnerSnapshotInvalidLocked(
+                            snapshot.ownerId, snapshot.generation,
+                            snapshot.schedulingSerial, snapshot.rawRenderPurpose) ||
+                        (purpose != snapshot.rawRenderPurpose && IsOwnerSnapshotInvalidLocked(
+                            snapshot.ownerId, snapshot.generation,
+                            snapshot.schedulingSerial, purpose))) return;
+                    const auto sameRequest = [&](const Result& result) {
+                        return result.ownerId == snapshot.ownerId &&
+                            result.generation == snapshot.generation &&
+                            result.schedulingSerial == snapshot.schedulingSerial &&
+                            result.rawRenderPurpose == purpose;
+                    };
+                    if (std::any_of(m_Completed.begin(), m_Completed.end(), sameRequest) ||
+                        (m_FallbackCompleted && sameRequest(*m_FallbackCompleted))) return;
+                    Result failed = MakeFailedResult(snapshot, m_ThreadFailure);
+                    failed.rawRenderPurpose = purpose;
+                    failed.telemetry.workerStarted = true;
+                    try {
+                        m_Completed.push_back(std::move(failed));
+                    } catch (...) {
+                        if (!m_FallbackCompleted) m_FallbackCompleted.emplace(std::move(failed));
+                    }
+                } catch (...) {
+                    // Fatal status survives even when host memory cannot hold an
+                    // owner-specific completion. Do not promise recovery from OOM.
+                }
+            };
+            if (unexpectedFailure) {
+                bool currentParked = false;
+                for (auto& [ownerId, owner] : m_OwnerStates) {
+                    (void)ownerId;
+                    if (!owner.continuation) continue;
+                    const Snapshot& parked = *owner.continuation;
+                    currentParked |= currentRequest &&
+                        parked.ownerId == currentRequest->ownerId &&
+                        parked.generation == currentRequest->generation &&
+                        parked.schedulingSerial == currentRequest->schedulingSerial;
+                    failSnapshot(parked, owner.resumeOriginalPurpose ||
+                        !RawRenderPurposeMayPublishPresentation(parked.rawRenderPurpose)
+                        ? parked.rawRenderPurpose : RawRenderPurpose::DenoiseCompletion);
+                    // Transfer terminal ownership before Pump can take a ready
+                    // continuation and report the same failure a second time.
+                    owner.continuation.reset();
+                    owner.continuationReady = false;
+                    owner.resumeOriginalPurpose = false;
+                }
+                if (currentRequest && !currentParked)
+                    failSnapshot(*currentRequest, currentRequest->rawRenderPurpose);
+                if (hadPending) failSnapshot(m_Pending, m_Pending.rawRenderPurpose);
+            }
+            m_Pending = {};
+            m_ProgressCompletedSteps = 0;
+            m_ProgressTotalSteps = 0;
+            m_ProgressLabel.clear();
+        } catch (...) {
+            // std::thread entry points cannot permit an exception to escape.
         }
-        m_Pending = {};
-        m_ProgressCompletedSteps = 0;
-        m_ProgressTotalSteps = 0;
-        m_ProgressLabel.clear();
-    } catch (...) {
-        // std::thread entry points cannot permit an exception to escape.
     }
     const auto failTask = [message](
         const std::shared_ptr<OpenGlTaskState>& state) noexcept {
@@ -1802,13 +1792,12 @@ void EditorRenderWorker::Shutdown() {
         GLFWwindow* previousContext = glfwGetCurrentContext();
         glfwMakeContextCurrent(m_WorkerWindow);
         {
+            RenderResultRetirement retired;
             std::lock_guard<std::mutex> lock(m_Mutex);
-            for (Result& result : m_Completed) ReleaseResultResources(result);
-            m_Completed.clear();
-            if (m_FallbackCompleted) {
-                ReleaseResultResources(*m_FallbackCompleted);
-                m_FallbackCompleted.reset();
-            }
+            retired.results.splice(retired.results.end(), m_CompletedTimings);
+            retired.results.splice(retired.results.end(), m_CompletedViewportTimings);
+            retired.results.splice(retired.results.end(), m_Completed);
+            retired.TakeFallback(m_FallbackCompleted);
         }
         glfwMakeContextCurrent(previousContext == m_WorkerWindow ? nullptr : previousContext);
         glfwDestroyWindow(m_WorkerWindow);
@@ -2032,22 +2021,23 @@ bool EditorRenderWorker::Submit(Snapshot snapshot) {
 }
 
 bool EditorRenderWorker::TryConsumeCompleted(Result& result) {
-    std::lock_guard<std::mutex> lock(m_Mutex);
-    if (!m_CompletedTimings.empty()) {
-        result = std::move(m_CompletedTimings.front());
-        m_CompletedTimings.pop();
-        return true;
+    Result completed;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (!m_CompletedTimings.empty()) {
+            completed = std::move(m_CompletedTimings.front());
+            m_CompletedTimings.pop_front();
+        } else if (!m_Completed.empty()) {
+            completed = std::move(m_Completed.front());
+            m_Completed.pop_front();
+        } else if (m_FallbackCompleted) {
+            completed = std::move(*m_FallbackCompleted);
+            m_FallbackCompleted.reset();
+        } else {
+            return false;
+        }
     }
-    if (!m_Completed.empty()) {
-        result = std::move(m_Completed.front());
-        m_Completed.pop_front();
-        return true;
-    }
-    if (!m_FallbackCompleted.has_value()) {
-        return false;
-    }
-    result = std::move(*m_FallbackCompleted);
-    m_FallbackCompleted.reset();
+    result = std::move(completed);
     return true;
 }
 
@@ -2108,6 +2098,116 @@ bool EditorRenderWorker::ShouldAbortStaleSnapshot(
           !Stack::GraphRendering::MayFinishActive(snapshot.graphRequest, m_Pending.graphRequest))) ||
         IsOwnerSnapshotInvalidLocked(snapshot.ownerId, snapshot.generation,
             snapshot.schedulingSerial, snapshot.rawRenderPurpose);
+}
+
+void EditorRenderWorker::PublishCompletedResult(Snapshot& snapshot, Result& result) {
+    RenderResultRetirement retired;
+    RenderResultResourceGuard resultResources(result);
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    RetainDenoiseContinuationLocked(snapshot, result.denoisePending);
+    m_Rendering = false;
+    if (result.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && result.calibration.renderMs > 0.0 &&
+        (result.telemetry.superseded || IsOwnerResultStaleLocked(result))) {
+        // Numeric measurements have a longer lifetime than presentation
+        // requests. Keep completed passes even if the next edit canceled
+        // the remaining passes or superseded the ordinary result queue.
+        try {
+            Result timing;
+            timing.ownerId = result.ownerId;
+            timing.rawRenderPurpose = RawRenderPurpose::ViewportCalibration;
+            timing.rawWorkspace.sourceKey = result.rawWorkspace.sourceKey;
+            timing.rawWorkspace.sourceHash = result.rawWorkspace.sourceHash;
+            timing.workloadKeys = result.workloadKeys;
+            timing.timingRepresentation=result.timingRepresentation;
+            timing.telemetry.timingHistoryEpoch=result.telemetry.timingHistoryEpoch;
+            timing.calibration = result.calibration;
+            timing.telemetry.superseded = true;
+            m_CompletedTimings.push_back(std::move(timing));
+        } catch (const std::bad_alloc&) { /* Foreground work retains priority. */ }
+    }
+    const bool carriesCancellationAcknowledgement =
+        result.rawWorkspace.preciseSolveResult.has_value() &&
+        result.rawWorkspace.preciseSolveResult->canceled;
+    const bool staleResult = IsOwnerResultStaleLocked(result);
+    if (m_StopRequested ||
+        (staleResult && !carriesCancellationAcknowledgement)) {
+        snapshot.generation = 0;
+        retired.TakeUnpublished(result);
+        m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+            HasDenoiseWorkLocked();
+        if (!m_Busy.load()) {
+            m_ProgressCompletedSteps = m_ProgressTotalSteps;
+            m_ProgressLabel =
+                m_StopRequested ? std::string{} : "Stale render cancelled.";
+        }
+        return;
+    }
+    auto cancellationAcknowledgement = m_Completed.end();
+    for (auto it = m_Completed.begin(); it != m_Completed.end();) {
+        if (it->ownerId != result.ownerId) {
+            ++it;
+            continue;
+        }
+        const auto stale = it++;
+        if (stale->rawRenderPurpose == RawRenderPurpose::ViewportCalibration && stale->calibration.renderMs > 0.0) {
+            stale->telemetry.superseded = true;
+            try {
+                m_CompletedTimings.push_back(std::move(*stale));
+                stale->outputTiles = {};
+            } catch (const std::bad_alloc&) {}
+            retired.Take(m_Completed, stale);
+            continue;
+        }
+        const bool staleIsCancellationAcknowledgement =
+            stale->rawWorkspace.preciseSolveResult.has_value() &&
+            stale->rawWorkspace.preciseSolveResult->canceled;
+        if (!carriesCancellationAcknowledgement &&
+            staleIsCancellationAcknowledgement &&
+            (cancellationAcknowledgement == m_Completed.end() ||
+                stale->generation >= cancellationAcknowledgement->generation)) {
+            if (cancellationAcknowledgement != m_Completed.end())
+                retired.Take(m_Completed, cancellationAcknowledgement);
+            cancellationAcknowledgement = stale;
+        } else {
+            retired.Take(m_Completed, stale);
+        }
+    }
+    if (cancellationAcknowledgement != m_Completed.end()) {
+        // Preserve the newest terminal acknowledgement without allocating a
+        // second queue node, after every other owner's retained completions.
+        m_Completed.splice(m_Completed.end(), m_Completed, cancellationAcknowledgement);
+    }
+    if (m_FallbackCompleted && m_FallbackCompleted->ownerId == result.ownerId) {
+        retired.TakeFallback(m_FallbackCompleted);
+    }
+    bool resultQueued = false;
+    bool resultStoredWithoutQueueAllocation = false;
+    try {
+        m_Completed.push_back(std::move(result));
+        result.outputTiles = {};
+        resultQueued = true;
+        // Retire identity before a consumer can take the packet.
+        snapshot.generation = 0;
+    } catch (...) {
+        if (!m_FallbackCompleted) {
+            m_FallbackCompleted.emplace(std::move(result));
+            result.outputTiles = {};
+            resultStoredWithoutQueueAllocation = true;
+            snapshot.generation = 0;
+        } else {
+            retired.TakeUnpublished(result);
+        }
+    }
+    m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+        HasDenoiseWorkLocked();
+    if (!m_Busy.load()) {
+        m_ProgressCompletedSteps = m_ProgressTotalSteps;
+        if (resultQueued || resultStoredWithoutQueueAllocation) {
+            m_ProgressLabel = "Render ready.";
+        } else {
+            m_ProgressLabel.clear();
+        }
+    }
 }
 
 void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
@@ -2304,137 +2404,16 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
             result.telemetry.publishedTextureBytes +=
                 static_cast<std::size_t>(result.viewportOverview.width) * result.viewportOverview.height * 8u;
         }
-        {
-            std::lock_guard<std::mutex> lock(m_Mutex);
-            RetainDenoiseContinuationLocked(snapshot, result.denoisePending);
-            m_Rendering = false;
-            if (result.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && result.calibration.renderMs > 0.0 &&
-                (result.telemetry.superseded || IsOwnerResultStaleLocked(result))) {
-                // Numeric measurements have a longer lifetime than presentation
-                // requests. Keep completed passes even if the next edit canceled
-                // the remaining passes or superseded the ordinary result queue.
-                try {
-                    Result timing;
-                    timing.ownerId = result.ownerId;
-                    timing.rawRenderPurpose = RawRenderPurpose::ViewportCalibration;
-                    timing.rawWorkspace.sourceKey = result.rawWorkspace.sourceKey;
-                    timing.rawWorkspace.sourceHash = result.rawWorkspace.sourceHash;
-                    timing.workloadKeys = result.workloadKeys;
-                    timing.timingRepresentation=result.timingRepresentation;
-                    timing.telemetry.timingHistoryEpoch=result.telemetry.timingHistoryEpoch;
-                    timing.calibration = result.calibration;
-                    timing.telemetry.superseded = true;
-                    m_CompletedTimings.push(std::move(timing));
-                } catch (const std::bad_alloc&) { /* Foreground work retains priority. */ }
-            }
-            const bool carriesCancellationAcknowledgement =
-                result.rawWorkspace.preciseSolveResult.has_value() &&
-                result.rawWorkspace.preciseSolveResult->canceled;
-            const bool staleResult = IsOwnerResultStaleLocked(result);
-            if (m_StopRequested ||
-                (staleResult && !carriesCancellationAcknowledgement)) {
-                snapshot.generation = 0;
-                ReleaseResultResources(result);
-                m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
-                    HasDenoiseWorkLocked();
-                if (!m_Busy.load()) {
-                    m_ProgressCompletedSteps = m_ProgressTotalSteps;
-                    m_ProgressLabel =
-                        m_StopRequested ? std::string{} : "Stale render cancelled.";
-                }
-                continue;
-            }
-            std::optional<Result> cancellationAcknowledgement;
-            for (auto it = m_Completed.begin(); it != m_Completed.end();) {
-                if (it->ownerId != result.ownerId) {
-                    ++it;
-                    continue;
-                }
-                Result stale = std::move(*it);
-                it = m_Completed.erase(it);
-                if (stale.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && stale.calibration.renderMs > 0.0) {
-                    stale.telemetry.superseded = true;
-                    try { m_CompletedTimings.push(std::move(stale)); } catch (const std::bad_alloc&) {}
-                    continue;
-                }
-                const bool staleIsCancellationAcknowledgement =
-                    stale.rawWorkspace.preciseSolveResult.has_value() &&
-                    stale.rawWorkspace.preciseSolveResult->canceled;
-                if (!carriesCancellationAcknowledgement &&
-                    staleIsCancellationAcknowledgement &&
-                    (!cancellationAcknowledgement.has_value() ||
-                        stale.generation >= cancellationAcknowledgement->generation)) {
-                    if (cancellationAcknowledgement.has_value()) {
-                        ReleaseResultResources(*cancellationAcknowledgement);
-                    }
-                    cancellationAcknowledgement = std::move(stale);
-                } else {
-                    ReleaseResultResources(stale);
-                }
-            }
-            if (m_FallbackCompleted && m_FallbackCompleted->ownerId == result.ownerId) {
-                ReleaseResultResources(*m_FallbackCompleted);
-                m_FallbackCompleted.reset();
-            }
-            bool cancellationAcknowledgementQueued = false;
-            bool resultQueued = false;
-            bool resultStoredWithoutQueueAllocation = false;
-            try {
-                if (cancellationAcknowledgement.has_value()) {
-                    m_Completed.push_back(
-                        std::move(*cancellationAcknowledgement));
-                    cancellationAcknowledgementQueued = true;
-                }
-                m_Completed.push_back(std::move(result));
-                resultQueued = true;
-                // Retire identity before a consumer can take the packet.
-                // Later bookkeeping/reset allocation failure must not invent
-                // a second terminal result for an already-published request.
-                snapshot.generation = 0;
-            } catch (...) {
-                if (!cancellationAcknowledgementQueued &&
-                    cancellationAcknowledgement.has_value()) {
-                    ReleaseResultResources(
-                        *cancellationAcknowledgement);
-                }
-                try {
-                    if (!m_FallbackCompleted) {
-                        m_FallbackCompleted.emplace(std::move(result));
-                        resultStoredWithoutQueueAllocation = true;
-                        snapshot.generation = 0;
-                    } else {
-                        ReleaseResultResources(result);
-                    }
-                } catch (...) {
-                    ReleaseResultResources(result);
-                }
-            }
-            m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
-                HasDenoiseWorkLocked();
-            if (!m_Busy.load()) {
-                m_ProgressCompletedSteps = m_ProgressTotalSteps;
-                if (resultQueued || resultStoredWithoutQueueAllocation) {
-                    m_ProgressLabel = "Render ready.";
-                } else {
-                    m_ProgressLabel.clear();
-                }
-            }
-        }
+        PublishCompletedResult(snapshot, result);
     }
 
     {
+        RenderResultRetirement retired;
         std::lock_guard<std::mutex> lock(m_Mutex);
-        while (!m_CompletedTimings.empty()) m_CompletedTimings.pop();
-        while (!m_CompletedViewportTimings.empty()) m_CompletedViewportTimings.pop();
-        while (!m_Completed.empty()) {
-            Result stale = std::move(m_Completed.front());
-            m_Completed.pop_front();
-            ReleaseResultResources(stale);
-        }
-        if (m_FallbackCompleted.has_value()) {
-            ReleaseResultResources(*m_FallbackCompleted);
-            m_FallbackCompleted.reset();
-        }
+        retired.results.splice(retired.results.end(), m_CompletedTimings);
+        retired.results.splice(retired.results.end(), m_CompletedViewportTimings);
+        retired.results.splice(retired.results.end(), m_Completed);
+        retired.TakeFallback(m_FallbackCompleted);
         m_ProgressCompletedSteps = 0;
         m_ProgressTotalSteps = 0;
         m_ProgressLabel.clear();
@@ -3222,7 +3201,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         }
                         result.outputTiles.tiles.clear();
                         result.outputTiles.complete = false;
-                        result.outputTiles.readyFence = nullptr;
+                        result.outputTiles = {};
                     };
                     const TileIterationResult tileIteration = RenderTiling::IterateTiles(
                         tiles,

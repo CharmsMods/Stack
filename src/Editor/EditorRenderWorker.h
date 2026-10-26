@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -782,6 +783,7 @@ private:
         int totalProgressSteps,
         int& progressCompleted);
     void SetProgress(int completedSteps, int totalSteps, std::string label);
+    void PublishCompletedResult(Snapshot& snapshot, Result& result);
     void AdvanceProgress(std::string label = {});
     bool ShouldAbortStaleSnapshot(const Snapshot& snapshot) const;
     bool IsOwnerSnapshotInvalidLocked(std::uint64_t ownerId,
@@ -812,9 +814,10 @@ private:
     OpenGlTaskQueue m_OpenGlTasks;
     std::uint64_t m_NextOpenGlTaskSerial = 1;
     std::shared_ptr<OpenGlTaskState> m_ActiveOpenGlTask;
-    std::deque<Result> m_Completed;
-    std::queue<Result> m_CompletedTimings;
-    std::queue<Result> m_CompletedViewportTimings;
+    // Stable queue nodes permit allocation-free retirement outside m_Mutex.
+    std::list<Result> m_Completed;
+    std::list<Result> m_CompletedTimings;
+    std::list<Result> m_CompletedViewportTimings;
     std::optional<Result> m_FallbackCompleted;
     std::unordered_map<std::uint64_t, OwnerRenderState> m_OwnerStates;
     std::vector<DrainingDenoiseState> m_DrainingDenoise;

@@ -3,7 +3,7 @@
 #include "Editor/EditorRenderWorker.h"
 
 #include <cstdint>
-#include <deque>
+#include <list>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -104,7 +104,6 @@ private:
         const EditorRenderWorker::Snapshot& snapshot,
         bool workerStarted, bool overload = false, RawPreviewSkipReason reason = RawPreviewSkipReason::None);
     void QueueWorkerFailure(const EditorRenderWorker::Snapshot& snapshot, const std::string& error);
-    static void ReleaseResultResources(EditorRenderWorker::Result& result);
 
     mutable std::mutex m_Mutex;
     // Protect worker initialization/shutdown without locking session edits for
@@ -114,9 +113,10 @@ private:
     std::unordered_set<ClientId> m_Clients;
     std::unordered_map<ClientId, EditorRenderWorker::Snapshot> m_Pending;
     std::unordered_map<ClientId, RawRenderSessionConfig> m_Sessions;
-    std::unordered_map<ClientId, std::deque<EditorRenderWorker::Result>>
+    // Stable queue nodes permit allocation-free retirement outside m_Mutex.
+    std::unordered_map<ClientId, std::list<EditorRenderWorker::Result>>
         m_Completed;
-    std::unordered_map<ClientId, std::deque<EditorRenderWorker::Result>> m_Timings;
+    std::unordered_map<ClientId, std::list<EditorRenderWorker::Result>> m_Timings;
     ClientId m_ActiveOwner = 0;
     EditorRenderWorker::Snapshot m_ActiveSnapshot;
     ClientId m_NextClientId = 1;

@@ -7,7 +7,9 @@ service scheduling/routing and explicit shutdown are production method bodies.
 Selected failure consumers and the fatal-idle scheduling gate are also copied
 unchanged. Shared/dedicated continuation purpose, polling and auxiliary-only
 dispatch branches are exercised with promise-backed model readiness. This checks
-lifecycle decisions, not the full worker/UI render loop.
+lifecycle decisions, not the full worker/UI render loop. Resource-delete stand-ins
+check real worker/service retirement while a separate thread probes both locks,
+including owner isolation, exactly-once tiled cleanup, failure and context order.
 A single queue-push failure exercises the existing allocation-free fallback; this
 is not a process-wide OOM proof. No private-state hook is added to production.
 """
@@ -39,6 +41,7 @@ pre = r'''
 #include "Editor/GraphRenderPolicy.h"
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -47,6 +50,8 @@ pre = r'''
 #include <future>
 #include <iostream>
 #include <limits>
+#include <list>
+#include <type_traits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -63,12 +68,15 @@ void Require(bool value, const char* text) { if (!value) throw std::runtime_erro
 struct GLFWwindow {};
 using GLsync = void*;
 int deletedTextures=0, deletedFences=0, destroyedWindows=0, drainedModels=0;
+std::function<void()> onResourceDelete;
+std::unordered_map<unsigned,int> textureDeletes;
+std::unordered_map<GLsync,int> fenceDeletes;
 GLFWwindow* currentContext=nullptr;
 void glfwMakeContextCurrent(GLFWwindow* context) { currentContext=context; }
 GLFWwindow* glfwGetCurrentContext() { return currentContext; }
 void glfwDestroyWindow(GLFWwindow*) { ++destroyedWindows; }
-void glDeleteTextures(int n, const unsigned*) { deletedTextures+=n; }
-void glDeleteSync(GLsync) { ++deletedFences; }
+void glDeleteTextures(int n, const unsigned* names) { if(onResourceDelete) onResourceDelete();deletedTextures+=n;for(int i=0;i<n;++i) ++textureDeletes[names[i]]; }
+void glDeleteSync(GLsync fence) { if(onResourceDelete) onResourceDelete();++deletedFences;++fenceDeletes[fence]; }
 namespace Raw {
 enum class OpenGlTaskPriority { Foreground, Background };
 namespace ViewportGpuTiming { void Release(int&) {} }
@@ -86,20 +94,21 @@ struct ViewportTilingSettings {};
 struct PreviewRequest { std::optional<int> assetCapture; bool assetCaptureInput=false; std::string rawLayerId,rawMaskId; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
 struct PreviewResult { bool assetCapture=false,assetCaptureInput=false,assetCaptureSuperseded=false,success=false; std::shared_ptr<int> assetFeedback;std::optional<int> capturedAsset; std::string rawLayerId,rawMaskId,error; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
 struct SolveRequest { std::uint64_t identity=0; };
-struct SolveResult { bool attempted=false,failed=false; struct Candidate { std::uint64_t identity=0; std::string reason; } candidate; std::string reason; };
-struct RawWorkspaceSnapshot { std::string sourceKey; std::uint64_t sourceHash=0; std::size_t recipeRevision=0; bool hasRecipe=false; int recipe=123; ViewportRequest viewport; std::optional<int> cachePrewarmStage; std::size_t cachePrewarmFingerprint=0; std::optional<SolveRequest> preciseSolveRequest; };
+struct SolveResult { bool attempted=false,failed=false,canceled=false; struct Candidate { std::uint64_t identity=0; std::string reason; } candidate; std::string reason; };
+struct RawWorkspaceSnapshot { std::string sourceKey; std::uint64_t sourceHash=0; std::size_t recipeRevision=0; bool hasRecipe=false; int recipe=123,viewportDependencyEdge=-1; ViewportRequest viewport; std::optional<int> cachePrewarmStage; std::size_t cachePrewarmFingerprint=0; std::optional<SolveRequest> preciseSolveRequest; };
 struct RawWorkspaceResult { std::string sourceKey; std::uint64_t sourceHash=0,viewportGeneration=0; std::size_t recipeRevision=0,presentationFingerprint=0; std::optional<int> cachePrewarmStage; std::size_t cachePrewarmFingerprint=0; std::optional<SolveResult> preciseSolveResult; };
 struct SharedTexture {
     unsigned texture=0; GLsync readyFence=nullptr;
     SharedTexture()=default;
     SharedTexture(SharedTexture&& other) noexcept : texture(std::exchange(other.texture,0)),readyFence(std::exchange(other.readyFence,nullptr)) {}
     SharedTexture& operator=(SharedTexture&& other) noexcept { if(this!=&other) { Reset();texture=std::exchange(other.texture,0);readyFence=std::exchange(other.readyFence,nullptr); } return *this; }
+    ~SharedTexture() { Reset(); }
     void Reset() { if(texture) glDeleteTextures(1,&texture); if(readyFence) glDeleteSync(readyFence); texture=0;readyFence=nullptr; }
 };
 struct WorkspaceResult : RawWorkspaceResult { SharedTexture localRangeOverlayTexture; };
-template<class T> struct FailureDeque : std::deque<T> {
+template<class T> struct FailureList : std::list<T> {
     bool failNextPush=false;
-    void push_back(T&& value) { if(std::exchange(failNextPush,false)) throw std::bad_alloc(); std::deque<T>::push_back(std::move(value)); }
+    void push_back(T&& value) { if(std::exchange(failNextPush,false)) throw std::bad_alloc(); std::list<T>::push_back(std::move(value)); }
 };
 class EditorRenderWorker {
 public:
@@ -112,7 +121,7 @@ public:
     struct RawRenderTelemetry {
         std::chrono::steady_clock::time_point queuedAt{},snapshotReadyAt{};
         double commandEnqueueMs=0; bool superseded=false,workerStarted=false,overloadSkipped=false;
-        std::uint64_t gestureId=0; RawPreviewSkipReason skipReason=RawPreviewSkipReason::None;
+        std::uint64_t gestureId=0,timingHistoryEpoch=0; RawPreviewSkipReason skipReason=RawPreviewSkipReason::None;
     };
     struct Snapshot {
         std::uint64_t ownerId=0,generation=0,schedulingSerial=0,lastAcceptedGeneration=0;
@@ -133,7 +142,9 @@ public:
         RawRenderTelemetry telemetry; int previewMaxDimension=0;
         WorkspaceResult rawWorkspace; ViewportRequest viewportPreview;
         int viewportViewId=0; std::size_t viewportExecutionIdentity=0,viewportContentIdentity=0;
-        bool timingOnly=false,success=false,workerFailed=false; std::string error; std::vector<unsigned char> pixels; int width=0,height=0;
+        struct Calibration { double renderMs=0; } calibration;
+        std::array<std::size_t,1> workloadKeys{};std::string timingRepresentation;
+        bool denoisePending=false,timingOnly=false,success=false,workerFailed=false; std::string error; std::vector<unsigned char> pixels; int width=0,height=0;
         SharedTextureResult outputTexture,viewportOverview; Tiles outputTiles;
         std::vector<PreviewResult> previews;
     };
@@ -157,7 +168,7 @@ public:
     std::uint64_t m_RenderingOwner=0,m_InvalidBeforeGeneration=0,m_InvalidBeforeSchedulingSerial=0,m_NextSchedulingSerial=1;
     Stack::GraphRendering::RequestTag m_LatestGraphRequest;
     Snapshot m_Pending;OpenGlTaskQueue m_OpenGlTasks;std::shared_ptr<OpenGlTaskState> m_ActiveOpenGlTask;
-    FailureDeque<Result> m_Completed;std::queue<Result> m_CompletedTimings,m_CompletedViewportTimings;std::optional<Result> m_FallbackCompleted;
+    FailureList<Result> m_Completed;std::list<Result> m_CompletedTimings,m_CompletedViewportTimings;std::optional<Result> m_FallbackCompleted;
     std::unordered_map<std::uint64_t,OwnerRenderState> m_OwnerStates;std::vector<DrainingDenoiseState> m_DrainingDenoise;
     int m_ProgressCompletedSteps=0,m_ProgressTotalSteps=0;std::string m_ProgressLabel;
     std::unique_ptr<RenderPipeline> m_CalibrationPipeline,m_PersistentPipeline;
@@ -167,7 +178,9 @@ public:
     void CancelOwnerSnapshots(std::uint64_t,std::optional<RawRenderPurpose> = {});
     void InvalidateOwnerSnapshotsBefore(std::uint64_t,std::uint64_t);
     void ReleaseOwner(std::uint64_t);
-    void PublishForTest(Snapshot&,Result);
+    void PublishCompletedResult(Snapshot&,Result&);
+    void RetainDenoiseContinuationLocked(Snapshot&,bool);
+    bool IsOwnerResultStaleLocked(const Result&) const;
     void HandleThreadFailure(const char*,const Snapshot*) noexcept;
     bool GetThreadFailure(std::string* = nullptr) const noexcept;
     static Result MakeFailedResult(const Snapshot&,const std::string&);
@@ -195,13 +208,16 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
 namespace Stack::Renderer { using ViewportPreviewRequest=::ViewportRequest; }
 namespace Stack::EditorRendering { std::size_t BuildRawPresentationFingerprint(int recipe,int) { return recipe; } }
 '''
-methods = ''
+retirement = (root / 'src/Editor/Internal/EditorRenderResultRetirement.h').read_text()
+retirement = '\n'.join(line for line in retirement.splitlines() if not line.startswith('#include') and line != '#pragma once')
+methods = retirement + '\nusing Stack::EditorRendering::Internal::RenderResultRetirement;\nusing Stack::EditorRendering::Internal::RenderResultResourceGuard;\n'
 for signature in [
     'void EditorRenderWorker::HandleThreadFailure(',
     'void EditorRenderWorker::RequestStopForShutdown()',
     'void EditorRenderWorker::Shutdown()',
     'bool EditorRenderWorker::GetThreadFailure(',
     'EditorRenderWorker::Result EditorRenderWorker::MakeFailedResult(',
+    'void EditorRenderWorker::PublishCompletedResult(',
     'bool EditorRenderWorker::Submit(',
     'bool EditorRenderWorker::TryConsumeCompleted(',
     'bool EditorRenderWorker::HasPendingSnapshotOrRender()',
@@ -216,6 +232,8 @@ for signature in [
     'void EditorRenderWorker::PollDenoiseContinuationsLocked()',
     'bool EditorRenderWorker::CanStartAuthoritativeRenderLocked(',
     'bool EditorRenderWorker::IsOwnerSnapshotInvalidLocked(',
+    'bool EditorRenderWorker::IsOwnerResultStaleLocked(',
+    'void EditorRenderWorker::RetainDenoiseContinuationLocked(',
     'bool EditorRenderWorker::HasDenoiseWorkLocked()',
     'bool EditorRenderWorker::HasPendingForOwner(',
     'bool EditorRenderWorker::HasSnapshotWorkFor(',
@@ -243,10 +261,6 @@ header = '\n'.join(line for line in header.splitlines() if not line.startswith('
 # Production service layout, made constructible solely in this generated fixture.
 header = header.replace('private:', 'public:')
 service = '\n'.join(line for line in service.splitlines() if not line.startswith('#include'))
-publication_start = worker.index('            bool cancellationAcknowledgementQueued = false;')
-publication_end = worker.index('            m_Busy = ', publication_start)
-publication = worker[publication_start:publication_end]
-methods += 'void EditorRenderWorker::PublishForTest(Snapshot& snapshot, Result result) { std::optional<Result> cancellationAcknowledgement;\n' + publication + 'Require(resultQueued != resultStoredWithoutQueueAllocation, "exactly one publication path owns the result");\n}\n'
 planning = (root / 'src/Editor/RawRenderPlanning.h').read_text()
 methods += 'namespace Stack::EditorRendering {\n' + method(planning, 'inline bool ShouldAdoptRawPresentation(') + '}\n'
 adoption = (root / 'src/Editor/Internal/EditorModuleRenderAdoption.cpp').read_text()
@@ -293,6 +307,92 @@ void CheckFailure(const Result& result,const Snapshot& source,RawRenderPurpose p
     Require(result.ownerId==source.ownerId && result.generation==source.generation && result.schedulingSerial==source.schedulingSerial,"owner/generation/attempt retained");
     Require(result.rawRenderPurpose==purpose && result.rawWorkspace.sourceKey==source.rawWorkspace.sourceKey && result.rawWorkspace.sourceHash==source.rawWorkspace.sourceHash && result.rawWorkspace.recipeRevision==source.rawWorkspace.recipeRevision,"purpose/source/recipe retained");
     Require(result.rawWorkspace.viewportGeneration==(source.viewportPreview.enabled?source.viewportPreview.generation:source.rawWorkspace.viewport.generation) && result.viewportContentIdentity==source.viewportContentIdentity,"viewport acceptance identity retained");
+}
+bool MutexAvailable(std::mutex& mutex) {
+    bool acquired=false;
+    std::thread contender([&] { acquired=mutex.try_lock();if(acquired) mutex.unlock(); });
+    contender.join();
+    return acquired;
+}
+Result ResourcePacket(const Snapshot& request,unsigned base) {
+    auto result=EditorRenderWorker::MakeFailedResult(request,"completed");
+    result.outputTexture.texture=base;result.outputTexture.readyFence=reinterpret_cast<void*>(base+10000);
+    result.viewportOverview.texture=base+1;result.viewportOverview.readyFence=reinterpret_cast<void*>(base+10001);
+    result.rawWorkspace.localRangeOverlayTexture.texture=base+2;result.rawWorkspace.localRangeOverlayTexture.readyFence=reinterpret_cast<void*>(base+10002);
+    result.outputTiles.tiles.push_back({base+3});result.outputTiles.tiles.push_back({base+4});result.outputTiles.readyFence=reinterpret_cast<void*>(base+10003);
+    return result;
+}
+void CheckPacketDeletes(unsigned base,int count) {
+    for(unsigned i=0;i<5;++i) Require(textureDeletes[base+i]==count,"every packet texture retired exactly once");
+    for(unsigned i=0;i<4;++i) Require(fenceDeletes[reinterpret_cast<void*>(base+10000+i)]==count,"every packet fence retired exactly once");
+}
+void WorkerRetirementLockBoundary() {
+    GLFWwindow context;currentContext=&context;
+    EditorRenderWorker worker;bool unlocked=true,correctContext=true;
+    onResourceDelete=[&] { unlocked &= MutexAvailable(worker.m_Mutex);correctContext &= currentContext==&context; };
+    auto request=Request(31,310);worker.m_OwnerStates[31].latestSerial=request.schedulingSerial;
+    worker.m_Completed.push_back(ResourcePacket(Request(31,301),1000));
+    worker.m_Completed.push_back(ResourcePacket(Request(32,302),1100));
+    auto ack=ResourcePacket(Request(31,303),1200);ack.rawWorkspace.preciseSolveResult.emplace();ack.rawWorkspace.preciseSolveResult->canceled=true;worker.m_Completed.push_back(std::move(ack));
+    auto newestAck=ResourcePacket(Request(31,304),1300);newestAck.rawWorkspace.preciseSolveResult.emplace();newestAck.rawWorkspace.preciseSolveResult->canceled=true;worker.m_Completed.push_back(std::move(newestAck));
+    worker.m_FallbackCompleted.emplace(ResourcePacket(Request(31,305),1400));
+    auto result=ResourcePacket(request,1500);worker.PublishCompletedResult(request,result);
+    Require(unlocked && correctContext && request.generation==0,"worker supersession retires after unlock on current context");
+    CheckPacketDeletes(1000,1);CheckPacketDeletes(1200,1);CheckPacketDeletes(1400,1);CheckPacketDeletes(1100,0);CheckPacketDeletes(1300,0);CheckPacketDeletes(1500,0);
+    worker.HandleThreadFailure("later housekeeping failure",&request);
+    currentContext=&context; // Fatal cleanup releases its context; published packets remain intact.
+    Result consumed;consumed.outputTexture.texture=1550;for(auto generation:{302u,304u,310u}) {
+        Require(worker.TryConsumeCompleted(consumed) && consumed.generation==generation,"other owners and newest cancellation acknowledgement preserve queue order");
+        ReleaseResultResources(consumed);
+    }
+    Require(textureDeletes[1550]==1 && unlocked,"worker dequeuing destroys prior caller texture only after unlocking");
+    Require(!worker.TryConsumeCompleted(consumed),"late failure cannot duplicate a published completion");
+    CheckPacketDeletes(1100,1);CheckPacketDeletes(1300,1);CheckPacketDeletes(1500,1);
+    Require(unlocked && correctContext,"all worker retirement callbacks observe released scheduling mutex");
+    onResourceDelete={};
+}
+void WorkerRetirementFailureAndStop() {
+    GLFWwindow context;currentContext=&context;
+    EditorRenderWorker worker;bool unlocked=true;
+    onResourceDelete=[&] { unlocked &= MutexAvailable(worker.m_Mutex); };
+    worker.m_FallbackCompleted.emplace(ResourcePacket(Request(42,420),1600));
+    worker.m_Completed.failNextPush=true;
+    auto request=Request(41,410);auto result=ResourcePacket(request,1700);worker.PublishCompletedResult(request,result);
+    Require(unlocked && worker.m_Completed.empty() && worker.m_FallbackCompleted->ownerId==42,"failed queue publication preserves another owner's fallback");
+    CheckPacketDeletes(1700,1);CheckPacketDeletes(1600,0);
+    worker.RequestStopForShutdown();auto stopped=Request(41,411);auto stoppedResult=ResourcePacket(stopped,1800);worker.PublishCompletedResult(stopped,stoppedResult);
+    Require(stopped.generation==0 && unlocked,"requested stop retires unpublished packet after unlocking");CheckPacketDeletes(1800,1);
+    worker.m_CompletedTimings.push_back(ResourcePacket(Request(41,412),1900));
+    worker.HandleThreadFailure("shutdown drain",&stopped);CheckPacketDeletes(1900,1);
+    currentContext=&context;
+    worker.m_WorkerWindow=&context;GLFWwindow ui;currentContext=&ui;
+    bool shutdownContext=true;onResourceDelete=[&] { unlocked &= MutexAvailable(worker.m_Mutex);shutdownContext &= currentContext==&context; };
+    worker.m_CompletedViewportTimings.push_back(ResourcePacket(Request(41,413),2000));
+    worker.Shutdown();CheckPacketDeletes(1600,1);CheckPacketDeletes(2000,1);
+    Require(unlocked && shutdownContext && currentContext==&ui,"shutdown retirement unlocks before GL deletion and restores context afterwards");
+    onResourceDelete={};
+}
+void ServiceRetirementLockBoundary() {
+    Service service;GLFWwindow context;currentContext=&context;auto owner=service.Acquire(&context),other=service.Acquire(&context);
+    bool unlocked=true,correctContext=true;
+    onResourceDelete=[&] { unlocked &= MutexAvailable(service.m_Mutex) && MutexAvailable(service.m_Worker.m_Mutex);correctContext &= currentContext==&context; };
+    auto old=ResourcePacket(Request(owner,510),2100);old.graphRequest.enabled=true;service.m_Completed[owner].push_back(std::move(old));
+    service.m_Completed[other].push_back(ResourcePacket(Request(other,511),2200));
+    auto fresh=ResourcePacket(Request(owner,512),2300);fresh.graphRequest.enabled=true;service.m_Worker.m_Completed.push_back(std::move(fresh));
+    service.m_Worker.m_Completed.push_back(ResourcePacket(Request(999,513),2400));
+    service.Pump();CheckPacketDeletes(2100,1);CheckPacketDeletes(2400,1);CheckPacketDeletes(2200,0);CheckPacketDeletes(2300,0);
+    Require(unlocked && correctContext && service.m_Completed[owner].size()==1 && service.m_Completed[other].size()==1,"service routing/coalescing retires outside both locks on caller context");
+    for(unsigned i=0;i<32;++i) { auto timing=EditorRenderWorker::MakeFailedResult(Request(owner,520+i),"timing");timing.timingOnly=true;service.m_Timings[owner].push_back(std::move(timing)); }
+    service.m_Timings[owner].front()=ResourcePacket(Request(owner,520),2500);
+    auto timing=EditorRenderWorker::MakeFailedResult(Request(owner,553),"timing");timing.timingOnly=true;service.m_Worker.m_Completed.push_back(std::move(timing));
+    service.Pump();CheckPacketDeletes(2500,1);Require(service.m_Timings[owner].size()==32,"timing queue remains bounded after retirement");
+    Result consumed;consumed.outputTexture.texture=2600;
+    Require(service.TryConsumeCompleted(owner,consumed) && consumed.generation==512,"current service packet is delivered");
+    Require(textureDeletes[2600]==1 && unlocked,"caller-owned previous texture is destroyed only after dequeue unlock");
+    ReleaseResultResources(consumed);CheckPacketDeletes(2300,1);
+    service.Release(other);CheckPacketDeletes(2200,1);
+    service.Release(owner);
+    Require(unlocked && correctContext,"service owner release never deletes under either scheduling mutex");onResourceDelete={};
 }
 void WorkerLifecycle() {
     EditorRenderWorker worker;
@@ -363,9 +463,9 @@ void NormalSupersession() {
 }
 void PublicationRetirement() {
     EditorRenderWorker worker;auto request=Request(12,120);auto result=EditorRenderWorker::MakeFailedResult(request,"completed");
-    worker.PublishForTest(request,std::move(result));Require(request.generation==0,"publication retires request before consumer can take it");
+    worker.PublishCompletedResult(request,result);Require(request.generation==0,"publication retires request before consumer can take it");
     Result consumed;Require(worker.TryConsumeCompleted(consumed),"published result consumed");worker.HandleThreadFailure("later housekeeping failure",&request);Require(!worker.TryConsumeCompleted(consumed),"consumed publication not failed again");
-    EditorRenderWorker fallback;auto second=Request(12,121);fallback.m_Completed.failNextPush=true;fallback.PublishForTest(second,EditorRenderWorker::MakeFailedResult(second,"completed"));Require(second.generation==0 && fallback.m_FallbackCompleted.has_value(),"fallback publication also retires identity");
+    EditorRenderWorker fallback;auto second=Request(12,121);fallback.m_Completed.failNextPush=true;auto fallbackResult=EditorRenderWorker::MakeFailedResult(second,"completed");fallback.PublishCompletedResult(second,fallbackResult);Require(second.generation==0 && fallback.m_FallbackCompleted.has_value(),"fallback publication also retires identity");
 }
 void GraphAndOverview() {
     Service service;GLFWwindow window;auto owner=service.Acquire(&window);
@@ -607,7 +707,7 @@ void AdoptionTerminalState() {
 '''
 main = r'''
 int main() {
-    try { WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure lifecycle: PASS\n"; }
+    try { WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''

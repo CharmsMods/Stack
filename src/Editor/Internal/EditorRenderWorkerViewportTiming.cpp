@@ -35,10 +35,14 @@ bool EditorRenderWorker::WaitForSubmittedGpuWork() {
 }
 
 bool EditorRenderWorker::TryConsumeViewportTiming(Result& result) {
-    std::lock_guard<std::mutex> lock(m_Mutex);
-    if (m_CompletedViewportTimings.empty()) return false;
-    result=std::move(m_CompletedViewportTimings.front());
-    m_CompletedViewportTimings.pop();
+    Result completed;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_CompletedViewportTimings.empty()) return false;
+        completed = std::move(m_CompletedViewportTimings.front());
+        m_CompletedViewportTimings.pop_front();
+    }
+    result = std::move(completed);
     return true;
 }
 
@@ -164,7 +168,7 @@ void EditorRenderWorker::PollViewportTimings() {
             for (auto& cost : result.stageCosts) cost*=result.telemetry.completedServiceMs/attributed;
         std::lock_guard<std::mutex> lock(m_Mutex);
         if (!IsOwnerSnapshotInvalidLocked(result.ownerId,result.generation,result.schedulingSerial,result.rawRenderPurpose)) {
-            if (m_CompletedViewportTimings.size()<64) m_CompletedViewportTimings.push(std::move(result));
+            if (m_CompletedViewportTimings.size()<64) m_CompletedViewportTimings.push_back(std::move(result));
         }
         it=m_PendingViewportTimings.erase(it);
     }

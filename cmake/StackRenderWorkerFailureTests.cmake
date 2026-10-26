@@ -4,6 +4,8 @@ add_custom_command(OUTPUT "${render_worker_failure_test}"
         --output "${render_worker_failure_test}"
     DEPENDS tools/tests/render_worker_failure_tests.py
         src/Editor/EditorRenderWorker.cpp
+        src/Editor/EditorRenderWorker.h
+        src/Editor/Internal/EditorRenderResultRetirement.h
         src/Editor/Internal/EditorRenderWorkerSessions.cpp
         src/Editor/Internal/EditorRenderWorkerViewportTiming.cpp
         src/Editor/RawRenderService.h
