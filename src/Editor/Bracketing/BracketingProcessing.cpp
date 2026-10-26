@@ -256,7 +256,7 @@ void EditorModule::TickBracketing(bool foreground) {
         }
     }
     TickBracketingDraft();
-    if(ui.preparationRequested||ui.preparationJob) {
+    if(Stack::Project::ShouldTickBracketingPreparation(ui)) {
         Stack::Project::BracketingJobRequest preparation;
         preparation.store=m_Project->store;preparation.snapshot=snapshot;preparation.setId=ui.setId;
         preparation.cacheRoot=AppPaths::GetCacheDirectory();

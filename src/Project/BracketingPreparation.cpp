@@ -2,6 +2,11 @@
 #include "Async/TaskSystem.h"
 
 namespace Stack::Project {
+bool ShouldTickBracketingPreparation(const BracketingState& ui) {
+    if(ui.preparationJob)return ui.preparationJob->done.load();
+    return ui.preparationRequested&&!ui.job&&ui.result;
+}
+
 bool TickBracketingPreparation(BracketingState& ui,BracketingJobRequest request,Async::ActivityMetadata activity) {
     bool changed=false;
     if(ui.preparationJob&&ui.preparationJob->done) {
