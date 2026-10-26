@@ -75,8 +75,7 @@ void AppShell::LayoutNavigationRail() {
     Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
         atEdge, overRail, railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
-    const bool glassRail = m_Appearance && m_Appearance->GetGlassChromeEnabled();
-    rail.position = ImVec2(glassRail ? viewport->Pos.x : viewport->Pos.x - width + rail.visibleWidth,
+    rail.position = ImVec2(viewport->Pos.x - width + rail.visibleWidth,
         viewport->Pos.y);
     const float available = std::max(0.f, viewport->Size.x - rail.visibleWidth);
     const bool gallery = m_ActiveProjectWorkspace == m_GalleryWorkspaceId && IsRaw(m_CurrentTabId);
@@ -108,7 +107,7 @@ void AppShell::LayoutNavigationRail() {
     const float hidden = width * (1.f - std::max(left, topReveal));
     const float leftWeight = total > 0.f ? left / total : 1.f;
     m_RawMaskToolbar.panelTogglePosition = ImVec2(
-        viewport->Pos.x - (glassRail ? 0.f : hidden * leftWeight) + Stack::Navigation::BarPadding * rail.scale,
+        viewport->Pos.x - (hidden * leftWeight) + Stack::Navigation::BarPadding * rail.scale,
         viewport->Pos.y - hidden * (1.f - leftWeight) + Stack::Navigation::BarPadding * rail.scale);
 }
 
@@ -122,12 +121,11 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(rail.position);
-    const bool glassRail = m_Appearance && m_Appearance->GetGlassChromeEnabled();
-    const float drawnWidth = glassRail ? rail.visibleWidth : width;
+    const float drawnWidth = width;
     ImGui::SetNextWindowSize(ImVec2(std::max(1.f,drawnWidth), viewport->Size.y));
     ImGui::SetNextWindowViewport(viewport->ID);
     ImVec4 railTint = palette.caption;
-    railTint.w = Stack::Header::ResolveSectionTintOpacity(rail.panelAmount);
+    railTint.w = 1.f;
     ImGui::PushStyleColor(ImGuiCol_WindowBg, railTint);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.f * s, 7.f * s));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
@@ -137,25 +135,13 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     ImGui::Begin("StackNavigationRail", nullptr, ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground |
-        (glassRail ? ImGuiWindowFlags_NoBringToFrontOnFocus : ImGuiWindowFlags_None) |
         (rail.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     auto* draw = ImGui::GetWindowDrawList();
-    if (glassRail) {
-        // The column only organizes controls. Capture once before any objects,
-        // including the shared top toggle, without painting a sidebar surface.
-        draw->PushClipRect(viewport->Pos, ImVec2(viewport->Pos.x+viewport->Size.x,
-            viewport->Pos.y+viewport->Size.y), false);
-        m_RailGlass.AddBackdrop(draw, ImVec2(rail.position.x,viewport->Pos.y),
-            ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),railTint);
-        draw->PopClipRect();
-    } else {
-        // The normal sidebar retains its original tint below the top bar.
-        draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
-            ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
-    }
+    // The sidebar is a visible native surface, independent of optional point optics.
+    draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
+        ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, Stack::Animation::ControlMotion& motion, bool enabled = true) {
-        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion, nullptr,
-            m_Appearance && m_Appearance->GetGlassChromeEnabled(), &m_RailGlass);
+        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion);
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.

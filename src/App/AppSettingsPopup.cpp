@@ -203,11 +203,11 @@ void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, Sta
     }
 
     bool glassChromeEnabled = appearance->GetGlassChromeEnabled();
-    if (ImGui::Checkbox("Floating glass navigation (experimental)", &glassChromeEnabled)) {
-        ReportPreferenceResult(state, "glass-chrome", "Floating glass navigation (experimental)",
+    if (ImGui::Checkbox("Liquid floating controls (experimental)", &glassChromeEnabled)) {
+        ReportPreferenceResult(state, "glass-chrome", "Liquid floating controls (experimental)",
             appearance->SetGlassChromeEnabled(glassChromeEnabled));
     }
-    ImGui::TextWrapped("Floating glass navigation and slider thumbs in the View side panel; photos and exports unchanged.");
+    ImGui::TextWrapped("Liquid graph points, slider thumbs, and the curve-mode selector in floating view tools. Tool backgrounds, other icons, dials, and the sidebar keep their standard appearance.");
     ImGui::Spacing();
 
     StackAppearance::RenderPaletteWorkshop(*appearance, state.paletteWorkshop, state.notifier);

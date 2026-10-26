@@ -1,4 +1,4 @@
-#include "Utils/SidePanelSlider.h"
+#include "Utils/GlassControls.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Library/LibraryControls.h"
 
@@ -91,6 +91,8 @@ bool BypassEyeButton(
     const ImVec2 eyeMinimum = ImGui::GetCursorScreenPos();
     const ImVec2 eyeSize(27.0f, 20.0f);
     const bool pressed = ImGui::InvisibleButton(id, eyeSize);
+    ImGuiExtras::DrawGlassLastItem(enabled);
+    ImGuiExtras::GlassForegroundInkScope glassInk;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const ImU32 color = enabled
         ? ImGui::GetColorU32(ImGuiCol_Text)
@@ -159,7 +161,7 @@ bool BareSliderFloat(
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
     const bool changed =
-        ImGuiExtras::SidePanelSliderFloat("##value", value, minimum, maximum, format);
+        ImGui::SliderFloat("##value", value, minimum, maximum, format);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(3);
     ImGui::PopID();
@@ -190,7 +192,7 @@ bool BareSliderInt(
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
     const bool changed =
-        ImGuiExtras::SidePanelSliderInt("##value", value, minimum, maximum, format);
+        ImGui::SliderInt("##value", value, minimum, maximum, format);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(3);
     ImGui::PopID();

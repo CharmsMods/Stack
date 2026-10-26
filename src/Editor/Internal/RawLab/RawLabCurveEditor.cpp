@@ -1,5 +1,6 @@
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
+#include "Utils/GlassControls.h"
 
 #include <imgui_internal.h>
 
@@ -475,6 +476,7 @@ bool DrawRawLabHistogramBackdrop(
     const RawLabGraphHistogram& histogram,
     bool rgb,
     int emphasizedChannel = -1) {
+    ImGuiExtras::GlassBackgroundScope background(*drawList);
     const auto style=GraphUI::ResolveGraphPlotStyle();
     if (!histogram.valid) {
         const char* pending = "Scope pending";
@@ -1082,6 +1084,7 @@ bool DrawBezierCurveInteraction(
     }
 
     if(!preparedSegments.empty() && changed)preparedSegments=Stack::RawRecipe::BuildRawBezierSegments(points);
+    ImGuiExtras::GlassBackgroundScope plotBackground(*drawList);
     auto plotStyle=GraphUI::ResolveGraphPlotStyle(scale);
     plotStyle.point=pointColor;
     const ImU32 hoverColor = plotStyle.hovered;
@@ -1120,10 +1123,18 @@ bool DrawBezierCurveInteraction(
                 ImGui::GetColorU32(ImGuiCol_TextDisabled, 0.45f));
         }
         drawList->AddLine(anchor, handle, selectedColor, 1.25f*scale);
-        drawList->AddCircleFilled(handle, (handleHovered ? 5.5f : 4.5f)*scale, selectedColor, 20);
+        plotBackground.End();
+        auto handleStyle=plotStyle;
+        handleStyle.pointRadius=4.5f*scale; handleStyle.selectedPointRadius=(handleHovered?5.5f:4.5f)*scale;
+        const int handleIdentity=0x40000000+state.selectedSegment*2+state.selectedSide;
+        GraphUI::DrawGraphPoint(*drawList,handle,handleStyle,true,true,
+            ImHashData(&handleIdentity,sizeof(handleIdentity),ImGui::GetItemID()),handleHovered,handleDragActive);
         drawList->AddCircle(anchor, 7.0f*scale, selectedColor, 24, 2.0f*scale);
     }
 
+    const int pointCount=int(points.size());
+    plotBackground.End();
+    const auto pointGroup=ImHashData(&pointCount,sizeof(pointCount),ImGui::GetItemID());
     for (int index = 0; index < static_cast<int>(points.size()); ++index) {
         const ImVec2 point = toScreen(
             rect,
@@ -1136,7 +1147,8 @@ bool DrawBezierCurveInteraction(
                 : state.selectedSegment + 1);
         auto anchorStyle=plotStyle;
         if(!activeAnchor)anchorStyle.selected=pointColor;
-        GraphUI::DrawGraphPoint(*drawList,point,anchorStyle,selectedPoint==index || activeAnchor,true);
+        GraphUI::DrawGraphPoint(*drawList,point,anchorStyle,selectedPoint==index || activeAnchor,true,
+            ImHashData(&index,sizeof(index),pointGroup),hoveredPoint==index,state.draggingPoint==index);
     }
 
     if (state.chooserOpen && state.selectedSegment >= 0) {

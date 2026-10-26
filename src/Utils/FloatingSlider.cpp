@@ -1,6 +1,6 @@
 #include "Utils/FloatingSlider.h"
 #include "Utils/ImGuiExtras.h"
-#include "Utils/SidePanelSlider.h"
+#include "Utils/GlassControls.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -17,6 +17,7 @@ template<class T>
 bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
     const char* format, float requestedWidth, bool bounded = true) {
     IM_ASSERT(active);
+    AutomaticGlassScope glassScope;
     // ImGui reserves half the scalar domain for its slider arithmetic. Values
     // outside that track remain intact and can still be entered exactly.
     minimum = std::max(minimum, std::numeric_limits<T>::lowest()/2);
@@ -27,30 +28,20 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
     const float width = std::max(60.f * scale, requestedWidth > 0.f
         ? requestedWidth : ImGui::GetContentRegionAvail().x);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float radius = 7.f * scale, thickness = 5.f * scale;
-    const float inset = 12.f * scale;
+    const bool water=IsGraphPointPresentation();
+    const float radius=(water?25.f:7.f)*scale,halfWidth=water?std::min(30.f*scale,width*.30f):radius,thickness=5.f*scale;
+    const float inset = water?std::min(34.f*scale,width*.12f):12.f*scale;
     const float top = 36.f * scale;
     ImGui::SetCursorScreenPos(ImVec2(origin.x + inset, origin.y + top));
     ImGui::SetNextItemWidth(width - inset * 2.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 6.f * scale));
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, radius * 2.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, (water?16.f:6.f) * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, halfWidth * 2.f);
     constexpr auto flags = ImGuiSliderFlags_NoInput | ImGuiSliderFlags_NoRoundToFormat;
     for (const auto color : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive,
              ImGuiCol_SliderGrab, ImGuiCol_SliderGrabActive, ImGuiCol_Border})
         ImGui::PushStyleColor(color, ImVec4(0,0,0,0));
-    bool changed;
-    if constexpr (std::is_same_v<T, int>)
-        changed = SidePanelSliderInt("##value", value, minimum, maximum, "", flags);
-    else if constexpr (std::is_same_v<T, float>)
-        changed = SidePanelSliderFloat("##value", value, minimum, maximum, "", flags);
-    else
-        changed = SidePanelSliderScalar("##value", std::is_integral_v<T> ? ImGuiDataType_S64 : ImGuiDataType_Double,
-            value, &minimum, &maximum, "", flags);
-    ImGui::PopStyleColor(6);
-    ImGui::PopStyleVar(2);
-    const ImVec2 low = ImGui::GetItemRectMin(), high = ImGui::GetItemRectMax();
-    const bool hovered = ImGui::IsItemHovered();
-    if (hovered && !ImGui::GetIO().KeyAlt && !IsSliderWheelConsumed() &&
+    auto wheelEdit=[&]() -> bool {
+    if (ImGui::IsItemHovered() && !ImGui::GetIO().KeyAlt && !IsSliderWheelConsumed() &&
         ImGui::GetIO().MouseWheel != 0.f && !(ImGui::GetItemFlags() & ImGuiItemFlags_Disabled)) {
         T next = *value;
         if constexpr (std::is_integral_v<T>) {
@@ -61,18 +52,29 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
             next = static_cast<T>(std::clamp(static_cast<double>(*value) + ImGui::GetIO().MouseWheel*step,
                 static_cast<double>(minimum),static_cast<double>(maximum)));
         }
-        changed |= next != *value;
+        const bool changed = next != *value;
         *value = next;
         ConsumeSliderWheel();
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+        return changed;
     }
+        return false;
+    };
+    const SliderSemanticEdit semanticEdit{[](void* data) {return (*static_cast<decltype(wheelEdit)*>(data))();},&wheelEdit};
+    constexpr auto scalarType=std::is_same_v<T,int>?ImGuiDataType_S32:std::is_same_v<T,float>?ImGuiDataType_Float:
+        std::is_integral_v<T>?ImGuiDataType_S64:ImGuiDataType_Double;
+    bool changed=GlassSliderScalar("##value",scalarType,value,&minimum,&maximum,"",flags,&semanticEdit);
+    ImGui::PopStyleColor(6);
+    ImGui::PopStyleVar(2);
+    const ImVec2 low=ImGui::GetItemRectMin(),high=ImGui::GetItemRectMax();
+    const bool hovered=ImGui::IsItemHovered();
     if (changed) ImGui::MarkItemEdited(key);
     if (hovered && label && *label) ImGui::SetTooltip("%s", label);
 
     const float ratio = maximum > minimum
         ? std::clamp(static_cast<float>((static_cast<double>(*value)-minimum) /
             (static_cast<double>(maximum)-minimum)), 0.f, 1.f) : 0.f;
-    const float left = low.x + radius + 2.f, right = high.x - radius - 2.f;
+    const float left = low.x + halfWidth + 2.f, right = high.x - halfWidth - 2.f;
     const ImVec2 center(left + (right-left)*ratio, (low.y+high.y)*.5f);
     auto* draw = ImGui::GetWindowDrawList();
     const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
@@ -82,11 +84,18 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
         draw->AddCircleFilled(ImVec2(a,center.y),thickness*.5f,ink,16);
         draw->AddCircleFilled(ImVec2(b,center.y),thickness*.5f,ink,16);
     };
-    // Leave the circle's interior transparent even over the image background.
-    if (!HasSidePanelSliderScope()) {
-        line(left,center.x-radius-2.f*scale);
-        line(center.x+radius+2.f*scale,right);
-        draw->AddCircle(center,radius,ink,32,2.f*scale);
+    if (!HasGlassControlScope()) {
+        {
+            GlassBackgroundScope underlay(*draw);
+            if(water) {
+                line(left,right);
+            } else {
+                line(left,center.x-halfWidth-2.f*scale);
+                line(center.x+halfWidth+2.f*scale,right);
+            }
+        }
+        if(!DrawGlassPoint(*draw,center,radius,key,false,hovered,ImGui::IsItemActive(),GlassMotionRole::Slider,halfWidth/radius))
+            draw->AddCircle(center,radius,ink,32,2.f*scale);
     }
 
     char text[96];

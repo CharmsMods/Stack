@@ -38,7 +38,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,
-    float scale, const Stack::Header::Palette& palette, Stack::Animation::ControlMotion& motion, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr, bool objectOutsideWindow = false) {
+    float scale, const Stack::Header::Palette& palette, Stack::Animation::ControlMotion& motion, const char* disabledReason = nullptr, bool glass = false, Stack::Renderer::GlassChrome* material = nullptr, bool objectOutsideWindow = false, Stack::Renderer::GlassChrome::SurfaceHandle backdrop = {}) {
     const float size = ButtonExtent * scale;
     ImGui::BeginDisabled(!enabled);
     if (glass) ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(0,0,0,0));
@@ -69,12 +69,12 @@ inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabl
             draw->PushClipRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,
                 viewport->Pos.y+viewport->Size.y),false);
         }
-        material->AddObject(draw,rect.Min,rect.Max,palette.caption,19.f*scale,glassState.Elevation(),
-            Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);
+        material->AddObject(draw,backdrop,rect.Min,rect.Max,palette.caption,19.f*scale,glassState.Elevation(),
+            Stack::Renderer::GlassChrome::MaterialRole::ClearControl);
         if (objectOutsideWindow) draw->PopClipRect();
     }
     // Feedback, keyboard focus and the single sharp glyph share adaptive ink.
-    const bool adaptiveInk = glass && material && material->BeginInk(draw,rect.Min,rect.Max,ImGui::GetItemID());
+    const bool adaptiveInk = glass && material && material->BeginInk(draw,backdrop,rect.Min,rect.Max,ImGui::GetItemID());
     const float press = glassState.press;
     if (glass) DrawGlassControlFeedback(rect,glassState,scale,palette);
     if (glass) GlassKeyboardFocus(rect,scale,palette);

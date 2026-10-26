@@ -1,4 +1,6 @@
 #include "Editor/EditorModule.h"
+#include "Utils/GlassControls.h"
+#include "App/settings/AppearanceTheme.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/UiPerformanceProbe.h"
 #include "App/WorkspaceInputScope.h"
@@ -24,6 +26,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         surface.input = {};
         surface.frame = -1;
         m_RawActiveControlFrame = -1;
+        m_RawToolGlass->BeginFrame(false,{});
         return;
     }
     UpdateNodeOpenTransition();
@@ -32,6 +35,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         surface.input = {};
         surface.frame = -1;
         m_RawActiveControlFrame = -1;
+        m_RawToolGlass->BeginFrame(false,{});
         return;
     }
     std::optional<Stack::Workspace::InputScope> openingInput;
@@ -43,6 +47,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         // window intercepting input over the photograph.
         surface.input={};
         m_RawActiveControlFrame=-1;
+        m_RawToolGlass->BeginFrame(false,{});
         return;
     }
     const auto* viewport = ImGui::GetMainViewport();
@@ -53,6 +58,11 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         std::max(1.f, size.y - margin * 2.f));
     const int tool = static_cast<int>(m_RawWorkspaceLabUi.activeTool);
     const auto key = RawNodeEditorStateKey();
+    m_RawToolGlass->BeginFrame(m_Appearance && m_Appearance->GetGlassChromeEnabled(),key);
+    if (!m_RawToolGlass->material.Error().empty() && !m_RawToolGlass->errorReported) {
+        PostNotification(UiNotificationSeverity::Error,m_RawToolGlass->material.Error(),"raw-tool-glass");
+        m_RawToolGlass->errorReported=true;
+    }
     const auto measured = surface.contentHeights.find(key);
     const auto preferred = definition ? definition->preferredSize : ImVec2(400,560);
     const bool genericOperation = definition && !definition->primary;
@@ -137,7 +147,10 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         ImGui::BeginDisabled(!enabled || imageNavigation);
         trace("routed");
         ImGui::PushID(key.c_str());
-        RenderRawWorkspaceActiveControls(context);
+        {
+            ImGuiExtras::GlassControlScope glass(*m_RawToolGlass,openingOpacity,false,ImGuiExtras::GlassElements::FloatingTools);
+            RenderRawWorkspaceActiveControls(context);
+        }
         ImGui::PopID();
         trace("control");
         ImGui::EndDisabled();

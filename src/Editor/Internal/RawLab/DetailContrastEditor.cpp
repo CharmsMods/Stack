@@ -1,4 +1,3 @@
-#include "Utils/SidePanelSlider.h"
 #include "Editor/Internal/RawLab/DetailContrastEditor.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include <imgui_internal.h>
@@ -18,7 +17,7 @@ bool DrawDetailContrastEditor(RawRecipe::DetailContrast& settings, DetailContras
             ImGui::SetNextItemWidth(-1);
         }
         const std::string widget = section == RawLabControlSection::Settings ? std::string("##") + id : label;
-        const bool edited = ImGuiExtras::SidePanelSliderFloat(widget.c_str(), value, minimum, maximum, format, flags);
+        const bool edited = ImGui::SliderFloat(widget.c_str(), value, minimum, maximum, format, flags);
         ImGui::EndDisabled();
         if (connected && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Driven by a graph input. This is the stored fallback value.");
         return edited;
@@ -38,7 +37,7 @@ bool DrawDetailContrastEditor(RawRecipe::DetailContrast& settings, DetailContras
             ImGui::TextUnformatted(label);
             ImGui::SetNextItemWidth(-1);
             const std::string widget = std::string("##DetailMacro") + label;
-            if (ImGuiExtras::SidePanelSliderFloat(widget.c_str(), &edited, 0, 3, "%.2fx")) {
+            if (ImGui::SliderFloat(widget.c_str(), &edited, 0, 3, "%.2fx")) {
                 AdjustDetailMacro(settings, first, last, edited - mean);
                 changed = true;
             }
@@ -54,7 +53,7 @@ bool DrawDetailContrastEditor(RawRecipe::DetailContrast& settings, DetailContras
         if (ui.fieldView) {
             ImGui::TextUnformatted("Paint gain");
             ImGui::SetNextItemWidth(-1);
-            ImGuiExtras::SidePanelSliderFloat("##DetailPaintGain", &ui.brushGain, 0, 3, "%.2fx");
+            ImGui::SliderFloat("##DetailPaintGain", &ui.brushGain, 0, 3, "%.2fx");
             LabTooltip("Drag to paint the response. Right-click restores the selected cells to their scale-graph value.");
         }
     }

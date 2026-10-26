@@ -42,6 +42,7 @@ namespace Stack::Validation { bool ValidateDemosaicing(const std::filesystem::pa
 namespace Stack::Validation { bool ValidateSharedCurves(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateTonalSliderInteractions(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSidePanelSliders(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateGlassMaterial(const std::filesystem::path&); }
 
 namespace {
 void BurstDiagnosticsUnavailable(int& exitCode) {
@@ -53,6 +54,10 @@ void BurstDiagnosticsUnavailable(int& exitCode) {
 }
 
 bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
+    if ((argc==2 || argc==3) && std::strcmp(argv[1],"--validate-glass-material")==0) {
+        exitCode=Stack::Validation::ValidateGlassMaterial(argc==3?std::filesystem::u8path(argv[2]):std::filesystem::path("_workspace/validation/glass"))?0:117;
+        return true;
+    }
     if ((argc==2 || argc==3) && std::strcmp(argv[1],"--validate-side-panel-sliders")==0) {
         exitCode=Stack::Validation::ValidateSidePanelSliders(argc==3?std::filesystem::u8path(argv[2]):std::filesystem::path{})?0:116;
         return true;

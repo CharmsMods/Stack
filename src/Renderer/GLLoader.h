@@ -305,6 +305,7 @@ extern void(APIENTRY* glUniform2i_)(GLint location, GLint v0, GLint v1);
 extern void(APIENTRY* glUniform4i_)(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
 extern void(APIENTRY* glUniform3f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 extern void(APIENTRY* glUniform4f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+extern void(APIENTRY* glUniform4fv_)(GLint location, GLsizei count, const GLfloat* value);
 extern void(APIENTRY* glUniform3fv_)(GLint location, GLsizei count, const GLfloat* value);
 extern void(APIENTRY* glUniformMatrix3fv_)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 extern void(APIENTRY* glUniformMatrix4fv_)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
@@ -397,6 +398,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glUniform4i glUniform4i_
 #define glUniform3f glUniform3f_
 #define glUniform4f glUniform4f_
+#define glUniform4fv glUniform4fv_
 #define glUniform3fv glUniform3fv_
 #define glUniformMatrix3fv glUniformMatrix3fv_
 #define glUniformMatrix4fv glUniformMatrix4fv_

@@ -89,22 +89,7 @@ float AppShell::RenderActivityIndicator(float width, float height, bool openDeta
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.pressed);
     auto context=NotificationContext();
-    const bool glass=m_Appearance && m_Appearance->GetGlassChromeEnabled();
-    if (!glass) m_NavigationRail.activityMotion.Reset();
-    bool adaptiveInk=false;
-    if (glass) {
-        context.customIndicatorFocus=true;
-        context.beginIndicator=[&](ImDrawList* draw,ImVec2 min,ImVec2 max,bool selected) {
-            const auto glassState=Stack::Navigation::UpdateGlassControlState(m_NavigationRail.activityMotion,selected);
-            Stack::Navigation::GlassObjectBacking(draw,min,max,std::min(max.x-min.x,max.y-min.y)*.5f,palette);
-            m_RailGlass.AddObject(draw,min,max,palette.caption,std::min(max.x-min.x,max.y-min.y)*.5f,glassState.Elevation(),
-                Stack::Renderer::GlassChrome::MaterialRole::NavigationControl);
-            adaptiveInk=m_RailGlass.BeginInk(draw,min,max,ImGui::GetItemID());
-            Stack::Navigation::DrawGlassControlFeedback(ImRect(min,max),glassState,m_NavigationRail.scale,palette);
-            Stack::Navigation::GlassKeyboardFocus(ImRect(min,max),m_NavigationRail.scale,palette);
-        };
-        context.endIndicator=[&](ImDrawList* draw) { if (adaptiveInk) m_RailGlass.EndInk(draw); };
-    }
+    m_NavigationRail.activityMotion.Reset();
     const float result = m_NotificationPresenter.RenderIndicator(*m_NotificationStore, CollectActivity(),
         m_ActivityPresentation, width, height, openDetails && !m_NotificationPresenter.BlocksInput(), context);
     ImGui::PopStyleColor(2);

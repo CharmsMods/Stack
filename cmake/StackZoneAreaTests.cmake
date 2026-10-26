@@ -12,6 +12,17 @@ add_executable(StackRawZoneAreaTests
     src/Editor/Internal/RawLab/RawLabAreaMask.cpp
     src/Editor/Internal/RawLab/RawLabCurveEditor.cpp
     src/Editor/GraphUI/GraphPlotStyle.cpp
+    src/Utils/GlassControls.cpp
+    src/Renderer/GlassChrome.cpp
+    src/Renderer/Glass/GlassChromeRendering.cpp
+    src/Renderer/Glass/GlassChromeJoins.cpp
+    src/Renderer/Glass/ProximityJoins.cpp
+    src/Renderer/Glass/GlassChromeInk.cpp
+    src/Renderer/Glass/MaterialRenderer.cpp
+    src/Animation/AnimationTypes.cpp
+    src/Animation/ScalarChannel.cpp
+    src/Animation/ControlMotion.cpp
+    src/Notifications/NotificationPreferences.cpp
     src/Raw/RawZoneAreaRecipe.cpp
     src/Raw/RawZoneAreaMask.cpp
     src/Raw/RawZoneAreaGuidance.cpp
@@ -32,7 +43,7 @@ add_executable(StackRawZoneAreaTests
     src/Renderer/Internal/RawZoneAreaGuide.cpp
     src/Renderer/GLHelpers.cpp
     src/Renderer/GLLoader.cpp)
-target_include_directories(StackRawZoneAreaTests PRIVATE src)
+target_include_directories(StackRawZoneAreaTests PRIVATE src "${CMAKE_BINARY_DIR}/generated/src")
 target_link_libraries(StackRawZoneAreaTests PRIVATE glfw imgui_core)
 if(WIN32)
     target_link_libraries(StackRawZoneAreaTests PRIVATE opengl32)

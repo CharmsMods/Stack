@@ -1,6 +1,7 @@
 #include "Editor/Internal/RawLab/CurveCanvas.h"
 #include "Editor/Internal/RawLab/CurveTonalSliders.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
+#include "Utils/GlassControls.h"
 #include "App/settings/AppearanceTheme.h"
 #include "ThirdParty/stb_image_write.h"
 #include <filesystem>
@@ -13,36 +14,113 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
+#include <optional>
 
 namespace Stack::Validation {
-void ValidateSharedCurveInteractions() {
+static void RunSharedCurveInteractions(bool glass) {
     using namespace Editor::RawLabInternal;
     using namespace RawRecipe;
     CurveCanvasState state;CurveAmountState amount;
     std::vector<RawBezierCurvePoint> points{{0,.5f,{1},{1}},{.5f,.5f,{1},{1}},{1,.5f,{1},{1}}};
+    Editor::GraphUI::GraphPlotStyle viewStyle;
     ImVec2 origin;ImRect plot,lastItem;float exposure=0;bool changed=false;
     bool tonalEnabled=false,disabled=false;
     CurveTonalSliderDomain domain;
     auto& io=ImGui::GetIO();
+    const auto previousConfig=io.ConfigFlags;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+    struct RestoreConfig {ImGuiIO& io;ImGuiConfigFlags flags;~RestoreConfig(){io.ConfigFlags=flags;}} restoreConfig{io,previousConfig};
+    ImGuiExtras::GlassControlState glassState;
+    struct Cleanup { ImGuiExtras::GlassControlState& state; ~Cleanup(){state.Shutdown();} } cleanup{glassState};
     const auto frame=[&] {
         ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();
-        ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize({600,400});
+        glassState.BeginFrame(glass,"curve-interaction-check");
+        ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize({600,650});
         ImGui::Begin("Curve interaction validation",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings);
+        std::optional<ImGuiExtras::GlassControlScope> presentation;
+        if (glass) presentation.emplace(glassState,1.f,false,ImGuiExtras::GlassElements::FloatingTools);
         origin=ImGui::GetCursorScreenPos();
-        const auto style=Editor::GraphUI::ResolveGraphPlotStyle();
+        const auto style=Editor::GraphUI::ResolveGraphPlotStyle();viewStyle=style;
         const float graphHeight=250.f-style.controlHeight-ImGui::GetStyle().ItemSpacing.y;
         const float inset=std::min(style.inset,std::min(400.f,graphHeight)*.2f);
         plot={{origin.x+inset,origin.y+inset},{origin.x+400.f-inset,origin.y+graphHeight-inset}};
         ImGui::BeginDisabled(disabled);
         changed=DrawCurveCanvas("curve",points,amount,state,false,{}, {400,250},12,&exposure,
             {},false,nullptr,false,true,tonalEnabled?&domain:nullptr);
+        if(state.geometry[0].valid && !SameCurvePoints(state.geometry[0].source,points))
+            throw std::runtime_error("Curve geometry lagged behind this frame's authored values.");
         lastItem={ImGui::GetItemRectMin(),ImGui::GetItemRectMax()};
         ImGui::EndDisabled();
+        presentation.reset();
         ImGui::End();ImGui::Render();
+        if (glass) {
+            glViewport(0,0,int(io.DisplaySize.x),int(io.DisplaySize.y));
+            glDisable(GL_SCISSOR_TEST);glClearColor(.1f,.1f,.1f,1.f);glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            if (!glassState.material.Error().empty()) throw std::runtime_error(glassState.material.Error());
+            if (glGetError()!=GL_NO_ERROR) throw std::runtime_error("Glass curve interaction produced an OpenGL error.");
+        }
     };
     const auto require=[](bool valid,const char* reason){if(!valid)throw std::runtime_error(reason);};
     io.AddMousePosEvent(-100,-100);frame();frame();
-    const ImVec2 middle(origin.x+200,origin.y+110);
+    // Exercise the actual selector buttons; selecting a mode is presentation
+    // state only and must not author curve data.
+    const auto modeStyle=viewStyle;
+    const auto beforeMode=points;
+    const float modeY=lastItem.GetCenter().y;
+    for(const int mode:{1,2,0}) {
+        io.AddMousePosEvent(origin.x+modeStyle.controlHeight*.5f+mode*(modeStyle.controlHeight+modeStyle.controlGap),modeY);
+        frame();io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        require(int(state.mode)==mode && !changed && SameCurvePoints(points,beforeMode),
+            "Curve-mode selector failed or authored curve data.");
+        if(glass && mode==2) {
+            for(int i=0;i<5;++i)frame();
+            bool enlarged=false;
+            for(const auto& entry:glassState.points)if(entry.second.role==ImGuiExtras::GlassMotionRole::Selection)
+                enlarged|=entry.second.output.uniformScale>1.05f;
+            require(enlarged,"Click-driven selection movement did not enlarge the lens.");
+        }
+    }
+    const float modeStep=modeStyle.controlHeight+modeStyle.controlGap;
+    const float firstMode=origin.x+modeStyle.controlHeight*.5f;
+    for(int i=0;i<40;++i)frame(); // Finish the prior click before picking up its lens.
+    io.AddMousePosEvent(firstMode,modeY);frame();io.AddMouseButtonEvent(0,true);frame();
+    io.AddMousePosEvent(firstMode+1.65f*modeStep,modeY);frame();
+    require(state.modeSelector.dragging && std::abs(state.modeSelector.position-1.65f)<.03f &&
+        state.mode==CurveGestureMode::Points && !changed && SameCurvePoints(points,beforeMode),
+        "Mode drag did not follow the pointer while retaining the committed mode.");
+    for(int i=0;i<8;++i)frame();
+    if(glass) {
+        bool enlarged=false;
+        for(const auto& entry:glassState.points)if(entry.second.role==ImGuiExtras::GlassMotionRole::Selection)
+            enlarged|=entry.second.output.uniformScale>1.1f;
+        require(enlarged,"The moving selector did not enlarge.");
+    }
+    io.AddMouseButtonEvent(0,false);frame();
+    require(state.mode==CurveGestureMode::Bend && !state.modeSelector.capture && SameCurvePoints(points,beforeMode),
+        "Mode drag did not snap to the nearest slot on release.");
+    for(int i=0;i<40;++i)frame();
+    io.AddMousePosEvent(firstMode+2*modeStep,modeY);frame();io.AddMouseButtonEvent(0,true);frame();
+    io.AddMousePosEvent(firstMode,modeY);frame();io.AddKeyEvent(ImGuiKey_Escape,true);frame();
+    io.AddKeyEvent(ImGuiKey_Escape,false);io.AddMouseButtonEvent(0,false);frame();
+    require(state.mode==CurveGestureMode::Bend && !state.modeSelector.capture,"Mode-drag cancellation changed the committed mode.");
+    disabled=true;frame();
+    io.AddMousePosEvent(firstMode,modeY);frame();io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    require(state.mode==CurveGestureMode::Bend && !state.modeSelector.capture,"Disabled selector accepted input.");
+    disabled=false;frame();
+    io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    require(state.mode==CurveGestureMode::Points,"Selector did not recover after disabled interaction.");
+    io.AddKeyEvent(ImGuiKey_RightArrow,true);frame();io.AddKeyEvent(ImGuiKey_RightArrow,false);frame();
+    io.AddKeyEvent(ImGuiKey_Space,true);frame();io.AddKeyEvent(ImGuiKey_Space,false);frame();
+    require(state.mode==CurveGestureMode::Select && !changed && SameCurvePoints(points,beforeMode),
+        "Keyboard navigation could not activate a selector slot.");
+    io.AddMousePosEvent(firstMode,modeY);frame();io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    for(int i=0;i<40;++i)frame();
+    io.AddMouseButtonEvent(0,true);frame();
+    io.AddMousePosEvent(firstMode+1.6f*modeStep,modeY);io.AddMouseButtonEvent(0,false);frame();
+    require(state.mode==CurveGestureMode::Bend,"Selector ignored movement carried by the pointer-up frame.");
+    io.AddMousePosEvent(firstMode,modeY);frame();io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    const ImVec2 middle=plot.GetCenter();
     io.AddMousePosEvent(middle.x,middle.y);frame();io.AddMouseButtonEvent(0,true);frame();
     io.AddMousePosEvent(middle.x+20,middle.y-30);frame();
     io.AddMouseButtonEvent(0,false);frame();
@@ -63,7 +141,7 @@ void ValidateSharedCurveInteractions() {
     io.AddMousePosEvent(empty.x,empty.y);frame();io.AddMouseButtonEvent(0,true);frame();
     io.AddMousePosEvent(empty.x,empty.y+20);frame();io.AddMouseButtonEvent(0,false);frame();
     require(points[0].y==before[0].y && points[1].y==before[1].y,"Empty selection unexpectedly changed the curve.");
-    const auto style=Editor::GraphUI::ResolveGraphPlotStyle();
+    const auto style=viewStyle;
     const ImVec2 lock(lastItem.Min.x-style.controlGap-style.controlHeight*.5f,lastItem.GetCenter().y);
     io.AddMousePosEvent(lock.x,lock.y);frame();io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
     require(amount.locked && amount.reference.size()==points.size(),"Curve lock did not capture its reference.");
@@ -148,7 +226,7 @@ void ValidateSharedCurveInteractions() {
     click(toggle);
     require(!state.showTonalSliders && !changed && SameCurvePoints(points,beforeVisibility),"Hiding sliders authored curve points.");
     click(toggle);require(state.showTonalSliders,"Could not show tonal sliders for widget checks.");
-    const float rowStep=ImGui::GetFrameHeight()+ImGui::GetStyle().ItemSpacing.y;
+    const float rowStep=lastItem.GetHeight()+ImGui::GetStyle().ItemSpacing.y;
     const ImVec2 secondSlider(lastItem.Min.x+lastItem.GetWidth()*.8f,lastItem.GetCenter().y-3*rowStep);
     click(secondSlider);
     require(owned()!=points.end() && TonalCurveSliderValue(points,1)>.1f,"The submitted tonal slider did not adjust its point.");
@@ -161,6 +239,8 @@ void ValidateSharedCurveInteractions() {
     disabled=false;frame();
     std::cout<<"Shared curve point/group, cancel, lock/amount, exposure and tonal slider ownership interactions passed.\n";
 }
+void ValidateSharedCurveInteractions() { RunSharedCurveInteractions(false); }
+void ValidateSharedGlassCurveInteractions() { RunSharedCurveInteractions(true); }
 
 bool ValidateTonalSliderInteractions(const std::filesystem::path& preview) {
     if(!glfwInit())return false;
@@ -180,12 +260,19 @@ bool ValidateTonalSliderInteractions(const std::filesystem::path& preview) {
         try {
             ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();ImGui::EndFrame();
             ValidateSharedCurveInteractions();
+            ValidateSharedGlassCurveInteractions();
             if(!preview.empty()) {
                 using namespace Editor::RawLabInternal;
                 using namespace RawRecipe;
                 CurveCanvasState localState,toneState;
                 localState.showTonalSliders=toneState.showTonalSliders=true;
+                localState.mode=CurveGestureMode::Select; toneState.mode=CurveGestureMode::Bend;
                 CurveAmountState localAmount,toneAmount;
+                ImGuiExtras::GlassControlState localGlass,toneGlass;
+                struct PreviewCleanup {
+                    ImGuiExtras::GlassControlState& first; ImGuiExtras::GlassControlState& second;
+                    ~PreviewCleanup(){first.Shutdown();second.Shutdown();}
+                } previewCleanup{localGlass,toneGlass};
                 float normalization=.35f;
                 auto localDomain=ExposureTonalSliderDomain(-8.f,6.f);
                 CurveTonalSliderDomain toneDomain;
@@ -197,23 +284,32 @@ bool ValidateTonalSliderInteractions(const std::filesystem::path& preview) {
                 SetTonalCurveSlider(tonePoints,3,toneDomain.positions[3],-.2f,64);
                 io.AddMousePosEvent(-100,-100);
                 ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();
+                localGlass.BeginFrame(true,"local-ev-preview"); toneGlass.BeginFrame(true,"tone-preview");
                 constexpr ImGuiWindowFlags flags=ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings|
                     ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize;
                 ImGui::SetNextWindowPos({26,24});ImGui::SetNextWindowSize({460,650});
                 ImGui::Begin("Local EV slider preview",nullptr,flags);
+                {
+                ImGuiExtras::GlassControlScope glass(localGlass,1.f,false,ImGuiExtras::GlassElements::FloatingTools);
                 ImGui::TextUnformatted("Local EV");ImGui::Spacing();
                 DrawCurveCanvas("LocalEV",localPoints,localAmount,localState,false,{},
                     {ImGui::GetContentRegionAvail().x,300},12,nullptr,{},false,&normalization,false,true,&localDomain);
+                }
                 ImGui::End();
                 ImGui::SetNextWindowPos({514,24});ImGui::SetNextWindowSize({460,650});
                 ImGui::Begin("Tone slider preview",nullptr,flags);
+                {
+                ImGuiExtras::GlassControlScope glass(toneGlass,1.f,false,ImGuiExtras::GlassElements::FloatingTools);
                 ImGui::TextUnformatted("Tone curve");ImGui::Spacing();
                 DrawCurveCanvas("Tone",tonePoints,toneAmount,toneState,true,{},
                     {ImGui::GetContentRegionAvail().x,300},64,nullptr,{},false,nullptr,false,true,&toneDomain);
+                }
                 ImGui::End();ImGui::Render();
                 glViewport(0,0,1000,700);glDisable(GL_SCISSOR_TEST);
                 glClearColor(.1f,.1f,.1f,1.f);glClear(GL_COLOR_BUFFER_BIT);
                 ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                if (!localGlass.material.Error().empty() || !toneGlass.material.Error().empty() || glGetError()!=GL_NO_ERROR)
+                    throw std::runtime_error("Native glass curve preview failed to render.");
                 std::vector<unsigned char> pixels(1000*700*4),topDown(pixels.size());
                 glReadPixels(0,0,1000,700,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
                 constexpr std::size_t stride=1000*4;

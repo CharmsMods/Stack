@@ -1,4 +1,3 @@
-#include "Utils/SidePanelSlider.h"
 #include "Editor/NodeEditors/StylizeEditors.h"
 #include "Editor/NodeEditors/RawWorkspaceEditContext.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
@@ -63,7 +62,7 @@ bool Draw(EditorModule&,RawWorkspaceEditContext& context,bool settings) {
     if (type=="CellShading") {
         if (!settings) {
             int levels=context.nodeSettings.at("levels");
-            if (ImGuiExtras::SidePanelSliderInt("Bands",&levels,2,12)) {context.nodeSettings["levels"]=levels;changed=true;}
+            if (ImGui::SliderInt("Bands",&levels,2,12)) {context.nodeSettings["levels"]=levels;changed=true;}
             changed|=Number(context,"bias","Band position",-1,1);
             changed|=Number(context,"gamma","Band spacing",.1f,3);
             changed|=Toggle(context,"showEdges","Ink outlines");

@@ -24,7 +24,7 @@
 #include "Utils/Utf8Text.h"
 #include "ThirdParty/stb_image.h"
 #include "App/settings/AppearanceTheme.h"
-#include "Utils/SidePanelSlider.h"
+#include "Utils/GlassControls.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -650,7 +650,7 @@ std::vector<unsigned char> GenerateMaskPreviewPixels(const EditorNodeGraph::Node
 
 EditorModule::EditorModule(std::shared_ptr<Stack::Project::ProjectSession> project)
     : m_Project(project ? std::move(project) : std::make_shared<Stack::Project::ProjectSession>()),
-      m_SidePanelSliders(std::make_unique<ImGuiExtras::SidePanelSliderState>()) {}
+      m_RawToolGlass(std::make_unique<ImGuiExtras::GlassControlState>()) {}
 
 EditorModule::~EditorModule() {
     Shutdown();
@@ -788,7 +788,7 @@ void EditorModule::Shutdown() {
         m_RawGalleryInspectionTexture = 0;
     }
     m_Sidebar.GetNodeGraphUI().Shutdown();
-    m_SidePanelSliders->Shutdown();
+    m_RawToolGlass->Shutdown();
     m_Project->layers.clear();
     m_Viewport.FrameTransition().Shutdown();
     m_RawViewportFadeRenderer.Shutdown();

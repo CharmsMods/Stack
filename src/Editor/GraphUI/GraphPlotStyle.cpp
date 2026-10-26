@@ -1,4 +1,5 @@
 #include "Editor/GraphUI/GraphPlotStyle.h"
+#include "Utils/GlassControls.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +10,7 @@ GraphPlotStyle ResolveGraphPlotStyle(float scale) {
     if (scale <= 0.0f)
         scale = ImGui::GetFontSize() / std::max(1.0f, ImGui::GetStyle().FontSizeBase);
     scale = std::max(0.01f, scale);
-    return {
+    GraphPlotStyle style{
         ImGui::GetColorU32(ImGuiCol_Text),
         ImGui::GetColorU32(ImGuiCol_Text),
         ImGui::GetColorU32(ImGuiCol_SliderGrab),
@@ -36,10 +37,17 @@ GraphPlotStyle ResolveGraphPlotStyle(float scale) {
         scale, 6.0f * scale, 1.7f * scale, 2.35f * scale, 2.8f * scale,
         3.8f * scale, 5.2f * scale, 23.0f * scale, 4.0f * scale
     };
+    if(ImGuiExtras::IsGraphPointPresentation()) {
+        style.liquidPoints=true;
+        style.pointRadius=16.f*scale;style.selectedPointRadius=19.f*scale;
+        style.inset=26.f*scale;style.controlHeight=36.f*scale;
+    }
+    return style;
 }
 
 void DrawGraphBackdrop(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,
     const GraphPlotStyle& style) {
+    ImGuiExtras::GlassBackgroundScope background(draw);
     if (style.background & IM_COL32_A_MASK)
         draw.AddRectFilled(minimum, maximum, style.background);
     if (style.grid & IM_COL32_A_MASK) {
@@ -54,11 +62,13 @@ void DrawGraphBackdrop(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,
 
 void DrawGraphReference(ImDrawList& draw, ImVec2 start, ImVec2 end,
     const GraphPlotStyle& style) {
+    ImGuiExtras::GlassBackgroundScope background(draw);
     draw.AddLine(start, end, style.reference, style.scale);
 }
 
 void DrawGraphChannelWash(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,
     int channel, const GraphPlotStyle& style) {
+    ImGuiExtras::GlassBackgroundScope background(draw);
     if (channel < 0 || channel >= 3) return;
     draw.AddTriangleFilled(minimum, {maximum.x, minimum.y}, {minimum.x, maximum.y}, style.channelWash[channel]);
     draw.AddTriangleFilled({maximum.x, minimum.y}, maximum, {minimum.x, maximum.y}, style.complementWash[channel]);
@@ -67,25 +77,42 @@ void DrawGraphChannelWash(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,
 void DrawGraphBezier(ImDrawList& draw, ImVec2 start, ImVec2 outgoing,
     ImVec2 incoming, ImVec2 end, ImU32 color, const GraphPlotStyle& style,
     bool hovered, bool selected) {
-    draw.AddBezierCubic(start, outgoing, incoming, end, color,
-        selected ? style.selectedWidth : hovered ? style.hoveredWidth : style.curveWidth);
+    ImGuiExtras::GlassBackgroundScope background(draw);
+    const float width=selected ? style.selectedWidth : hovered ? style.hoveredWidth : style.curveWidth;
+    if(!style.liquidPoints) {draw.AddBezierCubic(start,outgoing,incoming,end,color,width);return;}
+    // Tessellate once. Two faint wider strokes add a narrow halo without an
+    // offscreen blur, another image pass, or re-evaluating the authored curve.
+    draw.PathLineTo(start);draw.PathBezierCubicCurveTo(outgoing,incoming,end);
+    auto glow=ImGui::ColorConvertU32ToFloat4(color);
+    glow.w*=.045f;
+    draw.AddPolyline(draw._Path.Data,draw._Path.Size,ImGui::ColorConvertFloat4ToU32(glow),0,width+6.f*style.scale);
+    glow.w*=2.2f;
+    draw.AddPolyline(draw._Path.Data,draw._Path.Size,ImGui::ColorConvertFloat4ToU32(glow),0,width+3.f*style.scale);
+    draw.PathStroke(color,0,width);
 }
 
 void DrawGraphPoint(ImDrawList& draw, ImVec2 point, const GraphPlotStyle& style,
-    bool selected, bool filled) {
+    bool selected, bool filled, ImGuiID identity, bool hovered, bool held, const Animation::ControlInput* nativeInput) {
     const float radius = selected ? style.selectedPointRadius : style.pointRadius;
     const ImU32 color = selected ? style.selected : style.point;
+    const Renderer::GlassChrome::JoinGroup join{nativeInput?ImGuiID(nativeInput->identity):0,identity,.55f*style.pointRadius};
+    if (ImGuiExtras::DrawGlassPoint(draw,point,radius,identity,selected,hovered,held,
+        ImGuiExtras::GlassMotionRole::GraphPoint,1.f,nativeInput,&join)) {
+        return;
+    }
     if (filled) draw.AddCircleFilled(point, radius, color, 24);
     else draw.AddCircle(point, radius, color, 24, (selected ? 2.0f : 1.3f) * style.scale);
 }
 
 void DrawGraphProbe(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,
     float x, const GraphPlotStyle& style) {
+    ImGuiExtras::GlassBackgroundScope background(draw);
     draw.AddLine({x, minimum.y}, {x, maximum.y}, style.guide, style.scale);
 }
 
 void DrawGraphPointHalo(ImDrawList& draw, ImVec2 point, float pointerDistance,
     const GraphPlotStyle& style) {
+    if(style.liquidPoints)return; // The bead's own light response supplies hover feedback.
     const float reach = 30.0f * style.scale;
     if (pointerDistance >= reach) return;
     for (int ring = 0; ring < 4; ++ring) {

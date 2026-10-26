@@ -631,6 +631,7 @@ if (WIN32 AND STACK_BUILD_AUXILIARY_TOOLS)
 endif()
 
 include(CTest)
+include(cmake/StackGlassMaterial.cmake)
 if(BUILD_TESTING)
     include(cmake/StackAnimationTests.cmake)
     add_executable(StackProjectGraphHistoryTests tools/tests/project_graph_history_tests.cpp)
@@ -776,6 +777,7 @@ if (BUILD_TESTING)
         src/Async/TaskSystem.cpp
         src/Notifications/NotificationStore.cpp src/Notifications/Notifier.cpp
         src/Notifications/NotificationIndicator.cpp src/Notifications/NotificationPresentation.cpp
+        src/Notifications/NotificationPreferences.cpp
         src/Utils/MorphingLabel.cpp src/ThirdParty/imstb_truetype_impl.cpp)
     target_include_directories(StackUiActivityTests PRIVATE src)
     target_link_libraries(StackUiActivityTests PRIVATE imgui_core)

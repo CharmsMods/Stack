@@ -24,7 +24,6 @@
 #include "RawMaskToolbar.h"
 #include "ProjectWorkspace.h"
 #include "Renderer/WorkspaceCompositor.h"
-#include "Renderer/GlassChrome.h"
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -110,8 +109,6 @@ private:
     void DrawWorkspaceSwitcher();
     Stack::Workspace::Switcher m_WorkspaceSwitcher;
     Stack::Renderer::WorkspaceCompositor m_WorkspaceCompositor;
-    Stack::Renderer::GlassChrome m_RailGlass;
-    bool m_GlassErrorReported = false;
     ImGuiID m_WorkspaceOriginViewport = 0;
     ImVec2 m_WorkspaceOriginCursor{}, m_WorkspaceMainCursor{};
     double m_WorkspacePointerX = 0, m_WorkspacePointerY = 0;

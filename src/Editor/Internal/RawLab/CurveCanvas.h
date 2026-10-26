@@ -1,6 +1,7 @@
 #pragma once
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
+#include "Editor/Internal/RawLab/CurveModeSelector.h"
 #include <imgui.h>
 #include <array>
 #include <cstdint>
@@ -16,6 +17,7 @@ struct CurveCanvasGeometryCache {
 };
 struct CurveCanvasState {
     CurveGestureMode mode = CurveGestureMode::Points;
+    CurveModeSelectorState modeSelector;
     std::vector<bool> selected;
     std::vector<RawRecipe::RawBezierCurvePoint> before;
     ImVec2 press{};

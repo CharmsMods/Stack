@@ -1,0 +1,5 @@
+// Generated from material.frag. Edit the shader, not this file.
+#pragma once
+namespace Stack::Renderer::Glass {
+inline constexpr const char* MaterialSource = R"GLASS(@STACK_GLASS_MATERIAL_SOURCE@)GLASS";
+}

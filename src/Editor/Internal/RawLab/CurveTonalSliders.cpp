@@ -1,8 +1,8 @@
-#include "Utils/SidePanelSlider.h"
 #include "Editor/Internal/RawLab/CurveTonalSliders.h"
 #include "Editor/Internal/RawLab/CurveCanvas.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
 #include "Raw/Curves/TonalCurvePoints.h"
+#include "Utils/GlassControls.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -64,8 +64,15 @@ bool DrawCurveTonalSliders(std::vector<RawBezierCurvePoint>& points,
         for (const auto color : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered,
                  ImGuiCol_FrameBgActive, ImGuiCol_SliderGrab, ImGuiCol_SliderGrabActive})
             ImGui::PushStyleColor(color, ImVec4(0,0,0,0));
-        bool edited = ImGuiExtras::SidePanelSliderFloat("##tonal", &value, -100.f, 100.f, "",
+        const float radius = style.liquidPoints ? style.pointRadius : 4.f * style.scale;
+        if(style.liquidPoints) {
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,radius*2.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,{ImGui::GetStyle().FramePadding.x,
+                std::max(ImGui::GetStyle().FramePadding.y,(44.f*style.scale-ImGui::GetFontSize())*.5f)});
+        }
+        bool edited = ImGui::SliderFloat("##tonal", &value, -100.f, 100.f, "",
             ImGuiSliderFlags_NoInput | ImGuiSliderFlags_NoRoundToFormat);
+        if(style.liquidPoints) ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(5);
         const ImRect track(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
         const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
@@ -88,17 +95,22 @@ bool DrawCurveTonalSliders(std::vector<RawBezierCurvePoint>& points,
         if (ImGui::IsItemVisible()) {
             auto* draw = ImGui::GetWindowDrawList();
             const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
-            const float radius = 4.f * style.scale;
-            const float left = track.Min.x + radius + style.scale;
-            const float right = std::max(left, track.Max.x - radius - style.scale);
+            const float left = track.Min.x + radius + (style.liquidPoints ? 2.f : style.scale);
+            const float right = std::max(left, track.Max.x - radius - (style.liquidPoints ? 2.f : style.scale));
             const float y = track.GetCenter().y;
             const float x = left + (right - left) * (value + 100.f) / 200.f;
             draw->AddText({origin.x, y - ImGui::GetFontSize() * .5f}, ink, labels[region]);
-            draw->AddLine({left,y}, {std::max(left,x-radius-2.f*style.scale),y}, ink, style.scale);
-            draw->AddLine({std::min(right,x+radius+2.f*style.scale),y}, {right,y}, ink, style.scale);
-            draw->AddLine({(left+right)*.5f,y-3.f*style.scale},
-                {(left+right)*.5f,y+3.f*style.scale}, style.reference, style.scale);
-            draw->AddCircle({x,y}, radius, ink, 16, 1.5f*style.scale);
+            { ImGuiExtras::GlassBackgroundScope underlay(*draw);
+            if(style.liquidPoints) {
+                // The lens needs the complete track in its captured backdrop.
+                draw->AddLine({left,y}, {right,y}, ink, style.scale);
+            } else {
+                draw->AddLine({left,y}, {std::max(left,x-radius-2.f*style.scale),y}, ink, style.scale);
+                draw->AddLine({std::min(right,x+radius+2.f*style.scale),y}, {right,y}, ink, style.scale);
+            }
+            }
+            if(!ImGuiExtras::DrawGlassPoint(*draw,{x,y},radius,ImGui::GetItemID(),false,hovered,enabled && ImGui::IsItemActive(),ImGuiExtras::GlassMotionRole::Slider))
+                draw->AddCircle({x,y}, radius, ink, 32, 1.5f*style.scale);
             char text[24];
             if (value == 0.f) std::snprintf(text, sizeof(text), "0");
             else std::snprintf(text, sizeof(text), std::abs(value) < .05f ? "%+.2g" : "%+.1f", value);

@@ -1,9 +1,12 @@
 #include "Editor/Internal/RawLab/CurveCanvas.h"
+#include "Editor/Internal/RawLab/CurveCanvasPlot.h"
+#include "App/ControlMotionAdapter.h"
 #include "Editor/Internal/RawLab/CurveTonalSliders.h"
 #include "Raw/Curves/CurveAuthoring.h"
 #include "Raw/Curves/LocalEvCurveNormalization.h"
 #include "Raw/Curves/TonalCurvePoints.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
+#include "Utils/GlassControls.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -30,13 +33,6 @@ void FreezeHandles(std::vector<RawBezierCurvePoint>& points) {
         points[i+1].incoming={1,true,segment.rightHandleX-segment.right.x,segment.rightHandleY-segment.right.y};
     }
 }
-const std::vector<RawBezierSegment>& Geometry(CurveCanvasGeometryCache& cache,
-    const std::vector<RawBezierCurvePoint>& points) {
-    if(!cache.valid || !SameCurvePoints(cache.source,points)) {
-        cache.source=points;cache.segments=BuildRawBezierSegments(points);cache.valid=true;
-    }
-    return cache.segments;
-}
 float NormalizationMean(CurveCanvasState& state,const std::vector<RawBezierCurvePoint>& points) {
     if(!state.normalizationCached || !SameCurvePoints(state.normalizationSource,points)) {
         state.normalizationSource=points;
@@ -45,24 +41,7 @@ float NormalizationMean(CurveCanvasState& state,const std::vector<RawBezierCurve
     }
     return state.normalizationMean;
 }
-bool Glyph(int index,bool active,const char* tip,const GraphUI::GraphPlotStyle& style) {
-    ImGui::PushID(index);
-    const bool hit=ImGui::InvisibleButton("mode",{style.controlHeight,style.controlHeight});
-    const auto r=ImRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
-    const auto c=r.GetCenter(); auto* d=ImGui::GetWindowDrawList();
-    const auto color=ImGui::GetColorU32(ImGuiCol_Text,active?1.f:.55f);
-    const auto p=[&](float x,float y){return ImVec2(c.x+x*style.scale,c.y+y*style.scale);};
-    if(active || ImGui::IsItemHovered()) d->AddCircle(c,10*style.scale,ImGui::GetColorU32(ImGuiCol_Text,active?.45f:.2f),0,style.scale);
-    switch(index) {
-    case 0:d->AddLine(p(-6,5),p(6,-5),color,style.scale);d->AddCircle(c,3*style.scale,color,0,style.scale);break;
-    case 1:for(float x:{-4.f,4.f}) for(float y:{-4.f,4.f})d->AddCircle(p(x,y),2*style.scale,color,0,style.scale);break;
-    case 2:d->AddBezierCubic(p(-7,4),p(-4,-8),p(4,-8),p(7,4),color,1.5f*style.scale);break;
-    case 3:d->AddRect(p(-5,-1),p(5,6),color,2*style.scale,0,style.scale);d->AddCircle(p(0,-3),4*style.scale,color,0,style.scale);break;
-    case 4:for(float y:{-5.f,0.f,5.f}) {d->AddLine(p(-7,y),p(7,y),color,style.scale);const float x=y==0?3.f:-3.f;d->AddCircleFilled(p(x,y),2.f*style.scale,color);}break;
-    }
-    if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
-    ImGui::PopID();return hit;
-}
+
 }
 bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     CurveAmountState& amount,CurveCanvasState& s,bool diagonal,
@@ -89,6 +68,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         ImVec2(ImGui::GetItemRectMax().x-inset,ImGui::GetItemRectMax().y-inset));
     const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
     const bool plotVisible=ImGui::IsItemVisible();
+    const auto plotInput=UiMotion::LastItemInput();
     const bool inputEnabled=!(ImGui::GetItemFlags()&ImGuiItemFlags_Disabled);
     const bool editable=!amount.locked && inputEnabled;
     if(s.tonalSliderGesture && !editable) {
@@ -105,13 +85,9 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const float yMaximum=normalization ? std::max(1.f,1.f-offset) : view.maximum;
     const float ySpan=std::max(.0001f,yMaximum-yMinimum);
     const auto screen=[&](float x,float y){return ImVec2(box.Min.x+(x-view.minimum)/span*box.GetWidth(),box.Max.y-(y-offset-yMinimum)/ySpan*box.GetHeight());};
-    const auto plotScreen=[&](float x,float y){return ImVec2(box.Min.x+(x-view.minimum)/span*box.GetWidth(),box.Max.y-(y-yMinimum)/ySpan*box.GetHeight());};
     const auto mouseX=[&]{return std::clamp(view.minimum+(mouse.x-box.Min.x)/box.GetWidth()*span,0.f,1.f);};
     const auto mouseY=[&]{return std::clamp(offset+yMinimum+(box.Max.y-mouse.y)/box.GetHeight()*ySpan,0.f,1.f);};
     auto* d=ImGui::GetWindowDrawList();
-    const auto white=style.curve;
-    const auto muted=style.reference;
-    const auto accent=style.selected;
     s.selected.resize(points.size(),false);
     int nearest=-1;float best=16*16.f*style.scale*style.scale;
     for(int i=0;hovered && i<int(points.size());++i) {
@@ -233,81 +209,21 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
         s.radius=std::clamp(s.radius+ImGui::GetIO().MouseWheel*.025f,.025f,1.f);
     }
-    if(plotVisible) {
-    d->PushClipRect(box.Min,box.Max,true);
-    GraphUI::DrawGraphBackdrop(*d,box.Min,box.Max,style);
-    if(!s.histogramCached || s.histogramRevision!=histogramRevision || s.histogramValid!=histogram.valid ||
-        s.histogramView.minimum!=view.minimum || s.histogramView.maximum!=view.maximum ||
-        s.histogramSource!=histogram.luma) {
-        s.histogramSource=histogram.luma;s.histogramRevision=histogramRevision;
-        s.histogramView=view;s.histogramValid=histogram.valid;s.histogramCached=true;
-        s.histogramBins=view.minimum==0.f && view.maximum==1.f
-            ? histogram.luma : CropRawLabGraphHistogram(histogram,view).luma;
-        s.histogramPeak=*std::max_element(s.histogramBins.begin(),s.histogramBins.end());
-    }
-    if(s.histogramValid) {
-        for(int i=0;i<int(s.histogramBins.size());++i) {
-            const float x=float(i)/(s.histogramBins.size()-1);
-            d->AddLine({box.Min.x+x*box.GetWidth(),box.Max.y},{box.Min.x+x*box.GetWidth(),box.Max.y-(s.histogramPeak>0?.75f*s.histogramBins[i]/s.histogramPeak:0)*box.GetHeight()},style.histogram,style.scale);
-        }
-    }
-    GraphUI::DrawGraphReference(*d,plotScreen(0,diagonal?0:.5f),plotScreen(1,diagonal?1:.5f),style);
-    if(s.cachedSamplesRevision!=s.samplesRevision || s.cachedSamplesSize!=s.samples.size()) {
-        s.sampleBins.fill(0);
-        for(float x:s.samples)if(x>=0 && x<=1)++s.sampleBins[std::min(127,int(x*128))];
-        s.samplePeak=*std::max_element(s.sampleBins.begin(),s.sampleBins.end());
-        s.cachedSamplesRevision=s.samplesRevision;s.cachedSamplesSize=s.samples.size();
-    }
-    if(s.samplePeak)for(int i=0;i<128;++i)d->AddLine(plotScreen((i+.5f)/128,yMinimum),plotScreen((i+.5f)/128,yMinimum+.18f*ySpan*s.sampleBins[i]/s.samplePeak),style.guide,style.scale);
-    const auto paint=[&](const auto& curve,ImU32 color,float thickness,int cacheIndex) {
-        auto curveStyle=style;curveStyle.curveWidth=thickness;
-        for(const auto& seg:Geometry(s.geometry[cacheIndex],curve)) {
-            GraphUI::DrawGraphBezier(*d,screen(seg.left.x,seg.left.y),screen(seg.leftHandleX,seg.leftHandleY),
-                screen(seg.rightHandleX,seg.rightHandleY),screen(seg.right.x,seg.right.y),color,curveStyle);
-        }
-    };
-    if(s.gesture) {
-        paint(s.before,muted,style.scale,1);
-        if(s.mode==CurveGestureMode::Bend) for(float x:{s.pivot-s.radius,s.pivot,s.pivot+s.radius})d->AddLine(plotScreen(x,yMinimum),plotScreen(x,yMaximum),muted,style.scale);
-    }
-    if(amount.locked && amount.amount<1 && !amountDriven)paint(amount.reference,muted,style.scale,2);
-    const auto& source=amount.locked?amount.reference:points;
-    if(amountDriven && (s.effectiveAmount!=amount.amount || s.effectiveDiagonal!=diagonal ||
-        !SameCurvePoints(s.effectiveSource,source))) {
-        s.effectiveSource=source;s.effectiveAmount=amount.amount;s.effectiveDiagonal=diagonal;
-        s.effectivePoints=AttenuateCurve(source,amount.amount,diagonal);
-    }
-    const auto& effective=amountDriven?s.effectivePoints:points;
-    if(amountDriven)paint(source,muted,style.scale,2);
-    paint(effective,white,style.curveWidth,0);
-    if(s.probe && *s.probe>=0 && *s.probe<=1) {
-        const float x=*s.probe,y=EvaluateRawBezierCurve(effective,x);const auto p=screen(x,y);
-        GraphUI::DrawGraphProbe(*d,box.Min,box.Max,p.x,style);
-        const float radius=5.f*style.scale;
-        d->AddQuad({p.x,p.y-radius},{p.x+radius,p.y},{p.x,p.y+radius},{p.x-radius,p.y},accent,1.5f*style.scale);
-    }
-    d->PopClipRect();
-    d->PushClipRect(box.Min,box.Max,true);
-    for(int i=0;i<int(points.size());++i) {
-        const auto p=screen(points[i].x,points[i].y);const float dist=std::hypot(mouse.x-p.x,mouse.y-p.y);
-        if(hovered)GraphUI::DrawGraphPointHalo(*d,p,dist,style);
-        GraphUI::DrawGraphPoint(*d,p,style,s.selected[i]);
-    }
-    d->PopClipRect();
-    }
     ImGui::BeginDisabled(amount.locked);
-    const char* tips[]={"Edit points. Double-click to add; right-click a point to remove.","Select points with clicks; drag empty space to move the group.","Edit a soft brightness band; wheel changes its width."};
-    for(int i=0;i<3;++i) {if(i)ImGui::SameLine(0,style.controlGap);if(Glyph(i,int(s.mode)==i,tips[i],style)) {s.mode=CurveGestureMode(i);s.gesture=false;}}
+    int selectedMode=int(s.mode);
+    if(DrawCurveModeSelector(selectedMode,s.modeSelector,style)) {
+        s.mode=CurveGestureMode(selectedMode);s.gesture=false;
+    }
     ImGui::EndDisabled();
     if(tonalSliders) {
         ImGui::SameLine(0,style.controlGap);
-        if(Glyph(4,s.showTonalSliders,s.showTonalSliders ? "Hide tonal sliders." :
+        if(DrawCurveControlGlyph(4,s.showTonalSliders,s.showTonalSliders ? "Hide tonal sliders." :
             "Show tonal sliders. Slider points keep their brightness positions while moving vertically.",style))
             s.showTonalSliders=!s.showTonalSliders;
     }
     ImGui::SameLine(0,style.controlGap);
     ImGui::BeginDisabled(amountDriven);
-    if(Glyph(3,amount.locked,"Lock this curve, then vary its amount. Unlock keeps the current shape.",style)) {
+    if(DrawCurveControlGlyph(3,amount.locked,"Lock this curve, then vary its amount. Unlock keeps the current shape.",style)) {
         if(!amount.locked) {amount.reference=points;FreezeHandles(amount.reference);amount.amount=1;amount.locked=true;}
         else {amount={};}
         s.gesture=false;changed=true;
@@ -391,6 +307,17 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         if(editable && !SameCurvePoints(points,s.beforeTonalSliders)) {points=s.beforeTonalSliders;changed=true;}
         if(ImGui::GetActiveID()==s.activeTonalSlider)ImGui::ClearActiveID();
         s.tonalSliderGesture=false;s.activeTonalSlider=0;
+    }
+    if(plotVisible) {
+        // Authoring is complete, including tonal sliders, amount and cancel.
+        // Recompute only the normalization mapping affected by this edit.
+        const float displayOffset=changed && normalization
+            ? (*normalization>0?NormalizationMean(s,s.gesture?s.before:points)*std::clamp(*normalization,0.f,1.f):0.f)
+            : offset;
+        const float displayMin=normalization?std::min(0.f,-displayOffset):view.minimum;
+        const float displayMax=normalization?std::max(1.f,1.f-displayOffset):view.maximum;
+        DrawCurveCanvasPlot({box,style,view,plotInput,mouse,displayOffset,displayMin,displayMax,
+            diagonal,amountDriven,hovered,nearest,changed},points,amount,s,histogram,histogramRevision);
     }
     ImGui::PopID();return changed;
 }

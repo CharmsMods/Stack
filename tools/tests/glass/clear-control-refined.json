@@ -1,0 +1,141 @@
+{
+  "uBackdrop": 0,
+  "uSourceRectPx": [
+    0.0,
+    0.0,
+    400.0,
+    360.0
+  ],
+  "uLocalOriginPx": [
+    200.5856700546489,
+    203.95800513509388
+  ],
+  "uShapeCount": 1,
+  "uShapes": [
+    [
+      0.0,
+      0.0,
+      120.12570417879074,
+      99.47765145624747
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ]
+  ],
+  "uCrownAnisotropy": 0.9290498117897042,
+  "uRadii": [
+    99.47765145624747,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "uMergePx": 0.0,
+  "uMaterialize": 1.0,
+  "uBodyRadiusPx": 99.47765145624747,
+  "uCrownHeightPx": 22.53249505249296,
+  "uEdgeWidthPx": 38.4,
+  "uEdgeReachPx": 55.13,
+  "uEdgePeak": 0.12,
+  "uEdgeRegularization": 0.15696,
+  "uProfileKind": 2,
+  "uBevelWidthPx": 5.00000000013012,
+  "uBevelHeightPx": 1.0203849734248769,
+  "uTilt": [
+    0.0,
+    0.0
+  ],
+  "uIor": 1.46,
+  "uBodyReflection": 0.45713253977603785,
+  "uRimReflection": 0.050004520697637396,
+  "uInnerShade": 0.45,
+  "uInnerShadeWidthPx": 4.459885338733843,
+  "uInnerShadeInsetPx": 2.0,
+  "uLipOffsetPx": 6.0,
+  "uLipWidthPx": 3.3,
+  "uLipGain": 0.25,
+  "uOuterContour": 0.35,
+  "uContentReflection": 0.9728647736748406,
+  "uNeutralContrast": 0.45,
+  "uChromaGamma": 0.9435035070053983,
+  "uAdaptation": 1.0,
+  "uEnvironmentGain": 1.0,
+  "uLightShape": [
+    0.6877784334165146,
+    0.5499940848533063,
+    -0.6040609371120137,
+    0.6499998089057563
+  ],
+  "uLightGain": [
+    1.1624956720735657,
+    1.1452419566994338
+  ],
+  "uUseLightProfile": 1,
+  "uLightProfile": [
+    [
+      1.2909485404596106,
+      1.178906930760831,
+      1.0670891344155955,
+      0.9896331273541603
+    ],
+    [
+      0.9686263485040799,
+      0.8495233488129209,
+      0.7553015404128061,
+      0.8045592497584309
+    ],
+    [
+      0.73765129477536,
+      0.6357424205709106,
+      0.7270507017720689,
+      0.9318106243415557
+    ],
+    [
+      1.1087420493417681,
+      1.0038864183186622,
+      0.5440336806246712,
+      0.08323051779066433
+    ]
+  ],
+  "uAmbient": 0.025,
+  "uBodyPower": 0.5000007939699588,
+  "uRoughnessLod": 0.0,
+  "uTintAmount": 0.0,
+  "uTintLinear": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "uShadowOpacity": 0.31472128184367726,
+  "uShadowSigmaPx": 21.05012555756283,
+  "uShadowOffsetPx": [
+    0.0,
+    -58.511976216763244
+  ],
+  "uCausticGain": 0.23707803707811845,
+  "uCausticWidthPx": 42.74587962271549,
+  "uContactGain": 0.0,
+  "uContactLocalPx": [
+    0.0,
+    0.0
+  ],
+  "uContactRadiusPx": 40.0,
+  "uMaxMip": 8.0,
+  "uFilterQuality": 1,
+  "uOutputMode": 0,
+  "uDebug": 0
+}

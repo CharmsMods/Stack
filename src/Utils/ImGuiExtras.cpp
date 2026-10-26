@@ -1,4 +1,4 @@
-#include "Utils/SidePanelSlider.h"
+#include "Utils/GlassControls.h"
 #include "GraphCursor.h"
 #include "ImGuiExtras.h"
 #include "Utils/GraphNumericControls.h"
@@ -551,7 +551,7 @@ bool RenderGraphNodeSliderFloatLegacy(const char* label, float* v, float v_min, 
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    bool changed = ImGuiExtras::SidePanelSliderFloat("##track", v, v_min, v_max, "");
+    bool changed = ImGuiExtras::GlassSliderFloat("##track", v, v_min, v_max, "");
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -584,7 +584,7 @@ bool RenderGraphNodeSliderIntLegacy(const char* label, int* v, int v_min, int v_
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    bool changed = ImGuiExtras::SidePanelSliderInt("##track", v, v_min, v_max, "");
+    bool changed = ImGuiExtras::GlassSliderInt("##track", v, v_min, v_max, "");
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -1067,7 +1067,7 @@ bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, f
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
     const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
     const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
-    bool changed = ImGuiExtras::SidePanelSliderFloat("##track", v, v_min, v_max, "");
+    bool changed = ImGuiExtras::GlassSliderFloat("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
     changed |= ApplyFloatSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
@@ -1116,7 +1116,7 @@ bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_m
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
     const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
     const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
-    bool changed = ImGuiExtras::SidePanelSliderInt("##track", v, v_min, v_max, "");
+    bool changed = ImGuiExtras::GlassSliderInt("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
     changed |= ApplyIntSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);

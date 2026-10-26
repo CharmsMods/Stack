@@ -1,4 +1,3 @@
-#include "Utils/SidePanelSlider.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/Internal/RawLab/RawLabAreaGraph.h"
@@ -95,7 +94,7 @@ bool EditorModule::RenderRawWorkspaceLabAreas(RawWorkspaceEditContext& context, 
             if (BareToolIslandButton("Follow edges", ui.followEdges)) ui.followEdges = true;
             if (ui.followEdges) {
                 ImGui::SetNextItemWidth(-1);
-                ImGuiExtras::SidePanelSliderFloat("##edgeSensitivity", &ui.edgeSensitivity, 0, 1, "Edge sensitivity %.2f");
+                ImGui::SliderFloat("##edgeSensitivity", &ui.edgeSensitivity, 0, 1, "Edge sensitivity %.2f");
                 ImGui::TextWrapped(RawLabAreaGuide(ui,context.recipe,m_RawWorkspaceGraphScopeReadback)
                     ? "Start inside the area. Soft Add/Erase makes direct corrections."
                     : "You can paint while the edge guide prepares.");
@@ -114,7 +113,7 @@ bool EditorModule::RenderRawWorkspaceLabAreas(RawWorkspaceEditContext& context, 
             changed |= ImGui::Checkbox("Follow edges##lastStroke", &stroke.followEdges);
             if (stroke.followEdges) {
                 ImGui::SetNextItemWidth(-1);
-                changed |= ImGuiExtras::SidePanelSliderFloat("##lastStrokeSensitivity", &stroke.edgeSensitivity, 0, 1, "Edge sensitivity %.2f");
+                changed |= ImGui::SliderFloat("##lastStrokeSensitivity", &stroke.edgeSensitivity, 0, 1, "Edge sensitivity %.2f");
             }
             ImGui::TreePop();
         }

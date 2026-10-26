@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+namespace Stack::Animation { struct ControlInput; }
+
 namespace Stack::Editor::GraphUI {
 
 // Presentation only: callers supply plot geometry and own data and gestures.
@@ -14,6 +16,7 @@ struct GraphPlotStyle {
     ImVec4 histogramFill[4], histogramLine[4];
     float scale, inset, curveWidth, hoveredWidth, selectedWidth;
     float pointRadius, selectedPointRadius, controlHeight, controlGap;
+    bool liquidPoints=false;
 };
 
 GraphPlotStyle ResolveGraphPlotStyle(float scale = 0.0f);
@@ -27,7 +30,8 @@ void DrawGraphBezier(ImDrawList& draw, ImVec2 start, ImVec2 outgoing,
     ImVec2 incoming, ImVec2 end, ImU32 color, const GraphPlotStyle& style,
     bool hovered = false, bool selected = false);
 void DrawGraphPoint(ImDrawList& draw, ImVec2 point, const GraphPlotStyle& style,
-    bool selected = false, bool filled = false);
+    bool selected = false, bool filled = false, ImGuiID identity = 0,
+    bool hovered = false, bool held = false, const Animation::ControlInput* nativeInput = nullptr);
 void DrawGraphPointHalo(ImDrawList& draw, ImVec2 point, float pointerDistance,
     const GraphPlotStyle& style);
 void DrawGraphProbe(ImDrawList& draw, ImVec2 minimum, ImVec2 maximum,

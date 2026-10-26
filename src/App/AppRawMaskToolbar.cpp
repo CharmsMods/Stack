@@ -192,12 +192,7 @@ void AppShell::RenderSharedPanelToggle() {
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const float amount = std::max(m_NavigationRail.revealAmount, m_RawMaskToolbar.revealAmount);
     const float scale = m_NavigationRail.scale;
-    const bool glassLeft = !TopBarOwnsPanelToggle() && m_Appearance && m_Appearance->GetGlassChromeEnabled();
-    const float toggleWidth = glassLeft ? std::min(Stack::Navigation::ButtonExtent*scale,
-        m_NavigationRail.visibleWidth-Stack::Navigation::BarPadding*scale) : Stack::Navigation::ButtonExtent*scale;
-    // This sibling window must reveal with the rail, not float outside its
-    // clipped width or remain visible when both edge bars are fully hidden.
-    if (glassLeft && toggleWidth <= 0.f) return;
+    const float toggleWidth = Stack::Navigation::ButtonExtent*scale;
     const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetNextWindowPos(m_RawMaskToolbar.panelTogglePosition);
@@ -208,12 +203,11 @@ void AppShell::RenderSharedPanelToggle() {
     ImGui::Begin(ToggleWindow, nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing |
-        (glassLeft ? ImGuiWindowFlags_NoBringToFrontOnFocus : ImGuiWindowFlags_None) |
         (amount <= .001f || m_Editor->IsReturningToGraph() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
             Stack::Navigation::Glyph::Panel, false, true, scale, palette, m_NavigationRail.panelToggleMotion, nullptr,
-            glassLeft, &m_RailGlass, glassLeft))
+            false, nullptr, false, {}))
         ToggleWorkspaceSectionPanel();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::End();
