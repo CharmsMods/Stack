@@ -122,15 +122,19 @@ inline void ValidateBracketingHdrColor() {
         colorFallback[s].actual[0]==1&&colorFallback[s].fallback&&!colorFallback[s].clipped&&
         !colorFallback[s].valid&&colorFallback[s].support==0,
         "HDR fallback mixed exposures or promoted rejected measurements to valid support");
-    // Each channel can have support while no exposure supports the whole
-    // edge. The rejected short exposure remains the coherent fallback.
+    // Each channel has an accepted measurement although no exposure supports
+    // the whole edge. Rejected alternatives must not discard that support.
     for(unsigned s=1;s<3;++s) {
         samples[s][0].value=darkColor[s];samples[s][0].variance=.001;
         samples[s][0].measurementVariance=.001;samples[s][0].support=1;samples[s][0].headroom=1;
     }
     const auto splitSupport=BlendColor(samples,{},recipe);
-    for(unsigned s=0;s<4;++s)check(splitSupport[s].value==darkColor[s]&&splitSupport[s].actual[0]==1,
-        "Locally rejected HDR colors were split across incompatible exposures");
+    for(unsigned s=0;s<4;++s) {
+        const unsigned selected=(s==0||s==3)?1:0;const auto& p=splitSupport[s];
+        check(p.value==samples[s][selected].value&&p.actual[selected]==1&&p.actual[1-selected]==0&&
+            p.valid&&!p.fallback&&!p.clipped&&p.support==1&&p.localRejected,
+            "Rejected HDR alternatives discarded accepted colors or lost rejection diagnostics");
+    }
     // One accepted capture can land red/blue on the sky while the group's
     // fallback lands on the support. All fallback channels must use the latter.
     for(unsigned s=0;s<4;++s) {
