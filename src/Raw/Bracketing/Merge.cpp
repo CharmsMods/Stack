@@ -131,8 +131,13 @@ Pixel BlendWithWeights(const std::vector<Observation>& input,const double* reque
         return p;
     }
     // A valid sample immediately below saturation is still preferable to clipped data.
-    if(total<=1e-20) for(std::size_t i=0;i<input.size();++i) if(recipe.groups[i].enabled&&input[i].support>0) {
-        p.actual[i]=1/std::max(1e-12,input[i].variance);total+=p.actual[i];p.fallback=true;
+    if(total<=1e-20) {
+        // These weights replace the tapered ones; their normalization must
+        // not retain a tiny positive total from the first attempt.
+        total=0;
+        for(std::size_t i=0;i<input.size();++i) if(recipe.groups[i].enabled&&input[i].support>0) {
+            p.actual[i]=1/std::max(1e-12,input[i].variance);total+=p.actual[i];p.fallback=true;
+        }
     }
     if(total>0) {
         double effective=0;

@@ -6,7 +6,54 @@
 #include <stdexcept>
 
 namespace Stack::Validation {
+inline void ValidateBracketingWeightRetry() {
+    using namespace Raw::Bracketing;
+    const auto check=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
+    // A tiny but positive precision can enter the untapered retry even with
+    // full headroom. Replacing weights must also replace their denominator.
+    // This is a finite-range invariant, not an ordinary-camera quality claim.
+    for(unsigned count:{1u,2u})for(double variance:{.001,1e21})for(double headroom:{1.,0.}) {
+        BracketingRecipe retryRecipe;retryRecipe.groups.resize(count);ColorObservations retry;
+        const std::string context=" (groups="+std::to_string(count)+", precision="+
+            (variance>1e20?"tiny":"ordinary")+", headroom="+std::to_string(headroom)+")";
+        for(auto& site:retry)for(unsigned g=0;g<count;++g) {
+            Observation o;o.value=.25;o.variance=variance;o.measurementVariance=.75*variance;
+            o.uncertaintyVariance=.25*variance;o.support=3;o.headroom=headroom;o.finite=true;
+            site.push_back(o);
+        }
+        const std::vector<double> shares(count,1./count);
+        for(const auto& p:BlendColor(retry,shares,retryRecipe)) {
+            double weight=0;for(unsigned g=0;g<count;++g)weight+=p.actual[g];
+            check(p.valid&&std::abs(weight-1)<1e-12&&std::abs(p.value-.25)<1e-12,
+                ("Automatic retry lost normalized weights or constant signal"+context).c_str());
+            check(std::abs(p.variance/(variance/count)-1)<1e-12&&
+                std::abs(p.measurementVariance/(.75*variance/count)-1)<1e-12&&
+                std::abs(p.uncertaintyVariance/(.25*variance/count)-1)<1e-12&&
+                std::abs(p.support-3*count)<1e-12,
+                ("Automatic retry misstated propagated variance or capture support"+context).c_str());
+        }
+    }
+    BracketingRecipe authored;authored.groups.resize(2);authored.automatic=false;ColorObservations controls;
+    for(auto& site:controls)for(unsigned g=0;g<2;++g) {
+        Observation o;o.value=g?.75:.25;o.variance=.001;o.measurementVariance=.00075;
+        o.uncertaintyVariance=.00025;o.support=3;o.headroom=1;o.finite=true;site.push_back(o);
+    }
+    for(const auto& p:BlendColor(controls,{.2,.8},authored))
+        check(p.valid&&!p.fallback&&std::abs(p.value-.65)<1e-12&&
+            std::abs(p.actual[0]-.2)<1e-12&&std::abs(p.actual[1]-.8)<1e-12,
+            "Normal authored weights changed during retry normalization");
+    for(auto& site:controls) {
+        site[0].support=0;site[0].headroom=0;site[0].clipped=site[0].fallbackClipped=true;
+        site[0].value=site[0].fallback=1;site[0].variance=site[0].uncertaintyVariance=0;site[0].measurementVariance=-1;
+    }
+    for(const auto& p:BlendColor(controls,{1,0},authored))
+        check(p.valid&&p.fallback&&!p.clipped&&p.value==.75&&p.actual[0]==0&&p.actual[1]==1&&p.support==3,
+            "Clipped authored input influenced automatic valid-input fallback");
+    std::cout<<"HDR weight retry: 1/2-group normal/tiny precision, zero/full headroom, authored and clipped controls passed.\n";
+}
+
 inline void ValidateBracketingHdrColor() {
+    ValidateBracketingWeightRetry();
     using namespace Raw::Bracketing;
     const auto check=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
     BracketingRecipe recipe;recipe.groups.resize(2);
