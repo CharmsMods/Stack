@@ -155,6 +155,7 @@ bool BuildReliabilityMap(
         result.message = "MFD reliability cell stride is invalid.";
         return Fail(error, result.message);
     }
+    result.cellStrideBayerCells = cellStride;
     const std::uint64_t rawCellWidth = request.rawExtent.width / 2u;
     const std::uint64_t rawCellHeight = request.rawExtent.height / 2u;
     result.cellExtent = {
@@ -534,6 +535,8 @@ bool BuildReliabilityStore(
     }
     store.format = format;
     store.cellExtent = map.cellExtent;
+    store.rawExtent = map.rawExtent;
+    store.cellStrideBayerCells = map.cellStrideBayerCells;
     store.tileCells = tileCells;
     store.tilesX = static_cast<std::uint32_t>(
         (map.cellExtent.width + tileCells - 1u) / tileCells);
@@ -642,6 +645,32 @@ bool ReadReliabilityStoreCell(
         reliability = Clamp01(tile.floatValues[index]);
     }
     return true;
+}
+
+bool ReadReliabilityStoreRawCoordinate(
+    const ReliabilityStore& store,
+    RawCoordinate referenceRaw,
+    double& reliability,
+    std::uint16_t* rejectionBits,
+    std::string* error) {
+    reliability=0;
+    const auto stride=store.cellStrideBayerCells;
+    const auto width=store.rawExtent.width/2,height=store.rawExtent.height/2;
+    if(stride==0||stride>16||width==0||height==0||
+       store.cellExtent.width!=(width+stride-1)/stride||
+       store.cellExtent.height!=(height+stride-1)/stride||
+       store.cellExtent.width>std::numeric_limits<std::uint32_t>::max()||
+       store.cellExtent.height>std::numeric_limits<std::uint32_t>::max()||
+       !Finite(referenceRaw.x)||!Finite(referenceRaw.y)||referenceRaw.x<0||referenceRaw.y<0||
+       referenceRaw.x>=double(width*2)||referenceRaw.y>=double(height*2)) {
+        return Fail(error,"MFD reliability raw coordinate or reference-grid geometry is invalid.");
+    }
+    // Both builders sample fixed Bayer-cell blocks. The final block can be
+    // shorter; normalized image-to-grid scaling would shift all its boundaries.
+    // An odd trailing raw strip has no complete Bayer cell and is rejected above.
+    const auto x=static_cast<std::uint32_t>(referenceRaw.x/(2.0*stride));
+    const auto y=static_cast<std::uint32_t>(referenceRaw.y/(2.0*stride));
+    return ReadReliabilityStoreCell(store,x,y,reliability,rejectionBits,error);
 }
 
 const char* CandidateGateFailureName(CandidateGateFailure failure) {

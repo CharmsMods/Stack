@@ -44,16 +44,9 @@ CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source
         // measure it. Missing or stale evidence cannot authorize a match.
         if(!HasCurrentCaptureReliability(source)||motion.alignmentConfidence<=0)return result;
         const auto& map=*source.reliability;
-        if(!map.cellExtent.width||!map.cellExtent.height||!source.frame.activeExtent.width||
-           !source.frame.activeExtent.height)return result;
-        const auto cell=[](double p,std::uint64_t cells,std::uint64_t pixels) {
-            return static_cast<std::uint32_t>(std::clamp(p*cells/pixels,0.,double(cells-1)));
-        };
         double reliability=0;std::uint16_t bits=0;
-        if(!Mfd::ReadReliabilityStoreCell(map,
-            cell(point.x,map.cellExtent.width,source.frame.activeExtent.width),
-            cell(point.y,map.cellExtent.height,source.frame.activeExtent.height),
-            reliability,&bits,nullptr)||HardCaptureRejection(bits)||!std::isfinite(reliability))return result;
+        if(!Mfd::ReadReliabilityStoreRawCoordinate(map,point,reliability,&bits,nullptr)||
+           HardCaptureRejection(bits)||!std::isfinite(reliability))return result;
         // Sparse texture is uncertainty, not contradictory evidence. Keep the
         // conservative floor while retaining the measured positional risk.
         result.confidence=std::min(std::clamp(std::max(reliability,

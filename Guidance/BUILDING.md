@@ -65,6 +65,16 @@ for comparison, and keep the original RAW inputs unchanged.
 
 ### Checks completed and remaining limits
 
+- Fixed-stride reliability lookup now preserves short final Bayer blocks instead
+  of stretching their coordinates. Phase 6 storage checks and the actual Burst
+  correspondence regression cover partial cells, reference/source extents,
+  subpixel boundaries and unsupported coordinates; the previous lookup fails
+  the targeted even-dimension case. Temporal noise calibration also preserves
+  signed samples until block averaging. Its actual broad-scene regression fails
+  with the previous rectified predictor and passes with eligible estimated priors
+  and a positive control. This corrects predictor bias, not every ill-conditioned
+  read-noise fit or a demonstrated real-camera output improvement.
+
 - Forward/reverse closure now transports source-axis uncertainty into reference
   coordinates and checks each supported one-sided derivative at grid knots.
   Focused Phase 5 controls pass; the actual rotated-field regression fails with

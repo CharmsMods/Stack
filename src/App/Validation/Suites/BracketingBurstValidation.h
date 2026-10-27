@@ -3,13 +3,72 @@
 #include "Raw/Bracketing/BurstAlignment.h"
 #include "Raw/Bracketing/CaptureCorrespondence.h"
 #include "Raw/Bracketing/CaptureReliability.h"
+#include "Raw/Bracketing/PhotometricReliability.h"
 #include "Raw/Bracketing/SuperResolution/Preparation.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 
 namespace Stack::Validation {
+inline void ValidateBracketingReliabilityCoordinates() {
+    using namespace Raw::Bracketing;using namespace Raw::Mfd;
+    const auto check=[](bool value,const char* message){if(!value)throw std::runtime_error(message);};
+    // The normal large-image profile has four RAW pixels per evidence cell.
+    // These are actual correspondence/store calls, not an image generator.
+    for(const auto extent:{PixelExtent{4050,1000},PixelExtent{1000,4050},PixelExtent{4048,1000}}) {
+        PreparedSource source;source.frame.activeExtent=extent;
+        source.localMotion=std::make_shared<LocalMotionGrid>();auto& grid=*source.localMotion;
+        grid.valid=true;grid.width=grid.height=2;grid.spacingRawX=double(extent.width-1);grid.spacingRawY=double(extent.height-1);
+        grid.referenceRawExtent=grid.sourceRawExtent=extent;grid.nodes.resize(4);
+        for(auto& node:grid.nodes){node.state=MotionNodeState::Structured;node.confidence=1;node.covarianceRaw={.0025,0,.0025};}
+        ReliabilityMap map;map.valid=true;map.rawExtent=extent;map.cellStrideBayerCells=2;
+        map.cellExtent={(extent.width/2+1)/2,(extent.height/2+1)/2};
+        map.cells.resize(std::size_t(map.cellExtent.width)*map.cellExtent.height);
+        const bool vertical=extent.height>extent.width;
+        for(unsigned y=0;y<map.cellExtent.height;++y)for(unsigned x=0;x<map.cellExtent.width;++x) {
+            auto& cell=map.cells[std::size_t(y)*map.cellExtent.width+x];cell.reliability=1;
+            if((vertical?y:x)==506)cell.rejectionBits=ReliabilityRejectMask(ReliabilityRejectBit::PatchRejected);
+        }
+        source.reliability=std::make_shared<ReliabilityStore>();std::string error;
+        check(BuildReliabilityStore(map,ReliabilityStorageFormat::Uint16Unorm,32,*source.reliability,&error),
+            "Reliability coordinate store could not be built");
+        StampCaptureReliability(source);
+        for(double coordinate:{2023.999,2024.,2026.,2027.,2027.999,2028.}) {
+            const RawCoordinate point=vertical?RawCoordinate{500,coordinate}:RawCoordinate{coordinate,500};
+            const bool rejected=coordinate>=2024&&coordinate<2028;
+            check((EvaluateCaptureCorrespondence(source,point).confidence==0)==rejected,
+                "Reference-grid hard rejection moved at a partial final evidence block");
+        }
+        const auto last=vertical?RawCoordinate{500,double(extent.height-1)}:RawCoordinate{double(extent.width-1),500};
+        check(EvaluateCaptureCorrespondence(source,last).confidence>0,
+            "Short final reliability block lost its last RAW pixel");
+        if(extent.width==4050) {
+            // The stored evidence is indexed in reference coordinates, not by
+            // a source raster's dimensions. No source-size normalization belongs here.
+            source.frame.activeExtent.width=5000;grid.sourceRawExtent.width=5000;
+            check(EvaluateCaptureCorrespondence(source,{2027,500}).confidence==0&&
+                EvaluateCaptureCorrespondence(source,{2028,500}).confidence>0,
+                "Reliability lookup used source extent instead of stored reference geometry");
+        }
+    }
+    LocalMotionGrid motion;motion.valid=true;motion.width=motion.height=2;
+    motion.referenceRawExtent=motion.sourceRawExtent={10,14};motion.spacingRawX=9;motion.spacingRawY=13;
+    motion.nodes.resize(4);for(auto& node:motion.nodes){node.state=MotionNodeState::Structured;node.confidence=1;node.covarianceRaw={.0025,0,.0025};}
+    ReliabilityBuildRequest request;request.rawExtent={10,14};request.cellStrideBayerCells=2;
+    request.motionGrid=&motion;CfaLayout::TryCreate(Raw::CfaPattern::RGGB,request.layout);
+    request.residualEvaluator=[](RawCoordinate,CfaSite,const LocalMotionFieldSample&,ReliabilityResidualSample& sample) {
+        sample.valid=sample.hardValid=true;sample.referenceValue=sample.alternateValue=.2;
+        sample.referenceGateVariance=sample.alternateGateVariance=.0001;return true;
+    };
+    ReliabilityMap built;std::string error;
+    check(BuildColorReliability(request,built,error)&&built.cellStrideBayerCells==2&&
+        built.rawExtent.width==10&&built.rawExtent.height==14&&built.cellExtent.width==3&&built.cellExtent.height==4,
+        "Burst color-reliability builder lost its exact reference grid");
+
+}
+
 inline void ValidateBracketingBurstAlignment() {
+    ValidateBracketingReliabilityCoordinates();
     using namespace Raw::Bracketing;using namespace Raw::Mfd;
     const auto check=[](bool value,const std::string& message){if(!value)throw std::runtime_error(message);};
     std::array<double,25> a{},b{},variance{};variance.fill(1e-6);
@@ -65,7 +124,7 @@ inline void ValidateBracketingBurstAlignment() {
     check(EvaluateCaptureMotion(source,{32,32},{},corrected,&correctionConfidence)&&correctionConfidence==1,
         "An unsupported refinement changed the original confidence policy");
     ReliabilityMap reliability;reliability.valid=true;reliability.rawExtent={128,128};
-    reliability.cellExtent={64,64};reliability.cells.resize(64*64);
+    reliability.cellExtent={64,64};reliability.cellStrideBayerCells=1;reliability.cells.resize(64*64);
     for(auto& cell:reliability.cells)cell.reliability=1;
     const auto install=[&](std::uint16_t bits,double confidence) {
         for(auto& cell:reliability.cells){cell.rejectionBits=bits;cell.reliability=confidence;}

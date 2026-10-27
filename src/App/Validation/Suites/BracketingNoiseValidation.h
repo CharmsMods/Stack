@@ -1,12 +1,83 @@
 #pragma once
 #include "Raw/Bracketing/BurstNoise.h"
+#include "Raw/Bracketing/ProcessingInternal.h"
 #include "Raw/Bracketing/PhotometricReliability.h"
 #include "Raw/Bracketing/ExposureGraph.h"
 #include <random>
 #include <stdexcept>
 #include <limits>
+#include <iostream>
 
 namespace Stack::Validation {
+inline void ValidateBracketingTemporalNoiseSignal(const std::filesystem::path& directory) {
+    using namespace Raw::Bracketing;
+    using namespace Raw::Mfd;
+    constexpr unsigned side=640;
+    constexpr double shot=.001,read=1e-6;
+    bool signalUnbiased=true;
+    for(bool dark:{true,false}) {
+        PreparedDataset data;data.width=data.height=side;data.sources.resize(3);
+        data.directory=directory/(dark?"broad-dark":"positive-control");
+        DirectoryNormalizedTileCache cache(data.directory);
+        ProcessingRequest request;request.recipe.alignmentMode=AlignmentMode::FixedCoordinates;
+        request.recipe.groups.resize(1);
+        for(unsigned f=0;f<3;++f) {
+            auto& source=data.sources[f];source.id="temporal-noise-"+std::to_string(f);
+            source.exposureCalibrated=true;
+            auto& frame=source.frame;frame.cacheKey=frame.sourceContentSha256=std::string(64,char('a'+f));
+            frame.activeCfaPattern=Raw::CfaPattern::RGGB;frame.activeExtent={side,side};frame.sensorActiveArea={0,0,side,side};
+            frame.tileRawPixels=64;frame.tileColumns=frame.tileRows=side/64;
+            frame.calibration.usableSpanByCfaSite.fill(65535);
+            auto& model=source.noise;model.preparedFrameCacheKey=frame.cacheKey;model.identitySha256=std::string(64,'d');
+            model.quality=NoiseModelQuality::EstimatedBurst;model.diagnostics.quality=model.quality;
+            model.diagnostics.resolved=true;model.diagnostics.referenceOnly=false;
+            for(auto& profile:model.sites) {
+                profile.shotScale=shot;profile.offsetVariance=read;
+                profile.quantizationVariance=1./(12.*65535*65535);profile.quantizationIncluded=true;
+            }
+            // Compatible estimated priors are eligible for temporal fitting;
+            // generic dark-only priors deliberately are not. Both scenes have
+            // broad signal coverage, with known dark patches in the first.
+            if(!ValidateNoiseModel(model))throw std::runtime_error("Invalid temporal-noise fixture prior");
+            std::mt19937 random(4517+f);std::normal_distribution<double> normal;
+            for(unsigned ty=0;ty<side/64;++ty)for(unsigned tx=0;tx<side/64;++tx) {
+                PreparedRawTile tile;tile.tileX=tx;tile.tileY=ty;tile.originX=tx*64;tile.originY=ty*64;tile.extent={64,64};
+                tile.normalizedMosaic.resize(4096);tile.comparisonGain.assign(4096,1);tile.sampleFlags.assign(4096,0);
+                for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x) {
+                    const int band=std::max(0,(int(tile.originX+x)-4)/32);
+                    const double signal=dark?(band<9?0:.04*(band-8)):.10+.015*band;
+                    const float sample=float(signal+std::sqrt(shot*signal+read)*normal(random));
+                    if(!dark&&sample<=0)throw std::runtime_error("Positive temporal-noise control contains a nonpositive sample");
+                    tile.normalizedMosaic[y*64+x]=sample;
+                }
+                std::string error;if(!cache.Write(frame.cacheKey,tile,&error))throw std::runtime_error(error);
+            }
+        }
+        std::string error;std::vector<std::string> diagnostics;
+        if(!RefineBurstNoise(request,data,diagnostics,error))throw std::runtime_error(error);
+        for(const auto& source:data.sources) {
+            const auto& model=source.noise;
+            if(!ValidateNoiseModel(model)||model.diagnostics.sourceRecordId!="bracketing-temporal-pairs")
+                throw std::runtime_error("Eligible temporal-noise fit did not publish a valid model");
+            for(unsigned site=0;site<4;++site) {
+                const auto& fit=model.diagnostics.sites[site];const auto& profile=model.sites[site];
+                if(!fit.valid||fit.signalCoverage<.1||!std::isfinite(fit.signalMinimum)||fit.signalMinimum<0)
+                    throw std::runtime_error("Temporal-noise fit lost finite broad signal evidence");
+                if(dark)signalUnbiased&=fit.signalMinimum<std::sqrt(read)*.1;
+                else for(double signal:{.1,.4}) {
+                    const double expected=shot*signal+read,actual=profile.shotScale*signal+profile.offsetVariance;
+                    if(std::abs(actual/expected-1)>.2)
+                        throw std::runtime_error("Positive temporal-noise control changed its measured variance");
+                }
+            }
+        }
+    }
+    // Test the observable predictor rather than requiring a well-conditioned
+    // read intercept from every noisy broad-range fit. No fit weights change.
+    if(!signalUnbiased)throw std::runtime_error("Zero-signal temporal patches acquired a rectified noise-dependent predictor");
+    std::cout<<"Temporal noise: signed dark-patch signal, eligible priors and positive broad-scene control passed.\n";
+}
+
 inline void ValidateBracketingNoiseResolutionFailures() {
     using namespace Raw::Mfd;
     PreparedRawFrame frame;

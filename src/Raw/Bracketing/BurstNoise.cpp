@@ -109,7 +109,7 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
                     const auto offset=layout.OffsetFor(site);
                     std::vector<double> details;details.reserve(64);double signal=0;
                     for(unsigned by=0;by<8;++by) for(unsigned bx=0;bx<8;++bx) {
-                        double difference=0,shot=0,dark=0;bool valid=true;
+                        double difference=0,signalNumerator=0,dark=0;bool valid=true;
                         for(unsigned tap=0;tap<4;++tap) {
                             const Mfd::RawCoordinate coordinate={double(x+offset.x+bx*4+2*(tap%2)),
                                 double(y+offset.y+by*4+2*(tap/2))};
@@ -120,10 +120,14 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
                             const double coefficient=(tap==0||tap==3)?.5:-.5;
                             difference+=coefficient*(ga*a.normalizedSample-gb*b.normalizedSample);
                             dark+=.25*(ga*ga+gb*gb);
-                            shot+=.25*(ga*ga*std::max(0.,a.normalizedSample)+gb*gb*std::max(0.,b.normalizedSample));
+                            // Estimate the block's underlying signal before
+                            // imposing its nonnegative physical bound below.
+                            // Rectifying individual noisy taps invents positive
+                            // signal near black and biases the shot/read fit.
+                            signalNumerator+=.25*(ga*ga*a.normalizedSample+gb*gb*b.normalizedSample);
                         }
                         if(!error.empty()) return false;
-                        if(valid&&dark>0) {details.push_back(difference/std::sqrt(dark));signal+=shot/dark;}
+                        if(valid&&dark>0) {details.push_back(difference/std::sqrt(dark));signal+=signalNumerator/dark;}
                     }
                     BurstNoiseBlock block;
                     if(!details.empty()&&MeasureBurstNoiseBlock(details,signal/details.size(),block))
@@ -155,12 +159,12 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
             }
             source.noise.sites=sourceProfiles;source.noise.quality=Mfd::NoiseModelQuality::EstimatedBurst;
             source.noise.diagnostics.quality=source.noise.quality;
-            source.noise.diagnostics.source="temporal-burst-haar-v2-image-domain";
+            source.noise.diagnostics.source="temporal-burst-haar-v3-signed-signal";
             source.noise.diagnostics.sourceRecordId="bracketing-temporal-pairs";
             source.noise.diagnostics.correlatedNoiseUnmodeled=true;
             source.noise.diagnostics.warnings.clear();
             source.noise.diagnostics.warnings.push_back("Temporal noise calibration does not measure correlated or fixed-pattern noise. Narrow signal ranges retain the prior shot/read ratio.");
-            nlohmann::json identity={{"frame",source.frame.cacheKey},{"method","temporal-burst-haar-v2-image-domain"}};
+            nlohmann::json identity={{"frame",source.frame.cacheKey},{"method","temporal-burst-haar-v3-signed-signal"}};
             for(unsigned site=0;site<4;++site) {
                 auto& diagnostic=source.noise.diagnostics.sites[site];
                 diagnostic.acceptedBlockCount=blocks[site].size();diagnostic.candidateBlockCount=blocks[site].size();diagnostic.valid=true;

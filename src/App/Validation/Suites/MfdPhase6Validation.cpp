@@ -322,6 +322,48 @@ bool ValidatePixelAndAbsoluteGates() {
     return ok;
 }
 
+bool ValidateRawCoordinateStorage() {
+    using namespace Raw::Mfd;
+    bool ok=true;ReliabilityMap map;map.valid=true;map.rawExtent={10,14};map.cellExtent={3,4};
+    map.cellStrideBayerCells=2;map.cells.resize(12);
+    for(unsigned i=0;i<map.cells.size();++i) {map.cells[i].reliability=.05*(i+1);map.cells[i].rejectionBits=std::uint16_t(i);}
+    for(auto format:{ReliabilityStorageFormat::Uint16Unorm,ReliabilityStorageFormat::Float32}) {
+        ReliabilityStore store;std::string error;
+        ok &= Check(BuildReliabilityStore(map,format,2,store,&error),"raw-coordinate reliability store failed: "+error);
+        for(double y:{0.,3.999,4.,7.999,8.,11.999,12.,13.999})
+            for(double x:{0.,3.999,4.,7.999,8.,9.999}) {
+                double direct=0,raw=0;std::uint16_t directBits=0,rawBits=0;
+                ok &= Check(ReadReliabilityStoreCell(store,unsigned(x/4),unsigned(y/4),direct,&directBits)&&
+                    ReadReliabilityStoreRawCoordinate(store,{x,y},raw,&rawBits)&&raw==direct&&rawBits==directBits,
+                    "partial-block raw lookup disagrees with the exact cell-index operation");
+            }
+        for(const auto p:{RawCoordinate{-1,0},{0,-1},{10,0},{0,14},
+            {std::numeric_limits<double>::quiet_NaN(),0},{0,std::numeric_limits<double>::infinity()}}) {
+            double value=1;
+            ok &= Check(!ReadReliabilityStoreRawCoordinate(store,p,value)&&value==0,
+                "out-of-domain or nonfinite raw reliability coordinate was accepted");
+        }
+        for(unsigned stride:{0u,1u,17u}) {
+            auto malformed=store;malformed.cellStrideBayerCells=stride;double value=1;
+            ok &= Check(!ReadReliabilityStoreRawCoordinate(malformed,{0,0},value)&&
+                ReadReliabilityStoreCell(malformed,0,0,value),
+                "missing/inconsistent raw geometry changed the legacy cell-index read contract");
+        }
+        auto odd=store;odd.rawExtent={11,15};double value=0;
+        ok &= Check(ReadReliabilityStoreRawCoordinate(odd,{9,13},value)&&
+            !ReadReliabilityStoreRawCoordinate(odd,{10,13},value)&&
+            !ReadReliabilityStoreRawCoordinate(odd,{9,14},value),
+            "unpaired odd RAW strip inherited neighboring Bayer-cell evidence");
+    }
+    LocalMotionGrid motion=MakeIdentityMotionGrid({64,64});EvidencePattern pattern;
+    auto request=MakeRequest(NoiseModelQuality::EstimatedBurst,pattern,motion);request.cellStrideBayerCells=2;
+    ReliabilityMap built;std::string error;
+    ok &= Check(BuildReliabilityMap(request,built,&error)&&built.cellStrideBayerCells==2&&
+        built.rawExtent.width==request.rawExtent.width&&built.cellExtent.width==16,
+        "reliability builder lost the reference-grid stride");
+    return ok;
+}
+
 bool ValidateTiledStorageDecisionIdentity() {
     bool ok = true;
     Raw::Mfd::LocalMotionGrid motion = MakeIdentityMotionGrid({ 64u, 64u });
@@ -412,6 +454,7 @@ bool ValidateMfdPhase6Reliability() {
     ok &= ValidatePatchMapAndNoisePolicy();
     ok &= ValidateMovingMaskErosionAndHardSupport();
     ok &= ValidatePixelAndAbsoluteGates();
+    ok &= ValidateRawCoordinateStorage();
     ok &= ValidateTiledStorageDecisionIdentity();
     if (ok) {
         std::cout << "MFD Phase 6 reliability validation passed." << std::endl;

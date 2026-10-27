@@ -131,6 +131,7 @@ bool ValidateBracketing() {
         ValidateBracketingBorders();
         ValidateBracketingBurstAlignment();
         ValidateBracketingNoiseEvidence();
+        ValidateBracketingTemporalNoiseSignal(directory/"temporal-noise-signal");
         ValidateBracketingLocalDetailEvidence();
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();

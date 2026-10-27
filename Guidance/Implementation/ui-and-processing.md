@@ -163,12 +163,23 @@ source covariance unchanged for sampling. Missing derivative evidence leaves
 closure unverified without changing the public motion-sample contract. This is
 first-order marginal propagation, not a model of correlated forward/reverse fits.
 
+Photometric reliability uses fixed Bayer-cell blocks in reference coordinates,
+with a potentially shorter final block. Preserve the reference extent and stride
+with the in-process store and use its raw-coordinate lookup; proportional scaling
+by the number of stored cells shifts rejection boundaries. Missing geometry or an
+unpaired trailing Bayer strip cannot authorize a match.
+
 Resolved noise profiles already include quantization in their offset variance.
 Do not add that component again in reconstruction, alignment or presentation;
 unresolved inputs must honor their explicit inclusion flag. Defective and
 decoder-repaired payloads cannot supply a temporal noise pilot when neighboring
 pilot evidence is unavailable. Clipped but otherwise usable samples retain their
 separate lower-bound behavior.
+Temporal noise fitting averages signed black-subtracted samples before applying
+the block signal's nonnegative bound. Rectifying each noisy sample first biases
+dark-patch signal estimates; this is distinct from clamping a physical shot-noise
+pilot during fusion. Temporal refitting still requires compatible eligible priors
+and adequate scene evidence, rather than inventing a model for generic dark input.
 
 Use the [shared notifications subsystem](../../src/Notifications/README.md) for program-wide notices, activity and substantive decisions. Capture the initiating owner's notifier through asynchronous work and retain the feature's lifetime and generation checks. Report outcomes at accepted state transitions, rather than repeated drawing code. Keep messages short, put longer explanations in details, and leave settings forms and useful diagnostics beside their controls. Dismissing feedback does not resolve its cause, and notification history does not determine processing busy state.
 

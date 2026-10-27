@@ -101,13 +101,14 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     Mfd::ReliabilityMap& result,std::string& error,const CaptureMotionEvaluator& evaluateMotion) {
     result={};
     const auto stride=request.cellStrideBayerCells;
-    if(!stride||!request.motionGrid||!request.motionGrid->valid||!request.residualEvaluator||
+    if(!stride||stride>16||!request.motionGrid||!request.motionGrid->valid||!request.residualEvaluator||
         request.rawExtent.width<2||request.rawExtent.height<2) {error="Invalid bracket reliability request.";return false;}
     const auto rawCellWidth=request.rawExtent.width/2,rawCellHeight=request.rawExtent.height/2;
     const unsigned width=static_cast<unsigned>((rawCellWidth+stride-1)/stride);
     const unsigned height=static_cast<unsigned>((rawCellHeight+stride-1)/stride);
     const std::size_t count=static_cast<std::size_t>(width)*height;
     result.rawExtent=request.rawExtent;result.cellExtent={width,height};
+    result.cellStrideBayerCells=stride;
     result.noiseQuality=request.noiseQuality;result.noiseConfidence=1;
     result.cells.resize(count);std::vector<Evidence> evidence(count);
     std::array<Mfd::CfaOffset,4> siteOffsets{};

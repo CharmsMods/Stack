@@ -85,6 +85,9 @@ struct ReliabilityMap {
     std::string message;
     PixelExtent rawExtent;
     PixelExtent cellExtent;
+    // Fixed reference-grid spacing; zero means unavailable to raw-coordinate
+    // readers. A partial trailing block is not stretched.
+    std::uint32_t cellStrideBayerCells = 0u;
     NoiseModelQuality noiseQuality = NoiseModelQuality::Unavailable;
     double noiseConfidence = 0.0;
     // Frame usability counts spatially reliable cells before noise-model
@@ -138,6 +141,10 @@ struct ReliabilityStore {
     std::string contractId = kReliabilityContractId;
     ReliabilityStorageFormat format = ReliabilityStorageFormat::Uint16Unorm;
     PixelExtent cellExtent;
+    // Optional in-process reference-grid metadata for raw-coordinate reads.
+    // Cell-index reads remain available when this metadata is absent.
+    PixelExtent rawExtent;
+    std::uint32_t cellStrideBayerCells = 0u;
     std::uint32_t tileCells = 0u;
     std::uint32_t tilesX = 0u;
     std::uint32_t tilesY = 0u;
@@ -158,6 +165,16 @@ bool ReadReliabilityStoreCell(
     const ReliabilityStore& store,
     std::uint32_t cellX,
     std::uint32_t cellY,
+    double& reliability,
+    std::uint16_t* rejectionBits = nullptr,
+    std::string* error = nullptr);
+
+// Reads the fixed reference-grid cell containing a raw coordinate. Missing or
+// inconsistent geometry and coordinates outside complete Bayer cells fail;
+// this does not reinterpret the existing explicit cell-index read operation.
+bool ReadReliabilityStoreRawCoordinate(
+    const ReliabilityStore& store,
+    RawCoordinate referenceRaw,
     double& reliability,
     std::uint16_t* rejectionBits = nullptr,
     std::string* error = nullptr);
