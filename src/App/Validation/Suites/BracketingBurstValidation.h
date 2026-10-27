@@ -4,9 +4,11 @@
 #include "Raw/Bracketing/CaptureCorrespondence.h"
 #include "Raw/Bracketing/CaptureReliability.h"
 #include "Raw/Bracketing/PhotometricReliability.h"
+#include "Raw/Bracketing/GroupMemory.h"
 #include "Raw/Bracketing/SuperResolution/Preparation.h"
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace Stack::Validation {
@@ -67,8 +69,86 @@ inline void ValidateBracketingReliabilityCoordinates() {
 
 }
 
+inline void ValidateBracketingLocalAlignmentMemory() {
+    using namespace Raw::Bracketing;using namespace Raw::Mfd;
+    const auto check=[](bool value,const std::string& message){if(!value)throw std::runtime_error(message);};
+    constexpr std::uint64_t mib=1024ull*1024;
+    ProcessingRequest request;request.recipe.alignmentMode=AlignmentMode::AutomaticLocal;
+    request.memoryBudgetBytes=512*mib;request.workerCount=1;
+    PreparedDataset data;data.width=3648;data.height=2736;data.sources.resize(2);
+    const auto shape=[&](unsigned width,unsigned height) {
+        data.width=width;data.height=height;
+        for(auto& source:data.sources)source.frame.activeExtent={width,height};
+    };
+    shape(3648,2736);for(auto& source:data.sources)source.frame.tileRawPixels=128;
+    const std::uint64_t pixels=std::uint64_t(data.width)*data.height;
+    // Normal 10MP pair: the older decoder/group gates admit this shape, but
+    // pair pyramids + reference inspection + color evidence alone exceed512MiB.
+    check(pixels<=request.memoryBudgetBytes/48&&GroupWorkerFits(request.memoryBudgetBytes,
+        GroupOutputReserveBytes(pixels),GroupWorkerBytes(1,128,2,request.memoryBudgetBytes)),
+        "Local memory regression no longer reaches the prior admission gap");
+    std::uint64_t required=0,colorBytes=0;std::string error;
+    const auto cells=std::uint64_t(data.width/4)*(data.height/4);
+    check(ColorReliabilityWorkingBytes(cells,colorBytes),"Color evidence sizing failed");
+    const auto pairBytes=2*(17*(pixels+pixels/4+pixels/16+pixels/64)+pixels);
+    check(pairBytes+pixels/4*6+colorBytes>request.memoryBudgetBytes,
+        "Concrete simultaneous host payload no longer exceeds the old allowance");
+    check(!AdmitLocalAlignmentMemory(request,data,required,error)&&required>request.memoryBudgetBytes&&
+        error.find("memory budget")!=std::string::npos,"Two-capture local host budget was bypassed");
+    const auto expected=72*pixels+6*(pixels/4)+10*cells+64*mib;
+    check(required==expected,"Local stage maximum changed unexpectedly");
+    std::vector<std::string> diagnostics;
+    check(!PreflightBurstRefinement(request,data,diagnostics,error),
+        "Early preflight still bypasses two-capture local memory");
+    request.memoryBudgetBytes=1024*mib;
+    check(AdmitLocalAlignmentMemory(request,data,required,error)&&required==expected&&
+        PreflightBurstRefinement(request,data,diagnostics,error),"Sufficient local host memory was rejected");
+    request.memoryBudgetBytes=expected;
+    check(AdmitLocalAlignmentMemory(request,data,required,error),"Exact local allowance was rejected");
+    --request.memoryBudgetBytes;
+    check(!AdmitLocalAlignmentMemory(request,data,required,error),"One byte below local allowance was accepted");
+    request.memoryBudgetBytes=512*mib;data.sources[0].enabled=false;
+    check(!AdmitLocalAlignmentMemory(request,data,required,error),
+        "Disabled fixed reference hid an enabled alternate's pair memory");
+    data.sources[1].enabled=false;request.memoryBudgetBytes=1;
+    check(AdmitLocalAlignmentMemory(request,data,required,error)&&required==0,
+        "No-alternate request acquired an unused pair requirement");
+    data.sources[1].enabled=true;request.recipe.alignmentMode=AlignmentMode::FixedCoordinates;
+    check(AdmitLocalAlignmentMemory(request,data,required,error)&&required==0,
+        "Nonlocal alignment acquired an unused pair requirement");
+    request.recipe.alignmentMode=AlignmentMode::AutomaticLocal;
+    request.memoryBudgetBytes=std::numeric_limits<std::uint64_t>::max();
+    for(const auto width:{0u,1u,3u}) {
+        data.width=width;
+        check(!AdmitLocalAlignmentMemory(request,data,required,error),"Invalid local Bayer width was admitted");
+    }
+    shape(std::numeric_limits<unsigned>::max()-1,std::numeric_limits<unsigned>::max()-1);
+    check(!AdmitLocalAlignmentMemory(request,data,required,error)&&required==0&&error.find("overflow")!=std::string::npos,
+        "Overflowed local plan was admitted at UINT64_MAX budget");
+    check(!ColorReliabilityWorkingBytes(std::numeric_limits<std::uint64_t>::max(),colorBytes)&&colorBytes==0,
+        "Overflowed color-evidence payload was admitted");
+    shape(2,1000);
+    // Narrow/partial levels need ceil division, not a geometric-series shortcut.
+    const auto narrowPair=2*(17ull*(2000+1000+500+252)+2000);
+    check(AdmitLocalAlignmentMemory(request,data,required,error),error);
+    check(ColorReliabilityWorkingBytes(500,colorBytes),"Narrow color evidence sizing failed");
+    const auto narrowWorking=std::max({72ull*2000,narrowPair+colorBytes,
+        narrowPair+2000+512ull*1024,narrowPair/2+9ull*2*128*9});
+    check(required==6*500+10*500+narrowWorking+64*mib,"Partial CFA pyramid accounting lost ceil-rounded levels");
+    check(CaptureReliabilityStrideBayerCells({1998,1000})==1&&
+        CaptureReliabilityStrideBayerCells({2000,1000})==2&&
+        CaptureReliabilityStrideBayerCells({std::numeric_limits<std::uint64_t>::max(),2})==2,
+        "Reliability memory/profile stride disagrees at its area boundary");
+    shape(3648,2736);data.sources[1].frame.activeExtent.width+=2;
+    check(!AdmitLocalAlignmentMemory(request,data,required,error),"Mismatched prepared extent was admitted");
+    shape(3648,2736);data.sources[0].frame.tileRawPixels=0;
+    check(!AdmitLocalAlignmentMemory(request,data,required,error),"Invalid reference tile size was admitted");
+    std::cout<<"Local alignment host admission: two-capture gap, retained reference, stage maxima and overflow passed.\n";
+}
+
 inline void ValidateBracketingBurstAlignment() {
     ValidateBracketingReliabilityCoordinates();
+    ValidateBracketingLocalAlignmentMemory();
     using namespace Raw::Bracketing;using namespace Raw::Mfd;
     const auto check=[](bool value,const std::string& message){if(!value)throw std::runtime_error(message);};
     std::array<double,25> a{},b{},variance{};variance.fill(1e-6);

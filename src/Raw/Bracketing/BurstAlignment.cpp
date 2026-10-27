@@ -3,6 +3,7 @@
 #include "CaptureMotion.h"
 #include "CaptureReliability.h"
 #include "CaptureCorrespondence.h"
+#include "PhotometricReliability.h"
 #include "ParallelProcessing.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
@@ -71,8 +72,95 @@ bool AdmitRefinement(const ProcessingRequest& request,const RefinementMemoryPlan
 }
 }
 
+bool AdmitLocalAlignmentMemory(const ProcessingRequest& request,const PreparedDataset& data,
+    std::uint64_t& requiredBytes,std::string& error) {
+    requiredBytes=0;
+    if(request.recipe.alignmentMode!=AlignmentMode::AutomaticLocal)return true;
+    if(data.sources.empty()||data.origin>=data.sources.size()) {
+        error="Local-alignment memory planning has no fixed reference.";return false;
+    }
+    const auto& reference=data.sources[data.origin];
+    const bool hasAlternate=std::any_of(data.sources.begin(),data.sources.end(),
+        [&](const auto& source){return &source!=&reference&&source.enabled;});
+    if(!hasAlternate)return true;
+    if(data.width<2||data.height<2||data.width%2||data.height%2) {
+        error="Local-alignment memory planning requires an even Bayer extent.";return false;
+    }
+    bool representable=true;
+    const auto add=[&](std::uint64_t a,std::uint64_t b) {
+        if(a>std::numeric_limits<std::uint64_t>::max()-b){representable=false;return std::uint64_t(0);}
+        return a+b;
+    };
+    const auto multiply=[&](std::uint64_t a,std::uint64_t b) {
+        if(b&&a>std::numeric_limits<std::uint64_t>::max()/b){representable=false;return std::uint64_t(0);}
+        return a*b;
+    };
+    const auto pixels=multiply(data.width,data.height);
+    const auto parameters=CaptureAlignmentParameters(data);
+    std::uint64_t planeWidth=data.width/2,planeHeight=data.height/2,levelSamples=0;
+    for(unsigned level=0;level<parameters.registration.pyramidLevels;++level) {
+        levelSamples=add(levelSamples,multiply(4,multiply(planeWidth,planeHeight)));
+        planeWidth=planeWidth/2+planeWidth%2;planeHeight=planeHeight/2+planeHeight%2;
+    }
+    // Moved level-zero buffers are not duplicated. Clipped masks exist only
+    // at level zero; the other 17 bytes/sample exist at every pyramid level.
+    const auto pairPyramids=multiply(2,add(multiply(levelSamples,2*sizeof(double)+1),pixels));
+    const auto stride=CaptureReliabilityStrideBayerCells({data.width,data.height});
+    const std::uint64_t cellWidth=(std::uint64_t(data.width/2)+stride-1)/stride;
+    const std::uint64_t cellHeight=(std::uint64_t(data.height/2)+stride-1)/stride;
+    const auto cells=multiply(cellWidth,cellHeight);
+    std::uint64_t colorWorking=0;
+    if(!ColorReliabilityWorkingBytes(cells,colorWorking))representable=false;
+    // Evidence retires before the compact store and inspection are published.
+    // Old stores/inspections may remain live until a confidence refresh commits.
+    constexpr std::uint64_t inspectionBytes=sizeof(float)+sizeof(std::uint16_t);
+    constexpr std::uint64_t publishedCellBytes=inspectionBytes+2*sizeof(std::uint16_t);
+    const auto retained=add(multiply(pixels/4,inspectionBytes),
+        multiply(multiply(cells,publishedCellBytes),data.sources.size()-1));
+    const auto reliabilityWorking=std::max(colorWorking,
+        multiply(cells,sizeof(Mfd::ReliabilityCell)+publishedCellBytes));
+    std::uint64_t tilePixels=0;
+    for(const auto& source:data.sources) {
+        if(!source.enabled && &source!=&reference)continue;
+        if(source.frame.activeExtent.width!=data.width||source.frame.activeExtent.height!=data.height) {
+            error="Local-alignment memory planning has mismatched prepared extents.";return false;
+        }
+        const auto side=source.frame.tileRawPixels;
+        if(!side||side>16384) {
+            error="Local-alignment memory planning has an invalid prepared tile size.";return false;
+        }
+        tilePixels=std::max(tilePixels,multiply(std::min(side,data.width),std::min(side,data.height)));
+    }
+    const auto tileBytes=multiply(tilePixels,2*sizeof(float)+1);
+    // Retain the existing full-quality 72N search envelope, with explicit
+    // ceil-rounded pyramid/staging and per-worker allowances for unusual shapes.
+    // This is host admission only: driver/VRAM/unified-memory costs remain
+    // subject to the GPU owner's allocation checks, not a combined peak claim.
+    const auto searchWorking=std::max(multiply(pixels,72),
+        add(pairPyramids,add(pixels,multiply(ResolveBracketingWorkerCount(
+            request.memoryBudgetBytes,request.workerCount),512ull*1024))));
+    const auto working=std::max({add(pairPyramids,tileBytes),searchWorking,
+        add(pairPyramids,reliabilityWorking),add(pairPyramids/2,multiply(tileBytes,9))});
+    // The bounded original overviews, motion fields, metadata, vector/thread
+    // overhead and small radiometric scratch share the existing 64 MiB margin.
+    // Decoder images, group workers and final output are not live in this phase.
+    requiredBytes=add(add(retained,working),64ull*1024*1024);
+    if(!representable) {
+        requiredBytes=0;error="Local-alignment memory estimate overflowed.";return false;
+    }
+    if(requiredBytes<=request.memoryBudgetBytes)return true;
+    error="Full-quality local alignment needs an estimated "+MiB(requiredBytes)+
+        " MiB of host memory; the current memory budget is "+MiB(request.memoryBudgetBytes)+
+        " MiB. Close other memory-heavy work and retry; alignment quality was not reduced.";
+    return false;
+}
+
 bool PreflightBurstRefinement(const ProcessingRequest& request,const PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
+    std::uint64_t localBytes=0;
+    if(!AdmitLocalAlignmentMemory(request,data,localBytes,error))return false;
+    if(localBytes)diagnostics.push_back("Full-quality local alignment preflight: estimated "+
+        MiB(localBytes)+" MiB of host memory; memory budget "+MiB(request.memoryBudgetBytes)+" MiB.");
     if(!NeedsBurstRefinement(request,data))return true;
     // Local-motion nodes use twice this raw spacing, and burst refinement
     // samples halfway between them. Global-only fallbacks may be coarser;

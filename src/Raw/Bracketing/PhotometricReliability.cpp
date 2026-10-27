@@ -1,6 +1,7 @@
 #include "PhotometricReliability.h"
 #include "ParallelProcessing.h"
 #include <array>
+#include <limits>
 
 namespace Raw::Bracketing {
 namespace {
@@ -95,6 +96,13 @@ void VisitPatchStatisticsRow(const std::vector<Evidence>& evidence,unsigned widt
         }
     }
 }
+}
+
+bool ColorReliabilityWorkingBytes(std::uint64_t cellCount,std::uint64_t& bytes) {
+    bytes=0;
+    constexpr auto perCell=sizeof(Mfd::ReliabilityCell)+sizeof(Evidence);
+    if(cellCount>std::numeric_limits<std::uint64_t>::max()/perCell)return false;
+    bytes=cellCount*perCell;return true;
 }
 
 bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,

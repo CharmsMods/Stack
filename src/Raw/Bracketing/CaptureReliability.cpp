@@ -25,9 +25,7 @@ bool BuildReliability(const ProcessingRequest& request,
     // local-motion grid and ordinary scene edges, while reducing a 14 MP
     // capture from roughly 3.5 million statistical cells to 0.9 million.
     // Small validation images retain the original one-Bayer-cell grid.
-    const auto sensorPixels=static_cast<std::uint64_t>(reference.frame.activeExtent.width)*
-        reference.frame.activeExtent.height;
-    build.cellStrideBayerCells=sensorPixels>=2'000'000?2u:1u;
+    build.cellStrideBayerCells=CaptureReliabilityStrideBayerCells(reference.frame.activeExtent);
     build.motionOptions.registration=parameters.registration;
     build.noiseQuality=static_cast<Mfd::NoiseModelQuality>(std::max(
         static_cast<std::uint8_t>(reference.noise.quality),static_cast<std::uint8_t>(source.noise.quality)));
@@ -141,6 +139,12 @@ std::shared_ptr<AlignmentInspection> MakeInspection(const Mfd::ReliabilityMap& m
 }
 
 } // namespace
+
+std::uint32_t CaptureReliabilityStrideBayerCells(Mfd::PixelExtent extent) {
+    // Compare the area without overflowing on an invalid external extent.
+    constexpr std::uint64_t threshold=2'000'000;
+    return extent.height&&extent.width>=threshold/extent.height+(threshold%extent.height!=0)?2u:1u;
+}
 
 Mfd::Parameters CaptureAlignmentParameters(const PreparedDataset& data) {
     Mfd::Parameters parameters;

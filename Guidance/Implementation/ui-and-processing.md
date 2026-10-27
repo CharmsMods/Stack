@@ -147,6 +147,14 @@ and scalar verification remain explicit algorithm responsibilities. Keep
 measurement selection for occlusion/deghosting separate from backend failure.
 Report actual GPU tile counts rather than inferring success from context availability.
 
+Local-alignment host-memory admission covers a reference/alternate pair even
+when the fixed reference is disabled for fusion. Estimate retained payloads plus
+the largest simultaneous pyramid, search or reliability workspace, with checked
+arithmetic and the owner-defined reliability cell layout. An insufficient budget
+is a resource error, not an unreliable match or permission to reduce alignment
+quality. Host admission and GPU allocation checks are distinct; neither estimate
+alone establishes combined resident memory on every device.
+
 Consume completed group tiles for neutral-guide statistics before releasing them,
 using the same canonical float representation as the group cache. Single-input
 uncached measurements retain their GPU double representation. Guide and histogram

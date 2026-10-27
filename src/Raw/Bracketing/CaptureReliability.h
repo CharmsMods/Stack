@@ -3,6 +3,8 @@
 
 namespace Raw::Bracketing {
 Mfd::Parameters CaptureAlignmentParameters(const PreparedDataset&);
+// The production confidence grid and its admission plan share this spacing.
+std::uint32_t CaptureReliabilityStrideBayerCells(Mfd::PixelExtent);
 // Build against source's final motion and calibration, then replace evidence
 // and diagnostics together. The caller may stage a source before publishing it.
 bool RefreshCaptureReliability(const ProcessingRequest&,const PreparedSource& reference,

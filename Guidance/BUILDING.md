@@ -207,10 +207,14 @@ passes add traffic beyond nominal full-coverage figures.
   bytes. Prepared analysis also retains motion/reliability and bounded overviews.
   Replacing native output during SR no longer leaves redundant local owners alive
   into depth processing; required native data still remains alive during SR.
-- GPU workspaces remain bounded and operation-scoped, not whole-frame allocations.
-  CPU/GPU budgets are admission estimates, not a measured universal peak: the
-  two-capture local-alignment pyramid/scratch preflight remains a known accounting
-  gap near the minimum memory allowance. Full Windows/hardware profiling is pending.
+- Temporal-combining GPU workspaces remain bounded and operation-scoped.
+  CPU/GPU budgets are admission estimates, not a measured universal peak. Local
+  alignment checks its host-memory estimate before allocating pair pyramids and
+  reliability scratch, including two-capture runs and a disabled fixed reference
+  with an enabled alternate. It accounts for retained inspection/store payloads
+  and the largest overlapping work stage, not the sum of unrelated phases.
+  This host gate does not reserve VRAM or include driver/unified-memory costs;
+  GPU allocation checks remain separate. Full Windows/hardware profiling is pending.
 
 ### First checks after pulling and building
 

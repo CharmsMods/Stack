@@ -188,6 +188,8 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     if(request.recipe.alignmentMode!=AlignmentMode::AutomaticLocal) return true;
     if(data.sources.empty()||data.origin>=data.sources.size()) {error="Local alignment has no fixed reference.";return false;}
+    std::uint64_t requiredBytes=0;
+    if(!AdmitLocalAlignmentMemory(request,data,requiredBytes,error))return false;
     const auto parameters=CaptureAlignmentParameters(data);
     const auto workers=ResolveBracketingWorkerCount(
         request.memoryBudgetBytes,request.workerCount);

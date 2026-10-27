@@ -27,4 +27,7 @@ inline double GreenDifferenceResidual(double residual0,double variance0,double r
 }
 bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     Mfd::ReliabilityMap& result,std::string& error,const CaptureMotionEvaluator& evaluateMotion={});
+// Simultaneously live map and residual-evidence payload; no allocation occurs.
+// False means the requested payload cannot be represented in uint64 bytes.
+bool ColorReliabilityWorkingBytes(std::uint64_t cellCount,std::uint64_t& bytes);
 }
