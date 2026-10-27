@@ -15,6 +15,10 @@
 #include <imgui_internal.h>
 
 void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
+    if (m_PermanentGalleryWorkspace && IsRawWorkspaceFolderBrowserOpen()) {
+        RenderRawGallerySourceFolders(size);
+        return;
+    }
     const bool grid = m_RawWorkspaceLabUi.galleryWorkspaceGrid;
     const bool previewHoverArmed = m_RawWorkspaceGalleryPreviewHovered;
     m_RawWorkspaceGalleryPreviewHovered = false;

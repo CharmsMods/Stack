@@ -3,18 +3,13 @@
 
 void AppShell::SynchronizeRawWorkspaceFolder() {
     const auto catalogRevision = Stack::Project::ProjectCatalogRevision();
-    // Folder navigation is shared; project documents and editing state remain
-    // owned by their tabs. RequestOpenRawWorkspace preserves a pinned project.
+    // Catalog invalidation is shared. Browse roots and project origins are not.
     for (auto& workspace : m_ProjectWorkspaces) {
         if (workspace->id == m_GalleryWorkspaceId &&
             workspace->observedProjectCatalogRevision != catalogRevision) {
             workspace->observedProjectCatalogRevision = catalogRevision;
             workspace->rawCatalogRefreshPending = true;
         }
-        // Automatic queues keep their source folder while Gallery navigates.
-        if (workspace->editor->IsAutoBracketWorkspace()) continue;
-        if (!workspace->editor->AutoBracketWorkActive())
-            workspace->editor->SetRawWorkspaceFolder(m_SharedRawWorkspaceRoot);
     }
     UpdateWorkspacePreferencesOwner();
 }
@@ -25,9 +20,10 @@ void AppShell::UpdateWorkspacePreferencesOwner() {
             workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);
         return;
     }
-    EditorModule* writer = m_Editor && !m_Editor->IsAutoBracketWorkspace() ? m_Editor : nullptr;
-    if (!writer) for (auto& workspace : m_ProjectWorkspaces)
-        if (!workspace->editor->IsAutoBracketWorkspace()) { writer = workspace->editor.get(); break; }
+    // Hidden project editors must never replace the source registry or Gallery
+    // startup scope with their private editing context.
+    const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
+    EditorModule* writer = gallery ? gallery->editor.get() : nullptr;
     for (auto& workspace : m_ProjectWorkspaces)
         if (workspace->editor.get() != writer)
             workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);

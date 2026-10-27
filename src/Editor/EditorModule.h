@@ -24,6 +24,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "Editor/Internal/RawLab/RawLabGalleryPreviewState.h"
 #include "Editor/Internal/RawLab/RawLabGalleryFolderTree.h"
 #include "Editor/Internal/RawLab/RawLabGalleryNavigator.h"
+#include "Editor/Internal/RawLab/RawLabGalleryFolderCards.h"
 #include "Editor/Internal/RawLab/RawLabGalleryLayoutAnimation.h"
 #include "Editor/Internal/RawLab/RawLabGalleryGridStacks.h"
 #include "Editor/Internal/RawLab/RawFloatingSurfaceState.h"
@@ -866,7 +867,8 @@ public:
     }
     bool RequestOpenProjectFromPath(
         const std::filesystem::path& projectPath,
-        bool currentDispositionApproved = false);
+        bool currentDispositionApproved = false,
+        std::function<void(bool)> onComplete = {});
     bool EnsureRawWorkspaceProjectForSelectedRecipeEdit(
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
     bool MaterializeSelectedRawPreviewProject(
@@ -1130,8 +1132,42 @@ public:
         const ImVec2& canvasMax);
     const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceState() const { return m_RawWorkspace; }
     void SetRawWorkspaceFolder(const std::filesystem::path& root);
+    const std::vector<std::filesystem::path>& GetRawWorkspaceSourceFolders() const { return m_RawWorkspace.registeredSourceFolders; }
+    bool IsRawWorkspaceAllFolders() const { return m_RawWorkspace.allSourceFolders; }
+    void SetRawWorkspaceAllFolders(bool allFolders);
+    void OpenAllRawWorkspaceFolders() { SetRawWorkspaceAllFolders(true); }
+    void ShowRawWorkspaceSourceFolders();
+    void OpenRawWorkspaceFolderBrowser() { ShowRawWorkspaceSourceFolders(); }
+    bool IsRawWorkspaceFolderBrowserOpen() const { return m_RawGallerySourceFoldersOpen; }
+    const std::vector<Stack::RawWorkspace::SourceFolderCard>& GetRawWorkspaceSourceFolderCards() const;
+    bool FindRawWorkspaceGalleryProjectRecord(const std::filesystem::path& path, Stack::Project::ProjectRecord& record) const;
+    std::filesystem::path ResolveRawWorkspaceSourceFolder(const std::filesystem::path& path) const;
+    std::string GetRawWorkspaceGalleryScopeKey() const;
+
     void SetRawWorkspaceFolderChangedHandler(std::function<void(const std::filesystem::path&)> handler) {
         m_RawWorkspaceFolderChangedHandler = std::move(handler);
+    }
+    // Value-only application preferences. No browse scope, document state,
+    // in-flight work, selection, or image/cache resources cross this contract.
+    struct RawWorkspacePresentationPreferences {
+        float controlsPanelWidth = 0.f;
+        float rawLabToolRailWidth = 0.f;
+        float rawLabLowerShelfHeight = 0.f;
+        float rawLabFilmstripHeight = 0.f;
+        float rawLabGalleryThumbnailScale = 1.f;
+        bool rawLabLowerShelfOpen = false;
+        bool rawLabToolRailOnRight = false;
+        int rawLabActiveTool = 0;
+        int rawLabActivePointCurve = 0;
+        bool rawLabColorWarpLiveCloud = false;
+        int rawLabLastGalleryHost = 1;
+    };
+    RawWorkspacePresentationPreferences GetRawWorkspacePresentationPreferences() const;
+    void ApplyRawWorkspacePresentationPreferences(
+        const RawWorkspacePresentationPreferences& preferences, bool persist = false);
+    void SetRawWorkspacePresentationPreferencesChangedHandler(
+        std::function<void(const RawWorkspacePresentationPreferences&)> handler) {
+        m_RawWorkspacePresentationPreferencesChangedHandler = std::move(handler);
     }
     void SetWorkspaceAppStatePersistenceEnabled(bool enabled);
     const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceStateForValidation() const { return m_RawWorkspace; }
@@ -1236,6 +1272,9 @@ public:
     struct RawGalleryOpenItem {
         std::filesystem::path path;
         bool project = false;
+        // Captured by folder-card previews, which need not belong to the live
+        // Gallery catalog. Empty callers resolve provenance when enqueued.
+        std::filesystem::path sourceWorkspaceRoot;
     };
     struct RawGalleryOpenSelection {
         std::vector<RawGalleryOpenItem> items;
@@ -1752,6 +1791,7 @@ private:
     bool m_RawWorkspaceAppStateLoaded = false;
     bool m_WorkspaceAppStatePersistenceEnabled = true;
     std::function<void(const std::filesystem::path&)> m_RawWorkspaceFolderChangedHandler;
+    std::function<void(const RawWorkspacePresentationPreferences&)> m_RawWorkspacePresentationPreferencesChangedHandler;
     Stack::RawWorkspace::GalleryDisplayMode m_RawWorkspaceGalleryDisplayMode =
         Stack::RawWorkspace::GalleryDisplayMode::Grid;
     Stack::RawWorkspace::GalleryContentMode m_RawWorkspaceGalleryContentMode =
@@ -2700,8 +2740,14 @@ private:
     RawWorkspaceThumbnailSnapshot GetRawWorkspaceThumbnailSnapshot() const;
     void LoadRawWorkspaceAppState();
     void SaveRawWorkspaceAppState();
+    void QueueRawWorkspaceAppStateSave();
     void SaveRawWorkspaceGalleryGroupingState();
     void RequestOpenRawWorkspace(const std::filesystem::path& workspaceRoot);
+    void RequestRawWorkspaceAggregateScan();
+    void RememberRawWorkspaceFolderCards(bool complete = false);
+    void RequestRawWorkspaceFolderCardPreviews();
+    void UpdateRawWorkspaceFolderCardThumbnail(const Stack::RawWorkspace::SourceRecord& source);
+    void ResetRawWorkspaceBrowseSources();
     void RequestRawWorkspaceScan();
     void RequestRawWorkspaceScanImpl();
     void RequestRawWorkspaceThumbnailGeneration();
@@ -3135,6 +3181,15 @@ private:
     std::filesystem::path m_RawGalleryFolderWorkspaceRoot;
     Stack::Editor::RawLabInternal::GalleryFolderTree m_RawGalleryFolderTree;
     Stack::Editor::RawLabInternal::GalleryNavigator m_RawGalleryNavigator;
+    Stack::Editor::RawLabInternal::GalleryFolderCards m_RawGalleryFolderCards;
+    bool m_RawGallerySourceFoldersOpen = false;
+    std::uint64_t m_RawGalleryFolderCardLoadGeneration = 0;
+    // Advance for card publications and every registered-source-folder change.
+    std::uint64_t m_RawGalleryFolderCardRevision = 1;
+    mutable std::uint64_t m_RawGalleryFolderCardViewRevision = 0;
+    mutable std::vector<Stack::RawWorkspace::SourceFolderCard> m_RawGalleryFolderCardView;
+    std::unordered_map<std::string, Stack::RawWorkspace::SourceFolderCard> m_RawGallerySourceFolderCards;
+    void RenderRawGallerySourceFolders(const ImVec2& size);
     Stack::RawWorkspace::GalleryPresentation m_RawGalleryFilteredPresentation;
     std::uint64_t m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t m_RawGalleryFilteredQueueRevision = std::numeric_limits<std::uint64_t>::max();

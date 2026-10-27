@@ -41,6 +41,22 @@ struct RawWorkspaceProjectLoadResult {
     std::string errorMessage;
 };
 
+// The pending replacement and asynchronous loader share one completion. If
+// either drops its continuation (cancel/close), report failure once, not success
+// merely because the request was accepted. Cancellation callbacks must not
+// access the editor; it may be shutting down when the final capture is released.
+struct ProjectOpenCompletion {
+    explicit ProjectOpenCompletion(std::function<void(bool)> callback)
+        : callback(std::move(callback)) {}
+    ~ProjectOpenCompletion() { Complete(false); }
+    void Complete(bool success) {
+        auto finish = std::move(callback);
+        callback = {};
+        if (finish) finish(success);
+    }
+    std::function<void(bool)> callback;
+};
+
 } // namespace
 
 bool EditorModule::HasProjectContent() const {
@@ -2538,7 +2554,10 @@ bool EditorModule::RequestOpenRawWorkspaceProject(
 
 bool EditorModule::RequestOpenProjectFromPath(
     const std::filesystem::path& projectPath,
-    bool currentDispositionApproved) {
+    bool currentDispositionApproved,
+    std::function<void(bool)> onComplete) {
+    const auto completion = onComplete
+        ? std::make_shared<ProjectOpenCompletion>(std::move(onComplete)) : nullptr;
     if (projectPath.empty()) {
         return false;
     }
@@ -2556,7 +2575,7 @@ bool EditorModule::RequestOpenProjectFromPath(
     }
 
     const std::filesystem::path normalized = projectPath.lexically_normal();
-    auto openAction = [this, normalized](std::string* error) {
+    auto openAction = [this, normalized, completion](std::string* error) {
         std::error_code filesystemError;
         if (!std::filesystem::exists(normalized, filesystemError) ||
             filesystemError) {
@@ -2565,7 +2584,10 @@ bool EditorModule::RequestOpenProjectFromPath(
             }
             return false;
         }
-        LibraryManager::Get().RequestLoadProjectFromPath(normalized, this);
+        LibraryManager::Get().RequestLoadProjectFromPath(normalized, this,
+            [completion](bool success) {
+                if (completion) completion->Complete(success);
+            });
         return true;
     };
 

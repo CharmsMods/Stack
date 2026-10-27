@@ -1,6 +1,7 @@
 #include "Raw/RawGraphOperation.h"
 #include "Raw/RawRecipeCompatibility.h"
 #include "Raw/RawWorkspace.h"
+#include "Raw/RawSourceFolders.h"
 #include "Raw/RawWorkspaceManagedGraph.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include "Raw/MultiFrameDenoise/SharedBurst.h"
@@ -186,6 +187,21 @@ std::filesystem::path WriteProjectCoverCache(
         reinterpret_cast<const char*>(bytes.data()),
         static_cast<std::streamsize>(bytes.size()));
     return output.good() ? path : std::filesystem::path();
+}
+
+std::shared_ptr<const Stack::Project::ProjectRecord> GalleryProjectMetadata(
+    const Stack::Project::ProjectRecord& indexed,
+    const std::filesystem::path& sourceRoot) {
+    auto metadata = std::make_shared<Stack::Project::ProjectRecord>(indexed);
+    // Accepted cards already own their cover/cache and source-set summary.
+    // Retain no second encoded image or potentially large authored settings.
+    std::vector<unsigned char>().swap(metadata->coverThumbnailBytes);
+    std::vector<Stack::Project::MultiFrameSourceSet>().swap(metadata->sourceSets);
+    for (auto& source : metadata->sources) {
+        if (!source.workspaceRelativePath.empty())
+            source.originalPath = NormalizePath(sourceRoot / source.workspaceRelativePath);
+    }
+    return metadata;
 }
 
 void AttachProjectToSource(
@@ -436,13 +452,15 @@ bool AssociateWorkspaceProjects(
             continue;
         }
         ProjectInfo info = ProjectInfoFromIndex(record);
+        const auto managedOwner = ResolveManagedProjectSourceFolder(absolutePath);
+        const auto& sourceRoot = managedOwner.empty() ? layout.workspaceRoot : managedOwner;
 
         auto exactSource = absolutePathToSource.end();
         for (const Stack::Project::IndexedProjectSource& indexedSource :
              record.sources) {
             if (!indexedSource.workspaceRelativePath.empty()) {
                 exactSource = absolutePathToSource.find(LowerGenericPathKey(
-                    NormalizePath(layout.workspaceRoot / indexedSource.workspaceRelativePath)));
+                    NormalizePath(sourceRoot / indexedSource.workspaceRelativePath)));
                 if (exactSource != absolutePathToSource.end() &&
                     sources[exactSource->second].fingerprint == indexedSource.contentSha256) break;
                 exactSource = absolutePathToSource.end();
@@ -534,14 +552,18 @@ bool AssociateWorkspaceSourceSetProjects(
         if (!invalidBurst) {
             entry.coverThumbnailBytes = indexed.coverThumbnailBytes;
         }
+        entry.sourceWorkspaceRoot = ResolveManagedProjectSourceFolder(entry.absolutePath);
+        const auto projectLayout = entry.sourceWorkspaceRoot.empty()
+            ? layout : BuildManagedLayout(entry.sourceWorkspaceRoot);
+        entry.projectMetadata = GalleryProjectMetadata(indexed, projectLayout.workspaceRoot);
         entry.coverThumbnailCachePath = WriteProjectCoverCache(
-            layout, entry.projectId, entry.coverThumbnailBytes);
+            projectLayout, entry.projectId, entry.coverThumbnailBytes);
 
         std::unordered_map<std::string, std::vector<std::size_t>> assetSources;
         for (const Stack::Project::IndexedProjectSource& asset : indexed.sources) {
             if (asset.assetId.empty()) continue;
             const std::filesystem::path originPath = asset.workspaceRelativePath.empty()
-                ? asset.originalPath : layout.workspaceRoot / asset.workspaceRelativePath;
+                ? asset.originalPath : projectLayout.workspaceRoot / asset.workspaceRelativePath;
             if (!originPath.empty()) {
                 const auto source = originPathToSource.find(
                     LowerGenericPathKey(NormalizePath(originPath)));
@@ -631,7 +653,7 @@ bool AssociateWorkspaceSourceSetProjects(
                 sourceIdentities.push_back(indexedSource.contentSha256);
             std::vector<std::size_t> matches;
             const auto origin = indexedSource.workspaceRelativePath.empty()
-                ? indexedSource.originalPath : layout.workspaceRoot / indexedSource.workspaceRelativePath;
+                ? indexedSource.originalPath : projectLayout.workspaceRoot / indexedSource.workspaceRelativePath;
             if (!origin.empty()) {
                 const auto match = originPathToSource.find(
                     LowerGenericPathKey(NormalizePath(
@@ -702,6 +724,9 @@ bool AssociateWorkspaceSourceSetProjects(
             invalid.relativePath = record.absolutePath.lexically_relative(layout.projectsDirectory);
             invalid.status = ProjectStatus::Invalid;
             invalid.errorMessage = record.errorMessage;
+            invalid.sourceWorkspaceRoot = ResolveManagedProjectSourceFolder(record.absolutePath);
+            invalid.projectMetadata = GalleryProjectMetadata(record,
+                invalid.sourceWorkspaceRoot.empty() ? layout.workspaceRoot : invalid.sourceWorkspaceRoot);
             projects.push_back(std::move(invalid));
             continue;
         }

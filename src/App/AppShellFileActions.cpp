@@ -348,11 +348,24 @@ bool AppShell::ExecutePendingFileAction(bool discardCurrent, EditorModule* owner
                 else if (auto* workspace = FindProjectWorkspace(workspaceId)) workspace->rootTab = RootTabEditor;
             }
             break;
-        case PendingFileAction::OpenProject:
+        case PendingFileAction::OpenProject: {
+            const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
+            const auto sourceRoot = gallery
+                ? gallery->editor->ResolveRawWorkspaceSourceFolder(m_PendingFileProjectPath)
+                : std::filesystem::path{};
             success = owner->RequestOpenProjectFromPath(
                 m_PendingFileProjectPath,
-                true);
+                true,
+                [this, workspaceId, sourceRoot](bool opened) {
+                    // A canceled/discarded continuation has no editor to touch.
+                    if (!opened) return;
+                    if (auto* workspace = FindProjectWorkspace(workspaceId)) {
+                        workspace->sourceWorkspaceRoot = sourceRoot;
+                        workspace->editor->SetRawWorkspaceFolder(sourceRoot);
+                    }
+                });
             break;
+        }
         case PendingFileAction::CloseCurrent:
             success = owner->CloseCurrentProject(discardCurrent);
             if (success && workspaceId != m_GalleryWorkspaceId) m_PendingWorkspaceRetirement = workspaceId;

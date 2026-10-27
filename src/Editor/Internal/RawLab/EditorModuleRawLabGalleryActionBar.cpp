@@ -77,20 +77,25 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
     const bool canSort = !nativeWindow && m_RawWorkspaceGalleryContentMode ==
         Stack::RawWorkspace::GalleryContentMode::Gallery &&
         !m_RawWorkspace.workspaceRoot.empty() && CanEditRawWorkspaceFilmstripOrganization();
+    const bool canChooseScope = !nativeWindow && m_PermanentGalleryWorkspace &&
+        !GetRawWorkspaceSourceFolders().empty();
+    const bool canChooseNativeSort = canSort || (canChooseScope && IsRawWorkspaceAllFolders());
     const bool navigator = !nativeWindow && m_PermanentGalleryWorkspace;
     using FooterAction = Stack::Editor::RawLabInternal::GalleryNavigatorFooterAction;
     FooterAction requested = FooterAction::None;
     if (navigator) {
-        const auto organization = m_RawWorkspaceManualGroupings.find(m_RawGalleryFolderTree.workspaceKey);
+        const auto organization = m_RawWorkspaceManualGroupings.find(GetRawWorkspaceGalleryScopeKey());
         const auto sort = organization != m_RawWorkspaceManualGroupings.end()
             ? organization->second.sortMode : SortMode::TimelineAll;
-        const char* label = sort == SortMode::TimelineAll ? "Capture time" :
+        const char* label = IsRawWorkspaceAllFolders() ? "All Folders" : sort == SortMode::TimelineAll ? "Capture time" :
             sort == SortMode::TimelineByFolder ? "Capture time by folder" :
             Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(sort);
         requested = m_RawGalleryNavigator.RenderFooter(m_RawWorkspaceLabUi.galleryWorkspaceGrid,
-            m_RawWorkspaceLabUi.galleryPropertiesOpen, canSort, label);
-        if (requested == FooterAction::Grid) SetRawGalleryGridView(true);
-        if (requested == FooterAction::Filmstrip) SetRawGalleryGridView(false);
+            m_RawWorkspaceLabUi.galleryPropertiesOpen, canSort || canChooseScope, label);
+        if (requested == FooterAction::Grid || requested == FooterAction::Filmstrip) {
+            m_RawGallerySourceFoldersOpen = false;
+            SetRawGalleryGridView(requested == FooterAction::Grid);
+        }
     }
     // Layout children have zero padding/spacing. Menus retain useful native
     // gutters and row targets rather than inheriting the folder-body layout.
@@ -99,14 +104,21 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8 * scale, 6 * scale));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8 * scale, 12 * scale));
     }
-    if (requested == FooterAction::Sort || (!navigator && Ui::IconButton("Sort", Ui::Icon::Sort, false, canSort))) ImGui::OpenPopup("Sort");
+    if (requested == FooterAction::Sort || (!navigator && Ui::IconButton("Sort", Ui::Icon::Sort, false, canSort || canChooseScope))) ImGui::OpenPopup("Sort");
     if (!navigator && !canSort) LabTooltip("Open a folder and switch to original images to sort them.",
         ImGuiHoveredFlags_AllowWhenDisabled);
     if (ImGui::BeginPopup("Sort")) {
-        const auto workspaceKey = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        const auto workspaceKey = GetRawWorkspaceGalleryScopeKey();
         const auto organization = m_RawWorkspaceManualGroupings.find(workspaceKey);
         const auto current = organization != m_RawWorkspaceManualGroupings.end()
             ? organization->second.sortMode : SortMode::TimelineAll;
+        // Scope is independent of sort order. Aggregating folders never writes
+        // a synthetic sort mode into any source folder's saved organization.
+        if (m_PermanentGalleryWorkspace && ImGui::MenuItem("All Folders", nullptr,
+                IsRawWorkspaceAllFolders() && !IsRawWorkspaceFolderBrowserOpen(), canChooseScope)) {
+            m_RawWorkspaceGalleryContentMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
+            SetRawWorkspaceAllFolders(true);
+        }
         constexpr std::array modes {
             SortMode::TimelineAll, SortMode::TimelineByFolder, SortMode::Manual,
             SortMode::FileNameAscending, SortMode::FileNameDescending,
@@ -115,7 +127,10 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
         };
         for (const auto mode : modes) {
             if (ImGui::MenuItem(Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(mode),
-                    nullptr, current == mode, canSort)) SetRawWorkspaceFilmstripSortMode(mode);
+                    nullptr, !IsRawWorkspaceAllFolders() && current == mode, canChooseNativeSort)) {
+                m_RawGallerySourceFoldersOpen = false;
+                SetRawWorkspaceFilmstripSortMode(mode);
+            }
         }
         ImGui::EndPopup();
     }
@@ -171,7 +186,7 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
             if (!availability.enabled) return;
             if (ImGui::MenuItem(Stack::RawGalleryActions::Label(action))) ExecuteRawGalleryAction(action, context);
         };
-        if (!context.items.empty()) {
+        if (!IsRawWorkspaceFolderBrowserOpen() && !context.items.empty()) {
             ImGui::Separator();
             item(Action::CreateCaptureSet);
             item(Action::NewSavedVersion);

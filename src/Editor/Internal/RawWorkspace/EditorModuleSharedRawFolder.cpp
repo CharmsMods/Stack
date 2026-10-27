@@ -1,7 +1,8 @@
 #include "Editor/EditorModule.h"
 
 void EditorModule::SetRawWorkspaceFolder(const std::filesystem::path& root) {
-    if (root.lexically_normal() == m_RawWorkspace.workspaceRoot.lexically_normal()) return;
+    m_RawGallerySourceFoldersOpen = false;
+    if (!m_RawWorkspace.allSourceFolders && root.lexically_normal() == m_RawWorkspace.workspaceRoot.lexically_normal()) return;
     if (root.empty()) ClearRawWorkspace();
     else RequestOpenRawWorkspace(root);
 }

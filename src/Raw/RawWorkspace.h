@@ -11,9 +11,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace Stack::Project { struct ProjectRecord; }
 
 namespace Stack::RawWorkspace {
 
@@ -131,6 +134,9 @@ struct ProjectInfo {
 
 struct SourceSetProjectMembership {
     std::string projectId;
+    // Aggregate-only display qualification never replaces the authored ID.
+    // Empty for ordinary native catalog records.
+    std::string nativeProjectId;
     std::string projectName;
     std::filesystem::path projectPath;
     std::string sourceSetId;
@@ -142,7 +148,13 @@ struct SourceSetProjectMembership {
 };
 
 struct SourceSetProjectCatalogEntry {
+    // Discovery provenance. Never a destination inferred from the active Gallery.
+    std::filesystem::path sourceWorkspaceRoot;
     std::string projectId;
+    std::string nativeProjectId;
+    // Immutable scan-owned action/property metadata. Not serialized; another
+    // folder or editor rebuilding the shared index cannot replace this view.
+    std::shared_ptr<const Stack::Project::ProjectRecord> projectMetadata;
     std::string projectName;
     std::filesystem::path absolutePath;
     std::filesystem::path relativePath;
@@ -169,6 +181,10 @@ struct SourceSetProjectCatalogEntry {
 };
 
 struct SourceRecord {
+    // Aggregate browsing uses a qualified display key while storage retains
+    // the native root-relative identity. Empty metadata means a single folder.
+    std::filesystem::path sourceWorkspaceRoot;
+    std::string sourceRelativePathKey;
     std::filesystem::path absolutePath;
     std::filesystem::path relativePath;
     std::string relativePathKey;
@@ -190,6 +206,13 @@ struct SourceRecord {
     ThumbnailInfo transientThumbnail;
     ProjectInfo project;
     std::vector<SourceSetProjectMembership> sourceSetProjectMemberships;
+};
+
+struct SourceFolderCard {
+    std::filesystem::path root;
+    std::size_t sourceCount = 0;
+    bool countKnown = false;
+    std::vector<SourceRecord> previews;
 };
 
 struct CatalogThumbnailRecord {
@@ -261,11 +284,17 @@ struct ScanResult {
     ManagedLayout layout;
     std::vector<SourceRecord> sources;
     std::vector<SourceSetProjectCatalogEntry> sourceSetProjects;
+    // Accepted per-folder summaries, including successful empty folders.
+    // Aggregate sources may be deduplicated across overlapping roots; cards
+    // describe each folder's own native scan instead of that projection.
+    std::vector<SourceFolderCard> sourceFolderCards;
     ScanProgress progress;
 };
 
 struct WorkspaceState {
     std::filesystem::path workspaceRoot;
+    std::vector<std::filesystem::path> registeredSourceFolders;
+    bool allSourceFolders = false;
     std::vector<std::filesystem::path> recentWorkspaceRoots;
     std::vector<SourceRecord> sources;
     std::string selectedSourceKey;
@@ -376,6 +405,8 @@ struct RawPanelState {
 
 struct AppState {
     std::filesystem::path lastWorkspaceRoot;
+    std::vector<std::filesystem::path> registeredSourceFolders;
+    bool allSourceFolders = false;
     std::vector<std::filesystem::path> recentWorkspaceRoots;
     float controlsPanelWidth = 0.0f;
     float rawLabToolRailWidth = 0.0f;

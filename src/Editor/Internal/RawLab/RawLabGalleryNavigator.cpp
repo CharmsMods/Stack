@@ -125,11 +125,11 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     const float width = ImGui::GetContentRegionAvail().x;
     ImGui::PushFont(nullptr, 12 * m_Unit);
     ImGui::SetCursorScreenPos(ImVec2(heading.x + 4 * m_Unit, heading.y + 6 * m_Unit));
-    ImGui::TextColored(m_Secondary, "Source folder");
+    ImGui::TextColored(m_Secondary, "Source folders");
     ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
-    if (Button("##OpenSource", "Open...", Ui::Icon::OpenFolder, ImVec2(88 * m_Unit, 28 * m_Unit)))
+    if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
         result.openFolder = true;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open a different source folder");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose or add a source folder");
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(ImVec2(heading.x, heading.y + (compact ? 28 : 34) * m_Unit));
     if (hasSource) {
@@ -165,7 +165,7 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
         if (!hasSource) {
             ImGui::TextWrapped("Choose a folder to browse its original images, saved projects, and brackets.");
             Space(12 * m_Unit);
-            if (Button("##ChooseFolder", "Open folder...", Ui::Icon::OpenFolder, ImVec2(-1, 32 * m_Unit)))
+            if (Button("##ChooseFolder", "Browse source folders", Ui::Icon::AllFolders, ImVec2(-1, 32 * m_Unit)))
                 result.openFolder = true;
         } else {
             ImGuiListClipper clipper;

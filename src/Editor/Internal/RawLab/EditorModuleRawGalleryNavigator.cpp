@@ -5,7 +5,8 @@
 using namespace Stack::Editor::RawLabInternal;
 
 void EditorModule::SynchronizeRawGalleryFolderScope() {
-    if (m_RawGalleryFolderWorkspaceRoot == m_RawWorkspace.workspaceRoot) return;
+    if (m_RawGalleryFolderWorkspaceRoot == m_RawWorkspace.workspaceRoot &&
+        m_RawGalleryFolderTree.workspaceKey == GetRawWorkspaceGalleryScopeKey()) return;
     m_RawGalleryFolderWorkspaceRoot = m_RawWorkspace.workspaceRoot;
     m_RawGalleryFolderFilter.reset();
     m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
@@ -25,7 +26,8 @@ void EditorModule::PrepareRawGalleryFolderTree() {
     // Reuse the Brackets view's eligibility/deduplication, without resolving
     // project paths or touching disk just to display a count.
     AppendRawWorkspaceQueuedBrackets(brackets, false);
-    tree.Prepare(m_RawWorkspace.workspaceRoot, all, brackets, m_RawWorkspaceNavigatorRevision, queueRevision);
+    tree.Prepare(m_RawWorkspace.workspaceRoot, all, brackets, m_RawWorkspaceNavigatorRevision,
+        queueRevision, IsRawWorkspaceAllFolders(), GetRawWorkspaceSourceFolders());
 }
 
 void EditorModule::RenderRawGalleryFolderPanel() {
@@ -34,6 +36,7 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceGalleryContentMode, m_RawGalleryFolderFilter,
         Stack::Header::ResolvePanelColor(GetWorkspaceBaseColor()),
         [this] { RenderRawGallerySidebarControls(); });
+    if (action.category || action.folderChanged) m_RawGallerySourceFoldersOpen = false;
     if (action.category && *action.category != m_RawWorkspaceGalleryContentMode) {
         m_RawWorkspaceGalleryContentMode = *action.category;
         SaveRawWorkspaceAppState();
@@ -46,5 +49,8 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceLabFilmstripScrollTargetX = 0.f;
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
-    if (action.openFolder) OpenRawWorkspaceFolderDialog();
+    if (action.openFolder) {
+        if (m_PermanentGalleryWorkspace) ShowRawWorkspaceSourceFolders();
+        else OpenRawWorkspaceFolderDialog();
+    }
 }

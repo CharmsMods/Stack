@@ -761,6 +761,7 @@ void EditorModule::Shutdown() {
     PumpViewportOutputTileTextureDeletes(true);
     ClearCompositeSceneTextures();
     ClearRawWorkspaceThumbnailTextures(true);
+    m_RawGalleryFolderCards.Shutdown();
     m_RawLayerPanel.Clear();
     ClearRawWorkspaceLabGradingScope();
     m_RawWorkspaceLabUi.colorWarpWheelRenderer.Shutdown();
@@ -1335,8 +1336,8 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     m_Project->lastEditTime = 0.0;
     m_Project->lastAutosaveTime = -1.0;
     m_Project->lastAutosaveAttemptTime = -1.0;
-    // The shell supplies the shared RAW folder to additional tabs and assigns
-    // a single writer for the application's startup preferences.
+    // The shell supplies each tab's originating RAW folder and keeps Gallery
+    // as the single writer for application startup preferences.
     m_WorkspaceAppStatePersistenceEnabled = restoreWorkspace;
     if (restoreWorkspace) LoadRawWorkspaceAppState();
     else m_RawWorkspaceAppStateLoaded = true;

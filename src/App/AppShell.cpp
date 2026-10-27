@@ -3466,6 +3466,14 @@ void AppShell::Shutdown() {
 #if defined(_WIN32)
     SetFramelessMainWindowCursorReleaseCallback({});
 #endif
+    // Capture the last active presentation before Gallery (the first workspace)
+    // flushes its settings. Never rely on callbacks from editor destruction.
+    if (m_Editor && !m_UiPerformanceCapture && !m_Editor->IsAutoBracketWorkspace()) {
+        if (const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
+            gallery && gallery->editor.get() != m_Editor)
+            gallery->editor->ApplyRawWorkspacePresentationPreferences(
+                m_Editor->GetRawWorkspacePresentationPreferences(), true);
+    }
     // Shared-pool work captures module-owned cancellation state while it
     // finishes. Join those tasks before any module begins clearing the state
     // they can still observe. Main-thread completions are discarded by the
@@ -3480,6 +3488,8 @@ void AppShell::Shutdown() {
         m_QueueRenderer.Shutdown();
     });
     runPhase("editor-shutdown", [&]() {
+        for (auto& workspace : m_ProjectWorkspaces)
+            workspace->editor->SetRawWorkspacePresentationPreferencesChangedHandler({});
         for (auto& workspace : m_ProjectWorkspaces) workspace->editor->Shutdown();
         for (auto& workspace : m_RetiredProjectWorkspaces) workspace->editor->Shutdown();
         m_RetiredProjectWorkspaces.clear();

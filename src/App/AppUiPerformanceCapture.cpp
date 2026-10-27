@@ -102,8 +102,9 @@ void AppShell::TickUiPerformanceCapture() {
         if(!ActivateProjectWorkspace(s.firstWorkspace)){s.failure="Could not activate fixture workspace";s.finished=true;m_IsRunning=false;return;}
         m_Editor->SetDocumentPersistenceEnabled(false);
         if ((s.qualityCapture || s.imageSurfaceCapture) && Raw::RawLoader::IsRawPath(s.project.u8string())) {
-            m_SharedRawWorkspaceRoot=s.project.parent_path();
-            SynchronizeRawWorkspaceFolder();
+            if (auto* workspace = FindProjectWorkspace(s.firstWorkspace))
+                workspace->sourceWorkspaceRoot = s.project.parent_path();
+            m_Editor->SetRawWorkspaceFolder(s.project.parent_path());
         }
         Probe::WatchEditor(m_Editor);
         s.loadQueued=(s.qualityCapture || s.imageSurfaceCapture)

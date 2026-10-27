@@ -133,6 +133,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGallerySimilarity.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGpuMemoryBudget.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspace.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawSourceFolders.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGalleryThumbnailPixels.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceStorage.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceManagedGraph.cpp"

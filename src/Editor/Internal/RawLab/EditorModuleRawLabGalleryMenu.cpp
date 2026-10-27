@@ -5,7 +5,7 @@
 bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) {
     const bool hasWorkspace = !m_RawWorkspace.workspaceRoot.empty();
     bool workspaceChanged = false;
-    if (ImGui::MenuItem("Open RAW Folder...")) {
+    if (ImGui::MenuItem("Add Source Folder...")) {
         OpenRawWorkspaceFolderDialog();
         workspaceChanged = true;
     }
@@ -14,8 +14,7 @@ bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) 
     }
     if (includeFilmstripSort) {
         ImGui::Separator();
-        const std::string workspaceKey =
-            m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        const std::string workspaceKey = GetRawWorkspaceGalleryScopeKey();
         const auto organization =
             m_RawWorkspaceManualGroupings.find(workspaceKey);
         const auto currentSort =
@@ -25,8 +24,14 @@ bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) 
                     TimelineAll;
         if (ImGui::BeginMenu(
                 "Sort Filmstrip",
-                hasWorkspace &&
-                    CanEditRawWorkspaceFilmstripOrganization())) {
+                (hasWorkspace && CanEditRawWorkspaceFilmstripOrganization()) ||
+                    (m_PermanentGalleryWorkspace && !GetRawWorkspaceSourceFolders().empty()))) {
+            if (m_PermanentGalleryWorkspace && ImGui::MenuItem("All Folders", nullptr,
+                    IsRawWorkspaceAllFolders() && !IsRawWorkspaceFolderBrowserOpen(),
+                    !GetRawWorkspaceSourceFolders().empty())) {
+                m_RawWorkspaceGalleryContentMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
+                SetRawWorkspaceAllFolders(true);
+            }
             constexpr std::array sortModes {
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineAll,
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineByFolder,
@@ -49,7 +54,8 @@ bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) 
                         Stack::RawWorkspace::
                             RawGalleryFilmstripSortModeLabel(mode),
                         nullptr,
-                        currentSort == mode)) {
+                        !IsRawWorkspaceAllFolders() && currentSort == mode)) {
+                    m_RawGallerySourceFoldersOpen = false;
                     SetRawWorkspaceFilmstripSortMode(mode);
                 }
             }

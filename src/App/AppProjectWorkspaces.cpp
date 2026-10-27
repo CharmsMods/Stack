@@ -12,10 +12,9 @@ void AppShell::InitializeProjectWorkspaces() {
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
     workspace->rootTab = static_cast<int>(Stack::Workspace::Id::Raw);
     BindWorkspaceNotifications(*workspace);
-    workspace->editor->Initialize(m_Window, m_Appearance.get());
     workspace->editor->SetPermanentGalleryWorkspace(true);
+    workspace->editor->Initialize(m_Window, m_Appearance.get());
     workspace->editor->EnterRawWorkspaceRootTab();
-    m_SharedRawWorkspaceRoot = workspace->editor->GetRawWorkspaceState().workspaceRoot;
     m_ActiveProjectWorkspace = workspace->id;
     m_GalleryWorkspaceId = workspace->id;
     m_CurrentTabId = workspace->rootTab;
@@ -37,13 +36,24 @@ AppShell::LibraryToEditorProjectLoadPhase AppShell::ActiveProjectLoadPhase() con
 }
 
 std::uint64_t AppShell::CreateProjectWorkspace() {
+    // An unscoped new document has no arbitrary first-folder owner in All photos.
+    if (m_ActiveProjectWorkspace == m_GalleryWorkspaceId)
+        return CreateProjectWorkspace(m_Editor && !m_Editor->IsRawWorkspaceAllFolders() &&
+            !m_Editor->IsRawWorkspaceFolderBrowserOpen()
+            ? m_Editor->GetRawWorkspaceState().workspaceRoot : std::filesystem::path{});
+    const auto* owner = FindProjectWorkspace(m_ActiveProjectWorkspace);
+    return CreateProjectWorkspace(owner ? owner->sourceWorkspaceRoot : std::filesystem::path{});
+}
+
+std::uint64_t AppShell::CreateProjectWorkspace(const std::filesystem::path& sourceWorkspaceRoot) {
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
+    workspace->sourceWorkspaceRoot = sourceWorkspaceRoot;
     BindWorkspaceNotifications(*workspace);
     workspace->editor->Initialize(m_Window, m_Appearance.get(), false);
     workspace->editor->SetPermanentGalleryWorkspace(false);
     workspace->editor->EnterRawWorkspaceRootTab();
     ConfigureWorkspaceEditor(*workspace->editor);
-    workspace->editor->SetRawWorkspaceFolder(m_SharedRawWorkspaceRoot);
+    workspace->editor->SetRawWorkspaceFolder(sourceWorkspaceRoot);
     const auto id = workspace->id;
     m_ProjectWorkspaces.push_back(std::move(workspace));
     return id;
@@ -52,6 +62,21 @@ std::uint64_t AppShell::CreateProjectWorkspace() {
 void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
     if (m_DiagnosticQueueCurrent) editor.SetDocumentPersistenceEnabled(false);
     auto* owner = &editor;
+    // New tabs inherit current presentation defaults, not a stale disk copy.
+    // This value-only snapshot contains no browse scope or project state.
+    if (const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
+        gallery && gallery->editor.get() != owner)
+        editor.ApplyRawWorkspacePresentationPreferences(
+            gallery->editor->GetRawWorkspacePresentationPreferences());
+    editor.SetRawWorkspacePresentationPreferencesChangedHandler(
+        [this, owner](const EditorModule::RawWorkspacePresentationPreferences& preferences) {
+            if (m_UiPerformanceCapture || owner != m_Editor || owner->IsAutoBracketWorkspace()) return;
+            const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
+            if (!gallery || gallery->editor.get() == owner) return;
+            // Gallery remains the sole writer. Hidden editors cannot replace
+            // global defaults or leak their source-folder context into them.
+            gallery->editor->ApplyRawWorkspacePresentationPreferences(preferences, true);
+        });
     editor.SetProjectVersionHandler([this](const std::filesystem::path& path) {
         for (const auto& workspace : m_ProjectWorkspaces) {
             if (Stack::Project::SameProjectPath(path,
@@ -74,9 +99,6 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
         if (owner == m_Editor)
             QueueWorkspaceTabAction(WorkspaceTabAction::Select, m_GalleryWorkspaceId);
     });
-    editor.SetRawWorkspaceFolderChangedHandler([this](const std::filesystem::path& root) {
-        m_SharedRawWorkspaceRoot = root;
-    });
     editor.SetRawGalleryQueueRequestHandler(
         [this](const Stack::RawGalleryQueue::Request& request) {
             return m_Queue.Model().AddGalleryRequest(request);
@@ -94,6 +116,9 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
                 if (selection.bracketSources.size() < 2u) return;
                 GalleryTabOpen target;
                 target.kind = GalleryTabOpen::Kind::Bracket;
+                // Brackets spanning folders use the first selected input's owner.
+                // Resolve now: Gallery may navigate while this open is queued.
+                target.sourceWorkspaceRoot = owner->ResolveRawWorkspaceSourceFolder(selection.bracketSources.front());
                 target.bracketSources = std::move(selection.bracketSources);
                 m_GalleryTabOpenQueue.push_back(std::move(target));
             } else {
@@ -103,6 +128,9 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
                         ? GalleryTabOpen::Kind::Project
                         : GalleryTabOpen::Kind::Source;
                     target.path = item.path;
+                    target.sourceWorkspaceRoot = item.sourceWorkspaceRoot.empty()
+                        ? owner->ResolveRawWorkspaceSourceFolder(item.path)
+                        : item.sourceWorkspaceRoot;
                     m_GalleryTabOpenQueue.push_back(std::move(target));
                 }
             }
@@ -164,6 +192,19 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     const auto next = std::find_if(m_ProjectWorkspaces.begin(), m_ProjectWorkspaces.end(),
         [id](const auto& workspace) { return workspace->id == id; });
     if (next == m_ProjectWorkspaces.end() || !m_Editor->FinishWorkspaceInteraction()) return false;
+    std::filesystem::path gallerySourceRoot;
+    if (id == m_GalleryWorkspaceId) {
+        if (const auto* outgoing = FindProjectWorkspace(m_ActiveProjectWorkspace))
+            gallerySourceRoot = outgoing->sourceWorkspaceRoot;
+        else {
+            // Closing the active pill retires it before selecting its neighbor.
+            for (const auto& outgoing : m_RetiredProjectWorkspaces)
+                if (outgoing->id == m_ActiveProjectWorkspace) {
+                    gallerySourceRoot = outgoing->sourceWorkspaceRoot;
+                    break;
+                }
+        }
+    }
     if (m_ActiveProjectWorkspace != m_GalleryWorkspaceId)
         m_NavigationRail.lastEditingWorkspace = m_ActiveProjectWorkspace;
     if (m_ToolSwitcher.Open() || m_ToolSwitcher.cursorCaptured) CancelToolSwitcher();
@@ -195,6 +236,9 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     if (id != m_GalleryWorkspaceId && !m_Editor->IsViewMode())
         m_Editor->SetWorkspaceMode(Stack::Project::WorkspaceMode::Graph);
     if (id == m_GalleryWorkspaceId) {
+        // Centralize this for rail, direct, notification and retirement switches.
+        // Only Gallery navigates; the outgoing editor keeps its document and jobs.
+        if (!gallerySourceRoot.empty()) m_Editor->SetRawWorkspaceFolder(gallerySourceRoot);
         (*next)->rawCatalogRefreshPending = true;
         m_CurrentTabId = static_cast<int>(Stack::Workspace::Id::Raw);
         m_Editor->EnterRawWorkspaceRootTab();
@@ -297,7 +341,7 @@ void AppShell::TickProjectWorkspaces() {
         if (leavingCurrent && !m_Editor->FinishWorkspaceInteraction()) return;
         if (action == WorkspaceTabAction::Create && !m_GalleryTabOpenQueue.empty()) {
             if (m_Editor->FinishWorkspaceInteraction()) {
-                const auto createdId = CreateProjectWorkspace();
+                const auto createdId = CreateProjectWorkspace(m_GalleryTabOpenQueue.front().sourceWorkspaceRoot);
                 if (ActivateProjectWorkspace(createdId)) {
                     m_PendingGalleryTabOpen =
                         std::move(m_GalleryTabOpenQueue.front());
@@ -366,14 +410,19 @@ void AppShell::FinishProjectWorkspaceRetirement() {
     m_PendingWorkspaceRetirement = 0;
     const auto index = static_cast<std::size_t>(current - m_ProjectWorkspaces.begin());
     const bool wasActive = retiringId == m_ActiveProjectWorkspace;
+    if (wasActive && !m_UiPerformanceCapture && !(*current)->editor->IsAutoBracketWorkspace()) {
+        if (const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId))
+            gallery->editor->ApplyRawWorkspacePresentationPreferences(
+                (*current)->editor->GetRawWorkspacePresentationPreferences(), true);
+    }
     m_WorkspaceCompositor.ForgetProjectPreview(retiringId);
     if (m_NavigationRail.previewProject == retiringId) CancelProjectPillPreview();
     auto retiring = std::move(*current);
     m_NotificationStore->InvalidateOwner(retiring->id);
     auto* retiringEditor = retiring->editor.get();
     retiring->loadTransition.Reset();
+    retiringEditor->SetRawWorkspacePresentationPreferencesChangedHandler({});
     retiringEditor->SetWorkspaceAppStatePersistenceEnabled(false);
-    retiringEditor->SetRawWorkspaceFolderChangedHandler({});
     m_ProjectWorkspaces.erase(current);
     retiring->editor->SetWorkspaceDetachedWindowsVisible(false);
     if (!retiring->editor->IsAutoBracketWorkspace()) retiring->editor->SetDocumentPersistenceEnabled(false);

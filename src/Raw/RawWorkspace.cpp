@@ -1,6 +1,7 @@
 #include "Raw/RawViewportSettings.h"
 #include "Raw/RawGalleryInputPolicy.h"
 #include "RawWorkspace.h"
+#include "Raw/RawSourceFolders.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
 
 #include "RawLoader.h"
@@ -2010,6 +2011,10 @@ bool SaveAppStateIfCurrent(
     root["schemaVersion"] = 2;
     root["lastWorkspaceRoot"] = state.lastWorkspaceRoot.empty() ? nlohmann::json() : nlohmann::json(state.lastWorkspaceRoot.u8string());
     root["recentWorkspaces"] = std::move(recent);
+    root["sourceFolders"] = nlohmann::json::array();
+    for (const auto& folder : NormalizeSourceFolders(state.registeredSourceFolders))
+        root["sourceFolders"].push_back(folder.u8string());
+    root["allFolders"] = state.allSourceFolders;
     if (state.controlsPanelWidth > 0.0f && std::isfinite(state.controlsPanelWidth)) {
         root["controlsPanelWidth"] = state.controlsPanelWidth;
     }
@@ -2075,6 +2080,23 @@ bool LoadAppState(const std::filesystem::path& path, AppState& outState, std::st
         if (!lastRoot.empty()) {
             outState.lastWorkspaceRoot = NormalizePath(std::filesystem::u8path(lastRoot));
         }
+        // This optional preference extends app-state schema 2, not the project
+        // document format. Recent history is not an authorization to register
+        // every previously visited folder.
+        const auto* folders = FindJsonMember(root, "sourceFolders");
+        if (folders && folders->is_array()) {
+            for (const auto& item : *folders)
+                if (item.is_string() && !item.get_ref<const std::string&>().empty())
+                    outState.registeredSourceFolders.push_back(
+                        std::filesystem::u8path(item.get<std::string>()));
+        } else if (!outState.lastWorkspaceRoot.empty()) {
+            outState.registeredSourceFolders.push_back(outState.lastWorkspaceRoot);
+        }
+        outState.registeredSourceFolders = NormalizeSourceFolders(
+            outState.registeredSourceFolders);
+        const auto* allFolders = FindJsonMember(root, "allFolders");
+        outState.allSourceFolders = allFolders && allFolders->is_boolean() &&
+            allFolders->get<bool>() && !outState.registeredSourceFolders.empty();
         const nlohmann::json* controlsPanelWidth = FindJsonMember(root, "controlsPanelWidth");
         if (controlsPanelWidth != nullptr && controlsPanelWidth->is_number()) {
             const float width = controlsPanelWidth->get<float>();

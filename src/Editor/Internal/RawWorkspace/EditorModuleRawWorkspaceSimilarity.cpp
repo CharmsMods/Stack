@@ -9,7 +9,7 @@
 const std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>&
 EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     if (m_RawWorkspaceFilmstripStacksCacheWorkspaceKey == workspaceKey &&
         m_RawWorkspaceFilmstripStacksCacheContentRevision == m_RawWorkspaceNavigatorRevision &&
         m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration ==
@@ -106,7 +106,7 @@ bool EditorModule::MergeRawWorkspaceFilmstripStackMembers(
         return false;
     }
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     if (workspaceKey.empty()) return false;
     auto& grouping = m_RawWorkspaceManualGroupings[workspaceKey];
     if (!Stack::RawWorkspace::MergeRawGalleryManualStackMembers(
@@ -137,7 +137,7 @@ bool EditorModule::ReorderRawWorkspaceFilmstripSources(
         return false;
     }
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     if (workspaceKey.empty()) return false;
 
     std::vector<std::string> catalogKeys;
@@ -179,9 +179,16 @@ bool EditorModule::ReorderRawWorkspaceFilmstripSources(
 
 void EditorModule::SetRawWorkspaceFilmstripSortMode(
     Stack::RawWorkspace::RawGalleryFilmstripSortMode mode) {
-    if (!CanEditRawWorkspaceFilmstripOrganization()) return;
+    const bool leavingAggregate = m_RawWorkspace.allSourceFolders;
+    if (leavingAggregate) {
+        SetRawWorkspaceAllFolders(false);
+        if (m_RawWorkspace.allSourceFolders) return;
+    }
+    // A sort choice from All Folders first returns to the last native root.
+    // Its grouping has just been loaded, even while that root's rescan runs.
+    if (!leavingAggregate && !CanEditRawWorkspaceFilmstripOrganization()) return;
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     if (workspaceKey.empty()) return;
     auto& organization = m_RawWorkspaceManualGroupings[workspaceKey];
     if (organization.sortMode == mode) return;
@@ -201,7 +208,7 @@ void EditorModule::SetRawWorkspaceFilmstripSortMode(
 
 void EditorModule::NormalizeRawWorkspaceFilmstripOrganization() {
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     const auto found = m_RawWorkspaceManualGroupings.find(workspaceKey);
     if (workspaceKey.empty() || found == m_RawWorkspaceManualGroupings.end()) {
         return;
@@ -241,7 +248,7 @@ bool EditorModule::DetachRawWorkspaceFilmstripStackMember(
     if (current == stacks.end()) return false;
 
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     auto& grouping = m_RawWorkspaceManualGroupings[workspaceKey];
     if (!Stack::RawWorkspace::DetachRawGalleryManualStackMember(
             grouping, sourceKey)) {
@@ -271,7 +278,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
     }
 
     const std::string workspaceKey =
-        m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
+        GetRawWorkspaceGalleryScopeKey();
     const std::uint64_t generation =
         m_RawWorkspaceSimilarityGeneration.fetch_add(
             1,
@@ -335,9 +342,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                             result,
                             m_RawWorkspaceSimilarityGeneration.load(
                                 std::memory_order_relaxed),
-                            m_RawWorkspace.workspaceRoot
-                                .lexically_normal()
-                                .generic_string());
+                            GetRawWorkspaceGalleryScopeKey());
                     if (current) {
                         m_RawWorkspaceSimilarityPublishedGeneration =
                             result.generation;

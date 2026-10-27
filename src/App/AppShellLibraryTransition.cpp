@@ -290,6 +290,13 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
             firstRenderReady;
         if (readyForReveal) {
             transition.applySucceeded = true;
+            // Resolve only after this load was adopted. Save As and unrelated
+            // file-name changes must never retarget a project's Gallery return.
+            if (const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId)) {
+                workspace.sourceWorkspaceRoot = gallery->editor->ResolveRawWorkspaceSourceFolder(
+                    editor->GetCurrentProjectFileName());
+                editor->SetRawWorkspaceFolder(workspace.sourceWorkspaceRoot);
+            }
             if (transition.applyFinishedAt <= 0.0) {
                 transition.applyFinishedAt = ImGui::GetTime();
             }

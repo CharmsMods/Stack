@@ -438,6 +438,8 @@ void EditorModule::QueueRawWorkspaceThumbnailRepair(
     item.fileSizeBytes = sourceIt->fileSizeBytes;
     item.modifiedTimeTicks = sourceIt->modifiedTimeTicks;
     item.fingerprint = sourceIt->fingerprint;
+    item.sourceWorkspaceRoot = sourceIt->sourceWorkspaceRoot.empty() ? m_RawWorkspace.workspaceRoot : sourceIt->sourceWorkspaceRoot;
+    item.sourceRelativePathKey = sourceIt->sourceRelativePathKey;
 
     bool queuedOnActiveWorker = false;
     {

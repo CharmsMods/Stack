@@ -3432,7 +3432,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryInfoPanel() {
 
     if (!m_RawWorkspaceLabFocusedProjectPath.empty()) {
         Stack::Project::ProjectRecord project;
-        if (!Stack::Project::ProjectIndex::Get().FindByPath(
+        if (!FindRawWorkspaceGalleryProjectRecord(
                 m_RawWorkspaceLabFocusedProjectPath,
                 project)) {
             infoRow("PROJECT", m_RawWorkspaceLabFocusedProjectName);
@@ -3511,7 +3511,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryImagePreviewPanel() {
 
     if (!projectPath.empty()) {
         Stack::Project::ProjectRecord record;
-        if (Stack::Project::ProjectIndex::Get().FindByPath(
+        if (FindRawWorkspaceGalleryProjectRecord(
                 projectPath, record)) {
             if (displayName.empty()) displayName = record.displayName;
             for (const Stack::Project::IndexedProjectSource& source :

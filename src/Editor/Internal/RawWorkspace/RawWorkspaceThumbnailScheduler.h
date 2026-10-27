@@ -27,6 +27,8 @@ struct RawWorkspaceThumbnailWorkItem {
     std::uintmax_t fileSizeBytes = 0;
     std::int64_t modifiedTimeTicks = 0;
     std::string fingerprint;
+    std::filesystem::path sourceWorkspaceRoot;
+    std::string sourceRelativePathKey;
 };
 
 class RawWorkspaceThumbnailScheduler {

@@ -29,11 +29,13 @@ struct GalleryFolderTree {
     std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t queueRevision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t serial = 0;
+    bool allSourceFolders = false;
     // Rebuild only for a catalog/queue publication. No filesystem access.
     void Prepare(const std::filesystem::path& workspace,
         const RawWorkspace::GalleryPresentation& all,
         const std::vector<RawWorkspace::GalleryProjectView>& brackets,
-        std::uint64_t catalogRevision, std::uint64_t bracketRevision);
+        std::uint64_t catalogRevision, std::uint64_t bracketRevision,
+        bool aggregate = false, const std::vector<std::filesystem::path>& sourceRoots = {});
     const Folder* Find(const std::string& key) const;
 
 private:

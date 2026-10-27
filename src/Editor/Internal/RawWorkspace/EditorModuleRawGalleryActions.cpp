@@ -46,6 +46,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
     context.foregroundBusy = !editControlsOnly &&
         (GetProjectFileCommandContext().busy || IsBracketingPresentationActive());
     context.previewOnly = Stack::Workspace::IsPreview();
+    context.aggregateView = m_RawWorkspace.allSourceFolders;
     std::unordered_map<std::string, const Stack::RawWorkspace::SourceRecord*> sourcesByKey;
     std::unordered_map<std::string, const Stack::RawWorkspace::SourceRecord*> sourcesByFingerprint;
     if (!editControlsOnly && (m_RawWorkspace.selectedSourceKeys.size() > 1u || !m_RawWorkspaceLabSelectedProjectPaths.empty())) {
@@ -118,7 +119,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
         item.protectedProject = !editControlsOnly && (Stack::Project::SameProjectPath(path, m_Project->storePath) ||
             (m_ProjectRemovalGuard && m_ProjectRemovalGuard(path)));
         Stack::Project::ProjectRecord record;
-        if (Stack::Project::ProjectIndex::Get().FindByPath(path, record)) {
+        if (FindRawWorkspaceGalleryProjectRecord(path, record)) {
             item.canCopyEdits = record.hasRawWorkspaceRecipe || record.multiFrameProject;
             item.canVersion = record.format == Stack::Project::IndexedProjectFormat::CurrentBundle &&
                 record.storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle &&
@@ -126,7 +127,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
             if (!editControlsOnly) {
                 for (const auto& indexedSource : record.sources) {
                     std::filesystem::path original = indexedSource.originalPath;
-                    if (!indexedSource.fingerprint.empty()) {
+                    if (original.empty() && !indexedSource.fingerprint.empty()) {
                         const auto source = sourcesByFingerprint.find(indexedSource.fingerprint);
                         if (source != sourcesByFingerprint.end()) original = source->second->absolutePath;
                     }
@@ -160,6 +161,7 @@ void EditorModule::RefreshRawGalleryAfterFileMove(const std::filesystem::path& r
 bool EditorModule::ExecuteRawGalleryAction(Action action,
     const Stack::RawGalleryActions::Context& captured) {
     auto context = captured;
+    context.aggregateView = m_RawWorkspace.allSourceFolders;
     if (!SameRoot(context.workspaceRoot, m_RawWorkspace.workspaceRoot) ||
         context.catalogGeneration != m_RawWorkspaceScanGeneration) {
         PostNotification(UiNotificationSeverity::Warning,

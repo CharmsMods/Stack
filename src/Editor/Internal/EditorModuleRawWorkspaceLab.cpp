@@ -855,12 +855,12 @@ void EditorModule::RenderRawWorkspaceLabUI() {
     }
     const bool galleryBrowser = m_PermanentGalleryWorkspace;
     if (galleryBrowser) {
-        if (RenderRawWorkspaceGalleryActionBar()) {
+        if (!IsRawWorkspaceFolderBrowserOpen() && RenderRawWorkspaceGalleryActionBar()) {
             ImGui::EndChild();
             ImGui::PopStyleVar(2);
             return;
         }
-        HandleRawGalleryActionShortcuts();
+        if (!IsRawWorkspaceFolderBrowserOpen()) HandleRawGalleryActionShortcuts();
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
         if (m_RawSectionPanelFrame != ImGui::GetFrameCount()) {
             const float navigationWidth = std::min(
@@ -1031,7 +1031,7 @@ void EditorModule::RenderRawWorkspaceLabUI() {
     ImGui::BeginChild("RawModuleWorkspace", ImVec2(0.0f, 0.0f), false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    if (galleryBrowser && m_RawWorkspaceLabUi.galleryWorkspaceGrid) {
+    if (galleryBrowser && (m_RawWorkspaceLabUi.galleryWorkspaceGrid || IsRawWorkspaceFolderBrowserOpen())) {
         m_RawWorkspaceLabFilmstripDrawerPointerInside = false;
         m_RawWorkspaceLabFilmstripDrawerInteractionRetained = false;
         m_RawWorkspaceGalleryPreviewHovered = false;

@@ -4,6 +4,7 @@
 #include "Animation/ControlMotion.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -23,6 +24,9 @@ struct ProjectWorkspace {
     Stack::Animation::ControlMotion pillMotion;
     std::shared_ptr<Stack::Project::ProjectSession> project;
     std::unique_ptr<EditorModule> editor;
+    // The source owning this project, not whichever folder Gallery browses now.
+    // An empty origin leaves Gallery's current scope unchanged on return.
+    std::filesystem::path sourceWorkspaceRoot;
     int rootTab = 5;
     ProjectLoadTransition loadTransition;
     bool rawCatalogRefreshPending = false;

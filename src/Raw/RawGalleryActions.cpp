@@ -8,6 +8,9 @@ Availability GetAvailability(const Context& context, Action action) {
     const auto disabled = [](const char* reason) { return Availability{false, reason}; };
     if (context.previewOnly) return disabled("Gallery actions are unavailable during the workspace preview.");
     if (context.items.empty()) return disabled("Select an image or project first.");
+    if (context.aggregateView && (action == Action::PasteEdits || action == Action::NewSavedVersion ||
+        action == Action::TrashProjects || action == Action::RevertProjects))
+        return disabled("Open the source folder to change its saved projects. All Folders is a combined browsing view.");
     const bool projectsOnly = std::all_of(context.items.begin(), context.items.end(),
         [](const Item& item) { return item.kind == ItemKind::Project; });
     const auto* focused = context.focusedIndex < context.items.size()

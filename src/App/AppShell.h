@@ -129,6 +129,7 @@ private:
     enum class WorkspaceTabAction { None, Select, Create, Close };
     void InitializeProjectWorkspaces();
     std::uint64_t CreateProjectWorkspace();
+    std::uint64_t CreateProjectWorkspace(const std::filesystem::path& sourceWorkspaceRoot);
     ProjectWorkspace* FindProjectWorkspace(std::uint64_t id) const;
     LibraryToEditorProjectLoadPhase ActiveProjectLoadPhase() const;
     void ConfigureWorkspaceEditor(EditorModule& editor);
@@ -136,10 +137,10 @@ private:
     void UpdateWorkspacePreferencesOwner();
     void TickAutoBracketWorkspaces();
     bool CloseAutoBracketWorkspace(std::uint64_t id);
-    std::filesystem::path m_SharedRawWorkspaceRoot;
     struct GalleryTabOpen {
         enum class Kind { Source, Project, Bracket } kind = Kind::Source;
         std::filesystem::path path;
+        std::filesystem::path sourceWorkspaceRoot;
         std::vector<std::filesystem::path> bracketSources;
         std::uint64_t workspaceId = 0;
     };

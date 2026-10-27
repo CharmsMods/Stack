@@ -32,6 +32,8 @@ Rebuildable MultiFrame cache readers turn malformed metadata, truncated payloads
 
 Keep catalog discovery and filtering separate from authoritative document storage. Publish catalog changes after successful writes and invalidate derived listings through the established mechanism. A Gallery refresh must not mutate open project data to make its display agree.
 
+The permanent Gallery owns the registered source folders and saved browsing scope. Each project tab retains its own source-folder provenance; navigating Gallery must not broadcast a new source root into other projects. All Folders is a derived browsing projection, not a storage root. Its root-qualified display keys must be converted back to the owning folder's native source keys before thumbnail work, and its combined catalog must never be persisted into one folder. Capture the origin when queuing an open rather than consulting the later active folder. Unavailable registered folders remain registered.
+
 Only the current project format is supported. The graph reader accepts schema 16 and rejects obsolete generations transactionally, preserving the live project. Do not add old-project migrations or legacy execution modes. Advance the schema when saved semantics change rather than silently reinterpreting obsolete data.
 
 Design paths, file access and capability handling for the supported Windows audience. Use application configuration and platform helpers rather than this machine's folders, hardware or developer-installed dependencies.

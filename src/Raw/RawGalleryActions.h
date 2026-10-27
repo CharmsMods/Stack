@@ -47,6 +47,7 @@ struct Context {
     bool hasEditClipboard = false;
     bool foregroundBusy = false;
     bool previewOnly = false;
+    bool aggregateView = false;
 };
 
 struct Availability {

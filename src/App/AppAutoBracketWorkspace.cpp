@@ -56,7 +56,9 @@ void AppShell::TickAutoBracketWorkspaces() {
         const auto& root = worker.GetRawWorkspaceState().workspaceRoot;
         for (auto& workspace : m_ProjectWorkspaces)
             if (workspace->editor.get() != &worker && !workspace->editor->IsAutoBracketWorkspace() &&
-                workspace->editor->GetRawWorkspaceState().workspaceRoot == root)
+                (workspace->editor->IsRawWorkspaceAllFolders() ||
+                 workspace->editor->GetRawWorkspaceState().workspaceRoot == root ||
+                 Stack::Project::SameProjectPath(workspace->editor->GetRawWorkspaceState().workspaceRoot, root)))
                 workspace->rawCatalogRefreshPending = true;
     };
     for (auto& workspace : m_ProjectWorkspaces) {
@@ -91,11 +93,15 @@ void AppShell::TickAutoBracketWorkspaces() {
     }
     if (workerExists) return;
     auto& scheduler = *gallery->editor;
+    // Aggregate browsing must not launch a mixed-folder automatic batch under
+    // the remembered anchor root. Existing root-owned workers ticked above.
+    if (scheduler.IsRawWorkspaceAllFolders() || scheduler.IsRawWorkspaceFolderBrowserOpen()) return;
     scheduler.SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
     scheduler.TickAutoBracketing(blocked || foregroundBusy);
     if (blocked || foregroundBusy || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
 
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
+    workspace->sourceWorkspaceRoot = galleryRoot;
     workspace->editor->Initialize(m_Window, m_Appearance.get(), false);
     ConfigureWorkspaceEditor(*workspace->editor);
     workspace->editor->SetRawWorkspaceFolder(galleryRoot);
