@@ -27,6 +27,7 @@ uniform float detailPreference;
 uniform vec4 supportGeometry; // reference origin, fixed raw step, categorical mode
 uniform ivec2 supportSize;
 uniform vec2 supportDomain; // complete Bayer reference domain, not source extent
+uniform int depthSupportOffset; // packed per-output veto, -1 when not required
 bool supported(vec2 xy,ivec4 region) {
     if(supportGeometry.w==0)return true;
     if(supportGeometry.w!=2||any(isnan(xy))||any(isinf(xy))||
@@ -52,6 +53,7 @@ void main() {
     ivec2 outp=ivec2(gl_GlobalInvocationID.xy);
     if(any(greaterThanEqual(outp,outputSize)))return;
     int outi=outp.y*outputSize.x+outp.x;
+    if(depthSupportOffset>=0&&data[depthSupportOffset+outi/4][outi%4]<=0)return;
     vec2 reference=target.xy+vec2(outp)*target.z;
     if(!supported(reference,region))return;
     vec4 m=mapped(reference);
@@ -109,7 +111,7 @@ bool GpuKernel::Begin(const Tile& t,std::string& error) {
         program_=GLHelpers::CreateComputeProgram(shader);
         if(program_) {
             const char* names[]={"outputSize","mapSize","target","mapGeometry","detailPreference","regionValue","colorValue",
-                "supportGeometry","supportSize","supportDomain"};
+                "supportGeometry","supportSize","supportDomain","depthSupportOffset"};
             for(std::size_t i=0;i<uniforms_.size();++i)uniforms_[i]=glGetUniformLocation(program_,names[i]);
         }
     }
@@ -135,20 +137,26 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
     const auto limit=std::min<std::size_t>(std::numeric_limits<int>::max(),
         std::size_t(std::numeric_limits<GLsizeiptr>::max())/sizeof(Vec4));
     const auto supportRecords=f.support.cells.size()/4+(f.support.cells.size()%4!=0);
+    const auto depthRecords=f.depthSupport.values.size()/4+(f.depthSupport.values.size()%4!=0);
     if(f.support.cells.size()>std::size_t(std::numeric_limits<int>::max())||
+       f.depthSupport.values.size()>std::size_t(std::numeric_limits<int>::max())||
        f.mapping.size()>limit||f.samples.size()>limit-f.mapping.size()||
-       supportRecords>limit-f.mapping.size()-f.samples.size()) {
+       supportRecords>limit-f.mapping.size()-f.samples.size()||
+       depthRecords>limit-f.mapping.size()-f.samples.size()-supportRecords) {
         error="Super-resolution input exceeds GPU addressable storage.";return false;
     }
     const auto mapBytes=f.mapping.size()*sizeof(Vec4),sampleBytes=f.samples.size()*sizeof(Vec4);
     const auto supportBytes=supportRecords*sizeof(Vec4);
+    const auto depthBytes=depthRecords*sizeof(Vec4),depthOffset=f.mapping.size()+f.samples.size()+supportRecords;
     // Keep orphaning streamed input storage: the preceding capture can still
     // be reading it. In-place reuse here would introduce an implicit GPU wait.
-    glBufferData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes+supportBytes,nullptr,GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes+supportBytes+depthBytes,nullptr,GL_DYNAMIC_DRAW);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,mapBytes,f.mapping.data());
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,mapBytes,sampleBytes,f.samples.data());
     if(supportBytes)glBufferSubData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes,
         f.support.cells.size()*sizeof(float),f.support.cells.data());
+    if(depthBytes)glBufferSubData(GL_SHADER_STORAGE_BUFFER,depthOffset*sizeof(Vec4),
+        f.depthSupport.values.size()*sizeof(float),f.depthSupport.values.data());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,input_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,output_);
     glUseProgram(program_);
@@ -163,6 +171,7 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
         float(f.support.cellStepRawPixels),float(f.support.mode));
     glUniform2i(uniforms_[8],f.support.width,f.support.height);
     glUniform2f(uniforms_[9],float(f.support.rawWidth),float(f.support.rawHeight));
+    glUniform1i(uniforms_[10],f.depthSupportRequired?int(depthOffset):-1);
     glDispatchCompute((t.width+7)/8,(t.height+7)/8,1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
     return Check(error);

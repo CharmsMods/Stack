@@ -1,4 +1,5 @@
 #include "../HdrColorFusion.h"
+#include "../CaptureCorrespondence.h"
 #include "Reconstruction.h"
 #include "../PresentationEvidence.h"
 #include "Preparation.h"
@@ -179,15 +180,18 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     const auto sourceTile=data.sources[data.origin].frame.tileRawPixels;
     const auto fallbackBytes=std::uint64_t(sourceTile)*sourceTile*(groups*(sizeof(Observation)+32)+80);
     Sr::MemoryRequirements requirements;
+    const bool depthSupport=std::any_of(data.sources.begin(),data.sources.end(),
+        [&](const PreparedSource& source){return &source!=&data.sources[data.origin]&&HasCaptureDepthSupport(source);});
     requirements.residentBytes=std::uint64_t(data.width)*data.height*20+analysisBytes;
     requirements.outputBytes=pixels*28;
-    requirements.workingBytes=fallbackBytes+128ull*1024*1024+24+
+    requirements.workingBytes=fallbackBytes+128ull*1024*1024+24+(depthSupport?24:0)+
         result.analysis->guideEv.capacity()*sizeof(float)+p.guideEv.size()*sizeof(unsigned);
     requirements.sourceTileBytes=std::uint64_t(sourceTile)*sourceTile*9;
     requirements.preferredCacheTiles=data.sources.size()*4+4;
     // The cropped native reliability mask is no larger than a production
     // output tile (1x/2x, minimum side32). Include CPU/GPU copies and tail padding.
-    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4+8;
+    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4+8+
+        (depthSupport?8:0); // CPU/GPU copies of the conditional per-output depth veto
     const auto memoryPlan=Sr::PlanMemory(requirements,request.memoryBudgetBytes,
         request.automaticMemoryBudget,Mfd::QueryPhysicalMemorySnapshot());
     if(!memoryPlan.fits){error=memoryPlan.message;return false;}

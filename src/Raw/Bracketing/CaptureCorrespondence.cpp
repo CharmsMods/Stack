@@ -22,6 +22,18 @@ bool HasCurrentCaptureReliability(const PreparedSource& source) {
     return source.reliability&&source.reliabilityMotionRevision==source.motionRevision&&
         source.reliabilityScale==source.scale&&source.reliabilityScaleVariance==source.scaleVariance;
 }
+bool HasCaptureDepthSupport(const PreparedSource& source) {
+    return source.depthSupport&&source.depthSupport->width&&source.depthSupport->height&&
+        source.frame.activeExtent.width&&source.frame.activeExtent.height&&!source.depthSupport->rejected.empty();
+}
+bool CaptureDepthRejects(const PreparedSource& source,Mfd::RawCoordinate point,bool reference) {
+    if(reference||!HasCaptureDepthSupport(source)||!std::isfinite(point.x)||!std::isfinite(point.y))return false;
+    const auto& depth=*source.depthSupport;
+    const auto x=unsigned(std::clamp(point.x*depth.width/source.frame.activeExtent.width,0.,double(depth.width-1)));
+    const auto y=unsigned(std::clamp(point.y*depth.height/source.frame.activeExtent.height,0.,double(depth.height-1)));
+    const auto p=std::size_t(y)*depth.width+x;
+    return p<depth.rejected.size()&&depth.rejected[p];
+}
 bool BuildCaptureSupportMask(const PreparedSource& source,Mfd::RawCoordinate first,
     Mfd::RawCoordinate last,bool reference,CaptureSupportMask& mask,
     const std::function<bool()>& cancel,std::string& error) {
@@ -94,14 +106,7 @@ CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source
         result.confidence=std::min(std::clamp(std::max(reliability,
             kUncertainCaptureReliability),0.,1.),refinementConfidence);
     } else result=global(source.alignmentDiagnostic.localApplied?0:1);
-    if(result.confidence>0&&source.depthSupport&&source.depthSupport->width&&source.depthSupport->height&&
-       source.frame.activeExtent.width&&source.frame.activeExtent.height) {
-        const auto& depth=*source.depthSupport;
-        const auto x=unsigned(std::clamp(point.x*depth.width/source.frame.activeExtent.width,0.,double(depth.width-1)));
-        const auto y=unsigned(std::clamp(point.y*depth.height/source.frame.activeExtent.height,0.,double(depth.height-1)));
-        const auto p=std::size_t(y)*depth.width+x;
-        if(p<depth.rejected.size()&&depth.rejected[p])result.confidence=0;
-    }
+    if(result.confidence>0&&CaptureDepthRejects(source,point))result.confidence=0;
     return result;
 }
 }

@@ -41,6 +41,14 @@ bool Supports(const CaptureSupportMask& s,float x,float y) {
     const auto index=std::size_t(v)*s.width+std::size_t(u);
     return index<s.cells.size()&&s.cells[index]==1;
 }
+bool ValidDepthSupport(const Tile& t,const FrameRegion& f) {
+    const auto& depth=f.depthSupport;
+    if(!f.depthSupportRequired)return !depth.width&&!depth.height&&!depth.originX&&!depth.originY&&!depth.step&&depth.values.empty();
+    if(depth.width!=t.width||depth.height!=t.height||depth.originX!=t.originX||
+       depth.originY!=t.originY||depth.step!=t.step||depth.values.size()!=t.pixels.size())return false;
+    for(const float value:depth.values)if(value!=0&&value!=1)return false;
+    return true;
+}
 }
 bool Validate(const Tile& t,const FrameRegion& f,std::string& error) {
     if(!t.width||!t.height||t.pixels.size()!=std::size_t(t.width)*t.height||
@@ -48,7 +56,8 @@ bool Validate(const Tile& t,const FrameRegion& f,std::string& error) {
        f.width<=0||f.height<=0||f.samples.size()!=std::size_t(f.width)*f.height||
        f.mapWidth<2||f.mapHeight<2||f.mapping.size()!=std::size_t(f.mapWidth)*f.mapHeight||
        !(f.mapStep>0)||!std::isfinite(f.mapStep)||!std::isfinite(f.mapOriginX)||!std::isfinite(f.mapOriginY)||
-       !std::isfinite(f.detailPreference)||f.detailPreference<.1f||f.detailPreference>1||!ValidSupport(f)) {
+       !std::isfinite(f.detailPreference)||f.detailPreference<.1f||f.detailPreference>1||
+       !ValidSupport(f)||!ValidDepthSupport(t,f)) {
         error="Invalid super-resolution tile or capture region.";return false;
     }
     return true;
@@ -70,6 +79,8 @@ Vec4 Map(const FrameRegion& f,float x,float y) {
 }
 }
 void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y,PixelAccumulator& p) {
+    const auto output=std::size_t(y)*tile.width+x;
+    if(f.depthSupportRequired&&(output>=f.depthSupport.values.size()||f.depthSupport.values[output]!=1))return;
     if(f.supportRequired&&f.support.mode==CaptureSupportMask::Mode::NotRequired)return;
     if(!Supports(f.support,tile.originX+x*tile.step,tile.originY+y*tile.step))return;
     const auto m=Map(f,tile.originX+x*tile.step,tile.originY+y*tile.step);

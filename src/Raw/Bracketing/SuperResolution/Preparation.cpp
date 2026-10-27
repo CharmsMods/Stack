@@ -23,6 +23,23 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
     if(!BuildCaptureSupportMask(source,{tile.originX,tile.originY},
         {tile.originX+(tile.width-1)*tile.step,tile.originY+(tile.height-1)*tile.step},
         reference,out.support,cancel,error))return false;
+    auto& depth=out.depthSupport;
+    out.depthSupportRequired=!reference&&HasCaptureDepthSupport(source);
+    depth.width=depth.height=0;depth.originX=depth.originY=depth.step=0;depth.values.clear();
+    if(out.depthSupportRequired) {
+        if(tile.width>depth.values.max_size()/tile.height) {
+            error="Super-resolution depth support exceeds addressable storage.";return false;
+        }
+        depth.values.resize(std::size_t(tile.width)*tile.height);
+        for(unsigned y=0;y<tile.height;++y) {
+            if(cancel&&cancel()){error="Canceled";return false;}
+            for(unsigned x=0;x<tile.width;++x)
+                depth.values[std::size_t(y)*tile.width+x]=CaptureDepthRejects(source,
+                    {tile.originX+x*tile.step,tile.originY+y*tile.step})?0.f:1.f;
+        }
+        depth.width=tile.width;depth.height=tile.height;
+        depth.originX=tile.originX;depth.originY=tile.originY;depth.step=tile.step;
+    }
     const int guideWidth=data.width/2,guideHeight=data.height/2;
     const auto signal=[&](int x,int y){return .18*std::exp2(analysis.guideEv[std::size_t(std::clamp(y,0,guideHeight-1))*guideWidth+std::clamp(x,0,guideWidth-1)]);};
     // Reuse this capture scratch region. Every sample and mapping entry below

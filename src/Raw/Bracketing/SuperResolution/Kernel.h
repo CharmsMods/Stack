@@ -27,6 +27,13 @@ struct Tile {
     // channels after either CPU or GPU accumulation; it is not sensor noise.
     std::vector<float> samplingConfidence;
 };
+struct OutputDepthSupport {
+    unsigned width=0,height=0;
+    float originX=0,originY=0,step=0;
+    // Categorical veto at exact output points, evaluated once by the depth
+    // owner in CPU double precision. GPU consumers only index this field.
+    std::vector<float> values;
+};
 struct FrameRegion {
     int left=0,top=0,width=0,height=0;
     unsigned mapWidth=0,mapHeight=0;
@@ -42,6 +49,8 @@ struct FrameRegion {
     // The explicit requirement prevents a missing required mask becoming a bypass.
     bool supportRequired=false;
     CaptureSupportMask support;
+    bool depthSupportRequired=false;
+    OutputDepthSupport depthSupport;
 };
 struct ChannelResult { float value=0,variance=0,support=0; bool valid=false; float uncertainty=0; };
 bool Validate(const Tile&,const FrameRegion&,std::string&);
@@ -61,6 +70,6 @@ public:
 private:
     unsigned program_=0,input_=0,output_=0;
     std::size_t outputCapacity_=0;
-    std::array<int,10> uniforms_{};
+    std::array<int,11> uniforms_{};
 };
 }

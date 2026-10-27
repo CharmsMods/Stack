@@ -16,6 +16,10 @@ struct CaptureCorrespondence {
 bool HardCaptureRejection(std::uint16_t bits);
 void StampCaptureReliability(PreparedSource&);
 bool HasCurrentCaptureReliability(const PreparedSource&);
+bool HasCaptureDepthSupport(const PreparedSource&);
+// Unknown/missing depth evidence is not rejection. This categorical veto is
+// independent of photometric reliability and never applies to the reference.
+bool CaptureDepthRejects(const PreparedSource&,Mfd::RawCoordinate,bool reference=false);
 // Crops categorical reliability evidence without re-evaluating motion. Missing
 // or stale required evidence rejects; cancellation/resource failures are errors.
 bool BuildCaptureSupportMask(const PreparedSource&,Mfd::RawCoordinate first,

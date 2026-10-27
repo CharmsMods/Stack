@@ -174,8 +174,12 @@ coarse geometric mapping. A cropped, authoritative reference-grid veto is sample
 by cell before scalar or GPU accumulation; interpolating confidence at coarse
 corners must not bridge an interior hard rejection. Passing this veto does not
 promote correspondence or replace the existing corner checks. Required raster
-shape/resource errors fail the operation. Coarse motion/risk interpolation and
-depth-mask sampling remain separate limitations, not dense per-pixel validation.
+shape/resource errors fail the operation. When depth support exists, its owner
+also evaluates a conditional veto at exact output points using the established
+double-precision lookup; GPU consumers index that tile-bound mask rather than
+recomputing rational depth-cell boundaries. The no-depth and fixed-reference
+paths retain their existing behavior. Coarse motion/risk interpolation remains;
+these categorical vetoes are not dense geometric validation or a new depth model.
 
 Resolved noise profiles already include quantization in their offset variance.
 Do not add that component again in reconstruction, alignment or presentation;

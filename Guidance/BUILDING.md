@@ -69,8 +69,13 @@ for comparison, and keep the original RAW inputs unchanged.
   mapping. Actual preparation and scalar/GPU regressions verify interior hard
   rejections at 1x/2x while preserving neighboring valid support, existing corner
   gates, reference cases, partial cells and streamed-mask reuse. Independently
-  omitting either scalar or GPU veto makes the targeted regression fail. This
-  does not add dense geometric checks or fix separate depth-grid aliasing.
+  omitting either scalar or GPU veto makes the targeted regression fail.
+  Conditional per-output depth vetoes likewise preserve interior rejections
+  between coarse mapping points. Their actual preparation/scalar/GPU tests cover
+  global/local masks, 1x/2x, rational boundaries, fixed reference, missing or
+  mismatched required masks, cancellation and depth-to-no-depth reuse. These
+  checks do not run the depth estimator or establish camera-depth quality; the
+  geometric mapping and existing coarse-corner rejection remain unchanged.
 - Temporal GPU readback rejects non-finite arithmetic transactionally. An actual
   finite DNG-noise profile that overflows after gain propagation makes the
   regression fail against the former implementation; it is now diagnosed without
