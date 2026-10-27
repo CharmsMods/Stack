@@ -61,7 +61,8 @@ bool RefineBurstNoise(const ProcessingRequest& request,PreparedDataset& data,
             progress.completed=anchorIndex;progress.total=data.sources.size();
             progress.detail=Mfd::NoiseModelQualityName(anchor.noise.quality);progress.hasNoiseEstimate=true;
             for(unsigned b=0;b<16;++b)for(const auto& profile:anchor.noise.sites)
-                progress.noiseVariance[b]+=(profile.shotScale*b/15.+profile.offsetVariance+profile.quantizationVariance)*.25;
+                progress.noiseVariance[b]+=(profile.shotScale*b/15.+profile.offsetVariance+
+                    (profile.quantizationIncluded?0:profile.quantizationVariance))*.25;
             request.reportPresentation(progress);
         }
 

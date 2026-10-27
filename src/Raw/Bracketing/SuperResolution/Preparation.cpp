@@ -63,9 +63,11 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
             const auto site=layout.SiteAt(out.left+x,out.top+y);const auto i=static_cast<unsigned>(site);
             const auto& noise=source.noise.sites[i];const double gain=tap.comparisonGain*source.scale;
             s.x=float(tap.normalizedSample*gain);s.y=float(noise.shotScale*gain);
-            const double span=source.frame.calibration.usableSpanByCfaSite[i];
-            const double q=noise.quantizationIncluded?0:1/(12*std::max(1.,span*span));
-            s.z=float((noise.offsetVariance+noise.quantizationVariance+q)*gain*gain);
+            // Resolved offsets already contain quantization. Keep the same
+            // sensor variance as native temporal sampling, not a second copy
+            // of the code-step variance (or a newly inferred noise model).
+            const double offset=noise.offsetVariance+(noise.quantizationIncluded?0:noise.quantizationVariance);
+            s.z=float(offset*gain*gain);
             s.w=float(std::clamp((.995-tap.normalizedSample)/.045,0.,1.));s.w=s.w*s.w*(3-2*s.w);
         }
     }

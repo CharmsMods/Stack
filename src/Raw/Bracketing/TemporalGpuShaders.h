@@ -74,7 +74,10 @@ void main(){
         if(finiteValue(v)){pilot+=v;++used;}
     }
     vec4 center=tapAt(p);precise float product=center.x*center.y;
-    double point=(uint(center.z)&4u)!=0u?0.LF:double(product);
+    // A clipped center still supplies the established lower-bound pilot.
+    // Defective/repaired payloads are not sensor evidence, even when every
+    // same-CFA pilot tap is unavailable.
+    double point=(uint(center.z)&6u)!=0u?0.LF:double(product);
     pilot=max(0.LF,used>0?pilot/double(used):(finiteValue(point)?point:0.LF));
     double gx=0.LF,gy=0.LF,mean=0.LF;int count=0;
     bool border=any(lessThan(p,ivec2(4)))||any(greaterThanEqual(p+ivec2(4),sensor));

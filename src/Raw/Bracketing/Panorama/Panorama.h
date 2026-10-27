@@ -9,7 +9,7 @@ struct BracketingResult;
 struct Preview;
 struct CapturePreview;
 namespace Panorama {
-inline constexpr const char* Revision="panorama-v1";
+inline constexpr const char* Revision="panorama-v2-single-quantization";
 struct Camera {
     std::string frameId,name;
     unsigned width=0,height=0;

@@ -99,7 +99,7 @@ double Variance(const PreparedSource& source,Mfd::CfaSite site,
         propagated.effectiveDnStep*propagated.effectiveDnStep,1e-12,effective))
         return effective.gateVariance;
     return std::max(1e-12,(profile.shotScale*std::max(0.0,normalized)+
-        profile.offsetVariance+profile.quantizationVariance)*gain*gain);
+        profile.offsetVariance+(profile.quantizationIncluded?0:profile.quantizationVariance))*gain*gain);
 }
 
 bool BuildPyramid(const PreparedSource& source,const std::filesystem::path& directory,

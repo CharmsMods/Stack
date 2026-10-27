@@ -1620,6 +1620,7 @@ std::string BuildResultCacheKey(
             ? std::string("none")
             : EncodeOrderedIdentities(alternateIdentities) },
         { "alignment-mode", MfdAlignmentModeId(alignmentMode) },
+        { "motion-verification", "source-covariance-to-closure-v2" },
         { "fusion-engine", fusionBackend == MfdFusionBackend::SharedBurstV1
             ? kSharedBurstAlgorithmVersionId
             : kAlgorithmVersionId },

@@ -155,6 +155,21 @@ derivative disables only guide substitution, not source support or GPU execution
 The CPU scalar consumer and GPU Mapping layout must retain the same convention;
 update memory accounting and measurement cache identity with layout/semantic changes.
 
+Forward/reverse motion closure is measured in reference coordinates. Transport
+forward displacement covariance through the actual reverse-map Jacobian before
+combining it with reverse covariance. At a nonunique local-grid knot, require
+every supported one-sided linearization to pass the closure gate; keep the native
+source covariance unchanged for sampling. Missing derivative evidence leaves
+closure unverified without changing the public motion-sample contract. This is
+first-order marginal propagation, not a model of correlated forward/reverse fits.
+
+Resolved noise profiles already include quantization in their offset variance.
+Do not add that component again in reconstruction, alignment or presentation;
+unresolved inputs must honor their explicit inclusion flag. Defective and
+decoder-repaired payloads cannot supply a temporal noise pilot when neighboring
+pilot evidence is unavailable. Clipped but otherwise usable samples retain their
+separate lower-bound behavior.
+
 Use the [shared notifications subsystem](../../src/Notifications/README.md) for program-wide notices, activity and substantive decisions. Capture the initiating owner's notifier through asynchronous work and retain the feature's lifetime and generation checks. Report outcomes at accepted state transitions, rather than repeated drawing code. Keep messages short, put longer explanations in details, and leave settings forms and useful diagnostics beside their controls. Dismissing feedback does not resolve its cause, and notification history does not determine processing busy state.
 
 ## Account for the cost of the boundary

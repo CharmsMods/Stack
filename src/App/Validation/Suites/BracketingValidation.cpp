@@ -12,6 +12,7 @@
 #include "BracketingGuideCoordinatesValidation.h"
 #include "BracketingAnchorEvidenceValidation.h"
 #include "BracketingAnchorIntegrationValidation.h"
+#include "BracketingTemporalPilotValidation.h"
 #include "BracketingNeutralGuideValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSharpnessValidation.h"
@@ -152,6 +153,7 @@ bool ValidateBracketing() {
         }
         BracketingValidationGl gl;
         ValidateBracketingAnchorIntegration(gl.Executor(),directory/"anchor-integration");
+        ValidateBracketingTemporalPilot(gl.Executor(),directory/"temporal-pilot");
         const auto Request=[&gl](const std::vector<Raw::RawImageData>& raws,
             const std::filesystem::path& path,bool grouped=false) {
             auto request=MakeRequest(raws,path,grouped);

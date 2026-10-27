@@ -1,4 +1,4 @@
-#include "MotionJacobian.h"
+#include "MotionCovariance.h"
 #include "Raw/MultiFrameDenoise/LocalMotion.h"
 
 #include "Raw/MultiFrameDenoise/SameCfaSampler.h"
@@ -319,27 +319,6 @@ bool ClampCovariance(
     return Finite(result.xxRawPixelsSquared) &&
         Finite(result.xyRawPixelsSquared) &&
         Finite(result.yyRawPixelsSquared);
-}
-
-bool InvertCovariance(
-    SymmetricRawCovariance covariance,
-    SymmetricRawCovariance& inverse) {
-    const double determinant =
-        covariance.xxRawPixelsSquared * covariance.yyRawPixelsSquared -
-        covariance.xyRawPixelsSquared * covariance.xyRawPixelsSquared;
-    if (!Finite(determinant) || determinant <= 1.0e-20) return false;
-    inverse.xxRawPixelsSquared = covariance.yyRawPixelsSquared / determinant;
-    inverse.xyRawPixelsSquared = -covariance.xyRawPixelsSquared / determinant;
-    inverse.yyRawPixelsSquared = covariance.xxRawPixelsSquared / determinant;
-    return Finite(inverse.xxRawPixelsSquared) &&
-        Finite(inverse.xyRawPixelsSquared) &&
-        Finite(inverse.yyRawPixelsSquared);
-}
-
-double QuadraticForm(RawCoordinate vector, SymmetricRawCovariance matrix) {
-    return vector.x * vector.x * matrix.xxRawPixelsSquared +
-        2.0 * vector.x * vector.y * matrix.xyRawPixelsSquared +
-        vector.y * vector.y * matrix.yyRawPixelsSquared;
 }
 
 bool ValidateLevel(const CfaPyramidLevel& level) {
@@ -2232,6 +2211,66 @@ bool EstimateLocalMotionDirection(
     return true;
 }
 
+namespace {
+struct MotionFieldDifferentials {
+    std::array<RawMappingJacobian,4> sides;
+    unsigned count=0;
+};
+
+// The same confidence-normalized bilinear map is used by optional guide
+// derivatives and forward/backward uncertainty transport. Keep every supported
+// one-sided derivative at internal knots; physical edges use the inside side.
+MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+    double gridX,double gridY,std::uint32_t x0,std::uint32_t y0,
+    const LocalMotionOptions& options) {
+    const auto derivative=[&](std::uint32_t ix,std::uint32_t iy) {
+        RawMappingJacobian j;j.linear=grid.globalWarp.linear;
+        const double u=grid.width==1?0:gridX-ix,v=grid.height==1?0:gridY-iy;
+        const double wx[2]={1-u,u},wy[2]={1-v,v};
+        const double dx[2]={grid.width==1?0:-1/grid.spacingRawX,grid.width==1?0:1/grid.spacingRawX};
+        const double dy[2]={grid.height==1?0:-1/grid.spacingRawY,grid.height==1?0:1/grid.spacingRawY};
+        double mass=0,mx=0,my=0;RawCoordinate n{},nx{},ny{};
+        for(unsigned c=0;c<4;++c) {
+            const auto& node=grid.nodes[std::size_t(std::min(iy+c/2,grid.height-1))*grid.width+std::min(ix+c%2,grid.width-1)];
+            const double confidence=node.state==MotionNodeState::Rejected?0:Clamp01(node.confidence);
+            if(confidence<=0)continue;
+            const double w=wx[c%2]*wy[c/2]*confidence;
+            const double x=dx[c%2]*wy[c/2]*confidence,y=wx[c%2]*dy[c/2]*confidence;
+            mass+=w;mx+=x;my+=y;n.x+=w*node.residualRaw.x;n.y+=w*node.residualRaw.y;
+            nx.x+=x*node.residualRaw.x;nx.y+=x*node.residualRaw.y;
+            ny.x+=y*node.residualRaw.x;ny.y+=y*node.residualRaw.y;
+        }
+        if(!Finite(mass)||mass<=options.registration.interpolationWeightEpsilon)return j;
+        j.linear[0]+=(nx.x-n.x/mass*mx)/mass;j.linear[1]+=(ny.x-n.x/mass*my)/mass;
+        j.linear[2]+=(nx.y-n.y/mass*mx)/mass;j.linear[3]+=(ny.y-n.y/mass*my)/mass;
+        j.valid=FiniteMappingJacobian(j);return j;
+    };
+    MotionFieldDifferentials result;
+    result.sides[result.count++]=derivative(x0,y0);
+    result.sides[0].valid=result.sides[0].valid&&gridX>=0&&gridY>=0&&
+        gridX<=grid.width-1&&gridY<=grid.height-1;
+    const bool left=x0>0&&gridX==double(x0),above=y0>0&&gridY==double(y0);
+    for(unsigned c=1;c<4;++c) {
+        if((c&1)&&!left)continue;
+        if((c&2)&&!above)continue;
+        result.sides[result.count++]=derivative(x0-((c&1)?1:0),y0-((c&2)?1:0));
+    }
+    return result;
+}
+
+MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+    RawCoordinate point,const LocalMotionOptions& options) {
+    // Called only after the same grid/coordinate passed field evaluation.
+    const double x=(point.x-grid.originRawX)/grid.spacingRawX;
+    const double y=(point.y-grid.originRawY)/grid.spacingRawY;
+    const auto ix=grid.width==1?0u:std::min<std::uint32_t>(
+        static_cast<std::uint32_t>(std::floor(std::max(0.,x))),grid.width-2);
+    const auto iy=grid.height==1?0u:std::min<std::uint32_t>(
+        static_cast<std::uint32_t>(std::floor(std::max(0.,y))),grid.height-2);
+    return FieldDifferentials(grid,x,y,ix,iy,options);
+}
+} // namespace
+
 bool EvaluateLocalMotionField(
     const LocalMotionGrid& grid,
     RawCoordinate referenceRaw,
@@ -2364,43 +2403,11 @@ bool EvaluateLocalMotionField(
         return Fail(error, result.message);
     }
     if(jacobian) {
-        // Differentiate the same confidence-normalized bilinear residual, not
-        // just its global initializer. Composed fields already contain the
-        // final source-coordinate residual and use this same calculation.
-        const auto derivative=[&](std::uint32_t ix,std::uint32_t iy) {
-            RawMappingJacobian j;j.linear=grid.globalWarp.linear;
-            const double u=grid.width==1?0:gridX-ix,v=grid.height==1?0:gridY-iy;
-            const double wx[2]={1-u,u},wy[2]={1-v,v};
-            const double dx[2]={grid.width==1?0:-1/grid.spacingRawX,grid.width==1?0:1/grid.spacingRawX};
-            const double dy[2]={grid.height==1?0:-1/grid.spacingRawY,grid.height==1?0:1/grid.spacingRawY};
-            double mass=0,mx=0,my=0;RawCoordinate n{},nx{},ny{};
-            for(unsigned c=0;c<4;++c) {
-                const auto& node=grid.nodes[std::size_t(std::min(iy+c/2,grid.height-1))*grid.width+std::min(ix+c%2,grid.width-1)];
-                const double confidence=node.state==MotionNodeState::Rejected?0:Clamp01(node.confidence);
-                if(confidence<=0)continue;
-                const double w=wx[c%2]*wy[c/2]*confidence;
-                const double x=dx[c%2]*wy[c/2]*confidence,y=wx[c%2]*dy[c/2]*confidence;
-                mass+=w;mx+=x;my+=y;n.x+=w*node.residualRaw.x;n.y+=w*node.residualRaw.y;
-                nx.x+=x*node.residualRaw.x;nx.y+=x*node.residualRaw.y;
-                ny.x+=y*node.residualRaw.x;ny.y+=y*node.residualRaw.y;
-            }
-            if(!Finite(mass)||mass<=options.registration.interpolationWeightEpsilon)return j;
-            j.linear[0]+=(nx.x-n.x/mass*mx)/mass;j.linear[1]+=(ny.x-n.x/mass*my)/mass;
-            j.linear[2]+=(nx.y-n.y/mass*mx)/mass;j.linear[3]+=(ny.y-n.y/mass*my)/mass;
-            j.valid=FiniteMappingJacobian(j);return j;
-        };
-        auto j=derivative(x0,y0);
-        j.valid=j.valid&&gridX>=0&&gridY>=0&&gridX<=grid.width-1&&gridY<=grid.height-1;
-        // Physical/grid edges use their inside derivative. At internal knots
-        // both one-sided derivatives must agree; otherwise the guide cannot
-        // claim a unique differential there. The underlying motion is kept.
-        const bool left=x0>0&&gridX==double(x0),above=y0>0&&gridY==double(y0);
-        for(unsigned c=1;c<4&&j.valid;++c) {
-            if((c&1)&&!left)continue;if((c&2)&&!above)continue;
-            const auto other=derivative(x0-((c&1)?1:0),y0-((c&2)?1:0));
-            j.valid=other.valid&&SameMappingJacobian(j,other);
-        }
-        *jacobian=j;
+        const auto derivatives=FieldDifferentials(grid,gridX,gridY,x0,y0,options);
+        *jacobian=derivatives.sides[0];
+        for(unsigned i=1;i<derivatives.count&&jacobian->valid;++i)
+            jacobian->valid=derivatives.sides[i].valid&&
+                SameMappingJacobian(*jacobian,derivatives.sides[i]);
     }
     result.valid = true;
     result.rejectReason = MotionNodeRejectReason::None;
@@ -2474,13 +2481,14 @@ bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& reque
     if(!RefineTileSubpixel(reverse,mapped,Subtract(referenceRaw,reverse.globalWarp.Map(mapped)),reversed)||
        !reversed.observable)return false;
     const auto closure=Subtract(Add(reverse.globalWarp.Map(mapped),reversed.residualRaw),referenceRaw);
-    auto covariance=AddCovariance(refined.localCovarianceRaw,reversed.localCovarianceRaw);
+    // This point fit uses an affine map plus a constant local translation.
+    // Forward uncertainty is in alternate pixels; closure is in reference pixels.
     const auto& p=request.options.registration;
     const double floor=p.forwardBackwardCovarianceFloorRawPixels*p.forwardBackwardCovarianceFloorRawPixels;
-    covariance.xxRawPixelsSquared+=floor;covariance.yyRawPixelsSquared+=floor;
-    SymmetricRawCovariance inverse;
-    if(!InvertCovariance(covariance,inverse))return false;
-    const double mahalanobis=std::max(0.,QuadraticForm(closure,inverse));
+    std::array<RawMappingJacobian,4> reverseSides;
+    reverseSides[0]={reverse.globalWarp.linear,true};double mahalanobis=0;
+    if(!TryMotionClosureMahalanobis(closure,refined.localCovarianceRaw,reversed.localCovarianceRaw,
+        floor,reverseSides,1,mahalanobis))return false;
     if(!Finite(mahalanobis)||mahalanobis>p.forwardBackwardMahalanobisHardLimit||
        std::sqrt(SquaredNorm(closure))>p.forwardBackwardEuclideanHardLimitRawPixels)return false;
     result.centerRaw=referenceRaw;result.residualRaw=refined.residualRaw;
@@ -2698,12 +2706,11 @@ bool EstimateBidirectionalLocalMotion(
         }
         const RawCoordinate closureError = Subtract(
             reverseSample.sourceRaw, node.centerRaw);
-        SymmetricRawCovariance closureCovariance = AddCovariance(
-            node.covarianceRaw, reverseSample.covarianceRaw);
-        closureCovariance.xxRawPixelsSquared += closureFloorVariance;
-        closureCovariance.yyRawPixelsSquared += closureFloorVariance;
-        SymmetricRawCovariance closureInverse;
-        if (!InvertCovariance(closureCovariance, closureInverse)) {
+        const auto derivatives=FieldDifferentials(
+            result.reverse,alternateRaw,request.options);
+        double mahalanobis=0;
+        if(!TryMotionClosureMahalanobis(closureError,node.covarianceRaw,reverseSample.covarianceRaw,
+                closureFloorVariance,derivatives.sides,derivatives.count,mahalanobis)) {
             node.state = MotionNodeState::Rejected;
             node.rejectReason = MotionNodeRejectReason::InvalidCovariance;
             node.confidence = 0.0;
@@ -2712,8 +2719,7 @@ bool EstimateBidirectionalLocalMotion(
         }
         node.forwardBackwardErrorRaw = closureError;
         node.forwardBackwardEuclideanRaw = std::sqrt(SquaredNorm(closureError));
-        node.forwardBackwardMahalanobis = std::max(
-            0.0, QuadraticForm(closureError, closureInverse));
+        node.forwardBackwardMahalanobis = mahalanobis;
         if (!Finite(node.forwardBackwardMahalanobis) ||
             node.forwardBackwardMahalanobis >
                 request.options.registration.

@@ -1,6 +1,7 @@
 #include "App/Validation/ValidationSuites.h"
 
 #include "Raw/MultiFrameDenoise/LocalMotion.h"
+#include "Raw/MultiFrameDenoise/MotionCovariance.h"
 
 #include <algorithm>
 #include <array>
@@ -100,6 +101,107 @@ Raw::Mfd::AffineModel IdentityModel(Raw::Mfd::PixelExtent extent) {
         0.5 * static_cast<double>(extent.height - 1u)
     };
     return model;
+}
+
+// Independent matrix multiplication deliberately does not share production
+// transport arithmetic or coefficient ordering.
+Raw::Mfd::SymmetricRawCovariance MatrixTransport(
+    Raw::Mfd::SymmetricRawCovariance c,const std::array<double,4>& j) {
+    const double covariance[2][2]={{c.xxRawPixelsSquared,c.xyRawPixelsSquared},
+        {c.xyRawPixelsSquared,c.yyRawPixelsSquared}};
+    double result[2][2]{};
+    for(unsigned row=0;row<2;++row)for(unsigned column=0;column<2;++column)
+        for(unsigned a=0;a<2;++a)for(unsigned b=0;b<2;++b)
+            result[row][column]+=j[row*2+a]*covariance[a][b]*j[column*2+b];
+    return {result[0][0],result[0][1],result[1][1]};
+}
+
+double ClosureQuadratic(Raw::Mfd::RawCoordinate e,Raw::Mfd::SymmetricRawCovariance c) {
+    return (c.yyRawPixelsSquared*e.x*e.x-2*c.xyRawPixelsSquared*e.x*e.y+
+        c.xxRawPixelsSquared*e.y*e.y)/(c.xxRawPixelsSquared*c.yyRawPixelsSquared-
+            c.xyRawPixelsSquared*c.xyRawPixelsSquared);
+}
+
+bool ValidateClosureCovarianceTransport() {
+    using namespace Raw::Mfd;
+    bool ok=true;
+    const SymmetricRawCovariance input{.16,.015,.004};
+    const auto same=[](SymmetricRawCovariance a,SymmetricRawCovariance b) {
+        return a.xxRawPixelsSquared==b.xxRawPixelsSquared&&a.xyRawPixelsSquared==b.xyRawPixelsSquared&&
+            a.yyRawPixelsSquared==b.yyRawPixelsSquared;};
+    const auto near=[](SymmetricRawCovariance a,SymmetricRawCovariance b) {
+        return std::abs(a.xxRawPixelsSquared-b.xxRawPixelsSquared)<1e-12&&
+            std::abs(a.xyRawPixelsSquared-b.xyRawPixelsSquared)<1e-12&&
+            std::abs(a.yyRawPixelsSquared-b.yyRawPixelsSquared)<1e-12;};
+    const std::array<double,4> rotation{std::cos(.07),std::sin(.07),-std::sin(.07),std::cos(.07)};
+    for(const auto linear:{std::array<double,4>{1,0,0,1},rotation,
+        std::array<double,4>{1.03,0,0,.97},{1,.2,0,1},{0,-1,1,0},{1,0,0,0}}) {
+        SymmetricRawCovariance result;
+        ok &= Check(TryTransportMotionCovariance(input,{linear,true},result)&&
+            near(result,MatrixTransport(input,linear)),"closure covariance transport disagrees with independent matrix multiplication");
+        std::array<RawMappingJacobian,4> sides;sides.fill({linear,true});
+        double first=0,all=0;
+        ok &= Check(TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,1,first)&&
+            TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,4,all)&&first==all,
+            "agreeing knot derivatives changed the exact closure statistic");
+        sides[3].linear[0]+=16*std::numeric_limits<double>::epsilon();
+        ok &= Check(TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,4,all)&&first==all,
+            "numerically agreeing affine knot derivatives changed the selected-side statistic");
+    }
+    SymmetricRawCovariance translated;
+    ok &= Check(TryTransportMotionCovariance(input,{{1,0,0,1},true},translated)&&same(input,translated),
+        "translation transport changed covariance bits");
+    SymmetricRawCovariance rotated;
+    ok &= Check(TryTransportMotionCovariance(input,{rotation,true},rotated),"rotation transport failed");
+    auto previous=input,correct=rotated;
+    previous.xxRawPixelsSquared+=.0125;previous.yyRawPixelsSquared+=.0125;
+    correct.xxRawPixelsSquared+=.0125;correct.yyRawPixelsSquared+=.0125;
+    const double oldQ=ClosureQuadratic({1,.3},previous),newQ=ClosureQuadratic({1,.3},correct);
+    ok &= Check(std::abs(oldQ-8.783977110157368)<1e-12&&std::abs(newQ-10.847259465281725)<1e-12&&
+        oldQ<9.21&&newQ>9.21,"rotated anisotropic closure no longer exercises the false-accept regression");
+
+    std::array<RawMappingJacobian,4> sides;
+    sides[0]={{1,0,0,1},true};sides[1]={{1,.2,0,1},true};
+    sides[2]={rotation,true};sides[3]={{1.03,0,0,.97},true};
+    double branched=0,expected=0;
+    ok &= Check(TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,4,branched),
+        "different supported one-sided derivatives lost closure support");
+    for(const auto& side:sides) {
+        auto covariance=MatrixTransport(input,side.linear);
+        covariance.xxRawPixelsSquared+=.0125;covariance.yyRawPixelsSquared+=.0125;
+        expected=std::max(expected,ClosureQuadratic({1,.3},covariance));
+    }
+    ok &= Check(std::abs(branched-expected)<1e-12&&branched>=newQ-1e-12,
+        "ambiguous knot closure gained confidence by averaging its branches");
+    const SymmetricRawCovariance sentinel{7,.2,3};
+    for(const auto invalid:{SymmetricRawCovariance{-1,0,-1},{1,2,1},{1e-200,2e-200,1e-200},
+        {1,std::numeric_limits<double>::quiet_NaN(),1},{1,0,std::numeric_limits<double>::infinity()}}) {
+        auto unchanged=sentinel;
+        ok &= Check(!TryTransportMotionCovariance(invalid,sides[0],unchanged)&&same(unchanged,sentinel),
+            "invalid covariance was transported or changed the fallback");
+    }
+    for(unsigned count:{0u,5u}) {
+        double unchanged=7;
+        ok &= Check(!TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,count,unchanged)&&unchanged==7,
+            "missing derivatives fabricated closure evidence");
+    }
+    double unavailable=7;
+    ok &= Check(!TryMotionClosureMahalanobis({1,.3},input,{-1,0,-1},.01,sides,1,unavailable)&&unavailable==7&&
+        !TryMotionClosureMahalanobis({1,.3},{},{},0,sides,1,unavailable)&&unavailable==7&&
+        !TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},-.01,sides,1,unavailable)&&unavailable==7&&
+        !TryMotionClosureMahalanobis({std::numeric_limits<double>::infinity(),.3},input,
+            {.0025,0,.0025},.01,sides,1,unavailable)&&unavailable==7,
+        "invalid reverse covariance, singular closure, floor or residual fabricated evidence");
+    sides[1].valid=false;double unchanged=7;
+    ok &= Check(!TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,2,unchanged)&&unchanged==7,
+        "unsupported one-sided derivative was silently ignored");
+    sides[1]={{std::numeric_limits<double>::infinity(),0,0,1},true};
+    ok &= Check(!TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,2,unchanged)&&unchanged==7,
+        "nonfinite derivative fabricated closure evidence");
+    sides[1]={{1e300,0,0,1},true};
+    ok &= Check(!TryMotionClosureMahalanobis({1,.3},input,{.0025,0,.0025},.01,sides,2,unchanged)&&unchanged==7,
+        "overflowed transport fabricated closure evidence");
+    return ok;
 }
 
 bool ValidatePyramidConstruction() {
@@ -519,6 +621,93 @@ bool ValidateDepthBoundaryAndSourceBorder() {
     return ok;
 }
 
+bool ValidateFieldDerivativeBoundaries() {
+    using namespace Raw::Mfd;
+    auto grid=MakeManualBoundaryGrid({},{});
+    grid.width=grid.height=3;grid.originRawX=grid.originRawY=0;
+    grid.spacingRawX=grid.spacingRawY=70;grid.nodes.resize(9);
+    for(unsigned y=0;y<3;++y)for(unsigned x=0;x<3;++x) {
+        auto& node=grid.nodes[y*3+x];node.state=MotionNodeState::Structured;node.confidence=1;
+        node.centerRaw={70.*x,70.*y};node.residualRaw={.005*70*x,-.002*70*y};node.covarianceRaw={.01,0,.01};
+    }
+    bool ok=true;
+    for(const auto p:{RawCoordinate{35,35},{70,35},{70,70},{0,35},{140,35}}) {
+        LocalMotionFieldSample plain,withDerivative;RawMappingJacobian jacobian;
+        ok &= Check(EvaluateLocalMotionField(grid,p,{},plain)&&
+            EvaluateLocalMotionField(grid,p,{},withDerivative,nullptr,true,&jacobian)&&jacobian.valid&&
+            std::abs(jacobian.linear[0]-1.005)<1e-12&&std::abs(jacobian.linear[3]-.998)<1e-12&&
+            plain.sourceRaw.x==withDerivative.sourceRaw.x&&plain.sourceRaw.y==withDerivative.sourceRaw.y&&
+            plain.covarianceRaw.xxRawPixelsSquared==withDerivative.covarianceRaw.xxRawPixelsSquared,
+            "optional field derivative changed affine knot/edge support or sample");
+    }
+    // Confidence-normalized interpolation has a quotient-rule derivative,
+    // not just the global initializer plus an unweighted bilinear slope.
+    auto weighted=grid;weighted.nodes[0].confidence=.2;weighted.nodes[1].confidence=.9;
+    weighted.nodes[3].state=MotionNodeState::Rejected;
+    RawMappingJacobian weightedJacobian;LocalMotionFieldSample center,left,right,top,bottom;
+    constexpr double h=1e-3;
+    ok &= Check(EvaluateLocalMotionField(weighted,{35,35},{},center,nullptr,false,&weightedJacobian)&&
+        weightedJacobian.valid&&EvaluateLocalMotionField(weighted,{35-h,35},{},left)&&
+        EvaluateLocalMotionField(weighted,{35+h,35},{},right)&&
+        EvaluateLocalMotionField(weighted,{35,35-h},{},top)&&
+        EvaluateLocalMotionField(weighted,{35,35+h},{},bottom)&&
+        std::abs((right.sourceRaw.x-left.sourceRaw.x)/(2*h)-weightedJacobian.linear[0])<1e-8&&
+        std::abs((bottom.sourceRaw.x-top.sourceRaw.x)/(2*h)-weightedJacobian.linear[1])<1e-8&&
+        std::abs((right.sourceRaw.y-left.sourceRaw.y)/(2*h)-weightedJacobian.linear[2])<1e-8&&
+        std::abs((bottom.sourceRaw.y-top.sourceRaw.y)/(2*h)-weightedJacobian.linear[3])<1e-8,
+        "weighted actual-map derivative disagrees with finite differences");
+    for(bool vertical:{false,true}) {
+        auto line=grid;line.width=vertical?1:3;line.height=vertical?3:1;
+        line.originRawX=line.originRawY=50;line.spacingRawX=line.spacingRawY=40;
+        line.nodes.resize(3);
+        for(auto& node:line.nodes){node.residualRaw={};node.confidence=1;}
+        for(double offset:{0.,20.,80.}) {
+            RawMappingJacobian j;LocalMotionFieldSample sample;
+            ok &= Check(EvaluateLocalMotionField(line,{50+(vertical?0:offset),50+(vertical?offset:0)},
+                {},sample,nullptr,false,&j)&&j.valid&&j.linear==std::array<double,4>{1,0,0,1},
+                "single-axis field or physical edge lost its inside derivative");
+        }
+    }
+    grid.nodes[2].residualRaw.x+=.5;LocalMotionFieldSample sample;RawMappingJacobian jacobian;
+    ok &= Check(EvaluateLocalMotionField(grid,{70,35},{},sample,nullptr,true,&jacobian)&&!jacobian.valid,
+        "nonunique derivative either rejected the sample or claimed a unique guide derivative");
+    return ok;
+}
+
+bool ValidateRotatedClosureCoordinates() {
+    using namespace Raw::Mfd;
+    const PixelExtent extent{320,320};const auto options=TestOptions();
+    CfaPlanePyramid reference,alternate;
+    auto model=IdentityModel(extent);AffineModel inverse;
+    model.linear={std::cos(.07),-std::sin(.07),std::sin(.07),std::cos(.07)};
+    if(!InvertAffineModel(model,inverse))return Check(false,"rotation fixture inverse failed");
+    if(!MakePyramid(extent,SceneSignal,.00008,reference,options)||
+       !MakePyramid(extent,[&](RawCoordinate p,CfaSite site) {
+            auto q=inverse.Map(p);return SceneSignal({q.x-.3,q.y+.2},site);
+        },.00008,alternate,options))return Check(false,"rotated closure fixture failed");
+    BidirectionalLocalMotionRequest request;request.reference=&reference;request.alternate=&alternate;
+    request.referenceToAlternate=model;request.options=options;
+    BidirectionalLocalMotionResult result;std::string error;
+    if(!EstimateBidirectionalLocalMotion(request,result,&error))return Check(false,"rotated closure solve failed: "+error);
+    bool ok=true;unsigned checked=0;
+    for(const auto& node:result.forward.nodes) {
+        if(node.state!=MotionNodeState::Structured)continue;
+        auto mapped=model.Map(node.centerRaw);mapped.x+=node.residualRaw.x;mapped.y+=node.residualRaw.y;
+        LocalMotionFieldSample reverse;RawMappingJacobian jacobian;
+        if(!EvaluateLocalMotionField(result.reverse,mapped,options,reverse,nullptr,false,&jacobian)||!jacobian.valid)continue;
+        auto covariance=MatrixTransport(node.covarianceRaw,jacobian.linear);
+        const double floor=options.registration.forwardBackwardCovarianceFloorRawPixels*
+            options.registration.forwardBackwardCovarianceFloorRawPixels;
+        covariance.xxRawPixelsSquared+=reverse.covarianceRaw.xxRawPixelsSquared+floor;
+        covariance.xyRawPixelsSquared+=reverse.covarianceRaw.xyRawPixelsSquared;
+        covariance.yyRawPixelsSquared+=reverse.covarianceRaw.yyRawPixelsSquared+floor;
+        ok &= Check(std::abs(ClosureQuadratic(node.forwardBackwardErrorRaw,covariance)-
+            node.forwardBackwardMahalanobis)<1e-10,"actual rotated closure mixed source and reference covariance axes");
+        ++checked;
+    }
+    return Check(checked>0,"rotated fixture had no measured closure support")&&ok;
+}
+
 bool ValidateReverseClosureAndOcclusion() {
     bool ok = true;
     const Raw::Mfd::RawCoordinate truth { 5.25, -3.50 };
@@ -589,12 +778,15 @@ bool ValidateReverseClosureAndOcclusion() {
 
 bool ValidateMfdPhase5LocalMotion() {
     bool ok = true;
+    ok &= ValidateClosureCovarianceTransport();
     ok &= ValidatePyramidConstruction();
     ok &= ValidateHierarchicalFlowAndCovariance();
     ok &= ValidateFlatSafeAndAperturePolicy();
     ok &= ValidatePeriodicUniqueness();
     ok &= ValidateDepthBoundaryAndSourceBorder();
+    ok &= ValidateFieldDerivativeBoundaries();
     ok &= ValidateReverseClosureAndOcclusion();
+    ok &= ValidateRotatedClosureCoordinates();
     if (ok) {
         std::cout << "MFD Phase 5 local motion/covariance validation passed."
                   << std::endl;

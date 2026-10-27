@@ -37,7 +37,7 @@ For focused graph interaction/cache checks with `BUILD_TESTING` enabled, build t
 
 ## Current Burst engine changes and verification
 
-The October 23, 2026 source update is not a published release. It changes HDR
+The current source changes are not a published release. They change HDR
 admission and exposure fitting to use decoded layout and registered image evidence
 rather than camera/exposure labels. Unresolved captures get a local-alignment retry,
 then a documented exclusion instead of an invented metadata gain. It also improves
@@ -64,6 +64,19 @@ not a reconstruction upgrade. Use a project copy when retaining an older result
 for comparison, and keep the original RAW inputs unchanged.
 
 ### Checks completed and remaining limits
+
+- Forward/reverse closure now transports source-axis uncertainty into reference
+  coordinates and checks each supported one-sided derivative at grid knots.
+  Focused Phase 5 controls pass; the actual rotated-field regression fails with
+  the previous closure code. Translation/affine controls and native covariance
+  ownership are preserved. This does not establish real-capture alignment gains.
+- Source variance counts quantization once, including SR and Panorama paths.
+  The production SR preparation regression fails before the fix and passes eight
+  CFA/profile cases afterward. Actual temporal GPU checks likewise fail before
+  rejecting defective origin payloads from fallback noise pilots and pass all
+  twelve flag/value controls afterward. Valid/clipped pilots, GPU failure and
+  cancellation behavior remain covered. Software-Mesa checks are not Windows or
+  hardware-driver qualification, and Panorama end-to-end behavior is unverified.
 
 - Cloud C++17 checks passed for changed engine/editor translation units. Bounded
   executable checks passed for exposure graphs/cohorts, metadata admission, image
@@ -139,9 +152,9 @@ for comparison, and keep the original RAW inputs unchanged.
   A noise-scratch reuse experiment was removed because paired timings showed no
   useful speed gain despite fewer allocations.
   No end-to-end speedup or real-camera image-quality improvement is established.
-- Full Windows build and user-selected capture testing remain outstanding. The
-  full `Process` integration check was blocked by unavailable OpenCV development
-  headers; component checks do not replace it. Shared exposure-error correlations and very dark reference-guide observability remain
+- Full Windows build, full `Process` integration and user-selected capture testing
+  remain outstanding; component checks do not replace them. Shared exposure-error
+  correlations and very dark reference-guide observability remain
   modeling limitations; reported uncertainty is not a complete covariance model.
 
 ### Current memory and transfer flow

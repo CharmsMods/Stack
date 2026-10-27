@@ -65,7 +65,8 @@ void PreparePixels(const ProcessingRequest& request,RawImageData& raw,Capture& c
             if(!std::isfinite(v)||!std::isfinite(gain))throw std::runtime_error("Non-finite panorama sensor sample.");
             mosaic[p]=v*gain;
             const auto& profile=noise.model.sites[std::size_t(cfa.SiteAt(tile.originX+x,tile.originY+y))];
-            variance[p]=float((profile.shotScale*std::max(0.f,v)+profile.offsetVariance+profile.quantizationVariance)*gain*gain);
+            variance[p]=float((profile.shotScale*std::max(0.f,v)+profile.offsetVariance+
+                (profile.quantizationIncluded?0:profile.quantizationVariance))*gain*gain);
             clipping[p]=Mfd::HasSampleFlag(tile.sampleFlags[q],Mfd::PreparedSampleFlag::Saturated)||
                 Mfd::HasSampleFlag(tile.sampleFlags[q],Mfd::PreparedSampleFlag::ExplicitDecoderClip);
         }
