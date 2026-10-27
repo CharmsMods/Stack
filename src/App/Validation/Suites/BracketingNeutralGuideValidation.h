@@ -3,7 +3,10 @@
 #include "Raw/Bracketing/GroupTileStore.h"
 #include "Raw/Bracketing/ParallelProcessing.h"
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <stdexcept>
 
 namespace Stack::Validation {
@@ -15,6 +18,23 @@ inline void Require(bool value,const char* reason) {
 }
 template<class T> inline bool Same(const std::vector<T>& a,const std::vector<T>& b) {
     return a.size()==b.size()&&(a.empty()||std::memcmp(a.data(),b.data(),a.size()*sizeof(T))==0);
+}
+inline constexpr std::array<double Observation::*,8> observationNumbers={&Observation::value,&Observation::variance,
+    &Observation::headroom,&Observation::support,&Observation::fallback,&Observation::exposure,
+    &Observation::measurementVariance,&Observation::uncertaintyVariance};
+inline bool SameMeasurements(const Groups& a,const Groups& b) {
+    if(a.size()!=b.size())return false;
+    for(std::size_t g=0;g<a.size();++g) {
+        if(a[g].size()!=b[g].size())return false;
+        for(std::size_t i=0;i<a[g].size();++i) {
+            const auto& x=a[g][i];const auto& y=b[g][i];
+            for(auto field:observationNumbers)
+                if(x.*field!=y.*field&&!(std::isnan(x.*field)&&std::isnan(y.*field)))return false;
+            if(x.finite!=y.finite||x.clipped!=y.clipped||x.localRejected!=y.localRejected||
+                x.fixedReference!=y.fixedReference||x.fallbackClipped!=y.fallbackClipped)return false;
+        }
+    }
+    return true;
 }
 inline LuminanceTransform Transform() {
     LuminanceTransform value;value.channels={0,1,1,2};
@@ -75,8 +95,10 @@ inline void ValidateBracketingNeutralGuide() {
     BracketingRecipe recipe;recipe.groups.resize(3);recipe.groups[2].enabled=false;
     const std::array<NeutralGuideTile,4> tiles={NeutralGuideTile{0,0,8,8},{8,0,6,8},{0,8,8,2},{8,8,6,2}};
     std::array<Groups,4> values;
+    std::string error;
     for(unsigned i=0;i<tiles.size();++i) {
-        values[i]=Measurements(3,tiles[i]);CanonicalizeGroupTile(values[i]);Compare(recipe,tiles[i],values[i]);
+        values[i]=Measurements(3,tiles[i]);
+        Require(CanonicalizeGroupTile(values[i],error),"guide fixture canonicalization");Compare(recipe,tiles[i],values[i]);
     }
     // Tile tasks may finish in any order, but the reduction remains tile-index
     // ordered, matching Processor rather than accumulating in completion order.
@@ -87,7 +109,6 @@ inline void ValidateBracketingNeutralGuide() {
         expectedHistograms[i].assign(768,0);
         PreviousLoop(recipe,Transform(),tiles[i],7,values[i],expected,expectedCounts[i],expectedHistograms[i]);
     }
-    std::string error;
     for(unsigned i:{3u,1u,0u,2u})
         Require(BuildNeutralGuideTile(recipe,Transform(),tiles[i],7,values[i],actual,actualCounts[i],actualHistograms[i],error),"out-of-order tile");
     Require(Same(expected,actual),"out-of-order guide layout");
@@ -105,7 +126,7 @@ inline void ValidateBracketingNeutralGuide() {
     }
     Require(oldCounts==newCounts&&Same(oldHistogram,newHistogram),"deterministic histogram reduction");
     BracketingRecipe single;single.groups.resize(1);auto unrounded=Measurements(1,tiles[0]);Compare(single,tiles[0],unrounded);
-    auto rounded=unrounded;CanonicalizeGroupTile(rounded);
+    auto rounded=unrounded;Require(CanonicalizeGroupTile(rounded,error),"single fixture canonicalization");
     Require(unrounded[0][1].value!=rounded[0][1].value,"single-input fixture must contain unrounded doubles");
     const auto reject=[&](BracketingRecipe badRecipe,NeutralGuideTile tile,unsigned cellWidth,Groups input,std::size_t guideSize=35) {
         std::vector<float> guide(guideSize,-17);const auto priorGuide=guide;
@@ -134,7 +155,7 @@ inline void ValidateBracketingNeutralGuideCache(const std::filesystem::path& dir
     std::string error;
     for(unsigned ty=0;ty<2;++ty)for(unsigned tx=0;tx<2;++tx) {
         NeutralGuideTile tile{tx*8,ty*8,std::min(8u,14-tx*8),std::min(8u,10-ty*8)};
-        auto canonical=Measurements(3,tile);CanonicalizeGroupTile(canonical);
+        auto canonical=Measurements(3,tile);Require(CanonicalizeGroupTile(canonical,error),"cache fixture canonicalization");
         Require(WriteGroupTile(request,data,tx,ty,canonical,error),"cache fixture write");
         Groups loaded;Require(ReadGroupTile(request,data,tx,ty,loaded),"cache fixture read");
         Compare(request.recipe,tile,loaded);
@@ -143,6 +164,46 @@ inline void ValidateBracketingNeutralGuideCache(const std::filesystem::path& dir
             BuildNeutralGuideTile(request.recipe,Transform(),tile,7,loaded,b,cb,hb,error),"round-trip guide build");
         Require(Same(a,b)&&ca==cb&&Same(ha,hb),"resident versus actual cache guide parity");
     }
+    const auto cacheBytes=[&] {
+        std::map<std::string,std::string> files;
+        for(const auto& entry:std::filesystem::recursive_directory_iterator(directory))if(entry.is_regular_file()) {
+            std::ifstream stream(entry.path(),std::ios::binary);Require(bool(stream),"cache snapshot open");
+            files[entry.path().lexically_relative(directory).generic_string()]=
+                std::string(std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>());
+            Require(!stream.bad(),"cache snapshot read");
+        }
+        return files;
+    };
+    const auto stored=cacheBytes();
+    const auto rejectStorage=[&](Groups invalid) {
+        const auto previous=invalid;
+        error.clear();Require(!WriteGroupTile(request,data,0,0,invalid,error),"invalid float storage was published");
+        Require(!error.empty()&&cacheBytes()==stored,"invalid write changed a previously valid cache");
+        error.clear();Require(!CanonicalizeGroupTile(invalid,error),"invalid float canonicalization succeeded");
+        Require(!error.empty()&&SameMeasurements(invalid,previous),"late invalid field partially canonicalized input");
+    };
+    const auto ordinary=Measurements(3,{0,0,8,8});
+    // Every stored numeric field must be checked before narrowing, even when
+    // the invalid field is in the final observation after unrounded values.
+    for(auto field:observationNumbers) {
+        auto invalid=ordinary;invalid.back().back().*field=1e100;rejectStorage(std::move(invalid));
+    }
+    auto invalid=ordinary;invalid.back().back().value=std::numeric_limits<double>::quiet_NaN();rejectStorage(invalid);
+    invalid=ordinary;invalid.back().back().variance=-1;rejectStorage(invalid);
+    invalid=ordinary;invalid.back().back().support=1;invalid.back().back().measurementVariance=-1;rejectStorage(invalid);
+    auto valid=ordinary;auto& sentinel=valid.back().back();
+    sentinel.value=-.123456789;sentinel.fallback=-.234567891;sentinel.support=0;sentinel.measurementVariance=-1;
+    auto& boundary=valid.back().front();boundary.value=std::numeric_limits<float>::max();
+    boundary.fallback=-boundary.value;boundary.variance=boundary.measurementVariance=boundary.value;
+    boundary.uncertaintyVariance=0;boundary.exposure=boundary.value;
+    auto expected=valid;
+    for(auto& group:expected)for(auto& observation:group)for(auto field:observationNumbers)
+        observation.*field=float(observation.*field);
+    Require(CanonicalizeGroupTile(valid,error)&&SameMeasurements(valid,expected),"valid float rounding or negative/sentinel values changed");
+    data.motionIdentity="negative-sentinel-storage";
+    Require(WriteGroupTile(request,data,0,0,valid,error),"valid negative/sentinel cache write");
+    Groups restored;Require(ReadGroupTile(request,data,0,0,restored)&&SameMeasurements(restored,expected),
+        "valid negative/sentinel cache round-trip changed");
     // Actual cache publication cancellation must remain a failure. This does
     // not claim to run ProcessTiles or the full processor's cancellation path.
     request.shouldCancel=[] {return true;};data.motionIdentity="canceled-neutral-guide-write";

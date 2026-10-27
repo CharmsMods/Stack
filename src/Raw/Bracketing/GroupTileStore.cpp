@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <random>
 
 namespace Raw::Bracketing {
@@ -44,13 +45,32 @@ std::uint64_t Checksum(const std::vector<PackedObservation>& values) {
     for(std::size_t i=0;i<values.size()*sizeof(PackedObservation);++i) {hash^=bytes[i];hash*=1099511628211ull;}
     return hash;
 }
+bool FiniteFloat(double value) {
+    return std::isfinite(value)&&std::abs(value)<=std::numeric_limits<float>::max();
 }
-void CanonicalizeGroupTile(std::vector<std::vector<Observation>>& groups) {
+bool Storable(const Observation& o) {
+    // Match the reader's numeric contract before narrowing. Negative image
+    // values and the unsupported measurement sentinel are intentional.
+    return FiniteFloat(o.value)&&FiniteFloat(o.variance)&&o.variance>=0&&
+        FiniteFloat(o.support)&&o.support>=0&&FiniteFloat(o.measurementVariance)&&
+        (o.support<=0||o.measurementVariance>=0)&&FiniteFloat(o.uncertaintyVariance)&&o.uncertaintyVariance>=0&&
+        FiniteFloat(o.headroom)&&o.headroom>=0&&o.headroom<=1&&
+        FiniteFloat(o.fallback)&&FiniteFloat(o.exposure)&&o.exposure>=0;
+}
+bool StorageFailure(std::string& error) {
+    error="A group measurement observation is invalid or exceeds finite float storage.";return false;
+}
+}
+bool CanonicalizeGroupTile(std::vector<std::vector<Observation>>& groups,std::string& error) {
+    // Preflight in a separate pass: a late invalid field must not leave the
+    // earlier observations rounded. No second Observation tile is required.
+    for(const auto& group:groups)for(const auto& o:group)if(!Storable(o))return StorageFailure(error);
     for(auto& group:groups) for(auto& o:group) {
         o.value=float(o.value);o.variance=float(o.variance);o.headroom=float(o.headroom);
         o.support=float(o.support);o.fallback=float(o.fallback);o.exposure=float(o.exposure);
         o.measurementVariance=float(o.measurementVariance);o.uncertaintyVariance=float(o.uncertaintyVariance);
     }
+    return true;
 }
 bool ReadGroupTile(const ProcessingRequest& request,const PreparedDataset& data,
     unsigned tx,unsigned ty,std::vector<std::vector<Observation>>& groups) {
@@ -93,10 +113,13 @@ bool WriteGroupTile(const ProcessingRequest& request,const PreparedDataset& data
     std::vector<PackedObservation> packed;packed.reserve(count);
     for(const auto& group:groups) {
         if(group.size()!=pixels) {error="Invalid group measurement tile size.";return false;}
-        for(const auto& o:group) packed.push_back({float(o.value),float(o.variance),float(o.headroom),float(o.support),
+        for(const auto& o:group) {
+            if(!Storable(o))return StorageFailure(error);
+            packed.push_back({float(o.value),float(o.variance),float(o.headroom),float(o.support),
             float(o.fallback),float(o.exposure),float(o.measurementVariance),float(o.uncertaintyVariance),
             unsigned(o.finite)|(unsigned(o.clipped)<<1)|(unsigned(o.localRejected)<<2)|(unsigned(o.fixedReference)<<3)|
             (unsigned(o.fallbackClipped)<<4)});
+        }
     }
     Header header;header.width=width;header.height=height;header.groups=static_cast<unsigned>(groups.size());
     header.checksum=Checksum(packed);

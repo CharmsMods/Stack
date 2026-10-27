@@ -22,7 +22,7 @@ bool TemporalGroups(const ProcessingRequest& request,const PreparedDataset& data
     const auto temporal=std::chrono::steady_clock::now();LocalDetailStats patches;
     if(!CombineLocalDetail(request,data,tx,ty,groups,error,&patches))return false;
     const auto detail=std::chrono::steady_clock::now();
-    CanonicalizeGroupTile(groups);
+    if(!CanonicalizeGroupTile(groups,error))return false;
     if(!WriteGroupTile(request,data,tx,ty,groups,error))return false;
     data.groupMetrics.Add(seconds(read,temporal),seconds(temporal,detail),
         seconds(start,read)+seconds(detail,std::chrono::steady_clock::now()),false,patches);

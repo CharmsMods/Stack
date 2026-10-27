@@ -169,6 +169,19 @@ bool ReadReliabilityStoreCell(
     std::uint16_t* rejectionBits = nullptr,
     std::string* error = nullptr);
 
+struct ReliabilityRawGridGeometry {
+    PixelExtent rawExtent; // complete Bayer cells only
+    PixelExtent cellExtent;
+    std::uint32_t cellStepRawPixels = 0u;
+};
+
+// Validates only the fixed reference-grid geometry. Individual stored cells
+// still require ReadReliabilityStoreCell; absent/malformed payload is not support.
+bool ReadReliabilityStoreRawGridGeometry(
+    const ReliabilityStore& store,
+    ReliabilityRawGridGeometry& geometry,
+    std::string* error = nullptr);
+
 // Reads the fixed reference-grid cell containing a raw coordinate. Missing or
 // inconsistent geometry and coordinates outside complete Bayer cells fail;
 // this does not reinterpret the existing explicit cell-index read operation.

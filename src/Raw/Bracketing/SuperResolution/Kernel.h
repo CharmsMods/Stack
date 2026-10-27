@@ -1,4 +1,5 @@
 #pragma once
+#include "../CaptureSupport.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,10 @@ struct FrameRegion {
     std::vector<Vec4> samples;
     // Reference to source mapping and reliability: x, y, confidence, risk.
     std::vector<Vec4> mapping;
+    // Unlike the smooth mapping, categorical evidence is never interpolated.
+    // The explicit requirement prevents a missing required mask becoming a bypass.
+    bool supportRequired=false;
+    CaptureSupportMask support;
 };
 struct ChannelResult { float value=0,variance=0,support=0; bool valid=false; float uncertainty=0; };
 bool Validate(const Tile&,const FrameRegion&,std::string&);
@@ -56,6 +61,6 @@ public:
 private:
     unsigned program_=0,input_=0,output_=0;
     std::size_t outputCapacity_=0;
-    std::array<int,7> uniforms_{};
+    std::array<int,10> uniforms_{};
 };
 }

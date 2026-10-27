@@ -89,6 +89,16 @@ bool Region(const PreparedSource& source,const PreparedDataset& data,int left,in
     }
     return true;
 }
+bool ValidOutput(const GpuObservation& p){
+    // Unsupported/clipped fallbacks retain a negative measurement sentinel.
+    // FALLBACK_REJECTED (32) is valid transient provenance, stripped by Unpack.
+    // Finite inputs alone do not guarantee finite GPU arithmetic or readback.
+    return std::isfinite(p.value)&&std::isfinite(p.variance)&&p.variance>=0&&
+        std::isfinite(p.support)&&p.support>=0&&std::isfinite(p.measurement)&&
+        (p.support<=0||p.measurement>=0)&&std::isfinite(p.uncertainty)&&p.uncertainty>=0&&
+        std::isfinite(p.headroom)&&p.headroom>=0&&p.headroom<=1&&
+        std::isfinite(p.fallback)&&std::isfinite(p.exposure)&&p.exposure>=0&&(p.flags&~63u)==0;
+}
 Observation Unpack(const GpuObservation& p){
     Observation o;o.value=p.value;o.variance=p.variance;o.headroom=p.headroom;o.support=p.support;
     o.fallback=p.fallback;o.exposure=p.exposure;o.measurementVariance=p.measurement;o.uncertaintyVariance=p.uncertainty;
@@ -339,7 +349,12 @@ public:
             if(!gpuError.empty())break;
             if(!tile.Run([&](std::string& e){tile.Dispatch(3,left,top,width,height,data,0,0,1,1,reference,false,bands,false);
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER,tile.buffers[3]);glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,count*sizeof(GpuObservation),output.data());return tile.Status(e);},gpuError))break;
-            auto& group=pendingGroups[g];group.resize(count);for(std::size_t i=0;i<count;++i)group[i]=Unpack(output[i]);
+            auto& group=pendingGroups[g];group.resize(count);
+            for(std::size_t i=0;i<count;++i){
+                if(!ValidOutput(output[i]))return fail("GPU capture combining produced an invalid or non-finite observation in group "+
+                    std::to_string(g+1)+" at ("+std::to_string(left+i%width)+", "+std::to_string(top+i/width)+").");
+                group[i]=Unpack(output[i]);
+            }
         }
         if(Canceled(request)){error="Canceled";return false;}
         if(!gpuError.empty())return fail(gpuError);

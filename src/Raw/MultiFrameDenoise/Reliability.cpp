@@ -647,6 +647,24 @@ bool ReadReliabilityStoreCell(
     return true;
 }
 
+bool ReadReliabilityStoreRawGridGeometry(
+    const ReliabilityStore& store,
+    ReliabilityRawGridGeometry& geometry,
+    std::string* error) {
+    geometry={};
+    const auto stride=store.cellStrideBayerCells;
+    const auto width=store.rawExtent.width/2,height=store.rawExtent.height/2;
+    if(stride==0||stride>16||width==0||height==0||
+       store.cellExtent.width!=(width+stride-1)/stride||
+       store.cellExtent.height!=(height+stride-1)/stride||
+       store.cellExtent.width>std::numeric_limits<std::uint32_t>::max()||
+       store.cellExtent.height>std::numeric_limits<std::uint32_t>::max()) {
+        return Fail(error,"MFD reliability reference-grid geometry is invalid.");
+    }
+    geometry={{width*2,height*2},store.cellExtent,2*stride};
+    return true;
+}
+
 bool ReadReliabilityStoreRawCoordinate(
     const ReliabilityStore& store,
     RawCoordinate referenceRaw,
@@ -654,22 +672,16 @@ bool ReadReliabilityStoreRawCoordinate(
     std::uint16_t* rejectionBits,
     std::string* error) {
     reliability=0;
-    const auto stride=store.cellStrideBayerCells;
-    const auto width=store.rawExtent.width/2,height=store.rawExtent.height/2;
-    if(stride==0||stride>16||width==0||height==0||
-       store.cellExtent.width!=(width+stride-1)/stride||
-       store.cellExtent.height!=(height+stride-1)/stride||
-       store.cellExtent.width>std::numeric_limits<std::uint32_t>::max()||
-       store.cellExtent.height>std::numeric_limits<std::uint32_t>::max()||
-       !Finite(referenceRaw.x)||!Finite(referenceRaw.y)||referenceRaw.x<0||referenceRaw.y<0||
-       referenceRaw.x>=double(width*2)||referenceRaw.y>=double(height*2)) {
-        return Fail(error,"MFD reliability raw coordinate or reference-grid geometry is invalid.");
-    }
+    ReliabilityRawGridGeometry geometry;
+    if(!ReadReliabilityStoreRawGridGeometry(store,geometry,error))return false;
+    if(!Finite(referenceRaw.x)||!Finite(referenceRaw.y)||referenceRaw.x<0||referenceRaw.y<0||
+       referenceRaw.x>=double(geometry.rawExtent.width)||referenceRaw.y>=double(geometry.rawExtent.height))
+        return Fail(error,"MFD reliability raw coordinate is outside its reference grid.");
     // Both builders sample fixed Bayer-cell blocks. The final block can be
     // shorter; normalized image-to-grid scaling would shift all its boundaries.
     // An odd trailing raw strip has no complete Bayer cell and is rejected above.
-    const auto x=static_cast<std::uint32_t>(referenceRaw.x/(2.0*stride));
-    const auto y=static_cast<std::uint32_t>(referenceRaw.y/(2.0*stride));
+    const auto x=static_cast<std::uint32_t>(referenceRaw.x/geometry.cellStepRawPixels);
+    const auto y=static_cast<std::uint32_t>(referenceRaw.y/geometry.cellStepRawPixels);
     return ReadReliabilityStoreCell(store,x,y,reliability,rejectionBits,error);
 }
 

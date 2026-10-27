@@ -15,6 +15,14 @@ Vec4 MapCapture(const PreparedSource& source,float x,float y,bool reference) {
 bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& source,const Tile& tile,
     PreparedTileSampler& sampler,FrameRegion& out,const std::function<bool()>& cancel,std::string& error) {
     const auto& data=*analysis.prepared;
+    if(!tile.width||!tile.height||!std::isfinite(tile.step)||tile.step<=0) {
+        error="Invalid super-resolution output tile.";return false;
+    }
+    const bool reference=&source==&data.sources[data.origin];
+    out.supportRequired=!reference&&bool(source.localMotion);
+    if(!BuildCaptureSupportMask(source,{tile.originX,tile.originY},
+        {tile.originX+(tile.width-1)*tile.step,tile.originY+(tile.height-1)*tile.step},
+        reference,out.support,cancel,error))return false;
     const int guideWidth=data.width/2,guideHeight=data.height/2;
     const auto signal=[&](int x,int y){return .18*std::exp2(analysis.guideEv[std::size_t(std::clamp(y,0,guideHeight-1))*guideWidth+std::clamp(x,0,guideWidth-1)]);};
     // Reuse this capture scratch region. Every sample and mapping entry below
@@ -27,7 +35,7 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
     out.mapping.resize(std::size_t(out.mapWidth)*out.mapHeight);
     float loX=std::numeric_limits<float>::max(),loY=loX,hiX=-loX,hiY=-loX;
     for(unsigned y=0;y<out.mapHeight;++y)for(unsigned x=0;x<out.mapWidth;++x) {
-        auto m=MapCapture(source,out.mapOriginX+x*8,out.mapOriginY+y*8,&source==&data.sources[data.origin]);
+        auto m=MapCapture(source,out.mapOriginX+x*8,out.mapOriginY+y*8,reference);
         if(!std::isfinite(m.x)||!std::isfinite(m.y)){m={0,0,0,0};}
         const int gx=int((out.mapOriginX+x*8)/2),gy=int((out.mapOriginY+y*8)/2);
         const double dx=(signal(gx+1,gy)-signal(gx-1,gy))*.25,dy=(signal(gx,gy+1)-signal(gx,gy-1))*.25;

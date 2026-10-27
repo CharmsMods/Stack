@@ -1,6 +1,9 @@
 #pragma once
+#include "CaptureSupport.h"
 #include "Raw/MultiFrameDenoise/LocalMotion.h"
 #include <cstdint>
+#include <functional>
+#include <string>
 
 namespace Raw::Bracketing {
 struct PreparedSource;
@@ -13,6 +16,11 @@ struct CaptureCorrespondence {
 bool HardCaptureRejection(std::uint16_t bits);
 void StampCaptureReliability(PreparedSource&);
 bool HasCurrentCaptureReliability(const PreparedSource&);
+// Crops categorical reliability evidence without re-evaluating motion. Missing
+// or stale required evidence rejects; cancellation/resource failures are errors.
+bool BuildCaptureSupportMask(const PreparedSource&,Mfd::RawCoordinate first,
+    Mfd::RawCoordinate last,bool reference,CaptureSupportMask&,
+    const std::function<bool()>& shouldCancel,std::string& error);
 // Rejected matches retain their coordinates for display fallback, but cannot
 // contribute reconstruction support. The fixed reference needs no match.
 // When supplied, evaluatedMotion receives the successful local-motion sample;

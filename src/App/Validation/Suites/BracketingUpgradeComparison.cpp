@@ -85,10 +85,10 @@ void WriteBracketUpgradeComparison(const Raw::Bracketing::ProcessingRequest& req
             if(request.shouldCancel&&request.shouldCancel()) throw std::runtime_error("Canceled");
             std::vector<std::vector<Observation>> before,after;Raw::Mfd::PreparedRawTile tile;
             if(!ReadTemporalGroups(request,control,tx,ty,before,tile,error)) throw std::runtime_error(error);
-            CanonicalizeGroupTile(before);
+            if(!CanonicalizeGroupTile(before,error))throw std::runtime_error(error);
             if(refined) {
                 if(!ReadTemporalGroups(request,data,tx,ty,after,tile,error)) throw std::runtime_error(error);
-                CanonicalizeGroupTile(after);
+                if(!CanonicalizeGroupTile(after,error))throw std::runtime_error(error);
             }
             const auto& aligned=refined?after:before;
             const unsigned x0=std::max(left,tx*side)-left,y0=std::max(top,ty*side)-top;

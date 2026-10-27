@@ -65,6 +65,20 @@ for comparison, and keep the original RAW inputs unchanged.
 
 ### Checks completed and remaining limits
 
+- SR now applies categorical native-grid support separately from its coarse
+  mapping. Actual preparation and scalar/GPU regressions verify interior hard
+  rejections at 1x/2x while preserving neighboring valid support, existing corner
+  gates, reference cases, partial cells and streamed-mask reuse. Independently
+  omitting either scalar or GPU veto makes the targeted regression fail. This
+  does not add dense geometric checks or fix separate depth-grid aliasing.
+- Temporal GPU readback rejects non-finite arithmetic transactionally. An actual
+  finite DNG-noise profile that overflows after gain propagation makes the
+  regression fail against the former implementation; it is now diagnosed without
+  replacing previous groups. Separate
+  float-storage validation rejects narrowing overflow before mutation or file
+  publication. Controls retain large finite GPU doubles, valid float boundaries,
+  signed samples, clipped/unsupported sentinels, cancellation and recovery.
+
 - Fixed-stride reliability lookup now preserves short final Bayer blocks instead
   of stretching their coordinates. Phase 6 storage checks and the actual Burst
   correspondence regression cover partial cells, reference/source extents,

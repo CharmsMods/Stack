@@ -169,6 +169,14 @@ with the in-process store and use its raw-coordinate lookup; proportional scalin
 by the number of stored cells shifts rejection boundaries. Missing geometry or an
 unpaired trailing Bayer strip cannot authorize a match.
 
+Super-resolution keeps categorical photometric rejection separate from its
+coarse geometric mapping. A cropped, authoritative reference-grid veto is sampled
+by cell before scalar or GPU accumulation; interpolating confidence at coarse
+corners must not bridge an interior hard rejection. Passing this veto does not
+promote correspondence or replace the existing corner checks. Required raster
+shape/resource errors fail the operation. Coarse motion/risk interpolation and
+depth-mask sampling remain separate limitations, not dense per-pixel validation.
+
 Resolved noise profiles already include quantization in their offset variance.
 Do not add that component again in reconstruction, alignment or presentation;
 unresolved inputs must honor their explicit inclusion flag. Defective and
@@ -180,6 +188,14 @@ the block signal's nonnegative bound. Rectifying each noisy sample first biases
 dark-patch signal estimates; this is distinct from clamping a physical shot-noise
 pilot during fusion. Temporal refitting still requires compatible eligible priors
 and adequate scene evidence, rather than inventing a model for generic dark input.
+
+Finite metadata does not guarantee finite GPU arithmetic. Validate temporal
+readback before publishing any pending groups, preserving valid unsupported and
+clipped sentinels. The group-cache owner separately validates finite float
+representability before narrowing or writing; do not clamp overflow into an
+apparently successful result. GPU failure preserves prior groups; failed
+canonicalization preserves its inputs, and invalid writes preserve existing valid
+cache files.
 
 Use the [shared notifications subsystem](../../src/Notifications/README.md) for program-wide notices, activity and substantive decisions. Capture the initiating owner's notifier through asynchronous work and retain the feature's lifetime and generation checks. Report outcomes at accepted state transitions, rather than repeated drawing code. Keep messages short, put longer explanations in details, and leave settings forms and useful diagnostics beside their controls. Dismissing feedback does not resolve its cause, and notification history does not determine processing busy state.
 

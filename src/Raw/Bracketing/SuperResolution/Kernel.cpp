@@ -4,13 +4,51 @@
 #include <atomic>
 #include <thread>
 #include <system_error>
+#include <limits>
 
 namespace Raw::Bracketing::Sr {
+namespace {
+bool ValidSupport(const FrameRegion& f) {
+    const auto& s=f.support;
+    if(s.mode==CaptureSupportMask::Mode::NotRequired||s.mode==CaptureSupportMask::Mode::AllRejected)
+        return f.supportRequired==(s.mode==CaptureSupportMask::Mode::AllRejected)&&
+            !s.width&&!s.height&&!s.cellStepRawPixels&&!s.originRawX&&!s.originRawY&&
+            !s.rawWidth&&!s.rawHeight&&s.cells.empty();
+    if(s.mode!=CaptureSupportMask::Mode::Raster||!f.supportRequired||!s.width||!s.height||
+       s.width>std::numeric_limits<std::size_t>::max()/s.height||
+       s.cells.size()!=std::size_t(s.width)*s.height||
+       s.cellStepRawPixels<2||s.cellStepRawPixels>32||s.cellStepRawPixels%2||
+       s.rawWidth<2||s.rawHeight<2||s.rawWidth%2||s.rawHeight%2||
+       s.originRawX>=s.rawWidth||s.originRawY>=s.rawHeight||
+       s.originRawX%s.cellStepRawPixels||s.originRawY%s.cellStepRawPixels)return false;
+    const auto remainingX=s.rawWidth-s.originRawX,remainingY=s.rawHeight-s.originRawY;
+    if(s.width>1+(remainingX-1)/s.cellStepRawPixels||s.height>1+(remainingY-1)/s.cellStepRawPixels)return false;
+    // CPU and GLSL must describe identical categorical boundaries. Source
+    // geometry outside the shader's exact integer range is not approximated.
+    for(const auto value:{s.originRawX,s.originRawY,s.rawWidth,s.rawHeight})
+        if(value>(std::uint64_t(1)<<53)||double(float(value))!=double(value))return false;
+    for(const auto value:s.cells)if(value!=0&&value!=1)return false;
+    return true;
+}
+bool Supports(const CaptureSupportMask& s,float x,float y) {
+    if(s.mode==CaptureSupportMask::Mode::NotRequired)return true;
+    if(s.mode!=CaptureSupportMask::Mode::Raster||!s.cellStepRawPixels||!std::isfinite(x)||!std::isfinite(y)||
+       x<0||y<0||double(x)>=s.rawWidth||double(y)>=s.rawHeight||
+       double(x)<s.originRawX||double(y)<s.originRawY)return false;
+    const double u=(double(x)-s.originRawX)/s.cellStepRawPixels;
+    const double v=(double(y)-s.originRawY)/s.cellStepRawPixels;
+    if(u>=s.width||v>=s.height)return false;
+    const auto index=std::size_t(v)*s.width+std::size_t(u);
+    return index<s.cells.size()&&s.cells[index]==1;
+}
+}
 bool Validate(const Tile& t,const FrameRegion& f,std::string& error) {
     if(!t.width||!t.height||t.pixels.size()!=std::size_t(t.width)*t.height||
-       !(t.step>0)||f.width<=0||f.height<=0||f.samples.size()!=std::size_t(f.width)*f.height||
-       f.mapWidth<2||f.mapHeight<2||f.mapping.size()!=std::size_t(f.mapWidth)*f.mapHeight||!(f.mapStep>0)||
-       !std::isfinite(f.detailPreference)||f.detailPreference<.1f||f.detailPreference>1) {
+       !(t.step>0)||!std::isfinite(t.step)||!std::isfinite(t.originX)||!std::isfinite(t.originY)||
+       f.width<=0||f.height<=0||f.samples.size()!=std::size_t(f.width)*f.height||
+       f.mapWidth<2||f.mapHeight<2||f.mapping.size()!=std::size_t(f.mapWidth)*f.mapHeight||
+       !(f.mapStep>0)||!std::isfinite(f.mapStep)||!std::isfinite(f.mapOriginX)||!std::isfinite(f.mapOriginY)||
+       !std::isfinite(f.detailPreference)||f.detailPreference<.1f||f.detailPreference>1||!ValidSupport(f)) {
         error="Invalid super-resolution tile or capture region.";return false;
     }
     return true;
@@ -32,6 +70,8 @@ Vec4 Map(const FrameRegion& f,float x,float y) {
 }
 }
 void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y,PixelAccumulator& p) {
+    if(f.supportRequired&&f.support.mode==CaptureSupportMask::Mode::NotRequired)return;
+    if(!Supports(f.support,tile.originX+x*tile.step,tile.originY+y*tile.step))return;
     const auto m=Map(f,tile.originX+x*tile.step,tile.originY+y*tile.step);
     if(!std::isfinite(m.x)||!std::isfinite(m.y)||!std::isfinite(m.z)||!std::isfinite(m.w)||m.z<=0)return;
     const int cx=int(std::floor(m.x+.5f)),cy=int(std::floor(m.y+.5f));

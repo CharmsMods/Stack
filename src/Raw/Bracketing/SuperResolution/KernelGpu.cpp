@@ -1,6 +1,7 @@
 #include "Kernel.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/ScopedComputeBindings.h"
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 
@@ -23,6 +24,19 @@ uniform vec3 target; // reference origin, sensor step
 uniform vec3 mapGeometry;
 uniform vec4 regionValue, colorValue;
 uniform float detailPreference;
+uniform vec4 supportGeometry; // reference origin, fixed raw step, categorical mode
+uniform ivec2 supportSize;
+uniform vec2 supportDomain; // complete Bayer reference domain, not source extent
+bool supported(vec2 xy,ivec4 region) {
+    if(supportGeometry.w==0)return true;
+    if(supportGeometry.w!=2||any(isnan(xy))||any(isinf(xy))||
+       any(lessThan(xy,vec2(0)))||any(greaterThanEqual(xy,supportDomain)))return false;
+    vec2 uv=(xy-supportGeometry.xy)/supportGeometry.z;
+    if(any(lessThan(uv,vec2(0)))||any(greaterThanEqual(uv,vec2(supportSize))))return false;
+    ivec2 cell=ivec2(floor(uv));int i=cell.y*supportSize.x+cell.x;
+    int offset=mapSize.x*mapSize.y+region.z*region.w;
+    return data[offset+i/4][i%4]>0;
+}
 vec4 mapped(vec2 xy) {
     vec2 uv=clamp((xy-mapGeometry.xy)/mapGeometry.z,vec2(0),vec2(mapSize-1));
     ivec2 p=min(ivec2(uv),mapSize-2);vec2 f=uv-vec2(p);
@@ -38,7 +52,9 @@ void main() {
     ivec2 outp=ivec2(gl_GlobalInvocationID.xy);
     if(any(greaterThanEqual(outp,outputSize)))return;
     int outi=outp.y*outputSize.x+outp.x;
-    vec4 m=mapped(target.xy+vec2(outp)*target.z);
+    vec2 reference=target.xy+vec2(outp)*target.z;
+    if(!supported(reference,region))return;
+    vec4 m=mapped(reference);
     if(m.z<=0||any(isnan(m))||any(isinf(m)))return;
     ivec2 center=ivec2(floor(m.xy+.5));
     float headroom=1;bvec3 usable=bvec3(false);
@@ -92,7 +108,8 @@ bool GpuKernel::Begin(const Tile& t,std::string& error) {
     if(!program_) {
         program_=GLHelpers::CreateComputeProgram(shader);
         if(program_) {
-            const char* names[]={"outputSize","mapSize","target","mapGeometry","detailPreference","regionValue","colorValue"};
+            const char* names[]={"outputSize","mapSize","target","mapGeometry","detailPreference","regionValue","colorValue",
+                "supportGeometry","supportSize","supportDomain"};
             for(std::size_t i=0;i<uniforms_.size();++i)uniforms_[i]=glGetUniformLocation(program_,names[i]);
         }
     }
@@ -113,12 +130,25 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
     if(!Validate(t,f,error)||!program_||!output_)return false;
     Stack::Rendering::ScopedComputeBindings bindings;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER,input_);
+    // GLSL addresses vec4 records with signed ints. Check every offset and
+    // padded allocation before converting byte counts to GL's signed size.
+    const auto limit=std::min<std::size_t>(std::numeric_limits<int>::max(),
+        std::size_t(std::numeric_limits<GLsizeiptr>::max())/sizeof(Vec4));
+    const auto supportRecords=f.support.cells.size()/4+(f.support.cells.size()%4!=0);
+    if(f.support.cells.size()>std::size_t(std::numeric_limits<int>::max())||
+       f.mapping.size()>limit||f.samples.size()>limit-f.mapping.size()||
+       supportRecords>limit-f.mapping.size()-f.samples.size()) {
+        error="Super-resolution input exceeds GPU addressable storage.";return false;
+    }
     const auto mapBytes=f.mapping.size()*sizeof(Vec4),sampleBytes=f.samples.size()*sizeof(Vec4);
+    const auto supportBytes=supportRecords*sizeof(Vec4);
     // Keep orphaning streamed input storage: the preceding capture can still
     // be reading it. In-place reuse here would introduce an implicit GPU wait.
-    glBufferData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes,nullptr,GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes+supportBytes,nullptr,GL_DYNAMIC_DRAW);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,mapBytes,f.mapping.data());
     glBufferSubData(GL_SHADER_STORAGE_BUFFER,mapBytes,sampleBytes,f.samples.data());
+    if(supportBytes)glBufferSubData(GL_SHADER_STORAGE_BUFFER,mapBytes+sampleBytes,
+        f.support.cells.size()*sizeof(float),f.support.cells.data());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,input_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,output_);
     glUseProgram(program_);
@@ -129,6 +159,10 @@ bool GpuKernel::Add(const Tile& t,const FrameRegion& f,std::string& error) {
     glUniform1f(uniforms_[4],f.detailPreference);
     glUniform4f(uniforms_[5],float(f.left),float(f.top),float(f.width),float(f.height));
     glUniform4f(uniforms_[6],float(f.colors[0]),float(f.colors[1]),float(f.colors[2]),float(f.colors[3]));
+    glUniform4f(uniforms_[7],float(f.support.originRawX),float(f.support.originRawY),
+        float(f.support.cellStepRawPixels),float(f.support.mode));
+    glUniform2i(uniforms_[8],f.support.width,f.support.height);
+    glUniform2f(uniforms_[9],float(f.support.rawWidth),float(f.support.rawHeight));
     glDispatchCompute((t.width+7)/8,(t.height+7)/8,1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
     return Check(error);

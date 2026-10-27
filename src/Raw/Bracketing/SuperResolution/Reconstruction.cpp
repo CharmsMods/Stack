@@ -181,11 +181,13 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     Sr::MemoryRequirements requirements;
     requirements.residentBytes=std::uint64_t(data.width)*data.height*20+analysisBytes;
     requirements.outputBytes=pixels*28;
-    requirements.workingBytes=fallbackBytes+128ull*1024*1024+
+    requirements.workingBytes=fallbackBytes+128ull*1024*1024+24+
         result.analysis->guideEv.capacity()*sizeof(float)+p.guideEv.size()*sizeof(unsigned);
     requirements.sourceTileBytes=std::uint64_t(sourceTile)*sourceTile*9;
     requirements.preferredCacheTiles=data.sources.size()*4+4;
-    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4;
+    // The cropped native reliability mask is no larger than a production
+    // output tile (1x/2x, minimum side32). Include CPU/GPU copies and tail padding.
+    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4+8;
     const auto memoryPlan=Sr::PlanMemory(requirements,request.memoryBudgetBytes,
         request.automaticMemoryBudget,Mfd::QueryPhysicalMemorySnapshot());
     if(!memoryPlan.fits){error=memoryPlan.message;return false;}
