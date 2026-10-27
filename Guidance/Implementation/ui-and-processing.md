@@ -53,6 +53,14 @@ drawing. Shared recipe, identity, metadata and result serialization code does
 not own processing. Internal algorithm diagnostics use the separate diagnostic
 build described in [Building](../BUILDING.md).
 
+Completed-result inspection must retain the saved pixels even when an engine
+upgrade attaches newly prepared analysis. Native detail reads a bounded saved
+result region; compatible live Standard edits use the separate proposed-detail
+operation. The project owns this choice and rejects delayed detail when its
+result, recipe, revisions or cancellation state changes. Missing saved diagnostic
+planes are unavailable, not zero-valued evidence. Distinguish prepared-source
+estimates from historical output diagnostics without rewriting the saved result.
+
 Burst hosts share the same reconstruction quality plan. Limit background concurrency
 for responsiveness; do not omit alignment/refinement because a different host supplies
 a smaller budget. Resource or execution failures must remain errors, distinct from

@@ -1,8 +1,10 @@
 #include "Persistence/BracketingResultStore.h"
 #include "Editor/EditorModule.h"
 #include "BracketingSession.h"
+#include "BracketingPreviewAvailability.h"
 #include "Project/BracketingJobRunner.h"
 #include "Project/BracketingPreparation.h"
+#include "Project/BracketingDetail.h"
 #include "BurstEngine/Client.h"
 #include "Editor/RawRenderService.h"
 #include "BracketingGallery.h"
@@ -324,31 +326,45 @@ void EditorModule::TickBracketing(bool foreground) {
         MarkRenderRefreshDirty();
     }
     if(ui.detailJob&&ui.detailJob->done) {
-        if(!ui.detailJob->canceled&&ui.detailJob->recipeIdentity==stored) {
+        if(Stack::Project::CanAdoptBracketingDetail(ui,*ui.detailJob,snapshot.hdrInputRevision)) {
             if(ui.detailJob->error.empty()&&ui.detailJob->preview.width) {
+                // SR keeps a zero-initialized display plane when old saved
+                // sidecars are absent. Do not present it as historical evidence.
+                if(ui.detailJob->mode==Stack::Project::BracketingDetailMode::Completed&&
+                    !Stack::Editor::HasSavedBracketingDiagnostics(*ui.detailJob->source))
+                    ui.detailJob->preview.diagnostics.clear();
                 ui.detail=std::move(ui.detailJob->preview);ui.detailMode=true;
+                ui.detailContentMode=ui.detailJob->mode;
+                ui.detailPreparedEstimates=ui.detailJob->mode==Stack::Project::BracketingDetailMode::Completed&&
+                    bool(ui.detailJob->source->reconstructionInspection);
                 ui.zoom=1;ui.panX=ui.panY=0;ui.textureIdentity.clear();
                 ui.probeX=ui.probeY=.5f;
             } else ui.status=ui.detailJob->error;
         }
         ui.detailJob.reset();
     }
-    if(ui.requestDetail&&ui.result&&(ui.result->analysis||ui.result->panorama)&&!ui.detailJob) {
+    if(ui.requestDetail&&ui.result&&ui.result->raw&&(ui.result->analysis||ui.result->panorama)&&!ui.detailJob) {
         ui.requestDetail=false;
         auto job=std::make_shared<Stack::Editor::BracketingSession::DetailJob>();
-        job->recipeIdentity=stored;ui.detailJob=job;
-        Raw::Bracketing::ProcessingRequest request;request.recipe=ui.recipe;request.analysis=ui.result->analysis;
-        const auto budget=Raw::Mfd::ResolveMfdProcessingMemoryBudget(0,Raw::Mfd::QueryPhysicalMemorySnapshot());
-        request.memoryBudgetBytes=budget.valid?budget.budgetBytes:0;
-        request.shouldCancel=[job]{return job->canceled.load();};
-        const unsigned x=static_cast<unsigned>(ui.probeX*ui.result->raw->metadata.visibleWidth);
-        const unsigned y=static_cast<unsigned>(ui.probeY*ui.result->raw->metadata.visibleHeight);
-        const auto completed=ui.result;
-        if(!ProjectTasks().SubmitHighPriority([job,request,x,y,completed] {
-            try {job->preview=Stack::BurstEngine::RenderResultDetail(request,*completed,x,y,512);}
-            catch(const std::exception& e) {job->error=e.what();}
-            job->done=true;
-        })) {job->error="Could not schedule native detail.";job->done=true;}
+        Raw::Bracketing::ProcessingRequest request;
+        // A malformed completed recipe cannot safely borrow the current draft.
+        if(Stack::Project::CaptureBracketingDetail(ui,snapshot.hdrInputRevision,*job,request.recipe,ui.status)) {
+            ui.detailJob=job;request.analysis=job->source->analysis;
+            const auto budget=Raw::Mfd::ResolveMfdProcessingMemoryBudget(0,Raw::Mfd::QueryPhysicalMemorySnapshot());
+            request.memoryBudgetBytes=budget.valid?budget.budgetBytes:0;
+            request.shouldCancel=[job]{return job->canceled.load();};
+            const unsigned x=static_cast<unsigned>(ui.probeX*job->source->raw->metadata.visibleWidth);
+            const unsigned y=static_cast<unsigned>(ui.probeY*job->source->raw->metadata.visibleHeight);
+            if(!ProjectTasks().SubmitHighPriority([job,request,x,y] {
+                try {
+                    if(!job->canceled)job->preview=job->mode==Stack::Project::BracketingDetailMode::Proposed
+                        ?Stack::BurstEngine::RenderNativeDetail(request,x,y,512)
+                        :Stack::BurstEngine::RenderResultDetail(request,*job->source,x,y,512);
+                }
+                catch(const std::exception& e) {job->error=e.what();}
+                job->done=true;
+            })) {job->error="Could not schedule native detail.";job->done=true;}
+        }
     }
     if(ui.publishRequested&&ui.result&&ui.completedRecipe==stored&&ui.completedRevision==snapshot.hdrInputRevision&&!ui.pending&&!ui.job&&!ui.failed) {
         if(m_HdrAdoptedRawResult&&m_HdrAdoptedRawResult->projectId==snapshot.projectId&&

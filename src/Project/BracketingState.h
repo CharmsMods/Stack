@@ -34,6 +34,8 @@ struct BracketingJob {
     std::shared_ptr<ProcessingMailbox> presentation;
 };
 
+enum class BracketingDetailMode { Completed, Proposed };
+
 // Per-project draft, computation and accepted results. No window or selected
 // tab is required to edit a recipe or decide whether a worker may publish.
 struct BracketingState {
@@ -57,6 +59,8 @@ struct BracketingState {
     // Preserve successfully solved geometry if only the requested canvas size failed.
     std::shared_ptr<const Raw::Bracketing::BracketingAnalysis> panoramaAnalysis;
     Raw::Bracketing::Preview preview, detail;
+    BracketingDetailMode detailContentMode = BracketingDetailMode::Completed;
+    bool detailPreparedEstimates = false;
     struct PreviewJob {
         std::atomic<bool> done{false}, canceled{false};
         std::uint64_t revision = 0;
@@ -68,8 +72,11 @@ struct BracketingState {
     std::uint64_t previewRevision = 0;
     struct DetailJob {
         std::atomic<bool> done{false}, canceled{false};
+        BracketingDetailMode mode = BracketingDetailMode::Completed;
+        std::shared_ptr<const Raw::Bracketing::BracketingResult> source;
+        std::uint64_t inputRevision = 0, completedRevision = 0, previewRevision = 0;
         Raw::Bracketing::Preview preview;
-        std::string recipeIdentity, error;
+        std::string recipeIdentity, completedRecipeIdentity, error;
     };
     std::shared_ptr<DetailJob> detailJob;
     struct InspectionJob {

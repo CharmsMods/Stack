@@ -16,6 +16,7 @@
 #include "BracketingTemporalOutputValidation.h"
 #include "BracketingNeutralGuideValidation.h"
 #include "BracketingDetailFusionValidation.h"
+#include "BracketingSavedDetailValidation.h"
 #include "BracketingSharpnessValidation.h"
 #include "Raw/RawProcessingMath.h"
 #include "Persistence/BracketingProject.h"
@@ -136,6 +137,7 @@ bool ValidateBracketing() {
         ValidateBracketingLocalDetailEvidence();
         ValidateBracketingLocalExposure();
         ValidateBracketingDetailFusion();
+        ValidateBracketingSavedDetail(directory/"saved-detail");
         ValidateBracketingGuideCoordinates();
         ValidateBracketingNeutralGuide();
         ValidateBracketingNeutralGuideCache(directory/"neutral-guide-cache");

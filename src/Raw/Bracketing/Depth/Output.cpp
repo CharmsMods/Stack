@@ -1,20 +1,12 @@
 #include "Depth.h"
 #include "../ProcessingInternal.h"
+#include "../ResultDetail.h"
 #include "Raw/RawProcessingMath.h"
 #include <algorithm>
 
 namespace Raw::Bracketing::Depth {
 Preview ReadResultDetail(const ProcessingRequest& request,const BracketingResult& result,unsigned x,unsigned y,unsigned size) {
-    auto preview=RenderNativeDetail(request,x,y,size);
-    if(!result.raw||!result.raw->reconstructedCameraRgb)return preview;
-    const auto& raw=*result.raw;
-    for(unsigned yy=0;yy<preview.height;++yy) {
-        if(request.shouldCancel&&request.shouldCancel())return {};
-        const auto offset=(std::size_t(preview.sensorOriginY+yy)*raw.metadata.visibleWidth+unsigned(preview.sensorOriginX))*3;
-        std::copy_n(raw.linearFloatBuffer.begin()+offset,std::size_t(preview.width)*3,
-            preview.resultRgb.begin()+std::size_t(yy)*preview.width*3);
-    }
-    return preview;
+    return ReadCompletedResultDetail(request,result,x,y,size);
 }
 bool Finish(const ProcessingRequest& request,BracketingResult& result,std::string& error) {
     if(!result.raw||!result.analysis||!result.analysis->depth)return true;

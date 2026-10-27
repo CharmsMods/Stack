@@ -1,4 +1,5 @@
 #include "BracketingSession.h"
+#include "BracketingPreviewAvailability.h"
 #include "Raw/MultiFrameDenoise/Reliability.h"
 #include "Renderer/GLHelpers.h"
 #include <algorithm>
@@ -34,7 +35,14 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     auto& p=ui.detailMode?ui.detail:ui.preview;const auto groups=ui.recipe.groups.size();
     if(!groups) return;
     ui.selectedGroup=std::clamp(ui.selectedGroup,0,static_cast<int>(groups)-1);
-    if(!p.width||!p.height||p.resultRgb.empty()||p.sourceRgb.size()!=static_cast<std::size_t>(p.width)*p.height*groups*3) {
+    const auto pixels=static_cast<std::size_t>(p.width)*p.height;
+    const bool hasGroups=p.sourceRgb.size()==pixels*groups*3;
+    const bool hasContributions=p.contributions.size()==pixels*groups;
+    const bool hasRequested=p.requested.size()==pixels*groups;
+    const bool hasGuide=p.guideEv.size()==pixels,hasDiagnostics=p.diagnostics.size()==pixels;
+    const bool completedDetail=ui.detailMode&&ui.detailContentMode==Project::BracketingDetailMode::Completed;
+    const bool preparedEstimates=completedDetail&&ui.detailPreparedEstimates;
+    if(!p.width||!p.height||p.resultRgb.size()!=pixels*3) {
         ImGui::TextWrapped("The bracket preview appears after the captures have been prepared.");return;
     }
     const float controlsTop=ImGui::GetCursorScreenPos().y;
@@ -69,11 +77,23 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     }
     if(needsOriginal) {
         const auto label=ui.frameLabels.find(frame);
-        ImGui::TextWrapped("%s / %s",view==1?"Captured brightness":"Exposure matched",label==ui.frameLabels.end()?"Select a capture":label->second.c_str());
-        if(!original) {ImGui::TextWrapped("This capture is not prepared. Enable it to inspect its original.");return;}
-    } else if(view==6) ImGui::TextWrapped("Alignment confidence / %s",ui.frameLabels.count(frame)?ui.frameLabels.at(frame).c_str():"select a capture");
+        ImGui::TextWrapped("%s / %s",view==1?"Prepared source / captured brightness":"Prepared source / exposure matched",label==ui.frameLabels.end()?"Select a capture":label->second.c_str());
+        if(!HasBracketingOriginalPixels(original,bool(native),ui.inspectionPixels.size())) {ImGui::TextWrapped("This capture is not prepared. Enable it to inspect its original.");return;}
+    } else if(view==6) ImGui::TextWrapped("Prepared-source alignment confidence / %s",ui.frameLabels.count(frame)?ui.frameLabels.at(frame).c_str():"select a capture");
     else ImGui::TextDisabled(view==7?"Relative depth: light is near, dark is far, purple is unresolved":
-        view==2?"Actual contributions after clipping and fallback":"Merged result or denoised group / common exposure");
+        view==2?"Actual contributions after clipping and fallback":
+        view==4?"Prepared-source denoised group / common exposure":"Merged result / common exposure");
+    if(ui.detailMode)ImGui::TextDisabled(completedDetail?"Completed result pixels (saved output)":"Proposed result pixels (preview, not the saved output)");
+    if(view==2&&!hasContributions) {ImGui::TextWrapped("Contribution masks are unavailable for these completed pixels; no fresh measurements are substituted.");return;}
+    if(view==4&&!hasGroups) {ImGui::TextWrapped("Historical denoised group pixels are unavailable for this result. Inspect Original or Matched for prepared-source pixels.");return;}
+    if(view==6&&(!alignmentInspection||!alignmentInspection->width||!alignmentInspection->height||
+        alignmentInspection->confidence.size()!=std::size_t(alignmentInspection->width)*alignmentInspection->height||
+        alignmentInspection->rejectionBits.size()!=std::size_t(alignmentInspection->width)*alignmentInspection->height)) {
+        ImGui::TextWrapped("Prepared-source alignment evidence is unavailable for this capture.");return;
+    }
+    if(view==7&&(!ui.result||!ui.result->raw||!ui.result->raw->reconstructionDepth)) {
+        ImGui::TextWrapped("Depth evidence is unavailable for this result.");return;
+    }
     ImGui::TextDisabled(ui.detailMode?(ui.result&&ui.result->reconstructionInspection?
         "Native reconstruction pixels / original enlarged to the same scene area":"Native sensor pixels / identical demosaic / no resizing at 1x"):
         native?"Full-quality inspection / zoom to examine detail":ui.inspectionJob?"Loading full-quality pixels...":
@@ -81,7 +101,7 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
         view==2||view==6?"Mask overview / native detail available at cursor":"Preview / full-quality pixels load automatically");
     if(native) {ImGui::SameLine();ImGui::TextDisabled("%u x %u",imageWidth,imageHeight);}
     if(!ui.inspectionError.empty()&&!ui.detailMode)ImGui::TextDisabled("%s",ui.inspectionError.c_str());
-    const auto identity=ui.storedRecipe+std::to_string(view)+std::to_string(ui.selectedGroup)+std::to_string(ui.detailMode)+frame+
+    const auto identity=ui.storedRecipe+std::to_string(view)+std::to_string(ui.selectedGroup)+std::to_string(ui.detailMode)+std::to_string(int(ui.detailContentMode))+frame+
         std::to_string(ui.inspectionEv)+std::to_string(ui.showClipping)+std::to_string(ui.selectedMask)+std::to_string(ui.compareSplit)+
         "/"+std::to_string(imageWidth)+"x"+std::to_string(imageHeight);
     if(!ui.texture||ui.textureIdentity!=identity) {
@@ -129,7 +149,7 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
                     float v=0;for(unsigned channel=0;channel<3;++channel)v+=p.metadata.cameraToSrgb[c*3+channel]*camera[channel];
                     v=std::max(0.f,v);v/=1+v;color[c]=v<=.0031308f?v*12.92f:1.055f*std::pow(v,1/2.4f)-.055f;
                 }
-                const bool clipped=originalPixel?original->clipped[originalIndex]!=0:native&&view!=5?native->clipped[output]!=0:i<p.diagnostics.size()&&(p.diagnostics[i]&Raw::Bracketing::Preview::Unrecoverable);
+                const bool clipped=originalPixel?originalIndex<original->clipped.size()&&original->clipped[originalIndex]!=0:native&&view!=5?native->clipped[output]!=0:i<p.diagnostics.size()&&(p.diagnostics[i]&Raw::Bracketing::Preview::Unrecoverable);
                 if(ui.showClipping&&clipped) {color[0]=1;color[1]=0;color[2]=1;}
             }
             for(unsigned c=0;c<3;++c)rgba[output*4+c]=static_cast<unsigned char>(std::clamp(color[c],0.f,1.f)*255+.5f);
@@ -157,9 +177,11 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     draw->AddImage(static_cast<ImTextureID>(ui.texture),pos,{pos.x+size.x,pos.y+size.y});draw->PopClipRect();
     if(hovered) {ui.probeX=std::clamp((io.MousePos.x-pos.x)/size.x,0.f,.99999f);ui.probeY=std::clamp((io.MousePos.y-pos.y)/size.y,0.f,.99999f);}
     const auto pixel=static_cast<std::size_t>(ui.probeY*p.height)*p.width+static_cast<unsigned>(ui.probeX*p.width);
-    ImGui::Text("Scene %.2f EV",p.guideEv[pixel]);
+    if(hasGuide)ImGui::Text(preparedEstimates?"Prepared-source scene estimate %.2f EV":"Scene %.2f EV",p.guideEv[pixel]);
+    else ImGui::TextDisabled("Historical scene guide unavailable.");
     const auto g=static_cast<std::size_t>(ui.selectedGroup);
-    ImGui::Text(ui.recipe.automatic ? "%s: curve average %.1f%%, actual %.1f%%" : "%s: requested %.1f%%, actual %.1f%%",ui.recipe.groups[g].name.c_str(),p.requested[pixel*groups+g]*100,p.contributions[pixel*groups+g]*100);
+    if(hasRequested&&hasContributions)ImGui::Text(preparedEstimates ? "%s: prepared curve estimate %.1f%%, saved actual %.1f%%" : ui.recipe.automatic ? "%s: curve average %.1f%%, actual %.1f%%" : "%s: requested %.1f%%, actual %.1f%%",ui.recipe.groups[g].name.c_str(),p.requested[pixel*groups+g]*100,p.contributions[pixel*groups+g]*100);
+    else ImGui::TextDisabled("Historical requested/actual contribution measurements unavailable.");
     if((!ui.result||!ui.result->reconstructionInspection||ui.interactiveRaw)&&
         p.samples.size()==static_cast<std::size_t>(p.width)*p.height*4*groups) {
         double support=0;
@@ -181,7 +203,8 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
         ImGui::TextDisabled("Cyan = accepted, amber = uncertain, red = rejected.");
     }
     const auto diagnostic=pixel<p.diagnostics.size()?p.diagnostics[pixel]:0;
-    if(diagnostic&Raw::Bracketing::Preview::Invalid)
+    if(!hasDiagnostics)ImGui::TextDisabled("Historical clipping/fallback diagnostics unavailable.");
+    else if(diagnostic&Raw::Bracketing::Preview::Invalid)
         ImGui::TextUnformatted("No valid measurement for at least one sample here.");
     else if(diagnostic&Raw::Bracketing::Preview::Unrecoverable) {
         if(diagnostic&Raw::Bracketing::Preview::ShortestExposure)
@@ -194,13 +217,16 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
         ImGui::TextUnformatted("Fallback here: requested sources unusable; another enabled source supplies the sample.");
     else if(diagnostic&Raw::Bracketing::Preview::AlignmentRejected)
         ImGui::TextUnformatted("An uncertain alternate was rejected here; remaining reliable measurements were renormalized.");
-    else ImGui::TextDisabled("Actual contributions exclude unusable samples. RAW display mapping does not affect this mask.");
-    if(view==2) for(std::size_t group=0;group<groups;++group) {
+    else if(hasContributions)ImGui::TextDisabled("Actual contributions exclude unusable samples. RAW display mapping does not affect this mask.");
+    else ImGui::TextDisabled("No stored invalid, clipping or fallback flags at this sample.");
+    if(view==2&&hasRequested&&hasContributions) for(std::size_t group=0;group<groups;++group) {
         double average=0;for(std::size_t sample=group;sample<p.contributions.size();sample+=groups)average+=p.contributions[sample];
         average/=static_cast<double>(p.width)*p.height;
-        ImGui::TextColored(BracketColor(ui.recipe,group),ui.recipe.automatic ? "%s: curve average %.1f%% / cursor %.1f%% actual; view average %.1f%%" : "%s: cursor %.1f%% requested / %.1f%% actual; view average %.1f%%",ui.recipe.groups[group].name.c_str(),p.requested[pixel*groups+group]*100,p.contributions[pixel*groups+group]*100,average*100);
+        ImGui::TextColored(BracketColor(ui.recipe,group),preparedEstimates ? "%s: prepared curve estimate %.1f%% / saved actual %.1f%%; saved view average %.1f%%" : ui.recipe.automatic ? "%s: curve average %.1f%% / cursor %.1f%% actual; view average %.1f%%" : "%s: cursor %.1f%% requested / %.1f%% actual; view average %.1f%%",ui.recipe.groups[group].name.c_str(),p.requested[pixel*groups+group]*100,p.contributions[pixel*groups+group]*100,average*100);
     }
-    if(ui.showClipping)ImGui::TextDisabled("Magenta = sensor clipping, not display white. Result marks unrecoverable clipping.");
+    if(ui.showClipping)ImGui::TextDisabled(hasDiagnostics?
+        "Magenta = sensor clipping, not display white. Result marks unrecoverable clipping.":
+        "Magenta = prepared-source sensor clipping only; saved-result clipping evidence is unavailable.");
     ImGui::TextDisabled("Scroll to zoom. Middle-drag to pan. Viewing EV does not change the merge.");
 }
 } // namespace Stack::Editor

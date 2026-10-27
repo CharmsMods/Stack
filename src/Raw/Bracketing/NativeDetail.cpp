@@ -1,6 +1,7 @@
 #include "ProcessingInternal.h"
 #include "HdrColorFusion.h"
 #include "LocalDetail.h"
+#include "NativeDetailRegion.h"
 #include "Raw/RawProcessingMath.h"
 #include <algorithm>
 #include <cmath>
@@ -11,9 +12,9 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
     if(!request.analysis||!request.analysis->prepared) return {};
     if(request.analysis->identity!=AnalysisIdentity(request)) return {};
     const auto& analysis=*request.analysis;const auto& data=*analysis.prepared;
-    const unsigned width=std::min(size+8,data.width)&~1u,height=std::min(size+8,data.height)&~1u;
-    const unsigned left=std::min(centerX>width/2?centerX-width/2:0u,data.width-width)&~1u;
-    const unsigned top=std::min(centerY>height/2?centerY-height/2:0u,data.height-height)&~1u;
+    const auto region=DetailInternal::ChooseRegion(data.width,data.height,centerX,centerY,size);
+    const unsigned width=region.width,height=region.height,left=region.left,top=region.top;
+    if(!width||!height)return {};
     const auto groups=request.recipe.groups.size(),pixels=static_cast<std::size_t>(width)*height;
     const auto tilePixels=static_cast<std::uint64_t>(data.sources[data.origin].frame.tileRawPixels)*data.sources[data.origin].frame.tileRawPixels;
     if(pixels*(groups*5+4+data.sources.size()*5)*sizeof(float)+tilePixels*(groups*(sizeof(Observation)+16)+48)+
@@ -67,30 +68,6 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
             for(unsigned c=0;c<3;++c) out.sourceRgb[(i*groups+g)*3+c]=source[c];
         }
     }
-    Mfd::DirectoryNormalizedTileCache cache(data.directory);
-    std::map<std::string,std::shared_ptr<CapturePreview>> originals;
-    for(const auto& source:data.sources) {
-        if(request.shouldCancel&&request.shouldCancel()) return {};
-        auto original=std::make_shared<CapturePreview>();original->width=width;original->height=height;original->exposureScale=source.scale;
-        original->rgb.resize(pixels*3);original->clipped.resize(pixels);
-        std::vector<float> mosaic(pixels);
-        for(unsigned ty=top/tileSize;ty<=(top+height-1)/tileSize;++ty) for(unsigned tx=left/tileSize;tx<=(left+width-1)/tileSize;++tx) {
-            if(request.shouldCancel&&request.shouldCancel()) return {};
-            Mfd::PreparedRawTile tile;std::string error;
-            if(Mfd::ReadPreparedTile(source.frame,cache,tx,ty,tile,&error)!=Mfd::TileCacheReadStatus::Hit) throw std::runtime_error(error);
-            for(unsigned y=std::max<unsigned>(top,tile.originY);y<std::min<unsigned>(top+height,tile.originY+tile.extent.height);++y)
-            for(unsigned x=std::max<unsigned>(left,tile.originX);x<std::min<unsigned>(left+width,tile.originX+tile.extent.width);++x) {
-                const auto i=(y-top)*width+x-left;const auto q=(y-tile.originY)*tile.extent.width+x-tile.originX;
-                const float v=tile.normalizedMosaic[q]*tile.comparisonGain[q];mosaic[i]=std::isfinite(v)?v:0;
-                original->clipped[i]=Mfd::HasSampleFlag(tile.sampleFlags[q],Mfd::PreparedSampleFlag::Saturated)||Mfd::HasSampleFlag(tile.sampleFlags[q],Mfd::PreparedSampleFlag::ExplicitDecoderClip);
-            }
-        }
-        for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
-            const auto rgb=Processing::DemosaicMalvarHeCutlerAt(mosaic,width,height,source.frame.activeCfaPattern,x,y);
-            for(unsigned c=0;c<3;++c)original->rgb[(y*width+x)*3+c]=rgb[c];
-        }
-        originals[source.id]=std::move(original);
-    }
     // Hide the demosaic halo so ROI edges use the same neighbors as the full image.
     const unsigned borderX=width>8?4:0,borderY=height>8?4:0;
     const unsigned croppedWidth=width-2*borderX,croppedHeight=height-2*borderY;
@@ -103,12 +80,10 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
     std::vector<std::uint8_t> diagnostics(static_cast<std::size_t>(croppedWidth)*croppedHeight);
     for(unsigned y=0;y<croppedHeight;++y)std::copy_n(out.diagnostics.begin()+(y+borderY)*width+borderX,croppedWidth,diagnostics.begin()+y*croppedWidth);
     out.diagnostics=std::move(diagnostics);
-    for(auto& [id,original]:originals) {
-        crop(original->rgb,3);
-        std::vector<std::uint8_t> clipped(static_cast<std::size_t>(croppedWidth)*croppedHeight);
-        for(unsigned y=0;y<croppedHeight;++y)std::copy_n(original->clipped.begin()+(y+borderY)*width+borderX,croppedWidth,clipped.begin()+y*croppedWidth);
-        original->clipped=std::move(clipped);original->width=croppedWidth;original->height=croppedHeight;
-        out.originals[id]=original;
+    std::string originalError;
+    if(!DetailInternal::ReadOriginals(request,data,region,out.originals,originalError)) {
+        if(originalError=="Canceled")return {};
+        throw std::runtime_error(originalError);
     }
     out.width=croppedWidth;out.height=croppedHeight;
     out.sensorOriginX=left+borderX;out.sensorOriginY=top+borderY;

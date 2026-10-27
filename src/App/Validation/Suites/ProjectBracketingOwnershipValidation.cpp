@@ -1,5 +1,7 @@
 #include "ProjectBracketingOwnershipValidation.h"
 #include "Project/BracketingState.h"
+#include "Project/BracketingDetail.h"
+#include "Editor/Bracketing/BracketingPreviewAvailability.h"
 #include "Persistence/BracketingProject.h"
 #include <cmath>
 #include <iostream>
@@ -29,9 +31,153 @@ void InitializeBracket(Project::BracketingState& state, Project::RawProjectSnaps
     }
     document.sourceSets.push_back(std::move(set));
 }
+
+void ValidateNativeDetailOwnership() {
+    // Full-quality inspection publishes dimensions separately from display RGBA.
+    Raw::Bracketing::CapturePreview image;image.width=4;image.height=3;
+    Require(Editor::HasBracketingOriginalPixels(&image,true,4*3*4),
+        "A dimension-only full-quality original lost its separately stored RGBA pixels.");
+    Require(!Editor::HasBracketingOriginalPixels(&image,true,0),
+        "Missing full-quality RGBA passed availability.");
+    image.width=0;
+    Require(!Editor::HasBracketingOriginalPixels(&image,true,0),
+        "An empty native image passed availability.");
+    image.width=4;image.rgb.assign(4*3*3,.2f);
+    Require(Editor::HasBracketingOriginalPixels(&image,false,0),
+        "Ordinary prepared RGB pixels became unavailable.");
+    image.rgb.pop_back();
+    Require(!Editor::HasBracketingOriginalPixels(&image,false,0),
+        "A truncated prepared RGB plane passed availability.");
+    Raw::Bracketing::BracketingResult historical;
+    historical.raw=std::make_shared<Raw::RawImageData>();
+    historical.raw->metadata.visibleWidth=4;historical.raw->metadata.visibleHeight=3;
+    Require(!Editor::HasSavedBracketingDiagnostics(historical),
+        "Absent historical diagnostics were claimed available.");
+    auto maps=std::make_shared<Raw::RawImageData::MultiFrameMeasurementSidecars>();
+    maps->validity=maps->clipping=maps->localRejection=maps->fallbackReason=
+        std::make_shared<const std::vector<std::uint8_t>>(12,0);
+    historical.raw->multiFrameMeasurementSidecars=maps;
+    Require(Editor::HasSavedBracketingDiagnostics(historical),
+        "Complete historical diagnostics were lost.");
+    maps->clipping.reset();
+    Require(!Editor::HasSavedBracketingDiagnostics(historical),
+        "Partial historical diagnostics fabricated unrepresented conditions.");
+    using Project::BracketingDetailMode;
+    Project::BracketingState state;
+    Project::RawProjectSnapshot document;
+    InitializeBracket(state, document, "native-detail");
+    auto result = std::make_shared<Raw::Bracketing::BracketingResult>();
+    result->raw = std::make_shared<Raw::RawImageData>();
+    result->raw->metadata.pixelLayout = Raw::RawPixelLayout::MosaicBayer;
+    result->analysis = std::make_shared<Raw::Bracketing::BracketingAnalysis>();
+    state.result = result;
+    state.completedRecipe = state.storedRecipe;
+    state.completedRevision = document.hdrInputRevision;
+    Raw::Bracketing::BracketingRecipe requestRecipe;
+    std::string error;
+    Project::BracketingState::DetailJob unchanged;
+    Require(Project::CaptureBracketingDetail(state, document.hdrInputRevision, unchanged, requestRecipe, error) &&
+        unchanged.mode == BracketingDetailMode::Completed &&
+        Project::CanAdoptBracketingDetail(state, unchanged, document.hdrInputRevision),
+        "An unchanged saved bracket did not retain authoritative native-detail ownership.");
+
+    // Fresh preparation, even with the same saved recipe, replaces the lease.
+    // A previously submitted detail must not cross that result-owner boundary.
+    state.result = std::make_shared<Raw::Bracketing::BracketingResult>(*result);
+    Require(!Project::CanAdoptBracketingDetail(state, unchanged, document.hdrInputRevision),
+        "A native detail crossed a replaced result/preparation owner.");
+    state.result = result;
+    state.job = std::make_shared<Project::BracketingJob>();
+    Project::BracketingState::DetailJob reprocess;
+    Require(Project::CaptureBracketingDetail(state, document.hdrInputRevision, reprocess, requestRecipe, error) &&
+        reprocess.mode == BracketingDetailMode::Completed,
+        "A pending explicit reprocess silently substituted newly prepared pixels.");
+    state.job.reset();
+
+    state.recipe.automatic = false;
+    Project::CommitBracketingEdit(state, &document, false, 1.0);
+    Project::BracketingState::DetailJob awaitingPreview;
+    Require(Project::CaptureBracketingDetail(state, document.hdrInputRevision, awaitingPreview, requestRecipe, error) &&
+        awaitingPreview.mode == BracketingDetailMode::Completed && requestRecipe.automatic,
+        "Detail borrowed a proposed recipe before an interactive preview owned the view.");
+    state.interactiveRaw = std::make_shared<Raw::RawImageData>();
+    Project::BracketingState::DetailJob proposed;
+    Require(Project::CaptureBracketingDetail(state, document.hdrInputRevision, proposed, requestRecipe, error) &&
+        proposed.mode == BracketingDetailMode::Proposed && !requestRecipe.automatic &&
+        Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision) &&
+        !Project::CanAdoptBracketingDetail(state, awaitingPreview, document.hdrInputRevision),
+        "Live Standard contribution detail did not follow its interactive owner.");
+    state.pending = state.previewDirty = false;
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A proposed native detail survived loss of its interactive owner.");
+    state.pending = true;
+
+    proposed.canceled = true;
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A canceled native detail passed adoption.");
+    proposed.canceled = false;
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision + 1),
+        "A native detail crossed an input revision.");
+    ++state.completedRevision;
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A native detail crossed a completed revision.");
+    --state.completedRevision;
+    ++state.previewRevision;
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A native detail crossed a preview revision.");
+    --state.previewRevision;
+    const auto currentRecipe = state.storedRecipe;
+    state.storedRecipe += " ";
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A native detail crossed a current recipe stamp.");
+    state.storedRecipe = currentRecipe;
+    state.completedRecipe += " ";
+    Require(!Project::CanAdoptBracketingDetail(state, proposed, document.hdrInputRevision),
+        "A native detail crossed a completed recipe stamp.");
+    state.completedRecipe.pop_back();
+
+    // Undo may restore the same recipe while a newer revision's interactive
+    // preview is still active. It remains explicitly proposed until completion.
+    Raw::Bracketing::Deserialize(nlohmann::json::parse(state.completedRecipe), state.recipe, error);
+    state.storedRecipe = state.completedRecipe;
+    Project::BracketingState::DetailJob undone;
+    Require(Project::CaptureBracketingDetail(state, document.hdrInputRevision, undone, requestRecipe, error) &&
+        undone.mode == BracketingDetailMode::Proposed,
+        "An interactive undo lost its newer-revision detail ownership.");
+
+    const auto completedOnly = [&] {
+        Project::BracketingState::DetailJob candidate;
+        return Project::CaptureBracketingDetail(state, document.hdrInputRevision, candidate, requestRecipe, error) &&
+            candidate.mode == BracketingDetailMode::Completed && requestRecipe.automatic &&
+            requestRecipe.reconstruction == Raw::Bracketing::ReconstructionMode::Standard;
+    };
+    state.processRequired = true;
+    Require(completedOnly(), "An unprocessed input draft acquired proposed native detail.");
+    state.processRequired = false;
+    state.failed = true;
+    Require(completedOnly(), "A failed interactive owner acquired proposed native detail.");
+    state.failed = false;
+    state.recipe.alignmentMode = Raw::Bracketing::AlignmentMode::FixedCoordinates;
+    Require(completedOnly(), "Incompatible prepared inputs acquired proposed native detail.");
+    state.recipe.alignmentMode = Raw::Bracketing::AlignmentMode::AutomaticLocal;
+    for (auto mode : {Raw::Bracketing::ReconstructionMode::SuperResolution1x,
+        Raw::Bracketing::ReconstructionMode::SuperResolution2x, Raw::Bracketing::ReconstructionMode::Panorama}) {
+        state.recipe.reconstruction = mode;
+        Require(completedOnly(), "Non-Standard draft changed completed native-detail ownership.");
+    }
+    state.recipe.reconstruction = Raw::Bracketing::ReconstructionMode::Standard;
+    result->raw->reconstructedCameraRgb = true;
+    Require(completedOnly(), "Completed camera-RGB pixels acquired Bayer proposal ownership.");
+    result->raw->reconstructedCameraRgb = false;
+    state.completedRecipe = "not a recipe";
+    Project::BracketingState::DetailJob invalid;
+    Require(!Project::CaptureBracketingDetail(state, document.hdrInputRevision, invalid, requestRecipe, error),
+        "Invalid completed provenance silently borrowed the proposed recipe.");
+}
 }
 
 void ValidateProjectBracketingOwnership() {
+    ValidateNativeDetailOwnership();
     Project::RawProjectSnapshot exposures;
     Project::MultiFrameSourceSet captures;
     for (unsigned i = 0; i < 3; ++i) {
@@ -127,6 +273,6 @@ void ValidateProjectBracketingOwnership() {
     Require(a.job->canceled && !b.job->canceled && mailboxA.Read()->progress.stage == Raw::Bracketing::ProcessingStage::Preparing &&
         mailboxB.Read()->progress.stage == Raw::Bracketing::ProcessingStage::Blend,
         "Canceling one bracket changed another bracket's job or progress.");
-    std::cout << "PASS independent bracket edits/history, result publication and processing progress\n";
+    std::cout << "PASS independent bracket edits/history, result publication, native-detail ownership and processing progress\n";
 }
 }
