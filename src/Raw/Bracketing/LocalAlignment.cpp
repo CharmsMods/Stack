@@ -208,6 +208,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
     auto originInspection=std::make_shared<AlignmentInspection>();
     originInspection->width=data.width/2;originInspection->height=data.height/2;
     originInspection->rawWidth=data.width;originInspection->rawHeight=data.height;
+    originInspection->cellStrideBayerCells=1;
     originInspection->confidence.assign(static_cast<std::size_t>(originInspection->width)*originInspection->height,1.f);
     originInspection->rejectionBits.assign(originInspection->confidence.size(),0);
     reference.alignmentInspection=originInspection;reference.alignmentDiagnostic.localApplied=true;

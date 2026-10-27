@@ -1,5 +1,6 @@
 #include "BracketingSession.h"
 #include "BracketingPreviewAvailability.h"
+#include "Raw/Bracketing/AlignmentInspectionGrid.h"
 #include "Raw/MultiFrameDenoise/Reliability.h"
 #include "Renderer/GLHelpers.h"
 #include <algorithm>
@@ -15,14 +16,6 @@ bool HardAlignmentRejection(std::uint16_t bits) {
         Raw::Mfd::ReliabilityRejectMask(Raw::Mfd::ReliabilityRejectBit::PatchRejected)|
         Raw::Mfd::ReliabilityRejectMask(Raw::Mfd::ReliabilityRejectBit::NonFiniteEvidence);
     return (bits&mask)!=0;
-}
-std::pair<unsigned,unsigned> AlignmentCell(
-    const Raw::Bracketing::AlignmentInspection& inspection,double rawX,double rawY) {
-    const double rawWidth=std::max(1u,inspection.rawWidth);
-    const double rawHeight=std::max(1u,inspection.rawHeight);
-    return {
-        std::min(inspection.width-1,static_cast<unsigned>(std::max(0.0,rawX)*inspection.width/rawWidth)),
-        std::min(inspection.height-1,static_cast<unsigned>(std::max(0.0,rawY)*inspection.height/rawHeight))};
 }
 }
 
@@ -86,10 +79,10 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     if(ui.detailMode)ImGui::TextDisabled(completedDetail?"Completed result pixels (saved output)":"Proposed result pixels (preview, not the saved output)");
     if(view==2&&!hasContributions) {ImGui::TextWrapped("Contribution masks are unavailable for these completed pixels; no fresh measurements are substituted.");return;}
     if(view==4&&!hasGroups) {ImGui::TextWrapped("Historical denoised group pixels are unavailable for this result. Inspect Original or Matched for prepared-source pixels.");return;}
-    if(view==6&&(!alignmentInspection||!alignmentInspection->width||!alignmentInspection->height||
+    if(view==6&&(!alignmentInspection||!Raw::Bracketing::HasAlignmentInspectionGrid(*alignmentInspection)||
         alignmentInspection->confidence.size()!=std::size_t(alignmentInspection->width)*alignmentInspection->height||
         alignmentInspection->rejectionBits.size()!=std::size_t(alignmentInspection->width)*alignmentInspection->height)) {
-        ImGui::TextWrapped("Prepared-source alignment evidence is unavailable for this capture.");return;
+        ImGui::TextWrapped("Exact prepared-source alignment grid is unavailable for this capture.");return;
     }
     if(view==7&&(!ui.result||!ui.result->raw||!ui.result->raw->reconstructionDepth)) {
         ImGui::TextWrapped("Depth evidence is unavailable for this result.");return;
@@ -120,15 +113,17 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
                 if(sample.confidence>=.3)color[0]=color[1]=color[2]=.1f+.9f*sample.inverseDepth;
                 else {color[0]=.3f;color[1]=.12f;color[2]=.3f;}
             } else if(view==6) {
-                float confidence=0;std::uint16_t rejection=1;
-                if(alignmentInspection&&alignmentInspection->width&&alignmentInspection->height) {
-                    const double rawX=p.sensorOriginX+(i%p.width)*p.sensorStepX;
-                    const double rawY=p.sensorOriginY+(i/p.width)*p.sensorStepY;
-                    const auto [ax,ay]=AlignmentCell(*alignmentInspection,rawX,rawY);
+                float confidence=0;std::uint16_t rejection=0;unsigned ax=0,ay=0;
+                const double rawX=p.sensorOriginX+(i%p.width)*p.sensorStepX;
+                const double rawY=p.sensorOriginY+(i/p.width)*p.sensorStepY;
+                const bool located=Raw::Bracketing::FindAlignmentInspectionCell(*alignmentInspection,rawX,rawY,ax,ay);
+                if(located) {
                     const auto ai=static_cast<std::size_t>(ay)*alignmentInspection->width+ax;
                     confidence=alignmentInspection->confidence[ai];rejection=alignmentInspection->rejectionBits[ai];
                 }
-                if(HardAlignmentRejection(rejection)) {
+                if(!located) {
+                    color[0]=color[1]=color[2]=.2f;
+                } else if(HardAlignmentRejection(rejection)) {
                     color[0]=.95f;color[1]=.18f;color[2]=.08f;
                 } else if(rejection||confidence<.2f) {
                     color[0]=.95f;color[1]=.68f;color[2]=.08f;
@@ -191,16 +186,18 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     if(view==6&&alignmentInspection&&alignmentInspection->width&&alignmentInspection->height) {
         const double rawX=p.sensorOriginX+(pixel%p.width)*p.sensorStepX;
         const double rawY=p.sensorOriginY+(pixel/p.width)*p.sensorStepY;
-        const auto [ax,ay]=AlignmentCell(*alignmentInspection,rawX,rawY);
-        const auto ai=static_cast<std::size_t>(ay)*alignmentInspection->width+ax;
-        const auto confidence=alignmentInspection->confidence[ai];
-        const auto rejection=alignmentInspection->rejectionBits[ai];
-        if(HardAlignmentRejection(rejection))
-            ImGui::Text("Rejected / alignment confidence %.1f%%",confidence*100);
-        else if(rejection||confidence<.2f)
-            ImGui::Text("Uncertain, reduced weight / alignment confidence %.1f%%",confidence*100);
-        else ImGui::Text("Accepted / alignment confidence %.1f%%",confidence*100);
-        ImGui::TextDisabled("Cyan = accepted, amber = uncertain, red = rejected.");
+        unsigned ax=0,ay=0;
+        if(Raw::Bracketing::FindAlignmentInspectionCell(*alignmentInspection,rawX,rawY,ax,ay)) {
+            const auto ai=static_cast<std::size_t>(ay)*alignmentInspection->width+ax;
+            const auto confidence=alignmentInspection->confidence[ai];
+            const auto rejection=alignmentInspection->rejectionBits[ai];
+            if(HardAlignmentRejection(rejection))
+                ImGui::Text("Rejected / alignment confidence %.1f%%",confidence*100);
+            else if(rejection||confidence<.2f)
+                ImGui::Text("Uncertain, reduced weight / alignment confidence %.1f%%",confidence*100);
+            else ImGui::Text("Accepted / alignment confidence %.1f%%",confidence*100);
+        } else ImGui::TextDisabled("The cursor is outside the measured alignment grid.");
+        ImGui::TextDisabled("Cyan = accepted, amber = uncertain, red = rejected; gray = no grid sample.");
     }
     const auto diagnostic=pixel<p.diagnostics.size()?p.diagnostics[pixel]:0;
     if(!hasDiagnostics)ImGui::TextDisabled("Historical clipping/fallback diagnostics unavailable.");

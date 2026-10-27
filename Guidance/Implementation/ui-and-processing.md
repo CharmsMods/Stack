@@ -184,6 +184,10 @@ with a potentially shorter final block. Preserve the reference extent and stride
 with the in-process store and use its raw-coordinate lookup; proportional scaling
 by the number of stored cells shifts rejection boundaries. Missing geometry or an
 unpaired trailing Bayer strip cannot authorize a match.
+Carry that same stride into alignment inspection and its wire representation;
+the overlay and cursor probe must select the cell actually used by processing.
+Legacy inspection without stride remains readable, but its exact grid is
+unavailable rather than inferred by proportional scaling.
 
 Super-resolution keeps categorical photometric rejection separate from its
 coarse geometric mapping. A cropped, authoritative reference-grid veto is sampled

@@ -47,6 +47,8 @@ struct CaptureAlignment {
 struct AlignmentInspection {
     unsigned width=0,height=0;
     unsigned rawWidth=0,rawHeight=0;
+    // Zero means an older wire message did not retain exact grid ownership.
+    unsigned cellStrideBayerCells=0;
     std::vector<float> confidence;
     std::vector<std::uint16_t> rejectionBits;
 };

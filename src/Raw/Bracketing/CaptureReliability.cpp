@@ -130,6 +130,7 @@ std::shared_ptr<AlignmentInspection> MakeInspection(const Mfd::ReliabilityMap& m
     inspection->height=static_cast<unsigned>(map.cellExtent.height);
     inspection->rawWidth=static_cast<unsigned>(map.rawExtent.width);
     inspection->rawHeight=static_cast<unsigned>(map.rawExtent.height);
+    inspection->cellStrideBayerCells=map.cellStrideBayerCells;
     inspection->confidence.resize(map.cells.size());inspection->rejectionBits.resize(map.cells.size());
     for(std::size_t i=0;i<map.cells.size();++i) {
         inspection->confidence[i]=static_cast<float>(map.cells[i].reliability);

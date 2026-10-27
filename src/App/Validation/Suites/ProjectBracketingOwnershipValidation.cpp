@@ -1,4 +1,5 @@
 #include "ProjectBracketingOwnershipValidation.h"
+#include "BracketingAlignmentInspectionValidation.h"
 #include "Project/BracketingState.h"
 #include "Project/BracketingDetail.h"
 #include "Editor/Bracketing/BracketingPreviewAvailability.h"
@@ -33,6 +34,7 @@ void InitializeBracket(Project::BracketingState& state, Project::RawProjectSnaps
 }
 
 void ValidateNativeDetailOwnership() {
+    ValidateBracketingAlignmentInspectionGrid();
     // Full-quality inspection publishes dimensions separately from display RGBA.
     Raw::Bracketing::CapturePreview image;image.width=4;image.height=3;
     Require(Editor::HasBracketingOriginalPixels(&image,true,4*3*4),
@@ -273,6 +275,6 @@ void ValidateProjectBracketingOwnership() {
     Require(a.job->canceled && !b.job->canceled && mailboxA.Read()->progress.stage == Raw::Bracketing::ProcessingStage::Preparing &&
         mailboxB.Read()->progress.stage == Raw::Bracketing::ProcessingStage::Blend,
         "Canceling one bracket changed another bracket's job or progress.");
-    std::cout << "PASS independent bracket edits/history, result publication, native-detail ownership and processing progress\n";
+    std::cout << "PASS independent bracket edits/history, result publication, native-detail ownership, alignment inspection grid/CBOR and processing progress\n";
 }
 }

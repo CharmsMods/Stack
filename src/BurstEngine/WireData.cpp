@@ -1,4 +1,5 @@
 #include "WireData.h"
+#include "Raw/Bracketing/AlignmentInspectionGrid.h"
 #include "Raw/RawMetadataSerialization.h"
 #include <cstring>
 #include <limits>
@@ -141,7 +142,7 @@ Json Analysis(const BracketingAnalysis& a){
         {"peakToSidelobeRatio",c.peakToSidelobeRatio},{"acceptedCoverage",c.acceptedCoverage},{"uncertainCoverage",c.uncertainCoverage},
         {"rejectedCoverage",c.rejectedCoverage},{"localApplied",c.localApplied},{"backend",c.backend},{"message",c.message}};
     j["alignmentInspection"]=Json::object();for(const auto& [id,c]:a.alignmentInspection)if(c)j["alignmentInspection"][id]={{"width",c->width},{"height",c->height},
-        {"rawWidth",c->rawWidth},{"rawHeight",c->rawHeight},{"confidence",Pack(c->confidence)},{"rejectionBits",Pack(c->rejectionBits)}};
+        {"rawWidth",c->rawWidth},{"rawHeight",c->rawHeight},{"cellStrideBayerCells",c->cellStrideBayerCells},{"confidence",Pack(c->confidence)},{"rejectionBits",Pack(c->rejectionBits)}};
     if(a.depth)j["depth"]=Depth(*a.depth);return j;
 }
 std::shared_ptr<BracketingAnalysis> Analysis(const Json& j){
@@ -155,7 +156,13 @@ std::shared_ptr<BracketingAnalysis> Analysis(const Json& j){
         v.translationX=c.at("translationX");v.translationY=c.at("translationY");v.rotationDegrees=c.at("rotationDegrees");v.overlapFraction=c.at("overlapFraction");v.peakToSidelobeRatio=c.at("peakToSidelobeRatio");
         v.acceptedCoverage=c.at("acceptedCoverage");v.uncertainCoverage=c.at("uncertainCoverage");v.rejectedCoverage=c.at("rejectedCoverage");v.localApplied=c.at("localApplied");v.backend=c.at("backend");v.message=c.at("message");a->alignments[id]=std::move(v);}
     for(const auto& [id,c]:j.at("alignmentInspection").items()){auto v=std::make_shared<AlignmentInspection>();v->width=c.at("width");v->height=c.at("height");v->rawWidth=c.at("rawWidth");v->rawHeight=c.at("rawHeight");v->confidence=Unpack<float>(c.at("confidence"));v->rejectionBits=Unpack<std::uint16_t>(c.at("rejectionBits"));
-        if(v->confidence.size()!=std::uint64_t(v->width)*v->height||v->rejectionBits.size()!=v->confidence.size())throw std::runtime_error("Invalid burst alignment inspection dimensions.");a->alignmentInspection[id]=std::move(v);}
+        if(v->confidence.size()!=std::uint64_t(v->width)*v->height||v->rejectionBits.size()!=v->confidence.size())throw std::runtime_error("Invalid burst alignment inspection dimensions.");
+        if(const auto stride=c.find("cellStrideBayerCells");stride!=c.end()) {
+            if(!stride->is_number_integer()||*stride<0||*stride>16)throw std::runtime_error("Invalid burst alignment inspection stride.");
+            v->cellStrideBayerCells=stride->get<unsigned>();
+        }
+        if(v->cellStrideBayerCells&&!HasAlignmentInspectionGrid(*v))throw std::runtime_error("Invalid burst alignment inspection grid.");
+        a->alignmentInspection[id]=std::move(v);}
     if(j.contains("depth"))a->depth=Depth(j.at("depth"));return a;
 }
 Json Progress(const ProcessingProgress& p){
