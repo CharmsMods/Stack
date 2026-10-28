@@ -435,17 +435,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawWorkspaceLabFilmstripTimelineHoveredSourceKey.clear();
         m_RawWorkspaceLabFilmstripTimelineHoveredStackMember = false;
         m_RawWorkspaceLabFilmstripTimelineHoveredCenterX = 0.0f;
-        if (!stackFilmstrip && !projectFilmstrip) {
-            timelineSourcesByKey.reserve(m_RawWorkspace.sources.size());
-            for (const auto& source : m_RawWorkspace.sources) {
-                timelineSourcesByKey.emplace(source.relativePathKey, &source);
-            }
-            if (m_PinnedRawWorkspaceSource.has_value()) {
-                timelineSourcesByKey.insert_or_assign(
-                    m_PinnedRawWorkspaceSource->relativePathKey,
-                    &(*m_PinnedRawWorkspaceSource));
-            }
-        }
     }
     const auto addTimelineSourceTime = [](
         RawLabFilmstripTimelineEntry& entry,

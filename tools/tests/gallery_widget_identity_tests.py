@@ -22,6 +22,14 @@ item = source[source.index('    struct AnimatedGalleryItem {'):source.index('   
 assert 'GallerySourceView' not in item, 'animated cards copy unused gallery metadata'
 thumbnail = source[source.index('    auto drawThumbnail ='):source.index('    const auto sourceMultiSelected =')]
 assert 'const Stack::RawWorkspace::GallerySourceView&' not in thumbnail, 'thumbnail has unused metadata argument'
+# Non-stack timelines append source pointers directly; only a stack rebuild needs the map.
+timeline_setup = source[source.index('    const bool stackFilmstrip ='):source.index('    const auto addTimelineSourceTime =')]
+assert 'timelineSourcesByKey.' not in timeline_setup, 'non-stack frames build an unused timeline source map'
+stack_rebuild_start = source.index('            if (!m_RawWorkspaceLabFilmstripStackTimelineActive) {')
+stack_rebuild = source[stack_rebuild_start:source.index('            centerFilmstripItems(filmstripStacks.size());', stack_rebuild_start)]
+for required in ('timelineSourcesByKey.reserve(', 'timelineSourcesByKey.emplace(',
+                 'timelineSourcesByKey.insert_or_assign(', 'appendFilmstripTimelineEntry('):
+    assert required in stack_rebuild, 'stack timeline still needs its source map and pinned override'
 fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text()
 for marker, body in {
     '// PRODUCTION_KEY_HELPER': helper,
