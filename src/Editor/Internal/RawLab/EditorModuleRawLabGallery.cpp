@@ -1199,7 +1199,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 if (textWidth("...") > galleryTextWidth) {
                     return std::string();
                 }
-                std::string fitted = value;
+                // Bound the copy/trim work to the visible prefix. CalcTextSizeA
+                // stops at >= max_width; nextafter retains the old <= boundary.
+                const char* remaining = nullptr;
+                galleryFont->CalcTextSizeA(galleryTextSize,
+                    std::nextafter(galleryTextWidth, std::numeric_limits<float>::infinity()),
+                    0.0f, value.c_str(), nullptr, &remaining);
+                std::string fitted(value.c_str(), remaining);
                 while (!fitted.empty() &&
                        textWidth(fitted + "...") > galleryTextWidth) {
                     Stack::Utf8Text::RemoveLastCodePoint(fitted);

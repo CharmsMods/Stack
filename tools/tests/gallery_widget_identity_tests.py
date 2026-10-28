@@ -35,10 +35,13 @@ stack_rebuild = source[stack_rebuild_start:source.index('            centerFilms
 for required in ('timelineSourcesByKey.reserve(', 'timelineSourcesByKey.emplace(',
                  'timelineSourcesByKey.insert_or_assign(', 'appendFilmstripTimelineEntry('):
     assert required in stack_rebuild, 'stack timeline still needs its source map and pinned override'
+fit_start = source.index('            const auto fitGalleryText =')
+fit_text = source[fit_start:source.index('            const std::string ordinalPrefix', fit_start)]
 fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text()
 for marker, body in {
     '// PRODUCTION_KEY_HELPER': helper,
     '// PRODUCTION_LIST_HELPER': list_helper,
+    '// PRODUCTION_FIT_TEXT': fit_text,
     '// PRODUCTION_STACK_SCOPE': scope('item.animationKey'),
     '// PRODUCTION_SOURCE_SCOPE': scope('source->relativePathKey'),
     '// PRODUCTION_GROUP_SCOPE': scope('groupKey'),

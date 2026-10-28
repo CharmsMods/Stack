@@ -1,6 +1,22 @@
 #include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
 #include <iostream>
 #include <string>
+#include <vector>
+#include <limits>
+#include <cmath>
+#include <cstdlib>
+#include <new>
+#include "Utils/Utf8Text.h"
+
+static bool trackFitAllocations = false;
+static std::size_t fitAllocations = 0;
+void* operator new(std::size_t size) {
+    if (trackFitAllocations) ++fitAllocations;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 // PRODUCTION_KEY_HELPER
 // PRODUCTION_LIST_HELPER
@@ -193,12 +209,86 @@ bool ListRows() {
     return passed;
 }
 
+// Exercise the production lambda with real font measurement, not a stub width.
+bool FitTextTests() {
+    ImGui::CreateContext();
+    auto& io = ImGui::GetIO(); io.IniFilename = nullptr; io.LogFilename = nullptr;
+    io.DisplaySize = {700, 400}; io.DeltaTime = 1.f / 60;
+    unsigned char* pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    ImGui::NewFrame();
+    auto* galleryFont = ImGui::GetFont();
+    float galleryTextSize = 8.06f, galleryTextWidth = 152;
+    // PRODUCTION_FIT_TEXT
+    // Previous exact tail-removal behavior is the semantic oracle.
+    const auto oldFit = [&](const std::string& value) {
+        const auto measure = [&](const std::string& text) {
+            return galleryFont->CalcTextSizeA(galleryTextSize,
+                std::numeric_limits<float>::max(), 0, text.c_str()).x;
+        };
+        if (value.empty() || measure(value) <= galleryTextWidth) return value;
+        if (measure("...") > galleryTextWidth) return std::string();
+        std::string fitted = value;
+        while (!fitted.empty() && measure(fitted + "...") > galleryTextWidth)
+            Stack::Utf8Text::RemoveLastCodePoint(fitted);
+        return fitted.empty() ? std::string("...") : fitted + "...";
+    };
+    const std::string longName = std::string(240, 'W') + ".raw";
+    const std::vector<std::string> labels = {"", "ordinary.raw", longName,
+        u8"旅行_写真_éclair_📷_long_capture_name_edited_project.raw",
+        "17  " + std::string(180, 'M') + "  2/3",
+        "short\n" + longName, longName + "\nshort",
+        "short\r\n" + longName, longName + "\r\nshort",
+        std::string(60, 'W') + std::string("\xE2\x82", 2),
+        std::string("\xFF\x80", 2) + longName,
+        std::string(25, 'W') + std::string("\xE2\x82", 2) + longName};
+    bool passed = true;
+    for (const auto& label : labels)
+        for (float size : {8.f, 8.06f, 9.375f, 10.f})
+            for (float available : {12.f, 118.f, 152.f, 200.f}) {
+                galleryTextSize = size; galleryTextWidth = available;
+                const char* remaining = nullptr;
+                galleryFont->CalcTextSizeA(size,
+                    std::nextafter(available, std::numeric_limits<float>::infinity()),
+                    0, label.c_str(), nullptr, &remaining);
+                passed = Check(remaining >= label.c_str() && remaining <= label.c_str() + label.size(),
+                    "font prefix remains inside original string") && passed;
+                passed = Check(fitGalleryText(label) == oldFit(label),
+                    "bounded fit preserves exact UTF-8/multiline/CRLF output") && passed;
+            }
+    for (float size : {8.f, 8.06f, 9.375f, 10.f}) {
+        galleryTextSize = size;
+        for (int length : {1, 2, 12, 31, 32, 33}) {
+            const std::string candidate = std::string(length, 'W') + "...";
+            const float edge = galleryFont->CalcTextSizeA(size,
+                std::numeric_limits<float>::max(), 0, candidate.c_str()).x;
+            for (float available : {std::nextafter(edge, 0.f), edge,
+                    std::nextafter(edge, std::numeric_limits<float>::infinity())}) {
+                galleryTextWidth = available;
+                passed = Check(fitGalleryText(longName) == oldFit(longName),
+                    "bounded fit preserves inclusive float-neighbor boundary") && passed;
+            }
+        }
+    }
+    galleryTextSize = 8.06f; galleryTextWidth = 152;
+    fitGalleryText(longName); // warm font glyph state before allocation measurement
+    fitAllocations = 0; trackFitAllocations = true;
+    std::size_t outputBytes = 0;
+    for (int i = 0; i < 64; ++i) outputBytes += fitGalleryText(longName).size();
+    trackFitAllocations = false;
+    passed = Check(fitAllocations < 1024 && outputBytes == 64 * oldFit(longName).size(),
+        "long filenames do not copy and rescan every removed suffix") && passed;
+    ImGui::EndFrame(); ImGui::DestroyContext();
+    return passed;
+}
+
 int main() {
-    bool passed = ListRows();
+    bool passed = FitTextTests();
+    passed = ListRows() && passed;
     for (int kind = 0; kind < 3; ++kind)
         for (bool reorder : {false, true})
             for (bool sameFileName : {false, true})
                 passed = Scenario(kind, reorder, sameFileName) && passed;
     if (!passed) return 1;
-    std::cout << "Main gallery identity passed (stack tiles, source rows, group headers, reorder, ordinary IDs, literal list rows/input/clipping).\n";
+    std::cout << "Main gallery identity passed (stack tiles, source rows, group headers, reorder, ordinary IDs, literal list rows/input/clipping, bounded text fitting).\n";
 }
