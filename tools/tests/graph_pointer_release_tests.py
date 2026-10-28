@@ -445,6 +445,10 @@ def main():
         for name in ('ApplyGraphAutoFocusFrame', 'RequestGraphNodeAutoFocus', 'CancelGraphAutoFocusTracking')))
     begin_drag = block(drag_source, 'bool EditorNodeGraphUI::BeginDragLayout(')
     handoff = begin_drag[begin_drag.index('    if(!drag->room.Begin('):begin_drag.rfind('}')]
+    group_start = interaction.index('    // Intercept Canvas clicks')
+    group_end = interaction.index('        if (ImGui::IsMouseDoubleClicked', group_start)
+    group_handoff = interaction[group_start:group_end] + '    }\n'
+    focus = focus.replace('// PRODUCTION_GROUP_HANDOFF', group_handoff)
     generated += focus.replace('// PRODUCTION_DRAG_HANDOFF', handoff)
     groups_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp").read_text(encoding="utf-8")
     render_groups = block(groups_source, "void EditorNodeGraphUI::RenderGroups(")

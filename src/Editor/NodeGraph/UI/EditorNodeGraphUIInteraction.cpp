@@ -577,6 +577,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             } else {
                 m_DragGroupId = hitGroupId;
             }
+            editor->CancelGraphAutoFocusTracking();
             m_BoxSelecting = false;
         }
         

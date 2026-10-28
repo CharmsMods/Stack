@@ -242,15 +242,16 @@ void LibraryModule::RenderLibraryGrid(
     const bool reducedMotion = Stack::LibraryUi::ReducedMotion();
 
     for (const LibraryCachedPackedCard& targetCard : m_CachedPackedCards) {
-        std::string key;
+        const std::string* keyPointer = nullptr;
         if (m_ShowAssets) {
             if (targetCard.index >= assets.size() || !assets[targetCard.index]) continue;
-            key = assets[targetCard.index]->fileName;
+            keyPointer = &assets[targetCard.index]->fileName;
         } else {
             if (targetCard.index >= projects.size() || !projects[targetCard.index]) continue;
-            key = projects[targetCard.index]->fileName;
+            keyPointer = &projects[targetCard.index]->fileName;
         }
 
+        const std::string& key = *keyPointer;
         LibraryCardMotionState& motion = m_ShowAssets
             ? GetCardMotionState(m_AssetCardMotion, key)
             : GetCardMotionState(m_ProjectCardMotion, key);
