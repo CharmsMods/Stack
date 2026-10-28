@@ -679,7 +679,8 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
     const std::size_t maxBytes = m_PermanentGalleryWorkspace
         ? kGalleryThumbnailMaxResidentBytes : kRawWorkspaceThumbnailTextureMaxResidentBytes;
     struct ResidentTexture {
-        std::string key;
+        // Map keys remain stable until their own candidate is erased below.
+        const std::string* key = nullptr;
         std::uint64_t lastUseSerial = 0;
         std::size_t bytes = 0;
     };
@@ -706,7 +707,7 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
     for (const auto& [key, entry] : m_RawWorkspaceThumbnailTextures) {
         if (entry.texture != 0 && entry.width > 0 && entry.height > 0) {
             resident.push_back({
-                key,
+                &key,
                 entry.lastUseSerial,
                 RawWorkspaceThumbnailResidentBytes(entry.width, entry.height)
             });
@@ -721,12 +722,12 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
         if (residentCount <= maxCount && residentBytes <= maxBytes) {
             break;
         }
-        auto entry = m_RawWorkspaceThumbnailTextures.find(candidate.key);
+        auto entry = m_RawWorkspaceThumbnailTextures.find(*candidate.key);
         if (entry == m_RawWorkspaceThumbnailTextures.end() ||
             entry->second.texture == 0 || entry->second.uploadPending ||
             (entry->second.lastVisibleFrame >= 0 &&
                 entry->second.lastVisibleFrame >= ImGui::GetFrameCount() - 1) ||
-            m_RawWorkspaceGalleryLayoutAnimation.Protects(candidate.key)) {
+            m_RawWorkspaceGalleryLayoutAnimation.Protects(*candidate.key)) {
             continue;
         }
         QueueRawWorkspaceThumbnailTextureDelete(entry->second.texture);
