@@ -466,7 +466,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
             clickedOutsidePrompt) {
             CancelChannelSplitConfirm();
-        } else if (plainGPressed || ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        } else if (plainGPressed ||
+                   (editor->CanConsumeEditorCommandKeys() &&
+                    !graphHotkeysBlockedByNodeControls &&
+                    ImGui::IsKeyPressed(ImGuiKey_Enter, false))) {
             const int confirmNodeId = m_ChannelSplitConfirmNodeId;
             const EditorNodeGraph::Node* confirmNode = graph.FindNode(confirmNodeId);
             const bool splitImageAverage =
