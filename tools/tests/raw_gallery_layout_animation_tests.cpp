@@ -159,6 +159,76 @@ bool TestStackMotionAndInputGeometry() {
     motion.ObserveSlot("new", origin, clip);
     return Check(!motion.Observe("new", origin, clip), "new ready thumbnails draw immediately in their actual slot");
 }
+// Expanding on the second mouse-down hides the still-active collapsed cover.
+// Keep submitting that cover, as production does, while its members live in a
+// separate window. A hidden cover must not retain capture after mouse release.
+bool TestExpandedFilmstripClickHandoff(bool disablePointer = false) {
+    using Stack::Editor::RawLabInternal::GalleryThumbnailButton;
+    bool expanded = false;
+    int memberClicks = 0, memberOpens = 0, singletonClicks = 0;
+    const auto frame = [&](float x, float y, int buttonEvent) {
+        auto& io = ImGui::GetIO();
+        io.AddMousePosEvent(x, y);
+        if (buttonEvent >= 0) io.AddMouseButtonEvent(0, buttonEvent != 0);
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({0, 200});
+        ImGui::SetNextWindowSize({700, 350});
+        const auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoFocusOnAppearing;
+        ImGui::Begin("Filmstrip handoff drawer", nullptr, flags);
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+        ImGui::BeginChild("content", {650, 300});
+        const auto buttonFlags = ImGuiButtonFlags_PressedOnClickRelease |
+            ImGuiButtonFlags_PressedOnDoubleClick;
+        ImGui::SetCursorScreenPos({100, 400});
+        if (GalleryThumbnailButton("cover", {120, 80}, expanded && !disablePointer ? 0.f : 80.f,
+                buttonFlags, nullptr, !(expanded && disablePointer)) &&
+            ImGui::IsMouseDoubleClicked(0)) expanded = true;
+        ImGui::SetCursorScreenPos({300, 400});
+        if (GalleryThumbnailButton("singleton", {120, 80}, 80.f, buttonFlags)) ++singletonClicks;
+        if (expanded) {
+            ImGui::SetNextWindowPos({100, 280});
+            ImGui::SetNextWindowSize({120, 200});
+            ImGui::Begin("Filmstrip handoff members", nullptr, flags);
+            ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+            ImGui::SetCursorScreenPos({100, 280});
+            if (GalleryThumbnailButton("member", {120, 80}, 80.f, buttonFlags)) {
+                ++memberClicks;
+                if (ImGui::IsMouseDoubleClicked(0)) ++memberOpens;
+            }
+            ImGui::SetCursorScreenPos({100, 400});
+            GalleryThumbnailButton("expanded cover", {120, 80}, 80.f, buttonFlags);
+            ImGui::End();
+        }
+        ImGui::EndChild(); ImGui::End(); ImGui::Render();
+    };
+    // Warm up window hit testing and expire the previous scenario's click
+    // chain before double-clicking the collapsed stack.
+    const auto& io = ImGui::GetIO();
+    const int settleFrames = static_cast<int>(io.MouseDoubleClickTime / io.DeltaTime) + 2;
+    for (int frameIndex = 0; frameIndex < settleFrames; ++frameIndex)
+        frame(150, 440, -1);
+    frame(150, 440, 1); frame(150, 440, 0); frame(150, 440, 1);
+    if (!Check(expanded, "double-click expands the collapsed stack")) return false;
+    frame(150, 440, 0); frame(150, 440, -1);
+    if (!Check(ImGui::GetActiveID() == 0,
+        "hidden collapsed cover releases capture after expansion")) return false;
+    // Both a member in the independent window and a singleton in the host
+    // must remain clickable. Moving the pointer resets the double-click chain.
+    frame(150, 320, -1); frame(150, 320, 1); frame(150, 320, 0);
+    frame(150, 320, 1); frame(150, 320, 0);
+    frame(350, 440, -1); frame(350, 440, 1);
+    frame(350, 440, -1); frame(350, 440, 0);
+    if (!Check(memberClicks == 2 && memberOpens == 1 && singletonClicks == 1,
+        "expanded members open on double-click and neighboring singletons select")) return false;
+    expanded = false;
+    frame(150, 440, -1); frame(150, 440, -1);
+    frame(150, 440, 1); frame(150, 440, 0); frame(150, 440, 1);
+    frame(150, 440, 0); frame(150, 440, -1);
+    return Check(expanded && ImGui::GetActiveID() == 0,
+        "collapse and repeated expansion do not strand pointer capture");
+}
 }
 int main() {
     ImGui::CreateContext();
@@ -167,9 +237,12 @@ int main() {
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     ImGui::NewFrame();
-    const bool passed = TestSortTransitions(true) && TestSortTransitions(false) &&
+    bool passed = TestSortTransitions(true) && TestSortTransitions(false) &&
         TestInterruptions() && TestClippedAndUnloadedImages() && TestStackMotionAndInputGeometry();
-    ImGui::EndFrame(); ImGui::DestroyContext();
+    ImGui::EndFrame();
+    passed = TestExpandedFilmstripClickHandoff() && passed;
+    passed = TestExpandedFilmstripClickHandoff(true) && passed;
+    ImGui::DestroyContext();
     if (!passed) return 1;
-    std::cout << "Gallery layout animation tests passed (9 sort changes in each view, interruptions, reduced motion, lifetime).\n";
+    std::cout << "Gallery layout animation tests passed (9 sort changes in each view, interruptions, reduced motion, lifetime, expanded filmstrip click handoff).\n";
 }

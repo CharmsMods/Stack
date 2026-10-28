@@ -58,7 +58,14 @@ inline bool GalleryThumbnailButton(const char* id, const ImVec2& tileSize,
     const bool visible = ImGui::ItemAdd(hit, itemId, nullptr,
         ((flags & ImGuiButtonFlags_EnableNav) ? ImGuiItemFlags_None : ImGuiItemFlags_NoNav) |
             (pointerEnabled ? ImGuiItemFlags_None : ImGuiItemFlags_Disabled));
-    if (!visible || height <= 0.0f || !pointerEnabled) return false;
+    if (height <= 0.0f || !pointerEnabled) {
+        // Expansion can hide the collapsed cover on the second mouse-down.
+        // ItemAdd keeps its ID alive, so skipping ButtonBehavior must also
+        // retire its capture; otherwise no button processes the later release.
+        if (ImGui::GetActiveID() == itemId) ImGui::ClearActiveID();
+        return false;
+    }
+    if (!visible) return false;
     bool hovered = false, held = false;
     const bool pressed = ImGui::ButtonBehavior(hit, itemId, &hovered, &held, flags);
     ImGui::RenderNavCursor(target, itemId);
