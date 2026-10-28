@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate a CPU Output-card ownership regression.
 
-Copies the shipping card readout/Export branch, single-output resolver, and
+Copies the shipping card readout/Export and context-menu Export branches,
+single-output resolver, and
 accepted-presentation readiness checks unchanged. Completed graph chains,
 semantic descriptors, RAW source identity/hash accessors, ImGui, GPU statistics
 and native geometry are boundary doubles. No files are exported and no GPU/image
@@ -50,6 +51,7 @@ void Dummy(ImVec2){}
 void BeginDisabled(bool value){disabled=value;}
 void EndDisabled(){disabled=false;}
 bool Button(const char*,ImVec2){exportEnabled=!disabled;return click&&!disabled;}
+bool MenuItem(const char*){exportEnabled=!disabled;return click&&!disabled;}
 bool IsItemHovered(int){return true;}
 bool Has(const std::string& part){return std::any_of(text.begin(),text.end(),[&](const auto& line){return line.find(part)!=std::string::npos;});}
 }
@@ -98,6 +100,7 @@ struct EditorModule {
     bool HasCompleteNativeViewportOutput()const{return native;}
     bool IsExportBusy()const{return exportBusy;}
     Pipeline& GetPipeline(){return pipeline;}
+    FixtureGraph& GetNodeGraph(){return project.graph;}
     bool OutputPathNeedsViewTransform(int)const{return false;}
     const auto& GetGraphSemanticDiagnostics()const{return diagnostics;}
     const EditorNodeGraph::GraphOutputDescription* GetGraphOutputDescription(int id,const std::string& socket){
@@ -136,9 +139,31 @@ void Draw(EditorModule* editor,Card node,bool outputUsesChannel=false) {
     ImGui::text.clear();ImGui::disabled=false;ImGui::exportEnabled=false;
     CARD
 }
+void DrawContext(EditorModule* editor, Card card, bool outputUsesChannel=false) {
+    Card* node=&card;
+    ImGui::text.clear();ImGui::disabled=false;ImGui::exportEnabled=false;
+    CONTEXT_EXPORT
+}
 int failures=0;
 void Require(bool condition,const char* message){if(!condition){++failures;std::cerr<<"FAIL: "<<message<<'\n';}}
 int main(){
+    for(int scenario=0;scenario<9;++scenario){EditorModule e;Card card;
+        switch(scenario){
+            case 1:card.id=2;break;
+            case 2:card.outputEnabled=false;break;
+            case 3:e.Complete({1,2});break;
+            case 4:e.rawProjection=true;break;
+            case 5:e.composite=true;break;
+            case 6:e.maskPreview=true;break;
+            case 7:e.exportBusy=true;break;
+        }
+        const int opensBefore=FileDialogs::opens;
+        ImGui::click=true;DrawContext(&e,card,scenario==8);ImGui::click=false;
+        Require(ImGui::exportEnabled==(scenario==0),"context export enabled for wrong endpoint/mode");
+        Require(e.exports==(scenario==0) && FileDialogs::opens-opensBefore==(scenario==0),
+            "context menu opened export dialog or requested export for wrong endpoint/mode");
+    }
+
     {EditorModule e;Draw(&e,{1,true});Require(ImGui::exportEnabled&&ImGui::Has("Connected to output chain"),"sole A export/connectivity");
         Require(ImGui::Has("Direct result: Image")&&e.lastDescriptorNode==1,"sole A endpoint descriptor");
         for(int frame=0;frame<100;++frame){Draw(&e,{1,true});}Require(e.pipeline.reads==1,"unchanged draws repeated stats readback");}
@@ -198,7 +223,7 @@ int main(){
     {EditorModule e;ImGui::click=true;Draw(&e,{1,true});ImGui::click=false;Require(e.exports==1,"sole image command lost");
         e.exportBusy=true;ImGui::click=true;Draw(&e,{1,true});ImGui::click=false;Require(e.exports==1,"busy export enabled");}
     if(failures)return 1;
-    std::cout<<"Output card: per-node descriptors/connections, command target, accepted stats identity and unchanged draw checks passed.\n";
+    std::cout<<"Output card/context: per-node descriptors/connections, command target, accepted stats identity and unchanged draw checks passed.\n";
 }
 '''
 
@@ -207,19 +232,27 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--ui-source', type=Path, help='Optional pre-fix UI source for regression proof')
+    parser.add_argument('--context-source', type=Path, help='Optional pre-fix context-menu source for regression proof')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     ui = (args.ui_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp').read_text()
     start = ui.index('        const auto outputCard =') if '        const auto outputCard =' in ui else ui.index('        if (!node.outputEnabled) {')
     end = ui.index('        if (ImGui::Button(node.outputEnabled ?', start)
     card = ui[start:end]
+    context = (args.context_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp').read_text()
+    output_start = context.index('            if (node->kind == EditorNodeGraph::NodeKind::Output) {')
+    export_end = context.index('                ImGui::EndDisabled();', output_start) + len('                ImGui::EndDisabled();')
+    export_start = context.index('                ImGui::BeginDisabled(', output_start)
+    if '                const auto outputCard =' in context[output_start:export_start]:
+        export_start = context.index('                const auto outputCard =', output_start)
+    context_export = context[export_start:export_end]
     header = (root / 'src/Editor/EditorModule.h').read_text()
     readiness = block(header, 'bool IsRenderSettledForFullQualityExport() const')
     presentation = block((root / 'src/Editor/Internal/EditorModuleRenderPresentationState.cpp').read_text(), 'bool EditorModule::IsPresentedRenderComplete() const')
     descriptor = block((root / 'src/Editor/Internal/EditorModuleGraphSnapshot.cpp').read_text(), 'bool EditorModule::TryGetGraphOutputSemanticDescriptor(')
     resolver = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp').read_text(), 'int Graph::ResolvePreviewOutputNodeId() const').replace('Graph::', 'FixtureGraph::')
     connected = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp').read_text(), 'bool Graph::IsOutputConnected() const').replace('Graph::', 'FixtureGraph::')
-    text = PREAMBLE.replace('    READINESS', '    '+readiness).replace('    CARD', card)
+    text = PREAMBLE.replace('    READINESS', '    '+readiness).replace('    CARD', card).replace('    CONTEXT_EXPORT', context_export)
     # Definitions must precede main but can follow the class declarations.
     insertion = text.index('struct Card {')
     text = text[:insertion] + '\n'.join((presentation,descriptor,resolver,connected)) + '\n' + text[insertion:]

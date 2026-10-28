@@ -3,6 +3,7 @@
 
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
+#include "Editor/NodeGraph/UI/OutputCardPresentation.h"
 #include "NodeMath/ChannelImageSemantics.h"
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
@@ -235,8 +236,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                             input->fromNodeId,
                             input->fromSocketId);
                 }
+                const auto outputCard = Stack::Editor::NodeGraphUI::DescribeOutputCard(
+                    node->id, node->outputEnabled, editor->GetNodeGraph().GetCompletedChains(),
+                    !editor->IsEditingRawLayerMaskGraph() && !editor->IsCompositeViewportMode() &&
+                        !editor->IsAutoGainMaskPreviewActive());
                 ImGui::BeginDisabled(
-                    !editor->GetNodeGraph().IsOutputConnected() ||
+                    !outputCard.projectExportTargetsNode ||
                     outputUsesChannel ||
                     editor->IsExportBusy());
                 if (ImGui::MenuItem("Export")) {
@@ -250,6 +255,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     ImGui::SetTooltip(
                         "PNG export requires an Image. Connect this Channel "
                         "to Image Combine first.");
+                } else if (outputCard.connected && !outputCard.projectExportTargetsNode &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip(
+                        "This command exports the sole project output. Use the workspace "
+                        "Export controls for RAW graphs or composite outputs, and leave "
+                        "diagnostic mask preview before exporting an output node.");
                 }
                 ImGui::EndDisabled();
                 std::string queueReason;

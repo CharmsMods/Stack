@@ -4,6 +4,7 @@ add_custom_command(OUTPUT "${output_card_test}"
         --output "${output_card_test}"
     DEPENDS tools/tests/output_card_presentation_tests.py
         src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp
+        src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp
         src/Editor/NodeGraph/UI/OutputCardPresentation.h
         src/Editor/EditorModule.h
         src/Editor/Internal/EditorModuleGraphSnapshot.cpp
