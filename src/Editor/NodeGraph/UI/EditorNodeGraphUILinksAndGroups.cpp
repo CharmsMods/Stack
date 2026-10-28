@@ -310,6 +310,9 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     std::unordered_set<std::string> activeLinkKeys;
     activeLinkKeys.reserve(graph.GetLinks().size());
     std::vector<CachedRect> occupiedLabelRects;
+    // Stroke consumers finish synchronously; reuse one trim buffer across
+    // animated wires instead of allocating for each wire on every frame.
+    std::vector<CurveSample> tracedSamples;
     m_LinkLabelHitRects.clear();
     // Moving labels need fresh hit geometry. With labels hidden, immutable
     // endpoint geometry and an unchanged pointer can reuse the previous hit.
@@ -351,7 +354,6 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         const std::string& channel = visualStyle.channel;
         const std::string animationKey = LinkAnimationKey(link);
         const float screenLength = wirePath.geometry.length;
-        std::vector<CurveSample> tracedSamples;
         if(trace<1)tracedSamples=wirePath.samples;
         const auto& strokeSamples=trace<1?tracedSamples:wirePath.samples;
         if(trace<1) {
