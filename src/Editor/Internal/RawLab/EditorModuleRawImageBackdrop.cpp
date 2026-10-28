@@ -32,8 +32,9 @@ void MakeBackdropCoverageDisjoint(std::vector<BackdropPatch>& patches) {
     // Later matching-content detail replaces earlier overview pixels. Keep
     // their coverage disjoint so transparent pixels are composed only once.
     std::vector<BackdropPatch> accepted;
+    std::vector<BackdropPatch> retained;
     for (const auto& incoming : patches) {
-        std::vector<BackdropPatch> retained;
+        retained.clear();
         for (const auto& prior : accepted) {
             const ImVec2 low(std::max(prior.minimum.x, incoming.minimum.x), std::max(prior.minimum.y, incoming.minimum.y));
             const ImVec2 high(std::min(prior.maximum.x, incoming.maximum.x), std::min(prior.maximum.y, incoming.maximum.y));
@@ -48,7 +49,7 @@ void MakeBackdropCoverageDisjoint(std::vector<BackdropPatch>& patches) {
             keep(ImVec2(high.x, low.y), ImVec2(prior.maximum.x, high.y));
         }
         retained.push_back(incoming);
-        accepted = std::move(retained);
+        accepted.swap(retained);
     }
     patches = std::move(accepted);
 }
