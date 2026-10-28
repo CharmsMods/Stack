@@ -491,99 +491,9 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     const std::vector<NodeBrowserEntry>& entries = CachedNodeBrowserEntries();
     const auto& entryKeys = CachedEntryKeys();
-    const std::string search = m_NodeBrowserSearchBuffer;
-    bool filterChanged = false;
-    if (isOpen) {
-        const auto context = editor->GetGraphEditorContext();
-        const std::uint64_t graphRevision = graph.GetStructureRevision();
-        const auto renderRevision = editor->GetRenderRevision();
-        const bool availabilityChanged =
-            !m_NodeBrowserFilterCacheValid ||
-            m_NodeBrowserFilterCacheGraphRevision != graphRevision ||
-            m_NodeBrowserFilterCacheRenderRevision != renderRevision ||
-            m_NodeBrowserFilterCacheDocumentId != context.documentId ||
-            m_NodeBrowserFilterCacheGraphId != context.graphId ||
-            m_NodeBrowserFilterCacheMode != m_NodeBrowserMode ||
-            m_NodeBrowserFilterCacheDragFromNodeId != m_NodeBrowserDragFromNodeId ||
-            m_NodeBrowserFilterCacheDragFromSocketId != m_NodeBrowserDragFromSocketId ||
-            m_NodeBrowserFilterCacheDragToNodeId != m_NodeBrowserDragToNodeId ||
-            m_NodeBrowserFilterCacheDragToSocketId != m_NodeBrowserDragToSocketId;
-        const bool filterCacheDirty = availabilityChanged || m_NodeBrowserFilterCacheSearch != search;
-        if (filterCacheDirty) {
-            filterChanged = true;
-            m_NodeBrowserFilteredEntryIndices.clear();
-            m_NodeBrowserFilteredEntryIndices.reserve(entries.size());
-
-            std::optional<std::pair<int, std::string>> endpoint;
-            if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput)
-                endpoint = {{m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId}};
-            else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput)
-                endpoint = {{m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId}};
-            if (availabilityChanged) {
-                const auto available = context.queryAvailableNodes(endpoint);
-                m_NodeBrowserAvailableKeys.clear();
-                for (const auto& entry : available) m_NodeBrowserAvailableKeys.insert(EntryKey(entry));
-            }
-
-            for (std::size_t index = 0; index < entries.size(); ++index) {
-                const NodeBrowserEntry& entry = entries[index];
-                const bool matchesSearch =
-                    ContainsCaseInsensitive(entry.label, search) ||
-                    ContainsCaseInsensitive(entry.category, search) ||
-                    ContainsCaseInsensitive(entry.searchAliases, search);
-                if (!matchesSearch) {
-                    continue;
-                }
-
-                if (!m_NodeBrowserAvailableKeys.count(entryKeys[index])) continue;
-
-                m_NodeBrowserFilteredEntryIndices.push_back(index);
-            }
-
-            m_NodeBrowserFilterCacheValid = true;
-            m_NodeBrowserFilterCacheGraphRevision = graphRevision;
-            m_NodeBrowserFilterCacheRenderRevision = renderRevision;
-            m_NodeBrowserFilterCacheDocumentId = context.documentId;
-            m_NodeBrowserFilterCacheGraphId = context.graphId;
-            m_NodeBrowserFilterCacheSearch = search;
-            m_NodeBrowserFilterCacheMode = m_NodeBrowserMode;
-            m_NodeBrowserFilterCacheDragFromNodeId = m_NodeBrowserDragFromNodeId;
-            m_NodeBrowserFilterCacheDragFromSocketId = m_NodeBrowserDragFromSocketId;
-            m_NodeBrowserFilterCacheDragToNodeId = m_NodeBrowserDragToNodeId;
-            m_NodeBrowserFilterCacheDragToSocketId = m_NodeBrowserDragToSocketId;
-        }
-
-    }
-    static const std::vector<std::size_t> emptyEntries;
-    const auto& filtered = isOpen ? m_NodeBrowserFilteredEntryIndices : emptyEntries;
-    Stack::UiPerformance::Add(Stack::UiPerformance::Counter::CatalogMatches, filtered.size());
-    if (filterChanged || m_NodeBrowserVisibleCacheOpen != isOpen) {
-        m_NodeBrowserVisibleKeys.clear();
-        m_NodeBrowserVisibleKeys.reserve(filtered.size());
-        for (std::size_t index : filtered) {
-            m_NodeBrowserVisibleKeys.insert(entryKeys[index]);
-            m_NodeBrowserEntryAlpha.try_emplace(entryKeys[index], 0.0f);
-        }
-        m_NodeBrowserVisibleCacheOpen = isOpen;
-        m_NodeBrowserEntryAnimationsSettled = false;
-    }
-    if (!m_NodeBrowserEntryAnimationsSettled) {
-        bool settled = true;
-        for (auto it = m_NodeBrowserEntryAlpha.begin(); it != m_NodeBrowserEntryAlpha.end();) {
-            const bool visible = m_NodeBrowserVisibleKeys.count(it->first) != 0;
-            it->second = AnimateToward(it->second, visible ? 1.0f : 0.0f, visible ? 18.0f : 14.0f, dt);
-            if (!visible && it->second <= 0.01f) {
-                m_NodeBrowserCardHoverAnim.erase(it->first);
-                it = m_NodeBrowserEntryAlpha.erase(it);
-            } else {
-                if (visible && it->second >= 0.999f) it->second = 1.0f;
-                else settled = false;
-                ++it;
-            }
-        }
-        m_NodeBrowserEntryAnimationsSettled = settled;
-    }
     if (!isOpen && alpha <= 0.01f) {
+        m_NodeBrowserVisibleCacheOpen = false;
+        m_NodeBrowserVisibleKeys.clear();
         m_NodeBrowserEntryAlpha.clear();
         m_NodeBrowserCardHoverAnim.clear();
         return;
@@ -774,6 +684,100 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PushItemWidth(contentWidth);
         ImGuiInputTextFlags searchFlags = isOpen ? ImGuiInputTextFlags_None : ImGuiInputTextFlags_ReadOnly;
         ImGui::InputTextWithHint("##NodesPanelSearch", prompt, m_NodeBrowserSearchBuffer, sizeof(m_NodeBrowserSearchBuffer), searchFlags);
+        // Search edits and Enter can arrive together. Resolve the current input
+        // before drawing or activating results, using the same availability snapshot.
+        const std::string search = m_NodeBrowserSearchBuffer;
+        bool filterChanged = false;
+        if (isOpen) {
+            const auto context = editor->GetGraphEditorContext();
+            const std::uint64_t graphRevision = graph.GetStructureRevision();
+            const auto renderRevision = editor->GetRenderRevision();
+            const bool availabilityChanged =
+                !m_NodeBrowserFilterCacheValid ||
+                m_NodeBrowserFilterCacheGraphRevision != graphRevision ||
+                m_NodeBrowserFilterCacheRenderRevision != renderRevision ||
+                m_NodeBrowserFilterCacheDocumentId != context.documentId ||
+                m_NodeBrowserFilterCacheGraphId != context.graphId ||
+                m_NodeBrowserFilterCacheMode != m_NodeBrowserMode ||
+                m_NodeBrowserFilterCacheDragFromNodeId != m_NodeBrowserDragFromNodeId ||
+                m_NodeBrowserFilterCacheDragFromSocketId != m_NodeBrowserDragFromSocketId ||
+                m_NodeBrowserFilterCacheDragToNodeId != m_NodeBrowserDragToNodeId ||
+                m_NodeBrowserFilterCacheDragToSocketId != m_NodeBrowserDragToSocketId;
+            const bool filterCacheDirty = availabilityChanged || m_NodeBrowserFilterCacheSearch != search;
+            if (filterCacheDirty) {
+                filterChanged = true;
+                m_NodeBrowserFilteredEntryIndices.clear();
+                m_NodeBrowserFilteredEntryIndices.reserve(entries.size());
+
+                std::optional<std::pair<int, std::string>> endpoint;
+                if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput)
+                    endpoint = {{m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId}};
+                else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput)
+                    endpoint = {{m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId}};
+                if (availabilityChanged) {
+                    const auto available = context.queryAvailableNodes(endpoint);
+                    m_NodeBrowserAvailableKeys.clear();
+                    for (const auto& entry : available) m_NodeBrowserAvailableKeys.insert(EntryKey(entry));
+                }
+
+                for (std::size_t index = 0; index < entries.size(); ++index) {
+                    const NodeBrowserEntry& entry = entries[index];
+                    const bool matchesSearch =
+                        ContainsCaseInsensitive(entry.label, search) ||
+                        ContainsCaseInsensitive(entry.category, search) ||
+                        ContainsCaseInsensitive(entry.searchAliases, search);
+                    if (!matchesSearch) {
+                        continue;
+                    }
+
+                    if (!m_NodeBrowserAvailableKeys.count(entryKeys[index])) continue;
+
+                    m_NodeBrowserFilteredEntryIndices.push_back(index);
+                }
+
+                m_NodeBrowserFilterCacheValid = true;
+                m_NodeBrowserFilterCacheGraphRevision = graphRevision;
+                m_NodeBrowserFilterCacheRenderRevision = renderRevision;
+                m_NodeBrowserFilterCacheDocumentId = context.documentId;
+                m_NodeBrowserFilterCacheGraphId = context.graphId;
+                m_NodeBrowserFilterCacheSearch = search;
+                m_NodeBrowserFilterCacheMode = m_NodeBrowserMode;
+                m_NodeBrowserFilterCacheDragFromNodeId = m_NodeBrowserDragFromNodeId;
+                m_NodeBrowserFilterCacheDragFromSocketId = m_NodeBrowserDragFromSocketId;
+                m_NodeBrowserFilterCacheDragToNodeId = m_NodeBrowserDragToNodeId;
+                m_NodeBrowserFilterCacheDragToSocketId = m_NodeBrowserDragToSocketId;
+            }
+
+        }
+        static const std::vector<std::size_t> emptyEntries;
+        const auto& filtered = isOpen ? m_NodeBrowserFilteredEntryIndices : emptyEntries;
+        Stack::UiPerformance::Add(Stack::UiPerformance::Counter::CatalogMatches, filtered.size());
+        if (filterChanged || m_NodeBrowserVisibleCacheOpen != isOpen) {
+            m_NodeBrowserVisibleKeys.clear();
+            m_NodeBrowserVisibleKeys.reserve(filtered.size());
+            for (std::size_t index : filtered) {
+                m_NodeBrowserVisibleKeys.insert(entryKeys[index]);
+                m_NodeBrowserEntryAlpha.try_emplace(entryKeys[index], 0.0f);
+            }
+            m_NodeBrowserVisibleCacheOpen = isOpen;
+            m_NodeBrowserEntryAnimationsSettled = false;
+        }
+        if (!m_NodeBrowserEntryAnimationsSettled) {
+            bool settled = true;
+            for (auto it = m_NodeBrowserEntryAlpha.begin(); it != m_NodeBrowserEntryAlpha.end();) {
+                const bool visible = m_NodeBrowserVisibleKeys.count(it->first) != 0;
+                it->second = AnimateToward(it->second, visible ? 1.0f : 0.0f, visible ? 18.0f : 14.0f, dt);
+                if (!visible && it->second <= 0.01f) {
+                    m_NodeBrowserCardHoverAnim.erase(it->first);
+                    it = m_NodeBrowserEntryAlpha.erase(it);
+                } else {
+                    if (visible && it->second >= 0.999f) it->second = 1.0f;
+                    else settled = false;
+                    ++it;
+                }
+            }
+            m_NodeBrowserEntryAnimationsSettled = settled;
+        }
         if (Stack::UiPerformance::Probe::Active()) {
             const auto low=ImGui::GetItemRectMin(),high=ImGui::GetItemRectMax();
             Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Search,
