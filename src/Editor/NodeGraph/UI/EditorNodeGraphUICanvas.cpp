@@ -492,7 +492,12 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     }
 
     if (options.interactive) {
-        m_NodeNotes.BeginFrame(editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyDown(ImGuiKey_F));
+        m_NodeNotes.BeginFrame(editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyDown(ImGuiKey_F),
+            [&](const auto& note) {
+                const auto* target = graph.FindNode(note.nodeId);
+                return note.documentId == m_GraphContext.documentId && note.graphId == m_GraphContext.graphId &&
+                    target && target->instanceUuid == note.instanceUuid;
+            });
         const bool reveal = m_NodeNotes.Revealed();
         const float revealTarget = reveal ? 1.f : 0.f;
         if (m_LinkLabelRevealAlpha != revealTarget)
@@ -803,12 +808,12 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     if (pendingGraphAction) {
         pendingGraphAction();
     }
-    if (auto note = m_NodeNotes.TakeCommit()) {
-        std::string error;
-        if (!editor->SetGraphNodeNotes(note->documentId, note->graphId, note->nodeId,
-                note->instanceUuid, note->text, &error))
-            editor->ShowUiNotification(UiNotificationSeverity::Warning, error, "graph-node-notes");
-    }
+    std::string noteError;
+    if (!m_NodeNotes.CommitPending([&](const auto& note) {
+            return editor->SetGraphNodeNotes(note.documentId, note.graphId, note.nodeId,
+                note.instanceUuid, note.text, &noteError);
+        }))
+        editor->ShowUiNotification(UiNotificationSeverity::Warning, noteError, "graph-node-notes");
     if (!Stack::Workspace::IsPreview() && !ImGui::IsAnyMouseDown() && !ImGui::IsAnyItemActive())
         editor->GetProjectSession().graphHistory.EndGesture();
 }

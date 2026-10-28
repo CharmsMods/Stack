@@ -32,14 +32,47 @@ void ValidateNodeNotesInteractions() {
     Stack::Editor::GraphEditorContext owner;
     owner.documentId = "project-a";
     owner.graphId = "graph-a";
+    EditorNodeGraph::Node second;
+    second.id = 8; second.instanceUuid = "second-note"; second.notes = "Second";
+    bool showSecond = false, secondFirst = false, secondExists = true, drawNotes = true;
+    bool revealHeld = true;
+    bool acknowledge = false, reject = false, resetOnReject = false, deleteSuccessor = false;
+    int attempts = 0, accepted = 0;
     const auto frame = [&] {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Notes", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
-        notes.BeginFrame(true);
-        notes.Draw(node, owner, 1, {20, 20}, {300, 180}, 1,
-            {1, 1, 1, 1}, {.5f, .5f, .5f, 1}, true, 1);
+        if (drawNotes) {
+            notes.BeginFrame(revealHeld, [&](const auto& note) {
+                return note.documentId == owner.documentId && note.graphId == owner.graphId &&
+                    ((note.nodeId == node.id && note.instanceUuid == node.instanceUuid) ||
+                     (secondExists && note.nodeId == second.id && note.instanceUuid == second.instanceUuid));
+            });
+            const auto drawSecond = [&] {
+                if (showSecond && secondExists)
+                    notes.Draw(second, owner, 1, {220,20}, {395,180}, 1,
+                        {1,1,1,1}, {.5f,.5f,.5f,1}, true, 1);
+            };
+            if (secondFirst) drawSecond();
+            notes.Draw(node, owner, 1, {20, 20}, {200, 180}, 1,
+                {1, 1, 1, 1}, {.5f, .5f, .5f, 1}, true, 1);
+            if (!secondFirst) drawSecond();
+            if (acknowledge) notes.CommitPending([&](const auto& note) {
+                ++attempts;
+                require(notes.EditingNode() != second.id,
+                    "A changed-note successor activated before commit acknowledgement.");
+                require(note.documentId == owner.documentId && note.graphId == owner.graphId,
+                    "A handoff changed the outgoing document identity.");
+                if (reject) { if (resetOnReject) notes.Reset(); return false; }
+                auto& target = note.nodeId == node.id ? node : second;
+                require(note.instanceUuid == target.instanceUuid, "A handoff changed the outgoing node identity.");
+                target.notes = note.text;
+                ++accepted;
+                if (deleteSuccessor) secondExists = false;
+                return true;
+            });
+        }
         ImGui::End();
         ImGui::Render();
     };
@@ -49,7 +82,9 @@ void ValidateNodeNotesInteractions() {
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, false); frame(); frame();
     };
     const auto edit = [&](const char* text) {
+        revealHeld = true;
         click(50, 50);
+        revealHeld = false;
         require(notes.Editing(), "Click did not open a note draft.");
         io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_A, true); frame();
         io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); frame();
@@ -101,7 +136,7 @@ void ValidateNodeNotesInteractions() {
     edit("Cancel this note");
     io.AddKeyEvent(ImGuiKey_Escape, true); frame();
     io.AddKeyEvent(ImGuiKey_Escape, false); frame();
-    require(!notes.Editing() && !notes.TakeCommit(), "Escape queued a canceled note.");
+    require(!notes.Editing() && !notes.HasPendingCommit(), "Escape queued a canceled note.");
     require(notes.FinishEditing([&](const auto&) {
         throw std::runtime_error("Transition revived a canceled note.");
         return true;
@@ -118,6 +153,71 @@ void ValidateNodeNotesInteractions() {
         node.notes = note.text;
         return true;
     }), "A queued note could not finish before transition.");
-    require(!notes.TakeCommit(), "A successful transition left a duplicate queued commit.");
+    require(!notes.HasPendingCommit(), "A successful transition left a duplicate queued commit.");
+    // Handoff is independent of node z-order, and each accepted draft reaches
+    // the document/history callback exactly once.
+    for (bool earlier : {false, true}) {
+        notes.Reset(); node.notes = "Original"; second.notes = "Second";
+        showSecond = true; secondFirst = earlier; acknowledge = true;
+        attempts = accepted = 0;
+        edit("Handoff text");
+        click(250,50);
+        require(notes.EditingNode() == second.id && node.notes == "Handoff text" &&
+            attempts == 1 && accepted == 1, "One-click note handoff depends on draw order or duplicated its commit.");
+        frame(); frame();
+        require(attempts == 1, "A settled handoff repeated its history callback.");
+        // Switching an unchanged note also retains this frame's reveal after F
+        // release, including when the outgoing widget is drawn first.
+        click(50,50);
+        require(notes.EditingNode() == node.id && attempts == 1,
+            "An unchanged note handoff lost reveal after F release or created history.");
+        click(250,50);
+        require(notes.EditingNode() == second.id && attempts == 1,
+            "The reverse unchanged handoff depends on draw order.");
+        io.AddKeyEvent(ImGuiKey_Escape,true);frame();io.AddKeyEvent(ImGuiKey_Escape,false);frame();
+        require(!notes.Editing() && attempts == 1, "Canceling the successor revived the outgoing commit.");
+
+        edit("Keep rejected draft");
+        reject = resetOnReject = true;
+        click(250,50);
+        require(notes.EditingNode() == node.id && ImGui::GetActiveID() != 0 &&
+            node.notes == "Handoff text" && attempts == 2 && accepted == 1,
+            "A rejected handoff lost the outgoing draft/focus or activated the successor.");
+        reject = resetOnReject = false;
+        click(250,50);
+        require(notes.EditingNode() == second.id && node.notes == "Keep rejected draft" &&
+            attempts == 3 && accepted == 2, "Retry failed to retain the outgoing text exactly once.");
+        // Model undo/external edits invalidate a live draft rather than writing
+        // its superseded original back into the document on the next frame.
+        second.notes = "Restored by history";
+        frame();
+        require(!notes.Editing() && attempts == 3,
+            "An external history change revived or committed a superseded draft.");
+    }
+
+    notes.Reset(); node.notes = "Original"; second.notes = "Second";
+    attempts = accepted = 0;
+    edit("Survives target deletion");
+    deleteSuccessor = true;
+    click(250,50);
+    require(!notes.Editing() && node.notes == "Survives target deletion" &&
+        attempts == 1 && accepted == 1, "A deleted successor captured focus or discarded the accepted outgoing note.");
+    deleteSuccessor = false; secondExists = true;
+
+    edit("Survives focus loss and hiding");
+    io.AddFocusEvent(false); frame(); io.AddFocusEvent(true); frame();
+    drawNotes = false; frame(); frame(); frame(); drawNotes = true; frame();
+    require(notes.EditingNode() == node.id, "Focus loss or hidden frames discarded an uncommitted draft.");
+    require(notes.FinishEditing([&](const auto& note) {
+        require(note.text == "Survives focus loss and hiding", "Hidden draft text was lost.");
+        node.notes = note.text; return true;
+    }), "A hidden/focus-lost note could not be committed.");
+    frame(); frame();
+
+    edit("Must not enter replacement");
+    node.instanceUuid = "replacement-node";
+    frame();
+    require(!notes.Editing() && !notes.HasPendingCommit() && node.notes == "Survives focus loss and hiding",
+        "A removed/replaced target received the old node's draft.");
     std::cout << "Node notes transition interactions passed\n";
 }

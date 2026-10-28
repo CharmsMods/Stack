@@ -14,40 +14,58 @@ constexpr float kInset = 8.0f;
 constexpr const char* kEmptyNote = "Click to add a note.";
 }
 
-void NodeNotesView::BeginFrame(bool revealHeld) {
-    // A hidden or replaced canvas must not resume a stale keyboard capture.
-    const int frame = ImGui::GetFrameCount();
-    if (lastFrame_ >= 0 && frame > lastFrame_ + 1) edit_.reset();
-    lastFrame_ = frame;
-    held_ = revealHeld;
+void NodeNotesView::BeginFrame(bool revealHeld,
+    const std::function<bool(const Commit&)>& targetExists) {
+    // Visibility is not document lifetime: a hidden/cropped note keeps its
+    // draft. Only its owner can establish that the target was removed/replaced.
+    if (edit_ && targetExists && !targetExists(edit_->target)) edit_.reset();
+    // Latch visibility for this draw pass, including an unchanged outgoing
+    // note that finishes before the clicked successor is drawn.
+    held_ = revealHeld || edit_.has_value() || pending_.has_value() || next_.has_value();
 }
 
 void NodeNotesView::Reset() {
-    layouts_.clear(); edit_.reset(); commit_.reset(); held_ = false; lastFrame_ = -1;
+    layouts_.clear(); edit_.reset(); pending_.reset(); next_.reset(); held_ = false;
 }
 
 void NodeNotesView::Finish(bool cancel) {
     if (!edit_) return;
+    if (cancel) next_.reset();
     if (!cancel && edit_->target.text != edit_->original)
-        commit_ = std::move(edit_->target);
+        pending_ = std::move(edit_);
     edit_.reset();
     ImGui::ClearActiveID();
 }
 
-std::optional<NodeNotesView::Commit> NodeNotesView::TakeCommit() {
-    auto result = std::move(commit_); commit_.reset(); return result;
+bool NodeNotesView::CommitPending(const std::function<bool(const Commit&)>& commit) {
+    // Finish only after all note widgets have consumed this frame's text. A
+    // successor drawn before the outgoing widget must not truncate that input.
+    if (next_ && edit_) Finish(false);
+    if (!pending_) {
+        if (next_) { edit_ = std::move(next_); next_.reset(); }
+        return true;
+    }
+    // Validation may reset this view while rebuilding a rejected RAW canvas.
+    const auto outgoing = *pending_;
+    const auto successor = next_;
+    if (!commit(outgoing.target)) {
+        edit_ = outgoing;
+        edit_->focus = true;
+        pending_.reset(); next_.reset();
+        return false;
+    }
+    pending_.reset(); next_.reset();
+    edit_ = successor;
+    return true;
 }
 
 bool NodeNotesView::FinishEditing(const std::function<bool(const Commit&)>& commit) {
-    // Validation can rebuild a rejected RAW canvas, resetting this view. Keep
-    // callback arguments alive and recover its draft even in that case.
-    const auto queued = commit_;
-    if (queued && !commit(*queued)) { commit_ = queued; return false; }
-    commit_.reset();
+    if (!CommitPending(commit)) return false;
     if (!edit_) return true;
     const auto editing = *edit_;
     if (editing.target.text != editing.original && !commit(editing.target)) {
         edit_ = editing;
+        edit_->focus = true;
         return false;
     }
     edit_.reset();
@@ -69,12 +87,16 @@ bool NodeNotesView::Draw(const EditorNodeGraph::Node& node, const GraphEditorCon
 
     ImGui::PushID(node.id);
     ImGui::PushID("node-notes");
-    if (!edit_ && interactive && inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (interactive && inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        (!edit_ || edit_->target.nodeId != node.id)) {
+        // Queue a handoff in either draw order. The outgoing widget still gets
+        // to consume this frame's text before CommitPending asks its owner.
         Edit edit;
         edit.target = {context.documentId, context.graphId, node.instanceUuid, node.notes, node.id};
         edit.original = node.notes;
         edit.waitForFRelease = ImGui::IsKeyDown(ImGuiKey_F);
-        edit_ = std::move(edit);
+        if (pending_ || edit_) next_ = std::move(edit);
+        else edit_ = std::move(edit);
     }
     if (edit_ && edit_->target.nodeId == node.id) {
         auto& edit = *edit_;

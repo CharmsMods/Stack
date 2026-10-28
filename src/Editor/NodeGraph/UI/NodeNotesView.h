@@ -21,15 +21,19 @@ public:
         std::string documentId, graphId, instanceUuid, text;
         int nodeId = -1;
     };
-    void BeginFrame(bool revealHeld);
+    void BeginFrame(bool revealHeld,
+        const std::function<bool(const Commit&)>& targetExists = {});
     void Reset();
-    bool Revealed() const { return held_ || edit_.has_value(); }
+    bool Revealed() const { return held_ || edit_.has_value() || pending_.has_value() || next_.has_value(); }
     bool Editing() const { return edit_.has_value(); }
     int EditingNode() const { return edit_ ? edit_->target.nodeId : -1; }
     bool Draw(const EditorNodeGraph::Node& node, const GraphEditorContext& context,
         std::uint64_t editRevision, ImVec2 minimum, ImVec2 maximum,
         float scale, ImVec4 textColor, ImVec4 mutedColor, bool hovered, float opacity);
-    std::optional<Commit> TakeCommit();
+    bool HasPendingCommit() const { return pending_.has_value(); }
+    // Acknowledge queued text before activating a clicked successor note.
+    // Failure restores the outgoing draft rather than consuming its text.
+    bool CommitPending(const std::function<bool(const Commit&)>& commit);
     // Explicit owner transitions flush this canvas only. A rejected commit
     // keeps the draft, and finishing a background owner never steals focus.
     bool FinishEditing(const std::function<bool(const Commit&)>& commit);
@@ -50,9 +54,8 @@ private:
     };
     std::unordered_map<int, Layout> layouts_;
     std::optional<Edit> edit_;
-    std::optional<Commit> commit_;
+    std::optional<Edit> pending_, next_;
     bool held_ = false;
-    int lastFrame_ = -1;
     void Finish(bool cancel);
 };
 } // namespace Stack::Editor::NodeGraphUI
