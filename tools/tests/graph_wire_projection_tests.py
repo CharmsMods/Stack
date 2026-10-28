@@ -38,11 +38,18 @@ def main():
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <new>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+bool countAllocations=false;
+std::size_t allocations=0;
+void* operator new(std::size_t n){if(countAllocations)++allocations;if(void* p=std::malloc(n))return p;throw std::bad_alloc();}
+void operator delete(void* p) noexcept{std::free(p);}
+void operator delete(void* p,std::size_t) noexcept{std::free(p);}
 struct ImVec2 {float x=0,y=0; ImVec2()=default;ImVec2(float x_,float y_):x(x_),y(y_){} };
 namespace Stack::GraphRouting {
 using Vec2=ImVec2;
@@ -80,6 +87,15 @@ void Same(const ProjectedWire& a,const ProjectedWire& b) {
     for(std::size_t i=0;i<a.samples.size();++i){SamePoint(a.samples[i].point,b.samples[i].point);
         SamePoint(a.geometry.points[i],b.geometry.points[i]);Check(Near(a.samples[i].t,b.samples[i].t),"translation changed trace/label fractions");}
 }
+void Exact(const ProjectedWire& a,const ProjectedWire& b) {
+    Check(a.samples.size()==b.samples.size()&&a.geometry.points.size()==b.geometry.points.size(),"rebuild changed sample count");
+    auto same=[](ImVec2 x,ImVec2 y){return x.x==y.x&&x.y==y.y;};
+    Check(a.geometry.length==b.geometry.length&&same(a.geometry.bounds.min,b.geometry.bounds.min)&&
+        same(a.geometry.bounds.max,b.geometry.bounds.max),"rebuild changed path bounds/length");
+    for(std::size_t i=0;i<a.samples.size();++i)
+        Check(same(a.samples[i].point,b.samples[i].point)&&a.samples[i].t==b.samples[i].t&&
+            same(a.geometry.points[i],b.geometry.points[i]),"rebuild changed sample/trace geometry");
+}
 int main()try{
     using Stack::UiPerformance::rebuilds;
     int translatedFrames=0;
@@ -105,6 +121,29 @@ int main()try{
             ++translatedFrames;
         }
     }
+    // Geometry buffers survive shape/zoom changes; adaptive sampling itself
+    // remains unchanged and may still allocate. Growth is allowed to allocate.
+    for(bool gateway:{false,true})for(bool straight:{false,true}) {
+        WireRouteCache changing;
+        const void* points=nullptr;std::size_t capacity=0;
+        int frame=0;
+        for(float extent:{800.f,600.f,1200.f,300.f,700.f,200.f}) {
+            const float zoom=1.f+.01f*frame++;
+            ImVec2 a{32,45},b{extent,301},via{extent*.4f,207},exit{extent*.4f+72,207};
+            const auto& got=changing.Project("wire",a,b,{},zoom,straight,gateway?&via:nullptr,gateway?&exit:nullptr);
+            WireRouteCache fresh;
+            Exact(got,fresh.Project("wire",a,b,{},zoom,straight,gateway?&via:nullptr,gateway?&exit:nullptr));
+            if(points&&got.geometry.points.size()<=capacity)
+                Check(got.geometry.points.data()==points,"shape/zoom rebuilt an existing geometry allocation");
+            points=got.geometry.points.data();capacity=got.geometry.points.capacity();
+        }
+    }
+    WireRouteCache allocationCheck;
+    allocationCheck.Project("wire",{32,45},{824,301},{},1,false);
+    allocations=0;countAllocations=true;
+    allocationCheck.Project("wire",{32,45},{823,301},{},1.01f,false);
+    countAllocations=false;
+    Check(allocations==1,"warm shape update should allocate sampling only, not geometry");
     WireRouteCache cache;
     ImVec2 via{300,100},exit{360,100};
     auto project=[&](ImVec2 end,float zoom,bool straight,const ImVec2* v,const ImVec2* e){
@@ -123,7 +162,7 @@ int main()try{
     cache.Project("other",{10,20},{601,220},{},2,true);
     WireRouteCache otherOwner;otherOwner.Project("wire",{10,20},{601,220},{},2,true);
     Check(rebuilds==before+2,"wire keys or graph owners shared projection state");
-    std::cout<<"PASS "<<translatedFrames<<" translated frames: no tessellation rebuilds, stable storage, fresh-geometry agreement; endpoint/zoom/style/gateway/key/owner invalidations passed.\n";
+    std::cout<<"PASS "<<translatedFrames<<" translated frames: no tessellation rebuilds, stable storage, fresh-geometry agreement; exact rebuilt geometry/storage and endpoint/zoom/style/gateway/key/owner invalidations passed.\n";
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 '''
     if args.output:

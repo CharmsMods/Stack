@@ -108,7 +108,8 @@ const ProjectedWire& WireRouteCache::Project(const std::string& key,ImVec2 sourc
         const float handle=straight?0:EditorNodeGraphUIMetrics::LinkBezierHandle(source,target);
         cache.samples=SampleLinkCurve(source,{source.x+handle,source.y},{target.x-handle,target.y},target);
     }
-    std::vector<GraphRouting::Vec2> geometry;geometry.reserve(cache.samples.size());
+    auto geometry=std::move(cache.geometry.points);
+    geometry.clear();geometry.reserve(cache.samples.size());
     for(const auto& sample:cache.samples)geometry.push_back({sample.point.x,sample.point.y});
     cache.geometry=GraphRouting::MakePath(std::move(geometry));
     float distance=0;
