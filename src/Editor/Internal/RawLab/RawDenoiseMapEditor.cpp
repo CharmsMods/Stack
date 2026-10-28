@@ -204,12 +204,6 @@ RawDenoiseMapEditorResult RenderRawDenoiseMapEditor(
     RawDenoiseMapEditorResult result;
     state.activeLayer = std::clamp(state.activeLayer, 0, 1);
 
-    if (state.pointDragDiagnosticActive &&
-        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        state.pointDragDiagnosticActive = false;
-        result.viewChanged = true;
-    }
-
     ImGui::PushID("RawDenoiseMapLayerTabs");
     if (BareTextButton("Luma", state.activeLayer == 0)) {
         state.activeLayer = 0;
@@ -234,6 +228,19 @@ RawDenoiseMapEditorResult RenderRawDenoiseMapEditor(
         "##RawDenoiseFrequencyLuminanceMap",
         size,
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool enabled = !(ImGui::GetItemFlags() & ImGuiItemFlags_Disabled);
+    if (!enabled && ImGui::IsItemActive()) ImGui::ClearActiveID();
+    const bool ownsDrag = enabled && ImGui::IsItemActive() &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    // A retained point must not follow another control's gesture, or survive
+    // a hidden release into a fresh activation of this same map.
+    if (!ownsDrag || ImGui::IsItemActivated()) {
+        state.draggingPoint = false;
+        if (state.pointDragDiagnosticActive) {
+            state.pointDragDiagnosticActive = false;
+            result.viewChanged = true;
+        }
+    }
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     drawList->AddRectFilled(graph.Min, graph.Max, IM_COL32(14, 17, 20, 255));
@@ -403,7 +410,7 @@ RawDenoiseMapEditorResult RenderRawDenoiseMapEditor(
         state.draggingPoint = state.selectedPointId != 0;
     }
 
-    if (state.draggingPoint && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (state.draggingPoint && ownsDrag) {
         if (!state.pointDragDiagnosticActive &&
             ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             state.pointDragDiagnosticActive = true;
