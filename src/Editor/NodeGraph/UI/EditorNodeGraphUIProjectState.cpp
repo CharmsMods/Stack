@@ -18,6 +18,7 @@ void EditorNodeGraphUI::ResetProjectInteractionState() {
     CloseTransientDrawers();
     StopMiddlePanCapture();
     CancelChannelSplitConfirm();
+    m_NodeNotes.Reset();
     ResetPerGraphVisualCaches();
     m_NodeSelectionAnim.clear();
     m_NodeHoverAnim.clear();

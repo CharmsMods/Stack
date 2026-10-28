@@ -53,3 +53,6 @@ add_test(NAME StackEditor.NodeNotesTransitions COMMAND StackGraphControlTests --
 set_tests_properties(StackEditor.NodeNotesTransitions PROPERTIES LABELS "editor;node-graph;interaction")
 add_test(NAME StackEditor.GraphNumericOwnership COMMAND StackGraphControlTests --numeric-ownership)
 set_tests_properties(StackEditor.GraphNumericOwnership PROPERTIES LABELS "editor;node-graph;interaction")
+add_test(NAME StackEditor.NodeNotesCacheOwnership
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/node_notes_cache_wiring_tests.py")
+set_tests_properties(StackEditor.NodeNotesCacheOwnership PROPERTIES LABELS "editor;node-graph;interaction")

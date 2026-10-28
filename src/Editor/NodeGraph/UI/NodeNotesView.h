@@ -23,6 +23,8 @@ public:
     };
     void BeginFrame(bool revealHeld,
         const std::function<bool(const Commit&)>& targetExists = {});
+    // Topology/preview redraws discard wrapping caches, not authored drafts.
+    void InvalidateLayouts();
     void Reset();
     bool Revealed() const { return held_ || edit_.has_value() || pending_.has_value() || next_.has_value(); }
     bool Editing() const { return edit_.has_value(); }

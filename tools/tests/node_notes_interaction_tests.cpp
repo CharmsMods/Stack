@@ -38,6 +38,7 @@ void ValidateNodeNotesInteractions() {
     bool revealHeld = true;
     bool acknowledge = false, reject = false, resetOnReject = false, deleteSuccessor = false;
     int attempts = 0, accepted = 0;
+    std::uint64_t noteRevision = 1;
     const auto frame = [&] {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos({0, 0});
@@ -51,11 +52,11 @@ void ValidateNodeNotesInteractions() {
             });
             const auto drawSecond = [&] {
                 if (showSecond && secondExists)
-                    notes.Draw(second, owner, 1, {220,20}, {395,180}, 1,
+                    notes.Draw(second, owner, noteRevision, {220,20}, {395,180}, 1,
                         {1,1,1,1}, {.5f,.5f,.5f,1}, true, 1);
             };
             if (secondFirst) drawSecond();
-            notes.Draw(node, owner, 1, {20, 20}, {200, 180}, 1,
+            notes.Draw(node, owner, noteRevision, {20, 20}, {200, 180}, 1,
                 {1, 1, 1, 1}, {.5f, .5f, .5f, 1}, true, 1);
             if (!secondFirst) drawSecond();
             if (acknowledge) notes.CommitPending([&](const auto& note) {
@@ -214,10 +215,41 @@ void ValidateNodeNotesInteractions() {
     }), "A hidden/focus-lost note could not be committed.");
     frame(); frame();
 
+    // A same-owner topology revision may remove an asynchronous import
+    // placeholder without removing the node whose note is being edited.
+    edit("Survives unrelated topology");
+    secondExists = false; ++noteRevision; notes.InvalidateLayouts(); frame();
+    require(notes.EditingNode() == node.id,
+        "Removing an unrelated node discarded the live note draft.");
+    secondExists = true; showSecond = true; ++noteRevision; notes.InvalidateLayouts(); frame();
+    require(notes.EditingNode() == node.id,
+        "Adding an unrelated node discarded the live note draft.");
+    require(notes.FinishEditing([&](const auto& note) {
+        require(note.text == "Survives unrelated topology", "Topology change lost draft text.");
+        node.notes = note.text; return true;
+    }), "A topology-surviving draft could not be committed.");
+    frame(); frame();
+
+    acknowledge = false;
+    edit("Pending note survives unrelated topology");
+    click(390, 220);
+    require(notes.HasPendingCommit(), "Outside click did not queue the topology test note.");
+    secondExists = false; ++noteRevision; notes.InvalidateLayouts(); frame();
+    require(notes.HasPendingCommit(), "Unrelated removal discarded a queued note.");
+    require(notes.CommitPending([&](const auto& note) {
+        require(note.text == "Pending note survives unrelated topology", "Queued topology draft text was lost.");
+        node.notes = note.text; return true;
+    }), "A topology-surviving queued note could not be acknowledged.");
+    secondExists = true; acknowledge = true; frame(); frame();
+
     edit("Must not enter replacement");
     node.instanceUuid = "replacement-node";
     frame();
-    require(!notes.Editing() && !notes.HasPendingCommit() && node.notes == "Survives focus loss and hiding",
+    require(!notes.Editing() && !notes.HasPendingCommit() && node.notes == "Pending note survives unrelated topology",
         "A removed/replaced target received the old node's draft.");
+    edit("Must not survive explicit owner reset");
+    notes.Reset();
+    require(!notes.Editing() && !notes.HasPendingCommit() && !notes.Revealed(),
+        "Explicit owner teardown retained an uncommitted note.");
     std::cout << "Node notes transition interactions passed\n";
 }

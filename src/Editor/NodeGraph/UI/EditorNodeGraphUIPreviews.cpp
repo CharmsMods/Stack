@@ -84,11 +84,12 @@ void EditorNodeGraphUI::Shutdown() {
     m_PresetPreviewCurrentRenderer.reset();
     m_PresetPreviewPreviousRenderer.reset();
     m_SocketIconTexture.Reset();
+    m_NodeNotes.Reset();
     ResetPerGraphVisualCaches();
 }
 
 void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
-    m_NodeNotes.Reset();
+    m_NodeNotes.InvalidateLayouts();
     m_WireRoutes.reset();m_PreparedWireWorldRevision=0;++m_WireWorldRevision;m_WireGraph=nullptr;
     m_NodeLayoutCache.clear();
     m_NodeOrderCacheGraph = nullptr;

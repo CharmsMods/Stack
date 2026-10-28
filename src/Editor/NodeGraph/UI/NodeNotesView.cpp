@@ -24,8 +24,12 @@ void NodeNotesView::BeginFrame(bool revealHeld,
     held_ = revealHeld || edit_.has_value() || pending_.has_value() || next_.has_value();
 }
 
+void NodeNotesView::InvalidateLayouts() {
+    layouts_.clear();
+}
+
 void NodeNotesView::Reset() {
-    layouts_.clear(); edit_.reset(); pending_.reset(); next_.reset(); held_ = false;
+    InvalidateLayouts(); edit_.reset(); pending_.reset(); next_.reset(); held_ = false;
 }
 
 void NodeNotesView::Finish(bool cancel) {
