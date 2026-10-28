@@ -11,6 +11,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
@@ -22,7 +23,8 @@ namespace {
 void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 void Near(float actual, float expected, float tolerance, const char* message) {
     if (!std::isfinite(actual) || std::abs(actual-expected)>tolerance) {
-        std::cerr << message << ": " << actual << " != " << expected << '\n';
+        std::cerr << std::setprecision(9) << message << ": " << actual << " != " << expected
+            << " (tolerance " << tolerance << ")\n";
         throw std::runtime_error(message);
     }
 }
@@ -138,14 +140,16 @@ void CpuTests() {
     using namespace Stack::Renderer::RawDevelopmentCache;
     Check(BuildStageFingerprints(recipe,192).rawPlacement==BuildStageFingerprints(edited,192).rawPlacement,"area gain reuses RAW placement");
     Check(BuildStageFingerprints(recipe,192).postLocalRange!=BuildStageFingerprints(edited,192).postLocalRange,"area gain invalidates Zones output");
-    auto legacy=saved;legacy["localRange"].erase("areas");legacy["localRange"].erase("areasVersion");
-    legacy["rawRecipeVersion"]=22;
-    Check(IsCanonicalRawRecipeDocument(legacy),"version 22 project document remains accepted");
-    const auto oldRecipe=DeserializeRecipe(legacy);
-    auto migrated=SerializeRecipe(oldRecipe); migrated["rawRecipeVersion"]=22;
-    migrated["localRange"].erase("areas");migrated["localRange"].erase("areasVersion");
-    Check(migrated==legacy,"version 22 recipe operations survive migration");
-    Check(DeserializeRecipe(legacy).localRange.areas.empty(),"old recipes have no new areas");
+    auto withoutAreas=saved;withoutAreas["localRange"].erase("areas");withoutAreas["localRange"].erase("areasVersion");
+    auto obsolete=withoutAreas;obsolete["rawRecipeVersion"]=22;
+    Check(!IsCanonicalRawRecipeDocument(obsolete),"obsolete version 22 project document is rejected");
+    Check(IsCanonicalRawRecipeDocument(saved),"complete current recipe document is canonical");
+    Check(!IsCanonicalRawRecipeDocument(withoutAreas),"omitted serialized area fields are not canonical");
+    const auto defaultAreasRecipe=DeserializeRecipe(withoutAreas);
+    auto roundTrip=SerializeRecipe(defaultAreasRecipe);
+    roundTrip["localRange"].erase("areas");roundTrip["localRange"].erase("areasVersion");
+    Check(roundTrip==withoutAreas,"current recipe operations survive omitted-area round trip");
+    Check(defaultAreasRecipe.localRange.areas.empty(),"omitted areas default to empty");
     Stack::Editor::RawZoneAreaHistory history; history.Initialize({});
     history.Observe({area},true);history.Observe({edited.localRange.areas[0]},true);history.Observe(edited.localRange.areas,false);
     Check(history.CanUndo(),"completed gesture is undoable");

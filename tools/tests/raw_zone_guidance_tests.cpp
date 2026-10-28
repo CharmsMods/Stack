@@ -111,11 +111,13 @@ void CorrectionAndRecipeTests() {
         "disabled guidance retains its sensitivity after reopening");
     edited=a;edited.offsetEv=3;edited.points[0].deltaEv=2;
     Check(ZoneAreaMaskFingerprint(a)==ZoneAreaMaskFingerprint(edited),"gain and graph preserve guided mask cache");
-    auto legacy=recipe;legacy.localRange.areas={Area()};legacy.localRange.areas[0].strokes[0].followEdges=false;
-    auto legacyDocument=SerializeRecipe(legacy);legacyDocument["rawRecipeVersion"]=23;
-    Check(IsCanonicalRawRecipeDocument(legacyDocument),"version 23 soft area document remains canonical");
-    const auto legacyArea=DeserializeRecipe(legacyDocument).localRange.areas.front();
-    Check(!legacyArea.strokes[0].followEdges,"old strokes remain ordinary soft painting");
+    auto soft=recipe;soft.localRange.areas={Area()};soft.localRange.areas[0].strokes[0].followEdges=false;
+    const auto softDocument=SerializeRecipe(soft);
+    auto obsoleteDocument=softDocument;obsoleteDocument["rawRecipeVersion"]=23;
+    Check(!IsCanonicalRawRecipeDocument(obsoleteDocument),"obsolete version 23 soft area document is rejected");
+    Check(IsCanonicalRawRecipeDocument(softDocument),"current soft area document remains canonical");
+    const auto softArea=DeserializeRecipe(softDocument).localRange.areas.front();
+    Check(!softArea.strokes[0].followEdges,"current soft strokes remain ordinary soft painting");
     Stack::Editor::RawZoneAreaHistory history;history.Initialize({a});
     history.Observe({edited},true);history.Observe({edited},false);
     Check(SerializeZoneAreas(history.Undo())==SerializeZoneAreas({a}),"undo restores guided recipe exactly");
