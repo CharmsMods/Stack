@@ -47,6 +47,13 @@ using Stack::Editor::RawLabInternal::LabTooltip;
 
 namespace {
 
+// Gallery keys are literal paths, not ImGui labels. Preserve the entire key
+// (including legal ##/### filename bytes) while retaining the parent scope.
+void PushGalleryKeyID(const std::string& key) {
+    ImGui::PushOverrideID(ImHashData(key.data(), key.size(),
+        ImGui::GetCurrentWindow()->IDStack.back()));
+}
+
 void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
     std::size_t count, float opacity, bool completedBurst) {
     if (count > 1u) {
@@ -1769,7 +1776,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     if (source == nullptr) {
                         continue;
                     }
-                    ImGui::PushID(source->relativePathKey.c_str());
+                    PushGalleryKeyID(source->relativePathKey);
                     const bool selected = view.multiSelected;
                     const std::string row = source->fileName;
                     if (ImGui::Selectable(row.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick)) {
@@ -2869,7 +2876,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             }
         }
 
-        ImGui::PushID(groupKey.c_str());
+        PushGalleryKeyID(groupKey);
         constexpr float headerHeight = 22.0f;
         constexpr float chevronHitSize = 16.0f;
         constexpr float chevronVisualSize = 10.0f;
@@ -3126,7 +3133,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 if (item.source != nullptr) {
                     // The widget ID follows the stack, so changing its cover
                     // cannot steal a click or interrupt a double-click.
-                    ImGui::PushID(item.animationKey.c_str());
+                    PushGalleryKeyID(item.animationKey);
                     drawThumbnail(
                         *item.source,
                         item.view,

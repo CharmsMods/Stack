@@ -784,6 +784,7 @@ if (BUILD_TESTING)
     include(cmake/StackGalleryProjectSelectionTests.cmake)
     include(cmake/StackGalleryFolderCardIdentityTests.cmake)
     include(cmake/StackFilmstripTimelineRangeTests.cmake)
+    include(cmake/StackGalleryWidgetIdentityTests.cmake)
     include(cmake/StackGalleryFolderScopeTests.cmake)
     include(cmake/StackGalleryProjectPreviewTests.cmake)
 
