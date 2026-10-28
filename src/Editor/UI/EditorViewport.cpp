@@ -281,6 +281,8 @@ bool ReadPixelInspectionTileSetRegion(
     return true;
 }
 
+// Explicit uniform locations are shared by both stages and the draw callback.
+// Keep these bindings stable so inspection tiles need no per-draw driver queries.
 constexpr const char* kPixelInspectionVertexShader = R"GLSL(
 #version 430 core
 const vec2 kQuad[6] = vec2[](
@@ -291,10 +293,10 @@ const vec2 kQuad[6] = vec2[](
     vec2(1.0, 1.0),
     vec2(0.0, 1.0));
 
-uniform vec2 uImageMin;
-uniform vec2 uImageSize;
-uniform vec2 uDisplayPos;
-uniform vec2 uDisplaySize;
+layout(location = 1) uniform vec2 uImageMin;
+layout(location = 2) uniform vec2 uImageSize;
+layout(location = 3) uniform vec2 uDisplayPos;
+layout(location = 4) uniform vec2 uDisplaySize;
 
 out vec2 vImagePosition;
 
@@ -309,15 +311,15 @@ void main() {
 
 constexpr const char* kPixelInspectionFragmentShader = R"GLSL(
 #version 430 core
-uniform sampler2D uTexture;
-uniform ivec2 uFullSize;
-uniform ivec2 uStorageSize;
-uniform vec4 uRegionBounds;
-uniform ivec2 uTileOrigin;
-uniform ivec2 uTileHaloOrigin;
-uniform int uTiled;
-uniform float uRevealAlpha;
-uniform vec2 uImageSize;
+layout(location = 0) uniform sampler2D uTexture;
+layout(location = 5) uniform ivec2 uFullSize;
+layout(location = 6) uniform ivec2 uStorageSize;
+layout(location = 7) uniform vec4 uRegionBounds;
+layout(location = 8) uniform ivec2 uTileOrigin;
+layout(location = 9) uniform ivec2 uTileHaloOrigin;
+layout(location = 10) uniform int uTiled;
+layout(location = 11) uniform float uRevealAlpha;
+layout(location = 2) uniform vec2 uImageSize;
 
 in vec2 vImagePosition;
 layout(location = 0) out vec4 fragColor;
@@ -548,7 +550,9 @@ bool DrawDetachedPreviewToggle(
         contentScreen.y + std::max(0.0f, avail.y - buttonSize.y - edgeMargin));
     const ImVec2 buttonMax(buttonMin.x + buttonSize.x, buttonMin.y + buttonSize.y);
 
-    const bool hovered = ImGui::IsMouseHoveringRect(buttonMin, buttonMax, false);
+    // A geometric hit alone also reaches through popups and overlapping windows.
+    const bool hovered = ImGui::IsWindowHovered() &&
+        ImGui::IsMouseHoveringRect(buttonMin, buttonMax, false);
     const bool active = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     hoverAnim = AnimateUiValue(hoverAnim, hovered ? 1.0f : 0.0f, deltaTime, 17.0f, 11.0f);
@@ -983,43 +987,44 @@ void EditorViewport::DrawPixelInspectionCallback(
     glBindVertexArray(draw->vertexArray);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, draw->texture);
-    glUniform1i(glGetUniformLocation(draw->program, "uTexture"), 0);
+    // Bindings match the explicit locations in the pixel-inspection shaders.
+    glUniform1i(0, 0);
     glUniform2f(
-        glGetUniformLocation(draw->program, "uImageMin"),
+        1,
         draw->imageMin.x,
         draw->imageMin.y);
     glUniform2f(
-        glGetUniformLocation(draw->program, "uImageSize"),
+        2,
         draw->imageMax.x - draw->imageMin.x,
         draw->imageMax.y - draw->imageMin.y);
     glUniform2f(
-        glGetUniformLocation(draw->program, "uDisplayPos"),
+        3,
         draw->displayPos.x,
         draw->displayPos.y);
     glUniform2f(
-        glGetUniformLocation(draw->program, "uDisplaySize"),
+        4,
         draw->displaySize.x,
         draw->displaySize.y);
     glUniform2i(
-        glGetUniformLocation(draw->program, "uFullSize"),
+        5,
         draw->fullWidth,
         draw->fullHeight);
-    glUniform2i(glGetUniformLocation(draw->program, "uStorageSize"), draw->storageWidth, draw->storageHeight);
-    glUniform4f(glGetUniformLocation(draw->program, "uRegionBounds"),
+    glUniform2i(6, draw->storageWidth, draw->storageHeight);
+    glUniform4f(7,
         draw->regionBounds.x, draw->regionBounds.y, draw->regionBounds.z, draw->regionBounds.w);
     glUniform2i(
-        glGetUniformLocation(draw->program, "uTileOrigin"),
+        8,
         draw->tileX,
         draw->tileY);
     glUniform2i(
-        glGetUniformLocation(draw->program, "uTileHaloOrigin"),
+        9,
         draw->tileHaloX,
         draw->tileHaloY);
     glUniform1i(
-        glGetUniformLocation(draw->program, "uTiled"),
+        10,
         draw->tiled ? 1 : 0);
     glUniform1f(
-        glGetUniformLocation(draw->program, "uRevealAlpha"),
+        11,
         std::clamp(draw->revealAlpha, 0.0f, 1.0f));
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
