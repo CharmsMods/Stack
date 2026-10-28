@@ -9,9 +9,12 @@ retained state when an input edge is missed, not native event routing or pixels.
 Run with --output <file.cpp>, then compile that file with a C++17 compiler.
 No other source files, include directories, libraries, GPU or downloads are
 required. The source dependencies are EditorNodeGraphUIInteraction.cpp,
-EditorNodeGraphUIDragLayout.cpp and EditorNodeGraphUILinksAndGroups.cpp in
-src/Editor/NodeGraph/UI/.
+EditorNodeGraphUIDragLayout.cpp, EditorNodeGraphUILinksAndGroups.cpp,
+EditorNodeGraphUICamera.cpp and EditorNodeGraphUICanvas.cpp in
+src/Editor/NodeGraph/UI/, plus src/Utils/ImGuiExtras.cpp.
 The node update method is copied whole; layout application is a boundary double.
+Camera checks also copy the pan/zoom methods, easing and canvas advance block;
+input and appearance services remain boundary doubles.
 Group rename checks copy the render prelude and interaction gate; missing-group
 lookup is a boundary double. Native text input is not covered by this target.
 """
@@ -44,7 +47,7 @@ enum { ImGuiMouseButton_Left=0, ImGuiMouseButton_Right=1, ImGuiMouseButton_Middl
 #define IM_COL32(...) 0
 struct ImDrawList { template<class...T> void AddRect(T...){} template<class...T> void AddRectFilled(T...){} };
 namespace ImGui {
-struct IO { bool KeyCtrl=false,KeyAlt=false; ImVec2 MouseDelta; double MouseClickedTime[5]{}; };
+struct IO { float DeltaTime=1.f/60; bool KeyCtrl=false,KeyAlt=false; ImVec2 MouseDelta; double MouseClickedTime[5]{}; };
 inline IO io;
 inline bool down[3]{},clicked[3]{},released[3]{},popup=false;
 inline int frame=0;
@@ -103,7 +106,12 @@ public:
     struct SocketHit {int nodeId=-1;std::string socketId;bool IsValid()const{return nodeId>0;}};
     GraphMouseOwner m_MouseOwner=GraphMouseOwner::None;
     bool m_MiddlePanCaptureActive=false,m_GraphInteractionBlocked=false,m_BoxSelecting=false,m_DebugInteractionOverlay=false;
-    bool m_ExpansionMotion=false;
+    bool m_ExpansionMotion=false,m_SmoothZoomActive=false;
+    float m_Zoom=1.f,m_ZoomTarget=1.f;
+    ImVec2 m_CanvasOrigin,m_SmoothZoomFocusScreen,m_SmoothZoomFocusGraph;
+    void AdvanceZoom();
+    void ZoomAtMouse(float);
+
     int m_MiddlePanSuppressDeltaFrames=0,m_MiddlePanLastUpdateFrame=-1;
     int m_DragGroupId=-1,m_ResizingGroupId=-1,m_DragOutputNodeId=-1,m_DragInputNodeId=-1;
     double m_LeftPointerGestureStartedAt=-1.,m_GroupPointerGestureStartedAt=-1.;
@@ -116,7 +124,7 @@ public:
     bool UpdateMiddlePanCapture(EditorModule*,bool,bool);
     void Step(EditorModule*,GraphMouseOwner,bool=true);
     void TouchNodeFront(int){}
-    ImVec2 ScreenToGraph(ImVec2 value){return value;}
+    ImVec2 ScreenToGraph(const ImVec2& value) const;
     ImVec2 GraphToScreen(ImVec2 value){return value;}
     ImVec2 NodeSize(const EditorNodeGraph::Node&){return {100,100};}
     ImVec2 DisplayNodePosition(const EditorNodeGraph::Node&){return {};}
@@ -325,7 +333,59 @@ int Run() {
     return failures != before;
 }
 } // namespace RenameGateCheck
-int main(){return RunPointerTests() | NodeDragCheck::Run() | RenameGateCheck::Run();}
+int main(){return RunPointerTests() | RunPanZoomTests() | NodeDragCheck::Run() | RenameGateCheck::Run();}
+'''
+
+
+CAMERA_TESTS = r'''int RunPanZoomTests() {
+    const int before=failures;
+    EditorModule editor;
+    for(int wheelOrder:{0,1,2}) {
+        EditorNodeGraphUI ui;
+        ImGui::popup=false;ImGui::io.MouseDelta={};ImGui::mouse={180,130};
+        ImGui::Next(false,false);
+        ui.ZoomAtMouse(2.f);ui.AdvanceZoom();
+        Check(ui.m_SmoothZoomActive && ui.m_Zoom>1.f,"Wheel zoom fixture did not ease");
+        // Plain wheel advances before a newly accepted pan; Ctrl-wheel fallback
+        // can run after acceptance. Also exercise takeover before the advance.
+        // None may snap or overwrite the pan.
+        ImGui::Next(false,true);
+        if(wheelOrder<2) ui.ZoomAtMouse(1.f);
+        if(wheelOrder==0) ui.AdvanceZoom();
+        const auto pressPan=ui.m_Pan;const float pressZoom=ui.m_Zoom;
+        ui.UpdateMiddlePanCapture(&editor,true,true);
+        if(wheelOrder==2)ui.ZoomAtMouse(1.f);
+        ui.AdvanceZoom();
+        Check(!ui.m_SmoothZoomActive && ui.m_ZoomTarget==pressZoom && ui.m_Zoom==pressZoom &&
+            ui.m_Pan.x==pressPan.x && ui.m_Pan.y==pressPan.y,"Pan takeover snapped or retained stale zoom");
+        ImGui::Next(false,true);ui.UpdateMiddlePanCapture(&editor,true,false); // Warp suppression.
+        ImGui::Next(false,true);ImGui::io.MouseDelta={40,20};
+        ui.UpdateMiddlePanCapture(&editor,false,false); // Capture continues outside canvas.
+        ui.ZoomAtMouse(-2.f);ui.AdvanceZoom();
+        Check(std::abs(ui.m_Pan.x-pressPan.x-22.f)<.001f &&
+            std::abs(ui.m_Pan.y-pressPan.y-11.f)<.001f && ui.m_Zoom==pressZoom,
+            "Wheel easing overwrote captured pan delta");
+        ui.UpdateMiddlePanCapture(&editor,false,false);
+        Check(std::abs(ui.m_Pan.x-pressPan.x-22.f)<.001f,"Repeated update doubled pan delta");
+        ImGui::Next(false,false);ui.UpdateMiddlePanCapture(&editor,false,false);
+        const auto focus=ui.ScreenToGraph(ImGui::mouse);const float zoom=ui.m_Zoom;
+        ui.ZoomAtMouse(1.f);ui.AdvanceZoom();const auto after=ui.ScreenToGraph(ImGui::mouse);
+        Check(ui.m_SmoothZoomActive && ui.m_Zoom>zoom &&
+            std::abs(after.x-focus.x)<.001f && std::abs(after.y-focus.y)<.001f,
+            "Fresh wheel after pan release lost easing or focus");
+    }
+    for(bool popup:{false,true}) {
+        EditorNodeGraphUI ui;ImGui::Next(false,false);ImGui::popup=popup;
+        ImGui::Next(false,true);ui.ZoomAtMouse(1.f);
+        ui.UpdateMiddlePanCapture(&editor,!popup,false); // Another owner forbids starting.
+        Check(!ui.m_MiddlePanCaptureActive && ui.m_SmoothZoomActive,"Blocked pan cancelled camera input");
+        ImGui::popup=false;ui.UpdateMiddlePanCapture(&editor,true,true);
+        ImGui::popup=true;ui.UpdateMiddlePanCapture(&editor,true,false);
+        Check(!ui.m_MiddlePanCaptureActive && !ui.m_SmoothZoomActive,"Cancelled pan revived old zoom");
+        ImGui::popup=false;ImGui::io.MouseDelta={};ImGui::Next(false,false);
+    }
+    return failures!=before;
+}
 '''
 
 
@@ -351,10 +411,19 @@ def main():
     if offsets != sorted(offsets):
         raise ValueError("Production pointer branch order changed; review component extraction")
     branches = [block(interaction, marker) for marker in markers]
-    generated = PREAMBLE + "\n" + block(source, "void EditorNodeGraphUI::StopMiddlePanCapture()")
+    camera = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUICamera.cpp").read_text()
+    canvas = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUICanvas.cpp").read_text()
+    extras = (root / "src/Utils/ImGuiExtras.cpp").read_text()
+    generated = PREAMBLE + "\nnamespace ImGuiExtras {\n" + block(extras, "float AnimateTowards(") + "\n}\n"
+    generated += "bool GraphReducedMotion(){return false;}\n"
+    generated += block(camera, "EditorNodeGraph::Vec2 EditorNodeGraphUI::ScreenToGraph(")
+    generated += block(camera, "void EditorNodeGraphUI::ZoomAtMouse(")
+    generated += "void EditorNodeGraphUI::AdvanceZoom(){const struct{bool interactive=true;}options;\n"
+    generated += block(canvas, "    if (options.interactive && m_SmoothZoomActive) {") + "\n}\n"
+    generated += block(source, "void EditorNodeGraphUI::StopMiddlePanCapture()")
     generated += "\n" + block(source, "bool EditorNodeGraphUI::UpdateMiddlePanCapture(")
     generated += "\nvoid EditorNodeGraphUI::Step(EditorModule* editor,GraphMouseOwner hit,bool graphHovered) {\n"
-    generated += prelude + STEP_SETUP + branches[0] + STEP_HITS + "\n".join(branches[1:]) + "\n}\n" + TESTS
+    generated += prelude + STEP_SETUP + branches[0] + STEP_HITS + "\n".join(branches[1:]) + "\n}\n" + TESTS + CAMERA_TESTS
     drag_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp").read_text(encoding="utf-8")
     generated += NODE_PREAMBLE + block(drag_source, "void EditorNodeGraphUI::UpdateActiveNodeDrag(") + NODE_TESTS
     groups_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp").read_text(encoding="utf-8")

@@ -67,7 +67,7 @@ EditorNodeGraphUI::NodeGraphBounds(
 }
 
 void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
-    if (!std::isfinite(wheel) || wheel == 0.0f) return;
+    if (m_MiddlePanCaptureActive || !std::isfinite(wheel) || wheel == 0.0f) return;
     const EditorNodeGraph::Vec2 mouseScreen = ToGraphVec2(ImGui::GetMousePos());
     const EditorNodeGraph::Vec2 before = ScreenToGraph(mouseScreen);
     const float baseZoom = m_SmoothZoomActive ? m_ZoomTarget : m_Zoom;

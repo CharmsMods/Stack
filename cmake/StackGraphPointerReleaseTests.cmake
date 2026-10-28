@@ -4,6 +4,9 @@ add_custom_command(OUTPUT "${graph_pointer_release_test}"
         --output "${graph_pointer_release_test}"
     DEPENDS tools/tests/graph_pointer_release_tests.py
         src/Editor/NodeGraph/UI/EditorNodeGraphUIInteraction.cpp
+        src/Editor/NodeGraph/UI/EditorNodeGraphUICamera.cpp
+        src/Editor/NodeGraph/UI/EditorNodeGraphUICanvas.cpp
+        src/Utils/ImGuiExtras.cpp
         src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp
         src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp
     VERBATIM)

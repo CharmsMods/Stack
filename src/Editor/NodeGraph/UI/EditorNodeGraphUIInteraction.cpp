@@ -320,6 +320,9 @@ bool EditorNodeGraphUI::UpdateMiddlePanCapture(EditorModule* editor, bool graphH
         if (editor) {
             editor->CancelGraphAutoFocusTracking();
         }
+        // A captured pan owns the current camera, not the old wheel focus.
+        m_SmoothZoomActive = false;
+        m_ZoomTarget = m_Zoom;
         m_MiddlePanCaptureActive = true;
         m_MiddlePanSuppressDeltaFrames = 1;
         m_MiddlePanLastUpdateFrame = -1;
