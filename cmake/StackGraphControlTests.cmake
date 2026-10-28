@@ -5,6 +5,7 @@ add_executable(StackGraphControlTests
     tools/tests/floating_surface_tests.cpp
     tools/tests/node_notes_interaction_tests.cpp
     tools/tests/graph_numeric_ownership_tests.cpp
+    tools/tests/graph_numeric_disabled_tests.cpp
     src/Editor/NodeGraph/UI/NodeNotesView.cpp
     src/NodeMath/FirstClassValue.cpp
     src/NodeMath/DescriptorSerialization.cpp

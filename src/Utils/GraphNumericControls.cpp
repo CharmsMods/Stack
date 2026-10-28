@@ -154,6 +154,16 @@ bool Numeric(const char* label, const char* id, T* value, T minimum, T maximum,
     }
     NumericState& state = states[controlId];
     const bool eligible = !(ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled);
+    if (!eligible) {
+        // Losing edit authority must not commit a pending draft or restore a
+        // drag's old value over a driven/current parameter. Keep the chosen
+        // display mode, but resume from the authored value when enabled again.
+        // A held scrub may already be outside its native button rectangle.
+        if (ImGui::GetActiveID() == controlId) ImGui::ClearActiveID();
+        state.dragging = false;
+        state.focusRequested = false;
+        state.inputWasActive = false;
+    }
     if (eligible && wheelFrameInteractive && IsSliderWheelModifierActive() && nodeScope.graph &&
         wheelTarget.node < 0 && nodeScope.hovered) {
         wheelTarget = {nodeScope.graph, nodeScope.node, controlId, frame};
@@ -281,7 +291,7 @@ bool Numeric(const char* label, const char* id, T* value, T minimum, T maximum,
         if (escape) {
             FormatExact(state, *value);
             ImGui::ClearActiveID();
-        } else if (enter || ImGui::IsItemDeactivated() || toggle) commit();
+        } else if (eligible && (enter || ImGui::IsItemDeactivated() || toggle)) commit();
         if (toggle) {
             state.textMode = false;
             rightClickConsumed = true;
