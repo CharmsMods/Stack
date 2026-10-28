@@ -375,7 +375,9 @@ void LibraryModule::RenderLibraryGrid(
                 entranceOffsetY = (1.0f - ResolveCardEntranceProgress(motionIt->second, now)) * kCardEntranceOffsetY;
             }
             ImGui::SetCursorScreenPos(ImVec2(layoutStartScreen.x + card.x, layoutStartScreen.y + card.y + entranceOffsetY));
-            ImGui::PushID(project->fileName.c_str());
+            // Project paths are literal identities, not ImGui ### label overrides.
+            ImGui::PushOverrideID(ImHashData(project->fileName.data(), project->fileName.size(),
+                ImGui::GetCurrentWindow()->IDStack.back()));
             if (RenderProjectCard(*project, editor)) ++renderedCount;
             ImGui::PopID();
             priorityProjects.push_back(project->fileName);
