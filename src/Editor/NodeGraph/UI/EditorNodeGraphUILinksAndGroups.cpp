@@ -784,12 +784,9 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
             : ApplyStyleAlpha(IM_COL32(220, 232, 242, 165)),
         18);
     if (hoveredInputConnectable) {
-        const EditorNodeGraph::Node* hoveredInputNode = graph.FindNode(hoveredInput.nodeId);
-        const ImVec2 targetPin = hoveredInputNode
-            ? ToImVec2(InputPinScreenPos(*hoveredInputNode, hoveredInput.socketId))
-            : ImGui::GetMousePos();
+        // The hovered visual endpoint may be a compound gateway, not its node.
         drawList->AddCircle(
-            targetPin,
+            p2,
             NodePinRadius() * (1.55f + dragPulse * 0.24f),
             graphStyle.enabled
                 ? ColorWithAlpha(graphStyle.selected, 0.46f + dragPulse * 0.18f)
@@ -829,6 +826,10 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
     ImVec2 p1 = ImGui::GetMousePos();
     if (hoveredOutputConnectable) if (const auto* source=graph.FindNode(hoveredOutput.nodeId))
         p1=ToImVec2(OutputPinScreenPos(*source,hoveredOutput.socketId));
+    if(hoveredOutputConnectable && m_CompoundEntryDragOutput>=0 && std::size_t(m_CompoundEntryDragOutput)<m_CompoundEntryRows.size()) {
+        const auto& row=m_CompoundEntryRows[m_CompoundEntryDragOutput];
+        if(row.source==hoveredOutput.nodeId && row.sourceSocket==hoveredOutput.socketId)p1=row.output;
+    }
     ImVec2 targetPin = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
     if(m_CompoundEntryDragInput>=0 && std::size_t(m_CompoundEntryDragInput)<m_CompoundEntryRows.size()) {
         const auto& row=m_CompoundEntryRows[m_CompoundEntryDragInput];
@@ -862,12 +863,9 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
             : ApplyStyleAlpha(IM_COL32(220, 232, 242, 165)),
         18);
     if (hoveredOutputConnectable) {
-        const EditorNodeGraph::Node* hoveredOutputNode = graph.FindNode(hoveredOutput.nodeId);
-        const ImVec2 sourcePin = hoveredOutputNode
-            ? ToImVec2(OutputPinScreenPos(*hoveredOutputNode, hoveredOutput.socketId))
-            : ImGui::GetMousePos();
+        // Share the stroke's resolved node or gateway endpoint with its ring.
         drawList->AddCircle(
-            sourcePin,
+            p1,
             NodePinRadius() * (1.55f + dragPulse * 0.24f),
             graphStyle.enabled
                 ? ColorWithAlpha(graphStyle.selected, 0.46f + dragPulse * 0.18f)
