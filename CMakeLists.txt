@@ -798,6 +798,7 @@ if (BUILD_TESTING)
     include(cmake/StackGalleryNavigatorTests.cmake)
     include(cmake/StackViewTransformGraphTests.cmake)
     include(cmake/StackSceneToneOwnerTests.cmake)
+    include(cmake/StackBezierCurveOwnerTests.cmake)
     include(cmake/StackGalleryFolderScopeTests.cmake)
     include(cmake/StackGalleryProjectPreviewTests.cmake)
 

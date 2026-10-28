@@ -707,6 +707,19 @@ bool DrawBezierCurveInteraction(
         return false;
     }
 
+    const bool enabled = !(ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled);
+    if (ImGui::IsItemActive() && !state.draggingExposure &&
+        (state.draggingPoint >= 0 || state.draggingSegment >= 0) &&
+        !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        ImGui::ClearActiveID();
+    // Point/tangent gestures belong to this native item, not a retained index.
+    // Exposure has its own rollback/release contract below.
+    if (!enabled || !ImGui::IsItemActive() || ImGui::IsItemActivated()) {
+        state.draggingPoint = -1;
+        state.draggingSegment = -1;
+        state.draggingSide = -1;
+    }
+
     const int segmentCount = static_cast<int>(points.size()) - 1;
     // -1 is the normal state while a graph point (rather than a segment) is
     // selected or being dragged. Clearing it every frame also cleared the
@@ -783,7 +796,7 @@ bool DrawBezierCurveInteraction(
     };
 
     const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const bool itemHovered = ImGui::IsItemHovered();
+    const bool itemHovered = enabled && ImGui::IsItemHovered();
     const bool inside = rect.Contains(mouse) && itemHovered;
     const bool handleDragActive =
         state.draggingSegment >= 0 && state.draggingSide >= 0;
@@ -845,7 +858,7 @@ bool DrawBezierCurveInteraction(
 
     // Point controls live in a separate Settings panel. Only this graph's
     // own clicks may change its selection.
-    if (itemHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (itemHovered && ImGui::IsItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         if (!inside && hoveredPoint < 0 && !chooserContainsMouse) {
             ClearCurveSegmentSelection(state, selectedPoint);
             state.draggingPoint = -1;
@@ -916,7 +929,7 @@ bool DrawBezierCurveInteraction(
         }
     }
 
-    if (!state.draggingExposure && inside && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (!state.draggingExposure && inside && ImGui::IsItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         const int pointUnderMouse = findPoint(mouse);
         if (pointUnderMouse > 0 &&
             pointUnderMouse + 1 < static_cast<int>(points.size())) {
