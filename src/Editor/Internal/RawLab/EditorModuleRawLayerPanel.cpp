@@ -182,7 +182,7 @@ void EditorModule::RenderRawLayerPanelContents() {
     }
     if (!ImGui::IsPopupOpen("Rename layer")) m_RawLayerPanel.renameId.clear();
     selected = FindRawAdjustmentLayer(m_Project->rawLayers.State(),m_SelectedRawAdjustmentLayer);
-    if (selected) {
+    if (selected && selected->id != kRawBackgroundId) {
         if (ImGui::SmallButton("Graph")) OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer);
         LabTooltip("Edit this layer's operations, masks and branches in Graph.");
         ImGui::SameLine();

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Real ImGui opacity lifecycle with the production widget/gesture block.
+"""Real ImGui layer opacity lifecycle and Background footer protection.
 
+Widget/footer blocks and layer lookup are extracted from production.
 Layer commits use a narrow probe, not the real document/history model.
 --surface accepts an older production file for the negative control.
 """
@@ -26,6 +27,13 @@ def main():
         raise ValueError('Opacity gesture extraction anchors changed')
     generated = (root/'tools/tests/layer_opacity_gesture_tests.cpp').read_text()
     generated += '\nvoid Fixture::Draw() {\n auto* selected = &project.rawLayers.layer;\n float opacity = selected->opacity * 100;\n ImGui::SetNextItemWidth(300);\n' + block + '}\n'
+    footer_start = source.index('    selected = FindRawAdjustmentLayer(m_Project->rawLayers.State(),m_SelectedRawAdjustmentLayer);')
+    footer_end = source.index('    if (!deleteId.empty()) {', footer_start)
+    model = (root/'src/Project/RawLayerStack.cpp').read_text()
+    lookup_start = model.index('RawAdjustmentLayer* FindRawAdjustmentLayer(')
+    lookup_end = model.index('const RawAdjustmentLayer* FindRawAdjustmentLayer(', lookup_start)
+    generated += '\n' + model[lookup_start:lookup_end]
+    generated += '\nvoid FooterFixture::Draw() {\n RawAdjustmentLayer* selected = nullptr;\n std::string deleteId;\n const auto beginRename = [&](const Row&) {};\n' + source[footer_start:footer_end] + '}\n'
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(generated)

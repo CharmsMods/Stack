@@ -5,6 +5,7 @@ add_custom_command(OUTPUT "${layer_opacity_gesture_test}"
     DEPENDS tools/tests/layer_opacity_gesture_tests.py
         tools/tests/layer_opacity_gesture_tests.cpp
         src/Editor/Internal/RawLab/EditorModuleRawLayerPanel.cpp
+        src/Project/RawLayerStack.cpp
     VERBATIM)
 add_executable(StackLayerOpacityGestureTests "${layer_opacity_gesture_test}")
 target_link_libraries(StackLayerOpacityGestureTests PRIVATE imgui_core)

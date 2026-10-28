@@ -1,4 +1,8 @@
 #include <imgui.h>
+#include <imgui_internal.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -26,6 +30,32 @@ struct Fixture {
         project.rawLayers.layer = candidate;
         ++project.rawLayers.edits;
     }
+    void Draw();
+};
+// Production lookup and footer draw are appended by the generator. The model
+// stores only fields required by those blocks; no routing/history is simulated.
+inline constexpr const char* kRawBackgroundId = "background";
+struct RawAdjustmentLayer {
+    std::string id, name;
+    bool enabled = true;
+    int layerMask = 0;
+};
+struct RawLayerStackState {
+    RawAdjustmentLayer background{kRawBackgroundId,"Background"};
+    std::vector<RawAdjustmentLayer> layers{{"layer-a","Adjustment"}};
+};
+RawAdjustmentLayer* FindRawAdjustmentLayer(RawLayerStackState&, const std::string&);
+struct FooterFixture {
+    struct Document {
+        RawLayerStackState state;
+        RawLayerStackState& State() { return state; }
+    };
+    struct Project { Document rawLayers; } project;
+    Project* m_Project = &project;
+    std::string m_SelectedRawAdjustmentLayer;
+    struct Row { std::string id, name; bool enabled; int mask; bool toolMasks; };
+    void OpenRawLayerMaskGraph(const std::string&) {}
+    void LabTooltip(const char*) {}
     void Draw();
 };
 // Generator appends Fixture::Draw using the unchanged production opacity block.
@@ -87,6 +117,29 @@ int main() {
         frame();
         require(!gesture.active && gesture.finishes == 3,
             "Edited opacity release must close gesture");
+        FooterFixture footer;
+        const auto footerFrame = [&](const std::string& id) {
+            footer.m_SelectedRawAdjustmentLayer=id;
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos({0,0});
+            ImGui::SetNextWindowSize({500,300});
+            ImGui::Begin("Footer",nullptr,ImGuiWindowFlags_NoDecoration);
+            footer.Draw();
+            const ImGuiID last=GImGui->LastItemData.ID;
+            ImGui::End();
+            ImGui::Render();
+            return last;
+        };
+        footerFrame(""); // Let the new window establish layout.
+        require(footerFrame("")==0,
+            "Canonical Background selection must show explanation, not Graph/actions buttons");
+        require(footerFrame(kRawBackgroundId)==0,
+            "Explicit Background identity must not expose adjustment footer actions");
+        require(footerFrame("layer-a")!=0,
+            "Adjustment selection must retain its Graph/actions footer");
+        require(footerFrame("missing")==0,
+            "Missing adjustment must not expose footer actions");
+        std::cout << "PASS layer footer: canonical/explicit Background protected; adjustment actions retained\n";
         std::cout << "PASS layer opacity: unchanged Enter/Escape close; normal drag remains one gesture\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
