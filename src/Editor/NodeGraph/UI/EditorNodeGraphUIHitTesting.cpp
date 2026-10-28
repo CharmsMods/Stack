@@ -48,11 +48,6 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
         8.0f,
         NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
-    for(const auto& row:m_CompoundEntryRows) {
-        if(!LayoutGroupVisible(row.group))continue;
-        const float dx=row.input.x-screenPos.x,dy=row.input.y-screenPos.y;
-        if(dx*dx+dy*dy<=hitRadiusSq){if(m_DragInputNodeId<=0)m_CompoundEntryDragInput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.target,row.socket};}
-    }
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
         if(!LayoutNodeInteractive(nodeId))continue;
@@ -73,9 +68,23 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
             const float dx = anchor.screenPos.x - screenPos.x;
             const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                if(m_DragInputNodeId<=0)m_CompoundEntryDragInput=-1;return SocketHit{ nodeId, anchor.socketId };
+                if (m_DragInputNodeId <= 0) {
+                    m_CompoundEntryDragInput = -1;
+                }
+                return SocketHit{ nodeId, anchor.socketId };
             }
         }
+        // A front node body owns this point even when none of its sockets
+        // match. Do not pick a socket through it on a lower visual layer.
+        if (layout->frameRect.Contains(ToImVec2(screenPos))) {
+            return {};
+        }
+    }
+    // Compound gateways are drawn behind every node.
+    for(const auto& row:m_CompoundEntryRows) {
+        if(!LayoutGroupVisible(row.group))continue;
+        const float dx=row.input.x-screenPos.x,dy=row.input.y-screenPos.y;
+        if(dx*dx+dy*dy<=hitRadiusSq){if(m_DragInputNodeId<=0)m_CompoundEntryDragInput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.target,row.socket};}
     }
     return {};
 }
@@ -85,11 +94,6 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
         8.0f,
         NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
-    for(const auto& row:m_CompoundEntryRows) {
-        if(!LayoutGroupVisible(row.group))continue;
-        const float dx=row.output.x-screenPos.x,dy=row.output.y-screenPos.y;
-        if(row.source && dx*dx+dy*dy<=hitRadiusSq){if(m_DragOutputNodeId<=0)m_CompoundEntryDragOutput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.source,row.sourceSocket};}
-    }
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
         if(!LayoutNodeInteractive(nodeId))continue;
@@ -110,9 +114,23 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
             const float dx = anchor.screenPos.x - screenPos.x;
             const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                if(m_DragOutputNodeId<=0)m_CompoundEntryDragOutput=-1;return SocketHit{ nodeId, anchor.socketId };
+                if (m_DragOutputNodeId <= 0) {
+                    m_CompoundEntryDragOutput = -1;
+                }
+                return SocketHit{ nodeId, anchor.socketId };
             }
         }
+        // A front node body owns this point even when none of its sockets
+        // match. Do not pick a socket through it on a lower visual layer.
+        if (layout->frameRect.Contains(ToImVec2(screenPos))) {
+            return {};
+        }
+    }
+    // Compound gateways are drawn behind every node.
+    for(const auto& row:m_CompoundEntryRows) {
+        if(!LayoutGroupVisible(row.group))continue;
+        const float dx=row.output.x-screenPos.x,dy=row.output.y-screenPos.y;
+        if(row.source && dx*dx+dy*dy<=hitRadiusSq){if(m_DragOutputNodeId<=0)m_CompoundEntryDragOutput=int(&row-m_CompoundEntryRows.data());return SocketHit{row.source,row.sourceSocket};}
     }
     return {};
 }
