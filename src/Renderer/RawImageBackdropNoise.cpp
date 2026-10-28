@@ -102,6 +102,25 @@ bool RawImageBackdropNoise::Ensure(int w, int h) {
             !(grain = CreateArray(GrainSize, GrainSize, true, true, GL_RGBA16F))) {
             Shutdown(); failed = true; return false;
         }
+        analysisUniforms = {
+            glGetUniformLocation(analysisProgram, "image"),
+            glGetUniformLocation(analysisProgram, "previous"),
+            glGetUniformLocation(analysisProgram, "nativeExtent"),
+            glGetUniformLocation(analysisProgram, "clearOnly"),
+            glGetUniformLocation(analysisProgram, "rect"),
+            glGetUniformLocation(analysisProgram, "textureRect"),
+            glGetUniformLocation(analysisProgram, "previousOffset"),
+            glGetUniformLocation(analysisProgram, "previousScale"),
+            glGetUniformLocation(analysisProgram, "fadeAmount"),
+            glGetUniformLocation(analysisProgram, "encodedSrgb")};
+        filterUniforms = {
+            glGetUniformLocation(filterProgram, "varianceInput"),
+            glGetUniformLocation(filterProgram, "covarianceInput"),
+            glGetUniformLocation(filterProgram, "rejectOutliers"),
+            glGetUniformLocation(filterProgram, "direction")};
+        brightnessUniforms = {
+            glGetUniformLocation(brightnessProgram, "varianceInput"),
+            glGetUniformLocation(brightnessProgram, "covarianceInput")};
         glUseProgram(seedProgram);
         glBindImageTexture(0, grain, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
         Dispatch(GrainSize, GrainSize);
@@ -135,44 +154,44 @@ bool RawImageBackdropNoise::Prepare(const RawImageBackdropFrame& frame) {
     if (!Ensure(w, h)) return false;
     profileValid = false;
     glUseProgram(analysisProgram);
-    glUniform1i(glGetUniformLocation(analysisProgram, "image"), 0);
-    glUniform1i(glGetUniformLocation(analysisProgram, "previous"), 1);
-    glUniform2f(glGetUniformLocation(analysisProgram, "nativeExtent"), frame.nativeExtent.x, frame.nativeExtent.y);
+    glUniform1i(analysisUniforms.image, 0);
+    glUniform1i(analysisUniforms.previous, 1);
+    glUniform2f(analysisUniforms.nativeExtent, frame.nativeExtent.x, frame.nativeExtent.y);
     BindOutputs(profileVariance, profileCovariance);
-    glUniform1i(glGetUniformLocation(analysisProgram, "clearOnly"), 1);
+    glUniform1i(analysisUniforms.clearOnly, 1);
     Dispatch(width, height, 1);
-    glUniform1i(glGetUniformLocation(analysisProgram, "clearOnly"), 0);
+    glUniform1i(analysisUniforms.clearOnly, 0);
     for (const auto& patch : frame.SurroundPatches()) {
         if (!patch.texture || patch.imageBounds.z <= patch.imageBounds.x || patch.imageBounds.w <= patch.imageBounds.y) continue;
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, patch.previousTexture ? patch.previousTexture : patch.texture);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, patch.texture);
-        glUniform4f(glGetUniformLocation(analysisProgram, "rect"), patch.imageBounds.x, patch.imageBounds.y,
+        glUniform4f(analysisUniforms.rect, patch.imageBounds.x, patch.imageBounds.y,
             patch.imageBounds.z, patch.imageBounds.w);
-        glUniform4f(glGetUniformLocation(analysisProgram, "textureRect"), patch.uvMinimum.x, patch.uvMaximum.y,
+        glUniform4f(analysisUniforms.textureRect, patch.uvMinimum.x, patch.uvMaximum.y,
             patch.uvMaximum.x, patch.uvMinimum.y);
-        glUniform2f(glGetUniformLocation(analysisProgram, "previousOffset"), patch.previousOffset.x, patch.previousOffset.y);
-        glUniform2f(glGetUniformLocation(analysisProgram, "previousScale"), patch.previousScale.x, patch.previousScale.y);
-        glUniform1f(glGetUniformLocation(analysisProgram, "fadeAmount"), patch.previousTexture ? patch.fadeAmount : 1.f);
-        glUniform1i(glGetUniformLocation(analysisProgram, "encodedSrgb"), patch.encodedSrgb ? 1 : 0);
+        glUniform2f(analysisUniforms.previousOffset, patch.previousOffset.x, patch.previousOffset.y);
+        glUniform2f(analysisUniforms.previousScale, patch.previousScale.x, patch.previousScale.y);
+        glUniform1f(analysisUniforms.fadeAmount, patch.previousTexture ? patch.fadeAmount : 1.f);
+        glUniform1i(analysisUniforms.encodedSrgb, patch.encodedSrgb ? 1 : 0);
         Dispatch(width, height, 1);
     }
     glUseProgram(filterProgram);
-    glUniform1i(glGetUniformLocation(filterProgram, "varianceInput"), 0);
-    glUniform1i(glGetUniformLocation(filterProgram, "covarianceInput"), 1);
+    glUniform1i(filterUniforms.varianceInput, 0);
+    glUniform1i(filterUniforms.covarianceInput, 1);
     const auto filter = [&](unsigned int targetVariance, unsigned int targetCovariance,
         unsigned int sourceVariance, unsigned int sourceCovariance, bool median, int x, int y) {
         BindOutputs(targetVariance, targetCovariance); BindInputs(sourceVariance, sourceCovariance);
-        glUniform1i(glGetUniformLocation(filterProgram, "rejectOutliers"), median ? 1 : 0);
-        glUniform2i(glGetUniformLocation(filterProgram, "direction"), x, y);
+        glUniform1i(filterUniforms.rejectOutliers, median ? 1 : 0);
+        glUniform2i(filterUniforms.direction, x, y);
         Dispatch(width, height);
     };
     filter(filteredVariance, filteredCovariance, profileVariance, profileCovariance, true, 0, 0);
     filter(profileVariance, profileCovariance, filteredVariance, filteredCovariance, false, 1, 0);
     filter(filteredVariance, filteredCovariance, profileVariance, profileCovariance, false, 0, 1);
     glUseProgram(brightnessProgram);
-    glUniform1i(glGetUniformLocation(brightnessProgram, "varianceInput"), 0);
-    glUniform1i(glGetUniformLocation(brightnessProgram, "covarianceInput"), 1);
+    glUniform1i(brightnessUniforms.varianceInput, 0);
+    glUniform1i(brightnessUniforms.covarianceInput, 1);
     BindOutputs(brightnessVariance, brightnessCovariance); BindInputs(filteredVariance, filteredCovariance);
     Dispatch(BrightnessBins, 1);
     for (const auto texture : {filteredVariance, filteredCovariance}) {
@@ -199,6 +218,7 @@ void RawImageBackdropNoise::Shutdown() {
     if (filterProgram) glDeleteProgram(filterProgram);
     if (brightnessProgram) glDeleteProgram(brightnessProgram);
     analysisProgram = seedProgram = filterProgram = brightnessProgram = 0;
+    analysisUniforms = {}; filterUniforms = {}; brightnessUniforms = {};
     failed = false;
 }
 }
