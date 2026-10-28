@@ -2718,9 +2718,12 @@ void EditorViewport::RenderSingleImageMode(
         m_PixelInspectionOriginX = 0;
         m_PixelInspectionOriginY = 0;
     } else {
+        // Both conditional operands must be lvalues: a temporary empty set
+        // would copy every tile just to hash the accepted display metadata.
+        const EditorRenderWorker::SharedTextureTileSet noTiles;
         const std::uint64_t textureSignature = PixelInspectionTextureSignature(
             outputTex,
-            hasViewportTiles ? viewportTiles : EditorRenderWorker::SharedTextureTileSet{},
+            hasViewportTiles ? viewportTiles : noTiles,
             imgW,
             imgH,
             editor->GetViewportOutputRenderGeneration()) ^ static_cast<std::uint64_t>(outputRegion.Fingerprint());

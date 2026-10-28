@@ -16,6 +16,17 @@ def read(relative):
 
 
 class GraphViewportAnalysisWiring(unittest.TestCase):
+    def test_pixel_signature_borrows_tile_metadata(self):
+        source = read("src/Editor/UI/EditorViewport.cpp")
+        self.assertIn("const EditorRenderWorker::SharedTextureTileSet noTiles;", source)
+        call = source[source.index("const EditorRenderWorker::SharedTextureTileSet noTiles;"):]
+        call = call[:call.index("int readbackOriginX")]
+        self.assertIn("hasViewportTiles ? viewportTiles : noTiles,", call)
+        self.assertNotIn("SharedTextureTileSet{}", call)
+        signature = source[source.index("std::uint64_t PixelInspectionTextureSignature("):]
+        signature = signature[:signature.index("struct PixelInspectionBounds")]
+        self.assertIn("const EditorRenderWorker::SharedTextureTileSet& tiles,", signature)
+
     def test_graph_dispatch_drains_optional_analysis(self):
         source = read("src/Editor/Internal/EditorModuleRenderScheduling.cpp")
         self.assertRegex(source, re.compile(
