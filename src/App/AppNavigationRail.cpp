@@ -18,9 +18,26 @@ constexpr int Library = 0, Graph = 1, RawTab = 5, Queue = 7;
 bool IsRaw(int tab) { return tab == RawTab || tab == 3; }
 }
 
+void AppShell::QueueRailNavigation(int destination) {
+    auto& rail = m_NavigationRail;
+    const auto* owner = FindProjectWorkspace(m_ActiveProjectWorkspace);
+    rail.requestedDestination = owner ? destination : -1;
+    rail.requestedWorkspace = m_ActiveProjectWorkspace;
+    rail.requestedLoadGeneration = owner ? owner->loadTransition.generation : 0;
+}
+
 void AppShell::ApplyRailNavigation() {
     auto& rail = m_NavigationRail;
-    if (rail.requestedDestination < 0 || !CanSwitchProjectWorkspace()) return;
+    if (rail.requestedDestination < 0) return;
+    const auto* owner = FindProjectWorkspace(rail.requestedWorkspace);
+    if (!owner || owner->id != m_ActiveProjectWorkspace ||
+        owner->loadTransition.generation != rail.requestedLoadGeneration) {
+        rail.requestedDestination = -1;
+        return;
+    }
+    // Keep the latest user destination separate from load-owned Graph/View
+    // requests. A canceled or replaced load cannot replay its old navigation.
+    if (!CanSwitchProjectWorkspace() || owner->loadTransition.phase != ProjectLoadPhase::None) return;
     const int destination = std::exchange(rail.requestedDestination, -1);
     CancelProjectPillPreview();
     if (destination == Library && rail.galleryView) {
@@ -173,7 +190,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         const bool selected = item.first == Library ? m_CurrentTabId == Library || gallery
             : item.first == RawTab ? IsRaw(m_CurrentTabId) && !gallery : m_CurrentTabId == item.first;
         if (button(name, item.second, selected, item.first == Library ? rail.libraryMotion : rail.queueMotion, available)) {
-            rail.requestedDestination = item.first;
+            QueueRailNavigation(item.first);
             CancelProjectPillPreview();
         }
     }
@@ -201,7 +218,7 @@ void AppShell::RenderLibraryViewSwitch() {
     if (gallery) ImGui::PopFont();
     if (view >= 0 && (view != 0) != gallery) {
         rail.galleryView = view != 0;
-        rail.requestedDestination = Library;
+        QueueRailNavigation(Library);
     }
     ImGui::Dummy(ImVec2(0, (gallery ? 16.f : 10.f) * rail.scale));
 }

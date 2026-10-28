@@ -177,6 +177,9 @@ bool AppShell::CanSwitchProjectWorkspace() const {
 void AppShell::QueueWorkspaceTabAction(WorkspaceTabAction action, std::uint64_t id) {
     if (!CanSwitchProjectWorkspace()) return;
     if (action == WorkspaceTabAction::Close && id == m_GalleryWorkspaceId) return;
+    // Explicit pill navigation supersedes a root destination waiting on a load,
+    // including selecting the already-active project.
+    m_NavigationRail.requestedDestination = -1;
     m_WorkspaceTabAction = action;
     m_WorkspaceTabActionId = id;
 }
@@ -205,6 +208,7 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
                 }
         }
     }
+    m_NavigationRail.requestedDestination = -1;
     if (m_ActiveProjectWorkspace != m_GalleryWorkspaceId)
         m_NavigationRail.lastEditingWorkspace = m_ActiveProjectWorkspace;
     if (m_ToolSwitcher.Open() || m_ToolSwitcher.cursorCaptured) CancelToolSwitcher();

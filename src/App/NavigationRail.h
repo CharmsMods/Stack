@@ -29,6 +29,8 @@ struct RailState {
     bool galleryResizeActive = false;
     bool galleryResizeForQueue = false;
     int requestedDestination = -1;
+    std::uint64_t requestedWorkspace = 0;
+    std::uint64_t requestedLoadGeneration = 0;
     std::uint64_t lastEditingWorkspace = 0;
     std::uint64_t hoveredProject = 0;
     std::uint64_t previewProject = 0;

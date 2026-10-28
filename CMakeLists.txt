@@ -759,6 +759,7 @@ endif()
 
 if (BUILD_TESTING)
     include(cmake/StackWorkspaceSwitcherTests.cmake)
+    include(cmake/StackRailNavigationIntentTests.cmake)
     add_executable(StackRawGallerySimilarityTests
         tools/tests/raw_gallery_similarity_tests.cpp
         src/Raw/RawGalleryFilmstripOrganization.cpp

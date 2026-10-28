@@ -77,6 +77,7 @@ private:
     void TickUiViewportQualityCapture();
     void FinishUiPerformanceFrame();
     std::unique_ptr<UiPerformanceCapture> m_UiPerformanceCapture;
+    void QueueRailNavigation(int destination);
     void ApplyRailNavigation();
     void LayoutNavigationRail();
     void RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity);

@@ -1547,7 +1547,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     m_QueueRenderer.Configure(m_Window, m_Appearance.get(), &m_Queue.Model());
     m_Queue.SetGalleryRequestHandler([this] {
         m_NavigationRail.galleryView = true;
-        m_NavigationRail.requestedDestination = 0;
+        QueueRailNavigation(0);
     });
     m_Queue.SetStopRequestHandler([this] { m_QueueRenderer.StopAfterCurrent(); });
     m_Queue.SetExportRequestHandler(
