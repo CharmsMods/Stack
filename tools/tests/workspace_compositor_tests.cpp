@@ -2,6 +2,7 @@
 #include "Renderer/GLHelpers.h"
 #include "Renderer/WorkspaceCompositor.h"
 #include "App/WorkspaceSwitcher.h"
+#include "App/ToolSwitcher.h"
 #include "App/WorkspaceSwitcherDrawing.h"
 #include "App/WorkspaceInputScope.h"
 #include "imgui_impl_opengl3.h"
@@ -97,6 +98,67 @@ int main(int argc,char** argv) {
             std::ofstream out(argv[1],std::ios::binary); out << "P6\n800 600\n255\n";
             for(int y=599;y>=0;--y) out.write(reinterpret_cast<char*>(rgb.data()+y*800*3),800*3);
         }
+        // Translation must not affect physical pixels, including clipped fixed
+        // overlays and tool bounds, while fade history is interrupted/resized.
+        // Compare independent compositor histories at identical ImGui times.
+        {
+            Stack::Renderer::WorkspaceCompositor origin, translated;
+            Stack::Workspace::Switcher workspace; workspace.Begin(0); workspace.Tick(1);
+            Stack::Tools::Switcher tools; tools.count=2; tools.Begin(true); tools.Tick(.09f);
+            for(int step=0;step<12;++step) {
+                const bool toolMode=step>=6;
+                const int phase=step%6;
+                const int w=phase<4 ? 160 : 168, h=120;
+                const float scale=phase<5 ? 1.25f : 2.f;
+                const int pw=int(w*scale),ph=int(h*scale);
+                workspace.preview=phase<1 ? 0 : phase<3 ? 1 : 0;
+                io.DisplaySize=ImVec2(float(w),float(h)); io.DisplayFramebufferScale=ImVec2(scale,scale);
+                io.DeltaTime=1.f/60;
+                ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
+                auto* scene=ImGui::GetBackgroundDrawList();
+                scene->AddRectFilled(ImVec2(0,0),ImVec2(float(w),float(h)),
+                    workspace.preview ? IM_COL32(20,220,30,255) : IM_COL32(220,50,30,255));
+                scene->AddRectFilled(ImVec2(40,60),ImVec2(120,100),IM_COL32(30,70,220,255));
+                auto* overlay=ImGui::GetForegroundDrawList();
+                overlay->PushClipRect(ImVec2(12,12),ImVec2(24,24),true);
+                overlay->AddRectFilled(ImVec2(8,8),ImVec2(28,28),IM_COL32(0,255,0,255));
+                overlay->PopClipRect();
+                ImGui::Render(); auto* data=ImGui::GetDrawData();
+                const auto texture=GLHelpers::CreateTextureFromPixels(nullptr,pw,ph,4);
+                const auto target=GLHelpers::CreateFBO(texture);
+                Check(target!=0,"coordinate parity target allocation failed");
+                std::vector<unsigned char> expected(pw*ph*4),actual(expected.size());
+                auto render=[&](Stack::Renderer::WorkspaceCompositor& renderer,ImVec2 offset,
+                    std::vector<unsigned char>& pixels) {
+                    renderer.BeginFrame(); renderer.KeepFixed(overlay);
+                    renderer.SetToolBlurBounds(ImVec2(32+offset.x,32+offset.y),ImVec2(136+offset.x,108+offset.y));
+                    Check(renderer.Render(data,workspace,ImVec4(0,0,0,1),toolMode ? &tools : nullptr,
+                        workspace.preview,0,false,nullptr,target),"coordinate parity render failed");
+                    GLint viewport[4]{}; glGetIntegerv(GL_VIEWPORT,viewport);
+                    Check(viewport[0]==0 && viewport[1]==0 && viewport[2]==pw && viewport[3]==ph,
+                        "presentation viewport did not use framebuffer scale");
+                    glReadPixels(0,0,pw,ph,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
+                };
+                render(origin,ImVec2(),expected);
+                const ImVec2 offset(137,-91);
+                data->DisplayPos=offset;
+                for(auto* list:data->CmdLists) {
+                    for(auto& vertex:list->VtxBuffer) { vertex.pos.x+=offset.x; vertex.pos.y+=offset.y; }
+                    for(auto& command:list->CmdBuffer) {
+                        command.ClipRect.x+=offset.x; command.ClipRect.z+=offset.x;
+                        command.ClipRect.y+=offset.y; command.ClipRect.w+=offset.y;
+                    }
+                }
+                render(translated,offset,actual);
+                Check(actual==expected,"DisplayPos translation changed compositor pixels");
+                const auto marker=(size_t(ph-1-int(18*scale))*pw+int(18*scale))*4;
+                Check(actual[marker]==0 && actual[marker+1]==255,"scaled fixed overlay missing or misplaced");
+                glBindFramebuffer(GL_FRAMEBUFFER,0); glDeleteFramebuffers(1,&target); glDeleteTextures(1,&texture);
+            }
+            origin.Shutdown(); translated.Shutdown();
+            io.DisplayFramebufferScale=ImVec2(1,1);
+            Check(glGetError()==GL_NO_ERROR,"GL error after translated scaled fade/resize");
+        }
         for(const auto size : {ImVec2(1920,1080),ImVec2(3840,2160)}) {
             int w=int(size.x),h=int(size.y);
             auto tex=GLHelpers::CreateTextureFromPixels(nullptr,w,h,4); auto fb=GLHelpers::CreateFBO(tex);
@@ -127,7 +189,7 @@ int main(int argc,char** argv) {
         compositor.Shutdown(); compositor.Shutdown();
         Check(glGetError()==GL_NO_ERROR,"GL error after repeated resize/shutdown");
         ImGui_ImplOpenGL3_Shutdown(); ImGui::DestroyContext();
-        std::cout << "Workspace compositor orientation, curvature, overlay, identity, resize and cleanup passed.\n";
+        std::cout << "Workspace compositor orientation, curvature, overlay, identity, translated HiDPI fades, resize and cleanup passed.\n";
     } catch(const std::exception& e) { std::cerr << e.what() << '\n'; result=1; }
     glfwDestroyWindow(window); glfwTerminate(); return result;
 }
