@@ -69,6 +69,26 @@ const ProjectedWire& WireRouteCache::Project(const std::string& key,ImVec2 sourc
     if(cache.zoom==zoom && cache.origin.x==origin.x && cache.origin.y==origin.y &&
         cache.source.x==source.x && cache.source.y==source.y && cache.target.x==target.x && cache.target.y==target.y &&
         cache.straight==straight && cache.hasVia==(via!=nullptr) && (!via || (cache.via.x==via->x && cache.via.y==via->y && cache.exit.x==departure->x && cache.exit.y==departure->y)) && !cache.samples.empty())return cache;
+    // A workspace slide (or camera pan) only translates these screen-space
+    // curves. Keep the original adaptive tessellation and arc-length values:
+    // rebuilding them performs recursive subdivision and several hypot passes
+    // per wire, per animation frame. Require identical relative anchors so a
+    // node move, zoom, gateway resize or style change still rebuilds normally.
+    const ImVec2 delta{source.x-cache.source.x,source.y-cache.source.y};
+    const auto translated = [&](ImVec2 oldPoint, ImVec2 point) {
+        return oldPoint.x+delta.x==point.x && oldPoint.y+delta.y==point.y;
+    };
+    if(!cache.samples.empty() && cache.zoom==zoom && cache.straight==straight &&
+        cache.hasVia==(via!=nullptr) && translated(cache.target,target) &&
+        (!via || (translated(cache.via,*via) && translated(cache.exit,*departure)))) {
+        for(auto& sample:cache.samples) {sample.point.x+=delta.x;sample.point.y+=delta.y;}
+        for(auto& point:cache.geometry.points) {point.x+=delta.x;point.y+=delta.y;}
+        cache.geometry.bounds.min.x+=delta.x;cache.geometry.bounds.min.y+=delta.y;
+        cache.geometry.bounds.max.x+=delta.x;cache.geometry.bounds.max.y+=delta.y;
+        cache.source=source;cache.target=target;cache.origin=origin;
+        if(via){cache.via=*via;cache.exit=*departure;}
+        return cache;
+    }
     UiPerformance::Add(UiPerformance::Counter::WireProjection);
     cache.source=source;cache.target=target;cache.origin=origin;cache.zoom=zoom;cache.routeRevision=m_Result.revision;cache.straight=straight;
     cache.hasVia=via!=nullptr;if(via){cache.via=*via;cache.exit=*departure;}

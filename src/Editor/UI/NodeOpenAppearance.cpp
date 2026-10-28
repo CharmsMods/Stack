@@ -8,14 +8,20 @@ NodeAppearanceTexture::~NodeAppearanceTexture() {
     if (name) glDeleteTextures(1, &name);
 }
 
-void NodeOpenTransition::Appearance::Capture(const ImDrawList& list, int firstVertex, ImVec2 low, ImVec2 high) {
+void NodeOpenTransition::Appearance::Capture(const ImDrawList& list, int firstVertex, ImVec2 low, ImVec2 high, unsigned firstIndex) {
     minimum=low; maximum=high; meshes.clear();
     const auto font=ImGui::GetIO().Fonts->TexRef.GetTexID();
     std::unordered_map<ImTextureID,std::shared_ptr<NodeAppearanceTexture>> textures;
     for (const auto& command:list.CmdBuffer) {
         if (command.UserCallback) continue;
+        // A clicked node is usually near the end of a large canvas list.
+        // Earlier triangles cannot belong to it; do not walk the whole graph
+        // on the click frame. Keep the vertex ownership check for mixed meshes.
+        const unsigned first = firstIndex > command.IdxOffset
+            ? std::min(command.ElemCount, firstIndex-command.IdxOffset) : 0;
+        if (first >= command.ElemCount) continue;
         Mesh mesh; mesh.clip=command.ClipRect;
-        for (unsigned i=0;i+2<command.ElemCount;i+=3) {
+        for (unsigned i=first;i+2<command.ElemCount;i+=3) {
             unsigned indices[3]; bool owned=true;
             for (int corner=0;corner<3;++corner) {
                 indices[corner]=command.VtxOffset+list.IdxBuffer[command.IdxOffset+i+corner];

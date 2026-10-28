@@ -13,6 +13,9 @@
 
 namespace Stack::Renderer {
 namespace {
+// Explicit GL 4.3 uniform locations keep all presentation frames free of
+// program-name queries, which can serialize with shared-context image work.
+// Locations below must match the corresponding glUniform calls.
 constexpr const char* vertex = R"(#version 430 core
 out vec2 uv;
 void main() {
@@ -21,9 +24,11 @@ void main() {
 })";
 constexpr const char* fragment = R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D scene;
-uniform sampler2D softScene;
-uniform float amount, recess, curvature;
+layout(location=0) uniform sampler2D scene;
+layout(location=1) uniform sampler2D softScene;
+layout(location=2) uniform float amount;
+layout(location=3) uniform float recess;
+layout(location=4) uniform float curvature;
 void main() {
     vec2 p = (uv - .5) * 2.0;
     float scale = mix(1.0, recess, amount);
@@ -53,16 +58,19 @@ void main() {
 
 constexpr const char* blendFragment = R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D scene, previous;
-uniform float weight;
+layout(location=0) uniform sampler2D scene;
+layout(location=1) uniform sampler2D previous;
+layout(location=2) uniform float weight;
 void main() { color = mix(texture(previous,uv), texture(scene,uv), weight); }
 )";
 constexpr const char* previewFragment = R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D scene, preview;
-uniform vec4 bounds, fittedBounds;
-uniform vec3 backdrop;
-uniform float amount;
+layout(location=0) uniform sampler2D scene;
+layout(location=1) uniform sampler2D preview;
+layout(location=2) uniform vec4 bounds;
+layout(location=3) uniform vec4 fittedBounds;
+layout(location=4) uniform vec3 backdrop;
+layout(location=5) uniform float amount;
 void main() {
     vec4 live = texture(scene, uv);
     if (any(lessThan(uv, bounds.xy)) || any(greaterThan(uv, bounds.zw))) {
@@ -86,8 +94,8 @@ ImVec4 NormalizedBounds(ImVec2 min, ImVec2 max, const ImDrawData& data) {
         std::clamp(1.f - (min.y - data.DisplayPos.y) / h, 0.f, 1.f));
 }
 bool HasArea(const ImVec4& bounds) { return bounds.z > bounds.x && bounds.w > bounds.y; }
-void SetBounds(unsigned int program, const char* name, const ImVec4& bounds) {
-    glUniform4f(glGetUniformLocation(program, name), bounds.x, bounds.y, bounds.z, bounds.w);
+void SetBounds(int location, const ImVec4& bounds) {
+    glUniform4f(location, bounds.x, bounds.y, bounds.z, bounds.w);
 }
 // This is the shell's final main-window pass, not an arbitrary nested GL pass.
 // Its destination is explicit; querying unrelated shared GL objects here can
@@ -175,18 +183,18 @@ void WorkspaceCompositor::BlurTools(float amount, const ImVec4& bounds,
     glBlitFramebuffer(0, 0, width, height, 0, 0, toolBlurWidth, toolBlurHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glViewport(0, 0, toolBlurWidth, toolBlurHeight);
     glUseProgram(blurProgram);
-    glUniform1i(glGetUniformLocation(blurProgram, "scene"), 0);
-    SetBounds(blurProgram, "bounds", bounds);
-    glUniform2f(glGetUniformLocation(blurProgram, "feather"), feather.x, feather.y);
+    glUniform1i(0, 0);
+    SetBounds(2, bounds);
+    glUniform2f(3, feather.x, feather.y);
     // Half-resolution pixels are filtered with contiguous Gaussian taps.
     // Cap support at 24 texels per side to keep high-DPI rendering bounded.
-    glUniform1f(glGetUniformLocation(blurProgram, "sigma"),
+    glUniform1f(4,
         std::min(8.f, (2.f + 4.f * amount) * pixelScale));
     for (int pass = 0; pass < 2; ++pass) {
         glBindFramebuffer(GL_FRAMEBUFFER, toolBlurFramebuffers[1 - pass]);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, toolBlurTextures[pass]);
-        glUniform2f(glGetUniformLocation(blurProgram, "direction"),
+        glUniform2f(1,
             pass == 0 ? 1.f / toolBlurWidth : 0.f,
             pass == 1 ? 1.f / toolBlurHeight : 0.f);
         glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -225,12 +233,12 @@ bool WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
     glBindVertexArray(vao);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, presentedTexture); glBindSampler(0, 0);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, entry->texture); glBindSampler(1, 0);
-    glUniform1i(glGetUniformLocation(previewProgram, "scene"), 0);
-    glUniform1i(glGetUniformLocation(previewProgram, "preview"), 1);
-    SetBounds(previewProgram, "bounds", bounds);
-    SetBounds(previewProgram, "fittedBounds", ImVec4(x, y, x + fitWidth, y + fitHeight));
-    glUniform3f(glGetUniformLocation(previewProgram, "backdrop"), clear.x, clear.y, clear.z);
-    glUniform1f(glGetUniformLocation(previewProgram, "amount"), std::clamp(frame.previewAmount, 0.f, 1.f));
+    glUniform1i(0, 0);
+    glUniform1i(1, 1);
+    SetBounds(2, bounds);
+    SetBounds(3, ImVec4(x, y, x + fitWidth, y + fitHeight));
+    glUniform3f(4, clear.x, clear.y, clear.z);
+    glUniform1f(5, std::clamp(frame.previewAmount, 0.f, 1.f));
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     return true;
@@ -348,9 +356,9 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         glUseProgram(blendProgram); glBindVertexArray(vao);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,texture); glBindSampler(0,0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,historyValid ? historyTexture : texture); glBindSampler(1,0);
-        glUniform1i(glGetUniformLocation(blendProgram,"scene"),0);
-        glUniform1i(glGetUniformLocation(blendProgram,"previous"),1);
-        glUniform1f(glGetUniformLocation(blendProgram,"weight"),weight);
+        glUniform1i(0,0);
+        glUniform1i(1,1);
+        glUniform1f(2,weight);
         glDrawArrays(GL_TRIANGLES,0,3);
     }
     historyValid=true;
@@ -364,11 +372,11 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         glUseProgram(toolProgram);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, presentedTexture); glBindSampler(0,0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, toolBlurTextures[0]); glBindSampler(1,0);
-        glUniform1i(glGetUniformLocation(toolProgram, "scene"), 0);
-        glUniform1i(glGetUniformLocation(toolProgram, "softScene"), 1);
-        glUniform1f(glGetUniformLocation(toolProgram, "amount"), amount);
-        SetBounds(toolProgram, "bounds", blurBounds);
-        glUniform2f(glGetUniformLocation(toolProgram, "feather"), feather.x, feather.y);
+        glUniform1i(0, 0);
+        glUniform1i(1, 1);
+        glUniform1f(4, amount);
+        SetBounds(2, blurBounds);
+        glUniform2f(3, feather.x, feather.y);
     } else if (projectMode) {
         Stack::UiPerformance::Span presentTiming(Stack::UiPerformance::Stage::CompositorPresent);
         // No deformation or blur for ordinary project navigation.
@@ -396,10 +404,10 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         glUseProgram(program);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,presentedTexture);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,lowTexture);
-        glUniform1i(glGetUniformLocation(program,"scene"),0); glUniform1i(glGetUniformLocation(program,"softScene"),1);
-        glUniform1f(glGetUniformLocation(program,"amount"),sw.Amount());
-        glUniform1f(glGetUniformLocation(program,"recess"),sw.config.recessedScale);
-        glUniform1f(glGetUniformLocation(program,"curvature"),sw.config.curvature);
+        glUniform1i(0,0); glUniform1i(1,1);
+        glUniform1f(2,sw.Amount());
+        glUniform1f(3,sw.config.recessedScale);
+        glUniform1f(4,sw.config.curvature);
     }
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES,0,3);

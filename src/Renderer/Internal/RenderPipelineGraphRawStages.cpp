@@ -39,6 +39,12 @@ RenderPipeline::SharedRawBaseStageResult RenderPipeline::RenderSharedRawBaseStag
     std::size_t rawBaseFingerprint,
     const std::function<std::size_t(int, const std::string&)>& fingerprintImage) {
     SharedRawBaseStageResult stage;
+    bool canceled = false;
+    const auto cancellationRequested = [this, &canceled]() {
+        canceled = canceled || (m_ShouldCancelRender && m_ShouldCancelRender());
+        return canceled;
+    };
+    if (cancellationRequested()) return stage;
     stage.rawSource = FindUpstreamRawSourceNode(executionContext, rawConsumer);
     if (!stage.rawSource) {
         return stage;
@@ -75,13 +81,12 @@ RenderPipeline::SharedRawBaseStageResult RenderPipeline::RenderSharedRawBaseStag
     } else if (cachedPath != cacheKeyPath ||
         (rawData.rawBuffer.empty() && rawData.linearUInt16Buffer.empty() && rawData.linearFloatBuffer.empty())) {
         Raw::RawImageData loadedRaw;
-        if (Raw::RawLoader::LoadFile(stage.sourcePath, loadedRaw)) {
-            rawData = std::move(loadedRaw);
-            cachedPath = cacheKeyPath;
-        } else {
-            rawData = std::move(loadedRaw);
-            cachedPath = cacheKeyPath;
-        }
+        Raw::RawLoader::LoadFile(stage.sourcePath, loadedRaw, cancellationRequested);
+        // Keep any accepted source intact; a canceled candidate must not
+        // become the cache entry used by the replacement request.
+        if (cancellationRequested()) return stage;
+        rawData = std::move(loadedRaw);
+        cachedPath = cacheKeyPath;
     }
 
     const bool rawDataHasPixels =

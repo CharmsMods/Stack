@@ -469,8 +469,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     GraphNodeRenderResult result;
     Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup
         resultExceptionCleanup(result.texture, result.owned);
-    const auto cancellationRequested = [this]() {
-        return m_ShouldCancelRender && m_ShouldCancelRender();
+    bool canceled = false;
+    const auto cancellationRequested = [this, &canceled]() {
+        canceled = canceled || (m_ShouldCancelRender && m_ShouldCancelRender());
+        return canceled;
     };
     const auto recordFailure = [&](const std::string& error) {
         m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
@@ -498,7 +500,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         if (cached != m_RawSharedSourceData.end()) sourceLease = cached->second;
         else {
             auto loaded = std::make_shared<Raw::RawImageData>();
-            Raw::RawLoader::LoadFile(sourcePath, *loaded);
+            Raw::RawLoader::LoadFile(sourcePath, *loaded, cancellationRequested);
+            // A superseded decode is not a reusable source failure. In
+            // particular, do not poison the next request for the same RAW.
+            if (cancellationRequested()) return result;
             sourceLease = std::move(loaded);
             // Immutable decoder data is shared by Original and Current. Bound
             // retention when one renderer visits several independent sources.

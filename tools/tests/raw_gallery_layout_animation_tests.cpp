@@ -1,5 +1,6 @@
 #include "Editor/Internal/RawLab/RawLabGalleryLayoutAnimation.h"
 #include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
+#include "Editor/Internal/RawLab/RawLabGalleryGridSubmission.h"
 
 #include <cmath>
 #include <iostream>
@@ -24,6 +25,50 @@ float DrawX(GalleryLayoutAnimation& motion) {
     draw.PushClipRect(clip.Min, clip.Max);
     motion.Draw(&draw, clip, [](const auto&) { return GalleryLayoutAnimation::Texture{7, 120, 80}; });
     return draw.VtxBuffer.empty() ? -1.f : draw.VtxBuffer[0].pos.x;
+}
+bool TestClippedGridSubmission() {
+    using Stack::Editor::RawLabInternal::SubmitGalleryGrid;
+    const ImVec2 tile(158, 148);
+    constexpr float gap = 16;
+    // Compare real ImGui layout state against the former all-widget path,
+    // including an incomplete last row and a viewport wholly outside the group.
+    for (const float rowGap : {0.f, 4.f, 16.f})
+    for (const int count : {1, 19, 10000}) {
+        const int columns = 7;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, rowGap));
+        ImGui::BeginChild("grid-submission-check", ImVec2(900, 500));
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        auto* window = ImGui::GetCurrentWindow();
+        const auto before = window->DC;
+        for (int index = 0; index < count; ++index) {
+            if (index % columns) ImGui::SameLine(0.f, gap);
+            ImGui::Dummy(tile);
+        }
+        const ImVec2 oldAfter = ImGui::GetCursorScreenPos();
+        const ImVec2 oldMaximum = window->DC.CursorMaxPos;
+        window->DC = before;
+        int submitted = 0;
+        SubmitGalleryGrid(count, columns, tile, gap, {1, 3}, [&](int index) {
+            const ImVec2 position = ImGui::GetCursorScreenPos();
+            if (std::abs(position.x - (origin.x + (index % columns) * (tile.x + gap))) > .01f ||
+                std::abs(position.y - (origin.y + (index / columns) * (tile.y + rowGap))) > .01f)
+                submitted = -100000;
+            ++submitted;
+            ImGui::Dummy(tile);
+        });
+        const bool correct = submitted == std::max(0, std::min(count, 21) - 7) &&
+            std::abs(oldAfter.y - ImGui::GetCursorScreenPos().y) < .01f &&
+            std::abs(oldMaximum.x - window->DC.CursorMaxPos.x) < .01f &&
+            std::abs(oldMaximum.y - window->DC.CursorMaxPos.y) < .01f;
+        window->DC = before;
+        int outside = 0;
+        SubmitGalleryGrid(count, columns, tile, gap, {20000, 20001}, [&](int) { ++outside; });
+        const bool extent = outside == 0 && std::abs(oldMaximum.y - window->DC.CursorMaxPos.y) < .01f;
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        if (!Check(correct && extent, "clipped grid preserves tile positions/extents and only submits visible rows")) return false;
+    }
+    return true;
 }
 bool TestSortTransitions(bool grid) {
     GalleryLayoutAnimation motion;
@@ -237,12 +282,12 @@ int main() {
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     ImGui::NewFrame();
-    bool passed = TestSortTransitions(true) && TestSortTransitions(false) &&
+    bool passed = TestClippedGridSubmission() && TestSortTransitions(true) && TestSortTransitions(false) &&
         TestInterruptions() && TestClippedAndUnloadedImages() && TestStackMotionAndInputGeometry();
     ImGui::EndFrame();
     passed = TestExpandedFilmstripClickHandoff() && passed;
     passed = TestExpandedFilmstripClickHandoff(true) && passed;
     ImGui::DestroyContext();
     if (!passed) return 1;
-    std::cout << "Gallery layout animation tests passed (9 sort changes in each view, interruptions, reduced motion, lifetime, expanded filmstrip click handoff).\n";
+    std::cout << "Gallery layout animation tests passed (clipped grid: 14/10000 tiles submitted, identical extents; 9 sort changes in each view, interruptions, reduced motion, lifetime, expanded filmstrip click handoff).\n";
 }

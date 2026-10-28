@@ -6,11 +6,11 @@ namespace Stack::Renderer::ToolDrawerShaders {
 // The 24-texel support bounds each pass to at most 25 texture samples.
 inline constexpr const char* Blur = R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D scene;
-uniform vec2 direction;
-uniform vec4 bounds;
-uniform vec2 feather;
-uniform float sigma;
+layout(location=0) uniform sampler2D scene;
+layout(location=1) uniform vec2 direction;
+layout(location=2) uniform vec4 bounds;
+layout(location=3) uniform vec2 feather;
+layout(location=4) uniform float sigma;
 void main() {
     if (any(lessThanEqual(uv, bounds.xy)) || any(greaterThanEqual(uv, bounds.zw))) {
         color = texture(scene, uv); return;
@@ -42,10 +42,11 @@ void main() {
 
 inline constexpr const char* Composite = R"(#version 430 core
 in vec2 uv; out vec4 color;
-uniform sampler2D scene, softScene;
-uniform vec4 bounds;
-uniform vec2 feather;
-uniform float amount;
+layout(location=0) uniform sampler2D scene;
+layout(location=1) uniform sampler2D softScene;
+layout(location=2) uniform vec4 bounds;
+layout(location=3) uniform vec2 feather;
+layout(location=4) uniform float amount;
 void main() {
     vec4 sharp = texture(scene, uv);
     if (any(lessThanEqual(uv, bounds.xy)) || any(greaterThanEqual(uv, bounds.zw))) {

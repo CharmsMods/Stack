@@ -720,6 +720,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             const bool captureOpen = layout && openingNode == nodeId;
             const auto openingBounds = captureOpen ? layout->frameRect : CachedRect{};
             const int firstVertex = drawList->VtxBuffer.Size;
+            const unsigned firstIndex = static_cast<unsigned>(drawList->IdxBuffer.Size);
             if(revealAlpha<1)ImGui::BeginDisabled();
             RenderNode(editor, *node, pendingGraphAction);
             if(revealAlpha<1)ImGui::EndDisabled();
@@ -729,7 +730,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             }
             if(revealAlpha<1)Stack::UiPerformance::Add(Stack::UiPerformance::Counter::LayoutRevealingNodes);
             if (captureOpen) {
-                m_NodeOpenAppearance.Capture(*drawList, firstVertex, openingBounds.min, openingBounds.max);
+                m_NodeOpenAppearance.Capture(*drawList, firstVertex, openingBounds.min, openingBounds.max, firstIndex);
                 m_NodeOpenAppearance.nodeUuid = node->instanceUuid;
             }
         }

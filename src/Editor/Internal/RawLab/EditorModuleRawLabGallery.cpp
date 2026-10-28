@@ -3,6 +3,7 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Bracketing/BracketingGallery.h"
 #include "Editor/Internal/RawLab/RawLabGalleryLayout.h"
+#include "Editor/Internal/RawLab/RawLabGalleryGridSubmission.h"
 #include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -3098,19 +3099,25 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     std::max(
                         0.0f,
                         galleryClip.Max.y - galleryClip.Min.y)));
-            for (int index = 0; index < static_cast<int>(items.size()); ++index) {
-                if (index % columns != 0) {
-                    ImGui::SameLine(0.0f, gap);
+            if (!m_RawLabGalleryScrollToSourceKey.empty()) {
+                for (std::size_t index = 0; index < items.size(); ++index) {
+                    const auto* source = items[index].source;
+                    if (!source || source->relativePathKey != m_RawLabGalleryScrollToSourceKey) continue;
+                    const int row = static_cast<int>(index) / columns;
+                    if (row < visibleRows.first || row >= visibleRows.lastExclusive) {
+                        ImGui::SetCursorScreenPos(ImVec2(contentStart.x,
+                            contentStart.y + row * (tileHeight + ImGui::GetStyle().ItemSpacing.y)));
+                        updateScrollToSource(*source);
+                        ImGui::SetCursorScreenPos(contentStart);
+                    }
+                    break;
                 }
+            }
+            Stack::Editor::RawLabInternal::SubmitGalleryGrid(
+                static_cast<int>(items.size()), columns, ImVec2(tileWidth, tileHeight), gap,
+                visibleRows, [&](int index) {
                 const AnimatedGalleryItem& item = items[static_cast<std::size_t>(index)];
-                const int row = index / columns;
-                if (item.source != nullptr &&
-                    (row < visibleRows.first || row >= visibleRows.lastExclusive)) {
-                    updateScrollToSource(*item.source);
-                }
-                if (row >= visibleRows.first &&
-                    row < visibleRows.lastExclusive &&
-                    item.source != nullptr) {
+                if (item.source != nullptr) {
                     // The widget ID follows the stack, so changing its cover
                     // cannot steal a click or interrupt a double-click.
                     ImGui::PushID(item.animationKey.c_str());
@@ -3129,10 +3136,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         item.stackMembers, true, std::numeric_limits<float>::infinity(),
                         item.hasSavedBracketingResult, item.projectFamily);
                     ImGui::PopID();
-                } else {
-                    ImGui::Dummy(ImVec2(tileWidth, tileHeight));
                 }
-            }
+            });
             ImGui::PopClipRect();
             ImGui::SetCursorScreenPos(
                 ImVec2(contentStart.x, contentStart.y + animatedHeight));

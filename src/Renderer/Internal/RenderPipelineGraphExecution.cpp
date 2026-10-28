@@ -111,6 +111,15 @@ bool TryResolveIntrinsicGraphCanvas(
                 return true;
             }
 
+            // Snapshot preparation already binds immutable source geometry.
+            // Reuse it instead of reopening the RAW header for canvas setup;
+            // callers without a metadata lease retain the file fallback.
+            if (node.rawDevelopment.sourceMetadata &&
+                node.rawDevelopment.sourceMetadata->error.empty() &&
+                acceptRawMetadata(*node.rawDevelopment.sourceMetadata)) {
+                return true;
+            }
+
             const std::string& sourcePath =
                 node.rawDevelopment.recipe.source.sourcePath;
             if (!sourcePath.empty()) {

@@ -25,7 +25,8 @@ public:
         std::string nodeUuid;
         std::vector<Mesh> meshes;
         bool Valid() const { return maximum.x > minimum.x && maximum.y > minimum.y; }
-        void Capture(const ImDrawList& list, int firstVertex, ImVec2 low, ImVec2 high);
+        // firstIndex is the triangle boundary recorded before drawing this node.
+        void Capture(const ImDrawList& list, int firstVertex, ImVec2 low, ImVec2 high, unsigned firstIndex = 0);
     };
     void Begin(Appearance appearance, std::string document, double now) {
         if (active && hasImage && identity == document && appearance.Valid()) {
