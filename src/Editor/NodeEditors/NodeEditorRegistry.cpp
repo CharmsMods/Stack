@@ -54,7 +54,15 @@ struct NodeEditorRegistration {
         };
         add(Kind::Calibration,Tool::Calibration,{400,340},
             [](EditorModule& e,RawWorkspaceEditContext& c){ return e.RenderRawWorkspaceLabCalibrationSurface(c); },
-            [](EditorModule& e,RawWorkspaceEditContext& c){ return e.RenderRawWorkspaceLabCalibrationSettings(c); },nullptr);
+            [](EditorModule& e,RawWorkspaceEditContext& c){ return e.RenderRawWorkspaceLabCalibrationSettings(c); },
+            [](EditorModule&,RawWorkspaceEditContext& c) {
+                for (int i=0;i<3;++i) {
+                    if (!c.IsParameterDriven("hue-"+std::to_string(i))) c.recipe.colorCalibration.primaries[i].hue=0;
+                    if (!c.IsParameterDriven("saturation-"+std::to_string(i))) c.recipe.colorCalibration.primaries[i].saturation=0;
+                }
+                c.State<CalibrationEditorState>().radius=.65;
+                return true;
+            });
         add(Kind::Exposure,Tool::Exposure,{400,80},
             [](EditorModule& e,RawWorkspaceEditContext& c){
                 if (c.IsParameterDriven("ev")) {
@@ -155,6 +163,19 @@ const NodeEditorDefinition& FindNodeEditor(const EditorNodeGraph::Node& node) {
             return editor;
         }();
         return compoundControls;
+    }
+    if (node.kind==EditorNodeGraph::NodeKind::ConstantChannel) {
+        static const NodeEditorDefinition constant=[] {
+            NodeEditorDefinition editor;
+            editor.reset=[](EditorModule&,RawWorkspaceEditContext& context) {
+                if (!context.nodeDraft || context.IsParameterDriven("value")) return false;
+                const bool changed=context.nodeDraft->constantChannelSettings.value!=1.f;
+                context.nodeDraft->constantChannelSettings.value=1.f;
+                return changed;
+            };
+            return editor;
+        }();
+        return constant;
     }
     static const NodeEditorDefinition graphControls;
     return graphControls;

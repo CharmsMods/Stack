@@ -22,7 +22,7 @@ Coverage behavior follows the live input port's mask contract, including named a
 
 Managed Bracketing edits use the source set's existing project actions, rather than a second writable recipe in the node payload. Its Source side panel and floating contribution tool address that same owner. Capture membership remains in the source set; the graph presents one image source. Processing locks that project's document behind its full processing surface while other project owners remain available.
 
-The selected RAW operation's recipe adapter caches one decoded recipe by document, layer, node UUID and authored graph revision. Each drawing context takes its own value copy. Moving the floating tool resolves pointer input before window layout and does not invalidate that recipe. Curve histogram reuse follows the accepted measurement publication and plotted domain, so new measurements still replace the displayed distribution.
+Each RAW operation's recipe adapter caches its decoded recipe in the per-instance editor-state store by document, layer, node UUID and authored graph revision. Each drawing context takes its own value copy. Moving the floating tool resolves pointer input before window layout and does not invalidate that recipe. Curve histogram reuse follows the accepted measurement publication and plotted domain, so new measurements still replace the displayed distribution.
 
 The host prepares changes through `PrepareRawNodeEdit` and commits through `ApplyRawLayerStackEdit`, which also serves graph edits. A changed project, missing node or stale revision rejects a prepared edit. Preserve ownership, layout, connections and the legacy settings slot when changing parameters. Topology changes belong in explicit project commands.
 
@@ -32,7 +32,7 @@ Do not overwrite a graph-driven value with the value shown in a manual control. 
 
 Graph node notes are authored `Node::notes`, separate from processing parameters. Holding F shares the connection-information reveal and replaces node interiors with notes while retaining native bounds and sockets. `NodeNotesView` owns the transient draft, logical text layout and scroll cache; it commits once through `EditorModule::SetGraphNodeNotes` using document, graph and node-instance identity. Clicking a note retains editing after F is released; Ctrl+Enter or clicking outside saves, and Escape cancels. Text keeps a fixed logical size, wraps inside the node and scrolls when necessary. Do not derive explanatory text or rebuild wrap geometry on every frame. Compound templates supply editable defaults at creation, and decompile/repack retains both outer and child annotations, including deliberately empty text.
 
-Use `context.State<T>()` for per-instance hover, selection, view and interaction state while a registered editor is drawing. The store is owned by the editor host and keyed by the stable target. It does not hold authored values or undo history. Do not retain the drawing context or its borrowed pointers in asynchronous work.
+Use `context.State<T>()` for per-instance hover, selection, view and interaction state while a registered editor is drawing. The store is owned by the editor host and keyed by the stable target. It does not hold authored values or undo history. State types can implement `EndInteraction()`; the host dispatches that lifecycle on selection/host changes without clearing cached presentation or authored values. Do not retain the drawing context or its borrowed pointers in asynchronous work.
 
 Graph double-click opening uses `NodeOpenTransition`: capture the clicked node's geometry once, retaining small immutable copies of textured node details, morph into the live image, travel to the View camera, then reveal the surround and floating controls. Escape resolves the currently edited node by document/layer/node identity and captures its current geometry against the destination Graph canvas. Start from the current displayed photo even when View was entered directly from Gallery and no opening transition exists. Graph opens with its node library closed. Do not reuse the opening node's old screen rectangle as the return destination: tools, node layout and chrome may have changed. Retarget interrupted motion from its last displayed bounds and image/node/surround/control opacities, retaining the outgoing appearance until it fades. Follow chrome translation without recapturing geometry each frame. Fading controls and tool selection cannot change the editing target during motion; Escape remains available. Ineligible top chrome finishes its exit with input disabled rather than resetting its visible extent at the Graph handoff. The main photo remains borrowed from the current viewport owner. Node-detail snapshots are capped at 512 pixels per edge, shared within the captured appearance, and released when motion ends; do not copy or read back textures per animation frame. Display bounds must not replace the saved camera or drive per-frame processing demand. Update the transition once per frame before shell layout, suppress image gestures/probes during motion, and skip competing image-update fades. Reduced motion or an unavailable target uses an immediate return; document replacement and leaving View clear the retained state.
 
@@ -45,6 +45,52 @@ Graph plot presentation lives in [GraphUI/GraphPlotStyle](../../src/Editor/Graph
 Local EV's overall curve and Tone's component/direct-luminance curves offer optional tonal sliders through `RawLab/CurveTonalSliders`. Their points remain in the node's existing authored collection, with ownership and a retained insertion baseline in `Raw/Curves/TonalCurvePoints`. Owned anchors move only vertically; zero removes the anchor or restores an ordinary point it temporarily replaced. Preserve that metadata through conversion, amount references, save/history and graph gestures. Slider visibility is node-local presentation state. Curve geometry, normalization and histogram display preparation are cached by their actual inputs; showing the sliders does not request image analysis.
 
 Tone's direct editor and Local EV's primary overall curve use `RawLab/CurveCanvas`. Older Local EV area/gradient surfaces use `DrawBezierCurveInteraction` in `RawLabCurveEditor`; Film Grain reuses that interaction through `DrawFramelessResponseBezier`. Grain's points live in its authored layer parameters, with a flat 1x multiplier preserving the existing three-zone response. Its point editor and reader opt into uncapped collections; existing RAW callers retain their limits. `BuildRawBezierSegments` prepares a collection's geometry once for drawing or processing. Local EV's normalization retains the total authored curve and derives a residual plus uniform offset through `Raw/Curves/LocalEvCurveNormalization`; processing combines them before the existing strength, protection and masks. Node-specific selection, gestures and the grain reference preview belong to `context.State<T>()`. Some older area/RGB curve and Color Warp interaction state still belongs to the RAW view structure. Selection clears incompatible gestures and analysis caches. Move that state into the node's own module when changing that design, rather than adding more shared tool-specific fields.
+
+## View Controls panel
+
+View's Controls tab is an additional host for the registered primary editor, not
+another parameter model or a list of default tool enums. The catalog uses exact
+resolved definition identities and stable document/layer/node targets across all
+owned graphs. Repeated definitions share one section with numbered instances;
+selection of an instance changes presentation, never the graph's membership.
+The catalog changes on owner/structure revisions, independently of drawing.
+
+`RawWorkspaceEditContext::presentation` distinguishes Panel from Floating.
+Target-specific context preparation and `DrawNodeEditorPrimary` reuse the same
+registry callbacks and commit path. Drawing an unselected section must not change
+project selection. The host scopes legacy primary interaction state per instance;
+GPU resources and asynchronous services retain their existing owners. Generic
+graph controls draw a private node draft and report changes to that draft rather
+than marking the live graph edited from the drawing callback.
+
+Controls uses a thin native scrollbar over the panel seam while scrolling; it
+fades out when idle and never reserves a layout gutter. Its primary surfaces retain
+their designs at the available width; only the outer body scrolls. Hidden measured
+sections reserve their cached height without submitting controls or analysis.
+The panel header exposes Reset through its three-dot menu. The definition groups
+supply its labels; duplicate instances offer Reset all and individual layer/node
+entries. Reset invokes the registered callback and existing draft/history path.
+Serialized payload and inspection-only metadata do not create control sections.
+Calibration stays fitted at panel width and lets wheel input scroll the panel.
+The panel host suppresses hover tooltip windows, including help emitted by shared
+primary designs; floating help and click-opened menus retain their own behavior.
+Primary drawing uses a stable content budget independent of its measured outer
+slot. Preserve section measurements through catalog refreshes; image revisions
+must not feed a height feedback loop. Only the outer body scrolls, and captured
+controls remain submitted through release outside its clipping bounds. Hold the
+last accepted input-analysis display mapping during the active gesture, without
+accepting stale asynchronous results.
+Floating-only glass and movement stay with the floating host. While Controls is
+visible, that host releases pointer ownership and submits no floating window.
+Leaving Controls restores the last-used instance with a finite 180 ms fade
+(immediate for reduced motion). Panel/tab preferences belong to app state;
+numbered-instance selections belong to their document's transient editor state.
+
+Visible editors request their node's actual incoming analysis through the existing
+independent analysis lane. Requests are serial, identity/revision checked and
+latched on unchanged failures; they do not dirty the main image. Accepted packets
+are immutable per-instance presentation data. Hidden sections do not queue new
+requests, and removed catalog instances release retained analysis packets.
 
 ## Reuse analysis and rendering services
 

@@ -532,6 +532,42 @@ bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
         ContentIdentity(snapshot) == state.acceptedContentIdentity) {
         snapshot.rawRenderPurpose = RawRenderPurpose::AnalysisScopes;
         snapshot.rawWorkspace.analysisRequested = true;
+        if (m_NodeEditorPanel.visible && m_NodeEditorPanel.analysisTarget) {
+            const auto target=*m_NodeEditorPanel.analysisTarget;
+            const auto identity=Stack::Editor::NodeInputAnalysisIdentity(target,
+                m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+            m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target).attemptedFingerprint=identity;
+            bool configured=false;
+            const auto* authored=ResolveNodeEditorTarget(target);
+            if (authored) {
+                const auto compiled=std::find_if(snapshot.graph.nodes.begin(),snapshot.graph.nodes.end(),[&](const auto& node) {
+                    return node.authoredGraphId==target.layerId && node.authoredNodeUuid==target.nodeUuid;
+                });
+                if (compiled!=snapshot.graph.nodes.end()) {
+                    const auto input=std::find_if(snapshot.graph.links.begin(),snapshot.graph.links.end(),[&](const auto& link) {
+                        return link.toNodeId==compiled->nodeId && link.toSocketId=="imageIn";
+                    });
+                    if (input!=snapshot.graph.links.end()) {
+                        configured=true;
+                        snapshot.graph.rawLayerScopeNodeId=input->fromNodeId;
+                        snapshot.graph.rawLayerScopeSocketId=input->fromSocketId;
+                        snapshot.graph.rawLayerScopeOperationId=compiled->nodeId;
+                        snapshot.graph.rawLayerScopeDescriptor=input->semanticDescriptor;
+                        snapshot.rawWorkspace.graphScopeStage=Stack::Editor::FindNodeEditor(*authored).inputAnalysis;
+                        snapshot.rawWorkspace.graphScopeOwnerKey=target.Key();
+                        snapshot.rawWorkspace.graphScopeInputFingerprint=Stack::Editor::NodeInputAnalysisIdentity(target,
+                            m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+                        m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target).attemptedFingerprint=
+                            snapshot.rawWorkspace.graphScopeInputFingerprint;
+                    }
+                }
+            }
+            if (!configured) {
+                m_NodeEditorPanel.analysisTarget.reset();
+                m_RawWorkspaceAnalysisPending=m_RawWorkspaceAnalysisRequested=false;
+                return false;
+            }
+        }
         snapshot.telemetry.interactionActive = false;
         snapshot.rawWorkspace.viewport = {};
         snapshot.viewportViewId = 1;

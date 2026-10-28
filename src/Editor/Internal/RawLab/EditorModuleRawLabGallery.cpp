@@ -46,6 +46,36 @@ using Stack::Editor::RawLabInternal::LabTooltip;
 
 namespace {
 
+void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
+    std::size_t count, float opacity, bool completedBurst) {
+    if (count > 1u) {
+        const std::string countText =
+            std::to_string(count);
+        const ImVec2 countSize = ImGui::CalcTextSize(countText.c_str());
+        constexpr float kBadgeInset = 6.0f;
+        ImVec4 countColor =
+            ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        countColor.w *= std::clamp(
+            opacity,
+            0.0f,
+            1.0f);
+        drawList->AddText(
+            ImVec2(
+                area.Max.x - kBadgeInset - countSize.x,
+                area.Min.y + kBadgeInset),
+            ImGui::GetColorU32(countColor),
+            countText.c_str());
+    }
+    if (completedBurst) {
+        const ImVec2 center(area.GetCenter().x, area.Min.y + 12.0f);
+        const ImU32 tint = ImGui::GetColorU32(ImGuiCol_Text);
+        drawList->AddLine(ImVec2(center.x - 4.0f, center.y),
+            ImVec2(center.x - 1.0f, center.y + 3.0f), tint, 1.8f);
+        drawList->AddLine(ImVec2(center.x - 1.0f, center.y + 3.0f),
+            ImVec2(center.x + 4.5f, center.y - 3.5f), tint, 1.8f);
+    }
+}
+
 constexpr int kRawLabDetachedOpenGraceFrames = 120;
 constexpr float kRawLabFilmstripScrollWheelPixels = 90.0f;
 constexpr float kRawLabFilmstripScrollResponseSeconds = 0.11f;
@@ -639,7 +669,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                              float previewHoverBottomY =
                                  std::numeric_limits<float>::infinity(),
                              bool completedBurst = false,
-                             const std::vector<std::size_t>* projectFamily = nullptr) {
+                             const std::vector<std::size_t>* projectFamily = nullptr,
+                             ImRect* deferredBadgeArea = nullptr) {
         if (projectPath.empty() &&
             !source.relativePathKey.empty() &&
             source.relativePathKey.rfind("project-overlay:", 0) != 0) {
@@ -884,6 +915,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             color.w *= std::clamp(alpha, 0.0f, 1.0f);
             return color;
         };
+        ImRect badgeArea = imageArea;
         int textureWidth = 0;
         int textureHeight = 0;
         const auto drawImageCard = [&](
@@ -921,6 +953,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     cardArea.Min.x + (cardArea.GetWidth() - fitted.x) * 0.5f,
                     cardArea.Min.y + (cardArea.GetHeight() - fitted.y) * 0.5f);
                 const ImVec2 imageMaximum(imageMinimum.x + fitted.x, imageMinimum.y + fitted.y);
+                if (!drawCardFrame) badgeArea = ImRect(imageMinimum, imageMaximum);
                 if (!RecordRawWorkspaceGalleryThumbnail(cardSource.relativePathKey,
                         imageMinimum, imageMaximum, opacity)) {
                     drawList->AddImage(
@@ -1042,6 +1075,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     imageArea.Min.x + (imageArea.GetWidth() - fitted.x) * 0.5f,
                     imageArea.Min.y + (imageArea.GetHeight() - fitted.y) * 0.5f);
                 const ImVec2 imageMaximum(imageMinimum.x + fitted.x, imageMinimum.y + fitted.y);
+                badgeArea = ImRect(imageMinimum, imageMaximum);
                 if (!RecordRawWorkspaceGalleryThumbnail(source.relativePathKey,
                         imageMinimum, imageMaximum)) {
                     drawList->AddImage(
@@ -1214,33 +1248,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 ImGui::GetColorU32(targetColor),
                 5.0f);
         }
-        if (similarityStackCount > 1u) {
-            const std::string countText =
-                std::to_string(similarityStackCount);
-            const ImVec2 countSize = ImGui::CalcTextSize(countText.c_str());
-            constexpr float kBadgeInset = 6.0f;
-            ImVec4 countColor =
-                ImGui::GetStyleColorVec4(ImGuiCol_Text);
-            countColor.w *= std::clamp(
-                similarityStackCountOpacity,
-                0.0f,
-                1.0f);
-            drawList->AddText(
-                ImVec2(
-                    imageArea.Max.x - kBadgeInset - countSize.x,
-                    imageArea.Min.y + kBadgeInset),
-                ImGui::GetColorU32(countColor),
-                countText.c_str());
-        }
-        if (completedBurst) {
-            const ImVec2 center(imageArea.Min.x + 12.0f, imageArea.Min.y + 12.0f);
-            drawList->AddCircleFilled(center, 8.0f, ImGui::GetColorU32(ImVec4(0, 0, 0, 0.71f)), 12);
-            const ImU32 tint = ImGui::GetColorU32(ImGuiCol_Text);
-            drawList->AddLine(ImVec2(center.x - 4.0f, center.y),
-                ImVec2(center.x - 1.0f, center.y + 3.0f), tint, 1.8f);
-            drawList->AddLine(ImVec2(center.x - 1.0f, center.y + 3.0f),
-                ImVec2(center.x + 4.5f, center.y - 3.5f), tint, 1.8f);
-        }
+        if (deferredBadgeArea) *deferredBadgeArea = tileMotion.Map(badgeArea);
+        else DrawGalleryStackBadges(drawList, badgeArea, similarityStackCount,
+            similarityStackCountOpacity, completedBurst);
         const std::string versionsLabel = stackedProjects ? std::to_string(projectCount) + " versions" : std::string();
         const ImVec2 versionsSize = stackedProjects ? ImGui::CalcTextSize(versionsLabel.c_str()) : ImVec2();
         const ImRect versionsBadge(
@@ -1280,6 +1290,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 doubleClicked && !selectionModifier) {
                 selectSource(source.relativePathKey, false, false, false);
                 OpenRawWorkspaceGalleryStackInFilmstrip(source.relativePathKey);
+            } else if (compactFilmstrip && m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
+                filmstripTargetMembers && filmstripTargetMembers->size() > 1u &&
+                similarityStackCount > 1u &&
+                filmstripDrawerExpansion <= 0.001f &&
+                doubleClicked && !selectionModifier) {
+                selectSource(source.relativePathKey, false, false, false);
+                m_RawWorkspaceLabFilmstripDrawerKeyboardToggleRequested = true;
             } else if(IsBracketingToolActive() && !m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
                 filmstripTargetMembers && (!compactFilmstrip || filmstripDrawerExpansion <= 0.001f) &&
                 !doubleClicked) {
@@ -2041,24 +2058,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             if (m_PermanentGalleryWorkspace) {
                 for (std::size_t index = 0; index < filmstripStacks.size(); ++index) {
                     const auto& stack = filmstripStacks[index];
-                    const auto session = stack.sourceKeys.empty()
-                        ? m_RawWorkspaceLabFilmstripDrawerSessionOrders.end()
-                        : m_RawWorkspaceLabFilmstripDrawerSessionOrders.find(stack.sourceKeys.front());
-                    const auto order = session != m_RawWorkspaceLabFilmstripDrawerSessionOrders.end() &&
-                        Stack::RawWorkspace::IsRawGalleryFilmstripExpansionOrderCurrent(stack.sourceKeys, session->second)
-                        ? session->second : Stack::RawWorkspace::BuildRawGalleryExpansionOrder(stack.sourceKeys,
-                            Stack::RawWorkspace::ResolveRawGalleryStackCover(stack.sourceKeys,
-                                m_RawWorkspace.selectedSourceKey));
+                    const auto& order = stack.sourceKeys;
                     const ImVec2 base(filmstripStart.x + static_cast<float>(index) * (tileWidth + gap),
                         filmstripStart.y);
                     const auto slots = Stack::RawWorkspace::ComputeRawGalleryFilmstripStackLayout(
                         order.size(), tileHeight, gap, base.y, filmstripClip.Min.y,
                         expandedFilmstripDrawer ? filmstripDrawerExpansion : 0.0f);
-                    std::size_t frontDepth = 0;
-                    if (!m_RawWorkspaceLabFilmstripDrawerState.open) {
-                        const auto selected = std::find(order.begin(), order.end(), m_RawWorkspace.selectedSourceKey);
-                        if (selected != order.end()) frontDepth = static_cast<std::size_t>(selected - order.begin());
-                    }
+                    constexpr std::size_t frontDepth = 0;
                     const float frontTop = base.y - slots.cardStep * static_cast<float>(frontDepth);
                     for (std::size_t depth = 0; depth < order.size(); ++depth) {
                         const auto view = viewsBySource.find(order[depth]);
@@ -2161,42 +2167,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     }
                 }
                 {
-                    std::vector<std::string> orderedMembers;
-                    if (expandedFilmstripDrawer) {
-                        const auto sessionOrder =
-                            m_RawWorkspaceLabFilmstripDrawerSessionOrders.find(
-                                stackKey);
-                        if (sessionOrder !=
-                                m_RawWorkspaceLabFilmstripDrawerSessionOrders.end() &&
-                            Stack::RawWorkspace::
-                                IsRawGalleryFilmstripExpansionOrderCurrent(
-                                    stack.sourceKeys,
-                                    sessionOrder->second)) {
-                            orderedMembers = sessionOrder->second;
-                        } else {
-                            const std::string cover =
-                                Stack::RawWorkspace::ResolveRawGalleryStackCover(
-                                    stack.sourceKeys,
-                                    m_RawWorkspace.selectedSourceKey);
-                            orderedMembers =
-                                Stack::RawWorkspace::BuildRawGalleryExpansionOrder(
-                                    stack.sourceKeys,
-                                    cover);
-                            if (filmstripDrawerExpansion > 0.001f) {
-                                m_RawWorkspaceLabFilmstripDrawerSessionOrders[
-                                    stackKey] = orderedMembers;
-                            }
-                        }
-                    } else {
-                        const std::string cover =
-                            Stack::RawWorkspace::ResolveRawGalleryStackCover(
-                                stack.sourceKeys,
-                                m_RawWorkspace.selectedSourceKey);
-                        orderedMembers =
-                            Stack::RawWorkspace::BuildRawGalleryExpansionOrder(
-                                stack.sourceKeys,
-                                cover);
-                    }
+                    const auto& orderedMembers = stack.sourceKeys;
                     if (!orderedMembers.empty()) {
                         const std::string& frontSourceKey =
                             orderedMembers.front();
@@ -2229,7 +2200,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                                 &stack.sourceKeys,
                                 !expandedFilmstripDrawer ||
                                     filmstripDrawerExpansion <= 0.001f ||
-                                    orderedMembers.size() == 1u);
+                                    orderedMembers.size() == 1u,
+                                std::numeric_limits<float>::infinity(),
+                                stack.hasSavedBracketingResult && filmstripDrawerExpansion <= 0.001f);
                         }
                     }
                     if (expandedFilmstripDrawer &&
@@ -2238,7 +2211,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         visibleStacks.push_back({
                             stackIndex,
                             baseMinimum,
-                            std::move(orderedMembers)
+                            orderedMembers
                         });
                     }
                 }
@@ -2358,17 +2331,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             stackWheelApplied = true;
                         }
                     }
-                    std::size_t closingFrontDepth = orderedMembers.size();
-                    if (!m_RawWorkspaceLabFilmstripDrawerState.open) {
-                        const auto selected = std::find(
-                            orderedMembers.begin(),
-                            orderedMembers.end(),
-                            m_RawWorkspace.selectedSourceKey);
-                        if (selected != orderedMembers.end()) {
-                            closingFrontDepth = static_cast<std::size_t>(
-                                std::distance(orderedMembers.begin(), selected));
-                        }
-                    }
+                    const std::size_t closingFrontDepth =
+                        m_RawWorkspaceLabFilmstripDrawerState.open ? orderedMembers.size() : 0u;
+                    ImRect topBadgeArea;
                     const auto drawStackMember = [&](std::size_t depth,
                                                       bool visualFront) {
                         const std::string& sourceKey = orderedMembers[depth];
@@ -2416,15 +2381,14 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             resultCover?resultStack.resultProjectPath:std::filesystem::path(),
                             source,
                             depth > 0u,
-                            visualFront ? orderedMembers.size() : 1u,
-                            visualFront
-                                ? 1.0f - filmstripDrawerExpansion
-                                : 0.0f,
+                            1u,
+                            1.0f,
                             &filmstripStacks[visibleStack.stackIndex]
                                  .sourceKeys,
                             true,
                             exposedBottom,
-                            visualFront && resultStack.hasSavedBracketingResult);
+                            false, nullptr,
+                            depth + 1u == orderedMembers.size() ? &topBadgeArea : nullptr);
                     };
                     for (std::size_t reverseIndex = orderedMembers.size();
                          reverseIndex > 0u;
@@ -2438,11 +2402,14 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         }
                     }
                     if (closingFrontDepth < orderedMembers.size()) {
-                        // Let the newly selected member travel onto the cover
-                        // during retraction. At zero spacing it is already the
-                        // collapsed cover, so the final session-order handoff
-                        // cannot produce an image swap.
+                        // Keep the first image in front as the stack retracts.
                         drawStackMember(closingFrontDepth, true);
+                    }
+                    // Draw once above every card so overlap never slices a badge.
+                    if (topBadgeArea.GetWidth() > 0.0f) {
+                        DrawGalleryStackBadges(ImGui::GetWindowDrawList(), topBadgeArea,
+                            orderedMembers.size(), 1.0f,
+                            filmstripStacks[visibleStack.stackIndex].hasSavedBracketingResult);
                     }
                 }
                 ImGui::End();
@@ -3226,7 +3193,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                  index < section.firstStack + section.stackCount; ++index) {
                 const auto* stack = &stacks[index];
                 const auto cover = m_RawWorkspaceGalleryGridStacks.Cover(
-                    stack->sourceKeys, m_RawWorkspace.selectedSourceKey);
+                    stack->sourceKeys, {});
                 const auto* source = gridStackSource(cover);
                 const auto view = m_RawWorkspaceLabGalleryViewsBySource.find(cover);
                 if (!source || view == m_RawWorkspaceLabGalleryViewsBySource.end()) continue;
@@ -4073,7 +4040,6 @@ bool EditorModule::OpenRawWorkspaceGalleryWorkspace() {
     m_RawWorkspaceLabUi.galleryHost = RawGalleryHost::Filmstrip;
     m_RawWorkspaceLabUi.lastGalleryHost = RawGalleryHost::Filmstrip;
     m_RawWorkspaceGalleryPreviewHovered = false;
-    m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = true;
     return true;
 }
 
@@ -4100,7 +4066,6 @@ void EditorModule::SetPermanentGalleryWorkspace(bool permanent) {
     m_RawWorkspaceLabUi.galleryWorkspaceOpen = permanent;
     m_RawWorkspaceLabUi.galleryHost = permanent
         ? RawGalleryHost::Filmstrip : RawGalleryHost::Closed;
-    m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = permanent;
 }
 
 bool EditorModule::IsRawWorkspaceInfoAvailable() const {

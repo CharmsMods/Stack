@@ -36,6 +36,11 @@ using RawCurveGraphUiState = Stack::EditorModuleTypes::RawCurveGraphUiState;
 
 bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& context, RawLabControlSection section) {
     bool changed = false;
+    const RawDevelopmentGraphScopeReadback emptyScope;
+    const auto& inputScope=context.inputAnalysis ? *context.inputAnalysis :
+        context.presentation==Stack::Editor::NodeEditorPresentation::Panel ? emptyScope : m_RawWorkspaceGraphScopeReadback;
+    const auto inputRevision=context.inputAnalysis ? context.inputAnalysisRevision :
+        context.presentation==Stack::Editor::NodeEditorPresentation::Panel ? 0 : m_RawWorkspaceGraphScopeReadbackRevision;
     auto& graph = m_RawWorkspaceLabUi.zonesCurveGraph;
     auto& history = m_RawWorkspaceLabUi.exposureHistory;
     const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),context.rawAdjustmentLayerId);
@@ -90,8 +95,8 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             static_cast<std::size_t>(m_RawWorkspaceLabUi.selectedEvGradient)].curve;
         if (ShowsRawLabGraph(section)) {
             const auto& histogram = m_RawFloatingSurface.histogram.Zones(
-                m_RawWorkspaceGraphScopeReadback,
-                m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0, localCurve.minEv,
+                inputScope,
+                inputScope.valid ? inputRevision : 0, localCurve.minEv,
                 localCurve.maxEv, std::max(0.000001f, localCurve.middleGrey));
             ImVec2 graphSize = ImGui::GetContentRegionAvail();
             graphSize.y = std::max(12.f,std::min(graphSize.y,graphSize.x*.75f));
@@ -155,8 +160,8 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             const float maximumEv = context.recipe.localRange.maxEv;
             const float middleGrey = std::max(0.000001f, context.recipe.localRange.middleGrey);
             const auto& histogram = m_RawFloatingSurface.histogram.Zones(
-                m_RawWorkspaceGraphScopeReadback,
-                m_RawWorkspaceGraphScopeReadback.valid ? m_RawWorkspaceGraphScopeReadbackRevision : 0,
+                inputScope,
+                inputScope.valid ? inputRevision : 0,
                 minimumEv,
                 maximumEv,
                 middleGrey);
@@ -182,7 +187,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
                 curveChanged=DrawCurveCanvas("LocalEV",points,localRange.curveAmount,state,false,
                     histogram,graphSize,12,canAdjustExposure?&exposureEv:nullptr,{},false,
                     &normalization,normalizationDriven,normalizationAvailable,
-                    &tonalDomain,m_RawWorkspaceGraphScopeReadbackRevision);
+                    &tonalDomain,inputRevision);
                 if(!normalizationDriven)localRange.curveNormalization=normalization;
                 if(curveChanged && !Stack::RawRecipe::SameCurvePoints(points,
                     Stack::RawRecipe::RawLocalRangeBezierPoints(localRange))) {

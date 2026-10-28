@@ -74,9 +74,17 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
                     source.absolutePath.lexically_normal() == std::filesystem::path(asset->originalSourcePath).lexically_normal();
             });
             if (match == input.frames.end()) continue;
-            memberships.push_back({snapshot.projectId, snapshot.projectName, path,
-                input.set->sourceSetId, input.set->name, true, entry->coverThumbnailCachePath, input.completed,
-                input.selectedFrameCount});
+            RawWorkspace::SourceSetProjectMembership membership;
+            membership.projectId = snapshot.projectId;
+            membership.projectName = snapshot.projectName;
+            membership.projectPath = path;
+            membership.sourceSetId = input.set->sourceSetId;
+            membership.sourceSetName = input.set->name;
+            membership.projectIsMultiFrame = true;
+            membership.projectCoverThumbnailCachePath = entry->coverThumbnailCachePath;
+            membership.hasSavedBracketingResult = input.completed;
+            membership.sourceSetFrameCount = input.selectedFrameCount;
+            memberships.push_back(std::move(membership));
             member = true;
             if (entry->referenceSourceKey.empty() || match->first->frameId == input.set->referenceFrameId) {
                 entry->referenceSourceKey = source.relativePathKey;

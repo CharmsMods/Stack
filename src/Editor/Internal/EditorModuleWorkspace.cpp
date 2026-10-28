@@ -25,6 +25,7 @@ bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
     m_RawWorkspaceLabUi.previewSpacePanning = false;
     m_RawWorkspaceLabUi.previewPanning = false;
     m_Project->workspace.mode = mode;
+    UpdateNodeEditorPanelVisibility();
     m_RawWorkspaceRootTabActive = mode == WorkspaceMode::View;
     m_RawWorkspaceLockedByEditorProject = false;
     // Switching presentation must not switch the authored graph being edited.
@@ -46,10 +47,11 @@ void EditorModule::WorkspaceLoaded(WorkspaceMode mode) {
 }
 
 bool EditorModule::WorkspacePanelOpen() const {
-    return IsViewMode() ? m_Project->workspace.viewPanelOpen : m_Project->workspace.graphPanelOpen;
+    return IsViewMode() ? m_ViewSectionOpen : m_Project->workspace.graphPanelOpen;
 }
 void EditorModule::SetWorkspacePanelOpen(bool open) {
-    (IsViewMode() ? m_Project->workspace.viewPanelOpen : m_Project->workspace.graphPanelOpen) = open;
+    if (IsViewMode()) SetViewSectionPanelOpen(open);
+    else m_Project->workspace.graphPanelOpen=open;
 }
 
 void EditorModule::RenderViewWorkspace() {

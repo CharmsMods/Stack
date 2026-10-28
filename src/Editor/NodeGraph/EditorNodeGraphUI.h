@@ -37,6 +37,10 @@ public:
     Stack::Editor::NodeOpenTransition::Appearance CaptureNodeAppearance(
         EditorModule* editor, int nodeId, ImVec2 canvasMinimum, ImVec2 canvasMaximum, bool preserveViewport = false);
     void RenderOperationControls(EditorModule* editor, int nodeId);
+    void RenderOperationDraftControls(EditorModule* editor, EditorNodeGraph::Graph& graph,
+        EditorNodeGraph::Node& draft);
+    void RenderOperationControlsBody(EditorModule* editor, EditorNodeGraph::Graph& graph,
+        EditorNodeGraph::Node& node, bool draft);
     bool RenderRawScalarControl(const char* owner, const char* label, float* value,
         float minimum, float maximum, const char* format);
     Stack::EditorGraphCapture::GraphViewportSnapshot GetGraphCaptureViewportSnapshot() const;

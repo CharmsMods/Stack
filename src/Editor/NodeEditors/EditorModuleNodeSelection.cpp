@@ -9,6 +9,9 @@
 using namespace Stack::Project;
 
 const EditorNodeGraph::Node* EditorModule::SelectedEditingNode() const {
+    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeTarget)
+        return m_NodeEditorDrawingContext->nodeDraft ? &*m_NodeEditorDrawingContext->nodeDraft :
+            ResolveNodeEditorTarget(*m_NodeEditorDrawingContext->nodeTarget);
     if (m_Project->nodeEditor && m_Project->nodeEditor->layerId == kProjectGraphId) {
         if (m_Project->nodeEditor->documentId != GetProjectDocumentId()) return nullptr;
         for (const auto& node : m_Project->graph.GetNodes())
@@ -45,6 +48,8 @@ RawDevelopmentGraphScopeStage EditorModule::ActiveNodeEditorAnalysis() const {
 }
 
 std::string EditorModule::RawNodeEditorStateKey() const {
+    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeTarget)
+        return m_NodeEditorDrawingContext->nodeTarget->Key();
     if (m_Project->nodeEditor) return m_Project->nodeEditor->Key();
     const auto* node=SelectedEditingNode();
     const auto* layer=FindRawAdjustmentLayer(m_Project->rawLayers.State(),m_SelectedRawAdjustmentLayer);
@@ -59,19 +64,7 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
     const bool changed=!m_Project->nodeEditor || *m_Project->nodeEditor!=target;
     if(changed) {
         m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
-        if(m_Project->nodeEditor) {
-            auto& curve=m_NodeEditorState.Get<Stack::Editor::RawLabInternal::CurveCanvasState>(*m_Project->nodeEditor);
-            if(curve.activeTonalSlider && ImGui::GetActiveID()==curve.activeTonalSlider) ImGui::ClearActiveID();
-            curve.gesture=curve.exposureGesture=curve.amountGesture=curve.normalizationGesture=curve.tonalSliderGesture=false;
-            curve.activeTonalSlider=0;curve.probe.reset();
-            auto& tone=m_NodeEditorState.Get<Stack::Editor::ToneCurveEditorState>(*m_Project->nodeEditor);
-            for (auto& canvas:tone.canvas) {
-                if(canvas.activeTonalSlider && ImGui::GetActiveID()==canvas.activeTonalSlider) ImGui::ClearActiveID();
-                canvas.gesture=canvas.exposureGesture=canvas.amountGesture=canvas.normalizationGesture=canvas.tonalSliderGesture=false;
-                canvas.activeTonalSlider=0;canvas.probe.reset();
-            }
-            if (tone.advanced) {tone.advanced->ClearViewportProbe();tone.advanced->EndViewportTargetDrag();}
-        }
+        if(m_Project->nodeEditor) m_NodeEditorState.EndInteraction(*m_Project->nodeEditor);
         m_Project->rawLayers.EndGesture();
         if(m_RawWorkspaceAdaptiveGestureActive) NoteRawWorkspaceRecipePreviewEdit(false);
         m_RawWorkspaceLabUi.calibrationEditor.dragging=-1;

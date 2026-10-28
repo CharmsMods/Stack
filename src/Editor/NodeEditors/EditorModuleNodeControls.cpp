@@ -2,11 +2,41 @@
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/Timeline/TimelineParameterEdits.h"
 #include "imgui_internal.h"
+#include "Editor/LayerRegistry.h"
 
 bool EditorModule::RenderLayerControlsWithDirtyTracking(
     EditorNodeGraph::Node& node,
     const std::function<void(LayerBase&)>& renderControls,
     const std::function<void(std::function<void()>)>& deferCommand) {
+    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeTarget &&
+        m_NodeEditorDrawingContext->nodeDraft && m_NodeEditorDrawingContext->nodeDraft->instanceUuid==node.instanceUuid) {
+        auto& context=*m_NodeEditorDrawingContext;
+        struct Adapter { std::shared_ptr<LayerBase> layer; std::uint64_t revision=~std::uint64_t{0}; };
+        auto& adapter=context.State<Adapter>();
+        if (!adapter.layer) {
+            adapter.layer=LayerRegistry::CreateLayer(node.layerType);
+            if (adapter.layer) adapter.layer->InitializeGL();
+        }
+        if (!adapter.layer) {ImGui::TextDisabled("This operation is unavailable.");return false;}
+        if (adapter.revision!=context.nodeRevision) {
+            Stack::GraphModel::PrepareLayerParameterDraft(*adapter.layer,context.nodeSettings,node.title);
+            adapter.revision=context.nodeRevision;
+        }
+        auto& gui=*ImGui::GetCurrentContext();
+        const bool input=gui.ActiveId || gui.ActiveIdPreviousFrame || gui.NavActivateId || gui.NavMoveSubmitted ||
+            ImGui::GetIO().MouseWheel!=0.f || ImGui::GetIO().MouseWheelH!=0.f ||
+            ImGui::IsMouseClicked(0) || ImGui::IsMouseReleased(0);
+        // Legacy controls cannot manually replace graph-driven payload fields.
+        ImGui::BeginDisabled(!context.drivenParameters.empty());
+        renderControls(*adapter.layer);
+        ImGui::EndDisabled();
+        if (!input) return false;
+        const auto after=Stack::GraphModel::CaptureLayerParameters(*adapter.layer);
+        if (after==context.nodeSettings || !context.drivenParameters.empty()) return false;
+        context.nodeSettings=after;
+        context.draftChanged=true;
+        return true;
+    }
     if (node.kind != EditorNodeGraph::NodeKind::Layer ||
         node.layerIndex < 0 ||
         node.layerIndex >= static_cast<int>(GetLayers().size()) ||

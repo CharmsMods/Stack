@@ -11,8 +11,17 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeEditors/NodeEditorState.h"
 
+struct RawDevelopmentGraphScopeReadback;
 namespace Stack::Editor {
+enum class NodeEditorPresentation { Floating, Panel };
+struct NodeEditorDrawResult {
+    bool changed = false;
+    bool interactionActive = false;
+    bool activated = false;
+};
 struct RawWorkspaceEditContext {
+    NodeEditorPresentation presentation = NodeEditorPresentation::Floating;
+    bool draftChanged = false;
     Stack::Editor::RawLabInternal::RawEditabilityTrace editabilityTrace;
     std::string rawAdjustmentLayerId;
     std::string rawOperationUuid;
@@ -34,6 +43,8 @@ struct RawWorkspaceEditContext {
     NodeMath::ValueDescriptor inputDescriptor;
     RawLabInternal::RawLabGraphHistogram inputHistogram;
     std::uint64_t inputHistogramRevision = 0;
+    std::shared_ptr<const RawDevelopmentGraphScopeReadback> inputAnalysis;
+    std::uint64_t inputAnalysisRevision = 0;
     const GraphModel::Endpoint* Input(const std::string& port) const {
         const auto found=inputs.find(port);
         return found==inputs.end()?nullptr:&found->second;

@@ -103,6 +103,14 @@ void CheckNodeEditorTransactions() {
     const NodeEditTarget other{"project-a",kRawBackgroundId,firstId};
     Check(views.Get<State>(other).selected==0,"Repeated node editors share gesture state.");
     Check(views.Get<State>(target).selected==7,"Returning to a node lost its editor state.");
+    struct GestureState { bool dragging=true;int selected=3;void EndInteraction(){dragging=false;} };
+    views.Get<GestureState>(target);
+    views.Get<GestureState>(other);
+    views.EndInteraction(target);
+    Check(!views.Get<GestureState>(target).dragging && views.Get<GestureState>(target).selected==3,
+        "Ending a hidden editor gesture lost presentation selection or retained its drag.");
+    Check(views.Get<GestureState>(other).dragging,"Ending one editor's interaction affected another instance.");
+
     Check(views.Get<State>({"project-b",kRawBackgroundId,secondId}).selected==0,"A second project inherited node editor state.");
     // A graph-native effect uses the same mask creation path and fresh defaults.
     auto state=initial;

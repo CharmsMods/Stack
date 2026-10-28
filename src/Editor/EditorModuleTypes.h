@@ -475,7 +475,89 @@ struct RawPreviewLayoutState {
     ImVec2 imageMinimum{}, imageSize{};
 };
 
-struct RawWorkspaceLabUiState {
+// Per-instance primary-control interaction and view state. GPU resources and
+// asynchronous analysis remain with their existing host/service owners.
+struct RawNodePrimaryUiState {
+    void EndInteraction() {
+        zonesCurveGraph.draggingExposure=false;
+        zonesCurveGraph.draggingPoint=zonesCurveGraph.draggingSegment=zonesCurveGraph.draggingSide=-1;
+        for (auto& curve:toneCurveGraphs) {
+            curve.draggingExposure=false;curve.draggingPoint=curve.draggingSegment=curve.draggingSide=-1;
+        }
+        colorWarpDraggingSource=colorWarpDraggingProvisional=colorWarpInteractionActive=false;
+        colorWarpPendingCircleDrawing=colorWarpPendingCircleRefining=false;
+        colorWarpGestureOwner=colorWarpEvGesture=colorWarpQualifierDragHandle=0;
+    }
+    Editor::RawExposureHistory exposureHistory;
+    bool zonesTargetedView = false;
+    int selectedZonePoint = -1;
+    RawCurveGraphUiState zonesCurveGraph;
+    std::array<RawCurveGraphUiState, 4> toneCurveGraphs;
+    int selectedColorWarpPin = -1;
+    std::string selectedColorWarpGroupId;
+    int colorWarpGroupOperation = 0;
+    bool colorWarpDraggingSource = false;
+    int colorWarpQualifierDragHandle = 0;
+    bool colorWarpDraggingProvisional = false;
+    bool colorWarpProvisionalPinValid = false;
+    bool colorWarpProvisionalCreatedFromPhoto = false;
+    float colorWarpProvisionalA = 0.0f;
+    float colorWarpProvisionalB = 0.0f;
+    bool colorWarpProvisionalSceneEvValid = false;
+    float colorWarpProvisionalSceneEv = 0.0f;
+    bool colorWarpPhotoHoverValid = false;
+    float colorWarpPhotoHoverA = 0.0f;
+    float colorWarpPhotoHoverB = 0.0f;
+    float colorWarpPhotoHoverSceneEv = 0.0f;
+    bool colorWarpLiveCloud = false;
+    bool colorWarpInteractionActive = false;
+    ImVec2 colorWarpPanAnchorScreenPos { 0.0f, 0.0f };
+    ImVec2 colorWarpPanRestoreScreenPos { 0.0f, 0.0f };
+    bool colorWarpPendingCircleActive = false;
+    bool colorWarpPendingCircleDrawing = false;
+    bool colorWarpPendingCircleRefining = false;
+    bool colorWarpPendingCircleCommitRequested = false;
+    int colorWarpPendingCircleEditKind = 0; // 1 move, 2 resize.
+    ImVec2 colorWarpPendingCirclePressPosition { 0.0f, 0.0f };
+    float colorWarpPendingCirclePressCenterU = 0.5f;
+    float colorWarpPendingCirclePressCenterV = 0.5f;
+    float colorWarpPendingCirclePressRadiusU = 0.02f;
+    float colorWarpPendingCirclePressRadiusV = 0.02f;
+    Stack::RawRecipe::RawColorWarpSampleCircle colorWarpPendingCircle;
+    bool colorWarpDiagnosticLocked = false;
+    bool colorWarpInspectionActive = false;
+    bool colorWarpDiagnosticIsolateSelected = false;
+    int colorWarpHoveredSelection = -1;
+    int colorWarpTemporaryViewMode = 0;
+    std::unordered_map<std::string, int> colorWarpSelectionViewModes;
+    std::string colorWarpInspectedRegionId;
+    float colorWarpRegionReachWheelDelta = 0.0f;
+    float colorWarpRegionFeatherWheelDelta = 0.0f;
+    int colorWarpGestureOwner = 0;
+    int colorWarpWorkingRange = 0;
+    int colorWarpEvEditMode = 0; // 0 Draw, 1 Smart.
+    float colorWarpEvBrushWidth = 2.5f;
+    int colorWarpEvGesture = 0;
+    std::string colorWarpEvGesturePinId;
+    ImVec2 colorWarpEvGesturePress { 0.0f, 0.0f };
+    ImVec2 colorWarpEvGestureLast { 0.0f, 0.0f };
+    Stack::RawRecipe::RawColorWarpEvCurve colorWarpEvGestureStartCurve;
+    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartSelection;
+    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartHoverSelection;
+    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartGestureStart;
+    bool colorWarpLightnessRangePreviewActive = false;
+    float colorWarpViewCenterA = 0.0f;
+    float colorWarpViewCenterB = 0.0f;
+    float colorWarpViewExtent = 0.45f;
+    float colorWarpViewTargetCenterA = 0.0f;
+    float colorWarpViewTargetCenterB = 0.0f;
+    float colorWarpViewTargetExtent = 0.45f;
+    bool colorWarpViewAnimationInitialized = false;
+    bool colorWarpViewNeedsFit = true;
+    std::string colorWarpViewSourceKey;
+};
+
+struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
     RawLabTool activeTool = RawLabTool::Light;
     RawLabTool lastCurvesTool = RawLabTool::Zones;
     RawLabTool lastColorTool = RawLabTool::Color;
@@ -521,7 +603,6 @@ struct RawWorkspaceLabUiState {
     bool lightInteractionActive = false;
     Editor::RawLabInternal::CalibrationEditorState calibrationEditor;
     bool globalExposureInteractionActive = false;
-    Editor::RawExposureHistory exposureHistory;
     float lightExposureGlow = 0.0f;
     bool lightExposureGraphInitialized = false;
     Stack::Editor::VariablePrecisionValueGraph::State lightExposureGraph;
@@ -540,9 +621,7 @@ struct RawWorkspaceLabUiState {
     float lightDemosaicPreviousPointerAngle = 0.0f;
     int lightDemosaicPressedItem = -1;
     int lightDemosaicSelectedItem = 2;
-    bool zonesTargetedView = false;
     RawZoneAreaUiState zoneAreas;
-    int selectedZonePoint = -1;
     int selectedEvGradient = -1;
     int selectedToneGradient = -1;
     int hoveredEvGradient = -1;
@@ -569,40 +648,7 @@ struct RawWorkspaceLabUiState {
     std::array<float, 4> toneGraphFittedMaximum { 1.0f, 1.0f, 1.0f, 1.0f };
     std::array<bool, 4> toneGraphFittedRangeValid {};
     int selectedTonePoint = -1;
-    RawCurveGraphUiState zonesCurveGraph;
-    std::array<RawCurveGraphUiState, 4> toneCurveGraphs;
     Stack::Editor::RawLabInternal::RawDenoiseMapEditorState denoiseMap;
-    int selectedColorWarpPin = -1;
-    std::string selectedColorWarpGroupId;
-    int colorWarpGroupOperation = 0;
-    bool colorWarpDraggingSource = false;
-    int colorWarpQualifierDragHandle = 0;
-    bool colorWarpDraggingProvisional = false;
-    bool colorWarpProvisionalPinValid = false;
-    bool colorWarpProvisionalCreatedFromPhoto = false;
-    float colorWarpProvisionalA = 0.0f;
-    float colorWarpProvisionalB = 0.0f;
-    bool colorWarpProvisionalSceneEvValid = false;
-    float colorWarpProvisionalSceneEv = 0.0f;
-    bool colorWarpPhotoHoverValid = false;
-    float colorWarpPhotoHoverA = 0.0f;
-    float colorWarpPhotoHoverB = 0.0f;
-    float colorWarpPhotoHoverSceneEv = 0.0f;
-    bool colorWarpLiveCloud = false;
-    bool colorWarpInteractionActive = false;
-    ImVec2 colorWarpPanAnchorScreenPos { 0.0f, 0.0f };
-    ImVec2 colorWarpPanRestoreScreenPos { 0.0f, 0.0f };
-    bool colorWarpPendingCircleActive = false;
-    bool colorWarpPendingCircleDrawing = false;
-    bool colorWarpPendingCircleRefining = false;
-    bool colorWarpPendingCircleCommitRequested = false;
-    int colorWarpPendingCircleEditKind = 0; // 1 move, 2 resize.
-    ImVec2 colorWarpPendingCirclePressPosition { 0.0f, 0.0f };
-    float colorWarpPendingCirclePressCenterU = 0.5f;
-    float colorWarpPendingCirclePressCenterV = 0.5f;
-    float colorWarpPendingCirclePressRadiusU = 0.02f;
-    float colorWarpPendingCirclePressRadiusV = 0.02f;
-    Stack::RawRecipe::RawColorWarpSampleCircle colorWarpPendingCircle;
     std::uint64_t colorWarpAreaAnalysisGeneration = 0;
     std::shared_ptr<RawWorkspaceColorWarpAreaAnalysisState>
         colorWarpAreaAnalysisState;
@@ -627,15 +673,6 @@ struct RawWorkspaceLabUiState {
         colorWarpPendingReplaceCircleId.clear();
         colorWarpAreaStatus.clear();
     }
-    bool colorWarpDiagnosticLocked = false;
-    bool colorWarpInspectionActive = false;
-    bool colorWarpDiagnosticIsolateSelected = false;
-    int colorWarpHoveredSelection = -1;
-    int colorWarpTemporaryViewMode = 0;
-    std::unordered_map<std::string, int> colorWarpSelectionViewModes;
-    std::string colorWarpInspectedRegionId;
-    float colorWarpRegionReachWheelDelta = 0.0f;
-    float colorWarpRegionFeatherWheelDelta = 0.0f;
     int colorWarpDiagnosticTargetLongEdge = 192;
     std::uint64_t colorWarpDiagnosticGeneration = 0;
     std::size_t colorWarpDiagnosticRequestedFingerprint = 0;
@@ -653,28 +690,6 @@ struct RawWorkspaceLabUiState {
     }
     // Captured on pointer-down so pin, qualifier, pan, and zoom gestures
     // cannot steal one another until every pressed pointer is released.
-    int colorWarpGestureOwner = 0;
-    int colorWarpWorkingRange = 0;
-    int colorWarpEvEditMode = 0; // 0 Draw, 1 Smart.
-    float colorWarpEvBrushWidth = 2.5f;
-    int colorWarpEvGesture = 0;
-    std::string colorWarpEvGesturePinId;
-    ImVec2 colorWarpEvGesturePress { 0.0f, 0.0f };
-    ImVec2 colorWarpEvGestureLast { 0.0f, 0.0f };
-    Stack::RawRecipe::RawColorWarpEvCurve colorWarpEvGestureStartCurve;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartSelection;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartHoverSelection;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartGestureStart;
-    bool colorWarpLightnessRangePreviewActive = false;
-    float colorWarpViewCenterA = 0.0f;
-    float colorWarpViewCenterB = 0.0f;
-    float colorWarpViewExtent = 0.45f;
-    float colorWarpViewTargetCenterA = 0.0f;
-    float colorWarpViewTargetCenterB = 0.0f;
-    float colorWarpViewTargetExtent = 0.45f;
-    bool colorWarpViewAnimationInitialized = false;
-    bool colorWarpViewNeedsFit = true;
-    std::string colorWarpViewSourceKey;
     std::string colorWarpCloudSourceKey;
     std::size_t colorWarpCloudInputFingerprint = 0;
     int colorWarpCloudWorkingSpace = -1;

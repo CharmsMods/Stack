@@ -6,6 +6,7 @@
 
 namespace Stack::Editor::RawLabInternal {
 struct CalibrationEditorState {
+    void EndInteraction() { dragging=-1; }
     std::string source;
     int dragging = -1;
     int selected = -1;
@@ -17,5 +18,5 @@ struct CalibrationEditorState {
 // operation's existing edit draft, committed by its project action.
 bool DrawCalibrationEditor(RawRecipe::RawColorCalibrationRecipe& recipe,
     CalibrationEditorState& state, const ImVec2& size,
-    const std::array<bool, 3>& hueDriven, const std::array<bool, 3>& saturationDriven);
+    const std::array<bool, 3>& hueDriven, const std::array<bool, 3>& saturationDriven, bool fixedFit = false);
 } // namespace Stack::Editor::RawLabInternal

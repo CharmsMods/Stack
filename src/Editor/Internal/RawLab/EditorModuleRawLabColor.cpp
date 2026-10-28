@@ -44,9 +44,10 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         cachedScope.valid &&
         cachedScope.stage ==
             RawDevelopmentGraphScopeStage::ColorWarpInput;
-    const RawDevelopmentGraphScopeReadback& scope = cachedScopeMatches
-        ? cachedScope
-        : m_RawWorkspaceGraphScopeReadback;
+    const RawDevelopmentGraphScopeReadback emptyScope;
+    const RawDevelopmentGraphScopeReadback& scope = context.inputAnalysis ? *context.inputAnalysis :
+        context.presentation==Stack::Editor::NodeEditorPresentation::Panel ? emptyScope :
+        cachedScopeMatches ? cachedScope : m_RawWorkspaceGraphScopeReadback;
     const std::size_t cloudInputFingerprint =
         scope.graphInputFingerprint ? scope.graphInputFingerprint :
         (m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
@@ -62,6 +63,7 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         previewIdentity,
         [this]() { SaveRawWorkspaceAppState(); }
     };
+    args.panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;
     args.strengthDriven = context.IsParameterDriven("strength");
     args.areaOwner = {context.nodeTarget, previewIdentity,
         RawViewportSourceHash()};

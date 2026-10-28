@@ -217,6 +217,8 @@ EditorModule::BuildRawWorkspaceAppStateSnapshot() const {
             ? RawLabTool::Zones : m_RawWorkspaceLabUi.activeTool);
     appState.rawLabActivePointCurve =
         std::clamp(m_RawWorkspaceLabUi.activePointCurve, 0, 3);
+    appState.viewSectionTab=m_ViewSectionTab;
+    appState.viewSectionOpen=m_ViewSectionOpen;
     appState.rawLabColorWarpLiveCloud =
         m_RawWorkspaceLabUi.colorWarpLiveCloud;
     appState.rawLabLastGalleryHost =
@@ -599,6 +601,10 @@ void EditorModule::LoadRawWorkspaceAppState() {
             ? RawLabTool::Calibration : RawLabTool::Color;
     m_RawWorkspaceLabUi.activePointCurve =
         std::clamp(appState.rawLabActivePointCurve, 0, 3);
+    m_ViewSectionTab=appState.viewSectionTab;
+    m_ViewSectionOpen=appState.viewSectionOpen;
+    m_RawWorkspaceLabUi.settingsTabActive=m_ViewSectionTab==2;
+    m_RawAssetCapture.assetsTab=m_ViewSectionTab==3;
     m_RawWorkspaceLabUi.colorWarpLiveCloud =
         appState.rawLabColorWarpLiveCloud;
     m_RawWorkspaceLabUi.lastGalleryHost =
@@ -875,7 +881,6 @@ void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& workspac
         m_RawWorkspaceLabFilmstripScrollTargetX=0.f;
         m_RawWorkspaceLabFilmstripScrollLastAppliedX=-1.f;
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
-        m_RawWorkspaceGalleryDrawerNeedsInitialExpansion=true;
     }
     m_RawWorkspace.sources.clear();
     m_RawWorkspace.selectedSourceKey.clear();

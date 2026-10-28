@@ -1599,6 +1599,16 @@ bool EditorModule::SetNodeParameterExposed(int nodeId, const std::string& parame
 
 
 bool EditorModule::SetDataMathDomain(int nodeId, Stack::NodeMath::ArithmeticDomain domain) {
+    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
+        m_NodeEditorDrawingContext->nodeDraft->id==nodeId &&
+        m_NodeEditorDrawingContext->nodeDraft->kind==EditorNodeGraph::NodeKind::DataMath) {
+        auto& node=*m_NodeEditorDrawingContext->nodeDraft;
+        if (domain==Stack::NodeMath::ArithmeticDomain::Values && node.dataMathMode==EditorNodeGraph::DataMathMode::ImageAverage)
+            return false;
+        node.dataMathSettings.domain=domain;
+        m_NodeEditorDrawingContext->draftChanged=true;
+        return true;
+    }
     std::string error;
     const bool applied = ApplyGraphCommand(*this, [&](auto& graph) {
         auto* node = graph.FindNode(nodeId);

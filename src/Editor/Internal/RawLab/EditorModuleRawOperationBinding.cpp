@@ -76,19 +76,25 @@ void EditorModule::BindNodeInputContext(RawWorkspaceEditContext& context) const 
 }
 
 void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) const {
-    if (const auto* selected=SelectedEditingNode()) context.presentationNodeId=selected->id;
+    const auto target = context.nodeTarget ? context.nodeTarget : m_Project->nodeEditor;
+    const auto* selectedNode = target ? ResolveNodeEditorTarget(*target) : SelectedEditingNode();
+    if (const auto* selected=selectedNode) context.presentationNodeId=selected->id;
     const auto describeCurveInput=[&] {
-        const auto* selected=SelectedEditingNode();
+        const auto* selected=selectedNode;
         if (!selected || !context.nodeTarget) return;
         BindNodeInputContext(context);
         if (selected->kind!=EditorNodeGraph::NodeKind::RawOperation ||
             selected->rawOperation.kind!=GraphOperationKind::ToneCurve) return;
-        if (m_RawWorkspaceGraphScopeReadback.valid &&
-            m_RawWorkspaceGraphScopeReadback.stage==RawDevelopmentGraphScopeStage::FinishToneInput &&
-            m_RawWorkspaceGraphScopeReadbackRevision==m_RawWorkspaceFinishToneInputGraphScopeCache.contentRevision &&
+        const auto* analysis=context.inputAnalysis.get();
+        auto analysisRevision=context.inputAnalysisRevision;
+        if (!analysis && m_RawWorkspaceGraphScopeReadback.valid &&
             m_RawWorkspaceFinishToneInputGraphScopeCache.sourceKey==context.nodeTarget->Key() &&
             m_RawWorkspaceFinishToneInputGraphScopeCache.inputFingerprint==Stack::Editor::NodeInputAnalysisIdentity(
                 *context.nodeTarget,m_Project->editRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame)) {
+            analysis=&m_RawWorkspaceGraphScopeReadback;
+            analysisRevision=m_RawWorkspaceGraphScopeReadbackRevision;
+        }
+        if (analysis && analysis->valid && analysis->stage==RawDevelopmentGraphScopeStage::FinishToneInput) {
             const auto& parameters=selected->rawOperation.parameters;
             const auto mode=parameters.value("curveMode",std::string("components"));
             auto& cache=m_NodeEditorState.Get<Stack::Editor::NodeInputPresentationCache>(*context.nodeTarget);
@@ -98,24 +104,24 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
             const float maximum=components?parameters.value("logMaxEv",6.f):16.f;
             const float grey=parameters.value("middleGrey",.18f);
             const Stack::Editor::NodeInputPresentationCache::HistogramKey key{
-                m_RawWorkspaceGraphScopeReadbackRevision,components,domain,minimum,maximum,grey};
+                analysisRevision,components,domain,minimum,maximum,grey};
             if (!cache.histogramValid || cache.histogramKey!=key ||
                 !(cache.histogramDescriptor==context.inputDescriptor)) {
                 cache.histogram=Stack::Editor::RawLabInternal::BuildNodeInputToneHistogram(
-                    m_RawWorkspaceGraphScopeReadback,Stack::NodeMath::DescribeImageOperationInput(context.inputDescriptor),
+                    *analysis,Stack::NodeMath::DescribeImageOperationInput(context.inputDescriptor),
                     components,domain,minimum,maximum,grey);
                 cache.histogramKey=key;cache.histogramDescriptor=context.inputDescriptor;
-                cache.histogramValid=m_RawWorkspaceGraphScopeReadbackRevision!=0;
+                cache.histogramValid=analysisRevision!=0;
                 ++cache.histogramRevision;
             }
             context.inputHistogram=cache.histogram;
             context.inputHistogramRevision=cache.histogramRevision;
         }
     };
-    if (m_Project->nodeEditor && m_Project->nodeEditor->layerId == kProjectGraphId) {
-        const auto* node = SelectedEditingNode();
+    if (target && target->layerId == kProjectGraphId) {
+        const auto* node = selectedNode;
         if (!node) { context.canEdit=false; context.error="The selected node is no longer available."; return; }
-        context.nodeTarget = m_Project->nodeEditor;
+        context.nodeTarget = target;
         context.nodeRevision = m_Project->editRevision;
         context.rawAdjustmentLayerId = kProjectGraphId;
         context.rawOperationUuid = node->instanceUuid;
@@ -132,7 +138,7 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
             if (node->kind==EditorNodeGraph::NodeKind::Layer) context.nodeSettings=node->layerParameters;
         }
         if (node->kind == EditorNodeGraph::NodeKind::RawOperation)
-            context.recipe = m_RawOperationRecipeCache.Read(node->rawOperation,
+            context.recipe = m_NodeEditorState.Get<Stack::Editor::RawOperationRecipeCache>(*context.nodeTarget).Read(node->rawOperation,
                 node->instanceUuid, GetProjectDocumentId(), m_Project->editRevision);
         for (const auto& link : m_Project->graph.GetLinks()) if (link.toNodeId == node->id) {
             if (link.toSocketId.rfind("param:",0)==0) context.drivenParameters.insert(link.toSocketId.substr(6));
@@ -143,8 +149,8 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
         describeCurveInput();
         return;
     }
-    if (const auto* node = SelectedEditingNode()) {
-        const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), m_SelectedRawAdjustmentLayer);
+    if (const auto* node = selectedNode) {
+        const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), target ? target->layerId : m_SelectedRawAdjustmentLayer);
         context.nodeTarget = NodeEditTarget{GetProjectDocumentId(),layer->id,node->instanceUuid};
         context.nodeRevision = m_Project->rawLayers.Revision();
         context.rawAdjustmentLayerId = layer->id;
@@ -165,13 +171,13 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
             if(node->kind==EditorNodeGraph::NodeKind::Layer)
                 context.nodeSettings=node->layerParameters;
         }
-    } else if (m_Project->nodeEditor) {
+    } else if (target) {
         context.canEdit = false;
         context.error = "The selected node is no longer available.";
         return;
     }
-    if (!SelectedRawOperationKind()) {
-        if (const auto* node=SelectedEditingNode()) BindUniformParameterContext(context,*node);
+    if (!selectedNode || selectedNode->kind!=EditorNodeGraph::NodeKind::RawOperation) {
+        if (const auto* node=selectedNode) BindUniformParameterContext(context,*node);
         describeCurveInput();
         if (!m_SelectedRawAdjustmentLayer.empty() && m_SelectedRawAdjustmentLayer != kRawBackgroundId &&
             (m_RawWorkspaceLabUi.activeTool == RawLabTool::Light || m_RawWorkspaceLabUi.activeTool == RawLabTool::Denoise ||
@@ -181,18 +187,18 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
         }
         return;
     }
-    const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), m_SelectedRawAdjustmentLayer);
+    const auto* layer = FindRawAdjustmentLayer(m_Project->rawLayers.State(), target ? target->layerId : m_SelectedRawAdjustmentLayer);
     if (!layer) return;
     context.rawAdjustmentLayerId = layer->id;
     context.persistedRecipe = nullptr;
-    const auto* operation = SelectedRawOperation();
+    const auto* operation = selectedNode;
     if (!operation) {
         context.canEdit = false;
         context.error = "This operation is absent. Add an operation or select another instance.";
         return;
     }
     context.rawOperationUuid = operation->instanceUuid;
-    auto editing = m_RawOperationRecipeCache.Read(*layer, operation->instanceUuid,
+    auto editing = m_NodeEditorState.Get<Stack::Editor::RawOperationRecipeCache>(*context.nodeTarget).Read(*layer, operation->instanceUuid,
         GetProjectDocumentId(), m_Project->rawLayers.Revision());
     editing.source = context.recipe.source;
     editing.technical.workingSpace = context.recipe.technical.workingSpace;

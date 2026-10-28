@@ -185,8 +185,8 @@ void EditorModule::OpenRawWorkspaceGalleryStackInFilmstrip(const std::string& so
     m_RawLabGalleryScrollToSourceKey = sourceKey;
     m_RawWorkspaceLabUi.galleryWorkspaceGrid = false;
     m_RawWorkspaceLabFilmstripDrawerState = {};
+    m_RawWorkspaceLabFilmstripDrawerKeyboardToggleRequested = true;
     m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
-    m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = true;
     m_RawWorkspaceGalleryPreviewHovered = false;
     m_RawWorkspaceLabFilmstripHoverSourceKey = sourceKey;
     m_RawWorkspaceLabFilmstripHoverProjectPath.clear();
@@ -230,20 +230,11 @@ std::vector<std::string> EditorModule::BuildRawWorkspaceGallerySourceSelectionOr
         if (stack.sourceKeys.empty()) return;
         if (!compactFilmstrip) {
             order.push_back(m_RawWorkspaceGalleryGridStacks.Cover(
-                stack.sourceKeys, m_RawWorkspace.selectedSourceKey));
+                stack.sourceKeys, {}));
         } else if (expandedFilmstripDrawer && filmstripDrawerExpansion > 0.001f) {
-            const auto session = m_RawWorkspaceLabFilmstripDrawerSessionOrders.find(
-                stack.sourceKeys.front());
-            const auto members = session != m_RawWorkspaceLabFilmstripDrawerSessionOrders.end() &&
-                Stack::RawWorkspace::IsRawGalleryFilmstripExpansionOrderCurrent(
-                    stack.sourceKeys, session->second)
-                ? session->second : Stack::RawWorkspace::BuildRawGalleryExpansionOrder(
-                    stack.sourceKeys, Stack::RawWorkspace::ResolveRawGalleryStackCover(
-                        stack.sourceKeys, m_RawWorkspace.selectedSourceKey));
-            order.insert(order.end(), members.begin(), members.end());
+            order.insert(order.end(), stack.sourceKeys.begin(), stack.sourceKeys.end());
         } else {
-            order.push_back(Stack::RawWorkspace::ResolveRawGalleryStackCover(
-                stack.sourceKeys, m_RawWorkspace.selectedSourceKey));
+            order.push_back(stack.sourceKeys.front());
         }
     };
     for (const auto& stack : stacks) appendStack(stack);

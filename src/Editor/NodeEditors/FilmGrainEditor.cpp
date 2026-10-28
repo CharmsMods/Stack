@@ -19,6 +19,9 @@ namespace Stack::Editor {
 namespace {
 using Parameters=Renderer::FilmGrain::Parameters;
 struct GrainViewState {
+    void EndInteraction() {
+        curve.draggingExposure=false;curve.draggingPoint=curve.draggingSegment=curve.draggingSide=-1;
+    }
     EditorModuleTypes::RawCurveGraphUiState curve;
     int selected=-1;
     float tone=.18f;

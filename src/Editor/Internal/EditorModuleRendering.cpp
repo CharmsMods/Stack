@@ -529,6 +529,21 @@ void EditorModule::CacheRawWorkspaceGraphScopeReadback(
     if (sourceKey.empty() || inputFingerprint == 0 || !readback.valid) {
         return;
     }
+    for (const auto& group:m_NodeEditorPanel.groups) for (const auto& instance:group.instances) {
+        const auto& target=instance.target;
+        if (target.documentId!=GetProjectDocumentId() || instance.key!=sourceKey) continue;
+        const auto expected=Stack::Editor::NodeInputAnalysisIdentity(target,
+            m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+        if (inputFingerprint==expected && ResolveNodeEditorTarget(target)) {
+            auto& cached=m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target);
+            if (cached.acceptedFingerprint!=expected) {
+                cached.readback=std::make_shared<const RawDevelopmentGraphScopeReadback>(readback);
+                cached.acceptedFingerprint=expected;cached.revision=++m_RawWorkspaceGraphScopePublicationRevision;
+            }
+        }
+        if (m_NodeEditorPanel.analysisTarget==target) m_NodeEditorPanel.analysisTarget.reset();
+        break;
+    }
     if (m_RawWorkspaceLabUi.zoneAreas.sourceKey==sourceKey)
         Stack::Editor::RawLabInternal::RememberRawLabAreaGuide(m_RawWorkspaceLabUi.zoneAreas,readback);
 
@@ -566,6 +581,18 @@ void EditorModule::CacheRawWorkspaceGraphScopeReadback(
 }
 
 bool EditorModule::RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool() {
+    if (m_NodeEditorPanel.visible && m_Project->nodeEditor) {
+        const auto& target=*m_Project->nodeEditor;
+        const auto& cached=m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target);
+        const auto expected=Stack::Editor::NodeInputAnalysisIdentity(target,
+            m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+        if (cached.acceptedFingerprint==expected && cached.readback) {
+            if (m_RawWorkspaceGraphScopeReadbackRevision!=cached.revision) m_RawWorkspaceGraphScopeReadback=*cached.readback;
+            m_RawWorkspaceGraphScopeReadbackRevision=cached.revision;
+            return true;
+        }
+    }
+
     using Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint;
     using Stack::Renderer::RawDevelopmentCache::Stage;
 

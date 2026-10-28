@@ -18,6 +18,8 @@ EditorModule::GetRawWorkspacePresentationPreferences() const {
             ? RawLabTool::Zones : m_RawWorkspaceLabUi.activeTool);
     preferences.rawLabActivePointCurve = m_RawWorkspaceLabUi.activePointCurve;
     preferences.rawLabColorWarpLiveCloud = m_RawWorkspaceLabUi.colorWarpLiveCloud;
+    preferences.viewSectionTab=m_ViewSectionTab;
+    preferences.viewSectionOpen=m_ViewSectionOpen;
     preferences.rawLabLastGalleryHost = static_cast<int>(m_RawWorkspaceLabUi.lastGalleryHost);
     return preferences;
 }
@@ -43,6 +45,10 @@ void EditorModule::ApplyRawWorkspacePresentationPreferences(
         ? RawLabTool::Calibration : RawLabTool::Color;
     m_RawWorkspaceLabUi.activePointCurve = std::clamp(preferences.rawLabActivePointCurve, 0, 3);
     m_RawWorkspaceLabUi.colorWarpLiveCloud = preferences.rawLabColorWarpLiveCloud;
+    m_ViewSectionTab=std::clamp(preferences.viewSectionTab,0,3);
+    m_ViewSectionOpen=preferences.viewSectionOpen;
+    m_RawWorkspaceLabUi.settingsTabActive=m_ViewSectionTab==2;
+    m_RawAssetCapture.assetsTab=m_ViewSectionTab==3;
     m_RawWorkspaceLabUi.lastGalleryHost =
         preferences.rawLabLastGalleryHost == static_cast<int>(RawGalleryHost::NativeWindow)
             ? RawGalleryHost::NativeWindow : RawGalleryHost::Filmstrip;

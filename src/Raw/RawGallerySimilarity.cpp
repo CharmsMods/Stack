@@ -934,15 +934,16 @@ RawGalleryFilmstripDrawerState UpdateRawGalleryFilmstripDrawerState(
     if (!input.enabled) return {};
 
     if (input.galleryWorkspace) {
-        // The Gallery starts with its filmstrip expanded. A deliberate dwell
-        // over the image gives the preview more room; returning to the
-        // filmstrip expands it again without an extra hover delay.
+        // Gallery expansion is deliberate. Hovering a collapsed stack must
+        // not open it (including singleton entries).
         next.keyboardPinned = false;
         next.leaveStartedAt = -1.0;
         next.suppressHoverUntilPointerExit = false;
-        if (input.pointerInside || input.interactionRetained ||
-            !input.previewHovered) {
-            next.open = true;
+        if (input.keyboardToggle) {
+            next.open = !next.open;
+            next.hoverStartedAt = -1.0;
+        } else if (!next.open || input.pointerInside ||
+            input.interactionRetained || !input.previewHovered) {
             next.hoverStartedAt = -1.0;
         } else {
             if (next.hoverStartedAt < 0.0) next.hoverStartedAt = input.now;

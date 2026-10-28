@@ -6,6 +6,7 @@
 #include "App/WorkspaceInputScope.h"
 #include "Editor/Internal/RawLab/RawFloatingInputTrace.h"
 #include "Editor/UI/WindowDrawOpacity.h"
+#include "Library/LibraryControls.h"
 #include "imgui_internal.h"
 #include "Notifications/NotificationPresenter.h"
 
@@ -19,6 +20,12 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     const ImVec2& minimum, const ImVec2& size, bool enabled) {
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::FloatingControls);
     auto& surface = m_RawFloatingSurface;
+    UpdateNodeEditorPanelVisibility();
+    if (m_NodeEditorPanel.visible) {
+        surface.input={};surface.frame=-2;m_RawActiveControlFrame=-2;
+        m_RawToolGlass->BeginFrame(false,{});
+        return;
+    }
     if (IsBracketingPresentationActive() ||
         (IsBracketingToolActive() && !HasBracketingContributionTool())) {
         // No invisible tool may retain pointer ownership while the project is
@@ -30,7 +37,8 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         return;
     }
     UpdateNodeOpenTransition();
-    const float openingOpacity = m_NodeOpenTransition.ControlsOpacity(ImGui::GetTime());
+    const float openingOpacity = m_NodeOpenTransition.ControlsOpacity(ImGui::GetTime()) *
+        m_NodeEditorPanel.Reveal(ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
     if (openingOpacity <= .001f) {
         surface.input = {};
         surface.frame = -1;

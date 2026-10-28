@@ -48,6 +48,11 @@ void EditorModule::EndGraphLayoutGesture(bool cancelled) {
 }
 
 void EditorModule::MarkGraphEdited(int touchedNodeId, bool affectsPixels) {
+    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
+        m_NodeEditorDrawingContext->nodeDraft->id == touchedNodeId) {
+        m_NodeEditorDrawingContext->draftChanged = true;
+        return;
+    }
     if (IsEditingRawLayerMaskGraph()) {
         m_RawLayerMaskWorkspace->dirty = true;
         m_RawLayerMaskWorkspace->affectsPixels |= affectsPixels;

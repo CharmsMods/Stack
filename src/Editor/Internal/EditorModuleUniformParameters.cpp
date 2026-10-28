@@ -5,9 +5,19 @@
 #include "Project/GraphImagePayload.h"
 #include "NodeMath/ToneCurveParameters.h"
 #include "Utils/HashUtils.h"
+#include <tuple>
 
 std::size_t EditorModule::CurrentUniformSourceIdentity() const {return UniformSourceIdentityForFrame(m_TimelineUi.currentFrame);}
 std::size_t EditorModule::UniformSourceIdentityForFrame(int frame) const {
+    // The source inventory is shared by all visible editors. Rebuild it only
+    // when its owning graph/source revisions change, not once per section/frame.
+    using Key=std::tuple<std::uint64_t,std::uint64_t,std::uint64_t,std::uint64_t,std::uint64_t,int>;
+    struct SourceIdentityCache { Key key{};std::size_t identity=0; };
+    const auto sourceHash=GetActiveRawWorkspacePreviewSourceHash();
+    const Key key{m_Project->editRevision,m_Project->rawLayers.Revision(),m_Project->graph.GetStructureRevision(),
+        m_NodeDirtyGenerationCounter,sourceHash,frame};
+    auto& cached=m_NodeEditorState.Get<SourceIdentityCache>({GetProjectDocumentId(),Stack::Project::kProjectGraphId,"$uniform-source"});
+    if (cached.identity && cached.key==key) return cached.identity;
     // Producer identity belongs to captured data, independently of the visible
     // workspace, inspection endpoint or selected editing container.
     std::size_t identity=0;
@@ -35,7 +45,8 @@ std::size_t EditorModule::UniformSourceIdentityForFrame(int frame) const {
     if (IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive())
         StackHash::HashCombine(identity,GetActiveRawWorkspacePreviewSourceHash());
     StackHash::HashCombine(identity,StackHash::HashValue(frame));
-    return identity ? identity : 1;
+    cached.key=key;cached.identity=identity ? identity : 1;
+    return cached.identity;
 }
 
 void EditorModule::PublishUniformParameterFeedback(const GraphExecutionStats& stats) {

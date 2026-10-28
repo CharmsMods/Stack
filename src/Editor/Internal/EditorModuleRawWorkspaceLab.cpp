@@ -244,17 +244,20 @@ void EditorModule::CommitRawWorkspaceEditContext(
     // Bracketing controls commit the canonical source-set recipe themselves.
     // Its first-node surface has no RAW operation or project-graph parameter
     // draft for this generic host to write or cancel.
-    if (IsBracketingToolActive()) return;
+    if (context.nodeTarget) {
+        const auto* node=ResolveNodeEditorTarget(*context.nodeTarget);
+        if (node && node->kind==EditorNodeGraph::NodeKind::MultiFrameHdr &&
+            node->multiFrameHdr.bracketingSource) return;
+    } else if (IsBracketingToolActive()) return;
     if (context.nodeTarget && context.nodeTarget->layerId == Stack::Project::kProjectGraphId) {
         if (context.nodeTarget->documentId != GetProjectDocumentId() ||
-            context.nodeRevision != m_Project->editRevision || IsEditingRawLayerMaskGraph()) {
+            context.nodeRevision != m_Project->editRevision) {
             context.error="The project or node changed while this edit was prepared."; return;
         }
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {
             RestoreProjectGraphHistory(false,true); ImGui::ClearActiveID(); return;
         }
         if (changed) {
-            auto editor = GetGraphEditorContext();
             Stack::Project::RawAdjustmentLayer candidate;
             candidate.graph=m_Project->graph;
             EditorNodeGraph::Node* node=nullptr;
@@ -268,11 +271,12 @@ void EditorModule::CommitRawWorkspaceEditContext(
                 : Stack::Project::WriteRawLayerOperation(candidate,node->instanceUuid,context.recipe,error);
             if (prepared) {
                 const auto after=node->kind==EditorNodeGraph::NodeKind::RawOperation ? node->rawOperation.parameters : node->layerParameters;
-                auto timelineEdit=m_TimelineUi.open ? Stack::Timeline::PrepareParameterEditAnimation(m_Project->timeline,*node,editor.graphId,
+                auto timelineEdit=m_TimelineUi.open ? Stack::Timeline::PrepareParameterEditAnimation(m_Project->timeline,*node,Stack::Project::kProjectGraphId,
                     m_TimelineUi.currentFrame,before,after) : Stack::Timeline::ParameterEditAnimation{m_Project->timeline,{}};
-                auto proposal = Stack::GraphModel::ProposeEdit(*editor.graph,editor.revision,
+                auto proposal = Stack::GraphModel::ProposeEdit(m_Project->graph,m_Project->graph.GetStructureRevision(),
                     [&](auto& graph) { graph=candidate.graph; });
-                if (editor.applyDocumentEdit(std::move(proposal),Stack::GraphModel::LayerParameterRecords(candidate.graph),std::move(timelineEdit.animation),error)) {
+                if (ApplyProjectGraphDocumentEdit(context.nodeTarget->documentId,context.nodeRevision,
+                        std::move(proposal),std::move(timelineEdit.animation),interactionActive,error)) {
                     context.nodeRevision=m_Project->editRevision;
                     for (const auto& target:timelineEdit.livePreviewTargets) AddTimelineLiveEditPreviewTarget(target);
                 }
@@ -317,7 +321,7 @@ void EditorModule::CommitRawWorkspaceEditContext(
                     return prepared;
                 },error)) {
                 if (ApplyRawLayerStackEdit(std::move(candidate))) context.nodeRevision=m_Project->rawLayers.Revision();
-            } else m_RawLayerStatus=error;
+            } else context.error=m_RawLayerStatus=error;
         }
         if (!interactionActive) {
             m_Project->rawLayers.EndGesture();
@@ -694,7 +698,7 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
         !context.canEdit && IsRawWorkspaceProjectLoadBusy(),
         !context.canEdit && !IsRawWorkspaceProjectLoadBusy());
         const auto* nodeEditor = SelectedNodeEditor();
-        if (nodeEditor && nodeEditor->primary) changed |= nodeEditor->primary(*this,context);
+        if (nodeEditor && nodeEditor->primary) changed |= DrawNodeEditorPrimary(context).changed;
         else switch (m_RawWorkspaceLabUi.activeTool) {
             case RawLabTool::Transform:
                 if (ImGui::Button("Rotate left")) {
@@ -948,7 +952,6 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         m_RawWorkspaceLabFilmstripDrawerState = {};
         m_RawWorkspaceLabFilmstripDrawerAnimatedHeight = 0.0f;
         m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight = 0.0f;
-        m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = true;
         m_RawWorkspaceLabFilmstripDrawerPointerInside = false;
         m_RawWorkspaceLabFilmstripDrawerInteractionRetained = false;
         m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
@@ -1172,30 +1175,8 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         if (!drawerWasOpen &&
             m_RawWorkspaceLabFilmstripDrawerState.open) {
             m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
-            if (normalGalleryFilmstrip) {
-                for (const auto& stack : ResolveRawWorkspaceFilmstripStacks()) {
-                    if (stack.sourceKeys.empty()) continue;
-                    const std::string cover =
-                        Stack::RawWorkspace::ResolveRawGalleryStackCover(
-                            stack.sourceKeys,
-                            m_RawWorkspace.selectedSourceKey);
-                    std::vector<std::string> order =
-                        Stack::RawWorkspace::BuildRawGalleryExpansionOrder(
-                            stack.sourceKeys,
-                            cover);
-                    m_RawWorkspaceLabFilmstripDrawerSessionOrders.emplace(
-                        stack.sourceKeys.front(),
-                        std::move(order));
-                }
-            }
             m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight =
                 drawerHeightForCurrentStacks();
-            if (m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
-                m_RawWorkspaceGalleryDrawerNeedsInitialExpansion) {
-                m_RawWorkspaceLabFilmstripDrawerAnimatedHeight =
-                    m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight;
-                m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = false;
-            }
         }
         if (!filmstripRequested) {
             m_RawWorkspaceLabFilmstripDrawerState = {};

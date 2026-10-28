@@ -7,6 +7,7 @@
 #include "Editor/UI/WindowDrawOpacity.h"
 #include "RawLabUiSupport.h"
 #include "Library/LibraryControls.h"
+#include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -59,27 +60,34 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             RenderRawGalleryFolderPanel();
         } else if (visible) {
             const bool bracketSource=IsBracketingToolActive();
-            if (BareToolIslandButton(bracketSource ? "Source" : "Layers", !m_RawAssetCapture.assetsTab &&
-                (bracketSource || !m_RawWorkspaceLabUi.settingsTabActive))) {
-                m_RawWorkspaceLabUi.settingsTabActive = false; m_RawAssetCapture.assetsTab = false;
+            const auto tabButton=[&](const char* label,int tab) {
+                if (ImGui::GetCursorPosX()>14.f*unit &&
+                    ImGui::GetCursorPosX()+ImGui::CalcTextSize(label).x+16.f*unit>size.x-14.f*unit-(m_ViewSectionTab==1 ? 26.f*unit : 0.f))
+                    ImGui::NewLine();
+                if (BareToolIslandButton(label,m_ViewSectionTab==tab))
+                    SetViewSectionTab(tab==1 && m_ViewSectionTab==1 ? 0 : tab);
+            };
+            tabButton(bracketSource ? "Source" : "Layers",0);
+            ImGui::SameLine(0,8.f*unit);tabButton("Controls",1);
+            if (!bracketSource) { ImGui::SameLine(0,8.f*unit);tabButton("Settings",2); }
+            ImGui::SameLine(0,8.f*unit);tabButton("Assets",3);
+            if (m_ViewSectionTab==1) {
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),size.x-38.f*unit));
+                RenderNodeEditorPanelMenu();
             }
-            if (!bracketSource) {
-                ImGui::SameLine(0, 8.f * unit);
-                if (BareToolIslandButton("Settings", m_RawWorkspaceLabUi.settingsTabActive && !m_RawAssetCapture.assetsTab)) {
-                    m_RawWorkspaceLabUi.settingsTabActive = true; m_RawAssetCapture.assetsTab = false;
-                }
-            }
-            ImGui::SameLine(0,8.f*unit);
-            if (BareToolIslandButton("Assets",m_RawAssetCapture.assetsTab)) m_RawAssetCapture.assetsTab = true;
             ImGui::Spacing();
-            const bool settings = !bracketSource && m_RawWorkspaceLabUi.settingsTabActive && !m_RawAssetCapture.assetsTab;
-            ImGui::PushID(m_RawAssetCapture.assetsTab ? "Assets" : bracketSource ? "Source" : settings ? "Settings" : "Layers");
+            const bool controls=m_ViewSectionTab==1;
+            const bool settings = !bracketSource && m_ViewSectionTab==2;
+            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Layers");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
             const bool bodyVisible=ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,
-                ImGuiWindowFlags_NoBackground);
+                ImGuiWindowFlags_NoBackground | (controls ? ImGuiWindowFlags_NoScrollbar : ImGuiWindowFlags_None));
             {
-                if (bodyVisible && m_RawAssetCapture.assetsTab) {
+                if (bodyVisible && m_ViewSectionTab==3) {
                     RenderRawAssetsPanel();
+                } else if (bodyVisible && controls) {
+                    RenderNodeEditorPanel();
                 } else if (bodyVisible && bracketSource) {
                     RenderBracketingSidePanelUI();
                 } else if (bodyVisible && settings) {
@@ -96,7 +104,10 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
                     ImGui::TextWrapped("Open an image from Gallery to work with its layers and masks.");
                 }
             }
+            auto* body=ImGui::GetCurrentWindow();
             ImGui::EndChild();
+            if (controls && bodyVisible)
+                Stack::Editor::DrawControlsPanelScrollbar(body,ImGui::GetWindowPos().x+size.x);
             if (settings) ImGui::PopID();
             ImGui::PopID();
         }
@@ -118,8 +129,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
 
 void EditorModule::RequestRawSettingsPanel() {
     if (Stack::Workspace::IsPreview()) return;
-    m_RawWorkspaceLabUi.settingsTabActive = true;
-    m_RawAssetCapture.assetsTab = false;
+    SetViewSectionTab(2);
     m_RawSettingsPanelRequested = true;
 }
 

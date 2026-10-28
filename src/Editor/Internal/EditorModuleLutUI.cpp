@@ -82,7 +82,8 @@ void PreserveLutViewSettings(const ColorLut::LutPayload& source, ColorLut::LutPa
 } // namespace
 
 bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure) {
-    EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
+        m_NodeEditorDrawingContext->nodeDraft->id==nodeId ? &*m_NodeEditorDrawingContext->nodeDraft : GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }
@@ -122,7 +123,8 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
 }
 
 bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure) {
-    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
+    const EditorNodeGraph::Node* node = m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
+        m_NodeEditorDrawingContext->nodeDraft->id==nodeId ? &*m_NodeEditorDrawingContext->nodeDraft : GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut || node->lut.sourcePath.empty()) {
         if (notifyOnFailure) {
             PostNotification(
@@ -136,7 +138,8 @@ bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure)
 }
 
 bool EditorModule::ClearLutNodeData(int nodeId) {
-    EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
+        m_NodeEditorDrawingContext->nodeDraft->id==nodeId ? &*m_NodeEditorDrawingContext->nodeDraft : GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }

@@ -235,7 +235,7 @@ void EditorModule::RenderRawAssetCaptureOverlay(const ImVec2& minimum,const ImVe
             } else {
                 capture.armed=capture.feedbackNeeded=false;
                 capture.pending=true;++capture.serial;capture.status="Capturing native image values...";
-                capture.assetsTab=true;m_RawSettingsPanelRequested=true;
+                SetViewSectionTab(3);m_RawSettingsPanelRequested=true;
             }
         }
     }

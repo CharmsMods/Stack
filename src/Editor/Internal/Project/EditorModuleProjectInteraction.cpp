@@ -25,6 +25,10 @@ void EditorModule::ResetProjectInteractionState() {
     m_RawAssetPreviews.Clear();
     m_RawLayerToolPicker = {};
     m_RawOperationRecipeCache = {};
+    m_NodeEditorState.Clear();
+    m_NodePrimaryUiTarget.reset();
+    m_NodeEditorDrawingContext=nullptr;
+    m_NodeEditorPanel={};
     m_RawOperationInputCache = {};
     m_RawLayerStatus.clear();
     m_RawLayerMaskWorkspace.reset();

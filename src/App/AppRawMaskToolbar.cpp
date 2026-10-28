@@ -40,6 +40,7 @@ void AppShell::ToggleWorkspaceSectionPanel() {
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     m_NavigationRail.panelOpen = !m_NavigationRail.panelOpen;
     if (m_CurrentTabId == 1) m_Editor->SetWorkspacePanelOpen(m_NavigationRail.panelOpen);
+    else if (m_CurrentTabId==3 || m_CurrentTabId==5) m_Editor->SetViewSectionPanelOpen(m_NavigationRail.panelOpen);
     CancelProjectPillPreview();
 }
 

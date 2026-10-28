@@ -6,6 +6,11 @@
 
 namespace Stack::Editor {
 struct ToneCurveEditorState {
+    void EndInteraction() {
+        dragging=-1;
+        for (auto& value:canvas) value.EndInteraction();
+        if (advanced) {advanced->ClearViewportProbe();advanced->EndViewportTargetDrag();}
+    }
     int component=0, selected=-1, dragging=-1;
     float minimum=-16, maximum=16;
     std::array<RawLabInternal::CurveCanvasState,5> canvas;

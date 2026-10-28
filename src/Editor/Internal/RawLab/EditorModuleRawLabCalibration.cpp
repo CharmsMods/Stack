@@ -18,8 +18,9 @@ bool EditorModule::RenderRawWorkspaceLabCalibrationSurface(RawWorkspaceEditConte
         saturationDriven[i] = context.IsParameterDriven("saturation-" + std::to_string(i));
     }
     const ImVec2 available = ImGui::GetContentRegionAvail();
-    const ImVec2 size(std::max(30.f,available.x), std::max(30.f,std::min(available.x*.85f,available.y)));
-    const bool changed = DrawCalibrationEditor(context.recipe.colorCalibration,state,size,hueDriven,saturationDriven);
+    const bool panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;
+    const ImVec2 size(std::max(30.f,available.x), std::max(30.f,panel ? available.x : std::min(available.x*.85f,available.y)));
+    const bool changed = DrawCalibrationEditor(context.recipe.colorCalibration,state,size,hueDriven,saturationDriven,panel);
     try {
         Stack::RawRecipe::BuildColorCalibrationTransform(context.recipe.colorCalibration,context.recipe.technical.workingSpace);
     } catch (const std::exception& error) {

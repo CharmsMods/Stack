@@ -32,7 +32,7 @@ namespace Stack::Validation { bool ValidateToneDetail(const std::filesystem::pat
 namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
-namespace Stack::Validation { bool ValidateRawGraphCanvas(); }
+namespace Stack::Validation { bool ValidateRawGraphCanvas(); bool ValidateViewControlsPanel(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateGraphChannelOutputs(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesystem::path&, bool); }
@@ -142,6 +142,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-editing") == 0) {
         exitCode = Stack::Validation::ValidateRawGraphEditing() ? 0 : 89;
+        return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-view-controls-panel") == 0) {
+        exitCode=Stack::Validation::ValidateViewControlsPanel(std::filesystem::u8path(argv[2])) ? 0 : 89;
         return true;
     }
     if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-canvas") == 0) {

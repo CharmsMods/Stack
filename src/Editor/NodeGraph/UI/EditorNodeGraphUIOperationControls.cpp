@@ -22,6 +22,29 @@ void EditorNodeGraphUI::RenderOperationControls(EditorModule* editor, int nodeId
     auto* node = graph.FindNode(nodeId);
     if (!node) return;
     m_GraphContext = editor->GetGraphEditorContext();
+    RenderOperationControlsBody(editor,graph,*node,false);
+}
+
+void EditorNodeGraphUI::RenderOperationDraftControls(EditorModule* editor,
+    EditorNodeGraph::Graph& graph, EditorNodeGraph::Node& node) {
+    if (node.kind==EditorNodeGraph::NodeKind::Layer) {
+        editor->RenderLayerControlsWithDirtyTracking(node,[&](LayerBase& layer) {
+            NodeSurfaceContext surface;
+            surface.nodeId=node.id;
+            surface.availableWidth=surface.safeContentWidth=ImGui::GetContentRegionAvail().x;
+            surface.logicalAvailableWidth=surface.logicalSafeContentWidth=surface.safeContentWidth;
+            surface.focused=true;
+            layer.RenderExpandedNodeSurface(editor,surface);
+        });
+        return;
+    }
+    RenderOperationControlsBody(editor,graph,node,true);
+}
+
+void EditorNodeGraphUI::RenderOperationControlsBody(EditorModule* editor,
+    EditorNodeGraph::Graph& graph, EditorNodeGraph::Node& nodeValue, bool draft) {
+    using namespace Stack::Editor::NodeGraphUIVisuals;
+    auto* node=&nodeValue;
     const auto metrics = MetricsForNode(*node);
     const auto style = BuildGraphStyleTokens(editor);
     const NodeSurfaceSpec surface{};

@@ -43,9 +43,12 @@ void AppShell::LayoutNavigationRail() {
     const bool processing = m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace();
     if (m_CurrentTabId == Graph) m_NavigationRail.panelOpen = m_Editor->WorkspacePanelOpen();
     auto& rail = m_NavigationRail;
+    if (IsRaw(m_CurrentTabId) && !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen())
+        rail.panelOpen=m_Editor->ViewSectionPanelOpen();
     if (m_Editor->ConsumeRawSettingsPanelRequest()) {
         rail.panelOpen = true;
         if (m_CurrentTabId == Graph) m_Editor->SetWorkspacePanelOpen(true);
+        else if (IsRaw(m_CurrentTabId)) m_Editor->SetViewSectionPanelOpen(true);
     }
     if (m_Editor->IsReturningToGraph()) rail.panelOpen = false;
     auto* viewport = ImGui::GetMainViewport();

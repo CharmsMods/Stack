@@ -422,6 +422,8 @@ struct AppState {
     int rawLabActivePointCurve = 0;
     bool rawLabColorWarpLiveCloud = false;
     int rawLabLastGalleryHost = 1;
+    int viewSectionTab = 0;
+    bool viewSectionOpen = true;
     int rawLabGalleryDisplayMode = 0;
     int rawLabGalleryContentMode = 0;
     std::unordered_map<std::string, RawGalleryManualGrouping>

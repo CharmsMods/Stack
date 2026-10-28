@@ -1020,16 +1020,18 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             sampledFeatherEv);
     };
     const ImVec2 availableCanvasRegion = ImGui::GetContentRegionAvail();
-    const float availableWidth = std::max(180.0f, availableCanvasRegion.x);
+    const float availableWidth = std::max(args.panel ? 1.f : 180.0f, availableCanvasRegion.x);
     const float bottomControlReserve =
         colorWarp.pins.empty() ||
             args.ui.colorWarpProvisionalPinValid
         ? 42.0f
         : 178.0f;
     const float canvasWidth = availableWidth;
-    const float canvasHeight = std::max(
-        220.0f,
-        availableCanvasRegion.y - bottomControlReserve);
+    // A panel owns a contained editor; the floating surface may use a taller
+    // backdrop. Keep the complete default disc within the panel's width.
+    const float canvasHeight = args.panel
+        ? canvasWidth
+        : std::max(220.f,availableCanvasRegion.y-bottomControlReserve);
     const float canvasAspect = canvasWidth / std::max(1.0f, canvasHeight);
     if (args.ui.colorWarpViewNeedsFit) {
         fitColorCloud(canvasAspect);
@@ -1699,6 +1701,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             rawWorkspaceWindow = ancestor;
         }
     }
+    if (args.panel) rawWorkspaceWindow=nullptr;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImDrawList* backdropDrawList = rawWorkspaceWindow != nullptr
         ? rawWorkspaceWindow->DrawList
@@ -2013,19 +2016,16 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
                 nullptr);
         }
     }
-    if (colorCloud.empty()) {
-        drawList->AddText(
-            ImVec2(canvasMin.x + 10.0f, canvasMax.y - 24.0f),
-            ImGui::GetColorU32(ImGuiCol_TextDisabled),
-            "Using the last settled color map when available.");
-    } else if (spatialSelection && !feedback &&
-        (showSelectedCatch || args.ui.colorWarpLiveCloud)) {
-        drawList->AddText(
-            ImVec2(canvasMin.x + 10.0f, canvasMax.y - 24.0f),
-            ImGui::GetColorU32(ImGuiCol_TextDisabled),
-            args.feedback && args.feedback->Failed()
-                ? "Color analysis unavailable. Point at the image and press H to retry."
-                : "Spatial selection is refining.");
+    const char* canvasStatus=colorCloud.empty()
+        ? "Using the last settled color map when available."
+        : spatialSelection && !feedback && (showSelectedCatch || args.ui.colorWarpLiveCloud)
+        ? args.feedback && args.feedback->Failed()
+            ? "Color analysis unavailable. Point at the image and press H to retry."
+            : "Spatial selection is refining."
+        : nullptr;
+    if (canvasStatus && !args.panel) {
+        drawList->AddText(ImVec2(canvasMin.x+10.f,canvasMax.y-24.f),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled),canvasStatus);
     }
 
     if (args.ui.colorWarpPhotoHoverValid) {
@@ -2405,12 +2405,12 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
 
     ImGui::Spacing();
     if (args.ui.colorWarpProvisionalPinValid) {
-        ImGui::TextWrapped(
+        if (!args.panel) ImGui::TextWrapped(
             "Provisional pin: drag it to retain the edit, or click away to discard it.");
         return changed;
     }
     if (colorWarp.pins.empty()) {
-        ImGui::TextWrapped(
+        if (!args.panel) ImGui::TextWrapped(
             "Click the photograph or the OKLab disc to place the first pin.");
         return changed;
     }
@@ -2502,7 +2502,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         selected.softness * 100.0f);
 
     const ImVec2 stripMin = ImGui::GetCursorScreenPos();
-    const float stripWidth = std::max(180.0f, ImGui::GetContentRegionAvail().x);
+    const float stripWidth = std::max(args.panel ? 1.f : 180.0f, ImGui::GetContentRegionAvail().x);
     constexpr float stripHeight = 126.0f;
     ImGui::InvisibleButton(
         "##RawLabColorWarpEvCurve",

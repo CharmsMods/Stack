@@ -5,6 +5,7 @@
 #include "Editor/ToneCurveProbeCache.h"
 #include "Editor/NodeEditors/NodeEditorRegistry.h"
 #include "Editor/NodeEditors/NodeEditorState.h"
+#include "Editor/NodeEditors/NodeEditorPanelState.h"
 #include "Editor/NodeEditors/RawWorkspaceEditContext.h"
 
 namespace StackAppearance {
@@ -256,6 +257,9 @@ public:
     bool CreateRawOperationMask(const Stack::Editor::RawOperationMaskTarget& target,
         EditorNodeGraph::MaskGeneratorKind kind, std::string& error);
     void RequestRawSettingsPanel();
+    void SetViewSectionPanelOpen(bool open);
+    bool ViewSectionPanelOpen() const;
+    void SetViewSectionTab(int tab);
     bool ConsumeRawSettingsPanelRequest();
     bool GetRawActiveControlBounds(ImVec2& minimum, ImVec2& maximum) const;
     const Stack::Renderer::RawImageBackdropFrame* GetRawImageBackdrop() const;
@@ -1161,6 +1165,8 @@ public:
         int rawLabActivePointCurve = 0;
         bool rawLabColorWarpLiveCloud = false;
         int rawLabLastGalleryHost = 1;
+        int viewSectionTab = 0;
+        bool viewSectionOpen = true;
     };
     RawWorkspacePresentationPreferences GetRawWorkspacePresentationPreferences() const;
     void ApplyRawWorkspacePresentationPreferences(
@@ -1813,7 +1819,6 @@ private:
     bool m_RawWorkspaceLabGalleryPanelsOpen = true;
     float m_RawWorkspaceLabGalleryPanelsAnimation = 0.0f;
     bool m_RawWorkspaceGalleryPreviewHovered = false;
-    bool m_RawWorkspaceGalleryDrawerNeedsInitialExpansion = true;
     float m_RawWorkspaceLabAnimatedLowerShelfHeight = 0.0f;
     float m_RawWorkspaceLabAnimatedFilmstripHeight = 0.0f;
     float m_RawWorkspaceLabFilmstripAnimationOpenHeight = 0.0f;
@@ -3044,6 +3049,22 @@ private:
     std::string RawNodeEditorStateKey() const;
     RawDevelopmentGraphScopeStage ActiveNodeEditorAnalysis() const;
     mutable Stack::Editor::NodeEditorState m_NodeEditorState;
+    Stack::Editor::NodeEditorPanelState m_NodeEditorPanel;
+    RawWorkspaceEditContext* m_NodeEditorDrawingContext = nullptr;
+    std::optional<Stack::Project::NodeEditTarget> m_NodePrimaryUiTarget;
+    void BindNodeEditorPrimaryState(const Stack::Project::NodeEditTarget& target);
+    int m_ViewSectionTab = 0; // Layers, Controls, Settings, Assets.
+    bool m_ViewSectionOpen = true;
+    void RenderNodeEditorPanel();
+    void RenderNodeEditorPanelMenu();
+    void ResetNodeEditorPanelInstances(const std::vector<Stack::Project::NodeEditTarget>& targets);
+    void RefreshNodeEditorPanel();
+    void UpdateNodeEditorPanelVisibility();
+    bool ActivateNodeEditorPanelTarget(const Stack::Project::NodeEditTarget& target);
+    const EditorNodeGraph::Node* ResolveNodeEditorTarget(const Stack::Project::NodeEditTarget& target) const;
+    bool BeginNodeEditorContext(const Stack::Project::NodeEditTarget& target, RawWorkspaceEditContext& context) const;
+    Stack::Editor::NodeEditorDrawResult DrawNodeEditorPrimary(RawWorkspaceEditContext& context);
+
     std::optional<Stack::RawRecipe::GraphOperationKind> SelectedRawOperationKind() const;
     const EditorNodeGraph::Node* SelectedRawOperation() const;
     Stack::RawRecipe::RawDevelopmentRecipe ReadRawControlRecipe() const;

@@ -118,6 +118,9 @@ void EditorModule::ConsumeRenderWorkerResults() {
         resultsToProcess.pop_front();
 
         try {
+        if (result.rawRenderPurpose==RawRenderPurpose::AnalysisScopes && m_NodeEditorPanel.analysisTarget &&
+            result.rawWorkspace.graphScopeOwnerKey==m_NodeEditorPanel.analysisTarget->Key() &&
+            (!result.success || result.telemetry.superseded)) m_NodeEditorPanel.analysisTarget.reset();
         if (result.outputTexture.texture != 0) {
             bool fenceFailed = false;
             if (!PollSharedTextureFence(result.outputTexture.readyFence, fenceFailed)) {
@@ -639,7 +642,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     TryContinueRawWorkspaceStartingPointOnAnalysis();
                     if (result.rawRenderPurpose ==
                         RawRenderPurpose::AnalysisScopes) {
-                        const bool retryScope = !graphScopeRestored &&
+                        const bool retryScope = !graphScopeRestored && !(m_NodeEditorPanel.visible && !result.rawWorkspace.graphScopeOwnerKey.empty() && result.rawWorkspace.graphScopeReadback.valid) &&
                             m_RawWorkspaceAnalysisScopeRetryCount++ == 0;
                         if (graphScopeRestored) {
                             m_RawWorkspaceAnalysisScopeRetryCount = 0;
@@ -884,7 +887,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     TryContinueRawWorkspaceStartingPointOnAnalysis();
                     if (result.rawRenderPurpose ==
                         RawRenderPurpose::AnalysisScopes) {
-                        const bool retryScope = !graphScopeRestored &&
+                        const bool retryScope = !graphScopeRestored && !(m_NodeEditorPanel.visible && !result.rawWorkspace.graphScopeOwnerKey.empty() && result.rawWorkspace.graphScopeReadback.valid) &&
                             m_RawWorkspaceAnalysisScopeRetryCount++ == 0;
                         if (graphScopeRestored) {
                             m_RawWorkspaceAnalysisScopeRetryCount = 0;

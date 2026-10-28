@@ -7,7 +7,7 @@
 namespace Stack::Editor::RawLabInternal {
 bool DrawCalibrationEditor(RawRecipe::RawColorCalibrationRecipe& recipe,
     CalibrationEditorState& state, const ImVec2& size,
-    const std::array<bool, 3>& hueDriven, const std::array<bool, 3>& saturationDriven) {
+    const std::array<bool, 3>& hueDriven, const std::array<bool, 3>& saturationDriven, bool fixedFit) {
     using namespace RawRecipe;
     auto& io = ImGui::GetIO();
     ImGui::InvisibleButton("##CalibrationPrimaries", size);
@@ -19,12 +19,13 @@ bool DrawCalibrationEditor(RawRecipe::RawColorCalibrationRecipe& recipe,
     auto primaries = ColorCalibrationPrimaries(recipe);
     // Fit externally changed or re-opened values without changing the recipe.
     if (state.dragging < 0) {
+        if (fixedFit) state.radius=.65;
         for (const auto& p : primaries) {
             const double extent = std::hypot(p[0]-kCalibrationWhite[0], p[1]-kCalibrationWhite[1]);
             if (std::isfinite(extent) && extent > state.radius) state.radius = extent * 1.12;
         }
     }
-    if (hovered && state.dragging < 0 && io.MouseWheel != 0 && !io.KeyAlt) {
+    if (!fixedFit && hovered && state.dragging < 0 && io.MouseWheel != 0 && !io.KeyAlt) {
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
         const double radius = state.radius * std::exp(-double(io.MouseWheel) * .15);
         if (std::isfinite(radius) && radius > std::numeric_limits<double>::min()) state.radius = radius;

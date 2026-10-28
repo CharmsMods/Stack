@@ -24,6 +24,7 @@ struct RawLabColorSurfaceArgs {
     ColorWarpFeedback* feedback = nullptr;
     EditorModuleTypes::RawWorkspaceColorWarpAreaOwner areaOwner;
     bool areaEditingAllowed = false;
+    bool panel = false;
 };
 
 bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args);

@@ -16,6 +16,11 @@ struct CurveCanvasGeometryCache {
     bool valid = false;
 };
 struct CurveCanvasState {
+    void EndInteraction() {
+        gesture=exposureGesture=amountGesture=normalizationGesture=tonalSliderGesture=false;
+        gestureMoved=gestureApplied=false;dragged=-1;activeTonalSlider=0;probe.reset();
+        modeSelector.dragging=false;modeSelector.capture=0;
+    }
     CurveGestureMode mode = CurveGestureMode::Points;
     CurveModeSelectorState modeSelector;
     std::vector<bool> selected;
