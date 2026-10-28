@@ -2645,6 +2645,7 @@ void AppShell::RenderUI() {
     m_Editor->TickBracketing();
     m_Editor->UpdateBracketingPresentation();
     const bool bracketPresentation=m_Editor->IsBracketingPresentationActive();
+    m_Queue.ReleaseRetiredTextures();
     m_QueueRenderer.Tick();
     m_Queue.SetExecutionState(m_QueueRenderer.IsBusy());
     TickDiagnosticQueueExport();

@@ -8,6 +8,7 @@
 #include <functional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace StackAppearance { class AppearanceManager; }
 
@@ -28,6 +29,8 @@ public:
     void SetExecutionState(bool busy) { m_ExportState.busy = busy; if (!busy) m_ExportState.stopping = false; }
     void RenderUI(StackAppearance::AppearanceManager* appearance);
     void RenderSectionPanel();
+    // Called before UI submission, including while Queue is hidden.
+    void ReleaseRetiredTextures();
     void Shutdown();
 
     RenderQueueModel& Model() { return m_Model; }
@@ -44,6 +47,7 @@ private:
 
     TextureEntry* EnsureTexture(const Item& item);
     void ReleaseTexture(std::uint64_t id);
+    void RetireTexture(unsigned int texture);
     const std::vector<Item>& FrameItems();
     void Execute(ViewAction action);
     void DrawThumbnail(const Item& item, ImVec2 position, ImVec2 size);
@@ -52,6 +56,8 @@ private:
     ExportRequest m_ExportRequest;
     std::function<void()> m_OpenGallery, m_Stop;
     std::unordered_map<std::uint64_t, TextureEntry> m_Textures;
+    struct RetiredTexture { unsigned int texture; int frame; };
+    std::vector<RetiredTexture> m_RetiredTextures;
     std::string m_StatusText;
     std::vector<Item> m_FrameItems;
     std::uint64_t m_SnapshotRevision = 0;

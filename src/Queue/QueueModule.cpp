@@ -58,8 +58,26 @@ QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
 void QueueModule::ReleaseTexture(std::uint64_t id) {
     const auto found = m_Textures.find(id);
     if (found == m_Textures.end()) return;
-    if (found->second.texture) glDeleteTextures(1, &found->second.texture);
+    RetireTexture(found->second.texture);
     m_Textures.erase(found);
+}
+
+void QueueModule::RetireTexture(unsigned int texture) {
+    if (!texture) return;
+    // ImGui stores the name, not an owning texture reference. Any consumer may
+    // already have submitted it in this frame before Remove/replacement/pruning.
+    m_RetiredTextures.push_back({texture,
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1});
+}
+
+void QueueModule::ReleaseRetiredTextures() {
+    if (!ImGui::GetCurrentContext()) return;
+    const int frame = ImGui::GetFrameCount();
+    for (auto it = m_RetiredTextures.begin(); it != m_RetiredTextures.end();) {
+        if (it->frame >= frame) { ++it; continue; }
+        glDeleteTextures(1, &it->texture);
+        it = m_RetiredTextures.erase(it);
+    }
 }
 
 const std::vector<Item>& QueueModule::FrameItems() {
@@ -70,7 +88,7 @@ const std::vector<Item>& QueueModule::FrameItems() {
             for (const auto& item : m_FrameItems) present.insert(item.id);
             for (auto it = m_Textures.begin(); it != m_Textures.end();) {
                 if (present.find(it->first) != present.end()) { ++it; continue; }
-                if (it->second.texture) glDeleteTextures(1, &it->second.texture);
+                RetireTexture(it->second.texture);
                 it = m_Textures.erase(it);
             }
         }
@@ -172,6 +190,8 @@ void QueueModule::RenderUI(StackAppearance::AppearanceManager* appearance) {
 }
 
 void QueueModule::Shutdown() {
+    for (auto& entry : m_RetiredTextures) glDeleteTextures(1, &entry.texture);
+    m_RetiredTextures.clear();
     for (auto& entry : m_Textures) if (entry.second.texture) glDeleteTextures(1, &entry.second.texture);
     m_Textures.clear();
     m_FrameItems.clear();
