@@ -134,6 +134,7 @@ private:
         std::uint64_t revision = 0;
         EditorNodeGraph::Vec2 press;
         double lastFrame = 0;
+        double pressStartedAt = -1.0;
     };
     std::unique_ptr<DragLayoutState> m_DragLayout;
     bool BeginDragLayout(EditorModule* editor, EditorNodeGraph::Graph& graph);
@@ -630,6 +631,7 @@ private:
     std::vector<int> m_PushedNodeIds;
     int m_EditingGroupId = -1;
     char m_GroupRenameBuffer[128] = {};
+    double m_GroupPointerGestureStartedAt = -1.0;
     int m_DragGroupId = -1;
     int m_ResizingGroupId = -1;
     int m_HoveredGroupId = -1;

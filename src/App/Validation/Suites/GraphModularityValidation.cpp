@@ -466,13 +466,15 @@ void CanvasInteractionCase(Checks& c, bool raw) {
     Probe::Enable(c.folder);Probe::WatchEditor(&editor);Probe::WatchNode(f.effect);
     Perf::EnableFrameCapture(true);
     std::function<void()> canvasAction;
+    bool drawCanvas = true;
     const auto frame=[&] {
         Probe::BeginFrame();Perf::BeginFrame();
         ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();ImGuiExtras::BeginFrameInputRouting();
         ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Halation interaction",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings);
         if(canvasAction){auto action=std::move(canvasAction);canvasAction={};action();}
-        const auto start=std::chrono::steady_clock::now();ui.Render(canvasEditor);canvasEditor->FinishRawLayerGraphFrame();
+        const auto start=std::chrono::steady_clock::now();
+        if(drawCanvas) {ui.Render(canvasEditor);canvasEditor->FinishRawLayerGraphFrame();}
         const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
         ImGui::End();ImGui::Render();Probe::Presented();
         Perf::FinishFrame({},elapsed,0,elapsed,0,0,0,0);
@@ -693,6 +695,26 @@ void CanvasInteractionCase(Checks& c, bool raw) {
     io.AddMouseButtonEvent(0,false);frame();canvasEditor=&editor;frame();
     f.effect=idFor(effectUuid);Probe::WatchNode(f.effect);
     io.AddMousePosEvent(-100,-100);io.AddMouseButtonEvent(0,false);frame();
+    // A workspace retains its own canvas while another workspace is drawn.
+    // Advance ImGui input without drawing this canvas, then return promptly.
+    for (bool newPress : {false, true}) {
+        for(int settle=0;settle<20;++settle)frame();
+        const auto pressRegion=Probe::Last(Probe::Visual::Node).region;
+        const float x=pressRegion.x+pressRegion.width*.5f, y=pressRegion.y+12;
+        io.AddMousePosEvent(x,y);frame();io.AddMouseButtonEvent(0,true);frame();
+        io.AddMousePosEvent(x+18,y);frame();
+        const auto held=serialized();
+        drawCanvas=false;
+        io.AddMouseButtonEvent(0,false);frame();
+        if(newPress) {io.AddMousePosEvent(1300,900);io.AddMouseButtonEvent(0,true);frame();}
+        else frame(); // Consume the release edge while the owner is hidden.
+        drawCanvas=true;
+        io.AddMousePosEvent(1250,850);frame();
+        c.Check(serialized()==held && Perf::LastFrame().counters[std::size_t(Perf::Counter::LayoutSolve)]==0,
+            prefix+(newPress?"push-hidden-new-press":"push-hidden-release"),
+            "Returning to a retained canvas never applies an abandoned node drag at the later pointer");
+        io.AddMouseButtonEvent(0,false);frame();
+    }
     const auto processingBeforeOpen=editor.GetProjectSession().rawLayers.ProcessingRevision();
     std::unordered_set<std::string> previousNodes;
     for(const auto& node:editor.GetNodeGraph().GetNodes())previousNodes.insert(node.instanceUuid);

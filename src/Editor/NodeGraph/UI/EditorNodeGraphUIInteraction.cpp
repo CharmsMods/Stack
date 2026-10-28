@@ -379,8 +379,9 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     }
     // Finish retained group gestures even when a popup or node editor takes
     // input before the ordinary group branch can observe the release frame.
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-        (m_DragGroupId > 0 || m_ResizingGroupId > 0)) {
+    if ((m_DragGroupId > 0 || m_ResizingGroupId > 0) &&
+        (!ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+         ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left] != m_GroupPointerGestureStartedAt)) {
         m_DragGroupId = -1;
         m_ResizingGroupId = -1;
         editor->EndGraphLayoutGesture(false);
@@ -564,6 +565,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
 
     if (hitGroupId > 0) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_GroupPointerGestureStartedAt = ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left];
             if (hitResize) {
                 m_ResizingGroupId = hitGroupId;
             } else {

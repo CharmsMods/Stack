@@ -26,6 +26,7 @@ bool EditorNodeGraphUI::BeginDragLayout(EditorModule* editor,Graph& graph) {
     auto drag=std::make_unique<DragLayoutState>();
     drag->documentId=context.documentId;drag->graphId=context.graphId;drag->revision=context.documentRevision;
     drag->held=graph.GetSelectedNodeIds();drag->lastFrame=ImGui::GetTime();
+    drag->pressStartedAt=ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left];
     drag->restingNodesBefore=m_LayoutRestingNodes;drag->restingGroupsBefore=m_LayoutRestingGroups;
     std::unordered_map<int,Vec2> rests;
     for(const auto& node:graph.GetNodes())if(const auto found=m_LayoutRestingNodes.find(node.instanceUuid);found!=m_LayoutRestingNodes.end())
@@ -156,6 +157,12 @@ void EditorNodeGraphUI::UpdateActiveNodeDrag(EditorModule* editor,Graph& graph) 
     if(m_GraphContext.documentId!=m_DragLayout->documentId || m_GraphContext.graphId!=m_DragLayout->graphId ||
         m_GraphContext.documentRevision!=m_DragLayout->revision) {
         m_DragLayout.reset();m_DragNodeId=-1;return;
+    }
+    // A hidden canvas may miss release, or return during an unrelated press.
+    // Retain completed movement, but never apply that later pointer as a drop.
+    if (ImGui::GetIO().MouseClickedTime[ImGuiMouseButton_Left] != m_DragLayout->pressStartedAt ||
+        (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+        EndDragLayout(editor,false);return;
     }
     const double now=ImGui::GetTime();
     if(now-m_DragLayout->lastFrame>2) {EndDragLayout(editor,false);return;}

@@ -8,8 +8,9 @@ retained state when an input edge is missed, not native event routing or pixels.
 
 Run with --output <file.cpp>, then compile that file with a C++17 compiler.
 No other source files, include directories, libraries, GPU or downloads are
-required. The only source dependency is
-src/Editor/NodeGraph/UI/EditorNodeGraphUIInteraction.cpp.
+required. The source dependencies are EditorNodeGraphUIInteraction.cpp and
+EditorNodeGraphUIDragLayout.cpp in src/Editor/NodeGraph/UI/.
+The node update method is copied whole; layout application is a boundary double.
 """
 import argparse
 from pathlib import Path
@@ -28,6 +29,7 @@ def block(source, marker):
 
 
 PREAMBLE = r'''
+#include <memory>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -85,7 +87,8 @@ enum class UiNotificationSeverity { Error };
 struct EditorModule {
     EditorNodeGraph::Graph graph;
     EditorNodeGraph::Graph& GetNodeGraph(){return graph;}
-    void EndGraphLayoutGesture(bool){}
+    int layoutEnds=0;bool layoutCancelled=false;
+    void EndGraphLayoutGesture(bool cancel){++layoutEnds;layoutCancelled=cancel;}
     void CancelGraphAutoFocusTracking(){}
     const StackAppearance::AppearanceManager* GetAppearance(){return nullptr;}
 };
@@ -100,7 +103,7 @@ public:
     bool m_ExpansionMotion=false;
     int m_MiddlePanSuppressDeltaFrames=0,m_MiddlePanLastUpdateFrame=-1;
     int m_DragGroupId=-1,m_ResizingGroupId=-1,m_DragOutputNodeId=-1,m_DragInputNodeId=-1;
-    double m_LeftPointerGestureStartedAt=-1.;
+    double m_LeftPointerGestureStartedAt=-1.,m_GroupPointerGestureStartedAt=-1.;
     int m_HoveredInputNodeId=-1,m_HoveredOutputNodeId=-1,m_NodeBrowserDragFromNodeId=-1,m_NodeBrowserDragToNodeId=-1;
     std::string m_DragOutputSocketId,m_DragInputSocketId,m_HoveredInputSocketId,m_HoveredOutputSocketId;
     std::string m_NodeBrowserDragFromSocketId,m_NodeBrowserDragToSocketId;
@@ -140,7 +143,7 @@ STEP_HITS = r'''
 TESTS = r'''
 int failures=0;
 void Check(bool ok,const char* message){if(!ok){++failures;std::cerr<<message<<'\n';}}
-int main() try {
+int RunPointerTests() try {
     using Owner=EditorNodeGraphUI::GraphMouseOwner;
     for(bool output:{true,false})for(int interrupted=0;interrupted<4;++interrupted) {
         EditorModule editor;EditorNodeGraphUI ui;
@@ -209,9 +212,74 @@ int main() try {
         Check(editor.graph.selections==previousSelections+1 && !ui.m_BoxSelecting,
             "Normal marquee release must still select");
     }
+    for(bool resize:{false,true})for(bool changedPress:{false,true}) {
+        EditorModule editor;EditorNodeGraphUI ui;
+        ImGui::Next(false,false);ImGui::Next(true,false);
+        ui.m_GroupPointerGestureStartedAt=ImGui::GetIO().MouseClickedTime[0];
+        if(resize)ui.m_ResizingGroupId=7;else ui.m_DragGroupId=7;
+        if(changedPress){ImGui::Next(false,false);ImGui::Next(true,false);ImGui::Next(true,false);}
+        ui.Step(&editor,Owner::None,false);
+        Check(editor.layoutEnds==(changedPress?1:0) && !editor.layoutCancelled &&
+            (resize?ui.m_ResizingGroupId:ui.m_DragGroupId)==(changedPress?-1:7),
+            "Group dragging/resizing must retain only its original press");
+    }
     if(failures)return 1;
     std::cout<<"Graph wire/marquee missed-release, pan takeover, owner hide/reentry and ordinary release checks passed. Component only.\n";
+    return 0;
 } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+'''
+
+NODE_PREAMBLE = r'''
+namespace NodeDragCheck {
+using std::string;
+struct Vec2 {float x=0,y=0;};
+struct Graph {};
+namespace Stack {namespace GraphLayout {struct PlacementEdit{};} namespace UiPerformance {enum class Counter{LayoutSolve};void Add(Counter){}}}
+enum {ImGuiMouseButton_Left, ImGuiKey_Escape};
+namespace ImGui {
+struct IO {double MouseClickedTime[1]={1};Vec2 MouseDelta{10,10};}; IO io;
+bool down=true,released=false; double now=1.1;
+IO& GetIO(){return io;} bool IsMouseDown(int){return down;} bool IsMouseReleased(int){return released;}
+double GetTime(){return now;} bool IsKeyPressed(int,bool){return false;}
+Vec2 GetMouseDragDelta(int){return {10,10};} Vec2 GetMousePos(){return {100,100};}
+}
+enum class UiNotificationSeverity{Error};
+struct EditorModule {int ends=0;bool cancelled=false;void EndGraphLayoutGesture(bool cancel){++ends;cancelled=cancel;} void ShowUiNotification(UiNotificationSeverity,const string&,const char*){}};
+int moves=0;
+struct Room {bool Move(Vec2,Stack::GraphLayout::PlacementEdit&,string&){++moves;return true;}};
+struct Context {string documentId="A",graphId="graph";int documentRevision=1;};
+struct State {string documentId="A",graphId="graph",lastError;int revision=1;double pressStartedAt=1,lastFrame=1;bool moved=true;Vec2 press;Room room;};
+struct EditorNodeGraphUI {
+std::unique_ptr<State> m_DragLayout=std::make_unique<State>(); Context m_GraphContext;
+int m_DragNodeId=1,m_EditingGroupId=-1,m_DragGroupId=-1,m_ResizingGroupId=-1,m_DragOutputNodeId=-1,m_DragInputNodeId=-1;
+bool m_MiddlePanCaptureActive=false;
+bool HasDrawerOpen(){return false;} Vec2 ScreenToGraph(Vec2 p){return p;}
+void EndDragLayout(EditorModule* e,bool cancel){m_DragLayout.reset();m_DragNodeId=-1;e->EndGraphLayoutGesture(cancel);}
+bool ApplyAnimatedPlacement(EditorModule*,const Stack::GraphLayout::PlacementEdit&,bool,string&){return true;}
+void UpdateActiveNodeDrag(EditorModule*,Graph&);
+
+};
+
+'''
+
+NODE_TESTS = r'''
+int Run(){
+ Graph graph;int failures=0;
+ const char* names[]={"new press", "missed release", "ordinary release", "held press"};
+ for(int scenario=0;scenario<4;++scenario){
+  EditorModule e;EditorNodeGraphUI ui;moves=0;
+  ImGui::io.MouseClickedTime[0]=scenario==0?2:1;
+  ImGui::down=scenario==0 || scenario==3;ImGui::released=scenario==2;
+  ui.UpdateActiveNodeDrag(&e,graph);
+  bool ok=moves==((scenario==2||scenario==3)?1:0) &&
+      e.ends==(scenario==3?0:1) && !e.cancelled;
+  std::cout<<"Node "<<names[scenario]<<": "<<(ok?"PASS":"FAIL")<<" moves="<<moves<<"\n";failures+=!ok;
+ }
+ return failures?1:0;
+}
+
+} // namespace NodeDragCheck
+int main(){return RunPointerTests() | NodeDragCheck::Run();}
 '''
 
 
@@ -241,6 +309,8 @@ def main():
     generated += "\n" + block(source, "bool EditorNodeGraphUI::UpdateMiddlePanCapture(")
     generated += "\nvoid EditorNodeGraphUI::Step(EditorModule* editor,GraphMouseOwner hit,bool graphHovered) {\n"
     generated += prelude + STEP_SETUP + branches[0] + STEP_HITS + "\n".join(branches[1:]) + "\n}\n" + TESTS
+    drag_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp").read_text(encoding="utf-8")
+    generated += NODE_PREAMBLE + block(drag_source, "void EditorNodeGraphUI::UpdateActiveNodeDrag(") + NODE_TESTS
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(generated, encoding="utf-8")
 
