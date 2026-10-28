@@ -11,3 +11,7 @@ target_include_directories(StackGalleryWidgetIdentityTests PRIVATE src)
 target_link_libraries(StackGalleryWidgetIdentityTests PRIVATE imgui_core)
 add_test(NAME StackRaw.GalleryWidgetIdentity COMMAND StackGalleryWidgetIdentityTests)
 set_tests_properties(StackRaw.GalleryWidgetIdentity PROPERTIES LABELS "raw;gallery;ui;cpu" TIMEOUT 30)
+
+if(MSVC)
+    target_compile_options(StackGalleryWidgetIdentityTests PRIVATE /utf-8)
+endif()

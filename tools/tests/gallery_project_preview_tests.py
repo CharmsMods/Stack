@@ -16,11 +16,11 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     base = root / 'src/Editor/Internal/RawLab'
-    workspace = (base / 'EditorModuleRawLabGalleryWorkspace.cpp').read_text()
+    workspace = (base / 'EditorModuleRawLabGalleryWorkspace.cpp').read_text(encoding="utf-8")
     start = workspace.index('    const auto* requestedSource =')
     end = workspace.index('    const auto drawPreview =', start)
     state = workspace[start:end]
-    filmstrip = (base / 'EditorModuleRawLabFilmstripPreview.cpp').read_text()
+    filmstrip = (base / 'EditorModuleRawLabFilmstripPreview.cpp').read_text(encoding="utf-8")
     start = filmstrip.index('    struct PreviewImage {')
     end = filmstrip.index('    const PreviewImage current =', start)
     resolver = filmstrip[start:end]
@@ -35,10 +35,10 @@ def main():
     overlay = count_requested_normalization(overlay)
     # Project-only hover must reach both consumers rather than preserve a prior
     # source hover or gate a valid saved cover off before its resolver runs.
-    gallery = (base / 'EditorModuleRawLabGallery.cpp').read_text()
+    gallery = (base / 'EditorModuleRawLabGallery.cpp').read_text(encoding="utf-8")
     hover = gallery.split('if ((compactFilmstrip || m_PermanentGalleryWorkspace) && tileHovered)', 1)[1].split('if (gridSourceStack)', 1)[0]
     assert hover.count('!hoverKey.empty() || !activeProjectPath.empty()') == 2
-    host = (root / 'src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp').read_text()
+    host = (root / 'src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp').read_text(encoding="utf-8")
     target = host.split('const bool filmstripHoverTarget =', 1)[1].split(';', 1)[0]
     assert '!m_RawWorkspaceLabFilmstripHoverProjectPath.empty()' in target
     generated = r'''
@@ -188,7 +188,7 @@ int main() try {
 } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 '''
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(generated)
+    args.output.write_text(generated, encoding="utf-8")
 
 
 if __name__ == '__main__':

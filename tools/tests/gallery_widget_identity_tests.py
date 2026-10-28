@@ -6,7 +6,7 @@ root = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, required=True)
 args = parser.parse_args()
-source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabGallery.cpp').read_text()
+source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabGallery.cpp').read_text(encoding="utf-8")
 start = source.index('void PushGalleryKeyID(')
 helper = source[start:source.index('\n}', start) + 2]
 
@@ -37,7 +37,7 @@ for required in ('timelineSourcesByKey.reserve(', 'timelineSourcesByKey.emplace(
     assert required in stack_rebuild, 'stack timeline still needs its source map and pinned override'
 fit_start = source.index('            const auto fitGalleryText =')
 fit_text = source[fit_start:source.index('            const std::string ordinalPrefix', fit_start)]
-fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text()
+fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text(encoding="utf-8")
 for marker, body in {
     '// PRODUCTION_KEY_HELPER': helper,
     '// PRODUCTION_LIST_HELPER': list_helper,
@@ -49,4 +49,4 @@ for marker, body in {
 }.items():
     fixture = fixture.replace(marker, body)
 args.output.parent.mkdir(parents=True, exist_ok=True)
-args.output.write_text(fixture)
+args.output.write_text(fixture, encoding="utf-8")

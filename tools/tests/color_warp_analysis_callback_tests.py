@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabPreview.cpp').read_text()
+    source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabPreview.cpp').read_text(encoding="utf-8")
     start = source.index('                const auto submitAreaAnalysis = [&]() {')
     end = source.index('\n                if (colorUi.colorWarpAreaAnalysisState)', start)
     submit = textwrap.dedent(source[start:end])
@@ -30,7 +30,7 @@ def main():
     start = source.index('                        if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1')
     end = source.index('} else if (!colorUi.colorWarpPendingCircleAppend)', start)
     commit = textwrap.dedent(source[start:end] + '}')
-    types = (root / 'src/Editor/EditorModuleTypes.h').read_text()
+    types = (root / 'src/Editor/EditorModuleTypes.h').read_text(encoding="utf-8")
     state = types.split('struct RawWorkspaceColorWarpAreaAnalysisState {', 1)[1].split('\n};', 1)[0]
     owner = 'struct RawWorkspaceColorWarpAreaOwner {' + types.split('struct RawWorkspaceColorWarpAreaOwner {', 1)[1].split('\n};', 1)[0] + '\n};\n'
     area_fields = 'bool colorWarpPendingCircleActive' + types.split('bool colorWarpPendingCircleActive', 1)[1].split('    bool colorWarpDiagnosticLocked', 1)[0]
@@ -268,7 +268,7 @@ int main() {
 }
 '''
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(text)
+    args.output.write_text(text, encoding="utf-8")
 
 
 if __name__ == '__main__':

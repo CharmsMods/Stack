@@ -11,3 +11,7 @@ target_include_directories(StackGalleryNavigatorTests PRIVATE src src/Editor/Int
 target_link_libraries(StackGalleryNavigatorTests PRIVATE imgui_core)
 add_test(NAME StackRaw.GalleryNavigator COMMAND StackGalleryNavigatorTests)
 set_tests_properties(StackRaw.GalleryNavigator PROPERTIES LABELS "raw;gallery;identity;ui;cpu" TIMEOUT 30)
+
+if(MSVC)
+    target_compile_options(StackGalleryNavigatorTests PRIVATE /utf-8)
+endif()

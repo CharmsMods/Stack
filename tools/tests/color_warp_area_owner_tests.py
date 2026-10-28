@@ -20,9 +20,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    types = (root / 'src/Editor/EditorModuleTypes.h').read_text()
-    preview = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabPreview.cpp').read_text()
-    surface = (root / 'src/Editor/Internal/RawLab/RawLabColorSurface.cpp').read_text()
+    types = (root / 'src/Editor/EditorModuleTypes.h').read_text(encoding="utf-8")
+    preview = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabPreview.cpp').read_text(encoding="utf-8")
+    surface = (root / 'src/Editor/Internal/RawLab/RawLabColorSurface.cpp').read_text(encoding="utf-8")
     owner = section(types, 'struct RawWorkspaceColorWarpAreaOwner {', 'struct RawWorkspaceColorWarpDiagnosticState {')
     fields = section(types, '    bool colorWarpPendingCircleActive', '    bool colorWarpDiagnosticLocked')
     # Async request ownership remains with the host rather than its primary
@@ -37,20 +37,20 @@ def main():
     commit = section(surface, '    if (ownsPendingArea && args.ui.colorWarpPendingCircleCommitRequested', '    constexpr float fullWheelExtent')
     surface_source_reset = section(surface, '    if (args.ui.colorWarpViewSourceKey != previewIdentity)', '    args.ui.colorWarpViewExtent = std::clamp')
     # A delayed callback must be detached on every production owner lifetime boundary.
-    selection = (root / 'src/Editor/NodeEditors/EditorModuleNodeSelection.cpp').read_text()
+    selection = (root / 'src/Editor/NodeEditors/EditorModuleNodeSelection.cpp').read_text(encoding="utf-8")
     assert 'if(changed) {\n        m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();' in selection
     assert 'if (!SelectedEditingNode()) {\n            m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();' in selection
     assert 'void EditorModule::BindRequestedRawNodeEditor() {\n    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();' in selection
     assert section(selection, 'void EditorModule::ReconcileRawNodeEditorSelection()', '\n}') .count('ResetColorWarpAreaRequest();') == 2
-    project_reset = (root / 'src/Editor/Internal/Project/EditorModuleProjectInteraction.cpp').read_text()
+    project_reset = (root / 'src/Editor/Internal/Project/EditorModuleProjectInteraction.cpp').read_text(encoding="utf-8")
     assert 'ui.ResetColorWarpAreaRequest();' in project_reset
-    teardown = (root / 'src/Editor/Internal/RawWorkspace/EditorModuleRawWorkspacePreview.cpp').read_text()
+    teardown = (root / 'src/Editor/Internal/RawWorkspace/EditorModuleRawWorkspacePreview.cpp').read_text(encoding="utf-8")
     assert 'void EditorModule::ClearRawWorkspaceLivePreviewState() {\n    m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();' in teardown
-    graph_select = (root / 'src/Editor/Internal/RawLab/EditorModuleRawProjectGraph.cpp').read_text()
+    graph_select = (root / 'src/Editor/Internal/RawLab/EditorModuleRawProjectGraph.cpp').read_text(encoding="utf-8")
     assert graph_select.count('m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();') == 3
     assert preview.count('colorUi.colorWarpAreaOwner = areaOwner;') == 2
     assert 'args.ui.colorWarpAreaOwner = args.areaOwner;' in surface
-    color = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabColor.cpp').read_text()
+    color = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabColor.cpp').read_text(encoding="utf-8")
     assert 'args.areaOwner = {context.nodeTarget, previewIdentity,\n        RawViewportSourceHash()};' in color
     assert 'preview.edit.nodeTarget, preview.identity, RawViewportSourceHash()};' in preview
     text = r'''
@@ -277,7 +277,7 @@ int main() {
 }
 '''
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(text)
+    args.output.write_text(text, encoding="utf-8")
 
 
 if __name__ == '__main__':

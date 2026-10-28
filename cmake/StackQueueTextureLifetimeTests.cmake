@@ -17,3 +17,7 @@ elseif(UNIX)
 endif()
 add_test(NAME StackQueue.TextureLifetime COMMAND StackQueueTextureLifetimeTests)
 set_tests_properties(StackQueue.TextureLifetime PROPERTIES LABELS "queue;ui;gpu" TIMEOUT 30)
+
+if(MSVC)
+    target_compile_options(StackQueueTextureLifetimeTests PRIVATE /utf-8)
+endif()

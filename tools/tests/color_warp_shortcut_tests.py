@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--cxx', default='g++')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    source = (args.surface or root/'src/Editor/Internal/RawLab/RawLabColorSurface.cpp').read_text()
+    source = (args.surface or root/'src/Editor/Internal/RawLab/RawLabColorSurface.cpp').read_text(encoding="utf-8")
     key = source.index('ImGui::IsKeyPressed(ImGuiKey_Delete, false)')
     start = source.rfind('    if (', 0, key) + len('    if (')
     end = source.index(') {', key)
@@ -26,16 +26,16 @@ def main():
         raise ValueError('Color Warp shortcut extraction anchor changed')
     condition = source[start:end].replace('args.ui.selectedColorWarpPin', 'selected')
     generated = '#include <imgui.h>\nbool DeleteShortcut(int selected) {\n const auto& io = ImGui::GetIO();\n return ' + condition + ';\n}\n'
-    generated += (root/'tools/tests/color_warp_shortcut_tests.cpp').read_text()
+    generated += (root/'tools/tests/color_warp_shortcut_tests.cpp').read_text(encoding="utf-8")
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(generated)
+        args.output.write_text(generated, encoding="utf-8")
         return
     if not args.imgui:
         parser.error('--imgui required for standalone compilation (or use --output)')
     with tempfile.TemporaryDirectory(prefix='stack-color-shortcut-') as temp:
         cpp, exe = Path(temp)/'test.cpp', Path(temp)/'test'
-        cpp.write_text(generated)
+        cpp.write_text(generated, encoding="utf-8")
         subprocess.run([args.cxx, '-std=c++17', '-O2', '-DNDEBUG', '-I', str(args.imgui), str(cpp),
             *[str(args.imgui/name) for name in ['imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp']],
             '-o', str(exe)], check=True)

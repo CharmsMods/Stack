@@ -235,29 +235,29 @@ def main():
     parser.add_argument('--context-source', type=Path, help='Optional pre-fix context-menu source for regression proof')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    ui = (args.ui_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp').read_text()
+    ui = (args.ui_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp').read_text(encoding="utf-8")
     start = ui.index('        const auto outputCard =') if '        const auto outputCard =' in ui else ui.index('        if (!node.outputEnabled) {')
     end = ui.index('        if (ImGui::Button(node.outputEnabled ?', start)
     card = ui[start:end]
-    context = (args.context_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp').read_text()
+    context = (args.context_source or root / 'src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp').read_text(encoding="utf-8")
     output_start = context.index('            if (node->kind == EditorNodeGraph::NodeKind::Output) {')
     export_end = context.index('                ImGui::EndDisabled();', output_start) + len('                ImGui::EndDisabled();')
     export_start = context.index('                ImGui::BeginDisabled(', output_start)
     if '                const auto outputCard =' in context[output_start:export_start]:
         export_start = context.index('                const auto outputCard =', output_start)
     context_export = context[export_start:export_end]
-    header = (root / 'src/Editor/EditorModule.h').read_text()
+    header = (root / 'src/Editor/EditorModule.h').read_text(encoding="utf-8")
     readiness = block(header, 'bool IsRenderSettledForFullQualityExport() const')
-    presentation = block((root / 'src/Editor/Internal/EditorModuleRenderPresentationState.cpp').read_text(), 'bool EditorModule::IsPresentedRenderComplete() const')
-    descriptor = block((root / 'src/Editor/Internal/EditorModuleGraphSnapshot.cpp').read_text(), 'bool EditorModule::TryGetGraphOutputSemanticDescriptor(')
-    resolver = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp').read_text(), 'int Graph::ResolvePreviewOutputNodeId() const').replace('Graph::', 'FixtureGraph::')
-    connected = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp').read_text(), 'bool Graph::IsOutputConnected() const').replace('Graph::', 'FixtureGraph::')
+    presentation = block((root / 'src/Editor/Internal/EditorModuleRenderPresentationState.cpp').read_text(encoding="utf-8"), 'bool EditorModule::IsPresentedRenderComplete() const')
+    descriptor = block((root / 'src/Editor/Internal/EditorModuleGraphSnapshot.cpp').read_text(encoding="utf-8"), 'bool EditorModule::TryGetGraphOutputSemanticDescriptor(')
+    resolver = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp').read_text(encoding="utf-8"), 'int Graph::ResolvePreviewOutputNodeId() const').replace('Graph::', 'FixtureGraph::')
+    connected = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp').read_text(encoding="utf-8"), 'bool Graph::IsOutputConnected() const').replace('Graph::', 'FixtureGraph::')
     text = PREAMBLE.replace('    READINESS', '    '+readiness).replace('    CARD', card).replace('    CONTEXT_EXPORT', context_export)
     # Definitions must precede main but can follow the class declarations.
     insertion = text.index('struct Card {')
     text = text[:insertion] + '\n'.join((presentation,descriptor,resolver,connected)) + '\n' + text[insertion:]
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(text)
+    args.output.write_text(text, encoding="utf-8")
 
 
 if __name__ == '__main__':

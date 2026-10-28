@@ -8,7 +8,7 @@ p=argparse.ArgumentParser()
 p.add_argument('--output',type=Path,required=True)
 a=p.parse_args()
 root=Path(__file__).resolve().parents[2]
-s=(root/'src/Editor/UI/EditorViewport.cpp').read_text()
+s=(root/'src/Editor/UI/EditorViewport.cpp').read_text(encoding="utf-8")
 def block(marker):
     start=s.index(marker);end=s.index('{',start)+1;depth=1
     while depth:
@@ -16,8 +16,8 @@ def block(marker):
     return s[start:end]
 start=s.index('                ImVec2 magPos =')
 end=s.index('                ImDrawList* fg =',start)
-fixture=(root/'tools/tests/viewport_cursor_overlay_tests.cpp').read_text()
+fixture=(root/'tools/tests/viewport_cursor_overlay_tests.cpp').read_text(encoding="utf-8")
 fixture=fixture.replace('// PRODUCTION_READOUT',block('ImU32 ApplyAlpha(')+'\n'+block('void DrawPixelInspectionCursorReadout('))
 fixture=fixture.replace('// PRODUCTION_MAGNIFIER_PLACEMENT',s[start:end])
 a.output.parent.mkdir(parents=True,exist_ok=True)
-a.output.write_text(fixture)
+a.output.write_text(fixture, encoding="utf-8")
