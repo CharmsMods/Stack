@@ -12,6 +12,14 @@ namespace Stack::Editor::RawLabInternal {
 namespace {
 using Texture = GalleryFolderCards::Texture;
 
+// Filesystem paths are literal identities; ### in a legal name is not an
+// ImGui label-ID override. Retain the current folder/window scope as the seed.
+void PushPathID(const std::string& path) {
+    ImGui::PushOverrideID(ImHashData(path.data(), path.size(),
+        ImGui::GetCurrentWindow()->IDStack.back()));
+}
+
+
 ImU32 Ink(ImVec4 color, float alpha = 1.f) {
     color.w *= alpha * ImGui::GetStyle().Alpha;
     return ImGui::ColorConvertFloat4ToU32(color);
@@ -343,7 +351,7 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
             }
             const auto& folder = folders[index];
             const auto key = folder.root.lexically_normal().generic_u8string();
-            ImGui::PushID(key.c_str());
+            PushPathID(key);
             auto& motion = m_Motion[key];
             const int frame = ImGui::GetFrameCount();
             if (motion.frame != frame - 1) {
@@ -395,7 +403,7 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                     // A catalog refresh can replace/reorder preview slots while
                     // a button is held. Identity follows the original, not slot.
                     const auto previewKey = folder.previews[image].absolutePath.lexically_normal().generic_u8string();
-                    ImGui::PushID(previewKey.c_str());
+                    PushPathID(previewKey);
                     const bool clicked = HitButton("Open image", PageHit(origin, width, image, count, motion.reveal, motion.leanX, motion.leanY));
                     const bool keyboardFocused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
                     if (clicked && (hoveredPage == static_cast<int>(image) || keyboardFocused))
