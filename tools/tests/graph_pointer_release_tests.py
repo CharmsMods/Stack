@@ -11,10 +11,13 @@ No other source files, include directories, libraries, GPU or downloads are
 required. The source dependencies are EditorNodeGraphUIInteraction.cpp,
 EditorNodeGraphUIDragLayout.cpp, EditorNodeGraphUILinksAndGroups.cpp,
 EditorNodeGraphUICamera.cpp and EditorNodeGraphUICanvas.cpp in
-src/Editor/NodeGraph/UI/, plus src/Utils/ImGuiExtras.cpp.
+src/Editor/NodeGraph/UI/, plus src/Utils/ImGuiExtras.cpp,
+src/Editor/Internal/EditorModuleView.cpp and src/Editor/EditorModuleTypes.h.
 The node update method is copied whole; layout application is a boundary double.
 Camera checks also copy the pan/zoom methods, easing and canvas advance block;
-input and appearance services remain boundary doubles.
+input and appearance services remain boundary doubles. The autofocus fixture
+extracts the preparation failure/success handoff and actual autofocus state/math;
+layout preparation is a boundary double.
 Group rename checks copy the render prelude and interaction gate; missing-group
 lookup is a boundary double. Native text input is not covered by this target.
 """
@@ -36,6 +39,9 @@ def block(source, marker):
 
 PREAMBLE = r'''
 #include <memory>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -276,14 +282,15 @@ void UpdateActiveNodeDrag(EditorModule*,Graph&);
 NODE_TESTS = r'''
 int Run(){
  Graph graph;int failures=0;
- const char* names[]={"new press", "missed release", "ordinary release", "held press"};
- for(int scenario=0;scenario<4;++scenario){
+ const char* names[]={"new press", "missed release", "ordinary release", "held press", "stationary held press"};
+ for(int scenario=0;scenario<5;++scenario){
   EditorModule e;EditorNodeGraphUI ui;moves=0;
   ImGui::io.MouseClickedTime[0]=scenario==0?2:1;
-  ImGui::down=scenario==0 || scenario==3;ImGui::released=scenario==2;
+  ImGui::io.MouseDelta=scenario==4?Vec2{}:Vec2{10,10};
+  ImGui::down=scenario==0 || scenario>=3;ImGui::released=scenario==2;
   ui.UpdateActiveNodeDrag(&e,graph);
   bool ok=moves==((scenario==2||scenario==3)?1:0) &&
-      e.ends==(scenario==3?0:1) && !e.cancelled;
+      e.ends==(scenario>=3?0:1) && !e.cancelled;
   std::cout<<"Node "<<names[scenario]<<": "<<(ok?"PASS":"FAIL")<<" moves="<<moves<<"\n";failures+=!ok;
  }
  return failures?1:0;
@@ -333,7 +340,7 @@ int Run() {
     return failures != before;
 }
 } // namespace RenameGateCheck
-int main(){return RunPointerTests() | RunPanZoomTests() | NodeDragCheck::Run() | RenameGateCheck::Run();}
+int main(){return RunPointerTests() | RunPanZoomTests() | NodeDragCheck::Run() | DragAutoFocusCheck::Run() | RenameGateCheck::Run();}
 '''
 
 
@@ -426,6 +433,19 @@ def main():
     generated += prelude + STEP_SETUP + branches[0] + STEP_HITS + "\n".join(branches[1:]) + "\n}\n" + TESTS + CAMERA_TESTS
     drag_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp").read_text(encoding="utf-8")
     generated += NODE_PREAMBLE + block(drag_source, "void EditorNodeGraphUI::UpdateActiveNodeDrag(") + NODE_TESTS
+    view = (root / "src/Editor/Internal/EditorModuleView.cpp").read_text()
+    types = (root / "src/Editor/EditorModuleTypes.h").read_text()
+    focus = (root / "tools/tests/graph_drag_autofocus_fixture.cpp").read_text()
+    focus = focus.replace('// PRODUCTION_AUTOFOCUS_STATE', block(types, 'struct GraphAutoFocusState {') + ';')
+    constants = '\n'.join(line for line in view.splitlines() if line.startswith('constexpr ') and 'kGraphAutoFocus' in line)
+    helpers = constants + '\n' + block(view, 'float ComputeGraphAutoFocusZoom(') + '\n' + block(view, 'void ComputeGraphAutoFocusPan(')
+    helpers += '\nnamespace ImGuiExtras {\n' + block(extras, 'float EaseOutCubic(') + '\n}\n'
+    focus = focus.replace('// PRODUCTION_AUTOFOCUS_HELPERS', helpers)
+    focus = focus.replace('// PRODUCTION_AUTOFOCUS_METHODS', '\n'.join(block(view, 'void EditorModule::' + name + '(')
+        for name in ('ApplyGraphAutoFocusFrame', 'RequestGraphNodeAutoFocus', 'CancelGraphAutoFocusTracking')))
+    begin_drag = block(drag_source, 'bool EditorNodeGraphUI::BeginDragLayout(')
+    handoff = begin_drag[begin_drag.index('    if(!drag->room.Begin('):begin_drag.rfind('}')]
+    generated += focus.replace('// PRODUCTION_DRAG_HANDOFF', handoff)
     groups_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp").read_text(encoding="utf-8")
     render_groups = block(groups_source, "void EditorNodeGraphUI::RenderGroups(")
     rename_prelude = render_groups[render_groups.index("{") + 1:render_groups.index("    ImDrawList* drawList")]

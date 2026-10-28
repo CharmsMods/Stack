@@ -5,6 +5,7 @@
 
 #include <imgui_internal.h>
 #include <algorithm>
+#include <cstring>
 
 namespace Stack::Queue {
 namespace {
@@ -33,7 +34,7 @@ void Space(float height) { if (height > 0) ImGui::Dummy(ImVec2(0, height)); }
 void Ellipsis(const char* text, ImVec2 at, float right, ImU32 color) {
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), at,
-        ImVec2(std::max(at.x, right), at.y + ImGui::GetFontSize() + 2), right, text, nullptr, nullptr);
+        ImVec2(std::max(at.x, right), at.y + ImGui::GetFontSize() + 2), right, text, text + std::strlen(text), nullptr);
     ImGui::PopStyleColor();
 }
 ImVec4 Secondary() {

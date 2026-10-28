@@ -55,6 +55,7 @@ bool EditorNodeGraphUI::BeginDragLayout(EditorModule* editor,Graph& graph) {
     // Freeze the held geometry at the visible press position. Authored geometry
     // changes only with meaningful pointer movement; clicking creates no edit.
     for(int id:drag->held)if(!drag->easedHeld.count(id))m_LayoutNodeMotion.erase(id);
+    editor->CancelGraphAutoFocusTracking();
     m_SmoothZoomActive=false;m_ZoomTarget=m_Zoom;
     m_DragLayout=std::move(drag);return true;
 }

@@ -4,6 +4,7 @@ import argparse
 p = argparse.ArgumentParser()
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--source', type=Path)
+p.add_argument('--view-source', type=Path)
 a = p.parse_args()
 root = Path(__file__).resolve().parents[2]
 s = (a.source or root / 'src/Queue/QueueModule.cpp').read_text()
@@ -21,6 +22,8 @@ for marker in ['void QueueModule::RetireTexture(', 'void QueueModule::ReleaseRet
         # Old-source negative still compiles; its immediate deletion is tested.
         methods += '\nvoid Owner::' + ('RetireTexture(unsigned int) {}' if 'RetireTexture(' in marker else 'ReleaseRetiredTextures() {}')
 fixture = (root / 'tools/tests/queue_texture_lifetime_tests.cpp').read_text().replace('// PRODUCTION_METHODS', methods)
+if a.view_source:
+    fixture = fixture.replace('#include "Queue/QueueView.cpp"', '#include "' + a.view_source.resolve().as_posix() + '"')
 # Frame pump must run outside Queue's visibility/consumer branches.
 if not a.source:
     shell = (root / 'src/App/AppShell.cpp').read_text()
