@@ -3486,40 +3486,46 @@ void EditorModule::RenderRawWorkspaceLabGalleryImagePreviewPanel() {
     std::filesystem::path sourcePath;
     std::string displayName = m_RawWorkspaceLabFocusedProjectName;
 
-    if (!projectPath.empty()) {
+    const bool bracketBusy = AutoBracketWorkActive();
+    // Saved After inspection loads the project directly. Do not probe original
+    // files (potentially on offline/network storage) just to redraw that view.
+    const bool needsOriginalSource = m_RawGalleryInspectionShowBefore || bracketBusy;
+    if (!projectPath.empty() && (needsOriginalSource || displayName.empty())) {
         Stack::Project::ProjectRecord record;
         if (FindRawWorkspaceGalleryProjectRecord(
                 projectPath, record)) {
             if (displayName.empty()) displayName = record.displayName;
-            for (const Stack::Project::IndexedProjectSource& source :
-                 record.sources) {
-                std::error_code existsError;
-                if (!source.originalPath.empty() &&
-                    std::filesystem::is_regular_file(
-                        source.originalPath, existsError) &&
-                    !existsError) {
-                    sourcePath = source.originalPath;
-                    break;
-                }
-            }
-            if (sourcePath.empty()) {
+            if (needsOriginalSource) {
                 for (const Stack::Project::IndexedProjectSource& source :
                      record.sources) {
-                    if (source.fingerprint.empty()) continue;
-                    const auto found = std::find_if(
-                        m_RawWorkspace.sources.begin(),
-                        m_RawWorkspace.sources.end(),
-                        [&](const Stack::RawWorkspace::SourceRecord& candidate) {
-                            return candidate.fingerprint == source.fingerprint;
-                        });
-                    if (found != m_RawWorkspace.sources.end()) {
-                        sourcePath = found->absolutePath;
+                    std::error_code existsError;
+                    if (!source.originalPath.empty() &&
+                        std::filesystem::is_regular_file(
+                            source.originalPath, existsError) &&
+                        !existsError) {
+                        sourcePath = source.originalPath;
                         break;
+                    }
+                }
+                if (sourcePath.empty()) {
+                    for (const Stack::Project::IndexedProjectSource& source :
+                         record.sources) {
+                        if (source.fingerprint.empty()) continue;
+                        const auto found = std::find_if(
+                            m_RawWorkspace.sources.begin(),
+                            m_RawWorkspace.sources.end(),
+                            [&](const Stack::RawWorkspace::SourceRecord& candidate) {
+                                return candidate.fingerprint == source.fingerprint;
+                            });
+                        if (found != m_RawWorkspace.sources.end()) {
+                            sourcePath = found->absolutePath;
+                            break;
+                        }
                     }
                 }
             }
         }
-    } else if (!m_RawWorkspace.selectedSourceKey.empty()) {
+    } else if (projectPath.empty() && !m_RawWorkspace.selectedSourceKey.empty()) {
         if (const Stack::RawWorkspace::SourceRecord* source =
                 FindRawWorkspaceSourceByKey(
                     m_RawWorkspace.selectedSourceKey)) {
@@ -3538,7 +3544,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryImagePreviewPanel() {
     }
     const bool hasSavedProject = !projectPath.empty();
     if (!hasSavedProject) m_RawGalleryInspectionShowBefore = false;
-    if(AutoBracketWorkActive()) {
+    if(bracketBusy) {
         ImGui::TextUnformatted(displayName.c_str());
         const auto source=std::find_if(m_RawWorkspace.sources.begin(),m_RawWorkspace.sources.end(),
             [&](const auto& source){return source.absolutePath==sourcePath;});
