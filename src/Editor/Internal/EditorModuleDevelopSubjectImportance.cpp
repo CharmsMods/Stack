@@ -1370,12 +1370,21 @@ bool EditorModule::GetDevelopSubjectImportanceViewportState(DevelopSubjectViewpo
             viewportCell.boundaryHint = cellJson.value("boundaryHint", 0.0f);
             outState.refinedMapCells.push_back(viewportCell);
         };
-        const nlohmann::json solvedRefinedMap =
-            node->rawDevelop.integratedToneLayerJson.value(
-                "autoSubjectSceneRefinedMap",
-                nlohmann::json::object());
-        const nlohmann::json solvedRefinedCells =
-            solvedRefinedMap.value("cells", nlohmann::json::array());
+        // Borrow only for this read-only parse; both defaults outlive the references.
+        const auto memberOr = [](const nlohmann::json& object, const char* key,
+                                 const nlohmann::json& fallback) -> const nlohmann::json& {
+            if (!object.is_object()) {
+                // Retain value()'s type-error contract for malformed parent values.
+                (void)object.value(key, fallback);
+            }
+            const auto found = object.find(key);
+            return found != object.end() ? *found : fallback;
+        };
+        const nlohmann::json emptyMap = nlohmann::json::object();
+        const nlohmann::json emptyCells = nlohmann::json::array();
+        const nlohmann::json& solvedRefinedMap = memberOr(
+            node->rawDevelop.integratedToneLayerJson, "autoSubjectSceneRefinedMap", emptyMap);
+        const nlohmann::json& solvedRefinedCells = memberOr(solvedRefinedMap, "cells", emptyCells);
         if (solvedRefinedMap.value("version", std::string()) == kDevelopSubjectRefinedMapVersion &&
             solvedRefinedMap.value("active", false) &&
             solvedRefinedCells.is_array() &&
