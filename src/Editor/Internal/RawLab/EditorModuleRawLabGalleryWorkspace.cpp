@@ -116,10 +116,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         result.available = source != nullptr;
         if (!projectPath.empty()) {
             const auto& gallery = GetRawWorkspaceGalleryPresentation();
+            const auto normalizedProjectPath = projectPath.lexically_normal();
             const auto project = std::find_if(gallery.projects.begin(), gallery.projects.end(),
                 [&](const auto& candidate) {
                     return !candidate.projectPath.empty() &&
-                        candidate.projectPath.lexically_normal() == projectPath.lexically_normal();
+                        candidate.projectPath.lexically_normal() == normalizedProjectPath;
                 });
             if (project != gallery.projects.end() && !project->coverThumbnailCachePath.empty()) {
                 result.available = true;

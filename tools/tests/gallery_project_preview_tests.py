@@ -6,6 +6,7 @@ resolution, workspace preview state and filmstrip image resolver are extracted;
 this does not render pixels or run the native Before/After inspection renderer.
 """
 import argparse
+import re
 from pathlib import Path
 
 
@@ -24,6 +25,14 @@ def main():
     end = filmstrip.index('    const PreviewImage current =', start)
     resolver = filmstrip[start:end]
     overlay = filmstrip[start:filmstrip.index('    const float opacity =', end)]
+    # Count only requested-path normalization, while still executing the real
+    # std::filesystem operation. Candidate normalization remains untouched.
+    def count_requested_normalization(code):
+        return re.sub(r"(?<![.>])\bprojectPath\.lexically_normal\(\)",
+                      "CountRequestedNormalization(projectPath)", code)
+    state = count_requested_normalization(state)
+    resolver = count_requested_normalization(resolver)
+    overlay = count_requested_normalization(overlay)
     # Project-only hover must reach both consumers rather than preserve a prior
     # source hover or gate a valid saved cover off before its resolver runs.
     gallery = (base / 'EditorModuleRawLabGallery.cpp').read_text()
@@ -43,6 +52,10 @@ def main():
 #include <string>
 #include <unordered_map>
 #include <vector>
+std::size_t requestedNormalizations=0;
+std::filesystem::path CountRequestedNormalization(const std::filesystem::path& path) {
+    ++requestedNormalizations;return path.lexically_normal();
+}
 namespace Raw {struct RawMetadata {};}
 namespace Stack::RawWorkspace {
 enum class ThumbnailStatus {Ready};
@@ -142,6 +155,35 @@ int main() try {
         f.m_RawWorkspaceLabFilmstripPreviousHoverProjectPath.empty() &&
         f.m_RawWorkspaceLabFilmstripPreviousHoverSourceKey.empty() &&
         f.m_RawWorkspaceLabFilmstripHoverBlend==1.f,"filmstrip unavailable target kept previous fade");
+    // Same-call normalization must not scale with catalog position. Check the
+    // extracted production resolvers, normalized aliases, first-match ordering,
+    // a missing target and the empty-project branch without a freshness cache.
+    for(int selected:{0,99,199,300}) {
+        Fixture paths;
+        paths.gallery.projects.push_back({"","","",""});
+        for(int i=0;i<200;++i) {
+            const auto suffix=std::to_string(i);
+            paths.gallery.projects.push_back({"/photos/catalog/project-"+suffix,
+                "cover-"+suffix,"project-"+suffix,""});
+            paths.textures["cover-"+suffix]=i+1;
+        }
+        paths.gallery.projects.push_back({"/photos/catalog/./project-0","other-cover","duplicate",""});
+        paths.textures["other-cover"]=999;
+        const std::filesystem::path alias="/photos/temporary/../catalog/./project-"+std::to_string(selected);
+        const unsigned expected=selected<200 ? selected+1 : 0;
+        requestedNormalizations=0;
+        Require(paths.filmstrip("",alias).current==expected,"filmstrip normalized lookup changed first match");
+        Require(requestedNormalizations==1,"filmstrip repeatedly normalized requested path");
+        paths.m_RawWorkspaceLabFilmstripHoverProjectPath=alias;
+        requestedNormalizations=0;
+        Require(paths.step().current==expected,"workspace normalized lookup changed first match");
+        Require(requestedNormalizations==1,"workspace repeatedly normalized requested path");
+        paths.m_RawWorkspaceLabFilmstripHoverProjectPath.clear();paths.preview={};
+        requestedNormalizations=0;
+        Require(!paths.filmstrip("",{}).available && !paths.step().available,
+            "empty project path became a catalog match");
+        Require(requestedNormalizations==0,"empty project path unnecessarily normalized");
+    }
     std::cout<<"Gallery project-only hover/selection, cover loading, rapid switches and unavailable fallback passed.\n";
 } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 '''
