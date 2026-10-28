@@ -538,7 +538,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
         if (range && !m_RawWorkspaceLabProjectSelectionAnchor.empty()) {
             std::vector<const Stack::RawWorkspace::GalleryProjectView*> selectionOrder;
-            if (projectStacks) for (const auto& family : *projectStacks) {
+            // List rows expose every saved version; only grid/filmstrip cards
+            // collapse a family to one cover. Match the range to the shown order.
+            const bool stackedProjectOrder = projectStacks && (compactFilmstrip ||
+                m_RawWorkspaceGalleryDisplayMode != Stack::RawWorkspace::GalleryDisplayMode::List);
+            if (stackedProjectOrder) for (const auto& family : *projectStacks) {
                 const auto* member = &presentation.projects[family.projectIndices.front()];
                 const auto cover = m_RawWorkspaceGalleryProjectCoverIds.find(member->projectId);
                 for (const auto index : family.projectIndices) {

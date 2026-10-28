@@ -3,9 +3,15 @@
 
 namespace Raw {
 ViewportFadeRenderer::~ViewportFadeRenderer() { Shutdown(); }
-void ViewportFadeRenderer::Shutdown() { if (m_Program) glDeleteProgram(m_Program); m_Program = 0; m_Commands.clear(); }
+void ViewportFadeRenderer::Shutdown() {
+    if (m_Program) glDeleteProgram(m_Program);
+    m_Program = 0;
+    m_Uniforms = {};
+    m_Commands.clear();
+}
 bool ViewportFadeRenderer::Initialize() {
-    if (!m_Program) m_Program = GLHelpers::CreateShaderProgram(R"(
+    if (m_Program) return true;
+    m_Program = GLHelpers::CreateShaderProgram(R"(
 #version 330 core
 layout(location=0) in vec2 Position;
 layout(location=1) in vec2 UV;
@@ -37,19 +43,30 @@ void main() {
     OutColor=color*vec4(Encoded!=0 ? encode(rgb) : rgb,alpha);
 }
 )");
-    return m_Program != 0;
+    if (!m_Program) return false;
+    // Locations belong to this linked program. Resolve once, not for every
+    // RAW/Graph fade patch and backdrop draw during an animation.
+    m_Uniforms.projection = glGetUniformLocation(m_Program,"ProjMtx");
+    m_Uniforms.vertexColor = glGetUniformLocation(m_Program,"VertexColor");
+    m_Uniforms.texture = glGetUniformLocation(m_Program,"Texture");
+    m_Uniforms.previous = glGetUniformLocation(m_Program,"Previous");
+    m_Uniforms.amount = glGetUniformLocation(m_Program,"Amount");
+    m_Uniforms.encoded = glGetUniformLocation(m_Program,"Encoded");
+    m_Uniforms.previousOffset = glGetUniformLocation(m_Program,"PreviousOffset");
+    m_Uniforms.previousScale = glGetUniformLocation(m_Program,"PreviousScale");
+    return true;
 }
 void ViewportFadeRenderer::Bind(unsigned int previous, float amount, bool encoded, const float* projection, bool vertexColor,
     ImVec2 previousOffset, ImVec2 previousScale) const {
     glUseProgram(m_Program);
-    glUniformMatrix4fv(glGetUniformLocation(m_Program,"ProjMtx"),1,GL_FALSE,projection);
-    glUniform1i(glGetUniformLocation(m_Program,"VertexColor"),vertexColor ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program,"Texture"),0);
-    glUniform1i(glGetUniformLocation(m_Program,"Previous"),1);
-    glUniform1f(glGetUniformLocation(m_Program,"Amount"),amount);
-    glUniform1i(glGetUniformLocation(m_Program,"Encoded"),encoded ? 1 : 0);
-    glUniform2f(glGetUniformLocation(m_Program,"PreviousOffset"),previousOffset.x,previousOffset.y);
-    glUniform2f(glGetUniformLocation(m_Program,"PreviousScale"),previousScale.x,previousScale.y);
+    glUniformMatrix4fv(m_Uniforms.projection,1,GL_FALSE,projection);
+    glUniform1i(m_Uniforms.vertexColor,vertexColor ? 1 : 0);
+    glUniform1i(m_Uniforms.texture,0);
+    glUniform1i(m_Uniforms.previous,1);
+    glUniform1f(m_Uniforms.amount,amount);
+    glUniform1i(m_Uniforms.encoded,encoded ? 1 : 0);
+    glUniform2f(m_Uniforms.previousOffset,previousOffset.x,previousOffset.y);
+    glUniform2f(m_Uniforms.previousScale,previousScale.x,previousScale.y);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D,previous);
     glActiveTexture(GL_TEXTURE0);

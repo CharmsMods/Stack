@@ -27,5 +27,9 @@ private:
     std::deque<Command> m_Commands;
     int m_CommandFrame = -1;
     unsigned int m_Program = 0;
+    struct Uniforms {
+        int projection = -1, vertexColor = -1, texture = -1, previous = -1;
+        int amount = -1, encoded = -1, previousOffset = -1, previousScale = -1;
+    } m_Uniforms;
 };
 }
