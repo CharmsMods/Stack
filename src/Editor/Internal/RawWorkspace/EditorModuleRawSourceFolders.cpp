@@ -213,7 +213,6 @@ void EditorModule::SetRawWorkspaceAllFolders(bool allFolders) {
 void EditorModule::RequestRawWorkspaceAggregateScan() {
     ResetRawWorkspaceSimilarityStacks();
     const auto roots = m_RawWorkspace.registeredSourceFolders;
-    const auto selected = m_RawWorkspace.selectedSourceKey;
     std::uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
@@ -224,7 +223,7 @@ void EditorModule::RequestRawWorkspaceAggregateScan() {
         m_RawWorkspaceScanSnapshot.sourcesPublished = !m_RawWorkspace.sources.empty();
         m_RawWorkspaceScanSnapshot.statusText = "Scanning all source folders...";
     }
-    const auto submitted = ProjectTasks().Submit("Scanning source folders", [this, roots, selected, generation] {
+    const auto submitted = ProjectTasks().Submit("Scanning source folders", [this, roots, generation] {
         const auto canceled = [this, generation] {
             std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
             return generation != m_RawWorkspaceScanGeneration;
@@ -244,7 +243,7 @@ void EditorModule::RequestRawWorkspaceAggregateScan() {
         } catch (const std::exception& error) { result.errorMessage = error.what(); }
         catch (...) { result.errorMessage = "Could not scan the source folders."; }
         if (canceled()) return;
-        const bool published = ProjectTasks().PostToMain([this, generation, selected, result = std::move(result)]() mutable {
+        const bool published = ProjectTasks().PostToMain([this, generation, result = std::move(result)]() mutable {
             {
                 std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
                 if (generation != m_RawWorkspaceScanGeneration || !m_RawWorkspace.allSourceFolders) return;
@@ -264,8 +263,10 @@ void EditorModule::RequestRawWorkspaceAggregateScan() {
             m_RawWorkspace.sources = std::move(result.sources);
             m_RawWorkspace.sourceSetProjects = std::move(result.sourceSetProjects);
             m_RawWorkspace.selectedSourceKey.clear();
-            if (latestSelection.empty() || !Stack::RawWorkspace::SelectSourceByKey(m_RawWorkspace, latestSelection))
-                if (!selected.empty()) Stack::RawWorkspace::SelectSourceByKey(m_RawWorkspace, selected);
+            // Keep the latest user focus (including cleared focus), not the
+            // selection that happened to be active when the scan started.
+            if (!latestSelection.empty())
+                Stack::RawWorkspace::SelectSourceByKey(m_RawWorkspace, latestSelection);
             m_RawWorkspace.selectedSourceKeys.erase(std::remove_if(m_RawWorkspace.selectedSourceKeys.begin(),
                 m_RawWorkspace.selectedSourceKeys.end(), [this](const auto& key) { return !FindRawWorkspaceSourceByKey(key); }),
                 m_RawWorkspace.selectedSourceKeys.end());

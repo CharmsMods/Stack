@@ -939,7 +939,6 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
     ResetRawWorkspaceSimilarityStacks();
 
     const std::filesystem::path workspaceRoot = m_RawWorkspace.workspaceRoot;
-    const std::string selectedBeforeScan = m_RawWorkspace.selectedSourceKey;
     const bool allowCatalogWarmStart = m_RawWorkspace.sources.empty();
     std::unordered_map<std::string, RawWorkspaceCachedSourceIdentity>
         reusableIdentities;
@@ -975,7 +974,6 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                 this,
                 generation,
                 workspaceRoot,
-                selectedBeforeScan,
                 allowCatalogWarmStart,
                 reusableIdentities = std::move(reusableIdentities)
             ]() mutable {
@@ -1335,7 +1333,6 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                     const bool published = ProjectTasks().PostToMain([
                         this,
                         generation,
-                        selectedBeforeScan,
                         result = std::move(result)
                     ]() mutable {
                         try {
@@ -1473,6 +1470,8 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                 m_RawWorkspace,
                                 m_RawWorkspace.workspaceRoot);
 
+                            // Navigation during the scan owns focus, including an explicit
+                            // clear when selecting a project. Never revive launch-time focus.
                             const std::string latestSelection =
                                 m_RawWorkspace.selectedSourceKey;
                             bool restoredSelection =
@@ -1480,14 +1479,6 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                 Stack::RawWorkspace::SelectSourceByKey(
                                     m_RawWorkspace,
                                     latestSelection);
-                            if (!restoredSelection &&
-                                selectedBeforeScan != latestSelection &&
-                                !selectedBeforeScan.empty()) {
-                                restoredSelection =
-                                    Stack::RawWorkspace::SelectSourceByKey(
-                                        m_RawWorkspace,
-                                        selectedBeforeScan);
-                            }
                             if (!restoredSelection &&
                                 IsRawWorkspaceProjectActive() &&
                                 !m_Project->rawSourceKey.empty() &&

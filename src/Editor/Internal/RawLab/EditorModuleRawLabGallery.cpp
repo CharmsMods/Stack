@@ -1640,7 +1640,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             const auto visibleRows = ComputeGalleryVisibleRange(
                 rowCount,
                 tileHeight,
-                gap,
+                ImGui::GetStyle().ItemSpacing.y,
                 contentStart.y,
                 clip.Min.y,
                 clip.Max.y,
@@ -3067,8 +3067,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         if (animation.expansion > 0.0001f) {
             const int rowCount =
                 (static_cast<int>(items.size()) + columns - 1) / columns;
+            const float rowGap = ImGui::GetStyle().ItemSpacing.y;
             const float fullHeight = rowCount * tileHeight +
-                std::max(0, rowCount - 1) * gap;
+                std::max(0, rowCount - 1) * rowGap;
             const float animatedHeight = fullHeight * easedExpansion;
             const ImVec2 contentStart = ImGui::GetCursorScreenPos();
             if (m_PermanentGalleryWorkspace) {
@@ -3076,7 +3077,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     const auto& item = items[index];
                     if (!item.source) continue;
                     const ImVec2 minimum(contentStart.x + static_cast<float>(index % columns) * (tileWidth + gap),
-                        contentStart.y + static_cast<float>(index / columns) * (tileHeight + gap));
+                        contentStart.y + static_cast<float>(index / columns) * (tileHeight + rowGap));
                     recordGridStackSlot(item, minimum, imageHeight, viewClip);
                 }
             }
@@ -3091,7 +3092,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             const auto visibleRows = ComputeGalleryVisibleRange(
                 rowCount,
                 tileHeight,
-                gap,
+                ImGui::GetStyle().ItemSpacing.y,
                 contentStart.y,
                 galleryClip.Min.y,
                 std::min(galleryClip.Max.y, contentStart.y + animatedHeight),
