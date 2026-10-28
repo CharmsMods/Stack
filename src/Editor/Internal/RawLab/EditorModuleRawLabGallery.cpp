@@ -665,7 +665,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     };
 
     auto drawThumbnail = [&](const Stack::RawWorkspace::SourceRecord& source,
-                             const Stack::RawWorkspace::GallerySourceView& view,
                              const ImVec2& tileSize,
                              float imageHeight,
                              bool showDetails,
@@ -1508,17 +1507,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         ImGui::PopID();
     };
 
-    const auto sourceView = [&](const Stack::RawWorkspace::SourceRecord& source) {
-        Stack::RawWorkspace::GallerySourceView view;
-        view.relativePathKey = source.relativePathKey;
-        view.fileName = source.fileName;
-        view.projectStatus = source.project.status;
-        view.selected = source.relativePathKey == m_RawWorkspace.selectedSourceKey;
-        view.multiSelected = std::find(
+    const auto sourceMultiSelected = [&](const Stack::RawWorkspace::SourceRecord& source) {
+        return std::find(
             m_RawWorkspace.selectedSourceKeys.begin(),
             m_RawWorkspace.selectedSourceKeys.end(),
             source.relativePathKey) != m_RawWorkspace.selectedSourceKeys.end();
-        return view;
     };
     const auto projectCover = [&](const Stack::RawWorkspace::GalleryProjectStack& family)
         -> const Stack::RawWorkspace::GalleryProjectView& {
@@ -1618,7 +1611,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     ImGui::SameLine(0.0f, gap);
                 }
                 const auto& source = *sources[static_cast<std::size_t>(index)];
-                const auto view = sourceView(source);
+                const bool multiSelected = sourceMultiSelected(source);
                 RecordRawWorkspaceGallerySlot(source, ImGui::GetCursorScreenPos(),
                     ImVec2(tileWidth, imageHeight), clip);
                 if (index < visible.first || index >= visible.lastExclusive) {
@@ -1626,19 +1619,18 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 }
                 if (index >= visible.first && index < visible.lastExclusive) {
                     currentFilmstripTimelineIndex = static_cast<std::size_t>(index);
-                    if (creationMode && !view.multiSelected) {
+                    if (creationMode && !multiSelected) {
                         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.38f);
                     }
                     drawThumbnail(
                         source,
-                        view,
                         ImVec2(tileWidth, tileHeight),
                         imageHeight,
                         false,
                         source.fileName,
                         {},
                         &source);
-                    if (creationMode && !view.multiSelected) {
+                    if (creationMode && !multiSelected) {
                         ImGui::PopStyleVar();
                     }
                 } else {
@@ -1668,7 +1660,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         ImGui::SameLine(0.0f, gap);
                     }
                     const auto& source = *sources[static_cast<std::size_t>(index)];
-                    const auto view = sourceView(source);
+                    const bool multiSelected = sourceMultiSelected(source);
                     applyGridAnchor(source.relativePathKey, ImGui::GetCursorScreenPos(), imageHeight);
                     RecordRawWorkspaceGallerySlot(source, ImGui::GetCursorScreenPos(),
                         ImVec2(tileWidth, imageHeight), clip);
@@ -1676,19 +1668,18 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         updateScrollToSource(source);
                     }
                     if (row >= visibleRows.first && row < visibleRows.lastExclusive) {
-                        if (creationMode && !view.multiSelected) {
+                        if (creationMode && !multiSelected) {
                             ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.38f);
                         }
                         drawThumbnail(
                             source,
-                            view,
                             ImVec2(tileWidth, tileHeight),
                             imageHeight,
                             true,
                             source.fileName,
                             {},
                             &source);
-                        if (creationMode && !view.multiSelected) {
+                        if (creationMode && !multiSelected) {
                             ImGui::PopStyleVar();
                         }
                     } else {
@@ -2014,11 +2005,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         tileSource.thumbnail.status =
                             Stack::RawWorkspace::ThumbnailStatus::Ready;
                     }
-                    auto view = sourceView(tileSource);
-                    view.projectStatus = project.status;
                     drawThumbnail(
                         tileSource,
-                        view,
                         ImVec2(tileWidth, tileHeight),
                         imageHeight,
                         false,
@@ -2196,7 +2184,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             currentFilmstripTimelineIndex = stackIndex;
                             drawThumbnail(
                                 tileSource,
-                                view,
                                 ImVec2(tileWidth, tileHeight),
                                 imageHeight,
                                 false,
@@ -2386,7 +2373,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                                 layout.cardStep * static_cast<float>(depth) + layout.cardStep);
                         drawThumbnail(
                             *displayedSource,
-                            view,
                             ImVec2(tileWidth, tileHeight),
                             imageHeight,
                             false,
@@ -2774,7 +2760,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         Stack::Editor::DrawBracketingGalleryStacks(ResolveRawWorkspaceFilmstripStacks(),{tileWidth,tileHeight},gap,
             [this](const std::string& key){return FindRawWorkspaceSourceByKey(key);},
             [&](const auto& source,const auto& label,const auto& path,const auto* members,std::size_t count) {
-                drawThumbnail(source,sourceView(source),{tileWidth,tileHeight},imageHeight,false,label,path,
+                drawThumbnail(source,{tileWidth,tileHeight},imageHeight,false,label,path,
                     &source,false,count,1.f,members);
             });
         return;
@@ -2813,7 +2799,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
 
     struct AnimatedGalleryItem {
         const Stack::RawWorkspace::SourceRecord* source = nullptr;
-        Stack::RawWorkspace::GallerySourceView view;
         std::string label;
         std::filesystem::path projectPath;
         const void* itemId = nullptr;
@@ -3136,7 +3121,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     PushGalleryKeyID(item.animationKey);
                     drawThumbnail(
                         *item.source,
-                        item.view,
                         ImVec2(tileWidth, tileHeight),
                         imageHeight,
                         true,
@@ -3186,11 +3170,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         for (const auto& family : *projectStacks) {
             const auto& project = projectCover(family);
             auto& tileSource = projectTileSources[projectSourceIndex++];
-            auto view = sourceView(tileSource);
-            view.projectStatus = project.status;
             projectItems.push_back({
                 &tileSource,
-                std::move(view),
                 project.projectName,
                 project.projectPath,
                 &project,
@@ -3217,7 +3198,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 if (!source || view == m_RawWorkspaceLabGalleryViewsBySource.end()) continue;
                 sourceItems.push_back({
                     source,
-                    *view->second,
                     source->fileName,
                     {},
                     nullptr,
@@ -3238,7 +3218,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             for (const auto& view : group.sources) {
                 const auto* source = FindRawWorkspaceSourceByKey(view.relativePathKey);
                 if (!source) continue;
-                sourceItems.push_back({source, view, source->fileName, {}, source,
+                sourceItems.push_back({source, source->fileName, {}, source,
                     "source:" + source->relativePathKey});
             }
             renderAnimatedGroup("folder:" + group.folderKey, group.label, sourceItems);

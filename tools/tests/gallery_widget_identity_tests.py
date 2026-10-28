@@ -17,6 +17,11 @@ def scope(expression):
 # Keep the permanent-stack inner identity in sync with drawThumbnail.
 inner = 'ImGui::PushID("RawGalleryTile");\n        ImGui::PushID(itemId);'
 assert inner in source
+# Source-only cost guard: cards must not own unused metadata before row culling.
+item = source[source.index('    struct AnimatedGalleryItem {'):source.index('    const auto gridStackSource =')]
+assert 'GallerySourceView' not in item, 'animated cards copy unused gallery metadata'
+thumbnail = source[source.index('    auto drawThumbnail ='):source.index('    const auto sourceMultiSelected =')]
+assert 'const Stack::RawWorkspace::GallerySourceView&' not in thumbnail, 'thumbnail has unused metadata argument'
 fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text()
 for marker, body in {
     '// PRODUCTION_KEY_HELPER': helper,
