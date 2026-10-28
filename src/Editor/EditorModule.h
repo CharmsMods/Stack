@@ -1969,6 +1969,7 @@ private:
     std::optional<Stack::RawRecipe::RawEditAttributeBundle>
         m_RawEditAttributeClipboard;
     std::string m_RawEditAttributeClipboardObservedText;
+    std::uint32_t m_RawEditAttributeClipboardObservedSequence = 0;
     std::unordered_set<std::string> m_RawEditAttributePasteSelection;
     std::vector<RawEditAttributePasteTarget> m_RawEditAttributePasteTargets;
     bool m_RawEditAttributePastePopupRequested = false;
@@ -3306,7 +3307,7 @@ private:
         const std::string& sourceSetId,
         std::string displayName);
     bool StartRawEditAttributePaste(std::string* errorMessage = nullptr);
-    void RefreshRawEditAttributeClipboardFromSystem();
+    void RefreshRawEditAttributeClipboardFromSystem(bool force = true);
     void RenderRawWorkspaceLabNativeGalleryWindow();
     void OpenRawWorkspaceLabNativeGallery();
     void CloseRawWorkspaceLabNativeGallery();

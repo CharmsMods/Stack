@@ -2,6 +2,7 @@
 #include "Editor/EditorModule.h"
 
 #include "Async/TaskSystem.h"
+#include "App/PlatformHelpers.h"
 #include "Notifications/AsyncActivity.h"
 #include "Editor/RawAttributeTargetProject.h"
 #include "Library/LibraryManager.h"
@@ -120,6 +121,7 @@ bool EditorModule::CopyRawEditAttributesFromGallerySource(
 
     m_RawEditAttributeClipboard = std::move(bundle);
     m_RawEditAttributeClipboardObservedText.clear();
+    m_RawEditAttributeClipboardObservedSequence = 0;
     if (ImGui::GetCurrentContext()) {
         const std::string clipboardText =
             Stack::RawRecipe::SerializeRawEditAttributeBundle(
@@ -183,6 +185,7 @@ bool EditorModule::CopyRawEditAttributesFromProjectPath(
     }
     m_RawEditAttributeClipboard = std::move(bundle);
     m_RawEditAttributeClipboardObservedText.clear();
+    m_RawEditAttributeClipboardObservedSequence = 0;
     if (ImGui::GetCurrentContext()) {
         const std::string clipboardText =
             Stack::RawRecipe::SerializeRawEditAttributeBundle(
@@ -198,7 +201,7 @@ bool EditorModule::CopyRawEditAttributesFromProjectPath(
     return true;
 }
 
-void EditorModule::RefreshRawEditAttributeClipboardFromSystem() {
+void EditorModule::RefreshRawEditAttributeClipboardFromSystem(bool force) {
     // Targets remain owned by the paste dialog through its pending, open,
     // working and result states, until Cancel, Close or automatic reveal.
     // A Gallery redraw must not replace the edit captured for that session.
@@ -210,7 +213,16 @@ void EditorModule::RefreshRawEditAttributeClipboardFromSystem() {
     if (!ImGui::GetCurrentContext()) {
         return;
     }
+    // Passive Gallery controls need only notice changes. Avoid transferring
+    // and comparing unchanged OS clipboard text on every animation frame.
+    // Actual paste/actions force a read, including on sequence wrap or races.
+    const auto sequence = PlatformHelpers::ClipboardSequenceNumber();
+    if (!force && sequence != 0 && sequence == m_RawEditAttributeClipboardObservedSequence) return;
     const char* text = ImGui::GetClipboardText();
+    // A failed read must remain retryable. Delayed rendering can change the
+    // sequence during retrieval, so cache only a stable, successful read.
+    m_RawEditAttributeClipboardObservedSequence = text && sequence != 0 &&
+        sequence == PlatformHelpers::ClipboardSequenceNumber() ? sequence : 0;
     const char* observedText = text ? text : "";
     if (m_RawEditAttributeClipboardObservedText == observedText) {
         return;
@@ -363,6 +375,7 @@ void EditorModule::RequestPasteRawEditAttributesForGalleryTargets(
         }
         m_RawEditAttributeClipboard = std::move(bundle);
         m_RawEditAttributeClipboardObservedText.clear();
+        m_RawEditAttributeClipboardObservedSequence = 0;
         m_RawEditAttributePasteTargets = std::move(targets);
         m_RawEditAttributePasteSelection.clear();
         for (std::string key :

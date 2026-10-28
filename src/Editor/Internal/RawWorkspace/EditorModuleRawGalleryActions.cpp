@@ -41,7 +41,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
     context.catalogGeneration = m_RawWorkspaceScanGeneration;
     context.openAvailable = static_cast<bool>(m_RawGalleryOpenSelectionHandler);
     context.queueAvailable = static_cast<bool>(m_RawGalleryQueueRequestHandler);
-    RefreshRawEditAttributeClipboardFromSystem();
+    RefreshRawEditAttributeClipboardFromSystem(!editControlsOnly);
     context.hasEditClipboard = m_RawEditAttributeClipboard.has_value();
     context.foregroundBusy = !editControlsOnly &&
         (GetProjectFileCommandContext().busy || IsBracketingPresentationActive());

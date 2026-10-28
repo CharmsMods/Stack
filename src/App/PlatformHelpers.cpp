@@ -49,6 +49,14 @@ void SetLastErrorMessage(const std::string& fallback, std::string* outErrorMessa
 
 } // namespace
 
+std::uint32_t ClipboardSequenceNumber() {
+#if defined(_WIN32)
+    return static_cast<std::uint32_t>(GetClipboardSequenceNumber());
+#else
+    return 0;
+#endif
+}
+
 bool OpenUrl(const std::string& url, std::string* errorMessage) {
 #if defined(_WIN32)
     const std::wstring wideUrl = ToWide(url);

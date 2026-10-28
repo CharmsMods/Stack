@@ -38,7 +38,13 @@ void EditorNodeGraphUI::PrepareCompoundEntries(const EditorNodeGraph::Graph& gra
         const auto* group=graph.FindGroup(groupId);if(!group)continue;
         const auto bounds=DisplayGroupRect(*group);
         const auto left=GraphToScreen({bounds.min.x+20,bounds.min.y+62+24.f*index++});
-        row.input={left.x,left.y};row.output={left.x+160*m_Zoom,left.y};
+        const ImVec2 input{left.x,left.y}, output{left.x+160*m_Zoom,left.y};
+        // A fitted container can animate without moving any of its nodes.
+        // Its gateway still bends the visible wire, so a stationary pointer's
+        // cached link hit must follow these anchors, not only node projection.
+        if(row.input.x!=input.x || row.input.y!=input.y ||
+            row.output.x!=output.x || row.output.y!=output.y)m_LinkHitTestFrame=-1;
+        row.input=input;row.output=output;
     }
 }
 

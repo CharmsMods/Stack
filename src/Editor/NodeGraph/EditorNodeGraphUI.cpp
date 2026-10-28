@@ -173,28 +173,25 @@ void EditorNodeGraphUI::ProjectNodeLayoutCache(
     if(!cache.hasProjection ||
         cache.projectedPosition.x!=position.x || cache.projectedPosition.y!=position.y)++m_WireWorldRevision;
     ++m_NodeProjectionRevision;
-    const NodeProjectedLayout projected = ProjectNodeLayout(
-        cache.logicalLayout,
-        position,
-        m_CanvasOrigin,
-        m_Pan,
-        m_Zoom);
-    const auto toCachedRect = [](const LogicalRect& rect) {
+    // Project only what the persistent cache consumes. Building a temporary
+    // NodeProjectedLayout copies every socket/control-slot string on each pan,
+    // workspace slide or layout-animation frame, then discards those vectors.
+    const auto projectRect = [&](const LogicalRect& logical) {
+        const auto rect = ProjectRect(logical, position, m_CanvasOrigin, m_Pan, m_Zoom);
         return CachedRect {
             ImVec2(rect.min.x, rect.min.y),
             ImVec2(rect.max.x, rect.max.y)
         };
     };
-
-    cache.frameRect = toCachedRect(projected.body);
-    cache.headerRect = toCachedRect(projected.header);
-    cache.contentRect = toCachedRect(projected.content);
+    const auto& logical = cache.logicalLayout;
+    cache.frameRect = projectRect(logical.body);
+    cache.headerRect = projectRect(logical.header);
+    cache.contentRect = projectRect(logical.content);
     cache.contentUsedRect = {};
-    cache.persistentVisualRect =
-        toCachedRect(projected.bounds.persistentVisual);
-    cache.overlayRect = toCachedRect(projected.bounds.overlay);
+    cache.persistentVisualRect = projectRect(logical.bounds.persistentVisual);
+    cache.overlayRect = projectRect(logical.bounds.overlay);
     cache.baseOverlayRect = cache.overlayRect;
-    cache.interactionRect = toCachedRect(projected.bounds.interaction);
+    cache.interactionRect = projectRect(logical.bounds.interaction);
     const float projectedSocketHitRadius =
         (kSocketRadius + kSocketLogicalHitPadding) * m_Zoom;
     const float interactionExpansion =
@@ -206,23 +203,23 @@ void EditorNodeGraphUI::ProjectNodeLayoutCache(
         cache.interactionRect.max.x += interactionExpansion;
         cache.interactionRect.max.y += interactionExpansion;
     }
-    cache.socketAnchors.clear();
-    cache.socketAnchors.reserve(projected.sockets.size());
-    for (std::size_t index = 0; index < projected.sockets.size(); ++index) {
-        const SocketLayout& screenSocket = projected.sockets[index];
-        const SocketLayout& logicalSocket = cache.logicalLayout.sockets[index];
-        cache.socketAnchors.push_back(SocketAnchor {
-            screenSocket.socketId,
-            screenSocket.direction,
-            logicalSocket.center,
-            ImVec2(screenSocket.center.x, screenSocket.center.y)
-        });
-        if(folding && screenSocket.direction==EditorNodeGraph::SocketDirection::Output) {
-            const auto start=m_ExpansionMotion->socketOrigins.find(EditorNodeGraph::GraphOutputIdentity(node.id,screenSocket.socketId));
+    // Retain socket/string capacity while geometry moves. Layout changes still
+    // replace each identity and direction from the current logical layout.
+    cache.socketAnchors.resize(logical.sockets.size());
+    for (std::size_t index = 0; index < logical.sockets.size(); ++index) {
+        const SocketLayout& socket = logical.sockets[index];
+        const auto screen = ProjectPoint(socket.center, position, m_CanvasOrigin, m_Pan, m_Zoom);
+        auto& anchor = cache.socketAnchors[index];
+        anchor.socketId = socket.socketId;
+        anchor.direction = socket.direction;
+        anchor.logicalPos = socket.center;
+        anchor.screenPos = ImVec2(screen.x, screen.y);
+        if(folding && socket.direction==EditorNodeGraph::SocketDirection::Output) {
+            const auto start=m_ExpansionMotion->socketOrigins.find(EditorNodeGraph::GraphOutputIdentity(node.id,socket.socketId));
             if(start!=m_ExpansionMotion->socketOrigins.end()) {
                 const float t=std::clamp(float(m_ExpansionMotion->elapsed/.22),0.f,1.f),ease=t*t*(3-2*t);
                 const auto origin=GraphToScreen(start->second);
-                auto& point=cache.socketAnchors.back().screenPos;
+                auto& point=anchor.screenPos;
                 point={origin.x+(point.x-origin.x)*ease,origin.y+(point.y-origin.y)*ease};
             }
         }
