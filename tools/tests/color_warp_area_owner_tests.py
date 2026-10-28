@@ -25,6 +25,10 @@ def main():
     surface = (root / 'src/Editor/Internal/RawLab/RawLabColorSurface.cpp').read_text()
     owner = section(types, 'struct RawWorkspaceColorWarpAreaOwner {', 'struct RawWorkspaceColorWarpDiagnosticState {')
     fields = section(types, '    bool colorWarpPendingCircleActive', '    bool colorWarpDiagnosticLocked')
+    # Async request ownership remains with the host rather than its primary
+    # controls base; include that separate declaration/reset block unchanged.
+    fields += section(types, '    std::uint64_t colorWarpAreaAnalysisGeneration',
+        '    int colorWarpDiagnosticTargetLongEdge')
     submit = section(preview, '                const auto submitAreaAnalysis = [&]() {', '\n                if (colorUi.colorWarpAreaAnalysisState)')
     poll = section(preview, '                if (colorUi.colorWarpAreaAnalysisState)', '\n                const ImVec2 mouse')
     click = section(preview, '                        if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1', '} else if (!colorUi.colorWarpPendingCircleAppend)') + '}'

@@ -34,6 +34,11 @@ def main():
     state = types.split('struct RawWorkspaceColorWarpAreaAnalysisState {', 1)[1].split('\n};', 1)[0]
     owner = 'struct RawWorkspaceColorWarpAreaOwner {' + types.split('struct RawWorkspaceColorWarpAreaOwner {', 1)[1].split('\n};', 1)[0] + '\n};\n'
     area_fields = 'bool colorWarpPendingCircleActive' + types.split('bool colorWarpPendingCircleActive', 1)[1].split('    bool colorWarpDiagnosticLocked', 1)[0]
+    # Primary gesture fields and host-owned async state now live in separate
+    # base/derived structs; copy both current production declaration ranges.
+    area_fields += '    std::uint64_t colorWarpAreaAnalysisGeneration' + types.split(
+        '    std::uint64_t colorWarpAreaAnalysisGeneration', 1)[1].split(
+        '    int colorWarpDiagnosticTargetLongEdge', 1)[0]
     text = r'''
 #include "Async/TaskGroup.h"
 #include "Project/NodeEditTarget.h"
