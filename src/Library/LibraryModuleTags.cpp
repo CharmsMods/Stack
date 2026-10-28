@@ -23,6 +23,42 @@ ImVec4 BlendColor(const ImVec4& from, const ImVec4& to, float t) {
         from.w + (to.w - from.w) * clamped);
 }
 
+// Tags are literal user text. This binary tag control uses one native button
+// behavior for the full checkbox/label row, without ImGui's ##/### label syntax.
+bool LiteralTagCheckbox(const std::string& tag, bool* active) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImGuiID id = ImHashData(tag.data(), tag.size(), ImGui::GetID("Tag"));
+    const ImVec2 textSize = ImGui::CalcTextSize(tag.data(), tag.data() + tag.size(), false);
+    const float square = ImGui::GetFrameHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImRect bounds(origin, ImVec2(
+        origin.x + square + (textSize.x > 0.0f ? style.ItemInnerSpacing.x + textSize.x : 0.0f),
+        origin.y + textSize.y + style.FramePadding.y * 2.0f));
+    ImGui::ItemSize(bounds, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bounds, id)) return false;
+    bool hovered = false, held = false;
+    const bool pressed = ImGui::ButtonBehavior(bounds, id, &hovered, &held);
+    if (pressed) {
+        *active = !*active;
+        ImGui::MarkItemEdited(id);
+    }
+    ImGui::RenderNavCursor(bounds, id);
+    const ImGuiCol background = held && hovered ? ImGuiCol_FrameBgActive
+        : hovered ? ImGuiCol_FrameBgHovered : *active ? ImGuiCol_CheckboxSelectedBg : ImGuiCol_FrameBg;
+    ImGui::RenderFrame(origin, ImVec2(origin.x + square, origin.y + square),
+        ImGui::GetColorU32(background), true, style.FrameRounding);
+    if (*active) {
+        const float padding = std::max(1.0f, std::trunc(square / 6.0f));
+        ImGui::RenderCheckMark(window->DrawList, ImVec2(origin.x + padding, origin.y + padding),
+            ImGui::GetColorU32(ImGuiCol_CheckMark), square - padding * 2.0f);
+    }
+    ImGui::RenderText(ImVec2(origin.x + square + style.ItemInnerSpacing.x, origin.y + style.FramePadding.y),
+        tag.data(), tag.data() + tag.size(), false);
+    return pressed;
+}
+
 } // namespace
 
 void LibraryModule::SetSectionPanelHosted(bool hosted) {
@@ -193,7 +229,7 @@ void LibraryModule::RenderTagFilters(bool wallpaperSurfaces,
         ImGui::PushID("KnownTags");
         for (const auto& tag : allTags) {
             bool active = m_ActiveTagFilters.count(tag) > 0;
-            if (ImGui::Checkbox(tag.c_str(), &active)) {
+            if (LiteralTagCheckbox(tag, &active)) {
                 if (active) {
                     m_ActiveTagFilters.insert(tag);
                 } else {
