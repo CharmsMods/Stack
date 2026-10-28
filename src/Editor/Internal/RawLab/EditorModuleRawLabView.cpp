@@ -263,7 +263,12 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
     drawList->AddCircleFilled(pivotPoint, 4.0f, curveColor);
 
     bool changed = false;
-    if (ImGui::IsItemHovered() &&
+    const bool enabled = !(ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled);
+    if (ImGui::IsItemActive() && !ImGui::GetIO().WantTextInput &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::ClearActiveID();
+    // A hidden release or a fresh press in the outer margin cannot resume an old handle.
+    if (!enabled || !ImGui::IsItemActive() || ImGui::IsItemActivated()) draggingHandle = 0;
+    if (enabled && ImGui::IsItemActive() && ImGui::IsItemHovered() &&
         rect.Contains(ImGui::GetIO().MousePos) &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const float mouseX = ImGui::GetIO().MousePos.x;

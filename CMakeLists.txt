@@ -795,6 +795,7 @@ if (BUILD_TESTING)
     include(cmake/StackFilmstripTimelineRangeTests.cmake)
     include(cmake/StackGalleryWidgetIdentityTests.cmake)
     include(cmake/StackGalleryNavigatorTests.cmake)
+    include(cmake/StackViewTransformGraphTests.cmake)
     include(cmake/StackGalleryFolderScopeTests.cmake)
     include(cmake/StackGalleryProjectPreviewTests.cmake)
 
