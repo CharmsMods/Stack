@@ -470,15 +470,18 @@ void DrawPixelInspectionCursorReadout(
     const float width = std::max(hexSize.x, rgbSize.x) + 18.0f;
     const float height = hexSize.y + rgbSize.y + 16.0f;
     ImVec2 boxMin(mousePos.x + 16.0f, mousePos.y + 16.0f);
-    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    if (boxMin.x + width > displaySize.x) {
+    const ImGuiViewport* viewport = ImGui::GetWindowViewport();
+    const ImVec2 displayMin = viewport ? viewport->Pos : ImVec2(0, 0);
+    const ImVec2 displaySize = viewport ? viewport->Size : ImGui::GetIO().DisplaySize;
+    const ImVec2 displayMax(displayMin.x + displaySize.x, displayMin.y + displaySize.y);
+    if (boxMin.x + width > displayMax.x) {
         boxMin.x = mousePos.x - width - 16.0f;
     }
-    if (boxMin.y + height > displaySize.y) {
+    if (boxMin.y + height > displayMax.y) {
         boxMin.y = mousePos.y - height - 16.0f;
     }
-    boxMin.x = std::max(4.0f, boxMin.x);
-    boxMin.y = std::max(4.0f, boxMin.y);
+    boxMin.x = std::max(displayMin.x + 4.0f, boxMin.x);
+    boxMin.y = std::max(displayMin.y + 4.0f, boxMin.y);
     const ImVec2 boxMax(boxMin.x + width, boxMin.y + height);
 
     ImDrawList* foreground = ImGui::GetForegroundDrawList();
@@ -2602,9 +2605,12 @@ void EditorViewport::RenderSingleImageMode(
                 ImVec2 magPos = ImVec2(mousePos.x + 20, mousePos.y + 20);
 
                 // Keep magnifier on screen
-                ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-                if (magPos.x + magSize + 4 > displaySize.x) magPos.x = mousePos.x - magSize - 20;
-                if (magPos.y + magSize + 4 > displaySize.y) magPos.y = mousePos.y - magSize - 20;
+                const ImGuiViewport* viewport = ImGui::GetWindowViewport();
+                const ImVec2 displayMin = viewport ? viewport->Pos : ImVec2(0, 0);
+                const ImVec2 displaySize = viewport ? viewport->Size : ImGui::GetIO().DisplaySize;
+                const ImVec2 displayMax(displayMin.x + displaySize.x, displayMin.y + displaySize.y);
+                if (magPos.x + magSize + 4 > displayMax.x) magPos.x = mousePos.x - magSize - 20;
+                if (magPos.y + magSize + 4 > displayMax.y) magPos.y = mousePos.y - magSize - 20;
 
                 ImDrawList* fg = ImGui::GetForegroundDrawList();
                 fg->AddRectFilled(ImVec2(magPos.x - 2, magPos.y - 2),
