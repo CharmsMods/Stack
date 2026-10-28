@@ -817,7 +817,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
 
             ImGuiListClipper clipper;
             const int rowCount = static_cast<int>((filtered.size() + static_cast<std::size_t>(columnCount) - 1u) / static_cast<std::size_t>(columnCount));
-            clipper.Begin(rowCount, 154.0f);
+            // Table rows include padding above and below the 154px card.
+            clipper.Begin(rowCount, 154.0f + 2.0f * ImGui::GetStyle().CellPadding.y);
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
                     ImGui::TableNextRow();
