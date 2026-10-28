@@ -61,8 +61,62 @@ bool Equal(const Fixture& a, const Fixture& b) {
     }
     return true;
 }
-int main() {
+// PACKING_HELPERS
+namespace CurrentPacking { int passes=0;
+// PRODUCTION_PACKING
+}
+namespace OriginalPacking { int passes=0;
+// ORIGINAL_PACKING
+}
+bool EqualPacked(const std::vector<LibraryPackedCard>& a, const std::vector<LibraryPackedCard>& b) {
+    if(a.size()!=b.size())return false;
+    for(std::size_t i=0;i<a.size();++i) {
+        const auto& x=a[i];const auto& y=b[i];
+        if(x.index!=y.index || x.pos.x!=y.pos.x || x.pos.y!=y.pos.y ||
+           x.size.x!=y.size.x || x.size.y!=y.size.y || x.scaleMultiplier!=y.scaleMultiplier)return false;
+    }
+    return true;
+}
+bool PackingTests() {
     bool passed=true;
+    const auto compare=[&](const std::vector<LibraryPackedCard>& cards,float width,float gap,float scale) {
+        const auto before=cards;CurrentPacking::passes=OriginalPacking::passes=0;
+        const auto actual=CurrentPacking::PackLibraryCards(cards,width,gap,scale);
+        const auto expected=OriginalPacking::PackLibraryCards(cards,width,gap,scale);
+        passed=Check(EqualPacked(actual,expected),"packing exact order/position/size/growth parity")&&passed;
+        passed=Check(EqualPacked(cards,before),"packing leaves input unchanged")&&passed;
+    };
+    for(int count:{0,1,80,100}) {
+        std::vector<LibraryPackedCard> cards;
+        for(int i=0;i<count;++i){LibraryPackedCard c;c.index=i;c.size=ComputeLibraryCardSize(4000,3000,1);cards.push_back(c);}
+        compare(cards,1100,22,1.08f);
+        passed=Check(CurrentPacking::passes==1,"identical-aspect orders pack once")&&passed;
+        passed=Check(OriginalPacking::passes==(count<=80?4:3),"oracle retains all original orders")&&passed;
+        std::reverse(cards.begin(),cards.end());compare(cards,720,0,1);
+    }
+    // Orders A,B,A,B: these exact nonadjacent repeats must not be deduplicated.
+    std::vector<LibraryPackedCard> alternating(2);alternating[0].index=7;alternating[0].size={100,300};
+    alternating[1].index=2;alternating[1].size={400,200};
+    compare(alternating,900,22,1.08f);
+    passed=Check(CurrentPacking::passes==4,"nonadjacent order repeats preserve comparison sequence")&&passed;
+    // Bounded deterministic adversarial mixed shapes, ties, metadata, narrow
+    // fallback widths and caller scale/gap ranges (not a full-frame benchmark).
+    std::uint32_t seed=17;
+    for(int trial=0;trial<16;++trial) {
+        std::vector<LibraryPackedCard> cards;
+        for(int i=0;i<12+trial;++i) {
+            seed=seed*1664525u+1013904223u;LibraryPackedCard c;
+            c.index=(i*7)%31;c.pos={float(i%3),float(-i)};
+            c.size=ComputeLibraryCardSize(float(1+seed%5),float(1+(seed>>8)%5),.55f+.25f*(trial%6));
+            c.scaleMultiplier=.7f+.1f*(i%4);cards.push_back(c);
+        }
+        if(trial%2)std::reverse(cards.begin(),cards.end());
+        compare(cards,trial%4==0?1.f:float(600+trial*41),trial%3==0?-2.f:22.f,trial%2?1.f:1.08f);
+    }
+    return passed;
+}
+int main() {
+    bool passed=PackingTests();
     for(bool assets:{false,true}) {
         Fixture current;current.m_ShowAssets=assets;
         for(int i=0;i<1000;++i) {
@@ -97,5 +151,5 @@ int main() {
         passed=Check(states.count(oldName)&&states.count("C:/replacement/project.stack"),"motion maps own old and new identities")&&passed;
     }
     if(!passed)return 1;
-    std::cout<<"Library grid motion keys passed (cold, warm allocation, reorder, interrupted motion, null slots, ownership).\n";
+    std::cout<<"Library packing and grid motion keys passed (cold, warm allocation, reorder, interrupted motion, null slots, ownership).\n";
 }

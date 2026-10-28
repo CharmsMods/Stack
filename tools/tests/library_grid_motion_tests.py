@@ -1,4 +1,4 @@
-"""Compile the actual Library target-card motion loop and an owned-key oracle."""
+"""Compile actual Library packing/motion with original-order and owned-key oracles."""
 from pathlib import Path
 import argparse
 p = argparse.ArgumentParser()
@@ -19,8 +19,19 @@ def function(path, marker):
     source = (root / path).read_text()
     start = source.index(marker)
     return source[start:source.index('\n}', start)+2]
+packing = function('src/Library/Internal/LibraryModuleUIHelpers.cpp', 'std::vector<LibraryPackedCard> PackLibraryCards(')
+# Count exact production packing passes; no geometry/math instrumentation.
+packing = packing.replace('        std::vector<LibraryPackedCard> placed;', '        ++passes;\n        std::vector<LibraryPackedCard> placed;')
+original_packing = packing
+if '        // Only consecutive duplicates' in packing:
+    start = packing.index('        // Only consecutive duplicates')
+    end = packing.index('        orders.push_back(std::move(order));', start)
+    original_packing = packing[:start] + packing[end:]
 fixture = (root / 'tools/tests/library_grid_motion_tests.cpp').read_text()
 for marker, body in {
+    '// PRODUCTION_PACKING': packing,
+    '// ORIGINAL_PACKING': original_packing,
+    '// PACKING_HELPERS': function('src/Library/Internal/LibraryModuleUIHelpers.cpp', 'bool LibraryPackedRectsOverlap(') + '\n' + function('src/Library/Internal/LibraryModuleUIHelpers.cpp', 'float LibraryPackedContactScore('),
     '// PRODUCTION_LOOP': loop,
     '// OWNED_KEY_LOOP': reference,
     '// PRODUCTION_SIZE': function('src/Library/Internal/LibraryModuleUIHelpers.cpp', 'ImVec2 ComputeLibraryCardSize('),

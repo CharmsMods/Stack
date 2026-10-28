@@ -447,6 +447,14 @@ std::vector<LibraryPackedCard> PackLibraryCards(
     auto addSortedOrder = [&](const auto& comparator) {
         std::vector<LibraryPackedCard> order = inputCards;
         std::stable_sort(order.begin(), order.end(), comparator);
+        // Only consecutive duplicates are redundant: the height/contact winner
+        // comparison is tolerance-based, so nonadjacent repeats must still run.
+        const auto sameCard = [](const LibraryPackedCard& a, const LibraryPackedCard& b) {
+            return a.index == b.index && a.pos.x == b.pos.x && a.pos.y == b.pos.y &&
+                a.size.x == b.size.x && a.size.y == b.size.y &&
+                a.scaleMultiplier == b.scaleMultiplier;
+        };
+        if (std::equal(order.begin(), order.end(), orders.back().begin(), sameCard)) return;
         orders.push_back(std::move(order));
     };
     addSortedOrder([](const LibraryPackedCard& a, const LibraryPackedCard& b) {
