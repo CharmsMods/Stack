@@ -732,7 +732,7 @@ void EditorModule::Shutdown() {
         return;
     }
     m_ShutdownComplete = true;
-    m_NodeOpenTransition.Reset();
+    m_NodeOpenTransition.Shutdown();
     if (m_RawAssetCapture.cancellation) m_RawAssetCapture.cancellation->store(true);
     CancelMfdExperimentalProcessing({}, true);
     CloseDetachedPreviewFullscreen();

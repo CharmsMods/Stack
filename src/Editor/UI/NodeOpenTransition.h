@@ -48,12 +48,22 @@ public:
         requested = now; active = node.Valid(); surround = active; minimum = node.minimum; maximum = node.maximum;
     }
     void Reset() {
+        ReleaseSubmittedDraw();
         active = surround = closing = closed = hasImage = retargeting = false;
         started = presentedAt = -1; node = {}; identity.clear();
         openingPhoto = openingBlur = openingControls = 0.f; openingNode = 1.f;
         minimum=maximum=targetLow=targetHigh={};
     }
+    // ImGui commands borrow texture names until this frame reaches the backend.
+    // Navigation may replace the appearance after DrawNode, in the same frame.
+    void ReleaseSubmittedDraw() const {
+        if (!ImGui::GetCurrentContext() || ImGui::GetFrameCount() != drawnFrame)
+            drawnTextures.clear();
+    }
+    // The editor calls this only on its current GL context, between UI frames.
+    void Shutdown() { Reset(); drawnTextures.clear(); }
     void Tick(const std::string& document, double now, bool reducedMotion) {
+        ReleaseSubmittedDraw();
         if (!active) return;
         if (identity != document) {
             // A cancelled return belongs to the old document; it must not
@@ -160,6 +170,7 @@ public:
         }
     }
     void DrawNode(ImDrawList& list, double now) const {
+        ReleaseSubmittedDraw();
         if (!active) return;
         const float opacity=NodeOpacity(now);
         if (opacity<=0.f) return;
@@ -169,6 +180,11 @@ public:
             minimum.x+(p.x-node.minimum.x)*scaleX,
             minimum.y+(p.y-node.minimum.y)*scaleY); };
         for (const auto& mesh:node.meshes) {
+            if (mesh.texture && std::find(drawnTextures.begin(), drawnTextures.end(),
+                    mesh.texture) == drawnTextures.end()) {
+                drawnTextures.push_back(mesh.texture);
+                drawnFrame = ImGui::GetFrameCount();
+            }
             list.PushTextureID(mesh.texture ? ImTextureRef((ImTextureID)(intptr_t)mesh.texture->name) : ImGui::GetIO().Fonts->TexRef);
             list.PushClipRect(transform({mesh.clip.x,mesh.clip.y}),transform({mesh.clip.z,mesh.clip.w}),true);
             // Bound each reservation for backends using 16-bit draw indices.
@@ -209,6 +225,8 @@ private:
         expandedHigh = {center.x+width*.5f, center.y+width/aspect*.5f};
     }
     Appearance node;
+    mutable std::vector<std::shared_ptr<NodeAppearanceTexture>> drawnTextures;
+    mutable int drawnFrame = -1;
     std::string identity;
     ImVec2 minimum{},maximum{},expandedLow{},expandedHigh{},targetLow{},targetHigh{},returnOffset{},correctionLow{},correctionHigh{},retargetLow{},retargetHigh{};
     double requested=0,started=-1,presentedAt=-1,reverseFrom=0;
