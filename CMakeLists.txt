@@ -774,6 +774,7 @@ if (BUILD_TESTING)
     include(cmake/StackLayerOpacityGestureTests.cmake)
     include(cmake/StackColorWarpShortcutTests.cmake)
     include(cmake/StackGalleryProjectSelectionTests.cmake)
+    include(cmake/StackGalleryFolderScopeTests.cmake)
     include(cmake/StackGalleryProjectPreviewTests.cmake)
 
     add_executable(StackStartupRevealTests

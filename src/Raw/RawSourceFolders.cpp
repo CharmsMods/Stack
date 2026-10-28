@@ -272,8 +272,12 @@ ScanResult AggregateSourceFolders(
             source.relativePathKey = QualifiedSourceKey(rootKey, localKey);
             displayKeys.emplace(localKey, source.relativePathKey);
             // Folder grouping remains a presentation-only absolute scope.
-            source.parentFolderKey = result.layout.workspaceRoot.generic_u8string() +
-                (source.parentFolderKey.empty() ? "" : "/" + source.parentFolderKey);
+            // Join as paths so drive roots and roots with a trailing separator
+            // use the same key as the navigator's reconstructed folder tree.
+            source.parentFolderKey = (source.parentFolderKey.empty()
+                ? result.layout.workspaceRoot
+                : result.layout.workspaceRoot / std::filesystem::u8path(source.parentFolderKey))
+                .generic_u8string();
             sourceIdentities.emplace(identity, aggregate.sources.size());
             aggregate.sources.push_back(std::move(source));
         }

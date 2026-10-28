@@ -162,8 +162,7 @@ const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspacePan
         m_RawGalleryFilteredQueueRevision == m_RawWorkspaceCategoryQueueRevision) return m_RawGalleryFilteredPresentation;
     const std::string folder = *m_RawGalleryFolderFilter;
     const auto contains = [&](const std::string& key) {
-        return key == folder || (key.size() > folder.size() &&
-            key.compare(0, folder.size(), folder) == 0 && key[folder.size()] == '/');
+        return GalleryFolderTree::ContainsFolderKey(folder, key);
     };
     m_RawGalleryFilteredPresentation = source;
     auto& filtered = m_RawGalleryFilteredPresentation;

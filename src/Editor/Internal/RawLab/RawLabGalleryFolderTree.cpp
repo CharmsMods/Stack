@@ -113,4 +113,10 @@ const GalleryFolderTree::Folder* GalleryFolderTree::Find(const std::string& key)
     const auto found = m_Folders.find(key);
     return found == m_Folders.end() ? nullptr : found->second;
 }
+
+bool GalleryFolderTree::ContainsFolderKey(const std::string& folder, const std::string& key) {
+    return key == folder || (!folder.empty() && key.size() > folder.size() &&
+        key.compare(0, folder.size(), folder) == 0 &&
+        (folder.back() == '/' || key[folder.size()] == '/'));
+}
 } // namespace Stack::Editor::RawLabInternal

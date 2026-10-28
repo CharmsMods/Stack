@@ -37,6 +37,8 @@ struct GalleryFolderTree {
         std::uint64_t catalogRevision, std::uint64_t bracketRevision,
         bool aggregate = false, const std::vector<std::filesystem::path>& sourceRoots = {});
     const Folder* Find(const std::string& key) const;
+    // Lexical display keys only; no filesystem queries or ownership inference.
+    static bool ContainsFolderKey(const std::string& folder, const std::string& key);
 
 private:
     std::unordered_map<std::string, Folder*> m_Folders;
