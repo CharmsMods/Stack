@@ -9,13 +9,12 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
         unsigned int texture = 0;
         int width = 0;
         int height = 0;
+        bool available = false;
     };
     const auto resolveImage = [&](const std::string& sourceKey,
                                   const std::filesystem::path& projectPath) {
         PreviewImage image;
         const auto* source = FindRawWorkspaceSourceByKey(sourceKey);
-        if (source == nullptr) return image;
-
         if (!projectPath.empty()) {
             const auto& gallery = GetRawWorkspaceGalleryPresentation();
             const auto project = std::find_if(
@@ -36,11 +35,14 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
                     project->coverThumbnailCachePath;
                 coverSource.thumbnail.status =
                     Stack::RawWorkspace::ThumbnailStatus::Ready;
+                image.available = true;
                 image.texture = GetRawWorkspaceThumbnailTexture(
                     coverSource, &image.width, &image.height, true);
                 return image;
             }
         }
+        if (source == nullptr) return image;
+        image.available = true;
         image.texture = GetRawWorkspaceThumbnailTexture(
             *source, &image.width, &image.height, true);
         return image;
@@ -49,6 +51,13 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
     const PreviewImage current = resolveImage(
         m_RawWorkspaceLabFilmstripHoverSourceKey,
         m_RawWorkspaceLabFilmstripHoverProjectPath);
+    // An unavailable target must not retain an unrelated prior project's cover.
+    if (!current.available) {
+        m_RawWorkspaceLabFilmstripPreviousHoverSourceKey.clear();
+        m_RawWorkspaceLabFilmstripPreviousHoverProjectPath.clear();
+        m_RawWorkspaceLabFilmstripHoverBlend = 1.0f;
+        return;
+    }
     const PreviewImage previous = resolveImage(
         m_RawWorkspaceLabFilmstripPreviousHoverSourceKey,
         m_RawWorkspaceLabFilmstripPreviousHoverProjectPath);

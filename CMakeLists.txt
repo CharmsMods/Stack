@@ -772,6 +772,7 @@ if (BUILD_TESTING)
     add_test(NAME StackRaw.GalleryLayoutAnimation COMMAND StackRawGalleryLayoutAnimationTests)
     set_tests_properties(StackRaw.GalleryLayoutAnimation PROPERTIES LABELS "raw;gallery;ui;cpu")
     include(cmake/StackGalleryProjectSelectionTests.cmake)
+    include(cmake/StackGalleryProjectPreviewTests.cmake)
 
     add_executable(StackStartupRevealTests
         tools/tests/startup_reveal_tests.cpp

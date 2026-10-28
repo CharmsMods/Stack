@@ -76,10 +76,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
     const auto* requestedSource = m_RawWorkspaceLabFilmstripHoverSourceKey.empty() ? nullptr :
         FindRawWorkspaceSourceByKey(m_RawWorkspaceLabFilmstripHoverSourceKey);
     std::filesystem::path requestedProject = m_RawWorkspaceLabFilmstripHoverProjectPath;
-    if (!requestedSource) {
-        requestedSource = m_RawWorkspace.selectedSourceKey.empty() ? nullptr :
-            FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
+    if (!requestedSource && requestedProject.empty()) {
         requestedProject = m_RawWorkspaceLabFocusedProjectPath;
+        // A mixed selection may retain an unrelated original. Resolve a
+        // focused project's own reference below instead of borrowing that image.
+        requestedSource = !requestedProject.empty() || m_RawWorkspace.selectedSourceKey.empty() ? nullptr :
+            FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
     }
     if (!requestedSource && !requestedProject.empty()) {
         const auto& projects = GetRawWorkspaceGalleryPresentation().projects;
@@ -96,18 +98,22 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         std::shared_ptr<const Raw::RawMetadata> metadata;
         int width = 0;
         int height = 0;
+        bool available = false;
         bool ready() const { return texture != 0 && width > 0 && height > 0; }
     };
     const auto resolve = [&](const Stack::RawWorkspace::SourceRecord* source,
                              const std::filesystem::path& projectPath) {
         Thumbnail result;
-        if (!source) return result;
         if (projectPath.empty()) {
+            if (!source) return result;
+            result.available = true;
             result.texture = GetRawWorkspaceThumbnailTexture(*source, &result.width, &result.height, true);
             result.metadata = GetRawWorkspaceThumbnailMetadata(source->relativePathKey);
             return result;
         }
-        Stack::RawWorkspace::SourceRecord thumbnailSource = *source;
+        Stack::RawWorkspace::SourceRecord thumbnailSource = source
+            ? *source : Stack::RawWorkspace::SourceRecord{};
+        result.available = source != nullptr;
         if (!projectPath.empty()) {
             const auto& gallery = GetRawWorkspaceGalleryPresentation();
             const auto project = std::find_if(gallery.projects.begin(), gallery.projects.end(),
@@ -116,19 +122,28 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
                         candidate.projectPath.lexically_normal() == projectPath.lexically_normal();
                 });
             if (project != gallery.projects.end() && !project->coverThumbnailCachePath.empty()) {
+                result.available = true;
                 thumbnailSource.relativePathKey = "project-overlay:" +
                     (!project->projectId.empty() ? project->projectId : projectPath.generic_string());
                 thumbnailSource.thumbnail.absolutePath = project->coverThumbnailCachePath;
                 thumbnailSource.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Ready;
             }
         }
+        if (!result.available) return result;
         result.texture = GetRawWorkspaceThumbnailTexture(thumbnailSource, &result.width, &result.height, true);
         result.metadata = GetRawWorkspaceThumbnailMetadata(thumbnailSource.relativePathKey);
         return result;
     };
     const Thumbnail requested = resolve(requestedSource, requestedProject);
+    const std::string requestedSourceKey = requestedSource ? requestedSource->relativePathKey : std::string{};
+    // Retain the old image only while a resolvable thumbnail loads. A missing
+    // original with no saved cover is not a pending image from the old project.
+    if (!requested.available) {
+        preview = {};
+        preview.workspaceKey = workspaceKey;
+    }
     const auto* displayedSource = preview.sourceKey.empty() ? nullptr : FindRawWorkspaceSourceByKey(preview.sourceKey);
-    if (!displayedSource) {
+    if (!displayedSource && preview.projectPath.empty()) {
         preview.sourceKey.clear();
         preview.previousSourceKey.clear();
         preview.blend = 1.0f;
@@ -136,7 +151,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
     const Thumbnail displayed = displayedSource == requestedSource && preview.projectPath == requestedProject
         ? requested : resolve(displayedSource, preview.projectPath);
     // Keep the previous image and its properties while an uncached thumbnail loads.
-    if (requested.ready() && (preview.sourceKey != requestedSource->relativePathKey ||
+    if (requested.ready() && (preview.sourceKey != requestedSourceKey ||
             preview.projectPath != requestedProject)) {
         const double now = ImGui::GetTime();
         const bool rapidSwitch = preview.blend < 1.0f ||
@@ -157,7 +172,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
             preview.previousProjectPath.clear();
             preview.blend = 1.0f;
         }
-        preview.sourceKey = requestedSource->relativePathKey;
+        preview.sourceKey = requestedSourceKey;
         preview.projectPath = requestedProject;
         preview.lastChangedAt = now;
         displayedSource = requestedSource;
@@ -172,7 +187,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
     }
     const Thumbnail current = displayedSource == requestedSource && preview.projectPath == requestedProject
         ? requested : displayed;
-    const Thumbnail previous = preview.previousSourceKey.empty() ? Thumbnail{} :
+    const Thumbnail previous = preview.previousSourceKey.empty() && preview.previousProjectPath.empty() ? Thumbnail{} :
         resolve(FindRawWorkspaceSourceByKey(preview.previousSourceKey), preview.previousProjectPath);
     const auto drawPreview = [&](const ImVec2& available) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -206,8 +221,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
     };
     const auto drawEmpty = [&] {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f * unit, 8.0f * unit));
-        if (requestedSource) {
+        if (requested.available) {
             ImGui::TextDisabled("Loading preview...");
+        } else if (!requestedProject.empty()) {
+            ImGui::TextDisabled("No saved cover or original image is available.");
         } else if (m_RawWorkspace.workspaceRoot.empty()) {
             ImGui::TextUnformatted("Browse RAW images");
             ImGui::TextWrapped("Open a folder to browse its images and camera properties.");
@@ -245,7 +262,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
             RenderRawGalleryProperties(displayedSource, current.metadata, preview.projectPath,
                 [&](const ImVec2& available) { drawPreview(available); });
         else RenderRawGalleryProperties(displayedSource, current.metadata,
-            displayedSource ? preview.projectPath : requestedProject, {});
+            current.ready() ? preview.projectPath : requestedProject, {});
         Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(), propertiesAmount);
         ImGui::EndChild();
         ImGui::PopStyleVar();

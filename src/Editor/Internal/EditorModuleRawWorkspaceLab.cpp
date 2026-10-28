@@ -986,8 +986,9 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         (galleryBrowser || (filmstripPointerInside &&
             !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&
             !m_RawWorkspaceLabFilmstripHoverSuppressed)) &&
-        FindRawWorkspaceSourceByKey(
-            m_RawWorkspaceLabFilmstripHoverSourceKey) != nullptr;
+        (!m_RawWorkspaceLabFilmstripHoverProjectPath.empty() ||
+         FindRawWorkspaceSourceByKey(
+            m_RawWorkspaceLabFilmstripHoverSourceKey) != nullptr);
     m_RawWorkspaceLabFilmstripHoverBlend = std::min(
         1.0f,
         m_RawWorkspaceLabFilmstripHoverBlend +

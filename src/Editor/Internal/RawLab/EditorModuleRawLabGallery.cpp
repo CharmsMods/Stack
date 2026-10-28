@@ -1417,14 +1417,14 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     }
                 }
             }
-            if (!hoverKey.empty() &&
+            if ((!hoverKey.empty() || !activeProjectPath.empty()) &&
                 m_RawWorkspaceLabFilmstripHoverSuppressed &&
                 (m_RawWorkspaceLabFilmstripHoverSourceKey != hoverKey ||
                  m_RawWorkspaceLabFilmstripHoverProjectPath !=
                     activeProjectPath)) {
                 m_RawWorkspaceLabFilmstripHoverSuppressed = false;
             }
-            if (!hoverKey.empty() &&
+            if ((!hoverKey.empty() || !activeProjectPath.empty()) &&
                 !m_RawWorkspaceLabFilmstripHoverSuppressed) {
                 if (m_RawWorkspaceLabFilmstripHoverSourceKey != hoverKey ||
                     m_RawWorkspaceLabFilmstripHoverProjectPath != activeProjectPath) {
@@ -1433,7 +1433,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     m_RawWorkspaceLabFilmstripPreviousHoverProjectPath =
                         m_RawWorkspaceLabFilmstripHoverProjectPath;
                     m_RawWorkspaceLabFilmstripHoverBlend =
-                        m_RawWorkspaceLabFilmstripPreviousHoverSourceKey.empty()
+                        (m_RawWorkspaceLabFilmstripPreviousHoverSourceKey.empty() &&
+                             m_RawWorkspaceLabFilmstripPreviousHoverProjectPath.empty())
                             ? 1.0f
                             : 0.0f;
                 }
