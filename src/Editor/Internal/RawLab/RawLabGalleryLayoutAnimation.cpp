@@ -165,17 +165,29 @@ GalleryLayoutAnimation::Layout GalleryLayoutAnimation::Sample() const {
 void GalleryLayoutAnimation::Draw(ImDrawList* draw, const ImRect& bounds,
     const std::function<Texture(const std::string&)>& texture) {
     if (!m_Active) return;
-    m_Presented.clear();
+    // Keep owned key storage while the same photos animate. Clearing first
+    // destroys every long path string and reallocates it on the next frame.
+    std::size_t presentedCount = 0;
+    const auto present = [&](const std::string& key, Pose pose) {
+        if (presentedCount == m_Presented.size()) m_Presented.emplace_back(key, pose);
+        else {
+            auto& entry = m_Presented[presentedCount];
+            entry.first = key;
+            entry.second = pose;
+        }
+        ++presentedCount;
+    };
     for (const auto& [key, destination] : m_Layout) {
         // New images are drawn by their normal tile; the overlay owns only
         // identities that existed before this layout change.
         if (m_From.find(key) != m_From.end() && Participates(key))
-            m_Presented.emplace_back(key, SamplePose(key, destination));
+            present(key, SamplePose(key, destination));
     }
     for (const auto& [key, origin] : m_From) {
         if (m_Layout.find(key) == m_Layout.end() && Participates(key))
-            m_Presented.emplace_back(key, Interpolate(origin, OffscreenEndpoint(origin, m_Grid), m_Progress));
+            present(key, Interpolate(origin, OffscreenEndpoint(origin, m_Grid), m_Progress));
     }
+    m_Presented.resize(presentedCount);
     std::sort(m_Presented.begin(), m_Presented.end(), [](const auto& a, const auto& b) {
         return a.second.order < b.second.order;
     });

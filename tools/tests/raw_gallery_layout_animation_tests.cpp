@@ -3,8 +3,22 @@
 #include "Editor/Internal/RawLab/RawLabGalleryGridSubmission.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <new>
 #include <iostream>
 #include <utility>
+
+namespace {
+bool countPoseAllocations = false;
+std::size_t poseAllocations = 0;
+}
+void* operator new(std::size_t size) {
+    if (countPoseAllocations) ++poseAllocations;
+    if (void* memory = std::malloc(size ? size : 1)) return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 using Stack::Editor::RawLabInternal::GalleryLayoutAnimation;
 namespace {
@@ -70,6 +84,62 @@ bool TestClippedGridSubmission() {
     }
     return true;
 }
+bool TestPresentedStorageReuse() {
+    GalleryLayoutAnimation motion;
+    std::vector<std::string> keys;
+    for (int i = 0; i < 64; ++i)
+        keys.push_back(std::string(40 + i % 5, 'x') + "/capture-" + std::to_string(i));
+    const auto image = [](int i, bool visible) {
+        const float x = visible ? 20.f + (i % 8) * 120.f : 2000.f + i * 120.f;
+        const float y = 20.f + (i / 8) * 80.f;
+        return ImRect({x,y},{x+100,y+60});
+    };
+    const auto observe = [&](int visibleCount, bool reverse) {
+        for (int order = 0; order < 64; ++order) {
+            const int i = reverse ? 63-order : order;
+            const auto rect = image(i, i < visibleCount);
+            motion.ObserveSlot(keys[i],rect,clip);
+            motion.Observe(keys[i],rect,clip);
+        }
+        motion.EndFrame();
+    };
+    const auto texture = [](const std::string&) { return GalleryLayoutAnimation::Texture{7,100,60}; };
+    ImDrawList draw(ImGui::GetDrawListSharedData());
+    const auto prepareDraw = [&] { draw._ResetForNewFrame(); draw.PushClipRect(clip.Min,clip.Max); };
+    motion.BeginFrame("folder",true,1,0.,0,false); observe(1,false);
+    motion.BeginFrame("folder",false,2,1.,1,false); observe(64,false);
+    motion.BeginFrame("folder",false,3,1.20,1,false); observe(64,false);
+    // Sorting may put a longer key into a formerly shorter slot. Warm the
+    // unchanged identity set before checking steady animation allocations.
+    // Longer paths may still grow a reused string; do not require zero growth.
+    for (int warm = 0; warm < 2; ++warm) { prepareDraw(); motion.Draw(&draw,clip,texture); }
+    prepareDraw(); poseAllocations = 0; countPoseAllocations = true;
+    motion.Draw(&draw,clip,texture);
+    countPoseAllocations = false;
+    if (!Check(poseAllocations < keys.size() && draw.VtxBuffer.Size == 64*4,
+        "warm animation reuses path storage instead of allocating every key again")) return false;
+    motion.BeginFrame("folder",false,4,1.21,1,false); observe(16,true);
+    std::vector<std::string> resolved;
+    prepareDraw();
+    motion.Draw(&draw,clip,[&](const std::string& key) { resolved.push_back(key); return texture(key); });
+    if (!Check(resolved.size() == 16 && draw.VtxBuffer.Size == 16*4,
+        "shrinking participation removes stale presented entries")) return false;
+    for (int order = 0; order < 16; ++order) {
+        const int i = 15-order;
+        ImRect displayed;
+        if (!Check(resolved[order] == keys[i] && motion.DisplayRect(keys[i],image(i,true),displayed) &&
+            motion.ImageAt(displayed.GetCenter()) == keys[i],
+            "resorted reused slots retain the complete current key and picking pose")) return false;
+    }
+    prepareDraw(); motion.Draw(&draw,ImRect({0,0},{0,0}),texture);
+    if (!Check(draw.VtxBuffer.empty() && motion.ImageAt({70,50}).empty(),
+        "empty clipping cannot retain a previously rendered picking pose")) return false;
+    motion.Reset();
+    prepareDraw(); motion.Draw(&draw,clip,texture);
+    return Check(!motion.Active() && draw.VtxBuffer.empty() && motion.ImageAt({70,50}).empty(),
+        "reset releases reused presentation identities");
+}
+
 bool TestSortTransitions(bool grid) {
     GalleryLayoutAnimation motion;
     int frame = 1;
@@ -282,7 +352,7 @@ int main() {
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     ImGui::NewFrame();
-    bool passed = TestClippedGridSubmission() && TestSortTransitions(true) && TestSortTransitions(false) &&
+    bool passed = TestPresentedStorageReuse() && TestClippedGridSubmission() && TestSortTransitions(true) && TestSortTransitions(false) &&
         TestInterruptions() && TestClippedAndUnloadedImages() && TestStackMotionAndInputGeometry();
     ImGui::EndFrame();
     passed = TestExpandedFilmstripClickHandoff() && passed;

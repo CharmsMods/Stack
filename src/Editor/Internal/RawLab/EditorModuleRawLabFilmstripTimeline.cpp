@@ -142,6 +142,31 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
             static_cast<float>(index) * tileStep +
             scaledTileWidth * 0.5f - scrollX;
     };
+    // Search the same rounded centers used for drawing. Inverting the affine
+    // position can lose an inclusive boundary at large scroll offsets.
+    const auto entryRange = [&](float low, float high) {
+        const std::size_t count = m_RawWorkspaceLabFilmstripTimelineEntries.size();
+        if (!(tileStep > 0.0f) || !std::isfinite(tileStep) ||
+            !std::isfinite(low) || !std::isfinite(high) ||
+            !std::isfinite(imageCenterX(0)) || !std::isfinite(imageCenterX(count - 1u))) {
+            return std::pair<std::size_t, std::size_t>{0, count};
+        }
+        const auto bound = [&](float position, bool inclusive) {
+            std::size_t first = 0, last = count;
+            while (first < last) {
+                const std::size_t middle = first + (last - first) / 2u;
+                const float center = imageCenterX(middle);
+                if (center < position || (!inclusive && center == position)) {
+                    first = middle + 1u;
+                } else {
+                    last = middle;
+                }
+            }
+            return first;
+        };
+        return std::pair<std::size_t, std::size_t>{bound(low, true), bound(high, false)};
+    };
+    const auto visibleEntries = entryRange(left, right);
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImU32 trackFill = ImGui::GetColorU32(ImGuiCol_Text, 0.08f);
@@ -193,8 +218,10 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     if (ImGui::IsWindowHovered() && !dragging &&
         std::abs(ImGui::GetIO().MousePos.y - rulerY) <= 5.0f) {
         float nearestDistance = 7.0f;
-        for (std::size_t index = 0;
-             index < m_RawWorkspaceLabFilmstripTimelineEntries.size();
+        const float mouseX = ImGui::GetIO().MousePos.x;
+        const auto hoverEntries = entryRange(mouseX - nearestDistance, mouseX + nearestDistance);
+        for (std::size_t index = hoverEntries.first;
+             index < hoverEntries.second;
              ++index) {
             const float distance = std::abs(
                 ImGui::GetIO().MousePos.x - imageCenterX(index));
@@ -206,8 +233,8 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
         }
     }
 
-    for (std::size_t index = 0;
-         index < m_RawWorkspaceLabFilmstripTimelineEntries.size();
+    for (std::size_t index = visibleEntries.first;
+         index < visibleEntries.second;
          ++index) {
         const bool highlighted = index == hoveredIndex;
         const float alignedX = imageCenterX(index);
@@ -298,8 +325,8 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
         idleColor.w *= 1.0f - std::min(1.0f, hoverOpacity);
         float lastLabelRight = left - 1000.0f;
         int previousDay = std::numeric_limits<int>::min();
-        for (std::size_t index = 0;
-             index < m_RawWorkspaceLabFilmstripTimelineEntries.size();
+        for (std::size_t index = visibleEntries.first;
+             index < visibleEntries.second;
              ++index) {
             const auto& entry =
                 m_RawWorkspaceLabFilmstripTimelineEntries[index];
