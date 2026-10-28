@@ -605,6 +605,8 @@ private:
     mutable std::unique_ptr<Stack::Editor::NodeGraphUIVisuals::WireRouteCache> m_WireRoutes;
     const EditorNodeGraph::Graph* m_WireGraph = nullptr;
     std::vector<CachedRect> m_VisibleNodeFrameRects;
+    // Reuse channel buffers across draws; unique ownership also makes UI moves safe.
+    std::unique_ptr<ImDrawListSplitter> m_GraphDrawSplitter;
     mutable std::unordered_map<int, float> m_NodeMeasuredBaseHeights;
     mutable std::unordered_map<int, std::uint64_t>
         m_NodeMeasuredContentRevisions;

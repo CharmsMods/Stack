@@ -707,7 +707,8 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             graphHovered,cursorAppearance ? cursorAppearance->GetResolvedCreamPalette() : fallback,ImGui::GetWindowViewport());
     }
     ImGuiExtras::BeginGraphWheelFrame(&graph, options.interactive);
-    ImDrawListSplitter graphSplitter;
+    if (!m_GraphDrawSplitter) m_GraphDrawSplitter = std::make_unique<ImDrawListSplitter>();
+    auto& graphSplitter = *m_GraphDrawSplitter;
     graphSplitter.Split(drawList, 2);
     graphSplitter.SetCurrentChannel(drawList, 1);
     const std::vector<int>& nodeRenderOrder = GetNodeRenderOrder(graph);
