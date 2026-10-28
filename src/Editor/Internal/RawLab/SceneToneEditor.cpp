@@ -60,7 +60,12 @@ bool DrawSceneToneEditor(RawRecipe::SceneTone& tone, bool contrastView,
         const ImVec2 origin=ImGui::GetCursorScreenPos();
         const float width=std::max(160.0f,ImGui::GetContentRegionAvail().x),height=230;
         ImGui::InvisibleButton("##SceneToneGraph",ImVec2(width,height),ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
-        const bool hovered=ImGui::IsItemHovered();
+        const bool enabled=!(ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled);
+        if (ImGui::IsItemActive() && !ImGui::GetIO().WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Escape,false)) ImGui::ClearActiveID();
+        // Reacquire the point on a new press; hidden gestures never resume.
+        if (!enabled || !ImGui::IsItemActive() || ImGui::IsItemActivated()) dragging=-1;
+        const bool hovered=enabled && ImGui::IsItemHovered();
         const ImRect box(ImVec2(origin.x+30,origin.y+10),ImVec2(origin.x+width-8,origin.y+height-28));
         const auto x=[&](float v){return box.Min.x+(v-minEv)/(maxEv-minEv)*box.GetWidth();};
         const auto y=[&](float v){return box.Max.y-(v-minY)/(maxY-minY)*box.GetHeight();};
@@ -108,18 +113,18 @@ bool DrawSceneToneEditor(RawRecipe::SceneTone& tone, bool contrastView,
             char label[16];std::snprintf(label,sizeof(label),contrastView?"%.1f":"%.0f",value);
             draw->AddText(ImVec2(origin.x,y(value)-6),muted,label);
         }
-        if(hovered&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {selected=nearest;dragging=nearest;}
-        if(hovered&&nearest>=0&&ImGui::IsMouseClicked(ImGuiMouseButton_Right)&&tone.points.size()>2) {
+        if(hovered&&ImGui::IsItemActive()&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {selected=nearest;dragging=nearest;}
+        if(hovered&&ImGui::IsItemActive()&&nearest>=0&&ImGui::IsMouseClicked(ImGuiMouseButton_Right)&&tone.points.size()>2) {
             tone.points.erase(tone.points.begin()+nearest);selected=dragging=-1;changed=true;
         }
-        if(hovered&&nearest<0&&ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)&&tone.points.size()<32) {
+        if(hovered&&ImGui::IsItemActive()&&nearest<0&&ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)&&tone.points.size()<32) {
             const float e=std::clamp(minEv+(ImGui::GetIO().MousePos.x-box.Min.x)/box.GetWidth()*(maxEv-minEv),minEv,maxEv);
             // Insert on the authored base slope so adding a point alone is neutral.
             auto base=tone;base.contrast=1;base.enabled=true;
             tone.points.push_back({e,EvaluateSceneToneContrast(base,e)});
             tone=SanitizeSceneTone(std::move(tone));changed=true;
         }
-        if(dragging>=0&&dragging<int(tone.points.size())&&ImGui::IsMouseDown(ImGuiMouseButton_Left)&&ImGui::IsMouseDragging(ImGuiMouseButton_Left,0)) {
+        if(ImGui::IsItemActive()&&dragging>=0&&dragging<int(tone.points.size())&&ImGui::IsMouseDown(ImGuiMouseButton_Left)&&ImGui::IsMouseDragging(ImGuiMouseButton_Left,0)) {
             const float target=maxY-(ImGui::GetIO().MousePos.y-box.Min.y)/box.GetHeight()*(maxY-minY);
             if(contrastView) {
                 auto& p=tone.points[dragging];
