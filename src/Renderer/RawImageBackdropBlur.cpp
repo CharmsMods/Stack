@@ -69,6 +69,16 @@ bool RawImageBackdropBlur::Ensure(int w, int h) {
             RawImageBackdropColorFieldShaders::Generate.c_str());
         glGenVertexArrays(1, &vao);
         if (!copyProgram || !blurProgram || !colorFieldProgram || !vao) { failed = true; return false; }
+        blurUniforms = {
+            glGetUniformLocation(blurProgram, "image"),
+            glGetUniformLocation(blurProgram, "photo"),
+            glGetUniformLocation(blurProgram, "direction"),
+            glGetUniformLocation(blurProgram, "sigma"),
+            glGetUniformLocation(blurProgram, "radius")};
+        colorFieldUniforms = {
+            glGetUniformLocation(colorFieldProgram, "image"),
+            glGetUniformLocation(colorFieldProgram, "photoBounds"),
+            glGetUniformLocation(colorFieldProgram, "photoAspect")};
     }
     if (texture && framebuffer && width == w && height == h) return true;
     ReleaseImages();
@@ -138,11 +148,11 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer); glViewport(0, 0, width, height);
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(copyProgram);
-    glUniform1i(glGetUniformLocation(copyProgram, "image"), 0);
-    glUniform1i(glGetUniformLocation(copyProgram, "previous"), 1);
+    glUniform1i(BackdropUniforms::Copy::Image, 0);
+    glUniform1i(BackdropUniforms::Copy::Previous, 1);
     // Copy clips visible display texels before sampling, applies the accepted
     // frame fade, then decodes window RGB for every following convolution.
-    glUniform1i(glGetUniformLocation(copyProgram, "visibleColorOnly"), 1);
+    glUniform1i(BackdropUniforms::Copy::VisibleColorOnly, 1);
     for (const auto& patch : frame.SurroundPatches()) {
         if (wholePhoto && &patch != wholePhoto) continue;
         glActiveTexture(GL_TEXTURE1);
@@ -150,21 +160,21 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, patch.texture);
         const auto minimum = photoPoint(patch.imageBounds.x, patch.imageBounds.y);
         const auto maximum = photoPoint(patch.imageBounds.z, patch.imageBounds.w);
-        glUniform4f(glGetUniformLocation(copyProgram, "rect"), minimum.x,
+        glUniform4f(BackdropUniforms::Copy::Rect, minimum.x,
             minimum.y, maximum.x, maximum.y);
-        glUniform4f(glGetUniformLocation(copyProgram, "textureRect"),
+        glUniform4f(BackdropUniforms::Copy::TextureRect,
             patch.uvMinimum.x, patch.uvMaximum.y, patch.uvMaximum.x, patch.uvMinimum.y);
-        glUniform4f(glGetUniformLocation(copyProgram, "extendEdges"), patch.extendEdges.x,
+        glUniform4f(BackdropUniforms::Copy::ExtendEdges, patch.extendEdges.x,
             patch.extendEdges.y, patch.extendEdges.z, patch.extendEdges.w);
-        glUniform2f(glGetUniformLocation(copyProgram, "previousOffset"), patch.previousOffset.x, patch.previousOffset.y);
-        glUniform2f(glGetUniformLocation(copyProgram, "previousScale"), patch.previousScale.x, patch.previousScale.y);
-        glUniform1f(glGetUniformLocation(copyProgram, "fadeAmount"), patch.previousTexture ? patch.fadeAmount : 1.f);
-        glUniform1i(glGetUniformLocation(copyProgram, "encodedSrgb"), patch.encodedSrgb ? 1 : 0);
+        glUniform2f(BackdropUniforms::Copy::PreviousOffset, patch.previousOffset.x, patch.previousOffset.y);
+        glUniform2f(BackdropUniforms::Copy::PreviousScale, patch.previousScale.x, patch.previousScale.y);
+        glUniform1f(BackdropUniforms::Copy::FadeAmount, patch.previousTexture ? patch.fadeAmount : 1.f);
+        glUniform1i(BackdropUniforms::Copy::EncodedSrgb, patch.encodedSrgb ? 1 : 0);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
     glUseProgram(blurProgram);
-    glUniform1i(glGetUniformLocation(blurProgram, "image"), 0);
-    glUniform4f(glGetUniformLocation(blurProgram, "photo"), 0, 0, 1, 1);
+    glUniform1i(blurUniforms.image, 0);
+    glUniform4f(blurUniforms.photo, 0, 0, 1, 1);
     unsigned int source = texture;
     int sourceWidth = width;
     float variance = 0.f;
@@ -173,15 +183,15 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
         glViewport(0, 0, level.width, level.height);
         glBindFramebuffer(GL_FRAMEBUFFER, level.scratchFramebuffer);
         glBindTexture(GL_TEXTURE_2D, source);
-        glUniform2f(glGetUniformLocation(blurProgram, "direction"), 1.f/sourceWidth, 0);
-        glUniform1f(glGetUniformLocation(blurProgram, "sigma"), 4.f);
-        glUniform1i(glGetUniformLocation(blurProgram, "radius"), 12);
+        glUniform2f(blurUniforms.direction, 1.f/sourceWidth, 0);
+        glUniform1f(blurUniforms.sigma, 4.f);
+        glUniform1i(blurUniforms.radius, 12);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glBindFramebuffer(GL_FRAMEBUFFER, level.framebuffer);
         glBindTexture(GL_TEXTURE_2D, level.scratch);
-        glUniform2f(glGetUniformLocation(blurProgram, "direction"), 0, 1.f/level.height);
-        glUniform1f(glGetUniformLocation(blurProgram, "sigma"), 2.f);
-        glUniform1i(glGetUniformLocation(blurProgram, "radius"), 6);
+        glUniform2f(blurUniforms.direction, 0, 1.f/level.height);
+        glUniform1f(blurUniforms.sigma, 2.f);
+        glUniform1i(blurUniforms.radius, 6);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         const float sigma = 2.f / level.width;
         variance += sigma*sigma;
@@ -195,10 +205,10 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     glViewport(0, 0, ColorFieldSize, ColorFieldSize);
     glUseProgram(colorFieldProgram);
     glBindTexture(GL_TEXTURE_2D, levels[ColorSampleLevel].texture);
-    glUniform1i(glGetUniformLocation(colorFieldProgram, "image"), 0);
-    glUniform4f(glGetUniformLocation(colorFieldProgram, "photoBounds"), photoBounds.x,
+    glUniform1i(colorFieldUniforms.image, 0);
+    glUniform4f(colorFieldUniforms.photoBounds, photoBounds.x,
         photoBounds.y, photoBounds.z, photoBounds.w);
-    glUniform2f(glGetUniformLocation(colorFieldProgram, "photoAspect"),
+    glUniform2f(colorFieldUniforms.photoAspect,
         frame.nativeExtent.x/padding, frame.nativeExtent.y/padding);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     if (glGetError() != GL_NO_ERROR) return false;
@@ -229,5 +239,6 @@ void RawImageBackdropBlur::Shutdown() {
     if (colorFieldProgram) glDeleteProgram(colorFieldProgram);
     if (vao) glDeleteVertexArrays(1, &vao);
     copyProgram = blurProgram = colorFieldProgram = vao = 0; failed = false;
+    blurUniforms = {}; colorFieldUniforms = {};
 }
 }

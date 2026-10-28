@@ -27,6 +27,13 @@ private:
     ImVec4 photoBounds{0, 0, 1, 1};
     unsigned int texture = 0, framebuffer = 0, colorField = 0, colorFieldFramebuffer = 0;
     unsigned int copyProgram = 0, blurProgram = 0, colorFieldProgram = 0, vao = 0;
+    // Locations belong to the linked programs, not the resized atlas images.
+    struct BlurUniforms {
+        int image = -1, photo = -1, direction = -1, sigma = -1, radius = -1;
+    } blurUniforms;
+    struct ColorFieldUniforms {
+        int image = -1, photoBounds = -1, photoAspect = -1;
+    } colorFieldUniforms;
     int width = 0, height = 0;
     std::size_t identity = 0;
     bool valid = false, failed = false;
