@@ -2360,7 +2360,10 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         ImGui::EndPopup();
     }
 
-    if (args.ui.selectedColorWarpPin >= 0 &&
+    // Sibling controls share this root's focus. Text and active gestures own
+    // their keys, including the activation frame before WantTextInput updates.
+    if (!io.WantTextInput && !ImGui::IsAnyItemActive() &&
+        args.ui.selectedColorWarpPin >= 0 &&
         (ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
          ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) &&
         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
