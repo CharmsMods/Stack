@@ -2,6 +2,7 @@
 // folder-key presentation from disk discovery, image decoding and project IO.
 #include "Raw/RawSourceFolders.h"
 #include "Editor/Internal/RawLab/RawLabGalleryFolderTree.h"
+#include "gallery_stack_folder_scope_fixture.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -76,6 +77,11 @@ void CheckScope(const std::filesystem::path& root) {
             "Aggregate folder key differs from the navigator's selectable key.");
         Require(Tree::ContainsFolderKey(rootKey, source.parentFolderKey),
             "Selecting a separator-ended source root hides descendants.");
+        Require(ProductionStackFolderVisible(true, rootKey, source.parentFolderKey),
+            "Visible grid/filmstrip stacks omit descendants of the selected source root.");
+        Require(ProductionStackFolderVisible(true, dayKey, source.parentFolderKey) ==
+                Tree::ContainsFolderKey(dayKey, source.parentFolderKey),
+            "Visible stacks disagree with the selected folder's contents.");
         if (Tree::ContainsFolderKey(dayKey, source.parentFolderKey)) ++matched;
         const auto native = Gallery::NativeSourceRecord(source);
         Require(native.relativePathKey == native.relativePath.generic_u8string(),
@@ -91,6 +97,13 @@ int main() try {
     CheckScope(root);
     CheckScope(root / "");
     CheckScope(root.root_path());
+    Require(ProductionStackFolderVisible(false, std::string("Day1"), "Day10"),
+        "A project-local gallery incorrectly applied the permanent gallery's filter.");
+    Require(ProductionStackFolderVisible(true, std::nullopt, "Day10"),
+        "An unfiltered gallery omitted a stack.");
+    Require(ProductionStackFolderVisible(true, std::string("C:/"), "C:/Day1") &&
+            ProductionStackFolderVisible(true, std::string("//server/share/"), "//server/share/Day1"),
+        "Visible stacks omitted drive/UNC root display-key descendants.");
     Require(Tree::ContainsFolderKey("Day1", "Day1/Nested"), "Relative subfolder omitted.");
     Require(!Tree::ContainsFolderKey("Day1", "Day10"), "Sibling prefix admitted.");
     Require(!Tree::ContainsFolderKey("Day1", "Day"), "Parent admitted as a descendant.");

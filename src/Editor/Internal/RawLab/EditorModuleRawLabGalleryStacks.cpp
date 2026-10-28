@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Editor/Internal/RawLab/RawLabGalleryFolderTree.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -25,8 +26,7 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     const auto folderVisible = [&](const std::string& key) {
         if (!m_PermanentGalleryWorkspace || !m_RawGalleryFolderFilter) return true;
         const auto& folder = *m_RawGalleryFolderFilter;
-        return key == folder || (key.size() > folder.size() &&
-            key.compare(0, folder.size(), folder) == 0 && key[folder.size()] == '/');
+        return Stack::Editor::RawLabInternal::GalleryFolderTree::ContainsFolderKey(folder, key);
     };
     auto& views = m_RawWorkspaceLabGalleryViewsBySource;
     views.clear();
