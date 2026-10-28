@@ -3,6 +3,7 @@
 
 #include <imgui_internal.h>
 #include <algorithm>
+#include <cstring>
 
 namespace Stack::Editor::RawLabInternal {
 namespace {
@@ -49,7 +50,7 @@ void GalleryNavigator::PrepareRows(GalleryFolderTree& tree) {
 void GalleryNavigator::Text(const char* text, ImVec2 minimum, ImVec2 maximum, bool secondary) {
     ImGui::PushStyleColor(ImGuiCol_Text, secondary ? m_Secondary : m_Text);
     ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), minimum, maximum,
-        maximum.x, text, nullptr, nullptr);
+        maximum.x, text, text + std::strlen(text), nullptr);
     ImGui::PopStyleColor();
 }
 
@@ -179,7 +180,9 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
                 const float indent = std::min((all ? 0.f : row.depth * 16.f) * m_Unit,
                     std::max(0.f, ImGui::GetContentRegionAvail().x - 144 * m_Unit));
                 const float available = ImGui::GetContentRegionAvail().x;
-                ImGui::PushID(all ? "AllFolders" : folder.key.c_str());
+                if (all) ImGui::PushID("AllFolders");
+                else ImGui::PushOverrideID(ImHashData(folder.key.data(), folder.key.size(),
+                    ImGui::GetCurrentWindow()->IDStack.back()));
                 ImGui::SetCursorScreenPos(ImVec2(origin.x + indent, origin.y));
                 const bool selected = all ? !filter : filter && *filter == folder.key;
                 const bool clicked = Button("##Folder", folder.label.c_str(), all ? Ui::Icon::AllFolders : Ui::Icon::Folder,
