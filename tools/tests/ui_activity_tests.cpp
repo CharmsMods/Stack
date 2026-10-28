@@ -8,9 +8,23 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <future>
+#include <cstdlib>
+#include <new>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+
+namespace {
+thread_local bool countActivityAllocations = false;
+thread_local std::size_t activityAllocations = 0;
+}
+void* operator new(std::size_t size) {
+    if (countActivityAllocations) ++activityAllocations;
+    if (void* memory = std::malloc(size ? size : 1)) return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -25,6 +39,52 @@ struct CountPayloadCopies {
     CountPayloadCopies(const CountPayloadCopies& other) : copies(other.copies) { ++*copies; }
     void operator()() const {}
 };
+
+void CheckInactiveActivityAllocations() {
+    using Stack::UiActivity::Snapshot;
+    const std::string label = "Building previews for a long project name";
+    Snapshot idle, active;
+    active.SetOwner(17, "Existing owner");
+    active.Add(true, label);
+    active.SetPrimary(true, "Existing primary");
+    active.AddDetail("Existing detail");
+    active.SetAwaitingInteractionRelease(true);
+    const auto before = active;
+
+    activityAllocations = 0;
+    countActivityAllocations = true;
+    for (int i = 0; i < 1000; ++i) {
+        // Library's steady-state collector checks every catalog entry.
+        idle.Add(false, "Loading preview");
+        idle.Add(false, "Building previews");
+        active.Add(false, label);
+        active.Add(false, label.c_str());
+        active.AddMaintenance(false, label.c_str());
+        active.Add(false, static_cast<const char*>(nullptr));
+        active.Add(true, static_cast<const char*>(nullptr));
+        active.Add(true, "");
+    }
+    countActivityAllocations = false;
+    Require(activityAllocations == 0, "Inactive activity labels must not allocate temporary owned strings");
+    Require(!idle.Busy() && idle.entries.empty() && idle.labels.empty(), "Inactive labels must leave an idle snapshot empty");
+    Require(active.entries.size() == before.entries.size() && active.labels == before.labels &&
+        active.details == before.details && active.primaryLabel == before.primaryLabel &&
+        active.primaryOwnerId == before.primaryOwnerId && active.awaitingInteractionRelease,
+        "Inactive, null and empty additions must preserve accumulated activity");
+    const auto& entry = active.entries.front();
+    Require(entry.ownerId == 17 && entry.ownerLabel == "Existing owner" &&
+        entry.key == label && entry.label == label && !entry.maintenance &&
+        entry.operationId == 0 && entry.id == 0,
+        "Inactive maintenance must not alter the existing owner or operation");
+    active.Add(true, label.c_str());
+    Require(active.entries.size() == 1, "Active labels still deduplicate");
+    active.AddMaintenance(true, label.c_str());
+    Require(active.entries.front().maintenance, "Active maintenance still marks the current owner");
+    active.SetOwner(18, "Other owner");
+    active.Add(true, label);
+    Require(active.entries.size() == 2 && active.entries.back().ownerId == 18,
+        "Active string labels must retain independent owners");
+}
 
 void CheckActivity() {
     using namespace Stack::UiActivity;
@@ -616,6 +676,7 @@ void CheckSaveTarget() {
 
 int main() {
     try {
+        CheckInactiveActivityAllocations();
         CheckActivity();
         CheckRecords();
         CheckNativePresenters();

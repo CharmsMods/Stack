@@ -77,7 +77,7 @@ struct Snapshot {
             existing->details.push_back(std::move(detail));
     }
     void Add(bool active, const char* label) {
-        if (label) AddOperation(active, label, label);
+        if (active && label) AddOperation(active, label, label);
     }
     void Add(bool active, const std::string& label) {
         Add(active, label.c_str());
