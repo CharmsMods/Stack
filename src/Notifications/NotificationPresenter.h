@@ -50,7 +50,7 @@ private:
     EventId m_Preview = 0;
     double m_PreviewRemaining = 0.0;
     std::uint64_t m_SeenPreviewRevision = 0;
-    ImVec2 m_Anchor{};
+    ImVec2 m_Anchor{}, m_AnchorMinimum{};
     bool m_HasAnchor = false;
 };
 

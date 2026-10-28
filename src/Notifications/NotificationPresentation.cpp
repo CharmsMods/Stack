@@ -241,8 +241,24 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
     if (!m_HasAnchor || BlocksInput()) return;
     const float unit = ImGui::GetFontSize() / 13.0f;
     const auto* viewport = ImGui::GetMainViewport();
-    const float width = std::min(420.0f * unit, viewport->WorkSize.x - 24.0f * unit);
-    const ImVec2 anchor(std::min(m_Anchor.x, viewport->WorkPos.x + viewport->WorkSize.x - 12 * unit), m_Anchor.y + 6 * unit);
+    const ImVec2 margin(std::min(12.f * unit, viewport->WorkSize.x * .05f),
+        std::min(12.f * unit, viewport->WorkSize.y * .05f));
+    const ImVec2 minimum(viewport->WorkPos.x + margin.x, viewport->WorkPos.y + margin.y);
+    const ImVec2 maximum(viewport->WorkPos.x + viewport->WorkSize.x - margin.x,
+        viewport->WorkPos.y + viewport->WorkSize.y - margin.y);
+    if (maximum.x - minimum.x < 1.f || maximum.y - minimum.y < 1.f) return;
+    const float width = std::min(420.f * unit, maximum.x - minimum.x);
+    const auto boundedHeight = [&](float desired) { return std::min(desired, maximum.y - minimum.y); };
+    const auto place = [&](float height) {
+        // The indicator can live in the bottom-left rail or a top-right header.
+        // Explicit window positions bypass ImGui's ordinary viewport clamping.
+        const bool above = (m_AnchorMinimum.y + m_Anchor.y) * .5f >
+            (minimum.y + maximum.y) * .5f;
+        const ImVec2 anchor(std::clamp(m_Anchor.x, minimum.x + width, maximum.x),
+            std::clamp(above ? m_AnchorMinimum.y - 6.f * unit : m_Anchor.y + 6.f * unit,
+                minimum.y + (above ? height : 0.f), maximum.y - (above ? 0.f : height)));
+        ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1,above ? 1.f : 0.f));
+    };
     if (m_PanelOpen) {
         auto records = store.Snapshot();
         std::stable_sort(records.begin(),records.end(),[&](const Record& a,const Record& b) {
@@ -252,8 +268,10 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
             if (IsRunning(a) && IsRunning(b) && priority(a) != priority(b)) return priority(a) < priority(b);
             return a.updatedAt > b.updatedAt;
         });
-        ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1,0));
-        ImGui::SetNextWindowSize(ImVec2(width, std::min(560.0f * unit, viewport->WorkSize.y - 76 * unit)), ImGuiCond_Always);
+        const float height = boundedHeight(std::min(560.f * unit,
+            std::max(1.f, viewport->WorkSize.y - 76.f * unit)));
+        place(height);
+        ImGui::SetNextWindowSize(ImVec2(width,height), ImGuiCond_Always);
         ImGui::SetNextWindowViewport(viewport->ID);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 9 * unit);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16 * unit,14 * unit));
@@ -305,8 +323,9 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
     if (!m_Preview || m_PreviewRemaining <= 0) return;
     const auto record = store.Find(m_Preview);
     if (!record || record->dismissed) { m_Preview = 0; return; }
-    ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1,0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(width * .8f,0),ImVec2(width,240 * unit));
+    const float previewHeight = boundedHeight(240.f * unit);
+    place(previewHeight);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width * .8f,0),ImVec2(width,previewHeight));
     ImGui::SetNextWindowViewport(viewport->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,9 * unit);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(16 * unit,14 * unit));

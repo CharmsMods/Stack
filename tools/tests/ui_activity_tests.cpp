@@ -265,6 +265,67 @@ void CheckRecords() {
         "Owner retirement removes preview guards and renderer leases outside the store lock");
 }
 
+void CheckActivityPlacement() {
+    ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(800,600);
+    io.DeltaTime = 1.f / 60.f;
+    unsigned char* pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels,&width,&height);
+    auto store = std::make_shared<NotificationStore>();
+    auto owner = store->ForOwner(1,"Placement");
+    Presenter presenter;
+    Stack::UiActivity::Snapshot snapshot;
+    Stack::UiActivity::Presentation activity;
+    PresentationContext context;
+    context.reducedMotion = true;
+    owner.Info("A completed operation.");
+    const auto check = [&](bool panel, ImVec2 workPosition, ImVec2 workSize, bool bottomLeft) {
+        if (presenter.PanelOpen() != panel) presenter.TogglePanel();
+        for (int frame = 0; frame < 3; ++frame) {
+            ImGui::NewFrame();
+            auto* viewport = ImGui::GetMainViewport();
+            viewport->WorkPos = workPosition;
+            viewport->WorkSize = workSize;
+            const ImVec2 indicatorPosition(bottomLeft ? workPosition.x + 7.f : workPosition.x + workSize.x - 47.f,
+                bottomLeft ? workPosition.y + workSize.y - 41.f : workPosition.y + 7.f);
+            ImGui::SetNextWindowPos(indicatorPosition);
+            ImGui::SetNextWindowSize(ImVec2(40,32));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(0,0));
+            ImGui::Begin("Placement indicator",nullptr,ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+            presenter.RenderIndicator(*store,snapshot,activity,36,32,false,context);
+            ImGui::End();
+            ImGui::PopStyleVar();
+            presenter.RenderActivity(*store,context);
+            ImGui::Render();
+        }
+        const auto* window = ImGui::FindWindowByName(panel ? "##StackNotificationsActivity" : "##StackNotificationPreview");
+        if (workSize.x <= 0.f || workSize.y <= 0.f) {
+            Require(!window || !window->Active,"A minimized work area must not submit an activity surface");
+            return;
+        }
+        Require(window && window->Active,"Activity placement fixture must show its surface");
+        Require(window->Pos.x >= workPosition.x && window->Pos.y >= workPosition.y &&
+            window->Pos.x + window->Size.x <= workPosition.x + workSize.x + 1.f &&
+            window->Pos.y + window->Size.y <= workPosition.y + workSize.y + 1.f,
+            "Activity panels and previews must stay inside the work area at either indicator corner");
+    };
+    for (bool panel : {false,true}) {
+        check(panel,{0,0},{800,600},true);
+        check(panel,{0,0},{800,600},false);
+        check(panel,{90,70},{480,320},true);
+        check(panel,{90,70},{480,320},false);
+        check(panel,{0,0},{220,160},true);
+        io.FontGlobalScale = 1.4f;
+        check(panel,{0,0},{220,160},true);
+        io.FontGlobalScale = 1.f;
+        check(panel,{0,0},{0,0},true);
+        check(panel,{0,0},{800,600},true);
+    }
+    ImGui::DestroyContext();
+}
+
 void CheckNativePresenters() {
     ImGui::CreateContext();
     auto& io = ImGui::GetIO();
@@ -558,6 +619,7 @@ int main() {
         CheckActivity();
         CheckRecords();
         CheckNativePresenters();
+        CheckActivityPlacement();
         CheckWorkerIdentity();
         CheckSaveTarget();
         std::cout<<"Notification ownership, actions, retention, native presentation and worker handoff passed.\n";

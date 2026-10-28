@@ -21,6 +21,7 @@ float Presenter::RenderIndicator(NotificationStore& store,
     if (ImGui::InvisibleButton("##Activity",ImVec2(hitWidth,height),ImGuiButtonFlags_EnableNav)||openPanel)
         m_PanelOpen=!m_PanelOpen;
     if (context.customIndicatorFocus) ImGui::PopStyleColor();
+    m_AnchorMinimum=pos;
     m_Anchor=ImVec2(pos.x+hitWidth,pos.y+height);
     m_HasAnchor=true;
     auto* draw=ImGui::GetWindowDrawList();
