@@ -42,7 +42,7 @@ void EditorModule::RenderRawLayerPanelContents() {
             ApplyRawLayerStackEdit(std::move(candidate));
         }
     }
-    if (ImGui::IsItemDeactivatedAfterEdit()) m_Project->rawLayers.EndGesture();
+    if (ImGui::IsItemDeactivated()) m_Project->rawLayers.EndGesture();
     ImGui::EndDisabled();
 
     struct Row {
