@@ -10,6 +10,11 @@ source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabGallery.cpp').rea
 start = source.index('void PushGalleryKeyID(')
 helper = source[start:source.index('\n}', start) + 2]
 
+list_start = source.index('bool GalleryListSelectable(')
+list_helper = source[list_start:source.index('\n}', list_start) + 2]
+assert 'GalleryListSelectable(row, listProjectSelected)' in source
+assert 'GalleryListSelectable(row, selected)' in source
+
 def scope(expression):
     return next(line.strip() for line in source.splitlines()
                 if line.strip() == f'PushGalleryKeyID({expression});')
@@ -33,6 +38,7 @@ for required in ('timelineSourcesByKey.reserve(', 'timelineSourcesByKey.emplace(
 fixture = (root / 'tools/tests/gallery_widget_identity_tests.cpp').read_text()
 for marker, body in {
     '// PRODUCTION_KEY_HELPER': helper,
+    '// PRODUCTION_LIST_HELPER': list_helper,
     '// PRODUCTION_STACK_SCOPE': scope('item.animationKey'),
     '// PRODUCTION_SOURCE_SCOPE': scope('source->relativePathKey'),
     '// PRODUCTION_GROUP_SCOPE': scope('groupKey'),

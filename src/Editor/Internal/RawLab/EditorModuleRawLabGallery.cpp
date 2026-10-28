@@ -54,6 +54,34 @@ void PushGalleryKeyID(const std::string& key) {
         ImGui::GetCurrentWindow()->IDStack.back()));
 }
 
+// Keep native row interaction and identity, but treat file/project names as text.
+bool GalleryListSelectable(const std::string& label, bool selected) {
+    constexpr ImGuiSelectableFlags flags = ImGuiSelectableFlags_AllowDoubleClick;
+    if (label.find("##") == std::string::npos)
+        return ImGui::Selectable(label.c_str(), selected, flags);
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+    const ImVec2 textSize = ImGui::CalcTextSize(label.c_str(), nullptr, false);
+    ImVec2 textPos = window->DC.CursorPos;
+    textPos.y += window->DC.CurrLineTextBaseOffset;
+    const float available = window->WorkRect.Max.x - textPos.x;
+    // SpanAvailWidth uses the native (truncated) label width, so retain the
+    // explicit literal width when the full name is wider than the row.
+    ImGuiSelectableFlags rowFlags = flags;
+    if (textSize.x <= available) rowFlags |= ImGuiSelectableFlags_SpanAvailWidth;
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+    const bool pressed = ImGui::Selectable(label.c_str(), selected, rowFlags, textSize);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemVisible()) {
+        const ImRect bounds(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        ImGui::RenderTextClippedEx(window->DrawList, textPos,
+            ImVec2(window->WorkRect.Max.x, textPos.y + textSize.y),
+            label.c_str(), label.c_str() + label.size(), &textSize,
+            ImGui::GetStyle().SelectableTextAlign, &bounds);
+    }
+    return pressed;
+}
+
 void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
     std::size_t count, float opacity, bool completedBurst) {
     if (count > 1u) {
@@ -1693,8 +1721,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             (project.frameCount == 1u ? " frame" : " frames"));
                 const bool listProjectSelected =
                     isProjectSelected(project.projectPath);
-                if (ImGui::Selectable(row.c_str(), listProjectSelected,
-                        ImGuiSelectableFlags_AllowDoubleClick) && !project.projectPath.empty()) {
+                if (GalleryListSelectable(row, listProjectSelected) && !project.projectPath.empty()) {
                     selectProject(
                         project.projectPath,
                         project.projectName,
@@ -1759,7 +1786,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     PushGalleryKeyID(source->relativePathKey);
                     const bool selected = view.multiSelected;
                     const std::string row = source->fileName;
-                    if (ImGui::Selectable(row.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick)) {
+                    if (GalleryListSelectable(row, selected)) {
                         const bool doubleClicked =
                             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
                             !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&

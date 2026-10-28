@@ -32,8 +32,11 @@ def main():
     source = (args.gallery or root/'src/Editor/Internal/RawLab/EditorModuleRawLabGallery.cpp').read_text()
     selection = source[source.index('    const auto sameGalleryProjectPath ='):source.index('    const auto selectSource =')]
     rows = block(source, 'if (projectsOnly && !presentation.projects.empty())')
+    literal_row = (block(source, 'bool GalleryListSelectable(')
+                   if 'bool GalleryListSelectable(' in source else '')
     generated = r'''
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
@@ -41,6 +44,7 @@ def main():
 #include <string>
 #include <unordered_map>
 #include <vector>
+''' + literal_row + r'''
 namespace Stack::RawWorkspace {
 enum class GalleryDisplayMode { Grid, List };
 enum class GalleryContentMode { Projects, Bracket };
