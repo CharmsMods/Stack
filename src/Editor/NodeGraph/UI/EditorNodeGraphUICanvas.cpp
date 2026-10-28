@@ -19,6 +19,7 @@
 #include <imgui_internal.h>
 #include <limits>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -434,22 +435,17 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     m_LastNodeControlId = 0;
     m_NodeLayoutCache.reserve(graph.GetNodes().size());
 
+    // ImGui requires the canvas item to remain current while accepting. Own
+    // the delivery value now; resolve geometry after this frame's camera/layout.
+    std::optional<NodeBrowserEntry> deliveredEntry;
+    ImVec2 deliveredPosition{};
     if (options.allowDropTarget && ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ADD_NODE_DRAG_PAYLOAD")) {
-            if (payload->IsDelivery()) {
+            if (payload->IsDelivery() && payload->DataSize == sizeof(const NodeBrowserEntry*)) {
                 const NodeBrowserEntry* entry = *static_cast<const NodeBrowserEntry**>(payload->Data);
                 if (entry) {
-                    ImVec2 dropPos = ImGui::GetIO().MousePos;
-                    EditorNodeGraph::Vec2 graphPos = ScreenToGraph(ToGraphVec2(dropPos));
-                    const EditorNodeGraph::Link hoveredDropLink = FindLinkAt(graph, ToGraphVec2(dropPos));
-                    const int newNodeId = AddNodeFromBrowserEntry(editor, *entry, graphPos);
-                    if (newNodeId > 0 &&
-                        hoveredDropLink.fromNodeId > 0 &&
-                        hoveredDropLink.toNodeId > 0 &&
-                        hoveredDropLink.fromNodeId != newNodeId &&
-                        hoveredDropLink.toNodeId != newNodeId) {
-                        InsertNewNodeOnExistingLink(this, editor, hoveredDropLink, newNodeId);
-                    }
+                    deliveredEntry = *entry;
+                    deliveredPosition = ImGui::GetIO().MousePos;
                 }
             }
         }
@@ -644,19 +640,42 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         }
     }
     if (options.interactive) UpdateActiveNodeDrag(editor, graph);
-    {
-        Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::LogicalLayout);
-        for (auto& node : graph.GetNodes()) {
-            const auto position = ClampGraphPosition(node.position);
-            if (position.x != node.position.x || position.y != node.position.y) node.position = position;
-            RefreshLogicalNodeLayoutCache(graph, node, m_NodeLayoutCache[node.id]);
+    const auto prepareNodeProjection = [&] {
+        {
+            Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::LogicalLayout);
+            for (auto& node : graph.GetNodes()) {
+                const auto position = ClampGraphPosition(node.position);
+                if (position.x != node.position.x || position.y != node.position.y) node.position = position;
+                RefreshLogicalNodeLayoutCache(graph, node, m_NodeLayoutCache[node.id]);
+            }
         }
-    }
-    // Neighbor motion must not move the camera underneath a captured pointer.
-    if(!m_DragLayout && !m_ExpansionMotion)ClampPanToContent(graph);
-    {
-        Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Projection);
-        for (const auto& node : graph.GetNodes()) ProjectNodeLayoutCache(node, m_NodeLayoutCache[node.id]);
+        // Neighbor motion must not move the camera underneath a captured pointer.
+        if(!m_DragLayout && !m_ExpansionMotion)ClampPanToContent(graph);
+        {
+            Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Projection);
+            for (const auto& node : graph.GetNodes()) ProjectNodeLayoutCache(node, m_NodeLayoutCache[node.id]);
+        }
+    };
+    prepareNodeProjection();
+    if (deliveredEntry) {
+        // Compound gateways participate in picking even when only their group
+        // moved. Resolve all drop geometry before any node widgets capture IDs.
+        PrepareCompoundEntries(graph);
+        PrepareWireRoutes(graph);
+        // Labels still describe last frame here. As in RenderLinks, discard
+        // them before picking the current wire geometry; drawing rebuilds them.
+        m_LinkLabelHitRects.clear();
+        m_LinkHitTestFrame = -1;
+        const auto graphPosition = ScreenToGraph(ToGraphVec2(deliveredPosition));
+        const auto hoveredDropLink = FindLinkAt(graph, ToGraphVec2(deliveredPosition));
+        const int newNodeId = AddNodeFromBrowserEntry(editor, *deliveredEntry, graphPosition);
+        if (newNodeId > 0 && hoveredDropLink.fromNodeId > 0 && hoveredDropLink.toNodeId > 0 &&
+            hoveredDropLink.fromNodeId != newNodeId && hoveredDropLink.toNodeId != newNodeId) {
+            InsertNewNodeOnExistingLink(this, editor, hoveredDropLink, newNodeId);
+        }
+        // Adding/inserting can replace node storage or arrange neighbors.
+        // Refresh before obtaining render-order references and drawing them.
+        prepareNodeProjection();
     }
     const float graphElementCullMargin = std::clamp(
         std::min(canvasSize.x, canvasSize.y) * 0.35f,
