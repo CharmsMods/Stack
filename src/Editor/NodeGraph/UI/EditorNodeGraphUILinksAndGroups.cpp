@@ -876,6 +876,11 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
 }
 
 void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph) {
+    // A hidden canvas can miss the rename input's deactivation while history
+    // removes its group. Release only our retained gate, not another input's ID.
+    if (m_EditingGroupId > 0 && !graph.FindGroup(m_EditingGroupId)) {
+        m_EditingGroupId = -1;
+    }
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);

@@ -8,9 +8,12 @@ retained state when an input edge is missed, not native event routing or pixels.
 
 Run with --output <file.cpp>, then compile that file with a C++17 compiler.
 No other source files, include directories, libraries, GPU or downloads are
-required. The source dependencies are EditorNodeGraphUIInteraction.cpp and
-EditorNodeGraphUIDragLayout.cpp in src/Editor/NodeGraph/UI/.
+required. The source dependencies are EditorNodeGraphUIInteraction.cpp,
+EditorNodeGraphUIDragLayout.cpp and EditorNodeGraphUILinksAndGroups.cpp in
+src/Editor/NodeGraph/UI/.
 The node update method is copied whole; layout application is a boundary double.
+Group rename checks copy the render prelude and interaction gate; missing-group
+lookup is a boundary double. Native text input is not covered by this target.
 """
 import argparse
 from pathlib import Path
@@ -279,7 +282,50 @@ int Run(){
 }
 
 } // namespace NodeDragCheck
-int main(){return RunPointerTests() | NodeDragCheck::Run();}
+
+'''
+
+
+RENAME_PREAMBLE = r'''
+namespace RenameGateCheck {
+struct Graph {
+    bool exists = true;
+    const Graph* FindGroup(int id) const { return exists && id == 7 ? this : nullptr; }
+};
+struct EditorNodeGraphUI {
+    enum class GraphMouseOwner { None, Popup };
+    int m_EditingGroupId = 7;
+    bool m_GraphInteractionBlocked = false, m_BoxSelecting = false;
+    GraphMouseOwner m_MouseOwner = GraphMouseOwner::None;
+    void StopMiddlePanCapture() {}
+    void RenderPrelude(const Graph& graph);
+    void Interaction();
+};
+constexpr int ImGuiKey_Escape = 1;
+'''
+
+RENAME_TESTS = r'''
+int Run() {
+    const int before = failures;
+    Graph graph; EditorNodeGraphUI ui;
+    ui.RenderPrelude(graph); ui.Interaction();
+    Check(ui.m_EditingGroupId == 7 && ui.m_GraphInteractionBlocked,
+        "A live group must retain its rename gate");
+    // Hidden canvas frames omit both drawing and deactivation. Undo removes
+    // the group before that same owner's canvas becomes visible again.
+    graph.exists = false;
+    ui.m_GraphInteractionBlocked = false;
+    ui.RenderPrelude(graph); ui.Interaction();
+    Check(ui.m_EditingGroupId < 0 && !ui.m_GraphInteractionBlocked,
+        "A removed group's rename must not block the returning canvas");
+    graph.exists = true;
+    ui.RenderPrelude(graph); ui.Interaction();
+    Check(ui.m_EditingGroupId < 0 && !ui.m_GraphInteractionBlocked,
+        "A later group must not revive a cancelled rename");
+    return failures != before;
+}
+} // namespace RenameGateCheck
+int main(){return RunPointerTests() | NodeDragCheck::Run() | RenameGateCheck::Run();}
 '''
 
 
@@ -311,6 +357,12 @@ def main():
     generated += prelude + STEP_SETUP + branches[0] + STEP_HITS + "\n".join(branches[1:]) + "\n}\n" + TESTS
     drag_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp").read_text(encoding="utf-8")
     generated += NODE_PREAMBLE + block(drag_source, "void EditorNodeGraphUI::UpdateActiveNodeDrag(") + NODE_TESTS
+    groups_source = (root / "src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp").read_text(encoding="utf-8")
+    render_groups = block(groups_source, "void EditorNodeGraphUI::RenderGroups(")
+    rename_prelude = render_groups[render_groups.index("{") + 1:render_groups.index("    ImDrawList* drawList")]
+    generated += RENAME_PREAMBLE
+    generated += "\nvoid EditorNodeGraphUI::RenderPrelude(const Graph& graph) {\n" + rename_prelude + "\n}\n"
+    generated += "void EditorNodeGraphUI::Interaction() {\n" + block(interaction, "    if (m_EditingGroupId > 0) {") + "\n}\n" + RENAME_TESTS
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(generated, encoding="utf-8")
 

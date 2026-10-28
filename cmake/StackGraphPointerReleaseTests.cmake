@@ -5,6 +5,7 @@ add_custom_command(OUTPUT "${graph_pointer_release_test}"
     DEPENDS tools/tests/graph_pointer_release_tests.py
         src/Editor/NodeGraph/UI/EditorNodeGraphUIInteraction.cpp
         src/Editor/NodeGraph/UI/EditorNodeGraphUIDragLayout.cpp
+        src/Editor/NodeGraph/UI/EditorNodeGraphUILinksAndGroups.cpp
     VERBATIM)
 add_executable(StackGraphPointerReleaseTests "${graph_pointer_release_test}")
 add_test(NAME StackGraph.PointerRelease COMMAND StackGraphPointerReleaseTests)
