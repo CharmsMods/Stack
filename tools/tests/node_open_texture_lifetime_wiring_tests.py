@@ -1,4 +1,4 @@
-"""Keep submitted node textures on the common owner pump and GL teardown path."""
+"""Keep submitted node/graph textures on the common owner pump and GL teardown path."""
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
@@ -13,6 +13,9 @@ pump = body('src/Editor/Internal/EditorModulePersistence.cpp',
 release = pump.index('m_NodeOpenTransition.ReleaseSubmittedDraw();')
 assert release < pump.index('return;'), 'Inactive/duplicate-frame pump must not skip texture retirement'
 assert release < pump.index('if (ImGui::GetCurrentContext())'), 'Common cleanup must not depend on foreground/context branch'
+graph_release = pump.index('m_Viewport.FrameTransition().ReleaseSubmittedDraw();')
+assert graph_release < pump.index('return;'), 'Hidden graph-frame submitted leases must retire before early return'
+assert graph_release < pump.index('if (ImGui::GetCurrentContext())'), 'Graph-frame retirement must not depend on foreground/context branch'
 shutdown = body('src/Editor/EditorModule.cpp', 'void EditorModule::Shutdown()')
 assert 'm_NodeOpenTransition.Shutdown();' in shutdown, 'GL teardown must explicitly release submitted textures'
 assert 'm_NodeOpenTransition.Reset();' not in shutdown, 'Reset alone retains same-frame submitted references'

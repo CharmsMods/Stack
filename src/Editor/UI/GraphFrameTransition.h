@@ -19,6 +19,9 @@ public:
     void Clear();
     void Reset() { Clear(); m_Last = {}; }
     void Shutdown() { Reset(); m_DrawnPrevious.Reset(); m_Renderer.Shutdown(); }
+    // Retire submitted-only references even when this editor is not drawn.
+    // The active fade's m_Previous lease remains owned until normal clearing.
+    void ReleaseSubmittedDraw();
     void Validate(const Stack::GraphRendering::RequestTag& identity, double now);
     bool DescribeBlend(double now, BlendDescription& description);
     bool Draw(ImDrawList* list, unsigned int current, ImVec2 minimum, ImVec2 maximum,
@@ -30,7 +33,6 @@ private:
     Raw::RawGpuImageLease m_Previous;
     Raw::RawGpuImageLease m_DrawnPrevious;
     int m_DrawnFrame = -1;
-    void ReleaseSubmittedDraw();
     Raw::ViewportFadeRenderer m_Renderer;
     double m_Duration = 0;
     double m_StartedAt = -1.0;

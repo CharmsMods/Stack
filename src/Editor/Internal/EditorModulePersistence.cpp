@@ -1255,6 +1255,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
 
 void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foreground) {
     m_NodeOpenTransition.ReleaseSubmittedDraw();
+    m_Viewport.FrameTransition().ReleaseSubmittedDraw();
     if (ImGui::GetCurrentContext()) {
         const int frame = ImGui::GetFrameCount();
         if (m_LastNonRenderingPumpFrame == frame) {
