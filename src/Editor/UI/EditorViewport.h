@@ -1,5 +1,6 @@
 #pragma once
 #include "Editor/UI/GraphFrameTransition.h"
+#include "Editor/UI/ViewComparisonPreview.h"
 
 #include <imgui.h>
 #include <cstdint>
@@ -23,10 +24,17 @@ public:
     const GraphFrameTransition& FrameTransition() const { return m_FrameTransition; }
     void Render(EditorModule* editor, float revealAlpha = 1.0f, HostMode hostMode = HostMode::DockedPane);
     void ResetSinglePreviewState();
+    void SuspendComparison() { m_Comparison.Suspend(); }
+    bool PrepareRawSplitComparison(EditorModule* editor, const ImVec2& available);
+    void DrawRawComparisonBefore(ImDrawList* list, ImVec2 minimum, ImVec2 maximum) const;
+    void DrawRawComparisonControls(ImVec2 origin);
+    bool ComparisonControlsOwnPointer(ImVec2 origin) const;
     bool IsPanning() const { return m_Panning; }
 
 private:
     GraphFrameTransition m_FrameTransition;
+    Stack::Editor::ViewComparisonPreview m_Comparison;
+    bool m_ShowSplitCompare = false;
     enum class ExportHandleType {
         None,
         Move,

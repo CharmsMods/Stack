@@ -3,6 +3,7 @@
 #include "Editor/NodeEditors/NodeEditorPanelState.h"
 #include "Utils/GlassControls.h"
 #include "App/ControlMotionAdapter.h"
+#include "App/AppHeaderStyle.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -130,6 +131,56 @@ int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width) {
         if (start<group.instances.size()) ImGui::SetCursorScreenPos({rowStart.x,ImGui::GetCursorScreenPos().y});
     }
     return activated;
+}
+
+bool BeginControlsPanelBody() {
+    auto* host=ImGui::GetCurrentWindow();
+    const auto windowId=host->GetID("ControlsScrollWindow");
+    auto* body=ImGui::FindWindowByID(static_cast<ImGuiID>(host->StateStorage.GetInt(windowId)));
+    const auto targetId=ImHashStr("ControlsScrollTarget");
+    const auto currentId=ImHashStr("ControlsScrollCurrent");
+    const auto appliedId=ImHashStr("ControlsScrollApplied");
+    const auto frameId=ImHashStr("ControlsScrollFrame");
+    auto& gui=*ImGui::GetCurrentContext();
+    bool direct=true;
+    if(body) {
+        auto& state=body->StateStorage;
+        // NewFrame routes wheel input through native item/window ownership.
+        // Filter only that accepted request, before BeginChild lays out controls.
+        const bool wheel=gui.WheelingWindow==body && gui.WheelingWindowScrolledFrame==gui.FrameCount &&
+            body->ScrollTarget.y<FLT_MAX && body->ScrollTargetCenterRatio.y==0.f;
+        direct=state.GetInt(frameId,-2)!=gui.FrameCount-1 ||
+            body->Scroll.y!=state.GetFloat(appliedId,body->Scroll.y) ||
+            (body->ScrollTarget.y<FLT_MAX && !wheel) ||
+            gui.ActiveId==host->GetID("ControlsOverlayScroll");
+        if(!direct) {
+            float target=state.GetFloat(targetId,body->Scroll.y);
+            float current=state.GetFloat(currentId,body->Scroll.y);
+            if(wheel) {
+                const float delta=body->ScrollTarget.y-body->Scroll.y;
+                if(delta*(target-current)<0.f)target=current;
+                target+=delta;
+            }
+            target=std::clamp(target,0.f,body->ScrollMax.y);
+            current=std::clamp(current,0.f,body->ScrollMax.y);
+            if(current!=target) {
+                Stack::Header::Approach(current,target,22.f,.05f);
+                ImGui::SetScrollY(body,current);
+            }
+            state.SetFloat(targetId,target);state.SetFloat(currentId,current);
+        }
+    }
+    const bool visible=ImGui::BeginChild("PanelBody",ImVec2(0,0),ImGuiChildFlags_None,
+        ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoScrollbar);
+    body=ImGui::GetCurrentWindow();
+    host->StateStorage.SetInt(windowId,static_cast<int>(body->ID));
+    auto& state=body->StateStorage;
+    // Scrollbar/key navigation and reopening take effect immediately, ending
+    // any old wheel tail. Fractional wheel motion stays separate from ImGui's
+    // pixel-rounded scroll so a small remaining distance cannot stall.
+    if(direct || !visible) {state.SetFloat(targetId,body->Scroll.y);state.SetFloat(currentId,body->Scroll.y);}
+    state.SetFloat(appliedId,body->Scroll.y);state.SetInt(frameId,gui.FrameCount);
+    return visible;
 }
 
 void DrawControlsPanelScrollbar(ImGuiWindow* body,float seamX) {

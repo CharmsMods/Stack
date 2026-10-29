@@ -71,7 +71,10 @@ graph controls draw a private node draft and report changes to that draft rather
 than marking the live graph edited from the drawing callback.
 
 Controls uses a thin native scrollbar over the panel seam while scrolling; it
-fades out when idle and never reserves a layout gutter. Its primary surfaces retain
+fades out when idle and never reserves a layout gutter. Wheel requests use the
+shared finite easing before child layout, preserving native wheel ownership and
+matching control hit geometry. Scrollbar dragging and keyboard navigation remain
+direct; hiding the body ends its wheel tail. Its primary surfaces retain
 their designs at the available width; only the outer body scrolls. Hidden measured
 sections reserve their cached height without submitting controls or analysis.
 The panel header exposes Reset through its three-dot menu. The definition groups

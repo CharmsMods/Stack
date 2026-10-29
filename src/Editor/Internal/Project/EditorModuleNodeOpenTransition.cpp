@@ -78,7 +78,7 @@ void EditorModule::FinishNodeOpenPhoto(ImDrawList* drawList, int firstVertex) {
 
 void EditorModule::PublishNodeOpenBackdrop(ImVec2 minimum, ImVec2 maximum,
     ImVec2 viewMinimum, ImVec2 viewMaximum, ImDrawList* drawList, int firstCommand) {
-    if (!IsViewMode() || !m_NodeOpenTransition.SurroundRequested() ||
+    if (!IsViewMode() || !HasViewImageSurround() ||
         IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive()) return;
     PublishRawImageBackdrop(minimum, maximum, viewMinimum, viewMaximum, false);
     if (m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.patches.empty()) {

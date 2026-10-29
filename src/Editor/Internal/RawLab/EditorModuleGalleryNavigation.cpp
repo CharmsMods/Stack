@@ -15,13 +15,16 @@ Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionO
             const auto& projects=GetRawWorkspaceGalleryPresentation().projects;
             const auto project=std::find_if(projects.begin(),projects.end(),
                 [&](const auto& item){return item.projectPath==subject;});
-            if(project!=projects.end())key=project->referenceSourceKey;
+            if(project!=projects.end()) {
+                key="project-overlay:"+(!project->projectId.empty()?project->projectId:
+                    project->projectPath.lexically_normal().generic_string());
+            }
         }
         if(key.empty() && ImGui::GetCurrentContext())key=m_RawWorkspaceGalleryLayoutAnimation.ImageAt(ImGui::GetIO().MousePos);
     }
     origin.thumbnailKey=key;
     ImRect bounds=explicitBounds;
-    if(bounds.GetArea()<=0 && !m_RawWorkspaceGalleryLayoutAnimation.PresentedBounds(key,bounds))return origin;
+    if(bounds.GetArea()<=0)m_RawWorkspaceGalleryLayoutAnimation.PresentedBounds(key,bounds);
     origin.minimum=bounds.Min;origin.maximum=bounds.Max;
     const auto found=m_RawWorkspaceThumbnailTextures.find(key);
     if(found==m_RawWorkspaceThumbnailTextures.end())return origin;
@@ -38,4 +41,11 @@ Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionO
     }
     origin.thumbnail=std::move(lease);
     return origin;
+}
+
+bool EditorModule::GalleryLoadFailed() const {
+    return m_Project->files->load.state==Async::TaskState::Failed ||
+        m_RawWorkspaceProjectLoadTaskState==Async::TaskState::Failed ||
+        m_SourceLoadTaskState==Async::TaskState::Failed ||
+        m_DeferredLoadedProjectApply.failed;
 }

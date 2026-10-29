@@ -349,6 +349,7 @@ public:
     bool FinishWorkspaceInteraction();
     Stack::Project::WorkspaceMode GetWorkspaceMode() const;
     bool IsViewMode() const;
+    void UpdateViewComparisonPreview(Stack::Editor::ViewComparisonPreview& preview, int edge);
     bool SetWorkspaceMode(Stack::Project::WorkspaceMode mode);
     void WorkspaceLoaded(Stack::Project::WorkspaceMode mode = Stack::Project::WorkspaceMode::View);
     bool WorkspacePanelOpen() const;
@@ -452,7 +453,9 @@ public:
     bool IsReturningToGraph() const { return m_NodeOpenTransition.Closing(); }
     void SetGraphReturnBounds(ImVec2 minimum, ImVec2 maximum);
     bool IsNodeOpenTransitionActive() const { return m_NodeOpenTransition.Active(); }
-    bool HasNodeOpenSurround() const { return m_NodeOpenTransition.SurroundRequested(); }
+    bool HasViewImageSurround() const {
+        return m_RawWorkspaceLabUi.previewSurroundEnabled || m_RawWorkspaceLabUi.previewSurroundOpacity > 0.f;
+    }
     void PresentNodeOpenImage(ImVec2& minimum, ImVec2& maximum);
     void FinishNodeOpenPhoto(ImDrawList* drawList, int firstVertex);
     void PublishNodeOpenBackdrop(ImVec2 minimum, ImVec2 maximum, ImVec2 viewMinimum,
@@ -1282,6 +1285,7 @@ public:
     Stack::Renderer::GalleryTransitionOrigin CaptureGalleryTransitionOrigin(
         const std::filesystem::path& subject,const std::string& key={},const ImRect& bounds={});
     void EnsureGraphWorkers();
+    bool GalleryLoadFailed() const;
     struct RawGalleryOpenItem {
         std::filesystem::path path;
         bool project = false;
@@ -3216,8 +3220,9 @@ private:
     int m_NodeOpenTransitionFrame = -1;
     ImVec2 m_GraphReturnMinimum{}, m_GraphReturnMaximum{}, m_GraphReturnCapturedOrigin{};
     ImGuiExtras::FloatingSurfaceInput m_RawImageInput;
+    void UpdateViewImageSurround();
     void PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
-        ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview, bool forceSurround = false);
+        ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview);
     ImVec2 m_RawActiveControlMinimum{}, m_RawActiveControlMaximum{};
     bool m_RawToolPickerRequested = false;
     std::optional<std::string> m_RawGalleryFolderFilter;

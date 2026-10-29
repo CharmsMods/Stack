@@ -2,6 +2,7 @@
 #include "Animation/ScalarChannel.h"
 #include "Renderer/GalleryTransitionOrigin.h"
 #include <imgui_internal.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <unordered_map>
@@ -21,7 +22,7 @@ public:
     bool FoldersMoving() const {return folderAmount.IsActive();}
     bool FoldersRequested() const {return foldersRequested;}
     bool ChosenFolder(const std::string& key) const {return !foldersRequested && key==chosenFolder;}
-    ImRect Departure() const {return departure;}
+    ImRect Departure() const {return imageOrigin.thumbnail ? departure : ImRect{};}
     float FolderAmount() const {return std::clamp(folderAmount.Value(),0.f,1.f);}
     ImRect FolderPose(const std::string& key,const ImRect& target,std::size_t ordinal);
     void FolderPages(std::vector<Origin> pages) {pagesFromFolder=std::move(pages);}

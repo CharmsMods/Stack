@@ -1254,6 +1254,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
 }
 
 void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foreground) {
+    if (!foreground || !IsViewMode()) m_Viewport.SuspendComparison();
     m_NodeOpenTransition.ReleaseSubmittedDraw();
     m_Viewport.FrameTransition().ReleaseSubmittedDraw();
     if (ImGui::GetCurrentContext()) {

@@ -12,6 +12,8 @@ Use the active tab to route a new foreground action or decide which view to draw
 
 Selecting another project should not implicitly replace the outgoing document, clear its history or cancel its work. Explicit close, replacement and user-requested cancellation are different operations. If a feature needs a new cross-project restriction, understand and explain the product consequence.
 
+Gallery navigation intent has a separate generation from document loading. Returning to Gallery reverses presentation immediately while the receiving tab continues its legitimate load. Late completion updates that tab and may activate it only while its opening still owns foreground intent. Presentation coordinators retain identities, geometry and resource leases rather than editor pointers or document jobs; retirement and shutdown release those leases.
+
 ## Check the whole asynchronous lifetime
 
 For an affected job or callback, trace these points:

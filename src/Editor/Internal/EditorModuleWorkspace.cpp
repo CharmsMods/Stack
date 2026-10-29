@@ -63,6 +63,7 @@ void EditorModule::RenderViewWorkspace() {
         Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Project,
             Stack::UiPerformance::Probe::Key(GetProjectDocumentId()) ^ reinterpret_cast<std::uintptr_t>(this));
     const auto& io = ImGui::GetIO();
+    UpdateViewImageSurround();
     const bool escapeOwned = ImGui::IsAnyItemActive() || ImGui::IsAnyMouseDown() ||
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) ||
         m_Project->rawLayers.GestureActive() || ImGui::GetIO().KeyAlt;

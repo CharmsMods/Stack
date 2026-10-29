@@ -643,6 +643,14 @@ void EditorModule::QueueRawWorkspaceThumbnailTextureDelete(unsigned int texture)
 }
 
 void EditorModule::PumpRawWorkspaceThumbnailTextureDeletes(bool drainAll) {
+    // Only the small set of navigation leases is inspected here. Expiration
+    // retries budget trimming without a full-cache scan on every motion frame.
+    for(auto it=m_GalleryThumbnailLeases.begin();it!=m_GalleryThumbnailLeases.end();) {
+        if(it->second.expired()) {
+            it=m_GalleryThumbnailLeases.erase(it);
+            m_RawWorkspaceThumbnailTextureTrimNeeded=true;
+        } else ++it;
+    }
     const int currentFrame=ImGui::GetCurrentContext()?ImGui::GetFrameCount():-1;
     for(auto it=m_RetiredGalleryThumbnails.begin();it!=m_RetiredGalleryThumbnails.end();) {
         if(it->lease.use_count()==1 && (drainAll || it->submittedFrame<currentFrame)) {
@@ -761,7 +769,9 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
             : 0;
         --residentCount;
     }
-    m_RawWorkspaceThumbnailTextureTrimNeeded = residentCount > maxCount || residentBytes > maxBytes;
+    // Protected visible/leased entries cannot be reclaimed now. Retry on the
+    // next upload or lease retirement, instead of sorting the map every frame.
+    m_RawWorkspaceThumbnailTextureTrimNeeded = false;
 }
 
 void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {

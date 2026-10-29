@@ -1048,6 +1048,8 @@ EditorViewport::~EditorViewport() {
 }
 
 void EditorViewport::ResetSinglePreviewState() {
+    m_ShowSplitCompare = false;
+    m_Comparison.Reset();
     m_FrameTransition.Reset();
     m_ZoomLevel = m_ZoomTarget = 1.0f;
     m_ZoomAnimating = m_Panning = false;
@@ -1134,6 +1136,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     if (compositeMode) {
+        m_Comparison.Suspend();
         m_FrameTransition.Reset();
         RenderCompositeMode(editor, viewportRevealAlpha, deltaTime, wallpaperSurfaces, hostAvail, hostScreen, hostDrawList, inputBlocked);
         return;
@@ -1178,7 +1181,7 @@ void EditorViewport::RenderCompositeMode(
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
         const bool hovered = !inputBlocked && ImGui::IsItemHovered();
         const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
-        if (hovered && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        if (!editor->IsViewMode() && hovered && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             editor->ToggleCompositeExportBoundsEditMode();
         }
         if ((hovered || canvasFocused) && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_T, false)) {
@@ -2173,6 +2176,7 @@ void EditorViewport::RenderSingleImageMode(
         hasRawPresentationTexture ||
         hasViewportTiles;
     if (!outputConnected || !hasOutputTexture) {
+        m_Comparison.Suspend();
         editor->ClearToneCurveViewportProbe();
         const char* emptyMessage = nullptr;
         if (editor->IsEditorRenderBusy()) {
@@ -2252,12 +2256,36 @@ void EditorViewport::RenderSingleImageMode(
                 minimum.y + size.y * (outputRegion.y + outputRegion.height) / outputRegion.fullHeight)};
     };
     const bool singleOutputMode = editor->GetViewportMode() == EditorModule::ViewportMode::SingleOutputPreview;
+    const auto& compareIo = ImGui::GetIO();
+    const bool compareKeys = !inputBlocked && editor->CanConsumeEditorCommandKeys() &&
+        !compareIo.KeyCtrl && !compareIo.KeyShift && !compareIo.KeyAlt && !compareIo.KeySuper &&
+        !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        (isHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows));
+    if (editor->IsViewMode() && singleOutputMode && compareKeys && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+        m_ShowSplitCompare = !m_ShowSplitCompare;
+        m_ShowStaticSingleCompare = false;
+        m_StaticSingleCompareBlend = 0.f;
+        m_StaticCompareRectsInitialized = false;
+        editor->SetHoverFade(0.f);
+    }
+    const bool splitRequested = m_ShowSplitCompare && editor->IsViewMode() && singleOutputMode;
+    if (!splitRequested) m_Comparison.Suspend();
+    // Quantized screen demand avoids recreating the baseline during every
+    // resize/zoom frame. Baselines are bounded whole-image previews.
+    if (splitRequested && (hasRawPresentationTexture || editor->IsRawWorkspaceProjectActive())) {
+        const int edge = std::clamp(int(std::ceil(std::max(avail.x, avail.y) / 512.f)) * 512, 512, 4096);
+        editor->UpdateViewComparisonPreview(m_Comparison, edge);
+    }
+    const bool separateBaseline = hasRawPresentationTexture || editor->IsRawWorkspaceProjectActive();
+    const unsigned beforeTexture = separateBaseline ? m_Comparison.Texture() : sourceTex;
+    const bool splitActive = splitRequested && beforeTexture != 0 && beforeTexture != outputTex;
+    if (splitRequested && ComparisonControlsOwnPointer(contentScreen)) isHovered = false;
     EditorModule::DevelopSubjectViewportState developSubjectState;
     const bool hasDevelopSubjectOverlay =
         singleOutputMode && editor->GetDevelopSubjectImportanceViewportState(developSubjectState);
     bool canStaticCompare =
         singleOutputMode && sourceTex != 0 && sourceTex != outputTex;
-    if (!inputBlocked &&
+    if (compareKeys &&
         !rawWorkspaceContext &&
         singleOutputMode &&
         canStaticCompare &&
@@ -2267,6 +2295,8 @@ void EditorViewport::RenderSingleImageMode(
         !ImGui::GetIO().KeySuper &&
         ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
         m_ShowStaticSingleCompare = !m_ShowStaticSingleCompare;
+        m_ShowSplitCompare = false;
+        m_Comparison.Suspend();
         editor->SetHoverFade(0.0f);
     }
     if (!canStaticCompare || rawWorkspaceContext || !singleOutputMode) {
@@ -2661,7 +2691,7 @@ void EditorViewport::RenderSingleImageMode(
     // into the workspace instead of drawing a separate checkerboard plate.
     constexpr float kImageRounding = 18.0f;
     ImGui::Dummy(ImVec2(dispW, dispH));
-    const bool imageHovered = ImGui::IsItemHovered();
+    const bool imageHovered = ImGui::IsItemHovered() && !ComparisonControlsOwnPointer(contentScreen);
     ImVec2 imageMin = ImGui::GetItemRectMin();
     ImVec2 imageMax = ImGui::GetItemRectMax();
     editor->UpdateGraphViewportCoverage(imageMin, imageMax, contentScreen,
@@ -2671,8 +2701,8 @@ void EditorViewport::RenderSingleImageMode(
     const bool labelsFit = finalScale >= 42.0f;
     const EditorViewportPreview::StateInput previewInput {
         hasOutputTexture,
-        sourceAvailable,
-        imageHovered,
+        sourceAvailable && !splitRequested,
+        imageHovered && (!splitActive || mousePos.x >= (imageMin.x + imageMax.x) * .5f),
         canStaticCompare && (m_ShowStaticSingleCompare || m_StaticSingleCompareBlend > 0.001f),
         !inputBlocked && editor->CanConsumeEditorCommandKeys(),
         ImGui::GetIO().WantTextInput,
@@ -2703,7 +2733,7 @@ void EditorViewport::RenderSingleImageMode(
     const ImVec2 viewportMin = contentScreen;
     const ImVec2 viewportMax(contentScreen.x + avail.x, contentScreen.y + avail.y);
     const ImVec2 pixelInspectionClipMin(
-        std::max(imageMin.x, viewportMin.x),
+        std::max(splitActive ? (imageMin.x + imageMax.x) * .5f : imageMin.x, viewportMin.x),
         std::max(imageMin.y, viewportMin.y));
     const ImVec2 pixelInspectionClipMax(
         std::min(imageMax.x, viewportMax.x),
@@ -2993,7 +3023,7 @@ void EditorViewport::RenderSingleImageMode(
 
     // Handle Fade Factor (hover to compare with original)
     float currentFactor = editor->GetHoverFade();
-    if (pixelCleanModeRequested) {
+    if (pixelCleanModeRequested || splitRequested) {
         currentFactor = 0.0f;
     } else {
         const float hoverTarget =
@@ -3121,11 +3151,13 @@ void EditorViewport::RenderSingleImageMode(
             ImVec2(openingViewport->WorkPos.x+openingViewport->WorkSize.x,
                 openingViewport->WorkPos.y+openingViewport->WorkSize.y),false);
     }
-    const bool openingSurround = editor->IsViewMode() && editor->HasNodeOpenSurround();
+    const bool openingSurround = editor->IsViewMode() && editor->HasViewImageSurround();
     if (openingSurround) drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     const int firstOpeningPhotoCommand = drawList->CmdBuffer.Size - 1;
     const auto outputPatch = patchBounds(imageMin, imageMax);
     const ImU32 outputTint = IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha));
+    const float compareMidX = (imageMin.x + imageMax.x) * .5f;
+    if (splitActive) drawList->PushClipRect(ImVec2(compareMidX, imageMin.y), imageMax, true);
     drawOverviewGaps(imageMin, imageMax, outputTint);
     bool drewPixelInspectionColors = false;
     if (pixelCleanModeRequested) {
@@ -3169,6 +3201,14 @@ void EditorViewport::RenderSingleImageMode(
                                   regionalOutput ? 0.f : kImageRounding);
     }
 
+    if (splitActive) {
+        drawList->PopClipRect();
+        drawList->PushClipRect(imageMin, ImVec2(compareMidX, imageMax.y), true);
+        drawList->AddImageRounded((ImTextureID)(intptr_t)beforeTexture, imageMin, imageMax,
+            separateBaseline ? ImVec2(0, 0) : ImVec2(0, 1),
+            separateBaseline ? ImVec2(1, 1) : ImVec2(1, 0), outputTint, kImageRounding);
+        drawList->PopClipRect();
+    }
     if (openingSurround) {
         editor->PublishNodeOpenBackdrop(imageMin, imageMax, contentScreen,
             ImVec2(contentScreen.x+avail.x,contentScreen.y+avail.y),drawList,firstOpeningPhotoCommand);
@@ -3247,7 +3287,7 @@ void EditorViewport::RenderSingleImageMode(
                 pixelInspectionClipMin,
                 pixelInspectionClipMax,
                 true);
-        } else if (!inlinePixelValuesRequested && imageHovered) {
+        } else if (!inlinePixelValuesRequested && imageHovered && (!splitActive || mousePos.x >= compareMidX)) {
             DrawPixelInspectionCursorReadout(
                 mousePos,
                 m_PixelInspectionPixels,
@@ -3255,5 +3295,17 @@ void EditorViewport::RenderSingleImageMode(
                 m_PixelInspectionHeight,
                 viewportRevealAlpha);
         }
+    }
+    if (splitRequested) {
+        const ImVec2 savedCursor = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(ImVec2(contentScreen.x + 12.f, contentScreen.y + 12.f));
+        ImGui::PushID("ViewSplitComparison");
+        if (separateBaseline) {
+            m_Comparison.DrawControls();
+            if (!m_Comparison.Status().empty() && !m_Comparison.Texture())
+                ImGui::TextDisabled("%s", m_Comparison.Status().c_str());
+        } else if (!splitActive) ImGui::TextDisabled("The original source is unavailable.");
+        ImGui::PopID();
+        ImGui::SetCursorScreenPos(savedCursor);
     }
 }

@@ -106,7 +106,6 @@ public:
     }
     void SetReturnOffset(ImVec2 offset) { returnOffset = offset; }
     bool SurroundRequested() const { return surround; }
-    void ClearSurround() { surround=false; }
     float Progress(double now, double begin, double duration) const {
         if (!active) return closed ? 0.f : 1.f;
         if (started < 0) return 0.f;

@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "App/AppHeaderStyle.h"
 #include <algorithm>
 #include <utility>
 
@@ -91,8 +92,21 @@ const Stack::Renderer::RawImageBackdropFrame* EditorModule::GetRawImageBackdrop(
         ? &m_RawImageBackdrop : nullptr;
 }
 
+void EditorModule::UpdateViewImageSurround() {
+    auto& ui=m_RawWorkspaceLabUi;
+    const int frame=ImGui::GetFrameCount();
+    if(m_PermanentGalleryWorkspace || !IsViewMode() || ui.previewSurroundShortcutFrame==frame)return;
+    ui.previewSurroundShortcutFrame=frame;
+    const auto& io=ImGui::GetIO();
+    if(CanConsumeEditorCommandKeys() && !io.KeyCtrl && !io.KeyShift && !io.KeySuper &&
+        !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::IsKeyPressed(ImGuiKey_F,false))
+        ui.previewSurroundEnabled=!ui.previewSurroundEnabled;
+    Stack::Header::Approach(ui.previewSurroundOpacity,ui.previewSurroundEnabled ? 1.f : 0.f,22.f,.001f);
+}
+
 void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
-    ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview, bool forceSurround) {
+    ImVec2 viewMin, ImVec2 viewMax, bool rawStagePreview) {
     if (m_PermanentGalleryWorkspace ||
         ImGui::GetWindowViewport() != ImGui::GetMainViewport() ||
         m_RawImageBackdrop.frame == ImGui::GetFrameCount()) return;
@@ -106,43 +120,22 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     frame.completePhotoCoverage = false;
     frame.sharpDrawList = nullptr;
     frame.imageMinimum = imageMin; frame.imageMaximum = imageMax;
-    const bool hasControls = m_RawActiveControlFrame == ImGui::GetFrameCount() &&
-        GetRawActiveControlBounds(frame.controlsMinimum, frame.controlsMaximum);
-    // Floating tools have no panel-sized blur. Their geometry still determines
-    // first image contact and the separate Alt selector's temporary blur.
+    // Floating tools and their contact with the photo never enable the surround.
+    // The Alt selector owns its separate temporary control blur in the shell.
+    frame.controlsMinimum=frame.controlsMaximum=ImVec2{};
     frame.controlsAmount = 0.f;
     const ImVec2 size(imageMax.x - imageMin.x, imageMax.y - imageMin.y);
-    // Contact latches the target on. Fit changes the target to off without
-    // discarding the current opacity, so both directions can finish their fade.
     auto& ui = m_RawWorkspaceLabUi;
-    const bool atFit = ui.previewLayout.fitting && !ui.previewZoomAnimating;
-    const bool contact = hasControls && m_RawWorkspaceLabEditingSurfaceReveal > .001f &&
-        imageMin.x <= frame.controlsMaximum.x && imageMax.x >= frame.controlsMinimum.x &&
-        imageMin.y <= frame.controlsMaximum.y && imageMax.y >= frame.controlsMinimum.y;
     const double now = ImGui::GetTime();
-    const float t = ui.previewSurroundStarted >= 0.0 ? float(std::clamp(
-        (now-ui.previewSurroundStarted-.150)/.900, 0.0, 1.0)) : 1.f;
-    const float eased = t*t*t*(t*(6.f*t-15.f)+10.f);
-    frame.extensionOpacity = std::clamp(ui.previewSurroundFrom +
-        ((ui.previewSurroundTarget ? 1.f : 0.f)-ui.previewSurroundFrom)*eased, 0.f, 1.f);
-    const bool target = !atFit && (contact || ui.previewSurroundTarget);
-    if (!forceSurround && target != ui.previewSurroundTarget) {
-        ui.previewSurroundFrom = frame.extensionOpacity;
-        ui.previewSurroundStarted = now;
-        ui.previewSurroundTarget = target;
-    }
-    frame.extendImage = ui.previewSurroundTarget || frame.extensionOpacity > 0.f;
-    if(forceSurround) {frame.extendImage=true;frame.extensionOpacity=1.f;}
+    frame.extensionOpacity = ui.previewSurroundOpacity;
     if (m_NodeOpenTransition.SurroundRequested()) {
-        // Opening a node reveals the surround after the photo settles. Keep
-        // its final opacity after the transition; an explicit Fit releases it.
-        frame.extensionOpacity = m_NodeOpenTransition.BlurOpacity(now);
-        frame.extendImage = frame.extensionOpacity > 0.f;
-        if (!frame.extendImage) return;
+        // Navigation controls only the reveal envelope, never the user's choice.
+        frame.extensionOpacity *= m_NodeOpenTransition.BlurOpacity(now);
     }
+    frame.extendImage = frame.extensionOpacity > 0.f;
     frame.edgeOverlap = std::min(12.f, std::min(size.x, size.y)*.25f);
-    // At fit there are no pixels beyond the ordinary image draw to compose.
-    // Avoid the full-window copy and blur work until the photo leaves it.
+    // A disabled surround needs no compositor while the sharp image stays
+    // inside the ordinary viewport; panned photo coverage remains independent.
     if (!frame.extendImage && imageMin.x >= viewMin.x && imageMin.y >= viewMin.y &&
         imageMax.x <= viewMax.x && imageMax.y <= viewMax.y) return;
     // The overview only fills gaps while a newly exposed area is rendering.

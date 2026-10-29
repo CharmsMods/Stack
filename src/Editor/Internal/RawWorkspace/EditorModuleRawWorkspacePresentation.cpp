@@ -2109,7 +2109,7 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
         "");
     ImGui::TextDisabled("Compare");
     TooltipIfHovered(
-        "Compare needs a stable before/after RAW preview state; it is deferred until that state can be isolated safely.");
+        "Press S over the View image to toggle original-left / current-right comparison. Bracket originals can be selected in the Before menu.");
     ImGui::SameLine(0.0f, 5.0f);
     renderViewModeButton(
         "Affected",

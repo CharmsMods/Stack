@@ -53,7 +53,7 @@ void GalleryNavigationTransition::Folders(bool open,ImRect anchor,ImRect destina
     if(returning)imageGeometryActive=false;
     folderAmount.SpringTo(open?1.f:0.f,folderAmount.Velocity(),Animation::MotionSpec::Spring(5.f,1.f));
     folderDeadline=time+.42;
-    if(reduced)folderAmount.Finish();
+    if(reduced) {folderAmount.Finish();pagesFromFolder.clear();}
     Scene(.42f);
 }
 ImRect GalleryNavigationTransition::FolderPose(const std::string& key,const ImRect& target,std::size_t ordinal) {
@@ -105,7 +105,10 @@ void GalleryNavigationTransition::ReturnImage(Origin destination) {
     liveReady=false;readyAt=-1;returning=true;
     imageCrop.SpringTo(0,imageCrop.Velocity(),Animation::MotionSpec::Spring(6.f,1.f));
     if(reduced)imageCrop.Finish();
-    if(destination.Valid() && destination.subject==imageOrigin.subject)TargetImage({destination.minimum,destination.maximum});
+    if(destination.Valid() && destination.subject==imageOrigin.subject) {
+        imageOrigin.uvMinimum=destination.uvMinimum;imageOrigin.uvMaximum=destination.uvMaximum;
+        TargetImage({destination.minimum,destination.maximum});
+    }
     else {imageGeometryActive=false;readyAt=time;}
     Scene(.18f);
 }
@@ -116,6 +119,7 @@ void GalleryNavigationTransition::Retire(std::uint64_t workspace) {if(Owns(works
 ImRect GalleryNavigationTransition::PresentImage(std::uint64_t workspace,ImRect target) {
     if(!Owns(workspace) || returning)return target;
     if(liveReady && !imageGeometryActive) {
+        if(Equal(target,imageTarget))return target;
         const float values[]={target.Min.x,target.Min.y,target.Max.x,target.Max.y};
         for(std::size_t i=0;i<4;++i)imageBounds[i].Reset(values[i]);
         imageTarget=target;
@@ -147,6 +151,6 @@ void GalleryNavigationTransition::DrawOverlay(ImDrawList& draw) {
         const ImVec2 uvLow(imageOrigin.uvMinimum.x*(1-crop),imageOrigin.uvMinimum.y+(1-imageOrigin.uvMinimum.y)*crop);
         const ImVec2 uvHigh(imageOrigin.uvMaximum.x+(1-imageOrigin.uvMaximum.x)*crop,imageOrigin.uvMaximum.y*(1-crop));
         draw.AddImage(static_cast<ImTextureID>(imageOrigin.thumbnail->texture),low,high,uvLow,uvHigh,ink);
-    } else if(!liveReady)draw.AddRectFilled(low,high,ImGui::GetColorU32(ImVec4(.12f,.12f,.12f,opacity)),3);
+    } else if(!liveReady && !returning)draw.AddRectFilled(low,high,ImGui::GetColorU32(ImVec4(.12f,.12f,.12f,opacity)),3);
 }
 }

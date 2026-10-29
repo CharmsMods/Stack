@@ -126,6 +126,7 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
                 if (selection.bracketSources.size() < 2u) return;
                 GalleryTabOpen target;
                 target.kind = GalleryTabOpen::Kind::Bracket;
+                target.navigationGeneration=intent;
                 // Brackets spanning folders use the first selected input's owner.
                 // Resolve now: Gallery may navigate while this open is queued.
                 target.sourceWorkspaceRoot = owner->ResolveRawWorkspaceSourceFolder(selection.bracketSources.front());
@@ -226,8 +227,16 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
         auto* gallery=FindProjectWorkspace(m_GalleryWorkspaceId);
         Stack::Renderer::GalleryTransitionOrigin destination;
         if(const auto* outgoing=FindProjectWorkspace(m_ActiveProjectWorkspace);gallery && outgoing)
-            destination=gallery->editor->CaptureGalleryTransitionOrigin(outgoing->galleryOrigin.subject);
+            destination=gallery->editor->CaptureGalleryTransitionOrigin(std::filesystem::u8path(outgoing->galleryOrigin.subject));
         m_GalleryNavigationMotion->ReturnImage(std::move(destination));
+    } else if(m_ActiveProjectWorkspace==m_GalleryWorkspaceId && id!=m_GalleryWorkspaceId &&
+        !(*next)->galleryOrigin.subject.empty()) {
+        auto origin=m_Editor->CaptureGalleryTransitionOrigin(std::filesystem::u8path((*next)->galleryOrigin.subject));
+        if(origin.Valid()) {
+            const auto& rail=m_NavigationRail;
+            m_GalleryNavigationMotion->BeginImage(std::move(origin),id,
+                {rail.bodyPosition,{rail.bodyPosition.x+rail.bodySize.x,rail.bodyPosition.y+rail.bodySize.y}});
+        } else m_GalleryNavigationMotion->CancelImage();
     } else if(id!=m_GalleryWorkspaceId && !m_GalleryNavigationMotion->Owns(id) &&
         m_GalleryNavigationMotion->HasImage())m_GalleryNavigationMotion->CancelImage();
     m_NavigationRail.requestedDestination = -1;

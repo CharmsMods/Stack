@@ -727,6 +727,8 @@ bool EditorModule::IsWorkerShutdownReadyForAppClose() const {
 }
 
 void EditorModule::Shutdown() {
+    // Release optional before-image resources while the UI GL context exists.
+    m_Viewport.ResetSinglePreviewState();
     ShutdownAutoBracketing();
     if (m_ShutdownComplete) {
         return;

@@ -346,6 +346,10 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                 if (HitButton("Add source folder", tile)) action.addFolder = true;
                 const bool hovered = ImGui::IsItemHovered() || ImGui::IsItemFocused();
                 auto* draw=ImGui::GetWindowDrawList();
+                const bool travelling=navigation && navigation->FoldersMoving();
+                if(travelling)draw->PushClipRect(ImGui::GetMainViewport()->Pos,
+                    ImVec2(ImGui::GetMainViewport()->Pos.x+ImGui::GetMainViewport()->Size.x,
+                        ImGui::GetMainViewport()->Pos.y+ImGui::GetMainViewport()->Size.y),false);
                 const int first=draw->VtxBuffer.Size;
                 DrawAdd(draw, tile, surface, hovered, width / 220.f);
                 if(navigation && navigation->FoldersMoving()) {
@@ -356,6 +360,7 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                             pose.Min.y+(point.y-tile.Min.y)*pose.GetHeight()/tile.GetHeight()};
                     }
                 }
+                if(travelling)draw->PopClipRect();
                 if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 continue;
             }
@@ -451,8 +456,11 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                 std::string title = folder.root.filename().u8string(); if (title.empty()) title = key;
                 const std::string subtitle = folder.countKnown ? std::to_string(folder.sourceCount) + (folder.sourceCount == 1 ? " image" : " images") : "Open to browse";
                 auto* draw=ImGui::GetWindowDrawList();
-                const int firstVertex=draw->VtxBuffer.Size;
                 const bool moving=navigation && navigation->FoldersMoving();
+                if(moving)draw->PushClipRect(ImGui::GetMainViewport()->Pos,
+                    ImVec2(ImGui::GetMainViewport()->Pos.x+ImGui::GetMainViewport()->Size.x,
+                        ImGui::GetMainViewport()->Pos.y+ImGui::GetMainViewport()->Size.y),false);
+                const int firstVertex=draw->VtxBuffer.Size;
                 DrawFolder(draw, origin, width, moving && navigation->ChosenFolder(key) ?
                     motion.reveal+(1.f-motion.reveal)*(1.f-navigation->FolderAmount()) : motion.reveal, motion.leanX, motion.leanY,
                     motion.pageLift, images, folder, title, subtitle, surface, m_Material);
@@ -465,6 +473,7 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                             pose.Min.y+(point.y-target.Min.y)*pose.GetHeight()/target.GetHeight()};
                     }
                 }
+                if(moving)draw->PopClipRect();
             }
             if (bodyHovered || openHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             ImGui::PopID();

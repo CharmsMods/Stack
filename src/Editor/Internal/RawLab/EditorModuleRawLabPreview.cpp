@@ -358,10 +358,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         m_RawWorkspaceLabUi.previewPanY = 0.0f;
         m_RawWorkspaceLabUi.previewPanning = false;
         m_RawWorkspaceLabUi.previewLayout = {};
-        m_RawWorkspaceLabUi.previewSurroundFrom = m_RawImageBackdrop.extensionOpacity;
-        m_RawWorkspaceLabUi.previewSurroundTarget = false;
-        if (!m_NodeOpenTransition.Active()) m_NodeOpenTransition.ClearSurround();
-        m_RawWorkspaceLabUi.previewSurroundStarted = ImGui::GetTime();
         m_RawWorkspaceLabUi.selectedEvGradient = -1;
         m_RawWorkspaceLabUi.selectedToneGradient = -1;
         m_RawWorkspaceLabUi.hoveredEvGradient = -1;
@@ -444,6 +440,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     const auto& previewRecipe = preview.edit.recipe;
     const ImVec2 layoutStart = ImGui::GetCursorScreenPos();
     const ImVec2 available = ImGui::GetContentRegionAvail();
+    const bool splitComparison = IsViewMode() && !Stack::Workspace::IsPreview() &&
+        m_Viewport.PrepareRawSplitComparison(this, available);
     const bool colorLayout =
         m_RawWorkspaceLabUi.activeTool == RawLabTool::Color;
     const bool gradientLayout =
@@ -694,7 +692,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             const bool previewWindowHovered = ImGui::IsWindowHovered(
                 ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
                 (sourceMenuOpen ? ImGuiHoveredFlags_AllowWhenBlockedByPopup : 0));
-            const bool previewHovered =
+            const bool previewHovered = !m_Viewport.ComparisonControlsOwnPointer(layoutStart) &&
                 (previewWindowHovered || IsRawImageNavigationActive()) && bounds.Contains(previewIo.MousePos);
 
             if(currentRawPreview && !Stack::Workspace::IsPreview()) {
@@ -749,10 +747,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 Stack::ViewportNavigation::Update(navigation, navigationInput, baseImageSize,
                     bounds.Min, bounds.Max, unpannedMinimumFor);
                 if (previewHovered && navigationInput.reset) {
-                    m_NodeOpenTransition.ClearSurround();
-                    ui.previewSurroundFrom = m_RawImageBackdrop.extensionOpacity;
-                    ui.previewSurroundStarted = ImGui::GetTime();
-                    ui.previewSurroundTarget = false;
                     layout.fitting = !ui.previewActualPixels;
                 } else if (previewHovered && navigationInput.wheelAllowed &&
                     !navigationInput.middleDown && std::abs(navigationInput.wheel) > 0.0001f) {
@@ -831,11 +825,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (currentRawPreview) {
             ImRect visible = bounds;
             visible.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
-            PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview,
-                m_RawImageViewTransition.Active() || (m_GalleryNavigationMotion &&
-                    m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)));
+            PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview);
         }
         m_BracketingImageMin=imageRect.Min;m_BracketingImageMax=imageRect.Max;
+        if (m_Viewport.ComparisonControlsOwnPointer(layoutStart)) return;
         // The card is presentation geometry, not a stable picking/probe area.
         // Defer scopes, capture handles and diagnostic overlays until settled.
         if (m_NodeOpenTransition.Active() || (m_GalleryNavigationMotion &&
@@ -1727,7 +1720,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     // retained detail. Overlays added by finishImage stay outside this range.
     int firstPhotoVertex = 0;
     bool openingPhotoClip = false;
-    const auto beginPhoto = [&]() {
+    const auto beginPhoto = [&](const ImRect& rect) {
         openingPhotoClip = m_NodeOpenTransition.Active();
         if (openingPhotoClip) {
             const auto* viewport = ImGui::GetMainViewport();
@@ -1735,10 +1728,15 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 ImVec2(viewport->WorkPos.x+viewport->WorkSize.x,viewport->WorkPos.y+viewport->WorkSize.y),false);
         }
         firstPhotoVertex = drawList->VtxBuffer.Size;
+        if (splitComparison) drawList->PushClipRect(ImVec2(rect.GetCenter().x, rect.Min.y), rect.Max, true);
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         return drawList->CmdBuffer.Size - 1;
     };
     const auto endPhoto = [&](const ImRect& rect, int first, bool drawn) {
+        if (splitComparison) {
+            drawList->PopClipRect();
+            if (drawn) m_Viewport.DrawRawComparisonBefore(drawList, rect.Min, rect.Max);
+        }
         const int end = drawList->CmdBuffer.Size;
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         if (!drawn) { if (openingPhotoClip) drawList->PopClipRect(); return; }
@@ -1746,7 +1744,9 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (openingPhotoClip) drawList->PopClipRect();
         Stack::UiPerformance::Probe::ImageDrawn(ActiveViewportPreviewState().acceptedGeneration,
             {rect.Min.x,rect.Min.y,rect.GetWidth(),rect.GetHeight()});
+        if (splitComparison) drawList->PushClipRect(ImVec2(rect.GetCenter().x, rect.Min.y), rect.Max, true);
         finishImage(rect);
+        if (splitComparison) drawList->PopClipRect();
         if (m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.sharpDrawList &&
             ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {
             m_RawImageBackdrop.sharpDrawList = drawList;
@@ -1763,7 +1763,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             static_cast<float>(tiles.fullWidth),
             static_cast<float>(tiles.fullHeight));
         publishImageRect(imageRect);
-        const int firstPhotoCommand = beginPhoto();
+        const int firstPhotoCommand = beginPhoto(imageRect);
         drewPreview = DrawLabTileSet(tiles, imageRect);
         endPhoto(imageRect, firstPhotoCommand, drewPreview);
     }
@@ -1780,7 +1780,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         const ImRect imageRect = imageRectFor(
             static_cast<float>(hasGeometry ? geometry.logicalWidth : m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth : region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width),
             static_cast<float>(hasGeometry ? geometry.logicalHeight : m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight : region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height));
-        const int firstPhotoCommand = beginPhoto();
+        const int firstPhotoCommand = beginPhoto(imageRect);
         const ImVec2 rasterMin = region.Valid() ? ImVec2(
             imageRect.Min.x + imageRect.GetWidth() * region.x / region.fullWidth,
             imageRect.Min.y + imageRect.GetHeight() * region.y / region.fullHeight) : imageRect.Min;
@@ -1857,6 +1857,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             ImGui::GetColorU32(ImGuiCol_TextDisabled),
             label);
     }
+    if (IsViewMode() && !Stack::Workspace::IsPreview()) m_Viewport.DrawRawComparisonControls(layoutStart);
     ImGui::SetCursorScreenPos(layoutStart);
     ImGui::Dummy(ImVec2(
         std::max(120.0f, available.x),

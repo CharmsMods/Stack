@@ -799,6 +799,7 @@ bool EditorModule::RenderRawWorkspaceLabSecondaryControls(RawWorkspaceEditContex
 }
 
 void EditorModule::RenderRawWorkspaceLabUI() {
+    UpdateViewImageSurround();
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Workspace,2);
     if (Stack::UiPerformance::Probe::Active())
         Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Project,

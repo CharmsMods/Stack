@@ -205,7 +205,7 @@ void main() {
         blurredWeight = 1.0-(1.0-blurredWeight)*(1.0-coverage);
     }
     result += matchedNoise(blurredWeight, coverage>0.0 ? max(sigma,64.0) : sigma,result);
-    // Only the generated surround fades, once, after contact. Real photo
+    // Only the generated surround follows the presentation toggle. Real photo
     // pixels and their update fades remain independent of this appearance.
     if (distance > 0.0) result = mix(background, result, extensionOpacity);
     color = vec4(result, 1.0);
