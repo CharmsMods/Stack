@@ -267,3 +267,13 @@ bool GalleryLayoutAnimation::Participates(const std::string& key) const {
 }
 
 }
+
+namespace Stack::Editor::RawLabInternal {
+bool GalleryLayoutAnimation::PresentedBounds(const std::string& key,ImRect& bounds) const {
+    const auto found=m_Layout.find(key);
+    if(found==m_Layout.end() || !found->second.rendered)return false;
+    const auto pose=m_Active ? SamplePose(key,found->second) : found->second;
+    if(!pose.image.Overlaps(pose.clip))return false;
+    bounds=pose.image;return true;
+}
+}

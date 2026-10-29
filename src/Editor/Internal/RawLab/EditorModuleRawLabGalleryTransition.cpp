@@ -31,6 +31,15 @@ bool EditorModule::RecordRawWorkspaceGalleryThumbnail(const std::string& key,
         entry->second.lastVisibleFrame = ImGui::GetFrameCount();
         entry->second.lastUseSerial = ++m_RawWorkspaceThumbnailTextureUseSerial;
     }
+    if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && entry!=m_RawWorkspaceThumbnailTextures.end()) {
+        ImRect displayed;ImVec2 uvLow(0,1),uvHigh(1,0);
+        if(m_GalleryNavigationMotion->GalleryPhoto(entry->second.sourceIdentity,image,displayed,uvLow,uvHigh)) {
+            if(entry->second.texture)ImGui::GetWindowDrawList()->AddImage(
+                static_cast<ImTextureID>(entry->second.texture),displayed.Min,displayed.Max,uvLow,uvHigh,
+                ImGui::GetColorU32(ImVec4(1,1,1,opacity)));
+            return true;
+        }
+    }
     return m_PermanentGalleryWorkspace && entry != m_RawWorkspaceThumbnailTextures.end() &&
         entry->second.texture != 0 &&
         m_RawWorkspaceGalleryLayoutAnimation.Observe(key, image, clip, opacity);

@@ -295,7 +295,7 @@ bool HitButton(const char* id, const ImRect& rect, bool overlap = false, bool na
 
 GalleryFolderCards::Action GalleryFolderCards::Render(
     const std::vector<RawWorkspace::SourceFolderCard>& folders, const ImVec2& size,
-    ImVec4 surface, const ResolveTexture& texture) {
+    ImVec4 surface, const ResolveTexture& texture,Navigation::GalleryNavigationTransition* navigation) {
     Action action;
     const float unit = ImGui::GetFontSize() / 16.f;
     const bool reduced = LibraryUi::ReducedMotion();
@@ -345,7 +345,17 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                 const ImRect tile(origin, ImVec2(origin.x + width, origin.y + 168 * width / 220.f));
                 if (HitButton("Add source folder", tile)) action.addFolder = true;
                 const bool hovered = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-                DrawAdd(ImGui::GetWindowDrawList(), tile, surface, hovered, width / 220.f);
+                auto* draw=ImGui::GetWindowDrawList();
+                const int first=draw->VtxBuffer.Size;
+                DrawAdd(draw, tile, surface, hovered, width / 220.f);
+                if(navigation && navigation->FoldersMoving()) {
+                    const auto pose=navigation->FolderPose("add-folder",tile,index);
+                    for(int vertex=first;vertex<draw->VtxBuffer.Size;++vertex) {
+                        auto& point=draw->VtxBuffer[vertex].pos;
+                        point={pose.Min.x+(point.x-tile.Min.x)*pose.GetWidth()/tile.GetWidth(),
+                            pose.Min.y+(point.y-tile.Min.y)*pose.GetHeight()/tile.GetHeight()};
+                    }
+                }
                 if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 continue;
             }
@@ -372,7 +382,10 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                 bodyHovered |= ImGui::IsItemHovered();
             }
             if (bodyClicked) motion.expanded = !motion.expanded;
-            if (HitButton("Open folder gallery", open)) action.openFolder = folder.root;
+            if (HitButton("Open folder gallery", open)) {
+                action.openFolder=folder.root;
+                action.folderBounds={origin,{origin.x+width,origin.y+168*unit}};
+            }
             const bool openHovered = ImGui::IsItemHovered();
             if (openHovered && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Open all images in %s", folder.root.u8string().c_str());
             const auto mouse = ImGui::GetMousePos();
@@ -407,13 +420,28 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                     const bool clicked = HitButton("Open image", PageHit(origin, width, image, count, motion.reveal, motion.leanX, motion.leanY));
                     const bool keyboardFocused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
                     if (clicked && (hoveredPage == static_cast<int>(image) || keyboardFocused))
-                        action.openImage = Action::Image{folder.previews[image].absolutePath, folder.root};
+                        {
+                        const auto page=Page(origin,width,image,count,motion.reveal,motion.pageLift[image]);
+                        Action::Image selected{folder.previews[image].absolutePath,folder.root,
+                            folder.previews[image].relativePathKey,page.rect};
+                        CropUvs(images[image],page.rect.GetWidth()/page.rect.GetHeight(),selected.uvMinimum,selected.uvMaximum);
+                        action.openImage=std::move(selected);
+                    }
                     raised = hoveredPage == static_cast<int>(image) || keyboardFocused;
                     if (raised) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                     ImGui::PopID();
                 }
                 if (reduced) motion.pageLift[image] = raised ? 1.f : 0.f;
                 else Header::ApproachMotion(motion.pageLift[image], raised ? 1.f : 0.f, .18f);
+            }
+            if(action.openFolder && *action.openFolder==folder.root) {
+                for(std::size_t image=0;image<count;++image) {
+                    const auto page=Page(origin,width,image,count,motion.reveal,motion.pageLift[image]);
+                    Action::Image selected{folder.previews[image].absolutePath,folder.root,
+                        folder.previews[image].relativePathKey,page.rect};
+                    CropUvs(images[image],page.rect.GetWidth()/page.rect.GetHeight(),selected.uvMinimum,selected.uvMaximum);
+                    action.pages.push_back(std::move(selected));
+                }
             }
             // The clipper may retain a fully offscreen navigation row. Keep
             // its native input targets above, but not its meshes/material draws.
@@ -422,8 +450,21 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                     ImVec2(origin.x + width + 64 * unit, origin.y + 232 * unit))) {
                 std::string title = folder.root.filename().u8string(); if (title.empty()) title = key;
                 const std::string subtitle = folder.countKnown ? std::to_string(folder.sourceCount) + (folder.sourceCount == 1 ? " image" : " images") : "Open to browse";
-                DrawFolder(ImGui::GetWindowDrawList(), origin, width, motion.reveal, motion.leanX, motion.leanY,
+                auto* draw=ImGui::GetWindowDrawList();
+                const int firstVertex=draw->VtxBuffer.Size;
+                const bool moving=navigation && navigation->FoldersMoving();
+                DrawFolder(draw, origin, width, moving && navigation->ChosenFolder(key) ?
+                    motion.reveal+(1.f-motion.reveal)*(1.f-navigation->FolderAmount()) : motion.reveal, motion.leanX, motion.leanY,
                     motion.pageLift, images, folder, title, subtitle, surface, m_Material);
+                if(moving) {
+                    const ImRect target(origin,{origin.x+width,origin.y+168*width/220.f});
+                    const auto pose=navigation->FolderPose(key,target,static_cast<std::size_t>(row*columns+column));
+                    for(int vertex=firstVertex;vertex<draw->VtxBuffer.Size;++vertex) {
+                        auto& point=draw->VtxBuffer[vertex].pos;
+                        point={pose.Min.x+(point.x-target.Min.x)*pose.GetWidth()/target.GetWidth(),
+                            pose.Min.y+(point.y-target.Min.y)*pose.GetHeight()/target.GetHeight()};
+                    }
+                }
             }
             if (bodyHovered || openHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             ImGui::PopID();

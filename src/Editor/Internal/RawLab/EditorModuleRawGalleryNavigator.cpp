@@ -36,7 +36,12 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceGalleryContentMode, m_RawGalleryFolderFilter,
         Stack::Header::ResolvePanelColor(GetWorkspaceBaseColor()),
         [this] { RenderRawGallerySidebarControls(); });
-    if (action.category || action.folderChanged) m_RawGallerySourceFoldersOpen = false;
+    if(action.browseMaximum.x>action.browseMinimum.x)
+        m_GalleryBrowseAnchor={action.browseMinimum,action.browseMaximum};
+    if (action.category || action.folderChanged) {
+        m_RawGallerySourceFoldersOpen = false;
+        if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Folders(false,m_GalleryBrowseAnchor);
+    }
     if (action.category && *action.category != m_RawWorkspaceGalleryContentMode) {
         m_RawWorkspaceGalleryContentMode = *action.category;
         SaveRawWorkspaceAppState();
@@ -50,7 +55,12 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
     if (action.openFolder) {
-        if (m_PermanentGalleryWorkspace) ShowRawWorkspaceSourceFolders();
+        if (m_PermanentGalleryWorkspace) {
+            if(m_RawGallerySourceFoldersOpen) {
+                m_RawGallerySourceFoldersOpen=false;
+                if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Folders(false,m_GalleryBrowseAnchor);
+            } else ShowRawWorkspaceSourceFolders();
+        }
         else OpenRawWorkspaceFolderDialog();
     }
 }

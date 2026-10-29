@@ -2,6 +2,7 @@
 
 #include "Raw/RawWorkspace.h"
 #include "Renderer/FolderPocketMaterial.h"
+#include "App/GalleryNavigationTransition.h"
 #include <imgui.h>
 #include <array>
 #include <functional>
@@ -18,16 +19,24 @@ class GalleryFolderCards {
 public:
     struct Texture { unsigned int handle = 0; int width = 0, height = 0; };
     struct Action {
-        struct Image { std::filesystem::path path, sourceFolder; };
+        struct Image {
+            std::filesystem::path path, sourceFolder;
+            std::string key;
+            ImRect bounds;
+            ImVec2 uvMinimum{0,1},uvMaximum{1,0};
+        };
         std::optional<std::filesystem::path> openFolder;
         std::optional<Image> openImage;
         bool addFolder = false;
+        std::vector<Image> pages;
+        ImRect folderBounds;
     };
     using ResolveTexture = std::function<Texture(const std::filesystem::path&,
         const RawWorkspace::SourceRecord&)>;
 
     Action Render(const std::vector<RawWorkspace::SourceFolderCard>& folders,
-        const ImVec2& size, ImVec4 surface, const ResolveTexture& texture);
+        const ImVec2& size, ImVec4 surface, const ResolveTexture& texture,
+        Navigation::GalleryNavigationTransition* navigation = nullptr);
     void Reset() { m_Motion.clear(); }
     void Shutdown() { m_Material.Shutdown(); }
 

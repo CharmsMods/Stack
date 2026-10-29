@@ -61,7 +61,15 @@ in vec2 uv; out vec4 color;
 layout(location=0) uniform sampler2D scene;
 layout(location=1) uniform sampler2D previous;
 layout(location=2) uniform float weight;
-void main() { color = mix(texture(previous,uv), texture(scene,uv), weight); }
+layout(location=3) uniform vec4 departure;
+layout(location=4) uniform vec3 backdrop;
+void main() {
+    vec4 old = texture(previous,uv);
+    if (departure.z>departure.x && departure.w>departure.y &&
+        all(greaterThanEqual(uv,departure.xy)) && all(lessThanEqual(uv,departure.zw)))
+        old=vec4(backdrop,1.);
+    color = mix(old,texture(scene,uv),weight);
+}
 )";
 constexpr const char* previewFragment = R"(#version 430 core
 in vec2 uv; out vec4 color;
@@ -310,7 +318,9 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     const std::uint64_t nextDestination = projectMode ? projectWorkspace :
         static_cast<std::uint64_t>(toolMode ? toolIndex : sw.preview);
     const float fadeSeconds = toolMode || projectMode ? .18f : sw.config.previewFadeSeconds;
-    if (historyValid && destination != nextDestination && !reducedMotion) {
+    const bool navigationChanged=projectFrame && projectFrame->navigationTransition &&
+        navigationGeneration!=projectFrame->navigationGeneration;
+    if (historyValid && (destination != nextDestination || navigationChanged) && !reducedMotion) {
         // Reconstruct the previous hover only when a switch needs it. The clean
         // presented scene is still intact here; no per-hover-frame copy needed.
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER,historyFramebuffer);
@@ -326,6 +336,11 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     previewHistoryValid = false;
     float weight=historyValid && !reducedMotion ? std::clamp(float(now-fadeStarted)/fadeSeconds,0.f,1.f) : 1.f;
     weight=weight*weight*(3.f-2.f*weight);
+    if(projectFrame && projectFrame->navigationTransition) {
+        weight=projectFrame->navigationWeight;
+        navigationGeneration=projectFrame->navigationGeneration;
+        fadeStarted=now-fadeSeconds;
+    }
     if (!toolMode && !projectMode && !sw.held) weight=std::max(weight,1.f-sw.Amount());
     destination=nextDestination;
     if (!historyValid || reducedMotion) fadeStarted=now-fadeSeconds;
@@ -359,6 +374,10 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         glUniform1i(0,0);
         glUniform1i(1,1);
         glUniform1f(2,weight);
+        const ImVec4 departure=projectFrame && projectFrame->navigationTransition ?
+            NormalizedBounds(projectFrame->navigationDepartureLow,projectFrame->navigationDepartureHigh,*data) : ImVec4();
+        glUniform4f(3,departure.x,departure.y,departure.z,departure.w);
+        glUniform3f(4,clear.x,clear.y,clear.z);
         glDrawArrays(GL_TRIANGLES,0,3);
     }
     historyValid=true;

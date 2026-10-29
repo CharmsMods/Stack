@@ -795,6 +795,11 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             PresentNodeOpenImage(fullRect.Min, fullRect.Max);
             return fullRect;
         }
+        if(currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview() &&
+            m_GalleryNavigationMotion && m_GalleryNavigationMotion->Owns(m_GalleryNavigationWorkspace)) {
+            UpdateRawViewportCoverage(fullRect.Min,fullRect.Max,bounds.Min,bounds.Max,currentRawPreview);
+            return m_GalleryNavigationMotion->PresentImage(m_GalleryNavigationWorkspace,fullRect);
+        }
         if(currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview()) {
             const auto displayed=m_RawImageViewTransition.Present(Stack::Editor::ImageViewTransition::View::Raw,
                 preview.identity,{fullRect.Min,fullRect.Max},ImGui::GetTime(),Stack::Notifications::SystemReducedMotion());
@@ -827,12 +832,14 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             ImRect visible = bounds;
             visible.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
             PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview,
-                m_RawImageViewTransition.Active());
+                m_RawImageViewTransition.Active() || (m_GalleryNavigationMotion &&
+                    m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)));
         }
         m_BracketingImageMin=imageRect.Min;m_BracketingImageMax=imageRect.Max;
         // The card is presentation geometry, not a stable picking/probe area.
         // Defer scopes, capture handles and diagnostic overlays until settled.
-        if (m_NodeOpenTransition.Active()) return;
+        if (m_NodeOpenTransition.Active() || (m_GalleryNavigationMotion &&
+            m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace))) return;
         DrawMultiFrameRawDiagnosticOverlay(drawList, imageRect.Min, imageRect.Max);
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
             ImGui::IsKeyPressed(ImGuiKey_Escape)) {

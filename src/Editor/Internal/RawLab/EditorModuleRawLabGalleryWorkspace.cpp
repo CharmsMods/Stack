@@ -15,10 +15,37 @@
 #include <imgui_internal.h>
 
 void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
-    if (m_PermanentGalleryWorkspace && IsRawWorkspaceFolderBrowserOpen()) {
-        RenderRawGallerySourceFolders(size);
-        return;
+    const bool transitioning=m_PermanentGalleryWorkspace && m_GalleryNavigationMotion &&
+        m_GalleryNavigationMotion->FoldersMoving();
+    const bool folders=m_PermanentGalleryWorkspace && IsRawWorkspaceFolderBrowserOpen();
+    const ImVec2 origin=ImGui::GetCursorScreenPos();
+    if(!folders || transitioning) {
+        Stack::Workspace::InputScope suppress(transitioning,false);
+        ImGui::BeginChild("GalleryNavigationContent",size,ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+        RenderRawWorkspaceGalleryContentSurface(size);
+        if(transitioning)Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(),
+            1.f-m_GalleryNavigationMotion->FolderAmount());
+        ImGui::EndChild();
     }
+    if(folders || transitioning) {
+        ImGui::SetNextWindowPos(origin);ImGui::SetNextWindowSize(size);
+        ImGui::SetNextWindowViewport(ImGui::GetWindowViewport()->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(0,0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0.f);
+        ImGui::Begin("GallerySourceFolderSurface",nullptr,ImGuiWindowFlags_NoDecoration|
+            ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBackground|
+            ImGuiWindowFlags_NoFocusOnAppearing|(transitioning?ImGuiWindowFlags_NoInputs:0));
+        Stack::Workspace::InputScope suppress(transitioning,false);
+        if(m_GalleryNavigationMotion)ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+            ImGui::GetStyle().Alpha*m_GalleryNavigationMotion->FolderAmount());
+        RenderRawGallerySourceFolders(size);
+        if(m_GalleryNavigationMotion)ImGui::PopStyleVar();
+        ImGui::End();ImGui::PopStyleVar(2);
+    }
+}
+
+void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
     const bool grid = m_RawWorkspaceLabUi.galleryWorkspaceGrid;
     const bool previewHoverArmed = m_RawWorkspaceGalleryPreviewHovered;
     m_RawWorkspaceGalleryPreviewHovered = false;

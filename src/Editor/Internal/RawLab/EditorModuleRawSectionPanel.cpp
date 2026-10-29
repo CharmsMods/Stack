@@ -50,10 +50,12 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
         const bool visible = ImGui::BeginChild("SectionContents", size, ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         const float expansion = std::clamp(visibleWidth / size.x, 0.f, 1.f);
-        const float contentAlpha = expansion * expansion * (3.f - 2.f * expansion);
+        const float incoming=m_GalleryNavigationMotion ?
+            m_GalleryNavigationMotion->ImageControls(m_GalleryNavigationWorkspace) : 1.f;
+        const float contentAlpha = expansion * expansion * (3.f - 2.f * expansion)*incoming;
         // Suppress transition input without changing enabled/disabled styling.
         // Real disabled controls retain their normal appearance throughout.
-        Stack::Workspace::InputScope transitionInput(visibleWidth < size.x - 0.5f, false);
+        Stack::Workspace::InputScope transitionInput(visibleWidth < size.x - 0.5f || incoming<1.f, false);
         ImGui::BeginDisabled(Stack::Workspace::IsPreview());
         if (visible && m_PermanentGalleryWorkspace) {
             if (libraryNavigation) libraryNavigation();
@@ -115,6 +117,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
         // Include custom plots and thumbnails without double-dimming widgets.
         // The panel's separate translucent tint follows expansion above.
         Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(),contentAlpha);
+        if(incoming<1.f)Stack::Editor::TranslateWindowDraw(ImGui::GetCurrentWindow(),{-12.f*(1.f-incoming),0});
         ImGui::EndChild();
         ImGui::PopStyleVar(3);
     }

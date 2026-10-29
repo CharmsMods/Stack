@@ -38,6 +38,7 @@ public:
     bool DisplayRect(const std::string& key, const ImRect& target, ImRect& displayed) const;
     std::string ImageAt(const ImVec2& point) const;
     bool Protects(const std::string& key) const;
+    bool PresentedBounds(const std::string& key,ImRect& bounds) const;
     bool Active() const { return m_Active; }
     void Reset();
 

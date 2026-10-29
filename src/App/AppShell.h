@@ -138,15 +138,20 @@ private:
     void UpdateWorkspacePreferencesOwner();
     void TickAutoBracketWorkspaces();
     bool CloseAutoBracketWorkspace(std::uint64_t id);
+    std::shared_ptr<Stack::Navigation::GalleryNavigationTransition> m_GalleryNavigationMotion =
+        std::make_shared<Stack::Navigation::GalleryNavigationTransition>();
     struct GalleryTabOpen {
         enum class Kind { Source, Project, Bracket } kind = Kind::Source;
         std::filesystem::path path;
         std::filesystem::path sourceWorkspaceRoot;
         std::vector<std::filesystem::path> bracketSources;
         std::uint64_t workspaceId = 0;
+        std::uint64_t navigationGeneration=0;
+        Stack::Renderer::GalleryTransitionOrigin transitionOrigin;
     };
     std::deque<GalleryTabOpen> m_GalleryTabOpenQueue;
     std::optional<GalleryTabOpen> m_PendingGalleryTabOpen;
+    std::deque<GalleryTabOpen> m_BackgroundGalleryTabOpens;
     void TickProjectWorkspaces();
     bool CanSwitchProjectWorkspace() const;
     bool ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigation = false);

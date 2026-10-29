@@ -732,6 +732,8 @@ void EditorModule::Shutdown() {
         return;
     }
     m_ShutdownComplete = true;
+    m_DeferredGraphWorkers=false;m_DeferredGraphWorkerWindow=nullptr;
+    if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Retire(m_GalleryNavigationWorkspace);
     m_NodeOpenTransition.Shutdown();
     if (m_RawAssetCapture.cancellation) m_RawAssetCapture.cancellation->store(true);
     CancelMfdExperimentalProcessing({}, true);
@@ -1299,7 +1301,7 @@ void EditorModule::ClearCompositeSelection() {
 }
 
 void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::AppearanceManager* appearance,
-    bool restoreWorkspace) {
+    bool restoreWorkspace, bool lightweightView) {
     m_ShutdownComplete = false;
     m_Appearance = appearance;
     std::vector<std::string> registryErrors;
@@ -1314,11 +1316,13 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     m_Sidebar.Initialize();
     m_Viewport.Initialize();
     m_Scopes.Initialize();
-    m_RenderWorkerAvailable = sharedWindow && m_RenderWorker.Initialize(sharedWindow);
+    m_DeferredGraphWorkerWindow=sharedWindow;
+    m_DeferredGraphWorkers=lightweightView && sharedWindow;
+    m_RenderWorkerAvailable = !lightweightView && sharedWindow && m_RenderWorker.Initialize(sharedWindow);
     m_RawRenderClientId = sharedWindow
         ? Stack::EditorRendering::RawRenderService::Get().Acquire(sharedWindow)
         : 0;
-    m_NodeBrowserRenderWorkerAvailable = sharedWindow && m_NodeBrowserRenderWorker.Initialize(sharedWindow);
+    m_NodeBrowserRenderWorkerAvailable = !lightweightView && sharedWindow && m_NodeBrowserRenderWorker.Initialize(sharedWindow);
     (void)Raw::GetLibRawRuntimeStatus();
 
     m_Project->layers.clear();
@@ -1342,6 +1346,13 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     if (restoreWorkspace) LoadRawWorkspaceAppState();
     else m_RawWorkspaceAppStateLoaded = true;
 }
+void EditorModule::EnsureGraphWorkers() {
+    if(!m_DeferredGraphWorkers || m_ShutdownComplete)return;
+    m_DeferredGraphWorkers=false;
+    m_RenderWorkerAvailable=m_RenderWorker.Initialize(m_DeferredGraphWorkerWindow,false);
+    m_NodeBrowserRenderWorkerAvailable=m_NodeBrowserRenderWorker.Initialize(m_DeferredGraphWorkerWindow,false);
+}
+
 void EditorModule::EnterSingleOutputPreviewMode() {
     ClearCompositeTransientInteractionState();
     m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;

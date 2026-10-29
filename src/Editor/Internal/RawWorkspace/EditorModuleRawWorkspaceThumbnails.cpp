@@ -93,6 +93,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         existing->second = {};
         existing->second.absolutePath = displayThumbnail->absolutePath;
         existing->second.metadataIdentity = metadataIdentity;
+        existing->second.sourceIdentity=source.absolutePath.lexically_normal().generic_u8string();
         existing->second.status = displayThumbnail->status;
         m_RawWorkspaceThumbnailTextureUploadQueue.erase(
             std::remove(m_RawWorkspaceThumbnailTextureUploadQueue.begin(),
@@ -143,6 +144,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         RawWorkspaceThumbnailTexture entry;
         entry.absolutePath = displayThumbnail->absolutePath;
         entry.metadataIdentity = metadataIdentity;
+        entry.sourceIdentity=source.absolutePath.lexically_normal().generic_u8string();
         entry.status = displayThumbnail->status;
         entry.priority = prioritize;
         entry.lastUseSerial = ++m_RawWorkspaceThumbnailTextureUseSerial;
@@ -626,11 +628,30 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
 
 void EditorModule::QueueRawWorkspaceThumbnailTextureDelete(unsigned int texture) {
     if (texture != 0) {
+        const auto pinned=m_GalleryThumbnailLeases.find(texture);
+        if(pinned!=m_GalleryThumbnailLeases.end()) {
+            if(auto lease=pinned->second.lock()) {
+                m_RetiredGalleryThumbnailBytes+=lease->bytes;
+                m_RetiredGalleryThumbnails.push_back({std::move(lease),ImGui::GetCurrentContext()?ImGui::GetFrameCount():-1});
+                m_GalleryThumbnailLeases.erase(pinned);
+                return;
+            }
+            m_GalleryThumbnailLeases.erase(pinned);
+        }
         m_RawWorkspaceThumbnailTextureDeleteQueue.push_back(texture);
     }
 }
 
 void EditorModule::PumpRawWorkspaceThumbnailTextureDeletes(bool drainAll) {
+    const int currentFrame=ImGui::GetCurrentContext()?ImGui::GetFrameCount():-1;
+    for(auto it=m_RetiredGalleryThumbnails.begin();it!=m_RetiredGalleryThumbnails.end();) {
+        if(it->lease.use_count()==1 && (drainAll || it->submittedFrame<currentFrame)) {
+            m_RawWorkspaceThumbnailTextureDeleteQueue.push_back(it->lease->texture);
+            m_RetiredGalleryThumbnailBytes-=it->lease->bytes;
+            it=m_RetiredGalleryThumbnails.erase(it);
+            m_RawWorkspaceThumbnailTextureTrimNeeded=true;
+        } else ++it;
+    }
     if (m_RawWorkspaceThumbnailTextureDeleteQueue.empty()) {
         return;
     }
@@ -685,8 +706,8 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
         std::size_t bytes = 0;
     };
 
-    std::size_t residentCount = 0;
-    std::size_t residentBytes = 0;
+    std::size_t residentCount = m_RetiredGalleryThumbnails.size();
+    std::size_t residentBytes = m_RetiredGalleryThumbnailBytes;
     for (const auto& [key, entry] : m_RawWorkspaceThumbnailTextures) {
         if (entry.texture == 0 || entry.width <= 0 || entry.height <= 0) {
             continue;
@@ -725,6 +746,8 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
         auto entry = m_RawWorkspaceThumbnailTextures.find(*candidate.key);
         if (entry == m_RawWorkspaceThumbnailTextures.end() ||
             entry->second.texture == 0 || entry->second.uploadPending ||
+            (m_GalleryThumbnailLeases.count(entry->second.texture) &&
+                !m_GalleryThumbnailLeases.at(entry->second.texture).expired()) ||
             (entry->second.lastVisibleFrame >= 0 &&
                 entry->second.lastVisibleFrame >= ImGui::GetFrameCount() - 1) ||
             m_RawWorkspaceGalleryLayoutAnimation.Protects(*candidate.key)) {

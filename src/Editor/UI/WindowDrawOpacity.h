@@ -2,6 +2,14 @@
 #include "imgui_internal.h"
 
 namespace Stack::Editor {
+inline void TranslateWindowDraw(ImGuiWindow* window,ImVec2 offset) {
+    if(!window || (offset.x==0 && offset.y==0))return;
+    for(auto& vertex:window->DrawList->VtxBuffer) {
+        vertex.pos.x+=offset.x;vertex.pos.y+=offset.y;
+    }
+    for(auto* child:window->DC.ChildWindows)
+        if(child->Active)TranslateWindowDraw(child,offset);
+}
 // Fade completed window geometry once so custom explicit-color plots and
 // ordinary widgets share one opacity. Caller leaves style alpha unchanged.
 inline void ApplyWindowDrawOpacity(ImGuiWindow* window, float opacity) {

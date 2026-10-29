@@ -130,6 +130,9 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
     if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
         result.openFolder = true;
+    const auto browse=ImGui::GetItemRectMin(),browseMax=ImGui::GetItemRectMax();
+    result.browseMinimum={browse.x+10*m_Unit,(browse.y+browseMax.y-17*m_Unit)*.5f};
+    result.browseMaximum={result.browseMinimum.x+17*m_Unit,result.browseMinimum.y+17*m_Unit};
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose or add a source folder");
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(ImVec2(heading.x, heading.y + (compact ? 28 : 34) * m_Unit));

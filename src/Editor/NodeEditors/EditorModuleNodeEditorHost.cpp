@@ -5,6 +5,7 @@
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Library/LibraryControls.h"
 #include "App/WorkspacePresentation.h"
+#include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
 #include "imgui_internal.h"
 #include <unordered_set>
 #include <cstdio>
@@ -247,20 +248,14 @@ void EditorModule::RenderNodeEditorPanel() {
         firstSection=false;
         ImGui::PushID(group.definitionId.c_str());
         const float width=ImGui::GetContentRegionAvail().x;
-        ImGui::TextUnformatted(group.label.c_str());
-        const float rowStart=ImGui::GetCursorPosX();
-        const float buttonWidth=std::max(24.f,ImGui::GetFrameHeight());
-        for (std::size_t i=0;i<group.instances.size();++i) {
-            const auto& instance=group.instances[i];
-            const float nextWidth=std::max(buttonWidth,ImGui::CalcTextSize(instance.ordinal.c_str()).x+16.f);
-            if (i && ImGui::GetItemRectMax().x+4.f+nextWidth<=ImGui::GetWindowPos().x+rowStart+width)
-                ImGui::SameLine(0,4.f);
-            const auto& key=instance.key;
-            if (Stack::Editor::RawLabInternal::BareToolIslandButton(instance.ordinal.c_str(),group.selectedKey==key)) {
-                if (FinishWorkspaceInteraction() && ActivateNodeEditorPanelTarget(instance.target)) {
-                    if (group.selectedKey!=key) for (const auto& previous:group.instances)
+        const int activated=DrawControlsPanelHeader(group,width);
+        if (activated>=0 && activated<static_cast<int>(group.instances.size())) {
+            const auto& instance=group.instances[activated];
+            if (FinishWorkspaceInteraction() && ActivateNodeEditorPanelTarget(instance.target)) {
+                if (group.selectedKey!=instance.key) {
+                    for (const auto& previous:group.instances)
                         if (previous.key==group.selectedKey) m_NodeEditorState.Get<NodeEditorPanelAnalysis>(previous.target)={};
-                    group.selectedKey=key;group.measuredHeight=0.f;
+                    group.selectedKey=instance.key;group.measuredHeight=0.f;
                 }
             }
         }

@@ -1,10 +1,137 @@
 #include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
 #include "Notifications/NotificationPresenter.h"
+#include "Editor/NodeEditors/NodeEditorPanelState.h"
+#include "Utils/GlassControls.h"
+#include "App/ControlMotionAdapter.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
 
 namespace Stack::Editor {
+namespace {
+bool ControlHeading(const char* label,float width,float height) {
+    const auto transparent=ImVec4(0,0,0,0);
+    for (auto color:{ImGuiCol_Button,ImGuiCol_ButtonHovered,ImGuiCol_ButtonActive})
+        ImGui::PushStyleColor(color,transparent);
+    const bool clicked=ImGui::Button("##control-name",ImVec2(width,height));
+    ImGui::PopStyleColor(3);
+    if (!ImGui::IsItemVisible()) return clicked;
+    const bool hovered=ImGui::IsItemHovered();
+    const auto minimum=ImGui::GetItemRectMin(),maximum=ImGui::GetItemRectMax();
+    const auto textSize=ImGui::CalcTextSize(label);
+    const ImVec2 textAt(minimum.x,minimum.y+(height-textSize.y)*.5f);
+    auto* draw=ImGui::GetWindowDrawList();
+    const auto paint=[&](ImVec2 offset,ImVec4 ink) {
+        ImGui::PushStyleColor(ImGuiCol_Text,ink);
+        ImGui::RenderTextEllipsis(draw,{textAt.x+offset.x,textAt.y+offset.y},
+            {maximum.x+offset.x,maximum.y+offset.y},maximum.x+offset.x,label,nullptr,&textSize);
+        ImGui::PopStyleColor();
+    };
+    if (hovered) {
+        // A bounded glyph halo, submitted only for the hovered visible name.
+        // Native Button still owns click, focus and keyboard activation.
+        constexpr ImVec2 directions[]={{1,0},{-1,0},{0,1},{0,-1},
+            {.7071f,.7071f},{-.7071f,.7071f},{.7071f,-.7071f},{-.7071f,-.7071f}};
+        const float scale=ImGui::GetFontSize()/13.f;
+        for (int ring=3;ring>=1;--ring)
+            for (const auto& direction:directions) {
+                const float radius=ring*1.6f*scale;
+                paint({direction.x*radius,direction.y*radius},
+                    {1,1,1,ring==1 ? .22f : ring==2 ? .11f : .055f});
+            }
+    }
+    paint({0,0},hovered ? ImVec4(1,1,1,1) : ImVec4(.82f,.82f,.82f,1));
+    return clicked;
+}
+}
+
+int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width) {
+    if (group.instances.empty()) return -1;
+    const float height=ImGui::GetFontSize()+10.f;
+    const float step=std::max(height,ImGui::CalcTextSize(group.instances.back().ordinal.c_str()).x+14.f);
+    const float gap=8.f;
+    const float labelWidth=std::min(ImGui::CalcTextSize(group.label.c_str()).x,
+        std::max(1.f,width-step-gap));
+    const auto rowStart=ImGui::GetCursorScreenPos();
+    const int current=static_cast<int>(std::distance(group.instances.begin(),
+        std::find_if(group.instances.begin(),group.instances.end(),
+            [&](const auto& instance){return instance.key==group.selectedKey;})));
+    int activated=ControlHeading(group.label.c_str(),labelWidth,height) ? current : -1;
+    ImGui::SameLine(0,gap);
+    const float firstWidth=std::max(step,width-labelWidth-gap);
+    auto* draw=ImGui::GetWindowDrawList();
+    ImGuiExtras::AutomaticGlassScope glass;
+    for (std::size_t start=0;start<group.instances.size();) {
+        const float available=start ? width : firstWidth;
+        const auto count=std::min(group.instances.size()-start,
+            static_cast<std::size_t>(std::max(1.f,std::floor(available/step))));
+        const auto origin=ImGui::GetCursorScreenPos();
+        const ImRect pill(origin,{origin.x+float(count)*step,origin.y+height});
+        ImGui::PushID(static_cast<int>(start));
+        const auto selectionId=ImGui::GetID("version-bead");
+        {
+            ImGuiExtras::GlassBackgroundScope background(*draw);
+            draw->AddRectFilled(pill.Min,pill.Max,ImGui::GetColorU32(ImVec4(0,0,0,.16f)),height*.5f);
+        }
+        bool hovered=false,focused=false,held=false;
+        int captured=-1;
+        ImGuiID captureId=0;
+        for (std::size_t i=0;i<count;++i) {
+            if (i) ImGui::SameLine(0,0);
+            const auto index=start+i;
+            if (ImGui::InvisibleButton(group.instances[index].key.c_str(),{step,height},ImGuiButtonFlags_EnableNav))
+                activated=static_cast<int>(index);
+            hovered|=ImGui::IsItemHovered();focused|=ImGui::IsItemFocused();held|=ImGui::IsItemActive();
+            if (ImGui::IsItemActive() || (ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(0))) {
+                captured=static_cast<int>(i);captureId=ImGui::GetItemID();
+            }
+        }
+        float position=float((activated>=0 ? activated : current)-int(start));
+        bool direct=false,cancelled=false;
+        if (captured>=0) {
+            const auto& io=ImGui::GetIO();
+            cancelled=io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape,false);
+            const float dx=io.MousePos.x-io.MouseClickedPos[0].x,dy=io.MousePos.y-io.MouseClickedPos[0].y;
+            direct=!cancelled && ImGui::IsMousePosValid() &&
+                (ImGui::IsMouseDown(0) || ImGui::IsMouseReleased(0)) &&
+                dx*dx+dy*dy>=io.MouseDragThreshold*io.MouseDragThreshold;
+            if (direct) {
+                position=std::clamp(float(captured)+dx/step,0.f,float(count-1));
+                if (ImGui::IsMouseReleased(0)) activated=int(start)+int(std::lround(position));
+            }
+            if (cancelled) {
+                if (ImGui::GetActiveID()==captureId) ImGui::ClearActiveID();
+                activated=-1;position=float(current-int(start));
+            }
+        }
+        if (pill.Overlaps(ImGui::GetCurrentWindow()->ClipRect)) {
+            const int selected=activated>=0 ? activated : current;
+            if ((direct && captured>=0) || (selected>=static_cast<int>(start) && selected<static_cast<int>(start+count))) {
+                auto input=Stack::UiMotion::LastItemInput(true);
+                input.hovered=hovered;input.focused=focused;input.held=held;input.visible=true;
+                const ImGuiExtras::GlassSelectionInteraction interaction{input,position,direct,cancelled};
+                const ImVec2 first(origin.x+step*.5f,origin.y+height*.5f);
+                if (!ImGuiExtras::DrawGlassSelection(*draw,first,step,selected-int(start),
+                    height*.46f,selectionId,&interaction)) {
+                    ImGuiExtras::GlassBackgroundScope background(*draw);
+                    draw->AddCircleFilled({first.x+position*step,first.y},
+                        height*.46f,ImGui::GetColorU32(ImGuiCol_Text,.15f));
+                }
+            }
+            for (std::size_t i=0;i<count;++i) {
+                const auto& number=group.instances[start+i].ordinal;
+                const auto text=ImGui::CalcTextSize(number.c_str());
+                draw->AddText({origin.x+float(i)*step+(step-text.x)*.5f,origin.y+(height-text.y)*.5f},
+                    ImGui::GetColorU32(ImGuiCol_Text),number.c_str());
+            }
+        }
+        ImGui::PopID();
+        start+=count;
+        if (start<group.instances.size()) ImGui::SetCursorScreenPos({rowStart.x,ImGui::GetCursorScreenPos().y});
+    }
+    return activated;
+}
+
 void DrawControlsPanelScrollbar(ImGuiWindow* body,float seamX) {
     auto* host=ImGui::GetCurrentWindow();
     const auto id=host->GetID("ControlsOverlayScroll");

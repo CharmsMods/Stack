@@ -13,6 +13,7 @@ bool EditorModule::IsViewMode() const { return GetWorkspaceMode() == WorkspaceMo
 
 bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
     if (mode != GetWorkspaceMode() && IsBracketingPresentationActive()) return false;
+    if (mode == WorkspaceMode::Graph && IsViewMode()) EnsureGraphWorkers();
     if (mode == WorkspaceMode::Graph) {
         m_Project->workspace.graphPanelOpen = false;
         m_Sidebar.GetNodeGraphUI().CloseTransientDrawers();
@@ -73,7 +74,8 @@ void EditorModule::RenderViewWorkspace() {
     // project or graph. It belongs to the same View, without graph repair.
     if (rawProject || IsBracketingToolActive()) {
         if (rawProject && !IsRawProjectCanvas()) OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer, false);
-        Stack::Workspace::InputScope transitionInput(m_NodeOpenTransition.Active(), false);
+        Stack::Workspace::InputScope transitionInput(m_NodeOpenTransition.Active() ||
+            (m_GalleryNavigationMotion && m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)), false);
         RenderRawWorkspaceLabUI();
     } else {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -84,7 +86,8 @@ void EditorModule::RenderViewWorkspace() {
         if (SelectedEditingNode()) RenderRawFloatingControls(context, origin, size, context.canEdit);
         const bool ownsPointer = RawFloatingSurfaceOwnsPointer();
         Stack::Workspace::InputScope pointer(ownsPointer, false);
-        Stack::Workspace::InputScope transitionInput(m_NodeOpenTransition.Active(), false);
+        Stack::Workspace::InputScope transitionInput(m_NodeOpenTransition.Active() ||
+            (m_GalleryNavigationMotion && m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)), false);
         m_Viewport.Render(this, 1.f, EditorViewport::HostMode::DockedPane);
         SubmitRenderIfReady();
     }

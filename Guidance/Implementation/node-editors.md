@@ -53,6 +53,13 @@ another parameter model or a list of default tool enums. The catalog uses exact
 resolved definition identities and stable document/layer/node targets across all
 owned graphs. Repeated definitions share one section with numbered instances;
 selection of an instance changes presentation, never the graph's membership.
+Names are native activation buttons: clicking one selects that section's chosen
+instance through the existing node selection path, including image handles and
+Settings. Names are slightly dimmed at rest, white with a glyph halo on hover.
+The numbered instances sit beside the name in a darkened pill; its selection
+bead uses the shared glass selection motion. Native capture lets it follow a
+drag within the pill; release selects the nearest instance and cancellation keeps
+the previous target. Long lists wrap without changing instance order. Hover never changes the selected target.
 The catalog changes on owner/structure revisions, independently of drawing.
 
 `RawWorkspaceEditContext::presentation` distinguishes Panel from Floating.

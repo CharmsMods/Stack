@@ -485,6 +485,8 @@ void EditorModule::UpdateViewportPreviewRefinement(double now) {
     state.refinement = true;
 }
 bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
+    if(m_GalleryNavigationMotion && (m_GalleryNavigationMotion->Waiting(m_GalleryNavigationWorkspace) ||
+        m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)))return false;
     if (!m_RawWorkspaceAnalysisPending || !m_RawWorkspaceRootTabActive || !IsRawWorkspaceProjectActive() ||
         !UsesGraphViewportPreview() || GetViewportMode() == ViewportMode::CompositeCanvas ||
         m_RawAssetCapture.pending || m_RawAssetCapture.armed || IsExportBusy() ||

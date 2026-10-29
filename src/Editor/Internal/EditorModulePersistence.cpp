@@ -1270,7 +1270,10 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foregr
     if (!deferGraphPanWork) {
         ConsumeRenderWorkerResults();
         ConsumeNodeBrowserThumbnailWorkerResults();
-        if (foreground) m_Sidebar.GetNodeGraphUI().WarmPresetPreviewCache(this, 0.35);
+        if (foreground && !(m_GalleryNavigationMotion &&
+            (m_GalleryNavigationMotion->Waiting(m_GalleryNavigationWorkspace) ||
+             m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace))))
+            m_Sidebar.GetNodeGraphUI().WarmPresetPreviewCache(this, 0.35);
     }
 
     if (m_Project->lifecycle.Phase() ==

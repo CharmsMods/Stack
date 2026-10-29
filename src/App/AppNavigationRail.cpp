@@ -20,6 +20,7 @@ bool IsRaw(int tab) { return tab == RawTab || tab == 3; }
 
 void AppShell::QueueRailNavigation(int destination) {
     auto& rail = m_NavigationRail;
+    m_GalleryNavigationMotion->NewIntent();
     const auto* owner = FindProjectWorkspace(m_ActiveProjectWorkspace);
     rail.requestedDestination = owner ? destination : -1;
     rail.requestedWorkspace = m_ActiveProjectWorkspace;
@@ -37,7 +38,9 @@ void AppShell::ApplyRailNavigation() {
     }
     // Keep the latest user destination separate from load-owned Graph/View
     // requests. A canceled or replaced load cannot replay its old navigation.
-    if (!CanSwitchProjectWorkspace() || owner->loadTransition.phase != ProjectLoadPhase::None) return;
+    if (!CanSwitchProjectWorkspace() ||
+        (owner->loadTransition.phase != ProjectLoadPhase::None &&
+         !(rail.requestedDestination==Library && m_GalleryNavigationMotion->Owns(owner->id)))) return;
     const int destination = std::exchange(rail.requestedDestination, -1);
     CancelProjectPillPreview();
     if (destination == Library && rail.galleryView) {
@@ -117,6 +120,8 @@ void AppShell::LayoutNavigationRail() {
     const float top = processing ? 0.f : graphBody ? toolbarHeight : std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
     rail.bodyPosition = ImVec2(rail.panelPosition.x + rail.visiblePanelWidth, viewport->Pos.y + top);
     rail.bodySize = ImVec2(std::max(1.f, available - rail.visiblePanelWidth), std::max(1.f, viewport->Size.y - top));
+    m_GalleryNavigationMotion->Viewport(m_ActiveProjectWorkspace,
+        {rail.bodyPosition,{rail.bodyPosition.x+rail.bodySize.x,rail.bodyPosition.y+rail.bodySize.y}});
     m_Editor->SetGraphReturnBounds(
         ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight),
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));

@@ -17,6 +17,10 @@ public:
         std::uint64_t previewWorkspace = 0;
         int previewRootView = -1;
         float previewAmount = 0.f;
+        bool navigationTransition=false;
+        std::uint64_t navigationGeneration=0;
+        float navigationWeight=1.f;
+        ImVec2 navigationDepartureLow{},navigationDepartureHigh{};
     };
     void BeginFrame() {
         fixed.clear(); chrome.clear(); toolsFixed = nullptr;
@@ -64,6 +68,7 @@ private:
     ImVec4 lastPreviewClear{};
     int previousMode = 0;
     std::uint64_t destination = 0;
+    std::uint64_t navigationGeneration=0;
     double fadeStarted = 0;
     int width = 0, height = 0;
     bool failed = false;

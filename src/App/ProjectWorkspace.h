@@ -2,6 +2,7 @@
 
 #include "App/ProjectLoadTransition.h"
 #include "Animation/ControlMotion.h"
+#include "Renderer/GalleryTransitionOrigin.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -29,6 +30,7 @@ struct ProjectWorkspace {
     std::filesystem::path sourceWorkspaceRoot;
     int rootTab = 5;
     ProjectLoadTransition loadTransition;
+    Stack::Renderer::GalleryTransitionOrigin galleryOrigin;
     bool rawCatalogRefreshPending = false;
     std::uint64_t observedProjectCatalogRevision = 0;
     std::string previewDocumentId;

@@ -114,7 +114,7 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         };
         for (int i=0;i<12;++i) {frame();stablePositions();}
         capture("controls-320.png");
-        io.AddMousePosEvent(40,controls.front()->Pos.y-45.f);frame();
+        io.AddMousePosEvent(40,controls.front()->Pos.y-(ImGui::GetFontSize()+10.f)*.5f-ImGui::GetStyle().ItemSpacing.y);frame();
         io.AddMouseWheelEvent(0,-12);for (int i=0;i<5;++i) frame();
         bool scrolled=false;
         for (auto* item:ImGui::GetCurrentContext()->Windows) {
@@ -130,14 +130,30 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         io.AddMouseWheelEvent(0,30);for (int i=0;i<5;++i) frame();
         controls=primaries();
         // Use the rendered first section's geometry to click its second node.
-        const float buttonWidth=ImGui::CalcTextSize("1").x+14.f;
         const float buttonHeight=ImGui::GetFontSize()+10.f;
-        const ImVec2 secondButton(controls.front()->Pos.x+buttonWidth+4.f+buttonWidth*.5f,
+        const float buttonWidth=std::max(buttonHeight,ImGui::CalcTextSize("3").x+14.f);
+        const float versionsStart=controls.front()->Pos.x+ImGui::CalcTextSize("Exposure").x+8.f;
+        const ImVec2 secondButton(versionsStart+buttonWidth*1.5f,
             controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
         io.AddMousePosEvent(secondButton.x,secondButton.y);frame();
         io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
         require(editor->GetRawLayerToolIndex()!=selectedBefore,"The numbered selector did not change the active instance.");
         require(editor->SerializePipeline().at("rawLayerStack")==authored,"Selecting a numbered instance changed its parameters.");
+        controls=primaries();
+        const int numberedTarget=editor->GetRawLayerToolIndex();
+        require(controls.size()>1,"The heading selection check needs a second visible section.");
+        io.AddMousePosEvent(controls[1]->Pos.x+5.f,controls[1]->Pos.y+5.f);frame();
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        require(editor->GetRawLayerToolIndex()!=numberedTarget,"The other section did not activate its tool.");
+        controls=primaries();
+        io.AddMousePosEvent(controls.front()->Pos.x+10.f,
+            controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);frame();
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        require(editor->GetRawLayerToolIndex()==numberedTarget,"Clicking the name did not restore its chosen instance.");
+        editor->SetViewSectionTab(2);frame();
+        require(editor->GetRawLayerToolIndex()==numberedTarget,"Settings lost the name-selected tool.");
+        editor->SetViewSectionTab(1);frame();
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Selecting a heading changed authored values.");
         controls=primaries();
         const ImVec2 slider(controls.front()->Pos.x+controls.front()->Size.x*.75f,
             controls.front()->Pos.y+50.f*ImGui::GetFontSize()/16.f);
@@ -176,7 +192,7 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         require(editor->RedoRawLayerEdit(),"Panel editing could not be redone.");
         require(editor->SerializePipeline().at("rawLayerStack")==edited,"Redo did not restore the panel's instance edit.");
         controls=primaries();
-        const ImVec2 thirdButton(controls.front()->Pos.x+2*(buttonWidth+4.f)+buttonWidth*.5f,
+        const ImVec2 thirdButton(versionsStart+buttonWidth*2.5f,
             controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
         io.AddMousePosEvent(thirdButton.x,thirdButton.y);frame();
         io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
@@ -240,7 +256,7 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         RawWorkspace::AppState restored;
         require(RawWorkspace::LoadAppState(preferenceFile,restored,&error),error.c_str());
         require(restored.viewSectionTab==1 && !restored.viewSectionOpen,"Controls presentation did not survive app-state reload.");
-        std::cout<<"View Controls: hidden hover text, stable section layout through edits, continuous slider and curve outside-edge dragging and release, idle drawing, numbered instances across layers, targeted slider editing, undo/redo, panel tabs/closing, scrollbar-free scrolling, narrow layout, persisted preferences and finite reveal passed.\n";
+        std::cout<<"View Controls: inline version selection, name activation and Settings ownership, hidden hover text, stable section layout through edits, continuous slider and curve outside-edge dragging and release, idle drawing, numbered instances across layers, targeted slider editing, undo/redo, panel tabs/closing, scrollbar-free scrolling, narrow layout, persisted preferences and finite reveal passed.\n";
         success=true;
     } catch (const std::exception& exception) {std::cerr<<exception.what()<<'\n';}
     editor->RequestWorkerShutdownForAppClose();Async::TaskSystem::Get().Shutdown();editor.reset();

@@ -660,7 +660,7 @@ public:
 
     using OpenGlTask = std::function<bool(std::string&)>;
 
-    bool Initialize(GLFWwindow* sharedWindow);
+    bool Initialize(GLFWwindow* sharedWindow, bool waitForReady = true);
     // Executes a short, self-contained compute task on the worker's hidden
     // shared OpenGL context. The caller may be any non-render thread. Shutdown
     // and worker failure always release a blocked caller with an error.
@@ -684,6 +684,7 @@ public:
     bool TryConsumeViewportTiming(Result& result);
     bool IsBusy() const { return m_Busy.load(); }
     bool IsAvailable() const;
+    bool IsInitializing() const;
     // Fatal termination is distinct from cancellation/requested shutdown.
     // The bool remains authoritative if allocating the diagnostic fails.
     bool GetThreadFailure(std::string* error = nullptr) const noexcept;

@@ -13,6 +13,7 @@ struct GalleryNavigatorAction {
     std::optional<RawWorkspace::GalleryContentMode> category;
     bool folderChanged = false, openFolder = false;
     std::optional<std::string> folder;
+    ImVec2 browseMinimum{},browseMaximum{};
 };
 
 enum class GalleryNavigatorFooterAction { None, Grid, Filmstrip, Sort, Properties, More };

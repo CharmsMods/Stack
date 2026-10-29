@@ -75,7 +75,8 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     if (rawWorkspaceActive && !m_RenderDirty && !explicitCaptureRequested &&
         Stack::EditorRendering::RawRenderService::Get().HasWorkerFailure(m_RawRenderClientId)) return;
     if ((!m_RawWorkspaceRootTabActive || !rawWorkspaceActive) && !GraphRenderBackendReady()) {
-        FailFullQualityRenderRequest("The render worker is unavailable for full-quality rendering.");
+        if(!m_RenderWorker.IsInitializing())
+            FailFullQualityRenderRequest("The render worker is unavailable for full-quality rendering.");
         return;
     }
     const bool compositeMode = Stack::EditorRenderScheduling::

@@ -1941,6 +1941,11 @@ void AppShell::Run() {
                     static_cast<std::size_t>(Stack::UiPerformance::Stage::ProjectWorkspaces)];
         }
         if(m_UiPerformanceCapture)m_UiPerformanceCapture->BeginGpu();
+        if(m_GalleryNavigationMotion->HasImage()) {
+            auto* overlay=ImGui::GetForegroundDrawList();
+            m_GalleryNavigationMotion->DrawOverlay(*overlay);
+            m_WorkspaceCompositor.KeepFixed(overlay);
+        }
         ImGui::Render();
         if (!m_CloseRequested) {
             for (const auto& workspace : m_ProjectWorkspaces) ProcessGraphCaptureRequest(workspace->editor.get());
@@ -1983,6 +1988,12 @@ void AppShell::Run() {
         Stack::Renderer::WorkspaceCompositor::ProjectFrame projectFrame;
         projectFrame.reducedMotion = Stack::Notifications::SystemReducedMotion();
         projectFrame.rootView = m_CurrentTabId;
+        projectFrame.navigationTransition=m_GalleryNavigationMotion->HasImage() && m_GalleryNavigationMotion->Active() &&
+            (m_ActiveProjectWorkspace==m_GalleryWorkspaceId || m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace));
+        projectFrame.navigationGeneration=m_GalleryNavigationMotion->Generation();
+        projectFrame.navigationWeight=m_GalleryNavigationMotion->SceneWeight();
+        projectFrame.navigationDepartureLow=m_GalleryNavigationMotion->Departure().Min;
+        projectFrame.navigationDepartureHigh=m_GalleryNavigationMotion->Departure().Max;
         const auto* mainViewport = ImGui::GetMainViewport();
         // Retain the scene beneath the translucent live bars too. Cropping at
         // the panel left the outgoing project's backdrop beneath them on hover.
@@ -3349,6 +3360,15 @@ void AppShell::RequestRootTabTransition(int newTab) {
     if (ImGui::GetTopMostPopupModal() != nullptr) {
         return;
     }
+    if(m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace) &&
+        !IsRawWorkspaceRootTab(newTab) && newTab!=m_CurrentTabId)
+        m_GalleryNavigationMotion->CancelImage();
+    if(m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace) &&
+        IsRawWorkspaceRootTab(newTab)) {
+        if(newTab!=m_CurrentTabId)OnTabChanged(m_CurrentTabId,newTab);
+        m_CurrentTabId=newTab;m_RootTabBodyFadeActive=false;
+        return;
+    }
     if (m_RootTabBodyFadeActive) {
         m_RootTabBodyFadeQueuedTab =
             newTab == m_RootTabBodyFadeToTab ? -1 : newTab;
@@ -3446,6 +3466,8 @@ float AppShell::ConsumeRootTabBodyFadeAlpha(int* outRenderTabId) {
 void AppShell::Shutdown() {
     if (!m_Window) return;
 
+    m_GalleryNavigationMotion->Shutdown();
+    m_GalleryTabOpenQueue.clear();m_PendingGalleryTabOpen.reset();m_BackgroundGalleryTabOpens.clear();
     TraceShutdownPhase("shutdown-begin");
     auto runPhase = [&](const char* phase, const std::function<void()>& action) {
         TraceShutdownPhase((std::string(phase) + "-begin").c_str());

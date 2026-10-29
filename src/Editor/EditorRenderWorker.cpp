@@ -1503,7 +1503,7 @@ float EditorRenderWorker::CompareDevelopCandidateRenderMetrics(
         std::fabs(a.subjectMarkedLowPriorityPressure - b.subjectMarkedLowPriorityPressure) * 0.08f;
 }
 
-bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
+bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow, bool waitForReady) {
     if (m_Thread.joinable()) {
         return true;
     }
@@ -1583,6 +1583,7 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
         return false;
     }
 
+    if(!waitForReady)return true;
     {
         std::unique_lock<std::mutex> lock(m_Mutex);
         m_Cv.wait(lock, [this]() {
@@ -1887,6 +1888,11 @@ void EditorRenderWorker::UpdateGraphContext(const Stack::GraphRendering::Request
         }
         m_LatestGraphRequest = context;
     }
+}
+
+bool EditorRenderWorker::IsInitializing() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Thread.joinable() && !m_InitComplete && !m_StopRequested;
 }
 
 bool EditorRenderWorker::IsAvailable() const {

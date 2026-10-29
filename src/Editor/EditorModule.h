@@ -16,6 +16,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "Raw/RawViewportTransition.h"
 #include "Renderer/RawImageBackdrop.h"
 #include "Editor/UI/ImageViewTransition.h"
+#include "App/GalleryNavigationTransition.h"
 #include "Editor/UI/NodeOpenTransition.h"
 #include "Raw/RawViewportTimingHistory.h"
 #include "Raw/RawViewportPreferences.h"
@@ -208,7 +209,7 @@ public:
     ~EditorModule();
 
     void Initialize(GLFWwindow* sharedWindow = nullptr, StackAppearance::AppearanceManager* appearance = nullptr,
-        bool restoreWorkspace = true);
+        bool restoreWorkspace = true, bool lightweightView = false);
     void TickAutoBracketing(bool externalBusy);
     bool IsUserStartedProcessingBusy() const;
     bool ConsumeAutoBracketWorkspaceRequest();
@@ -1275,12 +1276,18 @@ public:
     }
     bool CanAddProjectOutputToQueue(int outputNodeId, std::string* reason = nullptr) const;
     bool AddProjectOutputToQueue(int outputNodeId);
+    void SetGalleryNavigationTransition(std::shared_ptr<Stack::Navigation::GalleryNavigationTransition> motion,
+        std::uint64_t workspace) {m_GalleryNavigationMotion=std::move(motion);m_GalleryNavigationWorkspace=workspace;}
+    Stack::Renderer::GalleryTransitionOrigin CaptureGalleryTransitionOrigin(
+        const std::filesystem::path& subject,const std::string& key={},const ImRect& bounds={});
+    void EnsureGraphWorkers();
     struct RawGalleryOpenItem {
         std::filesystem::path path;
         bool project = false;
         // Captured by folder-card previews, which need not belong to the live
         // Gallery catalog. Empty callers resolve provenance when enqueued.
         std::filesystem::path sourceWorkspaceRoot;
+        Stack::Renderer::GalleryTransitionOrigin transitionOrigin;
     };
     struct RawGalleryOpenSelection {
         std::vector<RawGalleryOpenItem> items;
@@ -1467,7 +1474,20 @@ private:
         std::string errorMessage;
     };
 
+    std::shared_ptr<Stack::Navigation::GalleryNavigationTransition> m_GalleryNavigationMotion;
+    std::uint64_t m_GalleryNavigationWorkspace=0;
+    ImRect m_GalleryBrowseAnchor;
+    GLFWwindow* m_DeferredGraphWorkerWindow=nullptr;
+    bool m_DeferredGraphWorkers=false;
+    struct RetiredGalleryThumbnail {
+        std::shared_ptr<const Stack::Renderer::GalleryThumbnailLease> lease;
+        int submittedFrame=-1;
+    };
+    std::unordered_map<unsigned int,std::weak_ptr<const Stack::Renderer::GalleryThumbnailLease>> m_GalleryThumbnailLeases;
+    std::vector<RetiredGalleryThumbnail> m_RetiredGalleryThumbnails;
+    std::size_t m_RetiredGalleryThumbnailBytes=0;
     struct RawWorkspaceThumbnailTexture {
+        std::string sourceIdentity;
         unsigned int texture = 0;
         std::filesystem::path absolutePath;
         std::string metadataIdentity;
@@ -3212,6 +3232,7 @@ private:
     mutable std::vector<Stack::RawWorkspace::SourceFolderCard> m_RawGalleryFolderCardView;
     std::unordered_map<std::string, Stack::RawWorkspace::SourceFolderCard> m_RawGallerySourceFolderCards;
     void RenderRawGallerySourceFolders(const ImVec2& size);
+    void RenderRawWorkspaceGalleryContentSurface(const ImVec2& size);
     Stack::RawWorkspace::GalleryPresentation m_RawGalleryFilteredPresentation;
     std::uint64_t m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t m_RawGalleryFilteredQueueRevision = std::numeric_limits<std::uint64_t>::max();

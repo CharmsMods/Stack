@@ -51,6 +51,10 @@ bool EditorModule::IsCurrentGraphResult(const EditorRenderWorker::Result& result
 }
 
 bool EditorModule::GraphRenderBackendReady() {
+    if(m_Project->graph.IsOutputConnected() && (!IsRawWorkspaceProjectActive() || !m_RawWorkspaceRootTabActive))
+        EnsureGraphWorkers();
+    // Startup readiness is not a rendering failure.
+    if(!IsRawWorkspaceProjectActive() && m_RenderWorkerAvailable && m_RenderWorker.IsInitializing())return false;
     m_Viewport.FrameTransition().Validate(CurrentGraphRenderTag(),
         ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0);
     const bool available = IsRawWorkspaceProjectActive()

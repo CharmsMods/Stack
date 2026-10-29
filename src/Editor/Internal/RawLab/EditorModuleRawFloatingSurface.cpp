@@ -38,7 +38,8 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     }
     UpdateNodeOpenTransition();
     const float openingOpacity = m_NodeOpenTransition.ControlsOpacity(ImGui::GetTime()) *
-        m_NodeEditorPanel.Reveal(ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
+        m_NodeEditorPanel.Reveal(ImGui::GetTime(),Stack::LibraryUi::ReducedMotion()) *
+        (m_GalleryNavigationMotion ? m_GalleryNavigationMotion->ImageControls(m_GalleryNavigationWorkspace) : 1.f);
     if (openingOpacity <= .001f) {
         surface.input = {};
         surface.frame = -1;
