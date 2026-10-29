@@ -32,7 +32,8 @@ inline bool CompatibleFrameGeometry(const FramePresentation& previous, const Fra
 
 inline double FrameBlendDuration(const FramePresentation& previous,
     const FramePresentation& next, double workMilliseconds,
-    int fadeBelowFps = Raw::kDefaultViewportFadeBelowFps) {
+    int fadeBelowFps = Raw::kDefaultViewportFadeBelowFps,
+    int targetFps = Raw::kDefaultViewportTargetFps) {
     const double oldDensity = previous.region.Valid() ?
         double(previous.width) * previous.region.fullWidth / previous.region.width : previous.width;
     const double newDensity = next.region.Valid() ?
@@ -40,14 +41,18 @@ inline double FrameBlendDuration(const FramePresentation& previous,
     const bool refinement = oldDensity > 0 && newDensity > oldDensity * 1.01;
     if (!CompatibleFrameGeometry(previous, next) ||
         next.width <= 0 || next.height <= 0 || previous.width <= 0 || previous.height <= 0 ||
-        previous.completedAt < 0 || !std::isfinite(workMilliseconds) || workMilliseconds <= 0 ||
-        (workMilliseconds < 1000.0 / Raw::ClampViewportFadeBelowFps(fadeBelowFps) && !refinement))
+        previous.completedAt < 0)
         return 0;
     const double cadence = next.completedAt - previous.completedAt;
-    if (!std::isfinite(cadence) || cadence <= 0) return 0;
-    // Follow actual completions, excluding idle time before an edit. Keep the
-    // blend shorter than the cadence so it does not add a queue of old frames.
-    const double duration = 0.6 * std::min(cadence, workMilliseconds / 1000.0);
+    if (!std::isfinite(cadence) || cadence <= 0 ||
+        (cadence < 1.0 / Raw::ClampViewportFadeBelowFps(fadeBelowFps) && !refinement)) return 0;
+    // The threshold describes visible update cadence, including intentional
+    // FPS pacing, not just worker cost. Bound duration separately so an idle
+    // gap does not make the first cheap edit fade for hundreds of milliseconds.
+    const double workSeconds = std::isfinite(workMilliseconds)
+        ? std::max(0.0, workMilliseconds) / 1000.0 : 0.0;
+    const double expectedInterval = 1.0 / Raw::ClampViewportTargetFps(targetFps);
+    const double duration = 0.6 * std::min(cadence, std::max(workSeconds, expectedInterval));
     return refinement ? std::clamp(duration, .020, .20) : std::clamp(duration, 0.0, .20);
 }
 }

@@ -13,10 +13,10 @@ FrameBounds NormalizedBounds(const Stack::Renderer::ImageRegion& region) {
 }
 
 bool GraphFrameTransition::Prepare(const Stack::GraphRendering::FramePresentation& next,
-    double workMilliseconds, int fadeBelowFps, bool smoothUpdates) {
+    double workMilliseconds, int fadeBelowFps, bool smoothUpdates, int targetFps) {
     ReleaseSubmittedDraw();
     const double duration = smoothUpdates
-        ? Stack::GraphRendering::FrameBlendDuration(m_Last, next, workMilliseconds, fadeBelowFps) : 0;
+        ? Stack::GraphRendering::FrameBlendDuration(m_Last, next, workMilliseconds, fadeBelowFps, targetFps) : 0;
     const double progress = m_StartedAt >= 0 && m_Duration > 0
         ? std::clamp((next.completedAt - m_StartedAt) / m_Duration, 0.0, 1.0) : 0.0;
     const bool keepBase = m_Previous && m_Duration > 0 && progress < 1.0 &&

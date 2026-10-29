@@ -37,10 +37,13 @@ void TestGraphRenderPolicyAndNavigation() {
     require(std::abs(FrameBlendDuration(previous, next, 200) - 0.12) < 0.0001);
     const double fadeCutoffMs = 1000.0 /
         Raw::ClampViewportFadeBelowFps(Raw::kDefaultViewportFadeBelowFps);
-    require(FrameBlendDuration(previous, next, fadeCutoffMs * 0.5) == 0);
-    const double cutoffBlend = FrameBlendDuration(previous, next, fadeCutoffMs);
+    // The fade threshold follows presented update intervals, not worker cost.
+    next.completedAt = previous.completedAt + fadeCutoffMs * 0.5 / 1000.0;
+    require(FrameBlendDuration(previous, next, 100) == 0);
+    next.completedAt = previous.completedAt + fadeCutoffMs * 1.01 / 1000.0;
+    const double cutoffBlend = FrameBlendDuration(previous, next, 1);
     require(cutoffBlend > 0 && std::abs(cutoffBlend -
-        0.6 * fadeCutoffMs / 1000.0) < 0.000001);
+        0.6 * fadeCutoffMs * 1.01 / 1000.0) < 0.000001);
     next.completedAt = 100;
     require(std::abs(FrameBlendDuration(previous, next, 100) - 0.06) < 0.0001);
     next.identity.outputNodeId++;

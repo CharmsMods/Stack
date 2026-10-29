@@ -136,6 +136,7 @@ public:
     void SetRawViewportPreferences(Raw::ViewportPreferences preferences);
     void ResetRawViewportLearnedTimings();
     std::string GetRawViewportDecisionStatus() const;
+    Stack::EditorRendering::ViewportQualityBar GetViewportQualityBar(int maximumFps) const;
     void SetSmoothRawViewportUpdates(bool enabled);
     int GetRawViewportFadeBelowFps() const;
     void SetRawViewportFadeBelowFps(int fps);

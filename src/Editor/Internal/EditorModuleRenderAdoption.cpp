@@ -944,7 +944,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                      result.rawWorkspace.viewportDiagnostic || result.rawRenderPurpose == RawRenderPurpose::ExplicitInspection},
                     result.telemetry.queueWaitMs + result.telemetry.workerTotalMs,
                     GetRawViewportFadeBelowFps(), GetSmoothRawViewportUpdates() && !m_NodeOpenTransition.Active() &&
-                        !ActiveViewportPreviewState().navigationActive);
+                        !ActiveViewportPreviewState().navigationActive, GetRawViewportTargetFps());
             } else {
                 frameTransition.Reset();
             }

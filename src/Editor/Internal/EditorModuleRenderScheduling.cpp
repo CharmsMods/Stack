@@ -128,7 +128,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     const bool workerBusy = allowBackgroundRenderWorker &&
         (m_RenderPending || IsAnyRenderBackendBusy());
     if (!compositeMode && m_RenderDirty) {
-        const auto& view = ActiveViewportPreviewState();
+        auto& view = ActiveViewportPreviewState();
         // Coalesce edits in the document while a useful interactive frame is
         // running. Do not serialize, hash and region-plan another full graph
         // on every UI frame merely to replace a pending snapshot.
@@ -137,14 +137,17 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         const bool snapshotWorkPending = m_RawRenderClientId != 0
             ? Stack::EditorRendering::RawRenderService::Get().HasSnapshotWorkFor(m_RawRenderClientId)
             : m_RenderWorker.HasSnapshotWorkFor(0);
-        if (UsesGraphViewportPreview() && (snapshotWorkPending || !m_DeferredRenderResults.empty()) &&
-            view.submittedPurpose == RawRenderPurpose::InteractivePresentation &&
-            Stack::GraphRendering::SameContext(view.submittedTag,CurrentGraphRenderTag())) return;
+        const bool graphPreview = UsesGraphViewportPreview();
+        const bool sameContext = graphPreview &&
+            Stack::GraphRendering::SameContext(view.submittedTag, CurrentGraphRenderTag());
+        if (graphPreview && (snapshotWorkPending || !m_DeferredRenderResults.empty()) &&
+            view.submittedPurpose == RawRenderPurpose::InteractivePresentation && sameContext) return;
         // The FPS setting limits preparation/submission as well as resolution.
         // This is a cadence limit, not a quiet-period debounce: continuous
         // input keeps producing frames at the configured rate.
-        if (view.lastSubmissionAt >= 0 && now-view.lastSubmissionAt <
-            1.0/std::max(1,GetRawViewportTargetFps())) return;
+        if (graphPreview && !sameContext)
+            view.submissionPacer.Reset();
+        if (!view.submissionPacer.Ready(now, GetRawViewportTargetFps())) return;
     }
     m_GraphPerformanceStats.lastPreviewRequestBuildMs = 0.0f;
     m_GraphPerformanceStats.lastCompositeRequestBuildMs = 0.0f;
@@ -391,7 +394,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         return;
     }
 
-    ActiveViewportPreviewState().lastSubmissionAt = now;
+    ActiveViewportPreviewState().submissionPacer.Submitted(now, GetRawViewportTargetFps());
     m_RenderGeneration =
         Stack::EditorRenderScheduling::NextGlobalGeneration();
     m_LastSubmittedRenderRevision = m_RenderRevision;

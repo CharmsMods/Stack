@@ -51,10 +51,12 @@ std::string EditorModule::GetRawViewportDecisionStatus() const {
     if (UsesGraphViewportPreview()) {
         const auto& state = ActiveViewportPreviewState();
         std::ostringstream text;
-        text << "Interactive sampling: " << state.interactiveEdge << " px longest side";
-        if (state.selection.predictedMs > 0) text << std::fixed << std::setprecision(1) <<
-            "; predicted " << state.selection.predictedMs << " ms";
-        if (state.selection.provisional) text << ". Learning this workload";
+        if (state.plannedEdge > 0) {
+            text << "Last planned sampling: " << state.plannedEdge << " px longest side";
+            if (state.plannedTiming.costKnown && state.plannedTiming.predictedMs > 0)
+                text << std::fixed << std::setprecision(1) << "; predicted " << state.plannedTiming.predictedMs << " ms";
+            if (state.plannedTiming.provisional) text << ". Provisional timing estimate";
+        } else text << "Preview timing is not available yet";
         if (state.refinementBlocked) text << ". Native detail is limited by the memory or texture budget";
         if (!state.refinementError.empty() && !state.refinementBlocked) {
             text << ". Native detail " << (state.refinementFailures >= 3 ? "failed after retries: " : "will retry: ")
@@ -81,7 +83,10 @@ std::string EditorModule::GetRawViewportDecisionStatus() const {
     return text.str();
 }
 void EditorModule::ResetRawViewportLearnedTimings() {
-    for (auto& state : m_ViewportPreviewStates) state.timings.Reset();
+    for (auto& state : m_ViewportPreviewStates) {
+        state.timings.Reset();
+        ++state.qualityModel.revision;
+    }
     CancelRawViewportCalibration();
     m_RawViewportTimingHistory.ResetHardware();
     m_RawViewportTimingHistory.MergeLoaded(m_RawViewportTimingBank);

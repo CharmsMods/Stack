@@ -1,4 +1,5 @@
 #include "App/settings/PaletteWorkshop.h"
+#include "App/settings/ViewportQualityControls.h"
 #include "AppSettingsPopup.h"
 #include "Raw/RawViewportSettings.h"
 
@@ -243,35 +244,9 @@ void RenderRawSection(EditorModule* editor, const float contentWidth) {
 
     ImGui::TextWrapped("Editing modules are selected from the left icon sidebar. Their controls appear beside it.");
     ImGui::Spacing();
-    int targetFps = editor->GetRawViewportRequestedFps();
-    ImGui::SetNextItemWidth(std::min(contentWidth, kSettingsControlWidth));
-    if (ImGui::SliderInt("Target viewport FPS", &targetFps,
-        Raw::kMinimumViewportTargetFps, std::max({240,editor->GetRawViewportMaximumFps(),targetFps}), "%d FPS",
-        ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
-        editor->SetRawViewportTargetFps(targetFps);
-    }
-    if (ImGui::IsItemDeactivatedAfterEdit()) editor->FinishRawViewportTargetFpsEdit();
-    ImGui::TextDisabled("Display limit: %d FPS", editor->GetRawViewportMaximumFps());
-    const double nativeFps = editor->GetRawViewportNativeFps();
-    if (nativeFps > 0.0) ImGui::Text("Whole image rebuild: approximately %.1f FPS", nativeFps);
-    const double visibleFps = editor->GetRawViewportVisibleNativeFps();
-    if (visibleFps > 0.0) ImGui::Text("Native visible area: approximately %.1f FPS", visibleFps);
-    if (editor->GetRawViewportRequestedFps()>editor->GetRawViewportMaximumFps())
-        ImGui::TextDisabled("Requested %d FPS; using %d FPS on this display",editor->GetRawViewportRequestedFps(),editor->GetRawViewportTargetFps());
-    auto preferences=editor->GetRawViewportPreferences();
-    int mode=static_cast<int>(preferences.mode);
-    ImGui::SetNextItemWidth(std::min(contentWidth,kSettingsControlWidth));
-    if (ImGui::Combo("During adjustments",&mode,"Target FPS\0Preserve detail\0")) {
-        preferences.mode=static_cast<Raw::ViewportInteractionMode>(mode);
-        editor->SetRawViewportPreferences(preferences);
-    }
-    ImGui::BeginDisabled(preferences.mode!=Raw::ViewportInteractionMode::PreserveDetail);
-    ImGui::SetNextItemWidth(std::min(contentWidth,kSettingsControlWidth));
-    if (ImGui::SliderInt("Minimum display detail",&preferences.minimumDetailPercent,25,100,"%d%%",ImGuiSliderFlags_AlwaysClamp))
-        editor->SetRawViewportPreferences(preferences);
-    ImGui::EndDisabled();
-    ImGui::TextWrapped("100%% matches physical display detail at the current zoom, up to native source detail. Preserving detail can lower the achieved update rate.");
+    Stack::Settings::RenderViewportQualityControls(*editor,std::min(contentWidth,kSettingsControlWidth));
     ImGui::TextWrapped("%s",editor->GetRawViewportDecisionStatus().c_str());
+    auto preferences = editor->GetRawViewportPreferences();
     if (ImGui::Checkbox("Learn extra RAW timings while idle",&preferences.backgroundLearning))
         editor->SetRawViewportPreferences(preferences);
     if (ImGui::Button("Reset learned timings for this hardware")) editor->ResetRawViewportLearnedTimings();
@@ -292,7 +267,7 @@ void RenderRawSection(EditorModule* editor, const float contentWidth) {
     ImGui::EndDisabled();
     const std::string calibrationStatus = editor->GetRawViewportCalibrationStatus();
     ImGui::TextWrapped("%s", calibrationStatus.c_str());
-    ImGui::TextWrapped("During adjustments, resolution adapts toward this target. RAW/Graph image requests are paced to avoid preparing work faster than it can be displayed. Lower FPS allows more detail; higher FPS favors responsiveness. After edits settle, the visible area returns to native detail where memory permits, including while zooming or panning. Moving a floating tool does not lower image quality.");
+    ImGui::TextWrapped("During adjustments, resolution adapts toward this target. RAW/Graph image requests are paced to avoid preparing work faster than it can be displayed. Lower FPS allows more detail; higher FPS favors responsiveness. After edits settle, the visible area returns to native detail where memory permits. Zooming and panning reuse retained detail; missing coverage is refined after navigation stops. Moving a floating tool does not lower image quality.");
 }
 
 void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, State& state, const float contentWidth) {

@@ -293,10 +293,15 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
         << state.acceptedContentIdentity << " refine=" << state.refinement << '\n';
     if (content != state.contentIdentity) {
         state.contentIdentity = content; state.contentChangedAt = ImGui::GetTime();
+        state.qualityModel.valid = false;
+        ++state.qualityModel.revision;
         state.refinement = false; state.refinementBlocked = false;
         state.refinementGeneration = 0; state.refinementFailures = 0;
         state.refinementRetryAt = -1; state.refinementError.clear();
     }
+    // A changed render revision remains untrusted until snapshot content has
+    // been reconciled above. Pure refinement can then reuse the editing model.
+    state.qualityModel.renderRevision = m_RenderRevision;
     const auto visible = request.visible;
     request.visible = PadViewportPreviewRegion(visible);
     const auto preferences = GetRawViewportPreferences();
@@ -349,6 +354,19 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     }
     state.selection = SelectViewportPreviewCandidate({displayEdge,minimum,nativeEdge,GetRawViewportTargetFps(),0,budget,
         preferences.mode == Raw::ViewportInteractionMode::PreserveDetail,initialEdge},candidates);
+    // Retain admitted plans for the settings forecast. Reuse these plans and
+    // timing evidence; drawing/hovering a setting must never plan or render graphs.
+    if (snapshot.telemetry.interactionActive && measuredDemand) {
+        auto& model = state.qualityModel;
+        model.input = {displayEdge,minimum,nativeEdge,GetRawViewportTargetFps(),0,budget,
+            preferences.mode == Raw::ViewportInteractionMode::PreserveDetail,initialEdge};
+        model.candidates = candidates;
+        model.visibleWidth = visible.width; model.visibleHeight = visible.height;
+        model.physicalWidth = state.physicalWidth; model.physicalHeight = state.physicalHeight;
+        model.preserveDetail = preferences.mode == Raw::ViewportInteractionMode::PreserveDetail;
+        model.minimumDetailPercent = preferences.minimumDetailPercent;
+        model.valid = true; ++model.revision;
+    }
     int edge = state.selection.edge;
     const auto measuredSizes = std::count_if(candidates.begin(), candidates.end(),
         [](const auto& candidate) { return candidate.timingCovered; });
@@ -427,6 +445,8 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     snapshot.prepareViewportOverview = request.visible.Partial() && state.overviewContentIdentity != content;
     snapshot.viewportTiling.mode = ViewportTilingMode::Off;
     const auto chosen = state.timings.Estimate(identity,edge);
+    state.plannedEdge = edge;
+    state.plannedTiming = chosen;
     snapshot.telemetry.predictedMs = chosen.costKnown ? chosen.predictedMs : 0.0;
     // An active ImGui item can be a floating window move, camera drag or FPS
     // setting. Only image edits should request approximate processing kernels.
@@ -617,6 +637,7 @@ void EditorModule::ObserveViewportPreviewTiming(const EditorRenderWorker::Result
         Clock::now();
     state.timings.Record(result.viewportExecutionIdentity,
         edge,result.telemetry.completedServiceMs,false,completedAt);
+    ++state.qualityModel.revision;
 }
 bool EditorModule::IsViewportPreviewResultCurrent(const EditorRenderWorker::Result& result) const {
     if (result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes && result.viewportViewId) {

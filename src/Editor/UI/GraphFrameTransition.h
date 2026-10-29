@@ -13,7 +13,8 @@ public:
         bool encoded = false;
     };
     bool Prepare(const Stack::GraphRendering::FramePresentation& next, double workMilliseconds,
-        int fadeBelowFps = Raw::kDefaultViewportFadeBelowFps, bool smoothUpdates = true);
+        int fadeBelowFps = Raw::kDefaultViewportFadeBelowFps, bool smoothUpdates = true,
+        int targetFps = Raw::kDefaultViewportTargetFps);
     void Retain(Raw::RawGpuImageLease previous) { if (!m_KeepBase) m_Previous = std::move(previous); }
     void RetainOwned(unsigned int texture, int width, int height);
     void Clear();

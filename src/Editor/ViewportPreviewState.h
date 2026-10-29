@@ -1,6 +1,8 @@
 #pragma once
 #include "Editor/EditorRenderWorker.h"
+#include "Editor/ViewportFramePacer.h"
 #include "Renderer/ViewportPreviewPolicy.h"
+#include "Editor/ViewportQualityPreview.h"
 #include <string>
 
 namespace Stack::EditorRendering {
@@ -11,6 +13,15 @@ struct ViewportPreviewState {
     Renderer::ViewportPreviewGeometry geometry;
     Renderer::ViewportPreviewTimingCurve timings;
     Renderer::ViewportPreviewSelection selection;
+    // Keep diagnostics paired with the final planned raster, after probing,
+    // stabilization and native refinement override the initial selection.
+    int plannedEdge = 0;
+    Renderer::ViewportPreviewTimingEstimate plannedTiming;
+    ViewportQualityModel qualityModel;
+    mutable ViewportQualityBar qualityBar;
+    mutable double qualityBarUpdatedAt = -1;
+    mutable std::uint64_t qualityBarRevision = 0;
+    mutable int qualityBarRequestedFps = 0, qualityBarDisplayFps = 0;
     EditorRenderWorker::SharedTextureResult overview;
     GraphRendering::RequestTag acceptedTag;
     GraphRendering::RequestTag submittedTag;
@@ -27,7 +38,7 @@ struct ViewportPreviewState {
     Renderer::ImageRegion backdropVisible;
     int backdropPhysicalWidth = 1, backdropPhysicalHeight = 1, backdropDemandFrame = -10;
     double contentChangedAt = -1;
-    double lastSubmissionAt = -1;
+    ViewportFramePacer submissionPacer;
     bool navigationActive = false, acceptedInteractive = false;
     double refinementRetryAt = -1;
     int refinementFailures = 0;
