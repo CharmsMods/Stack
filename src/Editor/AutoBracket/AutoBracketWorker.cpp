@@ -1,11 +1,16 @@
 #include "AutoBracketCoordinator.h"
+#include "AutoBracketMemoryPriority.h"
 #include "Persistence/BracketingResultStore.h"
+#include "Persistence/AutoBracketProvenance.h"
 #include "Persistence/MultiFrameProjectCreation.h"
 #include "Persistence/BracketingProject.h"
+#include "Project/BracketHdrStartingCurve.h"
+#include "Project/RawLayerStack.h"
 #include "Utils/PngEncodingUtils.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <optional>
 #include <thread>
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -74,9 +79,11 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
     // result IO. The engine is explicitly limited to this one CPU worker;
     // newly created std::threads must not be assumed to inherit this mode.
     const BackgroundWorkScope background;
+    std::optional<RunningAutomaticBurst> running;
     bool committed=false;
     bool processingFailure=false;
     try {
+        running.emplace(work->cancel);
         if(work->cancel)throw std::runtime_error("Canceled.");
         std::error_code ec;
         if(std::filesystem::exists(work->item.projectPath,ec)) {
@@ -138,7 +145,8 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
         }
         if(!committed) {
             const auto provenance=set->settings.find("autoBracket");
-            if(provenance!=set->settings.end()&&snapshot.persistedStorageRevision!=provenance->value("storageRevision",std::uint64_t{0})) {
+            if(provenance!=set->settings.end() && !Project::MatchesAutomaticBracketRevision(*set,
+                    snapshot.projectId, snapshot.dirtyRevision, snapshot.persistedStorageRevision)) {
                 work->outcome=State::Attention;
                 Status(work,"This bracket has existing edits and no current saved burst result. Open it to continue.");
                 work->notifier.FinishActivity(work->activity,Notifications::Outcome::Partial,
@@ -149,7 +157,8 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
             for(const auto value:orientations)if(Raw::Bracketing::ResolveOrientation(recipe,value)!=
                 Raw::Bracketing::ResolveOrientation(recipe,*orientations.begin()))
                     throw std::runtime_error("Review the capture orientations before processing.");
-            if(recipe.reconstruction!=Raw::Bracketing::ReconstructionMode::Standard)
+            if(recipe.reconstruction!=Raw::Bracketing::ReconstructionMode::Standard&&
+               recipe.reconstruction!=Raw::Bracketing::ReconstructionMode::Adaptive)
                 throw std::runtime_error("This bracket has manual reconstruction settings. Open it to continue.");
             if(provenance==set->settings.end()) {
                 const auto transaction=work->project.store->BeginTransaction(snapshot.persistedStorageRevision);
@@ -183,6 +192,14 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
             if(cover.empty())throw std::runtime_error("Could not encode the bracket preview.");
             if(work->cancel)throw std::runtime_error("Canceled.");
             Status(work,"Saving bracket...");
+            if(!set->settings.value(kBracketToneFitConsidered,false)) {
+                RawLayerStackState layers;
+                std::string layerError;
+                if(ReadRawLayersFromPipeline(snapshot.pipelineData,layers,layerError) &&
+                    FitBracketStartingCurve(layers,result,recipe))
+                    snapshot.pipelineData["rawLayerStack"]=SerializeRawLayerStack(layers);
+                set->settings[kBracketToneFitConsidered]=true;
+            }
             if(!SaveBracketingResult(work->project.store,snapshot,request.setId,result,cover,error)) {
                 work->storageFailure=true;throw std::runtime_error(error);
             }

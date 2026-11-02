@@ -120,7 +120,7 @@ std::vector<DngTiffReader::Entry> DngTiffReader::ReadEntries(std::uint32_t ifdOf
     return entries;
 }
 
-std::vector<std::uint32_t> DngTiffReader::ReadIfdTree() {
+std::vector<std::uint32_t> DngTiffReader::ReadIfdTree(bool preserveSubIfdOrder) {
     std::vector<std::uint32_t> result;
     std::vector<std::uint32_t> pending;
     std::vector<std::uint32_t> discovered;
@@ -146,7 +146,11 @@ std::vector<std::uint32_t> DngTiffReader::ReadIfdTree() {
         for (const Entry& entry : entries) {
             if (entry.tag != 330) continue;
             if (entry.count > kMaxIfds) Warn("DNG supplement exceeded the TIFF directory limit.");
-            for (double value : NumberValues(entry, kMaxIfds)) {
+            auto children = NumberValues(entry, kMaxIfds);
+            // The pending stack pops from the back. Semantic mask siblings
+            // retain the near-to-far order authored in the SubIFDs tag.
+            if (preserveSubIfdOrder) std::reverse(children.begin(), children.end());
+            for (double value : children) {
                 if (value > 0 && value <= std::numeric_limits<std::uint32_t>::max()) {
                     enqueue(static_cast<std::uint32_t>(value));
                 }

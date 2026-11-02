@@ -30,7 +30,7 @@ public:
     std::uint32_t FirstIfd() const { return m_FirstIfd; }
     std::uint64_t BytesRead() const { return m_BytesRead; }
     std::vector<Entry> ReadEntries(std::uint32_t ifdOffset);
-    std::vector<std::uint32_t> ReadIfdTree();
+    std::vector<std::uint32_t> ReadIfdTree(bool preserveSubIfdOrder = false);
     std::vector<std::uint8_t> RawBytes(const Entry& entry);
     std::string StringValue(const Entry& entry);
     // Fixed-size consumers can request a prefix without allocating the whole tag.

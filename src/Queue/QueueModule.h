@@ -3,6 +3,7 @@
 #include "Queue/RenderQueueModel.h"
 #include "Queue/QueueView.h"
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -37,7 +38,15 @@ public:
     const RenderQueueModel& Model() const { return m_Model; }
 
 private:
+    struct CameraPixels {
+        std::atomic<bool> ready{false};
+        std::vector<unsigned char> rgba;
+        int width = 0, height = 0;
+    };
+    // Workers hold only the result and counter, including after an item is removed.
+    std::shared_ptr<std::atomic<unsigned>> m_CameraLoads = std::make_shared<std::atomic<unsigned>>(0);
     struct TextureEntry {
+        std::shared_ptr<CameraPixels> camera;
         unsigned int texture = 0;
         int width = 0;
         int height = 0;

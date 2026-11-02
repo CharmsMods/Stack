@@ -1,5 +1,6 @@
 #include "PhotometricReliability.h"
 #include "ParallelProcessing.h"
+#include "LocalWarpSupport.h"
 #include <array>
 #include <limits>
 
@@ -109,7 +110,8 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
     Mfd::ReliabilityMap& result,std::string& error,const CaptureMotionEvaluator& evaluateMotion) {
     result={};
     const auto stride=request.cellStrideBayerCells;
-    if(!stride||stride>16||!request.motionGrid||!request.motionGrid->valid||!request.residualEvaluator||
+    if(!stride||stride>16||!request.motionGrid||!request.motionGrid->valid||
+        request.motionGrid->nodes.size()!=std::uint64_t(request.motionGrid->width)*request.motionGrid->height||!request.residualEvaluator||
         request.rawExtent.width<2||request.rawExtent.height<2) {error="Invalid bracket reliability request.";return false;}
     const auto rawCellWidth=request.rawExtent.width/2,rawCellHeight=request.rawExtent.height/2;
     const unsigned width=static_cast<unsigned>((rawCellWidth+stride-1)/stride);
@@ -137,7 +139,11 @@ bool BuildColorReliability(const Mfd::ReliabilityBuildRequest& request,
             auto& cell=result.cells[index];cell.cellX=x;cell.cellY=y;
             const auto cx=std::min<std::uint64_t>(rawCellWidth-1,static_cast<std::uint64_t>(x)*stride+stride/2);
             Mfd::LocalMotionFieldSample center;
-            if(!motionAt({2.*cx+.5,2.*cy+.5},center)) {
+            const Mfd::RawCoordinate point{2.*cx+.5,2.*cy+.5};
+            // One CFA-plane pixel spans two RAW pixels, so the patch width in
+            // plane pixels equals its half width on the sensor.
+            if(!motionAt(point,center)||!HasLocalWarpSupport(*request.motionGrid,point,
+                request.parameters.registration.finestPatchPlanePixels)) {
                 cell.rejectionBits=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid);continue;
             }
             cell.alignmentConfidence=std::clamp(center.alignmentConfidence,0.,1.);

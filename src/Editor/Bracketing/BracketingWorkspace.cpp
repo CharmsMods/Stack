@@ -86,10 +86,10 @@ void EditorModule::RenderBracketingSidePanelUI() {
     ImGui::Separator();
     bool changed=false;
     if(ImGui::CollapsingHeader("Processing",ImGuiTreeNodeFlags_DefaultOpen)) {
-        const char* reconstructionItems[]={"Standard","Super-resolution 1x","Super-resolution 2x","Panorama"};
+        static constexpr const char* reconstructionItems[]={"Standard (Bayer)","Super-resolution 1x","Super-resolution 2x","Panorama","Auto resolution"};
         int reconstruction=static_cast<int>(ui.recipe.reconstruction);
         ImGui::SetNextItemWidth(-1);
-        if(ImGui::Combo("##Reconstruction",&reconstruction,reconstructionItems,4)){ui.recipe.reconstruction=static_cast<Raw::Bracketing::ReconstructionMode>(reconstruction);
+        if(ImGui::Combo("##Reconstruction",&reconstruction,reconstructionItems,IM_ARRAYSIZE(reconstructionItems))){ui.recipe.reconstruction=static_cast<Raw::Bracketing::ReconstructionMode>(reconstruction);
             if(ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama)ui.recipe.aiAlignment=false;
             const auto reference=std::find_if(ui.sources.begin(),ui.sources.end(),[](const auto& source){return source.inspected&&source.metadata.supported;});
             if(reference!=ui.sources.end())for(auto& source:ui.sources)if(source.inspected) {
@@ -102,6 +102,13 @@ void EditorModule::RenderBracketingSidePanelUI() {
                 ui.sourceHistory[source.frameId]=source;
             }
             changed=true;}
+        if(ui.recipe.reconstruction!=Raw::Bracketing::ReconstructionMode::Panorama) {
+            static constexpr const char* smoothingItems[]={"Off","Super-resolution only","All bracket results"};
+            int smoothing=static_cast<int>(ui.recipe.smoothing);
+            if(ImGui::Combo("Burst-guided smoothing",&smoothing,smoothingItems,IM_ARRAYSIZE(smoothingItems))) {
+                ui.recipe.smoothing=static_cast<Raw::Bracketing::BurstSmoothing>(smoothing);changed=true;
+            }
+        }
         if(ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama) {
             const char* projections[]={"Auto projection","Perspective","Spherical"};int projection=int(ui.recipe.panorama.projection);
             ImGui::SetNextItemWidth(-1);
@@ -113,34 +120,25 @@ void EditorModule::RenderBracketingSidePanelUI() {
             if(ImGui::Combo("##PanoramaDenoise",&denoise,noiseItems,2)){ui.recipe.panorama.overlapDenoise=denoise==0;changed=true;}
             ImGui::TextWrapped("Stitch overlapping captures in any direction. Uncovered borders remain transparent.");
         } else {
-        const char* alignmentItems[]={"Automatic local","Global only","Translation only","Fixed coordinates"};
+        const char* alignmentItems[]={"Automatic local","Global only","Translation only","Off (fixed sensor coordinates)"};
         int alignment=static_cast<int>(ui.recipe.alignmentMode);
         ImGui::SetNextItemWidth(-1);
-        ImGui::BeginDisabled(ui.recipe.depth.enabled);
         if(ImGui::Combo("##Alignment",&alignment,alignmentItems,4)){ui.recipe.alignmentMode=static_cast<Raw::Bracketing::AlignmentMode>(alignment);
-            if(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::AutomaticLocal)ui.recipe.aiAlignment=false;
+            if(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::AutomaticLocal) {
+                ui.recipe.aiAlignment=false;
+            }
             changed=true;}
-        ImGui::EndDisabled();
+        if(ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off combines captures at identical sensor coordinates. AI assistance requires automatic local alignment.");
         ImGui::BeginDisabled(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::AutomaticLocal);
         if(ImGui::Checkbox("AI-assisted alignment (experimental)",&ui.recipe.aiAlignment))changed=true;
         if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Uses SEA-RAFT to suggest motion, followed by RAW verification. Requires the optional model package. May take longer; never generates image pixels.");
         ImGui::EndDisabled();
-        if(ImGui::Checkbox("Depth-aware reconstruction",&ui.recipe.depth.enabled)) {
-            if(ui.recipe.depth.enabled)ui.recipe.alignmentMode=Raw::Bracketing::AlignmentMode::AutomaticLocal;
-            changed=true;
-        }
-        if(ui.recipe.depth.enabled) {
-            float focus=float(ui.recipe.depth.focus),range=float(ui.recipe.depth.focusRange),radius=float(ui.recipe.depth.blurRadius);
-            ImGui::TextUnformatted("Focus: far to near");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthFocus",&focus,0,1,"%.2f")){ui.recipe.depth.focus=focus;changed=true;}
-            ImGui::TextUnformatted("Focus range");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthRange",&range,0,1,"%.2f")){ui.recipe.depth.focusRange=range;changed=true;}
-            ImGui::TextUnformatted("Blur radius");ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderFloat("##DepthBlurRadius",&radius,0,64,"%.1f px")){ui.recipe.depth.blurRadius=radius;changed=true;}
-            ImGui::TextWrapped("Relative depth from handheld parallax. Blur 0 keeps the sharp reconstruction. Uncertain regions stay sharp.");
-            const auto depth=ui.result&&ui.result->raw?ui.result->raw->reconstructionDepth:nullptr;
-            if(depth)ImGui::TextWrapped("%s",depth->message.c_str());
+        if(ui.recipe.alignmentMode!=Raw::Bracketing::AlignmentMode::FixedCoordinates) {
+            ImGui::TextWrapped("Depth masks are created automatically when the captures show parallax.");
+            if(ui.result && ui.result->raw && ui.result->raw->reconstructionDepth)
+                ImGui::TextWrapped("%s",ui.result->raw->reconstructionDepth->message.c_str());
         }
         }
     }

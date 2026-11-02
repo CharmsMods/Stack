@@ -15,11 +15,16 @@ Preview SuperResolutionDetail(const BracketingResult& result,unsigned x,unsigned
     request.shouldCancel=cancel;request.memoryBudgetBytes=memoryBudgetBytes;
     std::string error;
     request.recipe=cache.recipe;
-    auto native=RenderNativeDetail(request,x/cache.scale,y/cache.scale,std::max(16u,size/cache.scale));
+    const auto sensorPixel=[&](unsigned pixel,unsigned extent){return std::min(extent-1,unsigned((pixel+.5)/cache.scale));};
+    auto native=RenderNativeDetail(request,sensorPixel(x,cache.sensorWidth),sensorPixel(y,cache.sensorHeight),
+        std::max(16u,unsigned(std::ceil(size/cache.scale))));
     if(!native.width)return {};
     Preview out;out.metadata=native.metadata;
-    out.width=native.width*cache.scale;out.height=native.height*cache.scale;
-    const unsigned left=unsigned(native.sensorOriginX)*cache.scale,top=unsigned(native.sensorOriginY)*cache.scale;
+    const auto boundary=[&](double sensor){return unsigned(std::ceil(sensor*cache.scale-.5));};
+    const unsigned left=boundary(native.sensorOriginX),top=boundary(native.sensorOriginY);
+    const auto right=native.sensorOriginX+native.width,bottom=native.sensorOriginY+native.height;
+    out.width=(right>=cache.sensorWidth?unsigned(result.raw->metadata.visibleWidth):boundary(right))-left;
+    out.height=(bottom>=cache.sensorHeight?unsigned(result.raw->metadata.visibleHeight):boundary(bottom))-top;
     out.sensorStepX=out.sensorStepY=1.0/cache.scale;
     out.sensorOriginX=(left+.5)/cache.scale-.5;out.sensorOriginY=(top+.5)/cache.scale-.5;
     const auto count=std::size_t(out.width)*out.height,groups=std::size_t(cache.groups);
@@ -33,8 +38,10 @@ Preview SuperResolutionDetail(const BracketingResult& result,unsigned x,unsigned
     for(unsigned yy=0;yy<out.height;++yy) {
       if(cancel&&cancel())return {};
       for(unsigned xx=0;xx<out.width;++xx) {
-        const auto p=std::size_t(yy)*out.width+xx,q=std::size_t(yy/cache.scale)*native.width+xx/cache.scale;
         const unsigned gx=left+xx,gy=top+yy;const auto index=std::size_t(gy)*raw.metadata.visibleWidth+gx;
+        const auto q=std::size_t(sensorPixel(gy,cache.sensorHeight)-unsigned(native.sensorOriginY))*native.width+
+            sensorPixel(gx,cache.sensorWidth)-unsigned(native.sensorOriginX);
+        const auto p=std::size_t(yy)*out.width+xx;
         for(unsigned c=0;c<3;++c)out.resultRgb[p*3+c]=raw.linearFloatBuffer[index*3+c];
         std::copy_n(native.sourceRgb.begin()+q*groups*3,groups*3,out.sourceRgb.begin()+p*groups*3);
         out.guideEv[p]=native.guideEv[q];

@@ -16,7 +16,7 @@ void EditorModule::RefreshRawLayerToolPicker() const {
         cache.sourceRevision==sourceRevision) return;
     cache.documentId = document; cache.layerId = owner; cache.revision = revision;
     cache.sourceRevision=sourceRevision;cache.sourceUuid.clear();
-    cache.operationUuids.clear(); cache.labels.clear();
+    cache.operationUuids.clear(); cache.labels.clear(); cache.cards.clear(); cache.wires.clear();
     if (!projectGraph && !layer) return;
     if (!projectGraph && IsBracketingActive()) {
         const auto* source=m_Project->graph.FindNode(ResolveRawWorkspaceStageOutputNodeId());
@@ -30,6 +30,41 @@ void EditorModule::RefreshRawLayerToolPicker() const {
     const auto labels=Stack::Editor::RawLayerToolLabels(tools);
     cache.labels.insert(cache.labels.end(),labels.begin(),labels.end());
     for (const auto* node : tools) cache.operationUuids.push_back(node->instanceUuid);
+    const auto& graph = projectGraph ? m_Project->graph : layer->graph;
+    for (const auto& node : graph.GetNodes()) {
+        const auto found=std::find(cache.operationUuids.begin(),cache.operationUuids.end(),node.instanceUuid);
+        const int choice=found==cache.operationUuids.end() ? -1 : int(found-cache.operationUuids.begin());
+        cache.cards.push_back({node.id,choice,{node.position.x,node.position.y},
+            choice>=0 ? cache.labels[choice] : node.title});
+    }
+    for (const auto& link : graph.GetLinks()) {
+        const auto* from=graph.FindNode(link.fromNodeId);
+        const auto* to=graph.FindNode(link.toNodeId);
+        if (from && to) cache.wires.push_back({{from->position.x+190,from->position.y+30},
+            {to->position.x,to->position.y+30}});
+    }
+    if (!cache.sourceUuid.empty()) {
+        const auto first=cache.cards.empty() ? ImVec2{} : cache.cards.front().position;
+        cache.cards.push_back({-1,0,{first.x-250,first.y},cache.labels.front()});
+    }
+}
+
+const Stack::Editor::RawLayerToolPickerCache& EditorModule::GetRawLayerToolGraph() const {
+    if (!(m_Project->nodeEditor && m_Project->nodeEditor->layerId == Stack::Project::kProjectGraphId) &&
+        m_Project->rawMode != Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
+        static const auto legacy = [] {
+            Stack::Editor::RawLayerToolPickerCache result;
+            const char* labels[] = {"Transform","Denoise","Color","Exposure","Curves","View"};
+            for (int i=0;i<6;++i) {
+                result.cards.push_back({i,i,{float(i)*240.f,0.f},labels[i]});
+                if (i) result.wires.push_back({{float(i-1)*240.f+190.f,30.f},{float(i)*240.f,30.f}});
+            }
+            return result;
+        }();
+        return legacy;
+    }
+    RefreshRawLayerToolPicker();
+    return m_RawLayerToolPicker;
 }
 
 const std::vector<std::string>& EditorModule::GetRawLayerToolLabels() const {

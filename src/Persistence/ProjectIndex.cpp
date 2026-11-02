@@ -1,3 +1,4 @@
+#include "Persistence/ManagedAssetPaths.h"
 #include "Persistence/ProjectIndex.h"
 
 #include "App/AppPaths.h"
@@ -36,38 +37,7 @@ std::string LowerPathKey(const std::filesystem::path& path) {
     return key;
 }
 
-std::string SanitizeStem(std::string value) {
-    for (char& character : value) {
-        const unsigned char byte = static_cast<unsigned char>(character);
-        if (!(std::isalnum(byte) || character == '-' || character == '_' ||
-              character == '.' || character == ' ')) {
-            character = '_';
-        }
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '.')) {
-        value.pop_back();
-    }
-    return value.empty() ? std::string("Project") : value;
-}
 
-std::string ShortId(const std::string& projectId) {
-    std::string compact;
-    for (char value : projectId) {
-        if (std::isalnum(static_cast<unsigned char>(value))) {
-            compact.push_back(static_cast<char>(
-                std::tolower(static_cast<unsigned char>(value))));
-        }
-        if (compact.size() == 8u) break;
-    }
-    if (compact.size() < 8u) {
-        const std::size_t hash = std::hash<std::string>{}(projectId);
-        std::ostringstream stream;
-        stream << std::hex << std::setw(8) << std::setfill('0') <<
-            static_cast<std::uint32_t>(hash);
-        compact = stream.str();
-    }
-    return compact;
-}
 
 std::string StableInvalidIdForPath(const std::filesystem::path& path) {
     const std::size_t hash = std::hash<std::string>{}(LowerPathKey(path));
@@ -144,7 +114,10 @@ void AppendSnapshotSources(
     std::vector<IndexedProjectSource>& sources) {
     std::unordered_set<std::string> seen;
     for (const EmbeddedAssetRecord& asset : snapshot.embeddedAssets) {
+        if (asset.managedRole=="bracketing-result" || asset.managedRole=="bracketing-master" ||
+            (!asset.linkedSource && asset.originalSourcePath.empty())) continue;
         IndexedProjectSource source;
+        source.linked = asset.linkedSource;
         source.originalPath = std::filesystem::u8path(asset.originalSourcePath);
         source.workspaceRelativePath = std::filesystem::u8path(asset.workspaceRelativeSourcePath);
         source.fingerprint = asset.originalFileFingerprint;
@@ -202,8 +175,9 @@ ProjectRecord RecordFromStore(
     AppendRawWorkspaceMetadata(opened.snapshot.rawWorkspaceData, record);
     AppendSnapshotSources(opened.snapshot, record.sources);
     if (record.hasRawWorkspaceData && !record.sources.empty()) {
-        record.rawSourceEmbedded = true;
-        record.rawSourceLinked = false;
+        record.rawSourceLinked = record.storageKind == ProjectStorageKind::WorkingFile &&
+            std::any_of(record.sources.begin(), record.sources.end(), [](const auto& source){ return source.linked; });
+        record.rawSourceEmbedded = !record.rawSourceLinked;
     }
     return record;
 }
@@ -216,11 +190,7 @@ bool HasStackExtension(const std::filesystem::path& path) {
 }
 
 std::pair<std::uint64_t, std::int64_t> ProjectIndexSignature(
-    const std::filesystem::path& candidate,
-    bool directory) {
-    const std::filesystem::path signaturePath = directory
-        ? candidate / "project.stack"
-        : candidate;
+    const std::filesystem::path& signaturePath) {
     std::error_code error;
     const std::uint64_t size = static_cast<std::uint64_t>(
         std::filesystem::file_size(signaturePath, error));
@@ -315,14 +285,11 @@ std::vector<ProjectRecord> ProjectIndex::Rebuild(const std::vector<std::filesyst
                     iterator.disable_recursion_pending();
                     continue;
                 }
-                if (IsDirectoryProjectBundle(candidate)) iterator.disable_recursion_pending();
+                continue;
             }
-            const bool stackFile = iterator->is_regular_file(ec) && !ec &&
-                HasStackExtension(candidate);
-            ec.clear();
-            if (!directory && !stackFile) continue;
+            if (!iterator->is_regular_file(ec) || ec || !HasStackExtension(candidate)) continue;
             const auto [signatureSize, signatureModifiedTimeTicks] =
-                ProjectIndexSignature(candidate, directory);
+                ProjectIndexSignature(candidate);
             const auto previous = previousByPath.find(pathKey);
             if (previous != previousByPath.end() &&
                 signatureSize != 0 &&
@@ -339,39 +306,6 @@ std::vector<ProjectRecord> ProjectIndex::Rebuild(const std::vector<std::filesyst
                 records.push_back(previous->second);
                 continue;
             }
-            if (directory && !IsDirectoryProjectBundle(candidate)) {
-                // Closet itself now contains the shared Assets directory;
-                // Projects may contain first-save staging. Neither container
-                // is a half-written project, and both must remain traversable.
-                std::error_code markerError;
-                if (std::filesystem::is_regular_file(candidate / "workspace.json", markerError) ||
-                    std::filesystem::is_regular_file(candidate.parent_path() / "workspace.json", markerError)) continue;
-                std::error_code partialError;
-                const bool looksLikePartialBundle =
-                    std::filesystem::exists(candidate / "assets", partialError) ||
-                    std::filesystem::exists(candidate / ".staging", partialError) ||
-                    std::filesystem::exists(
-                        candidate / "project.stack.previous",
-                        partialError);
-                if (looksLikePartialBundle) {
-                    iterator.disable_recursion_pending();
-                    ProjectRecord invalid;
-                    invalid.projectId = StableInvalidIdForPath(candidate);
-                    invalid.absolutePath = NormalizePath(candidate);
-                    invalid.displayName = candidate.filename().u8string();
-                    invalid.format = IndexedProjectFormat::NeedsAttention;
-                    invalid.coverState = IndexedCoverState::Invalid;
-                    invalid.needsAttention = true;
-                    invalid.indexSignatureSize = signatureSize;
-                    invalid.indexSignatureModifiedTimeTicks =
-                        signatureModifiedTimeTicks;
-                    invalid.errorMessage =
-                        "The project bundle is incomplete or has no readable manifest.";
-                    records.push_back(std::move(invalid));
-                }
-                continue;
-            }
-
             ProjectStoreOpenResult opened = OpenProjectStore(candidate);
             if (opened) {
                 ProjectRecord record = RecordFromStore(
@@ -383,25 +317,9 @@ std::vector<ProjectRecord> ProjectIndex::Rebuild(const std::vector<std::filesyst
                 continue;
             }
 
-            if (directory) {
-                ProjectRecord invalid;
-                invalid.projectId = StableInvalidIdForPath(candidate);
-                invalid.absolutePath = NormalizePath(candidate);
-                invalid.displayName = candidate.filename().u8string();
-                invalid.format = IndexedProjectFormat::NeedsAttention;
-                invalid.coverState = IndexedCoverState::Invalid;
-                invalid.needsAttention = true;
-                invalid.indexSignatureSize = signatureSize;
-                invalid.indexSignatureModifiedTimeTicks =
-                    signatureModifiedTimeTicks;
-                invalid.errorMessage = opened.message.empty()
-                    ? "The project bundle manifest could not be read."
-                    : opened.message;
-                records.push_back(std::move(invalid));
-                continue;
-            }
-
-            if (stackFile) {
+            // Only recognized working/portable files belong in the project catalog.
+            // Old directory manifests and unrelated files named .stack stay on disk.
+            if (IsWorkingProjectFile(candidate) || IsPortableV3Project(candidate)) {
                 ProjectRecord invalid;
                 invalid.projectId = StableInvalidIdForPath(candidate);
                 invalid.absolutePath = NormalizePath(candidate);
@@ -409,10 +327,7 @@ std::vector<ProjectRecord> ProjectIndex::Rebuild(const std::vector<std::filesyst
                 invalid.format = IndexedProjectFormat::NeedsAttention;
                 invalid.coverState = IndexedCoverState::Invalid;
                 invalid.needsAttention = true;
-                invalid.indexSignatureSize = signatureSize;
-                invalid.indexSignatureModifiedTimeTicks =
-                    signatureModifiedTimeTicks;
-                invalid.errorMessage = "The project container could not be read.";
+                invalid.errorMessage = opened.message;
                 records.push_back(std::move(invalid));
             }
         }
@@ -475,16 +390,7 @@ std::filesystem::path ProjectIndex::BuildUniqueProjectPath(
     const std::filesystem::path& root,
     const std::string& displayName,
     const std::string& projectId) {
-    const std::string stem = SanitizeStem(displayName) + "--" + ShortId(projectId);
-    std::filesystem::path candidate = root / stem;
-    std::error_code ec;
-    if (!std::filesystem::exists(candidate, ec) && !ec) return candidate;
-    for (unsigned int suffix = 2; suffix < 10000; ++suffix) {
-        candidate = root / (stem + "-" + std::to_string(suffix));
-        ec.clear();
-        if (!std::filesystem::exists(candidate, ec) && !ec) return candidate;
-    }
-    return root / (stem + "-" + ShortId(GenerateStableUuid()));
+    return UniqueWorkingProjectPath(root, displayName);
 }
 
 bool ProjectIndex::CloneVersion(
@@ -548,7 +454,7 @@ bool ProjectIndex::CloneVersion(
         opened.store,
         clone,
         outProjectPath,
-        ProjectStorageKind::DirectoryBundle);
+        ProjectStorageKind::WorkingFile);
     if (!converted) {
         if (errorMessage) {
             *errorMessage = converted.message.empty()

@@ -36,7 +36,7 @@ def main():
     # Project-only hover must reach both consumers rather than preserve a prior
     # source hover or gate a valid saved cover off before its resolver runs.
     gallery = (base / 'EditorModuleRawLabGallery.cpp').read_text(encoding="utf-8")
-    hover = gallery.split('if ((compactFilmstrip || m_PermanentGalleryWorkspace) && tileHovered)', 1)[1].split('if (gridSourceStack)', 1)[0]
+    hover = gallery.split('if ((compactFilmstrip || m_PermanentGalleryWorkspace) && previewHovered)', 1)[1].split('if (gridSourceStack)', 1)[0]
     assert hover.count('!hoverKey.empty() || !activeProjectPath.empty()') == 2
     host = (root / 'src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp').read_text(encoding="utf-8")
     target = host.split('const bool filmstripHoverTarget =', 1)[1].split(';', 1)[0]
@@ -63,7 +63,7 @@ struct SourceRecord {std::string relativePathKey; struct {std::filesystem::path 
 }
 namespace ImGui {double time=1;struct IO {float DeltaTime=.016f;} io;double GetTime(){return time;} IO& GetIO(){return io;}}
 void Require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
-struct ProjectView {std::filesystem::path projectPath,coverThumbnailCachePath;std::string projectId,referenceSourceKey;};
+struct ProjectView {std::filesystem::path projectPath,coverThumbnailCachePath;std::string projectId,referenceSourceKey,projectCoverKey;bool standaloneMaster=false;};
 struct Fixture {
     struct {std::string selectedSourceKey;} m_RawWorkspace;
     struct Project {std::string rawSourceKey;} project;
@@ -81,9 +81,10 @@ struct Fixture {
         for (const auto& source:sources) if(source.relativePathKey==key)return &source;
         return nullptr;
     }
+    bool UsesGalleryPresetPreviews() const {return false;}
     const auto& GetRawWorkspaceGalleryPresentation(){return gallery;}
     unsigned int GetRawWorkspaceThumbnailTexture(const Stack::RawWorkspace::SourceRecord& source,int* width,int* height,bool) {
-        *width=400;*height=300;return textures[source.thumbnail.absolutePath.generic_string()];
+        if(width)*width=400;if(height)*height=300;return textures[source.thumbnail.absolutePath.generic_string()];
     }
     std::shared_ptr<const Raw::RawMetadata> GetRawWorkspaceThumbnailMetadata(const std::string&){return {};}
     struct Result {unsigned int current,previous;bool available;};

@@ -1,3 +1,4 @@
+#include "Raw/RawGalleryInputPolicy.h"
 #include "App/WorkspacePresentation.h"
 #include "Editor/EditorModule.h"
 
@@ -359,7 +360,8 @@ bool EditorModule::RequestOpenRawWorkspaceSourceForEditing(
     if (m_PermanentGalleryWorkspace) {
         if (!m_RawGalleryOpenSelectionHandler) return false;
         RawGalleryOpenSelection selection;
-        selection.items.push_back({source->absolutePath, false});
+        selection.items.push_back({source->absolutePath, false,
+            Stack::RawWorkspace::ResolveSourceWorkspaceRoot(*source, m_RawWorkspace.workspaceRoot)});
         m_RawGalleryOpenSelectionHandler(std::move(selection), false);
         return true;
     }
@@ -378,6 +380,13 @@ bool EditorModule::RequestOpenRawWorkspaceSourceForEditing(
                 *error = "The selected RAW image is no longer in the current Gallery folder.";
             }
             return false;
+        }
+        if (const auto* selected=FindRawWorkspaceSourceByKey(sourceKey);
+            selected && Stack::RawWorkspace::IsGalleryRasterPath(selected->absolutePath)) {
+            CloseRawWorkspaceGalleryWorkspace();
+            RequestOpenEditorTab();
+            RequestLoadSourceImage(selected->absolutePath.u8string());
+            return true;
         }
         m_RawWorkspaceExplicitReplacementSourceKey = sourceKey;
         CloseRawWorkspaceGalleryWorkspace();
@@ -448,6 +457,9 @@ const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspaceGal
     if (m_RawWorkspaceGalleryPresentationRevision != m_RawWorkspaceGalleryRevision) {
         m_RawWorkspaceGalleryPresentationCache =
             Stack::RawWorkspace::BuildGalleryPresentation(m_RawWorkspace);
+        m_GalleryPresetProjects.clear();
+        for (const auto& card : m_RawWorkspaceGalleryPresentationCache.projects)
+            m_GalleryPresetProjects.emplace(card.projectCoverKey,card.projectIndex);
         m_RawWorkspaceGalleryPresentationRevision = m_RawWorkspaceGalleryRevision;
     }
     return m_RawWorkspaceGalleryPresentationCache;
@@ -618,7 +630,7 @@ void EditorModule::LoadRawWorkspaceAppState() {
             ? Stack::RawWorkspace::GalleryDisplayMode::List
             : Stack::RawWorkspace::GalleryDisplayMode::Grid;
     m_RawWorkspaceGalleryContentMode = static_cast<Stack::RawWorkspace::GalleryContentMode>(
-        std::clamp(appState.rawLabGalleryContentMode,0,2));
+        std::clamp(appState.rawLabGalleryContentMode,0,4));
 
     if (appState.allSourceFolders && m_PermanentGalleryWorkspace &&
         !m_RawWorkspace.registeredSourceFolders.empty()) {
@@ -804,9 +816,10 @@ void EditorModule::FlushRawWorkspacePersistenceForShutdown() {
             : (appStateError.empty() ? "RAW Workspace state could not be saved." : appStateError);
     }
 
-    if (!m_RawWorkspace.workspaceRoot.empty() && !m_RawWorkspace.allSourceFolders) {
+    if (!m_RawWorkspace.workspaceRoot.empty() && !m_RawWorkspace.allSourceFolders &&
+        GetRawWorkspaceScanSnapshot().completedSuccessfully) {
         const Stack::RawWorkspace::ManagedLayout layout =
-            Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
+            Stack::RawWorkspace::BuildGalleryLayout(m_RawWorkspace.workspaceRoot);
         std::string catalogError;
         const bool catalogSaved = Stack::RawWorkspace::WriteCatalogSkeleton(
             layout,
@@ -835,26 +848,29 @@ void EditorModule::FlushRawWorkspacePersistenceForShutdown() {
     }
 }
 
-void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& workspaceRoot) {
+void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& selectedFolder) {
+    const auto workspaceRoot = Stack::RawWorkspace::OwningPhotoRoot(selectedFolder);
     if(RequestAutoBracketForeground("open another folder",[this,workspaceRoot]{RequestOpenRawWorkspace(workspaceRoot);}))return;
     if (workspaceRoot.empty()) {
         return;
     }
     std::string storageError;
-    if (!Stack::RawWorkspace::EnsureManagedFolders(workspaceRoot, &storageError)) {
+    if (!m_PermanentGalleryWorkspace && !Stack::RawWorkspace::EnsureManagedFolders(workspaceRoot, &storageError)) {
         PostNotification(UiNotificationSeverity::Error, storageError, "workspace-storage");
         return;
     }
     Stack::RawWorkspace::RawGalleryManualGrouping grouping;
-    if (!Stack::RawWorkspace::LoadGalleryState(
-            Stack::RawWorkspace::BuildManagedLayout(workspaceRoot), grouping, &storageError)) {
-        PostNotification(UiNotificationSeverity::Error, storageError, "gallery-state-load");
-        return;
+    const auto managedLayout = Stack::RawWorkspace::BuildManagedLayout(workspaceRoot);
+    if (Stack::RawWorkspace::IsMarkedCloset(managedLayout.dataDirectory) &&
+        !Stack::RawWorkspace::LoadGalleryState(managedLayout, grouping, &storageError)) {
+        PostNotification(UiNotificationSeverity::Warning, storageError, "gallery-state-load");
+        if (!m_PermanentGalleryWorkspace) return;
     }
     PreserveActiveRawProjectSourceForLibraryNavigation();
     RememberRawWorkspaceFolderCards();
     m_RawGallerySourceFoldersOpen = false;
     m_RawWorkspace.allSourceFolders = false;
+    m_RawWorkspace.nestedClosets.clear();
 
     std::error_code ec;
     const std::filesystem::path normalized = std::filesystem::absolute(workspaceRoot, ec).lexically_normal();
@@ -975,6 +991,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                 generation,
                 workspaceRoot,
                 allowCatalogWarmStart,
+                galleryBrowse = m_PermanentGalleryWorkspace,
                 reusableIdentities = std::move(reusableIdentities)
             ]() mutable {
                 auto isScanCancelled = [this, generation]() {
@@ -1020,7 +1037,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                 try {
                     if (allowCatalogWarmStart) {
                         const Stack::RawWorkspace::ManagedLayout cachedLayout =
-                            Stack::RawWorkspace::BuildManagedLayout(workspaceRoot);
+                            Stack::RawWorkspace::BuildGalleryLayout(workspaceRoot);
                         std::vector<Stack::RawWorkspace::SourceRecord> cachedSources;
                         std::vector<Stack::RawWorkspace::SourceSetProjectCatalogEntry>
                             cachedProjects;
@@ -1064,7 +1081,6 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                         std::move(cachedProjects);
                                     m_RawWorkspaceScanSnapshot.sourcesPublished = true;
                                 }
-                                NormalizeRawWorkspaceFilmstripOrganization();
                                 InvalidateRawWorkspaceGalleryPresentation();
                                 RequestRawWorkspaceSimilarityRebuild();
                                 });
@@ -1079,6 +1095,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                     auto flushProgressiveBatch = [
                         this,
                         generation,
+                        galleryBrowse,
                         &progressiveBatch,
                         previewSession
                     ](const Stack::RawWorkspace::ManagedLayout& layout) {
@@ -1091,7 +1108,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                             quickSources;
                         quickSources.reserve(batch.size());
                         for (const auto& source : batch) {
-                            if (source.thumbnail.status !=
+                            if (!galleryBrowse && !source.browsePreview && !source.thumbnail.camera.bytes && source.thumbnail.status !=
                                 Stack::RawWorkspace::ThumbnailStatus::Valid) {
                                 quickSources.push_back(source);
                             }
@@ -1128,17 +1145,17 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                         continue;
                                     }
                                     auto* existing = &m_RawWorkspace.sources[found->second];
-                                    if (existing->fingerprint == source.fingerprint) {
-                                        const auto project = existing->project;
-                                        const auto memberships = existing->
-                                            sourceSetProjectMemberships;
-                                        *existing = std::move(source);
-                                        existing->project = project;
-                                        existing->sourceSetProjectMemberships =
-                                            memberships;
+                                    if (existing->fingerprint == source.fingerprint || (existing->fingerprint.empty() && existing->browsePreview &&
+                                        existing->absolutePath == source.absolutePath && existing->fileSizeBytes == source.fileSizeBytes &&
+                                        existing->modifiedTimeTicks == source.modifiedTimeTicks)) {
+                                        source.project = std::move(existing->project);
+                                        source.sourceSetProjectMemberships = std::move(existing->sourceSetProjectMemberships);
+                                        if (!source.thumbnail.similarityDescriptor.IsValid())
+                                            source.transientThumbnail.similarityDescriptor = existing->transientThumbnail.similarityDescriptor;
                                     }
+                                    *existing = std::move(source);
                                 }
-                                NormalizeRawWorkspaceFilmstripOrganization();
+                                // Normalize saved order once the authoritative scan includes every member.
                                 InvalidateRawWorkspaceGalleryPresentation();
                                 RequestRawWorkspaceSimilarityRebuild();
                             })) {
@@ -1213,6 +1230,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                     bool firstSourcePublication = true;
                     auto lastSourcePublication = std::chrono::steady_clock::now();
                     auto sourceReady = [
+                        galleryBrowse,
                         &updateProgress,
                         &progressiveBatch,
                         &flushProgressiveBatch,
@@ -1229,6 +1247,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                             source,
                             Stack::RawWorkspace::
                                 kNeutralThumbnailMaxDimension);
+                        source.browsePreview |= galleryBrowse && source.thumbnail.status != Stack::RawWorkspace::ThumbnailStatus::Valid;
                         ++progress.cachedPreviewsChecked;
                         updateProgress(progress);
                         progressiveBatch.push_back(source);
@@ -1236,9 +1255,12 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         // Show the first source immediately. Later scanner
                         // yields combine ready records by count or elapsed time;
                         // scan completion flushes the final partial batch.
+                        // Once all paths are visible, batch metadata changes to avoid
+                        // rebuilding a large live grid for each verified original.
+                        const int batchScale = galleryBrowse ? 4 : 1;
                         if (firstSourcePublication ||
-                            progressiveBatch.size() >= kRawWorkspaceCatalogApplyBatchSize ||
-                            now - lastSourcePublication >= kRawWorkspaceCatalogPublishInterval) {
+                            progressiveBatch.size() >= kRawWorkspaceCatalogApplyBatchSize * batchScale ||
+                            now - lastSourcePublication >= kRawWorkspaceCatalogPublishInterval * batchScale) {
                             if (!flushProgressiveBatch(layout)) {
                                 throw std::runtime_error("Could not publish progressive RAW previews.");
                             }
@@ -1272,6 +1294,28 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         return true;
                     };
 
+                    std::function<void(const std::vector<Stack::RawWorkspace::SourceRecord>&)> publishListing;
+                    if (galleryBrowse) publishListing = [this, generation](const auto& sources) {
+                        if (!ProjectTasks().PostToMain([this, generation, listed = sources]() mutable {
+                            {
+                                std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+                                if (generation != m_RawWorkspaceScanGeneration) return;
+                                m_RawWorkspaceScanSnapshot.sourcesPublished = true;
+                            }
+                            // Keep warm metadata and completed textures while exposing newly added paths immediately.
+                            std::unordered_map<std::string, Stack::RawWorkspace::SourceRecord*> previous;
+                            previous.reserve(m_RawWorkspace.sources.size());
+                            for (auto& source : m_RawWorkspace.sources) previous.emplace(source.relativePathKey, &source);
+                            for (auto& source : listed) {
+                                const auto old = previous.find(source.relativePathKey);
+                                if (old != previous.end() && old->second->absolutePath == source.absolutePath &&
+                                    old->second->fileSizeBytes == source.fileSizeBytes && old->second->modifiedTimeTicks == source.modifiedTimeTicks)
+                                    source = std::move(*old->second);
+                            }
+                            m_RawWorkspace.sources = std::move(listed);
+                            InvalidateRawWorkspaceGalleryPresentation();
+                        })) throw std::runtime_error("Could not publish the Gallery file list.");
+                    };
                     Stack::RawWorkspace::ScanResult result =
                         Stack::RawWorkspace::ScanWorkspace(
                             workspaceRoot,
@@ -1279,7 +1323,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                             updateProgress,
                             isScanCancelled,
                             sourceReady,
-                            reuseSourceIdentity);
+                            reuseSourceIdentity, galleryBrowse, std::move(publishListing));
 
                     if (!flushProgressiveBatch(result.layout) &&
                         !isScanCancelled()) {
@@ -1317,7 +1361,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                 result.layout,
                                 result.sources,
                                 result.sourceSetProjects,
-                                isScanCancelled)) {
+                                isScanCancelled, &result.bracketMasters)) {
                             if (!isScanCancelled()) {
                                 markScanFailed(
                                     "Could not discover saved projects.");
@@ -1387,10 +1431,9 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                         m_PinnedRawWorkspaceSource.has_value() &&
                                                 m_PinnedRawWorkspaceSource->relativePathKey == source.relativePathKey
                                             ? &*m_PinnedRawWorkspaceSource : published->second;
-                                    const bool sameSource = previous != nullptr &&
-                                        !previous->fingerprint.empty() &&
-                                        previous->fingerprint == source.fingerprint;
-                                    if (sameSource &&
+                                    const bool samePublishedSource = !source.fingerprint.empty() &&
+                                        published->second->fingerprint == source.fingerprint;
+                                    if (samePublishedSource && !source.thumbnail.camera.bytes &&
                                         std::max(
                                             published->second->thumbnail.width,
                                             published->second->thumbnail.height) ==
@@ -1398,11 +1441,12 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                                 kNeutralThumbnailMaxDimension) {
                                         source.thumbnail = published->second->thumbnail;
                                     }
-                                    if (sameSource) {
+                                    if (samePublishedSource &&
+                                        !(source.thumbnail.camera.bytes && source.thumbnail.similarityDescriptor.IsValid())) {
                                         source.transientThumbnail =
                                             published->second->transientThumbnail;
                                     }
-                                    if (sameSource && previous != nullptr &&
+                                    if (previous != nullptr && !source.fingerprint.empty() && previous->fingerprint == source.fingerprint &&
                                         previous->project.status !=
                                             Stack::RawWorkspace::ProjectStatus::
                                                 NoProject &&
@@ -1417,6 +1461,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                     // later save publishes another refresh.
                                 }
                             }
+                            m_RawWorkspace.nestedClosets = std::move(result.nestedClosets);
                             m_RawWorkspace.sources = std::move(result.sources);
                             m_RawWorkspace.sourceSetProjects =
                                 std::move(result.sourceSetProjects);
@@ -1564,7 +1609,9 @@ void EditorModule::RequestRawWorkspaceThumbnailGeneration() {
                 source.thumbnail.status == Stack::RawWorkspace::ThumbnailStatus::Generating) {
                 source.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Failed;
             }
+            if (source.browsePreview || source.thumbnail.camera.bytes) source.transientThumbnail.similarityDescriptor = {};
         }
+        RequestRawWorkspaceSimilarityRebuild();
         std::lock_guard<std::mutex> lock(m_RawWorkspaceThumbnailMutex);
         const std::uint64_t generation = ++m_RawWorkspaceThumbnailGeneration;
         m_RawWorkspaceThumbnailSnapshot = {};
@@ -1606,6 +1653,7 @@ void EditorModule::FailRawWorkspaceThumbnailGeneration(
             continue;
         }
         source.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Failed;
+        if (source.browsePreview || source.thumbnail.camera.bytes) source.transientThumbnail.similarityDescriptor = {};
         SetRawWorkspaceStatusNoThrow(source.thumbnail.errorMessage, message);
     }
 
@@ -1629,6 +1677,7 @@ void EditorModule::FailRawWorkspaceThumbnailGeneration(
             message);
     }
     InvalidateRawWorkspaceGalleryPresentation(false);
+    RequestRawWorkspaceSimilarityRebuild();
     try {
         PersistRawWorkspaceCatalog();
     } catch (...) {
@@ -1649,7 +1698,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
     }
 
     const Stack::RawWorkspace::ManagedLayout layout =
-        Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
+        Stack::RawWorkspace::BuildGalleryLayout(m_RawWorkspace.workspaceRoot);
     std::vector<RawWorkspaceThumbnailWorkItem> pending;
     std::vector<RawWorkspaceThumbnailWorkItem> quickPending;
     pending.reserve(m_RawWorkspace.sources.size());
@@ -1675,9 +1724,10 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
                 source.fingerprint,
                 Stack::RawWorkspace::ResolveSourceWorkspaceRoot(source, m_RawWorkspace.workspaceRoot),
                 source.sourceRelativePathKey,
+                source.thumbnail.camera,
             };
             pending.push_back(workItem);
-            if (source.transientThumbnail.status !=
+            if (!m_PermanentGalleryWorkspace && !source.browsePreview && !source.thumbnail.camera.bytes && source.transientThumbnail.status !=
                 Stack::RawWorkspace::ThumbnailStatus::Ready) {
                 source.transientThumbnail = {};
                 quickPending.push_back(std::move(workItem));
@@ -1777,6 +1827,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
         progress.queued = pendingTotal;
         std::vector<RawWorkspaceThumbnailUpdate> thumbnailUpdates;
         thumbnailUpdates.reserve(kRawWorkspaceThumbnailApplyBatchSize);
+        auto lastThumbnailPublication = std::chrono::steady_clock::now();
 
         auto updateProgress = [&](const std::string& item, bool transientPreview) {
             progress.currentItem = item;
@@ -1802,6 +1853,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
             std::vector<RawWorkspaceThumbnailUpdate> updates = std::move(thumbnailUpdates);
             thumbnailUpdates.clear();
             thumbnailUpdates.reserve(kRawWorkspaceThumbnailApplyBatchSize);
+            lastThumbnailPublication = std::chrono::steady_clock::now();
 
             return ProjectTasks().PostToMain([
                 this,
@@ -1818,18 +1870,19 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
                 bool anyThumbnailUpdated = false;
                 bool anyPersistentThumbnailUpdated = false;
                 for (RawWorkspaceThumbnailUpdate& update : updates) {
-                    auto source = std::find_if(
-                        m_RawWorkspace.sources.begin(),
-                        m_RawWorkspace.sources.end(),
-                        [&](const auto& candidate) {
-                            return candidate.relativePathKey ==
-                                update.sourceKey;
-                        });
-                    if (source != m_RawWorkspace.sources.end()) {
+                    auto& sources = m_RawWorkspace.sources;
+                    const bool indexMatches = update.sourceIndex < sources.size() &&
+                        sources[update.sourceIndex].relativePathKey == update.sourceKey;
+                    auto source = indexMatches ? sources.begin() + update.sourceIndex :
+                        std::find_if(sources.begin(), sources.end(),
+                            [&](const auto& candidate) { return candidate.relativePathKey == update.sourceKey; });
+                    if (source != sources.end()) {
                         if (update.transientPreview) {
                             source->transientThumbnail =
                                 std::move(update.thumbnail);
                         } else {
+                            if (source->browsePreview || source->thumbnail.camera.bytes)
+                                source->transientThumbnail.similarityDescriptor = {};
                             source->thumbnail =
                                 std::move(update.thumbnail);
                             anyPersistentThumbnailUpdated = true;
@@ -1865,6 +1918,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
             source.fingerprint = item.fingerprint;
             source.sourceWorkspaceRoot = item.sourceWorkspaceRoot;
             source.sourceRelativePathKey = item.sourceRelativePathKey;
+            source.thumbnail.camera = item.camera;
             return Stack::RawWorkspace::NativeSourceRecord(source);
         };
 
@@ -1893,8 +1947,8 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
                         m_RawWorkspaceThumbnailMutex);
                     return generation != m_RawWorkspaceThumbnailGeneration;
                 };
-                const auto sourceLayout = item.sourceWorkspaceRoot.empty() ? layout :
-                    Stack::RawWorkspace::BuildManagedLayout(item.sourceWorkspaceRoot);
+                const auto sourceLayout = item.sourceWorkspaceRoot.empty() || item.sourceWorkspaceRoot == layout.workspaceRoot
+                    ? layout : Stack::RawWorkspace::BuildGalleryLayout(item.sourceWorkspaceRoot);
                 Stack::RawWorkspace::ThumbnailGenerationResult result =
                     transientPreview
                     ? Stack::RawWorkspace::GenerateFastNeutralThumbnail(
@@ -1932,8 +1986,8 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
                     std::move(result.thumbnail),
                     transientPreview,
                 });
-                if (thumbnailUpdates.size() >=
-                    kRawWorkspaceThumbnailApplyBatchSize) {
+                if (thumbnailUpdates.size() >= kRawWorkspaceThumbnailApplyBatchSize ||
+                    std::chrono::steady_clock::now() - lastThumbnailPublication >= std::chrono::milliseconds(200)) {
                     if (!flushThumbnailUpdates()) {
                         return false;
                     }
@@ -2326,6 +2380,10 @@ void EditorModule::PersistRawWorkspaceCatalog() {
     if (m_RawWorkspace.allSourceFolders || m_RawWorkspace.workspaceRoot.empty()) {
         return;
     }
+    // A document opened directly from Originals owns only its selected file.
+    // Leave folder-wide persistence to editors which actually ran discovery.
+    const auto scan = GetRawWorkspaceScanSnapshot();
+    if (!scan.completedSuccessfully && !Async::IsBusy(scan.state)) return;
 
     m_RawWorkspaceCatalogPersistGeneration.fetch_add(1, std::memory_order_relaxed);
     m_RawWorkspaceCatalogPersistDirty = true;
@@ -2359,7 +2417,7 @@ void EditorModule::StartRawWorkspaceCatalogPersistIfNeeded() {
     }
 
     const Stack::RawWorkspace::ManagedLayout layout =
-        Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
+        Stack::RawWorkspace::BuildGalleryLayout(m_RawWorkspace.workspaceRoot);
     std::vector<Stack::RawWorkspace::CatalogSourceRecord> sources =
         Stack::RawWorkspace::BuildCatalogSourceRecords(m_RawWorkspace.sources);
     const std::string selectedSourceKey = m_PinnedRawWorkspaceSource.has_value()

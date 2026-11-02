@@ -315,8 +315,8 @@ void LibraryModule::RenderPreviewPopup(
     }
 
     ImGui::Spacing();
-    if (ImGui::Button("Export Project...", ImVec2(contentWidth, 34.0f))) {
-        std::string exportPath = FileDialogs::SaveProjectFileDialog("Export Project File", m_PreviewProject->fileName.c_str());
+    if (ImGui::Button("Pack portable project...", ImVec2(contentWidth, 34.0f))) {
+        std::string exportPath = FileDialogs::SaveProjectFileDialog("Pack Portable Project", m_PreviewProject->fileName.c_str());
         if (!exportPath.empty()) {
             LibraryManager::Get().ExportProject(m_PreviewProject->fileName, exportPath);
         }

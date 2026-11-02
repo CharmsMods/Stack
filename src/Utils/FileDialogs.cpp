@@ -3,6 +3,7 @@
 #include "App/AppPaths.h"
 #include "Utils/ScopedComApartment.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -610,8 +611,7 @@ std::string OpenStackProjectFileDialog(const char* title) {
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFilter =
         "Stack Projects\0*.stack\0"
-        "Working Project Document\0project.stack\0"
-        "Packed Stack Project\0*.stack\0";
+        "All files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
@@ -628,65 +628,25 @@ std::string OpenStackProjectFileDialog(const char* title) {
 
 std::string SaveProjectFileDialog(const char* title, const char* defaultFileName) {
 #ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    if (defaultFileName && defaultFileName[0]) {
-        strncpy_s(filename, defaultFileName, _TRUNCATE);
-    } else {
-        strncpy_s(filename, "project.stack", _TRUNCATE);
-    }
-
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Modular Studio Project\0*.stack\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = title;
-    ofn.lpstrDefExt = "stack";
-
-    if (RunSaveFileDialog(ofn, "SaveProjectFileDialog", title)) {
-        return std::string(filename);
-    }
-#else
-    (void)title;
-    (void)defaultFileName;
-#endif
-    return "";
-}
-
-std::string SaveProjectBundleDialog(
-    const char* title,
-    const char* defaultFileName) {
-#ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    if (defaultFileName && defaultFileName[0]) {
-        strncpy_s(filename, defaultFileName, _TRUNCATE);
-    } else {
-        strncpy_s(filename, "Project", _TRUNCATE);
-    }
-
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Stack Working Project Folder\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = title;
-    ofn.lpstrDefExt = nullptr;
-
-    if (RunSaveFileDialog(ofn, "SaveProjectBundleDialog", title)) {
-        if (IsFileDialogTraceEnabled()) {
-            std::ofstream& stream = FileDialogTraceStream();
-            if (stream.is_open()) {
-                stream << "event=selection kind=SaveProjectBundleDialog path=\""
-                       << filename << "\"\n";
-                stream.flush();
-            }
-        }
-        return std::string(filename);
-    }
+    std::vector<wchar_t> filename(32768);
+    const auto suggested=std::filesystem::u8path(defaultFileName && *defaultFileName ? defaultFileName : "Project.stack");
+    if (suggested.native().size()>=filename.size()) return {};
+    std::copy(suggested.native().begin(),suggested.native().end(),filename.begin());
+    const auto wideTitle=std::filesystem::u8path(title ? title : "Save project").wstring();
+    const auto owner=ResolveDialogOwnerWindow("SaveProjectFileDialog",title);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize=sizeof(dialog);
+    dialog.hwndOwner=owner.effectiveOwner;
+    dialog.lpstrFile=filename.data();
+    dialog.nMaxFile=static_cast<DWORD>(filename.size());
+    dialog.lpstrFilter=L"Stack project (*.stack)\0*.stack\0";
+    dialog.lpstrDefExt=L"stack";
+    dialog.lpstrTitle=wideTitle.c_str();
+    dialog.Flags=OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    TraceFileDialog("begin","SaveProjectFileDialog",title,owner);
+    const BOOL chosen=GetSaveFileNameW(&dialog);
+    TraceFileDialog("end","SaveProjectFileDialog",title,owner,chosen,chosen ? 0 : CommDlgExtendedError());
+    if (chosen) return std::filesystem::path(filename.data()).u8string();
 #else
     (void)title;
     (void)defaultFileName;

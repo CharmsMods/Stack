@@ -33,6 +33,13 @@ struct BracketingRenderValidationAccess {
             e.m_RenderRevision != renderRevision)
             throw std::runtime_error("Unchanged bracket recipe scheduled reconstruction");
         for(unsigned control=0;control<2;++control) {
+            if (control == 1) {
+                const auto& background = e.m_Project->rawLayers.State().background;
+                const auto* color = Stack::Project::FindRawOperation(
+                    background, Stack::RawRecipe::GraphOperationKind::ColorWarp);
+                if (!color) throw std::runtime_error("Bracket has no Color Warp adjustment");
+                e.SelectRawNodeEditor(background.id, color->instanceUuid);
+            }
             EditorModule::RawWorkspaceEditContext context;
             if(!e.BeginRawWorkspaceEditContext(nullptr,context)||!context.canEdit)
                 throw std::runtime_error("Bracket RAW controls are unavailable");
@@ -45,7 +52,6 @@ struct BracketingRenderValidationAccess {
                     context.recipe.technical.mosaicDenoise.lumaStrength=.3f;
                 }
             } else {
-                e.m_RawWorkspaceLabUi.activeTool=EditorModule::RawLabTool::Color;
                 context.recipe.colorWarp.enabled=true;
                 Stack::RawRecipe::RawColorWarpPin pin;pin.id="bracket-settle-test";pin.targetA=.025f;
                 context.recipe.colorWarp.pins={pin};
@@ -79,6 +85,7 @@ struct BracketingRenderValidationAccess {
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(120);
         auto nextStatus=std::chrono::steady_clock::now()+std::chrono::seconds(15);
         unsigned idle=0;
+        bool reportedProxy = false;
         while(std::chrono::steady_clock::now()<deadline) {
             ImGui::GetIO().DeltaTime=1.f/60;ImGui::NewFrame();
             e.TickBracketing();e.ConsumeRenderWorkerResults();
@@ -89,11 +96,27 @@ struct BracketingRenderValidationAccess {
             e.RenderRawWorkspacePreviewCanvas(nullptr, false, &imageMinimum, &imageMaximum);
             if (!e.UsesRawWorkspaceStageRender() && e.m_RawWorkspacePresentationTexture.height > 0 &&
                 imageMaximum.y > imageMinimum.y && e.HasRawWorkspaceLivePreviewForSource(e.GetActiveRawWorkspacePreviewIdentity())) {
-                const float expectedAspect = float(e.m_RawWorkspacePresentationTexture.width) /
-                    e.m_RawWorkspacePresentationTexture.height;
-                const float shownAspect = (imageMaximum.x-imageMinimum.x)/(imageMaximum.y-imageMinimum.y);
-                if (std::abs(expectedAspect-shownAspect) > .001f)
-                    throw std::runtime_error("RAW viewport stretched the downstream Graph output");
+                // A proxy is rounded to whole texels and may only cover the visible region.
+                // The returned rectangle describes the complete downstream image.
+                Stack::Renderer::ViewportPreviewGeometry geometry;
+                const bool hasGeometry = e.TryGetViewportPreviewGeometry(geometry) && geometry.Valid();
+                const auto& texture = e.m_RawWorkspacePresentationTexture;
+                const int width = hasGeometry ? geometry.logicalWidth : texture.width;
+                const int height = hasGeometry ? geometry.logicalHeight : texture.height;
+                const float shownWidth = imageMaximum.x - imageMinimum.x;
+                const float shownHeight = imageMaximum.y - imageMinimum.y;
+                const float expectedAspect = float(width) / height;
+                if (std::abs(shownWidth / shownHeight - expectedAspect) > .001f)
+                    throw std::runtime_error("RAW viewport aspect mismatch: drawn " +
+                        std::to_string(shownWidth) + " x " + std::to_string(shownHeight) +
+                        ", logical " + std::to_string(width) + " x " + std::to_string(height) +
+                        ", texture " + std::to_string(texture.width) + " x " + std::to_string(texture.height));
+                if (!reportedProxy && std::abs(float(texture.width) / texture.height - expectedAspect) > .001f) {
+                    std::cout << "Full image " << width << " x " << height << ", drawn "
+                        << shownWidth << " x " << shownHeight << ", resident texture "
+                        << texture.width << " x " << texture.height << '\n';
+                    reportedProxy = true;
+                }
             }
             ImGui::End();
             e.SubmitRenderIfReady();e.UpdateBracketingPresentation();

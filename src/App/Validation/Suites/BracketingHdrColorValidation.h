@@ -122,6 +122,63 @@ inline void ValidateBracketingHdrColor() {
         colorFallback[s].actual[0]==1&&colorFallback[s].fallback&&!colorFallback[s].clipped&&
         !colorFallback[s].valid&&colorFallback[s].support==0,
         "HDR fallback mixed exposures or promoted rejected measurements to valid support");
+    {
+        auto highlightRecipe=recipe;
+        highlightRecipe.originFrameId="reference";
+        highlightRecipe.groups[0].frames={{"short"}};
+        highlightRecipe.groups[1].frames={{"reference"}};
+        auto isolated=samples;
+        const double ref[4]={.55,1.,1.,.85},donor[4]={.275,.65,.65,.425};
+        for(unsigned s=0;s<4;++s) {
+            isolated[s][0].fallback=donor[s];
+            isolated[s][1].clippedReference=ClippedReference::LowerBound;
+            isolated[s][1].value=isolated[s][1].fallback=ref[s];
+            isolated[s][1].fixedReference=isolated[s][1].support>0;
+        }
+        const auto recovered=BlendColor(isolated,{},highlightRecipe);
+        for(unsigned s:{0u,3u})check(recovered[s].valid&&recovered[s].actual[1]==1&&recovered[s].value==ref[s],
+            "An isolated clipped highlight displaced a measured reference color");
+        for(unsigned s:{1u,2u})check(!recovered[s].valid&&recovered[s].support==0&&
+            recovered[s].fallbackReason==MeasurementFallbackReason::HighlightFallback&&std::abs(recovered[s].value-1.3)<1e-12,
+            "Rejected highlight data painted a dark hole or gained independent support");
+        for(auto& site:isolated){
+            auto& refSite=site[1];refSite.value=refSite.fallback=1;refSite.clipped=refSite.fallbackClipped=true;refSite.support=0;
+        }
+        const auto bounded=BlendColor(isolated,{},highlightRecipe);
+        for(const auto& p:bounded)check(p.value==1&&p.clipped&&!p.valid&&p.support==0&&p.actual[1]==1,
+            "A rejected dark donor cut a hole in a fully clipped reference point");
+        // A neutral display fallback can have unequal sensor-channel values.
+        // Its brightness is still unknown, independent of CFA phase, group
+        // order and the radiance units of the linear master.
+        const double neutral[4]={.5,1,1,2./3.};
+        for(unsigned phase=0;phase<4;++phase) {
+            auto shifted=isolated;auto reordered=highlightRecipe;
+            std::swap(reordered.groups[0],reordered.groups[1]);
+            for(unsigned s=0;s<4;++s) {
+                auto& cell=shifted[s];
+                std::swap(cell[0],cell[1]);
+                auto& refSite=cell[0];
+                refSite.clippedReference=ClippedReference::EstimatedColor;
+                refSite.fallback=4.;
+                refSite.value=8.*neutral[(s+phase)%4];
+            }
+            const auto inferred=BlendColor(shifted,{},reordered);
+            for(unsigned s=0;s<4;++s)check(inferred[s].value==shifted[s][0].value&&
+                inferred[s].clipped&&!inferred[s].valid&&inferred[s].support==0&&inferred[s].actual[0]==1,
+                "Neutral fallback changed clipping, fabricated support or depended on group order or CFA phase");
+        }
+        auto noiseRecipe=highlightRecipe;noiseRecipe.groups={highlightRecipe.groups[1]};
+        for(unsigned s=0;s<4;++s) {
+            auto refSite=isolated[s][1];
+            refSite.clippedReference=ClippedReference::EstimatedColor;
+            refSite.value=1+.2*s;
+            isolated[s]={refSite};
+        }
+        const auto noiseHighlight=BlendColor(isolated,{},noiseRecipe);
+        for(unsigned s=0;s<4;++s)check(noiseHighlight[s].value==isolated[s][0].value&&
+            noiseHighlight[s].clipped&&noiseHighlight[s].support==0&&!noiseHighlight[s].valid,
+            "Equal-exposure clipping bypassed color recovery or fabricated a measurement");
+    }
     // Each channel has an accepted measurement although no exposure supports
     // the whole edge. Rejected alternatives must not discard that support.
     for(unsigned s=1;s<3;++s) {

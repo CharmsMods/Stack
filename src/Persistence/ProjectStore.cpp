@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -36,11 +37,8 @@ std::string LowerAscii(std::string value) {
     return value;
 }
 
-constexpr const char* kWorkingProjectManifestName = "project.stack";
-constexpr const char* kWorkingProjectPreviousManifestName = "project.stack.previous";
+constexpr char kWorkingHeader[] = "STACK-WORKING-1\n";
 constexpr const char* kWorkingProjectAssetsDirectoryName = "assets";
-constexpr const char* kWorkingProjectPreviewsDirectoryName = "previews";
-constexpr const char* kBundleStagingDirectoryName = ".staging";
 constexpr std::array<char, 8> kPortableHeader = { 'S', 'T', 'K', 'R', 'A', 'W', '3', '\0' };
 constexpr std::array<char, 4> kRecordMagic = { 'S', 'R', '3', 'R' };
 constexpr std::array<char, 4> kFooterMagic = { 'S', 'R', '3', 'F' };
@@ -57,6 +55,7 @@ struct AssetLocation {
     std::string checksum;
     std::filesystem::path relativePath;
     bool closetShared = false;
+    bool linkedSource = false;
 };
 
 struct StagedAsset {
@@ -102,23 +101,6 @@ bool IsSafeManagedAssetPath(const std::filesystem::path& path) {
         if (*component == "." || *component == "..") return false;
     }
     return true;
-}
-
-std::filesystem::path NormalizeDirectoryStorePath(
-    const std::filesystem::path& requestedPath) {
-    if (LowerAscii(requestedPath.filename().u8string()) ==
-        kWorkingProjectManifestName) {
-        // A packed project is allowed to be named project.stack, and a
-        // project directory can have that name too. Only an actual bundle
-        // manifest (or its not-yet-created path) denotes the parent store.
-        std::error_code error;
-        if (std::filesystem::is_directory(requestedPath, error) ||
-            IsPortableV3Project(requestedPath)) {
-            return requestedPath.lexically_normal();
-        }
-        return requestedPath.parent_path().lexically_normal();
-    }
-    return requestedPath.lexically_normal();
 }
 
 struct StorePathLess {
@@ -264,6 +246,12 @@ bool ReadJsonFile(const std::filesystem::path& path, json& value, std::string& e
         error = "Could not open project manifest.";
         return false;
     }
+    std::array<char, sizeof(kWorkingHeader) - 1> header{};
+    if (!input.read(header.data(), header.size()) ||
+        std::string_view(header.data(), header.size()) != kWorkingHeader) {
+        error = "Unsupported Stack working project format.";
+        return false;
+    }
     try {
         input >> value;
     } catch (const std::exception& exception) {
@@ -287,6 +275,40 @@ bool VerifyFileIdentity(
         return false;
     }
     return true;
+}
+
+// Called when opening media or packing a project. Gallery's directory walk
+// already publishes an identity catalog, so a rename needs no new tree walk.
+std::filesystem::path ResolveLinkedSourceFile(
+    const std::filesystem::path& project, const EmbeddedAssetRecord& asset) {
+    const auto matches = [&](const std::filesystem::path& candidate) {
+        std::error_code ec;
+        std::string error;
+        return !candidate.empty() && std::filesystem::file_size(candidate, ec) == asset.byteLength &&
+            !ec && VerifyFileIdentity(candidate, asset, error);
+    };
+    auto expected = ExpectedSourcePath(project, asset);
+    if (matches(expected)) return expected;
+    const auto shared = ClosetAssetRoot(project);
+    if (shared.empty()) return {};
+    const auto closet = shared.parent_path();
+    // A saved standalone master can also be the original of a new edit.
+    for (const auto* filename : {"catalog.json","masters.json"}) {
+        if (asset.managedRole=="bracketing-master" && std::string_view(filename)=="catalog.json") continue;
+        std::ifstream input(closet / "Catalog" / filename,std::ios::binary);
+        if (!input) continue;
+        const auto catalog=json::parse(input,nullptr,false);
+        if (!catalog.is_object() || !catalog.contains("sources") || !catalog["sources"].is_array()) continue;
+        for (const auto& source : catalog["sources"]) {
+            if (!source.is_object() || !source.contains("fingerprint") || source["fingerprint"]!=asset.sha256 ||
+                !source.contains("relativePath") || !source["relativePath"].is_string()) continue;
+            const auto relative=std::filesystem::u8path(source["relativePath"].get<std::string>());
+            if (relative.has_root_path() || std::find(relative.begin(),relative.end(),"..")!=relative.end()) continue;
+            const auto candidate=closet.parent_path()/relative;
+            if (candidate!=expected && matches(candidate)) return candidate;
+        }
+    }
+    return {};
 }
 
 bool WriteUnsigned32(std::ostream& output, std::uint32_t value) {
@@ -379,7 +401,7 @@ json SerializeStoreEnvelope(
         if (!entry.second.relativePath.empty()) {
             location["relativePath"] = entry.second.relativePath.generic_u8string();
         }
-        location["scope"] = entry.second.closetShared ? "closet" : "project";
+        location["scope"] = entry.second.linkedSource ? "source" : entry.second.closetShared ? "closet" : "project";
         storage["assets"][entry.first] = std::move(location);
     }
     if (coverLocation) {
@@ -421,7 +443,7 @@ bool DeserializeStoreEnvelope(
     AssetLocation& coverLocation,
     bool& hasCover,
     std::string& error) try {
-    const json storage = value.value("_store", json::object());
+    const auto& storage=value.at("_store");
     ProjectStorageKind kind;
     if (!ParseProjectStorageKind(storage.value("kind", std::string()), kind) ||
         kind != expectedKind) {
@@ -454,12 +476,19 @@ bool DeserializeStoreEnvelope(
         location.checksum = iterator.value().value("checksum", std::string());
         location.relativePath = std::filesystem::u8path(iterator.value().value("relativePath", std::string()));
         const auto scope = iterator.value().value("scope", std::string("project"));
-        if (scope != "project" && scope != "closet") {
+        if (scope != "project" && scope != "closet" && scope != "source") {
             error = "Unknown project asset storage scope.";
             return false;
         }
         location.closetShared = scope == "closet";
-        if (expectedKind == ProjectStorageKind::DirectoryBundle &&
+        location.linkedSource = scope == "source";
+        const auto* asset = FindEmbeddedAsset(snapshot, iterator.key());
+        if (!asset || asset->sha256 != location.checksum || asset->byteLength != location.payloadLength ||
+            (location.linkedSource && (expectedKind != ProjectStorageKind::WorkingFile || !asset->linkedSource))) {
+            error = "Asset identity does not match the project manifest.";
+            return false;
+        }
+        if (expectedKind == ProjectStorageKind::WorkingFile && !location.linkedSource &&
             (location.closetShared
                 ? (location.relativePath.empty() || location.relativePath.has_parent_path() ||
                    location.relativePath != std::filesystem::path(location.checksum + "-" +
@@ -477,6 +506,12 @@ bool DeserializeStoreEnvelope(
         coverLocation.payloadLength = cover->value("payloadLength", 0ull);
         coverLocation.checksum = cover->value("checksum", std::string());
         coverLocation.relativePath = std::filesystem::u8path(cover->value("relativePath", std::string()));
+        if (expectedKind == ProjectStorageKind::WorkingFile &&
+            coverLocation.relativePath != std::filesystem::path("Thumbnails") / "Project Covers" /
+                (coverLocation.checksum + "-" + std::to_string(coverLocation.payloadLength) + ".png")) {
+            error = "Invalid working project thumbnail location.";
+            return false;
+        }
         hasCover = true;
     }
     return true;
@@ -652,11 +687,9 @@ bool AppendRecordHeader(
 class TransactionalProjectStore final : public ProjectStore {
 public:
     TransactionalProjectStore(std::filesystem::path path, ProjectStorageKind kind)
-        : m_Path(kind == ProjectStorageKind::DirectoryBundle
-              ? NormalizeDirectoryStorePath(path)
-              : std::move(path)),
+        : m_Path(std::move(path)),
           m_Kind(kind), m_CommitMutex(CommitMutexForPath(m_Path)),
-          m_SharedAssetRoot(kind == ProjectStorageKind::DirectoryBundle ? ClosetAssetRoot(m_Path) : std::filesystem::path{}) {}
+          m_SharedAssetRoot(kind == ProjectStorageKind::WorkingFile ? ClosetAssetRoot(m_Path) : std::filesystem::path{}) {}
 
     ProjectStorageKind StorageKind() const override { return m_Kind; }
     const std::filesystem::path& StoragePath() const override { return m_Path; }
@@ -675,7 +708,7 @@ public:
     std::filesystem::path ResolveAssetFile(const std::string& assetId) const override {
         std::lock_guard<std::mutex> lock(m_Mutex);
         const auto found = m_AssetLocations.find(assetId);
-        return m_Kind == ProjectStorageKind::DirectoryBundle && found != m_AssetLocations.end()
+        return m_Kind == ProjectStorageKind::WorkingFile && found != m_AssetLocations.end()
             ? AssetPath(found->second) : std::filesystem::path{};
     }
 
@@ -711,7 +744,8 @@ public:
                         asset.assetId;
                     return false;
                 }
-                if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+                if (location->second.linkedSource) continue;
+                if (m_Kind == ProjectStorageKind::WorkingFile) {
                     sizeError.clear();
                     const std::uint64_t actualSize =
                         static_cast<std::uint64_t>(std::filesystem::file_size(
@@ -749,7 +783,7 @@ public:
             return true;
         };
 
-        if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+        if (m_Kind == ProjectStorageKind::WorkingFile) {
             json currentManifest;
             std::string currentError;
             if (ReadJsonFile(CurrentManifestPath(), currentManifest, currentError) &&
@@ -759,24 +793,17 @@ public:
                 return true;
             }
 
-            json previousManifest;
-            std::string previousError;
-            if (!ReadJsonFile(
-                    PreviousManifestPath(),
-                    previousManifest,
-                    previousError) ||
-                !applyManifest(previousManifest, previousError)) {
-                error = "Current bundle manifest is invalid (" + currentError +
-                    "); previous manifest recovery also failed (" + previousError + ").";
-                return false;
+            if (currentManifest.is_object() && currentManifest.contains("_store") && currentManifest["_store"].contains("previous")) {
+                std::string recoveryError;
+                if (applyManifest(currentManifest.at("_store").at("previous"),recoveryError)) {
+                    m_Snapshot=snapshot;
+                    m_ReadOnlyRecovery=recoveredPrevious=true;
+                    error="The previous working project revision was recovered. Save As to keep a repaired copy.";
+                    return true;
+                }
             }
-            recoveredPrevious = true;
-            m_ReadOnlyRecovery = true;
-            error = "Recovered the previous project generation because the current manifest is invalid: " +
-                currentError;
-            if (!previousError.empty()) {
-                error += " " + previousError;
-            }
+            error = currentError;
+            return false;
         } else {
             json manifest;
             std::uint64_t generation = 0;
@@ -814,7 +841,7 @@ public:
         MultiFrameInputFamily inputFamily,
         const json& captureMetadataSummary,
         EmbeddedAssetRecord& record,
-        std::string* errorMessage) override {
+        std::string* errorMessage, bool linkOriginal) override {
         std::string error;
         const RawEvidence::SourceIdentity identity = RawEvidence::ComputeSourceIdentity(sourcePath);
         if (!identity.valid) {
@@ -826,22 +853,8 @@ public:
         record.byteLength = identity.byteSize;
         record.originalFilename = sourcePath.filename().u8string();
         record.displayName = record.originalFilename;
-        record.originalSourcePath = sourcePath.u8string();
-        // Provenance is relative to the enclosing photo workspace, when this
-        // store belongs to one. Asset playback always uses projectAssetPath.
-        for (auto parent = m_Path.parent_path(); !parent.empty();) {
-            std::error_code provenanceError;
-            if (LowerAscii(parent.filename().u8string()) == "closet" &&
-                std::filesystem::is_regular_file(parent / "workspace.json", provenanceError)) {
-                const auto relative = sourcePath.lexically_normal().lexically_relative(parent.parent_path());
-                if (!relative.empty() && !relative.is_absolute() && *relative.begin() != "..")
-                    record.workspaceRelativeSourcePath = relative.generic_u8string();
-                break;
-            }
-            const auto next = parent.parent_path();
-            if (next == parent) break;
-            parent = next;
-        }
+        SetSourceLocation(m_Path, sourcePath, record);
+        record.linkedSource = linkOriginal;
         record.originalFileFingerprint = identity.sha256;
         record.inputFamily = inputFamily;
         record.captureMetadataSummary = captureMetadataSummary;
@@ -886,6 +899,10 @@ public:
                 std::filesystem::u8path(managedName);
         }
         record.projectAssetPath = managedPath.generic_u8string();
+        if (record.linkedSource && m_Kind == ProjectStorageKind::WorkingFile) {
+            state->assets.emplace(record.assetId, StagedAsset{record, {}});
+            return Finish(errorMessage, {}, true);
+        }
         if (!m_SharedAssetRoot.empty() &&
             std::filesystem::exists(m_SharedAssetRoot / ContentAssetName(record))) {
             if (!VerifyFileIdentity(m_SharedAssetRoot / ContentAssetName(record), record, error))
@@ -916,6 +933,19 @@ public:
         }
         state->assets.emplace(record.assetId, StagedAsset { record, stagedPath });
         return Finish(errorMessage, std::string(), true);
+    }
+
+    bool StageSourceReference(const ProjectStoreTransaction& transaction,
+        const EmbeddedAssetRecord& record, std::string& error) override {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        auto* state = FindTransaction(transaction, error);
+        if (!state || m_Kind != ProjectStorageKind::WorkingFile || !record.linkedSource ||
+            record.assetId != MakeAssetId(record.sha256, record.byteLength)) {
+            error = "Invalid linked source reference.";
+            return false;
+        }
+        state->assets[record.assetId] = StagedAsset{record, {}};
+        return true;
     }
 
     bool StageAssetStream(
@@ -1030,7 +1060,7 @@ public:
             return {};
         }
         ProjectAssetStream result;
-        if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+        if (m_Kind == ProjectStorageKind::WorkingFile) {
             const std::filesystem::path assetPath = AssetPath(found->second);
             auto stream = std::make_unique<std::ifstream>(assetPath, std::ios::binary);
             if (!*stream) {
@@ -1119,7 +1149,7 @@ public:
         std::vector<std::string> localErrors = validation.errors;
         for (const EmbeddedAssetRecord& asset : snapshot.embeddedAssets) {
             std::filesystem::path temporary;
-            if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+            if (m_Kind == ProjectStorageKind::WorkingFile) {
                 std::lock_guard<std::mutex> lock(m_Mutex);
                 const auto found = m_AssetLocations.find(asset.assetId);
                 if (found == m_AssetLocations.end()) {
@@ -1169,7 +1199,7 @@ public:
     }
 
     bool Optimize(std::string* errorMessage) override {
-        if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+        if (m_Kind == ProjectStorageKind::WorkingFile) {
             return Finish(errorMessage, std::string(), true);
         }
         const std::filesystem::path temporary =
@@ -1313,8 +1343,7 @@ private:
 #if defined(_WIN32)
         // Serialize the read-revision/publish pair across Stack processes too.
         // A child handle also prevents a directory rename during publication.
-        const auto lockPath = m_Kind == ProjectStorageKind::DirectoryBundle
-            ? m_Path / ".write.lock" : std::filesystem::path(m_Path.wstring() + L".write.lock");
+        const auto lockPath = std::filesystem::path(m_Path.wstring() + L".write.lock");
         const HANDLE fileLock = CreateFileW(lockPath.c_str(), GENERIC_READ | GENERIC_WRITE,
             0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
         if (fileLock == INVALID_HANDLE_VALUE)
@@ -1372,7 +1401,7 @@ private:
         }
         RawProjectSnapshot snapshot = requestedSnapshot;
         snapshot.persistedStorageRevision = newRevision;
-        const bool committed = m_Kind == ProjectStorageKind::DirectoryBundle
+        const bool committed = m_Kind == ProjectStorageKind::WorkingFile
             ? CommitDirectory(*state, snapshot, newRevision, error)
             : CommitPortable(*state, snapshot, newRevision, error);
         if (!committed) {
@@ -1388,18 +1417,10 @@ private:
     }
 
     std::filesystem::path StagingRoot() const {
-        return m_Kind == ProjectStorageKind::DirectoryBundle
-            ? m_Path / kBundleStagingDirectoryName
-            : PortableStagingRoot(m_Path);
+        return PortableStagingRoot(m_Path);
     }
 
-    std::filesystem::path CurrentManifestPath() const {
-        return m_Path / kWorkingProjectManifestName;
-    }
-
-    std::filesystem::path PreviousManifestPath() const {
-        return m_Path / kWorkingProjectPreviousManifestName;
-    }
+    std::filesystem::path CurrentManifestPath() const { return m_Path; }
 
     void RemoveStagingDirectory(const std::filesystem::path& path) const {
         const std::filesystem::path root = StagingRoot().lexically_normal();
@@ -1407,6 +1428,7 @@ private:
         if (target.empty() || target == root || target.parent_path() != root) return;
         std::error_code error;
         std::filesystem::remove_all(target, error);
+        std::filesystem::remove(root, error); // Only succeeds after the last transaction exits.
     }
 
     TransactionState* FindTransaction(
@@ -1423,7 +1445,7 @@ private:
 
     bool ReadCurrentRevision(std::uint64_t& revision, std::string& error) const {
         json manifest;
-        if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+        if (m_Kind == ProjectStorageKind::WorkingFile) {
             if (!ReadJsonFile(CurrentManifestPath(), manifest, error)) return false;
             revision = manifest.value("_store", json::object()).value("generation", 0ull);
         } else if (!FindLastPortableManifest(m_Path, manifest, revision, nullptr, error)) {
@@ -1441,9 +1463,9 @@ private:
         bytes.clear();
         if (!m_HasCover || m_CoverLocation.payloadLength == 0u) return true;
         std::unique_ptr<std::istream> input;
-        if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+        if (m_Kind == ProjectStorageKind::WorkingFile) {
             auto file = std::make_unique<std::ifstream>(
-                m_Path / m_CoverLocation.relativePath, std::ios::binary);
+                CoverRoot() / m_CoverLocation.relativePath, std::ios::binary);
             if (!*file) {
                 error = "Could not read project cover thumbnail.";
                 return false;
@@ -1487,28 +1509,21 @@ private:
         std::uint64_t revision,
         std::string& error) {
         std::error_code filesystemError;
-        const std::filesystem::path mediaRoot =
-            m_Path / kWorkingProjectAssetsDirectoryName;
-        std::filesystem::create_directories(mediaRoot, filesystemError);
-        if (filesystemError) {
-            error = "Could not create bundle media directory.";
-            return false;
-        }
         auto newLocations = m_AssetLocations;
         for (const auto& entry : state.assets) {
             const EmbeddedAssetRecord& asset = entry.second.record;
+            if (asset.linkedSource && entry.second.stagingPath.empty()) {
+                newLocations[asset.assetId] = {0u, asset.byteLength, asset.sha256, {}, false, true};
+                continue;
+            }
             if (!entry.second.stagingPath.empty() && !FlushOwnedFile(entry.second.stagingPath)) {
                 error = "Could not flush a staged project asset.";
                 return false;
             }
-            const auto authoredPath = std::filesystem::u8path(asset.projectAssetPath);
-            const std::filesystem::path relative = !m_SharedAssetRoot.empty()
-                ? ContentAssetName(asset) : IsSafeManagedAssetPath(authoredPath)
-                ? authoredPath
-                : std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
-                    FileNameForAsset(asset);
+            const auto relative = m_SharedAssetRoot.empty()
+                ? std::filesystem::path(kWorkingProjectAssetsDirectoryName) / ContentAssetName(asset) : ContentAssetName(asset);
             const std::filesystem::path destination =
-                (m_SharedAssetRoot.empty() ? m_Path : m_SharedAssetRoot) / relative;
+                (m_SharedAssetRoot.empty() ? m_Path.parent_path() : m_SharedAssetRoot) / relative;
             std::filesystem::create_directories(
                 destination.parent_path(), filesystemError);
             if (filesystemError) {
@@ -1540,9 +1555,9 @@ private:
             // legacy preview.png before the new manifest commits. Unreferenced
             // covers from failed commits are retained, like managed assets.
             const std::filesystem::path relative =
-                std::filesystem::path(kWorkingProjectPreviewsDirectoryName) /
+                std::filesystem::path("Thumbnails") / "Project Covers" /
                 (identity.sha256 + "-" + std::to_string(identity.byteSize) + ".png");
-            const std::filesystem::path coverPath = m_Path / relative;
+            const std::filesystem::path coverPath = CoverRoot() / relative;
             const auto matchesCover = [&]() {
                 std::error_code statusError;
                 if (!std::filesystem::is_regular_file(
@@ -1600,29 +1615,24 @@ private:
             }
         }
 
-        const json manifest = SerializeStoreEnvelope(
+        for (auto it = newLocations.begin(); it != newLocations.end();) {
+            if (!FindEmbeddedAsset(snapshot, it->first)) it = newLocations.erase(it);
+            else ++it;
+        }
+        json manifest = SerializeStoreEnvelope(
             snapshot, m_Kind, revision, newLocations,
             hasCover ? &coverLocation : nullptr);
+        // Keep one generation of metadata in the same file. Both generations
+        // refer to the same immutable media/asset store.
+        if (m_StorageRevision && !m_Snapshot.projectId.empty())
+            manifest["_store"]["previous"]=SerializeStoreEnvelope(m_Snapshot,m_Kind,m_StorageRevision,m_AssetLocations,
+                m_HasCover ? &m_CoverLocation : nullptr);
         const std::filesystem::path manifestPath = CurrentManifestPath();
         std::filesystem::path temporary = manifestPath;
         temporary += ".tmp-" + state.stagingDirectory.filename().u8string();
-        if (!WriteTextFile(temporary, manifest.dump(2))) {
+        if (!WriteTextFile(temporary, kWorkingHeader + manifest.dump())) {
             error = "Could not write staged bundle manifest.";
             return false;
-        }
-        filesystemError.clear();
-        if (std::filesystem::exists(manifestPath, filesystemError)) {
-            const std::filesystem::path previous = PreviousManifestPath();
-            std::filesystem::path previousTemporary = previous;
-            previousTemporary += ".tmp-" + state.stagingDirectory.filename().u8string();
-            std::filesystem::copy_file(
-                manifestPath, previousTemporary,
-                std::filesystem::copy_options::overwrite_existing, filesystemError);
-            if (filesystemError || !ReplaceFileAtomically(previousTemporary, previous)) {
-                std::filesystem::remove(temporary, filesystemError);
-                error = "Could not retain the previous bundle manifest.";
-                return false;
-            }
         }
         if (!ReplaceFileAtomically(temporary, manifestPath)) {
             std::filesystem::remove(temporary, filesystemError);
@@ -1709,6 +1719,10 @@ private:
             appendOffset += kRecordFixedHeaderSize + 5u + identity.byteSize;
         }
 
+        for (auto it = newLocations.begin(); it != newLocations.end();) {
+            if (!FindEmbeddedAsset(snapshot, it->first)) it = newLocations.erase(it);
+            else ++it;
+        }
         const json manifest = SerializeStoreEnvelope(
             snapshot, m_Kind, revision, newLocations,
             hasCover ? &coverLocation : nullptr);
@@ -1755,9 +1769,17 @@ private:
     std::shared_ptr<std::mutex> m_CommitMutex;
     std::filesystem::path m_SharedAssetRoot;
 
+    std::filesystem::path CoverRoot() const {
+        return m_SharedAssetRoot.empty() ? m_Path.parent_path() : m_SharedAssetRoot.parent_path();
+    }
+
     std::filesystem::path AssetPath(const AssetLocation& location) const {
+        if (location.linkedSource) {
+            const auto* asset = FindEmbeddedAsset(m_Snapshot, MakeAssetId(location.checksum, location.payloadLength));
+            return asset ? ResolveLinkedSourceFile(m_Path, *asset) : std::filesystem::path{};
+        }
         if (location.closetShared && m_SharedAssetRoot.empty()) return {};
-        return ((location.closetShared ? m_SharedAssetRoot : m_Path) / location.relativePath).lexically_normal();
+        return ((location.closetShared ? m_SharedAssetRoot : m_Path.parent_path()) / location.relativePath).lexically_normal();
     }
 };
 
@@ -1765,77 +1787,35 @@ bool InitializeStorage(
     const std::filesystem::path& path,
     ProjectStorageKind kind,
     std::string& error) {
-    const std::filesystem::path storagePath = kind == ProjectStorageKind::DirectoryBundle
-        ? NormalizeDirectoryStorePath(path)
-        : path;
     std::error_code filesystemError;
-    if (kind == ProjectStorageKind::DirectoryBundle) {
-        if (!EnsureParentDirectory(storagePath, error)) return false;
-        // Claim the root in one filesystem operation. Checking existence and
-        // then creating nested directories lets two creators share a root,
-        // overwrite each other's manifest, or delete each other's assets.
-        if (!std::filesystem::create_directory(storagePath, filesystemError)) {
-            error = filesystemError
-                ? "Could not create project bundle: " + filesystemError.message()
-                : "A project or directory already exists at the requested bundle path.";
-            return false;
-        }
-        std::filesystem::create_directories(
-            storagePath / kWorkingProjectAssetsDirectoryName,
-            filesystemError);
-        if (filesystemError) {
-            std::error_code cleanupError;
-            std::filesystem::remove_all(storagePath, cleanupError);
-            error = "Could not create project bundle.";
-            return false;
-        }
-        std::filesystem::create_directories(
-            storagePath / kBundleStagingDirectoryName,
-            filesystemError);
-        if (filesystemError) {
-            std::error_code cleanupError;
-            std::filesystem::remove_all(storagePath, cleanupError);
-            error = "Could not create project bundle staging directory.";
-            return false;
-        }
-        return true;
-    }
-
     if (!EnsureParentDirectory(path, error)) return false;
+    const std::string_view header = kind == ProjectStorageKind::WorkingFile
+        ? std::string_view(kWorkingHeader) : std::string_view(kPortableHeader.data(), kPortableHeader.size());
 #if defined(_WIN32)
     const HANDLE output = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
         CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (output == INVALID_HANDLE_VALUE) {
-        error = "Could not claim a new portable project file.";
+        error = "Could not claim a new project file.";
         return false;
     }
     DWORD written = 0;
-    const bool headerWritten = WriteFile(output, kPortableHeader.data(),
-        static_cast<DWORD>(kPortableHeader.size()), &written, nullptr) &&
-        written == kPortableHeader.size() && FlushFileBuffers(output);
+    const bool headerWritten = WriteFile(output, header.data(),
+        static_cast<DWORD>(header.size()), &written, nullptr) &&
+        written == header.size() && FlushFileBuffers(output);
     const bool closed = CloseHandle(output) != FALSE;
 #else
     const int output = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
     if (output < 0) {
-        error = "Could not claim a new portable project file.";
+        error = "Could not claim a new project file.";
         return false;
     }
-    const bool headerWritten = write(output, kPortableHeader.data(), kPortableHeader.size()) ==
-        static_cast<ssize_t>(kPortableHeader.size()) && fsync(output) == 0;
+    const bool headerWritten = write(output, header.data(), header.size()) ==
+        static_cast<ssize_t>(header.size()) && fsync(output) == 0;
     const bool closed = close(output) == 0;
 #endif
     if (!headerWritten || !closed) {
         std::filesystem::remove(path, filesystemError);
         error = "Could not write portable project header.";
-        return false;
-    }
-    std::filesystem::create_directories(PortableStagingRoot(path), filesystemError);
-    if (filesystemError) {
-        std::error_code cleanupError;
-        std::filesystem::remove(path, cleanupError);
-        cleanupError.clear();
-        std::filesystem::remove_all(PortableStagingRoot(path), cleanupError);
-        error = "Could not create portable project staging directory.";
         return false;
     }
     return true;
@@ -1844,32 +1824,18 @@ bool InitializeStorage(
 } // namespace
 
 std::filesystem::path ResolveProjectStoreRoot(const std::filesystem::path& path) {
-    return NormalizeDirectoryStorePath(path);
+    return path.lexically_normal();
 }
 
-std::filesystem::path WorkingProjectDocumentPath(
-    const std::filesystem::path& projectRoot) {
-    return NormalizeDirectoryStorePath(projectRoot) /
-        kWorkingProjectManifestName;
+std::filesystem::path WorkingProjectDocumentPath(const std::filesystem::path& path) {
+    return path.lexically_normal();
 }
 
-bool IsDirectoryProjectBundle(const std::filesystem::path& path) {
-    const std::filesystem::path root = NormalizeDirectoryStorePath(path);
-    std::error_code error;
-    if (!std::filesystem::is_directory(root, error) || error) {
-        return false;
-    }
-    error.clear();
-    if (std::filesystem::is_regular_file(
-            root / kWorkingProjectManifestName, error) && !error) {
-        return true;
-    }
-    error.clear();
-    if (std::filesystem::is_regular_file(
-            root / kWorkingProjectPreviousManifestName, error) && !error) {
-        return true;
-    }
-    return false;
+bool IsWorkingProjectFile(const std::filesystem::path& path) {
+    std::array<char, sizeof(kWorkingHeader) - 1> header{};
+    std::ifstream input(path, std::ios::binary);
+    return input.read(header.data(), header.size()) &&
+        std::string_view(header.data(), header.size()) == kWorkingHeader;
 }
 
 bool IsPortableV3Project(const std::filesystem::path& path) {
@@ -1897,17 +1863,15 @@ ProjectStoreOpenResult CreateProjectStore(
             : validation.errors.front();
         return result;
     }
-    const std::filesystem::path storagePath = storageKind == ProjectStorageKind::DirectoryBundle
-        ? NormalizeDirectoryStorePath(path)
-        : path;
+    const std::filesystem::path storagePath = path.lexically_normal();
     if (!InitializeStorage(storagePath, storageKind, error)) {
         result.message = error;
         return result;
     }
     const auto cleanupInitializedStorage = [&]() {
         std::error_code cleanupError;
-        if (storageKind == ProjectStorageKind::DirectoryBundle) {
-            std::filesystem::remove_all(storagePath, cleanupError);
+        if (storageKind == ProjectStorageKind::WorkingFile) {
+            std::filesystem::remove(storagePath, cleanupError);
         } else {
             std::filesystem::remove(storagePath, cleanupError);
             cleanupError.clear();
@@ -1929,14 +1893,14 @@ ProjectStoreOpenResult CreateProjectStore(
     // disk-revision reader by publishing the first generation directly.
     std::string commitError;
     bool initialized = false;
-    if (storageKind == ProjectStorageKind::DirectoryBundle) {
+    if (storageKind == ProjectStorageKind::WorkingFile) {
         json manifest = SerializeStoreEnvelope(
             bootstrap, storageKind, 1u, {}, nullptr);
         const std::filesystem::path manifestPath =
-            storagePath / kWorkingProjectManifestName;
+            storagePath;
         std::filesystem::path temporary = manifestPath;
         temporary += ".tmp-initial";
-        initialized = WriteTextFile(temporary, manifest.dump(2)) &&
+        initialized = WriteTextFile(temporary, kWorkingHeader + manifest.dump()) &&
             ReplaceFileAtomically(temporary, manifestPath);
     } else {
         std::ofstream output(storagePath, std::ios::binary | std::ios::app);
@@ -1981,8 +1945,8 @@ ProjectStoreOpenResult CreateProjectStore(
 ProjectStoreOpenResult OpenProjectStore(const std::filesystem::path& path) {
     ProjectStoreOpenResult result;
     ProjectStorageKind kind;
-    if (IsDirectoryProjectBundle(path)) {
-        kind = ProjectStorageKind::DirectoryBundle;
+    if (IsWorkingProjectFile(path)) {
+        kind = ProjectStorageKind::WorkingFile;
     } else if (IsPortableV3Project(path)) {
         kind = ProjectStorageKind::PortableFile;
     } else {
@@ -1990,9 +1954,7 @@ ProjectStoreOpenResult OpenProjectStore(const std::filesystem::path& path) {
             "This is not a current Stack working project or packed project.";
         return result;
     }
-    const std::filesystem::path storagePath = kind == ProjectStorageKind::DirectoryBundle
-        ? NormalizeDirectoryStorePath(path)
-        : path;
+    const std::filesystem::path storagePath = path.lexically_normal();
     auto store = std::make_shared<TransactionalProjectStore>(storagePath, kind);
     if (!store->Load(
             result.snapshot, result.recoveredPreviousManifest, result.message)) {
@@ -2000,6 +1962,90 @@ ProjectStoreOpenResult OpenProjectStore(const std::filesystem::path& path) {
     }
     result.store = std::move(store);
     return result;
+}
+
+bool RelinkProjectSources(const std::filesystem::path& project,
+    const std::filesystem::path& folder, std::size_t& reconnected, std::string& error) {
+    reconnected = 0;
+    auto opened = OpenProjectStore(project);
+    if (!opened || opened.store->StorageKind() != ProjectStorageKind::WorkingFile) {
+        error = "Choose a working project to relink.";
+        return false;
+    }
+    struct PendingProject {
+        std::filesystem::path file;
+        std::uint64_t revision;
+        std::vector<std::string> missing;
+    };
+    std::vector<PendingProject> documents;
+    std::unordered_map<std::uint64_t,std::set<std::string>> wanted;
+    std::map<std::filesystem::path,RawEvidence::SourceIdentity> verified;
+    const auto collect=[&](const std::filesystem::path& file,const ProjectStoreOpenResult& doc) {
+        if (!doc || doc.store->StorageKind()!=ProjectStorageKind::WorkingFile || doc.recoveredPreviousManifest) return;
+        PendingProject pending{file,doc.snapshot.persistedStorageRevision,{}};
+        for (const auto& asset:doc.snapshot.embeddedAssets) {
+            if (!asset.linkedSource) continue;
+            const auto expected=ExpectedSourcePath(file,asset);
+            auto known=verified.find(expected);
+            if (known==verified.end()) known=verified.emplace(expected,RawEvidence::ComputeSourceIdentity(expected)).first;
+            if (known->second.valid && known->second.sha256==asset.sha256 && known->second.byteSize==asset.byteLength) continue;
+            wanted[asset.byteLength].insert(asset.assetId);
+            pending.missing.push_back(asset.assetId);
+        }
+        if (!pending.missing.empty()) documents.push_back(std::move(pending));
+    };
+    collect(project,opened);
+    const auto shared=ClosetAssetRoot(project);
+    std::error_code ec;
+    if (!shared.empty()) {
+        const auto projects=shared.parent_path()/"Projects";
+        for (std::filesystem::recursive_directory_iterator it(projects,std::filesystem::directory_options::skip_permission_denied,ec),end;
+            it!=end;it.increment(ec)) {
+            if (ec) { ec.clear();continue; }
+            if (!it->is_regular_file(ec) || it->path()==project || !IsWorkingProjectFile(it->path())) continue;
+            collect(it->path(),OpenProjectStore(it->path()));
+        }
+    }
+    std::map<std::string,std::filesystem::path> matches;
+    std::filesystem::recursive_directory_iterator it(folder,std::filesystem::directory_options::skip_permission_denied,ec),end;
+    if (ec) { error=ec.message();return false; }
+    for (;it!=end && !wanted.empty();it.increment(ec)) {
+        if (ec) { ec.clear();continue; }
+        if (it->is_directory(ec)) {
+            if (it->path().filename()=="Closet" && IsPhotoCloset(it->path())) it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        const auto wantedSize=wanted.find(it->file_size(ec));
+        if (ec || wantedSize==wanted.end()) continue;
+        auto known=verified.find(it->path());
+        if (known==verified.end()) known=verified.emplace(it->path(),RawEvidence::ComputeSourceIdentity(it->path())).first;
+        if (!known->second.valid) continue;
+        const auto id=MakeAssetId(known->second.sha256,known->second.byteSize);
+        if (wantedSize->second.erase(id)) matches.emplace(id,it->path());
+        if (wantedSize->second.empty()) wanted.erase(wantedSize);
+    }
+    std::set<std::string> reconnectedIds;
+    for (const auto& pending:documents) {
+        if (std::none_of(pending.missing.begin(),pending.missing.end(),[&](const auto& id){return matches.count(id);})) continue;
+        auto doc=OpenProjectStore(pending.file);
+        if (!doc || doc.snapshot.persistedStorageRevision!=pending.revision) {
+            error="A project changed while locating its originals. Run Locate folder again.";return false;
+        }
+        for (auto& asset:doc.snapshot.embeddedAssets) {
+            const auto found=matches.find(asset.assetId);
+            if (found!=matches.end() && std::find(pending.missing.begin(),pending.missing.end(),asset.assetId)!=pending.missing.end())
+                SetSourceLocation(pending.file,found->second,asset);
+        }
+        const auto tx=doc.store->BeginTransaction(pending.revision);
+        if (!tx) {error="Could not begin relink.";return false;}
+        const auto commit=doc.store->Commit(tx,doc.snapshot);
+        if (!commit) {doc.store->Abort(tx);error=commit.message;return false;}
+        for (const auto& id:pending.missing) if (matches.count(id)) reconnectedIds.insert(id);
+        reconnected=reconnectedIds.size();
+    }
+    error.clear();
+    return true;
 }
 
 ProjectStoreOpenResult ConvertProjectStore(
@@ -2031,18 +2077,15 @@ ProjectStoreOpenResult ConvertProjectStore(
     bootstrap.postRecipeRevision = 0;
     bootstrap.dirtyRevision = 0;
     bootstrap.persistedStorageRevision = 0;
-    const std::filesystem::path normalizedDestination =
-        destinationKind == ProjectStorageKind::DirectoryBundle
-        ? NormalizeDirectoryStorePath(destinationPath)
-        : destinationPath;
+    const std::filesystem::path normalizedDestination = destinationPath.lexically_normal();
     ProjectStoreOpenResult destination = CreateProjectStore(
         normalizedDestination, destinationKind, bootstrap);
     if (!destination) return destination;
     const auto cleanupDestination = [&]() {
         destination.store.reset();
         std::error_code cleanupError;
-        if (destinationKind == ProjectStorageKind::DirectoryBundle) {
-            std::filesystem::remove_all(normalizedDestination, cleanupError);
+        if (destinationKind == ProjectStorageKind::WorkingFile) {
+            std::filesystem::remove(normalizedDestination, cleanupError);
         } else {
             std::filesystem::remove(normalizedDestination, cleanupError);
             cleanupError.clear();
@@ -2058,7 +2101,7 @@ ProjectStoreOpenResult ConvertProjectStore(
         return destination;
     }
     RawProjectSnapshot converted = snapshot;
-    if (destinationKind == ProjectStorageKind::DirectoryBundle) {
+    if (destinationKind == ProjectStorageKind::WorkingFile) {
         for (EmbeddedAssetRecord& asset : converted.embeddedAssets) {
             if (asset.displayName.empty()) {
                 asset.displayName = asset.originalFilename;
@@ -2076,24 +2119,34 @@ ProjectStoreOpenResult ConvertProjectStore(
                     std::filesystem::u8path(managedName)).generic_u8string();
             }
         }
-        std::string rebaseError;
-        if (!RebaseSingleRawRecipeToManagedAsset(
-                converted, normalizedDestination, &rebaseError)) {
-            destination.store->Abort(transaction);
-            destination.message = rebaseError.empty()
-                ? "The copied RAW project could not bind its managed asset."
-                : std::move(rebaseError);
-            cleanupDestination();
-            return destination;
-        }
     }
     std::vector<std::string> unavailableResults;
-    for (const EmbeddedAssetRecord& asset : converted.embeddedAssets) {
+    for (auto& asset : converted.embeddedAssets) {
         std::string error;
+        if (destinationKind == ProjectStorageKind::WorkingFile && asset.linkedSource) {
+            auto path = ExpectedSourcePath(sourceStore->StoragePath(), asset);
+            if (sourceStore->StorageKind() == ProjectStorageKind::PortableFile) {
+                path = ResolveLinkedSourceFile(sourceStore->StoragePath(), asset);
+                if (path.empty()) {
+                    destination.store->Abort(transaction);
+                    destination.message = "Locate this packed original before making a linked copy: " + asset.originalFilename;
+                    cleanupDestination();
+                    return destination;
+                }
+            }
+            SetSourceLocation(normalizedDestination, path, asset);
+            if (!destination.store->StageSourceReference(transaction, asset, error)) {
+                destination.store->Abort(transaction);
+                destination.message = error;
+                cleanupDestination();
+                return destination;
+            }
+            continue;
+        }
         ProjectAssetStream stream = sourceStore->OpenAssetStream(asset.assetId, &error);
         if (!stream || !destination.store->StageAssetStream(
                 transaction, *stream.stream, asset, &error)) {
-            if (asset.managedRole == "bracketing-result") {
+            if (asset.managedRole == "bracketing-result" && destinationKind != ProjectStorageKind::PortableFile) {
                 unavailableResults.push_back(asset.assetId);
                 continue;
             }
@@ -2109,6 +2162,18 @@ ProjectStoreOpenResult ConvertProjectStore(
         for(auto& set:converted.sourceSets) {
             const auto result=set.settings.find("bracketingResult");
             if(result!=set.settings.end()&&result->value("assetId",std::string())==id)set.settings.erase(result);
+        }
+    }
+    if (destinationKind == ProjectStorageKind::WorkingFile) {
+        std::string rebaseError;
+        if (!RebaseSingleRawRecipeToManagedAsset(
+                converted, normalizedDestination, &rebaseError)) {
+            destination.store->Abort(transaction);
+            destination.message = rebaseError.empty()
+                ? "The copied RAW project could not bind its managed asset."
+                : std::move(rebaseError);
+            cleanupDestination();
+            return destination;
         }
     }
     // Stage session-owned additions in the destination transaction. Save As

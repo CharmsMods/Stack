@@ -227,7 +227,7 @@ void TestUnicodeProjectPaths(const std::filesystem::path& sandbox) {
     }}) }} }};
     const auto written = Format::WriteProjectFileWithResult(path, document);
     if (!written) throw std::runtime_error("Save a project in a Unicode folder: " + written.commit.message);
-    const auto root = path.parent_path() / path.stem();
+    const auto root = path;
     Format::ProjectDocument loaded;
     Check(Format::ReadProjectFile(root, loaded), "Open a project from a Unicode folder");
     Check(loaded.metadata.projectName == path.stem().u8string() &&
@@ -243,7 +243,7 @@ void TestUnicodeProjectPaths(const std::filesystem::path& sandbox) {
     Check(Format::WriteProjectFile(root, loaded), "Resave a loaded Unicode project");
     Format::ProjectDocument rewritten;
     Check(Format::ReadProjectFile(root, rewritten), "Read rewritten managed source path");
-    const auto expected = (root / std::filesystem::u8path(asset.projectAssetPath)).lexically_normal();
+    const auto expected = loaded.projectStore->ResolveAssetFile(asset.assetId).lexically_normal();
     Check(rewritten.rawWorkspaceData["rawRecipe"]["sourceRef"]["sourcePath"] == expected.u8string() &&
             rewritten.adoptedFrom == document.adoptedFrom,
         "Managed raw paths and resaved adoption paths must retain Unicode characters");
@@ -254,7 +254,7 @@ void TestMalformedManifestRecovery(const std::filesystem::path& sandbox) {
     Project::RawProjectSnapshot snapshot;
     snapshot.projectId = Project::GenerateStableUuid();
     snapshot.projectName = "Previous generation";
-    auto created = Project::CreateProjectStore(root, Project::ProjectStorageKind::DirectoryBundle, snapshot);
+    auto created = Project::CreateProjectStore(root, Project::ProjectStorageKind::WorkingFile, snapshot);
     Check(static_cast<bool>(created), "Create recovery fixture");
     auto transaction = created.store->BeginTransaction(created.snapshot.persistedStorageRevision);
     snapshot = created.snapshot;
@@ -264,10 +264,12 @@ void TestMalformedManifestRecovery(const std::filesystem::path& sandbox) {
     Format::json manifest;
     {
         std::ifstream stream(manifestPath);
+        std::string format;std::getline(stream,format);
+        Check(format=="STACK-WORKING-1","Working project format marker");
         stream >> manifest;
     }
     manifest["_store"]["kind"] = 17u;
-    const auto text = manifest.dump();
+    const auto text = "STACK-WORKING-1\n"+manifest.dump();
     WriteBytes(manifestPath, Bytes(text.begin(), text.end()));
     const auto recovered = Project::OpenProjectStore(root);
     Check(static_cast<bool>(recovered) && recovered.store->IsReadOnlyRecovery() &&
@@ -286,7 +288,7 @@ void TestCreateOnlyProjectSave(const std::filesystem::path& sandbox) {
     const auto original = Project::OpenProjectStore(root);
     Check(static_cast<bool>(original), "Create-only project must be readable");
     const Bytes sentinel { 11u, 22u, 33u };
-    const auto sentinelPath = root / "keep.bin";
+    const auto sentinelPath = root.parent_path() / "keep.bin";
     WriteBytes(sentinelPath, sentinel);
     document.metadata.projectName = "Replacement project";
     Check(!Format::WriteProjectFile(root, document, true),
@@ -322,7 +324,7 @@ void TestCreateOnlyProjectSave(const std::filesystem::path& sandbox) {
                 snapshot.projectName = "Creator " + std::to_string(index);
                 ready.wait();
                 return Project::CreateProjectStore(
-                    competingRoot, Project::ProjectStorageKind::DirectoryBundle, snapshot);
+                    competingRoot, Project::ProjectStorageKind::WorkingFile, snapshot);
             }));
         }
     } catch (...) {
@@ -345,9 +347,9 @@ void TestCreateOnlyProjectSave(const std::filesystem::path& sandbox) {
 }
 
 void TestConcurrentProjectStoreHandles(const std::filesystem::path& sandbox) {
-    for (auto kind : { Project::ProjectStorageKind::DirectoryBundle,
+    for (auto kind : { Project::ProjectStorageKind::WorkingFile,
                        Project::ProjectStorageKind::PortableFile }) {
-        const auto root = sandbox / (kind == Project::ProjectStorageKind::DirectoryBundle
+        const auto root = sandbox / (kind == Project::ProjectStorageKind::WorkingFile
             ? "concurrent-bundle" : "concurrent-portable.stack");
         Project::RawProjectSnapshot initial;
         initial.projectId = Project::GenerateStableUuid();
@@ -390,12 +392,10 @@ void TestProjectAssetCollision(const std::filesystem::path& sandbox) {
     Project::RawProjectSnapshot initial;
     initial.projectId = Project::GenerateStableUuid();
     initial.projectName = "Collision check";
-    auto created = Project::CreateProjectStore(root, Project::ProjectStorageKind::DirectoryBundle, initial);
+    auto created = Project::CreateProjectStore(root, Project::ProjectStorageKind::WorkingFile, initial);
     Check(static_cast<bool>(created), "Create asset collision project");
-    const auto assetPath = root / "assets" / "collision.bin";
     const Bytes original { 1u, 2u, 3u };
     const Bytes incoming { 4u, 5u, 6u };
-    WriteBytes(assetPath, original);
     const auto identity = Stack::RawEvidence::ComputeSourceIdentity(incoming);
     Project::EmbeddedAssetRecord record;
     record.assetId = Project::MakeAssetId(identity.sha256, identity.byteSize);
@@ -407,6 +407,9 @@ void TestProjectAssetCollision(const std::filesystem::path& sandbox) {
     record.originalFileFingerprint = identity.sha256;
     record.inputFamily = Project::MultiFrameInputFamily::Raster;
     record.captureMetadataSummary = Format::json::object();
+    const auto assetPath=root.parent_path()/"assets"/(record.sha256+"-"+std::to_string(record.byteLength)+".original");
+    std::filesystem::create_directories(assetPath.parent_path());
+    WriteBytes(assetPath, original);
     const auto transaction = created.store->BeginTransaction(created.snapshot.persistedStorageRevision);
     std::istringstream stream(std::string(incoming.begin(), incoming.end()), std::ios::in | std::ios::binary);
     Check(created.store->StageAssetStream(transaction, stream, record), "Stage colliding asset bytes");

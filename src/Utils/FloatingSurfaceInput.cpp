@@ -3,15 +3,15 @@
 
 namespace ImGuiExtras {
 FloatingSurfaceInputScope::FloatingSurfaceInputScope(FloatingSurfaceInput& state, bool canStart,
-    ImGuiID backgroundCapture) {
+    ImGuiID backgroundCapture, bool middleMoves) {
     auto& io = ImGui::GetIO();
     mouse = io.MousePos;
     delta = io.MouseDelta;
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 3; ++i)
         saved[i] = {io.MouseDown[i], io.MouseClicked[i], io.MouseReleased[i],
             io.MouseDoubleClicked[i], io.MouseDownDuration[i], io.MouseClickedCount[i]};
     const auto suppress = [&] {
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < (middleMoves ? 3 : 2); ++i) {
             io.MouseDown[i] = io.MouseClicked[i] = io.MouseReleased[i] = io.MouseDoubleClicked[i] = false;
             io.MouseDownDuration[i] = -1.f;
             io.MouseClickedCount[i] = 0;
@@ -33,7 +33,7 @@ FloatingSurfaceInputScope::FloatingSurfaceInputScope(FloatingSurfaceInput& state
         io.MouseClickedCount[state.button] = state.doubleClick ? 2 : 1;
         io.MouseDownDuration[state.button] = 0.f;
     };
-    const bool anyDown = saved[0].down || saved[1].down;
+    const bool anyDown = saved[0].down || saved[1].down || (middleMoves && saved[2].down);
     const bool bothDown = saved[0].down && saved[1].down;
     state.moving = false;
     using Phase = FloatingSurfaceInput::Phase;
@@ -41,6 +41,11 @@ FloatingSurfaceInputScope::FloatingSurfaceInputScope(FloatingSurfaceInput& state
         state.phase = anyDown ? Phase::Drain : Phase::Idle;
         suppress();
         return;
+    }
+    if (state.phase == Phase::Idle && canStart && middleMoves && saved[2].clicked) {
+        state.button = 2;
+        state.press = io.MousePos;
+        state.phase = Phase::Moving;
     }
     if (state.phase == Phase::Idle && canStart && (saved[0].clicked || saved[1].clicked)) {
         state.button = saved[0].clicked ? 0 : 1;
@@ -72,12 +77,16 @@ FloatingSurfaceInputScope::FloatingSurfaceInputScope(FloatingSurfaceInput& state
         io.MouseDown[1-state.button] = io.MouseClicked[1-state.button] =
             io.MouseReleased[1-state.button] = io.MouseDoubleClicked[1-state.button] = false;
         io.MouseClickedCount[1-state.button] = 0;
+        if (middleMoves) {
+            io.MouseDown[2] = io.MouseClicked[2] = io.MouseReleased[2] = io.MouseDoubleClicked[2] = false;
+            io.MouseClickedCount[2] = 0;
+        }
         if (!saved[state.button].down) state.phase = anyDown ? Phase::Drain : Phase::Idle;
         break;
     case Phase::Moving:
         suppress();
-        state.moving = bothDown;
-        if (!bothDown) state.phase = anyDown ? Phase::Drain : Phase::Idle;
+        state.moving = state.button == 2 ? saved[2].down : bothDown;
+        if (!state.moving) state.phase = anyDown ? Phase::Drain : Phase::Idle;
         break;
     case Phase::ReleaseClick:
         suppress();
@@ -103,7 +112,7 @@ FloatingSurfaceInputScope::~FloatingSurfaceInputScope() {
     auto& io = ImGui::GetIO();
     io.MousePos = mouse;
     io.MouseDelta = delta;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         io.MouseDown[i] = saved[i].down;
         io.MouseClicked[i] = saved[i].clicked;
         io.MouseReleased[i] = saved[i].released;

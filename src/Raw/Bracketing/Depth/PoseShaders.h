@@ -7,7 +7,7 @@ struct Pose {vec4 rotation[3];vec4 translation;vec4 camera;vec4 stats;};
 layout(std430,binding=0) readonly buffer Input {Track tracks[];};
 layout(std430,binding=1) readonly buffer Models {Model models[];};
 layout(std430,binding=2) buffer Poses {Pose poses[];};
-uniform int count,mode;uniform vec2 size;
+uniform int count,mode;uniform vec2 size,focalPrior;
 dvec4 point(int i){return (dvec4(tracks[i].xy)-dvec4((size-1)*.5,(size-1)*.5))/double(max(size.x,size.y));}
 dmat3 matrix(){return dmat3(models[1536].col[0].xyz,models[1536].col[1].xyz,models[1536].col[2].xyz);}
 dmat3 camera(double f){return dmat3(f,0,0,0,f,0,0,0,1);}
@@ -36,7 +36,15 @@ void main(){int id=int(gl_GlobalInvocationID.x);float pixels=max(size.x,size.y);
  vec4 counts=models[1536].stats;if(counts.w<40||counts.x<counts.w*.65||counts.z>=counts.w*.85)return;
  float diagonal=length(size)/pixels,lo=log(diagonal*.15),hi=log(diagonal*20),limit=log(1.5);
  double a=0,b=0;
- if(id==34){dmat3 u,v;dvec3 s;svd3(f,u,s,v);a=sqrt(focalSquared(f,u[2]));b=sqrt(focalSquared(transpose(f),v[2]));}
+ // Short baselines can support several projective reconstructions with wrong
+ // depth ordering. When the capture supplies a 35 mm equivalent focal length,
+ // test a bounded family around it and retain the same cheirality, residual
+ // and agreement requirements. Unknown lenses use the image-only fit below.
+ if(min(focalPrior.x,focalPrior.y)>0){
+  a=double(focalPrior.x)*double(exp(float(id%7-3)*.02));
+  b=double(focalPrior.y)*a/double(focalPrior.x)*double(exp(float(id/7-2)*.01));
+  if(essentialError(f,log(float(a)),log(float(b/a)))>.02)return;
+ } else if(id==34){dmat3 u,v;dvec3 s;svd3(f,u,s,v);a=sqrt(focalSquared(f,u[2]));b=sqrt(focalSquared(transpose(f),v[2]));}
  else {float lf=mix(lo,hi,float(id%17)/16),ratio=0,fs=(hi-lo)/32,rs=limit/4;double best=essentialError(f,lf,ratio);
   for(int it=0;it<28;++it){float nf=lf,nr=ratio;
    for(int x=-1;x<=1;++x)for(int y=-1;y<=1;++y){if(id<17&&x!=0)continue;

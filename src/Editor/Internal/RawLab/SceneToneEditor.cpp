@@ -123,6 +123,9 @@ bool DrawSceneToneEditor(RawRecipe::SceneTone& tone, bool contrastView,
             auto base=tone;base.contrast=1;base.enabled=true;
             tone.points.push_back({e,EvaluateSceneToneContrast(base,e)});
             tone=SanitizeSceneTone(std::move(tone));changed=true;
+            const auto inserted=std::min_element(tone.points.begin(),tone.points.end(),
+                [e](const auto& a,const auto& b){return std::abs(a.ev-e)<std::abs(b.ev-e);});
+            selected=dragging=int(inserted-tone.points.begin());
         }
         if(ImGui::IsItemActive()&&dragging>=0&&dragging<int(tone.points.size())&&ImGui::IsMouseDown(ImGuiMouseButton_Left)&&ImGui::IsMouseDragging(ImGuiMouseButton_Left,0)) {
             const float target=maxY-(ImGui::GetIO().MousePos.y-box.Min.y)/box.GetHeight()*(maxY-minY);

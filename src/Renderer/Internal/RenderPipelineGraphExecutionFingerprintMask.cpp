@@ -1,3 +1,4 @@
+#include "Raw/DepthMask.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionRuntime.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
@@ -123,6 +124,11 @@ void GraphExecutionRuntime::BindMaskFingerprint() {
             HashCombine(fingerprint, HashValue(payload.invert));
             HashCombine(fingerprint, HashValue(payload.blurRadius));
             HashCombine(fingerprint, HashValue(payload.expandContract));
+            if(payload.depthMask) {
+                HashCombine(fingerprint,node.uniformSourceIdentity);
+                HashCombine(fingerprint,HashValue(payload.depthMask->id));
+                HashCombine(fingerprint,HashValue(payload.depthOrientation));
+            }
             HashCombine(fingerprint, HashValue(payload.rasterLayer.size()));
             if (!payload.rasterLayer.empty()) HashCombine(fingerprint, payload.rasterLayer.Fingerprint());
             HashCombine(fingerprint, HashValue(payload.objects.size()));

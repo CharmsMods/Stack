@@ -30,7 +30,7 @@ void ValidatePanoramaSessions(GLFWwindow* window,const std::filesystem::path& pa
             editor->Initialize(window,nullptr,false);editor->SetWorkspaceAppStatePersistenceEnabled(false);
             const auto copyPath=output/(editor==a.get()?"tab-a.stack":"tab-b.stack");
             auto copy=Project::ConvertProjectStore(original.store,original.snapshot,copyPath,
-                Project::ProjectStorageKind::DirectoryBundle,
+                Project::ProjectStorageKind::WorkingFile,
                 [](const auto&,const auto&,auto& snapshot,std::string& error){
                     snapshot.projectId=Project::GenerateStableUuid();
                     Raw::Bracketing::BracketingRecipe recipe;

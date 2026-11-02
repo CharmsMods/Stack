@@ -31,9 +31,16 @@ bool HasSavedBracketingResult(const ProjectStoreHandle& store,const RawProjectSn
     const MultiFrameSourceSet& set) {
     if(!store||!HasSavedBracketingResult(snapshot,set))return false;
     const auto* asset=FindEmbeddedAsset(snapshot,set.settings.at("bracketingResult").at("assetId").get<std::string>());
+    const auto& saved=set.settings.at("bracketingResult");
+    if (saved.contains("masterAssetId")) {
+        const auto* master = FindEmbeddedAsset(snapshot, saved.value("masterAssetId", std::string{}));
+        if (!master) return false;
+        if (store->StorageKind() == ProjectStorageKind::WorkingFile &&
+            store->ResolveAssetFile(master->assetId).empty()) return false;
+    }
     const auto stream=store->OpenAssetStream(asset->assetId);
     if(!stream||stream.byteLength!=asset->byteLength)return false;
-    if(store->StorageKind()==ProjectStorageKind::DirectoryBundle) {
+    if(store->StorageKind()==ProjectStorageKind::WorkingFile) {
         // Immutable shared assets can disappear independently of the manifest.
         // Catalog scans check presence/length; Restore verifies complete content.
         std::error_code error;

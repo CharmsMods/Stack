@@ -60,6 +60,8 @@ struct RawLayerStackState {
     // Project assets have no layer owner. This document supplies transactions,
     // history and persistence until the future RAW layer document redesign.
     Assets::Library assets;
+    // Previously offered result masks remain recorded after the user deletes a node.
+    std::vector<std::string> offeredDepthMasks;
     bool explicitRouting = false;
     std::optional<GraphModel::Endpoint> imageOutput;
     // Canvas-only placements of the synthetic source/output anchors.

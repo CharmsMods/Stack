@@ -1,3 +1,4 @@
+#include "Utils/PngEncodingUtils.h"
 #include "Persistence/ProjectSnapshotCapture.h"
 #include "Project/BracketingCopy.h"
 #include "Utils/UiBusyState.h"
@@ -873,17 +874,7 @@ Stack::Project::ProjectStoreOpenResult Stack::Project::CreateMultiFrameProject(
     }
 
     std::filesystem::path path = requestedPath.lexically_normal();
-    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
-        const std::string extension = Lower(path.extension().string());
-        const std::string fileName = Lower(path.filename().string());
-        if (fileName == "project.stack") {
-            path = path.parent_path();
-        } else if (extension == ".stack" || extension == ".stackbundle") {
-            path = path.parent_path() / path.stem();
-        }
-    } else if (Lower(path.extension().string()) != ".stack") {
-        path += ".stack";
-    }
+    if (Lower(path.extension().string()) != ".stack") path += ".stack";
     std::error_code filesystemError;
     ProjectStoreOpenResult created;
     if (std::filesystem::exists(path, filesystemError)) {
@@ -911,7 +902,7 @@ Stack::Project::ProjectStoreOpenResult Stack::Project::CreateMultiFrameProject(
     const auto cleanupCreatedStore = [&]() {
         created.store.reset();
         std::error_code cleanupError;
-        if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
+        if (storageKind == Stack::Project::ProjectStorageKind::WorkingFile) {
             std::filesystem::remove_all(path, cleanupError);
         } else {
             std::filesystem::remove(path, cleanupError);
@@ -2795,6 +2786,19 @@ void EditorModule::StartManagedProjectSaveAsync(
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - snapshotCaptureBegin).count();
 
+    // Capture a reduced, complete output from this exact editor revision.
+    // Encoding stays on the save worker; a pending image never blocks saving.
+    std::vector<unsigned char> coverPixels;
+    int coverWidth=0,coverHeight=0,textureWidth=0,textureHeight=0;
+    unsigned coverTexture=0;
+    if (rawProject && HasCurrentRawWorkspacePresentation()) {
+        bool complete=TryGetViewportPreviewOverview(coverTexture,textureWidth,textureHeight);
+        Stack::Renderer::ViewportPreviewGeometry geometry;
+        const bool partial=TryGetViewportPreviewGeometry(geometry) && geometry.resident.Partial();
+        if (!complete && !partial) complete=TryGetActiveRawWorkspacePresentationTexture(coverTexture,textureWidth,textureHeight);
+        if (complete) coverPixels=m_Pipeline.GetExternalTexturePixels(coverTexture,textureWidth,textureHeight,coverWidth,coverHeight,320);
+    }
+
     const Stack::Project::ProjectSaveToken saveToken =
         m_Project->lifecycle.BeginSave();
     if (!saveToken) {
@@ -2851,6 +2855,7 @@ void EditorModule::StartManagedProjectSaveAsync(
     work->snapshot = std::move(snapshot);
 
     auto saveWork = [
+        coverPixels=std::move(coverPixels),coverWidth,coverHeight,
         owner, bracketDraft = std::move(bracketDraft), adoptionWorkspace,
         sourceStore,
         bracketResult, bracketSetId,
@@ -2867,6 +2872,11 @@ void EditorModule::StartManagedProjectSaveAsync(
     ]() mutable {
         const auto commitBegin = std::chrono::steady_clock::now();
         try {
+        if (!coverPixels.empty()) {
+            auto encoded=Stack::PngEncoding::EncodeInterleaved(coverPixels,coverWidth,coverHeight,4);
+            if(!encoded.empty())work->snapshot.coverThumbnailBytes=std::move(encoded);
+            coverPixels.clear();
+        }
         if (adopting) {
             if (!adoptionWorkspace.empty() &&
                 !Stack::RawWorkspace::EnsureManagedFolders(adoptionWorkspace, &work->error))
@@ -2876,7 +2886,7 @@ void EditorModule::StartManagedProjectSaveAsync(
                     sourceStore,
                     work->snapshot,
                     destination,
-                    Stack::Project::ProjectStorageKind::DirectoryBundle,
+                    Stack::Project::ProjectStorageKind::WorkingFile,
                     [bracketResult, bracketSetId, &bracketDraft](const auto& store, const auto& transaction, auto& snapshot, auto& error) {
                         if (bracketDraft && !Stack::Project::StageBracketingCopy(
                             *bracketDraft, store, transaction, snapshot, error)) return false;
@@ -2885,7 +2895,7 @@ void EditorModule::StartManagedProjectSaveAsync(
                             return false;
                         }
                         return !bracketResult || Stack::Project::StageBracketingResult(
-                            store, transaction, snapshot, bracketSetId, *bracketResult, {}, error);
+                            store, transaction, snapshot, bracketSetId, *bracketResult, {}, error,true);
                     });
             if (converted) {
                 work->success = true;
@@ -3102,23 +3112,10 @@ bool EditorModule::SaveActiveMultiFrameRawProjectAs(
     // that store first: the active snapshot and graph below are the complete
     // in-memory project state and are written directly to the new store.
     std::filesystem::path normalizedDestination = destination.lexically_normal();
-    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
-        const std::string extension =
-            Lower(normalizedDestination.extension().string());
-        const std::string fileName =
-            Lower(normalizedDestination.filename().string());
-        if (fileName == "project.stack") {
-            normalizedDestination = normalizedDestination.parent_path();
-        } else if (extension == ".stack" || extension == ".stackbundle") {
-            normalizedDestination = normalizedDestination.parent_path() /
-                normalizedDestination.stem();
-        }
-    } else if (Lower(normalizedDestination.extension().string()) != ".stack") {
-        normalizedDestination += ".stack";
-    }
+    if (Lower(normalizedDestination.extension().string()) != ".stack") normalizedDestination += ".stack";
     RawProjectSnapshot snapshotForCopy = CopyProjectSnapshotWithoutPipeline(*m_Project->snapshot);
     if (!m_Project->name.empty()) snapshotForCopy.projectName = m_Project->name;
-    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
+    if (storageKind == Stack::Project::ProjectStorageKind::WorkingFile) {
         snapshotForCopy.projectId = Stack::Project::GenerateStableUuid();
         snapshotForCopy.lifecycle.creationOrigin = Stack::Project::ProjectCreationOrigin::Manual;
         snapshotForCopy.lifecycle.cleanupWhenUntouched = false;
@@ -3153,7 +3150,7 @@ bool EditorModule::SaveActiveMultiFrameRawProjectAs(
                     const auto* set = Stack::Project::FindSourceSet(snapshot, m_Bracketing->setId);
                     if (set && set->settings.at("bracketing").dump() == m_Bracketing->completedRecipe)
                         return Stack::Project::StageBracketingResult(store, transaction, snapshot,
-                            m_Bracketing->setId, *m_Bracketing->result, {}, error);
+                            m_Bracketing->setId, *m_Bracketing->result, {}, error,true);
                 }
                 return true;
             });
@@ -3569,7 +3566,7 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
                 : "Create a bracket from Bayer RAW captures. Exposure groups and global RAW alignment are suggested automatically."));
     ImGui::Separator();
     ImGui::InputText("Project name", projectName, sizeof(projectName));
-    ImGui::TextDisabled("Format: Working project folder (project.stack + assets/)");
+    ImGui::TextDisabled("Format: Working project (.stack)");
     ImGui::TextDisabled(
         "%s",
         creatingBurst
@@ -3708,7 +3705,7 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
         ](std::string* actionError) {
             const bool created = CreateMultiFrameRawProject(
                 destination,
-                Stack::Project::ProjectStorageKind::DirectoryBundle,
+                Stack::Project::ProjectStorageKind::WorkingFile,
                 requestedProjectName,
                 requestedSourceSetName,
                 requestedIntent,
@@ -4289,7 +4286,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
                     std::filesystem::path(folder) / snapshot.projectName;
                 if (!SaveActiveMultiFrameRawProjectAs(
                         destination,
-                        Stack::Project::ProjectStorageKind::DirectoryBundle,
+                        Stack::Project::ProjectStorageKind::WorkingFile,
                         &error)) {
                     m_RawWorkspaceLabUi.multiFrameStatusText = error;
                 } else {

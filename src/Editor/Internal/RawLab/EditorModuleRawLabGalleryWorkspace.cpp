@@ -5,6 +5,7 @@
 #include "App/WorkspaceInputScope.h"
 #include "Library/LibraryControls.h"
 #include "Editor/UI/WindowDrawOpacity.h"
+#include "Utils/HoverTextScope.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <imgui_internal.h>
 
 void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
+    ImGuiExtras::HoverTextScope noHoverText;
     const bool transitioning=m_PermanentGalleryWorkspace && m_GalleryNavigationMotion &&
         m_GalleryNavigationMotion->FoldersMoving();
     const bool folders=m_PermanentGalleryWorkspace && IsRawWorkspaceFolderBrowserOpen();
@@ -75,10 +77,26 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
     if (grid) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * unit, 12.0f * unit));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(16.0f, 16.0f));
+        auto* host = ImGui::GetCurrentWindow();
+        auto& scrollState = host->StateStorage;
+        const auto timeKey = ImGui::GetID("GridScrollTime");
+        const auto posKey = ImGui::GetID("GridScrollPosition");
+        const float now = static_cast<float>(ImGui::GetTime());
+        const float age = now-scrollState.GetFloat(timeKey,-100.f);
+        const float opacity = std::clamp((2.f-age)/.18f,0.f,1.f);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,{0,0,0,0});
+        for (auto color : {ImGuiCol_ScrollbarGrab,ImGuiCol_ScrollbarGrabHovered,ImGuiCol_ScrollbarGrabActive}) {
+            auto ink = ImGui::GetStyleColorVec4(color); ink.w*=opacity; ImGui::PushStyleColor(color,ink);
+        }
         ImGui::BeginChild("Grid", ImVec2(imageWidth, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoScrollWithMouse);
         RenderRawWorkspaceLabGalleryContent(false);
+        const auto* body = ImGui::GetCurrentWindow();
+        if (scrollState.GetFloat(posKey,body->Scroll.y)!=body->Scroll.y ||
+            (ImGui::GetIO().MouseWheel!=0.f && ImGui::IsWindowHovered())) scrollState.SetFloat(timeKey,now);
+        scrollState.SetFloat(posKey,body->Scroll.y);
         ImGui::EndChild();
+        ImGui::PopStyleColor(4);
         ImGui::PopStyleVar(2);
     }
 
@@ -126,6 +144,7 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         int width = 0;
         int height = 0;
         bool available = false;
+        bool edited = false;
         bool ready() const { return texture != 0 && width > 0 && height > 0; }
     };
     const auto resolve = [&](const Stack::RawWorkspace::SourceRecord* source,
@@ -138,8 +157,7 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
             result.metadata = GetRawWorkspaceThumbnailMetadata(source->relativePathKey);
             return result;
         }
-        Stack::RawWorkspace::SourceRecord thumbnailSource = source
-            ? *source : Stack::RawWorkspace::SourceRecord{};
+        Stack::RawWorkspace::SourceRecord thumbnailSource;
         result.available = source != nullptr;
         if (!projectPath.empty()) {
             const auto& gallery = GetRawWorkspaceGalleryPresentation();
@@ -149,17 +167,20 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
                     return !candidate.projectPath.empty() &&
                         candidate.projectPath.lexically_normal() == normalizedProjectPath;
                 });
-            if (project != gallery.projects.end() && !project->coverThumbnailCachePath.empty()) {
+            if (project != gallery.projects.end() && (UsesGalleryPresetPreviews() || project->standaloneMaster || !project->coverThumbnailCachePath.empty())) {
                 result.available = true;
-                thumbnailSource.relativePathKey = "project-overlay:" +
-                    (!project->projectId.empty() ? project->projectId : projectPath.generic_string());
+                result.edited = true;
+                thumbnailSource.relativePathKey = project->projectCoverKey;
                 thumbnailSource.thumbnail.absolutePath = project->coverThumbnailCachePath;
                 thumbnailSource.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Ready;
             }
         }
         if (!result.available) return result;
-        result.texture = GetRawWorkspaceThumbnailTexture(thumbnailSource, &result.width, &result.height, true);
-        result.metadata = GetRawWorkspaceThumbnailMetadata(thumbnailSource.relativePathKey);
+        result.texture = GetRawWorkspaceThumbnailTexture(result.edited ? thumbnailSource : *source, &result.width, &result.height, true);
+        if (source) {
+            GetRawWorkspaceThumbnailTexture(*source,nullptr,nullptr,true);
+            result.metadata = GetRawWorkspaceThumbnailMetadata(source->relativePathKey);
+        }
         return result;
     };
     const Thumbnail requested = resolve(requestedSource, requestedProject);
@@ -244,7 +265,14 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         };
         // Dissolve the new image over an opaque old image to avoid a dark dip.
         drawImage(previous, 1.0f);
-        drawImage(current, previous.ready() ? preview.blend : 1.0f);
+        Thumbnail full = current;
+        if (full.ready() && requestedSource && displayedSource == requestedSource &&
+            requestedProject.empty() && preview.projectPath.empty()) {
+            const ImVec2 area(std::max(1.f, available.x - 32.f * unit), std::max(1.f, available.y - 24.f * unit));
+            if (auto detail = GetGalleryOriginalDetail(*requestedSource, area, full.width, full.height))
+                full.texture = detail;
+        }
+        drawImage(full, previous.ready() ? preview.blend : 1.0f);
         ImGui::Dummy(available);
     };
     const auto drawEmpty = [&] {
@@ -286,9 +314,31 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::BeginChild("Properties", ImVec2(fullDetailsWidth, 0.0f), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        if (grid && current.ready())
+        std::function<void(const ImVec2&)> comparison;
+        if (!preview.projectPath.empty() && current.ready()) comparison = [&](const ImVec2& available) {
+            const auto original = resolve(displayedSource,{});
+            const auto origin = ImGui::GetCursorScreenPos();
+            const float slot = std::max(1.f,(available.y-12.f)*.5f);
+            const auto drawComparison = [&](const Thumbnail& photo, const char* label, const char* unavailable, float y) {
+                auto* draw = ImGui::GetWindowDrawList();
+                draw->AddText({origin.x+12.f, y},ImGui::GetColorU32(ImGuiCol_TextDisabled),label);
+                const float labelHeight = ImGui::GetFontSize()+4.f;
+                const float room = std::max(1.f,slot-labelHeight);
+                if (photo.ready()) {
+                    const float scale = std::min(std::max(1.f,available.x-24.f)/photo.width,room/photo.height);
+                    const ImVec2 minimum(origin.x+(available.x-photo.width*scale)*.5f,y+labelHeight+(room-photo.height*scale)*.5f);
+                    draw->AddImageRounded((ImTextureID)(intptr_t)photo.texture,minimum,
+                        {minimum.x+photo.width*scale,minimum.y+photo.height*scale},{0,1},{1,0},IM_COL32_WHITE,4.f);
+                } else draw->AddText({origin.x+12.f,y+labelHeight},ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                    unavailable);
+            };
+            drawComparison(current.edited ? current : Thumbnail{},"Edited","Edited preview unavailable",origin.y);
+            drawComparison(original,"Original",displayedSource ? "Loading original..." : "Original unavailable",origin.y+slot+8.f);
+            ImGui::Dummy(available);
+        };
+        if (current.ready())
             RenderRawGalleryProperties(displayedSource, current.metadata, preview.projectPath,
-                [&](const ImVec2& available) { drawPreview(available); });
+                [&](const ImVec2& available) { drawPreview(available); },comparison);
         else RenderRawGalleryProperties(displayedSource, current.metadata,
             current.ready() ? preview.projectPath : requestedProject, {});
         Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(), propertiesAmount);

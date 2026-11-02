@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -79,22 +80,25 @@ CustomMaskTool CustomMaskToolFromString(const std::string& value) {
     return CustomMaskTool::Brush;
 }
 
-std::vector<unsigned char> EncodeCustomMaskRasterU16(const std::vector<float>& raster) {
-    std::vector<unsigned char> bytes;
-    bytes.resize(raster.size() * 2);
+std::vector<unsigned char> EncodeCustomMaskRaster(const std::vector<float>& raster) {
+    static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
+        "Masks require IEEE binary32.");
+    std::vector<unsigned char> bytes(raster.size() * sizeof(float));
     for (std::size_t i = 0; i < raster.size(); ++i) {
-        const float clamped = std::clamp(raster[i], 0.0f, 1.0f);
-        const auto value = static_cast<std::uint16_t>(std::lround(clamped * 65535.0f));
-        bytes[i * 2 + 0] = static_cast<unsigned char>(value & 0xffu);
-        bytes[i * 2 + 1] = static_cast<unsigned char>((value >> 8) & 0xffu);
+        std::uint32_t bits;
+        std::memcpy(&bits, &raster[i], sizeof(bits));
+        for (unsigned n = 0; n < 4; ++n) {
+            bytes[i * 4 + n] = static_cast<unsigned char>(bits >> (8 * n));
+        }
     }
     return bytes;
 }
 
-std::vector<float> DecodeCustomMaskRasterU16(
-    const nlohmann::json& encoded,
-    int width,
-    int height) {
+std::vector<float> DecodeCustomMaskRaster(
+    const nlohmann::json& encoded, int width, int height, const std::string& format) {
+    const bool floating = format == "f32le-normalized";
+    if (!floating && format != "u16le-normalized") return {};
+    const std::size_t stride = floating ? 4u : 2u;
     if (!encoded.is_binary()) {
         return {};
     }
@@ -104,8 +108,8 @@ std::vector<float> DecodeCustomMaskRasterU16(
     if (expected == 0 || bytes.empty()) {
         return {};
     }
-    if (expected > std::numeric_limits<std::size_t>::max() / 2u ||
-        bytes.size() != expected * 2u) {
+    if (expected > std::numeric_limits<std::size_t>::max() / stride ||
+        bytes.size() != expected * stride) {
         return {};
     }
 
@@ -118,6 +122,15 @@ std::vector<float> DecodeCustomMaskRasterU16(
         return {};
     }
     for (std::size_t i = 0; i < expected; ++i) {
+        if (floating) {
+            std::uint32_t bits = 0;
+            for (unsigned n = 0; n < 4; ++n) {
+                bits |= std::uint32_t(bytes[i * 4 + n]) << (8 * n);
+            }
+            std::memcpy(&raster[i], &bits, sizeof(bits));
+            if (!std::isfinite(raster[i]) || raster[i] < 0.0f || raster[i] > 1.0f) return {};
+            continue;
+        }
         const std::uint16_t value =
             static_cast<std::uint16_t>(bytes[i * 2 + 0]) |
             static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[i * 2 + 1]) << 8);
@@ -209,8 +222,8 @@ nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload, bool
         { "width", payload.width },
         { "height", payload.height },
         { "aspectLocked", payload.aspectLocked },
-        { "rasterFormat", "u16le-normalized" },
-        { "rasterLayer", nlohmann::json::binary(includeRaster ? EncodeCustomMaskRasterU16(payload.rasterLayer.Values()) : std::vector<unsigned char>{}) },
+        { "rasterFormat", "f32le-normalized" },
+        { "rasterLayer", nlohmann::json::binary(includeRaster ? EncodeCustomMaskRaster(payload.rasterLayer.Values()) : std::vector<unsigned char>{}) },
         { "objects", std::move(objects) },
         { "nextObjectId", payload.nextObjectId },
         { "globalOps", {
@@ -254,7 +267,8 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
     payload.aspectLocked = value.value("aspectLocked", payload.aspectLocked);
     const auto rasterIt = value.find("rasterLayer");
     payload.rasterLayer = rasterIt != value.end()
-        ? DecodeCustomMaskRasterU16(*rasterIt, payload.width, payload.height)
+        ? DecodeCustomMaskRaster(*rasterIt, payload.width, payload.height,
+            value.value("rasterFormat", std::string("u16le-normalized")))
         : std::vector<float>{};
 
     const nlohmann::json objects = value.value("objects", nlohmann::json::array());

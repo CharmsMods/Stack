@@ -6,12 +6,18 @@
 
 namespace Stack::Editor::RawLabInternal {
 struct CalibrationEditorState {
-    void EndInteraction() { dragging=-1; }
+    void EndInteraction() { dragging=-1; dialGesture=false; }
     std::string source;
     int dragging = -1;
     int selected = -1;
+    bool dialGesture = false;
+    float dialPhase = 0.f;
     double radius = .65;
     RawRecipe::RawColorCalibrationRecipe gestureStart;
+    RawRecipe::RawColorCalibrationRecipe checkedRecipe;
+    Raw::RawWorkingSpace checkedSpace{};
+    bool transformChecked = false;
+    std::string transformError;
 };
 
 // Only presentation/gesture state lives here; the supplied recipe is the

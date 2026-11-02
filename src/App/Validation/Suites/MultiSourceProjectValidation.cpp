@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -759,9 +760,13 @@ bool ValidateGraphBindingRoundTrip() {
         { "id", "" }, { "version", "" }, { "contentHash", "" }
     };
     EditorNodeGraph::Graph rejectedManaged;
-    EditorNodeGraph::DeserializeGraphPayload(
-        obsoleteManaged, rejectedManaged, 0);
-    ok &= Check(rejectedManaged.GetNodes().empty(),
+    bool rejected = false;
+    try {
+        EditorNodeGraph::DeserializeGraphPayload(obsoleteManaged, rejectedManaged, 0);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    ok &= Check(rejected && rejectedManaged.GetNodes().empty(),
         "a managed source-set node with an obsolete empty identity was accepted");
     return ok;
 }
@@ -980,9 +985,13 @@ bool ValidateMfdGraphContract() {
         }
     }
     EditorNodeGraph::Graph rejectedManaged;
-    EditorNodeGraph::DeserializeGraphPayload(
-        obsoleteManaged, rejectedManaged, 0);
-    ok &= Check(rejectedManaged.GetNodes().empty(),
+    bool rejected = false;
+    try {
+        EditorNodeGraph::DeserializeGraphPayload(obsoleteManaged, rejectedManaged, 0);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    ok &= Check(rejected && rejectedManaged.GetNodes().empty(),
         "managed RAW nodes with obsolete empty identities were accepted");
     return ok;
 }
@@ -1161,35 +1170,16 @@ bool ValidateStores(const std::filesystem::path& root) {
 
     RawProjectSnapshot bootstrap = BuildBootstrap();
     const std::filesystem::path obsoletePath = root / "obsolete-project";
-    ProjectStoreOpenResult obsoleteCreated = CreateProjectStore(
-        obsoletePath, ProjectStorageKind::DirectoryBundle, bootstrap);
-    ok &= Check(static_cast<bool>(obsoleteCreated),
-        "obsolete-project rejection fixture could not be created: " +
-            obsoleteCreated.message);
-    if (obsoleteCreated) {
-        obsoleteCreated.store.reset();
-        const std::filesystem::path obsoleteDocument =
-            obsoletePath / "project.stack";
-        nlohmann::json obsoleteManifest = nlohmann::json::parse(
-            ReadBytes(obsoleteDocument), nullptr, false);
-        obsoleteManifest["schemaVersion"] =
-            kRawProjectSourceSetSchemaVersion - 1u;
-        const std::string obsoleteText = obsoleteManifest.dump(2);
-        const std::vector<unsigned char> obsoleteBytes(
-            obsoleteText.begin(), obsoleteText.end());
-        ok &= Check(WriteBytes(obsoleteDocument, obsoleteBytes),
-            "obsolete-project rejection fixture could not be written");
-        ProjectStoreOpenResult obsoleteOpened = OpenProjectStore(obsoletePath);
-        ok &= Check(
-            !obsoleteOpened &&
-                std::filesystem::is_directory(obsoletePath) &&
-                ReadBytes(obsoleteDocument) == obsoleteBytes,
-            "opening an obsolete project did not reject it untouched");
-    }
+    std::filesystem::create_directories(obsoletePath);
+    const auto obsoleteDocument = obsoletePath / "project.stack";
+    const std::vector<unsigned char> obsoleteBytes{'{', '}'};
+    ok &= Check(WriteBytes(obsoleteDocument, obsoleteBytes) && !OpenProjectStore(obsoletePath) &&
+        !OpenProjectStore(obsoleteDocument) && ReadBytes(obsoleteDocument) == obsoleteBytes,
+        "opening a legacy bundle modified it or accepted its obsolete format");
 
     const std::filesystem::path cancelledPath = root / "cancelled";
     ProjectStoreOpenResult cancelled = CreateProjectStore(
-        cancelledPath, ProjectStorageKind::DirectoryBundle, bootstrap);
+        cancelledPath, ProjectStorageKind::WorkingFile, bootstrap);
     ok &= Check(static_cast<bool>(cancelled),
         "cancellation test store creation failed: " + cancelled.message);
     if (cancelled) {
@@ -1218,7 +1208,7 @@ bool ValidateStores(const std::filesystem::path& root) {
         root / "preview-resilience";
     ProjectStoreOpenResult previewStore = CreateProjectStore(
         previewResiliencePath,
-        ProjectStorageKind::DirectoryBundle,
+        ProjectStorageKind::WorkingFile,
         bootstrap);
     ok &= Check(static_cast<bool>(previewStore),
         "preview resilience store creation failed: " + previewStore.message);
@@ -1261,8 +1251,11 @@ bool ValidateStores(const std::filesystem::path& root) {
             const std::vector<unsigned char> corruptedPreview {
                 0xdeu, 0xadu, 0xbeu, 0xefu
             };
-            const nlohmann::json previewManifest = nlohmann::json::parse(
-                ReadBytes(WorkingProjectDocumentPath(previewResiliencePath)), nullptr, false);
+            std::ifstream previewFile(previewResiliencePath, std::ios::binary);
+            std::string magic;
+            std::getline(previewFile, magic);
+            const nlohmann::json previewManifest = nlohmann::json::parse(previewFile, nullptr, false);
+            previewFile.close();
             std::string previewRelativePath;
             if (previewManifest.is_object() && previewManifest.contains("_store")) {
                 const auto& storage = previewManifest["_store"];
@@ -1277,7 +1270,7 @@ bool ValidateStores(const std::filesystem::path& root) {
             ok &= Check(!previewRelativePath.empty(),
                 "preview corruption fixture could not resolve the committed cover path");
             ok &= Check(!previewRelativePath.empty() && WriteBytes(
-                    previewResiliencePath / std::filesystem::u8path(previewRelativePath),
+                    previewResiliencePath.parent_path() / std::filesystem::u8path(previewRelativePath),
                     corruptedPreview),
                 "preview corruption fixture could not be written");
             ProjectStoreOpenResult missingPreview = OpenProjectStore(
@@ -1302,7 +1295,7 @@ bool ValidateStores(const std::filesystem::path& root) {
     const std::filesystem::path bundlePath = root / "roundtrip";
     std::cout << "[multi-source/store] create bundle" << std::endl;
     ProjectStoreOpenResult created = CreateProjectStore(
-        bundlePath, ProjectStorageKind::DirectoryBundle, bootstrap);
+        bundlePath, ProjectStorageKind::WorkingFile, bootstrap);
     ok &= Check(static_cast<bool>(created), "directory store creation failed: " + created.message);
     if (!created) return false;
 
@@ -1426,7 +1419,7 @@ bool ValidateStores(const std::filesystem::path& root) {
         reopened.store,
         reopened.snapshot,
         directoryCopyPath,
-        ProjectStorageKind::DirectoryBundle);
+        ProjectStorageKind::WorkingFile);
     ok &= Check(static_cast<bool>(directoryCopy),
         "bundle Save As conversion failed: " + directoryCopy.message);
     if (directoryCopy) {
@@ -1539,7 +1532,7 @@ bool ValidateStores(const std::filesystem::path& root) {
         afterInterruptedAppend.store,
         afterInterruptedAppend.snapshot,
         convertedBackPath,
-        ProjectStorageKind::DirectoryBundle);
+        ProjectStorageKind::WorkingFile);
     ok &= Check(static_cast<bool>(convertedBack),
         "portable to bundle conversion failed: " + convertedBack.message);
     if (convertedBack) {
@@ -1548,39 +1541,20 @@ bool ValidateStores(const std::filesystem::path& root) {
     }
 
     std::cout << "[multi-source/store] previous manifest recovery" << std::endl;
-    ok &= Check(WriteBytes(
-        bundlePath / "project.stack",
-        std::vector<unsigned char> { '{', 'b', 'a', 'd' }),
-        "current bundle manifest could not be corrupted for recovery test");
-    ProjectStoreOpenResult recovered = OpenProjectStore(bundlePath);
-    ok &= Check(static_cast<bool>(recovered) && recovered.recoveredPreviousManifest &&
-        recovered.store->IsReadOnlyRecovery(),
-        "invalid current bundle manifest did not open the retained previous manifest read-only");
-    if (recovered) {
-        ProjectStoreTransaction blocked = recovered.store->BeginTransaction(
-            recovered.snapshot.persistedStorageRevision);
-        ProjectStoreCommitResult blockedCommit = recovered.store->Commit(
-            blocked, recovered.snapshot);
-        ok &= Check(blockedCommit.status == ProjectStoreCommitStatus::ReadOnlyRecovery,
-            "recovered bundle allowed an in-place commit");
-        recovered.store->Abort(blocked);
-
-        const std::filesystem::path storedAsset =
-            bundlePath / assetA.projectAssetPath;
-        std::fstream corruptAsset(
-            storedAsset, std::ios::binary | std::ios::in | std::ios::out);
-        char changedByte = 0;
-        corruptAsset.read(&changedByte, 1);
-        changedByte ^= static_cast<char>(0x5a);
-        corruptAsset.clear();
-        corruptAsset.seekp(0, std::ios::beg);
-        corruptAsset.write(&changedByte, 1);
-        corruptAsset.close();
-        std::vector<std::string> checksumErrors;
-        ok &= Check(!reopened.store->Verify(
-                reopened.snapshot, &checksumErrors) && !checksumErrors.empty(),
-            "embedded-original checksum corruption was not detected");
-    }
+    // A same-length impostor at the expected location must never be served.
+    auto impostor = rawA;
+    impostor.front() ^= 0x5a;
+    ok &= Check(WriteBytes(rawAPath, impostor) &&
+        !reopened.store->OpenAssetStream(assetA.assetId), "linked source identity substitution was accepted");
+    const auto relocated = root / "relocated";
+    std::filesystem::create_directory(relocated);
+    ok &= Check(WriteBytes(relocated / "renamed.dng", rawA), "could not create relocated source");
+    std::size_t matched = 0;
+    ok &= Check(RelinkProjectSources(bundlePath, relocated, matched, error) && matched == 1,
+        "exact batch relink failed: " + error);
+    auto relinked = OpenProjectStore(bundlePath);
+    ok &= Check(relinked && ReadStream(relinked.store->OpenAssetStream(assetA.assetId)) == rawA,
+        "relinked working source did not return its original bytes");
     return ok;
 }
 

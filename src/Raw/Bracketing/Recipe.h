@@ -5,12 +5,9 @@
 #include <vector>
 
 namespace Raw::Bracketing {
-inline constexpr int RecipeVersion = 8;
-struct DepthSettings {
-    bool enabled=false;
-    double focus=.5,focusRange=.08,blurRadius=0;
-};
-enum class ReconstructionMode { Standard, SuperResolution1x, SuperResolution2x, Panorama };
+inline constexpr int RecipeVersion = 10;
+enum class BurstSmoothing { Off, SuperResolutionOnly, All };
+enum class ReconstructionMode { Standard, SuperResolution1x, SuperResolution2x, Panorama, Adaptive };
 enum class PanoramaProjection { Auto, Perspective, Spherical };
 struct PanoramaSettings {
     PanoramaProjection projection=PanoramaProjection::Auto;
@@ -56,9 +53,11 @@ struct BracketingRecipe {
     AlignmentMode alignmentMode = AlignmentMode::AutomaticLocal;
     bool aiAlignment = false;
     ReconstructionMode reconstruction = ReconstructionMode::Standard;
+    BurstSmoothing smoothing = BurstSmoothing::SuperResolutionOnly;
     PanoramaSettings panorama;
-    DepthSettings depth;
 };
+bool NeedsBurstSpatialGuide(const BracketingRecipe&);
+void ResolveGroupReconstruction(BracketingRecipe&,bool nativeBayer);
 int ResolveOrientation(const BracketingRecipe&, int original);
 int ResolveStoredOrientation(const nlohmann::json&, int original);
 bool UsesStoredFrame(const nlohmann::json&, const std::string& frameId);

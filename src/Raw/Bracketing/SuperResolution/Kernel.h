@@ -14,6 +14,7 @@ struct Vec4 { float x=0,y=0,z=0,w=0; };
 struct Moment { float value=0,weight=0,noise=0,frameWeightSquared=0; };
 struct PixelAccumulator {
     Vec4 kernel; // inverse covariance xx, xy, yy; stable scene signal pilot
+    Vec4 broadKernel{1,0,1,0};
     std::array<Moment,3> narrow{}, broad{};
     std::array<float,4> narrowUncertainty{},broadUncertainty{};
     std::array<float,4> crossNoise{},crossFrameWeight{},crossUncertainty{};
@@ -58,6 +59,7 @@ void AccumulatePixel(const Tile&,const FrameRegion&,unsigned x,unsigned y,PixelA
 bool AccumulateCpu(Tile&,const FrameRegion&,const std::function<bool()>& cancel,std::string&,unsigned workers=1);
 ChannelResult Resolve(const PixelAccumulator&,unsigned channel,float samplingConfidence=1);
 std::array<ChannelResult,3> ResolveChannels(const PixelAccumulator&,float samplingConfidence=1);
+float ResolveAlpha(const PixelAccumulator&,float samplingConfidence);
 
 // These methods run only on the caller's render-owner context. One tile stays
 // resident across captures; only original source regions are streamed to it.

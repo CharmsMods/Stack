@@ -5,6 +5,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawGallerySimilarity.h"
 #include "Raw/RawGalleryThumbnailPixels.h"
+#include "Raw/RawCameraThumbnail.h"
 
 #include <chrono>
 #include <cstddef>
@@ -48,7 +49,9 @@ enum class GalleryDisplayMode {
 enum class GalleryContentMode {
     Gallery,
     Projects,
-    Bracket
+    Bracket,
+    Unlinked,
+    AllProjects
 };
 
 enum class GalleryPlacementMode {
@@ -102,6 +105,7 @@ struct ThumbnailSignature {
 };
 
 struct ThumbnailInfo {
+    CameraThumbnail camera;
     std::filesystem::path absolutePath;
     std::filesystem::path relativePath;
     std::filesystem::path signaturePath;
@@ -147,7 +151,13 @@ struct SourceSetProjectMembership {
     std::uint64_t sourceSetFrameCount = 0;
 };
 
+struct SourceRecord;
+
 struct SourceSetProjectCatalogEntry {
+    std::shared_ptr<SourceRecord> masterSource;
+    std::string masterCaptureSetIdentity;
+    // Verified input for edits linked outside Originals (including result-backed edits).
+    std::shared_ptr<const SourceRecord> linkedOriginal;
     // Discovery provenance. Never a destination inferred from the active Gallery.
     std::filesystem::path sourceWorkspaceRoot;
     std::string projectId;
@@ -159,13 +169,16 @@ struct SourceSetProjectCatalogEntry {
     std::filesystem::path absolutePath;
     std::filesystem::path relativePath;
     Stack::Project::ProjectStorageKind storageKind =
-        Stack::Project::ProjectStorageKind::DirectoryBundle;
+        Stack::Project::ProjectStorageKind::WorkingFile;
     ProjectStatus status = ProjectStatus::Unknown;
     bool readOnlyRecovery = false;
     bool dirty = false;
     bool conflict = false;
     bool multiFrameProject = false;
     bool bracketingProject = false;
+    bool untouchedAutomaticBracket = false;
+    bool unlinked = false;
+    bool standaloneMaster = false;
     bool hasSavedBracketingResult = false;
     // Derived catalog relationships, never authored project state.
     std::vector<std::string> sourceKeys;
@@ -206,6 +219,8 @@ struct SourceRecord {
     ThumbnailInfo transientThumbnail;
     ProjectInfo project;
     std::vector<SourceSetProjectMembership> sourceSetProjectMemberships;
+    // The directory entry is drawable before project identity and metadata are indexed.
+    bool browsePreview = false;
 };
 
 struct SourceFolderCard {
@@ -216,6 +231,7 @@ struct SourceFolderCard {
 };
 
 struct CatalogThumbnailRecord {
+    CameraThumbnail camera;
     std::filesystem::path relativePath;
     std::filesystem::path signatureRelativePath;
     ThumbnailStatus status = ThumbnailStatus::Unknown;
@@ -280,8 +296,10 @@ struct ScanProgress {
 
 struct ScanResult {
     bool success = false;
+    nlohmann::json bracketMasters = nlohmann::json::array();
     std::string errorMessage;
     ManagedLayout layout;
+    std::vector<std::filesystem::path> nestedClosets;
     std::vector<SourceRecord> sources;
     std::vector<SourceSetProjectCatalogEntry> sourceSetProjects;
     // Accepted per-folder summaries, including successful empty folders.
@@ -292,6 +310,7 @@ struct ScanResult {
 };
 
 struct WorkspaceState {
+    std::vector<std::filesystem::path> nestedClosets;
     std::filesystem::path workspaceRoot;
     std::vector<std::filesystem::path> registeredSourceFolders;
     bool allSourceFolders = false;
@@ -339,6 +358,7 @@ struct GallerySourceView {
     std::string projectName;
     std::filesystem::path projectPath;
     std::filesystem::path projectCoverThumbnailCachePath;
+    std::string projectCoverKey;
     std::uint64_t savedProjectCount = 0;
     bool hasSavedBracketingResult = false;
 };
@@ -361,9 +381,13 @@ struct GalleryProjectView {
     ProjectStatus status = ProjectStatus::Unknown;
     bool multiFrameProject = false;
     bool bracketingProject = false;
+    bool untouchedAutomaticBracket = false;
+    bool unlinked = false;
+    bool standaloneMaster = false;
     bool hasSavedBracketingResult = false;
     std::vector<std::string> sourceKeys;
     std::string sourceIdentityKey;
+    std::string projectCoverKey;
 };
 
 struct GalleryProjectStack {
@@ -437,20 +461,28 @@ using ScanSourceReadyCallback =
 using SourceIdentityReuseCallback = std::function<bool(SourceRecord&)>;
 using CancellationPredicate = std::function<bool()>;
 
+std::filesystem::path OwningPhotoRoot(const std::filesystem::path& selected);
+bool IsMarkedCloset(const std::filesystem::path& directory);
 ManagedLayout BuildManagedLayout(const std::filesystem::path& workspaceRoot);
+ManagedLayout BuildGalleryLayout(const std::filesystem::path& workspaceRoot);
 bool IsManagedFolderName(const std::string& folderName);
 bool EnsureManagedFolders(const std::filesystem::path& workspaceRoot, std::string* outError = nullptr);
 bool LoadGalleryState(const ManagedLayout& layout, RawGalleryManualGrouping& grouping, std::string* error = nullptr);
 bool SaveGalleryState(const ManagedLayout& layout, const RawGalleryManualGrouping& grouping, std::string* error = nullptr);
 bool DefaultRawPathPredicate(const std::filesystem::path& path);
+bool LoadGalleryRasterThumbnail(const std::filesystem::path& path, int maxDimension,
+    std::vector<unsigned char>& rgba, int& width, int& height);
 ScanResult ScanWorkspace(
     const std::filesystem::path& workspaceRoot,
     RawPathPredicate isRawPath = {},
     ScanProgressCallback progressCallback = {},
     CancellationPredicate shouldCancel = {},
     ScanSourceReadyCallback sourceReadyCallback = {},
-    SourceIdentityReuseCallback reuseSourceIdentity = {});
+    SourceIdentityReuseCallback reuseSourceIdentity = {},
+    bool galleryBrowse = false,
+    std::function<void(const std::vector<SourceRecord>&)> listingReady = {});
 
+SourceRecord* FindStandaloneMaster(const WorkspaceState& state, const std::string& sourceKey);
 bool SelectSourceByKey(WorkspaceState& state, const std::string& sourceKey);
 void AddRecentWorkspace(WorkspaceState& state, const std::filesystem::path& workspaceRoot, std::size_t maxRecent = 8);
 ThumbnailSignature BuildThumbnailSignature(const SourceRecord& source, int maxDimension = kNeutralThumbnailMaxDimension);
@@ -530,7 +562,8 @@ bool DiscoverWorkspaceProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
-    CancellationPredicate shouldCancel = {});
+    CancellationPredicate shouldCancel = {},
+    const nlohmann::json* scannedMasters = nullptr);
 nlohmann::json BuildRawSourceRefJson(const SourceRecord& source, bool linkedRaw = true);
 nlohmann::json BuildRawProjectData(
     const SourceRecord& source,

@@ -804,6 +804,7 @@ private:
     mutable std::mutex m_Mutex;
     std::condition_variable m_Cv;
     bool m_StopRequested = false;
+    bool m_ThreadExited = true;
     bool m_InitComplete = false;
     bool m_InitSucceeded = false;
     std::string m_InitError;

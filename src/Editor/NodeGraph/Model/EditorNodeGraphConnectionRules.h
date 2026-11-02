@@ -7,6 +7,8 @@
 
 namespace EditorNodeGraph::ConnectionRules {
 
+inline constexpr char kCycleError[] = "That connection would create a cycle.";
+
 inline bool IsChannelProcessingBridge(
     const Graph& graph,
     int fromNodeId,

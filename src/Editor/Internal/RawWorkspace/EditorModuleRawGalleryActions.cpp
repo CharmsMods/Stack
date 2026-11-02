@@ -1,6 +1,7 @@
 #include "Editor/EditorModule.h"
 
 #include "App/PlatformHelpers.h"
+#include "Utils/FileDialogs.h"
 #include "App/WorkspacePresentation.h"
 #include "Library/LibraryManager.h"
 #include "Persistence/ProjectIndex.h"
@@ -103,6 +104,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
         item.sourceKey = key;
         // An original remains an unedited input even when a saved project
         // references it. Copying edits belongs to the saved project card.
+        item.camera = source->thumbnail.camera;
         if (source->thumbnail.status == Stack::RawWorkspace::ThumbnailStatus::Ready ||
             source->thumbnail.status == Stack::RawWorkspace::ThumbnailStatus::Valid)
             item.thumbnailPath = source->thumbnail.absolutePath;
@@ -120,9 +122,9 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
             (m_ProjectRemovalGuard && m_ProjectRemovalGuard(path)));
         Stack::Project::ProjectRecord record;
         if (FindRawWorkspaceGalleryProjectRecord(path, record)) {
-            item.canCopyEdits = record.hasRawWorkspaceRecipe || record.multiFrameProject;
+            item.canCopyEdits = !record.needsAttention && (record.projectKind=="editor" || record.hasRawWorkspaceRecipe || record.multiFrameProject);
             item.canVersion = record.format == Stack::Project::IndexedProjectFormat::CurrentBundle &&
-                record.storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle &&
+                record.storageKind == Stack::Project::ProjectStorageKind::WorkingFile &&
                 !record.readOnlyRecovery && !record.needsAttention;
             if (!editControlsOnly) {
                 for (const auto& indexedSource : record.sources) {
@@ -161,8 +163,8 @@ void EditorModule::RefreshRawGalleryAfterFileMove(const std::filesystem::path& r
 bool EditorModule::ExecuteRawGalleryAction(Action action,
     const Stack::RawGalleryActions::Context& captured) {
     auto context = captured;
-    context.aggregateView = m_RawWorkspace.allSourceFolders;
-    if (!SameRoot(context.workspaceRoot, m_RawWorkspace.workspaceRoot) ||
+    if (context.aggregateView != m_RawWorkspace.allSourceFolders ||
+        !SameRoot(context.workspaceRoot, m_RawWorkspace.workspaceRoot) ||
         context.catalogGeneration != m_RawWorkspaceScanGeneration) {
         PostNotification(UiNotificationSeverity::Warning,
             "The Gallery folder changed. Select the items again.", "raw-gallery-action-stale");
@@ -203,7 +205,7 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
         Stack::RawGalleryQueue::Request request;
         for (const auto& item : context.items) {
             if (item.kind == Kind::Project) request.projectPaths.push_back(item.path);
-            else request.sources.push_back({item.path, item.thumbnailPath});
+            else request.sources.push_back({item.path, item.thumbnailPath, item.camera});
         }
         const auto result = m_RawGalleryQueueRequestHandler(request);
         Stack::Notifications::NoticeSpec notice;
@@ -220,12 +222,22 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
         GetNotifier().Post(std::move(notice));
         return result.added > 0u || result.alreadyPresent > 0u;
     }
+    case Action::Relink:
+        return RequestGalleryProjectRelink(context.items[context.focusedIndex].path);
+    case Action::ApplyProject:
     case Action::CopyEdits: {
         const auto& item = context.items[context.focusedIndex];
         std::string error;
+        m_GalleryApplyChooseTarget = action == Action::ApplyProject;
         const bool copied = CopyRawEditAttributesFromProjectPath(item.path, {}, &error);
         if (!copied) PostNotification(UiNotificationSeverity::Error,
             error.empty() ? "The focused item has no copyable RAW edit." : error, "raw-edit-attributes-copy-failed");
+        if (copied && m_GalleryApplyChooseTarget) {
+            m_RawWorkspaceGalleryContentMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
+            m_RawWorkspaceLabSelectedProjectPaths.clear();
+            InvalidateRawWorkspaceGalleryPresentation(false);
+            PostNotification(UiNotificationSeverity::Info,"Select a target original or linked project, then choose Apply to selection.","preset-select-target");
+        } else if (!copied) m_GalleryApplyChooseTarget=false;
         return copied;
     }
     case Action::PasteEdits: {
@@ -271,22 +283,38 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
         m_RawWorkspaceRevertPopupRequested = true;
         RenderRawWorkspaceGalleryRevertPopup();
         return true;
-    case Action::TrashProjects: {
+    case Action::MoveToTrash: {
         const auto document = GetProjectDocumentId();
         auto remove = [this, context, document] {
-            if (GetProjectDocumentId() != document || !SameRoot(context.workspaceRoot, m_RawWorkspace.workspaceRoot)) {
+            if (GetProjectDocumentId() != document || context.aggregateView != m_RawWorkspace.allSourceFolders ||
+                context.catalogGeneration != m_RawWorkspaceScanGeneration ||
+                !SameRoot(context.workspaceRoot, m_RawWorkspace.workspaceRoot)) {
                 PostNotification(UiNotificationSeverity::Warning,
-                    "The Gallery folder changed before the projects could be moved. Try again.", "raw-gallery-action-stale");
+                    "The Gallery folder changed before the items could be moved. Select them again.", "raw-gallery-action-stale");
                 return;
             }
-            std::vector<std::filesystem::path> paths;
+            Stack::RawGalleryFileActions::Result result;
             bool protectedProject = false;
             for (const auto& item : context.items) {
-                if (Stack::Project::SameProjectPath(item.path, m_Project->storePath) ||
-                    (m_ProjectRemovalGuard && m_ProjectRemovalGuard(item.path))) protectedProject = true;
-                else paths.push_back(item.path);
+                if (item.kind == Kind::Project) {
+                    const auto store = Stack::Project::ResolveProjectStoreRoot(item.path);
+                    if (Stack::Project::SameProjectPath(store, Stack::Project::ResolveProjectStoreRoot(m_Project->storePath)) ||
+                        (m_ProjectRemovalGuard && m_ProjectRemovalGuard(store))) {
+                        protectedProject = true;
+                        continue;
+                    }
+                }
+                const auto owner = ResolveRawWorkspaceSourceFolder(item.path);
+                if (owner.empty()) {
+                    result.errors.push_back("Could not identify the source folder for " + item.path.u8string());
+                    continue;
+                }
+                auto moved = item.kind == Kind::Source
+                    ? Stack::RawGalleryFileActions::DeleteSourcesToTrash(owner, {item.path})
+                    : Stack::RawGalleryFileActions::DeleteProjectsToTrash(owner, {item.path});
+                result.moved += moved.moved;
+                result.errors.insert(result.errors.end(), moved.errors.begin(), moved.errors.end());
             }
-            const auto result = Stack::RawGalleryFileActions::DeleteProjectsToTrash(context.workspaceRoot, paths);
             if (result.moved) RefreshRawGalleryAfterFileMove(context.workspaceRoot);
             Stack::Notifications::NoticeSpec notice;
             notice.severity = !result.errors.empty() || protectedProject ? UiNotificationSeverity::Warning :
@@ -294,14 +322,14 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
             notice.outcome = !result.errors.empty() || protectedProject ? Stack::Notifications::Outcome::Partial :
                 result.moved ? Stack::Notifications::Outcome::Success : Stack::Notifications::Outcome::Failure;
             notice.message = result.moved ? "Moved " + std::to_string(result.moved) +
-                (result.moved == 1u ? " project to Stack Trash." : " projects to Stack Trash.") :
-                "No projects were moved to Stack Trash.";
+                (result.moved == 1u ? " item to Closet Trash." : " items to Closet Trash.") :
+                "No items were moved to Closet Trash.";
             if (protectedProject) notice.message += " Open projects were kept.";
             notice.dedupeKey = "raw-gallery-delete-project";
             for (const auto& error : result.errors) notice.details += error + "\n";
             GetNotifier().Post(std::move(notice));
         };
-        if (!RequestAutoBracketForeground("remove these projects", remove)) remove();
+        if (!RequestAutoBracketForeground("move these items to Trash", remove)) remove();
         return true;
     }
     }
@@ -313,14 +341,16 @@ void EditorModule::RenderRawGalleryContextActions(const std::filesystem::path& f
     for (std::size_t i = 0; i < context.items.size(); ++i)
         if (Stack::Project::SameProjectPath(context.items[i].path, focusedPath)) context.focusedIndex = i;
     constexpr std::array actions {Action::Open, Action::CreateCaptureSet, Action::AddToQueue,
-        Action::CopyEdits, Action::PasteEdits, Action::NewSavedVersion, Action::ShowInExplorer,
-        Action::CopyPath, Action::TrashProjects, Action::RevertProjects};
+        Action::ApplyProject, Action::CopyEdits, Action::PasteEdits, Action::NewSavedVersion, Action::ShowInExplorer,
+        Action::CopyPath, Action::Relink, Action::MoveToTrash, Action::RevertProjects};
     for (const auto action : actions) {
+        if (action == Action::ApplyProject && !UsesGalleryPresetPreviews()) continue;
+        if (action == Action::Relink && m_RawWorkspaceGalleryContentMode != Stack::RawWorkspace::GalleryContentMode::Unlinked) continue;
         if (action == Action::CopyEdits && (context.focusedIndex >= context.items.size() ||
                 context.items[context.focusedIndex].kind != Kind::Project)) continue;
-        if (action == Action::CopyEdits || action == Action::ShowInExplorer || action == Action::TrashProjects)
+        if (action == Action::CopyEdits || action == Action::ShowInExplorer || action == Action::MoveToTrash)
             ImGui::Separator();
-        if ((action == Action::TrashProjects || action == Action::RevertProjects || action == Action::NewSavedVersion) &&
+        if ((action == Action::RevertProjects || action == Action::NewSavedVersion) &&
             std::none_of(context.items.begin(), context.items.end(), [](const auto& item) { return item.kind == Kind::Project; }))
             continue;
         const auto available = Stack::RawGalleryActions::GetAvailability(context, action);
@@ -340,7 +370,7 @@ void EditorModule::HandleRawGalleryActionShortcuts() {
     std::optional<Action> action;
     if (!io.KeyCtrl && !io.KeyAlt && !io.KeyShift &&
         (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)))
-        action = Action::TrashProjects;
+        action = Action::MoveToTrash;
     else if (io.KeyCtrl && io.KeyShift && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_C, false))
         action = Action::CopyEdits;
     else if (io.KeyCtrl && io.KeyShift && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_V, false))
@@ -349,4 +379,20 @@ void EditorModule::HandleRawGalleryActionShortcuts() {
         m_RawGalleryShortcutFrame = ImGui::GetFrameCount();
         ExecuteRawGalleryAction(*action, CaptureRawGalleryActionContext());
     }
+}
+
+bool EditorModule::RequestGalleryProjectRelink(const std::filesystem::path& path) {
+    const auto folder = FileDialogs::OpenFolderDialog("Locate original photos");
+    if (folder.empty()) return false;
+    const auto owner = m_Project;
+    return ProjectTasks().Submit("Relinking project originals", [this, owner, path, folder] {
+        std::size_t matched = 0;
+        std::string error;
+        const bool ok = Stack::Project::RelinkProjectSources(path, std::filesystem::u8path(folder), matched, error);
+        owner->tasks.PostToMain([this, ok, matched, error] {
+            PostNotification(ok ? UiNotificationSeverity::Info : UiNotificationSeverity::Error,
+                ok ? "Reconnected " + std::to_string(matched) + " original(s)." : error, "gallery-relink");
+            if (matched) RefreshUnifiedProjectViewsAfterSave(true);
+        });
+    });
 }

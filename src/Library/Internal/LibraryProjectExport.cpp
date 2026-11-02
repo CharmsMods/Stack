@@ -27,7 +27,7 @@ bool ExportPortableProject(const std::filesystem::path& source,
         return false;
     }
     std::vector<std::filesystem::path> protectedSources{source, opened.store->StoragePath()};
-    if (opened.store->StorageKind() == Project::ProjectStorageKind::DirectoryBundle)
+    if (opened.store->StorageKind() == Project::ProjectStorageKind::WorkingFile)
         protectedSources.push_back(Project::WorkingProjectDocumentPath(opened.store->StoragePath()));
     for (const auto& asset : opened.snapshot.embeddedAssets) {
         if (!asset.originalSourcePath.empty() && asset.originalSourcePath.find("://") == std::string::npos)

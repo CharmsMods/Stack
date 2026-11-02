@@ -41,6 +41,8 @@ std::vector<std::string> OrderedSelectedAttributeKeys(
             keys.emplace_back(descriptor.key);
         }
     }
+    for (const auto& key : selected)
+        if (key.compare(0,6,"layer/") == 0) keys.push_back(key);
     return keys;
 }
 
@@ -143,7 +145,7 @@ bool EditorModule::CopyRawEditAttributesFromProjectPath(
     std::string* errorMessage) {
     Stack::RawRecipe::RawEditAttributeBundle bundle;
     if (SameProjectPath(projectPath, m_Project->storePath) &&
-        m_Project->snapshot) {
+        m_Project->snapshot && (IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive())) {
         Stack::Project::RawProjectEditRecipeBinding binding;
         std::string resolveError;
         if (!Stack::Project::ResolveRawProjectEditRecipe(
@@ -172,6 +174,8 @@ bool EditorModule::CopyRawEditAttributesFromProjectPath(
             binding.sourceLabel,
             binding.sourceKind,
             binding.viewTransformPlacement);
+        const auto pipeline = SerializePipeline();
+        Stack::RawRecipe::CaptureAuthoredLayers(bundle,pipeline,projectPath.u8string());
     } else {
         std::string captureError;
         if (!Stack::Project::CaptureRawEditAttributesFromProject(
@@ -186,17 +190,18 @@ bool EditorModule::CopyRawEditAttributesFromProjectPath(
     m_RawEditAttributeClipboard = std::move(bundle);
     m_RawEditAttributeClipboardObservedText.clear();
     m_RawEditAttributeClipboardObservedSequence = 0;
-    if (ImGui::GetCurrentContext()) {
-        const std::string clipboardText =
-            Stack::RawRecipe::SerializeRawEditAttributeBundle(
-                *m_RawEditAttributeClipboard).dump();
-        ImGui::SetClipboardText(clipboardText.c_str());
+    if (!m_GalleryApplyChooseTarget) {
+        m_GalleryCopyEditSelection = true;
+        m_RawEditAttributePasteTargets.clear();
+        m_RawEditAttributePasteSelection.clear();
+        for (auto& key : Stack::RawRecipe::DefaultRawEditAttributeSelection()) m_RawEditAttributePasteSelection.insert(key);
+        if (m_RawEditAttributeClipboard->authoredLayers)
+            for (const auto& choice : m_RawEditAttributeClipboard->authoredLayers->choices)
+                m_RawEditAttributePasteSelection.insert(choice.key);
+        m_RawEditAttributePastePopupRequested = true;
+        m_RawEditAttributePasteTaskState = Async::TaskState::Idle;
+        m_RawEditAttributePasteStatusText.clear();
     }
-    PostNotification(
-        UiNotificationSeverity::Success,
-        "RAW edits copied from " +
-            m_RawEditAttributeClipboard->sourceLabel + ".",
-        "raw-edit-attributes-copy");
     if (errorMessage) errorMessage->clear();
     return true;
 }
@@ -205,7 +210,7 @@ void EditorModule::RefreshRawEditAttributeClipboardFromSystem(bool force) {
     // Targets remain owned by the paste dialog through its pending, open,
     // working and result states, until Cancel, Close or automatic reveal.
     // A Gallery redraw must not replace the edit captured for that session.
-    if (m_RawEditAttributePastePopupRequested ||
+    if (m_GalleryApplyChooseTarget || m_GalleryCopyEditSelection || m_RawEditAttributePastePopupRequested ||
         !m_RawEditAttributePasteTargets.empty() ||
         Async::IsBusy(m_RawEditAttributePasteTaskState)) {
         return;
@@ -299,28 +304,16 @@ void EditorModule::RequestPasteRawEditAttributesForGalleryTargets(
         target.displayName = source.fileName.empty()
             ? source.relativePathKey
             : source.fileName;
-        const bool existing =
-            (source.project.status ==
-                 Stack::RawWorkspace::ProjectStatus::Existing ||
-             source.project.status ==
-                 Stack::RawWorkspace::ProjectStatus::Embedded) &&
-            !source.project.absolutePath.empty();
-        target.createProject = !existing;
-        target.projectPath = existing
-            ? source.project.absolutePath
-            : std::filesystem::path();
-        if (existing && std::any_of(
-                targets.begin(),
-                targets.end(),
-                [&](const RawEditAttributePasteTarget& candidate) {
-                    return SameProjectPath(
-                        candidate.projectPath, target.projectPath);
-                })) {
-            continue;
-        }
+        target.createProject = true;
         targets.push_back(std::move(target));
     }
     for (const auto& project : projects) {
+        if (project.unlinked) {
+            PostNotification(UiNotificationSeverity::Warning,
+                "Relink the target project’s original in Unlinked before applying edits.", "paste-relink-original");
+            RequestGalleryProjectRelink(project.absolutePath);
+            return;
+        }
         const bool alreadyAdded = std::any_of(
             targets.begin(),
             targets.end(),
@@ -346,6 +339,15 @@ void EditorModule::RequestPasteRawEditAttributesForGalleryTargets(
                 target.source = *source;
             }
         }
+        if (target.source.absolutePath.empty() && project.linkedOriginal) target.source=*project.linkedOriginal;
+        if (target.source.absolutePath.empty()) {
+            PostNotification(UiNotificationSeverity::Warning,
+                "Locate the target project’s original before applying edits.", "paste-relink-original");
+            RequestGalleryProjectRelink(target.projectPath);
+            return;
+        }
+        target.projectPath.clear();
+        target.createProject = true;
         targets.push_back(std::move(target));
     }
     if (targets.empty()) {
@@ -378,10 +380,19 @@ void EditorModule::RequestPasteRawEditAttributesForGalleryTargets(
         m_RawEditAttributeClipboardObservedSequence = 0;
         m_RawEditAttributePasteTargets = std::move(targets);
         m_RawEditAttributePasteSelection.clear();
+        if (m_RawEditAttributeClipboard && m_RawEditAttributeClipboard->authoredLayers)
+            for (const auto& choice : m_RawEditAttributeClipboard->authoredLayers->choices)
+                m_RawEditAttributePasteSelection.insert(choice.key);
         for (std::string key :
              Stack::RawRecipe::DefaultRawEditAttributeSelection()) {
             m_RawEditAttributePasteSelection.insert(std::move(key));
         }
+        if (!m_RawEditAttributeClipboard->copiedSelection.empty()) {
+            const auto& selected=m_RawEditAttributeClipboard->copiedSelection;
+            m_RawEditAttributePasteSelection={selected.begin(),selected.end()};
+        }
+        m_GalleryApplyChooseTarget=false;
+        m_GalleryCopyEditSelection=false;
         m_RawEditAttributePasteStatusText.clear();
         m_RawEditAttributePasteAutoOpenProjectPath.clear();
         m_RawEditAttributePastePopupRequested = true;
@@ -423,10 +434,21 @@ void EditorModule::RequestPasteRawEditAttributesForProject(
                 target.source = *source;
             }
         }
+        if (target.source.absolutePath.empty() && project.linkedOriginal) target.source=*project.linkedOriginal;
         break;
     }
+    if (target.source.absolutePath.empty()) {
+        RequestGalleryProjectRelink(target.projectPath);
+        return;
+    }
+    target.projectPath.clear();
+    target.createProject=true;
+    m_GalleryCopyEditSelection=false;
     m_RawEditAttributePasteTargets.assign(1u, std::move(target));
     m_RawEditAttributePasteSelection.clear();
+        if (m_RawEditAttributeClipboard && m_RawEditAttributeClipboard->authoredLayers)
+            for (const auto& choice : m_RawEditAttributeClipboard->authoredLayers->choices)
+                m_RawEditAttributePasteSelection.insert(choice.key);
     for (std::string key :
          Stack::RawRecipe::DefaultRawEditAttributeSelection()) {
         m_RawEditAttributePasteSelection.insert(std::move(key));
@@ -688,7 +710,7 @@ void EditorModule::RenderRawEditAttributePasteDialog() {
     const std::size_t targetCount = m_RawEditAttributePasteTargets.size();
 
     // Header bar with source and target info
-    ImGui::TextUnformatted("Copy RAW Settings");
+    ImGui::TextUnformatted(m_GalleryCopyEditSelection ? "Copy project edits" : "Apply edits to a new project");
     ImGui::SameLine(0.0f, 12.0f);
     ImGui::TextDisabled("From: %s", sourceLabel.c_str());
 
@@ -699,7 +721,7 @@ void EditorModule::RenderRawEditAttributePasteDialog() {
         std::max(
             ImGui::GetCursorPosX(),
             ImGui::GetWindowContentRegionMax().x - targetSummaryWidth));
-    ImGui::TextDisabled("%s", targetSummary.c_str());
+    if (!m_GalleryCopyEditSelection) ImGui::TextDisabled("%s", targetSummary.c_str());
     if (ImGui::IsItemHovered() && targetCount > 0u) {
         ImGui::BeginTooltip();
         ImGui::TextUnformatted("Target Destinations:");
@@ -868,6 +890,23 @@ void EditorModule::RenderRawEditAttributePasteDialog() {
         ImGui::EndTable();
     }
 
+    if (m_RawEditAttributeClipboard && m_RawEditAttributeClipboard->authoredLayers) {
+        ImGui::SeparatorText("Layers and operations");
+        for (const auto& choice : m_RawEditAttributeClipboard->authoredLayers->choices) {
+            const bool operation = !choice.layerKey.empty();
+            if (operation && !m_RawEditAttributePasteSelection.count(choice.layerKey)) continue;
+            if (operation) ImGui::Indent();
+            ImGui::PushID(choice.key.c_str());
+            bool selected = m_RawEditAttributePasteSelection.count(choice.key) != 0;
+            if (ImGui::Checkbox(choice.label.c_str(), &selected)) {
+                if (selected) m_RawEditAttributePasteSelection.insert(choice.key);
+                else m_RawEditAttributePasteSelection.erase(choice.key);
+            }
+            ImGui::PopID();
+            if (operation) ImGui::Unindent();
+        }
+    }
+
     ImGui::EndDisabled();
     ImGui::PopStyleVar(2);
 
@@ -921,6 +960,9 @@ void EditorModule::RenderRawEditAttributePasteDialog() {
     Stack::UiActivity::BeginDisabledForWork(busy, finished);
     if (ImGui::Button("Check All")) {
         m_RawEditAttributePasteSelection.clear();
+        if (m_RawEditAttributeClipboard && m_RawEditAttributeClipboard->authoredLayers)
+            for (const auto& choice : m_RawEditAttributeClipboard->authoredLayers->choices)
+                m_RawEditAttributePasteSelection.insert(choice.key);
         for (std::string key : Stack::RawRecipe::AllRawEditAttributeKeys()) {
             m_RawEditAttributePasteSelection.insert(std::move(key));
         }
@@ -957,14 +999,21 @@ void EditorModule::RenderRawEditAttributePasteDialog() {
         }
     } else {
         if (ImGui::Button("Cancel", ImVec2(cancelButtonWidth, 0.0f))) {
+            m_GalleryCopyEditSelection=false;
             ImGui::CloseCurrentPopup();
             m_RawEditAttributePasteTargets.clear();
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(m_RawEditAttributePasteSelection.empty());
-        if (ImGui::Button("Copy", ImVec2(copyButtonWidth, 0.0f))) {
+        if (ImGui::Button(m_GalleryCopyEditSelection ? "Copy" : "Create project", ImVec2(copyButtonWidth, 0.0f))) {
             std::string startError;
-            if (!StartRawEditAttributePaste(&startError)) {
+            if (m_GalleryCopyEditSelection && m_RawEditAttributeClipboard) {
+                m_RawEditAttributeClipboard->copiedSelection=OrderedSelectedAttributeKeys(m_RawEditAttributePasteSelection);
+                ImGui::SetClipboardText(Stack::RawRecipe::SerializeRawEditAttributeBundle(*m_RawEditAttributeClipboard).dump().c_str());
+                m_GalleryCopyEditSelection=false;
+                PostNotification(UiNotificationSeverity::Success,"Selected project edits copied.","gallery-copy-edits");
+                ImGui::CloseCurrentPopup();
+            } else if (!StartRawEditAttributePaste(&startError)) {
                 m_RawEditAttributePasteStatusText = std::move(startError);
             }
         }

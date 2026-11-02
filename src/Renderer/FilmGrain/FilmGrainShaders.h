@@ -124,9 +124,9 @@ void main(){
     vec3 base=original;
     if(encoding==1 && !scalar)base=decode(base);
     vec4 g=texture(grain,uv);
-    float common=sqrt(clamp(1.-colorAmount+colorAmount*correlation,0.,1.));
+    float sharedGrainWeight=sqrt(clamp(1.-colorAmount+colorAmount*correlation,0.,1.));
     float separate=sqrt(max(0.,colorAmount*(1.-correlation)));
-    vec3 noise=scalar ? vec3(g.x) : common*g.xxx+separate*g.yzw;
+    vec3 noise=scalar ? vec3(g.x) : sharedGrainWeight*g.xxx+separate*g.yzw;
     float tone=scalar ? base.r : dot(base,luma);
     vec3 strength=deviation*response(tone)*(scalar ? vec3(1) : channelStrength);
     vec3 changed;
@@ -137,7 +137,7 @@ void main(){
         // Gaussian moment correction reduces the density model's bright bias.
         // The field is non-Gaussian, so this is an approximation, not a promise
         // that every realization preserves every image's exact mean.
-        vec3 variance=scalar ? vec3(fieldVariance.x) : common*common*fieldVariance.xxx+separate*separate*fieldVariance.yzw;
+        vec3 variance=scalar ? vec3(fieldVariance.x) : sharedGrainWeight*sharedGrainWeight*fieldVariance.xxx+separate*separate*fieldVariance.yzw;
         vec3 correction=compensateMean ? .5*d*d*variance : vec3(0);
         changed=base+max(base,vec3(exposureFloor))*(exp(-noise*d-correction)-1.);
     }

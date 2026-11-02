@@ -114,7 +114,25 @@ bool ResolveRawProjectEditRecipe(
             }
             return false;
         }
-        binding.recipe = Stack::RawRecipe::DeserializeRecipe(storedRecipe);
+        // A compact RAW graph authors development values on its source node.
+        // The workspace block only describes technical input and display state.
+        const nlohmann::json* authored=&storedRecipe;
+        if (!snapshot.pipelineData.contains("rawLayerStack") && snapshot.pipelineData.contains("nodeGraph")) {
+            const auto& graph=snapshot.pipelineData.at("nodeGraph");
+            const auto uuid=snapshot.pipelineData.value("rawLayerSourceNodeUuid",std::string{});
+            if (graph.contains("nodes") && graph["nodes"].is_array()) for (const auto& node:graph["nodes"]) {
+                if (node.value("kind",std::string{})!="RawDevelopment" ||
+                    (!uuid.empty() && node.value("instanceUuid",std::string{})!=uuid) ||
+                    !node.contains("rawRecipe") || !IsStoredRecipe(node["rawRecipe"])) continue;
+                if (authored!=&storedRecipe) {
+                    if (errorMessage) *errorMessage="Select the RAW input to copy from this multi-input graph.";
+                    return false;
+                }
+                authored=&node.at("rawRecipe");
+            }
+        }
+        binding.recipe=Stack::RawRecipe::DeserializeRecipe(*authored);
+        binding.recipe.source=Stack::RawRecipe::DeserializeRecipe(storedRecipe).source;
         binding.sourceLabel = snapshot.projectName.empty()
             ? Stack::RawRecipe::RecipeDisplayName(binding.recipe)
             : snapshot.projectName;

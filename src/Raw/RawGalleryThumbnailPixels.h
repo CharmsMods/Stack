@@ -7,6 +7,9 @@ namespace Stack::RawWorkspace {
 inline constexpr int kFastNeutralThumbnailMaxDimension = 320;
 inline constexpr int kNeutralThumbnailMaxDimension = 512;
 
+bool OrientThumbnailPixels(std::vector<unsigned char>& pixels, int& width, int& height,
+    int orientation, const std::function<bool()>& shouldCancel);
+
 // Shared neutral pixel preparation for Gallery thumbnails and scene matching.
 // The standard path averages the same sensor regions before white balance and
 // encoding, then applies camera EXIF orientation (including mirrored variants).

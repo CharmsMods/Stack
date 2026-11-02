@@ -439,7 +439,7 @@ void RenderPipeline::EnsureMaskPrograms() {
                 float radiansAngle = radians(uAngle);
                 vec2 dir = vec2(cos(radiansAngle), sin(radiansAngle));
                 maskValue = dot(uv - vec2(0.5), dir) * max(uScale, 0.001) + 0.5 + uOffset;
-                maskValue = clamp(maskValue, 0.0, 1.0);
+                maskValue = smoothstep(0.0, 1.0, maskValue);
             } else if (uKind == 2 || uKind == 4) {
                 vec2 delta = uv - uCenter;
                 float angle = radians(uAngle);

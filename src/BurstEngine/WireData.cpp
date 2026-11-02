@@ -112,7 +112,7 @@ Json Preview(const Raw::Bracketing::Preview& p){
         {"requested",Pack(p.requested)},{"coverage",Pack(p.coverage)},{"guideEv",Pack(p.guideEv)},{"diagnostics",Pack(p.diagnostics)}};
     std::vector<float> values;std::vector<std::uint8_t> flags;values.reserve(p.samples.size()*8);flags.reserve(p.samples.size());
     for(const auto& s:p.samples){values.insert(values.end(),{s.value,s.variance,s.headroom,s.support,s.fallback,s.exposure,s.measurementVariance,s.uncertaintyVariance});
-        flags.push_back(std::uint8_t((s.finite?1:0)|(s.clipped?2:0)|(s.localRejected?4:0)|(s.fixedReference?8:0)|(s.fallbackClipped?16:0)));}
+        flags.push_back(std::uint8_t((s.finite?1:0)|(s.clipped?2:0)|(s.localRejected?4:0)|(s.fixedReference?8:0)|(s.fallbackClipped?16:0)|(unsigned(s.clippedReference)<<5)));}
     j["sampleValues"]=Pack(values);j["sampleFlags"]=Pack(flags);j["originals"]=Json::object();
     for(const auto& [id,capture]:p.originals)if(capture)j["originals"][id]=Capture(*capture);return j;
 }
@@ -128,7 +128,8 @@ Raw::Bracketing::Preview Preview(const Json& j){
     const auto values=Unpack<float>(j.at("sampleValues"));const auto flags=Unpack<std::uint8_t>(j.at("sampleFlags"));
     if(values.size()!=flags.size()*8)throw std::runtime_error("Invalid burst preview samples.");p.samples.resize(flags.size());
     for(std::size_t i=0;i<flags.size();++i){const auto n=i*8;auto& s=p.samples[i];s.value=values[n];s.variance=values[n+1];s.headroom=values[n+2];s.support=values[n+3];s.fallback=values[n+4];s.exposure=values[n+5];s.measurementVariance=values[n+6];s.uncertaintyVariance=values[n+7];
-        s.finite=(flags[i]&1)!=0;s.clipped=(flags[i]&2)!=0;s.localRejected=(flags[i]&4)!=0;s.fixedReference=(flags[i]&8)!=0;s.fallbackClipped=(flags[i]&16)!=0;}
+        s.finite=(flags[i]&1)!=0;s.clipped=(flags[i]&2)!=0;s.localRejected=(flags[i]&4)!=0;s.fixedReference=(flags[i]&8)!=0;s.fallbackClipped=(flags[i]&16)!=0;
+        s.clippedReference=static_cast<ClippedReference>((flags[i]>>5)&3);}
     for(const auto& [id,capture]:j.at("originals").items())p.originals[id]=Capture(capture);return p;
 }
 Json Analysis(const BracketingAnalysis& a){

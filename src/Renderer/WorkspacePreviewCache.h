@@ -33,7 +33,7 @@ public:
 
 private:
     static constexpr std::size_t Capacity = 6;
-    static constexpr int MaximumEdge = 1600;
+    static constexpr std::uint64_t ByteBudget = 128ull * 1024 * 1024;
     static void Release(Entry& entry);
     std::array<Entry, Capacity> entries{};
     std::uint64_t clock = 0;

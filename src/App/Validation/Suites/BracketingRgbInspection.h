@@ -11,7 +11,7 @@ inline bool WriteBracketRgbComparisons(const Raw::Bracketing::BracketingResult& 
     const std::vector<std::array<unsigned,2>>& regions) {
     const auto& raw=*result.raw;const auto& m=raw.metadata;
     const unsigned width=m.visibleWidth,height=m.visibleHeight;
-    const unsigned scale=result.reconstructionInspection?result.reconstructionInspection->scale:1;
+    const double scale=result.reconstructionInspection?result.reconstructionInspection->scale:1;
     const auto& rgb=raw.linearFloatBuffer;
     if(rgb.size()!=std::size_t(width)*height*3)return false;
     std::ofstream binary(output/"merged-camera-rgb.f32",std::ios::binary);
@@ -20,10 +20,10 @@ inline bool WriteBracketRgbComparisons(const Raw::Bracketing::BracketingResult& 
     report["nativeComparison"]={{"exposureEv",2},{"display","camera color, Reinhard, sRGB"},
         {"width",width},{"height",height},{"orientation",m.orientation},{"scale",scale},
         {"cameraWhiteBalance",m.cameraWhiteBalance},{"cameraToSrgb",m.cameraToSrgb}};
-    auto centers=regions;if(centers.empty())centers.push_back({width/(2*scale),height/(2*scale)});
+    auto centers=regions;if(centers.empty())centers.push_back({unsigned(width/(2*scale)),unsigned(height/(2*scale))});
     const unsigned size=std::min({640u,width,height});
     for(std::size_t r=0;r<centers.size();++r) {
-        const unsigned cx=centers[r][0]*scale,cy=centers[r][1]*scale;
+        const unsigned cx=unsigned(std::lround(centers[r][0]*scale)),cy=unsigned(std::lround(centers[r][1]*scale));
         const unsigned left=std::min(cx>size/2?cx-size/2:0u,width-size);
         const unsigned top=std::min(cy>size/2?cy-size/2:0u,height-size);
         std::vector<unsigned char> bytes(std::size_t(size)*size*3);

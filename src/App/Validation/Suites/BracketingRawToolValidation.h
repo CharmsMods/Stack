@@ -135,10 +135,14 @@ struct BracketingRawToolValidationAccess {
             Check(reopened.ApplyLoadedProject(data),"Could not reopen the pending bracket draft");
             reopened.OpenBracketingTool();reopened.TickBracketing();
             const auto restoreDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+            const auto restoreJob = reopened.m_Bracketing->job;
             while(reopened.m_Bracketing->job&&std::chrono::steady_clock::now()<restoreDeadline) {
-                Check(reopened.m_Bracketing->job->restoredFromProject,"Reopening a pending draft started a merge");
+                Check(reopened.m_Bracketing->job == restoreJob,"Reopening a pending draft scheduled another job");
                 reopened.TickBracketing();std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
+            // The worker records whether it restored or regenerated before publishing done.
+            if (restoreJob) Check(restoreJob->done.load() && restoreJob->restoredFromProject,
+                "Reopening a pending draft did not restore its saved result");
             Check(reopened.HasPendingBracketingDraft()&&!reopened.m_Bracketing->job&&
                 !reopened.m_Bracketing->publishRequested,"The saved result did not finish opening beside its pending draft");
             const auto restored=reopened.m_HdrAdoptedRawResult?reopened.m_HdrAdoptedRawResult->rawData:nullptr;
@@ -185,9 +189,9 @@ struct BracketingRawToolValidationAccess {
         }),"Saved bracket is absent from Bracket");
         e.m_RawWorkspaceGalleryContentMode=Stack::RawWorkspace::GalleryContentMode::Projects;
         const auto& projects=e.GetRawWorkspaceCategoryPresentation();
-        Check(std::none_of(projects.projects.begin(),projects.projects.end(),[](const auto& project) {
-            return project.bracketingProject;
-        }),"Projects contains bracket projects");
+        Check(std::any_of(projects.projects.begin(),projects.projects.end(),[&](const auto& project) {
+            return project.bracketingProject && project.projectId==snapshot.projectId;
+        }),"The saved bracket document is missing from Projects");
         e.m_RawWorkspaceGalleryContentMode=previousMode;
         for(const auto& source:e.m_Bracketing->sources)
             Check(source.sourceKey.rfind("project-overlay:",0)!=0,"The bracket result became an original capture");
@@ -201,8 +205,13 @@ struct BracketingRawToolValidationAccess {
         e.m_Bracketing->detail=e.m_Bracketing->preview;
         e.m_Bracketing->detailMode=true;
         e.m_Bracketing->detail.resultRgb.front()=-9876.f;
-        e.m_Bracketing->recipe.automatic=false;
-        e.m_Bracketing->recipe.knots.front().ev-=.1;
+        auto& recipe = e.m_Bracketing->recipe;
+        recipe.automatic = false;
+        // Endpoint knots stay fixed in the editor. Insert a point the same way
+        // as the contribution editor so its Bezier handles remain ordered.
+        Raw::Bracketing::InsertKnot(recipe.knots, (recipe.knots[0].ev + recipe.knots[1].ev) * .5);
+        std::string recipeError;
+        if (!Raw::Bracketing::Validate(recipe, recipeError)) throw std::runtime_error(recipeError);
         ImGui::NewFrame();e.CommitBracketingEdit();e.TickBracketing();ImGui::EndFrame();
         const auto previewDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
         while(e.m_Bracketing->previewJob&&std::chrono::steady_clock::now()<previewDeadline) {

@@ -25,7 +25,7 @@ int main() {
     Put(original,"synthetic immutable source");
     Project::RawProjectSnapshot snapshot;
     snapshot.projectId=Project::GenerateStableUuid(); snapshot.projectName="Export fixture";
-    auto opened=Project::CreateProjectStore(source,Project::ProjectStorageKind::DirectoryBundle,snapshot);
+    auto opened=Project::CreateProjectStore(source,Project::ProjectStorageKind::WorkingFile,snapshot);
     Require(bool(opened),"create actual project store");
     auto tx=opened.store->BeginTransaction(opened.snapshot.persistedStorageRevision);
     Project::EmbeddedAssetRecord asset;

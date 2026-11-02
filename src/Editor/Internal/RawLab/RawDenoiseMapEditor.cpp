@@ -399,6 +399,7 @@ RawDenoiseMapEditorResult RenderRawDenoiseMapEditor(
         }
         activeMap.points.push_back(point);
         state.selectedPointId = point.id;
+        state.draggingPoint = true;
         if (point.linkGroup != 0) {
             RawDenoiseControlPoint linked = point;
             linked.id = recipe.nextControlPointId++;

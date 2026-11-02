@@ -505,6 +505,8 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
 
     if (presentation.kind == NodePresentationKind::FramelessMedia) {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const bool depthMask=node.kind==EditorNodeGraph::NodeKind::CustomMask && node.rawCoverage.contains("bracketDepthMask");
+        const bool depthMissing=depthMask && node.rawCoverage.value("depthUnavailable",false);
         unsigned int texture = 0;
         ImVec2 imageSourceSize(1.0f, 1.0f);
         if (node.kind == EditorNodeGraph::NodeKind::Image) {
@@ -515,7 +517,9 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         } else if ((node.kind == EditorNodeGraph::NodeKind::MaskTexture ||
                     node.kind == EditorNodeGraph::NodeKind::CustomMask) && editor) {
             int width = 0, height = 0;
-            texture = editor->GetRawMaskTexturePreview(node.id,width,height);
+            if(!depthMissing && ImGui::IsRectVisible(min,max))
+                texture = editor->GetRawMaskTexturePreview(node,width,height);
+            if(depthMask && !texture){width=node.customMask.width;height=node.customMask.height;}
             imageSourceSize = ImVec2(static_cast<float>(std::max(1,width)),static_cast<float>(std::max(1,height)));
         } else if (node.kind == EditorNodeGraph::NodeKind::Output && editor) {
             int presentationWidth = 0;
@@ -554,6 +558,20 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 imageMax,
                 ColorWithAlpha(graphStyle.nodeSurface, 0.42f),
                 5.0f * uiScale);
+        }
+        if(depthMask) {
+            const ImVec2 label(imageMin.x+5*uiScale,imageMin.y+4*uiScale);
+            drawList->PushClipRect(imageMin,imageMax,true);
+            if(texture) {
+                const auto size=ImGui::CalcTextSize(node.title.c_str());
+                drawList->AddRectFilled({label.x-3*uiScale,label.y-1*uiScale},
+                    {label.x+size.x+3*uiScale,label.y+size.y+1*uiScale},
+                    ApplyStyleAlpha(IM_COL32(12,12,12,205)),2*uiScale);
+            }
+            drawList->AddText(label,ColorToU32(familyStyle.mutedText),node.title.c_str());
+            if(depthMissing)drawList->AddText({label.x,label.y+ImGui::GetTextLineHeight()},
+                ColorToU32(familyStyle.mutedText),"Unavailable");
+            drawList->PopClipRect();
         }
         const float previewRounding = 5.0f * uiScale;
         if (node.kind == EditorNodeGraph::NodeKind::MaskTexture ||

@@ -328,7 +328,9 @@ std::optional<RawGalleryActions::Action> GalleryDetails::Render(
     // never the footer height or the metadata's available scrolling area.
     const float footerHeight = (84.f + (stacked ? 44.f : 0.f)) * m_Unit;
     const float bodyHeight = std::max(1.f, ImGui::GetContentRegionAvail().y - footerHeight);
-    m_Condensed = m_PreferredBodyHeight > bodyHeight;
+    const float comparisonHeight = actions.comparison ? std::min(340.f*m_Unit,bodyHeight*.38f) : 0.f;
+    const float metadataHeight = std::max(1.f,bodyHeight-comparisonHeight);
+    m_Condensed = m_PreferredBodyHeight > metadataHeight;
     const float padding = (m_Condensed ? CondensedSpacing.padding : QuietSpacing.padding) * m_Unit;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding, padding));
     // Keep native wheel/drag input and its wider hit rail, with a quiet 4 px
@@ -340,12 +342,13 @@ std::optional<RawGalleryActions::Action> GalleryDetails::Render(
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, m_Scrollbar[0]);
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, m_Scrollbar[1]);
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, m_Scrollbar[2]);
-    if (ImGui::BeginChild("Metadata", ImVec2(0, bodyHeight),
+    if (ImGui::BeginChild("Metadata", ImVec2(0, metadataHeight),
             ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoBackground))
         command = RenderMetadata(actions, thumbnail);
     ImGui::EndChild();
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(4);
+    if (actions.comparison) actions.comparison({ImGui::GetContentRegionAvail().x,comparisonHeight});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.f * m_Unit, 12.f * m_Unit));
     if (ImGui::BeginChild("EditActions", ImVec2(0, footerHeight), ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
@@ -414,9 +417,8 @@ std::optional<RawGalleryActions::Action> GalleryDetails::RenderMetadata(
         }
         ImGui::PopStyleVar();
         Space(4.f * m_Unit);
-        if (Button("Location", "Open location", 2, actions.locationEnabled, ImVec2(-1, s.locationHeight * m_Unit), true))
+        if (actions.locationVisible && Button("Location", "Open location", 2, actions.locationEnabled, ImVec2(-1, s.locationHeight * m_Unit), true))
             command = RawGalleryActions::Action::ShowInExplorer;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reveal the displayed image or project in File Explorer");
     }
     return command;
 }

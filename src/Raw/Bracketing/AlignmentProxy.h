@@ -22,18 +22,21 @@ public:
         const unsigned px=x/stride,py=y/stride;
         if(px>=width||py>=height) return;
         const auto p=static_cast<std::size_t>(py)*width+px;
-        if(invalid||!std::isfinite(value)) flags[p]|=2;
+        if(invalid||!std::isfinite(value)) flags[p]|=8;
         else sums[p][channel]+=value;
-        if(clipped) flags[p]|=1;
+        if(clipped) flags[p]|=static_cast<std::uint8_t>(1u<<channel);
     }
 
-    void Finish(std::vector<float>& rgb,std::vector<std::uint8_t>& clipped) const {
+    void Finish(std::vector<float>& rgb,std::vector<std::uint8_t>& clipped,
+        std::vector<std::uint8_t>* calibrationMask=nullptr) const {
         rgb.resize(sums.size()*3);clipped.resize(sums.size());
+        if(calibrationMask) calibrationMask->resize(sums.size());
         const double sitesPerColor=double(stride)*stride/4;
         for(std::size_t p=0;p<sums.size();++p) {
             clipped[p]=flags[p]!=0;
+            if(calibrationMask) (*calibrationMask)[p]=(flags[p]&8)?0:(7u & ~flags[p]);
             for(unsigned c=0;c<3;++c)
-                rgb[p*3+c]=(flags[p]&2)?std::numeric_limits<float>::quiet_NaN():
+                rgb[p*3+c]=(flags[p]&8)?std::numeric_limits<float>::quiet_NaN():
                     static_cast<float>(sums[p][c]/(sitesPerColor*(c==1?2:1)));
         }
     }

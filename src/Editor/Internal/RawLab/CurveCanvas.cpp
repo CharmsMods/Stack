@@ -60,7 +60,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const float surfaceScreenX=ImGui::GetCursorScreenPos().x;
     bool changed=false;
     const auto style=GraphUI::ResolveGraphPlotStyle();
-    const float controlsHeight=(normalization ? 2.f : 1.f)*(style.controlHeight+ImGui::GetStyle().ItemSpacing.y);
+    const float controlsHeight=style.controlHeight+ImGui::GetStyle().ItemSpacing.y;
     size.x=std::max(1.f,size.x);size.y=std::max(12.f*style.scale,size.y-controlsHeight);
     ImGui::InvisibleButton("curve",size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
     const float inset=std::min(style.inset,std::min(size.x,size.y)*.2f);
@@ -79,8 +79,8 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const float span=std::max(.0001f,view.maximum-view.minimum);
     // Keep the display offset stable while dragging authored points. At release
     // the new curve mean becomes the normalization reference.
-    const float offset=(plotVisible || s.gesture) && normalization && *normalization>0
-        ? NormalizationMean(s,s.gesture?s.before:points)*std::clamp(*normalization,0.f,1.f) : 0.f;
+    const float offset=(plotVisible || s.gesture) && normalization
+        ? NormalizationMean(s,s.gesture?s.before:points) : 0.f;
     const float yMinimum=normalization ? std::min(0.f,-offset) : view.minimum;
     const float yMaximum=normalization ? std::max(1.f,1.f-offset) : view.maximum;
     const float ySpan=std::max(.0001f,yMaximum-yMinimum);
@@ -117,10 +117,14 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
                 mouseY(),{1},{1}};
             const auto at=std::lower_bound(points.begin(),points.end(),p.x,[](auto a,float x){return a.x<x;});
             if((at==points.begin() || p.x-(at-1)->x>.001f) && (at==points.end() || at->x-p.x>.001f)) {
+                const int inserted=int(at-points.begin());
                 points.insert(at,p);Smooth(points);changed=true;
+                s.gesture=true;s.exposureGesture=false;s.gestureMoved=false;s.gestureApplied=false;
+                s.press=mouse;s.before=points;s.dragged=inserted;
+                s.selected.assign(points.size(),false);s.selected[inserted]=true;
             }
         }
-        if(changed) {s.gesture=false;s.selected.assign(points.size(),false);}
+        if(changed && !ImGui::IsMouseDoubleClicked(0)) {s.gesture=false;s.selected.assign(points.size(),false);}
     }
     if(s.gesture && !editable) {
         s.gesture=s.exposureGesture=false;
@@ -260,47 +264,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive())
         ImGui::SetTooltip("Curve amount: %.0f%%. Drag horizontally; double-click restores 100%%. Lock first. Separate exposure and area controls keep their values.",amount.amount*100);
     ImGui::EndDisabled();
-    if(normalization) {
-        // Align this second dial directly beneath curve amount and lock.
-        const float rowY=ImGui::GetCursorScreenPos().y;
-        d->PushClipRect({surfaceScreenX,rowY},{dial.Min.x-style.controlGap,rowY+style.controlHeight},true);
-        d->AddText({surfaceScreenX,rowY+(style.controlHeight-ImGui::GetFontSize())*.5f},style.label,"Normalize");
-        d->PopClipRect();
-        ImGui::SetCursorScreenPos({dial.Min.x,rowY});
-        ImGui::BeginDisabled(normalizationDriven);
-        ImGui::InvisibleButton("normalization",{dialWidth,style.controlHeight});
-        const ImRect normalizationDial(ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
-        if(s.normalizationGesture && !inputEnabled) {
-            s.normalizationGesture=false;
-            if(ImGui::IsItemActive())ImGui::ClearActiveID();
-        }
-        if(inputEnabled && !normalizationDriven && ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-            s.normalizationGesture=true;s.normalizationBefore=*normalization;
-        }
-        if(s.normalizationGesture && (normalizationDriven || ImGui::GetIO().AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape,false) ||
-            (ImGui::IsMouseDown(0) && (!ImGui::IsItemActive() || ImGui::IsMouseDown(1))))) {
-            if(!normalizationDriven){changed|=*normalization!=s.normalizationBefore;*normalization=s.normalizationBefore;}
-            s.normalizationGesture=false;
-            if(ImGui::IsItemActive())ImGui::ClearActiveID();
-        }
-        if(inputEnabled && !normalizationDriven && s.normalizationGesture && ImGui::IsItemActive() && ImGui::IsMouseDragging(0,1.f)) {
-            const float value=std::clamp(*normalization+ImGui::GetIO().MouseDelta.x/dialWidth,0.f,1.f);
-            changed|=value!=*normalization;*normalization=value;
-        }
-        if(inputEnabled && !normalizationDriven && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            changed|=*normalization!=0.f;*normalization=0.f;
-        }
-        if(!ImGui::IsMouseDown(0))s.normalizationGesture=false;
-        GraphUI::DrawGraphDial(*d,normalizationDial.Min,normalizationDial.Max,*normalization,!normalizationDriven,style);
-        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive()) {
-            if(normalizationDriven && !normalizationAvailable)
-                ImGui::SetTooltip("Waiting for the connected normalization value from Graph.");
-            else ImGui::SetTooltip("Normalization: %.0f%%. Global offset: %+.3f EV. Move the curve's mean into a uniform offset without changing the total correction. Double-click restores 0%%.%s",
-                *normalization*100.f,8.f*NormalizationMean(s,points)*std::clamp(*normalization,0.f,1.f),normalizationDriven?" Driven from Graph.":"");
-        }
-        ImGui::EndDisabled();
-        ImGui::SetCursorPosX(surfaceStartX);
-    }
+    s.normalizationGesture=false;
     if(tonalSliders && s.showTonalSliders)
         changed|=DrawCurveTonalSliders(points,s,*tonalSliders,maximumPoints,!editable);
     else if(s.tonalSliderGesture) {
@@ -312,7 +276,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         // Authoring is complete, including tonal sliders, amount and cancel.
         // Recompute only the normalization mapping affected by this edit.
         const float displayOffset=changed && normalization
-            ? (*normalization>0?NormalizationMean(s,s.gesture?s.before:points)*std::clamp(*normalization,0.f,1.f):0.f)
+            ? NormalizationMean(s,s.gesture?s.before:points)
             : offset;
         const float displayMin=normalization?std::min(0.f,-displayOffset):view.minimum;
         const float displayMax=normalization?std::max(1.f,1.f-displayOffset):view.maximum;

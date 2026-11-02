@@ -1,5 +1,6 @@
 #include "OutputInternal.h"
 #include "Raw/Bracketing/OutputSource.h"
+#include "Raw/Demosaic/FloatDemosaic.h"
 #include "Raw/RawColorTransform.h"
 #include "Raw/RawProcessingMath.h"
 #include "NodeMath/Uuid.h"
@@ -58,7 +59,7 @@ std::array<float,3> Internal::Image::Pixel(unsigned x,unsigned y) const {
         case 8:sx=width-1-y;sy=x;break;
         default:break;
     }
-    const auto camera=Raw::Processing::DemosaicMalvarHeCutlerAt(mosaic,width,height,metadata.cfaPattern,sx,sy);
+    const auto* camera=(reconstructed?reconstructed->data():cameraRgb.data())+(static_cast<std::size_t>(sy)*width+sx)*3;
     std::array<float,3> rgb{};
     for(unsigned c=0;c<3;++c) {
         float value=0;for(unsigned k=0;k<3;++k)value+=cameraToWorking[c*3+k]*camera[k];
@@ -73,8 +74,8 @@ Result Write(const Raw::Bracketing::BracketingResult& result,const Request& requ
     Result out;
     try {
         Internal::CheckCanceled(request);
-        if(result.status!=Raw::Bracketing::BracketingResult::Status::Completed||!result.raw||result.panorama||result.raw->reconstructedCameraRgb)
-            throw std::runtime_error("File output currently supports completed standard Bayer bursts.");
+        if(result.status!=Raw::Bracketing::BracketingResult::Status::Completed||!result.raw||result.panorama)
+            throw std::runtime_error("File output requires a completed burst.");
         if(!std::isfinite(request.exposureStops)||std::abs(request.exposureStops)>24)
             throw std::runtime_error("Output exposure must be between -24 and +24 stops.");
         if(request.destination.filename().empty()||request.destination.stem().empty())
@@ -83,16 +84,23 @@ Result Write(const Raw::Bracketing::BracketingResult& result,const Request& requ
         desired.replace_extension(Extension(request.format));
         if(!std::filesystem::is_directory(desired.parent_path()))throw std::runtime_error("The output folder does not exist.");
         const auto& metadata=result.raw->metadata;
-        if(metadata.rawWidth<2||metadata.rawHeight<2||metadata.cfaPattern==Raw::CfaPattern::Unknown)
-            throw std::runtime_error("Output requires a known Bayer pattern and valid sensor dimensions.");
+        const bool reconstructed=result.raw->reconstructedCameraRgb;
+        if(metadata.rawWidth<2||metadata.rawHeight<2||(!reconstructed&&metadata.cfaPattern==Raw::CfaPattern::Unknown))
+            throw std::runtime_error("Invalid burst output geometry.");
         const auto pixels=std::uint64_t(metadata.rawWidth)*metadata.rawHeight;
-        // One calibrated CFA copy, a reference tile and bounded encoder rows.
-        if(pixels>(request.memoryBudgetBytes>32ull*1024*1024?(request.memoryBudgetBytes-32ull*1024*1024)/4:0))
+        // DNG needs one calibrated CFA copy. Finished output additionally needs
+        // Enhanced DCB's peak 40 bytes/pixel of reconstruction workspace.
+        // Keep the reference-tile and encoder allowance separate from that peak.
+        const std::uint64_t bytesPerPixel=reconstructed?1:(request.format==Format::Dng?4:44);
+        if(pixels>(request.memoryBudgetBytes>32ull*1024*1024?(request.memoryBudgetBytes-32ull*1024*1024)/bytesPerPixel:0))
             throw std::runtime_error("The available output memory budget is too small for this image.");
-        Internal::Image image{metadata};image.width=metadata.rawWidth;image.height=metadata.rawHeight;
+        Internal::Image image{metadata};image.depth=result.raw->reconstructionDepth.get();image.width=metadata.rawWidth;image.height=metadata.rawHeight;
         image.outputWidth=image.width;image.outputHeight=image.height;
         if(metadata.orientation>=5&&metadata.orientation<=8)std::swap(image.outputWidth,image.outputHeight);
-        image.mosaic=Raw::Bracketing::BuildOutputMosaic(result,request.shouldCancel,[&](double progress){Internal::Progress(request,progress*.15,"Preparing output calibration");});
+        if(reconstructed) {
+            if(result.raw->linearFloatBuffer.size()!=pixels*3)throw std::runtime_error("Incomplete reconstructed camera RGB.");
+            image.reconstructed=&result.raw->linearFloatBuffer;
+        } else image.mosaic=Raw::Bracketing::BuildOutputMosaic(result,request.shouldCancel,[&](double progress){Internal::Progress(request,progress*.15,"Preparing output calibration");});
         if(request.format!=Format::Dng) {
             if(!metadata.hasCameraMatrix&&!(metadata.isDng&&(metadata.hasDngColorMatrix1||metadata.hasDngColorMatrix2||metadata.hasDngForwardMatrix1||metadata.hasDngForwardMatrix2)))
                 throw std::runtime_error("The source has no camera color calibration for finished output.");
@@ -102,7 +110,17 @@ Result Write(const Raw::Bracketing::BracketingResult& result,const Request& requ
             image.cameraToWorking=Raw::BuildRawCameraToWorkingTransform(metadata,settings,true);
             for(float value:image.cameraToWorking)if(!std::isfinite(value))throw std::runtime_error("Camera color calibration is invalid.");
             std::string error;
-            if(!Raw::Processing::ApplyWhiteBalanceToCfaMosaic(metadata,wb,image.mosaic,&error))throw std::runtime_error(error);
+            if(reconstructed) {
+                for(unsigned i=0;i<image.cameraToWorking.size();++i)image.cameraToWorking[i]*=wb[i%3];
+            }
+            else {
+                if(!Raw::Processing::ApplyWhiteBalanceToCfaMosaic(metadata,wb,image.mosaic,&error))throw std::runtime_error(error);
+                Internal::Progress(request,.15,"Reconstructing finished color");
+                if(!Raw::Demosaic::Reconstruct(image.mosaic,image.width,image.height,
+                metadata.cfaPattern,Raw::DemosaicMethod::DcbEnhanced,image.cameraRgb,error,request.shouldCancel))
+                    throw std::runtime_error(error);
+                std::vector<float>().swap(image.mosaic);
+            }
             image.exposure=std::exp2(request.exposureStops+(metadata.hasDngBaselineExposure?metadata.dngBaselineExposure:0));
         }
         TemporaryFile temporary{ReserveTemporary(desired.parent_path())};

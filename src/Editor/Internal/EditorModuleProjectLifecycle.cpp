@@ -382,6 +382,7 @@ void EditorModule::ResetToBlankProject() {
     m_Project->store.reset();
     m_Project->snapshot.reset();
     m_Project->singleRawSource.reset();
+    m_Project->singleMasterMaskSource.reset();
     m_Project->lifecycle.Clear();
     m_Project->rawRecipe = {};
     m_Project->rawMode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
@@ -435,7 +436,8 @@ const Stack::RawWorkspace::SourceRecord* EditorModule::FindRawWorkspaceSourceByK
         [&](const Stack::RawWorkspace::SourceRecord& source) {
             return source.relativePathKey == sourceKey;
         });
-    return it == m_RawWorkspace.sources.end() ? nullptr : &(*it);
+    return it == m_RawWorkspace.sources.end()
+        ? Stack::RawWorkspace::FindStandaloneMaster(m_RawWorkspace, sourceKey) : &(*it);
 }
 
 Stack::RawWorkspace::SourceRecord* EditorModule::FindRawWorkspaceSourceByKey(const std::string& sourceKey) {
@@ -449,7 +451,8 @@ Stack::RawWorkspace::SourceRecord* EditorModule::FindRawWorkspaceSourceByKey(con
         [&](const Stack::RawWorkspace::SourceRecord& source) {
             return source.relativePathKey == sourceKey;
         });
-    return it == m_RawWorkspace.sources.end() ? nullptr : &(*it);
+    return it == m_RawWorkspace.sources.end()
+        ? Stack::RawWorkspace::FindStandaloneMaster(m_RawWorkspace, sourceKey) : &(*it);
 }
 
 void EditorModule::PreserveActiveRawProjectSourceForLibraryNavigation() {
@@ -486,6 +489,7 @@ bool EditorModule::ApplyLoadedRawProjectSessionMetadata(
     std::string* outError) {
     const bool isRawProject =
         projectData.projectKind == StackBinaryFormat::kRawProjectKind;
+    m_Project->singleMasterMaskSource.reset();
     m_Project->singleRawSource = isRawProject
         ? projectData.decodedRawSource
         : std::shared_ptr<const Raw::RawImageData>();
@@ -1407,7 +1411,7 @@ bool EditorModule::MaterializeSelectedRawPreviewProject(
 
     Project::ProjectStoreOpenResult created = Project::CreateProjectStore(
         projectRoot,
-        Project::ProjectStorageKind::DirectoryBundle,
+        Project::ProjectStorageKind::WorkingFile,
         bootstrap);
     if (!created) {
         if (outError) *outError = created.message;
@@ -1420,7 +1424,7 @@ bool EditorModule::MaterializeSelectedRawPreviewProject(
     if (!transaction) {
         created.store.reset();
         std::error_code cleanupError;
-        std::filesystem::remove_all(projectRoot, cleanupError);
+        std::filesystem::remove(projectRoot, cleanupError);
         if (outError) *outError = "Could not begin the first project asset import.";
         return false;
     }
@@ -1443,7 +1447,7 @@ bool EditorModule::MaterializeSelectedRawPreviewProject(
             &stageError)) {
         created.store->Abort(transaction);
         std::error_code cleanupError;
-        std::filesystem::remove_all(projectRoot, cleanupError);
+        std::filesystem::remove(projectRoot, cleanupError);
         if (outError) {
             *outError = stageError.empty()
                 ? "Could not copy the viewed RAW into the project."
@@ -1492,7 +1496,7 @@ bool EditorModule::MaterializeSelectedRawPreviewProject(
     if (!committed) {
         created.store->Abort(transaction);
         std::error_code cleanupError;
-        std::filesystem::remove_all(projectRoot, cleanupError);
+        std::filesystem::remove(projectRoot, cleanupError);
         if (outError) *outError = committed.message;
         return false;
     }
@@ -2227,12 +2231,7 @@ bool EditorModule::RequestSaveProjectAs(
         destinationName.end(),
         destinationName.begin(),
         [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (destinationName == "project.stack") {
-        destination = destination.parent_path();
-    } else if (destinationExtension == ".stack" ||
-               destinationExtension == ".stackbundle") {
-        destination = destination.parent_path() / destination.stem();
-    }
+    if (destinationExtension != ".stack") destination += ".stack";
     std::error_code absoluteError;
     destination = std::filesystem::absolute(destination, absoluteError).lexically_normal();
     if (absoluteError) {

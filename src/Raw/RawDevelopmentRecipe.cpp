@@ -1,5 +1,4 @@
 #include "Raw/Demosaic/DemosaicCatalog.h"
-#include "HdrDisplayMapping.h"
 #include "ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/Curves/CurveAuthoring.h"
@@ -12,6 +11,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace Stack::RawRecipe {
@@ -147,6 +147,9 @@ nlohmann::json SanitizeFinishToneJson(nlohmann::json value) {
 }
 
 nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
+    if (value.is_object() && value.contains("displayCurve") &&
+        value.at("displayCurve") != Raw::SigmoidDisplay::Id)
+        throw std::runtime_error("Unsupported View Transform display curve.");
     const nlohmann::json input = value.is_object()
         ? std::move(value)
         : nlohmann::json::object();
@@ -158,18 +161,13 @@ nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
         }
     }
     value["type"] = "ViewTransform";
-    value["displayCurve"] = value.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic
-        ? Raw::HdrDisplay::Photographic : "standard";
+    value["displayCurve"] = Raw::SigmoidDisplay::Id;
     value["enabled"] =
         value.contains("enabled") && value["enabled"].is_boolean()
             ? value["enabled"].get<bool>()
             : true;
     value["exposure"] = ClampFinite(value.value("exposure", 0.0f), 0.0f, -8.0f, 8.0f);
-    value["blackEv"] = ClampFinite(value.value("blackEv", -8.0f), -8.0f, -16.0f, 0.0f);
-    value["whiteEv"] = ClampFinite(value.value("whiteEv", 4.0f), 4.0f, 0.0f, 16.0f);
-    value["middleGrey"] = ClampFinite(value.value("middleGrey", 0.18f), 0.18f, 0.01f, 1.0f);
-    value["shoulder"] = ClampFinite(value.value("shoulder", 0.45f), 0.45f, 0.05f, 4.0f);
-    value["toe"] = ClampFinite(value.value("toe", 0.18f), 0.18f, 0.0f, 1.0f);
+    value["middleGrey"] = ClampFinite(value.value("middleGrey", Raw::SigmoidDisplay::MiddleGrey), Raw::SigmoidDisplay::MiddleGrey, 0.01f, .5f);
     value["contrast"] = ClampFinite(value.value("contrast", 1.0f), 1.0f, 0.25f, 2.5f);
     value["contrastPivotEv"] = ClampFinite(
         value.value("contrastPivotEv", 0.0f),
@@ -177,18 +175,6 @@ nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
         -8.0f,
         8.0f);
     value["contrastModel"] = kViewContrastModelPivotedLogV2;
-    const float minimumPivot = std::max(
-        -8.0f,
-        value["blackEv"].get<float>() + 0.1f);
-    const float maximumPivot = std::min(
-        8.0f,
-        value["whiteEv"].get<float>() - 0.1f);
-    if (minimumPivot <= maximumPivot) {
-        value["contrastPivotEv"] = std::clamp(
-            value["contrastPivotEv"].get<float>(),
-            minimumPivot,
-            maximumPivot);
-    }
     value["saturation"] = ClampFinite(value.value("saturation", 1.0f), 1.0f, 0.0f, 2.0f);
     value["preserveHue"] = value.value("preserveHue", true);
     value["debugFalseColor"] = value.value("debugFalseColor", false);
@@ -565,7 +551,10 @@ RawDevelopmentRecipe BuildNeutralComparisonRecipe(
     // Preserve internal-vs-graph View placement without preserving a custom
     // authored View curve. Otherwise an external View node could be applied
     // twice in the comparison snapshot.
+    // Newly prepared bracket recipes may omit the optional View layer. Treat
+    // that as the default enabled transform; json::value rejects null objects.
     const bool currentInternalViewEnabled =
+        !currentRecipe.viewTransform.layerJson.is_object() ||
         currentRecipe.viewTransform.layerJson.value("enabled", true);
     neutral.viewTransform.layerJson["enabled"] =
         currentInternalViewEnabled;
@@ -2018,14 +2007,10 @@ nlohmann::json DefaultViewTransformJson() {
     const auto& p = Raw::ViewTransform::Defaults;
     return {
         { "type", "ViewTransform" },
-        { "displayCurve", "standard" },
+        { "displayCurve", Raw::SigmoidDisplay::Id },
         { "enabled", true },
         { "exposure", p.exposure },
-        { "blackEv", p.blackEv },
-        { "whiteEv", p.whiteEv },
         { "middleGrey", p.middleGrey },
-        { "shoulder", p.shoulder },
-        { "toe", p.toe },
         { "contrast", p.contrast },
         { "contrastPivotEv", p.contrastPivotEv },
         { "contrastModel", kViewContrastModelPivotedLogV2 },
@@ -2040,16 +2025,12 @@ nlohmann::json DefaultViewTransformJson() {
 float EvaluateViewTransformDisplayLuma(
     float input,
     float exposure,
-    float blackEv,
-    float whiteEv,
     float middleGrey,
-    float shoulder,
-    float toe,
     float contrast,
     float contrastPivotEv) {
     Raw::ViewTransform::Parameters p;
-    p.exposure=exposure;p.blackEv=blackEv;p.whiteEv=whiteEv;p.middleGrey=middleGrey;
-    p.shoulder=shoulder;p.toe=toe;p.contrast=contrast;p.contrastPivotEv=contrastPivotEv;
+    p.exposure=exposure;p.middleGrey=middleGrey;
+    p.contrast=contrast;p.contrastPivotEv=contrastPivotEv;
     return Raw::ViewTransform::PreparedTransform(p).Luma(input);
 }
 
@@ -2888,7 +2869,7 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
 
     const int storedRecipeVersion = value.value("rawRecipeVersion", 0);
     if (storedRecipeVersion != kRawDevelopmentRecipeVersion) {
-        return recipe;
+        throw std::runtime_error("Unsupported RAW development recipe version.");
     }
     recipe.rawRecipeVersion = kRawDevelopmentRecipeVersion;
     recipe.colorCalibration = DeserializeColorCalibration(

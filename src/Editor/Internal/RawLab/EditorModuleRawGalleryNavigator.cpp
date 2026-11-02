@@ -42,13 +42,18 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawGallerySourceFoldersOpen = false;
         if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Folders(false,m_GalleryBrowseAnchor);
     }
+    if ((action.category && *action.category != m_RawWorkspaceGalleryContentMode) ||
+        (action.folderChanged && action.folder != m_RawGalleryFolderFilter)) {
+        m_RawWorkspace.selectedSourceKeys.clear();
+        m_RawWorkspaceLabSelectedProjectPaths.clear();
+        InvalidateRawWorkspaceGalleryPresentation(false);
+    }
     if (action.category && *action.category != m_RawWorkspaceGalleryContentMode) {
         m_RawWorkspaceGalleryContentMode = *action.category;
         SaveRawWorkspaceAppState();
     }
     if (action.folderChanged && action.folder != m_RawGalleryFolderFilter) {
         m_RawGalleryFolderFilter = action.folder;
-        InvalidateRawWorkspaceGalleryPresentation(false);
         m_RawWorkspaceLabGalleryScrollTargetY = 0.f;
         m_RawWorkspaceLabGalleryScrollCurrentY = 0.f;
         m_RawWorkspaceLabFilmstripScrollTargetX = 0.f;

@@ -2,11 +2,43 @@
 #include "Editor/UI/GraphFrameTransitionPolicy.h"
 #include "Editor/GraphRenderMemory.h"
 #include "Editor/UI/ViewportNavigation.h"
+#include "Editor/UI/ViewComparisonLayout.h"
 #include <stdexcept>
 #include <cmath>
 
 void TestGraphRenderPolicyAndNavigation() {
     auto require = [](bool value) { if (!value) throw std::runtime_error("Graph rendering policy/navigation regression"); };
+    // RAW and Graph fit different camera rectangles. Test both with a sidebar
+    // on either edge as well as an unobstructed viewport.
+    for (const ImVec2 viewport : {ImVec2(1280,720), ImVec2(720,720), ImVec2(420,800)}) {
+        for (const ImVec2 source : {ImVec2(6000,4000), ImVec2(4000,6000)}) {
+            for (const float margin : {Stack::Editor::RawViewFitFraction, .94f}) {
+                const float fit = margin * std::min(viewport.x/source.x, viewport.y/source.y);
+                const ImVec2 size(source.x*fit, source.y*fit);
+                const ImVec2 low((viewport.x-size.x)*.5f, (viewport.y-size.y)*.5f);
+                const ImVec2 high(low.x+size.x, low.y+size.y);
+                for (const ImVec2 inset : {ImVec2(0,0), ImVec2(120,0), ImVec2(0,150)}) {
+                    const ImVec2 visibleMin(inset.x, 0), visibleMax(viewport.x-inset.y, viewport.y);
+                    const auto layout = Stack::Editor::ViewComparisonLayout::Resolve(
+                        {0,0}, viewport, visibleMin, visibleMax, size, 1);
+                    const auto left = layout.Present(low, false), right = layout.Present(high, true);
+                    const auto leftEnd = layout.Present(high, false), rightStart = layout.Present(low, true);
+                    require(std::abs(left.x-visibleMin.x) < .001f && std::abs(right.x-visibleMax.x) < .001f);
+                    require(std::abs(rightStart.x-leftEnd.x-layout.gap) < .001f);
+                    require(std::abs((leftEnd.x-left.x)-(right.x-rightStart.x)) < .001f);
+                    require(std::abs((leftEnd.x-left.x)/(leftEnd.y-left.y)-source.x/source.y) < .001f);
+                    for (float progress : {0.f,.25f,.5f,.75f,1.f}) {
+                        const auto motion = Stack::Editor::ViewComparisonLayout::Resolve(
+                            {0,0}, viewport, visibleMin, visibleMax, size, progress);
+                        for (bool after : {false,true}) {
+                            const auto inverse = motion.CameraPoint(motion.Present(low,after),after);
+                            require(std::abs(inverse.x-low.x)<.001f && std::abs(inverse.y-low.y)<.001f);
+                        }
+                    }
+                }
+            }
+        }
+    }
     using namespace Stack::GraphRendering;
     RequestTag active {true, 4, 0, false, 1, 123, 10};
     auto latest = active;

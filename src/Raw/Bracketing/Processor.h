@@ -12,6 +12,7 @@
 #include <map>
 
 namespace Raw::Bracketing {
+namespace Sr { struct ScaleEvidence; }
 namespace Panorama { struct Prepared; struct Layout; }
 class ProcessingEvidenceStream;
 struct Source {
@@ -52,12 +53,14 @@ struct AlignmentInspection {
     std::vector<float> confidence;
     std::vector<std::uint16_t> rejectionBits;
 };
+enum class ClippedReference : std::uint8_t { None, LowerBound, EstimatedColor };
 enum class MeasurementFallbackReason : std::uint8_t {
     None = 0,
     AutomaticValidInput = 1,
     FixedReference = 2,
     ShortestExposure = 3,
-    NoFiniteMeasurement = 4
+    NoFiniteMeasurement = 4,
+    HighlightFallback = 5
 };
 struct PreparedDataset;
 // Host-owned lease for prepared work retained outside this address space.
@@ -70,6 +73,8 @@ struct BracketingAnalysis {
     unsigned version=1;
     std::string identity;
     std::shared_ptr<const PreparedDataset> prepared;
+    // Kept with the worker's prepared inputs for Auto reblends and native inspection.
+    std::shared_ptr<const Sr::ScaleEvidence> resolutionDecision;
     std::vector<float> guideEv;
     std::vector<Knot> suggestion;
     std::array<float,256> histogram {};
@@ -90,7 +95,7 @@ struct Preview {
         Invalid=4,
         AlignmentRejected=8,
         FixedReference=16,
-        ShortestExposure=32
+        ShortestExposure=32, HighlightFallback=64
     };
     unsigned width=0,height=0;
     double sensorOriginX=0,sensorOriginY=0,sensorStepX=1,sensorStepY=1;
@@ -104,6 +109,7 @@ struct Preview {
         bool finite=false,clipped=false,localRejected=false,fixedReference=false;
         float measurementVariance=-1,uncertaintyVariance=0;
         bool fallbackClipped=false;
+        ClippedReference clippedReference=ClippedReference::None;
     };
     std::vector<Sample> samples;
     std::map<std::string,std::shared_ptr<const CapturePreview>> originals;
@@ -120,7 +126,8 @@ struct BracketingResult {
     std::shared_ptr<const Panorama::Layout> panorama;
     struct ReconstructionInspection {
         std::filesystem::path directory;
-        unsigned scale=1,tilePixels=256,sensorWidth=0,sensorHeight=0,groups=0;
+        double scale=1;
+        unsigned tilePixels=256,sensorWidth=0,sensorHeight=0,groups=0;
         BracketingRecipe recipe;
         std::map<std::pair<unsigned,unsigned>,std::string> checksums;
         ~ReconstructionInspection();

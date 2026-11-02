@@ -8,16 +8,6 @@ void EditorModule::SetCurrentProjectFileName(const std::string& fileName) {
     if (fileName.empty()) return;
     std::filesystem::path path(fileName);
     if (!path.is_absolute()) path = LibraryManager::Get().GetLibraryPath() / path;
-    auto root = Stack::Project::ResolveProjectStoreRoot(path);
-    std::error_code error;
-    if (!std::filesystem::exists(path, error) && path.extension() == ".stack") {
-        // The legacy save entry point may return a .stack name even though
-        // its writer created the corresponding directory bundle.
-        const auto candidate = path.parent_path() / path.stem();
-        if (Stack::Project::IsDirectoryProjectBundle(candidate)) root = candidate;
-    }
-    if (Stack::Project::IsDirectoryProjectBundle(root))
-        path = Stack::Project::WorkingProjectDocumentPath(root);
     m_Project->savedFileStamp = Stack::Project::ProjectFileStamp::Read(path);
 }
 

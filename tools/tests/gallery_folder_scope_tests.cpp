@@ -13,7 +13,7 @@ using Tree = Stack::Editor::RawLabInternal::GalleryFolderTree;
 
 namespace Stack::Project {
 std::filesystem::path ResolveProjectStoreRoot(const std::filesystem::path& path) { return path; }
-bool IsDirectoryProjectBundle(const std::filesystem::path&) { return false; }
+bool IsWorkingProjectFile(const std::filesystem::path&) { return false; }
 }
 
 namespace Stack::RawWorkspace {

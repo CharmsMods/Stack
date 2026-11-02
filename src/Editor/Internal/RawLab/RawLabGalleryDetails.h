@@ -21,6 +21,8 @@ struct GalleryInspectorActions {
     bool copyEnabled = false;
     bool pasteEnabled = false;
     bool locationEnabled = false;
+    bool locationVisible = true;
+    std::function<void(const ImVec2&)> comparison;
     const char* copyReason = "Select an image first.";
     const char* pasteReason = "Select an image first.";
 };

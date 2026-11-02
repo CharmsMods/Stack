@@ -1,13 +1,14 @@
 #pragma once
-#include "Raw/HdrDisplayMapping.h"
 #include "Renderer/RenderPipeline.h"
+#include "Utils/HashUtils.h"
 #include <cmath>
 #include <stdexcept>
 
 namespace Stack::Validation {
 // Exercise the actual RAW graph, its stage cache and native-region path with
 // the published float Bayer input. A proxy or stale demosaic cache must fail.
-inline void InspectBracketRawHandoff(const std::shared_ptr<const Raw::RawImageData>& raw,nlohmann::json& report) {
+inline void InspectBracketRawHandoff(const std::shared_ptr<const Raw::RawImageData>& raw,nlohmann::json& report,
+    bool baselineOnly = false) {
     RenderPipeline pipeline;pipeline.Initialize();
     pipeline.SetRawDevelopmentAnalysisEnabled(false);pipeline.SetRawRgbDenoiseAsyncEnabled(false);
     pipeline.SetRawDevelopmentViewportValidationEnabled(false);pipeline.SetPreviewMaxDimension(0);
@@ -35,18 +36,24 @@ inline void InspectBracketRawHandoff(const std::shared_ptr<const Raw::RawImageDa
     if(static_cast<std::size_t>(width)*height!=static_cast<std::size_t>(m.visibleWidth)*m.visibleHeight)
         throw std::runtime_error("Bracket RAW native render changed the sensor pixel count.");
     report["rawHandoff"]["width"]=width;report["rawHandoff"]["height"]=height;
-    graph.nodes[0].rawDevelopment.recipe.viewTransform.layerJson["displayCurve"]=Raw::HdrDisplay::Photographic;
+    if (baselineOnly) {
+        report["rawHandoff"]["developedPixelHash"] = StackHash::HashBytes(
+            reinterpret_cast<const unsigned char*>(baseline.data()), baseline.size() * sizeof(float));
+        pipeline.Shutdown();
+        return;
+    }
+    graph.nodes[0].rawDevelopment.recipe.viewTransform.layerJson["contrast"]=1.35f;
     auto photographic=read();double photographicDifference=0;
     if(photographic.size()!=baseline.size())throw std::runtime_error("HDR display changed native dimensions.");
     for(std::size_t i=0;i<photographic.size();++i) {
         if(!std::isfinite(photographic[i]))throw std::runtime_error("HDR display produced a nonfinite RAW result.");
         photographicDifference=std::max(photographicDifference,double(std::abs(photographic[i]-baseline[i])));
     }
-    if(photographicDifference<=1e-7)throw std::runtime_error("Photographic curve did not reach the RAW output or reused a stale display cache.");
+    if(photographicDifference<=1e-7)throw std::runtime_error("Sigmoid contrast did not reach the RAW output or reused a stale display cache.");
     graph.nodes[0].rawDevelopment.recipe=recipe;
     auto restoredDisplay=read();
-    if(restoredDisplay!=baseline)throw std::runtime_error("Restoring Standard did not reproduce its cached RAW output.");
-    report["rawHandoff"]["photographicDisplayMaximumDifference"]=photographicDifference;
+    if(restoredDisplay!=baseline)throw std::runtime_error("Restoring Sigmoid did not reproduce its cached RAW output.");
+    report["rawHandoff"]["displayContrastMaximumDifference"]=photographicDifference;
     report["rawHandoff"]["displayCacheRestoredExactly"]=true;
     photographic.clear();photographic.shrink_to_fit();restoredDisplay.clear();restoredDisplay.shrink_to_fit();
     const auto baselineMethod=recipe.technical.demosaicMethod;

@@ -1,4 +1,9 @@
 #include "BracketingResultStore.h"
+#include "Persistence/BracketMaster.h"
+#include "Raw/ReconstructionDepth.h"
+#include "Persistence/ManagedAssetPaths.h"
+#include "Persistence/BracketAuxiliaryStorage.h"
+#include "AutoBracketProvenance.h"
 #include "App/AppPaths.h"
 #include "Raw/Bracketing/ResultSerialization.h"
 #include "Raw/RawTechnicalEvidence.h"
@@ -27,20 +32,33 @@ std::string RecipeIdentity(const MultiFrameSourceSet& set) {
 
 bool StageBracketingResult(const ProjectStoreHandle& store,const ProjectStoreTransaction& transaction,RawProjectSnapshot& snapshot,
     const std::string& setId,const Raw::Bracketing::BracketingResult& result,
-    const std::vector<unsigned char>& cover,std::string& error) {
+    const std::vector<unsigned char>& cover,std::string& error,bool dependenciesAlreadyStaged) {
     auto* set=FindSourceSet(snapshot,setId);
     if(!store||!set||!result.raw||result.status!=Raw::Bracketing::BracketingResult::Status::Completed) {
         error="No completed bracket to save.";return false;
     }
     try {
-        if(HasSavedBracketingResult(snapshot,*set) && set->settings["bracketingResult"].value("identity",std::string())==result.identity) {
+        // ConvertProjectStore verifies and stages dependencies before invoking
+        // its preparation callback. They cannot be read through the new store
+        // until commit. Reuse this measurement in every Save As / Pack path.
+        if (dependenciesAlreadyStaged && HasSavedBracketingResult(snapshot,*set)) {
+            const auto& saved=set->settings.at("bracketingResult");
+            if (saved.value("identity",std::string{})==result.identity) {
+                if (store->StorageKind()==ProjectStorageKind::PortableFile) return true;
+                if (const auto* master=FindEmbeddedAsset(snapshot,saved.value("masterAssetId",std::string{}))) {
+                    const auto id=RawEvidence::ComputeSourceIdentity(ExpectedSourcePath(store->StoragePath(),*master));
+                    if (id.valid && id.byteSize==master->byteLength && id.sha256==master->sha256) return true;
+                }
+            }
+        }
+        if(HasSavedBracketingResult(store,snapshot,*set) && set->settings["bracketingResult"].value("identity",std::string())==result.identity) {
             const auto* asset=FindEmbeddedAsset(snapshot,set->settings["bracketingResult"].at("assetId").get<std::string>());
             auto stream=store->OpenAssetStream(asset->assetId);
             // Saved bytes may have disappeared since this snapshot was opened.
             // Only reuse a result whose complete content still matches.
             if(stream) {
                 RawEvidence::SourceIdentity identity;
-                if(store->StorageKind()==ProjectStorageKind::DirectoryBundle)
+                if(store->StorageKind()==ProjectStorageKind::WorkingFile)
                     identity=RawEvidence::ComputeSourceIdentity(store->ResolveAssetFile(asset->assetId));
                 else {
                     const auto directory=AppPaths::GetCacheDirectory()/"BracketTransfer";
@@ -57,23 +75,48 @@ bool StageBracketingResult(const ProjectStoreHandle& store,const ProjectStoreTra
         const auto directory=AppPaths::GetCacheDirectory()/"BracketTransfer";
         std::filesystem::create_directories(directory);
         Temporary temporary{directory/(GenerateStableUuid()+".bracket")};
-        if(!Raw::Bracketing::Serialization::WriteResultFile(temporary.path,result))throw std::runtime_error("Could not write the completed bracket.");
         if(!transaction)throw std::runtime_error("Could not begin saving the bracket result.");
         auto updated=snapshot;auto* target=FindSourceSet(updated,setId);
+        const bool working=store->StorageKind()==ProjectStorageKind::WorkingFile;
+        std::string masterId;
+        if (working) {
+            const auto master=PublishBracketMaster(store,snapshot,*set,result);
+            EmbeddedAssetRecord record;
+            if (!store->StageAssetFile(transaction,master,MultiFrameInputFamily::Raw,json::object(),record,&error))
+                throw std::runtime_error(error);
+            record.managedRole="bracketing-master";
+            masterId=record.assetId;
+            if(!FindEmbeddedAsset(updated,masterId)) updated.embeddedAssets.push_back(std::move(record));
+        }
+        if(!Raw::Bracketing::Serialization::WriteResultFile(temporary.path,result,working))
+            throw std::runtime_error("Could not write the completed bracket's measurements.");
+        Temporary compressed;
+        const auto plainBytes=std::filesystem::file_size(temporary.path);
+        if (working) {
+            compressed.path=directory/(GenerateStableUuid()+".gz");
+            BracketAuxiliaryStorage::Compress(temporary.path,compressed.path);
+        }
         EmbeddedAssetRecord asset;
-        if(!store->StageAssetFile(transaction,temporary.path,MultiFrameInputFamily::Raw,json::object(),asset,&error))
+        if(!store->StageAssetFile(transaction,working?compressed.path:temporary.path,MultiFrameInputFamily::Raw,json::object(),asset,&error,false))
             throw std::runtime_error(error);
         asset.managedRole="bracketing-result";asset.displayName="Bracket result";
         asset.originalSourcePath.clear();asset.workspaceRelativeSourcePath.clear();
         if(!FindEmbeddedAsset(updated,asset.assetId))updated.embeddedAssets.push_back(asset);
         target->settings["bracketingResult"]={{"version",1},{"assetId",asset.assetId},
             {"recipe",RecipeIdentity(*set)},{"inputRevision",snapshot.hdrInputRevision},{"identity",result.identity}};
+        if (working) {
+            auto& saved=target->settings["bracketingResult"];
+            saved["masterAssetId"]=masterId;
+            saved["auxiliaryCodec"]="gzip-v1";
+            saved["auxiliaryBytes"]=plainBytes;
+        }
         updated.embeddedAssets.erase(std::remove_if(updated.embeddedAssets.begin(),updated.embeddedAssets.end(),
             [&](const auto& previous) {
-                if(previous.managedRole!="bracketing-result"||previous.assetId==asset.assetId)return false;
+                if(previous.managedRole!="bracketing-result" && previous.managedRole!="bracketing-master") return false;
                 return std::none_of(updated.sourceSets.begin(),updated.sourceSets.end(),[&](const auto& candidate) {
                     const auto saved=candidate.settings.find("bracketingResult");
-                    return saved!=candidate.settings.end()&&saved->value("assetId",std::string())==previous.assetId;
+                    return saved!=candidate.settings.end()&&(saved->value("assetId",std::string())==previous.assetId ||
+                        saved->value("masterAssetId",std::string())==previous.assetId);
                 });
             }),updated.embeddedAssets.end());
         if(!cover.empty())updated.coverThumbnailBytes=cover;
@@ -93,9 +136,14 @@ bool SaveBracketingResult(const ProjectStoreHandle& store,RawProjectSnapshot& sn
     if(!transaction || !StageBracketingResult(store,transaction,updated,setId,result,cover,error)) {
         if(transaction)store->Abort(transaction);return false;
     }
-    if (auto* set=FindSourceSet(updated,setId); set && set->settings.contains("autoBracket"))
-        set->settings["autoBracket"]["storageRevision"]=snapshot.persistedStorageRevision+1;
     ++updated.dirtyRevision;
+    if (auto* set = FindSourceSet(updated,setId); set && MatchesAutomaticBracketRevision(
+            *set, snapshot.projectId, snapshot.dirtyRevision, snapshot.persistedStorageRevision)) {
+        auto& marker = set->settings["autoBracket"];
+        marker["projectId"] = snapshot.projectId;
+        marker["storageRevision"] = snapshot.persistedStorageRevision + 1;
+        marker["editRevision"] = updated.dirtyRevision;
+    }
     const auto committed=store->Commit(transaction,updated);
     if(!committed){store->Abort(transaction);error=committed.message;return false;}
     updated.persistedStorageRevision=committed.committedStorageRevision;snapshot=std::move(updated);return true;
@@ -110,7 +158,7 @@ bool RestoreBracketingResult(const ProjectStoreHandle& store,const RawProjectSna
         const auto& saved=set->settings.at("bracketingResult");
         const auto* asset=FindEmbeddedAsset(snapshot,saved.at("assetId").get<std::string>());
         Temporary temporary;std::filesystem::path path;
-        if(store->StorageKind()==ProjectStorageKind::DirectoryBundle)path=store->ResolveAssetFile(asset->assetId);
+        if(store->StorageKind()==ProjectStorageKind::WorkingFile)path=store->ResolveAssetFile(asset->assetId);
         else {
             const auto directory=AppPaths::GetCacheDirectory()/"BracketTransfer";std::filesystem::create_directories(directory);
             temporary.path=directory/(GenerateStableUuid()+".bracket");path=temporary.path;
@@ -121,8 +169,31 @@ bool RestoreBracketingResult(const ProjectStoreHandle& store,const RawProjectSna
         if(!identity.valid||identity.sha256!=asset->sha256||identity.byteSize!=asset->byteLength)
             throw std::runtime_error("The saved bracket result failed content verification.");
         if(shouldCancel&&shouldCancel())return false;
-        std::ifstream stream(path,std::ios::binary);
-        Raw::Bracketing::Serialization::ReadResult(stream,identity.byteSize,set->settings.at("bracketing").at("groups").size(),result,AppPaths::GetCacheDirectory()/"BracketInspection");
+        const auto decode=[&](std::istream& stream) {
+            Raw::Bracketing::Serialization::ReadResult(stream,saved.value("auxiliaryBytes",identity.byteSize),set->settings.at("bracketing").at("groups").size(),
+            result,AppPaths::GetCacheDirectory()/"BracketInspection",[&](Raw::RawImageData& raw) {
+                const auto master=saved.value("masterAssetId",std::string{});
+                auto file=store->ResolveAssetFile(master);
+                std::shared_ptr<Temporary> embedded;
+                if (file.empty() && store->StorageKind()==ProjectStorageKind::PortableFile) {
+                    embedded=std::make_shared<Temporary>();
+                    embedded->path=temporary.path.parent_path()/(GenerateStableUuid()+".master");
+                    if (!store->CopyAssetToFile(master,embedded->path,&error)) throw std::runtime_error(error);
+                    file=embedded->path;
+                }
+                if (file.empty()) throw std::runtime_error("Locate or regenerate the missing bracket master.");
+                ReadBracketMasterPixels(file,saved.at("identity").get<std::string>(),raw);
+                if (embedded && raw.reconstructionDepth && !raw.reconstructionDepth->masks.empty()) {
+                    auto depth=std::make_shared<Raw::ReconstructionDepth>(*raw.reconstructionDepth);
+                    for (auto& mask : depth->masks) {
+                        mask.readPixels=[embedded,read=std::move(mask.readPixels)]{ return read(); };
+                    }
+                    raw.reconstructionDepth=std::move(depth);
+                }
+            });
+        };
+        if (saved.value("auxiliaryCodec",std::string{})=="gzip-v1") BracketAuxiliaryStorage::Read(path,decode);
+        else { std::ifstream stream(path,std::ios::binary); decode(stream); }
         if(result.identity!=saved.at("identity").get<std::string>())throw std::runtime_error("The saved result belongs to another bracket revision.");
         return true;
     }catch(const std::exception& exception){result={};error=exception.what();return false;}

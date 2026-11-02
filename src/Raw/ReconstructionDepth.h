@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include "Raw/DepthMask.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,11 +14,18 @@ struct ReconstructionDepth {
     float measuredFraction=0;
     std::string message;
     std::vector<float> inverseDepth,confidence;
+    std::vector<DepthMask> masks;
     bool Available() const {
         return acceptedPairs&&width&&height&&sensorWidth&&sensorHeight&&
             inverseDepth.size()==std::size_t(width)*height&&confidence.size()==inverseDepth.size();
     }
 };
+inline std::shared_ptr<ReconstructionDepth> UnavailableDepth(unsigned width,unsigned height,const std::string& reason) {
+    auto depth=std::make_shared<ReconstructionDepth>();
+    depth->sensorWidth=width;depth->sensorHeight=height;
+    depth->message="Depth masks unavailable: "+reason;
+    return depth;
+}
 struct DepthSample {float inverseDepth=0,confidence=0;};
 DepthSample SampleReconstructionDepth(const ReconstructionDepth&,double sensorX,double sensorY);
 // Additional geometric rejection in the same reference grid. Unknown depth

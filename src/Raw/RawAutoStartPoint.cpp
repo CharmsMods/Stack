@@ -2,6 +2,7 @@
 
 #include "Raw/RawAutoBase.h"
 #include "Raw/RawImageAnalysis.h"
+#include "Raw/SigmoidDisplayMapping.h"
 
 #include <algorithm>
 #include <array>
@@ -653,26 +654,24 @@ std::string FormatViewFitSummary(const Stack::RawAutoBase::ViewTransformFit& fit
         return "Display Fit unavailable until current-frame stats are available.";
     }
     std::ostringstream out;
-    out << "middle grey " << std::fixed << std::setprecision(3) << fit.middleGrey
-        << ", black " << std::setprecision(2) << fit.blackEv << " EV"
-        << ", white +" << fit.whiteEv << " EV"
-        << ", shoulder " << fit.shoulder
-        << ", toe " << fit.toe;
+    const float grey = Raw::SigmoidDisplay::MiddleGrey;
+    const float exposure = std::clamp(fit.exposure + std::log2(grey / fit.middleGrey), -8.f, 8.f);
+    out << "Sigmoid exposure " << std::fixed << std::setprecision(2) << exposure
+        << " EV, middle grey " << std::setprecision(3) << grey
+        << ", contrast " << fit.contrast;
     return out.str();
 }
 
 std::string FormatViewTransformLayerSummary(
     const nlohmann::json& viewTransform,
     const char* prefix) {
-    Stack::RawAutoBase::ViewTransformFit fit;
-    fit.valid = viewTransform.is_object();
-    fit.middleGrey = JsonNumberOr(viewTransform, "middleGrey", 0.18f);
-    fit.blackEv = JsonNumberOr(viewTransform, "blackEv", -8.0f);
-    fit.whiteEv = JsonNumberOr(viewTransform, "whiteEv", 4.0f);
-    fit.shoulder = JsonNumberOr(viewTransform, "shoulder", 0.45f);
-    fit.toe = JsonNumberOr(viewTransform, "toe", 0.18f);
-
-    const std::string values = FormatViewFitSummary(fit);
+    std::ostringstream out;
+    out << "Sigmoid exposure " << std::fixed << std::setprecision(2)
+        << JsonNumberOr(viewTransform, "exposure", 0.f)
+        << " EV, middle grey " << std::setprecision(3)
+        << JsonNumberOr(viewTransform, "middleGrey", Raw::SigmoidDisplay::MiddleGrey)
+        << ", contrast " << JsonNumberOr(viewTransform, "contrast", 1.f);
+    const std::string values = out.str();
     if (prefix == nullptr || prefix[0] == '\0') {
         return values;
     }

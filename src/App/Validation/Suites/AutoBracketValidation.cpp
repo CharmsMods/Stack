@@ -1,4 +1,5 @@
 #include "Editor/AutoBracket/AutoBracketCoordinator.h"
+#include "Editor/AutoBracket/AutoBracketMemoryPriority.h"
 #include "Editor/AutoBracket/AutoBracketPresentation.h"
 #include "Editor/EditorModule.h"
 #include "Editor/RawRenderService.h"
@@ -119,7 +120,7 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Check(CollectCandidates(scan.sources,corrected).size()==1,"Manual grouping correction was ignored");
 
         std::string error;
-        Check(editor->CreateMultiFrameRawProject(root/"foreground",Project::ProjectStorageKind::DirectoryBundle,
+        Check(editor->CreateMultiFrameRawProject(root/"foreground",Project::ProjectStorageKind::WorkingFile,
             "Foreground edits","Captures",Project::MultiFrameOperationIntent::RawCaptureSet,
             {argv[1],argv[2]},0,&error),error);
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(45);
@@ -187,6 +188,46 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Check(queue.GetQueue().items.front().state==State::Completed,"Cancellation reset completed work");
         checkForeground();queue.RunNow();queue.Tick(263,true,false,executor);
         Check(queue.HasWork()&&queue.Current()->item.projectId==canceledId,"Cancellation created a duplicate project");
+        const auto competing = queue.Current();
+        const auto runningDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+        while (competing->progress == 0 && !competing->done && std::chrono::steady_clock::now() < runningDeadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        Check(competing->progress > 0 && !competing->done, "No active automatic burst for memory recovery");
+        Project::BracketingJobRequest manual;
+        manual.store = first->project.store;
+        manual.snapshot = first->project.snapshot;
+        manual.setId = manual.snapshot.activeSourceSetId;
+        manual.cacheRoot = root / "manual-memory-retry";
+        manual.executeOpenGlTask = executor;
+        manual.restoreSavedResult = false;
+        const auto* manualSet = Project::FindSourceSet(manual.snapshot, manual.setId);
+        Check(manualSet && Raw::Bracketing::Deserialize(manualSet->settings.at("bracketing"), manual.recipe, error), error);
+        unsigned unrelatedAttempts = 0;
+        const auto unrelated = RunForegroundBurst([&] {
+            ++unrelatedAttempts;
+            Raw::Bracketing::BracketingResult failure;
+            failure.status = Raw::Bracketing::BracketingResult::Status::Failed;
+            failure.message = "A bracket source asset is missing.";
+            return failure;
+        }, [] { return false; }, [](const char*) {});
+        Check(unrelatedAttempts == 1 && !competing->cancel && unrelated.message == "A bracket source asset is missing.",
+            "An unrelated failure interrupted automatic processing");
+        unsigned attempts = 0;
+        const auto retried = RunForegroundBurst([&] {
+            if (++attempts == 1) {
+                Raw::Bracketing::BracketingResult failure;
+                failure.status = Raw::Bracketing::BracketingResult::Status::Failed;
+                failure.message = "The RAW decoder and output exceed the available bracketing memory budget.";
+                return failure;
+            }
+            Check(competing->done && competing->outcome == State::Pending, "Manual retry preceded automatic worker drain");
+            return Project::RunBracketingJob(manual);
+        }, [] { return false; }, [](const char*) {});
+        Check(attempts == 2 && retried.raw, "Manual burst did not recover after automatic cancellation");
+        Check(finish(263)->outcome == State::Pending, "Interrupted automatic job was lost");
+        queue.RunNow();queue.Tick(264,true,false,executor);
+        Check(queue.HasWork() && queue.Current()->item.projectId == canceledId, "Memory recovery duplicated the automatic project");
+        std::cout << "PASS manual memory failure interrupted an active burst, retried once, and preserved its queue item\n";
         queue.NoteActivity(264);auto second=finish(265);Check(second->outcome==State::Completed,second->status);checkForeground();
         queue.Tick(326,true,false,executor);Check(!queue.HasWork(),"Completed stacks were processed twice");
         Check(editor->UndoProjectGraphEdit()&&editor->CanRedoProjectGraphEdit(),"Foreground undo history could not be used after takeover");
@@ -222,9 +263,9 @@ bool ValidateAutoBracket(int argc,char** argv) {
                 CheckResult(restored,loaded);
             }
         }
-        for(const auto kind:{Project::ProjectStorageKind::DirectoryBundle,Project::ProjectStorageKind::PortableFile}) {
+        for(const auto kind:{Project::ProjectStorageKind::WorkingFile,Project::ProjectStorageKind::PortableFile}) {
             auto copied=Project::ConvertProjectStore(first->project.store,first->project.snapshot,
-                root/(kind==Project::ProjectStorageKind::DirectoryBundle?"copied":"portable.stack"),kind);
+                root/(kind==Project::ProjectStorageKind::WorkingFile?"copied":"portable.stack"),kind);
             Check(bool(copied),copied.message);Check(copied.store->Verify(copied.snapshot),"Copied assets failed verification");
             Raw::Bracketing::BracketingResult restored;
             Check(Project::RestoreBracketingResult(copied.store,copied.snapshot,copied.snapshot.activeSourceSetId,restored,error),error);
@@ -239,9 +280,15 @@ bool ValidateAutoBracket(int argc,char** argv) {
         {
             auto retryQueue=independent;
             retryQueue.root=root/"review-retry";
+            for (auto& item : retryQueue.items) {
+                if (!item.projectPath.empty())
+                    item.projectPath = retryQueue.root/"Closet"/"Projects"/item.projectPath.filename();
+            }
             Check(SaveQueue(retryQueue,error),error);
             AutoBracketCoordinator retry;
             Check(retry.SetRoot(retryQueue.root,0),"Could not open the review retry queue");
+            Check(retry.Error().empty() && !retry.GetQueue().items.empty(),
+                "Could not load the review retry fixture: " + retry.Error());
             retry.Retry(candidates.front().identity);
             const auto& item=retry.GetQueue().items.front();
             Check(item.state==State::Pending&&item.projectId.empty()&&item.projectPath.empty(),
@@ -257,6 +304,39 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Reconcile(loaded,candidates,{});
         Check(loaded.items.front().state==State::Attention&&loaded.items.back().state==State::Excluded,
             "Attention or explicit exclusion was lost");
+        // Observe the same rescanned cards as Gallery, across a storage-only
+        // commit and an authored rename of one of the two scratch projects.
+        const auto checkCategories = [&](bool edited) {
+            RawWorkspace::WorkspaceState state;
+            state.workspaceRoot = root;
+            Check(RawWorkspace::DiscoverSourceSetProjects(RawWorkspace::BuildManagedLayout(root),
+                state.sources,state.sourceSetProjects),"Could not discover saved automatic brackets");
+            const auto all = RawWorkspace::BuildGalleryPresentation(state);
+            for (auto mode : {RawWorkspace::GalleryContentMode::Bracket, RawWorkspace::GalleryContentMode::Projects}) {
+                auto cards = all;
+                RawWorkspace::FilterGalleryProjectCards(cards,mode);
+                const auto contains = [&](const auto& item) {
+                    return std::any_of(cards.projects.begin(),cards.projects.end(),
+                        [&](const auto& card) {return card.projectPath == item.projectPath;});
+                };
+                const bool brackets = mode == RawWorkspace::GalleryContentMode::Bracket;
+                Check(contains(first->item) == (brackets || edited) && contains(second->item) == brackets,
+                    "Automatic project Gallery category does not match its saved edit history");
+            }
+        };
+        checkCategories(false);
+        for (bool edit : {false,true}) {
+            auto saved = Project::OpenProjectStore(first->item.projectPath);
+            Check(bool(saved),saved.message);
+            if (edit) {
+                saved.snapshot.projectName += " edited";
+                ++saved.snapshot.dirtyRevision;
+            }
+            const auto tx = saved.store->BeginTransaction(saved.snapshot.persistedStorageRevision);
+            const auto committed = saved.store->Commit(tx,saved.snapshot);
+            Check(bool(committed),committed.message);
+            checkCategories(edit);
+        }
         if(argc==6) {
             queue.Shutdown();Check(queue.SetRoot(root/"incompatible-captures",400),"Could not select failure-check root");
             Candidate incompatible;incompatible.name="Captures needing review";

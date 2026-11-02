@@ -1,10 +1,12 @@
 #include "Editor/UI/ViewportNavigation.h"
 #include "Editor/EditorModule.h"
+#include "Editor/UI/ViewComparisonLayout.h"
 #include "App/UiPerformanceProbe.h"
 #include "App/UiPerformanceTrace.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/Internal/RawLab/RawFloatingInputTrace.h"
 #include "Editor/NodeEditors/ColorWarpFeedback.h"
+#include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
 
 #include "Async/TaskSystem.h"
 #include "Raw/RawColorWarpMask.h"
@@ -12,6 +14,7 @@
 #include "Utils/ImGuiExtras.h"
 #include "Notifications/NotificationPresenter.h"
 #include "App/WorkspacePresentation.h"
+#include "App/WorkspaceInputScope.h"
 
 #include <imgui_internal.h>
 
@@ -279,6 +282,13 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     const bool unclutteredPresentation =
         m_RawWorkspaceLabUi.galleryHost == RawGalleryHost::Closed &&
         !m_RawWorkspaceLabUi.lowerShelfOpen;
+    const auto fittedSizeFor = [&](float width, float height, const ImVec2& bounds) {
+        const ImVec2 fitBounds(
+            bounds.x,
+            std::max(1.0f, bounds.y - previewBottomClearance));
+        const ImVec2 fitted = FitLabImage(width, height, fitBounds);
+        return ImVec2(fitted.x * Stack::Editor::RawViewFitFraction, fitted.y * Stack::Editor::RawViewFitFraction);
+    };
     const auto imageSizeFor = [&](float width, float height, const ImVec2& bounds) {
         if (m_RawWorkspaceLabUi.previewActualPixels) {
             const ImVec2 framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
@@ -289,11 +299,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 std::max(1.0f, width / previewPixelScale),
                 std::max(1.0f, height / previewPixelScale));
         }
-        const ImVec2 fitBounds(
-            bounds.x,
-            std::max(1.0f, bounds.y - previewBottomClearance));
-        const ImVec2 fitted = FitLabImage(width, height, fitBounds);
-        return ImVec2(fitted.x * .80f, fitted.y * .80f);
+        return fittedSizeFor(width, height, bounds);
     };
     const auto imageMinimumFor = [&](const ImVec2& start,
                                      const ImVec2& bounds,
@@ -381,10 +387,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 });
             if (project != presentation.projects.end() &&
                 !project->coverThumbnailCachePath.empty()) {
-                thumbnailSource.relativePathKey = "project-overlay:" +
-                    (!project->projectId.empty()
-                        ? project->projectId
-                        : project->projectPath.lexically_normal().generic_string());
+                thumbnailSource.relativePathKey = project->projectCoverKey;
                 thumbnailSource.thumbnail.absolutePath =
                     project->coverThumbnailCachePath;
                 thumbnailSource.thumbnail.status =
@@ -447,21 +450,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     const bool gradientLayout =
         m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones ||
         m_RawWorkspaceLabUi.activeTool == RawLabTool::Tone;
-    const bool floatingTools = (m_NodeOpenTransition.Active() || m_RawFloatingSurface.frame == ImGui::GetFrameCount()) &&
-        ImGui::GetWindowViewport() == ImGui::GetMainViewport();
-    const float colorSideMargin = !floatingTools && colorLayout ? 18.0f : 0.0f;
-    const float colorVerticalMargin = floatingTools ? 0.f : gradientLayout ? 36.0f : colorLayout &&
-            !previewRecipe.colorWarp.pins.empty()
-        ? 34.0f
-        : (colorLayout ? 18.0f : 0.0f);
-    const ImVec2 canvasStart(
-        layoutStart.x + colorSideMargin,
-        layoutStart.y + colorVerticalMargin);
+    // Tool selection changes overlays, never the camera's available space.
+    const ImVec2 canvasStart = layoutStart;
     const ImVec2 canvasBounds(
-        std::max(120.0f, available.x - colorSideMargin * 2.0f),
-        std::max(
-            120.0f,
-            available.y - colorVerticalMargin * 2.0f));
+        std::max(120.0f, available.x), std::max(120.0f, available.y));
     const RawLabPreviewPresentationBounds presentationBounds =
         MakeRawLabPreviewPresentationBounds(
             canvasStart,
@@ -473,13 +465,12 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         start,
         ImVec2(start.x + imageBounds.x, start.y + imageBounds.y));
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    if (gradientLayout)
-        RenderRawWorkspaceLabGradientDots(selectedSource, layoutStart, available.x);
     const bool rawStagePreview = UsesRawWorkspaceStageRender();
     const bool currentRawPreview =
         selectedProjectActive &&
         m_ViewportOutputRawWorkspaceSourceKey == preview.identity;
 
+    const auto drawSavedColors = [&] {
     if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
         constexpr float circleRadius = 12.0f;
         constexpr float circleSpacing = 9.0f;
@@ -490,7 +481,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 circleSpacing;
         const float firstCenterX = layoutStart.x +
             (available.x - totalWidth) * 0.5f + circleRadius;
-        const float centerY = layoutStart.y + (floatingTools ? 18.f : colorVerticalMargin * 0.5f);
+        const float centerY = layoutStart.y + 18.f;
         const int previousHovered =
             m_RawWorkspaceLabUi.colorWarpHoveredSelection;
         int hovered = -1;
@@ -534,6 +525,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     m_RawWorkspaceLabUi.colorWarpTemporaryViewMode, 0, 2);
             }
             if (itemHovered && std::abs(ImGui::GetIO().MouseWheel) > 0.0001f) {
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
                 const int direction = ImGui::GetIO().MouseWheel > 0.0f ? 1 : 2;
                 mode = (mode + direction) % 3;
                 if (selectedPin) {
@@ -615,11 +607,40 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         m_RawWorkspaceLabUi.colorWarpHoveredSelection = -1;
         MarkRenderRefreshDirty();
     }
+    };
 
+    // Submit the chip visuals after the photograph, but reserve their input
+    // before any direct image polling or deferred image-button routing.
+    bool stripOwnsPointer = false;
+    if (ImGui::IsWindowHovered()) {
+        if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
+            const float width = float(previewRecipe.colorWarp.pins.size())*33.f-9.f;
+            stripOwnsPointer = ImRect({layoutStart.x+(available.x-width)*.5f-3.f,layoutStart.y+3.f},
+                {layoutStart.x+(available.x+width)*.5f+3.f,layoutStart.y+33.f}).Contains(ImGui::GetIO().MousePos);
+        } else if (gradientLayout && preview.edit.canEdit &&
+            preview.edit.resolvedMode != Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
+            (m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones || preview.edit.rawAdjustmentLayerId.empty())) {
+            const auto count = m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones
+                ? previewRecipe.evGradients.size() : previewRecipe.toneGradients.size();
+            const float width = count ? float(count)*26.f-8.f : 0.f;
+            const float left = layoutStart.x+std::max(0.f,(available.x-width)*.5f);
+            stripOwnsPointer = count && ImRect({left-2.f,layoutStart.y+6.f},
+                {left+width+2.f,layoutStart.y+28.f}).Contains(ImGui::GetIO().MousePos);
+        }
+    }
+    std::optional<Stack::Workspace::InputScope> stripInput;
+    if (stripOwnsPointer) stripInput.emplace(true,false);
     bool previewNavigationHandled = false;
     std::unique_ptr<ImGuiExtras::FloatingSurfaceInputScope> imagePointerScope;
     auto imageRectFor = [&](float width, float height, bool rememberLayout = true) {
         const ImVec2 baseImageSize = imageSizeFor(width, height, imageBounds);
+        ImVec2 comparisonFit, comparisonCameraMax;
+        if (splitComparison) {
+            comparisonFit = m_RawWorkspaceLabUi.previewActualPixels
+                ? fittedSizeFor(width, height, imageBounds) : baseImageSize;
+            comparisonCameraMax = ImVec2(bounds.Max.x,
+                bounds.Min.y + std::max(1.f, imageBounds.y - previewBottomClearance));
+        }
         auto& ui = m_RawWorkspaceLabUi;
         auto& layout = ui.previewLayout;
         if (!layout.valid) {
@@ -692,8 +713,14 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             const bool previewWindowHovered = ImGui::IsWindowHovered(
                 ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
                 (sourceMenuOpen ? ImGuiHoveredFlags_AllowWhenBlockedByPopup : 0));
+            // The workspace input guard still suppresses buttons/keys over a
+            // floating tool. Forward only its unclaimed wheel and anchor.
+            const bool forwardedWheel = m_RawFloatingSurface.frame == ImGui::GetFrameCount() &&
+                m_RawFloatingSurface.forwardsImageWheel;
+            const ImVec2 navigationMouse = forwardedWheel ? m_RawFloatingSurface.imageWheelPointer : previewIo.MousePos;
             const bool previewHovered = !m_Viewport.ComparisonControlsOwnPointer(layoutStart) &&
-                (previewWindowHovered || IsRawImageNavigationActive()) && bounds.Contains(previewIo.MousePos);
+                (previewWindowHovered || IsRawImageNavigationActive() ||
+                 forwardedWheel) && bounds.Contains(navigationMouse);
 
             if(currentRawPreview && !Stack::Workspace::IsPreview()) {
                 const bool editOwnsPointer=ui.zoneAreas.active || ui.gradientDragHandle>=0 ||
@@ -703,22 +730,31 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     !editOwnsPointer && !previewIo.WantTextInput && !ImGui::IsAnyItemActive() &&
                     !ImGui::IsKeyDown(ImGuiKey_Space) && !ImGui::IsKeyDown(ImGuiKey_C) &&
                     !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
-                imagePointerScope=std::make_unique<ImGuiExtras::FloatingSurfaceInputScope>(m_RawImageInput,canStart);
+                imagePointerScope=std::make_unique<ImGuiExtras::FloatingSurfaceInputScope>(m_RawImageInput,canStart,0,false);
             }
 
             Stack::ViewportNavigation::Input navigationInput;
             navigationInput.panConstraint = Stack::ViewportNavigation::PanConstraint::BoundedSurround;
-            navigationInput.mouse = previewIo.MousePos;
+            navigationInput.mouse = navigationMouse;
             navigationInput.delta = previewIo.MouseDelta;
+            if (splitComparison) m_Viewport.MapRawComparisonInput(navigationInput.mouse,
+                navigationInput.delta,bounds.Min,comparisonCameraMax,comparisonFit);
             // Half the logarithmic wheel step: about 8.6% per notch instead
             // of 18%, preserving fractional scrolling and cursor anchoring.
-            navigationInput.wheel = previewIo.MouseWheel * .5f;
+            navigationInput.wheel = (forwardedWheel ? m_RawFloatingSurface.imageWheel : previewIo.MouseWheel) * .5f;
             navigationInput.seconds = previewIo.DeltaTime;
             navigationInput.hovered = previewHovered;
             navigationInput.wheelAllowed = !previewIo.KeyAlt && (!colorLayout ||
                 (!m_RawWorkspaceLabUi.colorWarpPendingCircleActive &&
                  !(m_RawWorkspaceLabUi.colorWarpInspectionActive &&
                    (previewIo.KeyCtrl || previewIo.KeyShift))));
+            // Saved-color chips bind their wheel to inspection mode.
+            if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
+                const float stripWidth=float(previewRecipe.colorWarp.pins.size())*33.f-9.f;
+                navigationInput.wheelAllowed &= !ImRect(
+                    {layoutStart.x+(available.x-stripWidth)*.5f-3.f,layoutStart.y+3.f},
+                    {layoutStart.x+(available.x+stripWidth)*.5f+3.f,layoutStart.y+33.f}).Contains(previewIo.MousePos);
+            }
             const bool spaceStart = previewHovered && IsRawImageNavigationActive() &&
                 !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             if (spaceStart) ui.previewSpacePanning = true;
@@ -800,6 +836,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             fullRect={displayed.minimum,displayed.maximum};
         }
         UpdateRawViewportCoverage(fullRect.Min, fullRect.Max, bounds.Min, bounds.Max, currentRawPreview);
+        if (splitComparison)
+            m_Viewport.PresentRawComparison(fullRect.Min, fullRect.Max, bounds.Min, comparisonCameraMax, comparisonFit);
         if (currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview())
             PresentNodeOpenImage(fullRect.Min, fullRect.Max);
         return fullRect;
@@ -822,7 +860,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             ImVec2(1.0f - uInset, vInset));
     };
     auto finishImage = [&](const ImRect& imageRect) {
-        if (currentRawPreview) {
+        if (currentRawPreview && !splitComparison) {
             ImRect visible = bounds;
             visible.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
             PublishRawImageBackdrop(imageRect.Min, imageRect.Max, visible.Min, visible.Max, rawStagePreview);
@@ -915,21 +953,9 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             colorWarpDisplayedPin >= 0 &&
             colorWarpDisplayedPin < static_cast<int>(
                 previewRecipe.colorWarp.pins.size())) {
-            const std::string previewIdentity =
-                GetActiveRawWorkspacePreviewIdentity();
-            const RawDevelopmentGraphScopeReadback& cachedColorScope =
-                m_RawWorkspaceColorWarpInputGraphScopeCache.readback;
-            const bool cachedColorScopeMatches =
-                !previewIdentity.empty() &&
-                m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
-                    previewIdentity &&
-                cachedColorScope.valid &&
-                cachedColorScope.stage ==
-                    RawDevelopmentGraphScopeStage::ColorWarpInput;
-            const RawDevelopmentGraphScopeReadback& colorScope =
-                cachedColorScopeMatches
-                ? cachedColorScope
-                : m_RawWorkspaceGraphScopeReadback;
+            const auto& previewIdentity = preview.identity;
+            std::size_t colorInputFingerprint = 0;
+            const auto& colorScope = ColorWarpInput(preview.edit, colorInputFingerprint);
             const std::size_t colorScopePixelCount = colorScope.valid &&
                     colorScope.stage ==
                         RawDevelopmentGraphScopeStage::ColorWarpInput &&
@@ -966,7 +992,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 if (feedbackCache) {
                     feedbackCache->Update(colorScope,
                         previewIdentity + preview.edit.nodeTarget->Key(),
-                        m_RawWorkspaceColorWarpInputGraphScopeCache.inputFingerprint,
+                        colorInputFingerprint,
                         previewRecipe.colorWarp, previewRecipe.technical.workingSpace,
                         [this](std::function<void()> job) {
                             return ProjectTasks().SubmitHighPriority("Analyzing colors", std::move(job));
@@ -1184,529 +1210,9 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 kWorkingLabel);
         }
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
-            currentRawPreview && areaOwner.Valid() && preview.edit.canEdit &&
+            currentRawPreview &&
             !m_EditingRawLayerMask && !capturingAsset && !IsRawImageNavigationActive()) {
-            const std::string previewIdentity =
-                GetActiveRawWorkspacePreviewIdentity();
-            const RawDevelopmentGraphScopeReadback& cachedColorScope =
-                m_RawWorkspaceColorWarpInputGraphScopeCache.readback;
-            const bool cachedColorScopeMatches =
-                !previewIdentity.empty() &&
-                m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
-                    previewIdentity &&
-                cachedColorScope.valid &&
-                cachedColorScope.stage ==
-                    RawDevelopmentGraphScopeStage::ColorWarpInput;
-            const RawDevelopmentGraphScopeReadback& colorScope =
-                cachedColorScopeMatches
-                ? cachedColorScope
-                : m_RawWorkspaceGraphScopeReadback;
-            const std::size_t colorScopePixelCount = colorScope.valid &&
-                    colorScope.stage ==
-                        RawDevelopmentGraphScopeStage::ColorWarpInput &&
-                    colorScope.width > 0 && colorScope.height > 0
-                ? static_cast<std::size_t>(colorScope.width) *
-                    static_cast<std::size_t>(colorScope.height)
-                : 0u;
-            if (colorScopePixelCount > 0u &&
-                colorScope.pixels.size() >= colorScopePixelCount * 3u) {
-                auto& colorUi = m_RawWorkspaceLabUi;
-                const auto displayToSource = [&](float displayU, float displayV) {
-                    const auto& crop = previewRecipe.cropRotation;
-                    const bool cropEnabled = crop.cropEnabled;
-                    return ImVec2(
-                        cropEnabled ? crop.cropX + displayU * crop.cropWidth : displayU,
-                        cropEnabled ? crop.cropY + displayV * crop.cropHeight : displayV);
-                };
-                const auto sourceToDisplay = [&](float sourceU, float sourceV) {
-                    const auto& crop = previewRecipe.cropRotation;
-                    const bool cropEnabled = crop.cropEnabled;
-                    return ImVec2(
-                        cropEnabled
-                            ? (sourceU - crop.cropX) / std::max(0.000001f, crop.cropWidth)
-                            : sourceU,
-                        cropEnabled
-                            ? (sourceV - crop.cropY) / std::max(0.000001f, crop.cropHeight)
-                            : sourceV);
-                };
-                const auto submitAreaAnalysis = [&]() {
-                    if (colorUi.colorWarpAreaOwner != areaOwner) {
-                        colorUi.ResetColorWarpAreaRequest();
-                        return;
-                    }
-                    // A changed circle owns a new request even when preparing
-                    // or submitting it fails. Never commit the previous
-                    // circle's colors against the replacement geometry.
-                    const std::uint64_t generation =
-                        ++colorUi.colorWarpAreaAnalysisGeneration;
-                    colorUi.colorWarpAreaAnalysisState.reset();
-                    colorUi.colorWarpAreaAnalysisResult = {};
-                    colorUi.colorWarpPendingCircleCommitRequested = false;
-                    colorUi.colorWarpPendingCircleRefining = false;
-                    const auto failAnalysis = [&]() {
-                        colorUi.colorWarpAreaAnalysisState.reset();
-                        colorUi.colorWarpPendingCircleRefining = false;
-                        colorUi.colorWarpAreaStatus = "Analysis unavailable";
-                    };
-                    try {
-                        std::vector<Stack::RawRecipe::RawColorWarpAnalysisSample> samples;
-                        samples.reserve(colorScopePixelCount);
-                        for (int y = 0; y < colorScope.height; ++y) {
-                            for (int x = 0; x < colorScope.width; ++x) {
-                                const std::size_t index =
-                                    static_cast<std::size_t>(y) * colorScope.width + x;
-                                const std::size_t offset = index * 3u;
-                                Stack::RawRecipe::RawColorWarpAnalysisSample sample;
-                                sample.sourceU = (static_cast<float>(x) + 0.5f) /
-                                    colorScope.width;
-                                sample.sourceV = (static_cast<float>(y) + 0.5f) /
-                                    colorScope.height;
-                                sample.color = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
-                                    { colorScope.pixels[offset + 0u],
-                                      colorScope.pixels[offset + 1u],
-                                      colorScope.pixels[offset + 2u] },
-                                    previewRecipe.technical.workingSpace);
-                                sample.valid = std::isfinite(sample.color.a) &&
-                                    std::isfinite(sample.color.b) &&
-                                    std::isfinite(sample.color.sceneEv);
-                                samples.push_back(sample);
-                            }
-                        }
-                        const auto circle = colorUi.colorWarpPendingCircle;
-                        std::size_t reclaimedSlots = 0u;
-                        if (!colorUi.colorWarpPendingReplaceRegionId.empty()) {
-                            reclaimedSlots = static_cast<std::size_t>(std::count_if(
-                                previewRecipe.colorWarp.pins.begin(),
-                                previewRecipe.colorWarp.pins.end(),
-                                [&](const auto& pin) {
-                                    return pin.regionId ==
-                                        colorUi.colorWarpPendingReplaceRegionId;
-                                }));
-                        }
-                        const std::size_t occupiedSlots =
-                            previewRecipe.colorWarp.pins.size() - reclaimedSlots;
-                        const std::size_t availableSlots =
-                            Stack::RawRecipe::kMaxRawColorWarpPins > occupiedSlots
-                                ? Stack::RawRecipe::kMaxRawColorWarpPins - occupiedSlots
-                                : 0u;
-                        auto state = std::make_shared<
-                            Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
-                        state->generation = generation;
-                        state->owner = colorUi.colorWarpAreaOwner;
-                        colorUi.colorWarpAreaAnalysisState = state;
-                        colorUi.colorWarpPendingCircleRefining = true;
-                        colorUi.colorWarpAreaStatus = "Refining";
-                        const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
-                            [state, generation, samples = std::move(samples), circle,
-                             availableSlots]() mutable {
-                                Stack::RawRecipe::RawColorWarpAreaAnalysisResult analysis;
-                                bool failed = false;
-                                try {
-                                    analysis = Stack::RawRecipe::AnalyzeRawColorWarpArea(
-                                        samples,
-                                        circle,
-                                        availableSlots);
-                                } catch (...) {
-                                    // Pool exception handling releases task
-                                    // ownership, not this request's UI state.
-                                    failed = true;
-                                }
-                                std::lock_guard<std::mutex> lock(state->mutex);
-                                if (state->generation == generation) {
-                                    state->result = std::move(analysis);
-                                    state->failed = failed;
-                                    state->ready = true;
-                                }
-                            });
-                        if (!submitted) failAnalysis();
-                    } catch (...) {
-                        failAnalysis();
-                    }
-                };
-
-                if (colorUi.colorWarpAreaAnalysisState) {
-                    const auto completedState = colorUi.colorWarpAreaAnalysisState;
-                    std::lock_guard<std::mutex> lock(completedState->mutex);
-                    if (completedState->generation != colorUi.colorWarpAreaAnalysisGeneration ||
-                        completedState->owner != areaOwner || colorUi.colorWarpAreaOwner != areaOwner) {
-                        colorUi.ResetColorWarpAreaRequest();
-                    } else if (completedState->ready) {
-                        colorUi.colorWarpAreaAnalysisResult =
-                            std::move(completedState->result);
-                        colorUi.colorWarpPendingCircleRefining = false;
-                        if (completedState->failed) {
-                            colorUi.colorWarpAreaAnalysisResult = {};
-                            colorUi.colorWarpAreaStatus = "Analysis unavailable";
-                        } else if (colorUi.colorWarpAreaAnalysisResult.proposals.empty()) {
-                            colorUi.colorWarpAreaStatus =
-                                colorUi.colorWarpAreaAnalysisResult.capacityLimited
-                                ? "No pin slots available"
-                                : "No usable pixels";
-                        } else if (colorUi.colorWarpAreaAnalysisResult.capacityLimited) {
-                            colorUi.colorWarpAreaStatus = "Result limited by remaining pin slots";
-                        } else {
-                            colorUi.colorWarpAreaStatus =
-                                std::to_string(colorUi.colorWarpAreaAnalysisResult.proposals.size()) +
-                                (colorUi.colorWarpAreaAnalysisResult.proposals.size() == 1u
-                                    ? " color ready"
-                                    : " colors ready");
-                        }
-                        colorUi.colorWarpAreaAnalysisState.reset();
-                    }
-                }
-
-                const ImVec2 mouse = ImGui::GetIO().MousePos;
-                const bool previewHovered = imageRect.Contains(mouse) &&
-                    ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-                if (previewHovered) {
-                    const float displayU = std::clamp(
-                        (mouse.x - imageRect.Min.x) / std::max(1.0f, imageRect.GetWidth()),
-                        0.0f, 0.999999f);
-                    const float displayV = std::clamp(
-                        (mouse.y - imageRect.Min.y) / std::max(1.0f, imageRect.GetHeight()),
-                        0.0f, 0.999999f);
-                    const ImVec2 source = displayToSource(displayU, displayV);
-                    const int sampleX = std::clamp(
-                        static_cast<int>(source.x * colorScope.width), 0, colorScope.width - 1);
-                    const int sampleY = std::clamp(
-                        static_cast<int>(source.y * colorScope.height), 0, colorScope.height - 1);
-                    const std::size_t offset =
-                        (static_cast<std::size_t>(sampleY) * colorScope.width + sampleX) * 3u;
-                    const auto coordinate = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
-                        { colorScope.pixels[offset + 0u],
-                          colorScope.pixels[offset + 1u],
-                          colorScope.pixels[offset + 2u] },
-                        previewRecipe.technical.workingSpace);
-                    colorUi.colorWarpPhotoHoverValid = std::isfinite(coordinate.a) &&
-                        std::isfinite(coordinate.b) && std::isfinite(coordinate.sceneEv);
-                    if (colorUi.colorWarpPhotoHoverValid) {
-                        colorUi.colorWarpPhotoHoverA = coordinate.a;
-                        colorUi.colorWarpPhotoHoverB = coordinate.b;
-                        colorUi.colorWarpPhotoHoverSceneEv = coordinate.sceneEv;
-                    }
-
-                    const ImVec2 pendingDisplay = sourceToDisplay(
-                        colorUi.colorWarpPendingCircle.centerU,
-                        colorUi.colorWarpPendingCircle.centerV);
-                    const ImVec2 pendingCenter(
-                        imageRect.Min.x + pendingDisplay.x * imageRect.GetWidth(),
-                        imageRect.Min.y + pendingDisplay.y * imageRect.GetHeight());
-                    const float radiusX = colorUi.colorWarpPendingCircle.radiusU *
-                        imageRect.GetWidth() /
-                        std::max(0.000001f,
-                            previewRecipe.cropRotation.cropEnabled
-                                ? previewRecipe.cropRotation.cropWidth
-                                : 1.0f);
-                    const float radiusY = colorUi.colorWarpPendingCircle.radiusV *
-                        imageRect.GetHeight() /
-                        std::max(0.000001f,
-                            previewRecipe.cropRotation.cropEnabled
-                                ? previewRecipe.cropRotation.cropHeight
-                                : 1.0f);
-                    const float pendingRadius = std::max(4.0f, (radiusX + radiusY) * 0.5f);
-                    const float pendingDistance = std::hypot(
-                        mouse.x - pendingCenter.x, mouse.y - pendingCenter.y);
-
-                    if (ImGui::IsKeyPressed(ImGuiKey_Escape) &&
-                        colorUi.colorWarpPendingCircleActive) {
-                        colorUi.ResetColorWarpAreaRequest();
-                    }
-                    if (!colorUi.colorWarpPendingCircleActive &&
-                        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        bool recalledCircleHit = false;
-                        const bool inspectingRecalledRegion =
-                            colorUi.colorWarpInspectionActive &&
-                            !colorUi.colorWarpInspectedRegionId.empty();
-                        if (inspectingRecalledRegion) {
-                            const auto inspected = std::find_if(
-                                previewRecipe.colorWarp.regions.begin(),
-                                previewRecipe.colorWarp.regions.end(),
-                                [&](const auto& region) {
-                                    return region.id == colorUi.colorWarpInspectedRegionId;
-                                });
-                            if (inspected != previewRecipe.colorWarp.regions.end()) {
-                                const auto& crop = previewRecipe.cropRotation;
-                                const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
-                                const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
-                                for (const auto& circle : inspected->circles) {
-                                    const ImVec2 recalledDisplay = sourceToDisplay(
-                                        circle.centerU, circle.centerV);
-                                    const ImVec2 recalledCenter(
-                                        imageRect.Min.x + recalledDisplay.x * imageRect.GetWidth(),
-                                        imageRect.Min.y + recalledDisplay.y * imageRect.GetHeight());
-                                    const float recalledRadius = 0.5f * (
-                                        circle.radiusU * imageRect.GetWidth() /
-                                            std::max(0.000001f, cropWidth) +
-                                        circle.radiusV * imageRect.GetHeight() /
-                                            std::max(0.000001f, cropHeight));
-                                    if (std::hypot(mouse.x - recalledCenter.x,
-                                                   mouse.y - recalledCenter.y) <=
-                                        recalledRadius + 6.0f) {
-                                        colorUi.ResetColorWarpAreaRequest();
-                                        colorUi.colorWarpAreaOwner = areaOwner;
-                                        colorUi.colorWarpPendingCircle = circle;
-                                        colorUi.colorWarpPendingCircleActive = true;
-                                        colorUi.colorWarpPendingCircleDrawing = false;
-                                        colorUi.colorWarpPendingCircleEditKind = 1;
-                                        colorUi.colorWarpPendingCircleAppend = false;
-                                        colorUi.colorWarpPendingReplaceRegionId = inspected->id;
-                                        colorUi.colorWarpPendingReplaceCircleId = circle.id;
-                                        colorUi.colorWarpAreaStatus = "Edit sampled area";
-                                        submitAreaAnalysis();
-                                        recalledCircleHit = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (recalledCircleHit) {
-                            colorUi.colorWarpPendingCirclePressPosition = mouse;
-                            colorUi.colorWarpPendingCirclePressCenterU =
-                                colorUi.colorWarpPendingCircle.centerU;
-                            colorUi.colorWarpPendingCirclePressCenterV =
-                                colorUi.colorWarpPendingCircle.centerV;
-                            colorUi.colorWarpPendingCirclePressRadiusU =
-                                colorUi.colorWarpPendingCircle.radiusU;
-                            colorUi.colorWarpPendingCirclePressRadiusV =
-                                colorUi.colorWarpPendingCircle.radiusV;
-                        } else if (inspectingRecalledRegion &&
-                                   !colorUi.colorWarpDiagnosticLocked) {
-                            colorUi.colorWarpInspectionActive = false;
-                            colorUi.colorWarpInspectedRegionId.clear();
-                        } else {
-                        colorUi.ResetColorWarpAreaRequest();
-                        colorUi.colorWarpAreaOwner = areaOwner;
-                        colorUi.colorWarpPendingCircleActive = true;
-                        colorUi.colorWarpPendingCircleDrawing = true;
-                        colorUi.colorWarpPendingCircleEditKind = 2;
-                        colorUi.colorWarpPendingCirclePressPosition = mouse;
-                        colorUi.colorWarpPendingCircle = {};
-                        colorUi.colorWarpPendingReplaceRegionId.clear();
-                        colorUi.colorWarpPendingReplaceCircleId.clear();
-                        colorUi.colorWarpPendingCircleAppend = false;
-                        if (ImGui::GetIO().KeyShift &&
-                            colorUi.selectedColorWarpPin >= 0 &&
-                            colorUi.selectedColorWarpPin < static_cast<int>(
-                                previewRecipe.colorWarp.pins.size())) {
-                            const auto& selectedPin = previewRecipe.colorWarp.pins[
-                                static_cast<std::size_t>(colorUi.selectedColorWarpPin)];
-                            if (!selectedPin.regionId.empty()) {
-                                colorUi.colorWarpPendingCircleAppend = true;
-                                colorUi.colorWarpPendingReplaceRegionId =
-                                    selectedPin.regionId;
-                                colorUi.colorWarpPendingCircle.polarity =
-                                    Stack::RawRecipe::RawColorWarpSamplePolarity::Include;
-                            }
-                        }
-                        colorUi.colorWarpPendingCircle.id = "sample-1";
-                        colorUi.colorWarpPendingCircle.centerU = source.x;
-                        colorUi.colorWarpPendingCircle.centerV = source.y;
-                        const auto& crop = previewRecipe.cropRotation;
-                        const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
-                        const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
-                        colorUi.colorWarpPendingCircle.radiusU =
-                            12.0f / std::max(1.0f, imageRect.GetWidth()) * cropWidth;
-                        colorUi.colorWarpPendingCircle.radiusV =
-                            12.0f / std::max(1.0f, imageRect.GetHeight()) * cropHeight;
-                        colorUi.colorWarpAreaStatus = "Drag to size";
-                        }
-                    } else if (colorUi.colorWarpPendingCircleActive &&
-                               !colorUi.colorWarpPendingCircleDrawing &&
-                               ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        if (std::abs(pendingDistance - pendingRadius) <= 7.0f) {
-                            colorUi.colorWarpPendingCircleEditKind = 2;
-                        } else if (pendingDistance <= pendingRadius) {
-                            colorUi.colorWarpPendingCircleEditKind = 1;
-                        } else {
-                            colorUi.ResetColorWarpAreaRequest();
-                        }
-                        colorUi.colorWarpPendingCirclePressPosition = mouse;
-                        colorUi.colorWarpPendingCirclePressCenterU =
-                            colorUi.colorWarpPendingCircle.centerU;
-                        colorUi.colorWarpPendingCirclePressCenterV =
-                            colorUi.colorWarpPendingCircle.centerV;
-                        colorUi.colorWarpPendingCirclePressRadiusU =
-                            colorUi.colorWarpPendingCircle.radiusU;
-                        colorUi.colorWarpPendingCirclePressRadiusV =
-                            colorUi.colorWarpPendingCircle.radiusV;
-                    }
-                    if (colorUi.colorWarpPendingCircleActive &&
-                        ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                        const float dragDistance = std::hypot(
-                            mouse.x - colorUi.colorWarpPendingCirclePressPosition.x,
-                            mouse.y - colorUi.colorWarpPendingCirclePressPosition.y);
-                        const auto& crop = previewRecipe.cropRotation;
-                        const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
-                        const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
-                        if (colorUi.colorWarpPendingCircleDrawing ||
-                            (colorUi.colorWarpPendingCircleEditKind == 2 && dragDistance > 2.0f)) {
-                            const float radiusPixels = std::max(
-                                4.0f,
-                                colorUi.colorWarpPendingCircleDrawing
-                                    ? dragDistance
-                                    : std::hypot(
-                                        mouse.x - pendingCenter.x,
-                                        mouse.y - pendingCenter.y));
-                            colorUi.colorWarpPendingCircle.radiusU = radiusPixels /
-                                std::max(1.0f, imageRect.GetWidth()) * cropWidth;
-                            colorUi.colorWarpPendingCircle.radiusV = radiusPixels /
-                                std::max(1.0f, imageRect.GetHeight()) * cropHeight;
-                        } else if (colorUi.colorWarpPendingCircleEditKind == 1 && dragDistance > 2.0f) {
-                            colorUi.colorWarpPendingCircle.centerU = std::clamp(
-                                colorUi.colorWarpPendingCirclePressCenterU +
-                                    (mouse.x - colorUi.colorWarpPendingCirclePressPosition.x) /
-                                        std::max(1.0f, imageRect.GetWidth()) * cropWidth,
-                                0.0f, 1.0f);
-                            colorUi.colorWarpPendingCircle.centerV = std::clamp(
-                                colorUi.colorWarpPendingCirclePressCenterV +
-                                    (mouse.y - colorUi.colorWarpPendingCirclePressPosition.y) /
-                                        std::max(1.0f, imageRect.GetHeight()) * cropHeight,
-                                0.0f, 1.0f);
-                        }
-                    }
-                    if (colorUi.colorWarpPendingCircleActive &&
-                        ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-                        const float dragDistance = std::hypot(
-                            mouse.x - colorUi.colorWarpPendingCirclePressPosition.x,
-                            mouse.y - colorUi.colorWarpPendingCirclePressPosition.y);
-                        const bool wasInitial = colorUi.colorWarpPendingCircleDrawing;
-                        colorUi.colorWarpPendingCircleDrawing = false;
-                        if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1 &&
-                            dragDistance <= 2.0f && !colorUi.colorWarpPendingCircleRefining &&
-                            colorUi.colorWarpAreaOwner == areaOwner &&
-                            (colorUi.colorWarpPendingCircleAppend ||
-                             !colorUi.colorWarpAreaAnalysisResult.proposals.empty())) {
-                            colorUi.colorWarpPendingCircleCommitRequested = true;
-                        } else if (!colorUi.colorWarpPendingCircleAppend) {
-                            submitAreaAnalysis();
-                        } else {
-                            colorUi.colorWarpPendingCircleRefining = false;
-                            colorUi.colorWarpAreaStatus =
-                                colorUi.colorWarpPendingCircle.polarity ==
-                                    Stack::RawRecipe::RawColorWarpSamplePolarity::Exclude
-                                ? "Exclusion ready"
-                                : "Include seed ready";
-                        }
-                        colorUi.colorWarpPendingCircleEditKind = 0;
-                    }
-                    if (colorUi.colorWarpPendingCircleActive &&
-                        pendingDistance <= pendingRadius + 90.0f &&
-                        std::abs(ImGui::GetIO().MouseWheel) > 0.0001f &&
-                        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                        colorUi.colorWarpPendingCircle.interpretation =
-                            CycleColorWarpInterpretation(
-                                colorUi.colorWarpPendingCircle.interpretation,
-                                ImGui::GetIO().MouseWheel > 0.0f ? 1 : -1);
-                        submitAreaAnalysis();
-                    }
-                }
-
-                if (colorUi.colorWarpPendingCircleActive) {
-                    const ImVec2 display = sourceToDisplay(
-                        colorUi.colorWarpPendingCircle.centerU,
-                        colorUi.colorWarpPendingCircle.centerV);
-                    const ImVec2 center(
-                        imageRect.Min.x + display.x * imageRect.GetWidth(),
-                        imageRect.Min.y + display.y * imageRect.GetHeight());
-                    const auto& crop = previewRecipe.cropRotation;
-                    const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
-                    const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
-                    const float radius = 0.5f * (
-                        colorUi.colorWarpPendingCircle.radiusU * imageRect.GetWidth() /
-                            std::max(0.000001f, cropWidth) +
-                        colorUi.colorWarpPendingCircle.radiusV * imageRect.GetHeight() /
-                            std::max(0.000001f, cropHeight));
-                    drawList->AddCircle(center, std::max(4.0f, radius),
-                        IM_COL32(245, 245, 245, 235), 0, 2.0f);
-                    const float reachPixels = 24.0f *
-                        imageRect.GetWidth() / std::max(1, colorScope.sourceWidth);
-                    drawList->AddCircle(center, std::max(4.0f, radius + reachPixels),
-                        IM_COL32(236, 164, 72, 210), 32, 1.5f);
-                    const char* modeLabel = ColorWarpInterpretationLabel(
-                        colorUi.colorWarpPendingCircle.interpretation);
-                    const std::string polarityLabel =
-                        colorUi.colorWarpPendingCircle.polarity ==
-                            Stack::RawRecipe::RawColorWarpSamplePolarity::Exclude
-                        ? "Exclude · "
-                        : "";
-                    const std::string tag = polarityLabel + std::string(modeLabel) +
-                        (colorUi.colorWarpPendingCircleRefining
-                            ? "  refining..."
-                            : "  " + colorUi.colorWarpAreaStatus);
-                    const ImVec2 tagPosition(center.x + radius + 8.0f, center.y - 10.0f);
-                    const ImVec2 tagSize = ImGui::CalcTextSize(tag.c_str());
-                    drawList->AddRectFilled(
-                        ImVec2(tagPosition.x - 6.0f, tagPosition.y - 4.0f),
-                        ImVec2(tagPosition.x + tagSize.x + 6.0f,
-                               tagPosition.y + tagSize.y + 4.0f),
-                        IM_COL32(18, 20, 24, 220), 5.0f);
-                    drawList->AddText(tagPosition, IM_COL32(245, 245, 245, 245), tag.c_str());
-                }
-                if (colorUi.colorWarpInspectionActive &&
-                    !colorUi.colorWarpInspectedRegionId.empty() &&
-                    !colorUi.colorWarpPendingCircleActive) {
-                    const auto inspected = std::find_if(
-                        previewRecipe.colorWarp.regions.begin(),
-                        previewRecipe.colorWarp.regions.end(),
-                        [&](const auto& region) {
-                            return region.id == colorUi.colorWarpInspectedRegionId;
-                        });
-                    if (inspected != previewRecipe.colorWarp.regions.end()) {
-                        const auto& crop = previewRecipe.cropRotation;
-                        const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
-                        const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
-                        const float inspectionWheel = ImGui::GetIO().MouseWheel;
-                        if (previewHovered &&
-                            std::abs(inspectionWheel) > 0.0001f) {
-                            if (ImGui::GetIO().KeyCtrl) {
-                                colorUi.colorWarpRegionReachWheelDelta +=
-                                    inspectionWheel * 4.0f;
-                            } else if (ImGui::GetIO().KeyShift) {
-                                colorUi.colorWarpRegionFeatherWheelDelta +=
-                                    inspectionWheel * 4.0f;
-                            }
-                        }
-                        drawList->PushClipRect(imageRect.Min, imageRect.Max, true);
-                        for (const auto& circle : inspected->circles) {
-                            const ImVec2 display = sourceToDisplay(circle.centerU, circle.centerV);
-                            const ImVec2 center(
-                                imageRect.Min.x + display.x * imageRect.GetWidth(),
-                                imageRect.Min.y + display.y * imageRect.GetHeight());
-                            const float radius = 0.5f * (
-                                circle.radiusU * imageRect.GetWidth() /
-                                    std::max(0.000001f, cropWidth) +
-                                circle.radiusV * imageRect.GetHeight() /
-                                    std::max(0.000001f, cropHeight));
-                            const float sourceToDisplayScale = 0.5f * (
-                                imageRect.GetWidth() / std::max(1, colorScope.sourceWidth) +
-                                imageRect.GetHeight() / std::max(1, colorScope.sourceHeight));
-                            drawList->AddCircle(center, std::max(4.0f, radius),
-                                IM_COL32(245, 245, 245, 225), 0, 2.0f);
-                            DrawPreviewDashedCircle(
-                                drawList, center,
-                                std::max(4.0f, radius +
-                                    inspected->reachPixels * sourceToDisplayScale),
-                                IM_COL32(236, 164, 72, 215));
-                            if (inspected->featherPixels > 0.0f) {
-                                drawList->AddCircle(
-                                    center,
-                                    std::max(4.0f, radius +
-                                        inspected->featherPixels * sourceToDisplayScale),
-                                    IM_COL32(174, 104, 242, 220), 48, 1.5f);
-                            }
-                            const std::string tag = std::string(
-                                ColorWarpInterpretationLabel(circle.interpretation)) +
-                                " · " + Stack::RawRecipe::RawColorWarpSpatialModeStableString(
-                                    inspected->spatialMode) +
-                                " · Ctrl-wheel reach · Shift-wheel feather";
-                            drawList->AddText(
-                                ImVec2(center.x + radius + 7.0f, center.y - 9.0f),
-                                IM_COL32(245, 245, 245, 235), tag.c_str());
-                        }
-                        drawList->PopClipRect();
-                    }
-                }
-            }
+            RenderColorWarpAreaSelector(preview.edit, areaOwner, imageRect);
         }
         if (selectedSource && !preview.edit.multiFrameResult && !m_EditingRawLayerMask && !capturingAsset) HandleRawWorkspaceLocalRangeTargetInteraction(
             *selectedSource,
@@ -1727,27 +1233,32 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             drawList->PushClipRect(viewport->WorkPos,
                 ImVec2(viewport->WorkPos.x+viewport->WorkSize.x,viewport->WorkPos.y+viewport->WorkSize.y),false);
         }
+        if (splitComparison) m_Viewport.PushRawComparisonClip(drawList,bounds.Min,bounds.Max,true);
         firstPhotoVertex = drawList->VtxBuffer.Size;
-        if (splitComparison) drawList->PushClipRect(ImVec2(rect.GetCenter().x, rect.Min.y), rect.Max, true);
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         return drawList->CmdBuffer.Size - 1;
     };
     const auto endPhoto = [&](const ImRect& rect, int first, bool drawn) {
-        if (splitComparison) {
-            drawList->PopClipRect();
-            if (drawn) m_Viewport.DrawRawComparisonBefore(drawList, rect.Min, rect.Max);
-        }
         const int end = drawList->CmdBuffer.Size;
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-        if (!drawn) { if (openingPhotoClip) drawList->PopClipRect(); return; }
+        if (!drawn) {
+            if (splitComparison) drawList->PopClipRect();
+            if (openingPhotoClip) drawList->PopClipRect();
+            return;
+        }
         FinishNodeOpenPhoto(drawList, firstPhotoVertex);
+        if (splitComparison) drawList->PopClipRect();
         if (openingPhotoClip) drawList->PopClipRect();
+        if (splitComparison) m_Viewport.DrawRawComparisonBefore(drawList, bounds.Min, bounds.Max);
         Stack::UiPerformance::Probe::ImageDrawn(ActiveViewportPreviewState().acceptedGeneration,
             {rect.Min.x,rect.Min.y,rect.GetWidth(),rect.GetHeight()});
-        if (splitComparison) drawList->PushClipRect(ImVec2(rect.GetCenter().x, rect.Min.y), rect.Max, true);
+        if (splitComparison) m_Viewport.PushRawComparisonClip(drawList,bounds.Min,bounds.Max,true);
         finishImage(rect);
         if (splitComparison) drawList->PopClipRect();
-        if (m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.sharpDrawList &&
+        // Comparison uses complete, identical photo rectangles on both sides.
+        // Keep the after image sharp to its edge instead of handing its outer
+        // 12 pixels to the surround pass while the before image stays whole.
+        if (!splitComparison && m_RawImageBackdrop.frame == ImGui::GetFrameCount() && !m_RawImageBackdrop.sharpDrawList &&
             ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {
             m_RawImageBackdrop.sharpDrawList = drawList;
             m_RawImageBackdrop.sharpCommandBegin = first;
@@ -1777,9 +1288,15 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         const bool hasGeometry = TryGetViewportPreviewGeometry(geometry) && geometry.Valid();
         const auto region = hasGeometry ? geometry.resident :
             rawStagePreview ? m_RawViewportPresentedRegion : Raw::ViewportRegion{};
-        const ImRect imageRect = imageRectFor(
-            static_cast<float>(hasGeometry ? geometry.logicalWidth : m_ViewportOutputExpectedNativeWidth > 0 ? m_ViewportOutputExpectedNativeWidth : region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width),
-            static_cast<float>(hasGeometry ? geometry.logicalHeight : m_ViewportOutputExpectedNativeHeight > 0 ? m_ViewportOutputExpectedNativeHeight : region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height));
+        // Only accepted Graph geometry describes the downstream crop or reformat.
+        // The RAW engine's expected native extent can belong to the source image.
+        const bool hasRawExtent = rawStagePreview &&
+            m_ViewportOutputExpectedNativeWidth > 0 && m_ViewportOutputExpectedNativeHeight > 0;
+        const int fullWidth = hasGeometry ? geometry.logicalWidth : hasRawExtent
+            ? m_ViewportOutputExpectedNativeWidth : region.Valid() ? region.fullWidth : m_RawWorkspacePresentationTexture.width;
+        const int fullHeight = hasGeometry ? geometry.logicalHeight : hasRawExtent
+            ? m_ViewportOutputExpectedNativeHeight : region.Valid() ? region.fullHeight : m_RawWorkspacePresentationTexture.height;
+        const ImRect imageRect = imageRectFor(static_cast<float>(fullWidth), static_cast<float>(fullHeight));
         const int firstPhotoCommand = beginPhoto(imageRect);
         const ImVec2 rasterMin = region.Valid() ? ImVec2(
             imageRect.Min.x + imageRect.GetWidth() * region.x / region.fullWidth,
@@ -1857,6 +1374,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             ImGui::GetColorU32(ImGuiCol_TextDisabled),
             label);
     }
+    imagePointerScope.reset();
+    stripInput.reset();
+    if (gradientLayout) RenderRawWorkspaceLabGradientDots(selectedSource, layoutStart, available.x);
+    drawSavedColors();
     if (IsViewMode() && !Stack::Workspace::IsPreview()) m_Viewport.DrawRawComparisonControls(layoutStart);
     ImGui::SetCursorScreenPos(layoutStart);
     ImGui::Dummy(ImVec2(
@@ -1939,4 +1460,563 @@ void EditorModule::RenderRawWorkspaceLabPreview(
         std::max(1.0f, canvasSize.y)));
     ImGui::EndChild();
     ImGui::PopStyleVar();
+}
+
+const RawDevelopmentGraphScopeReadback& EditorModule::ColorWarpInput(
+    const RawWorkspaceEditContext& context, std::size_t& fingerprint) const {
+    static const RawDevelopmentGraphScopeReadback empty;
+    if (!context.nodeTarget) return empty;
+    const auto& target = *context.nodeTarget;
+    fingerprint = Stack::Editor::NodeInputAnalysisIdentity(target,
+        m_Project->editRevision + m_Project->rawLayers.ProcessingRevision(),
+        CurrentUniformSourceIdentity(), m_TimelineUi.currentFrame);
+    const auto& panel = m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target);
+    if (panel.acceptedFingerprint == fingerprint && panel.readback) return *panel.readback;
+    const auto& cache = m_RawWorkspaceColorWarpInputGraphScopeCache;
+    if (cache.sourceKey == target.Key() && cache.inputFingerprint == fingerprint) return cache.readback;
+    return empty;
+}
+
+Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner EditorModule::ColorWarpAreaOwner(
+    const RawWorkspaceEditContext& context) const {
+    const auto source = GetActiveRawWorkspacePreviewIdentity();
+    if (!source.empty()) return {context.nodeTarget, source, RawViewportSourceHash()};
+    return {context.nodeTarget, GetProjectDocumentId(), CurrentUniformSourceIdentity()};
+}
+
+void EditorModule::RenderGraphColorWarpAreaSelector(const ImRect& imageRect) {
+    if (!IsViewMode() || m_RawWorkspaceLabUi.activeTool != RawLabTool::Color ||
+        !m_Project->nodeEditor || m_NodeOpenTransition.Active() || IsRawImageNavigationActive() ||
+        Stack::Workspace::IsPreview()) return;
+    RawWorkspaceEditContext context;
+    if (!BeginRawWorkspaceEditContext(nullptr, context)) return;
+    const auto owner = ColorWarpAreaOwner(context);
+    auto& ui = m_RawWorkspaceLabUi;
+    if (ui.colorWarpAreaOwner.Valid() && (ui.colorWarpAreaOwner != owner || !context.canEdit))
+        ui.ResetColorWarpAreaRequest();
+    ui.colorWarpPhotoHoverValid = false;
+    RenderColorWarpAreaSelector(context, owner, imageRect);
+}
+
+void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& context,
+    const Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner& areaOwner, const ImRect& imageRect) {
+    if (!areaOwner.Valid() || !context.canEdit) return;
+    const auto& previewRecipe = context.recipe;
+    auto* drawList = ImGui::GetWindowDrawList();
+    std::size_t fingerprint = 0;
+    const auto& colorScope = ColorWarpInput(context, fingerprint);
+    const std::size_t colorScopePixelCount = colorScope.valid && colorScope.stage == RawDevelopmentGraphScopeStage::ColorWarpInput &&
+        colorScope.width > 0 && colorScope.height > 0 ? std::size_t(colorScope.width) * colorScope.height : 0;
+    const bool scopeReady = colorScopePixelCount && colorScope.pixels.size() / 3 >= colorScopePixelCount;
+    auto& colorUi = m_RawWorkspaceLabUi;
+    const auto displayToSource = [&](float displayU, float displayV) {
+        const auto& crop = previewRecipe.cropRotation;
+        const bool cropEnabled = crop.cropEnabled;
+        return ImVec2(
+            cropEnabled ? crop.cropX + displayU * crop.cropWidth : displayU,
+            cropEnabled ? crop.cropY + displayV * crop.cropHeight : displayV);
+    };
+    const auto sourceToDisplay = [&](float sourceU, float sourceV) {
+        const auto& crop = previewRecipe.cropRotation;
+        const bool cropEnabled = crop.cropEnabled;
+        return ImVec2(
+            cropEnabled
+                ? (sourceU - crop.cropX) / std::max(0.000001f, crop.cropWidth)
+                : sourceU,
+            cropEnabled
+                ? (sourceV - crop.cropY) / std::max(0.000001f, crop.cropHeight)
+                : sourceV);
+    };
+    const auto submitAreaAnalysis = [&]() {
+        if (colorUi.colorWarpAreaOwner != areaOwner) {
+            colorUi.ResetColorWarpAreaRequest();
+            return;
+        }
+        // A changed circle owns a new request even when preparing
+        // or submitting it fails. Never commit the previous
+        // circle's colors against the replacement geometry.
+        const std::uint64_t generation =
+            ++colorUi.colorWarpAreaAnalysisGeneration;
+        colorUi.colorWarpAreaAnalysisState.reset();
+        colorUi.colorWarpAreaAnalysisResult = {};
+        colorUi.colorWarpPendingCircleCommitRequested = false;
+        colorUi.colorWarpPendingCircleRefining = false;
+        colorUi.colorWarpAreaWaitingForInput = !scopeReady;
+        if (!scopeReady) {
+            colorUi.colorWarpAreaStatus = "Waiting for image colors";
+            return;
+        }
+        const auto failAnalysis = [&]() {
+            colorUi.colorWarpAreaAnalysisState.reset();
+            colorUi.colorWarpPendingCircleRefining = false;
+            colorUi.colorWarpAreaStatus = "Analysis unavailable";
+        };
+        try {
+            std::vector<Stack::RawRecipe::RawColorWarpAnalysisSample> samples;
+            samples.reserve(colorScopePixelCount);
+            for (int y = 0; y < colorScope.height; ++y) {
+                for (int x = 0; x < colorScope.width; ++x) {
+                    const std::size_t index =
+                        static_cast<std::size_t>(y) * colorScope.width + x;
+                    const std::size_t offset = index * 3u;
+                    Stack::RawRecipe::RawColorWarpAnalysisSample sample;
+                    sample.sourceU = (static_cast<float>(x) + 0.5f) /
+                        colorScope.width;
+                    sample.sourceV = (static_cast<float>(y) + 0.5f) /
+                        colorScope.height;
+                    sample.color = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
+                        { colorScope.pixels[offset + 0u],
+                          colorScope.pixels[offset + 1u],
+                          colorScope.pixels[offset + 2u] },
+                        previewRecipe.technical.workingSpace);
+                    sample.valid = std::isfinite(sample.color.a) &&
+                        std::isfinite(sample.color.b) &&
+                        std::isfinite(sample.color.sceneEv);
+                    samples.push_back(sample);
+                }
+            }
+            const auto circle = colorUi.colorWarpPendingCircle;
+            std::size_t reclaimedSlots = 0u;
+            if (!colorUi.colorWarpPendingReplaceRegionId.empty()) {
+                reclaimedSlots = static_cast<std::size_t>(std::count_if(
+                    previewRecipe.colorWarp.pins.begin(),
+                    previewRecipe.colorWarp.pins.end(),
+                    [&](const auto& pin) {
+                        return pin.regionId ==
+                            colorUi.colorWarpPendingReplaceRegionId;
+                    }));
+            }
+            const std::size_t occupiedSlots =
+                previewRecipe.colorWarp.pins.size() - reclaimedSlots;
+            const std::size_t availableSlots =
+                Stack::RawRecipe::kMaxRawColorWarpPins > occupiedSlots
+                    ? Stack::RawRecipe::kMaxRawColorWarpPins - occupiedSlots
+                    : 0u;
+            auto state = std::make_shared<
+                Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
+            state->generation = generation;
+            state->owner = colorUi.colorWarpAreaOwner;
+            colorUi.colorWarpAreaAnalysisState = state;
+            colorUi.colorWarpPendingCircleRefining = true;
+            colorUi.colorWarpAreaStatus = "Refining";
+            const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
+                [state, generation, samples = std::move(samples), circle,
+                 availableSlots]() mutable {
+                    Stack::RawRecipe::RawColorWarpAreaAnalysisResult analysis;
+                    bool failed = false;
+                    try {
+                        analysis = Stack::RawRecipe::AnalyzeRawColorWarpArea(
+                            samples,
+                            circle,
+                            availableSlots);
+                    } catch (...) {
+                        // Pool exception handling releases task
+                        // ownership, not this request's UI state.
+                        failed = true;
+                    }
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    if (state->generation == generation) {
+                        state->result = std::move(analysis);
+                        state->failed = failed;
+                        state->ready = true;
+                    }
+                });
+            if (!submitted) failAnalysis();
+        } catch (...) {
+            failAnalysis();
+        }
+    };
+
+    if (colorUi.colorWarpAreaAnalysisState) {
+        const auto completedState = colorUi.colorWarpAreaAnalysisState;
+        std::lock_guard<std::mutex> lock(completedState->mutex);
+        if (completedState->generation != colorUi.colorWarpAreaAnalysisGeneration ||
+            completedState->owner != areaOwner || colorUi.colorWarpAreaOwner != areaOwner) {
+            colorUi.ResetColorWarpAreaRequest();
+        } else if (completedState->ready) {
+            colorUi.colorWarpAreaAnalysisResult =
+                std::move(completedState->result);
+            colorUi.colorWarpPendingCircleRefining = false;
+            if (completedState->failed) {
+                colorUi.colorWarpAreaAnalysisResult = {};
+                colorUi.colorWarpAreaStatus = "Analysis unavailable";
+            } else if (colorUi.colorWarpAreaAnalysisResult.proposals.empty()) {
+                colorUi.colorWarpAreaStatus =
+                    colorUi.colorWarpAreaAnalysisResult.capacityLimited
+                    ? "No pin slots available"
+                    : "No usable pixels";
+            } else if (colorUi.colorWarpAreaAnalysisResult.capacityLimited) {
+                colorUi.colorWarpAreaStatus = "Result limited by remaining pin slots";
+            } else {
+                colorUi.colorWarpAreaStatus =
+                    std::to_string(colorUi.colorWarpAreaAnalysisResult.proposals.size()) +
+                    (colorUi.colorWarpAreaAnalysisResult.proposals.size() == 1u
+                        ? " color ready"
+                        : " colors ready");
+            }
+            colorUi.colorWarpAreaAnalysisState.reset();
+        }
+    }
+
+    if (scopeReady && colorUi.colorWarpAreaWaitingForInput &&
+        colorUi.colorWarpPendingCircleActive && !colorUi.colorWarpPendingCircleDrawing)
+        submitAreaAnalysis();
+
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool previewHovered = imageRect.Contains(mouse) &&
+        ImRect(drawList->GetClipRectMin(), drawList->GetClipRectMax()).Contains(mouse) &&
+        !RawFloatingSurfaceOwnsPointer() &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (previewHovered) {
+        const float displayU = std::clamp(
+            (mouse.x - imageRect.Min.x) / std::max(1.0f, imageRect.GetWidth()),
+            0.0f, 0.999999f);
+        const float displayV = std::clamp(
+            (mouse.y - imageRect.Min.y) / std::max(1.0f, imageRect.GetHeight()),
+            0.0f, 0.999999f);
+        const ImVec2 source = displayToSource(displayU, displayV);
+        if (!colorUi.colorWarpPendingCircleActive && !colorUi.colorWarpInspectionActive) {
+            drawList->AddCircle(mouse, 12.f, IM_COL32(15, 15, 15, 200), 32, 3.f);
+            drawList->AddCircle(mouse, 12.f, IM_COL32(245, 245, 245, 225), 32, 1.f);
+        }
+        if (scopeReady) {
+            const int sampleX = std::clamp(
+                static_cast<int>(source.x * colorScope.width), 0, colorScope.width - 1);
+            const int sampleY = std::clamp(
+                static_cast<int>(source.y * colorScope.height), 0, colorScope.height - 1);
+            const std::size_t offset =
+                (static_cast<std::size_t>(sampleY) * colorScope.width + sampleX) * 3u;
+            const auto coordinate = Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
+                { colorScope.pixels[offset + 0u],
+                  colorScope.pixels[offset + 1u],
+                  colorScope.pixels[offset + 2u] },
+                previewRecipe.technical.workingSpace);
+            colorUi.colorWarpPhotoHoverValid = std::isfinite(coordinate.a) &&
+                std::isfinite(coordinate.b) && std::isfinite(coordinate.sceneEv);
+            if (colorUi.colorWarpPhotoHoverValid) {
+                colorUi.colorWarpPhotoHoverA = coordinate.a;
+                colorUi.colorWarpPhotoHoverB = coordinate.b;
+                colorUi.colorWarpPhotoHoverSceneEv = coordinate.sceneEv;
+            }
+        }
+
+        const ImVec2 pendingDisplay = sourceToDisplay(
+            colorUi.colorWarpPendingCircle.centerU,
+            colorUi.colorWarpPendingCircle.centerV);
+        const ImVec2 pendingCenter(
+            imageRect.Min.x + pendingDisplay.x * imageRect.GetWidth(),
+            imageRect.Min.y + pendingDisplay.y * imageRect.GetHeight());
+        const float radiusX = colorUi.colorWarpPendingCircle.radiusU *
+            imageRect.GetWidth() /
+            std::max(0.000001f,
+                previewRecipe.cropRotation.cropEnabled
+                    ? previewRecipe.cropRotation.cropWidth
+                    : 1.0f);
+        const float radiusY = colorUi.colorWarpPendingCircle.radiusV *
+            imageRect.GetHeight() /
+            std::max(0.000001f,
+                previewRecipe.cropRotation.cropEnabled
+                    ? previewRecipe.cropRotation.cropHeight
+                    : 1.0f);
+        const float pendingRadius = std::max(4.0f, (radiusX + radiusY) * 0.5f);
+        const float pendingDistance = std::hypot(
+            mouse.x - pendingCenter.x, mouse.y - pendingCenter.y);
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) &&
+            colorUi.colorWarpPendingCircleActive) {
+            colorUi.ResetColorWarpAreaRequest();
+        }
+        if (!colorUi.colorWarpPendingCircleActive &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            bool recalledCircleHit = false;
+            const bool inspectingRecalledRegion =
+                colorUi.colorWarpInspectionActive &&
+                !colorUi.colorWarpInspectedRegionId.empty();
+            if (inspectingRecalledRegion) {
+                const auto inspected = std::find_if(
+                    previewRecipe.colorWarp.regions.begin(),
+                    previewRecipe.colorWarp.regions.end(),
+                    [&](const auto& region) {
+                        return region.id == colorUi.colorWarpInspectedRegionId;
+                    });
+                if (inspected != previewRecipe.colorWarp.regions.end()) {
+                    const auto& crop = previewRecipe.cropRotation;
+                    const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
+                    const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
+                    for (const auto& circle : inspected->circles) {
+                        const ImVec2 recalledDisplay = sourceToDisplay(
+                            circle.centerU, circle.centerV);
+                        const ImVec2 recalledCenter(
+                            imageRect.Min.x + recalledDisplay.x * imageRect.GetWidth(),
+                            imageRect.Min.y + recalledDisplay.y * imageRect.GetHeight());
+                        const float recalledRadius = 0.5f * (
+                            circle.radiusU * imageRect.GetWidth() /
+                                std::max(0.000001f, cropWidth) +
+                            circle.radiusV * imageRect.GetHeight() /
+                                std::max(0.000001f, cropHeight));
+                        if (std::hypot(mouse.x - recalledCenter.x,
+                                       mouse.y - recalledCenter.y) <=
+                            recalledRadius + 6.0f) {
+                            colorUi.ResetColorWarpAreaRequest();
+                            colorUi.colorWarpAreaOwner = areaOwner;
+                            colorUi.colorWarpPendingCircle = circle;
+                            colorUi.colorWarpPendingCircleActive = true;
+                            colorUi.colorWarpPendingCircleDrawing = false;
+                            colorUi.colorWarpPendingCircleEditKind = 1;
+                            colorUi.colorWarpPendingCircleAppend = false;
+                            colorUi.colorWarpPendingReplaceRegionId = inspected->id;
+                            colorUi.colorWarpPendingReplaceCircleId = circle.id;
+                            colorUi.colorWarpAreaStatus = "Edit sampled area";
+                            submitAreaAnalysis();
+                            recalledCircleHit = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (recalledCircleHit) {
+                colorUi.colorWarpPendingCirclePressPosition = mouse;
+                colorUi.colorWarpPendingCirclePressCenterU =
+                    colorUi.colorWarpPendingCircle.centerU;
+                colorUi.colorWarpPendingCirclePressCenterV =
+                    colorUi.colorWarpPendingCircle.centerV;
+                colorUi.colorWarpPendingCirclePressRadiusU =
+                    colorUi.colorWarpPendingCircle.radiusU;
+                colorUi.colorWarpPendingCirclePressRadiusV =
+                    colorUi.colorWarpPendingCircle.radiusV;
+            } else if (inspectingRecalledRegion &&
+                       !colorUi.colorWarpDiagnosticLocked) {
+                colorUi.colorWarpInspectionActive = false;
+                colorUi.colorWarpInspectedRegionId.clear();
+            } else {
+            colorUi.ResetColorWarpAreaRequest();
+            colorUi.colorWarpAreaOwner = areaOwner;
+            colorUi.colorWarpPendingCircleActive = true;
+            colorUi.colorWarpPendingCircleDrawing = true;
+            colorUi.colorWarpPendingCircleEditKind = 2;
+            colorUi.colorWarpPendingCirclePressPosition = mouse;
+            colorUi.colorWarpPendingCircle = {};
+            colorUi.colorWarpPendingReplaceRegionId.clear();
+            colorUi.colorWarpPendingReplaceCircleId.clear();
+            colorUi.colorWarpPendingCircleAppend = false;
+            if (ImGui::GetIO().KeyShift &&
+                colorUi.selectedColorWarpPin >= 0 &&
+                colorUi.selectedColorWarpPin < static_cast<int>(
+                    previewRecipe.colorWarp.pins.size())) {
+                const auto& selectedPin = previewRecipe.colorWarp.pins[
+                    static_cast<std::size_t>(colorUi.selectedColorWarpPin)];
+                if (!selectedPin.regionId.empty()) {
+                    colorUi.colorWarpPendingCircleAppend = true;
+                    colorUi.colorWarpPendingReplaceRegionId =
+                        selectedPin.regionId;
+                    colorUi.colorWarpPendingCircle.polarity =
+                        Stack::RawRecipe::RawColorWarpSamplePolarity::Include;
+                }
+            }
+            colorUi.colorWarpPendingCircle.id = "sample-1";
+            colorUi.colorWarpPendingCircle.centerU = source.x;
+            colorUi.colorWarpPendingCircle.centerV = source.y;
+            const auto& crop = previewRecipe.cropRotation;
+            const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
+            const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
+            colorUi.colorWarpPendingCircle.radiusU =
+                12.0f / std::max(1.0f, imageRect.GetWidth()) * cropWidth;
+            colorUi.colorWarpPendingCircle.radiusV =
+                12.0f / std::max(1.0f, imageRect.GetHeight()) * cropHeight;
+            colorUi.colorWarpAreaStatus = "Drag to size";
+            }
+        } else if (colorUi.colorWarpPendingCircleActive &&
+                   !colorUi.colorWarpPendingCircleDrawing &&
+                   ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (std::abs(pendingDistance - pendingRadius) <= 7.0f) {
+                colorUi.colorWarpPendingCircleEditKind = 2;
+            } else if (pendingDistance <= pendingRadius) {
+                colorUi.colorWarpPendingCircleEditKind = 1;
+            } else {
+                colorUi.ResetColorWarpAreaRequest();
+            }
+            colorUi.colorWarpPendingCirclePressPosition = mouse;
+            colorUi.colorWarpPendingCirclePressCenterU =
+                colorUi.colorWarpPendingCircle.centerU;
+            colorUi.colorWarpPendingCirclePressCenterV =
+                colorUi.colorWarpPendingCircle.centerV;
+            colorUi.colorWarpPendingCirclePressRadiusU =
+                colorUi.colorWarpPendingCircle.radiusU;
+            colorUi.colorWarpPendingCirclePressRadiusV =
+                colorUi.colorWarpPendingCircle.radiusV;
+        }
+        if (colorUi.colorWarpPendingCircleActive &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const float dragDistance = std::hypot(
+                mouse.x - colorUi.colorWarpPendingCirclePressPosition.x,
+                mouse.y - colorUi.colorWarpPendingCirclePressPosition.y);
+            const auto& crop = previewRecipe.cropRotation;
+            const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
+            const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
+            if (colorUi.colorWarpPendingCircleDrawing ||
+                (colorUi.colorWarpPendingCircleEditKind == 2 && dragDistance > 2.0f)) {
+                const float radiusPixels = std::max(
+                    4.0f,
+                    colorUi.colorWarpPendingCircleDrawing
+                        ? dragDistance
+                        : std::hypot(
+                            mouse.x - pendingCenter.x,
+                            mouse.y - pendingCenter.y));
+                colorUi.colorWarpPendingCircle.radiusU = radiusPixels /
+                    std::max(1.0f, imageRect.GetWidth()) * cropWidth;
+                colorUi.colorWarpPendingCircle.radiusV = radiusPixels /
+                    std::max(1.0f, imageRect.GetHeight()) * cropHeight;
+            } else if (colorUi.colorWarpPendingCircleEditKind == 1 && dragDistance > 2.0f) {
+                colorUi.colorWarpPendingCircle.centerU = std::clamp(
+                    colorUi.colorWarpPendingCirclePressCenterU +
+                        (mouse.x - colorUi.colorWarpPendingCirclePressPosition.x) /
+                            std::max(1.0f, imageRect.GetWidth()) * cropWidth,
+                    0.0f, 1.0f);
+                colorUi.colorWarpPendingCircle.centerV = std::clamp(
+                    colorUi.colorWarpPendingCirclePressCenterV +
+                        (mouse.y - colorUi.colorWarpPendingCirclePressPosition.y) /
+                            std::max(1.0f, imageRect.GetHeight()) * cropHeight,
+                    0.0f, 1.0f);
+            }
+        }
+        if (colorUi.colorWarpPendingCircleActive &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            const float dragDistance = std::hypot(
+                mouse.x - colorUi.colorWarpPendingCirclePressPosition.x,
+                mouse.y - colorUi.colorWarpPendingCirclePressPosition.y);
+            const bool wasInitial = colorUi.colorWarpPendingCircleDrawing;
+            colorUi.colorWarpPendingCircleDrawing = false;
+            if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1 &&
+                dragDistance <= 2.0f && !colorUi.colorWarpPendingCircleRefining &&
+                colorUi.colorWarpAreaOwner == areaOwner &&
+                (colorUi.colorWarpPendingCircleAppend ||
+                 !colorUi.colorWarpAreaAnalysisResult.proposals.empty())) {
+                colorUi.colorWarpPendingCircleCommitRequested = true;
+            } else if (!colorUi.colorWarpPendingCircleAppend) {
+                submitAreaAnalysis();
+            } else {
+                colorUi.colorWarpPendingCircleRefining = false;
+                colorUi.colorWarpAreaStatus =
+                    colorUi.colorWarpPendingCircle.polarity ==
+                        Stack::RawRecipe::RawColorWarpSamplePolarity::Exclude
+                    ? "Exclusion ready"
+                    : "Include seed ready";
+            }
+            colorUi.colorWarpPendingCircleEditKind = 0;
+        }
+        if (colorUi.colorWarpPendingCircleActive &&
+            pendingDistance <= pendingRadius + 90.0f &&
+            std::abs(ImGui::GetIO().MouseWheel) > 0.0001f &&
+            !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            colorUi.colorWarpPendingCircle.interpretation =
+                CycleColorWarpInterpretation(
+                    colorUi.colorWarpPendingCircle.interpretation,
+                    ImGui::GetIO().MouseWheel > 0.0f ? 1 : -1);
+            submitAreaAnalysis();
+        }
+    }
+
+    if (colorUi.colorWarpPendingCircleActive) {
+        const ImVec2 display = sourceToDisplay(
+            colorUi.colorWarpPendingCircle.centerU,
+            colorUi.colorWarpPendingCircle.centerV);
+        const ImVec2 center(
+            imageRect.Min.x + display.x * imageRect.GetWidth(),
+            imageRect.Min.y + display.y * imageRect.GetHeight());
+        const auto& crop = previewRecipe.cropRotation;
+        const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
+        const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
+        const float radius = 0.5f * (
+            colorUi.colorWarpPendingCircle.radiusU * imageRect.GetWidth() /
+                std::max(0.000001f, cropWidth) +
+            colorUi.colorWarpPendingCircle.radiusV * imageRect.GetHeight() /
+                std::max(0.000001f, cropHeight));
+        drawList->AddCircle(center, std::max(4.0f, radius),
+            IM_COL32(245, 245, 245, 235), 0, 2.0f);
+        const float reachPixels = 24.0f *
+            imageRect.GetWidth() / std::max(1, colorScope.sourceWidth > 0 ? colorScope.sourceWidth : m_ViewportOutputExpectedNativeWidth);
+        drawList->AddCircle(center, std::max(4.0f, radius + reachPixels),
+            IM_COL32(236, 164, 72, 210), 32, 1.5f);
+        const char* modeLabel = ColorWarpInterpretationLabel(
+            colorUi.colorWarpPendingCircle.interpretation);
+        const std::string polarityLabel =
+            colorUi.colorWarpPendingCircle.polarity ==
+                Stack::RawRecipe::RawColorWarpSamplePolarity::Exclude
+            ? "Exclude · "
+            : "";
+        const std::string tag = polarityLabel + std::string(modeLabel) +
+            (colorUi.colorWarpPendingCircleRefining
+                ? "  refining..."
+                : "  " + colorUi.colorWarpAreaStatus);
+        const ImVec2 tagPosition(center.x + radius + 8.0f, center.y - 10.0f);
+        const ImVec2 tagSize = ImGui::CalcTextSize(tag.c_str());
+        drawList->AddRectFilled(
+            ImVec2(tagPosition.x - 6.0f, tagPosition.y - 4.0f),
+            ImVec2(tagPosition.x + tagSize.x + 6.0f,
+                   tagPosition.y + tagSize.y + 4.0f),
+            IM_COL32(18, 20, 24, 220), 5.0f);
+        drawList->AddText(tagPosition, IM_COL32(245, 245, 245, 245), tag.c_str());
+    }
+    if (colorUi.colorWarpInspectionActive &&
+        !colorUi.colorWarpInspectedRegionId.empty() &&
+        !colorUi.colorWarpPendingCircleActive) {
+        const auto inspected = std::find_if(
+            previewRecipe.colorWarp.regions.begin(),
+            previewRecipe.colorWarp.regions.end(),
+            [&](const auto& region) {
+                return region.id == colorUi.colorWarpInspectedRegionId;
+            });
+        if (inspected != previewRecipe.colorWarp.regions.end()) {
+            const auto& crop = previewRecipe.cropRotation;
+            const float cropWidth = crop.cropEnabled ? crop.cropWidth : 1.0f;
+            const float cropHeight = crop.cropEnabled ? crop.cropHeight : 1.0f;
+            const float inspectionWheel = ImGui::GetIO().MouseWheel;
+            if (previewHovered &&
+                std::abs(inspectionWheel) > 0.0001f) {
+                if (ImGui::GetIO().KeyCtrl) {
+                    colorUi.colorWarpRegionReachWheelDelta +=
+                        inspectionWheel * 4.0f;
+                } else if (ImGui::GetIO().KeyShift) {
+                    colorUi.colorWarpRegionFeatherWheelDelta +=
+                        inspectionWheel * 4.0f;
+                }
+            }
+            for (const auto& circle : inspected->circles) {
+                const ImVec2 display = sourceToDisplay(circle.centerU, circle.centerV);
+                const ImVec2 center(
+                    imageRect.Min.x + display.x * imageRect.GetWidth(),
+                    imageRect.Min.y + display.y * imageRect.GetHeight());
+                const float radius = 0.5f * (
+                    circle.radiusU * imageRect.GetWidth() /
+                        std::max(0.000001f, cropWidth) +
+                    circle.radiusV * imageRect.GetHeight() /
+                        std::max(0.000001f, cropHeight));
+                const float sourceToDisplayScale = 0.5f * (
+                    imageRect.GetWidth() / std::max(1, colorScope.sourceWidth > 0 ? colorScope.sourceWidth : m_ViewportOutputExpectedNativeWidth) +
+                    imageRect.GetHeight() / std::max(1, colorScope.sourceHeight > 0 ? colorScope.sourceHeight : m_ViewportOutputExpectedNativeHeight));
+                drawList->AddCircle(center, std::max(4.0f, radius),
+                    IM_COL32(245, 245, 245, 225), 0, 2.0f);
+                DrawPreviewDashedCircle(
+                    drawList, center,
+                    std::max(4.0f, radius +
+                        inspected->reachPixels * sourceToDisplayScale),
+                    IM_COL32(236, 164, 72, 215));
+                if (inspected->featherPixels > 0.0f) {
+                    drawList->AddCircle(
+                        center,
+                        std::max(4.0f, radius +
+                            inspected->featherPixels * sourceToDisplayScale),
+                        IM_COL32(174, 104, 242, 220), 48, 1.5f);
+                }
+                const std::string tag = std::string(
+                    ColorWarpInterpretationLabel(circle.interpretation)) +
+                    " · " + Stack::RawRecipe::RawColorWarpSpatialModeStableString(
+                        inspected->spatialMode) +
+                    " · Ctrl-wheel reach · Shift-wheel feather";
+                drawList->AddText(
+                    ImVec2(center.x + radius + 7.0f, center.y - 9.0f),
+                    IM_COL32(245, 245, 245, 235), tag.c_str());
+            }
+        }
+    }
 }

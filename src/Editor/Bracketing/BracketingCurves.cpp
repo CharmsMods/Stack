@@ -166,7 +166,11 @@ bool DrawBracketingCurves(BracketingSession& ui,const ImVec2& size) {
         ui.selectedPoint=hit;ui.selectedHandle=handle;
         if(recipe.automatic) {recipe.knots=suggestion;recipe.automatic=false;changed=true;}
         if(hit<0&&ImGui::IsMouseDoubleClicked(0)&&recipe.knots.size()<128) {
-            InsertKnot(recipe.knots,ui.viewMin+(io.MousePos.x-origin.x)/size.x*(ui.viewMax-ui.viewMin));changed=true;
+            const double ev=ui.viewMin+(io.MousePos.x-origin.x)/size.x*(ui.viewMax-ui.viewMin);
+            InsertKnot(recipe.knots,ev);changed=true;
+            const auto inserted=std::min_element(recipe.knots.begin(),recipe.knots.end(),
+                [ev](const auto& a,const auto& b){return std::abs(a.ev-ev)<std::abs(b.ev-ev);});
+            ui.selectedPoint=int(inserted-recipe.knots.begin());ui.selectedHandle=0;
         }
     }
     if(ImGui::IsItemActive()&&ImGui::IsMouseDragging(0)&&ui.selectedPoint>=0&&ui.selectedPoint<static_cast<int>(recipe.knots.size())) {

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 namespace Stack::Validation {
 namespace {
@@ -94,15 +95,46 @@ bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
     }
 
     if (generateThumbnails) {
-        for (const auto& source : scan.sources) {
-            const auto quick = Stack::RawWorkspace::GenerateFastNeutralThumbnail(scan.layout, source);
-            const auto standard = Stack::RawWorkspace::GenerateNeutralThumbnail(scan.layout, source);
-            if (!quick.success || !standard.success) {
-                std::cerr << "Thumbnail generation failed: " << quick.errorMessage << " " << standard.errorMessage << std::endl;
+        for (auto& source : scan.sources) {
+            using namespace Stack::RawWorkspace;
+            ClassifyThumbnailMetadata(scan.layout, source);
+            if (const auto& camera = source.thumbnail.camera; camera.bytes) {
+                std::vector<unsigned char> rgba;
+                int width = 0, height = 0;
+                if (LoadOriginalGalleryPixels(source.absolutePath, camera, kNeutralThumbnailMaxDimension, false, rgba, width, height) !=
+                    GalleryPixelSource::CameraJpeg || width <= 0 || height <= 0) return false;
+                std::cout << source.fileName << " embedded " << camera.width << " x " << camera.height
+                    << ", " << camera.bytes << " bytes, displayed " << width << " x " << height << '\n';
+                const auto detail = LoadOriginalGalleryPixels(source.absolutePath, camera, 2048, true, rgba, width, height);
+                if (detail == GalleryPixelSource::Unavailable || rgba.size() != std::size_t(width) * height * 4) return false;
+                std::cout << "Large preview " << width << " x " << height << " from "
+                    << (detail == GalleryPixelSource::CameraJpeg ? "camera JPEG" : "original RAW samples") << '\n';
+            } else if (!GenerateFastNeutralThumbnail(scan.layout, source).success) return false;
+            const auto standard = GenerateNeutralThumbnail(scan.layout, source);
+            if (!standard.success || !standard.thumbnail.similarityDescriptor.IsValid()) {
+                std::cerr << "Thumbnail analysis failed: " << standard.errorMessage << std::endl;
                 return false;
             }
         }
         if (!Stack::RawWorkspace::RemoveTransientThumbnailCache(scan.layout)) return false;
+    }
+    std::unordered_map<std::string,const Stack::RawWorkspace::SourceRecord*> indexed;
+    for (const auto& source : scan.sources) indexed.emplace(source.relativePathKey,&source);
+    const auto warmStart=Clock::now();
+    const auto warm=Stack::RawWorkspace::ScanWorkspace(workspaceRoot,isRawPath,{},{},{},
+        [&](Stack::RawWorkspace::SourceRecord& file) {
+            const auto found=indexed.find(file.relativePathKey);
+            if (found==indexed.end() || found->second->fileSizeBytes!=file.fileSizeBytes ||
+                found->second->modifiedTimeTicks!=file.modifiedTimeTicks) return false;
+            file.fingerprint=found->second->fingerprint;
+            file.sourceIdentityAlgorithmVersion=found->second->sourceIdentityAlgorithmVersion;
+            file.captureTimestamp=found->second->captureTimestamp;
+            file.captureMetadataChecked=found->second->captureMetadataChecked;
+            return true;
+        });
+    const auto warmEnd=Clock::now();
+    if (!warm.success || warm.progress.reusedSourceIdentityCount!=scan.sources.size()) {
+        std::cerr<<"Warm scan failed to reuse all unchanged capture identities.\n";return false;
     }
     const Clock::time_point classifyStart = Clock::now();
     if (!Stack::RawWorkspace::ClassifyThumbnails(scan.layout, scan.sources)) {
@@ -230,6 +262,8 @@ bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
                  })
               << ", sourceSets=" << sourceSetProjects.size()
               << ") timings(ms scan=" << ElapsedMilliseconds(scanStart, scanEnd)
+              << ", warmScan=" << ElapsedMilliseconds(warmStart,warmEnd)
+              << ", reused=" << warm.progress.reusedSourceIdentityCount
               << ", classify=" << ElapsedMilliseconds(classifyStart, classifyEnd)
               << ", discover=" << ElapsedMilliseconds(discoverStart, discoverEnd)
               << ", cachedDiscover=" << ElapsedMilliseconds(

@@ -11,6 +11,7 @@
 #include "Library/LibraryManager.h"
 #include "Library/LibraryControls.h"
 #include "Persistence/ProjectIndex.h"
+#include "Persistence/ClosetMerge.h"
 #include "Project/ProjectPath.h"
 #include "Raw/RawGalleryFileActions.h"
 #include "Raw/RawLoader.h"
@@ -18,6 +19,7 @@
 #include "Renderer/GLHelpers.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/HoverTextScope.h"
 #include "Utils/RawGallerySelectionVisuals.h"
 #include "Utils/Utf8Text.h"
 
@@ -83,7 +85,7 @@ bool GalleryListSelectable(const std::string& label, bool selected) {
 }
 
 void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
-    std::size_t count, float opacity, bool completedBurst) {
+    std::size_t count, float opacity, bool completedBurst, bool aboveImage = false) {
     if (count > 1u) {
         const std::string countText =
             std::to_string(count);
@@ -103,8 +105,10 @@ void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
             countText.c_str());
     }
     if (completedBurst) {
-        const ImVec2 center(area.GetCenter().x, area.Min.y + 12.0f);
-        const ImU32 tint = ImGui::GetColorU32(ImGuiCol_Text);
+        const ImVec2 center(area.GetCenter().x, area.Min.y + (aboveImage ? -9.0f : 12.0f));
+        ImVec4 color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        color.w *= std::clamp(opacity, 0.0f, 1.0f);
+        const ImU32 tint = ImGui::GetColorU32(color);
         drawList->AddLine(ImVec2(center.x - 4.0f, center.y),
             ImVec2(center.x - 1.0f, center.y + 3.0f), tint, 1.8f);
         drawList->AddLine(ImVec2(center.x - 1.0f, center.y + 3.0f),
@@ -113,7 +117,6 @@ void DrawGalleryStackBadges(ImDrawList* drawList, const ImRect& area,
 }
 
 constexpr int kRawLabDetachedOpenGraceFrames = 120;
-constexpr float kRawLabFilmstripScrollWheelPixels = 90.0f;
 constexpr float kRawLabFilmstripScrollResponseSeconds = 0.11f;
 constexpr float kRawLabGalleryCullPrefetchPixels = 240.0f;
 
@@ -128,8 +131,9 @@ constexpr char kRawLabFilmstripSourcePayload[] =
 } // namespace
 
 bool EditorModule::RenderRawWorkspaceLabGalleryHeader(bool nativeWindow, bool sidebar) {
+    ImGuiExtras::HoverTextScope noHoverText;
     LoadResourceTextures();
-    m_RawWorkspaceLabUi.galleryThumbnailScale = 1.0f;
+
     auto switchHost = [&](RawGalleryHost host) {
         if (host == RawGalleryHost::Filmstrip && !m_PermanentGalleryWorkspace &&
             m_GalleryNavigationHandler) {
@@ -204,6 +208,9 @@ bool EditorModule::RenderRawWorkspaceLabGalleryHeader(bool nativeWindow, bool si
         const auto category = [&](const char* label, Ui::Icon icon, Stack::RawWorkspace::GalleryContentMode mode) {
             if (Ui::IconButton(label, icon, m_RawWorkspaceGalleryContentMode == mode) &&
                     m_RawWorkspaceGalleryContentMode != mode) {
+                m_RawWorkspace.selectedSourceKeys.clear();
+                m_RawWorkspaceLabSelectedProjectPaths.clear();
+                InvalidateRawWorkspaceGalleryPresentation(false);
                 m_RawWorkspaceGalleryContentMode = mode;
                 SaveRawWorkspaceAppState();
             }
@@ -213,10 +220,87 @@ bool EditorModule::RenderRawWorkspaceLabGalleryHeader(bool nativeWindow, bool si
         category("Saved projects", Ui::Icon::Projects, Stack::RawWorkspace::GalleryContentMode::Projects);
         ImGui::SameLine(0.f, 10.f * unit);
         category("Brackets", Ui::Icon::Bracket, Stack::RawWorkspace::GalleryContentMode::Bracket);
+        ImGui::SameLine(0.f, 10.f * unit);
+        const bool browsingAll = m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::AllProjects;
+        category("Unlinked", Ui::Icon::Projects, Stack::RawWorkspace::GalleryContentMode::Unlinked);
+        if (browsingAll || m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Unlinked) {
+            if (ImGui::Button(m_GalleryComparisonName.empty() ? "Comparison image..." : m_GalleryComparisonName.c_str())) {
+                const auto path=FileDialogs::OpenImageFileDialog("Choose a fixed comparison image");
+                if (!path.empty()) ChooseGalleryComparison(std::filesystem::u8path(path));
+            }
+            if (!m_GalleryComparisonName.empty()) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Test pattern")) ChooseGalleryComparison({});
+            }
+            bool all = browsingAll;
+            if (ImGui::Checkbox("All projects", &all)) {
+                m_RawWorkspaceGalleryContentMode = all ? Stack::RawWorkspace::GalleryContentMode::AllProjects :
+                    Stack::RawWorkspace::GalleryContentMode::Unlinked;
+                m_RawWorkspaceLabSelectedProjectPaths.clear();
+                InvalidateRawWorkspaceGalleryPresentation(false);
+            }
+        }
     }
 
+    if (m_GalleryApplyChooseTarget) {
+        ImGui::TextWrapped("Select a target original or linked project.");
+        if (ImGui::SmallButton("Cancel apply")) {
+            m_GalleryApplyChooseTarget=false;
+            RefreshRawEditAttributeClipboardFromSystem();
+        }
+    }
     bool workspaceChanged = false;
+    bool newFolder = false;
     if (ImGui::BeginPopup("RawGalleryOptionsMenu")) {
+        if (ImGui::MenuItem("New photo folder...", nullptr, false,
+                !m_RawWorkspace.workspaceRoot.empty() && !m_RawWorkspace.allSourceFolders)) {
+            m_RawGalleryNewFolderName[0] = 0;
+            newFolder = true;
+        }
+        if (!m_RawWorkspace.nestedClosets.empty() && ImGui::BeginMenu("Merge nested Closet")) {
+            for (const auto& closet : m_RawWorkspace.nestedClosets) {
+                if (!ImGui::MenuItem(closet.parent_path().u8string().c_str())) continue;
+                const auto root = m_RawWorkspace.workspaceRoot;
+                const auto owner = m_Project;
+                ProjectTasks().Submit("Inspecting nested Closet", [this, owner, root, closet] {
+                    Stack::Project::ClosetMergePlan plan;
+                    std::string error;
+                    const bool ok = Stack::Project::InspectClosetMerge(root, closet, plan, error);
+                    owner->tasks.PostToMain([this, owner, ok, error, plan = std::move(plan)] {
+                        if (!ok) { PostNotification(UiNotificationSeverity::Error, error, "closet-merge"); return; }
+                        Stack::Notifications::NoticeSpec notice;
+                        notice.message = "Merge " + std::to_string(plan.projects.size()) + " projects and " +
+                            std::to_string(plan.authoredAssets.size()) + " shared payloads?";
+                        notice.details = plan.nestedCloset.u8string();
+                        for (const auto& file : plan.projects) notice.details += "\n" + file.filename().u8string();
+                        for (const auto& name : plan.authoredAssets) notice.details += "\n" + name;
+                        Stack::Notifications::ActionSpec accept;
+                        accept.label = "Merge";
+                        accept.invoke = [this, owner, plan] {
+                            const bool submitted = ProjectTasks().Submit("Merging nested Closet", [this, owner, plan] {
+                                std::string error;
+                                const bool merged = Stack::Project::MergeCloset(plan, error);
+                                owner->tasks.PostToMain([this, merged, error, root = plan.parentRoot] {
+                                    PostNotification(merged ? UiNotificationSeverity::Success : UiNotificationSeverity::Error,
+                                        merged ? "Nested Closet merged." : error, "closet-merge");
+                                    RefreshRawGalleryAfterFileMove(root);
+                                });
+                            });
+                            return submitted ? Stack::Notifications::ActionResult::Success() :
+                                Stack::Notifications::ActionResult::Failure("Could not start the merge.");
+                        };
+                        notice.actions.push_back(std::move(accept));
+                        Stack::Notifications::ActionSpec cancel;
+                        cancel.label = "Cancel";
+                        cancel.safeCancel = true;
+                        cancel.invoke = [] { return Stack::Notifications::ActionResult::Success(); };
+                        notice.actions.push_back(std::move(cancel));
+                        RequestNotificationDecision(std::move(notice));
+                    });
+                });
+            }
+            ImGui::EndMenu();
+        }
         RenderAutoBracketControls(true);
         ImGui::Separator();
         if (!nativeWindow) {
@@ -244,6 +328,34 @@ bool EditorModule::RenderRawWorkspaceLabGalleryHeader(bool nativeWindow, bool si
         }
         ImGui::EndPopup();
     }
+    if (newFolder) ImGui::OpenPopup("New photo folder");
+    if (ImGui::BeginPopupModal("New photo folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("Enter a folder name relative to the current photo root.");
+        const bool enter = ImGui::InputText("Folder", m_RawGalleryNewFolderName,
+            sizeof(m_RawGalleryNewFolderName), ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::Button("Create") || enter) {
+            const auto relative = std::filesystem::u8path(m_RawGalleryNewFolderName).lexically_normal();
+            const auto root = m_RawWorkspace.workspaceRoot;
+            std::error_code ec;
+            const auto target = root / relative;
+            const bool safe = !relative.empty() && !relative.has_root_path() &&
+                *relative.begin() != ".." && relative != "." &&
+                std::none_of(relative.begin(), relative.end(), [](const auto& part) {
+                    auto name = part.u8string();
+                    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c){ return char(std::tolower(c)); });
+                    return name == "closet" || name.rfind(".stack-merged-", 0) == 0;
+                }) && std::filesystem::weakly_canonical(target, ec) == target && !ec;
+            if (safe && std::filesystem::create_directories(target, ec)) {
+                RescanRawWorkspace();
+                ImGui::CloseCurrentPopup();
+            } else PostNotification(UiNotificationSeverity::Warning,
+                "Choose an unused folder name inside the photo root.", "gallery-new-folder");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
 
     if (creatingMfd) {
         advanceHeaderControl(8.0f);
@@ -419,10 +531,28 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     bool compactFilmstrip,
     bool expandedFilmstripDrawer,
     float filmstripDrawerExpansion) {
+    ImGuiExtras::HoverTextScope noHoverText;
     auto& layoutMotion = m_RawWorkspaceGalleryLayoutAnimation;
     if (ImGui::GetCurrentWindow()->SkipItems) {
-        layoutMotion.Reset();
         return;
+    }
+    auto& gridBrowse = m_RawWorkspaceGalleryGridStacks;
+    int gridGroup = -1;
+    bool gridImageHovered = false;
+    const std::string browsingScope = GetRawWorkspaceGalleryScopeKey() + ":" +
+        std::to_string(static_cast<int>(m_RawWorkspaceGalleryContentMode)) + ":" +
+        m_RawGalleryFolderFilter.value_or(std::string{});
+    if (gridBrowse.scope != browsingScope) {
+        gridBrowse.Close(); gridBrowse.scope = browsingScope;
+    }
+    if (!compactFilmstrip) {
+        auto& scale = m_RawWorkspaceLabUi.galleryThumbnailScale;
+        if (gridBrowse.scaleTarget < 0.f) gridBrowse.scaleTarget = scale;
+        const auto& io = ImGui::GetIO();
+        if (io.KeyCtrl && io.MouseWheel != 0.f && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
+            gridBrowse.scaleTarget = std::clamp(gridBrowse.scaleTarget * std::exp(io.MouseWheel * .12f), .55f, 2.5f);
+        if (Stack::LibraryUi::ReducedMotion()) scale = gridBrowse.scaleTarget;
+        else if (scale != gridBrowse.scaleTarget) Stack::Header::Approach(scale, gridBrowse.scaleTarget, 18.f, .0005f);
     }
     const ImRect viewClip = ImGui::GetCurrentWindow()->ClipRect;
     if (m_PermanentGalleryWorkspace) layoutMotion.SetViewport(viewClip);
@@ -510,6 +640,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             RawGalleryNavigationMode::ProjectRoot &&
         m_RawWorkspaceGalleryContentMode !=
             Stack::RawWorkspace::GalleryContentMode::Gallery;
+    const bool canEditOrganization = !projectsOnly && CanEditRawWorkspaceFilmstripOrganization();
     const auto* projectStacks = projectsOnly ? &ResolveRawWorkspaceGalleryProjectStacks() : nullptr;
     if(!compactFilmstrip&&m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket)RenderAutoBracketQueueItems();
     if ((projectsOnly && presentation.projects.empty()) ||
@@ -526,7 +657,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         return;
     }
 
-    m_RawWorkspaceLabUi.galleryThumbnailScale = 1.0f;
+
 
     const auto sameGalleryProjectPath = [](
         const std::filesystem::path& left,
@@ -555,9 +686,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             const auto chosen = std::find_if(family.projectIndices.begin(), family.projectIndices.end(),
                 [&](const auto index) { return sameGalleryProjectPath(presentation.projects[index].projectPath, projectPath); });
             if (chosen == family.projectIndices.end()) continue;
-            const auto& chosenId = presentation.projects[*chosen].projectId;
+            const auto& chosenId = presentation.projects[*chosen].projectCoverKey;
             for (const auto index : family.projectIndices)
-                m_RawWorkspaceGalleryProjectCoverIds[presentation.projects[index].projectId] = chosenId;
+                m_RawWorkspaceGalleryProjectCoverIds[presentation.projects[index].projectCoverKey] = chosenId;
             break;
         }
         if (range && !m_RawWorkspaceLabProjectSelectionAnchor.empty()) {
@@ -568,10 +699,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawWorkspaceGalleryDisplayMode != Stack::RawWorkspace::GalleryDisplayMode::List);
             if (stackedProjectOrder) for (const auto& family : *projectStacks) {
                 const auto* member = &presentation.projects[family.projectIndices.front()];
-                const auto cover = m_RawWorkspaceGalleryProjectCoverIds.find(member->projectId);
+                const auto cover = m_RawWorkspaceGalleryProjectCoverIds.find(member->projectCoverKey);
                 for (const auto index : family.projectIndices) {
                     const auto& candidate = presentation.projects[index];
-                    if (cover != m_RawWorkspaceGalleryProjectCoverIds.end() && candidate.projectId == cover->second)
+                    if (cover != m_RawWorkspaceGalleryProjectCoverIds.end() && candidate.projectCoverKey == cover->second)
                         member = &candidate;
                     if (sameGalleryProjectPath(candidate.projectPath, projectPath) ||
                         sameGalleryProjectPath(candidate.projectPath, m_RawWorkspaceLabProjectSelectionAnchor)) {
@@ -681,6 +812,25 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawLabGalleryScrollToSourceKey.clear();
     };
 
+    const auto projectReferenceSource = [&](const Stack::RawWorkspace::GalleryProjectView& project)
+        -> const Stack::RawWorkspace::SourceRecord* {
+        if (project.referenceSourceIndex < m_RawWorkspace.sources.size()) {
+            const auto& source = m_RawWorkspace.sources[project.referenceSourceIndex];
+            if (source.relativePathKey == project.referenceSourceKey) return &source;
+        }
+        if (project.projectIndex < m_RawWorkspace.sourceSetProjects.size()) {
+            const auto& linked = m_RawWorkspace.sourceSetProjects[project.projectIndex].linkedOriginal;
+            if (linked) return linked.get();
+        }
+        if (!project.referenceSourceKey.empty()) {
+            if (const auto* source = FindRawWorkspaceSourceByKey(project.referenceSourceKey)) {
+                return source;
+            }
+        }
+        return nullptr;
+    };
+
+    if (compactFilmstrip) m_RawWorkspaceLabFilmstripDragState.deliveryHandledThisFrame = false;
     auto drawThumbnail = [&](const Stack::RawWorkspace::SourceRecord& source,
                              const ImVec2& tileSize,
                              float imageHeight,
@@ -698,7 +848,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                                  std::numeric_limits<float>::infinity(),
                              bool completedBurst = false,
                              const std::vector<std::size_t>* projectFamily = nullptr,
-                             ImRect* deferredBadgeArea = nullptr) {
+                             ImRect* deferredBadgeArea = nullptr,
+                             float previewHoverTopY = std::numeric_limits<float>::infinity()) {
         if (projectPath.empty() &&
             !source.relativePathKey.empty() &&
             source.relativePathKey.rfind("project-overlay:", 0) != 0) {
@@ -744,6 +895,14 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const bool tileHovered = pointerOnVisibleCard &&
             ImGui::IsItemHovered() &&
             ImGui::GetIO().MousePos.y >= tileMotion.Map(tileMinimum).y;
+        // Only preview extends above a short stack. Native item bounds still
+        // own selection, double-click, dragging and context actions.
+        const ImVec2 pointer = ImGui::GetIO().MousePos;
+        const bool previewHovered = tileHovered ||
+            (compactFilmstrip && previewHoverEnabled && pointerEnabled && !tileMotion.Active() &&
+             ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() &&
+             pointer.x >= tileMinimum.x && pointer.x < tileMinimum.x + tileSize.x &&
+             pointer.y >= previewHoverTopY && pointer.y < tileMinimum.y);
         if (compactFilmstrip && tileHovered &&
             currentFilmstripTimelineIndex <
                 m_RawWorkspaceLabFilmstripTimelineEntries.size()) {
@@ -758,6 +917,50 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 filmstripTargetMembers->size() > 1u &&
                 filmstripDrawerExpansion > 0.001f;
         }
+        gridImageHovered |= tileHovered;
+        const bool gridDraggable = !compactFilmstrip && !projectsOnly && m_PermanentGalleryWorkspace &&
+            projectPath.empty() && canEditOrganization && !tileMotion.Active();
+        if (gridDraggable && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+            if (gridBrowse.dragged.empty()) {
+                gridBrowse.dragged = gridBrowse.groupCount == 0 && filmstripTargetMembers
+                    ? *filmstripTargetMembers : std::vector<std::string>{source.relativePathKey};
+                gridBrowse.dragGroup = gridGroup;
+                if (gridBrowse.groupCount && gridGroup >= 0 &&
+                    std::find(m_RawWorkspace.selectedSourceKeys.begin(),m_RawWorkspace.selectedSourceKeys.end(),
+                        source.relativePathKey) != m_RawWorkspace.selectedSourceKeys.end()) {
+                    gridBrowse.dragged.clear();
+                    for (const auto& member : gridBrowse.groups[gridGroup])
+                        if (std::find(m_RawWorkspace.selectedSourceKeys.begin(),m_RawWorkspace.selectedSourceKeys.end(),member)
+                            != m_RawWorkspace.selectedSourceKeys.end()) gridBrowse.dragged.push_back(member);
+                }
+            }
+            ImGui::SetDragDropPayload("RawGalleryGridMembers", source.relativePathKey.c_str(), source.relativePathKey.size()+1);
+            int dragWidth=0,dragHeight=0;
+            const auto dragTexture=GetRawWorkspaceThumbnailTexture(source,&dragWidth,&dragHeight,false);
+            if (dragTexture && dragWidth>0 && dragHeight>0) {
+                const float factor=std::min(112.f/dragWidth,84.f/dragHeight);
+                const ImVec2 minimum(pointer.x+14.f,pointer.y+12.f);
+                ImGui::GetForegroundDrawList()->AddImageRounded((ImTextureID)(intptr_t)dragTexture,minimum,
+                    {minimum.x+dragWidth*factor,minimum.y+dragHeight*factor},{0,1},{1,0},IM_COL32(255,255,255,210),4.f);
+            }
+            ImGui::EndDragDropSource();
+        }
+        if (gridDraggable && ImGui::BeginDragDropTarget()) {
+            if (const auto* payload = ImGui::AcceptDragDropPayload("RawGalleryGridMembers")) {
+                const auto target = gridBrowse.groupCount && gridGroup >= 0 ? gridBrowse.groups[gridGroup] :
+                    filmstripTargetMembers ? *filmstripTargetMembers : std::vector<std::string>{source.relativePathKey};
+                if (payload->IsDelivery() && !gridBrowse.dragged.empty() &&
+                    std::find(target.begin(),target.end(),gridBrowse.dragged.front()) == target.end()) {
+                    if (!gridBrowse.groupCount && gridBrowse.dragged.size()>1 && target.size()>1) {
+                        gridBrowse.Open(gridBrowse.dragged,target,ImGui::GetFrameCount());
+                    } else {
+                        gridBrowse.pendingMembers = target;
+                        gridBrowse.pendingGroup = gridGroup;
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
         const bool tileDoubleClicked = tilePressed &&
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
         const bool gridSourceStack = !compactFilmstrip && m_PermanentGalleryWorkspace &&
@@ -771,7 +974,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 tileRect.Max.x,
                 std::min(tileRect.Max.y, tileRect.Min.y + imageHeight)));
         const bool draggableFilmstripSource = compactFilmstrip && !tileMotion.Active() &&
-            CanEditRawWorkspaceFilmstripOrganization() &&
+            canEditOrganization &&
             projectPath.empty() &&
             !source.relativePathKey.empty() &&
             source.relativePathKey.rfind("project-overlay:", 0) != 0;
@@ -848,7 +1051,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             filmstripDrag.proxyMinimum = ImVec2(
                 ImGui::GetIO().MousePos.x - filmstripDrag.grabOffset.x,
                 ImGui::GetIO().MousePos.y - filmstripDrag.grabOffset.y);
-            filmstripDrag.deliveryHandledThisFrame = false;
             ImGui::SetDragDropPayload(
                 kRawLabFilmstripSourcePayload,
                 source.relativePathKey.c_str(),
@@ -885,27 +1087,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     filmstripDrag.animationEndMinimum = tileMinimum;
                     if (payload->IsDelivery()) {
                         filmstripDrag.deliveryHandledThisFrame = true;
-                        filmstripDrag.animationStartMinimum =
-                            filmstripDrag.proxyMinimum;
-                        filmstripDrag.phaseStartedAt = ImGui::GetTime();
-                        if (filmstripDrag.collapsedStackSource) {
-                            filmstripDrag.phase =
-                                RawGalleryFilmstripDragPhase::
-                                    AwaitingStackChoice;
-                            filmstripDrag.popupRequested = true;
-                        } else {
-                            const bool changed =
-                                MergeRawWorkspaceFilmstripStackMembers(
-                                    { filmstripDrag.sourceKey },
-                                    filmstripDrag.targetStackMembers);
-                            filmstripDrag.phase = changed
-                                ? RawGalleryFilmstripDragPhase::Settling
-                                : RawGalleryFilmstripDragPhase::Returning;
-                            if (!changed) {
-                                filmstripDrag.animationEndMinimum =
-                                    filmstripDrag.originMinimum;
-                            }
-                        }
+                        // Commit after the strip finishes using its borrowed stack order.
                     }
                 }
             }
@@ -919,10 +1101,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             return &presentation.projects[(*projectFamily)[index]];
         };
         std::size_t activeProjectIndex = 0;
-        const auto cover = projectCount ? m_RawWorkspaceGalleryProjectCoverIds.find(projectAt(0)->projectId) :
+        const auto cover = projectCount ? m_RawWorkspaceGalleryProjectCoverIds.find(projectAt(0)->projectCoverKey) :
             m_RawWorkspaceGalleryProjectCoverIds.end();
         for (std::size_t index = 0; index < projectCount; ++index) {
-            if ((cover != m_RawWorkspaceGalleryProjectCoverIds.end() && projectAt(index)->projectId == cover->second) ||
+            if ((cover != m_RawWorkspaceGalleryProjectCoverIds.end() && projectAt(index)->projectCoverKey == cover->second) ||
                 (cover == m_RawWorkspaceGalleryProjectCoverIds.end() &&
                     sameGalleryProjectPath(projectAt(index)->projectPath, m_RawWorkspaceLabFocusedProjectPath))) {
                 activeProjectIndex = index;
@@ -1036,50 +1218,31 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 ImVec2(6.0f, 3.0f),
                 ImVec2(8.0f, 4.0f)
             }};
+            const auto drawProjectCard = [&](const Stack::RawWorkspace::GalleryProjectView& project,
+                                             const ImVec2& offset, float opacity, bool frame) {
+                if (project.coverThumbnailCachePath.empty() && !project.standaloneMaster && !UsesGalleryPresetPreviews()) {
+                    if (const auto* reference = projectReferenceSource(project)) {
+                        drawImageCard(*reference, offset, opacity, frame);
+                        return;
+                    }
+                }
+                Stack::RawWorkspace::SourceRecord cover;
+                cover.relativePathKey = project.projectCoverKey;
+                if (!project.coverThumbnailCachePath.empty()) {
+                    cover.thumbnail.absolutePath = project.coverThumbnailCachePath;
+                    cover.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Ready;
+                }
+                drawImageCard(cover, offset, opacity, frame);
+            };
             std::size_t depth = 0;
             for (std::size_t index = 0; index < projectCount && depth < stackOffsets.size(); ++index) {
                 if (index == activeProjectIndex) {
                     continue;
                 }
-                Stack::RawWorkspace::SourceRecord cardSource = source;
-                const auto* project = projectAt(index);
-                cardSource.relativePathKey = "project-overlay:" +
-                    (!project->projectId.empty()
-                        ? project->projectId
-                        : project->projectPath.lexically_normal().generic_string());
-                cardSource.fileName = project->projectName;
-                cardSource.stem = project->projectName;
-                cardSource.thumbnail = {};
-                if (!project->coverThumbnailCachePath.empty()) {
-                    cardSource.thumbnail.absolutePath =
-                        project->coverThumbnailCachePath;
-                    cardSource.thumbnail.status =
-                        Stack::RawWorkspace::ThumbnailStatus::Ready;
-                }
-                const ImVec2 offset = stackOffsets[
-                    std::min(depth, stackOffsets.size() - 1u)];
-                drawImageCard(
-                    cardSource,
-                    offset,
-                    0.84f,
-                    true);
+                drawProjectCard(*projectAt(index), stackOffsets[depth], 0.84f, true);
                 ++depth;
             }
-            Stack::RawWorkspace::SourceRecord topSource = source;
-            topSource.relativePathKey = "project-overlay:" +
-                (!activeProject->projectId.empty()
-                    ? activeProject->projectId
-                    : activeProject->projectPath.lexically_normal().generic_string());
-            topSource.fileName = activeProjectName;
-            topSource.stem = activeProjectName;
-            topSource.thumbnail = {};
-            if (!activeProject->coverThumbnailCachePath.empty()) {
-                topSource.thumbnail.absolutePath =
-                    activeProject->coverThumbnailCachePath;
-                topSource.thumbnail.status =
-                    Stack::RawWorkspace::ThumbnailStatus::Ready;
-            }
-            drawImageCard(topSource, ImVec2(0.0f, 0.0f), 1.0f, false);
+            drawProjectCard(*activeProject, ImVec2(0.0f, 0.0f), 1.0f, false);
             drawList->AddRect(
                 imageArea.Min,
                 imageArea.Max,
@@ -1257,7 +1420,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         textureHeight > 0
                             ? textureHeight
                             : source.thumbnail.height),
-            compactFilmstrip ? 0.0f : 4.0f);
+            compactFilmstrip ? 0.0f : 4.0f, &badgeArea.Min, &badgeArea.Max);
         const bool dragPlaceholder = compactFilmstrip &&
             filmstripDrag.phase != RawGalleryFilmstripDragPhase::Idle &&
             filmstripDrag.sourceKey == source.relativePathKey;
@@ -1284,7 +1447,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
         if (deferredBadgeArea) *deferredBadgeArea = tileMotion.Map(badgeArea);
         else DrawGalleryStackBadges(drawList, badgeArea, similarityStackCount,
-            similarityStackCountOpacity, completedBurst);
+            similarityStackCountOpacity, completedBurst, compactFilmstrip);
         const std::string versionsLabel = stackedProjects ? std::to_string(projectCount) + " versions" : std::string();
         const ImVec2 versionsSize = stackedProjects ? ImGui::CalcTextSize(versionsLabel.c_str()) : ImVec2();
         const ImRect versionsBadge(
@@ -1316,14 +1479,23 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawLabGalleryFlashSourceKey.clear();
             }
         }
-        if (tilePressed && !versionsPressed) {
+        const bool collapsedCaptureStack = activeProjectPath.empty() && filmstripTargetMembers &&
+            filmstripTargetMembers->size() > 1u &&
+            ((gridSourceStack && gridBrowse.groupCount == 0) ||
+             (compactFilmstrip && similarityStackCount > 1u && filmstripDrawerExpansion <= .001f));
+        const auto selectCaptureStack = [&] {
+            selectSource(source.relativePathKey, false, false, false);
+            m_RawWorkspace.selectedSourceKeys = *filmstripTargetMembers;
+            InvalidateRawWorkspaceGalleryPresentation(false);
+        };
+        if (tilePressed && !versionsPressed && (!compactFilmstrip || filmstripDrag.phase == RawGalleryFilmstripDragPhase::Idle)) {
             const bool doubleClicked = tileDoubleClicked;
             const ImGuiIO& click = ImGui::GetIO();
             const bool selectionModifier = click.KeyCtrl || click.KeyShift;
             if (gridSourceStack && filmstripTargetMembers->size() > 1u &&
                 doubleClicked && !selectionModifier) {
                 selectSource(source.relativePathKey, false, false, false);
-                OpenRawWorkspaceGalleryStackInFilmstrip(source.relativePathKey);
+                gridBrowse.Open(*filmstripTargetMembers, {}, ImGui::GetFrameCount());
             } else if (compactFilmstrip && m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
                 filmstripTargetMembers && filmstripTargetMembers->size() > 1u &&
                 similarityStackCount > 1u &&
@@ -1335,6 +1507,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 filmstripTargetMembers && (!compactFilmstrip || filmstripDrawerExpansion <= 0.001f) &&
                 !doubleClicked) {
                 SelectBracketingSources(*filmstripTargetMembers,click.KeyCtrl,click.KeyShift);
+            } else if (collapsedCaptureStack && !selectionModifier && !doubleClicked) {
+                selectCaptureStack();
             } else if (!activeProjectPath.empty()) {
                 selectProject(
                     activeProjectPath,
@@ -1359,8 +1533,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     doubleClicked && !creationMode && !selectionModifier);
             }
         }
-        if (!queuePlaceholder && pointerOnVisibleCard && ImGui::IsItemHovered() &&
-            ImGui::IsMouseReleased(ImGuiMouseButton_Right)) ImGui::OpenPopup("RawGalleryEditContext");
+        if (!queuePlaceholder && tileHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+            if (collapsedCaptureStack) selectCaptureStack();
+            ImGui::OpenPopup("RawGalleryEditContext");
+        }
         if (!queuePlaceholder && ImGui::BeginPopup("RawGalleryEditContext")) {
             if (!activeProjectPath.empty()) {
                 if (!isProjectSelected(activeProjectPath)) {
@@ -1384,7 +1560,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             if (stackedProjects && ImGui::BeginMenu("Open saved version")) {
                 for (std::size_t index = 0; index < projectCount; ++index) {
                     const auto* project = projectAt(index);
-                    ImGui::PushID(project->projectId.c_str());
+                    ImGui::PushID(project->projectCoverKey.c_str());
                     const auto label = project->projectName + " / Version " + std::to_string(index + 1u);
                     const auto details = std::to_string(project->frameCount) + " captures";
                     if (ImGui::MenuItem(label.c_str(), details.c_str(),
@@ -1404,47 +1580,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             }
             ImGui::EndPopup();
         }
-        if ((compactFilmstrip || m_PermanentGalleryWorkspace) && tileHovered) {
+        if ((compactFilmstrip || m_PermanentGalleryWorkspace) && previewHovered) {
             m_RawWorkspaceLabFilmstripHoverFrame = ImGui::GetFrameCount();
             std::string hoverKey = source.relativePathKey;
             if (hoverKey.rfind("project-overlay:", 0) == 0) {
-                hoverKey =
-                    m_RawWorkspaceLabFilmstripHoverProjectPath ==
-                            activeProjectPath
-                    ? m_RawWorkspaceLabFilmstripHoverSourceKey
-                    : std::string {};
-                if (hoverKey.empty() && activeProject != nullptr) {
-                    hoverKey = activeProject->referenceSourceKey;
-                }
-                if (!hoverKey.empty() &&
-                    FindRawWorkspaceSourceByKey(hoverKey) == nullptr) {
-                    hoverKey.clear();
-                }
-                if (hoverKey.empty()) {
-                    for (const auto& candidate : m_RawWorkspace.sources) {
-                        const bool directProject =
-                            !candidate.project.absolutePath.empty() &&
-                            sameGalleryProjectPath(
-                                candidate.project.absolutePath,
-                                activeProjectPath);
-                        const bool sourceSetProject = std::any_of(
-                            candidate.sourceSetProjectMemberships.begin(),
-                            candidate.sourceSetProjectMemberships.end(),
-                            [&](const auto& membership) {
-                                return sameGalleryProjectPath(
-                                    membership.projectPath,
-                                    activeProjectPath) ||
-                                    (activeProject != nullptr &&
-                                     !activeProject->projectId.empty() &&
-                                     membership.projectId ==
-                                         activeProject->projectId);
-                            });
-                        if (directProject || sourceSetProject) {
-                            hoverKey = candidate.relativePathKey;
-                            break;
-                        }
-                    }
-                }
+                hoverKey = activeProject ? activeProject->referenceSourceKey : std::string{};
             }
             if ((!hoverKey.empty() || !activeProjectPath.empty()) &&
                 m_RawWorkspaceLabFilmstripHoverSuppressed &&
@@ -1514,7 +1654,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             ImGui::TextDisabled("Open saved version");
             for (std::size_t index = 0; index < projectCount; ++index) {
                 const auto* project = projectAt(index);
-                ImGui::PushID(project->projectId.c_str());
+                ImGui::PushID(project->projectCoverKey.c_str());
                 const auto label = project->projectName + " / Version " + std::to_string(index + 1u);
                 const auto details = std::to_string(project->frameCount) + " captures";
                 if (ImGui::MenuItem(label.c_str(), details.c_str(),
@@ -1539,25 +1679,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     const auto projectCover = [&](const Stack::RawWorkspace::GalleryProjectStack& family)
         -> const Stack::RawWorkspace::GalleryProjectView& {
         const auto& first = presentation.projects[family.projectIndices.front()];
-        const auto chosen = m_RawWorkspaceGalleryProjectCoverIds.find(first.projectId);
+        const auto chosen = m_RawWorkspaceGalleryProjectCoverIds.find(first.projectCoverKey);
         if (chosen != m_RawWorkspaceGalleryProjectCoverIds.end()) {
             for (const auto index : family.projectIndices)
-                if (presentation.projects[index].projectId == chosen->second) return presentation.projects[index];
+                if (presentation.projects[index].projectCoverKey == chosen->second) return presentation.projects[index];
         }
         return first;
-    };
-    const auto projectReferenceSource = [&](const Stack::RawWorkspace::GalleryProjectView& project)
-        -> const Stack::RawWorkspace::SourceRecord* {
-        if (project.referenceSourceIndex < m_RawWorkspace.sources.size()) {
-            const auto& source = m_RawWorkspace.sources[project.referenceSourceIndex];
-            if (source.relativePathKey == project.referenceSourceKey) return &source;
-        }
-        if (!project.referenceSourceKey.empty()) {
-            if (const auto* source = FindRawWorkspaceSourceByKey(project.referenceSourceKey)) {
-                return source;
-            }
-        }
-        return nullptr;
     };
     const auto galleryTileSource = [](
         const Stack::RawWorkspace::SourceRecord& source,
@@ -1719,7 +1846,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         if (projectsOnly && !presentation.projects.empty()) {
             ImGui::TextDisabled("%s",m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket?"Bracket":"Projects");
             for (const auto& project : presentation.projects) {
-                ImGui::PushID(project.projectId.c_str());
+                ImGui::PushID(project.projectCoverKey.c_str());
                 const std::string row = project.projectName + "    " +
                     (!project.multiFrameProject
                         ? std::string("Single image")
@@ -1837,7 +1964,16 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     const float gap = compactFilmstrip ? 10.0f : 16.0f;
     if (compactFilmstrip) {
         const ImGuiIO& io = ImGui::GetIO();
+        const float viewportWidth = ImGui::GetCurrentWindow()->ClipRect.GetWidth();
+        auto& scrollMotion = gridBrowse.filmstripScroll;
         const float currentScrollX = ImGui::GetScrollX();
+        scrollMotion.Observe(currentScrollX,m_RawWorkspaceLabFilmstripScrollTargetX,ImGui::GetFrameCount());
+        const float wheelMaximum = std::max(0.f,ImGui::GetScrollMaxX());
+        const auto applyWheel = [&](float wheel) {
+            scrollMotion.Wheel(wheel, std::min(viewportWidth*.22f,(tileWidth+gap)*1.5f),
+                wheelMaximum,ImGui::GetTime(),m_RawWorkspaceLabFilmstripScrollTargetX);
+        };
+        m_RawFilmstripHeight.ObserveScroll(currentScrollX, ImGui::GetTime(), io.DeltaTime);
         if (m_RawWorkspaceLabFilmstripDragState.phase !=
                 RawGalleryFilmstripDragPhase::Idle &&
             m_RawWorkspaceLabFilmstripDragState.lastObservedScrollX >= 0.0f) {
@@ -1863,31 +1999,22 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 ? io.MouseWheelH
                 : io.MouseWheel;
             if (std::abs(wheel) > 0.0001f) {
-                m_RawWorkspaceLabFilmstripScrollTargetX -=
-                    wheel * kRawLabFilmstripScrollWheelPixels;
+                applyWheel(wheel);
             }
         }
 
-        const float scrollMaximumX = std::max(0.0f, ImGui::GetScrollMaxX());
-        if (scrollMaximumX > 0.0f) {
-            m_RawWorkspaceLabFilmstripScrollTargetX = std::clamp(
-                m_RawWorkspaceLabFilmstripScrollTargetX,
-                0.0f,
-                scrollMaximumX);
-        }
-        const float delta = std::clamp(io.DeltaTime, 0.0f, 0.05f);
-        const float response = 1.0f - std::exp(
-            -delta / kRawLabFilmstripScrollResponseSeconds);
-        const float nextScrollX = currentScrollX +
-            (m_RawWorkspaceLabFilmstripScrollTargetX - currentScrollX) * response;
-        if (std::abs(nextScrollX - currentScrollX) > 0.01f) {
-            ImGui::SetScrollX(nextScrollX);
-        }
-        m_RawWorkspaceLabFilmstripScrollLastAppliedX = nextScrollX;
+        const float scrollMaximumX = std::max(0.f,ImGui::GetScrollMaxX());
+        scrollMotion.Step(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaximumX,io.DeltaTime,
+            ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
+        ImGui::SetScrollX(scrollMotion.current);
+        m_RawWorkspaceLabFilmstripScrollLastAppliedX = scrollMotion.current;
         const ImRect filmstripClip = ImGui::GetCurrentWindow()->ClipRect;
         ImVec2 filmstripStart = ImGui::GetCursorScreenPos();
+        float visualRebound=scrollMotion.rebound;
+        filmstripStart.x += visualRebound;
+        ImGui::SetCursorScreenPos(filmstripStart);
         const float unscrolledContentOriginX =
-            filmstripStart.x + ImGui::GetScrollX();
+            filmstripStart.x - visualRebound + ImGui::GetScrollX();
         m_RawWorkspaceLabFilmstripTimelineContentOriginX =
             unscrolledContentOriginX;
         const float filmstripAvailableWidth = std::max(
@@ -1902,6 +2029,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             if (!horizontalLayout.centered) {
                 return;
             }
+            visualRebound=0.f;scrollMotion.overshoot=scrollMotion.rebound=0.f;
             m_RawWorkspaceLabFilmstripScrollTargetX = 0.0f;
             m_RawWorkspaceLabFilmstripScrollLastAppliedX = 0.0f;
             ImGui::SetScrollX(0.0f);
@@ -1944,7 +2072,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             if (std::abs(autoScrollVelocity) > 0.001f) {
                 m_RawWorkspaceLabFilmstripScrollTargetX = std::clamp(
                     m_RawWorkspaceLabFilmstripScrollTargetX +
-                        autoScrollVelocity * delta,
+                        autoScrollVelocity * std::clamp(io.DeltaTime, 0.0f, 0.05f),
                     0.0f,
                     scrollMaximumX);
                 m_RawWorkspaceLabFilmstripDrawerInteractionRetained = true;
@@ -1973,19 +2101,6 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawWorkspaceLabFilmstripProjectTimelineActive = true;
             }
             centerFilmstripItems(projectStacks->size());
-            if (m_PermanentGalleryWorkspace) {
-                for (std::size_t index = 0; index < projectStacks->size(); ++index) {
-                    const auto& project = projectCover((*projectStacks)[index]);
-                    Stack::RawWorkspace::SourceRecord slot;
-                    slot.relativePathKey = "project-overlay:" + (!project.projectId.empty()
-                        ? project.projectId : project.projectPath.lexically_normal().generic_string());
-                    if (layoutMotion.AnchorKey() == slot.relativePathKey)
-                        applyFilmstripAnchor(index, projectStacks->size());
-                    RecordRawWorkspaceGallerySlot(slot, ImVec2(filmstripStart.x +
-                        static_cast<float>(index) * (tileWidth + gap), filmstripStart.y),
-                        ImVec2(tileWidth, imageHeight), filmstripClip);
-                }
-            }
             const auto visibleItems = ComputeGalleryVisibleRange(
                 static_cast<int>(projectStacks->size()),
                 tileWidth,
@@ -1997,6 +2112,23 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     std::max(
                         0.0f,
                         filmstripClip.Max.x - filmstripClip.Min.x)));
+            if (m_PermanentGalleryWorkspace) {
+                const bool needAllSlots = layoutMotion.Active() || layoutMotion.AnchorPending() ||
+                    !m_RawLabGalleryScrollToSourceKey.empty();
+                const auto firstSlot = needAllSlots ? 0u : static_cast<std::size_t>(visibleItems.first);
+                const auto lastSlot = needAllSlots ? projectStacks->size() : static_cast<std::size_t>(visibleItems.lastExclusive);
+                for (std::size_t index = firstSlot; index < lastSlot; ++index) {
+                    const auto& project = projectCover((*projectStacks)[index]);
+                    Stack::RawWorkspace::SourceRecord slot;
+                    slot.relativePathKey = project.projectCoverKey;
+                    if (layoutMotion.AnchorKey() == slot.relativePathKey)
+                        applyFilmstripAnchor(index, projectStacks->size());
+                    RecordRawWorkspaceGallerySlot(slot, ImVec2(filmstripStart.x +
+                        static_cast<float>(index) * (tileWidth + gap), filmstripStart.y),
+                        ImVec2(tileWidth, imageHeight), filmstripClip);
+                }
+            }
+
             for (int tileIndex = visibleItems.first;
                  tileIndex < visibleItems.lastExclusive;
                  ++tileIndex) {
@@ -2017,10 +2149,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         : Stack::RawWorkspace::SourceRecord {};
                     tileSource.fileName = project.projectName;
                     tileSource.stem = project.projectName;
-                    tileSource.relativePathKey = "project-overlay:" +
-                        (!project.projectId.empty()
-                            ? project.projectId
-                            : project.projectPath.lexically_normal().generic_string());
+                    tileSource.relativePathKey = project.projectCoverKey;
                     if (!project.coverThumbnailCachePath.empty()) {
                         tileSource.thumbnail.absolutePath =
                             project.coverThumbnailCachePath;
@@ -2076,10 +2205,24 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawWorkspaceLabFilmstripStackTimelineActive = true;
             }
             centerFilmstripItems(filmstripStacks.size());
-            // Map every member's slot, including clipped and collapsed cards.
-            // This records geometry only; texture decoding remains virtualized.
+            const auto visibleItems = ComputeGalleryVisibleRange(
+                static_cast<int>(filmstripStacks.size()),
+                tileWidth,
+                gap,
+                filmstripStart.x,
+                filmstripClip.Min.x,
+                filmstripClip.Max.x,
+                RawLabGalleryPrefetchPixels(
+                    std::max(
+                        0.0f,
+                        filmstripClip.Max.x - filmstripClip.Min.x)));
+            // Record offscreen destinations only when a transition or scroll request needs them.
             if (m_PermanentGalleryWorkspace) {
-                for (std::size_t index = 0; index < filmstripStacks.size(); ++index) {
+                const bool needAllSlots = layoutMotion.Active() || layoutMotion.AnchorPending() ||
+                    !m_RawLabGalleryScrollToSourceKey.empty();
+                const auto firstSlot = needAllSlots ? 0u : static_cast<std::size_t>(visibleItems.first);
+                const auto lastSlot = needAllSlots ? filmstripStacks.size() : static_cast<std::size_t>(visibleItems.lastExclusive);
+                for (std::size_t index = firstSlot; index < lastSlot; ++index) {
                     const auto& stack = filmstripStacks[index];
                     const auto& order = stack.sourceKeys;
                     const ImVec2 base(filmstripStart.x + static_cast<float>(index) * (tileWidth + gap),
@@ -2113,17 +2256,34 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     }
                 }
             }
-            const auto visibleItems = ComputeGalleryVisibleRange(
-                static_cast<int>(filmstripStacks.size()),
-                tileWidth,
-                gap,
-                filmstripStart.x,
-                filmstripClip.Min.x,
-                filmstripClip.Max.x,
-                RawLabGalleryPrefetchPixels(
-                    std::max(
-                        0.0f,
-                        filmstripClip.Max.x - filmstripClip.Min.x)));
+
+            auto onScreen = ComputeGalleryVisibleRange(
+                static_cast<int>(filmstripStacks.size()), tileWidth, gap,
+                filmstripStart.x, filmstripClip.Min.x, filmstripClip.Max.x, 0.0f);
+            // Drawing includes a spare edge slot; height and hover use only
+            // cards that actually intersect the visible strip.
+            while (onScreen.lastExclusive > onScreen.first && filmstripStart.x +
+                float(onScreen.lastExclusive-1)*(tileWidth+gap) >= filmstripClip.Max.x)
+                --onScreen.lastExclusive;
+            if (onScreen.first < onScreen.lastExclusive && filmstripStart.x +
+                float(onScreen.first)*(tileWidth+gap)+tileWidth <= filmstripClip.Min.x)
+                ++onScreen.first;
+            auto& height = m_RawFilmstripHeight;
+            if (height.first != onScreen.first || height.last != onScreen.lastExclusive ||
+                height.revision != m_RawWorkspaceNavigatorRevision ||
+                height.organization != m_RawWorkspaceFilmstripOrganizationRevision) {
+                height.first = onScreen.first;
+                height.last = onScreen.lastExclusive;
+                height.revision = m_RawWorkspaceNavigatorRevision;
+                height.organization = m_RawWorkspaceFilmstripOrganizationRevision;
+                height.maximum = 1;
+                for (int index = onScreen.first; index < onScreen.lastExclusive; ++index)
+                    height.maximum = std::max(height.maximum, filmstripStacks[index].sourceKeys.size());
+            }
+            constexpr float badgeHeadroom = 14.0f;
+            const float commonHoverTop = Stack::RawWorkspace::ComputeRawGalleryFilmstripStackLayout(
+                height.maximum, tileHeight, gap, filmstripStart.y,
+                filmstripClip.Min.y + badgeHeadroom, filmstripDrawerExpansion).top;
             struct VisibleSimilarityStack {
                 std::size_t stackIndex = 0;
                 ImVec2 baseMinimum;
@@ -2195,10 +2355,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         const std::string& frontSourceKey =
                             orderedMembers.front();
                         const auto viewIt = viewsBySource.find(frontSourceKey);
-                        const Stack::RawWorkspace::SourceRecord* source =
-                            FindRawWorkspaceSourceByKey(frontSourceKey);
-                        if (source != nullptr &&
-                            viewIt != viewsBySource.end()) {
+                        if (viewIt != viewsBySource.end() && viewIt->second->sourceIndex < m_RawWorkspace.sources.size()) {
+                            const auto* source = &m_RawWorkspace.sources[viewIt->second->sourceIndex];
                             const auto& view = *viewIt->second;
                             const Stack::RawWorkspace::SourceRecord& tileSource =
                                 galleryTileSource(*source, view);
@@ -2224,7 +2382,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                                     filmstripDrawerExpansion <= 0.001f ||
                                     orderedMembers.size() == 1u,
                                 std::numeric_limits<float>::infinity(),
-                                stack.hasSavedBracketingResult && filmstripDrawerExpansion <= 0.001f);
+                                stack.hasSavedBracketingResult && (orderedMembers.size() == 1u || filmstripDrawerExpansion <= 0.001f),
+                                nullptr, nullptr, commonHoverTop);
                         }
                     }
                     if (expandedFilmstripDrawer &&
@@ -2271,7 +2430,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             }
 
             ImGuiViewport* mainViewport = ImGui::GetMainViewport();
-            const float drawerTop = filmstripClip.Min.y;
+            const float drawerTop = filmstripClip.Min.y + badgeHeadroom;
             bool stackWheelApplied = false;
             for (const VisibleSimilarityStack& visibleStack : visibleStacks) {
                 const std::vector<std::string>& orderedMembers =
@@ -2295,14 +2454,15 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     continue;
                 }
 
+                const float windowTop = std::min(commonHoverTop, layout.top) - badgeHeadroom;
                 ImGui::SetNextWindowViewport(mainViewport->ID);
                 ImGui::SetNextWindowPos(
-                    ImVec2(windowMinimumX, layout.top),
+                    ImVec2(windowMinimumX, windowTop),
                     ImGuiCond_Always);
                 ImGui::SetNextWindowSize(
                     ImVec2(
                         windowMaximumX - windowMinimumX,
-                        layout.bottom - layout.top),
+                        layout.bottom - windowTop),
                     ImGuiCond_Always);
                 ImGui::SetNextWindowBgAlpha(0.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
@@ -2348,8 +2508,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             ? io.MouseWheelH
                             : io.MouseWheel;
                         if (std::abs(wheel) > 0.0001f) {
-                            m_RawWorkspaceLabFilmstripScrollTargetX -=
-                                wheel * kRawLabFilmstripScrollWheelPixels;
+                            applyWheel(wheel);
                             stackWheelApplied = true;
                         }
                     }
@@ -2360,11 +2519,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                                                       bool visualFront) {
                         const std::string& sourceKey = orderedMembers[depth];
                         const auto viewIt = viewsBySource.find(sourceKey);
-                        const Stack::RawWorkspace::SourceRecord* source =
-                            FindRawWorkspaceSourceByKey(sourceKey);
-                        if (source == nullptr || viewIt == viewsBySource.end()) {
+                        if (viewIt == viewsBySource.end() || viewIt->second->sourceIndex >= m_RawWorkspace.sources.size())
                             return;
-                        }
+                        const auto* source = &m_RawWorkspace.sources[viewIt->second->sourceIndex];
                         ImGui::SetCursorScreenPos(ImVec2(
                             visibleStack.baseMinimum.x,
                             visibleStack.baseMinimum.y -
@@ -2378,7 +2535,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         const auto* displayedSource = &tileSource;
                         if(resultCover) {
                             displayed = tileSource;
-                            displayed->relativePathKey="project-overlay:"+resultStack.resultProjectId;
+                            displayed->relativePathKey=resultStack.resultProjectCoverKey;
                             displayed->fileName=resultStack.resultProjectName;
                             displayed->thumbnail.absolutePath=resultStack.resultCoverPath;
                             displayed->thumbnail.status=Stack::RawWorkspace::ThumbnailStatus::Ready;
@@ -2409,7 +2566,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                             true,
                             exposedBottom,
                             false, nullptr,
-                            depth + 1u == orderedMembers.size() ? &topBadgeArea : nullptr);
+                            depth + 1u == orderedMembers.size() ? &topBadgeArea : nullptr,
+                            depth + 1u == orderedMembers.size() ? commonHoverTop : std::numeric_limits<float>::infinity());
                     };
                     for (std::size_t reverseIndex = orderedMembers.size();
                          reverseIndex > 0u;
@@ -2430,7 +2588,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     if (topBadgeArea.GetWidth() > 0.0f) {
                         DrawGalleryStackBadges(ImGui::GetWindowDrawList(), topBadgeArea,
                             orderedMembers.size(), 1.0f,
-                            filmstripStacks[visibleStack.stackIndex].hasSavedBracketingResult);
+                            filmstripStacks[visibleStack.stackIndex].hasSavedBracketingResult, true);
                     }
                 }
                 ImGui::End();
@@ -2539,6 +2697,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         ? drag.animationEndMinimum
                         : drag.originMinimum);
             };
+
+            if (drag.deliveryHandledThisFrame && drag.phase == RawGalleryFilmstripDragPhase::Dragging &&
+                drag.dropKind == RawGalleryFilmstripDropKind::Group)
+                commitPendingDrop(drag.collapsedStackSource);
 
             if (drag.phase == RawGalleryFilmstripDragPhase::Dragging &&
                 !ImGui::IsDragDropActive() &&
@@ -2775,6 +2937,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawWorkspaceLabFilmstripDragState = {};
             }
         }
+        ImGui::GetCurrentWindow()->DC.CursorMaxPos.x -= visualRebound;
         return;
     }
 
@@ -2792,6 +2955,9 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         1,
         static_cast<int>((availableWidth + gap) / (tileWidth + gap)));
 
+    if (gridBrowse.columns != columns) {
+        gridBrowse.columns = columns; ++gridBrowse.navigationRevision;
+    }
     const std::string workspaceKey =
         m_RawWorkspace.workspaceRoot.lexically_normal().generic_string();
     if (m_RawWorkspaceLabGalleryScrollWorkspaceKey != workspaceKey) {
@@ -2830,6 +2996,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const std::vector<std::size_t>* projectFamily = nullptr;
     };
 
+    if (!projectsOnly && m_PermanentGalleryWorkspace) ResolveRawWorkspaceVisibleGalleryStacks();
     const auto gridStackSource = [&](const std::string& key)
         -> const Stack::RawWorkspace::SourceRecord* {
         const auto view = m_RawWorkspaceLabGalleryViewsBySource.find(key);
@@ -2865,7 +3032,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             return;
         }
 
-        const bool targetExpanded =
+        const bool targetExpanded = gridBrowse.groupCount ||
             m_RawWorkspaceLabCollapsedGalleryGroups.find(groupKey) ==
             m_RawWorkspaceLabCollapsedGalleryGroups.end();
         RawGalleryFolderAnimationState& animation =
@@ -2894,7 +3061,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             "##GalleryFolderHeader",
             ImVec2(headerWidth, headerHeight));
         const bool headerHovered = ImGui::IsItemHovered();
-        if (ImGui::IsItemClicked()) {
+        if (ImGui::IsItemClicked() && !gridBrowse.groupCount) {
             if (targetExpanded) {
                 m_RawWorkspaceLabCollapsedGalleryGroups.insert(groupKey);
             } else {
@@ -3174,10 +3341,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 ? *reference
                 : Stack::RawWorkspace::SourceRecord {});
             auto& tileSource = projectTileSources.back();
-            tileSource.relativePathKey = "project-overlay:" +
-                (!project.projectId.empty()
-                    ? project.projectId
-                    : project.projectPath.lexically_normal().generic_string());
+            tileSource.relativePathKey = project.projectCoverKey;
             tileSource.fileName = project.projectName;
             tileSource.stem = project.projectName;
             if (!project.coverThumbnailCachePath.empty()) {
@@ -3205,7 +3369,41 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             projectItems);
     }
 
-    if (!projectsOnly && m_PermanentGalleryWorkspace) {
+    if (!projectsOnly && m_PermanentGalleryWorkspace && gridBrowse.groupCount) {
+        for (int group = 0; group < gridBrowse.groupCount; ++group) {
+            gridGroup = group;
+            const auto start = ImGui::GetCursorScreenPos();
+            std::vector<AnimatedGalleryItem> members;
+            members.reserve(gridBrowse.groups[group].size());
+            for (const auto& key : gridBrowse.groups[group]) {
+                if (const auto* source = gridStackSource(key))
+                    members.push_back({source, source->fileName, {}, source, "source:"+key});
+            }
+            renderAnimatedGroup(group == 0 ? "opened-stack-a" : "opened-stack-b",
+                gridBrowse.groupCount == 1 ? "Stack" : group == 0 ? "First stack" : "Second stack", members);
+            const auto end = ImGui::GetCursorScreenPos();
+            const ImRect area(start, {start.x+availableWidth,std::max(end.y,start.y+tileHeight+32.f)});
+            if (ImGui::BeginDragDropTargetCustom(area,ImGui::GetID(group ? "StackDropB" : "StackDropA"))) {
+                if (const auto* payload = ImGui::AcceptDragDropPayload("RawGalleryGridMembers")) {
+                    if (payload->IsDelivery() && gridBrowse.dragGroup != group) {
+                        gridBrowse.pendingMembers = gridBrowse.groups[group];
+                        gridBrowse.pendingGroup = group;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SetCursorScreenPos({start.x,area.Max.y});
+            ImGui::Dummy({0,0}); // Register the drop area in native layout, including an empty group.
+            if (group+1 < gridBrowse.groupCount) {
+                ImGui::Separator(); ImGui::Dummy({0,16.f});
+            }
+        }
+        gridGroup = -1;
+        if (gridBrowse.openedFrame != ImGui::GetFrameCount() &&
+            (ImGui::IsKeyPressed(ImGuiKey_Escape,false) ||
+             (!gridImageHovered && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::GetDragDropPayload())))
+            gridBrowse.Close();
+    } else if (!projectsOnly && m_PermanentGalleryWorkspace) {
         const auto& stacks = ResolveRawWorkspaceVisibleGalleryStacks();
         for (const auto& section : m_RawWorkspaceLabVisibleGallerySections) {
             std::vector<AnimatedGalleryItem> sourceItems;
@@ -3247,6 +3445,24 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
     }
 
+    if (!gridBrowse.pendingMembers.empty() || gridBrowse.pendingGroup >= 0) {
+        // Empty destinations use the moving set as their seed, preserving the
+        // established grouping save/notification path.
+        const bool moved = gridBrowse.pendingMembers.empty() && gridBrowse.dragged.size()==1
+            ? DetachRawWorkspaceFilmstripStackMember(gridBrowse.dragged.front())
+            : MergeRawWorkspaceFilmstripStackMembers(gridBrowse.dragged,gridBrowse.pendingMembers);
+        if (moved) {
+            if (gridBrowse.groupCount && gridBrowse.pendingGroup >= 0) {
+                for (const auto& key : gridBrowse.dragged) {
+                    for (auto& group : gridBrowse.groups) group.erase(std::remove(group.begin(),group.end(),key),group.end());
+                    gridBrowse.groups[gridBrowse.pendingGroup].push_back(key);
+                }
+            }
+            ++gridBrowse.navigationRevision;
+        }
+        gridBrowse.pendingMembers.clear(); gridBrowse.pendingGroup = -1;
+    }
+    if (!ImGui::GetDragDropPayload()) gridBrowse.dragged.clear();
     const float maximumScrollY = gridAnchorApplied
         ? std::max(0.0f, ImGui::GetCursorScreenPos().y - ImGui::GetWindowPos().y +
             ImGui::GetScrollY() + ImGui::GetStyle().WindowPadding.y - ImGui::GetWindowSize().y)
@@ -3980,6 +4196,16 @@ void EditorModule::MarkRawWorkspaceLabNativeGalleryPlatformPresented(GLFWwindow*
 bool EditorModule::RequestOpenRawWorkspaceProjectFromGallery(
     const std::filesystem::path& projectPath) {
     if (m_PermanentGalleryWorkspace) {
+        for (const auto& entry : m_RawWorkspace.sourceSetProjects) {
+            if (!entry.unlinked || entry.absolutePath!=projectPath) continue;
+            m_RawWorkspaceGalleryContentMode=Stack::RawWorkspace::GalleryContentMode::Unlinked;
+            m_RawWorkspaceLabFocusedProjectPath=projectPath;
+            m_RawWorkspaceLabSelectedProjectPaths.assign(1,projectPath);
+            InvalidateRawWorkspaceGalleryPresentation(false);
+            return true;
+        }
+    }
+    if (m_PermanentGalleryWorkspace) {
         if (!m_RawGalleryOpenSelectionHandler) return false;
         RawGalleryOpenSelection selection;
         selection.items.push_back({projectPath, true});
@@ -3996,6 +4222,11 @@ bool EditorModule::RequestOpenRawWorkspaceProjectFromGallery(
             "Finish opening the current selection before opening another project.",
             "raw-workspace-project-replacement-busy");
         return false;
+    }
+
+    for (const auto& card : m_RawWorkspace.sourceSetProjects) {
+        if (card.masterSource && card.absolutePath.lexically_normal() == projectPath.lexically_normal())
+            return RequestOpenRawWorkspaceSourceForEditing(card.masterSource->relativePathKey);
     }
 
     // A saved card names one exact document, including a non-default version.

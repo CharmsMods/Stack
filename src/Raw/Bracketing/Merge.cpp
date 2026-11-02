@@ -42,7 +42,7 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     parameters.referenceComparisonPilot=std::max(0.0,referencePilot);
     parameters.warpCovariance=covariance;
     Mfd::SameCfaSampleResult sampled;CaptureFallback fallback;
-    if(!sampler.SampleSameCfa(source.frame,source.noise,mapped,site,parameters,sampled,fallback,&error)) {
+    if(!sampler.SampleSameCfa(source.frame,source.noise,mapped,site,parameters,sampled,fallback,result.headroom,&error)) {
         if(fallback.finite) {
             result.fallback=fallback.value;result.finite=true;result.exposure=1/source.scale;
             result.clipped=result.fallbackClipped=fallback.clipped;
@@ -54,11 +54,7 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     // creating false color. Keep the normal unclipped interpolation without
     // claiming that its alignment passed or adding any capture support.
     result.fallback=sampled.value;result.finite=true;result.clipped=false;result.fallbackClipped=false;
-    if(confidence<=0)return result;
-    double headroom=1;
-    if(hasNearest) {
-        headroom=std::clamp((.995-nearest.normalizedSample)/.045,0.0,1.0);headroom=headroom*headroom*(3-2*headroom);
-    }
+    if(confidence<=0){result.headroom=0;return result;}
     result.value=sampled.value;
     // Confidence moderates scene-dependent registration risk, not sensor
     // noise. An uncertain location on a flat surface remains useful evidence.
@@ -72,7 +68,7 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     result.uncertaintyVariance=sampled.residualModelVariance+sampled.exposureScaleVariance+
         registrationRisk/std::max(kUncertainCaptureReliability,confidence);
     result.variance=result.measurementVariance+result.uncertaintyVariance;
-    result.headroom=headroom;result.support=1;result.clipped=false;return result;
+    result.support=1;result.clipped=false;return result;
 }
 
 static bool EvaluateTemporalRegion(const ProcessingRequest& request,const PreparedDataset& data,
@@ -92,7 +88,8 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
     if(Mfd::ReadPreparedTile(frame,cache,tx,ty,origin,&error)!=Mfd::TileCacheReadStatus::Hit) return false;
     const bool detailFusion=std::any_of(data.sources.begin(),data.sources.end(),
         [](const auto& source){return source.enabled&&source.detailPreference<.999;});
-    if(!detailFusion) return EvaluateTemporalRegion(request,data,groups,origin,false,error);
+    const bool useSpatialGuide=NeedsBurstSpatialGuide(request.recipe)&&!data.spatialGuide.cells.empty();
+    if(!detailFusion&&!useSpatialGuide) return EvaluateTemporalRegion(request,data,groups,origin,false,error);
     const auto left=origin.originX>=4?origin.originX-4:0,top=origin.originY>=4?origin.originY-4:0;
     const auto right=std::min<std::uint64_t>(data.width,origin.originX+origin.extent.width+4);
     const auto bottom=std::min<std::uint64_t>(data.height,origin.originY+origin.extent.height+4);
@@ -100,12 +97,19 @@ bool ReadTemporalGroups(const ProcessingRequest& request,const PreparedDataset& 
     if(!ReadPreparedRegion(frame,sampler,left,top,static_cast<unsigned>(right-left),
         static_cast<unsigned>(bottom-top),expanded,error)) return false;
     std::vector<std::vector<Observation>> full;
-    if(!EvaluateTemporalRegion(request,data,full,expanded,true,error)) return false;
+    if(!EvaluateTemporalRegion(request,data,full,expanded,detailFusion,error)) return false;
     groups.resize(full.size());
     for(auto& group:groups)group.resize(origin.extent.width*origin.extent.height);
-    for(std::size_t g=0;g<groups.size();++g) for(unsigned y=0;y<origin.extent.height;++y)
-        for(unsigned x=0;x<origin.extent.width;++x)
-            groups[g][y*origin.extent.width+x]=full[g][(y+origin.originY-top)*expanded.extent.width+x+origin.originX-left];
+    for(unsigned y=0;y<origin.extent.height;++y)for(unsigned x=0;x<origin.extent.width;++x) {
+        const unsigned px=unsigned(origin.originX)+x,py=unsigned(origin.originY)+y;
+        const auto index=(py-top)*expanded.extent.width+px-left;
+        const bool smooth=useSpatialGuide&&px>=2&&py>=2&&px+2<data.width&&py+2<data.height;
+        const auto agreement=smooth?data.spatialGuide.At(float(px),float(py)):std::array<float,4>{};
+        for(std::size_t g=0;g<groups.size();++g) {
+            const auto& sample=full[g][index];
+            groups[g][y*origin.extent.width+x]=smooth?SmoothBurstSample(&sample,expanded.extent.width,agreement):sample;
+        }
+    }
     return true;
 }
 Pixel BlendWithWeights(const std::vector<Observation>& input,const double* requested,std::size_t requestedCount,

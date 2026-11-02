@@ -17,7 +17,7 @@
 
 namespace Stack::RawRecipe {
 
-inline constexpr int kRawDevelopmentRecipeVersion = 27;
+inline constexpr int kRawDevelopmentRecipeVersion = 28;
 inline constexpr std::size_t kMaxRawGradientAdjustments = 16;
 inline constexpr std::size_t kMaxRawPointCurvePoints = 12;
 inline constexpr std::size_t kMaxRawLocalRangeTargetZones = 32;
@@ -547,11 +547,7 @@ inline constexpr const char* kViewContrastModelPivotedLogV2 = "pivoted-log-v2";
 float EvaluateViewTransformDisplayLuma(
     float input,
     float exposure,
-    float blackEv,
-    float whiteEv,
     float middleGrey,
-    float shoulder,
-    float toe,
     float contrast,
     float contrastPivotEv = 0.0f);
 std::vector<RawLocalRangePoint> DefaultLocalRangePoints(float minEv = -8.0f, float maxEv = 6.0f);

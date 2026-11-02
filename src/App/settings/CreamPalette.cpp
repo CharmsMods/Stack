@@ -31,17 +31,17 @@ CreamPalette MakeMonochromeGray() {
     CreamPalette p = MakeMonochromeDark();
     p.id = kMonochromeGrayPaletteId;
     p.name = "Gray";
-    p.seeds[1] = Hex(0x454545);
+    p.seeds[1] = Hex(0x242424);
     return p;
 }
 
 ResolvedCreamPalette ResolveMonochromePalette(const CreamPalette& p);
 ResolvedCreamPalette ResolveMonochromeGrayPalette(const CreamPalette& p) {
     ResolvedCreamPalette r = ResolveMonochromePalette(p);
-    const ImVec4 gray = Hex(0x454545), panel = gray, raised = Hex(0x525252);
-    const ImVec4 control = Hex(0x565656), hover = Hex(0x606060), active = Hex(0x686868);
-    const ImVec4 text = Hex(0xFFFFFF), muted = Hex(0xF4F4F4), disabled = Hex(0xC8C8C8);
-    const ImVec4 border = Hex(0x8A8A8A), focus = Hex(0xFFFFFF);
+    const ImVec4 gray = Hex(0x242424), panel = gray, raised = Hex(0x2D2D2D);
+    const ImVec4 control = Hex(0x333333), hover = Hex(0x3F3F3F), active = Hex(0x4B4B4B);
+    const ImVec4 text = Hex(0xE8E8E8), muted = Hex(0xC0C0C0), disabled = Hex(0x959595);
+    const ImVec4 border = Hex(0x565656), focus = Hex(0xEEEEEE);
     auto surface = [&](ImVec4 background) {
         SurfaceColors role{};
         role.background = background; role.foreground = text; role.mutedForeground = muted;
@@ -55,9 +55,9 @@ ResolvedCreamPalette ResolveMonochromeGrayPalette(const CreamPalette& p) {
     r.control = surface(control); r.popup = surface(panel); r.navigation = surface(panel);
     r.section = surface(raised);
     for (size_t i = 0; i < r.groups.size(); ++i)
-        r.groups[i] = surface(Hex(0x535353 + static_cast<unsigned>(i) * 0x030303));
+        r.groups[i] = surface(Hex(0x303030 + static_cast<unsigned>(i) * 0x020202));
     r.navigationAccent = focus; r.enabledAccent = focus;
-    r.primaryAction = surface(Hex(0x646464));
+    r.primaryAction = surface(Hex(0x454545));
     r.primaryAction.disabledBackground = panel;
     auto& n = r.nodeAppearance;
     n.surface = raised; n.text = text; n.mutedText = muted; n.disabledText = disabled;

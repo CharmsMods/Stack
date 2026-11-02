@@ -25,8 +25,9 @@ void EditorModule::StartInitialRawProjectSaveAsync(
         return;
     }
     const auto source = *selected;
+    const auto layout = Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
     const auto destination = Project::ProjectIndex::BuildUniqueProjectPath(
-        Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot).projectsDirectory,
+        layout.projectsDirectory,
         owner->name.empty() ? source.stem : owner->name, projectId);
     Project::RawProjectSnapshot captured;
     captured.projectId = projectId;
@@ -41,7 +42,7 @@ void EditorModule::StartInitialRawProjectSaveAsync(
     ApplyActiveRawWorkspaceModeDataToDocument(rawDocument);
     captured.rawWorkspaceData = std::move(rawDocument.rawWorkspaceData);
 
-    auto work = [this, owner, projectId, source, destination, capturedRevision,
+    auto work = [this, owner, projectId, source, layout, destination, capturedRevision,
         captured = std::move(captured), completion]() mutable {
         Project::ProjectStoreOpenResult saved;
         Project::ProjectStoreTransaction transaction;
@@ -51,6 +52,9 @@ void EditorModule::StartInitialRawProjectSaveAsync(
         std::string error;
         bool success = false;
         try {
+            if (!Stack::RawWorkspace::IsMarkedCloset(layout.dataDirectory) &&
+                !Stack::RawWorkspace::EnsureManagedFolders(layout.workspaceRoot, &error))
+                throw std::runtime_error(error);
             if (Project::ClosetAssetRoot(destination).empty())
                 throw std::runtime_error("The Gallery folder moved or is no longer available.");
             Project::RawProjectSnapshot bootstrap;
@@ -58,7 +62,7 @@ void EditorModule::StartInitialRawProjectSaveAsync(
             bootstrap.projectName = captured.projectName;
             bootstrap.projectKindHint = captured.projectKindHint;
             saved = Project::CreateProjectStore(stagingRoot,
-                Project::ProjectStorageKind::DirectoryBundle, bootstrap);
+                Project::ProjectStorageKind::WorkingFile, bootstrap);
             if (!saved) throw std::runtime_error(saved.message);
             createdStaging = true;
             transaction = saved.store->BeginTransaction(saved.snapshot.persistedStorageRevision);
@@ -106,10 +110,10 @@ void EditorModule::StartInitialRawProjectSaveAsync(
             if (createdStaging && stagingRoot.parent_path() == stagingParent &&
                 stagingRoot.filename() != "." && stagingRoot.filename() != "..") {
                 std::error_code cleanupError;
-                std::filesystem::remove_all(stagingRoot, cleanupError);
+                std::filesystem::remove(stagingRoot, cleanupError);
             }
         }
-        owner->tasks.PostToMain([this, owner, projectId, destination, capturedRevision,
+        owner->tasks.PostToMain([this, owner, projectId, source, destination, capturedRevision,
             captured = std::move(captured), saved = std::move(saved), success,
             error = std::move(error), completion = std::move(completion)]() mutable {
             Project::ProjectSaveResult result;
@@ -127,7 +131,7 @@ void EditorModule::StartInitialRawProjectSaveAsync(
                     owner->editRevision, owner->snapshot->persistedStorageRevision);
                 owner->snapshot->dirtyRevision = owner->lifecycle.DirtyRevision();
                 const auto assetId = owner->snapshot->rawWorkspaceData.value("managedAssetId", std::string());
-                const auto managedPath = owner->store->ResolveAssetFile(assetId).string();
+                const auto managedPath = source.absolutePath.string();
                 const auto originalPath = owner->rawRecipe.source.sourcePath;
                 owner->rawRecipe.source.sourcePath = managedPath;
                 for (auto& node : owner->graph.GetNodes()) {

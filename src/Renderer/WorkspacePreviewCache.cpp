@@ -38,12 +38,20 @@ void WorkspacePreviewCache::Capture(unsigned int sourceFramebuffer,
         entry = &*std::min_element(entries.begin(), entries.end(),
             [](const Entry& a, const Entry& b) { return a.used < b.used; });
     }
-    const float scale = std::min(1.f,
-        float(MaximumEdge) / float(std::max(sourceWidth, sourceHeight)));
-    const int w = std::max(1, int(std::lround(sourceWidth * scale)));
-    const int h = std::max(1, int(std::lround(sourceHeight * scale)));
+    const int w = sourceWidth, h = sourceHeight;
     if (entry->width != w || entry->height != h || !entry->framebuffer) {
         Release(*entry);
+        std::uint64_t total = std::uint64_t(w) * h * 4;
+        for (const auto& cached : entries)
+            total += std::uint64_t(cached.width) * cached.height * 4;
+        while (total > ByteBudget) {
+            Entry* oldest = nullptr;
+            for (auto& cached : entries)
+                if (cached.texture && (!oldest || cached.used < oldest->used)) oldest = &cached;
+            if (!oldest) break;
+            total -= std::uint64_t(oldest->width) * oldest->height * 4;
+            Release(*oldest);
+        }
         entry->texture = GLHelpers::CreateTextureFromPixels(nullptr, w, h, 4, false);
         entry->framebuffer = entry->texture ? GLHelpers::CreateFBO(entry->texture) : 0;
         if (!entry->framebuffer) { Release(*entry); return; }
@@ -53,7 +61,7 @@ void WorkspacePreviewCache::Capture(unsigned int sourceFramebuffer,
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFramebuffer);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, entry->framebuffer);
     glDisable(GL_SCISSOR_TEST);
-    glBlitFramebuffer(left, bottom, right, top, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBlitFramebuffer(left, bottom, right, top, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     entry->workspace = workspace;
     entry->rootView = rootView;
     entry->sourceWidth = sourceWidth;

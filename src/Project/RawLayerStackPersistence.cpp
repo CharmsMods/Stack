@@ -83,6 +83,7 @@ nlohmann::json SerializeLayerStack(const RawLayerStackState& state, bool include
         {"explicitRouting",state.explicitRouting},{"imageOutput",EndpointJson(state.imageOutput)}};
     if(state.sourceCanvasPosition)result["sourceCanvasPosition"]={state.sourceCanvasPosition->x,state.sourceCanvasPosition->y};
     if(state.outputCanvasPosition)result["outputCanvasPosition"]={state.outputCanvasPosition->x,state.outputCanvasPosition->y};
+    if(!state.offeredDepthMasks.empty())result["offeredDepthMasks"]=state.offeredDepthMasks;
     result["sourceCanvasNotes"]=state.sourceCanvasNotes;
     result["sourceChannelOutputs"]=EditorNodeGraph::SerializeChannelOutputs(state.sourceChannelOutputs);
     result["outputCanvasNotes"]=state.outputCanvasNotes;
@@ -171,6 +172,7 @@ bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& r
         candidate.outputCanvasNotes=value.value("outputCanvasNotes",std::string{});
         candidate.explicitRouting = value.value("explicitRouting",false);
         if (candidate.explicitRouting && value.contains("imageOutput")) candidate.imageOutput = ReadEndpoint(value.at("imageOutput"));
+        candidate.offeredDepthMasks=value.value("offeredDepthMasks",std::vector<std::string>{});
         candidate.nextId = value.at("nextId").get<std::uint64_t>();
         if (value.contains("createdAssets") && !Assets::DeserializeLibrary(value.at("createdAssets"), candidate.assets, error)) return false;
         candidate.background = readLayer(value.at("background"));

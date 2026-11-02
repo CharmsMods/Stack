@@ -69,7 +69,6 @@ void DrawGuides(ImDrawList* draw, const ImVec2& minimum, const ImVec2& maximum,
     const ImVec2 size(maximum.x - minimum.x, maximum.y - minimum.y);
     const ImU32 lineColor = IM_COL32(255, 255, 255, 205);
     const ImU32 innerColor = IM_COL32(210, 235, 255, 170);
-    draw->PushClipRect(minimum, maximum, true);
     if (mask.shape == RawGradientShape::Linear) {
         const float cs = std::cos(mask.angleRadians), sn = std::sin(mask.angleRadians);
         const float extent = std::max(size.x, size.y) / std::max(size.y, 1.0f) * 2.0f;
@@ -106,7 +105,6 @@ void DrawGuides(ImDrawList* draw, const ImVec2& minimum, const ImVec2& maximum,
         draw->AddCircleFilled(center, 5.0f, IM_COL32(32, 36, 42, 240));
         draw->AddCircle(center, 5.0f, lineColor, 16, 1.5f);
     }
-    draw->PopClipRect();
 }
 
 void DrawWeightOverlay(ImDrawList* draw, const ImVec2& minimum,
@@ -504,7 +502,7 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
         ? (ev ? &context.recipe.evGradients[static_cast<std::size_t>(selected)].mask
             : &context.recipe.toneGradients[static_cast<std::size_t>(selected)].mask)
         : nullptr;
-    if (selectedMask && ui.gradientDrawShape < 0 && inImage &&
+    if (selectedMask && ui.gradientDrawShape < 0 && ImGui::IsWindowHovered() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const int handles = selectedMask->shape == RawGradientShape::Linear ? 4 : 5;
         for (int handle = 0; handle < handles; ++handle) {

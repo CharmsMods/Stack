@@ -20,10 +20,14 @@ Result RevertProjectsToTrash(
     const std::vector<std::filesystem::path>& projectPaths,
     const std::filesystem::path& workspaceRoot = {});
 
-// Only project-owned bundles may be moved. Original camera files are never
+// Only recognized project bundles and portable projects may be moved. Original camera files are never
 // accepted by this API, including when they are referenced by a saved project.
 Result DeleteProjectsToTrash(
     const std::filesystem::path& workspaceRoot,
     const std::vector<std::filesystem::path>& projectPaths);
+
+Result DeleteSourcesToTrash(
+    const std::filesystem::path& workspaceRoot,
+    const std::vector<std::filesystem::path>& paths);
 
 } // namespace Stack::RawGalleryFileActions

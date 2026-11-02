@@ -8,6 +8,6 @@ Vec4 MapCapture(const PreparedSource&,float x,float y,bool reference);
 bool BuildFrameRegion(const BracketingAnalysis&,const PreparedSource&,const Tile&,
     PreparedTileSampler&,FrameRegion&,const std::function<bool()>&,std::string&);
 float SamplingDiversity(const PreparedDataset&);
-Tile MakeTile(unsigned x,unsigned y,unsigned width,unsigned height,unsigned scale,
-    const BracketingAnalysis&,std::size_t group);
+Tile MakeTile(unsigned x,unsigned y,unsigned width,unsigned height,double scale,
+    const BracketingAnalysis&,std::size_t group,bool adaptive=false);
 }

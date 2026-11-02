@@ -55,28 +55,27 @@ void AppShell::TickAutoBracketWorkspaces() {
         if (!worker.ConsumeRawWorkspaceCatalogChanged()) return;
         const auto& root = worker.GetRawWorkspaceState().workspaceRoot;
         for (auto& workspace : m_ProjectWorkspaces)
-            if (workspace->editor.get() != &worker && !workspace->editor->IsAutoBracketWorkspace() &&
+            if (workspace->editor.get() != &worker &&
                 (workspace->editor->IsRawWorkspaceAllFolders() ||
                  workspace->editor->GetRawWorkspaceState().workspaceRoot == root ||
                  Stack::Project::SameProjectPath(workspace->editor->GetRawWorkspaceState().workspaceRoot, root)))
                 workspace->rawCatalogRefreshPending = true;
     };
+    // Apply manual publications before a worker gets another admission, independent of tab order.
+    for (const auto& workspace : m_ProjectWorkspaces)
+        if (!workspace->editor->IsAutoBracketWorkspace()) publishCatalogChanges(*workspace->editor);
+    for (const auto& workspace : m_RetiredProjectWorkspaces)
+        if (!workspace->editor->IsAutoBracketWorkspace()) publishCatalogChanges(*workspace->editor);
     for (auto& workspace : m_ProjectWorkspaces) {
-        if (!workspace->editor->IsAutoBracketWorkspace()) {
-            publishCatalogChanges(*workspace->editor);
-            continue;
-        }
+        if (!workspace->editor->IsAutoBracketWorkspace()) continue;
         const auto& workerRoot=workspace->editor->GetRawWorkspaceState().workspaceRoot;
         workerExists |= workerRoot==galleryRoot || Stack::Project::SameProjectPath(workerRoot,galleryRoot);
         workspace->editor->SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-        workspace->editor->TickAutoBracketing(blocked || foregroundBusy);
+        workspace->editor->TickAutoBracketing(blocked || foregroundBusy || workspace->rawCatalogRefreshPending);
         publishCatalogChanges(*workspace->editor);
     }
     for (auto& workspace : m_RetiredProjectWorkspaces) {
-        if (!workspace->editor->IsAutoBracketWorkspace()) {
-            publishCatalogChanges(*workspace->editor);
-            continue;
-        }
+        if (!workspace->editor->IsAutoBracketWorkspace()) continue;
         const auto& workerRoot=workspace->editor->GetRawWorkspaceState().workspaceRoot;
         workerExists |= workerRoot==galleryRoot || Stack::Project::SameProjectPath(workerRoot,galleryRoot);
         // Cancellation must publish its queue state before a replacement
@@ -85,8 +84,10 @@ void AppShell::TickAutoBracketWorkspaces() {
         publishCatalogChanges(*workspace->editor);
     }
     for (auto& workspace : m_ProjectWorkspaces) {
-        if (workspace->id != m_ActiveProjectWorkspace ||
-            !workspace->rawCatalogRefreshPending || workspace->editor->IsRawWorkspaceScanBusy() ||
+        if (!workspace->rawCatalogRefreshPending ||
+            (workspace->id != m_ActiveProjectWorkspace && workspace->id != m_GalleryWorkspaceId &&
+                !workspace->editor->IsAutoBracketWorkspace()) ||
+            workspace->editor->AutoBracketWorkActive() || workspace->editor->IsRawWorkspaceScanBusy() ||
             workspace->editor->IsWorkspaceTransitionPending()) continue;
         workspace->rawCatalogRefreshPending = false;
         workspace->editor->RescanRawWorkspace();
@@ -97,14 +98,13 @@ void AppShell::TickAutoBracketWorkspaces() {
     // the remembered anchor root. Existing root-owned workers ticked above.
     if (scheduler.IsRawWorkspaceAllFolders() || scheduler.IsRawWorkspaceFolderBrowserOpen()) return;
     scheduler.SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-    scheduler.TickAutoBracketing(blocked || foregroundBusy);
+    scheduler.TickAutoBracketing(blocked || foregroundBusy || gallery->rawCatalogRefreshPending);
     if (blocked || foregroundBusy || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
 
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
     workspace->sourceWorkspaceRoot = galleryRoot;
     workspace->editor->Initialize(m_Window, m_Appearance.get(), false);
     ConfigureWorkspaceEditor(*workspace->editor);
-    workspace->editor->SetRawWorkspaceFolder(galleryRoot);
     if (scheduler.TransferAutoBracketingTo(*workspace->editor)) {
         // Starting automatic work does not change the user's selection.
         workspace->editor->SetWorkspaceDetachedWindowsVisible(false);

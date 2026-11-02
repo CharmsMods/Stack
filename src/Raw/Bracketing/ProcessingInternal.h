@@ -1,5 +1,6 @@
 #pragma once
 #include "Processor.h"
+#include "BurstSpatialGuide.h"
 #include "CaptureMotion.h"
 #include "GroupProcessingMetrics.h"
 #include "Raw/ReconstructionDepth.h"
@@ -25,6 +26,7 @@ struct PreparedSource {
     double detailPreference=1;
     std::shared_ptr<CapturePreview> original;
     mutable std::weak_ptr<const ProcessingThumbnail> presentationThumbnail;
+    std::vector<std::uint8_t> calibrationChannelMask;
     unsigned proxyStride=2;
     Mfd::AffineModel alignment;
     CaptureAlignment alignmentDiagnostic;
@@ -51,6 +53,7 @@ struct PreparedDataset {
     std::size_t origin=0;
     std::string motionIdentity;
     std::string depthIdentity;
+    BurstSpatialGuide spatialGuide;
     std::shared_ptr<const ReconstructionDepth> depth;
     unsigned width=0,height=0;
     std::map<std::string,double> stageSeconds;
@@ -67,6 +70,9 @@ struct Observation {
     // A group may contain accepted measurements while its selected fallback
     // capture is clipped. These are separate validity decisions.
     bool fallbackClipped=false;
+    // For an unsupported clipped site only, value can hold a display estimate.
+    // fallback remains the actual sensor lower bound.
+    ClippedReference clippedReference=ClippedReference::None;
 };
 struct Pixel {
     double value=0,variance=0,support=0;

@@ -411,7 +411,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -423,7 +423,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -455,7 +455,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId,fromSocketId,toNodeId,toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -520,7 +520,7 @@ bool Graph::CanConnectSockets(
                 toSocketId)) {
             if (errorMessage) {
                 *errorMessage =
-                    "That connection would create a cycle.";
+                    ConnectionRules::kCycleError;
             }
             return false;
         }
@@ -558,7 +558,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -577,7 +577,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -611,7 +611,7 @@ bool Graph::CanConnectSockets(
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -672,7 +672,7 @@ bool Graph::CanConnectSockets(
         }
 
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
             return false;
         }
         return true;
@@ -775,7 +775,7 @@ bool Graph::CanConnectSockets(
         return false;
     }
     if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-        if (errorMessage) *errorMessage = "That connection would create a cycle.";
+        if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
         return false;
     }
 
@@ -849,7 +849,7 @@ bool Graph::CanInsertImageToScalarExtractor(
         return false;
     }
     if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-        if (errorMessage) *errorMessage = "That connection would create a cycle.";
+        if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
         return false;
     }
     return true;
@@ -1091,13 +1091,12 @@ bool Graph::WouldCreateCycle(int fromNodeId, const std::string& fromSocketId, in
         if (!node) continue;
         if (current.first == toNodeId &&
             EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, current.second, toSocketId)) return true;
-        for (const auto& link : m_Links) {
-            if (link.toNodeId != current.first) continue;
+        ForEachIncomingLink(current.first, [&](const Link& link) {
             // Replacing a single-input binding removes its old edge.
-            if (link.toNodeId == toNodeId && link.toSocketId == toSocketId) continue;
+            if (link.toNodeId == toNodeId && link.toSocketId == toSocketId) return;
             if (EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, current.second, link.toSocketId))
                 pending.emplace_back(link.fromNodeId, link.fromSocketId);
-        }
+        });
     }
     return false;
 }

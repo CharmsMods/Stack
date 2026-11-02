@@ -1,4 +1,6 @@
 #include "Project/RawLayerStackSnapshot.h"
+#include "Raw/ReconstructionDepth.h"
+#include "Raw/RawOrientation.h"
 #include "Project/RawProjectGraph.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 
@@ -39,7 +41,8 @@ Stack::NodeMath::ValueDescriptor RawLayerSceneDescriptor(Raw::RawWorkingSpace sp
 
 bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState& state,
     int backgroundNodeId, std::uint64_t revision, std::string& error, int frame, int duration, int framesPerSecond,
-    const EditorNodeGraph::Graph* composition, EditorNodeGraph::GraphOutputDescriptions* outputDescriptions) {
+    const EditorNodeGraph::Graph* composition, EditorNodeGraph::GraphOutputDescriptions* outputDescriptions,
+    const Raw::RawImageData* standaloneMaskSource) {
     if (!ValidateRawLayerStack(state, error, composition, backgroundNodeId)) return false;
     auto candidate = snapshot;
     const auto backgroundIt = std::find_if(candidate.nodes.begin(), candidate.nodes.end(),
@@ -58,6 +61,9 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             while (!allocated.insert(id).second) ++id;
             return id;
         };
+        if (standaloneMaskSource && !backgroundIt->rawDevelopment.embeddedRawData &&
+            !backgroundIt->rawDevelopment.sourceMetadata)
+            backgroundIt->rawDevelopment.sourceMetadata=std::make_shared<const Raw::RawMetadata>(standaloneMaskSource->metadata);
         const auto source = *backgroundIt;
         const auto recipe = source.rawDevelopment.recipe;
         const auto scene = RawLayerSceneDescriptor(recipe.technical.workingSpace);
@@ -296,6 +302,28 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 } else {
                     const bool projectCanvas = (node.kind == RenderGraphNodeKind::MaskGenerator || node.kind == RenderGraphNodeKind::CustomMask) &&
                         node.rawCoverage.value("canvas",std::string{}) == "project";
+                    if(node.kind==RenderGraphNodeKind::CustomMask && node.rawCoverage.contains("bracketDepthMask")) {
+                        const auto* raw = source.rawDevelopment.embeddedRawData ?
+                            source.rawDevelopment.embeddedRawData.get() : standaloneMaskSource;
+                        const auto depth=raw?raw->reconstructionDepth:nullptr;
+                        const auto id=node.rawCoverage.at("bracketDepthMask").get<std::string>();
+                        if(depth)for(const auto& m:depth->masks)if(m.id==id){
+                            node.customMask.depthMask=std::shared_ptr<const Raw::DepthMask>(depth,&m);
+                            const auto& placement = recipe.cropRotation;
+                            int orientation=Raw::RotateExifOrientationClockwise(raw->metadata.orientation,placement.rotationDegrees);
+                            constexpr int horizontalFlip[]{0,2,1,4,3,6,5,8,7};
+                            constexpr int verticalFlip[]{0,4,3,2,1,8,7,6,5};
+                            if (placement.flipHorizontally) orientation=horizontalFlip[orientation];
+                            if (placement.flipVertically) orientation=verticalFlip[orientation];
+                            node.customMask.depthOrientation=orientation;
+                            node.customMask.width=m.width;node.customMask.height=m.height;
+                            if(orientation>=5 && orientation<=8)
+                                std::swap(node.customMask.width,node.customMask.height);
+                            break;
+                        }
+                        if(!node.customMask.depthMask)
+                            candidate.unavailableOutputs[node.nodeId]="Depth mask unavailable in the current bracket result.";
+                    }
                     if (projectCanvas) node.maskCanvasSourceNodeId = base;
                     if (node.kind == RenderGraphNodeKind::MaskGenerator && !projectCanvas &&
                         std::none_of(capture.snapshot.links.begin(),capture.snapshot.links.end(),[&](const auto& connection) {
@@ -490,6 +518,12 @@ bool IsRawLayerOutputAvailable(const RenderGraphSnapshot& graph, std::string& er
         const auto node = nodes.find(endpoint.node);
         if (node == nodes.end()) { error = "The requested image producer is missing."; return false; }
         for (const auto* link : inputs[endpoint.node]) {
+            const auto producer = nodes.find(link->fromNodeId);
+            if (producer != nodes.end() && producer->second->rawCoverage.contains("bracketDepthMask") &&
+                graph.unavailableOutputs.count(link->fromNodeId)) {
+                error = graph.unavailableOutputs.at(link->fromNodeId);
+                return false;
+            }
             // Optional missing coverage leaves its consumer unrestricted.
             // A missing required math input still makes that branch unavailable.
             if (link->toSocketId == "maskIn" || link->toSocketId == "factor" ||

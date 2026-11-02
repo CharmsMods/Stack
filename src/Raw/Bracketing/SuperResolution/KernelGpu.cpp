@@ -11,13 +11,13 @@
 
 namespace Raw::Bracketing::Sr {
 namespace {
-static_assert(sizeof(PixelAccumulator)==208);
+static_assert(sizeof(PixelAccumulator)==224);
 static_assert(sizeof(Vec4)==16);
 const char* shader=R"GLSL(
 #version 430 core
 layout(local_size_x=8,local_size_y=8) in;
 layout(std430,binding=0) readonly buffer Input { vec4 data[]; };
-struct Pixel { vec4 kernel; vec4 narrow[3]; vec4 broad[3]; vec4 narrowUncertainty; vec4 broadUncertainty; vec4 crossNoise; vec4 crossFrameWeight; vec4 crossUncertainty; vec4 detailBroadWeight; };
+struct Pixel { vec4 kernel; vec4 broadKernel; vec4 narrow[3]; vec4 broad[3]; vec4 narrowUncertainty; vec4 broadUncertainty; vec4 crossNoise; vec4 crossFrameWeight; vec4 crossUncertainty; vec4 detailBroadWeight; };
 layout(std430,binding=1) buffer Output { Pixel pixels[]; };
 uniform ivec2 outputSize,mapSize;
 uniform vec3 target; // reference origin, sensor step
@@ -78,7 +78,7 @@ void main() {
         float v=max(1e-10,s.y*max(0.,p.kernel.w)+s.z);
         float base=m.z*headroom*1e-5/(v+max(0.,m.w));
         float w=detailPreference*base*exp(-.5*(p.kernel.x*d.x*d.x+2*p.kernel.y*d.x*d.y+p.kernel.z*d.y*d.y));
-        float bw=base*exp(-.5*dot(d,d));
+        float bw=base*exp(-.5*(p.broadKernel.x*d.x*d.x+2*p.broadKernel.y*d.x*d.y+p.broadKernel.z*d.y*d.y));
         p.narrow[c].xyz+=vec3(w*s.x,w,w*w*v);weights[c]+=w;
         p.broad[c].xyz+=vec3(bw*s.x,bw,bw*bw*v);bwts[c]+=bw;
         p.detailBroadWeight[c]+=bw*detailPreference;

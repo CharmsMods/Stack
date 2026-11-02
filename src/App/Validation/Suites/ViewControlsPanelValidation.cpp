@@ -127,18 +127,59 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         }
         require(scrolled,"The Controls body did not scroll with the wheel.");
         capture("controls-bottom-320.png");
-        io.AddMouseWheelEvent(0,30);for (int i=0;i<5;++i) frame();
+        io.AddMouseWheelEvent(0,30);
+        // Wheel scrolling now eases to its target. Select from settled native
+        // geometry rather than clicking a heading while it is still moving.
+        bool returnedToTop=false;
+        for (int i=0;i<60 && !returnedToTop;++i) {
+            frame();
+            for (auto* item:ImGui::GetCurrentContext()->Windows) {
+                const std::string name=item->Name;
+                const auto body=name.rfind("/PanelBody_");
+                if (item->Active && body!=std::string::npos && name.find('/',body+1)==std::string::npos)
+                    returnedToTop=item->Scroll.y==0;
+            }
+        }
+        require(returnedToTop,"The Controls body did not settle back at the top.");
         controls=primaries();
         // Use the rendered first section's geometry to click its second node.
         const float buttonHeight=ImGui::GetFontSize()+10.f;
         const float buttonWidth=std::max(buttonHeight,ImGui::CalcTextSize("3").x+14.f);
-        const float versionsStart=controls.front()->Pos.x+ImGui::CalcTextSize("Exposure").x+8.f;
+        const float switchStart=controls.front()->Pos.x+ImGui::CalcTextSize("Exposure").x+8.f;
+        const float versionsStart=switchStart+buttonHeight*1.5f+8.f;
         const ImVec2 secondButton(versionsStart+buttonWidth*1.5f,
             controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
         io.AddMousePosEvent(secondButton.x,secondButton.y);frame();
         io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        if (editor->GetRawLayerToolIndex()==selectedBefore) {
+            capture("controls-selector-320.png");
+            std::cerr << "Selector at " << secondButton.x << ',' << secondButton.y
+                << "; primary at " << controls.front()->Pos.x << ',' << controls.front()->Pos.y << '\n';
+        }
         require(editor->GetRawLayerToolIndex()!=selectedBefore,"The numbered selector did not change the active instance.");
         require(editor->SerializePipeline().at("rawLayerStack")==authored,"Selecting a numbered instance changed its parameters.");
+        const auto clickToggle=[&] {
+            io.AddMousePosEvent(switchStart+buttonHeight*.75f,secondButton.y);frame();
+            io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        };
+        clickToggle();
+        const auto disabled=editor->SerializePipeline().at("rawLayerStack");
+        require(document.Load(disabled,error),error.c_str());
+        for (const auto& node:document.State().background.graph.GetNodes())
+            if (node.kind==EditorNodeGraph::NodeKind::RawOperation)
+                require(node.rawOperation.enabled==(node.instanceUuid!=second),"Toggle affected the wrong RAW instance.");
+        require(disabled!=authored,"The switch did not persist the bypass.");
+        controls=primaries();
+        const auto disabledSlider=ImVec2(controls.front()->Pos.x+controls.front()->Size.x*.75f,
+            controls.front()->Pos.y+50.f*ImGui::GetFontSize()/16.f);
+        io.AddMousePosEvent(disabledSlider.x,disabledSlider.y);frame();
+        io.AddMouseButtonEvent(0,true);frame();
+        io.AddMousePosEvent(disabledSlider.x+40.f,disabledSlider.y);frame();
+        io.AddMouseButtonEvent(0,false);frame();
+        require(editor->SerializePipeline().at("rawLayerStack")==disabled,"A disabled slider edited its node.");
+        capture("controls-exposure-off.png");
+        clickToggle();
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Re-enabling the node changed its parameters or graph.");
         controls=primaries();
         const int numberedTarget=editor->GetRawLayerToolIndex();
         require(controls.size()>1,"The heading selection check needs a second visible section.");

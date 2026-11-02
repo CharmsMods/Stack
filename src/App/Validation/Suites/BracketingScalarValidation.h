@@ -4,7 +4,6 @@
 #include "Raw/Bracketing/AlignmentExposureSeed.h"
 #include "Raw/RawCaptureCompatibility.h"
 #include "Raw/Bracketing/ExposureGraph.h"
-#include "Raw/Tone/BurstStartingLook.h"
 
 #include <algorithm>
 #include <cmath>
@@ -215,44 +214,12 @@ inline void ValidateImageFirstAdmission() {
         "Empty image evidence invented an exposure search seed");
 }
 
-inline void ValidateStartingLook() {
-    using Stack::RawRecipe::PlanBurstStartingLook;
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const float infinity = std::numeric_limits<float>::infinity();
-    auto plan = PlanBurstStartingLook(.18f, .18f);
-    Require(plan.valid && std::abs(plan.exposureEv) < 1e-6f && plan.shoulder == 0,
-        "Neutral burst starting look changed");
-    const std::vector<std::pair<float, float>> invalidInputs{
-        {0, 1}, {-1, 1}, {nan, 1}, {.18f, infinity}, {.18f, .1f}};
-    for (const auto& input : invalidInputs) {
-        Require(!PlanBurstStartingLook(input.first, input.second).valid,
-            "Invalid burst starting-look input accepted");
-    }
-    for (float median : {.0001f, .01f, .18f, 1.f, 100.f}) {
-        for (float ratio : {1.f, 2.f, 16.f, 1024.f}) {
-            plan = PlanBurstStartingLook(median, median * ratio);
-            Require(plan.valid && std::isfinite(plan.exposureEv) && std::abs(plan.exposureEv) <= .5f,
-                "Burst starting-look exposure exceeded its bound");
-            float previous = -infinity;
-            for (float knot : {-16.f, -8.f, -4.f, 0.f, 1.f, 2.f, 3.f, 4.f, 6.f, 8.f, 12.f, 16.f}) {
-                const auto mapped = plan.OutputEv(knot);
-                Require(std::isfinite(mapped) && mapped >= previous,
-                    "Burst starting-look shoulder became nonfinite or nonmonotone");
-                previous = mapped;
-            }
-            Require(plan.OutputEv(0) == 0 && plan.OutputEv(1) == 1,
-                "Burst starting-look shoulder changed shadows or midtones");
-        }
-    }
-}
-
 } // namespace BracketingScalarValidation
 
 inline void ValidateBracketingScalars() {
     BracketingScalarValidation::ValidateExposureGraph();
     BracketingScalarValidation::ValidateExposureCohorts();
     BracketingScalarValidation::ValidateImageFirstAdmission();
-    BracketingScalarValidation::ValidateStartingLook();
 }
 
 } // namespace Stack::Validation

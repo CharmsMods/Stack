@@ -56,11 +56,7 @@ bool EditorModule::RequestProjectCopy(const std::filesystem::path& requestedDest
     }
     snapshot.rawWorkspaceData["repairRequired"] = false;
     auto destination = requestedDestination.lexically_normal();
-    if (portable) {
-        if (destination.extension() != ".stack") destination += ".stack";
-    } else if (destination.filename() == "project.stack") destination = destination.parent_path();
-    else if (destination.extension() == ".stack" || destination.extension() == ".stackbundle")
-        destination = destination.parent_path() / destination.stem();
+    if (destination.extension() != ".stack") destination += ".stack";
 
     std::optional<Project::BracketingCopy> draft;
     std::shared_ptr<const Raw::Bracketing::BracketingResult> result;
@@ -89,7 +85,7 @@ bool EditorModule::RequestProjectCopy(const std::filesystem::path& requestedDest
         Project::ProjectStoreOpenResult copy;
         try {
             copy = Project::ConvertProjectStore(sourceStore, snapshot, destination,
-                portable ? Project::ProjectStorageKind::PortableFile : Project::ProjectStorageKind::DirectoryBundle,
+                portable ? Project::ProjectStorageKind::PortableFile : Project::ProjectStorageKind::WorkingFile,
                 [&](const auto& store, const auto& transaction, auto& captured, auto& error) {
                     if (draft && !Project::StageBracketingCopy(*draft, store, transaction, captured, error)) return false;
                     if (!StackBinaryFormat::ExternalizeManagedProjectAssets(store, transaction, captured)) {
@@ -97,7 +93,7 @@ bool EditorModule::RequestProjectCopy(const std::filesystem::path& requestedDest
                         return false;
                     }
                     return !result || Project::StageBracketingResult(store, transaction,
-                        captured, resultSet, *result, {}, error);
+                        captured, resultSet, *result, {}, error,true);
                 });
         } catch (const std::exception& error) { copy.message = error.what(); }
         owner->tasks.PostToMain([this, owner, originalId, revision, sourceStore, destination,

@@ -248,20 +248,52 @@ void EditorModule::RenderNodeEditorPanel() {
         firstSection=false;
         ImGui::PushID(group.definitionId.c_str());
         const float width=ImGui::GetContentRegionAvail().x;
-        const int activated=DrawControlsPanelHeader(group,width);
+        const auto selected=std::find_if(group.instances.begin(),group.instances.end(),
+            [&](const auto& value){return value.key==group.selectedKey;});
+        if (selected==group.instances.end()) {ImGui::PopID();continue;}
+        auto target=selected->target;
+        const auto* node=ResolveNodeEditorTarget(target);
+        using Kind=EditorNodeGraph::NodeKind;
+        const auto enabledState=[](const EditorNodeGraph::Node* n)->std::optional<bool> {
+            if (!n) return {};
+            if (n->kind==Kind::RawOperation) return n->rawOperation.enabled;
+            if (n->kind==Kind::Layer) return n->layerParameters.value("enabled",true);
+            if (n->kind==Kind::MaskUtility && n->maskUtilityKind==EditorNodeGraph::MaskUtilityKind::Invert)
+                return n->maskUtilitySettings.enabled;
+            return {};
+        };
+        auto enabled=enabledState(node);
+        bool toggle=false;
+        const int activated=DrawControlsPanelHeader(group,width,enabled ? &*enabled : nullptr,toggle);
+        if (toggle && enabled && FinishWorkspaceInteraction()) {
+            RawWorkspaceEditContext edit;
+            if (BeginNodeEditorContext(target,edit) && edit.canEdit) {
+                node=ResolveNodeEditorTarget(target);
+                if (node) {
+                    edit.nodeDraft=*node;
+                    if (node->kind==Kind::Layer) {
+                        edit.nodeSettings=node->layerParameters;
+                        edit.nodeSettings["enabled"]=!*enabled;
+                    } else if (node->kind==Kind::RawOperation) edit.nodeDraft->rawOperation.enabled=!*enabled;
+                    else edit.nodeDraft->maskUtilitySettings.enabled=!*enabled;
+                    CommitRawWorkspaceEditContext(edit,true,false);
+                }
+            }
+            node=ResolveNodeEditorTarget(target);
+            enabled=enabledState(node);
+        }
         if (activated>=0 && activated<static_cast<int>(group.instances.size())) {
             const auto& instance=group.instances[activated];
             if (FinishWorkspaceInteraction() && ActivateNodeEditorPanelTarget(instance.target)) {
                 if (group.selectedKey!=instance.key) {
-                    for (const auto& previous:group.instances)
-                        if (previous.key==group.selectedKey) m_NodeEditorState.Get<NodeEditorPanelAnalysis>(previous.target)={};
+                    m_NodeEditorState.Get<NodeEditorPanelAnalysis>(target)={};
                     group.selectedKey=instance.key;group.measuredHeight=0.f;
                 }
+                target=instance.target;
             }
+            node=ResolveNodeEditorTarget(target);
+            enabled=enabledState(node);
         }
-        const auto chosen=std::find_if(group.instances.begin(),group.instances.end(),[&](const auto& value){return value.key==group.selectedKey;});
-        const auto target=chosen->target; // Never retain graph pointers across a commit.
-        const auto* node=ResolveNodeEditorTarget(target);
         const auto* definition=node ? &FindNodeEditor(*node) : nullptr;
         if (definition) {
             const float font=ImGui::GetFontSize();
@@ -275,7 +307,7 @@ void EditorModule::RenderNodeEditorPanel() {
             const auto* parent=ImGui::GetCurrentWindow();
             const bool onScreen=origin.y+estimated>=parent->ClipRect.Min.y && origin.y<=parent->ClipRect.Max.y;
             const bool ownsGesture=m_NodeEditorPanel.gestureTarget==target;
-            if (onScreen && m_NodeEditorPanel.analysisTarget==target) queuedAnalysisVisible=true;
+            if (onScreen && enabled.value_or(true) && m_NodeEditorPanel.analysisTarget==target) queuedAnalysisVisible=true;
             if (onScreen || ownsGesture || !measured) {
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(0,0));
                 ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize,0.f);
@@ -294,6 +326,7 @@ void EditorModule::RenderNodeEditorPanel() {
                     RawWorkspaceEditContext context;
                     if (BeginNodeEditorContext(target,context)) {
                         context.presentation=NodeEditorPresentation::Panel;
+                        context.canEdit &= enabled.value_or(true);
                         if (onScreen && context.canEdit && definition->inputAnalysis!=RawDevelopmentGraphScopeStage::None && !nextAnalysis) {
                             const auto identity=NodeInputAnalysisIdentity(target,
                                 m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);

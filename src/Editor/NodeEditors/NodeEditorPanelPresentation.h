@@ -3,7 +3,7 @@ struct ImGuiWindow;
 namespace Stack::Editor {
 struct NodeEditorPanelGroup;
 // Returns an explicitly activated instance, or -1 for an unchanged header.
-int DrawControlsPanelHeader(const NodeEditorPanelGroup& group, float width);
+int DrawControlsPanelHeader(const NodeEditorPanelGroup& group, float width, const bool* enabled, bool& toggle);
 
 // Smooth native wheel requests before child layout; pair with EndChild().
 bool BeginControlsPanelBody();

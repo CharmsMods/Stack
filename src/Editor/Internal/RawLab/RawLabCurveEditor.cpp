@@ -899,6 +899,9 @@ bool DrawBezierCurveInteraction(
         }
     }
 
+    const bool createPoint=enabled && inside && ImGui::IsItemActive() &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && findPoint(mouse)<0;
+    if(createPoint) state.draggingExposure=false;
     if (state.draggingExposure && exposureEv) {
         const bool cancel = ImGui::GetIO().AppFocusLost ||
             (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false));
@@ -929,7 +932,8 @@ bool DrawBezierCurveInteraction(
         }
     }
 
-    if (!state.draggingExposure && inside && ImGui::IsItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (!state.draggingExposure && inside && ImGui::IsItemActive() &&
+        (createPoint || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
         const int pointUnderMouse = findPoint(mouse);
         if (pointUnderMouse > 0 &&
             pointUnderMouse + 1 < static_cast<int>(points.size())) {
@@ -970,6 +974,11 @@ bool DrawBezierCurveInteraction(
                 points.insert(insertion, added);
                 state = {};
                 selectedPoint = insertionIndex;
+                if(createPoint) {
+                    state.draggingPoint=insertionIndex;
+                    state.dragMouseStart=mouse;
+                    state.dragPointStart=graphPoint;
+                }
                 changed = true;
             }
         }

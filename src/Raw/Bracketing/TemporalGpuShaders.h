@@ -148,15 +148,14 @@ Observation sampleAt(int i,ivec2 p){
     // llround rounds halfway away from zero, including the outside border.
     ivec2 nearest=ivec2(sign(plane)*floor(abs(plane)+.5LF));
     bool nearestInside=all(greaterThanEqual(nearest,ivec2(0)))&&all(lessThan(nearest,extent));
-    double nearestValue=0.LF;
-    if(nearestInside){vec4 t=tapAt(nearest*2+(p&1));nearestValue=double(t.x);
+    if(nearestInside){vec4 t=tapAt(nearest*2+(p&1));
         if(!badTap(t)){o.flags|=FINITE;o.fallback=double(t.x)*double(t.y)*scale;o.exposure=1.LF/scale;
             if((uint(t.z)&9u)!=0u)o.flags|=CLIPPED|FALLBACK_CLIP;}}
     ivec2 base=ivec2(floor(plane));bool interior=all(greaterThanEqual(base,ivec2(1)))&&all(lessThan(base+2,extent));
     if(!interior&&(any(lessThan(plane,dvec2(0)))||any(greaterThan(plane,dvec2(extent-1)))||any(lessThan(extent,ivec2(2)))))return o;
     if(!interior)base=min(base,extent-2);
     double value=0.LF,variance=0.LF,gx=0.LF,gy=0.LF,fallback=0.LF,dark=0.LF,dn=0.LF;bool valid=true,validFallback=true,clippedFallback=false;
-    double sum=0.LF,sumDx=0.LF,sumDy=0.LF;
+    double sum=0.LF,sumDx=0.LF,sumDy=0.LF,safety=0.LF,magnitude=0.LF;
     for(int k=0;k<16;++k){
         ivec2 txy;double w,dx,dy;
         if(interior){txy=base+ivec2(k%4-1,k/4-1);dvec2 d=plane-dvec2(txy);
@@ -167,8 +166,10 @@ Observation sampleAt(int i,ivec2 p){
             dx=k<4?(j%2==0?-1.LF:1.LF)*(j/2==0?1.LF-f.y:f.y):0.LF;
             dy=k<4?(j/2==0?-1.LF:1.LF)*(j%2==0?1.LF-f.x:f.x):0.LF;
         }
+        if(w==0.LF&&dx==0.LF&&dy==0.LF)continue;
         sum+=w;sumDx+=dx;sumDy+=dy;
         vec4 t=tapAt(txy*2+(p&1));double gain=scale*double(t.y),v=gain*double(t.x);
+        safety+=abs(w)*headroom(double(t.x));magnitude+=abs(w);
         bool bad=badTap(t);if(bad||(uint(t.z)&9u)!=0u)valid=false;
         if(abs(w)>1e-12LF){if(bad)validFallback=false;
             fallback+=w*double(t.x)*double(t.y)*scale;clippedFallback=clippedFallback||((uint(t.z)&9u)!=0u);}
@@ -192,7 +193,7 @@ Observation sampleAt(int i,ivec2 p){
         double sceneRisk=risk(guides[i].yz,guideMap);if(sceneRisk>=0.LF)reg=sceneRisk;
     }
     o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+scaleRisk+reg/max(.20LF,m.confidence);
-    o.variance=o.measurement+o.uncertainty;o.headroom=nearestInside?headroom(nearestValue):1.LF;o.support=1.LF;
+    o.variance=o.measurement+o.uncertainty;o.headroom=safety/magnitude;o.support=1.LF;
     return o;
 }
 )GLSL";

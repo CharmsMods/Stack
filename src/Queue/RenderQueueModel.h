@@ -39,6 +39,7 @@ struct Item {
     std::shared_ptr<const Stack::Project::LoadedProjectData> projectSnapshot;
     std::filesystem::path outputPath;
     bool selected = true;
+    RawWorkspace::CameraThumbnail camera;
     ItemState state = ItemState::Waiting;
     float progress = 0.0f;
     std::string status;

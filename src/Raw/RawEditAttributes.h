@@ -3,6 +3,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,13 +23,30 @@ struct RawEditAttributeDescriptor {
     bool spatiallySpecific = false;
 };
 
+struct LayerEditChoice {
+    std::string key;
+    std::string label;
+    std::string layerKey;
+};
+
+struct AuthoredLayerEdits {
+    nlohmann::json stack;
+    std::string sourceProject;
+    std::vector<LayerEditChoice> choices;
+};
+
 struct RawEditAttributeBundle {
     std::uint32_t version = kRawEditAttributeBundleVersion;
     std::string sourceLabel;
     std::string sourceKind = "single-raw";
     std::string viewTransformPlacement = "internal";
     RawDevelopmentRecipe recipe;
+    std::shared_ptr<const AuthoredLayerEdits> authoredLayers;
+    std::vector<std::string> copiedSelection;
 };
+
+void CaptureAuthoredLayers(RawEditAttributeBundle& bundle, const nlohmann::json& stack,
+    const std::string& sourceProject);
 
 struct RawEditAttributeApplyResult {
     bool success = false;

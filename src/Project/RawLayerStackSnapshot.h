@@ -15,7 +15,8 @@ bool LowerRawLayerStack(
     RenderGraphSnapshot& snapshot, const RawLayerStackState& state,
     int backgroundNodeId, std::uint64_t revision, std::string& error, int frame = 0, int duration = 120, int framesPerSecond = 30,
     const EditorNodeGraph::Graph* composition = nullptr,
-    EditorNodeGraph::GraphOutputDescriptions* outputDescriptions = nullptr);
+    EditorNodeGraph::GraphOutputDescriptions* outputDescriptions = nullptr,
+    const Raw::RawImageData* standaloneMaskSource = nullptr);
 
 // Apply to a private preview snapshot. Image thumbnails include the shared
 // viewing transform; mask thumbnails read exactly the numerical attachment.

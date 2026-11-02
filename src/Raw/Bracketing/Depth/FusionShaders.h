@@ -20,7 +20,6 @@ layout(std430,binding=0) buffer Evidence {vec2 evidence[];};
 layout(std430,binding=1) buffer Output {vec2 result[];};
 layout(std430,binding=2) buffer Statistics {vec4 stats[10];};
 layout(std430,binding=3) readonly buffer Guide {float guide[];};
-layout(std430,binding=4) buffer Gates {float rejected[];};
 uniform int count,views,mode;uniform ivec2 size,guideSize;
 float median(float v[8],int n){for(int i=1;i<n;++i){float t=v[i];int j=i-1;while(j>=0&&v[j]>t){v[j+1]=v[j];j--;}v[j+1]=t;}return v[n/2];}
 void main(){uint i=gl_GlobalInvocationID.x;
@@ -53,12 +52,6 @@ void main(){uint i=gl_GlobalInvocationID.x;
    if(prev<measured*19/20&&sum>=measured*19/20)high=value;}
   low=exp(low);high=exp(high);stats[8]=vec4(low,high,float(measured)/float(count),high-low>=.15*exp(middle)?1:0);return;}
  if(mode==3){if(i>=uint(count))return;vec4 s=stats[8];result[i].x=s.w>0?clamp((result[i].x-s.x)/(s.y-s.x),0.,1.):0;return;}
- // Reconstruction gates use physical relative inverse depth before the
- // percentile display normalization clips its near/far tails.
- if(mode==4){if(i>=uint(count))return;vec2 fused=result[i];float value=fused.x;int support=0,validViews=0;
-  for(int v=0;v<views;++v)if(stats[v].y>0){validViews++;vec2 e=evidence[v*count+int(i)];
-   if(e.y>.3&&abs(e.x*stats[v].x/value-1)<.25)support++;}
-  for(int v=0;v<views;++v){vec2 e=evidence[v*count+int(i)];rejected[v*count+int(i)]=
-   validViews>=3&&support>=2&&fused.y>.6&&e.y>.5&&stats[v].y>0&&abs(e.x*stats[v].x/value-1)>.35?1:0;}return;}
-})GLSL";
+ }
+)GLSL";
 }

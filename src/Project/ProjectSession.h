@@ -65,6 +65,8 @@ public:
     ProjectStoreHandle store;
     std::shared_ptr<RawProjectSnapshot> snapshot;
     std::shared_ptr<const Raw::RawImageData> singleRawSource;
+    // Directory and lazy coverage readers for a master whose image is still staged.
+    std::shared_ptr<const Raw::RawImageData> singleMasterMaskSource;
     RawRecipe::RawDevelopmentRecipe rawRecipe;
     RawLayerStackDocument rawLayers;
     // Derived compilation only; never serialized or copied into authored history.

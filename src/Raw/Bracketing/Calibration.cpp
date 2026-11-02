@@ -9,6 +9,7 @@
 #include "LocalDetail.h"
 #include "HdrColorFusion.h"
 #include "GroupMemory.h"
+#include "IntegerCodeSpacing.h"
 #include "Depth/Depth.h"
 #include "Raw/RawLoader.h"
 #include "Panorama/Panorama.h"
@@ -62,6 +63,8 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
             if(!Stack::Project::AreHdrCapturesStructurallyCompatible(reference,candidate,&error,&diagnostics)) return false;
         }
         Mfd::PreparationOptions options;options.shouldCancel=request.shouldCancel;
+        if(!raw.metadata.isDng&&!raw.rawBuffer.empty())
+            options.saturationDnMargin*=IntegerCodeSpacing(raw.rawBuffer);
         const auto bytesPerTilePixel=request.recipe.groups.size()*(sizeof(Observation)+2*sizeof(double))+48;
         // Preparation and group execution must admit the same tile size. The
         // old preparation-only estimate could select 512-pixel tiles that the
@@ -129,10 +132,10 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         // Bound all original overview images together, independent of capture count.
         const auto captureCount=std::max<std::size_t>(1,request.sources.size());
         unsigned previewStride=2;
-        while(static_cast<std::uint64_t>((width+previewStride-1)/previewStride)*((height+previewStride-1)/previewStride)*13*captureCount>8*1024*1024) previewStride+=2;
+        while(static_cast<std::uint64_t>((width+previewStride-1)/previewStride)*((height+previewStride-1)/previewStride)*14*captureCount>8*1024*1024) previewStride+=2;
         previewStride=std::min(previewStride,std::min(width,height));
         AlignmentProxyAccumulator proxy(width,height,previewStride);
-        if(static_cast<std::uint64_t>(proxy.width)*proxy.height*13*captureCount>8*1024*1024) {
+        if(static_cast<std::uint64_t>(proxy.width)*proxy.height*14*captureCount>8*1024*1024) {
             error="The capture overviews exceed the bracketing proxy budget.";return false;
         }
         s.original=std::make_shared<CapturePreview>();
@@ -158,7 +161,7 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
                     Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Defective)||Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired));
             }
         }
-        proxy.Finish(original.rgb,original.clipped);
+        proxy.Finish(original.rgb,original.clipped,&s.calibrationChannelMask);
         if(request.reportPresentation) {
             auto image=std::make_shared<ProcessingThumbnail>();image->frameId=f.id;image->group=static_cast<unsigned>(g);
             const unsigned step=std::max(1u,(std::max(original.width,original.height)+511)/512);
@@ -191,10 +194,7 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
     std::vector<std::string>& diagnostics,std::string& error) {
     if(!PrepareSources(request,data,diagnostics,error))return false;
     if(!PreflightBurstRefinement(request,data,diagnostics,error))return false;
-    {
-        ProcessingTimer timer(data.stageSeconds,"global_alignment");
-        if(!Align(request,data,diagnostics,error)) return false;
-    }
+    if(!Align(request,data,diagnostics,error)) return false;
     {
         ProcessingTimer timer(data.stageSeconds,"exposure_calibration");
         ReportPresentation(request,ProcessingStage::Exposure);
@@ -275,7 +275,18 @@ bool Prepare(const ProcessingRequest& request,PreparedDataset& data,
         }
     }
     if(!RefineBurstAlignment(request,data,diagnostics,error))return false;
-    if(!Depth::Estimate(request,data,diagnostics,error))return false;
-    return MeasureCaptureSharpness(request,data,diagnostics,error);
+    std::string depthError;
+    bool depthFinished = false;
+    try { depthFinished = Depth::Estimate(request,data,diagnostics,depthError); }
+    catch (const std::exception& e) { depthError = e.what(); }
+    if(!depthFinished) {
+        if(request.shouldCancel && request.shouldCancel()){error="Canceled.";return false;}
+        auto unavailable=std::make_shared<ReconstructionDepth>();
+        unavailable->sensorWidth=data.width;unavailable->sensorHeight=data.height;
+        unavailable->message="Depth masks unavailable: "+depthError;
+        diagnostics.push_back(unavailable->message);
+        data.depth=std::move(unavailable);
+    }
+    return MeasureCaptureSharpness(request,data,diagnostics,error)&&MeasureSpatialGuide(request,data,diagnostics,error);
 }
 } // namespace Raw::Bracketing

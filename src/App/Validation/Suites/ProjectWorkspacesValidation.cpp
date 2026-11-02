@@ -115,6 +115,52 @@ void ValidateWorkspaceHistoryReplacement(EditorModule& editor, const EditorModul
     std::cout << "PASS close and pipeline replacement clear only the owning project's undo/redo\n";
 }
 
+void ValidateFilmGrainGraph(EditorModule& editor) {
+    constexpr int side = 256;
+    std::vector<unsigned char> gray(side * side * 4, 128);
+    for (size_t i = 3; i < gray.size(); i += 4) gray[i] = 255;
+    auto& pipeline = editor.GetPipeline();
+    pipeline.LoadSourceFromPixels(gray.data(), side, side, 4);
+    EditorNodeGraph::ImagePayload image;
+    image.width = image.height = side;
+    image.channels = 4;
+    image.pixels = pipeline.GetSourcePixelsRaw();
+    auto& graph = editor.GetNodeGraph();
+    const int source = graph.AddImageNode(std::move(image), {})->id;
+    editor.AddLayerNodeAt(LayerType::Noise, {200, 0});
+    const int grain = graph.GetSelectedNodeId();
+    auto& settings = graph.FindNode(grain)->layerParameters;
+    RequireWorkspace(settings.value("noiseType", -1) == 13, "New Film Grain node selected the wrong model.");
+    editor.AddOutputNodeAt({400, 0});
+    const int output = graph.GetSelectedNodeId();
+    std::string error;
+    RequireWorkspace(editor.ConnectGraphSockets(source, "imageOut", grain, "imageIn", &error) &&
+        editor.ConnectGraphSockets(grain, "imageOut", output, "imageIn", &error), error);
+    const auto render = [&](float mix) {
+        graph.FindNode(grain)->layerParameters["grainMix"] = mix;
+        editor.MarkGraphEdited(grain);
+        pipeline.ExecuteGraph(editor.BuildGraphSnapshot());
+        const auto& failure = pipeline.GetLastGraphExecutionStats().lastSpecializedFailure;
+        RequireWorkspace(pipeline.GetOutputTexture() && failure.empty(), "Film Grain graph render failed. " + failure);
+        std::vector<float> pixels(gray.size());
+        glBindTexture(GL_TEXTURE_2D, pipeline.GetOutputTexture());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        return pixels;
+    };
+    const auto bypass = render(0.f);
+    const auto grainPixels = render(1.f);
+    const auto restored = render(0.f);
+    double sum = 0;
+    for (size_t i = 0; i < bypass.size(); i += 4) {
+        const double delta = grainPixels[i] - bypass[i];
+        sum += delta * delta;
+    }
+    const double rms = std::sqrt(sum / (side * side));
+    std::cout << "Film Grain graph RMS pixel change: " << rms << std::endl;
+    RequireWorkspace(std::isfinite(rms) && rms > 0 && bypass == restored,
+        "Film Grain changed no pixels or failed to restore the bypassed image.");
+}
+
 void ValidateUniformAdjustment(EditorModule& editor) {
     if (editor.GetProjectSessionKind()!=EditorModule::ProjectSessionKind::Empty)
         RequireWorkspace(editor.CloseCurrentProject(true),"Could not prepare the uniform parameter check.");
@@ -486,7 +532,19 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
     auto second = std::make_unique<ProjectWorkspace>(2);
     bool success = false;
     try {
-        if(projectPath=="--auto-only") {
+        if (projectPath == "--film-grain") {
+            first->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+            first->editor->Initialize(window, nullptr, false);
+            ValidateFilmGrainGraph(*first->editor);
+            success = true;
+        } else if (projectPath == "--saves-only") {
+            for (auto* workspace : {first.get(), second.get()}) {
+                workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+                workspace->editor->Initialize(window, nullptr, false);
+            }
+            ValidateOverlappingProjectFileOperations(*first->editor, *second->editor, WorkspaceSaveScratchDirectory());
+            success = true;
+        } else if(projectPath=="--auto-only") {
             first->editor->SetWorkspaceAppStatePersistenceEnabled(false);
             first->editor->Initialize(window,nullptr,false);
             ValidateAutoBracketWorkspaceLifecycle(*first->editor,window,WorkspaceSaveScratchDirectory());

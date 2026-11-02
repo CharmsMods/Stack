@@ -9,13 +9,17 @@ Availability GetAvailability(const Context& context, Action action) {
     if (context.previewOnly) return disabled("Gallery actions are unavailable during the workspace preview.");
     if (context.items.empty()) return disabled("Select an image or project first.");
     if (context.aggregateView && (action == Action::PasteEdits || action == Action::NewSavedVersion ||
-        action == Action::TrashProjects || action == Action::RevertProjects))
+        action == Action::RevertProjects))
         return disabled("Open the source folder to change its saved projects. All Folders is a combined browsing view.");
     const bool projectsOnly = std::all_of(context.items.begin(), context.items.end(),
         [](const Item& item) { return item.kind == ItemKind::Project; });
     const auto* focused = context.focusedIndex < context.items.size()
         ? &context.items[context.focusedIndex] : nullptr;
     switch (action) {
+    case Action::Relink:
+        if (!projectsOnly || context.items.size() != 1 || !focused || focused->protectedProject)
+            return disabled("Choose one closed working project to relink.");
+        break;
     case Action::Open:
         if (!context.openAvailable) return disabled("Opening Gallery items is unavailable in this view.");
         if (context.foregroundBusy) return disabled("Finish the current project operation before opening another item.");
@@ -28,6 +32,7 @@ Availability GetAvailability(const Context& context, Action action) {
     case Action::AddToQueue:
         if (!context.queueAvailable) return disabled("Queue is unavailable in this view.");
         break;
+    case Action::ApplyProject:
     case Action::CopyEdits:
         if (focused && focused->kind != ItemKind::Project)
             return disabled("Original images have no edits to copy. Select a saved project or bracket.");
@@ -48,9 +53,10 @@ Availability GetAvailability(const Context& context, Action action) {
             return disabled("Close this project in all tabs first. Versions copy the saved project.");
         if (context.foregroundBusy) return disabled("Finish the current project operation before creating a version.");
         break;
-    case Action::TrashProjects:
     case Action::RevertProjects:
-        if (!projectsOnly) return disabled("Only saved projects can be moved to Stack Trash. Original RAW files stay read-only.");
+        if (!projectsOnly) return disabled("Select a saved project to revert.");
+        [[fallthrough]];
+    case Action::MoveToTrash:
         if (std::any_of(context.items.begin(), context.items.end(),
                 [](const Item& item) { return item.protectedProject; }))
             return disabled("Close the selected projects in all tabs before moving them to Stack Trash.");
@@ -64,12 +70,14 @@ const char* Label(Action action) {
     case Action::Open: return "Open";
     case Action::CreateCaptureSet: return "Create Capture Set";
     case Action::AddToQueue: return "Add to Queue";
+    case Action::Relink: return "Locate folder...";
+    case Action::ApplyProject: return "Apply project...";
     case Action::CopyEdits: return "Copy edits";
     case Action::PasteEdits: return "Paste edits...";
     case Action::ShowInExplorer: return "Show in Explorer";
     case Action::CopyPath: return "Copy path";
     case Action::NewSavedVersion: return "New saved version";
-    case Action::TrashProjects: return "Move project to Stack Trash";
+    case Action::MoveToTrash: return "Move to Closet Trash";
     case Action::RevertProjects: return "Revert saved project...";
     }
     return "Gallery action";

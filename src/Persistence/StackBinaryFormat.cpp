@@ -924,6 +924,24 @@ void GatherGraphImageNodes(json& value, std::vector<json*>& nodes) {
     if (value.is_structured()) for (auto& child : value) GatherGraphImageNodes(child, nodes);
 }
 
+// An image node may have been painted, rotated, pasted, or imported from a
+// photograph. Only the last case can safely reopen from the original file.
+bool OriginalRepresentsImage(const std::vector<std::uint8_t>& original,
+    const std::vector<std::uint8_t>& savedPixels) {
+    if (original == savedPixels) return true;
+    constexpr auto maxBytes = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (original.empty() || savedPixels.empty() || original.size() > maxBytes || savedPixels.size() > maxBytes)
+        return false;
+    int width = 0, height = 0, channels = 0, otherWidth = 0, otherHeight = 0;
+    if (!stbi_info_from_memory(original.data(), static_cast<int>(original.size()), &width, &height, &channels) ||
+        !stbi_info_from_memory(savedPixels.data(), static_cast<int>(savedPixels.size()), &otherWidth, &otherHeight, &channels) ||
+        width != otherWidth || height != otherHeight || width <= 0 || height <= 0) return false;
+    using Pixels = std::unique_ptr<stbi_uc, decltype(&stbi_image_free)>;
+    Pixels a(stbi_load_from_memory(original.data(), static_cast<int>(original.size()), &width, &height, &channels, 4), stbi_image_free);
+    Pixels b(stbi_load_from_memory(savedPixels.data(), static_cast<int>(savedPixels.size()), &otherWidth, &otherHeight, &channels, 4), stbi_image_free);
+    return a && b && std::memcmp(a.get(), b.get(), static_cast<std::size_t>(width) * height * 4) == 0;
+}
+
 bool ExternalizeGraphImageAssets(
     const Stack::Project::ProjectStoreHandle& store,
     const Stack::Project::ProjectStoreTransaction& transaction,
@@ -970,6 +988,27 @@ bool ExternalizeGraphImageAssets(
         const std::string managedPath = (
             std::filesystem::path("assets") / "images" /
             (stableNodeId + ".png")).generic_string();
+        if (!sourcePath.empty()) {
+            const auto path = std::filesystem::u8path(sourcePath);
+            std::ifstream originalFile(path, std::ios::binary);
+            if (originalFile) {
+                std::vector<std::uint8_t> original{std::istreambuf_iterator<char>(originalFile), {}};
+                if (OriginalRepresentsImage(original, bytes)) {
+                    const auto identity = Stack::RawEvidence::ComputeSourceIdentity(original);
+                    Stack::Project::EmbeddedAssetRecord record;
+                    if (!identity.valid || !store->StageAssetFile(transaction, path,
+                            Stack::Project::MultiFrameInputFamily::Raster, json::object(), record) ||
+                        record.sha256 != identity.sha256) return false;
+                    record.managedRole = "graph-image";
+                    if (!Stack::Project::FindEmbeddedAsset(snapshot, record.assetId)) snapshot.embeddedAssets.push_back(record);
+                    node["managedAssetId"] = record.assetId;
+                    node["projectAssetPath"] = record.projectAssetPath;
+                    node.erase("pngBytes");
+                    referencedGraphAssets.insert(record.assetId);
+                    continue;
+                }
+            }
+        }
         std::string assetId;
         if (!StageManagedBytes(
                 store,
@@ -1053,6 +1092,8 @@ bool RehydrateGraphImageAssets(
         if (!asset || !ReadManagedAssetBytes(opened.store, *asset, bytes)) {
             return false;
         }
+        if (asset->linkedSource && opened.store->StorageKind() == Stack::Project::ProjectStorageKind::WorkingFile)
+            node["sourcePath"] = opened.store->ResolveAssetFile(assetId).u8string();
         node["pngBytes"] = json::binary(std::move(bytes));
     }
     return true;
@@ -1064,7 +1105,7 @@ void RewriteManagedRawSourcePaths(
     json& rawWorkspaceData) {
     if (!opened.store ||
         opened.store->StorageKind() !=
-            Stack::Project::ProjectStorageKind::DirectoryBundle ||
+            Stack::Project::ProjectStorageKind::WorkingFile ||
         !rawWorkspaceData.is_object()) {
         return;
     }
@@ -1170,12 +1211,6 @@ static bool WriteProjectFileCaptured(
             const std::filesystem::path currentPath =
                 document.projectStore->StoragePath().lexically_normal();
             std::filesystem::path destination = path.lexically_normal();
-            if (destination.extension() == ".stack" &&
-                destination.filename() != "project.stack") {
-                destination = destination.parent_path() / destination.stem();
-            } else {
-                destination = Stack::Project::ResolveProjectStoreRoot(destination);
-            }
             const Stack::Project::ProjectStoreTransaction transaction =
                 document.projectStore->BeginTransaction(
                     expectedStorageRevision.value_or(snapshot.persistedStorageRevision));
@@ -1199,7 +1234,7 @@ static bool WriteProjectFileCaptured(
                     document.projectStore,
                     snapshot,
                     destination,
-                    Stack::Project::ProjectStorageKind::DirectoryBundle);
+                    Stack::Project::ProjectStorageKind::WorkingFile);
                 if (!converted) {
                     result.commit = { Stack::Project::ProjectStoreCommitStatus::IoFailure,
                         0, std::move(converted.message) };
@@ -1221,13 +1256,9 @@ static bool WriteProjectFileCaptured(
             return false;
         }
         std::filesystem::path destination = path.lexically_normal();
-        if (destination.extension() == ".stack" &&
-            destination.filename() != "project.stack") {
-            destination = destination.parent_path() / destination.stem();
-        }
         auto created = Stack::Project::CreateProjectStore(
             destination,
-            Stack::Project::ProjectStorageKind::DirectoryBundle,
+            Stack::Project::ProjectStorageKind::WorkingFile,
             snapshot);
         if (!created) {
             result.commit.message = std::move(created.message);
@@ -1240,25 +1271,9 @@ static bool WriteProjectFileCaptured(
         return true;
     }
 
-    // Every current working document uses the same folder-backed store. A
-    // "Name.stack" destination is interpreted as the working
-    // folder "Name"; portable .stack files are created only by Pack Project.
-    std::filesystem::path projectRoot = path.lexically_normal();
-    std::string extension = projectRoot.extension().u8string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    std::string filename = projectRoot.filename().u8string();
-    std::transform(filename.begin(), filename.end(), filename.begin(),
-        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (extension == ".stack" && filename != "project.stack") {
-        projectRoot = projectRoot.parent_path() / projectRoot.stem();
-    } else {
-        projectRoot = Stack::Project::ResolveProjectStoreRoot(projectRoot);
-    }
-
+    const auto projectRoot = path.lexically_normal();
     Stack::Project::ProjectStoreOpenResult opened;
-    if (expectedStorageRevision && *expectedStorageRevision == 0) requireNewStore = true;
-    if (!requireNewStore && Stack::Project::IsDirectoryProjectBundle(projectRoot)) {
+    if (!requireNewStore && Stack::Project::IsWorkingProjectFile(projectRoot)) {
         opened = Stack::Project::OpenProjectStore(projectRoot);
         if (!opened) return false;
         if (expectedStorageRevision &&
@@ -1279,7 +1294,7 @@ static bool WriteProjectFileCaptured(
             ? Stack::Project::GenerateStableUuid()
             : document.projectId;
         bootstrap.projectName = document.metadata.projectName.empty()
-            ? projectRoot.filename().u8string()
+            ? projectRoot.stem().u8string()
             : document.metadata.projectName;
         bootstrap.projectKindHint = document.metadata.projectKind.empty()
             ? std::string(kEditorProjectKind)
@@ -1288,7 +1303,7 @@ static bool WriteProjectFileCaptured(
             Stack::Project::ProjectCreationOrigin::Manual;
         opened = Stack::Project::CreateProjectStore(
             projectRoot,
-            Stack::Project::ProjectStorageKind::DirectoryBundle,
+            Stack::Project::ProjectStorageKind::WorkingFile,
             bootstrap);
         if (!opened) {
             result.commit.message = std::move(opened.message);
@@ -1414,7 +1429,7 @@ bool WriteProjectFile(const std::filesystem::path& path,
 }
 
 bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& document, const ProjectLoadOptions& options) {
-    if (Stack::Project::IsDirectoryProjectBundle(path) ||
+    if (Stack::Project::IsWorkingProjectFile(path) ||
         Stack::Project::IsPortableV3Project(path)) {
         Stack::Project::ProjectStoreOpenResult opened =
             Stack::Project::OpenProjectStore(path);

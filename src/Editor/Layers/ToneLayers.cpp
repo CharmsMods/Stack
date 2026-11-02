@@ -1,4 +1,4 @@
-#include "Raw/HdrDisplayMapping.h"
+#include "Raw/SigmoidDisplayMapping.h"
 #include "ToneLayers.h"
 
 #include "Editor/EditorModule.h"
@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <imgui.h>
 
 namespace {
@@ -454,7 +455,7 @@ void ToneEqualizerLayer::Deserialize(const json& j) {
     m_PreserveHue = j.value("preserveHue", m_PreserveHue);
 }
 
-ViewTransformLayer::ViewTransformLayer() = default;
+ViewTransformLayer::ViewTransformLayer() { ResetDisplayDefaults(); }
 
 void ViewTransformLayer::RenderUI() {
     ImGui::TextDisabled("Double-click for display transform controls.");
@@ -470,20 +471,10 @@ NodeSurfaceSpec ViewTransformLayer::GetNodeSurfaceSpec() const {
 }
 
 void ViewTransformLayer::ResetDisplayDefaults() {
-    m_Exposure = 0.0f;
-    m_BlackEv = -8.0f;
-    m_WhiteEv = 4.0f;
-    m_MiddleGrey = 0.18f;
-    m_Shoulder = 0.45f;
-    m_Toe = 0.18f;
-    m_Contrast = 1.0f;
-    m_ContrastPivotEv = 0.0f;
-    m_Saturation = 1.0f;
-    m_PreserveHue = true;
-    m_DebugFalseColor = false;
-    m_InputIsRec2020 = false;
-    m_EncodeSrgbOutput = false;
-    m_PhotographicHdr = false;
+    m_Exposure=0.f; m_MiddleGrey=Raw::SigmoidDisplay::MiddleGrey;
+    m_Contrast=1.f; m_ContrastPivotEv=0.f; m_Saturation=1.f;
+    m_PreserveHue=true; m_DebugFalseColor=false;
+    m_InputIsRec2020=false; m_EncodeSrgbOutput=false;
 }
 
 void ViewTransformLayer::StoreProbeStats(const RenderTextureStats& stats) {
@@ -500,106 +491,51 @@ void ViewTransformLayer::StoreProbeStats(const RenderTextureStats& stats) {
 }
 
 void ViewTransformLayer::ApplyAutoFromStats(const RenderTextureStats& stats) {
-    if (!stats.valid) {
-        m_LastProbeValid = false;
-        return;
-    }
+    if (!stats.valid) { m_LastProbeValid=false; return; }
     StoreProbeStats(stats);
-    const float middle = std::clamp(stats.p50Luma > 0.000001f ? stats.p50Luma : 0.18f, 0.01f, 1.0f);
-    auto evFor = [&](float value) {
-        return std::log2(std::max(value, 0.000001f) / std::max(middle, 0.000001f));
-    };
-    m_Exposure = 0.0f;
-    m_MiddleGrey = middle;
-    m_BlackEv = std::clamp(std::floor(evFor(std::max(stats.p01Luma, 0.000001f)) - 0.5f), -16.0f, -0.5f);
-    m_WhiteEv = std::clamp(std::ceil(evFor(std::max(stats.p99Luma, middle)) + 0.5f), 1.0f, 16.0f);
-    m_Shoulder = stats.hdrPixelPercent > 1.0f ? 0.75f : 0.45f;
-    m_Toe = 0.18f;
-    m_Contrast = 1.0f;
-    m_ContrastPivotEv = 0.0f;
-    m_Saturation = 1.0f;
-    m_PreserveHue = true;
+    const float middle=std::max(stats.p50Luma,1e-6f);
+    m_Exposure=std::clamp(std::log2(m_MiddleGrey/middle),-8.f,8.f);
+    m_ContrastPivotEv=0.f;
 }
 
 void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeSurfaceContext& context) {
     ImGuiExtras::RichSectionLabel("View Transform / Display Render");
-    ImGui::TextDisabled("Final scene-to-display mapping. This is the intentional display compression stage.");
-    ImGui::TextDisabled("EV values are stops relative to Middle Grey.");
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    if (ImGui::Button("Auto From Current Frame", ImVec2(context.safeContentWidth, 0.0f))) {
+    ImGui::TextDisabled("Sigmoid: scene-linear RGB to SDR display RGB.");
+    const float width=context.safeContentWidth;
+    if (ImGui::Button("Auto From Current Frame",ImVec2(width,0.f))) {
         RenderTextureStats stats;
-        if (editor && editor->ProbeViewTransformInputStats(context.nodeId, stats)) {
-            ApplyAutoFromStats(stats);
-        } else {
-            m_LastProbeValid = false;
-        }
+        if (editor && editor->ProbeViewTransformInputStats(context.nodeId,stats)) ApplyAutoFromStats(stats);
+        else m_LastProbeValid=false;
     }
-    const float halfWidth = std::max(70.0f, context.safeContentWidth * 0.48f);
-    if (ImGui::Button("Analyze Input", ImVec2(halfWidth, 0.0f))) {
+    const float halfWidth=std::max(70.f,width*.48f);
+    if (ImGui::Button("Analyze Input",ImVec2(halfWidth,0.f))) {
         RenderTextureStats stats;
-        if (editor && editor->ProbeViewTransformInputStats(context.nodeId, stats)) {
-            StoreProbeStats(stats);
-        } else {
-            m_LastProbeValid = false;
-        }
+        if (editor && editor->ProbeViewTransformInputStats(context.nodeId,stats)) StoreProbeStats(stats);
+        else m_LastProbeValid=false;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Reset Defaults", ImVec2(halfWidth, 0.0f))) {
-        ResetDisplayDefaults();
-    }
+    if (ImGui::Button("Reset Defaults",ImVec2(halfWidth,0.f))) ResetDisplayDefaults();
     if (m_LastProbeValid) {
-        ImGui::Dummy(ImVec2(0.0f, context.itemGap));
-        ImGui::TextDisabled("Input RGB %.3f to %.3f", m_LastMinRgb, m_LastMaxRgb);
-        ImGui::TextDisabled("Luma p01 %.4f  p50 %.4f  p99 %.4f", m_LastP01Luma, m_LastP50Luma, m_LastP99Luma);
-        ImGui::TextDisabled("HDR > 1.0: %.1f%%   Display-edge pixels: %.1f%%", m_LastHdrPixelPercent, m_LastDisplayEdgePercent);
+        ImGui::TextDisabled("Luma p01 %.4f  p50 %.4f  p99 %.4f",m_LastP01Luma,m_LastP50Luma,m_LastP99Luma);
     }
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::NodeSliderFloat("Exposure", "##ViewExposure", &m_Exposure, -8.0f, 8.0f, "%.2f stops", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("Black EV", "##ViewBlackEv", &m_BlackEv, -16.0f, 0.0f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("White EV", "##ViewWhiteEv", &m_WhiteEv, 0.0f, 16.0f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("Middle Grey", "##ViewMiddleGrey", &m_MiddleGrey, 0.01f, 1.0f, "%.3f", context.safeContentWidth);
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::NodeSliderFloat("Highlight Shoulder", "##ViewShoulder", &m_Shoulder, 0.05f, 4.0f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("Shadow Toe", "##ViewToe", &m_Toe, 0.0f, 1.0f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("Contrast", "##ViewContrast", &m_Contrast, 0.25f, 2.5f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat(
-        "Contrast Pivot",
-        "##ViewContrastPivot",
-        &m_ContrastPivotEv,
-        std::max(-8.0f, m_BlackEv + 0.1f),
-        std::min(8.0f, m_WhiteEv - 0.1f),
-        "%+.2f EV",
-        context.safeContentWidth);
-    ImGuiExtras::NodeSliderFloat("Saturation", "##ViewSaturation", &m_Saturation, 0.0f, 2.0f, "%.2f", context.safeContentWidth);
-    ImGuiExtras::NodeCheckbox("Preserve Hue", "##ViewPreserveHue", &m_PreserveHue, context.safeContentWidth);
-    ImGuiExtras::NodeCheckbox("EV False Color", "##ViewFalseColor", &m_DebugFalseColor, context.safeContentWidth);
-    const char* inputSpaces[] = {
-        "Linear sRGB / D65",
-        "Linear Rec. 2020 / D65"
-    };
-    int inputSpace = m_InputIsRec2020 ? 1 : 0;
-    if (ImGuiExtras::NodeCombo(
-            "Input Space",
-            "##ViewInputSpace",
-            &inputSpace,
-            inputSpaces,
-            IM_ARRAYSIZE(inputSpaces),
-            context.safeContentWidth)) {
-        m_InputIsRec2020 = inputSpace == 1;
-    }
-    ImGuiExtras::NodeCheckbox("Encode sRGB Output", "##ViewEncodeSrgb", &m_EncodeSrgbOutput, context.safeContentWidth);
-    ImGui::TextDisabled("False color: blue < -4, cyan -4..-2, green -2..0, yellow 0..2, orange 2..4, red > 4 EV.");
+    ImGuiExtras::NodeSliderFloat("Exposure","##ViewExposure",&m_Exposure,-8.f,8.f,"%.2f stops",width);
+    ImGuiExtras::NodeSliderFloat("Middle Grey","##ViewMiddleGrey",&m_MiddleGrey,.01f,.5f,"%.3f",width);
+    ImGuiExtras::NodeSliderFloat("Contrast","##ViewContrast",&m_Contrast,.25f,2.5f,"%.2f",width);
+    ImGuiExtras::NodeSliderFloat("Contrast Pivot","##ViewContrastPivot",&m_ContrastPivotEv,-8.f,8.f,"%+.2f EV",width);
+    ImGuiExtras::NodeSliderFloat("Saturation","##ViewSaturation",&m_Saturation,0.f,2.f,"%.2f",width);
+    ImGuiExtras::NodeCheckbox("Preserve Hue","##ViewPreserveHue",&m_PreserveHue,width);
+    ImGuiExtras::NodeCheckbox("EV False Color","##ViewFalseColor",&m_DebugFalseColor,width);
+    const char* spaces[]={"Linear sRGB / D65","Linear Rec. 2020 / D65"};
+    int space=m_InputIsRec2020?1:0;
+    if (ImGuiExtras::NodeCombo("Input Space","##ViewInputSpace",&space,spaces,IM_ARRAYSIZE(spaces),width)) m_InputIsRec2020=space==1;
+    ImGuiExtras::NodeCheckbox("Encode sRGB Output","##ViewEncodeSrgb",&m_EncodeSrgbOutput,width);
 }
 
 json ViewTransformLayer::Serialize() const {
     return json{
         { "type", "ViewTransform" },
         { "exposure", m_Exposure },
-        { "blackEv", m_BlackEv },
-        { "whiteEv", m_WhiteEv },
         { "middleGrey", m_MiddleGrey },
-        { "shoulder", m_Shoulder },
-        { "toe", m_Toe },
         { "contrast", m_Contrast },
         { "contrastPivotEv", m_ContrastPivotEv },
         { "contrastModel", Stack::RawRecipe::kViewContrastModelPivotedLogV2 },
@@ -608,17 +544,15 @@ json ViewTransformLayer::Serialize() const {
         { "debugFalseColor", m_DebugFalseColor },
         { "inputWorkingSpace", m_InputIsRec2020 ? "linear-rec2020-d65" : "linear-srgb-d65" },
         { "encodeSrgbOutput", m_EncodeSrgbOutput },
-        { "displayCurve", m_PhotographicHdr ? Raw::HdrDisplay::Photographic : "standard" }
+        { "displayCurve", Raw::SigmoidDisplay::Id }
     };
 }
 
 void ViewTransformLayer::Deserialize(const json& j) {
+    if (j.contains("displayCurve") && j.at("displayCurve") != Raw::SigmoidDisplay::Id)
+        throw std::runtime_error("Unsupported View Transform display curve.");
     m_Exposure = j.value("exposure", m_Exposure);
-    m_BlackEv = j.value("blackEv", m_BlackEv);
-    m_WhiteEv = j.value("whiteEv", m_WhiteEv);
     m_MiddleGrey = j.value("middleGrey", m_MiddleGrey);
-    m_Shoulder = j.value("shoulder", m_Shoulder);
-    m_Toe = j.value("toe", m_Toe);
     m_Contrast = j.value("contrast", m_Contrast);
     m_ContrastPivotEv = j.value("contrastPivotEv", 0.0f);
     m_Saturation = j.value("saturation", m_Saturation);
@@ -626,7 +560,6 @@ void ViewTransformLayer::Deserialize(const json& j) {
     m_DebugFalseColor = j.value("debugFalseColor", m_DebugFalseColor);
     m_InputIsRec2020 = j.value("inputWorkingSpace", std::string("linear-srgb-d65")) == "linear-rec2020-d65";
     m_EncodeSrgbOutput = j.value("encodeSrgbOutput", false);
-    m_PhotographicHdr = j.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic;
 }
 
 ShadowsHighlightsLayer::ShadowsHighlightsLayer() = default;

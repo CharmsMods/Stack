@@ -9,6 +9,8 @@ struct BatchOptions {
     OutputLocation location=OutputLocation::NewFolder;
     bool preferGpuCombining=true;
     bool aiAlignment=false;
+    bool autoResolution=false;
+    Raw::Bracketing::BurstSmoothing smoothing=Raw::Bracketing::BurstSmoothing::SuperResolutionOnly;
 };
 struct BatchProgress {
     std::size_t set=0, total=0, outputs=0;

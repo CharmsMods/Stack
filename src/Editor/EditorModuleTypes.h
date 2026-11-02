@@ -653,6 +653,7 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
     std::shared_ptr<RawWorkspaceColorWarpAreaAnalysisState>
         colorWarpAreaAnalysisState;
     Stack::RawRecipe::RawColorWarpAreaAnalysisResult colorWarpAreaAnalysisResult;
+    bool colorWarpAreaWaitingForInput = false;
     std::string colorWarpAreaStatus;
     std::string colorWarpPendingReplaceRegionId;
     std::string colorWarpPendingReplaceCircleId;
@@ -671,6 +672,7 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
         colorWarpPendingCircleEditKind = 0;
         colorWarpPendingReplaceRegionId.clear();
         colorWarpPendingReplaceCircleId.clear();
+        colorWarpAreaWaitingForInput = false;
         colorWarpAreaStatus.clear();
     }
     int colorWarpDiagnosticTargetLongEdge = 192;

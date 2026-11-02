@@ -8,6 +8,14 @@ Third-party components retain their respective licenses and copyright notices be
 This product includes DNG technology under license by Adobe.
 See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://helpx.adobe.com/camera-raw/desktop/dng-and-file-formats/digital-negative.html#DNGSpecificationpatentlicense).
 
+## darktable Sigmoid curve and hue correction adaptation
+
+- Version: local 2026-11-02 sigmoid.c reference; zero-skew SDR subset
+- Upstream: https://github.com/darktable-org/darktable/blob/master/src/iop/sigmoid.c
+- License: GPL-3.0-or-later
+- Copyright: Copyright (C) 2020-2026 darktable developers; Stack adaptations 2026
+- Included license files: `Darktable-GPL-3.0.txt`
+
 ## Adaptagrams libavoid
 
 - Version: 840ebcff20dbba36ad03a2160edf7cbaf9859984
@@ -54,7 +62,7 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 - Upstream: https://opencv.org/
 - License: Apache-2.0; BSD-3-Clause; zlib; FDLIBM permission notice
 - Copyright: See OpenCV copyright and bundled notices
-- Included license files: `OpenCV-Apache-2.0.txt`, `OpenCV-COPYRIGHT.txt`, `OpenCV-zlib.txt`, `OpenCV-SoftFloat-FDLIBM.txt`, `OpenCV-FLANN-BSD.txt`
+- Included license files: `OpenCV-Apache-2.0.txt`, `OpenCV-COPYRIGHT.txt`, `OpenCV-zlib.txt`, `OpenCV-SoftFloat-FDLIBM.txt`, `OpenEXR-BSD.txt`, `OpenCV-FLANN-BSD.txt`
 
 ## DCB demosaicing
 

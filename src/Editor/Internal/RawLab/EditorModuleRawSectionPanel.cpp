@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Utils/HoverTextScope.h"
 #include "App/AppHeaderStyle.h"
 #include "App/settings/AppearanceTheme.h"
 #include "App/UiPerformanceTrace.h"
@@ -19,6 +20,7 @@ using namespace Stack::Editor::RawLabInternal;
 void EditorModule::RenderRawWorkspaceSectionPanel(
     const ImVec2& position, const ImVec2& size, float visibleWidth,
     const std::function<void()>& libraryNavigation) {
+    ImGuiExtras::HoverTextScope noHoverText(m_PermanentGalleryWorkspace);
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewPanel);
     m_RawSectionPanelFrame = ImGui::GetFrameCount();
     if (visibleWidth <= 0.5f || size.x <= 0.0f || size.y <= 0.0f) return;

@@ -12,6 +12,7 @@
 #include "Renderer/WorkspaceCompositor.h"
 #include "ThirdParty/stb_image_write.h"
 
+#include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -62,6 +64,35 @@ void CheckBracketSource(const EditorNodeGraph::Graph& graph) {
     }
     RequireBracketSurface(sources == 1, "Expected one Bracketing source node.");
 }
+
+// Inspect the textures actually submitted by the canvas, without requesting
+// a preview (a request here would hide a selected-only scheduling regression).
+std::set<unsigned> DrawnCoverageThumbnails() {
+    std::set<unsigned> checked,coverage;
+    GLint previous=0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,&previous);
+    for(const auto* list:ImGui::GetDrawData()->CmdLists)for(const auto& cmd:list->CmdBuffer) {
+        const auto texture=static_cast<unsigned>((intptr_t)cmd.GetTexID());
+        if(!texture||!checked.insert(texture).second||!glIsTexture(texture))continue;
+        glBindTexture(GL_TEXTURE_2D,texture);
+        GLint w=0,h=0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_WIDTH,&w);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_HEIGHT,&h);
+        if(w<=0||h<=0||std::max(w,h)!=128)continue;
+        std::vector<unsigned char> rgba(std::size_t(w)*h*4);
+        glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
+        bool gray=true,black=false,selected=false,partial=false;
+        for(std::size_t i=0;i<rgba.size();i+=4) {
+            gray &= rgba[i]==rgba[i+1] && rgba[i]==rgba[i+2] && rgba[i+3]==255;
+            black |= rgba[i]==0;
+            selected |= rgba[i]>16;
+            partial |= rgba[i]>0 && rgba[i]<255;
+        }
+        if(gray && black && selected && partial)coverage.insert(texture);
+    }
+    glBindTexture(GL_TEXTURE_2D,previous);
+    return coverage;
+}
 }
 
 // One real import/process/save/reopen lifecycle, or --draft-only to exercise
@@ -95,10 +126,12 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
             const auto root = std::filesystem::absolute(std::filesystem::u8path(argv[0]));
             std::filesystem::create_directories(root);
             const bool reopenOnly = argc == 3 && std::string(argv[1]) == "--reopen";
-            const bool galleryOpen = argc == 3 && std::string(argv[1]) == "--gallery-open";
+            const bool maskThumbnails = argc == 3 && std::string(argv[1]) == "--mask-thumbnails";
+            const bool galleryOpen = maskThumbnails || (argc == 3 && std::string(argv[1]) == "--gallery-open");
             const bool catalogOnly = argc == 3 && std::string(argv[1]) == "--catalog-only";
             const bool folderFlow = argc == 4 && std::string(argv[1]) == "--folder-flow";
-            const bool draftOnly = argc >= 4 && std::string(argv[1]) == "--draft-only";
+            const bool gridOnly = argc >= 4 && std::string(argv[1]) == "--grid-only";
+            const bool draftOnly = gridOnly || (argc >= 4 && std::string(argv[1]) == "--draft-only");
             if (catalogOnly || folderFlow) for(int folder=2;folder<(folderFlow?4:3);++folder) {
                 const auto workflowRoot = std::filesystem::absolute(std::filesystem::u8path(argv[folder]));
                 const auto scan = RawWorkspace::ScanWorkspace(workflowRoot);
@@ -129,6 +162,14 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 }
                 files.push_back(std::move(file));
             }
+            if (draftOnly) {
+                RequireBracketSurface(RawWorkspace::EnsureManagedFolders(root),"Could not initialize the fixture Closet.");
+                RawWorkspace::RawGalleryManualGrouping organization;
+                auto& stack=organization.stacks.emplace_back();
+                for (const auto& file:files) stack.push_back(file.lexically_relative(root).generic_u8string());
+                RequireBracketSurface(RawWorkspace::SaveGalleryState(RawWorkspace::BuildManagedLayout(root),organization),
+                    "Could not prepare the collapsed capture stack.");
+            }
             for (auto* editor : {owner.get(), other.get()}) {
                 editor->SetWorkspaceAppStatePersistenceEnabled(false);
                 if (galleryOpen) editor->SetDocumentPersistenceEnabled(false);
@@ -146,7 +187,10 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
             std::filesystem::path textCapture;
             std::string capturedText;
             bool viewRequestObserved = false, panelRequestObserved = false;
+            bool testingCaptureButton = false;
+            std::function<void(ImGuiIO&)> injectPointer;
             unsigned frames = 0;
+            int gridErrors=0,gridIdConflicts=0;
             const auto sharedFolder=std::make_shared<std::filesystem::path>(owner->GetRawWorkspaceState().workspaceRoot);
             if(folderFlow)for(auto* editor:{owner.get(),other.get()})
                 editor->SetRawWorkspaceFolderChangedHandler([sharedFolder](const auto& folder){*sharedFolder=folder;});
@@ -155,6 +199,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 Async::TaskSystem::Get().PumpMainThreadTasks(8, 4);
                 ImGui_ImplOpenGL3_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
+                if (injectPointer) injectPointer(ImGui::GetIO());
                 ImGui::NewFrame();
                 if(folderFlow)for(auto* editor:{owner.get(),other.get()})editor->SetRawWorkspaceFolder(*sharedFolder);
                 for (auto* editor : {owner.get(), other.get()}) {
@@ -178,10 +223,10 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                     panelRequestObserved = true;
                     foreground->SetWorkspacePanelOpen(true);
                 }
-                const float panelWidth = (!draftOnly || foreground->WorkspacePanelOpen()) ? 320.f : 0.f;
+                const float panelWidth = (!draftOnly || gridOnly || foreground->WorkspacePanelOpen()) ? 320.f : 0.f;
                 // AppShell draws its hosted navigator before the body. That
                 // marks this frame hosted and suppresses the inline fallback.
-                if(catalogOnly || folderFlow)foreground->RenderRawWorkspaceSectionPanel({0, 0}, {320, 900}, panelWidth);
+                if(catalogOnly || folderFlow || gridOnly)foreground->RenderRawWorkspaceSectionPanel({0, 0}, {320, 900}, panelWidth);
                 ImGui::SetNextWindowPos({panelWidth, 0});
                 ImGui::SetNextWindowSize({1440.f - panelWidth, 900});
                 ImGui::Begin("Bracket native workspace", nullptr,
@@ -200,13 +245,13 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 }
                 {
                     Workspace::InputScope locked(foreground->IsBracketingPresentationActive(), false);
-                    if(catalogOnly || folderFlow)foreground->RenderRawWorkspaceLabUI();else foreground->RenderUI();
+                    if(catalogOnly || folderFlow || gridOnly || testingCaptureButton)foreground->RenderRawWorkspaceLabUI();else foreground->RenderUI();
                 }
                 ImGui::End();
                 // End() finishes logging for the workspace root. The Source
                 // panel is a sibling window, so append its labels separately.
                 if (!logPath.empty()) ImGui::LogToFile(0, logPath.string().c_str());
-                if(!catalogOnly && !folderFlow)foreground->RenderRawWorkspaceSectionPanel({0, 0}, {320, 900}, panelWidth);
+                if(!catalogOnly && !folderFlow && !gridOnly)foreground->RenderRawWorkspaceSectionPanel({0, 0}, {320, 900}, panelWidth);
                 foreground->RenderBracketingPresentation(appearance.GetClearColor(), {0, 0}, {1440, 900});
                 if (!logPath.empty()) {
                     ImGui::LogFinish();
@@ -215,6 +260,10 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                     capturedText.assign(std::istreambuf_iterator<char>(log), std::istreambuf_iterator<char>());
                 }
                 ImGui::Render();
+                if(gridOnly) {
+                    gridErrors+=ImGui::GetCurrentContext()->ErrorCountCurrentFrame;
+                    gridIdConflicts=std::max(gridIdConflicts,ImGui::GetCurrentContext()->HoveredIdPreviousFrameItemCount);
+                }
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0, 0, 1440, 900);
                 const auto clear = appearance.GetClearColor();
@@ -284,6 +333,25 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 CaptureBracketSurface(root / "gallery-open-view.png");
                 owner->SetWorkspaceMode(Project::WorkspaceMode::Graph);
                 for (unsigned settle = 0; settle < 24; ++settle) frame();
+                if(maskThumbnails) {
+                    auto& graph=owner->GetNodeGraph();
+                    graph.ClearSelection();
+                    wait([&]{return DrawnCoverageThumbnails().size()>=2;},
+                        "Disconnected coverage thumbnails did not appear in Graph.",60);
+                    const auto drawn=DrawnCoverageThumbnails();
+                    unsigned shown=0,masks=0;
+                    for(const auto& node:graph.GetNodes())if(node.rawCoverage.contains("bracketDepthMask")) {
+                        ++masks;
+                        RequireBracketSurface(!graph.IsNodeSelected(node.id) &&
+                            std::none_of(graph.GetLinks().begin(),graph.GetLinks().end(),
+                                [&](const auto& link){return link.fromNodeId==node.id||link.toNodeId==node.id;}),
+                            "Fresh mask was selected or connected.");
+                        int w=0,h=0;
+                        shown+=unsigned(drawn.count(owner->GetRawMaskTexturePreview(node,w,h)));
+                    }
+                    RequireBracketSurface(shown>=2,"Drawn grayscale textures did not belong to the mask nodes.");
+                    std::cout<<"PASS "<<shown<<" unselected mask thumbnails drawn, "<<masks<<" disconnected masks.\n";
+                }
                 CaptureBracketSurface(root / "gallery-open-graph.png");
                 RequireBracketSurface(other->GetProjectDocumentId() == otherId &&
                     other->SerializePipeline() == otherPipeline,
@@ -339,6 +407,63 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 std::cout << "PASS actual native Gallery Originals with saved burst discovery; no Process\nCapture: "
                     << root / "gallery-completed-stacks.png" << '\n' << std::flush;
                 success=true;
+            } else if (gridOnly) {
+                owner->SetPermanentGalleryWorkspace(true);
+                owner->OpenRawWorkspaceGalleryWorkspace();
+                wait([&] { return !owner->IsRawWorkspaceScanBusy() && owner->GetRawWorkspaceState().sources.size()==files.size(); },
+                    "Grid fixture scan did not finish.");
+                wait([&] { return !owner->IsRawWorkspaceThumbnailBusy(); }, "Grid fixture thumbnails did not finish.");
+                for(int i=0;i<35;++i)frame();
+                ImGuiWindow* footer=nullptr;
+                for(auto* candidate:ImGui::GetCurrentContext()->Windows)
+                    if(candidate->Active && std::string(candidate->Name).find("NavigatorFooter")!=std::string::npos)footer=candidate;
+                RequireBracketSurface(footer,"Gallery navigator footer is missing.");
+                const auto scope=ImHashStr("GallerySidebar",0,footer->ID);
+                ImGui::ActivateItemByID(ImHashStr("##Grid",0,scope));
+                for(int i=0;i<35;++i)frame();
+                CaptureBracketSurface(root/"grid-collapsed.png");
+                bool leftDown=false,control=false,shift=false;
+                ImVec2 pointer{430,120};
+                injectPointer=[&](ImGuiIO& io) {
+                    io.AddMousePosEvent(pointer.x,pointer.y);
+                    io.AddMouseButtonEvent(ImGuiMouseButton_Left,leftDown);
+                    io.AddKeyEvent(ImGuiMod_Ctrl,control);
+                    io.AddKeyEvent(ImGuiMod_Shift,shift);
+                };
+                const auto click=[&] {leftDown=true;frame();leftDown=false;frame();};
+                frame();frame();click();click();
+                for(int i=0;i<40;++i)frame();
+                CaptureBracketSurface(root/"grid-opened.png");
+                pointer={600,120};control=true;frame();click();
+                CaptureBracketSurface(root/"grid-multiselected.png");
+                RequireBracketSurface(owner->GetRawWorkspaceState().selectedSourceKeys.size()==2,
+                    "Control-clicking the second stack member did not select both captures.");
+                control=false;frame();
+                leftDown=true;frame();pointer.x+=35;frame();frame();
+                const auto* payload=ImGui::GetDragDropPayload();
+                RequireBracketSurface(payload&&payload->IsDataType("RawGalleryGridMembers"),
+                    "Dragging selected stack members did not begin a native Gallery drag.");
+                CaptureBracketSurface(root/"grid-dragging.png");
+                leftDown=false;frame();frame();
+                pointer={430,120};frame();click();
+                RequireBracketSurface(owner->GetRawWorkspaceState().selectedSourceKeys.size()==1,
+                    "A plain click did not replace the stack-member selection.");
+                pointer={600,120};shift=true;frame();click();
+                RequireBracketSurface(owner->GetRawWorkspaceState().selectedSourceKeys.size()==2,
+                    "Shift-click did not select the visible stack-member range.");
+                shift=false;
+                unsigned openedMembers=0;
+                owner->SetRawGalleryOpenSelectionHandler([&](EditorModule::RawGalleryOpenSelection selection,bool bracket) {
+                    RequireBracketSurface(!bracket&&selection.items.size()==1&&!selection.items[0].project&&
+                        selection.items[0].path==files[0],"Stack member opening handed off the wrong image.");
+                    ++openedMembers;
+                });
+                pointer={430,120};frame();click();click();
+                RequireBracketSurface(openedMembers==1,"Double-click did not open the individual stack member.");
+                RequireBracketSurface(gridErrors==0&&gridIdConflicts<=1,
+                    "Opened stack grid reported ImGui layout or duplicate-ID errors.");
+                std::cout << "PASS native grid stack opening, Ctrl/Shift selection, drag payload, member opening, and ImGui error checks\n";
+                success=true;
             } else if (draftOnly) {
                 RequireBracketSurface(files.size() >= 2, "Draft entry needs at least two original captures.");
                 owner->SetWorkspaceMode(Project::WorkspaceMode::View);
@@ -356,18 +481,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 other->OpenRawWorkspaceGalleryWorkspace();
                 wait([&] { return !other->IsRawWorkspaceScanBusy() &&
                     other->GetRawWorkspaceState().sources.size() == files.size(); }, "Draft Gallery scan timed out.", 60);
-                bool first = true;
-                for (const auto& file : files) {
-                    const auto& sources = other->GetRawWorkspaceState().sources;
-                    const auto found = std::find_if(sources.begin(), sources.end(), [&](const auto& source) {
-                        return source.absolutePath.lexically_normal() == file.lexically_normal();
-                    });
-                    RequireBracketSurface(found != sources.end(), "Copied RAW is missing from Gallery.");
-                    other->SelectRawWorkspaceSourceForGallery(found->relativePathKey, !first, false, false);
-                    first = false;
-                }
-                RequireBracketSurface(other->GetRawWorkspaceState().selectedSourceKeys.size() == files.size(),
-                    "Gallery did not retain all selected originals.");
+                int handoffs=0;
                 bool handedOff = false;
                 other->SetRawGalleryOpenSelectionHandler([&](EditorModule::RawGalleryOpenSelection selection, bool bracket) {
                     RequireBracketSurface(bracket && selection.bracketSources.size() == files.size(),
@@ -375,6 +489,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                     for (const auto& file : files) RequireBracketSurface(std::find(selection.bracketSources.begin(),
                         selection.bracketSources.end(), file) != selection.bracketSources.end(),
                         "Gallery changed a selected original path.");
+                    if (++handoffs==1) return;
                     owner->BeginBracketingDraft(true);
                     owner->AddBracketingDraftFiles(selection.bracketSources);
                     owner->OpenBracketingTool();
@@ -383,14 +498,44 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                     owner->RequestOpenRawLabTab();
                     handedOff = true;
                 });
-                frameAction = [&] {
-                    // On the permanent Gallery this public command executes
-                    // CreateCaptureSet with its captured Gallery selection.
-                    other->OpenBracketingTool();
-                    RequireBracketSurface(handedOff, "Gallery Create Capture Set was rejected.");
+                foreground=other.get();
+                testingCaptureButton=true;
+                for (int i=0;i<35;++i) frame();
+                // The single collapsed filmstrip stack is centered in this fixed-size test window.
+                bool rightDown=false;
+                injectPointer=[&](ImGuiIO& io) {
+                    io.AddMousePosEvent(880,765);
+                    io.AddMouseButtonEvent(ImGuiMouseButton_Right,rightDown);
                 };
-                viewRequestObserved = panelRequestObserved = false;
+                frame();rightDown=true;frame();rightDown=false;frame();
+                injectPointer={};
+                RequireBracketSurface(ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+                    other->GetRawWorkspaceState().selectedSourceKeys.size()==files.size(),
+                    "Right-clicking the unopened stack did not select every capture and open its menu.");
+                for (int i=0;i<4;++i) frame();
+                CaptureBracketSurface(root / "unopened-stack-menu.png");
+                auto* popup=ImGui::GetCurrentContext()->OpenPopupStack.back().Window;
+                RequireBracketSurface(popup,"Missing Gallery context popup.");
+                ImGui::ActivateItemByID(popup->GetID("Create Capture Set"));
                 frame();
+                RequireBracketSurface(handoffs==1,"The context menu did not hand off the unopened stack.");
+                ImGuiWindow* selectionBar=nullptr;
+                for (int i=0;i<30;++i) {
+                    frame();
+                    for (auto* w:ImGui::GetCurrentContext()->Windows)
+                        if (w->Active && std::string_view(w->Name).find("/SelectionActions_")!=std::string_view::npos)
+                            selectionBar=w;
+                }
+                RequireBracketSurface(selectionBar,"Gallery selection action bar did not appear.");
+                CaptureBracketSurface(root / "gallery-capture-button.png");
+                const char* label="Create Capture Set";
+                const auto buttonId=ImHashStr(label,0,selectionBar->GetID(label));
+                ImGui::ActivateItemByID(buttonId);
+                frame();
+                testingCaptureButton=false;
+                RequireBracketSurface(handedOff,"The Create Capture Set button did not hand off the selected originals.");
+                foreground=owner.get();
+                viewRequestObserved = panelRequestObserved = false;
                 frame(); // Consume the operation's View/panel requests and start metadata inspection.
                 other->SetRawGalleryOpenSelectionHandler({});
                 wait([&] { return owner->ProjectTasks().IsIdle() && !owner->IsRawWorkspaceScanBusy(); },

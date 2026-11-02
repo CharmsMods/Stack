@@ -105,14 +105,14 @@ void AppShell::RenderStackMenu() {
             if (fileMenuItem("Show in Explorer", nullptr, m_FileOpenProjectTexture, !context.projectPath.empty()))
                 PlatformHelpers::RevealPathInExplorer(context.projectPath);
 
-            if (fileMenuItem("Export Project (.stack)...", nullptr, m_FileSaveTexture, context.canSaveAs)) {
+            if (fileMenuItem("Pack portable project...", nullptr, m_FileSaveTexture, context.canSaveAs)) {
                 const auto workspaceId = m_ActiveProjectWorkspace;
                 const auto documentId = m_Editor->EnsureProjectDocumentId();
                 const auto name = m_Editor->GetCurrentProjectName() + ".stack";
-                const auto destination = FileDialogs::SaveProjectFileDialog("Export Complete Project", name.c_str());
+                const auto destination = FileDialogs::SaveProjectFileDialog("Pack Portable Project", name.c_str());
                 auto* workspace = FindProjectWorkspace(workspaceId);
                 if (!destination.empty() && workspace && workspace->editor->GetProjectDocumentId() == documentId)
-                    workspace->editor->RequestProjectCopy(destination, true, false);
+                    workspace->editor->RequestProjectCopy(std::filesystem::u8path(destination), true, false);
             }
 
             menuSeparator();

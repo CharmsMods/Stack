@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Raw/RawGalleryCoverCache.h"
 #include "Editor/Internal/RawLab/RawLabGalleryFolderTree.h"
 
 #include <algorithm>
@@ -10,7 +11,6 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     const auto& resolved = ResolveRawWorkspaceFilmstripStacks();
     if (m_RawWorkspaceLabVisibleGalleryWorkspaceKey == m_RawWorkspaceFilmstripStacksCacheWorkspaceKey &&
         m_RawWorkspaceLabVisibleGalleryRevision == m_RawWorkspaceGalleryRevision &&
-        m_RawWorkspaceLabVisibleGallerySimilarityGeneration == m_RawWorkspaceSimilarityPublishedGeneration &&
         m_RawWorkspaceLabVisibleGalleryOrganizationRevision == m_RawWorkspaceFilmstripOrganizationRevision) {
         return m_RawWorkspaceLabVisibleGalleryStacksCache;
     }
@@ -20,7 +20,6 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     const bool orderCurrent =
         m_RawWorkspaceLabVisibleGalleryWorkspaceKey == m_RawWorkspaceFilmstripStacksCacheWorkspaceKey &&
         m_RawWorkspaceLabVisibleGalleryContentRevision == m_RawWorkspaceNavigatorRevision &&
-        m_RawWorkspaceLabVisibleGallerySimilarityGeneration == m_RawWorkspaceSimilarityPublishedGeneration &&
         m_RawWorkspaceLabVisibleGalleryOrganizationRevision == m_RawWorkspaceFilmstripOrganizationRevision &&
         m_RawWorkspaceLabVisibleGalleryFolderFilter == folderFilter;
     const auto folderVisible = [&](const std::string& key) {
@@ -66,11 +65,11 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     // Selection/thumbnail changes replace borrowed presentation views without
     // changing the order or regrouping/sorting the source catalog.
     if (orderCurrent) {
-        updateCompletion(m_RawWorkspaceLabVisibleGalleryStacksCache);
         m_RawWorkspaceLabVisibleGalleryRevision = m_RawWorkspaceGalleryRevision;
         return m_RawWorkspaceLabVisibleGalleryStacksCache;
     }
     auto& stacks = m_RawWorkspaceLabVisibleGalleryStacksCache;
+    m_RawFilmstripHeight.first = -1;
     stacks = resolved;
     std::unordered_set<std::string> assigned;
     assigned.reserve(views.size());
@@ -114,7 +113,6 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     m_RawWorkspaceLabVisibleGalleryRevision = m_RawWorkspaceGalleryRevision;
     m_RawWorkspaceLabVisibleGalleryContentRevision = m_RawWorkspaceNavigatorRevision;
     m_RawWorkspaceLabVisibleGalleryFolderFilter = folderFilter;
-    m_RawWorkspaceLabVisibleGallerySimilarityGeneration = m_RawWorkspaceSimilarityPublishedGeneration;
     m_RawWorkspaceLabVisibleGalleryOrganizationRevision = m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceLabVisibleGallerySections = Stack::RawWorkspace::BuildRawGalleryStackSections(
         stacks, ordering.sortMode);
@@ -129,39 +127,70 @@ EditorModule::ResolveRawWorkspaceGalleryProjectStacks() {
     const auto folder = m_PermanentGalleryWorkspace ? m_RawGalleryFolderFilter : std::optional<std::string>{};
     if (m_RawWorkspaceGalleryProjectStacksRevision == m_RawWorkspaceGalleryRevision &&
         m_RawWorkspaceGalleryProjectStacksQueueRevision == m_RawWorkspaceCategoryQueueRevision &&
-        m_RawWorkspaceGalleryProjectStacksSimilarityGeneration == m_RawWorkspaceSimilarityPublishedGeneration &&
         m_RawWorkspaceGalleryProjectStacksOrganizationRevision == m_RawWorkspaceFilmstripOrganizationRevision &&
         m_RawWorkspaceGalleryProjectStacksMode == m_RawWorkspaceGalleryContentMode &&
         m_RawWorkspaceGalleryProjectStacksFolder == folder) return m_RawWorkspaceGalleryProjectStacks;
     m_RawWorkspaceGalleryProjectStacks = Stack::RawWorkspace::BuildGalleryProjectStacks(
         presentation, ResolveRawWorkspaceFilmstripStacks());
+    if (!UsesGalleryPresetPreviews()) {
+        auto& families = m_RawWorkspaceGalleryProjectStacks;
+        for (auto& family : families) {
+            auto& indices = family.projectIndices;
+            indices.erase(std::remove_if(indices.begin(), indices.end(), [&](std::size_t index) {
+                const auto& project = presentation.projects[index];
+                if (project.standaloneMaster) {
+                    const auto preview = m_GalleryPresetThumbnails.find(project.projectCoverKey);
+                    const auto& master = m_RawWorkspace.sourceSetProjects[project.projectIndex].masterSource;
+                    return preview != m_GalleryPresetThumbnails.end() && master &&
+                        preview->second.revision == static_cast<std::uint64_t>(master->modifiedTimeTicks) &&
+                        !preview->second.error.empty();
+                }
+                if (!project.coverThumbnailCachePath.empty()) return false;
+                const auto failed = m_RawWorkspaceThumbnailTextures.find(project.projectCoverKey);
+                if (failed != m_RawWorkspaceThumbnailTextures.end() && !failed->second.texture &&
+                    failed->second.decodeState == Async::TaskState::Failed && !failed->second.sourcePath.empty() &&
+                    project.referenceSourceIndex < m_RawWorkspace.sources.size()) {
+                    const auto& original = m_RawWorkspace.sources[project.referenceSourceIndex];
+                    if (failed->second.sourcePath == original.absolutePath &&
+                        failed->second.sourceModified == original.modifiedTimeTicks &&
+                        failed->second.sourceBytes == original.fileSizeBytes) return true;
+                }
+                if (project.referenceSourceIndex < m_RawWorkspace.sources.size()) return false;
+                return project.projectIndex >= m_RawWorkspace.sourceSetProjects.size() ||
+                    !m_RawWorkspace.sourceSetProjects[project.projectIndex].linkedOriginal;
+            }), indices.end());
+        }
+        families.erase(std::remove_if(families.begin(), families.end(), [](const auto& family) {
+            return family.projectIndices.empty();
+        }), families.end());
+    }
     auto& covers = m_RawWorkspaceGalleryProjectCoverIds;
     std::unordered_set<std::string> catalogIds;
-    for (const auto& project : m_RawWorkspace.sourceSetProjects) catalogIds.insert(project.projectId);
-    for (const auto& project : presentation.projects) catalogIds.insert(project.projectId);
+    for (const auto& project : m_RawWorkspace.sourceSetProjects) catalogIds.insert(Stack::RawWorkspace::ProjectCoverKey(project.absolutePath,project.projectId));
+    for (const auto& project : presentation.projects) catalogIds.insert(project.projectCoverKey);
     for (auto cover = covers.begin(); cover != covers.end();) {
         if (!catalogIds.count(cover->first) || !catalogIds.count(cover->second)) cover = covers.erase(cover);
         else ++cover;
     }
     for (const auto& family : m_RawWorkspaceGalleryProjectStacks) {
         std::unordered_set<std::string> members;
-        for (const auto index : family.projectIndices) members.insert(presentation.projects[index].projectId);
+        for (const auto index : family.projectIndices) members.insert(presentation.projects[index].projectCoverKey);
         std::string chosen;
         for (const auto index : family.projectIndices) {
-            const auto existing = covers.find(presentation.projects[index].projectId);
+            const auto existing = covers.find(presentation.projects[index].projectCoverKey);
             if (existing != covers.end() && members.count(existing->second)) {
                 chosen = existing->second;
                 break;
             }
         }
         if (chosen.empty()) {
-            chosen = presentation.projects[family.projectIndices.front()].projectId;
+            chosen = presentation.projects[family.projectIndices.front()].projectCoverKey;
             for (const auto index : family.projectIndices) {
                 const auto& project = presentation.projects[index];
                 if (project.projectPath == m_RawWorkspaceLabFocusedProjectPath ||
                     std::find(m_RawWorkspaceLabSelectedProjectPaths.begin(), m_RawWorkspaceLabSelectedProjectPaths.end(),
                         project.projectPath) != m_RawWorkspaceLabSelectedProjectPaths.end()) {
-                    chosen = project.projectId;
+                    chosen = project.projectCoverKey;
                     break;
                 }
             }
@@ -170,7 +199,6 @@ EditorModule::ResolveRawWorkspaceGalleryProjectStacks() {
     }
     m_RawWorkspaceGalleryProjectStacksRevision = m_RawWorkspaceGalleryRevision;
     m_RawWorkspaceGalleryProjectStacksQueueRevision = m_RawWorkspaceCategoryQueueRevision;
-    m_RawWorkspaceGalleryProjectStacksSimilarityGeneration = m_RawWorkspaceSimilarityPublishedGeneration;
     m_RawWorkspaceGalleryProjectStacksOrganizationRevision = m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceGalleryProjectStacksMode = m_RawWorkspaceGalleryContentMode;
     m_RawWorkspaceGalleryProjectStacksFolder = folder;
@@ -221,6 +249,18 @@ std::vector<std::string> EditorModule::BuildRawWorkspaceGallerySourceSelectionOr
         m_RawWorkspaceGalleryDisplayMode == Stack::RawWorkspace::GalleryDisplayMode::List)) {
         for (const auto& group : presentation.groups) {
             for (const auto& source : group.sources) order.push_back(source.relativePathKey);
+        }
+        return order;
+    }
+
+    if (!compactFilmstrip && m_RawWorkspaceGalleryGridStacks.groupCount) {
+        // Range selection follows the opened grid's member order. Collapsed
+        // stack covers omit the other members currently visible to the user.
+        for (int group = 0; group < m_RawWorkspaceGalleryGridStacks.groupCount; ++group) {
+            for (const auto& key : m_RawWorkspaceGalleryGridStacks.groups[group]) {
+                if (m_RawWorkspaceLabGalleryViewsBySource.find(key) != m_RawWorkspaceLabGalleryViewsBySource.end())
+                    order.push_back(key);
+            }
         }
         return order;
     }

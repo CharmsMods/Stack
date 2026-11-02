@@ -4,6 +4,7 @@
 #include "Raw/RawAutoStartPoint.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawLoader.h"
+#include "Raw/SigmoidDisplayMapping.h"
 #include "Utils/ImGuiExtras.h"
 
 #include <imgui.h>
@@ -371,12 +372,11 @@ std::string FormatStartingPointDisplayFitValueSummary(
         return "Display Fit refreshed from post-edit analysis";
     }
     std::ostringstream out;
-    out << "Display Fit refreshed: middle grey " << std::fixed << std::setprecision(3)
-        << fit.middleGrey
-        << ", black " << std::setprecision(2) << fit.blackEv << " EV"
-        << ", white +" << fit.whiteEv << " EV"
-        << ", shoulder " << fit.shoulder
-        << ", toe " << fit.toe;
+    const float grey = Raw::SigmoidDisplay::MiddleGrey;
+    const float exposure = std::clamp(fit.exposure + std::log2(grey / fit.middleGrey), -8.f, 8.f);
+    out << "Display Fit refreshed: Sigmoid exposure " << std::fixed << std::setprecision(2)
+        << exposure << " EV, middle grey " << std::setprecision(3) << grey
+        << ", contrast " << fit.contrast;
     return out.str();
 }
 

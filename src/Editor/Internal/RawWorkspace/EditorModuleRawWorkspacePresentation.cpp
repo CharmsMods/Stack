@@ -2564,7 +2564,7 @@ void EditorModule::RenderRawWorkspaceBrowser(
         if (view.representsProject &&
             !view.projectCoverThumbnailCachePath.empty()) {
             thumbnailSource.relativePathKey =
-                "project-overlay:" + view.projectId;
+                view.projectCoverKey;
             thumbnailSource.thumbnail.absolutePath =
                 view.projectCoverThumbnailCachePath;
             thumbnailSource.thumbnail.status =

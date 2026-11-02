@@ -2,6 +2,7 @@
 
 #include "Async/TaskSystem.h"
 #include "Utils/FileDialogs.h"
+#include "Persistence/ManagedAssetPaths.h"
 
 #include <GLFW/glfw3.h>
 
@@ -155,38 +156,17 @@ void AppShell::RequestFileMenuSaveAs() {
         return;
     }
 
-    std::filesystem::path destination;
-    if (context.storageKind ==
-        Stack::Project::ProjectStorageKind::DirectoryBundle) {
-        const std::string projectName = m_Editor->GetCurrentProjectName().empty()
-            ? "RAW Project"
-            : m_Editor->GetCurrentProjectName();
-        const std::string selected = FileDialogs::SaveProjectBundleDialog(
-            "Save Working Project As",
-            projectName.c_str());
-        if (selected.empty()) {
-            return;
-        }
-        destination = selected;
-    } else {
-        std::string defaultName;
-        if (!context.projectPath.empty() &&
-            context.projectPath.extension() == ".stack") {
-            defaultName = context.projectPath.filename().string();
-        }
-        if (defaultName.empty()) {
-            defaultName = (m_Editor->GetCurrentProjectName().empty()
-                ? std::string("Untitled Project")
-                : m_Editor->GetCurrentProjectName()) + ".stack";
-        }
-        const std::string selected = FileDialogs::SaveProjectFileDialog(
-            "Save Project As",
-            defaultName.c_str());
-        if (selected.empty()) {
-            return;
-        }
-        destination = selected;
-    }
+    auto directory=context.projectPath.parent_path();
+    const auto shared=Stack::Project::ClosetAssetRoot(context.projectPath);
+    const auto& workspace=m_Editor->GetRawWorkspaceState();
+    if (!shared.empty()) directory=shared.parent_path()/"Projects";
+    else if (!workspace.workspaceRoot.empty())
+        directory=Stack::RawWorkspace::BuildManagedLayout(workspace.workspaceRoot).projectsDirectory;
+    const auto name=m_Editor->GetCurrentProjectName();
+    const auto suggested=Stack::Project::UniqueWorkingProjectPath(directory,name.empty() ? "Project" : name);
+    const auto selected=FileDialogs::SaveProjectFileDialog("Save Working Project As",suggested.u8string().c_str());
+    if (selected.empty()) return;
+    auto destination=std::filesystem::u8path(selected);
 
     // Native save dialogs run their own modal message loop. Defer the project
     // mutation until the following ImGui frame so the save cannot be dropped
@@ -273,17 +253,12 @@ void AppShell::QueueFileAction(
         const bool supported = !pathError &&
             std::filesystem::exists(projectPath, pathError) &&
             !pathError &&
-            ((isDirectory && Stack::Project::IsDirectoryProjectBundle(projectPath)) ||
-             (!isDirectory &&
-               (Stack::Project::IsPortableV3Project(projectPath) ||
-                extension == ".stack" ||
-                (projectPath.filename() == "project.stack" &&
-                Stack::Project::IsDirectoryProjectBundle(
-                    projectPath.parent_path())))));
+            !isDirectory && (Stack::Project::IsWorkingProjectFile(projectPath) ||
+                Stack::Project::IsPortableV3Project(projectPath));
         if (!supported) {
             PostNotification(
                 UiNotificationSeverity::Error,
-                "Choose a Stack project document, working project folder, or packed .stack file.",
+                "Choose a working or portable .stack project.",
                 "file-menu-open-invalid-project");
             return;
         }

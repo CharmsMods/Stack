@@ -2,6 +2,7 @@
 #include "Raw/Bracketing/BurstNoise.h"
 #include "Raw/Bracketing/ProcessingInternal.h"
 #include "Raw/Bracketing/PhotometricReliability.h"
+#include "Raw/Bracketing/LocalWarpSupport.h"
 #include "Raw/Bracketing/ExposureGraph.h"
 #include <random>
 #include <stdexcept>
@@ -167,6 +168,14 @@ inline void ValidateBracketingNoiseEvidence() {
     motion.spacingRawX=motion.spacingRawY=63;motion.nodes.resize(4);motion.structuredCount=4;
     for(auto& node:motion.nodes) {node.state=Raw::Mfd::MotionNodeState::Structured;
         node.confidence=1;node.covarianceRaw={.0025,0,.0025};}
+    auto sparse=motion;
+    for(unsigned i=0;i<4;++i)sparse.nodes[i].centerRaw={double(i%2)*63,double(i/2)*63};
+    sparse.nodes[3].state=Raw::Mfd::MotionNodeState::Rejected;sparse.rejectedCount=1;
+    if(!HasLocalWarpSupport(sparse,{22,22},8)||HasLocalWarpSupport(sparse,{47,47},8))
+        throw std::runtime_error("Warp support crossed a missing registration corner");
+    sparse.nodes[1].state=sparse.nodes[2].state=Raw::Mfd::MotionNodeState::Rejected;
+    if(!HasLocalWarpSupport(sparse,{4,4},8)||HasLocalWarpSupport(sparse,{22,22},8))
+        throw std::runtime_error("One registration node was extended beyond its measured patch");
     Raw::Mfd::ReliabilityBuildRequest request;request.rawExtent={64,64};request.motionGrid=&motion;
     Raw::Mfd::CfaLayout::TryCreate(Raw::CfaPattern::RGGB,request.layout);
     request.noiseQuality=Raw::Mfd::NoiseModelQuality::GenericLowConfidence;

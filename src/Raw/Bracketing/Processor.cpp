@@ -6,6 +6,7 @@
 #include "ProcessingTiles.h"
 #include "TemporalGpu.h"
 #include "SuperResolution/Reconstruction.h"
+#include "SuperResolution/AdaptiveResolution.h"
 #include "Panorama/Panorama.h"
 #include "Depth/Depth.h"
 #include "NodeMath/ContractTypes.h"
@@ -91,7 +92,7 @@ Preview ReblendPreviewImpl(SourcePreview&& source,const BracketingRecipe& recipe
             for(std::size_t g=0;g<n;++g) {
                 const auto& v=samples[(p*4+c)*n+g];
                 input[c][g]={v.value,v.variance,v.headroom,v.support,v.fallback,v.exposure,
-                    v.finite,v.clipped,v.localRejected,v.fixedReference,v.measurementVariance,v.uncertaintyVariance,v.fallbackClipped};
+                    v.finite,v.clipped,v.localRejected,v.fixedReference,v.measurementVariance,v.uncertaintyVariance,v.fallbackClipped,v.clippedReference};
                 if(includeSourceMeasurements)sources[g][c]=v.support>0?v.value:v.fallback;
             }
         }
@@ -103,7 +104,8 @@ Preview ReblendPreviewImpl(SourcePreview&& source,const BracketingRecipe& recipe
                 (!blended.valid&&!blended.clipped?Preview::Invalid:0)|
                 (blended.localRejected?Preview::AlignmentRejected:0)|
                 (blended.fallbackReason==MeasurementFallbackReason::FixedReference?Preview::FixedReference:0)|
-                (blended.fallbackReason==MeasurementFallbackReason::ShortestExposure?Preview::ShortestExposure:0);
+                (blended.fallbackReason==MeasurementFallbackReason::ShortestExposure?Preview::ShortestExposure:0)|
+                (blended.fallbackReason==MeasurementFallbackReason::HighlightFallback?Preview::HighlightFallback:0);
             for(std::size_t g=0;g<n;++g) out.contributions[p*n+g]+=static_cast<float>(blended.actual[g]*.25);
         }
         StoreColor(out.resultRgb.data()+p*3,cell,colorChannels);
@@ -111,14 +113,6 @@ Preview ReblendPreviewImpl(SourcePreview&& source,const BracketingRecipe& recipe
             if(includeSourceMeasurements)StoreColor(out.sourceRgb.data()+(p*n+g)*3,sources[g],colorChannels);
             out.requested[p*n+g]=static_cast<float>(shares[g]);
         }
-    }
-    if(recipe.depth.enabled&&recipe.depth.blurRadius>0&&analysis.depth) {
-        std::vector<float> blurred;std::string error;
-        if(!Depth::RenderDefocusGpu(out.resultRgb,out.width,out.height,*analysis.depth,recipe.depth,
-            out.sensorOriginX,out.sensorOriginY,out.sensorStepX,out.sensorStepY,blurred,executor,shouldCancel,error)) {
-            if(failure)*failure=error;return {};
-        }
-        out.resultRgb=std::move(blurred);
     }
     return out;
 }
@@ -143,7 +137,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         try {request.evidenceStream=std::make_shared<ProcessingEvidenceStream>();}
         catch(...) {request.reportPresentation={};request.evidenceStream.reset();}
     }
-    if((request.recipe.reconstruction==ReconstructionMode::SuperResolution1x||
+    if((request.recipe.reconstruction==ReconstructionMode::Adaptive||request.recipe.reconstruction==ReconstructionMode::SuperResolution1x||
         request.recipe.reconstruction==ReconstructionMode::SuperResolution2x)&&submittedRequest.reportProgress)
         request.reportProgress=[report=submittedRequest.reportProgress](double p,const std::string& stage){report(.90*p,stage);};
     request.workerCount=ResolveBracketingWorkerCount(
@@ -221,7 +215,10 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
            pixels*36ull+tileBytes+32ull*1024*1024>request.memoryBudgetBytes)
             return fail("The output and tile buffers exceed the available bracketing memory budget.");
         const unsigned cellWidth=data.width/2,cellHeight=data.height/2;
-        if(!reuseGuide) {
+        auto groupRequest=request;
+        ResolveGroupReconstruction(groupRequest.recipe,request.recipe.reconstruction==ReconstructionMode::Standard);
+        const bool adaptive=request.recipe.reconstruction==ReconstructionMode::Adaptive;
+        const auto buildGuide=[&](double begin,double span) {
             analysis->guideEv.clear();analysis->suggestion.clear();analysis->histogram.fill(0);
             analysis->diagnostics.erase(std::remove_if(analysis->diagnostics.begin(),analysis->diagnostics.end(),
                 [](const std::string& message){return message.rfind("Temporal merge.",0)==0;}),analysis->diagnostics.end());
@@ -238,18 +235,18 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                 return NeutralGuideTile{left,top,std::min(side,data.width-left),std::min(side,data.height-top)};
             };
             TemporalGpu::Operation workspaceOperation(*data.combiningGpu);
-            if(!ProcessTiles(request,data,.52,.33,"Combining groups and neutral guide",ProcessingStage::Groups,
+            if(!ProcessTiles(groupRequest,data,begin,.825*span,"Combining groups and neutral guide",ProcessingStage::Groups,
                 [&](unsigned tx,unsigned ty,std::string& tileError) {
                     std::vector<std::vector<Observation>> observations;
-                    if(!PrepareGroupTile(request,data,tx,ty,observations,tileError))return false;
+                    if(!PrepareGroupTile(groupRequest,data,tx,ty,observations,tileError))return false;
                     const auto index=static_cast<std::size_t>(ty)*origin.frame.tileColumns+tx;
                     const auto start=std::chrono::steady_clock::now();
                     const bool success=BuildNeutralGuideTile(request.recipe,guideLuminance,bounds(tx,ty),cellWidth,
                         observations,analysis->guideEv,tileCounts[index],tileHistograms[index],tileError);
                     tileGuideSeconds[index]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
                     return success;
-                },error)) return fail(error);
-            if(!workspaceOperation.Finish(error))return fail(error);
+                },error)) return false;
+            if(!workspaceOperation.Finish(error))return false;
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
             {
                 const auto& m=data.groupMetrics;std::lock_guard<std::mutex> lock(m.mutex);
@@ -267,19 +264,19 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             analysis->stageSeconds["group_neutral_guide_worker_seconds"]=guideWorkerSeconds;
             const auto guideStart=std::chrono::steady_clock::now();
             if(std::count_if(data.sources.begin(),data.sources.end(),[](const auto& source){return source.enabled;})>1)
-                analysis->diagnostics.push_back("Temporal merge. Local detail uses agreement across at least three captures. Additional spatial denoising is controlled in RAW.");
+                analysis->diagnostics.push_back("Temporal merge. Local detail uses agreement across at least three captures. Additional RAW denoising is editable.");
             // Keep the existing ordered presentation stages, but do not reread
             // group/RAW cache payloads merely to display the completed guide.
-            if(!ProcessTiles(request,data,.85,.07,"Finalizing neutral guide",ProcessingStage::Guide,
+            if(!ProcessTiles(groupRequest,data,begin+.825*span,.175*span,"Finalizing neutral guide",ProcessingStage::Guide,
                 [&](unsigned tx,unsigned ty,std::string&) {
                 const auto tile=bounds(tx,ty);
-                if(request.evidenceStream)request.evidenceStream->Tile(request,ProcessingStage::Guide,
+                if(groupRequest.evidenceStream)groupRequest.evidenceStream->Tile(groupRequest,ProcessingStage::Guide,
                     tile.left,tile.top,tile.width,tile.height,[&](unsigned sx,unsigned sy) {
                     PresentationSample sample;const auto ev=analysis->guideEv[(sy/2)*cellWidth+sx/2];
                     const double y=.18*std::exp2(ev);sample.rgb={y,y,y};sample.first=ev;return sample;
                 });
                 return true;
-            },error)) return fail(error);
+            },error)) return false;
             for(std::size_t tileIndex=0;tileIndex<tileCount;++tileIndex)
                 for(std::size_t bin=0;bin<256;++bin) {
                     analysis->histogram[bin]+=tileCounts[tileIndex][bin];
@@ -303,6 +300,26 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                 analysis->suggestion.push_back({ev,ev-(b?1.25/3:0),ev+(b<16?1.25/3:0),shares,shares,shares});
             }
             analysis->stageSeconds["neutral_guide"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-guideStart).count();
+            return true;
+        };
+        if(!reuseGuide&&!buildGuide(.52,adaptive?.20:.40))return fail(error);
+        if(adaptive) {
+            // Score the original SR guide, including its HDR shares. Only a native
+            // decision needs a different set of group measurements for publication.
+            if(!analysis->resolutionDecision) {
+                auto decision=std::make_shared<Sr::ScaleEvidence>();
+                ProcessingTimer timer(analysis->stageSeconds,"adaptive_resolution_evidence");
+                if(request.reportProgress)request.reportProgress(.72,"Checking recoverable detail against original captures");
+                if(std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;})>1&&
+                   !Sr::MeasureResolution(request,*analysis,*decision,error))return fail(error);
+                analysis->resolutionDecision=decision;
+            }
+            if(!analysis->resolutionDecision->reconstruct) {
+                groupRequest.recipe=request.recipe;
+                ResolveGroupReconstruction(groupRequest.recipe,true);
+                const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});
+                if(!reuseGuide&&enabled>1&&!buildGuide(.72,.20))return fail(error);
+            }
         }
         if(request.preparationOnly) {
             result.status=BracketingResult::Status::Completed;
@@ -334,7 +351,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         if(!ProcessTiles(request,data,.92,.08,"Blending bracket",ProcessingStage::Blend,
             [&](unsigned tx,unsigned ty,std::string& tileError) {
             std::vector<std::vector<Observation>> observations;Mfd::PreparedRawTile tile;
-            if(!ReadGroups(request,data,tx,ty,observations,tile,tileError)) return false;
+            if(!ReadGroups(groupRequest,data,tx,ty,observations,tile,tileError)) return false;
             std::uint64_t tileFallback=0,tileUnrecoverable=0,tileInvalid=0;
             ColorObservations colorInput;
             std::vector<double> shares;
@@ -354,7 +371,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                         if(keep) preview.samples[(previewIndex*4+c)*groups+g]={static_cast<float>(o.value),static_cast<float>(o.variance),
                             static_cast<float>(o.headroom),static_cast<float>(o.support),static_cast<float>(o.fallback),static_cast<float>(o.exposure),
                             o.finite,o.clipped,o.localRejected,o.fixedReference,
-                            static_cast<float>(o.measurementVariance),static_cast<float>(o.uncertaintyVariance),o.fallbackClipped};
+                            static_cast<float>(o.measurementVariance),static_cast<float>(o.uncertaintyVariance),o.fallbackClipped,o.clippedReference};
                     }
                     const auto& b=color[c];
                     if(keep&&request.evidenceStream)for(std::size_t g=0;g<groups;++g) {
@@ -403,7 +420,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.fallbackSamples=fallbackSamples.load(std::memory_order_relaxed);
         result.unrecoverableSamples=unrecoverableSamples.load(std::memory_order_relaxed);
         result.invalidSamples=invalidSamples.load(std::memory_order_relaxed);
-        result.identity=Stack::NodeMath::Sha256ContentIdentity(analysis->identity+Identity(request.recipe)+data.motionIdentity+data.depthIdentity);
+        result.identity=Stack::NodeMath::Sha256ContentIdentity("bracket-highlight-fallback-v2|"+analysis->identity+Identity(request.recipe)+data.motionIdentity+data.depthIdentity);
         auto raw=std::make_shared<RawImageData>();raw->metadata=origin.metadata;
         raw->metadata.sourcePath="bracketing://result";raw->metadata.sourceContentSha256=result.identity.substr(7);
         raw->metadata.sourceByteSize=pixels*sizeof(float);
@@ -432,10 +449,16 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.message=enabled==1?"Single capture contribution. No multi-frame noise reduction or additional recovered dynamic range.":"Bracket ready.";
         auto reconstructionRequest=request;
         reconstructionRequest.reportProgress=submittedRequest.reportProgress;
-        if(!ReconstructSuperResolution(reconstructionRequest,result,error)) return fail(error);
-        if(request.recipe.depth.enabled) {
+        if(!ReconstructSuperResolution(reconstructionRequest,result,*analysis,error)) return fail(error);
+        if(analysis->depth) {
             ProcessingTimer timer(analysis->stageSeconds,"depth_output");
-            if(!Depth::Finish(reconstructionRequest,result,error)) return fail(error);
+            try {
+                if(!Depth::Finish(reconstructionRequest,result,error)) return fail(error);
+            } catch(const std::exception& e) {
+                if(request.shouldCancel && request.shouldCancel())return fail("Canceled.");
+                result.raw->reconstructionDepth=Raw::UnavailableDepth(data.width,data.height,e.what());
+                result.message+=" "+result.raw->reconstructionDepth->message;
+            }
         }
         return result;
     } catch(const std::exception& e) {return fail(std::string("Bracketing failed: ")+e.what());}

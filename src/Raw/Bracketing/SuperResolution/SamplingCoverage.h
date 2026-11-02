@@ -11,7 +11,7 @@ namespace Raw::Bracketing::Sr {
 // shifts can complete native colour without providing half-pixel measurements.
 class SamplingCoverage {
 public:
-    explicit SamplingCoverage(unsigned outputScale=1):harmonics_(outputScale>1?2u:1u) {}
+    explicit SamplingCoverage(double outputScale=1):harmonics_(unsigned(std::clamp(std::ceil(outputScale),1.,4.))) {}
     void Add(double dx,double dy,double weight) {
         if(!std::isfinite(dx)||!std::isfinite(dy)||!std::isfinite(weight)||weight<=0)return;
         constexpr double pi=3.14159265358979323846;
@@ -35,7 +35,7 @@ public:
     }
 private:
     unsigned harmonics_=1;
-    std::array<double,8> real_{},imaginary_{};
+    std::array<double,16> real_{},imaginary_{};
     double weight_=0,squared_=0;
 };
 }

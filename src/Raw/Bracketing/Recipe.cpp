@@ -11,12 +11,13 @@ const char* ReconstructionModeName(ReconstructionMode mode) {
         case ReconstructionMode::SuperResolution1x:return "super-resolution-1x";
         case ReconstructionMode::SuperResolution2x:return "super-resolution-2x";
         case ReconstructionMode::Panorama:return "panorama";
+        case ReconstructionMode::Adaptive:return "adaptive";
     }
     return "invalid";
 }
 bool ParseReconstructionMode(const std::string& text,ReconstructionMode& mode) {
     for(auto value:{ReconstructionMode::Standard,
-            ReconstructionMode::SuperResolution1x,ReconstructionMode::SuperResolution2x,ReconstructionMode::Panorama})
+            ReconstructionMode::SuperResolution1x,ReconstructionMode::SuperResolution2x,ReconstructionMode::Panorama,ReconstructionMode::Adaptive})
         if(text==ReconstructionModeName(value)){mode=value;return true;}
     return false;
 }
@@ -120,18 +121,21 @@ void InsertKnot(std::vector<Knot>& knots, double ev) {
     }
     knots.insert(it,std::move(k));
 }
+bool NeedsBurstSpatialGuide(const BracketingRecipe& r) {
+    if(r.smoothing!=BurstSmoothing::SuperResolutionOnly)return r.smoothing==BurstSmoothing::All;
+    return r.reconstruction==ReconstructionMode::Adaptive||r.reconstruction==ReconstructionMode::SuperResolution1x||
+        r.reconstruction==ReconstructionMode::SuperResolution2x;
+}
+void ResolveGroupReconstruction(BracketingRecipe& recipe,bool nativeBayer) {
+    recipe.reconstruction=nativeBayer?ReconstructionMode::Standard:ReconstructionMode::SuperResolution1x;
+    recipe.smoothing=NeedsBurstSpatialGuide(recipe)?BurstSmoothing::All:BurstSmoothing::Off;
+}
 bool Validate(const BracketingRecipe& r, std::string& error, bool allowInactiveDraft) {
     const auto fail=[&](const char* e){error=e;return false;};
     for (const auto& entry : r.orientationOverrides)
         if (entry.first < 0 || entry.first > 8 || entry.second < 0 || entry.second > 8)
             return fail("Invalid bracket orientation correction.");
     if (r.version!=RecipeVersion) return fail("Unsupported bracketing recipe version.");
-    if(!std::isfinite(r.depth.focus)||r.depth.focus<0||r.depth.focus>1||
-       !std::isfinite(r.depth.focusRange)||r.depth.focusRange<0||r.depth.focusRange>1||
-       !std::isfinite(r.depth.blurRadius)||r.depth.blurRadius<0||r.depth.blurRadius>64)
-        return fail("Invalid depth-of-field settings.");
-    if(r.depth.enabled&&r.reconstruction!=ReconstructionMode::Panorama&&r.alignmentMode!=AlignmentMode::AutomaticLocal)
-        return fail("Depth reconstruction needs Automatic local alignment.");
     if(r.aiAlignment&&(r.alignmentMode!=AlignmentMode::AutomaticLocal||r.reconstruction==ReconstructionMode::Panorama))
         return fail("AI alignment needs Automatic local alignment and a non-panorama reconstruction.");
     if(std::string(ReconstructionModeName(r.reconstruction))=="invalid") return fail("Invalid reconstruction mode.");
@@ -175,13 +179,16 @@ std::vector<int> ColorSlots(const BracketingRecipe& recipe) {
     return slots;
 }
 nlohmann::json Serialize(const BracketingRecipe& r) {
-    nlohmann::json j={{"version",RecipeVersion},{"origin",r.originFrameId},{"automatic",r.automatic},
+    const bool separate=r.smoothing==BurstSmoothing::SuperResolutionOnly;
+    const int version=separate?RecipeVersion:(r.smoothing==BurstSmoothing::All||r.reconstruction==ReconstructionMode::Adaptive?9:8);
+    nlohmann::json j={{"version",version},{"origin",r.originFrameId},{"automatic",r.automatic},
         {"alignmentMode",AlignmentModeName(r.alignmentMode)},
         {"aiAlignment",r.aiAlignment},
         {"reconstruction",ReconstructionModeName(r.reconstruction)},
         {"groups",nlohmann::json::array()},{"knots",nlohmann::json::array()}};
+    if(separate)j["burstSmoothing"]="super-resolution-only";
+    else if(version==9)j["directionalDenoise"]=r.smoothing==BurstSmoothing::All;
     j["panorama"]={{"projection",int(r.panorama.projection)},{"outputScale",r.panorama.outputScale},{"overlapDenoise",r.panorama.overlapDenoise}};
-    j["depth"]={{"enabled",r.depth.enabled},{"focus",r.depth.focus},{"focusRange",r.depth.focusRange},{"blurRadius",r.depth.blurRadius}};
     j["orientationOverrides"] = nlohmann::json::object();
     for (const auto& entry : r.orientationOverrides)
         j["orientationOverrides"][std::to_string(entry.first)] = entry.second;
@@ -202,11 +209,12 @@ bool Deserialize(const nlohmann::json& j,BracketingRecipe& output,std::string& e
         r.version=RecipeVersion;r.originFrameId=j.at("origin").get<std::string>();
         r.automatic=j.value("automatic",true);
         r.aiAlignment=j.value("aiAlignment",false);
-        if(j.contains("depth")) {
-            const auto& depth=j.at("depth");r.depth.enabled=depth.value("enabled",false);
-            r.depth.focus=depth.value("focus",.5);r.depth.focusRange=depth.value("focusRange",.08);
-            r.depth.blurRadius=depth.value("blurRadius",0.);
+        if(storedVersion==10) {
+            if(j.at("burstSmoothing")!="super-resolution-only"){error="Invalid burst smoothing policy.";return false;}
+            r.smoothing=BurstSmoothing::SuperResolutionOnly;
         }
+        else r.smoothing=storedVersion>=9&&j.value("directionalDenoise",true)?BurstSmoothing::All:BurstSmoothing::Off;
+
         if(j.contains("panorama")) {
             const auto& p=j.at("panorama");
             r.panorama.projection=static_cast<PanoramaProjection>(p.value("projection",0));

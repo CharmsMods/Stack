@@ -475,11 +475,7 @@ public:
 private:
     unsigned int m_ShaderProgram = 0;
     float m_Exposure = 0.0f;
-    float m_BlackEv = -8.0f;
-    float m_WhiteEv = 4.0f;
     float m_MiddleGrey = 0.18f;
-    float m_Shoulder = 0.45f;
-    float m_Toe = 0.18f;
     float m_Contrast = 1.0f;
     float m_ContrastPivotEv = 0.0f;
     float m_Saturation = 1.0f;
@@ -487,7 +483,6 @@ private:
     bool m_DebugFalseColor = false;
     bool m_InputIsRec2020 = false;
     bool m_EncodeSrgbOutput = false;
-    bool m_PhotographicHdr = false;
     bool m_LastProbeValid = false;
     float m_LastMinRgb = 0.0f;
     float m_LastMaxRgb = 0.0f;

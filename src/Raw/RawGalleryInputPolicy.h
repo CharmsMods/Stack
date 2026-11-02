@@ -11,6 +11,10 @@ inline std::string RawGalleryPathOrderKey(std::string path) {
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return path;
 }
+inline bool IsGalleryRasterPath(const std::filesystem::path& path) {
+    const auto extension=RawGalleryPathOrderKey(path.extension().u8string());
+    return extension==".jpg" || extension==".jpeg" || extension==".png" || extension==".bmp" || extension==".tga";
+}
 // Keep Gallery discovery and explicit selected-file analysis on the same
 // supported workflow. Decoder format support alone does not expand this list.
 inline bool IsGalleryRawPath(const std::filesystem::path& path) {

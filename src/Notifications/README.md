@@ -37,7 +37,7 @@ scope.Post(std::move(notice));
 
 `NoticeSpec` also accepts actions, `operationId`, `dedupeKey`, `imagePreview` and specialized `customBody` content. Reuse one operation ID for stages and outcomes of the same operation. Independent operations get different IDs even when their labels match. A dedupe key groups repeated events within that owner, operation and record kind; it is a local feature key, not a central message catalogue.
 
-Post success after the operation's accepted result or completed write. Use `Outcome::Partial` when only part succeeded and preserve the failed items in details. Routine recomputes and autosaves normally use quiet results with `preview = false`. The default preview lasts four seconds, pauses for hover or keyboard focus, and waits behind a center dialog.
+Post success after the operation's accepted result or completed write. Use `Outcome::Partial` when only part succeeded and preserve the failed items in details. Routine recomputes and autosaves normally use quiet results with `preview = false`. The default preview lasts four seconds, pauses for hover or keyboard focus, and waits behind a decision dialog. Previews, Activity, and decision dialogs anchor to the lower right of the main viewport. Render notifications after workspace overlays and preserve their native input ownership.
 
 ## Track asynchronous work
 

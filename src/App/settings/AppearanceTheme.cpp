@@ -841,11 +841,11 @@ ThemeDefinition BuildPhotoshopGrayscaleTheme() {
     theme.readOnly = true;
     theme.textScale = 1.0f;
 
-    const ImVec4 background = MakeColor(0.267f, 0.267f, 0.267f, 1.0f);        // #444444
-    const ImVec4 windowBackground = MakeColor(0.267f, 0.267f, 0.267f, 1.0f);  // #444444
-    const ImVec4 surfaceBackground = MakeColor(0.157f, 0.157f, 0.157f, 1.0f); // #282828 Photoshop panel background
-    const ImVec4 surfaceElevated = MakeColor(0.251f, 0.251f, 0.251f, 1.0f);   // #404040 Hover / elevated element
-    const ImVec4 border = MakeColor(0.118f, 0.118f, 0.118f, 0.92f);           // #1E1E1E Subtle dark border
+    const ImVec4 background = MakeColor(0.118f, 0.118f, 0.118f, 1.0f);        // #1E1E1E
+    const ImVec4 windowBackground = MakeColor(0.118f, 0.118f, 0.118f, 1.0f);  // #1E1E1E
+    const ImVec4 surfaceBackground = MakeColor(0.086f, 0.086f, 0.086f, 1.0f); // #161616
+    const ImVec4 surfaceElevated = MakeColor(0.180f, 0.180f, 0.180f, 1.0f);   // #2E2E2E
+    const ImVec4 border = MakeColor(0.063f, 0.063f, 0.063f, 0.92f);           // #101010
     const ImVec4 accent = MakeColor(0.231f, 0.510f, 0.965f, 1.0f);           // #3B82F6 Photoshop blue focus accent
     const ImVec4 text = MakeColor(0.882f, 0.882f, 0.882f, 1.0f);             // #E1E1E1 Neutral text
     const ImVec4 textMuted = MakeColor(0.549f, 0.549f, 0.549f, 1.0f);        // #8C8C8C Muted gray text

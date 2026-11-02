@@ -12,8 +12,6 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
         GetRawWorkspaceGalleryScopeKey();
     if (m_RawWorkspaceFilmstripStacksCacheWorkspaceKey == workspaceKey &&
         m_RawWorkspaceFilmstripStacksCacheContentRevision == m_RawWorkspaceNavigatorRevision &&
-        m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration ==
-            m_RawWorkspaceSimilarityPublishedGeneration &&
         m_RawWorkspaceFilmstripStacksCacheOrganizationRevision ==
             m_RawWorkspaceFilmstripOrganizationRevision) {
         return m_RawWorkspaceFilmstripStacksCache;
@@ -70,8 +68,6 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
     }
     m_RawWorkspaceFilmstripStacksCacheWorkspaceKey = workspaceKey;
     m_RawWorkspaceFilmstripStacksCacheContentRevision = m_RawWorkspaceNavigatorRevision;
-    m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration =
-        m_RawWorkspaceSimilarityPublishedGeneration;
     m_RawWorkspaceFilmstripStacksCacheOrganizationRevision =
         m_RawWorkspaceFilmstripOrganizationRevision;
     return m_RawWorkspaceFilmstripStacksCache;
@@ -210,7 +206,7 @@ void EditorModule::NormalizeRawWorkspaceFilmstripOrganization() {
     const std::string workspaceKey =
         GetRawWorkspaceGalleryScopeKey();
     const auto found = m_RawWorkspaceManualGroupings.find(workspaceKey);
-    if (workspaceKey.empty() || found == m_RawWorkspaceManualGroupings.end()) {
+    if (workspaceKey.empty() || found == m_RawWorkspaceManualGroupings.end() || found->second.manualSourceOrder.empty()) {
         return;
     }
     std::vector<std::string> catalogKeys;
@@ -263,7 +259,7 @@ bool EditorModule::DetachRawWorkspaceFilmstripStackMember(
 void EditorModule::ResetRawWorkspaceSimilarityStacks() {
     m_RawWorkspaceSimilarityGeneration.fetch_add(1, std::memory_order_relaxed);
     m_RawWorkspaceSimilarityPublishedGeneration = 0;
-    ++m_RawWorkspaceFilmstripOrganizationRevision;
+    if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceSimilarityWorkspaceKey.clear();
     m_RawWorkspaceSimilarityStacks.clear();
     m_RawWorkspaceSimilarityRebuildPending = false;
@@ -287,7 +283,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
 
     if (workspaceKey.empty() || m_RawWorkspace.sources.empty()) {
         m_RawWorkspaceSimilarityPublishedGeneration = generation;
-        ++m_RawWorkspaceFilmstripOrganizationRevision;
+        if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
         m_RawWorkspaceSimilarityStacks.clear();
         return;
@@ -348,7 +344,13 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                             result.generation;
                         // Automatic grouping changes the same displayed order
                         // as manual organization, without persisting a manual edit.
-                        ++m_RawWorkspaceFilmstripOrganizationRevision;
+                        const bool sameOrder = std::equal(result.stacks.begin(), result.stacks.end(),
+                            m_RawWorkspaceSimilarityStacks.begin(), m_RawWorkspaceSimilarityStacks.end(),
+                            [](const auto& a, const auto& b) {
+                                return a.anchorCatalogIndex == b.anchorCatalogIndex &&
+                                    a.folderKey == b.folderKey && a.sourceKeys == b.sourceKeys;
+                            });
+                        if (!sameOrder) ++m_RawWorkspaceFilmstripOrganizationRevision;
                         m_RawWorkspaceSimilarityWorkspaceKey =
                             result.workspaceKey;
                         m_RawWorkspaceSimilarityStacks =
@@ -372,7 +374,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
             std::memory_order_relaxed)) {
         m_RawWorkspaceSimilarityWorkerActive = false;
         m_RawWorkspaceSimilarityPublishedGeneration = generation;
-        ++m_RawWorkspaceFilmstripOrganizationRevision;
+        if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
         m_RawWorkspaceSimilarityStacks.clear();
     } else if (!submitted) {

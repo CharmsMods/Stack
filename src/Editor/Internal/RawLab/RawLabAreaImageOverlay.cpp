@@ -129,6 +129,9 @@ void DrawRawLabAreaImage(EditorModuleTypes::RawZoneAreaUiState& ui,
         if(ui.maskPending || !current) DrawPendingStroke(*area,recipe.cropRotation,current ? coverage.get() : nullptr,
             image,mapping ? &*mapping : nullptr);
     }
+    draw->PopClipRect();
+    // Coverage belongs inside the photo; the brush outline and controls remain
+    // visible across its edge on the surrounding workspace.
     const auto& io=ImGui::GetIO();
     if (ui.active || ImGui::IsMouseHoveringRect(hit.Min,hit.Max)) {
         const int mode=ui.active ? ui.gestureMode : ui.mode;
@@ -161,6 +164,5 @@ void DrawRawLabAreaImage(EditorModuleTypes::RawZoneAreaUiState& ui,
             draw->AddText(p,IM_COL32(255,255,255,255),text);
         }
     }
-    draw->PopClipRect();
 }
 }

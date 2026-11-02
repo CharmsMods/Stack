@@ -21,13 +21,13 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     source = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabPreview.cpp').read_text(encoding="utf-8")
-    start = source.index('                const auto submitAreaAnalysis = [&]() {')
-    end = source.index('\n                if (colorUi.colorWarpAreaAnalysisState)', start)
+    start = source.index('    const auto submitAreaAnalysis = [&]() {')
+    end = source.index('\n    if (colorUi.colorWarpAreaAnalysisState)', start)
     submit = textwrap.dedent(source[start:end])
     start = end + 1
-    end = source.index('\n                const ImVec2 mouse', start)
+    end = source.index('\n    const ImVec2 mouse', start)
     poll = textwrap.dedent(source[start:end])
-    start = source.index('                        if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1')
+    start = source.index('            if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1')
     end = source.index('} else if (!colorUi.colorWarpPendingCircleAppend)', start)
     commit = textwrap.dedent(source[start:end] + '}')
     types = (root / 'src/Editor/EditorModuleTypes.h').read_text(encoding="utf-8")
@@ -108,6 +108,7 @@ struct Fixture {
     Fixture() {colorUi.colorWarpAreaOwner=areaOwner;colorUi.colorWarpPendingCircleActive=true;colorUi.colorWarpPendingCircleEditKind=1;}
     Tasks tasks;
     struct Scope { int width=1, height=1; std::vector<float> pixels{0,0,0}; } colorScope;
+    bool scopeReady=true;
     std::size_t colorScopePixelCount=1;
     struct Recipe {
         struct { int workingSpace=0; } technical;
@@ -119,7 +120,7 @@ struct Fixture {
         submitAreaAnalysis();
     }
     void Poll() {
-''' + poll + r'''
+''' + poll.replace('submitAreaAnalysis();','Submit();') + r'''
     }
     bool ClickToCommit() {
         const bool wasInitial=false;

@@ -13,8 +13,12 @@ Stack's Gallery grouping rules. Choose output formats and whether results go
 beside the source files or into a new subfolder. The window reports progress and
 allows cancellation. Original camera files remain read-only.
 
-Output formats are editable DNG, 16-bit TIFF, JPEG, and PNG. DNG output contains
-the processed Bayer mosaic rather than a rendered preview. TIFF, JPEG, and PNG
+Auto resolution checks detail in independent captures and chooses a native
+Bayer merge, native-size camera RGB or a larger reconstruction up to 4x per
+dimension. New native Bayer results use the temporal merge directly.
+Super-resolution keeps its burst-guided smoothing.
+Output formats are editable DNG, 16-bit TIFF, JPEG, and PNG. DNG stores
+the processed Bayer mosaic or reconstructed linear camera RGB. TIFF, JPEG, and PNG
 use the same default tone, gamut and display transform as Stack. Authored edits
 in a Stack project can intentionally change that finish. Supported input extensions are .arw, .srf, .sr2, .raw, and
 .dng; the engine checks each capture's supported sensor layout and metadata.
@@ -27,7 +31,10 @@ Command-line entry points from this installation folder:
 
 The UTF-8 manifest uses schemaVersion 1 and an array named files containing
 absolute input paths. Batch jobs also accept outputFormats (an array of dng,
-tiff, jpeg, and/or png) and destination (beside or folder). Example:
+tiff, jpeg, and/or png) and destination (beside or folder). Optional boolean
+fields are autoResolution (default false in batch) and directionalDenoise.
+Omit directionalDenoise for super-resolution-only smoothing. Explicit true
+or false applies to all results. Example:
   {"schemaVersion":1,"files":["C:\\Photos\\01.ARW","C:\\Photos\\02.ARW"],
    "outputFormats":["dng","tiff","jpeg","png"],"destination":"folder"}
 

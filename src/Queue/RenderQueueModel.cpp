@@ -64,6 +64,8 @@ Item MakeSourceItem(const Stack::RawGalleryQueue::SourceRequest& source) {
     item.kind = ItemKind::SourceImage;
     item.path = NormalizePath(source.sourcePath);
     item.displayName = item.path.stem().u8string();
+    item.camera = source.camera;
+    if (item.camera.bytes) return item;
     auto thumbnail = ReadThumbnailBytes(source.thumbnailPath);
     if (!thumbnail.empty())
         item.thumbnailBytes = std::make_shared<const std::vector<unsigned char>>(
@@ -93,7 +95,7 @@ Stack::RawGalleryQueue::Result RenderQueueModel::AddGalleryRequest(
             continue;
         }
         auto projectPath = NormalizePath(requestedPath);
-        if (Stack::Project::IsDirectoryProjectBundle(projectPath)) {
+        if (Stack::Project::IsWorkingProjectFile(projectPath)) {
             projectPath = Stack::Project::ResolveProjectStoreRoot(projectPath);
         } else if (!Stack::Project::IsPortableV3Project(projectPath)) {
             skip("The selected project is unavailable or unsupported: " +

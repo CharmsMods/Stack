@@ -34,7 +34,7 @@ void EditorModule::OpenBracketingTool() {
     BindBracketingSourceNodeEditor();
     // Capture-set entry opens its controls before the shell consumes View's
     // navigation request. Later frames preserve the user's collapse choice.
-    m_Project->workspace.viewPanelOpen=true;
+    SetViewSectionPanelOpen(true);
     RequestRawSettingsPanel();
 }
 void EditorModule::BeginBracketingDraft(bool fresh) {
@@ -50,6 +50,7 @@ void EditorModule::BeginBracketingDraft(bool fresh) {
     m_Bracketing=std::make_shared<Stack::Editor::BracketingSession>();
     m_Project->nodeEditor.reset();
     m_Bracketing->newProject=true;
+    m_Bracketing->recipe.reconstruction=Raw::Bracketing::ReconstructionMode::Adaptive;
     m_Bracketing->boundDocument=EnsureProjectDocumentId();
     m_Bracketing->processRequired=true;
     m_Bracketing->status="Select captures in the filmstrip or Gallery, then press Process.";
@@ -73,23 +74,17 @@ void EditorModule::RestoreBracketingSelection() {
         source.frameId=frame.id;source.path=asset->originalSourcePath;source.inspected=true;
         Stack::Project::DeserializeRawCaptureCompatibilitySummary(asset->captureMetadataSummary,source.metadata,nullptr);
         for(const auto& candidate:m_RawWorkspace.sources) {
-            if((!asset->sha256.empty()&&candidate.fingerprint==asset->sha256)||candidate.absolutePath==source.path||
-                (!asset->workspaceRelativeSourcePath.empty()&&candidate.relativePathKey==asset->workspaceRelativeSourcePath)) {
+            if(!asset->sha256.empty() && candidate.fingerprint == asset->sha256 &&
+                candidate.fileSizeBytes == asset->byteLength) {
                 source.sourceKey=candidate.relativePathKey;source.path=candidate.absolutePath;
                 m_RawWorkspace.selectedSourceKeys.push_back(source.sourceKey);break;
             }
         }
         if(source.sourceKey.empty()) {
-            std::error_code ec;
-            if(!std::filesystem::is_regular_file(source.path,ec)) {
-                const auto managed=m_Project->store->ResolveAssetFile(asset->assetId);
-                if(std::filesystem::is_regular_file(managed,ec))source.path=managed;
-                else {
-                    source.path=AppPaths::GetCacheDirectory()/"BracketingOriginals"/
-                        (asset->sha256+std::filesystem::path(asset->originalFilename).extension().string());
-                    if(!std::filesystem::is_regular_file(source.path,ec))materialize.emplace_back(asset->assetId,source);
-                }
-            }
+            if (m_Project->store->StorageKind() == Stack::Project::ProjectStorageKind::PortableFile)
+                source.path=AppPaths::GetCacheDirectory()/"BracketingOriginals"/
+                    (asset->sha256+std::filesystem::path(asset->originalFilename).extension().string());
+            materialize.emplace_back(asset->assetId, source);
             Stack::RawWorkspace::SourceRecord record;
             source.sourceKey="bracket-original:"+ui.projectId+"/"+frame.id;
             record.relativePathKey=source.sourceKey;record.absolutePath=source.path;
@@ -113,7 +108,10 @@ void EditorModule::RestoreBracketingSelection() {
         if(!ProjectTasks().Submit([job,store,materialize=std::move(materialize)]()mutable {
             for(auto& item:materialize) {
                 std::error_code ec;std::filesystem::create_directories(item.second.path.parent_path(),ec);
-                store->CopyAssetToFile(item.first,item.second.path,&item.second.error);
+                if (store->StorageKind() == Stack::Project::ProjectStorageKind::WorkingFile) {
+                    item.second.path = store->ResolveAssetFile(item.first);
+                    if (item.second.path.empty()) item.second.error = "Locate this original to reprocess the bracket.";
+                } else store->CopyAssetToFile(item.first,item.second.path,&item.second.error);
                 job->sources.push_back(std::move(item.second));
             }
             job->done=true;

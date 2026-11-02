@@ -5,8 +5,8 @@
 #include <algorithm>
 
 void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorker::PreviewRequest>& requests) {
-    const bool projectGraph = IsEditingRawLayerMaskGraph() && m_RawLayerMaskWorkspace->projectCanvas;
-    if ((!m_RawWorkspaceRootTabActive && !projectGraph) || !IsRawWorkspaceProjectActive()) return;
+    if ((!m_RawWorkspaceRootTabActive && !IsEditingRawLayerMaskGraph()) ||
+        (!IsRawWorkspaceProjectActive() && !IsMultiFrameRawProjectActive())) return;
     m_RawLayerPanel.Prune(ImGui::GetFrameCount());
     const auto revision = std::max<std::uint64_t>(1, m_RenderRevision);
     int count = 0;
@@ -25,27 +25,34 @@ void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorke
     }
 }
 
-unsigned int EditorModule::GetRawMaskTexturePreview(int nodeId, int& width, int& height) {
+unsigned int EditorModule::GetRawMaskTexturePreview(const EditorNodeGraph::Node& node, int& width, int& height) {
     width = height = 0;
     if (!IsEditingRawLayerMaskGraph()) return 0;
-    const auto* node = GetNodeGraph().FindNode(nodeId);
-    if (!node || (node->kind != EditorNodeGraph::NodeKind::MaskTexture &&
-        node->kind != EditorNodeGraph::NodeKind::CustomMask)) return 0;
-    const auto& owner = node->rawLayerOwnerId.empty() ? m_RawLayerMaskWorkspace->layerId : node->rawLayerOwnerId;
-    const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
-    if (!layer) return 0;
-    for (const auto& mask : layer->maskOutputs) {
-        if (mask.nodeUuid != node->instanceUuid) continue;
-        auto& preview = m_RawLayerPanel.thumbnails[Stack::Editor::RawLayerPanelState::Key(owner,mask.id)];
-        preview.layerId = owner;
-        preview.maskId = mask.id;
-        preview.visibleFrame = ImGui::GetFrameCount();
-        width = preview.width;
-        height = preview.height;
-        // Retain the last completed image while the next revision is rendering.
-        return preview.texture;
+    auto& workspace = *m_RawLayerMaskWorkspace;
+    const auto revision = m_Project->rawLayers.Revision();
+    if (workspace.thumbnailKeyRevision != revision) {
+        workspace.thumbnailKeys.clear();
+        workspace.thumbnailKeyRevision = revision;
     }
-    return 0;
+    auto& key = workspace.thumbnailKeys[node.id];
+    auto found = m_RawLayerPanel.thumbnails.find(key);
+    if (found == m_RawLayerPanel.thumbnails.end()) {
+        const auto& owner = node.rawLayerOwnerId.empty() ? workspace.layerId : node.rawLayerOwnerId;
+        const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
+        if (!layer) return 0;
+        const auto mask = std::find_if(layer->maskOutputs.begin(),layer->maskOutputs.end(),
+            [&](const auto& entry) { return entry.nodeUuid == node.instanceUuid; });
+        if (mask == layer->maskOutputs.end()) return 0;
+        key = Stack::Editor::RawLayerPanelState::Key(owner,mask->id);
+        found = m_RawLayerPanel.thumbnails.try_emplace(key).first;
+        found->second.layerId = owner;
+        found->second.maskId = mask->id;
+    }
+    auto& preview = found->second;
+    preview.visibleFrame = ImGui::GetFrameCount();
+    width = preview.width;
+    height = preview.height;
+    return preview.texture;
 }
 
 void EditorModule::AdoptRawLayerThumbnail(const EditorRenderWorker::PreviewResult& result) {

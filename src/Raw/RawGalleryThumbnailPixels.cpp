@@ -4,7 +4,6 @@
 #include <cstdint>
 
 namespace Stack::RawWorkspace {
-namespace {
 bool OrientThumbnailPixels(std::vector<unsigned char>& pixels, int& width,
     int& height, int orientation, const std::function<bool()>& shouldCancel) {
     if (orientation < 2 || orientation > 8) return true;
@@ -38,6 +37,7 @@ bool OrientThumbnailPixels(std::vector<unsigned char>& pixels, int& width,
     return true;
 }
 
+namespace {
 float NormalizeRawValue(float value, const Raw::RawMetadata& metadata) {
     const float black = metadata.blackLevel;
     const float white = std::max(black + 1.0f, metadata.whiteLevel);

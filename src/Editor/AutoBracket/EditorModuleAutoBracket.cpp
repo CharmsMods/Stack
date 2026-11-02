@@ -16,6 +16,35 @@ bool AutoBracketPathExists(const std::filesystem::path& path) {
 }
 }
 
+bool EditorModule::TryGetBracketSidebarTexture(unsigned& texture, int& width, int& height) {
+    const std::filesystem::path* capture = nullptr;
+    if (m_IsAutoBracketWorkspace && m_AutoBracket) {
+        const auto& presentation = *m_AutoBracketPresentation;
+        if (presentation.texture && presentation.width && presentation.height) {
+            texture = presentation.texture;
+            width = static_cast<int>(presentation.width);
+            height = static_cast<int>(presentation.height);
+            return true;
+        }
+        const auto work = m_AutoBracket->Current();
+        if (work && !work->item.candidate.sources.empty()) capture = &work->item.candidate.sources.front().path;
+    } else if (m_Bracketing && !m_Bracketing->sources.empty()) {
+        capture = &m_Bracketing->sources.front().path;
+    }
+    auto& source = m_BracketSidebarSource;
+    if (capture && !capture->empty() && *capture != source.absolutePath) {
+        source = {};
+        source.absolutePath = *capture;
+        source.relativePathKey = "bracket-sidebar:" + capture->generic_u8string();
+        source.browsePreview = true;
+    }
+    if (!capture && !m_IsAutoBracketWorkspace) return false;
+    if (source.absolutePath.empty()) return false;
+    texture = GetRawWorkspaceThumbnailTexture(source, &width, &height);
+    if (!texture && !m_RawWorkspaceThumbnailTextureUploadQueue.empty()) PumpRawWorkspaceThumbnailTextureUploads();
+    return texture != 0 && width > 0 && height > 0;
+}
+
 void EditorModule::TickAutoBracketing(bool externalBusy) {
     if((!m_DocumentPersistenceEnabled&&!m_IsAutoBracketWorkspace)||Stack::Workspace::IsPreview())return;
     const double now=ImGui::GetTime();
@@ -39,7 +68,7 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
     const bool rootCurrent=!m_AutoBracketWorkspaceClosing&&coordinator.SetRoot(root,now);
     const auto scan=GetRawWorkspaceScanSnapshot();
     const bool ready=rootCurrent&&!root.empty()&&scan.completedSuccessfully&&!Async::IsBusy(scan.state)&&
-        !IsRawWorkspaceThumbnailBusy()&&!m_RawWorkspaceThumbnailWorkerActive&&
+        GetRawWorkspaceThumbnailSnapshot().state==Async::TaskState::Idle&&!m_RawWorkspaceThumbnailWorkerActive&&
         !m_RawWorkspaceSimilarityWorkerActive&&!m_RawWorkspaceSimilarityRebuildPending&&
         m_RawWorkspaceSimilarityPublishedGeneration==m_RawWorkspaceSimilarityGeneration.load()&&
         m_RawWorkspaceSimilarityWorkspaceKey==root.generic_string();
@@ -71,6 +100,11 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
             const auto identity=Stack::AutoBracket::SourceIdentity(sources);
             if(!identity.empty())represented.emplace(identity,std::make_pair(set.projectId,project->second));
         }
+        // A marked, rediscovered image is completion evidence even after its Closet was removed.
+        // Leave the working-project destination empty for result-only entries.
+        for (const auto& project : m_RawWorkspace.sourceSetProjects)
+            if (project.standaloneMaster && !project.masterCaptureSetIdentity.empty())
+                represented.try_emplace(project.masterCaptureSetIdentity);
         coordinator.UpdateCandidates(candidates,represented);
         m_AutoBracketRoot=root.generic_string();m_AutoBracketCatalogRevision=catalogContentsRevision;
         m_AutoBracketGroupingGeneration=m_RawWorkspaceSimilarityPublishedGeneration;
@@ -120,7 +154,24 @@ bool EditorModule::ConsumeAutoBracketWorkspaceRequest() {
 }
 bool EditorModule::TransferAutoBracketingTo(EditorModule& target) {
     if(&target==this||m_IsAutoBracketWorkspace||!m_AutoBracket||target.m_AutoBracket||
-        target.GetProjectSessionKind()!=ProjectSessionKind::Empty||target.IsDirty())return false;
+        target.GetProjectSessionKind()!=ProjectSessionKind::Empty||target.IsDirty()||target.IsRawWorkspaceScanBusy())return false;
+    // The scheduler has already verified the captures and reconciled the queue.
+    // Give the new worker its own catalog snapshot without a second scan/decode.
+    target.m_RawWorkspace = m_RawWorkspace;
+    for (auto& project : target.m_RawWorkspace.sourceSetProjects)
+        if (project.masterSource) project.masterSource = std::make_shared<Stack::RawWorkspace::SourceRecord>(*project.masterSource);
+    target.m_RawWorkspaceScanSnapshot = GetRawWorkspaceScanSnapshot();
+    target.m_RawWorkspaceScanSnapshot.generation = target.m_RawWorkspaceScanGeneration;
+    target.m_RawWorkspaceThumbnailSnapshot = GetRawWorkspaceThumbnailSnapshot();
+    target.m_RawWorkspaceThumbnailSnapshot.generation = target.m_RawWorkspaceThumbnailGeneration;
+    target.m_RawWorkspaceSimilarityStacks = m_RawWorkspaceSimilarityStacks;
+    target.m_RawWorkspaceSimilarityWorkspaceKey = m_RawWorkspaceSimilarityWorkspaceKey;
+    target.m_RawWorkspaceSimilarityGeneration.store(m_RawWorkspaceSimilarityPublishedGeneration);
+    target.m_RawWorkspaceSimilarityPublishedGeneration = m_RawWorkspaceSimilarityPublishedGeneration;
+    const auto scope = GetRawWorkspaceGalleryScopeKey();
+    const auto grouping = m_RawWorkspaceManualGroupings.find(scope);
+    if (grouping != m_RawWorkspaceManualGroupings.end()) target.m_RawWorkspaceManualGroupings[scope] = grouping->second;
+    target.InvalidateRawWorkspaceGalleryPresentation();
     target.m_AutoBracket=std::move(m_AutoBracket);
     target.m_AutoBracketPresentation=std::move(m_AutoBracketPresentation);
     target.m_IsAutoBracketWorkspace=true;
@@ -130,10 +181,10 @@ bool EditorModule::TransferAutoBracketingTo(EditorModule& target) {
     target.m_AutoBracketProtectedProjectPaths=m_AutoBracketProtectedProjectPaths;
     if(m_Project->snapshot)target.m_AutoBracketProtectedProjectIds.push_back(m_Project->snapshot->projectId);
     target.m_AutoBracket->SetProtectedProjectIds(target.m_AutoBracketProtectedProjectIds,target.m_AutoBracketProtectedProjectPaths);
-    // The target scans the shared folder independently. Reconcile its own catalog
-    // once ready, keeping the transferred queue's durable identities and progress.
-    target.m_AutoBracketRoot.clear();
-    target.m_AutoBracketCatalogRevision=target.m_AutoBracketGroupingGeneration=target.m_AutoBracketOrganizationRevision=0;
+    target.m_AutoBracketRoot = m_AutoBracketRoot;
+    target.m_AutoBracketCatalogRevision = target.m_RawWorkspaceNavigatorRevision;
+    target.m_AutoBracketGroupingGeneration = target.m_RawWorkspaceSimilarityPublishedGeneration;
+    target.m_AutoBracketOrganizationRevision = target.m_RawWorkspaceFilmstripOrganizationRevision;
     m_AutoBracketWorkspaceRequested=false;
     m_AutoBracketRoot.clear();
     m_AutoBracketCatalogRevision=m_AutoBracketGroupingGeneration=m_AutoBracketOrganizationRevision=0;
@@ -247,7 +298,7 @@ void EditorModule::RenderAutoBracketQueueItems() {
             if(item.state==Stack::AutoBracket::State::Attention||item.state==Stack::AutoBracket::State::Failed||item.state==Stack::AutoBracket::State::Excluded) {
                 if(ImGui::SmallButton("Retry"))m_AutoBracket->Retry(item.candidate.identity);
                 ImGui::SameLine();
-                if(!m_IsAutoBracketWorkspace&&!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath/"project.stack")) {
+                if(!m_IsAutoBracketWorkspace&&!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath)) {
                     if(ImGui::SmallButton("Open"))RequestOpenRawWorkspaceProjectFromGallery(item.projectPath);
                 }else if(!m_IsAutoBracketWorkspace&&!item.candidate.sources.empty()&&ImGui::SmallButton("Review captures")) {
                     std::vector<std::filesystem::path> paths;
@@ -292,22 +343,21 @@ void EditorModule::AppendRawWorkspaceQueuedBrackets(
                 return !item.projectId.empty()&&project.projectId==item.projectId;
             });
             if(found==projects.end()) {
-                if(item.state==Stack::AutoBracket::State::Completed)continue;
-                projects.emplace_back();found=std::prev(projects.end());
+                if (item.state == Stack::AutoBracket::State::Completed || item.candidate.sources.empty()) continue;
+                const auto& capture = item.candidate.sources.front();
+                const auto source = std::find_if(m_RawWorkspace.sources.begin(), m_RawWorkspace.sources.end(),
+                    [&](const auto& record) { return record.fingerprint == capture.fingerprint && record.fileSizeBytes == capture.bytes; });
+                if (source == m_RawWorkspace.sources.end()) continue;
+                projects.emplace_back(); found=std::prev(projects.end());
+                found->projectIndex = static_cast<std::size_t>(-1);
                 found->projectId=item.projectId.empty()?"queued:"+item.candidate.identity:item.projectId;
+                found->projectCoverKey = "project-overlay:queued:" + item.candidate.identity;
                 found->projectName=item.candidate.name;
                 found->bracketingProject=true;found->multiFrameProject=true;
                 found->frameCount=item.candidate.sources.size();
-                if(resolveProjectPaths&&!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath/"project.stack"))found->projectPath=item.projectPath;
-                if(!item.candidate.sources.empty()) {
-                    const auto source=std::find_if(m_RawWorkspace.sources.begin(),m_RawWorkspace.sources.end(),[&](const auto& source){
-                        return source.fingerprint==item.candidate.sources.front().fingerprint;
-                    });
-                    if(source!=m_RawWorkspace.sources.end()) {
-                        found->referenceSourceKey=source->relativePathKey;
-                        found->referenceSourceIndex=static_cast<std::size_t>(std::distance(m_RawWorkspace.sources.begin(),source));
-                    }
-                }
+                if(resolveProjectPaths&&!item.projectPath.empty()&&AutoBracketPathExists(item.projectPath))found->projectPath=item.projectPath;
+                found->referenceSourceKey=source->relativePathKey;
+                found->referenceSourceIndex=static_cast<std::size_t>(std::distance(m_RawWorkspace.sources.begin(),source));
             }
             found->projectName+=" / "+std::string(Stack::AutoBracket::StateName(item.state));
         }

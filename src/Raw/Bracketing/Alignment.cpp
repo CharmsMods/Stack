@@ -2,6 +2,7 @@
 #include "AlignmentProxy.h"
 #include "AlignmentExposureSeed.h"
 #include "PresentationEvidence.h"
+#include "ProcessingTimer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,16 +39,24 @@ bool SampleProxySource(const PreparedSource& source,Mfd::RawCoordinate sourceRaw
         static_cast<std::size_t>(y0+1)*preview.width+x0+1};
     const std::array<double,4> weights={(1-fx)*(1-fy),fx*(1-fy),(1-fx)*fy,fx*fy};
     std::array<double,4> samples{};
-    if(color)color->fill(0);
+    if(color) {
+        color->fill(0);
+        unsigned mask=7;
+        for(std::size_t i=0;i<4;++i) {
+            if(weights[i]<=1e-12) continue;
+            const auto index=indices[i];
+            mask &= source.calibrationChannelMask.empty()
+                ? (preview.clipped[index]?0u:7u) : source.calibrationChannelMask[index];
+            for(unsigned c=0;c<3;++c) (*color)[c]+=weights[i]*preview.rgb[index*3+c];
+        }
+        for(unsigned c=0;c<3;++c) if(!(mask&(1u<<c)))
+            (*color)[c]=std::numeric_limits<double>::quiet_NaN();
+        return mask!=0;
+    }
     for(std::size_t i=0;i<4;++i) {
         if(weights[i]>1e-12&&preview.clipped[indices[i]]) return false;
         samples[i]=ProxyLuminance(preview,indices[i]);
         if(!std::isfinite(samples[i])) return false;
-        if(color)for(unsigned c=0;c<3;++c) {
-            const double v=preview.rgb[indices[i]*3+c];
-            if(!std::isfinite(v))return false;
-            (*color)[c]+=weights[i]*v;
-        }
     }
     value=0;for(std::size_t i=0;i<4;++i)value+=weights[i]*samples[i];
     if(gradient) {
@@ -152,6 +161,7 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
     auto& reference=data.sources[data.origin];
     const Mfd::RawCoordinate center={.5*(data.width-1.0),.5*(data.height-1.0)};
     {
+        ProcessingTimer timer(data.stageSeconds,"exposure_seed");
         // Seed-only sorted samples need not remain resident during FFT/search.
         const auto referenceExposure=ExposureDistribution(reference);
         for(auto& source:data.sources) {
@@ -165,6 +175,7 @@ bool Align(const ProcessingRequest& request,PreparedDataset& data,
         diagnostics.push_back("Alignment is off. Captures use identical sensor coordinates.");
         return true;
     }
+    ProcessingTimer timer(data.stageSeconds,"global_alignment");
     if(!reference.original) {error="The alignment reference proxy is unavailable.";return false;}
     std::size_t alternate=0;
     const auto alternateCount=data.sources.size()-1;

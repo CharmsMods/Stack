@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Raw/RawCameraThumbnail.h"
 #include <cstddef>
 #include <filesystem>
 #include <string>
@@ -12,6 +13,7 @@ namespace Stack::RawGalleryQueue {
 struct SourceRequest {
     std::filesystem::path sourcePath;
     std::filesystem::path thumbnailPath;
+    Stack::RawWorkspace::CameraThumbnail camera;
 };
 
 struct Request {

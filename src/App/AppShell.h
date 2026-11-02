@@ -130,7 +130,7 @@ private:
     enum class WorkspaceTabAction { None, Select, Create, Close };
     void InitializeProjectWorkspaces();
     std::uint64_t CreateProjectWorkspace();
-    std::uint64_t CreateProjectWorkspace(const std::filesystem::path& sourceWorkspaceRoot);
+    std::uint64_t CreateProjectWorkspace(const std::filesystem::path& sourceWorkspaceRoot, bool scanFolder = true);
     ProjectWorkspace* FindProjectWorkspace(std::uint64_t id) const;
     LibraryToEditorProjectLoadPhase ActiveProjectLoadPhase() const;
     void ConfigureWorkspaceEditor(EditorModule& editor);

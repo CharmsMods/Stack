@@ -219,6 +219,8 @@ public:
     void SetAutoBracketProtectedProjectIds(const std::vector<std::string>& projectIds,
         const std::vector<std::filesystem::path>& paths = {});
     bool IsAutoBracketProjectBusy(const std::filesystem::path& path) const;
+    void RenderGraphColorWarpAreaSelector(const ImRect& imageRect);
+    bool TryGetBracketSidebarTexture(unsigned& texture, int& width, int& height);
     bool IsAutoBracketWorkspace() const { return m_IsAutoBracketWorkspace; }
     void CancelAutoBracketingForWorkspaceClose(bool pauseQueue = true);
     void RenderAutoBracketWorkspace();
@@ -268,6 +270,7 @@ public:
     bool ConsumeRawToolPickerRequest();
     int GetRawLabToolIndex() const;
     const std::vector<std::string>& GetRawLayerToolLabels() const;
+    const Stack::Editor::RawLayerToolPickerCache& GetRawLayerToolGraph() const;
     int GetRawLayerToolIndex() const;
     void RequestRawLayerToolIndex(int index);
     bool RenderRawGraphOperationControls();
@@ -286,9 +289,6 @@ public:
     void RenderBracketingPresentation(ImVec4 background, ImVec2 bodyPosition, ImVec2 bodySize);
     void CancelBracketingPresentation();
     void TickBracketing(bool foreground = true);
-    void ArmBracketingStartingLook();
-    void PrepareBracketingStartingLookAnalysis();
-    void TryApplyBracketingStartingLook(const RenderTextureStats& stats, std::uint64_t sourceHash);
     void ResetBracketingForProjectLoad(const std::filesystem::path& projectPath);
     void RefreshBracketingProjectCard();
     bool CaptureBracketingDraftForCopy(
@@ -299,6 +299,8 @@ public:
     bool IsBracketingActive() const;
     bool StartBracketingProcessing(bool publish, std::string* error = nullptr);
     void CommitBracketingEdit();
+    void RestoreSingleMasterMaskNodes();
+    void OfferBracketGraphMasks(const Raw::RawImageData&);
     bool IsBracketingToolActive() const;
     void OpenBracketingTool();
     void BindBracketingSourceNodeEditor();
@@ -441,6 +443,10 @@ public:
     void MarkDetachedPlatformPresented(DetachedSurfaceKind kind, GLFWwindow* window);
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
+    // Shell chrome may constrain tools without becoming the photo's camera.
+    void SetViewToolBounds(ImVec2 minimum, ImVec2 maximum) {
+        m_ViewToolMinimum = minimum; m_ViewToolMaximum = maximum;
+    }
     Stack::Editor::GraphEditorContext GetGraphEditorContext();
     bool ApplyProjectGraphDocumentEdit(const std::string& document,std::uint64_t revision,
         Stack::GraphModel::EditProposal proposal,Stack::Timeline::TimelineAnimationState animation,
@@ -820,7 +826,7 @@ public:
     const GraphPreviewPixels* GetCachedPreviewPixelsForNode(int previewNodeId) const;
     // Borrowed UI texture for this editor's live mask source. Calling marks it
     // visible so the render worker refreshes it after document changes.
-    unsigned int GetRawMaskTexturePreview(int nodeId, int& width, int& height);
+    unsigned int GetRawMaskTexturePreview(const EditorNodeGraph::Node& node, int& width, int& height);
     HdrMergeNodeStatus GetHdrMergeNodeStatus(int nodeId) const;
     bool GetGraphPerformancePopupEnabled() const { return m_ShowGraphPerformancePopup; }
     void SetGraphPerformancePopupEnabled(bool enabled) { m_ShowGraphPerformancePopup = enabled; }
@@ -1141,6 +1147,7 @@ public:
         const ImVec2& canvasMax);
     const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceState() const { return m_RawWorkspace; }
     void SetRawWorkspaceFolder(const std::filesystem::path& root);
+    void OpenGalleryOriginalInNewTab(const std::filesystem::path& root, const std::filesystem::path& original);
     const std::vector<std::filesystem::path>& GetRawWorkspaceSourceFolders() const { return m_RawWorkspace.registeredSourceFolders; }
     bool IsRawWorkspaceAllFolders() const { return m_RawWorkspace.allSourceFolders; }
     void SetRawWorkspaceAllFolders(bool allFolders);
@@ -1211,6 +1218,8 @@ public:
         ImVec2 clipMin, ImVec2 clipMax);
     std::string GetActiveRawWorkspacePresentationDiagnosticForValidation() const;
     const Stack::RawWorkspace::GalleryPresentation& GetRawWorkspaceGalleryPresentation();
+    const std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>&
+        ResolveRawWorkspaceVisibleGalleryStacks();
     void EnsureRawWorkspaceLoaded();
     void OpenRawWorkspaceFolderDialog();
     void RescanRawWorkspace();
@@ -1259,9 +1268,11 @@ public:
         const Stack::RawWorkspace::SourceRecord& source,
         int* outWidth = nullptr,
         int* outHeight = nullptr,
-        bool prioritize = false);
+        bool prioritize = false, int detailEdge = 0);
+    unsigned int GetGalleryOriginalDetail(const Stack::RawWorkspace::SourceRecord& source, ImVec2 available,
+        int& width, int& height);
     std::shared_ptr<const Raw::RawMetadata> GetRawWorkspaceThumbnailMetadata(
-        const std::string& thumbnailSourceKey) const;
+        const std::string& thumbnailSourceKey);
     bool CopyRawEditAttributesFromGallerySource(
         const Stack::RawWorkspace::SourceRecord& source,
         std::string* errorMessage = nullptr);
@@ -1443,6 +1454,7 @@ public:
     bool AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload payload);
 
 private:
+    ImVec2 m_ViewToolMinimum{}, m_ViewToolMaximum{};
     std::shared_ptr<Stack::Project::ProjectSession> m_Project;
     std::function<bool(const std::filesystem::path&)> m_ProjectRemovalGuard;
     std::function<bool(const std::filesystem::path&)> m_ProjectVersionHandler;
@@ -1492,12 +1504,18 @@ private:
     std::vector<RetiredGalleryThumbnail> m_RetiredGalleryThumbnails;
     std::size_t m_RetiredGalleryThumbnailBytes=0;
     struct RawWorkspaceThumbnailTexture {
+        int lastDemandFrame = -1;
+        std::shared_ptr<std::atomic<bool>> cancelTile;
         std::string sourceIdentity;
         unsigned int texture = 0;
         std::filesystem::path absolutePath;
-        std::string metadataIdentity;
+        std::filesystem::path sourcePath;
+        std::string sourceFingerprint;
+        std::int64_t sourceModified = 0;
+        std::uintmax_t sourceBytes = 0;
+        int detailEdge = 0;
         std::shared_ptr<const Raw::RawMetadata> metadata;
-        bool metadataChecked = false;
+        std::uint64_t metadataTicket = 0;
         Stack::RawWorkspace::ThumbnailStatus status = Stack::RawWorkspace::ThumbnailStatus::Unknown;
         int width = 0;
         int height = 0;
@@ -1749,6 +1767,7 @@ private:
     bool m_ActivityRawRenderIsProxy = false;
     std::unique_ptr<Stack::AutoBracket::AutoBracketCoordinator> m_AutoBracket;
     std::unique_ptr<Stack::AutoBracket::Presentation> m_AutoBracketPresentation;
+    Stack::RawWorkspace::SourceRecord m_BracketSidebarSource;
     bool m_IsAutoBracketWorkspace=false, m_AutoBracketWorkspaceRequested=false, m_AutoBracketWorkspaceClosing=false;
     std::vector<std::string> m_AutoBracketProtectedProjectIds;
     std::vector<std::filesystem::path> m_AutoBracketProtectedProjectPaths;
@@ -1825,6 +1844,21 @@ private:
     std::function<void(const RawWorkspacePresentationPreferences&)> m_RawWorkspacePresentationPreferencesChangedHandler;
     Stack::RawWorkspace::GalleryDisplayMode m_RawWorkspaceGalleryDisplayMode =
         Stack::RawWorkspace::GalleryDisplayMode::Grid;
+    struct PresetThumbnail {
+        std::uint64_t revision = 0;
+        bool attempted = false;
+        Stack::RawWorkspace::SourceRecord textureSource;
+        std::string error;
+    };
+    std::unordered_map<std::string,std::size_t> m_GalleryPresetProjects;
+    std::unordered_map<std::string,PresetThumbnail> m_GalleryPresetThumbnails;
+    std::shared_ptr<const Raw::RawImageData> m_GalleryComparisonImage;
+    std::string m_GalleryComparisonName;
+    std::uint64_t m_GalleryComparisonGeneration = 0;
+    unsigned m_GalleryComparisonJobs = 0;
+    void ChooseGalleryComparison(const std::filesystem::path& image);
+    bool UsesGalleryPresetPreviews() const;
+    const Stack::RawWorkspace::SourceRecord* GalleryPresetThumbnail(const std::string& key);
     Stack::RawWorkspace::GalleryContentMode m_RawWorkspaceGalleryContentMode =
         Stack::RawWorkspace::GalleryContentMode::Gallery;
     bool m_RawWorkspaceGalleryWindowOpen = false;
@@ -1835,6 +1869,7 @@ private:
     Stack::Editor::RawLabInternal::GalleryPreviewState m_RawWorkspaceGalleryPreview;
     float m_RawGalleryPropertiesAmount = -1.f;
     Stack::Editor::RawLabInternal::GalleryLayoutAnimation m_RawWorkspaceGalleryLayoutAnimation;
+    Stack::Editor::RawLabInternal::FilmstripHeightState m_RawFilmstripHeight;
     Stack::Editor::RawLabInternal::GalleryGridStacks m_RawWorkspaceGalleryGridStacks;
     std::optional<RawWorkspaceLabUiState> m_WorkspacePreviewUi;
     float m_WorkspacePreviewPaneWidth = 0;
@@ -1998,6 +2033,9 @@ private:
     std::unordered_set<std::string> m_RawEditAttributePasteSelection;
     std::vector<RawEditAttributePasteTarget> m_RawEditAttributePasteTargets;
     bool m_RawEditAttributePastePopupRequested = false;
+    bool m_GalleryCopyEditSelection = false;
+    bool m_GalleryApplyChooseTarget = false;
+    bool RequestGalleryProjectRelink(const std::filesystem::path& project);
     Async::TaskState m_RawEditAttributePasteTaskState =
         Async::TaskState::Idle;
     std::shared_ptr<RawEditAttributePasteProgressState>
@@ -2039,7 +2077,6 @@ private:
     mutable std::size_t m_RawWorkspaceFilmstripMaximumStackSizeCache = 1u;
     mutable std::string m_RawWorkspaceFilmstripStacksCacheWorkspaceKey;
     mutable std::uint64_t m_RawWorkspaceFilmstripStacksCacheContentRevision = 0;
-    mutable std::uint64_t m_RawWorkspaceFilmstripStacksCacheSimilarityGeneration = 0;
     mutable std::uint64_t m_RawWorkspaceFilmstripStacksCacheOrganizationRevision = 0;
     std::uint64_t m_RawWorkspaceFilmstripOrganizationRevision = 1;
     std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>
@@ -2052,7 +2089,6 @@ private:
     std::uint64_t m_RawWorkspaceLabVisibleGalleryRevision = 0;
     std::uint64_t m_RawWorkspaceLabVisibleGalleryContentRevision = 0;
     std::optional<std::string> m_RawWorkspaceLabVisibleGalleryFolderFilter;
-    std::uint64_t m_RawWorkspaceLabVisibleGallerySimilarityGeneration = 0;
     std::uint64_t m_RawWorkspaceLabVisibleGalleryOrganizationRevision = 0;
     std::vector<Stack::RawWorkspace::GalleryProjectStack> m_RawWorkspaceGalleryProjectStacks;
     // Every member points to its family's chosen cover. This preserves the
@@ -2060,7 +2096,6 @@ private:
     std::unordered_map<std::string, std::string> m_RawWorkspaceGalleryProjectCoverIds;
     std::uint64_t m_RawWorkspaceGalleryProjectStacksRevision = 0;
     std::uint64_t m_RawWorkspaceGalleryProjectStacksQueueRevision = 0;
-    std::uint64_t m_RawWorkspaceGalleryProjectStacksSimilarityGeneration = 0;
     std::uint64_t m_RawWorkspaceGalleryProjectStacksOrganizationRevision = 0;
     Stack::RawWorkspace::GalleryContentMode m_RawWorkspaceGalleryProjectStacksMode =
         Stack::RawWorkspace::GalleryContentMode::Gallery;
@@ -2098,6 +2133,9 @@ private:
     std::unordered_map<std::string, int> m_RawWorkspaceThumbnailDecodeRepairAttempts;
     std::atomic<std::uint64_t> m_RawWorkspaceThumbnailTextureResetGeneration { 0 };
     std::uint64_t m_RawWorkspaceThumbnailTextureRequestGeneration = 0;
+    std::string m_GalleryDetailSourceKey;
+    double m_GalleryDetailChangedAt = 0;
+    std::atomic<std::uint64_t> m_GalleryDetailRequest{0};
     std::uint64_t m_RawWorkspaceThumbnailTextureUseSerial = 0;
     bool m_RawWorkspaceThumbnailTextureTrimNeeded = false;
     int m_RawWorkspaceThumbnailTextureRequestFrame = -1;
@@ -2803,8 +2841,6 @@ private:
     void ResetRawWorkspaceSimilarityStacks();
     const std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>&
         ResolveRawWorkspaceFilmstripStacks() const;
-    const std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>&
-        ResolveRawWorkspaceVisibleGalleryStacks();
     const std::vector<Stack::RawWorkspace::GalleryProjectStack>&
         ResolveRawWorkspaceGalleryProjectStacks();
     std::vector<std::string> BuildRawWorkspaceGallerySourceSelectionOrder(
@@ -3144,6 +3180,9 @@ private:
         const std::string& sourceSetId,
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
         bool interactionActive, bool cancelGesture = false);
+    const RawDevelopmentGraphScopeReadback& ColorWarpInput(const RawWorkspaceEditContext&, std::size_t& fingerprint) const;
+    Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner ColorWarpAreaOwner(const RawWorkspaceEditContext&) const;
+    void RenderColorWarpAreaSelector(const RawWorkspaceEditContext&, const Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner&, const ImRect&);
     void RenderRawWorkspacePreviewCanvas(
         const Stack::RawWorkspace::SourceRecord* selectedSource,
         bool drawImageFrame,
@@ -3231,6 +3270,7 @@ private:
     Stack::Editor::RawLabInternal::GalleryNavigator m_RawGalleryNavigator;
     Stack::Editor::RawLabInternal::GalleryFolderCards m_RawGalleryFolderCards;
     bool m_RawGallerySourceFoldersOpen = false;
+    char m_RawGalleryNewFolderName[256]{};
     std::uint64_t m_RawGalleryFolderCardLoadGeneration = 0;
     // Advance for card publications and every registered-source-folder change.
     std::uint64_t m_RawGalleryFolderCardRevision = 1;
@@ -3302,7 +3342,8 @@ private:
     void RenderRawGalleryProperties(const Stack::RawWorkspace::SourceRecord* source,
         const std::shared_ptr<const Raw::RawMetadata>& metadata,
         const std::filesystem::path& projectPath,
-        const std::function<void(const ImVec2&)>& thumbnail);
+        const std::function<void(const ImVec2&)>& thumbnail,
+        const std::function<void(const ImVec2&)>& comparison = {});
     bool ExecuteRawGalleryAction(Stack::RawGalleryActions::Action action,
         const Stack::RawGalleryActions::Context& context);
     void RenderRawGalleryContextActions(const std::filesystem::path& focusedPath);

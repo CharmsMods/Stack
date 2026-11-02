@@ -1,4 +1,4 @@
-#include "Raw/HdrDisplayMapping.h"
+#include "Raw/ViewTransform.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -98,23 +98,17 @@ ImVec2 GraphToScreen(const ImRect& rect, float x, float y) {
 
 bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& draggingHandle) {
     const float exposure = JsonFloat(view, "exposure", 0.0f);
-    float blackEv = JsonFloat(view, "blackEv", -8.0f);
-    float whiteEv = JsonFloat(view, "whiteEv", 4.0f);
     const float middleGrey = JsonFloat(view, "middleGrey", 0.18f);
-    const float shoulder = JsonFloat(view, "shoulder", 0.45f);
-    const float toe = JsonFloat(view, "toe", 0.18f);
     const float contrast = JsonFloat(view, "contrast", 1.0f);
     float contrastPivotEv = JsonFloat(view, "contrastPivotEv", 0.0f);
     const bool encodeSrgb = JsonBoolean(view, "encodeSrgbOutput", true);
-    const float blackSceneEv = blackEv - exposure;
-    const float whiteSceneEv = whiteEv - exposure;
     const float pivotSceneEv = contrastPivotEv - exposure;
     const float graphMinEv = std::min(
         -12.0f,
-        std::min(blackSceneEv, pivotSceneEv) - 2.0f);
+        pivotSceneEv - 2.0f);
     const float graphMaxEv = std::max(
         8.0f,
-        std::max(whiteSceneEv, pivotSceneEv) + 2.0f);
+        pivotSceneEv + 2.0f);
     const float graphSpan = std::max(1.0f, graphMaxEv - graphMinEv);
 
     ImGui::InvisibleButton("##RawLabViewGraph", size, ImGuiButtonFlags_MouseButtonLeft);
@@ -169,34 +163,42 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
     constexpr int sampleCount = 192;
     std::array<ImVec2, sampleCount> curvePoints {};
     std::array<ImVec2, sampleCount> referencePoints {};
+    // Bounded value-keyed cache: unchanged drawing only places prepared samples.
+    // Geometry, hover and dragging do not repeat curve preparation/evaluation.
+    struct Samples {
+        bool valid = false;
+        std::array<float, 8> key {};
+        std::array<float, sampleCount> actual {}, reference {};
+        float pivot = 0;
+    };
+    static thread_local Samples samples;
+    const std::array<float, 8> key {exposure,middleGrey,contrast,contrastPivotEv,
+        float(encodeSrgb),graphMinEv,graphMaxEv,graphSpan};
+    if (!samples.valid || samples.key != key) {
+        Raw::ViewTransform::Parameters p;
+        p.exposure=exposure;p.middleGrey=middleGrey;
+        p.contrast=contrast;p.contrastPivotEv=contrastPivotEv;
+        const Raw::ViewTransform::PreparedTransform actual(p);
+        p.contrast=1.f;
+        const Raw::ViewTransform::PreparedTransform reference(p);
+        for (int index=0;index<sampleCount;++index) {
+            const float input=middleGrey*std::exp2(graphMinEv+graphSpan*index/(sampleCount-1));
+            samples.actual[index]=EncodeViewGraphOutput(actual.Luma(input),encodeSrgb);
+            samples.reference[index]=EncodeViewGraphOutput(reference.Luma(input),encodeSrgb);
+        }
+        samples.pivot=EncodeViewGraphOutput(actual.Luma(middleGrey*std::exp2(pivotSceneEv)),encodeSrgb);
+        samples.key=key;samples.valid=true;
+    }
     for (int index = 0; index < sampleCount; ++index) {
         const float u = static_cast<float>(index) / static_cast<float>(sampleCount - 1);
-        const float sceneEv = graphMinEv + u * graphSpan;
-        const float input = middleGrey * std::exp2(sceneEv);
-        const auto evaluate = [&](float evaluatedContrast) {
-            return EncodeViewGraphOutput(
-                (view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic
-                    ? Raw::HdrDisplay::Evaluate(input,{exposure,blackEv,whiteEv,middleGrey,evaluatedContrast,contrastPivotEv})
-                    : Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
-                    input,
-                    exposure,
-                    blackEv,
-                    whiteEv,
-                    middleGrey,
-                    shoulder,
-                    toe,
-                    evaluatedContrast,
-                    contrastPivotEv)),
-                encodeSrgb);
-        };
         curvePoints[static_cast<std::size_t>(index)] = GraphToScreen(
             rect,
             u,
-            evaluate(contrast));
+            samples.actual[index]);
         referencePoints[static_cast<std::size_t>(index)] = GraphToScreen(
             rect,
             u,
-            evaluate(1.0f));
+            samples.reference[index]);
     }
     if (std::abs(contrast - 1.0f) > 0.001f) {
         drawList->AddPolyline(
@@ -217,37 +219,8 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
         const float u = std::clamp((sceneEv - graphMinEv) / graphSpan, 0.0f, 1.0f);
         return GraphToScreen(rect, u, 0.0f).x;
     };
-    const float blackX = sceneEvToX(blackSceneEv);
-    const float whiteX = sceneEvToX(whiteSceneEv);
     const float pivotX = sceneEvToX(pivotSceneEv);
-    const ImU32 markerColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-    drawList->AddLine(ImVec2(blackX, rect.Min.y), ImVec2(blackX, rect.Max.y), markerColor, 1.0f);
-    drawList->AddLine(ImVec2(whiteX, rect.Min.y), ImVec2(whiteX, rect.Max.y), markerColor, 1.0f);
-    drawList->AddTriangleFilled(
-        ImVec2(blackX, rect.Max.y - 7.0f),
-        ImVec2(blackX - 5.0f, rect.Max.y),
-        ImVec2(blackX + 5.0f, rect.Max.y),
-        markerColor);
-    drawList->AddTriangleFilled(
-        ImVec2(whiteX, rect.Min.y + 7.0f),
-        ImVec2(whiteX - 5.0f, rect.Min.y),
-        ImVec2(whiteX + 5.0f, rect.Min.y),
-        markerColor);
-    const float pivotInput = middleGrey * std::exp2(pivotSceneEv);
-    const float pivotOutput = EncodeViewGraphOutput(
-        (view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic
-            ? Raw::HdrDisplay::Evaluate(pivotInput,{exposure,blackEv,whiteEv,middleGrey,contrast,contrastPivotEv})
-            : Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
-            pivotInput,
-            exposure,
-            blackEv,
-            whiteEv,
-            middleGrey,
-            shoulder,
-            toe,
-            contrast,
-            contrastPivotEv)),
-        encodeSrgb);
+    const float pivotOutput = samples.pivot;
     const ImVec2 pivotPoint = GraphToScreen(
         rect,
         (pivotSceneEv - graphMinEv) / graphSpan,
@@ -268,19 +241,11 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
         ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::ClearActiveID();
     // A hidden release or a fresh press in the outer margin cannot resume an old handle.
     if (!enabled || !ImGui::IsItemActive() || ImGui::IsItemActivated()) draggingHandle = 0;
+    if (draggingHandle != 3) draggingHandle = 0;
     if (enabled && ImGui::IsItemActive() && ImGui::IsItemHovered() &&
         rect.Contains(ImGui::GetIO().MousePos) &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        const float mouseX = ImGui::GetIO().MousePos.x;
-        float bestDistance = std::abs(mouseX - blackX);
-        draggingHandle = 1;
-        if (std::abs(mouseX - whiteX) < bestDistance) {
-            bestDistance = std::abs(mouseX - whiteX);
-            draggingHandle = 2;
-        }
-        if (std::abs(mouseX - pivotX) < bestDistance) {
-            draggingHandle = 3;
-        }
+        draggingHandle = 3;
     }
     if (draggingHandle != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         const float u = std::clamp(
@@ -290,36 +255,10 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
             1.0f);
         const float sceneEv = graphMinEv + u * graphSpan;
         const float displayEv = sceneEv + exposure;
-        if (draggingHandle == 1) {
-            const float clamped = std::clamp(
-                displayEv,
-                -16.0f,
-                std::min(0.0f, whiteEv - 0.1f));
-            if (std::abs(clamped - blackEv) > 0.0001f) {
-                blackEv = clamped;
-                view["blackEv"] = blackEv;
-                changed = true;
-            }
-        } else if (draggingHandle == 2) {
-            const float clamped = std::clamp(
-                displayEv,
-                std::max(0.0f, blackEv + 0.1f),
-                16.0f);
-            if (std::abs(clamped - whiteEv) > 0.0001f) {
-                whiteEv = clamped;
-                view["whiteEv"] = whiteEv;
-                changed = true;
-            }
-        } else {
-            const float clamped = std::clamp(
-                displayEv,
-                std::max(-8.0f, blackEv + 0.1f),
-                std::min(8.0f, whiteEv - 0.1f));
-            if (std::abs(clamped - contrastPivotEv) > 0.0001f) {
-                contrastPivotEv = clamped;
-                view["contrastPivotEv"] = contrastPivotEv;
-                changed = true;
-            }
+        const float clamped=std::clamp(displayEv,-8.f,8.f);
+        if (std::abs(clamped-contrastPivotEv)>0.0001f) {
+            view["contrastPivotEv"]=clamped;
+            changed=true;
         }
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -387,24 +326,7 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
             "Scene-linear output is active. Add a View Transform node near the graph Output.");
     }
     ImGui::BeginDisabled(!controlsEnabled);
-    int curve = view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic ? 1 : 0;
-    if (ImGui::Combo("Display curve", &curve, "Standard\0Photographic HDR\0")) {
-        view["displayCurve"] = curve ? Raw::HdrDisplay::Photographic : "standard";
-        changed = true;
-    }
-    LabTooltip("Photographic HDR keeps middle grey anchored as the highlight range changes. It maps brightness without smoothing or sharpening the image.");
-    ImGui::BeginDisabled(!m_RawWorkspaceViewTransformInputStats.valid ||
-        m_RawWorkspaceAnalysisPending || m_RawWorkspaceAnalysisRequested);
-    if (FramelessTextButton("Fit HDR highlight range", false)) {
-        view["displayCurve"] = Raw::HdrDisplay::Photographic;
-        view["whiteEv"] = Raw::HdrDisplay::FitWhite(
-            m_RawWorkspaceViewTransformInputStats.p999Luma,
-            JsonFloat(view,"exposure",0.f),JsonFloat(view,"middleGrey",.18f),
-            JsonFloat(view,"contrastPivotEv",0.f));
-        changed = true;
-    }
-    ImGui::EndDisabled();
-    LabTooltip("Fits the highlight range to the current image. Your exposure, black point, contrast and color edits stay as set. Small bright lights can still reach display white.");
+    ImGui::TextDisabled("Sigmoid display mapping");
     const ImVec2 graphSize = CompactLabGraphSize(
         118.0f,
         150.0f,
@@ -415,8 +337,7 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
             m_ProjectInteractionUi.viewTransformDraggingHandle)) {
         changed = true;
     }
-    LabTooltip(
-        "Scene EV to display output. Drag the black, pivot, or white marker. The faint curve is the neutral-contrast reference.");
+    LabTooltip("Scene EV to display output. Drag the middle-grey pivot. Highlights approach white gradually.");
     float contrast = JsonFloat(view, "contrast", 1.0f);
     if (BareSliderFloat(
             "Contrast",
@@ -431,18 +352,16 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
     }
     float pivotEv = JsonFloat(view, "contrastPivotEv", 0.0f);
     if (BareSliderFloat(
-            view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic ? "Grey point" : "Pivot",
+            "Pivot",
             "RawLabViewContrastPivot",
             &pivotEv,
-            std::max(-8.0f, JsonFloat(view, "blackEv", -8.0f) + 0.1f),
-            std::min(8.0f, JsonFloat(view, "whiteEv", 4.0f) - 0.1f),
+            -8.f,
+            8.f,
             "%+.2f EV",
             std::max(180.0f, ImGui::GetContentRegionAvail().x - 110.0f))) {
         view["contrastPivotEv"] = pivotEv;
         changed = true;
     }
-    if(view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic)
-        LabTooltip("Scene brightness mapped to middle grey. Contrast pivots around this point.");
     float saturation = JsonFloat(view, "saturation", 1.0f);
     if (BareSliderFloat(
             "Saturation",
@@ -492,28 +411,6 @@ bool EditorModule::RenderRawWorkspaceLabViewSecondaryControls(
         view["exposure"] = exposure;
         changed = true;
     }
-    float blackEv = JsonFloat(view, "blackEv", -8.0f);
-    if (BareSliderFloat(
-            "Black EV",
-            "RawLabViewBlack",
-            &blackEv,
-            -16.0f,
-            2.0f,
-            "%.2f")) {
-        view["blackEv"] = blackEv;
-        changed = true;
-    }
-    float whiteEv = JsonFloat(view, "whiteEv", 4.0f);
-    if (BareSliderFloat(
-            "White EV",
-            "RawLabViewWhite",
-            &whiteEv,
-            -2.0f,
-            16.0f,
-            "%.2f")) {
-        view["whiteEv"] = whiteEv;
-        changed = true;
-    }
     float middleGrey = JsonFloat(view, "middleGrey", 0.18f);
     if (BareSliderFloat(
             "Middle Grey",
@@ -525,32 +422,6 @@ bool EditorModule::RenderRawWorkspaceLabViewSecondaryControls(
         view["middleGrey"] = middleGrey;
         changed = true;
     }
-    const bool photographic = view.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic;
-    ImGui::BeginDisabled(photographic);
-    float toe = JsonFloat(view, "toe", 0.18f);
-    if (BareSliderFloat(
-            "Toe",
-            "RawLabViewToe",
-            &toe,
-            0.0f,
-            1.0f,
-            "%.2f")) {
-        view["toe"] = toe;
-        changed = true;
-    }
-    float shoulder = JsonFloat(view, "shoulder", 0.45f);
-    if (BareSliderFloat(
-            "Shoulder",
-            "RawLabViewShoulder",
-            &shoulder,
-            0.001f,
-            2.0f,
-            "%.2f")) {
-        view["shoulder"] = shoulder;
-        changed = true;
-    }
-    ImGui::EndDisabled();
-    if (photographic) ImGui::TextDisabled("Photographic HDR uses the black, white and pivot markers for its curve.");
     bool preserveHue = JsonBoolean(view, "preserveHue", true);
     if (ImGui::Checkbox("Preserve Hue", &preserveHue)) {
         view["preserveHue"] = preserveHue;

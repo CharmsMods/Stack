@@ -50,7 +50,7 @@ struct RawGallerySimilarityStack {
     std::vector<std::string> sourceKeys;
     // Derived presentation only. Project membership, not manual grouping,
     // owns a processed stack and its cover.
-    std::string resultProjectId, resultProjectName;
+    std::string resultProjectId, resultProjectName, resultProjectCoverKey;
     std::filesystem::path resultProjectPath, resultCoverPath;
     bool hasSavedBracketingResult = false;
 };

@@ -1,6 +1,10 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
+#include "Utils/ImGuiExtras.h"
+#include "Editor/GraphUI/GraphPlotStyle.h"
+#include <imgui_internal.h>
+#include <cmath>
 
 #include <algorithm>
 #include <exception>
@@ -19,17 +23,56 @@ bool EditorModule::RenderRawWorkspaceLabCalibrationSurface(RawWorkspaceEditConte
     }
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const bool panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;
-    const ImVec2 size(std::max(30.f,available.x), std::max(30.f,panel ? available.x : std::min(available.x*.85f,available.y)));
-    const bool changed = DrawCalibrationEditor(context.recipe.colorCalibration,state,size,hueDriven,saturationDriven,panel);
-    try {
-        Stack::RawRecipe::BuildColorCalibrationTransform(context.recipe.colorCalibration,context.recipe.technical.workingSpace);
-    } catch (const std::exception& error) {
+    const ImVec2 size(std::max(30.f,available.x), std::max(30.f,panel ? available.x : std::min(available.x*.85f,available.y-44.f)));
+    bool changed = DrawCalibrationEditor(context.recipe.colorCalibration,state,size,hueDriven,saturationDriven,panel);
+    const auto diagramMaximum=ImGui::GetItemRectMax();
+    auto& calibration = context.recipe.colorCalibration;
+    const bool editable = calibration.enabled && std::none_of(saturationDriven.begin(),saturationDriven.end(),[](bool v){return v;});
+    const auto style = Stack::Editor::GraphUI::ResolveGraphPlotStyle();
+    ImGui::TextUnformatted("Saturation"); ImGui::SameLine(0,style.controlGap);
+    ImGui::BeginDisabled(!editable);
+    ImGui::InvisibleButton("##CalibrationSaturation",{std::min(140.f*style.scale,ImGui::GetContentRegionAvail().x),style.controlHeight});
+    if (ImGui::IsItemActivated()) {state.dialGesture=true;state.gestureStart=calibration;}
+    const bool cancel = state.dialGesture && (!editable || ImGui::GetIO().AppFocusLost ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape,false) || ImGui::IsMouseDown(1));
+    if(cancel) {
+        calibration.primaries=state.gestureStart.primaries;changed=true;
+        state.dialGesture=false;ImGui::ClearActiveID();
+    }
+    if(editable && state.dialGesture && ImGui::IsItemActive() && ImGui::IsMouseDragging(0,1.f)) {
+        const float delta=ImGui::GetIO().MouseDelta.x*(ImGui::GetIO().KeyShift ? .08f : .8f)/style.scale;
+        if(delta!=0.f) {
+            for(auto& primary:calibration.primaries) primary.saturation+=delta;
+            state.dialPhase=std::fmod(state.dialPhase+delta/100.f,100.f);
+            changed=true;
+        }
+    }
+    if(editable && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+        for(auto& primary:calibration.primaries) {changed|=primary.saturation!=0.f;primary.saturation=0.f;}
+        state.dialPhase=0.f;
+    }
+    if(!ImGui::IsMouseDown(0))state.dialGesture=false;
+    Stack::Editor::GraphUI::DrawGraphDial(*ImGui::GetWindowDrawList(),ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
+        state.dialPhase,editable,style);
+    ImGui::EndDisabled();
+    const auto& recipe=context.recipe.colorCalibration;
+    bool transformChanged=!state.transformChecked || state.checkedSpace!=context.recipe.technical.workingSpace ||
+        state.checkedRecipe.enabled!=recipe.enabled;
+    for(int i=0;i<3;++i) transformChanged|=state.checkedRecipe.primaries[i].hue!=recipe.primaries[i].hue ||
+        state.checkedRecipe.primaries[i].saturation!=recipe.primaries[i].saturation;
+    if(transformChanged) {
+        state.checkedRecipe=recipe;state.checkedSpace=context.recipe.technical.workingSpace;
+        state.transformChecked=true;state.transformError.clear();
+        try { Stack::RawRecipe::BuildColorCalibrationTransform(recipe,state.checkedSpace); }
+        catch(const std::exception& error) {state.transformError=error.what();}
+    }
+    if(!state.transformError.empty()) {
         // Keep the authored shape. The renderer reports its unavailable
         // result; the editor supplies a small, local explanation.
-        const auto maximum = ImGui::GetItemRectMax();
+        const auto maximum = diagramMaximum;
         const ImVec2 marker(maximum.x-14.f,maximum.y-20.f);
         ImGui::GetWindowDrawList()->AddText(marker,IM_COL32(255,175,90,255),"!");
-        if (ImGui::IsMouseHoveringRect(marker,maximum)) ImGui::SetTooltip("%s",error.what());
+        if (ImGui::IsMouseHoveringRect(marker,maximum)) ImGui::SetTooltip("%s",state.transformError.c_str());
     }
     return changed;
 }

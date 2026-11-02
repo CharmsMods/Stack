@@ -15,7 +15,7 @@
 #include <filesystem>
 
 namespace Stack::Validation { bool BenchmarkBracketingPresentation(const std::filesystem::path&,const std::filesystem::path&); bool ValidateBracketing(); bool ValidateBracketingUi(const std::filesystem::path&); }
-namespace Stack::Validation { bool ValidateBracketingWorkflow(int,char**,bool=false,unsigned=2); }
+namespace Stack::Validation { bool ValidateBracketingWorkflow(int,char**,bool=false,unsigned=2,bool=false); }
 namespace Stack::Validation { bool ValidateProjectStageState(int,char**); }
 namespace Stack::Validation { bool ValidateAutoBracket(int,char**); }
 namespace Stack::Validation { bool ValidateAutoBracketReopen(const std::filesystem::path&); }
@@ -23,14 +23,17 @@ namespace Stack::Validation { bool DiagnoseBracketingProject(int,char**); }
 namespace Stack::Validation { bool ValidateSuperResolution(int,char**); bool ValidateHdrDisplay(int,char**); }
 namespace Stack::Validation { bool ValidateProcessingPresentation(const std::filesystem::path&,const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateColorCalibration(int, char**); }
-namespace Stack::Validation { bool ValidateProjectGallery(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateFilmGrain(); }
+namespace Stack::Validation { bool ValidateClosetGallery(const std::string&, const std::string&, const std::string&, bool, bool); bool ValidateGalleryTrash(const std::filesystem::path&); bool ValidateProjectGallery(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateImmediateGalleryOpen(const std::string&, const std::string&); }
 namespace Stack::Validation { bool ValidateConcurrentBracketing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidatePanorama(int,char**); }
 namespace Stack::Validation { bool ValidateBurstWorker(const std::filesystem::path&,const std::filesystem::path&,bool); }
 namespace Stack::Validation { bool ValidateBurstParity(const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateToneDetail(const std::filesystem::path&, const std::filesystem::path&); }
-namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); bool ValidateClosetEditing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
+namespace Stack::Validation { bool ValidateBracketMaskResult(int,char**); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
 namespace Stack::Validation { bool ValidateRawGraphCanvas(); bool ValidateViewControlsPanel(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
@@ -117,6 +120,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3], true) ? 0 : 93;
         return true;
     }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-immediate-gallery-open") == 0) {
+        exitCode = Stack::Validation::ValidateImmediateGalleryOpen(argv[2], argv[3]) ? 0 : 93;
+        return true;
+    }
     if (argc == 4 && std::strcmp(argv[1], "--validate-raw-gallery-open") == 0) {
         exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3]) ? 0 : 93;
         return true;
@@ -156,6 +163,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateToneDetail(argv[2], argv[3]) ? 0 : 90;
         return true;
     }
+    if (argc == 4 && std::strcmp(argv[1],"--validate-closet-editing")==0) {
+        exitCode=Stack::Validation::ValidateClosetEditing(argv[2],argv[3]) ? 0 : 91;
+        return true;
+    }
     if (argc == 3 && std::strcmp(argv[1], "--validate-raw-layers") == 0) {
         exitCode = Stack::Validation::ValidateRawLayers(argv[2]) ? 0 : 89;
         return true;
@@ -172,8 +183,22 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateConcurrentBracketing(argv[2], argv[3]) ? 0 : 87;
         return true;
     }
+    const bool checkAutoIntake = argc == 5 && std::strcmp(argv[1], "--validate-gallery-auto-intake") == 0;
+    const bool jumpOnly = argc == 4 && std::strcmp(argv[1], "--validate-gallery-jump") == 0;
+    if (jumpOnly || checkAutoIntake || (argc >= 3 && argc <= 5 && std::strcmp(argv[1], "--validate-closet-gallery") == 0)) {
+        exitCode=Stack::Validation::ValidateClosetGallery(argv[2], argc >= 4 ? argv[3] : "", argc == 5 ? argv[4] : "", checkAutoIntake, jumpOnly) ? 0 : 93;
+        return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-gallery-trash") == 0) {
+        exitCode = Stack::Validation::ValidateGalleryTrash(argv[2]) ? 0 : 86;
+        return true;
+    }
     if (argc == 3 && std::strcmp(argv[1], "--validate-project-gallery") == 0) {
         exitCode = Stack::Validation::ValidateProjectGallery(argv[2]) ? 0 : 86;
+        return true;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--validate-film-grain") == 0) {
+        exitCode = Stack::Validation::ValidateFilmGrain() ? 0 : 1;
         return true;
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-color-calibration") == 0) {
@@ -182,7 +207,7 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-project-workspaces") == 0) {
         if (argc > 3) {
-            std::cerr << "Usage: Stack.exe --validate-project-workspaces [existing-project.stack | --auto-only]\n";
+            std::cerr << "Usage: Stack.exe --validate-project-workspaces [existing-project.stack | --auto-only | --saves-only | --film-grain]\n";
             exitCode = 84;
         } else {
             exitCode = Stack::Validation::ValidateProjectWorkspaces(argc == 3 ? argv[2] : "") ? 0 : 84;
@@ -237,6 +262,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
 #endif
         return true;
     }
+    if (argc > 4 && std::strcmp(argv[1], "--validate-closet-bracket") == 0) {
+        exitCode = Stack::Validation::ValidateBracketingWorkflow(argc-2,argv+2,false,2,true) ? 0 : 75;
+        return true;
+    }
     if (argc > 3 && std::strcmp(argv[1], "--validate-bracketing-workflow") == 0) {
         exitCode = Stack::Validation::ValidateBracketingWorkflow(argc-2,argv+2) ? 0 : 75;
         return true;
@@ -248,6 +277,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         BurstDiagnosticsUnavailable(exitCode); return true;
 #endif
         return true;
+    }
+    if(argc==5 && std::strcmp(argv[1],"--validate-bracket-mask-result")==0) {
+        exitCode=Stack::Validation::ValidateBracketMaskResult(argc-2,argv+2)?0:80;return true;
     }
     if (argc > 2 && std::strcmp(argv[1], "--validate-bracketing-depth") == 0) {
 #if STACK_BUILD_BURST_DIAGNOSTICS

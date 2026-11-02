@@ -30,20 +30,22 @@ double QuantizedSignalFloor(const PreparedSource& source) {
 bool PatchRatio(const PreparedSource& a,const PreparedSource& b,const ExposurePatch& patchA,
     const ExposurePatch& patchB,double signalFloorA,double signalFloorB,
     double& ratio,double& ratioVariance) {
-    std::array<double,3> totalA{},totalB{};unsigned count=0;
-    const auto valid=patchA.valid&patchB.valid;
-    for(unsigned sample=0;sample<25;++sample) if(valid&(1u<<sample)) {
-        for(unsigned c=0;c<3;++c) {totalA[c]+=patchA.color[sample][c];totalB[c]+=patchB.color[sample][c];}
-        ++count;
-    }
-    if(count<16) return false;
     std::array<double,3> ev{},variance{};std::array<bool,3> usable{};
     // Average linear measurements before taking a ratio. Thresholding each
     // dark noisy sample and then taking logs biases the exposure estimate.
     // A modest correlation allowance covers bilinear proxy sampling.
     // Repeated one-code values are not independent sub-code measurements.
     for(unsigned c=0;c<3;++c) {
-        const double x=totalA[c]/count,y=totalB[c]/count;
+        const auto valid=patchA.valid[c]&patchB.valid[c];
+        unsigned count=0;
+        double totalA=0,totalB=0;
+        for(unsigned sample=0;sample<25;++sample) if(valid&(1u<<sample)) {
+            totalA+=patchA.color[sample][c];
+            totalB+=patchB.color[sample][c];
+            ++count;
+        }
+        if(count<16) continue;
+        const double x=totalA/count,y=totalB/count;
         const double va=2*ProxyNoiseVariance(a,x,c)/count,vb=2*ProxyNoiseVariance(b,y,c)/count;
         if(x<=std::max(signalFloorA,3*std::sqrt(va))||
             y<=std::max(signalFloorB,3*std::sqrt(vb)))continue;

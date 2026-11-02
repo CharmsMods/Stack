@@ -49,7 +49,6 @@ std::string OpenProjectFileDialog(const char* title = "Load Project (.stack/.com
 // working project folder. The dispatcher normalizes project.stack to its folder.
 std::string OpenStackProjectFileDialog(const char* title = "Open Stack Project");
 std::string SaveProjectFileDialog(const char* title = "Save Project (.stack)", const char* defaultFileName = "project.stack");
-std::string SaveProjectBundleDialog(const char* title = "Save Working Project", const char* defaultFileName = "Project");
 std::string OpenThemePresetFileDialog(const char* title = "Import Theme Preset");
 std::string SaveThemePresetFileDialog(const char* title = "Export Theme Preset", const char* defaultFileName = "theme_preset.stacktheme.json");
 // These shell dialogs return UTF-8 paths. Use std::filesystem::u8path when

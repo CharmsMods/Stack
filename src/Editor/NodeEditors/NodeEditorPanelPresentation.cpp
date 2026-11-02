@@ -36,9 +36,9 @@ bool ControlHeading(const char* label,float width,float height) {
         const float scale=ImGui::GetFontSize()/13.f;
         for (int ring=3;ring>=1;--ring)
             for (const auto& direction:directions) {
-                const float radius=ring*1.6f*scale;
+                const float radius=ring*.65f*scale;
                 paint({direction.x*radius,direction.y*radius},
-                    {1,1,1,ring==1 ? .22f : ring==2 ? .11f : .055f});
+                    {1,1,1,ring==1 ? .045f : ring==2 ? .018f : .006f});
             }
     }
     paint({0,0},hovered ? ImVec4(1,1,1,1) : ImVec4(.82f,.82f,.82f,1));
@@ -46,20 +46,34 @@ bool ControlHeading(const char* label,float width,float height) {
 }
 }
 
-int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width) {
+int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width,const bool* enabled,bool& toggle) {
     if (group.instances.empty()) return -1;
     const float height=ImGui::GetFontSize()+10.f;
     const float step=std::max(height,ImGui::CalcTextSize(group.instances.back().ordinal.c_str()).x+14.f);
     const float gap=8.f;
+    const float switchWidth=height*1.5f;
+    const float switchSpace=enabled ? switchWidth+gap : 0.f;
     const float labelWidth=std::min(ImGui::CalcTextSize(group.label.c_str()).x,
-        std::max(1.f,width-step-gap));
+        std::max(1.f,width-step-gap-switchSpace));
     const auto rowStart=ImGui::GetCursorScreenPos();
     const int current=static_cast<int>(std::distance(group.instances.begin(),
         std::find_if(group.instances.begin(),group.instances.end(),
             [&](const auto& instance){return instance.key==group.selectedKey;})));
     int activated=ControlHeading(group.label.c_str(),labelWidth,height) ? current : -1;
     ImGui::SameLine(0,gap);
-    const float firstWidth=std::max(step,width-labelWidth-gap);
+    if (enabled) {
+        toggle=ImGui::InvisibleButton("##enable-node",{switchWidth,height},ImGuiButtonFlags_EnableNav);
+        auto* draw=ImGui::GetWindowDrawList();
+        const auto min=ImGui::GetItemRectMin();
+        const float radius=height*.31f;
+        const float cy=min.y+height*.5f;
+        draw->AddRectFilled({min.x,cy-radius},{min.x+switchWidth,cy+radius},
+            ImGui::GetColorU32(*enabled ? ImGuiCol_SliderGrabActive : ImGuiCol_FrameBg),radius);
+        draw->AddCircleFilled({min.x+(*enabled ? switchWidth-radius : radius),cy},radius-2.f,
+            ImGui::GetColorU32(ImGuiCol_Text));
+        ImGui::SameLine(0,gap);
+    }
+    const float firstWidth=std::max(step,width-labelWidth-gap-switchSpace);
     auto* draw=ImGui::GetWindowDrawList();
     ImGuiExtras::AutomaticGlassScope glass;
     for (std::size_t start=0;start<group.instances.size();) {
@@ -149,7 +163,7 @@ bool BeginControlsPanelBody() {
         // Filter only that accepted request, before BeginChild lays out controls.
         const bool wheel=gui.WheelingWindow==body && gui.WheelingWindowScrolledFrame==gui.FrameCount &&
             body->ScrollTarget.y<FLT_MAX && body->ScrollTargetCenterRatio.y==0.f;
-        direct=state.GetInt(frameId,-2)!=gui.FrameCount-1 ||
+        direct=Stack::Notifications::SystemReducedMotion() || state.GetInt(frameId,-2)!=gui.FrameCount-1 ||
             body->Scroll.y!=state.GetFloat(appliedId,body->Scroll.y) ||
             (body->ScrollTarget.y<FLT_MAX && !wheel) ||
             gui.ActiveId==host->GetID("ControlsOverlayScroll");
@@ -164,7 +178,9 @@ bool BeginControlsPanelBody() {
             target=std::clamp(target,0.f,body->ScrollMax.y);
             current=std::clamp(current,0.f,body->ScrollMax.y);
             if(current!=target) {
-                Stack::Header::Approach(current,target,22.f,.05f);
+                const float distanceToEdge = target < current ? current : body->ScrollMax.y-current;
+                const float edgeBlend = std::clamp(distanceToEdge/100.f,0.f,1.f);
+                Stack::Header::Approach(current,target,18.f+4.f*edgeBlend,.05f);
                 ImGui::SetScrollY(body,current);
             }
             state.SetFloat(targetId,target);state.SetFloat(currentId,current);

@@ -601,7 +601,7 @@ void LibraryManager::RequestPersistNodeBrowserThumbnails(
     const std::filesystem::path projectPath = ResolveProjectPath(fileName);
     // Managed thumbnails are rebuildable runtime data. The legacy writer
     // cannot update their manifest field and must not rewrite the project.
-    if (Stack::Project::IsDirectoryProjectBundle(projectPath) ||
+    if (Stack::Project::IsWorkingProjectFile(projectPath) ||
         Stack::Project::IsPortableV3Project(projectPath)) return;
     std::uint64_t revision = 0;
     try {
@@ -815,8 +815,8 @@ bool LibraryManager::DeleteProject(const std::string& fileName) {
         StackFormat::ProjectLoadOptions metadataOnly { true, false, false };
         const bool loadedMetadata = LoadProjectDocument(fileName, document, metadataOnly);
         std::error_code removeError;
-        const bool removedProject = Stack::Project::IsDirectoryProjectBundle(projectPath)
-            ? std::filesystem::remove_all(projectPath, removeError) > 0u
+        const bool removedProject = Stack::Project::IsWorkingProjectFile(projectPath)
+            ? std::filesystem::remove(projectPath, removeError)
             : false;
         if (!removedProject || removeError) return false;
         TagManager::Get().SetTags(fileName, {});

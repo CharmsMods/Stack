@@ -145,7 +145,7 @@ std::filesystem::path ResolveManagedProjectSourceFolder(
     const std::filesystem::path& projectPath) try {
     if (projectPath.empty()) return {};
     const auto store = Stack::Project::ResolveProjectStoreRoot(projectPath);
-    if (!Stack::Project::IsDirectoryProjectBundle(store)) return {};
+    if (!Stack::Project::IsWorkingProjectFile(store)) return {};
     std::error_code error;
     const auto canonicalStore = std::filesystem::weakly_canonical(store, error);
     if (error) return {};
@@ -200,7 +200,7 @@ ScanResult AggregateSourceFolders(
     for (const auto& root : roots) {
         if (cancelled()) return cancelResult();
         const auto rootKey = SourceFolderPathKey(root);
-        const auto layout = BuildManagedLayout(root);
+        const auto layout = BuildGalleryLayout(root);
         std::vector<SourceRecord> cached;
         LoadCatalogSnapshot(layout, cached);
         std::unordered_map<std::string, const SourceRecord*> reusable;
@@ -230,12 +230,13 @@ ScanResult AggregateSourceFolders(
         auto result = ScanWorkspace(root, acceptsSource, report, shouldCancel,
             [](const ManagedLayout& owner, SourceRecord& source, ScanProgress& state) {
                 ClassifyThumbnailMetadata(owner, source);
+                source.browsePreview |= source.thumbnail.status != ThumbnailStatus::Valid;
                 ++state.cachedPreviewsChecked;
-            }, reuseIdentity);
+            }, reuseIdentity, true);
         ++scanned;
         if (cancelled()) return cancelResult();
         if (result.success && !DiscoverWorkspaceProjects(result.layout,
-                result.sources, result.sourceSetProjects, shouldCancel)) {
+                result.sources, result.sourceSetProjects, shouldCancel, &result.bracketMasters)) {
             result.success = false;
             result.errorMessage = "Could not discover saved projects.";
         }

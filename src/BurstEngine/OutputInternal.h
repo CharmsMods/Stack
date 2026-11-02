@@ -15,8 +15,11 @@ inline void Progress(const Request& request,double fraction,const char* stage) {
 struct Image {
     const Raw::RawMetadata& metadata;
     std::vector<float> mosaic;
+    std::vector<float> cameraRgb;
+    const std::vector<float>* reconstructed=nullptr;
     std::array<float,9> cameraToWorking{};
     Raw::ViewTransform::PreparedTransform display{};
+    const Raw::ReconstructionDepth* depth=nullptr;
     unsigned width=0,height=0;
     unsigned outputWidth=0,outputHeight=0;
     float exposure=1;

@@ -177,18 +177,11 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
                 auto& state=context.State<CurveCanvasState>();
                 auto points=Stack::RawRecipe::RawLocalRangeBezierPoints(localRange);
                 const auto tonalDomain=ExposureTonalSliderDomain(minimumEv,maximumEv);
-                const bool normalizationDriven=context.IsParameterDriven("normalization");
-                float normalization=localRange.curveNormalization;
-                const auto normalizationFeedback=context.uniformParameters.find("normalization");
-                const bool normalizationAvailable=normalizationFeedback!=context.uniformParameters.end() &&
-                    normalizationFeedback->second.available && std::isfinite(normalizationFeedback->second.value);
-                if(normalizationDriven && normalizationAvailable)
-                    normalization=std::clamp(float(normalizationFeedback->second.value),0.f,1.f);
+                float normalization=1.f;
                 curveChanged=DrawCurveCanvas("LocalEV",points,localRange.curveAmount,state,false,
                     histogram,graphSize,12,canAdjustExposure?&exposureEv:nullptr,{},false,
-                    &normalization,normalizationDriven,normalizationAvailable,
+                    &normalization,false,true,
                     &tonalDomain,inputRevision);
-                if(!normalizationDriven)localRange.curveNormalization=normalization;
                 if(curveChanged && !Stack::RawRecipe::SameCurvePoints(points,
                     Stack::RawRecipe::RawLocalRangeBezierPoints(localRange))) {
                     localRange.points.clear();

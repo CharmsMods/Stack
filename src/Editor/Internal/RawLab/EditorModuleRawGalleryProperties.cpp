@@ -6,7 +6,8 @@ void EditorModule::RenderRawGalleryProperties(
     const Stack::RawWorkspace::SourceRecord* source,
     const std::shared_ptr<const Raw::RawMetadata>& metadata,
     const std::filesystem::path& projectPath,
-    const std::function<void(const ImVec2&)>& thumbnail) {
+    const std::function<void(const ImVec2&)>& thumbnail,
+    const std::function<void(const ImVec2&)>& comparison) {
     using Action = Stack::RawGalleryActions::Action;
     using namespace Stack::Editor::RawLabInternal;
     const auto count = m_RawWorkspace.selectedSourceKeys.size() + m_RawWorkspaceLabSelectedProjectPaths.size();
@@ -14,6 +15,7 @@ void EditorModule::RenderRawGalleryProperties(
     // only on a command; the panel must not rebuild bracket/source indexes.
     const auto editContext = count ? CaptureRawGalleryActionContext(true) : Stack::RawGalleryActions::Context{};
     GalleryInspectorActions actions;
+    actions.comparison = comparison;
     actions.selectionCount = count;
     if (editContext.focusedIndex < editContext.items.size()) {
         const auto& focused = editContext.items[editContext.focusedIndex];
@@ -28,13 +30,20 @@ void EditorModule::RenderRawGalleryProperties(
     actions.pasteEnabled = paste.enabled;
     actions.copyReason = copy.reason.c_str();
     actions.pasteReason = paste.reason.c_str();
-    const bool hasLocation = !projectPath.empty() || (source && !source->absolutePath.empty());
+    const bool grid = m_RawWorkspaceLabUi.galleryWorkspaceGrid;
+    const bool hasLocation = grid ? actions.focusedPath && !actions.focusedPath->empty()
+        : !projectPath.empty() || (source && !source->absolutePath.empty());
+    actions.locationVisible = !grid || count != 0;
     actions.locationEnabled = hasLocation && !Stack::Workspace::IsPreview();
     if (!m_RawWorkspaceGalleryDetails) m_RawWorkspaceGalleryDetails = std::make_shared<GalleryDetails>();
     const auto command = m_RawWorkspaceGalleryDetails->Render(source, metadata, projectPath,
         actions, GetWorkspaceBaseColor(), thumbnail);
     if (!command) return;
     if (*command == Action::ShowInExplorer) {
+        if (grid) {
+            if (hasLocation) ExecuteRawGalleryAction(*command, editContext);
+            return;
+        }
         Stack::RawGalleryActions::Context location;
         location.workspaceRoot = m_RawWorkspace.workspaceRoot;
         location.catalogGeneration = m_RawWorkspaceScanGeneration;

@@ -152,6 +152,7 @@ function Get-SpdxLicenseExpression {
         "libraw" { return "LGPL-2.1-only" }
         "libavoid" { return "LGPL-2.1-or-later" }
         "libraw-classic-demosaic" { return "GPL-3.0-only" }
+        "darktable-sigmoid" { return "GPL-3.0-or-later" }
         "roboto-font" { return "Apache-2.0" }
         "press-start-2p-font" { return "OFL-1.1" }
         "silkscreen-font" { return "OFL-1.1" }

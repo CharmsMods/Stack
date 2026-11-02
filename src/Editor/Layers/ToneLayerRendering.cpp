@@ -414,20 +414,13 @@ layout (location = 0) out vec4 FragColor;
 
 uniform sampler2D uInputTex;
 uniform ivec2 uOutputSize;
-uniform float uExposure;
-uniform float uBlackEv;
-uniform float uWhiteEv;
 uniform float uMiddleGrey;
-uniform float uShoulder;
-uniform float uToe;
-uniform float uContrast;
-uniform float uContrastPivotEv;
 uniform float uSaturation;
 uniform int uPreserveHue;
 uniform int uDebugFalseColor;
 uniform int uInputIsRec2020;
 uniform int uEncodeSrgbOutput;
-uniform int uPhotographicHdr;
+uniform vec4 uSigmoidParameters;
 
 )" ) + Raw::ViewTransform::ShaderFunctions() + R"(
 void main() {
@@ -833,22 +826,16 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
     glUniform2i(glGetUniformLocation(m_ShaderProgram, "uOutputSize"), width, height);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uExposure"), m_Exposure);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uBlackEv"), m_BlackEv);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uWhiteEv"), m_WhiteEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uMiddleGrey"), m_MiddleGrey);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uShoulder"), m_Shoulder);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uToe"), m_Toe);
-    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uContrast"), m_Contrast);
-    glUniform1f(
-        glGetUniformLocation(m_ShaderProgram, "uContrastPivotEv"),
-        m_ContrastPivotEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uSaturation"), m_Saturation);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uPreserveHue"), m_PreserveHue ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDebugFalseColor"), m_DebugFalseColor ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputIsRec2020"), m_InputIsRec2020 ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uPhotographicHdr"), m_PhotographicHdr ? 1 : 0);
+    const auto sigmoid = Raw::SigmoidDisplay::PreparedCurve(
+        m_MiddleGrey, m_Contrast, m_Exposure, m_ContrastPivotEv).Coefficients();
+    glUniform4f(glGetUniformLocation(m_ShaderProgram, "uSigmoidParameters"),
+        sigmoid[0], sigmoid[1], sigmoid[2], sigmoid[3]);
     quad.Draw();
     glUseProgram(0);
 }

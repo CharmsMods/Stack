@@ -116,7 +116,8 @@ std::shared_ptr<const Stack::Project::GraphSnapshotResult> EditorModule::EnsureC
             std::string error;
             if (!Stack::Project::LowerRawLayerStack(result.snapshot, m_Project->rawLayers.State(),
                     background, m_Project->rawLayers.ProcessingRevision(), error, frame.frame, frame.durationFrames,
-                    frame.framesPerSecond, &m_Project->graph, &result.outputDescriptions)) {
+                    frame.framesPerSecond, &m_Project->graph, &result.outputDescriptions,
+                    m_Project->singleMasterMaskSource.get())) {
                 Stack::NodeMath::Diagnostic diagnostic;
                 diagnostic.ruleId = "RAW-LAYER-LOWERING";
                 diagnostic.stage = Stack::NodeMath::DiagnosticStage::Lowering;

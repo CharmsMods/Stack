@@ -14,6 +14,9 @@ std::filesystem::path ResolveSourceWorkspaceRoot(
 // Returns native source/membership identities and clears their aggregate-only
 // backup keys. Idempotent; source ownership and cache paths remain unchanged.
 SourceRecord NativeSourceRecord(const SourceRecord& source);
+// Resolve one explicitly opened original without reading or updating a folder catalog.
+bool ReadGalleryOriginal(const std::filesystem::path& root, const std::filesystem::path& path,
+    SourceRecord& source, std::string& error, CancellationPredicate cancelled);
 // Resolve only a real directory project stored below a validated
 // <source>/Closet/Projects. Exports and arbitrary ancestors prove no owner.
 // This performs filesystem reads and belongs at scan/open boundaries, not UI

@@ -1058,11 +1058,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         FinishViewportPreviewRequest(result, result.success && result.error.empty());
         CompleteFullQualityRenderRequest(result, acceptedMainFrame);
-        if (result.success && result.error.empty() && rawWorkspaceResultMatchesActive &&
-            result.rawWorkspace.analysisCaptured &&
-            (acceptedMainFrame || result.rawRenderPurpose == RawRenderPurpose::AnalysisScopes))
-            TryApplyBracketingStartingLook(result.rawWorkspace.viewTransformInputStats,
-                result.rawWorkspace.sourceHash);
         QueueViewportOutputTextureRelease(result.viewportOverview);
         // A worker can finish successfully while the UI cannot adopt/upload its
         // texture. That is a terminal first-frame failure too, not a reason to

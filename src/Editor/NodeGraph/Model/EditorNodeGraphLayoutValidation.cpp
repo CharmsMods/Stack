@@ -458,6 +458,13 @@ ValidationResult Graph::Validate() const {
         if (!CanConnectSockets(link.fromNodeId, link.fromSocketId,
                 link.toNodeId, link.toSocketId, &normalized, &reason) || normalized != link.toSocketId) {
             result.valid = false;
+            // A feedback loop makes downstream socket descriptions unreliable.
+            // Report the broken chain once instead of retraversing it for every wire.
+            if (reason == ConnectionRules::kCycleError) {
+                result.messages.push_back("Render chain contains a cycle.");
+                result.outputConnected = IsOutputConnected();
+                return result;
+            }
             result.messages.push_back(reason.empty() ? "Connection requires an explicit socket conversion." : reason);
         }
     }

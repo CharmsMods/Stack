@@ -1,4 +1,6 @@
 #include "ResultSerialization.h"
+#include "Raw/DepthMaskManifest.h"
+#include "Raw/Bracketing/DepthMaskStorage.h"
 #include "Raw/RawMetadataSerialization.h"
 #include "Raw/Bracketing/Panorama/Panorama.h"
 #include "NodeMath/ContractTypes.h"
@@ -64,13 +66,13 @@ private:
     std::uint64_t remaining_;
 };
 }
-bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::BracketingResult& result) {
+bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::BracketingResult& result, bool auxiliaryOnly) {
     if(!result.raw)throw std::runtime_error("The bracket result contains no image measurement.");
     const auto& raw=*result.raw;
     const auto& preview=result.preview;
     const auto sidecars=raw.multiFrameMeasurementSidecars;
     json header={
-        {"version",raw.reconstructionDepth?3:result.panorama?2:1},{"storageInstance",StorageId()},{"identity",result.identity},{"contentIdentity",raw.contentIdentity},
+        {"version",raw.reconstructionDepth?5:result.panorama?2:1},{"storageInstance",auxiliaryOnly ? result.identity : StorageId()},{"externalPixels",auxiliaryOnly},{"identity",result.identity},{"contentIdentity",raw.contentIdentity},
         {"contentHash",raw.contentIdentityHash},{"mosaicHash",raw.normalizedMosaicContentHash},
         {"decoderVersion",raw.decoderIdentityVersion},{"cameraRgb",raw.reconstructedCameraRgb},
         {"metadata",Raw::Serialization::SerializeMetadata(raw.metadata)},
@@ -84,6 +86,7 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
         {"stepX",preview.sensorStepX},{"stepY",preview.sensorStepY},
         {"fallback",result.fallbackSamples},{"unrecoverable",result.unrecoverableSamples},{"invalid",result.invalidSamples}
     };
+    if (auxiliaryOnly) header["previewMetadata"]["sourcePath"]="bracketing://preview-reference";
     if(result.reconstructionInspection) {
         const auto& inspection=*result.reconstructionInspection;
         json tiles=json::array();
@@ -95,16 +98,29 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
             {"tiles",std::move(tiles)}};
     }
     if(result.panorama)header["panorama"]=Raw::Bracketing::Panorama::SerializeLayout(*result.panorama);
-    if(raw.reconstructionDepth) {
-        const auto& d=*raw.reconstructionDepth;
-        header["depth"]={{"width",d.width},{"height",d.height},{"sensorWidth",d.sensorWidth},{"sensorHeight",d.sensorHeight},
-            {"pairs",d.acceptedPairs},{"measuredFraction",d.measuredFraction},{"message",d.message}};
+    auto depth=raw.reconstructionDepth;
+    std::vector<DepthMask::Bytes> encodedMasks;
+    if(depth) {
+        const auto& d=*depth;
+        try {
+            if(!auxiliaryOnly) for(const auto& mask:d.masks) encodedMasks.push_back(CompressCoverage(mask));
+            header["depth"]={{"width",d.width},{"height",d.height},{"sensorWidth",d.sensorWidth},{"sensorHeight",d.sensorHeight},
+            {"masks",Raw::DepthMaskManifest(d.masks)},{"pairs",d.acceptedPairs},{"measuredFraction",d.measuredFraction},{"message",d.message}};
+        } catch(const std::exception& e) {
+            depth=Raw::UnavailableDepth(d.sensorWidth,d.sensorHeight,e.what());
+            encodedMasks.clear();
+            header["depth"]={{"width",0},{"height",0},{"sensorWidth",depth->sensorWidth},{"sensorHeight",depth->sensorHeight},
+                {"masks",json::array()},{"pairs",0},{"measuredFraction",0},{"message",depth->message}};
+        }
     }
     const auto text=header.dump();
     std::ofstream stream(path,std::ios::binary|std::ios::trunc);
     stream.write(magic.data(),magic.size());Write(stream,static_cast<std::uint64_t>(text.size()));
     stream.write(text.data(),text.size());
-    WriteBlock(stream,raw.normalizedMosaicBuffer);WriteBlock(stream,raw.linearFloatBuffer);
+    if (!auxiliaryOnly) {
+        WriteBlock(stream,raw.normalizedMosaicBuffer);
+        WriteBlock(stream,raw.linearFloatBuffer);
+    }
     const Raw::RawImageData::MultiFrameMeasurementSidecars empty;
     const auto& maps=sidecars?*sidecars:empty;
     WriteBlock(stream,maps.variance);WriteBlock(stream,maps.fusionUncertaintyVariance);
@@ -120,7 +136,7 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
             values.insert(values.end(),{sample.value,sample.variance,sample.headroom,sample.support,
                 sample.fallback,sample.exposure,sample.measurementVariance,sample.uncertaintyVariance});
             flags.push_back(static_cast<std::uint8_t>((sample.finite?1:0)|(sample.clipped?2:0)|
-                (sample.localRejected?4:0)|(sample.fixedReference?8:0)|(sample.fallbackClipped?16:0)));
+                (sample.localRejected?4:0)|(sample.fixedReference?8:0)|(sample.fallbackClipped?16:0)|(unsigned(sample.clippedReference)<<5)));
         }
         WriteBlock(stream,values);WriteBlock(stream,flags);
     }
@@ -142,12 +158,13 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
         WriteBlock(stream,raw.outputCoverage);WriteBlock(stream,preview.coverage);
         WriteBlock(stream,result.panorama->ownership);
     }
-    if(raw.reconstructionDepth) {
-        WriteBlock(stream,raw.reconstructionDepth->inverseDepth);WriteBlock(stream,raw.reconstructionDepth->confidence);
+    if(depth) {
+        WriteBlock(stream,depth->inverseDepth);WriteBlock(stream,depth->confidence);
+        for(const auto& mask:encodedMasks)WriteBlock(stream,mask);
     }
     stream.close();return stream.good();
 }
-void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw::Bracketing::BracketingResult& result,const std::filesystem::path& inspectionDirectory) {
+void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw::Bracketing::BracketingResult& result,const std::filesystem::path& inspectionDirectory, const std::function<void(RawImageData&)>& loadMaster) {
     Reader reader(stream,bytes);std::array<char,8> found{};reader.Bytes(found.data(),found.size());
     if(found!=magic)throw std::runtime_error("The bracket result format is unsupported.");
     const auto headerBytes=reader.Value<std::uint64_t>();
@@ -155,7 +172,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
     std::string text(static_cast<std::size_t>(headerBytes),'\0');reader.Bytes(text.data(),headerBytes);
     const auto header=json::parse(text);
     const int version=header.at("version");
-    if(version<1||version>3)throw std::runtime_error("The bracket result version is unsupported.");
+    if(version<1||version>5)throw std::runtime_error("The bracket result version is unsupported.");
     const bool panorama=version>=2&&header.contains("panorama");
     auto raw=std::make_shared<Raw::RawImageData>();
     raw->metadata=Raw::Serialization::DeserializeMetadata(header.at("metadata"));
@@ -169,8 +186,13 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
         Raw::NormalizedMosaicInputContract::BracketingPreGain:Raw::NormalizedMosaicInputContract::None;
     raw->contentIdentity=header.at("contentIdentity").get<std::string>();raw->contentIdentityHash=header.at("contentHash");
     raw->normalizedMosaicContentHash=header.at("mosaicHash");raw->decoderIdentityVersion=header.at("decoderVersion");
-    raw->normalizedMosaicBuffer=reader.Map<float>(pixels);
-    raw->linearFloatBuffer=reader.Block<float>(pixels*3);
+    if (header.value("externalPixels",false)) {
+        if (!loadMaster) throw std::runtime_error("Locate the bracket master to restore the result.");
+        loadMaster(*raw);
+    } else {
+        raw->normalizedMosaicBuffer=reader.Map<float>(pixels);
+        raw->linearFloatBuffer=reader.Block<float>(pixels*3);
+    }
     if(raw->reconstructedCameraRgb?raw->linearFloatBuffer.size()!=pixels*3:!raw->normalizedMosaicBuffer)
         throw std::runtime_error("The saved bracket pixels are incomplete.");
     auto maps=std::make_shared<Raw::RawImageData::MultiFrameMeasurementSidecars>();
@@ -215,6 +237,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
             // an accepted group mean proves its fallback capture was usable.
             sample.fallbackClipped=header.value("previewFallbackClipping",false)?
                 (flags[i]&16)!=0:sample.clipped||sample.support>0;
+            sample.clippedReference=static_cast<Raw::Bracketing::ClippedReference>((flags[i]>>5)&3);
         }
     }
     if(header.contains("inspection")) {
@@ -223,10 +246,10 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
         inspection->scale=saved.at("scale");inspection->tilePixels=saved.at("tilePixels");
         inspection->sensorWidth=saved.at("sensorWidth");inspection->sensorHeight=saved.at("sensorHeight");
         inspection->groups=saved.at("groups");std::string error;
-        if(!raw->reconstructedCameraRgb||inspection->scale<1||inspection->scale>4||
+        if(!raw->reconstructedCameraRgb||!std::isfinite(inspection->scale)||inspection->scale<1||inspection->scale>4||
             !inspection->tilePixels||inspection->tilePixels>4096||inspection->groups!=groups||
-            std::uint64_t(inspection->sensorWidth)*inspection->scale!=raw->metadata.visibleWidth||
-            std::uint64_t(inspection->sensorHeight)*inspection->scale!=raw->metadata.visibleHeight||
+            std::llround(inspection->sensorWidth*inspection->scale)!=raw->metadata.visibleWidth||
+            std::llround(inspection->sensorHeight*inspection->scale)!=raw->metadata.visibleHeight||
             !Raw::Bracketing::Deserialize(saved.at("recipe"),inspection->recipe,error))
             throw std::runtime_error("Invalid saved reconstruction measurements.");
         const unsigned columns=(raw->metadata.visibleWidth-1)/inspection->tilePixels+1;
@@ -267,23 +290,60 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
         result.panorama=std::move(layout);
     }
     if(version>=3&&header.contains("depth")) {
-        const auto& saved=header.at("depth");auto d=std::make_shared<Raw::ReconstructionDepth>();
-        d->width=saved.at("width");d->height=saved.at("height");
-        d->sensorWidth=saved.at("sensorWidth");d->sensorHeight=saved.at("sensorHeight");
-        d->acceptedPairs=saved.at("pairs");d->measuredFraction=saved.at("measuredFraction");d->message=saved.at("message");
-        if(!d->width||!d->height||d->width>512||d->height>512||!d->sensorWidth||!d->sensorHeight||d->acceptedPairs>8||
-            !std::isfinite(d->measuredFraction)||d->measuredFraction<0||d->measuredFraction>1||
-            std::uint64_t(d->sensorWidth)*raw->metadata.visibleHeight!=std::uint64_t(d->sensorHeight)*raw->metadata.visibleWidth)
-            throw std::runtime_error("Invalid saved depth geometry.");
-        const auto count=std::uint64_t(d->width)*d->height;
-        d->inverseDepth=reader.Block<float>(count);d->confidence=reader.Block<float>(count);
-        if(d->inverseDepth.size()!=d->confidence.size()||(!d->inverseDepth.empty()&&d->inverseDepth.size()!=count)||
-            (d->acceptedPairs&&!d->Available()))throw std::runtime_error("Incomplete saved depth evidence.");
-        for(float v:d->inverseDepth)if(v<0||v>1)throw std::runtime_error("Invalid saved relative depth.");
-        for(float v:d->confidence)if(v<0||v>1)throw std::runtime_error("Invalid saved depth confidence.");
-        raw->reconstructionDepth=std::move(d);
-    }
-    if(!reader.Finished())throw std::runtime_error("Unexpected data in saved bracket result.");
+        // Depth is the final, optional section. All image data has already passed validation.
+        try {
+            const auto& saved=header.at("depth");auto d=std::make_shared<Raw::ReconstructionDepth>();
+            d->width=saved.at("width");d->height=saved.at("height");
+            d->sensorWidth=saved.at("sensorWidth");d->sensorHeight=saved.at("sensorHeight");
+            d->acceptedPairs=saved.at("pairs");d->measuredFraction=saved.at("measuredFraction");d->message=saved.at("message");
+            if((!d->width!=!d->height)||(d->acceptedPairs&&!d->width)||d->width>512||d->height>512||!d->sensorWidth||!d->sensorHeight||d->acceptedPairs>8||
+                !std::isfinite(d->measuredFraction)||d->measuredFraction<0||d->measuredFraction>1||
+                (result.reconstructionInspection?
+                    d->sensorWidth!=result.reconstructionInspection->sensorWidth||d->sensorHeight!=result.reconstructionInspection->sensorHeight:
+                    std::uint64_t(d->sensorWidth)*raw->metadata.visibleHeight!=std::uint64_t(d->sensorHeight)*raw->metadata.visibleWidth))
+                throw std::runtime_error("Invalid saved depth geometry.");
+            const auto count=std::uint64_t(d->width)*d->height;
+            d->inverseDepth=reader.Block<float>(count);d->confidence=reader.Block<float>(count);
+            if(d->inverseDepth.size()!=d->confidence.size()||(!d->inverseDepth.empty()&&d->inverseDepth.size()!=count)||
+                (d->acceptedPairs&&!d->Available()))throw std::runtime_error("Incomplete saved depth evidence.");
+            // Older GPU completion passes could round a normalized weighted mean
+            // just past an endpoint. Keep rejecting materially invalid evidence.
+            constexpr float depthRoundoff=8*std::numeric_limits<float>::epsilon();
+            for(float& v:d->inverseDepth) {
+                if(v < -depthRoundoff||v > 1.f+depthRoundoff)throw std::runtime_error("Invalid saved relative depth.");
+                v=std::clamp(v,0.f,1.f);
+            }
+            for(float v:d->confidence)if(v<0||v>1)throw std::runtime_error("Invalid saved depth confidence.");
+            if(version>=4) {
+                d->masks=ReadDepthMaskManifest(saved.at("masks"));
+                if (version==5 && header.value("externalPixels",false)) {
+                    const auto master=raw->reconstructionDepth;
+                    if(master && !master->Available() && master->masks.empty() && !master->message.empty()) {
+                        d->masks.clear();
+                        d->message=master->message;
+                    } else if ((!master && !d->masks.empty()) ||
+                        (master && DepthMaskManifest(master->masks)!=saved.at("masks")))
+                        throw std::runtime_error("The bracket master mask directory does not match the project.");
+                    if (master) d->masks=master->masks;
+                } else for(auto& mask:d->masks) {
+                    const auto size=std::uint64_t(mask.w)*mask.h;
+                    if (version==5) {
+                        auto encoded=reader.Block<std::uint8_t>(compressBound(static_cast<uLong>(size)));
+                        if (encoded.empty()) throw std::runtime_error("Missing compressed depth mask.");
+                        SetCompressedCoverage(mask,std::move(encoded));
+                        continue;
+                    }
+                    auto bytes=reader.Block<std::uint8_t>(size);
+                    if(bytes.size()!=size)throw std::runtime_error("Truncated depth mask.");
+                    mask.pixels=std::make_shared<const DepthMask::Bytes>(std::move(bytes));
+                }
+            }
+            raw->reconstructionDepth=std::move(d);
+            if(!reader.Finished())throw std::runtime_error("Unexpected trailing depth data.");
+        } catch(const std::exception& e) {
+            raw->reconstructionDepth=Raw::UnavailableDepth(raw->metadata.visibleWidth,raw->metadata.visibleHeight,e.what());
+        }
+    } else if(!reader.Finished())throw std::runtime_error("Unexpected data in saved bracket result.");
     result.raw=std::move(raw);result.identity=header.at("identity");result.fallbackSamples=header.at("fallback");
     result.unrecoverableSamples=header.at("unrecoverable");result.invalidSamples=header.at("invalid");
     result.status=Raw::Bracketing::BracketingResult::Status::Completed;result.message="Saved bracket ready.";

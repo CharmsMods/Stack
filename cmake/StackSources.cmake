@@ -31,10 +31,13 @@ if (NOT STACK_BUILD_BURST_DIAGNOSTICS)
         list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/App/Validation/Suites/${suite}\\.cpp$")
     endforeach()
 endif()
+# Built once with the bundled OpenEXR include paths.
+list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/Persistence/Bracket(RgbMaster|AuxiliaryStorage)[.]cpp$")
 # Worker entry points are never linked into the desktop process.
 list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/BurstEngine/.*\\.cpp$")
 list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/GraphRoutingBackend/.*\\.cpp$")
 list(APPEND STACK_APP_SOURCE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/OutputDng.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Client.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Protocol.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/WireData.cpp")
@@ -135,6 +138,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspace.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawSourceFolders.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGalleryThumbnailPixels.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawCameraThumbnail.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceStorage.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceManagedGraph.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceProjects.cpp"
@@ -145,6 +149,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/RawProjectAttributeTransfer.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/MultiFrameGraph.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/ProjectStore.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/ClosetMerge.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/ProjectIndex.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/BracketingResultEvidence.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Persistence/ProjectSaveCoordinator.cpp"

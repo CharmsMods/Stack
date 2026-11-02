@@ -33,27 +33,10 @@ using RawCurveGraphUiState = Stack::EditorModuleTypes::RawCurveGraphUiState;
 
 bool EditorModule::RenderRawWorkspaceLabColorSurface(
     RawWorkspaceEditContext& context, RawLabControlSection section) {
-    const std::string previewIdentity =
-        GetActiveRawWorkspacePreviewIdentity();
-    const RawDevelopmentGraphScopeReadback& cachedScope =
-        m_RawWorkspaceColorWarpInputGraphScopeCache.readback;
-    const bool cachedScopeMatches =
-        !previewIdentity.empty() &&
-        m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
-            previewIdentity &&
-        cachedScope.valid &&
-        cachedScope.stage ==
-            RawDevelopmentGraphScopeStage::ColorWarpInput;
-    const RawDevelopmentGraphScopeReadback emptyScope;
-    const RawDevelopmentGraphScopeReadback& scope = context.inputAnalysis ? *context.inputAnalysis :
-        context.presentation==Stack::Editor::NodeEditorPresentation::Panel ? emptyScope :
-        cachedScopeMatches ? cachedScope : m_RawWorkspaceGraphScopeReadback;
-    const std::size_t cloudInputFingerprint =
-        scope.graphInputFingerprint ? scope.graphInputFingerprint :
-        (m_RawWorkspaceColorWarpInputGraphScopeCache.sourceKey ==
-                previewIdentity
-            ? m_RawWorkspaceColorWarpInputGraphScopeCache.inputFingerprint
-            : 0u);
+    const auto owner = ColorWarpAreaOwner(context);
+    const auto& previewIdentity = owner.sourceKey;
+    std::size_t cloudInputFingerprint = 0;
+    const auto& scope = ColorWarpInput(context, cloudInputFingerprint);
     RawLabColorSurfaceArgs args {
         m_RawWorkspaceLabUi,
         context.recipe.colorWarp,
@@ -65,8 +48,7 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
     };
     args.panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;
     args.strengthDriven = context.IsParameterDriven("strength");
-    args.areaOwner = {context.nodeTarget, previewIdentity,
-        RawViewportSourceHash()};
+    args.areaOwner = owner;
     args.areaEditingAllowed = context.canEdit;
     if (context.nodeTarget && context.editorState) {
         args.feedback = &context.State<Stack::Editor::ColorWarpFeedback>();

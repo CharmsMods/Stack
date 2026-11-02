@@ -1,5 +1,6 @@
 #include "Editor/UI/ViewportNavigation.h"
 #include "EditorViewport.h"
+#include "Notifications/NotificationPresenter.h"
 #include "App/UiPerformanceProbe.h"
 #include "App/Resources/EmbeddedTabIcons.h"
 #include "Editor/EditorModule.h"
@@ -1049,6 +1050,7 @@ EditorViewport::~EditorViewport() {
 
 void EditorViewport::ResetSinglePreviewState() {
     m_ShowSplitCompare = false;
+    m_RawSplitProgress = 0.f;
     m_Comparison.Reset();
     m_FrameTransition.Reset();
     m_ZoomLevel = m_ZoomTarget = 1.0f;
@@ -2278,7 +2280,10 @@ void EditorViewport::RenderSingleImageMode(
     }
     const bool separateBaseline = hasRawPresentationTexture || editor->IsRawWorkspaceProjectActive();
     const unsigned beforeTexture = separateBaseline ? m_Comparison.Texture() : sourceTex;
-    const bool splitActive = splitRequested && beforeTexture != 0 && beforeTexture != outputTex;
+    const bool splitReady = splitRequested && beforeTexture != 0 && beforeTexture != outputTex;
+    m_RawSplitProgress = Stack::Notifications::SystemReducedMotion() ? (splitReady ? 1.f : 0.f) :
+        std::clamp(m_RawSplitProgress+(splitReady ? 1.f : -1.f)*compareIo.DeltaTime/.22f,0.f,1.f);
+    const bool splitActive = m_RawSplitProgress > 0.f && beforeTexture != 0;
     if (splitRequested && ComparisonControlsOwnPointer(contentScreen)) isHovered = false;
     EditorModule::DevelopSubjectViewportState developSubjectState;
     const bool hasDevelopSubjectOverlay =
@@ -2312,6 +2317,7 @@ void EditorViewport::RenderSingleImageMode(
     float scaleY = avail.y / (float)imgH;
     float baseScale = std::min(scaleX, scaleY) * 0.94f; // Use more of the pane so detail holds up better before zooming
 
+    const ImVec2 fittedSize(imgW * baseScale, imgH * baseScale);
     Stack::ViewportNavigation::State navigation {
         m_ZoomLevel, m_ZoomTarget, m_PanX, m_PanY,
         m_ZoomAnimating, m_Panning, m_ZoomFocusScreen, m_ZoomFocusUv };
@@ -2319,6 +2325,8 @@ void EditorViewport::RenderSingleImageMode(
     const auto& navigationIo = ImGui::GetIO();
     navigationInput.mouse = mousePos;
     navigationInput.delta = navigationIo.MouseDelta;
+    if (splitActive) MapRawComparisonInput(navigationInput.mouse,navigationInput.delta,
+        contentScreen,{contentScreen.x+avail.x,contentScreen.y+avail.y},fittedSize);
     navigationInput.wheel = navigationIo.MouseWheel;
     navigationInput.seconds = navigationIo.DeltaTime;
     navigationInput.hovered = isHovered && !m_IsLocked;
@@ -2328,7 +2336,7 @@ void EditorViewport::RenderSingleImageMode(
     navigationInput.reset = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle);
     if (inputBlocked || m_IsLocked) m_ZoomAnimating = m_Panning = false;
     Stack::ViewportNavigation::Update(navigation, navigationInput,
-        ImVec2(imgW * baseScale, imgH * baseScale), contentScreen,
+        fittedSize, contentScreen,
         ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y),
         [&](ImVec2 size) {
             return ImVec2(contentScreen.x + (avail.x - size.x) * 0.5f,
@@ -2362,8 +2370,16 @@ void EditorViewport::RenderSingleImageMode(
     };
     float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
     float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
-    const ImVec2 singleImageMin(contentScreen.x + offsetX, contentScreen.y + offsetY);
-    const ImVec2 singleImageMax(singleImageMin.x + dispW, singleImageMin.y + dispH);
+    ImVec2 singleImageMin(contentScreen.x + offsetX, contentScreen.y + offsetY);
+    ImVec2 singleImageMax(singleImageMin.x + dispW, singleImageMin.y + dispH);
+    const ImVec2 cameraImageMin=singleImageMin,cameraImageMax=singleImageMax;
+    if(splitActive) {
+        PresentRawComparison(singleImageMin,singleImageMax,contentScreen,
+            {contentScreen.x+avail.x,contentScreen.y+avail.y},fittedSize);
+        offsetX=singleImageMin.x-contentScreen.x;offsetY=singleImageMin.y-contentScreen.y;
+        dispW=singleImageMax.x-singleImageMin.x;dispH=singleImageMax.y-singleImageMin.y;
+        finalScale=dispW/std::max(1,imgW);
+    }
 
     if (canStaticCompare) {
         const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
@@ -2694,7 +2710,7 @@ void EditorViewport::RenderSingleImageMode(
     const bool imageHovered = ImGui::IsItemHovered() && !ComparisonControlsOwnPointer(contentScreen);
     ImVec2 imageMin = ImGui::GetItemRectMin();
     ImVec2 imageMax = ImGui::GetItemRectMax();
-    editor->UpdateGraphViewportCoverage(imageMin, imageMax, contentScreen,
+    editor->UpdateGraphViewportCoverage(cameraImageMin, cameraImageMax, contentScreen,
         ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y), m_Panning || m_ZoomAnimating);
     if (editor->IsViewMode()) editor->PresentNodeOpenImage(imageMin, imageMax);
     const bool sourceAvailable = sourceTex != 0 && sourceTex != outputTex;
@@ -2702,7 +2718,7 @@ void EditorViewport::RenderSingleImageMode(
     const EditorViewportPreview::StateInput previewInput {
         hasOutputTexture,
         sourceAvailable && !splitRequested,
-        imageHovered && (!splitActive || mousePos.x >= (imageMin.x + imageMax.x) * .5f),
+        imageHovered,
         canStaticCompare && (m_ShowStaticSingleCompare || m_StaticSingleCompareBlend > 0.001f),
         !inputBlocked && editor->CanConsumeEditorCommandKeys(),
         ImGui::GetIO().WantTextInput,
@@ -2733,7 +2749,7 @@ void EditorViewport::RenderSingleImageMode(
     const ImVec2 viewportMin = contentScreen;
     const ImVec2 viewportMax(contentScreen.x + avail.x, contentScreen.y + avail.y);
     const ImVec2 pixelInspectionClipMin(
-        std::max(splitActive ? (imageMin.x + imageMax.x) * .5f : imageMin.x, viewportMin.x),
+        std::max(imageMin.x, viewportMin.x),
         std::max(imageMin.y, viewportMin.y));
     const ImVec2 pixelInspectionClipMax(
         std::min(imageMax.x, viewportMax.x),
@@ -3154,10 +3170,10 @@ void EditorViewport::RenderSingleImageMode(
     const bool openingSurround = editor->IsViewMode() && editor->HasViewImageSurround();
     if (openingSurround) drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     const int firstOpeningPhotoCommand = drawList->CmdBuffer.Size - 1;
+    if (splitActive) PushRawComparisonClip(drawList,contentScreen,
+        {contentScreen.x+avail.x,contentScreen.y+avail.y},true);
     const auto outputPatch = patchBounds(imageMin, imageMax);
     const ImU32 outputTint = IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha));
-    const float compareMidX = (imageMin.x + imageMax.x) * .5f;
-    if (splitActive) drawList->PushClipRect(ImVec2(compareMidX, imageMin.y), imageMax, true);
     drawOverviewGaps(imageMin, imageMax, outputTint);
     bool drewPixelInspectionColors = false;
     if (pixelCleanModeRequested) {
@@ -3201,21 +3217,22 @@ void EditorViewport::RenderSingleImageMode(
                                   regionalOutput ? 0.f : kImageRounding);
     }
 
-    if (splitActive) {
-        drawList->PopClipRect();
-        drawList->PushClipRect(imageMin, ImVec2(compareMidX, imageMax.y), true);
-        drawList->AddImageRounded((ImTextureID)(intptr_t)beforeTexture, imageMin, imageMax,
-            separateBaseline ? ImVec2(0, 0) : ImVec2(0, 1),
-            separateBaseline ? ImVec2(1, 1) : ImVec2(1, 0), outputTint, kImageRounding);
-        drawList->PopClipRect();
-    }
-    if (openingSurround) {
+    if (openingSurround && !splitActive) {
         editor->PublishNodeOpenBackdrop(imageMin, imageMax, contentScreen,
             ImVec2(contentScreen.x+avail.x,contentScreen.y+avail.y),drawList,firstOpeningPhotoCommand);
         drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     }
     editor->FinishNodeOpenPhoto(drawList, firstOpeningPhotoVertex);
+    if (splitActive) drawList->PopClipRect();
     if (openingPhotoClip) drawList->PopClipRect();
+    if (splitActive) {
+        const float t=m_RawSplitProgress;
+        PushRawComparisonClip(drawList,contentScreen,{contentScreen.x+avail.x,contentScreen.y+avail.y},false);
+        drawList->AddImageRounded((ImTextureID)(intptr_t)beforeTexture,m_RawComparisonBeforeMin,m_RawComparisonBeforeMax,
+            separateBaseline ? ImVec2(0,0) : ImVec2(0,1),separateBaseline ? ImVec2(1,1) : ImVec2(1,0),
+            ApplyAlpha(outputTint,t*t*(3.f-2.f*t)),kImageRounding);
+        drawList->PopClipRect();
+    }
     Stack::UiPerformance::Probe::ImageDrawn(editor->GetViewportOutputRenderGeneration(),
         {imageMin.x,imageMin.y,imageMax.x-imageMin.x,imageMax.y-imageMin.y});
     if (currentFactor > 0.001f) {
@@ -3225,6 +3242,12 @@ void EditorViewport::RenderSingleImageMode(
                                       ImVec2(imgW > 1 ? 1.f - .5f / imgW : 1.f, imgH > 1 ? .5f / imgH : 0.f),
                                       IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f * viewportRevealAlpha)), kImageRounding);
         }
+    }
+
+    if (editor->IsViewMode() && !m_Panning && !ComparisonControlsOwnPointer(contentScreen)) {
+        if (splitActive) PushRawComparisonClip(drawList, contentScreen, {contentScreen.x+avail.x,contentScreen.y+avail.y}, true);
+        editor->RenderGraphColorWarpAreaSelector(ImRect(imageMin, imageMax));
+        if (splitActive) drawList->PopClipRect();
     }
 
     if (hasDevelopSubjectOverlay) {
@@ -3287,7 +3310,7 @@ void EditorViewport::RenderSingleImageMode(
                 pixelInspectionClipMin,
                 pixelInspectionClipMax,
                 true);
-        } else if (!inlinePixelValuesRequested && imageHovered && (!splitActive || mousePos.x >= compareMidX)) {
+        } else if (!inlinePixelValuesRequested && imageHovered) {
             DrawPixelInspectionCursorReadout(
                 mousePos,
                 m_PixelInspectionPixels,

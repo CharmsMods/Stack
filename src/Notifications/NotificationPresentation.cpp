@@ -238,7 +238,7 @@ void Presenter::RenderActions(NotificationStore& store, const Record& record, bo
 
 void Presenter::RenderActivity(NotificationStore& store, const PresentationContext& context) {
     UpdatePreview(store);
-    if (!m_HasAnchor || BlocksInput()) return;
+    if (BlocksInput()) return;
     const float unit = ImGui::GetFontSize() / 13.0f;
     const auto* viewport = ImGui::GetMainViewport();
     const ImVec2 margin(std::min(12.f * unit, viewport->WorkSize.x * .05f),
@@ -249,15 +249,8 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
     if (maximum.x - minimum.x < 1.f || maximum.y - minimum.y < 1.f) return;
     const float width = std::min(420.f * unit, maximum.x - minimum.x);
     const auto boundedHeight = [&](float desired) { return std::min(desired, maximum.y - minimum.y); };
-    const auto place = [&](float height) {
-        // The indicator can live in the bottom-left rail or a top-right header.
-        // Explicit window positions bypass ImGui's ordinary viewport clamping.
-        const bool above = (m_AnchorMinimum.y + m_Anchor.y) * .5f >
-            (minimum.y + maximum.y) * .5f;
-        const ImVec2 anchor(std::clamp(m_Anchor.x, minimum.x + width, maximum.x),
-            std::clamp(above ? m_AnchorMinimum.y - 6.f * unit : m_Anchor.y + 6.f * unit,
-                minimum.y + (above ? height : 0.f), maximum.y - (above ? 0.f : height)));
-        ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1,above ? 1.f : 0.f));
+    const auto place = [&](float) {
+        ImGui::SetNextWindowPos(maximum, ImGuiCond_Always, ImVec2(1,1));
     };
     if (m_PanelOpen) {
         auto records = store.Snapshot();
@@ -278,6 +271,8 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
         if (ImGui::Begin("##StackNotificationsActivity", nullptr,
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse)) {
+            if (ImGui::GetCurrentContext()->OpenPopupStack.empty())
+                ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
             if (context.keepFixed) context.keepFixed(ImGui::GetWindowDrawList());
             ImGui::TextUnformatted("Activity");
             ImGui::SameLine(std::max(0.f,ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize("Close").x - ImGui::GetStyle().FramePadding.x * 2));
@@ -332,6 +327,8 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
     ImGui::Begin("##StackNotificationPreview",nullptr,
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing);
+    if (ImGui::GetCurrentContext()->OpenPopupStack.empty())
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
     if (context.keepFixed) context.keepFixed(ImGui::GetWindowDrawList());
     Muted(record->owner.label);
     if (!record->content.title.empty()) Wrapped(record->content.title);
@@ -381,9 +378,10 @@ void Presenter::RenderDialog(NotificationStore& store, const PresentationContext
             (record->content.imagePreview ? 160.f * unit : 0),190.f * unit,420.f * unit);
     const float height=std::min(desiredHeight,
         std::max(140.f,context.workspaceSize.y-32.f*unit));
-    const ImVec2 center(context.workspacePosition.x+context.workspaceSize.x*.5f,
-        context.workspacePosition.y+context.workspaceSize.y*.5f);
-    ImGui::SetNextWindowPos(center,ImGuiCond_Always,ImVec2(.5f,.5f));
+    const auto* viewport = ImGui::GetMainViewport();
+    const ImVec2 corner(viewport->WorkPos.x+viewport->WorkSize.x-12.f*unit,
+        viewport->WorkPos.y+viewport->WorkSize.y-12.f*unit);
+    ImGui::SetNextWindowPos(corner,ImGuiCond_Always,ImVec2(1.f,1.f));
     ImGui::SetNextWindowSize(ImVec2(width,height),ImGuiCond_Always);
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,9.f*unit);

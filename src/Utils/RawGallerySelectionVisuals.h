@@ -17,7 +17,9 @@ inline void DrawTileSelection(
     std::size_t selectionOrdinal,
     bool filmstripPerforations = false,
     bool sideFilmstripPerforations = false,
-    float topInset = 0.0f) {
+    float topInset = 0.0f,
+    const ImVec2* imageMinimum = nullptr,
+    const ImVec2* imageMaximum = nullptr) {
     if (drawList == nullptr) {
         return;
     }
@@ -38,8 +40,8 @@ inline void DrawTileSelection(
             0,
             (!filmstripPerforations && selected) ? 92 : 42);
         drawList->AddRectFilled(
-            ImVec2(minimum.x, minimum.y + std::max(0.0f, topInset)),
-            maximum,
+            imageMinimum ? *imageMinimum : ImVec2(minimum.x, minimum.y + std::max(0.0f, topInset)),
+            imageMaximum ? *imageMaximum : maximum,
             shade,
             rounding);
     }

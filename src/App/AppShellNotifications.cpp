@@ -165,17 +165,6 @@ void AppShell::RenderFileCommandPrompts() {
         std::filesystem::path selected =
             FileDialogs::OpenStackProjectFileDialog("Open Project");
         if (!selected.empty()) {
-            std::string fileName = selected.filename().string();
-            std::transform(
-                fileName.begin(),
-                fileName.end(),
-                fileName.begin(),
-                [](unsigned char value) {
-                    return static_cast<char>(std::tolower(value));
-                });
-            if (fileName == "project.stack") {
-                selected = selected.parent_path();
-            }
             QueueFileAction(PendingFileAction::OpenProject, std::move(selected));
         }
     }

@@ -2,6 +2,17 @@
   "schemaVersion": 1,
   "components": [
     {
+      "id": "darktable-sigmoid",
+      "name": "darktable Sigmoid curve and hue correction adaptation",
+      "version": "local 2026-11-02 sigmoid.c reference; zero-skew SDR subset",
+      "homepage": "https://github.com/darktable-org/darktable/blob/master/src/iop/sigmoid.c",
+      "license": "GPL-3.0-or-later",
+      "copyright": "Copyright (C) 2020-2026 darktable developers; Stack adaptations 2026",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": ["Darktable-GPL-3.0.txt"]
+    },
+    {
       "id": "libavoid",
       "name": "Adaptagrams libavoid",
       "version": "840ebcff20dbba36ad03a2160edf7cbaf9859984",
@@ -132,6 +143,7 @@
         "OpenCV-COPYRIGHT.txt",
         "OpenCV-zlib.txt",
         "OpenCV-SoftFloat-FDLIBM.txt",
+        "OpenEXR-BSD.txt",
         "OpenCV-FLANN-BSD.txt"
       ]
     },

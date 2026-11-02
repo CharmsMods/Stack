@@ -359,8 +359,8 @@ bool TestPresentationHelpers() {
         Stack::RawWorkspace::ComputeRawGalleryFilmstripDrawerTargetHeight(
             180.0f, 100.0f, 10.0f, 1u, 1000.0f);
     if (!Check(
-            std::abs(singletonDrawerHeight - 290.0f) < 0.001f,
-            "singleton filmstrips still open by one tile interval")) return false;
+            std::abs(singletonDrawerHeight - 180.0f) < 0.001f,
+            "singleton filmstrips do not reserve space for a taller stack")) return false;
 
     const auto natural =
         Stack::RawWorkspace::ComputeRawGalleryFilmstripStackLayout(

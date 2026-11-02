@@ -8,7 +8,7 @@
 namespace Raw::Bracketing {
 struct ExposurePatch {
     std::array<std::array<double,3>,25> color{};
-    std::uint32_t valid=0;
+    std::array<std::uint32_t,3> valid{};
 };
 struct ExposurePoint {Mfd::RawCoordinate coordinate;unsigned spatialBin=0;};
 
@@ -52,9 +52,9 @@ public:
                 const Mfd::RawCoordinate raw={points[p].coordinate.x+dx*double(stride_),
                     points[p].coordinate.y+dy*double(stride_)};
                 double value=0;
-                if(SampleAlignmentProxyColor(data_.sources[sourceIndex],raw,value,patch.color[sample])&&
-                    *std::max_element(patch.color[sample].begin(),patch.color[sample].end())<.8) {
-                    patch.valid|=1u<<sample;
+                if(SampleAlignmentProxyColor(data_.sources[sourceIndex],raw,value,patch.color[sample])) {
+                    for(unsigned c=0;c<3;++c) if(patch.color[sample][c]<.8 && std::isfinite(patch.color[sample][c]))
+                        patch.valid[c]|=1u<<sample;
                 }
             }
         }

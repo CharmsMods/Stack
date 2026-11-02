@@ -26,6 +26,11 @@ public:
     void ResetSinglePreviewState();
     void SuspendComparison() { m_Comparison.Suspend(); }
     bool PrepareRawSplitComparison(EditorModule* editor, const ImVec2& available);
+    void PresentRawComparison(ImVec2& minimum, ImVec2& maximum,
+        ImVec2 viewMinimum, ImVec2 viewMaximum, ImVec2 fittedSize);
+    void MapRawComparisonInput(ImVec2& mouse, ImVec2& delta,
+        ImVec2 viewMinimum, ImVec2 viewMaximum, ImVec2 fittedSize) const;
+    void PushRawComparisonClip(ImDrawList* list, ImVec2 viewMinimum, ImVec2 viewMaximum, bool after) const;
     void DrawRawComparisonBefore(ImDrawList* list, ImVec2 minimum, ImVec2 maximum) const;
     void DrawRawComparisonControls(ImVec2 origin);
     bool ComparisonControlsOwnPointer(ImVec2 origin) const;
@@ -35,6 +40,8 @@ private:
     GraphFrameTransition m_FrameTransition;
     Stack::Editor::ViewComparisonPreview m_Comparison;
     bool m_ShowSplitCompare = false;
+    float m_RawSplitProgress = 0.f;
+    ImVec2 m_RawComparisonBeforeMin{}, m_RawComparisonBeforeMax{};
     enum class ExportHandleType {
         None,
         Move,

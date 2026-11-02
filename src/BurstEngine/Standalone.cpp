@@ -35,6 +35,9 @@ BatchOptions ReadOptions(const std::filesystem::path& path){
         throw std::runtime_error("captureCombining must be auto or gpu. GPU processing is required; CPU mode is not supported.");
     result.preferGpuCombining=true;
     result.aiAlignment=json.value("aiAlignment",false);
+    result.autoResolution=json.value("autoResolution",false);
+    if(json.contains("directionalDenoise"))result.smoothing=json.at("directionalDenoise").get<bool>()?
+        Raw::Bracketing::BurstSmoothing::All:Raw::Bracketing::BurstSmoothing::Off;
     if(destination=="beside")result.location=OutputLocation::BesideOriginals;
     else if(destination!="folder")throw std::runtime_error("Destination must be beside or folder.");
     if(result.formats.empty())throw std::runtime_error("Choose at least one output format.");return result;

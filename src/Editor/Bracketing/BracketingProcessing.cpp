@@ -1,10 +1,13 @@
 #include "Persistence/BracketingResultStore.h"
 #include "Editor/EditorModule.h"
 #include "BracketingSession.h"
+#include "Editor/AutoBracket/AutoBracketMemoryPriority.h"
 #include "BracketingPreviewAvailability.h"
 #include "Project/BracketingJobRunner.h"
 #include "Project/BracketingPreparation.h"
 #include "Project/BracketingDetail.h"
+#include "Project/BracketGraphMasks.h"
+#include "Project/BracketHdrStartingCurve.h"
 #include "BurstEngine/Client.h"
 #include "Editor/RawRenderService.h"
 #include "BracketingGallery.h"
@@ -18,6 +21,14 @@
 #include "Async/TaskSystem.h"
 #include <thread>
 #include <utility>
+
+void EditorModule::OfferBracketGraphMasks(const Raw::RawImageData& raw) {
+    if((!raw.reconstructionDepth || raw.reconstructionDepth->masks.empty()) &&
+        m_Project->rawLayers.State().offeredDepthMasks.empty())return;
+    auto candidate=m_Project->rawLayers.State();
+    if(Stack::Project::OfferBracketMasks(candidate,raw) && !ApplyRawLayerStackEdit(std::move(candidate),true))
+        PostNotification(UiNotificationSeverity::Error,m_RawLayerStatus,"bracket-depth-masks");
+}
 
 void EditorModule::ResetBracketingForProjectLoad(const std::filesystem::path& projectPath) {
     // A newly created bracket has a draft waiting for its own initial import.
@@ -152,7 +163,9 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
     ui.job=job;ui.pending=false;ui.failed=false;ui.status="Preparing bracket...";
     m_MultiFrameGraphProcessingTaskState=Async::TaskState::Running;
     const bool submitted=ProjectTasks().SubmitHighPriority(activityMetadata,[request=std::move(request),job,notifier,activity,completionLease]() mutable {
-        job->result=Stack::Project::RunBracketingJob(request);
+        job->result = Stack::AutoBracket::RunForegroundBurst(
+            [&] { return Stack::Project::RunBracketingJob(request); }, request.shouldCancel,
+            [&](const char* message) { request.reportProgress(0, message); });
         Raw::Bracketing::ProcessingProgress terminal;
         terminal.stage=job->canceled?Raw::Bracketing::ProcessingStage::Canceled:
             job->result.status==Raw::Bracketing::BracketingResult::Status::Completed?Raw::Bracketing::ProcessingStage::Completed:Raw::Bracketing::ProcessingStage::Failed;
@@ -179,7 +192,6 @@ void EditorModule::TickBracketing(bool foreground) {
             state->awaitingProject.clear();state->newProject=false;
             state->projectId=m_Project->snapshot->projectId;
             state->setId=m_Project->snapshot->activeSourceSetId;
-            ArmBracketingStartingLook();
             const bool saved = CommitBracketingDraft(state->processAfterImport,nullptr);
             auto completion = std::exchange(state->saveBeforeCloseCompletion, {});
             if (completion) completion(saved);
@@ -231,7 +243,6 @@ void EditorModule::TickBracketing(bool foreground) {
             auto job=std::make_shared<Stack::Editor::BracketingJob>();
             job->projectId=snapshot.projectId;job->setId=set->sourceSetId;
             job->revision=snapshot.hdrInputRevision;job->recipeIdentity=stored;
-            job->restoredFromProject=true;
             ui.job=job;ui.pending=false;ui.publishRequested=true;
             ui.status="Opening saved bracket...";
             m_MultiFrameGraphProcessingTaskState=Async::TaskState::Running;
@@ -242,13 +253,27 @@ void EditorModule::TickBracketing(bool foreground) {
             ui.activityNotifier=notifier;ui.activity=activity;ui.activityMeaningful=false;
             const auto completionLease=Stack::Notifications::RetainAsyncActivity(notifier,activity);
             ui.activityLease=completionLease;
+            Stack::Project::BracketingJobRequest request;
+            request.store = m_Project->store;
+            request.snapshot = snapshot;
+            request.setId = job->setId;
+            request.cacheRoot = AppPaths::GetCacheDirectory();
+            // A pending draft is separate from the recipe that produced this master.
+            std::string recipeError;
+            if (!Raw::Bracketing::Deserialize(set->settings.at("bracketing"), request.recipe, recipeError)) {
+                ui.job.reset(); ui.failed=true; ui.status=recipeError;
+                notifier.FailActivity(activity,ui.status); ui.activityLease.reset();
+                m_MultiFrameGraphProcessingTaskState=Async::TaskState::Failed;
+                return;
+            }
+            request.didRestoreResult = [job] { job->restoredFromProject = true; };
+            request.shouldCancel = [job] { return job->canceled.load(); };
+            request.reportProgress = [notifier,activity](double,const std::string& message) {
+                notifier.UpdateActivity(activity,message);
+            };
             if(!ProjectTasks().SubmitHighPriority(Stack::Notifications::ForAsyncActivity(notifier,activity,"Processing frames"),
-                [job,snapshot,store=m_Project->store,notifier,activity,completionLease] {
-                std::string error;
-                const bool restored=Stack::Project::RestoreBracketingResult(store,snapshot,job->setId,
-                    job->result,error,[job]{return job->canceled.load();});
-                if(!restored)job->result.message=error.empty()?
-                    "The saved result is unavailable. Press Process to rebuild it from the saved captures.":error;
+                [job,request=std::move(request),completionLease] {
+                job->result = Stack::Project::OpenOrRegenerateBracket(request);
                 job->done=true;
             })) {
                 ui.job.reset();ui.failed=true;ui.status="Could not schedule opening the saved bracket.";
@@ -283,11 +308,25 @@ void EditorModule::TickBracketing(bool foreground) {
         if(current) {
             if(Stack::Project::AdoptBracketingJob(ui,*job)) {
                 ui.gradedResult=true;
+                auto* sourceSet=Stack::Project::FindSourceSet(*m_Project->snapshot,ui.setId);
+                if (!job->restoredFromProject && sourceSet &&
+                    !sourceSet->settings.value(Stack::Project::kBracketToneFitConsidered,false)) {
+                    sourceSet->settings[Stack::Project::kBracketToneFitConsidered]=true;
+                    if (!m_Project->rawLayers.GestureActive() && m_Project->layers.empty() &&
+                        Stack::RawRecipe::IsViewTransformEnabled(m_Project->rawRecipe) &&
+                        m_Project->rawRecipe.viewTransform.layerJson==Stack::RawRecipe::DefaultViewTransformJson()) {
+                        auto candidate=m_Project->rawLayers.State();
+                        if (Stack::Project::FitBracketStartingCurve(candidate,*ui.result,ui.recipe) &&
+                            ApplyRawLayerStackEdit(std::move(candidate),true,false))
+                            PostNotification(UiNotificationSeverity::Info,
+                                "HDR highlights fitted in Tone Curve. Undo restores the previous curve.","hdr-starting-curve");
+                    }
+                }
                 if(m_DocumentPersistenceEnabled && !job->restoredFromProject)MarkDirty();
                 ui.textureIdentity.clear();
                 if(ui.interactiveRaw){ui.interactiveRaw.reset();ClearRawWorkspaceGraphScopeReadbackCaches();MarkRenderRefreshDirty();}
                 if(ui.detailMode&&ui.detail.width&&ui.detail.height) {
-                    const double scale=ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::SuperResolution2x?2.:1.;
+                    const double scale=ui.result->reconstructionInspection?ui.result->reconstructionInspection->scale:1.;
                     ui.probeX=static_cast<float>(std::clamp((ui.detail.sensorOriginX+ui.detail.width*ui.detail.sensorStepX*.5)*scale/
                         ui.result->raw->metadata.visibleWidth,0.,.99999));
                     ui.probeY=static_cast<float>(std::clamp((ui.detail.sensorOriginY+ui.detail.height*ui.detail.sensorStepY*.5)*scale/
@@ -384,15 +423,16 @@ void EditorModule::TickBracketing(bool foreground) {
         adopted.contentHash=ui.result->raw->contentIdentityHash;
         m_BracketingPresentedSourceHash=0;
         m_HdrAdoptedRawResult=std::move(adopted);ui.publishRequested=false;
+        OfferBracketGraphMasks(*ui.result->raw);
         ClearRawWorkspaceGraphScopeReadbackCaches();
         NoteRawWorkspaceRecipePreviewEdit(false);
         Stack::Editor::UpdateBracketingGalleryProject(m_RawWorkspace,snapshot,GetCurrentProjectFileName(),m_Project->store);
+        m_RawWorkspaceCatalogChanged = true;
         InvalidateRawWorkspaceGalleryPresentation();
         for(auto& node:m_Project->graph.EditNodes()) if(node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr&&node.multiFrameHdr.sourceSetId==set->sourceSetId) {
             node.multiFrameHdr.resultState="ready";node.multiFrameHdr.presentationStatus="Bracket result ready.";
         }
         m_RawWorkspaceStaleRenderStatusText.clear();m_MultiFrameProjectCoverRefreshPending=true;MarkRenderDirty();
-        PrepareBracketingStartingLookAnalysis();
     }
     // A superseded job can finish after navigation has left Bracketing. RAW
     // must start the requested revision without depending on that tab drawing.

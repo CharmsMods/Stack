@@ -65,6 +65,30 @@ bool ValidateBurstWorker(const std::filesystem::path& inputs, const std::filesys
                 std::cout << "Burst worker: " << int(fraction * 100) << "% " << stage << '\n' << std::flush;
         };
         request.reportPresentation = [&](const ProcessingProgress&) { ++presentationEvents; };
+        double fixedSeconds = 0;
+        {
+            auto fixed = request;
+            fixed.recipe.alignmentMode = AlignmentMode::FixedCoordinates;
+            fixed.recipe.aiAlignment = false;
+            fixed.cacheDirectory = output / "fixed-cache";
+            const auto fixedStart = std::chrono::steady_clock::now();
+            const auto result = BurstEngine::Process(fixed);
+            fixedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - fixedStart).count();
+            require(result.status == BracketingResult::Status::Completed && result.raw && result.analysis,
+                "Fixed-coordinate reconstruction failed: " + result.message);
+            const auto& stages = result.analysis->stageSeconds;
+            require(!stages.count("global_alignment") && !stages.count("local_pyramids") &&
+                !stages.count("local_search_gpu_and_cpu_verification") && !stages.count("burst_alignment_refinement"),
+                "Fixed-coordinate processing ran a registration stage.");
+            for (const auto& source : fixed.sources) {
+                const auto& alignment = result.analysis->alignments.at(source.frameId);
+                require(alignment.model == CaptureAlignment::Model::Identity && !alignment.localApplied &&
+                    alignment.translationX == 0 && alignment.translationY == 0 && alignment.rotationDegrees == 0,
+                    "Fixed-coordinate processing moved a capture.");
+            }
+        }
+        progressEvents = 0;
+        presentationEvents = 0;
         const auto start = std::chrono::steady_clock::now();
         auto result = BurstEngine::Process(request);
         const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -140,7 +164,7 @@ bool ValidateBurstWorker(const std::filesystem::path& inputs, const std::filesys
         }
         nlohmann::json report = {
             {"passed", true}, {"sourceCount", request.sources.size()}, {"processingSeconds", elapsed},
-            {"retainedPreviewSeconds", previewSeconds}, {"progressEvents", progressEvents.load()},
+            {"fixedCoordinateProcessingSeconds", fixedSeconds}, {"retainedPreviewSeconds", previewSeconds}, {"progressEvents", progressEvents.load()},
             {"presentationEvents", presentationEvents.load()}, {"workerCount", request.workerCount},
             {"recipeIdentity", Identity(request.recipe)}, {"analysisIdentity", state.result->analysis->identity},
             {"stageSeconds", state.result->analysis->stageSeconds}, {"originalsUnchanged", true},

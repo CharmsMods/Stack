@@ -5,6 +5,7 @@
 #include "Project/RawProjectGraph.h"
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class LayerBase;
@@ -21,5 +22,8 @@ struct RawLayerMaskWorkspace {
     bool affectsPixels = false;
     int previewOutputNodeId = 0;
     std::optional<Stack::Project::RawProjectGraph> projectCanvas;
+    // Resolve the authored publication once per visible draft node/revision.
+    std::unordered_map<int,std::string> thumbnailKeys;
+    std::uint64_t thumbnailKeyRevision = 0;
 };
 }

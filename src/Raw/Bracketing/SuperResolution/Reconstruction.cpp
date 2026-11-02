@@ -4,6 +4,8 @@
 #include "../PresentationEvidence.h"
 #include "Preparation.h"
 #include "Memory.h"
+#include "AdaptiveResolution.h"
+#include "AdaptiveMerge.h"
 #include "Raw/RawProcessingMath.h"
 #include "NodeMath/Uuid.h"
 #include "NodeMath/ContractTypes.h"
@@ -144,8 +146,10 @@ bool RunGroup(const ProcessingRequest& request,const BracketingAnalysis& analysi
     observe();return true;
 }
 }
-bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResult& result,std::string& error) {
-    if(request.recipe.reconstruction!=ReconstructionMode::SuperResolution1x&&
+bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResult& result,
+    BracketingAnalysis& analysis,std::string& error) {
+    const bool adaptive=request.recipe.reconstruction==ReconstructionMode::Adaptive;
+    if(!adaptive&&request.recipe.reconstruction!=ReconstructionMode::SuperResolution1x&&
        request.recipe.reconstruction!=ReconstructionMode::SuperResolution2x)return true;
     if(!result.raw||!result.analysis||!result.analysis->prepared){error="Super-resolution requires prepared captures.";return false;}
     if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
@@ -155,8 +159,28 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     }
     const auto start=std::chrono::steady_clock::now();
     const auto& data=*result.analysis->prepared;const auto& native=*result.raw;
-    const unsigned scale=request.recipe.reconstruction==ReconstructionMode::SuperResolution2x?2:1;
-    const unsigned width=data.width*scale,height=data.height*scale;const auto groups=request.recipe.groups.size();
+    const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});
+    if(adaptive&&enabled<2)return true; // Keep the native result and its single-capture explanation.
+    double scale=request.recipe.reconstruction==ReconstructionMode::SuperResolution2x?2.:1.;
+    std::string autoDecision;
+    if(adaptive) {
+        Sr::ScaleEvidence measured;
+        if(analysis.resolutionDecision)measured=*analysis.resolutionDecision;
+        else {
+            if(request.reportProgress)request.reportProgress(.90,"Checking recoverable detail against original captures");
+            if(!Sr::MeasureResolution(request,*result.analysis,measured,error))return false;
+            analysis.stageSeconds["adaptive_resolution_evidence"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+        }
+        autoDecision=measured.Summary();
+        analysis.diagnostics.push_back(autoDecision);
+        scale=measured.scale;
+        if(!measured.reconstruct){result.message=autoDecision;return true;}
+    }
+    if(data.width*scale>std::numeric_limits<int>::max()||data.height*scale>std::numeric_limits<int>::max()){
+        error="Super-resolution dimensions exceed the supported image extent.";return false;
+    }
+    const unsigned width=unsigned(std::lround(data.width*scale)),height=unsigned(std::lround(data.height*scale));
+    const auto groups=request.recipe.groups.size();
     const std::uint64_t pixels=std::uint64_t(width)*height;
     if(pixels>std::numeric_limits<std::size_t>::max()/28) {
         error="Super-resolution dimensions exceed the addressable output size.";return false;
@@ -182,7 +206,8 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     Sr::MemoryRequirements requirements;
     const bool depthSupport=std::any_of(data.sources.begin(),data.sources.end(),
         [&](const PreparedSource& source){return &source!=&data.sources[data.origin]&&HasCaptureDepthSupport(source);});
-    requirements.residentBytes=std::uint64_t(data.width)*data.height*20+analysisBytes;
+    requirements.residentBytes=std::uint64_t(data.width)*data.height*20+analysisBytes+
+        data.spatialGuide.cells.capacity()*sizeof(data.spatialGuide.cells.front());
     requirements.outputBytes=pixels*28;
     requirements.workingBytes=fallbackBytes+128ull*1024*1024+24+(depthSupport?24:0)+
         result.analysis->guideEv.capacity()*sizeof(float)+p.guideEv.size()*sizeof(unsigned);
@@ -190,7 +215,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     requirements.preferredCacheTiles=data.sources.size()*4+4;
     // The cropped native reliability mask is no larger than a production
     // output tile (1x/2x, minimum side32). Include CPU/GPU copies and tail padding.
-    requirements.bytesPerOutputTilePixel=groups*3*sizeof(Sr::ChannelResult)+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4+8+
+    requirements.bytesPerOutputTilePixel=groups*(3*sizeof(Sr::ChannelResult)+(adaptive?sizeof(Sr::PixelAccumulator):0))+3*(sizeof(Sr::PixelAccumulator)+sizeof(float))+groups*4+8+
         (depthSupport?8:0); // CPU/GPU copies of the conditional per-output depth veto
     const auto memoryPlan=Sr::PlanMemory(requirements,request.memoryBudgetBytes,
         request.automaticMemoryBudget,Mfd::QueryPhysicalMemorySnapshot());
@@ -227,13 +252,15 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     // The planner bounded both the source cache and output tile before any
     // full-resolution allocation. Keep neighboring sensor tiles across tiles.
     GpuSession gpu(request);PreparedTileSampler sampler(data.directory,cacheCount);NativeFallback nativeFallback;
+    auto fallbackRequest=request;
+    ResolveGroupReconstruction(fallbackRequest.recipe,false);
     Preview preview=std::move(result.preview);
     std::vector<unsigned> previewCounts(preview.guideEv.size());
     std::fill(preview.resultRgb.begin(),preview.resultRgb.end(),0.f);
     std::fill(preview.contributions.begin(),preview.contributions.end(),0.f);
     std::fill(preview.diagnostics.begin(),preview.diagnostics.end(),0);
-    const auto enabled=std::count_if(data.sources.begin(),data.sources.end(),[](const auto& s){return s.enabled;});
     std::vector<std::vector<std::array<Sr::ChannelResult,3>>> groupResults(groups);
+    std::vector<std::vector<Sr::PixelAccumulator>> groupMoments(adaptive?groups:0);
     std::vector<float> actual;std::vector<double> shares;ColorObservations observations;
     for(auto& site:observations)site.resize(groups);
     result.invalidSamples=result.fallbackSamples=result.unrecoverableSamples=0;
@@ -241,17 +268,27 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     for(unsigned top=0;top<height;top+=tileSide)for(unsigned left=0;left<width;left+=tileSide) {
         if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
         const auto tw=std::min(tileSide,width-left),th=std::min(tileSide,height-top);const auto count=std::size_t(tw)*th;
+        Sr::Tile tile;
         for(std::size_t g=0;g<groups;++g) {
-            auto tile=Sr::MakeTile(left,top,tw,th,scale,*result.analysis,g);
+            if(!adaptive||g==0)tile=Sr::MakeTile(left,top,tw,th,scale,*result.analysis,g,adaptive);
+            else {
+                tile.pixels=std::move(groupMoments[g]);
+                tile.pixels.assign(count,{});
+                for(std::size_t i=0;i<count;++i) {
+                    tile.pixels[i].kernel=groupMoments[0][i].kernel;
+                    tile.pixels[i].broadKernel=groupMoments[0][i].broadKernel;
+                }
+            }
             if(!RunGroup(request,*result.analysis,g,tile,sampler,gpu,error))return false;
             groupResults[g].resize(count);
             for(std::size_t p=0;p<count;++p)
-                groupResults[g][p]=Sr::ResolveChannels(tile.pixels[p],tile.samplingConfidence[p]);
+                groupResults[g][p]=Sr::ResolveChannels(tile.pixels[p],adaptive?0.f:tile.samplingConfidence[p]);
+            if(adaptive)groupMoments[g]=std::move(tile.pixels);
         }
         actual.assign(count*groups,0.f);
         for(unsigned y=0;y<th;++y)for(unsigned x=0;x<tw;++x) {
             const auto p=std::size_t(y)*tw+x,index=std::size_t(top+y)*width+left+x;
-            const unsigned sx=std::min(data.width-1,(left+x)/scale),sy=std::min(data.height-1,(top+y)/scale);
+            const unsigned sx=std::min(data.width-1,unsigned((left+x+.5)/scale)),sy=std::min(data.height-1,unsigned((top+y+.5)/scale));
             const auto nativeIndex=std::size_t(sy)*data.width+sx;
             const float ev=result.analysis->guideEv[(sy/2)*(data.width/2)+sx/2];
             Evaluate(request.recipe.automatic?result.analysis->suggestion:request.recipe.knots,ev,shares);
@@ -265,11 +302,12 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
                     o.support=channel.valid?channel.support:0;o.headroom=1;o.finite=channel.valid;
                 }
             }
-            const auto color=BlendColor(observations,shares,request.recipe,3);
+            auto color=BlendColor(observations,shares,request.recipe,3);
+            if(adaptive)Sr::ResolveAdaptiveGroups(groupMoments,p,tile.samplingConfidence[p],color);
             for(unsigned c=0;c<3;++c) {
                 auto blended=color[c];
                 if(!blended.valid) {
-                    blended=nativeFallback.Read(request,data,sx,sy,c,shares,error);
+                    blended=nativeFallback.Read(fallbackRequest,data,sx,sy,c,shares,error);
                     if(!error.empty())return false;
                 }
                 valid&=blended.valid;clipped|=blended.clipped;didFallback|=blended.fallback;
@@ -305,7 +343,8 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
             s.rgb={raw->linearFloatBuffer[index*3],raw->linearFloatBuffer[index*3+1],raw->linearFloatBuffer[index*3+2]};
             const auto group=PresentationGroup(request);
             s.first=actual[(std::size_t(y-top)*tw+x-left)*groups+group];
-            const auto ev=result.analysis->guideEv[((y/scale)/2)*(data.width/2)+(x/scale)/2];
+            const auto sx=std::min(data.width-1,unsigned((x+.5)/scale)),sy=std::min(data.height-1,unsigned((y+.5)/scale));
+            const auto ev=result.analysis->guideEv[(sy/2)*(data.width/2)+sx/2];
             s.second=float(Evaluate(request.recipe.automatic?result.analysis->suggestion:request.recipe.knots,ev)[group]);
             s.known=(*validity)[index]!=0;return s;
         });
@@ -328,14 +367,14 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     evidence->localRejection=rejection;evidence->fallbackReason=fallback;
     evidence->originalFrameIds=native.multiFrameMeasurementSidecars->originalFrameIds;evidence->evidenceIdentitySha256=metadata.sourceContentSha256;
     raw->multiFrameMeasurementSidecars=evidence;
-    auto analysis=std::make_shared<BracketingAnalysis>(*result.analysis);
-    analysis->estimatedPeakResidentBytes=std::max(analysis->estimatedPeakResidentBytes,memoryPlan.peakBytes);
-    analysis->diagnostics.push_back(memoryPlan.message);
-    analysis->stageSeconds["super_resolution"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-    analysis->diagnostics.push_back("Super-resolution "+std::to_string(scale)+"x / GPU verified against scalar probes / measured Bayer phase bins "+std::to_string(diversity)+" of 16.");
-    if(!diverse)analysis->diagnostics.push_back("Limited sampling diversity. Noise reduction is supported; additional resolved detail is limited.");
-    result.analysis=analysis;result.raw=raw;result.preview=std::move(preview);result.reconstructionInspection=inspection;
-    result.message="Super-resolution "+std::to_string(scale)+"x ready. "+std::to_string(width)+" x "+std::to_string(height)+". "+(!diverse?"Limited sampling diversity.":"Additional spatial cleanup is controlled in RAW.");
+    analysis.estimatedPeakResidentBytes=std::max(analysis.estimatedPeakResidentBytes,memoryPlan.peakBytes);
+    analysis.diagnostics.push_back(memoryPlan.message);
+    analysis.stageSeconds["super_resolution"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    analysis.diagnostics.push_back("Super-resolution "+std::to_string(scale)+"x / GPU verified against scalar probes / measured Bayer phase bins "+std::to_string(diversity)+" of 16.");
+    if(!diverse)analysis.diagnostics.push_back("Limited sampling diversity. Additional resolved detail is limited.");
+    result.raw=raw;result.preview=std::move(preview);result.reconstructionInspection=inspection;
+    result.message=(adaptive?autoDecision:"Super-resolution "+std::to_string(int(scale))+"x ready.")+
+        " "+std::to_string(width)+" x "+std::to_string(height)+".";
     return true;
 }
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Raw/RawCameraThumbnail.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -29,6 +31,7 @@ struct RawWorkspaceThumbnailWorkItem {
     std::string fingerprint;
     std::filesystem::path sourceWorkspaceRoot;
     std::string sourceRelativePathKey;
+    Stack::RawWorkspace::CameraThumbnail camera;
 };
 
 class RawWorkspaceThumbnailScheduler {

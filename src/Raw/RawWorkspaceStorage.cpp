@@ -1,6 +1,11 @@
+#include "Persistence/ManagedAssetPaths.h"
+#include "App/AppPaths.h"
+#include "NodeMath/ContractTypes.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <sstream>
 #include <chrono>
 #include <fstream>
 #include <thread>
@@ -13,6 +18,16 @@
 
 namespace Stack::RawWorkspace {
 namespace StorageIO {
+std::filesystem::path GalleryCatalogReadPath(const ManagedLayout& layout, const std::filesystem::path& filename) {
+    const auto path = layout.catalogDirectory / filename;
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) || ec) return path;
+    const auto managed = BuildManagedLayout(layout.workspaceRoot);
+    if (layout.catalogDirectory == managed.catalogDirectory && layout.thumbnailsDirectory != managed.thumbnailsDirectory)
+        return layout.thumbnailsDirectory.parent_path() / "Catalog" / filename;
+    return path;
+}
+
 bool WriteJsonFile(
     const std::filesystem::path& path,
     const nlohmann::json& json,
@@ -31,15 +46,19 @@ bool WriteJsonFile(const std::filesystem::path& path, const nlohmann::json& json
 }
 
 std::filesystem::path MakeTempPath(const std::filesystem::path& path) {
-    const auto nowTicks = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    const std::size_t threadHash = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    std::filesystem::path temp = path;
-    temp += ".tmp.";
-    temp += std::to_string(nowTicks);
-    temp += ".";
-    temp += std::to_string(threadHash);
-    return temp;
+    // Keep the temporary component short even for long project names. The
+    // per-process sequence makes simultaneous writers use different siblings.
+    static std::atomic<std::uint64_t> next{
+        static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
+    std::ostringstream name;
+    name << ".st-" << std::hex;
+#ifdef _WIN32
+    name << GetCurrentProcessId() << '-';
+#else
+    name << std::hash<std::thread::id>{}(std::this_thread::get_id()) << '-';
+#endif
+    name << next.fetch_add(1, std::memory_order_relaxed);
+    return path.parent_path() / name.str();
 }
 
 bool ReplaceFileAtomically(
@@ -176,6 +195,23 @@ std::string ToLowerAscii(std::string value) {
 }
 using namespace StorageIO;
 
+bool IsMarkedCloset(const std::filesystem::path& directory) {
+    return Stack::Project::IsPhotoCloset(directory);
+}
+
+std::filesystem::path OwningPhotoRoot(const std::filesystem::path& selected) {
+    if (selected.empty()) return {};
+    const auto absolute = NormalizePath(selected);
+    auto owner = absolute;
+    for (auto parent = absolute; !parent.empty();) {
+        if (IsMarkedCloset(parent / "Closet")) owner = parent;
+        const auto next = parent.parent_path();
+        if (next == parent) break;
+        parent = next;
+    }
+    return owner;
+}
+
 ManagedLayout BuildManagedLayout(const std::filesystem::path& workspaceRoot) {
     ManagedLayout layout;
     layout.workspaceRoot = NormalizePath(workspaceRoot);
@@ -191,6 +227,25 @@ ManagedLayout BuildManagedLayout(const std::filesystem::path& workspaceRoot) {
     layout.projectTrashDirectory = layout.dataDirectory / "Trash" / "Projects";
     layout.catalogPath = layout.catalogDirectory / kCatalogFileName;
     layout.ratingsPath = layout.catalogDirectory / kRatingsFileName;
+    return layout;
+}
+
+ManagedLayout BuildGalleryLayout(const std::filesystem::path& root) {
+    auto layout = BuildManagedLayout(root);
+    const bool managed = IsMarkedCloset(layout.dataDirectory);
+    const auto key = Stack::NodeMath::Sha256ContentIdentity(layout.workspaceRoot.generic_u8string()).substr(7);
+    const auto cache = AppPaths::GetCacheDirectory() / "PhotoBrowser" / key;
+    std::error_code ec;
+    if (!managed || std::filesystem::is_directory(cache, ec)) {
+        // Keep the warm original previews when the first project creates a Closet.
+        layout.thumbnailsDirectory = cache / "Standard";
+        layout.transientThumbnailsDirectory = cache / "Quick";
+    }
+    if (!managed) {
+        layout.catalogDirectory = cache / "Catalog";
+        layout.catalogPath = layout.catalogDirectory / kCatalogFileName;
+        layout.ratingsPath = layout.catalogDirectory / kRatingsFileName;
+    }
     return layout;
 }
 
@@ -255,7 +310,8 @@ bool EnsureManagedFolders(const std::filesystem::path& workspaceRoot, std::strin
         }
     };
     for (const auto& path : {layout.dataDirectory, layout.catalogDirectory,
-            layout.thumbnailsDirectory, layout.projectCoversDirectory, layout.projectsDirectory}) {
+            layout.thumbnailsDirectory, layout.projectCoversDirectory, layout.projectsDirectory,
+            layout.dataDirectory / "Assets", layout.dataDirectory / "Trash"}) {
         const auto destination = target / path.lexically_relative(layout.dataDirectory);
         std::filesystem::create_directories(destination, ec);
         if (ec || !writable(destination)) {
@@ -266,7 +322,7 @@ bool EnsureManagedFolders(const std::filesystem::path& workspaceRoot, std::strin
     if (!initialized) {
         const auto catalog = target / "Catalog";
         if (!WriteJsonFile(target / "workspace.json",
-                {{"schema", "stack.rawWorkspace.closet"}, {"schemaVersion", 1}}, outError) ||
+                {{"schema", "stack.rawWorkspace.closet"}, {"schemaVersion", 1}, {"workingProjectFormat", 1}}, outError) ||
             !WriteJsonFile(catalog / "gallery.json",
                 {{"schema", "stack.rawWorkspace.gallery"}, {"schemaVersion", 1},
                  {"grouping", SerializeRawGalleryManualGrouping({})}}, outError) ||
@@ -306,6 +362,7 @@ bool LoadGalleryState(const ManagedLayout& layout, RawGalleryManualGrouping& gro
 }
 
 bool SaveGalleryState(const ManagedLayout& layout, const RawGalleryManualGrouping& grouping, std::string* error) {
+    if (!IsMarkedCloset(layout.dataDirectory) && !EnsureManagedFolders(layout.workspaceRoot, error)) return false;
     return WriteJsonFile(layout.galleryPath,
         {{"schema", "stack.rawWorkspace.gallery"}, {"schemaVersion", 1},
          {"grouping", SerializeRawGalleryManualGrouping(grouping)}}, error);

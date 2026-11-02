@@ -182,7 +182,7 @@ ProjectFormatProbe ProjectOpenCoordinator::Probe(
         return probe;
     }
 
-    if (directory || IsPortableV3Project(probe.normalizedPath)) {
+    if (regularFile) {
         ProjectStoreOpenResult opened = OpenProjectStore(probe.normalizedPath);
         if (!opened) {
             probe.error = opened.message.empty()
@@ -196,7 +196,7 @@ ProjectFormatProbe ProjectOpenCoordinator::Probe(
                 "The project uses an obsolete editor graph schema.";
             return probe;
         }
-        probe.format = directory
+        probe.format = opened.store->StorageKind() == ProjectStorageKind::WorkingFile
             ? ProjectOpenFormat::CurrentBundle
             : ProjectOpenFormat::PackedPortable;
         probe.supported = true;
@@ -214,9 +214,7 @@ ProjectFormatProbe ProjectOpenCoordinator::Probe(
         return probe;
     }
 
-    probe.error = regularFile
-        ? "The selected file is not a current packed Stack project."
-        : "The selected path is not a current Stack project.";
+    probe.error = "Choose a working or portable .stack project.";
     return probe;
 }
 

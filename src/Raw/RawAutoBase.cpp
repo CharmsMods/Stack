@@ -1,4 +1,5 @@
 #include "Raw/RawAutoBase.h"
+#include "Raw/SigmoidDisplayMapping.h"
 
 #include <algorithm>
 #include <cmath>
@@ -207,14 +208,17 @@ void ApplyViewTransformFitToRecipe(
     viewTransform["type"] = "ViewTransform";
     viewTransform["exposure"] = fit.exposure;
     viewTransform["middleGrey"] = fit.middleGrey;
-    viewTransform["blackEv"] = fit.blackEv;
-    viewTransform["whiteEv"] = fit.whiteEv;
-    viewTransform["shoulder"] = fit.shoulder;
-    viewTransform["toe"] = fit.toe;
     viewTransform["contrast"] = fit.contrast;
     viewTransform["saturation"] = fit.saturation;
     viewTransform["preserveHue"] = fit.preserveHue;
     viewTransform["debugFalseColor"] = false;
+    {
+        viewTransform["displayCurve"] = Raw::SigmoidDisplay::Id;
+        const float grey = Raw::SigmoidDisplay::MiddleGrey;
+        viewTransform["middleGrey"] = grey;
+        viewTransform["contrastPivotEv"] = 0.f;
+        viewTransform["exposure"] = std::clamp(fit.exposure + std::log2(grey / fit.middleGrey), -8.f, 8.f);
+    }
     recipe.viewTransform.layerJson = std::move(viewTransform);
 }
 
@@ -583,10 +587,7 @@ HighlightRecommendation BuildHighlightRecommendation(
 
     recommendation.recommendNoPositiveRawExposure =
         analysis.highlight.blocksPositiveRawExposure;
-    recommendation.recommendProtectiveViewShoulder =
-        analysis.highlight.anyChannelClipPercent > 0.02f ||
-        analysis.highlight.hdrPixelPercent > 1.0f ||
-        analysis.highlight.displayClipPercent > 1.0f;
+    recommendation.recommendProtectiveViewShoulder = false; // Sigmoid has no separate shoulder control.
     recommendation.recommendReconstruction =
         analysis.highlight.anyChannelClipPercent > 0.10f ||
         analysis.highlight.severeSensorClip ||
@@ -679,26 +680,9 @@ void ApplyHighlightProtectionToRecipe(
     Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     const HighlightRecommendation& recommendation,
     const ViewTransformFit& fit) {
-    if (!recommendation.valid || !recommendation.recommendProtectiveViewShoulder) {
-        return;
-    }
-
-    nlohmann::json viewTransform = recipe.viewTransform.layerJson.is_object()
-        ? recipe.viewTransform.layerJson
-        : Stack::RawRecipe::DefaultViewTransformJson();
-    viewTransform["type"] = "ViewTransform";
-    const float currentShoulder = viewTransform.value("shoulder", 0.45f);
-    const float currentWhiteEv = viewTransform.value("whiteEv", 4.0f);
-    const float targetShoulder = fit.valid
-        ? std::max(currentShoulder, fit.shoulder)
-        : std::max(currentShoulder, 0.60f);
-    const float targetWhiteEv = fit.valid
-        ? std::max(currentWhiteEv, fit.whiteEv)
-        : currentWhiteEv + 0.35f;
-    viewTransform["shoulder"] = ClampFinite(targetShoulder, 0.60f, 0.05f, 4.0f);
-    viewTransform["whiteEv"] = ClampFinite(targetWhiteEv, 4.0f, 0.0f, 16.0f);
-    viewTransform["preserveHue"] = true;
-    recipe.viewTransform.layerJson = std::move(viewTransform);
+    // Kept as the recommendation interface; Sigmoid rolls highlights off itself.
+    // Sensor reconstruction and scene exposure remain separate operations.
+    (void)recipe; (void)recommendation; (void)fit;
 }
 
 } // namespace Stack::RawAutoBase

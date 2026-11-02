@@ -4,12 +4,35 @@
 #include <imgui_internal.h>
 
 #include <functional>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Stack::Editor::RawLabInternal {
+
+// Visible-content summary and shrink hysteresis belong to one Gallery owner.
+struct FilmstripHeightState {
+    int first=-1,last=-1;
+    std::uint64_t revision=~std::uint64_t{0},organization=~std::uint64_t{0},similarity=~std::uint64_t{0};
+    std::size_t maximum=1;
+    float scroll=-1,target=0,pending=0;
+    double holdUntil=0,shrinkAt=0;
+    void ObserveScroll(float value,double now,float seconds) {
+        if(scroll>=0 && seconds>0 && std::abs(value-scroll)/seconds>650.f) holdUntil=now+.24;
+        scroll=value;
+    }
+    float Target(float desired,double now) {
+        if(desired>=target) {target=desired;pending=desired;shrinkAt=0;}
+        else {
+            if(pending!=desired) {pending=desired;shrinkAt=now+.12;}
+            if(now>=std::max(shrinkAt,holdUntil)) target=desired;
+        }
+        return target;
+    }
+};
 
 // Stores geometry only. The thumbnail cache owns textures and resolves them
 // at draw time, so a folder change or eviction cannot leave a stale GL handle.

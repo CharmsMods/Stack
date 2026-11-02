@@ -18,7 +18,7 @@ namespace Stack::BurstEngine {
 namespace {
 constexpr UINT Updated=WM_APP+1;
 enum Control { Title=100, Summary, FormatLabel, Dng, Tiff, Jpeg, Png, LocationLabel,
-    Beside, Folder, AiAlignment, Hint, Stage, Progress, Details, Reveal, Start, Close };
+    Beside, Folder, AiAlignment, Hint, Stage, Progress, Details, Reveal, Start, Close, AutoResolution };
 enum class Phase { Analyzing, Ready, Processing, Finished };
 std::wstring Count(std::size_t n,const wchar_t* singular,const wchar_t* plural){return std::to_wstring(n)+L" "+(n==1?singular:plural);}
 std::wstring Wide(const std::string& text){return TextPath(text).wstring();}
@@ -69,7 +69,7 @@ struct Window {
         Place(FormatLabel,24,106,560,20);
         Place(Dng,24,134,133,44);Place(Tiff,165,134,133,44);Place(Png,306,134,133,44);Place(Jpeg,447,134,133,44);
         Place(LocationLabel,24,200,560,20);Place(Beside,24,228,274,44);Place(Folder,306,228,274,44);
-        Place(AiAlignment,24,282,556,26);
+        Place(AiAlignment,24,282,310,26);Place(AutoResolution,338,282,242,26);
         Place(Hint,24,316,556,42);Place(Stage,24,368,556,38);Place(Progress,24,412,556,8);
         RECT client{};GetClientRect(handle,&client);const int footer=MulDiv(client.bottom,96,int(dpi))-58;
         Place(Details,32,438,540,std::max(40,footer-458));Place(Reveal,24,footer,180,36);Place(Start,286,footer,190,36);Place(Close,484,footer,96,36);
@@ -87,6 +87,8 @@ struct Window {
         SendMessageW(Item(Folder),BM_SETCHECK,BST_CHECKED,0);
         Add(AiAlignment,L"BUTTON",L"AI-assisted alignment (experimental)",BS_AUTOCHECKBOX|WS_TABSTOP);
         SendMessageW(Item(AiAlignment),BM_SETCHECK,BST_UNCHECKED,0);
+        Add(AutoResolution,L"BUTTON",L"Auto resolution",BS_AUTOCHECKBOX|WS_TABSTOP);
+        SendMessageW(Item(AutoResolution),BM_SETCHECK,BST_CHECKED,0);
         Add(Hint,L"STATIC",L"Full-resolution outputs in a new Stack Burst folder.\r\nDNG stays editable; TIFF, PNG and JPEG are finished images.");
         Add(Stage,L"STATIC",L"Reading selected images...");Add(Progress,PROGRESS_CLASSW,L"");
         SendMessageW(Item(Progress),PBM_SETRANGE32,0,1000);
@@ -148,8 +150,9 @@ struct Window {
         BatchOptions options;options.formats=Formats();if(options.formats.empty())return;
         options.location=SendMessageW(Item(Beside),BM_GETCHECK,0,0)==BST_CHECKED?OutputLocation::BesideOriginals:OutputLocation::NewFolder;
         options.aiAlignment=SendMessageW(Item(AiAlignment),BM_GETCHECK,0,0)==BST_CHECKED;
+        options.autoResolution=SendMessageW(Item(AutoResolution),BM_GETCHECK,0,0)==BST_CHECKED;
         auto plan=current.plan;auto worker=session;worker->cancel=false;busy=true;current.phase=Phase::Processing;
-        for(int id:{Dng,Tiff,Jpeg,Png,Beside,Folder,AiAlignment,Start})EnableWindow(Item(id),FALSE);
+        for(int id:{Dng,Tiff,Jpeg,Png,Beside,Folder,AiAlignment,AutoResolution,Start})EnableWindow(Item(id),FALSE);
         Text(Close,L"Cancel");Text(Stage,L"Starting burst processing...");
         std::thread([worker,plan,options]{
             auto batch=std::make_shared<BatchResult>();

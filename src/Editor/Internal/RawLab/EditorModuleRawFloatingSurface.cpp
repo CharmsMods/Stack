@@ -17,9 +17,15 @@
 #include <string_view>
 
 void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
-    const ImVec2& minimum, const ImVec2& size, bool enabled) {
+    const ImVec2& suppliedMinimum, const ImVec2& suppliedSize, bool enabled) {
+    const bool shellBounds = IsViewMode() && m_ViewToolMaximum.x > m_ViewToolMinimum.x;
+    const ImVec2 minimum(shellBounds ? std::max(suppliedMinimum.x,m_ViewToolMinimum.x) : suppliedMinimum.x,
+        shellBounds ? std::max(suppliedMinimum.y,m_ViewToolMinimum.y) : suppliedMinimum.y);
+    const ImVec2 size(std::max(1.f,suppliedMinimum.x+suppliedSize.x-minimum.x),
+        std::max(1.f,suppliedMinimum.y+suppliedSize.y-minimum.y));
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::FloatingControls);
     auto& surface = m_RawFloatingSurface;
+    surface.forwardsImageWheel = false;
     UpdateNodeEditorPanelVisibility();
     if (m_NodeEditorPanel.visible) {
         surface.input={};surface.frame=-2;m_RawActiveControlFrame=-2;
@@ -81,8 +87,8 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     const ImVec2 lower(minimum.x + margin, minimum.y + margin);
     const ImVec2 upper(lower.x + std::max(0.f, available.x - extent.x),
         lower.y + std::max(0.f, available.y - extent.y));
-    if (!surface.positioned) {
-        surface.verticalOffset = lower.y - viewport->Pos.y;
+    if (!surface.positioned || !surface.userPlaced) {
+        surface.verticalOffset = (viewport->Size.y - extent.y) * .5f;
         surface.positioned = true;
     }
     // Keep horizontal placement relative to the usable area. Rail/panel
@@ -130,6 +136,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         if (surface.horizontalTravel > 0.f)
             surface.horizontalPlacement = (position.x-lower.x) / surface.horizontalTravel;
         surface.verticalOffset = position.y-viewport->Pos.y;
+        surface.userPlaced = true;
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
     }
     // Resolve input before Begin(), so layout, clipping, drawing and pointer
@@ -170,6 +177,13 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(),openingOpacity);
     }
     input.reset();
+    surface.forwardsImageWheel = enabled && openingOpacity == 1.f && ImGui::GetIO().MouseWheel != 0.f &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        !surface.input.OwnsPointer() && !ImGui::IsAnyItemActive() &&
+        !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::TestKeyOwner(ImGuiKey_MouseWheelY,ImGuiKeyOwner_NoOwner);
+    surface.imageWheel = surface.forwardsImageWheel ? ImGui::GetIO().MouseWheel : 0.f;
+    surface.imageWheelPointer = ImGui::GetIO().MousePos;
     trace("restored");
     if (ImGui::GetCurrentContext()->OpenPopupStack.empty())
         ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());

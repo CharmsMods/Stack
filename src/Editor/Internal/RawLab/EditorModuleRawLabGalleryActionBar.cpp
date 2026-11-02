@@ -24,8 +24,7 @@ void EditorModule::SetRawGalleryGridView(bool grid) {
         for (const auto& project : GetRawWorkspaceGalleryPresentation().projects) {
             if (project.projectPath.lexically_normal() ==
                 m_RawWorkspaceLabFilmstripHoverProjectPath.lexically_normal()) {
-                preferred = "project-overlay:" + (!project.projectId.empty()
-                    ? project.projectId : project.projectPath.lexically_normal().generic_string());
+                preferred = project.projectCoverKey;
                 break;
             }
         }
@@ -40,12 +39,14 @@ bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
     // Queue eligibility needs only selection and the connected service. Resolve
     // full action targets only on a click; do not rebuild indexes on every draw.
     const bool canQueue = count > 0 && m_RawGalleryQueueRequestHandler && !Stack::Workspace::IsPreview();
+    const bool canCreate = m_RawWorkspace.selectedSourceKeys.size() >= 2 &&
+        m_RawGalleryOpenSelectionHandler && !Stack::Workspace::IsPreview();
     const float unit = ImGui::GetFontSize() / 13.f;
     ImGui::PushID(nativeWindow ? "RawNativeGalleryActions" : "RawGalleryActions");
     auto* storage = ImGui::GetStateStorage();
     const ImGuiID amountId = ImGui::GetID("SelectionAmount");
     float amount = storage->GetFloat(amountId, 0.f);
-    const float target = canQueue ? 1.f : 0.f;
+    const float target = (canQueue || canCreate) ? 1.f : 0.f;
     if (Ui::ReducedMotion()) amount = target;
     else Stack::Header::ApproachMotion(amount, target, .20f);
     storage->SetFloat(amountId, amount);
@@ -56,9 +57,16 @@ bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
     ImGui::BeginChild("SelectionActions", ImVec2(0, (ImGui::GetFrameHeight() + 12.f * unit) * amount),
         ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    if (canQueue) {
+    if (canQueue || canCreate) {
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%zu selected", count);
+        if (canCreate) {
+            ImGui::SameLine();
+            if (Ui::TextButton("Create Capture Set"))
+                ExecuteRawGalleryAction(Action::CreateCaptureSet, CaptureRawGalleryActionContext());
+        }
+    }
+    if (canQueue) {
         const float queueWidth = ImGui::CalcTextSize("Queue").x + ImGui::GetStyle().FramePadding.x * 2.f;
         ImGui::SameLine();
         ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - queueWidth));
@@ -191,7 +199,7 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
             item(Action::CreateCaptureSet);
             item(Action::NewSavedVersion);
             item(Action::CopyPath);
-            item(Action::TrashProjects);
+            item(Action::MoveToTrash);
             item(Action::RevertProjects);
         }
         ImGui::EndPopup();
@@ -241,7 +249,10 @@ void EditorModule::RenderRawGalleryPropertyActions(const Stack::RawWorkspace::So
             button("Copy edits", Action::CopyEdits);
             Stack::Editor::RawLabInternal::ContinueRawLabControlRow("Paste edits", 6.f);
         }
-        button("Paste edits", Action::PasteEdits, !showCopy);
+        button(m_GalleryApplyChooseTarget ? "Apply to selection" : "Paste edits", Action::PasteEdits, !showCopy);
+        if (showCopy && UsesGalleryPresetPreviews()) button("Apply project...", Action::ApplyProject, true);
     }
+    if (m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Unlinked)
+        button("Locate folder...", Action::Relink, true);
     button("Open location", Action::ShowInExplorer, true);
 }

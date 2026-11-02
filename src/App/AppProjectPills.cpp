@@ -1,4 +1,5 @@
 #include "AppShell.h"
+#include "ProjectSidebarEntry.h"
 #include "AppHeaderStyle.h"
 #include "GlassNavigationFeedback.h"
 #include "imgui_internal.h"
@@ -38,23 +39,19 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
         rail.hoverStarted = ImGui::GetTime();
     }
     const auto* workspace = hovered ? FindProjectWorkspace(hovered) : nullptr;
-    const bool ready = workspace && ImGui::GetTime() - rail.hoverStarted >= .22;
+    const bool ready = workspace && ImGui::GetTime() - rail.hoverStarted >= .065;
     if (ready && rail.previewProject != hovered) {
-        // Fade out the old view before showing another project, never substitute
-        // another texture halfway through an existing crossfade.
-        if (rail.previewAmount <= .001f) {
-            rail.previewProject = hovered;
-            rail.previewRootView = workspace->rootTab;
-            if (!workspace->editor->IsAutoBracketWorkspace() &&
-                (rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Queue) ||
-                 rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Library)))
-                rail.previewRootView = static_cast<int>(Stack::Workspace::Id::Graph);
-        }
+        rail.previewProject = hovered;
+        rail.previewRootView = workspace->rootTab;
+        if (!workspace->editor->IsAutoBracketWorkspace() &&
+            (rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Queue) ||
+             rail.previewRootView == static_cast<int>(Stack::Workspace::Id::Library)))
+            rail.previewRootView = static_cast<int>(Stack::Workspace::Id::Graph);
     }
     const bool showing = ready && rail.previewProject == hovered;
     const float target = showing ? 1.f : 0.f;
     if (Stack::Notifications::SystemReducedMotion()) rail.previewAmount = target;
-    else Stack::Header::Approach(rail.previewAmount, target, 24.f);
+    else Stack::Header::Approach(rail.previewAmount, target, 42.f);
     if (blocked) rail.previewAmount = 0.f;
     if (rail.previewAmount <= .001f && !showing) {
         rail.previewProject = 0;
@@ -64,8 +61,6 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
 
 void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     const auto& rail = m_NavigationRail;
-    const auto palette = Stack::Header::ResolvePalette(m_Editor ? m_Editor->GetWorkspaceBaseColor()
-        : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetCursorScreenPos(position);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 3.f * rail.scale));
@@ -87,15 +82,38 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const auto id = workspace->id;
         ImGui::PushID(static_cast<int>(id));
         const bool selected = id == m_ActiveProjectWorkspace;
-        const bool automatic = workspace->editor->IsAutoBracketWorkspace();
-        std::string name = workspace->editor->GetCurrentProjectName();
-        if (name.empty()) name = "Untitled project";
         const bool dirty = workspace->editor->NeedsWorkspaceSaveBeforeTransition();
+        unsigned texture=0; int width=0,height=0;
+        auto& editor=*workspace->editor;
+        const bool automatic=editor.IsAutoBracketWorkspace();
+        const char* name=automatic ? "Auto bracket" : editor.GetCurrentProjectName().empty()
+            ? "Untitled project" : editor.GetCurrentProjectName().c_str();
+        if (!automatic && !editor.TryGetViewportPreviewOverview(texture,width,height)) {
+            Stack::Renderer::ViewportPreviewGeometry geometry;
+            const bool partial=editor.TryGetViewportPreviewGeometry(geometry) && geometry.resident.Partial();
+            if (!partial && !editor.TryGetActiveRawWorkspacePresentationTexture(texture,width,height) &&
+                editor.GetViewportOutputRenderGeneration() &&
+                (!editor.IsBracketingToolActive() || editor.HasCurrentRawWorkspacePresentation())) {
+                auto& pipeline=editor.GetPipeline(); texture=pipeline.GetOutputTexture();
+                width=pipeline.GetCanvasWidth();height=pipeline.GetCanvasHeight();
+            }
+        }
+        if (!texture || width <= 0 || height <= 0) {
+            const auto& cover = workspace->galleryOrigin.thumbnail;
+            if (cover) {
+                texture = cover->texture;
+                width = cover->width;
+                height = cover->height;
+            } else if (ImGui::IsRectVisible(ImVec2(size.x, size.x * 2.f))) {
+                editor.TryGetBracketSidebarTexture(texture, width, height);
+            }
+        }
+        const float rowHeight=Stack::Navigation::ProjectEntryHeight(size.x,rail.scale,
+            texture ? width : 0, texture ? height : 0);
         // The workspace scope supplies identity; renaming must not replace the
         // active/navigation item during a press or save completion.
         const bool clicked = ImGui::InvisibleButton("##ProjectPill",
-            ImVec2(size.x - 4.f * rail.scale, 24.f * rail.scale), ImGuiButtonFlags_EnableNav);
-        const bool focused = ImGui::IsItemFocused();
+            ImVec2(size.x - 4.f * rail.scale, rowHeight), ImGuiButtonFlags_EnableNav);
         const bool over = ImGui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride);
         // Preview follows pointer hover only. Navigation focus can persist
         // after opening a document, which would otherwise keep its input blocked.
@@ -108,17 +126,13 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
             CancelProjectPillPreview(); QueueWorkspaceTabAction(WorkspaceTabAction::Close, id); hovered = 0;
         }
         const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-        const ImVec2 pillMin(min.x + 4.f * rail.scale, min.y + 5.f * rail.scale);
-        const ImVec2 pillMax(max.x - 4.f * rail.scale, max.y - 5.f * rail.scale);
         auto* draw = ImGui::GetWindowDrawList();
-        workspace->pillMotion.Reset();
-        Stack::Header::DrawProjectPill(draw,pillMin,pillMax,rail.scale,palette,
-            {selected,over,focused,dirty,automatic});
-        if (over || focused) ImGui::SetTooltip("%s%s%s\nClick to activate. Middle-click to close.",
-            name.c_str(), dirty ? " (unsaved changes)" : "",
-            automatic ? "\nAutomatic bursts - background priority" : "");
+        if (ImGui::IsItemVisible())
+            Stack::Navigation::DrawProjectEntry(draw,min,max,rail.scale,texture,width,height,
+                automatic ? "Auto" : name,selected,dirty);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s",name);
         if (ImGui::BeginPopupContextItem("ProjectActions")) {
-            ImGui::TextUnformatted(name.c_str());
+            ImGui::TextUnformatted(name);
             if (dirty) ImGui::TextDisabled("Unsaved changes");
             if (ImGui::MenuItem("Open workspace")) QueueWorkspaceTabAction(WorkspaceTabAction::Select, id);
             if (ImGui::MenuItem("Close project")) QueueWorkspaceTabAction(WorkspaceTabAction::Close, id);

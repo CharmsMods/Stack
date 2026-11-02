@@ -116,7 +116,7 @@ float SamplingDiversity(const PreparedDataset& data) {
     }
     return total/9;
 }
-Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const BracketingAnalysis& analysis,std::size_t group) {
+Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,double scale,const BracketingAnalysis& analysis,std::size_t group,bool adaptive) {
     Tile tile;tile.width=w;tile.height=h;tile.step=1.f/scale;
     tile.originX=(x+.5f)/scale-.5f;tile.originY=(y+.5f)/scale-.5f;
     tile.pixels.resize(std::size_t(w)*h);
@@ -135,7 +135,7 @@ Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const B
         const float px=std::clamp(coverageX+xx*coverageStep,0.f,float(data.width-1));
         const float py=std::clamp(coverageY+yy*coverageStep,0.f,float(data.height-1));
         SamplingCoverage measured(scale);
-        for(const auto& source:data.sources)if(source.enabled&&source.group==group) {
+        for(const auto& source:data.sources)if(source.enabled&&(adaptive||source.group==group)) {
             const auto mapped=MapCapture(source,px,py,&source==&data.sources[data.origin]);
             if(mapped.x<0||mapped.y<0||mapped.x>data.width-1||mapped.y>data.height-1)continue;
             measured.Add(mapped.x-px,mapped.y-py,mapped.z*source.detailPreference);
@@ -180,8 +180,9 @@ Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const B
         const float theta=.5f*std::atan2(2*jxy,jxx-jyy),nx=std::cos(theta),ny=std::sin(theta);
         const float edge=coherence*std::clamp(std::sqrt((jxx+jyy+delta)*.5f)/std::max(.005f,pilot)*3,0.f,1.f);
         const float confidence=confidenceAt((firstX+xx)*2.f,(firstY+yy)*2.f);
-        const float normal=.9f+confidence*(.55f-.15f*edge-.9f);
-        const float tangent=.9f+confidence*(.55f+.60f*edge-.9f);
+        const float detailScale=adaptive?float(scale):1.f;
+        const float normal=.9f+confidence*((.55f-.15f*edge)/detailScale-.9f);
+        const float tangent=.9f+confidence*((.55f+.60f*edge)/detailScale-.9f);
         const float a=1/(normal*normal),b=1/(tangent*tangent);
         kernels[std::size_t(yy)*kw+xx]={b+(a-b)*nx*nx,(a-b)*nx*ny,b+(a-b)*ny*ny,pilot};
     }
@@ -192,6 +193,16 @@ Tile MakeTile(unsigned x,unsigned y,unsigned w,unsigned h,unsigned scale,const B
         const auto i=std::size_t(iy)*kw+ix;
         tile.pixels[std::size_t(yy)*w+xx].kernel=lerp(lerp(kernels[i],kernels[i+1],fx),lerp(kernels[i+kw],kernels[i+kw+1],fx),fy);
         tile.samplingConfidence[std::size_t(yy)*w+xx]=confidenceAt(tile.originX+xx*tile.step,tile.originY+yy*tile.step);
+        if(!data.spatialGuide.cells.empty()) {
+            const auto agree=data.spatialGuide.At(tile.originX+xx*tile.step,tile.originY+yy*tile.step);
+            const float confidence=*std::max_element(agree.begin(),agree.end());
+            // The broad estimate follows independent RAW neighbour agreement.
+            // Opposed diagonal preferences provide the cross term of the metric.
+            const float diagonal=.22f*(agree[2]+agree[3]);
+            auto& p=tile.pixels[std::size_t(yy)*w+xx];
+            p.broadKernel={1+.65f*confidence-.85f*agree[0]-diagonal,.22f*(agree[3]-agree[2]),
+                1+.65f*confidence-.85f*agree[1]-diagonal,0};
+        }
     }
     return tile;
 }

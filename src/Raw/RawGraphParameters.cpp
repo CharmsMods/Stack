@@ -22,7 +22,9 @@ std::vector<GraphParameter> GraphParameters(GraphOperationKind kind) {
             break;
         case GraphOperationKind::LocalEv:
             add("strength", "Strength", "/localRange/strength", 1, 0, 2, "ratio");
-            add("normalization", "Curve normalization", "/localRange/curveNormalization", 0, 0, 1, "ratio");
+            // Preserve existing graph wires and saved parameter identities.
+            // The editor has no dial and processing always normalizes fully.
+            add("normalization", "Normalization (automatic)", "/localRange/curveNormalization", 1, 1, 1, "ratio");
             break;
         case GraphOperationKind::ToneCurve:
             add("luminance-amount", "Luminance curve amount", "/luminanceTone/curveAmount/amount", 1, 0, 1, "ratio");

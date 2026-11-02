@@ -32,8 +32,7 @@ float LocalEvCurveOffset(const std::vector<RawBezierCurvePoint>& points, float n
 }
 
 float LocalEvGlobalOffsetEv(const RawLocalRangeRecipe& recipe) {
-    if (!std::isfinite(recipe.curveNormalization) || recipe.curveNormalization <= 0.0f) return 0.0f;
-    return 8.0f * LocalEvCurveOffset(RawLocalRangeBezierPoints(recipe), recipe.curveNormalization);
+    return 8.0f * LocalEvCurveOffset(RawLocalRangeBezierPoints(recipe), 1.f);
 }
 
 } // namespace Stack::RawRecipe

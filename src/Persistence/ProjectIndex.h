@@ -29,6 +29,7 @@ struct IndexedProjectSource {
     std::string contentSha256;
     std::uint64_t byteLength = 0;
     std::string assetId;
+    bool linked = false;
 };
 
 struct ProjectRecord {
@@ -40,7 +41,7 @@ struct ProjectRecord {
     int sourceWidth = 0;
     int sourceHeight = 0;
     IndexedProjectFormat format = IndexedProjectFormat::NeedsAttention;
-    ProjectStorageKind storageKind = ProjectStorageKind::DirectoryBundle;
+    ProjectStorageKind storageKind = ProjectStorageKind::WorkingFile;
     IndexedCoverState coverState = IndexedCoverState::Missing;
     std::vector<unsigned char> coverThumbnailBytes;
     std::vector<IndexedProjectSource> sources;

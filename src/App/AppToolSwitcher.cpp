@@ -7,6 +7,7 @@
 #include "AppShell.h"
 #include "WorkspaceInputScope.h"
 #include "AppHeaderStyle.h"
+#include "ToolGraphPickerDrawing.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
 #include <iterator>
@@ -44,9 +45,14 @@ void AppShell::TickToolSwitcher() {
     const bool mouseRequest = m_Editor->ConsumeRawToolPickerRequest();
     ImVec2 minimum, maximum;
     const bool hasBounds = m_Editor->GetRawActiveControlBounds(minimum, maximum);
+    if (!hasBounds) {
+        const auto* viewport = ImGui::GetMainViewport();
+        minimum = viewport->WorkPos;
+        maximum = {minimum.x+viewport->WorkSize.x,minimum.y+viewport->WorkSize.y};
+    }
     sw.count = static_cast<int>(m_Editor->GetRawLayerToolLabels().size());
     const bool available = focused && !chord && !m_CloseRequested && !m_NotificationPresenter.BlocksInput() &&
-        ((m_CurrentTabId == 1 && m_Editor->IsViewMode()) || m_CurrentTabId == 5 || m_CurrentTabId == 3) && hasBounds && sw.HasChoices() &&
+        ((m_CurrentTabId == 1 && m_Editor->IsViewMode()) || m_CurrentTabId == 5 || m_CurrentTabId == 3) && sw.HasChoices() &&
         !m_Editor->IsWorkspaceTransitionPending() && !m_Editor->IsNodeOpenTransitionActive() &&
         !m_Editor->IsRawWorkspaceLockedByEditorProject() &&
         !m_Editor->IsAutoBracketWorkspace() && !m_Editor->IsRawBracketModeActive() &&
@@ -84,17 +90,15 @@ void AppShell::TickToolSwitcher() {
             if (sw.held) {
                 double x, y;
                 glfwGetCursorPos(m_Window, &x, &y);
-                sw.pointer.x += static_cast<float>(x - sw.lastPointerX);
-                sw.pointer.y += static_cast<float>(y - sw.lastPointerY);
+                sw.graphCenter.x += static_cast<float>(x - sw.lastPointerX) / sw.graphZoom;
+                sw.graphCenter.y += static_cast<float>(y - sw.lastPointerY) / sw.graphZoom;
                 sw.lastPointerX = x; sw.lastPointerY = y;
-                const float length = std::hypot(sw.pointer.x, sw.pointer.y);
-                if (length > layout.radius * .8f) {
-                    sw.pointer.x *= layout.radius * .8f / length;
-                    sw.pointer.y *= layout.radius * .8f / length;
-                }
-            } else sw.pointer = ImVec2(io.MousePos.x - layout.center.x, io.MousePos.y - layout.center.y);
-            sw.hovered = sw.Hit(sw.pointer, layout);
-            if (sw.mouseOpen && std::hypot(sw.pointer.x, sw.pointer.y) > layout.radius) sw.hovered = -1;
+            }
+            sw.graphZoom=std::clamp(sw.graphZoom*std::exp(io.MouseWheel*.15f),.2f,1.5f);
+            const auto crosshair=sw.held ? layout.center : io.MousePos;
+            sw.hovered=Stack::Tools::PickGraphTool(sw,layout,m_Editor->GetRawLayerToolGraph(),crosshair);
+            if (!sw.held && (std::abs(crosshair.x-layout.center.x)>layout.radius ||
+                std::abs(crosshair.y-layout.center.y)>layout.radius*.7f)) sw.hovered=-1;
             if (sw.held && !down) close(true);
             else if (sw.mouseOpen && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) close(sw.hovered >= 0);
         }
@@ -110,6 +114,12 @@ void AppShell::TickToolSwitcher() {
             ReleaseLockedScrubCursor(false);
             sw.controlsMin = minimum; sw.controlsMax = maximum;
             sw.Begin(!mouseRequest);
+            sw.graphZoom=.65f;
+            const auto& graph=m_Editor->GetRawLayerToolGraph();
+            const int active=m_Editor->GetRawLayerToolIndex();
+            for(const auto& card:graph.cards) if(card.choice==active) {
+                sw.graphCenter={card.position.x+95,card.position.y+30};break;
+            }
             if (sw.held) {
                 double x, y;
                 glfwGetCursorPos(m_Window, &x, &y);
@@ -145,41 +155,12 @@ void AppShell::DrawToolSwitcher() {
     ImGui::SetNextWindowViewport(viewport->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
-    ImGui::Begin("RawToolRadial", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+    ImGui::Begin("RawToolGraphPicker", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
     auto* draw = ImGui::GetWindowDrawList();
-    const float alpha = sw.Amount(), radius = layout.radius * (.96f + .04f * alpha);
-    const auto tint = [&](ImVec4 color, float opacity) { color.w *= alpha * opacity; return ImGui::GetColorU32(color); };
-    draw->AddCircleFilled(layout.center, radius, tint(palette.caption, .93f), 96);
-    constexpr float pi = 3.14159265359f;
-    const int active = m_Editor->GetRawLayerToolIndex();
-    for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
-        const float angle = -pi * .5f + 2.f * pi * i / labels.size();
-        const float half = pi / labels.size() - .025f;
-        if (i == sw.hovered || i == active) {
-            draw->PathArcTo(layout.center, radius - 4.f, angle - half, angle + half, 18);
-            for (int j = 18; j >= 0; --j) {
-                const float a = angle - half + 2.f * half * j / 18.f;
-                draw->PathLineTo(ImVec2(layout.center.x + std::cos(a) * layout.inner,
-                    layout.center.y + std::sin(a) * layout.inner));
-            }
-            draw->PathFillConcave(tint(palette.selected, i == sw.hovered ? 1.f : .45f));
-        }
-        const float fontSize = std::min(ImGui::GetFontSize(), radius * .105f);
-        const auto text = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0, labels[i].c_str());
-        const ImVec2 position(layout.center.x + std::cos(angle) * radius * .68f - text.x * .5f,
-            layout.center.y + std::sin(angle) * radius * .68f - text.y * .5f);
-        draw->AddText(ImGui::GetFont(), fontSize, position,
-            tint(palette.text, i == sw.hovered || i == active ? 1.f : .72f), labels[i].c_str());
-    }
-    const char* center = sw.hovered >= 0 ? (sw.held ? "Release" : "Choose") : "Cancel";
-    const auto text = ImGui::CalcTextSize(center);
-    draw->AddText(ImVec2(layout.center.x - text.x * .5f, layout.center.y - text.y * .5f),
-        tint(palette.mutedText, .85f), center);
-    if (sw.held && std::hypot(sw.pointer.x, sw.pointer.y) > 2.f)
-        draw->AddCircleFilled(ImVec2(layout.center.x + sw.pointer.x, layout.center.y + sw.pointer.y),
-            3.f * m_NavigationRail.scale, tint(palette.text, 1.f), 16);
+    Stack::Tools::DrawGraphPicker(*draw,sw,layout,m_Editor->GetRawLayerToolGraph(),palette,
+        m_Editor->GetRawLayerToolIndex());
     m_WorkspaceCompositor.KeepToolsFixed(draw);
     ImGui::End();
     ImGui::PopStyleVar(2);

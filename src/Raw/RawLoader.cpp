@@ -1,3 +1,14 @@
+#ifdef STACK_READ_BRACKET_MASTERS
+#include "Persistence/BracketMaster.h"
+#include "Raw/RawTechnicalEvidence.h"
+#include "Persistence/BracketDngMaster.h"
+#include "Raw/ReconstructionDepth.h"
+#include "Raw/RawGalleryInputPolicy.h"
+#include "ThirdParty/stb_image.h"
+#include <cmath>
+#include <fstream>
+#include "Raw/RawMetadataSerialization.h"
+#endif
 #include "RawLoader.h"
 
 #include "LibRawRuntime.h"
@@ -17,6 +28,35 @@ std::string ToLower(std::string value) {
     return value;
 }
 
+#ifdef STACK_READ_BRACKET_MASTERS
+bool ReadGalleryRaster(const std::filesystem::path& path, RawMetadata& metadata, RawImageData* output) {
+    std::ifstream input(path,std::ios::binary);
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)),{});
+    int w=0,h=0,channels=0;
+    if (bytes.size()>INT_MAX || !stbi_info_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels)) {
+        metadata.error="Could not read the raster original."; return false;
+    }
+    metadata.rawWidth=metadata.visibleWidth=w; metadata.rawHeight=metadata.visibleHeight=h;
+    metadata.pixelLayout=RawPixelLayout::LinearRgb; metadata.mosaiced=false; metadata.linearChannels=3;
+    metadata.cameraWhiteBalance={1,1,1,1}; metadata.whiteLevel=1.f;
+    metadata.bitDepth=stbi_is_16_bit_from_memory(bytes.data(),int(bytes.size())) ? 16 : 8;
+    if (!output) return true;
+    std::unique_ptr<stbi_us,decltype(&stbi_image_free)> rgba(stbi_load_16_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels,4),stbi_image_free);
+    if (!rgba) { metadata.error="Could not decode the raster original.";return false; }
+    output->linearFloatBuffer.resize(std::size_t(w)*h*3);
+    for (std::size_t i=0;i<std::size_t(w)*h;++i) {
+        if (rgba.get()[4*i+3]!=65535) {
+            metadata.error="These RAW edits need opaque pixels. Open this image in the graph editor to preserve its alpha channel.";
+            return false;
+        }
+        for (int c=0;c<3;++c) {
+            const float x=rgba.get()[4*i+c]/65535.f;
+            output->linearFloatBuffer[3*i+c]=x<=.04045f ? x/12.92f : std::pow((x+.055f)/1.055f,2.4f);
+        }
+    }
+    return true;
+}
+#endif
 } // namespace
 
 bool RawLoader::IsRawPath(const std::string& path) {
@@ -48,6 +88,18 @@ bool RawLoader::LoadMetadata(const std::string& path, RawMetadata& outMetadata) 
         outMetadata.error = "No RAW source path.";
         return false;
     }
+#ifdef STACK_READ_BRACKET_MASTERS
+    try {
+        const auto file=std::filesystem::u8path(path);
+        if (Stack::RawWorkspace::IsGalleryRasterPath(file)) return ReadGalleryRaster(file,outMetadata,nullptr);
+        const auto marker = Stack::Project::BracketMasterMetadata(file);
+        if (marker.is_object()) {
+            outMetadata = Serialization::DeserializeMetadata(marker.at("metadata"));
+            outMetadata.sourcePath = path;
+            return true;
+        }
+    } catch (const std::exception& e) { outMetadata.error=e.what();return false; }
+#endif
     const LibRawRuntimeStatus& runtimeStatus = GetLibRawRuntimeStatus();
     if (!runtimeStatus.runtimeAvailable) {
         outMetadata.error = runtimeStatus.message;
@@ -71,6 +123,30 @@ bool RawLoader::LoadFile(
         return false;
     }
 
+#ifdef STACK_READ_BRACKET_MASTERS
+    try {
+        const auto file = std::filesystem::u8path(path);
+        if (Stack::RawWorkspace::IsGalleryRasterPath(file)) return ReadGalleryRaster(file,outData.metadata,&outData);
+        const auto marker = Stack::Project::BracketMasterMetadata(file);
+        if (marker.is_object()) {
+            outData.metadata = Serialization::DeserializeMetadata(marker.at("metadata"));
+            outData.metadata.sourcePath = path;
+            outData.contentIdentity = marker.at("resultId").get<std::string>();
+            outData.contentIdentityHash = marker.at("contentHash").get<std::uint64_t>();
+            outData.normalizedMosaicContentHash = marker.at("mosaicHash").get<std::uint64_t>();
+            outData.decoderIdentityVersion = marker.at("decoderVersion").get<std::string>();
+            outData.reconstructedCameraRgb = marker.at("cameraRgb");
+            if (!outData.reconstructedCameraRgb)
+                outData.normalizedMosaicInputContract = NormalizedMosaicInputContract::BracketingPreGain;
+            const auto identity = Stack::RawEvidence::ComputeSourceIdentity(file, shouldCancel);
+            if (!identity.valid) throw std::runtime_error("Could not verify bracket master: " + identity.reason);
+            outData.metadata.sourceContentSha256 = identity.sha256;
+            outData.metadata.sourceByteSize = identity.byteSize;
+            Stack::Project::ReadBracketMasterPixels(file,outData.contentIdentity,outData);
+            return true;
+        }
+    } catch (const std::exception& e) { outData.metadata.error=e.what();return false; }
+#endif
     const LibRawRuntimeStatus& runtimeStatus = GetLibRawRuntimeStatus();
     if (!runtimeStatus.runtimeAvailable) {
         outData.metadata.error = runtimeStatus.message;
@@ -81,7 +157,19 @@ bool RawLoader::LoadFile(
         return false;
     }
 
-    return DecodeWithLibRaw(path, outData, shouldCancel);
+    if(!DecodeWithLibRaw(path,outData,shouldCancel))return false;
+#ifdef STACK_READ_BRACKET_MASTERS
+    // Standalone StackBurst DNG exports use a calibrated raster and have no
+    // project-master marker. Their semantic mask directories are self-contained.
+    if(outData.metadata.isDng)try {
+        auto masks=Stack::Project::DngMaster::ReadMasks(std::filesystem::u8path(path));
+        if(!masks.empty()) {
+            auto depth=std::make_shared<ReconstructionDepth>();depth->masks=std::move(masks);
+            outData.reconstructionDepth=std::move(depth);
+        }
+    }catch(const std::exception& e){outData.metadata.error=e.what();return false;}
+#endif
+    return true;
 }
 
 } // namespace Raw

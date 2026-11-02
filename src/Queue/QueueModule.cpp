@@ -1,4 +1,5 @@
 #include "Queue/QueueModule.h"
+#include "Async/TaskSystem.h"
 #include "App/settings/AppearanceTheme.h"
 #include "App/PlatformHelpers.h"
 #include "Library/LibraryControls.h"
@@ -18,17 +19,24 @@ void QueueModule::SetExportRequestHandler(ExportRequest handler) {
 }
 
 QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
-    if (!item.thumbnailBytes || item.thumbnailBytes->empty()) return nullptr;
+    if (!item.camera.bytes && (!item.thumbnailBytes || item.thumbnailBytes->empty())) return nullptr;
     const int frame = ImGui::GetFrameCount();
     const auto found = m_Textures.find(item.id);
-    if (found != m_Textures.end() && found->second.bytes == item.thumbnailBytes) {
-        found->second.usedFrame = frame;
-        return found->second.texture ? &found->second : nullptr;
-    }
-    // First visibility requests only. Bound one-time thumbnail decode/upload
-    // demand, including when a long queue is first opened or scrolled rapidly.
     if (m_ThumbnailFrame != frame) { m_ThumbnailFrame = frame; m_ThumbnailLoads = 0; }
-    if (m_ThumbnailLoads >= 2) return nullptr;
+    if (found != m_Textures.end() && found->second.bytes == item.thumbnailBytes) {
+        auto& entry = found->second;
+        entry.usedFrame = frame;
+        if (entry.camera && entry.camera->ready.load() && m_ThumbnailLoads < 2) {
+            ++m_ThumbnailLoads;
+            auto pixels = std::move(entry.camera);
+            if (!pixels->rgba.empty()) {
+                entry.width = pixels->width; entry.height = pixels->height;
+                entry.texture = GLHelpers::CreateTextureFromPixels(pixels->rgba.data(), entry.width, entry.height, 4);
+            }
+        }
+        return entry.texture ? &entry : nullptr;
+    }
+    if (m_ThumbnailLoads >= 2 || (item.camera.bytes && m_CameraLoads->load() >= 2)) return nullptr;
     ++m_ThumbnailLoads;
     ReleaseTexture(item.id);
     if (m_Textures.size() >= 128) {
@@ -39,6 +47,21 @@ QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
     auto& entry = m_Textures[item.id];
     entry.bytes = item.thumbnailBytes;
     entry.usedFrame = frame;
+    if (item.camera.bytes) {
+        auto pixels = std::make_shared<CameraPixels>();
+        auto count = m_CameraLoads;
+        ++*count;
+        if (Async::TaskSystem::Get().Submit("Loading Queue thumbnail", [pixels, count, path = item.path, camera = item.camera] {
+            try {
+                if (!RawWorkspace::DecodeCameraThumbnail(path, camera, 320, pixels->rgba, pixels->width, pixels->height))
+                    pixels->rgba.clear();
+            } catch (...) { pixels->rgba.clear(); }
+            pixels->ready.store(true);
+            --*count;
+        })) entry.camera = std::move(pixels);
+        else --*count;
+        return nullptr;
+    }
     const auto& bytes = *entry.bytes;
     if (bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return nullptr;
     int channels = 0;

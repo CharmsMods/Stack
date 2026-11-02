@@ -1,11 +1,17 @@
+#include "Raw/Bracketing/SourceSetIdentity.h"
+#include <set>
 #include "Raw/RawGraphOperation.h"
 #include "Raw/RawRecipeCompatibility.h"
 #include "Raw/RawWorkspace.h"
 #include "Raw/RawSourceFolders.h"
+#include "Raw/RawGalleryCoverCache.h"
 #include "Raw/RawWorkspaceManagedGraph.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include "Raw/MultiFrameDenoise/SharedBurst.h"
 #include "Persistence/ProjectIndex.h"
+#include "Persistence/BracketSourceReferences.h"
+#include "Persistence/AutoBracketProvenance.h"
+#include "Utils/AtomicExportFile.h"
 
 #include <algorithm>
 #include <chrono>
@@ -148,8 +154,10 @@ ProjectInfo ProjectInfoFromIndex(
     return info;
 }
 
+} // namespace
+
 std::filesystem::path WriteProjectCoverCache(
-    const ManagedLayout& layout,
+    const std::filesystem::path& directory,
     const std::string& projectId,
     const std::vector<unsigned char>& bytes) {
     if (projectId.empty() || bytes.empty()) return {};
@@ -170,25 +178,29 @@ std::filesystem::path WriteProjectCoverCache(
     fileName << safeId << '-' << std::hex << hash << ".png";
 
     std::error_code error;
-    const std::filesystem::path directory =
-        layout.projectCoversDirectory;
     std::filesystem::create_directories(directory, error);
     if (error) return {};
     const std::filesystem::path path = directory / fileName.str();
     error.clear();
-    if (std::filesystem::exists(path, error) && !error &&
-        std::filesystem::file_size(path, error) == bytes.size() && !error) {
-        return path;
-    }
+    const auto matches = [&] {
+        std::error_code readError;
+        if (std::filesystem::file_size(path,readError)!=bytes.size() || readError) return false;
+        std::ifstream input(path,std::ios::binary);
+        const std::vector<unsigned char> cached{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+        return cached==bytes;
+    };
+    if (matches()) return path;
+    // Covers are rebuildable content-addressed files. Publish complete bytes
+    // so a concurrent thumbnail reader cannot latch a half-written PNG.
+    Stack::FileSave::ExportFileTarget target;
+    std::string failure;
+    if (Stack::FileSave::PrepareExportFileTarget(path,{}, {".png"},target,failure) &&
+        Stack::FileSave::WriteExportFileAtomically(target,bytes,failure)) return path;
+    return matches() ? path : std::filesystem::path{};
 
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) return {};
-    output.write(
-        reinterpret_cast<const char*>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size()));
-    return output.good() ? path : std::filesystem::path();
 }
 
+namespace {
 std::shared_ptr<const Stack::Project::ProjectRecord> GalleryProjectMetadata(
     const Stack::Project::ProjectRecord& indexed,
     const std::filesystem::path& sourceRoot) {
@@ -231,7 +243,7 @@ void AttachProjectToSource(
 
 std::vector<Stack::Project::ProjectRecord> ScanWorkspaceProjects(const ManagedLayout& layout) {
     auto roots = Stack::Project::ProjectIndex::DefaultRoots();
-    roots.insert(roots.begin(), {layout.workspaceRoot, layout.projectsDirectory});
+    roots.insert(roots.begin(),layout.projectsDirectory);
     auto records = Stack::Project::ProjectIndex::Get().Rebuild(roots, true);
     const auto inside = [](const auto& path, const auto& root) {
         if (root.empty()) return false;
@@ -240,17 +252,16 @@ std::vector<Stack::Project::ProjectRecord> ScanWorkspaceProjects(const ManagedLa
         return LowerGenericPathKey(NormalizePath(path)).rfind(prefix, 0) == 0;
     };
     records.erase(std::remove_if(records.begin(), records.end(), [&](const auto& record) {
-        return !inside(record.absolutePath, layout.workspaceRoot) &&
-            !inside(record.absolutePath, layout.projectsDirectory);
+        return !inside(record.absolutePath,layout.projectsDirectory);
     }), records.end());
     return records;
 }
 } // namespace
 
 std::filesystem::path BuildProjectRelativePathForSource(const SourceRecord& source) {
-    // Working projects are folders in Stack's configured Projects directory;
+    // Working files share the root Closet's Projects directory;
     // the viewed source hierarchy is provenance, not storage architecture.
-    return std::filesystem::path(SafeProjectStem(source)).lexically_normal();
+    return std::filesystem::path(SafeProjectStem(source) + ".stack");
 }
 
 ProjectInfo BuildExpectedProjectInfo(const ManagedLayout& layout, const SourceRecord& source) {
@@ -381,10 +392,14 @@ bool ReadProjectInfoFromDocument(
         outInfo.sourceModifiedTimeTicks = JsonInt64OrDefault(sourceRef, "modifiedTimeTicks");
         outInfo.linkedRaw = sourceRef.value("linked", true);
     }
-    outInfo.embeddedRaw = raw.contains("managedAssetId") &&
-        raw["managedAssetId"].is_string() &&
-        !raw["managedAssetId"].get<std::string>().empty();
-    if (outInfo.embeddedRaw) outInfo.linkedRaw = false;
+    const auto assetId=raw.value("managedAssetId",std::string{});
+    if (!assetId.empty() && document.rawProjectSnapshot) {
+        const auto* asset=Stack::Project::FindEmbeddedAsset(*document.rawProjectSnapshot,assetId);
+        const bool portable=document.projectStore &&
+            document.projectStore->StorageKind()==Stack::Project::ProjectStorageKind::PortableFile;
+        outInfo.embeddedRaw=asset && (portable || !asset->linkedSource);
+        outInfo.linkedRaw=asset && !outInfo.embeddedRaw;
+    }
 
     if (outRecipe != nullptr) {
         const nlohmann::json recipe = raw.value(
@@ -456,8 +471,17 @@ bool AssociateWorkspaceProjects(
         const auto& sourceRoot = managedOwner.empty() ? layout.workspaceRoot : managedOwner;
 
         auto exactSource = absolutePathToSource.end();
-        for (const Stack::Project::IndexedProjectSource& indexedSource :
-             record.sources) {
+        if (!info.sourceRelativePathKey.empty() && !info.sourceFingerprint.empty()) {
+            auto expected = absolutePathToSource.find(LowerGenericPathKey(NormalizePath(
+                sourceRoot / std::filesystem::u8path(info.sourceRelativePathKey))));
+            if (expected != absolutePathToSource.end() &&
+                sources[expected->second].fingerprint == info.sourceFingerprint &&
+                sources[expected->second].fileSizeBytes == info.sourceFileSizeBytes) {
+                exactSource = expected;
+            }
+        }
+        for (const Stack::Project::IndexedProjectSource& indexedSource : record.sources) {
+            if (exactSource != absolutePathToSource.end()) break;
             if (!indexedSource.workspaceRelativePath.empty()) {
                 exactSource = absolutePathToSource.find(LowerGenericPathKey(
                     NormalizePath(sourceRoot / indexedSource.workspaceRelativePath)));
@@ -537,6 +561,13 @@ bool AssociateWorkspaceSourceSetProjects(
         entry.multiFrameProject = indexed.multiFrameProject;
         entry.bracketingProject = std::any_of(indexed.sourceSets.begin(),indexed.sourceSets.end(),[](const auto& set){return set.settings.contains("bracketing");});
         entry.hasSavedBracketingResult = indexed.hasSavedBracketingResult;
+        entry.untouchedAutomaticBracket = std::any_of(indexed.sourceSets.begin(), indexed.sourceSets.end(),
+            [&](const auto& set) {
+                return Stack::Project::MatchesAutomaticBracketRevision(set, indexed.projectId,
+                    indexed.editRevision, indexed.storageRevision) &&
+                    std::find(indexed.savedBracketingSourceSetIds.begin(), indexed.savedBracketingSourceSetIds.end(),
+                        set.sourceSetId) != indexed.savedBracketingSourceSetIds.end();
+            });
         entry.sourceSetCount = static_cast<std::uint64_t>(indexed.sourceSets.size());
         const bool invalidBurst = std::any_of(
             indexed.sourceSets.begin(),
@@ -557,13 +588,18 @@ bool AssociateWorkspaceSourceSetProjects(
             ? layout : BuildManagedLayout(entry.sourceWorkspaceRoot);
         entry.projectMetadata = GalleryProjectMetadata(indexed, projectLayout.workspaceRoot);
         entry.coverThumbnailCachePath = WriteProjectCoverCache(
-            projectLayout, entry.projectId, entry.coverThumbnailBytes);
+            projectLayout.projectCoversDirectory, entry.projectId, entry.coverThumbnailBytes);
 
         std::unordered_map<std::string, std::vector<std::size_t>> assetSources;
         for (const Stack::Project::IndexedProjectSource& asset : indexed.sources) {
             if (asset.assetId.empty()) continue;
-            const std::filesystem::path originPath = asset.workspaceRelativePath.empty()
-                ? asset.originalPath : projectLayout.workspaceRoot / asset.workspaceRelativePath;
+            const bool primarySource = !indexed.rawSourceRelativePathKey.empty() &&
+                indexed.rawSourceFingerprint == asset.contentSha256 &&
+                indexed.rawSourceFileSizeBytes == asset.byteLength;
+            const std::filesystem::path originPath = primarySource
+                ? projectLayout.workspaceRoot / std::filesystem::u8path(indexed.rawSourceRelativePathKey)
+                : (asset.workspaceRelativePath.empty()
+                    ? asset.originalPath : projectLayout.workspaceRoot / asset.workspaceRelativePath);
             if (!originPath.empty()) {
                 const auto source = originPathToSource.find(
                     LowerGenericPathKey(NormalizePath(originPath)));
@@ -577,6 +613,11 @@ bool AssociateWorkspaceSourceSetProjects(
             const auto sameSize = byteLengthToSources.find(asset.byteLength);
             if (sameSize == byteLengthToSources.end()) continue;
             for (std::size_t sourceIndex : sameSize->second) {
+                if (!sources[sourceIndex].fingerprint.empty()) {
+                    if (sources[sourceIndex].fingerprint == asset.contentSha256)
+                        assetSources[asset.assetId].push_back(sourceIndex);
+                    continue;
+                }
                 auto identity = sourceIdentities.find(sourceIndex);
                 if (identity == sourceIdentities.end()) {
                     identity = sourceIdentities.emplace(
@@ -587,6 +628,51 @@ bool AssociateWorkspaceSourceSetProjects(
                 if (identity->second.valid &&
                     identity->second.sha256 == asset.contentSha256) {
                     assetSources[asset.assetId].push_back(sourceIndex);
+                }
+            }
+        }
+
+        if (indexed.storageKind == Stack::Project::ProjectStorageKind::WorkingFile) {
+            std::string referenceId;
+            std::set<std::string> required;
+            for (const auto& set : indexed.sourceSets) {
+                const auto submitted=set.settings.find("bracketing");
+                if (submitted!=set.settings.end()) {
+                    const auto active=Stack::Project::BracketCaptureIds(*submitted);
+                    required.insert(active.begin(),active.end());
+                } else for (const auto& frame:set.frames) if (frame.enabled) required.insert(frame.frameId);
+                for (const auto& frame:set.frames)
+                    if (frame.frameId==set.referenceFrameId && referenceId.empty()) referenceId=frame.assetId;
+            }
+            for (const auto& asset:indexed.sources) {
+                if (!asset.linked || !assetSources[asset.assetId].empty()) continue;
+                const bool reference=indexed.sourceSets.empty() ? indexed.sources.size()==1 : asset.assetId==referenceId;
+                const bool needed=indexed.sourceSets.empty() || std::any_of(indexed.sourceSets.begin(),indexed.sourceSets.end(),
+                    [&](const auto& set){return std::any_of(set.frames.begin(),set.frames.end(),[&](const auto& frame){
+                        return frame.assetId==asset.assetId && required.count(frame.frameId);});});
+                if (!reference && (!needed || entry.hasSavedBracketingResult)) continue;
+                auto path=asset.workspaceRelativePath.empty() ? asset.originalPath : projectLayout.workspaceRoot/asset.workspaceRelativePath;
+                std::error_code ec;
+                const bool existing=std::filesystem::file_size(path,ec)==asset.byteLength && !ec &&
+                    Stack::RawEvidence::ComputeSourceIdentity(path,shouldCancel).sha256==asset.contentSha256;
+                if (!existing) {
+                    // The store also consults the master catalog for renamed bracket-backed originals.
+                    auto opened=Stack::Project::OpenProjectStore(indexed.absolutePath);
+                    path=opened ? opened.store->ResolveAssetFile(asset.assetId) : std::filesystem::path{};
+                }
+                if (path.empty()) {
+                    if (needed && !entry.hasSavedBracketingResult) entry.unlinked=true;
+                } else if (reference) {
+                    auto source=std::make_shared<SourceRecord>();
+                    source->absolutePath=path; source->sourceWorkspaceRoot=projectLayout.workspaceRoot;
+                    source->relativePath=asset.workspaceRelativePath.empty() ? path.filename() : asset.workspaceRelativePath;
+                    source->relativePathKey=source->relativePath.generic_u8string();
+                    source->fileName=path.filename().u8string(); source->stem=path.stem().u8string();
+                    source->extension=path.extension().u8string(); source->fileSizeBytes=asset.byteLength;
+                    source->fingerprint=asset.contentSha256;
+                    source->sourceIdentityAlgorithmVersion=kSourceIdentityAlgorithmVersion;
+                    source->browsePreview = true;
+                    entry.linkedOriginal=std::move(source);
                 }
             }
         }
@@ -651,29 +737,7 @@ bool AssociateWorkspaceSourceSetProjects(
             if (!indexed.sourceSets.empty()) break;
             if (!indexedSource.originalPath.empty())
                 sourceIdentities.push_back(indexedSource.contentSha256);
-            std::vector<std::size_t> matches;
-            const auto origin = indexedSource.workspaceRelativePath.empty()
-                ? indexedSource.originalPath : projectLayout.workspaceRoot / indexedSource.workspaceRelativePath;
-            if (!origin.empty()) {
-                const auto match = originPathToSource.find(
-                    LowerGenericPathKey(NormalizePath(
-                        origin)));
-                if (match != originPathToSource.end() &&
-                    sources[match->second].fingerprint == indexedSource.contentSha256) {
-                    matches.push_back(match->second);
-                }
-            }
-            if (matches.empty() && !indexedSource.fingerprint.empty()) {
-                for (std::size_t sourceIndex = 0;
-                     sourceIndex < sources.size();
-                     ++sourceIndex) {
-                    if (sources[sourceIndex].fingerprint ==
-                        indexedSource.fingerprint) {
-                        matches.push_back(sourceIndex);
-                    }
-                }
-            }
-            for (std::size_t sourceIndex : matches) {
+            for (std::size_t sourceIndex : assetSources[indexedSource.assetId]) {
                 if (!directlyAttached.insert(sourceIndex).second) continue;
                 entry.sourceKeys.push_back(sources[sourceIndex].relativePathKey);
                 const bool alreadyAttached = std::any_of(
@@ -763,14 +827,78 @@ bool DiscoverWorkspaceProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
-    CancellationPredicate shouldCancel) {
+    CancellationPredicate shouldCancel,
+    const nlohmann::json* scannedMasters) {
     if (shouldCancel && shouldCancel()) return false;
     // Keep discovery scoped to this operation. Both associations consume the
     // same records; another workspace cannot replace them via the global index.
-    const auto indexedProjects = ScanWorkspaceProjects(layout);
+    std::error_code ec;
+    const auto indexedProjects = std::filesystem::is_directory(layout.projectsDirectory, ec) &&
+        IsMarkedCloset(layout.dataDirectory) ? ScanWorkspaceProjects(layout) : std::vector<Stack::Project::ProjectRecord>{};
     if (shouldCancel && shouldCancel()) return false;
-    return AssociateWorkspaceProjects(layout, sources, indexedProjects, shouldCancel) &&
-        AssociateWorkspaceSourceSetProjects(layout, sources, projects, indexedProjects, shouldCancel);
+    if (!AssociateWorkspaceProjects(layout, sources, indexedProjects, shouldCancel) ||
+        !AssociateWorkspaceSourceSetProjects(layout, sources, projects, indexedProjects, shouldCancel)) return false;
+    std::set<std::string> represented;
+    for (const auto& doc : indexedProjects) for (const auto& set : doc.sourceSets) {
+        if (std::find(doc.savedBracketingSourceSetIds.begin(), doc.savedBracketingSourceSetIds.end(), set.sourceSetId) ==
+            doc.savedBracketingSourceSetIds.end()) continue;
+        auto saved=set.settings.find("bracketingResult");
+        if (saved!=set.settings.end() && saved->is_object()) represented.insert(saved->value("identity",std::string{}));
+    }
+    nlohmann::json catalog;
+    if (!scannedMasters) {
+        std::ifstream stream(layout.catalogDirectory / "masters.json", std::ios::binary);
+        if (!stream) return true;
+        catalog=nlohmann::json::parse(stream,nullptr,false);
+        if (!catalog.is_object() || !catalog.contains("sources")) return true;
+        scannedMasters = &catalog["sources"];
+    }
+    if (!scannedMasters->is_array()) return true;
+    for (const auto& master : *scannedMasters) {
+        if (!master.is_object() || !master.contains("resultId") || !master["resultId"].is_string() ||
+            !master.contains("relativePath") || !master["relativePath"].is_string()) continue;
+        const auto id=master["resultId"].get<std::string>();
+        if (!represented.insert(id).second) continue;
+        const auto relative=std::filesystem::u8path(master["relativePath"].get<std::string>());
+        if (relative.empty() || relative.has_root_path() || std::find(relative.begin(),relative.end(),"..")!=relative.end()) continue;
+        SourceSetProjectCatalogEntry card;
+        card.projectId="master:"+id;card.projectName=relative.stem().u8string();
+        card.relativePath=relative;card.absolutePath=layout.workspaceRoot/relative;
+        card.sourceWorkspaceRoot=layout.workspaceRoot;card.status=ProjectStatus::Existing;
+        card.bracketingProject=true;card.hasSavedBracketingResult=true;
+        card.standaloneMaster = true;
+        const auto captures = master.find("captures");
+        if (captures != master.end() && captures->is_array()) {
+            std::vector<Raw::Bracketing::CaptureContentIdentity> identities;
+            for (const auto& capture : *captures) {
+                if (!capture.is_object() || !capture.contains("sha256") || !capture["sha256"].is_string() ||
+                    !capture.contains("byteLength") || !capture["byteLength"].is_number_unsigned()) {
+                    identities.clear();
+                    break;
+                }
+                identities.push_back({capture["sha256"].get<std::string>(), capture["byteLength"].get<std::uint64_t>()});
+            }
+            card.masterCaptureSetIdentity = Raw::Bracketing::SourceSetIdentity(identities);
+        }
+        auto source = std::make_shared<SourceRecord>();
+        source->sourceWorkspaceRoot = layout.workspaceRoot;
+        source->absolutePath = card.absolutePath;
+        source->relativePath = relative;
+        source->relativePathKey = relative.generic_u8string();
+        source->fileName = relative.filename().u8string();
+        source->stem = relative.stem().u8string();
+        source->extension = relative.extension().u8string();
+        source->parentFolderKey = relative.parent_path().generic_u8string();
+        source->fingerprint = master.value("fingerprint", std::string{});
+        source->fileSizeBytes = master.value("fileSizeBytes", std::uintmax_t{});
+        source->modifiedTimeTicks = master.value("modifiedTimeTicks", std::int64_t{});
+        source->sourceIdentityAlgorithmVersion = kSourceIdentityAlgorithmVersion;
+        source->project.status = ProjectStatus::NoProject;
+        card.referenceSourceKey = source->relativePathKey;
+        card.masterSource = std::move(source);
+        projects.push_back(std::move(card));
+    }
+    return true;
 }
 
 } // namespace Stack::RawWorkspace

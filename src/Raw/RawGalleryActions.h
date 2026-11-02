@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Raw/RawCameraThumbnail.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -13,12 +14,14 @@ enum class Action {
     Open,
     CreateCaptureSet,
     AddToQueue,
+    ApplyProject,
     CopyEdits,
     PasteEdits,
     ShowInExplorer,
     CopyPath,
     NewSavedVersion,
-    TrashProjects,
+    Relink,
+    MoveToTrash,
     RevertProjects
 };
 
@@ -32,6 +35,7 @@ struct Item {
     bool canCopyEdits = false;
     bool canVersion = false;
     bool protectedProject = false;
+    Stack::RawWorkspace::CameraThumbnail camera;
 };
 
 // Requests carry the selection that initiated the operation. Hover state and

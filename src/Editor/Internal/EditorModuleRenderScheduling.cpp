@@ -67,6 +67,13 @@ void EditorModule::SubmitRenderIfReady() noexcept {
 
 void EditorModule::SubmitRenderIfReadyImpl() {
     const bool rawWorkspaceActive = IsRawWorkspaceProjectActive();
+    // A newly opened photo tab can be waiting for its first source. Keep its
+    // dirty revision for when an output is attached and a worker is needed.
+    if (m_DeferredGraphWorkers && !rawWorkspaceActive && !m_Project->graph.IsOutputConnected()) {
+        if (m_FullQualityRenderRequest.Pending())
+            FailFullQualityRenderRequest("Full-quality rendering requires a connected image output.");
+        return;
+    }
     // A dead worker cannot satisfy automatic preview/refinement retries.
     // Explicit dirty requests and captures still pass through once so their
     // ordinary failed result releases the caller's expected-completion state.

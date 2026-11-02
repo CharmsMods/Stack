@@ -1905,11 +1905,11 @@ void AppShell::Run() {
                 if (preview) m_Editor->RestoreWorkspacePreviewLayout();
                 if (preview || savingTransition || m_NotificationPresenter.BlocksInput()) { ImGui::EndDisabled(); ImGui::PopStyleVar(); }
             }
-            RenderNotifications();
             if (!m_NotificationPresenter.BlocksInput()) {
                 DrawToolSwitcher();
                 DrawWorkspaceSwitcher();
             }
+            RenderNotifications();
             renderUiMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - renderUiStarted).count();
             TickDiagnosticProjectOpen();
@@ -2816,8 +2816,12 @@ void AppShell::RenderUI() {
         RenderEditorSavePrompts();
     }
 
-    const ImVec2 projectBodyPosition = m_NavigationRail.bodyPosition;
-    const ImVec2 projectBodySize = m_NavigationRail.bodySize;
+    const bool stableViewCamera = m_Editor->IsViewMode() &&
+        !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !bracketPresentation;
+    m_Editor->SetViewToolBounds(m_NavigationRail.bodyPosition,
+        {viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y});
+    const ImVec2 projectBodyPosition = stableViewCamera ? viewport->Pos : m_NavigationRail.bodyPosition;
+    const ImVec2 projectBodySize = stableViewCamera ? viewport->Size : m_NavigationRail.bodySize;
     const bool pillPreview = m_NavigationRail.previewAmount > .001f;
     Stack::Workspace::InputScope previewInput(pillPreview, false);
     if (pillPreview) { ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 1.f); ImGui::BeginDisabled(); }
@@ -2849,6 +2853,9 @@ void AppShell::RenderUI() {
         ImVec2(graphBody || bracketPresentation || m_Editor->IsAutoBracketWorkspace() ? 0.f : 12.f * m_NavigationRail.scale, 0.f));
     ImGui::BeginChild("StackWorkingArea", projectBodySize, ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // Chrome masks the photo but never changes its camera dimensions.
+    if (stableViewCamera) ImGui::PushClipRect(m_NavigationRail.bodyPosition,
+        {viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y},true);
     if (m_Editor->IsAutoBracketWorkspace()) {
         ImGui::BeginChild("AutoBracketWorkspace", ImVec2(0, 0), false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -2952,6 +2959,7 @@ void AppShell::RenderUI() {
         }
     }
 
+    if (stableViewCamera) ImGui::PopClipRect();
     ImGui::EndChild();
     ImGui::PopStyleVar();
     railInput.reset();

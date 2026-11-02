@@ -1,6 +1,8 @@
 #include "Editor/Internal/RawLab/RawLabGalleryLayoutAnimation.h"
 #include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
 #include "Editor/Internal/RawLab/RawLabGalleryGridSubmission.h"
+#include "Editor/Internal/RawLab/RawLabGalleryScroll.h"
+#include "Editor/Internal/RawLab/RawLabGalleryGridStacks.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -346,6 +348,37 @@ bool TestExpandedFilmstripClickHandoff(bool disablePointer = false) {
 }
 }
 int main() {
+    using namespace Stack::Editor::RawLabInternal;
+    GalleryGridStacks browsing;
+    browsing.Open({"a","b"},{"c","d"},1);
+    if(!Check(browsing.groupCount==2 && browsing.groups[0].size()==2 && browsing.groups[1].size()==2,
+        "stack transfer opens two independent groups"))return 1;
+    const auto revision=browsing.navigationRevision;
+    browsing.Close();
+    if(!Check(!browsing.groupCount && browsing.navigationRevision>revision,"background exit invalidates navigation geometry"))return 1;
+    GalleryScrollMotion scroll;
+    float target=0.f,native=0.f;double now=0.;
+    for(int frame=1;frame<=1000;++frame) {
+        scroll.Observe(native,target,frame);
+        if(frame<80)scroll.Wheel(-1.f,150.f,3000.f,now,target);
+        scroll.Step(target,3000.f,1.f/120.f,now,false);
+        native=std::floor(scroll.current);now+=1./120.;
+    }
+    if(!Check(scroll.current==3000.f && scroll.rebound==0.f,"wheel reaches exact far edge and rebound settles"))return 1;
+    for(int frame=1001;frame<=2000;++frame) {
+        scroll.Observe(native,target,frame);
+        if(frame<1080)scroll.Wheel(1.f,150.f,3000.f,now,target);
+        scroll.Step(target,3000.f,1.f/120.f,now,false);
+        native=std::floor(scroll.current);now+=1./120.;
+    }
+    if(!Check(scroll.current==0.f && scroll.rebound==0.f,"wheel reaches exact near edge without integer stalls"))return 1;
+    Stack::Editor::RawLabInternal::FilmstripHeightState filmstripHeight;
+    if (!Check(filmstripHeight.Target(500,0)==500,"tall stacks expand immediately")) return 1;
+    filmstripHeight.ObserveScroll(0,0,.016f);
+    filmstripHeight.ObserveScroll(100,.1,.016f);
+    if (!Check(filmstripHeight.Target(200,.1)==500 && filmstripHeight.Target(200,.25)==500,
+        "fast scrolling holds the taller drawer")) return 1;
+    if (!Check(filmstripHeight.Target(200,.35)==200,"shorter stacks shrink after scrolling settles")) return 1;
     ImGui::CreateContext();
     auto& io = ImGui::GetIO();
     io.IniFilename = nullptr; io.LogFilename = nullptr; io.DisplaySize = {1000, 700};

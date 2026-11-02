@@ -7,7 +7,8 @@ namespace Stack::Project {
 
 bool StageBracketingResult(const ProjectStoreHandle& store, const ProjectStoreTransaction& transaction,
     RawProjectSnapshot& snapshot, const std::string& setId,
-    const Raw::Bracketing::BracketingResult& result, const std::vector<unsigned char>& cover, std::string& error);
+    const Raw::Bracketing::BracketingResult& result, const std::vector<unsigned char>& cover, std::string& error,
+    bool dependenciesAlreadyStaged = false);
 bool SaveBracketingResult(const ProjectStoreHandle& store, RawProjectSnapshot& snapshot,
     const std::string& setId, const Raw::Bracketing::BracketingResult& result,
     const std::vector<unsigned char>& cover, std::string& error);

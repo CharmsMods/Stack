@@ -28,6 +28,6 @@ void main(){ivec2 p=ivec2(gl_GlobalInvocationID.xy);
  if(contributors<8||available<total*.12||weight<=0||max(min(sides.x,sides.y),min(sides.z,sides.w))<weight*.1)return;
  float mean=sum/weight,variance=max(0.,squares/weight-mean*mean);
  if(variance>.0064)return;float c=min(.55,.85*confidence/available)*exp(-variance/.0064);
- if(c>=.3)result[i]=vec2(mean,c);
+ if(c>=.3)result[i]=vec2(clamp(mean,0.,1.),c);
 })GLSL";
 }

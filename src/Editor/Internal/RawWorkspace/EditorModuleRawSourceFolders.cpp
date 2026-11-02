@@ -100,7 +100,7 @@ void EditorModule::RequestRawWorkspaceFolderCardPreviews() {
             std::error_code error;
             if (std::filesystem::is_directory(root, error) && !error) {
                 std::vector<Stack::RawWorkspace::SourceRecord> sources;
-                if (Stack::RawWorkspace::LoadCatalogSnapshot(Stack::RawWorkspace::BuildManagedLayout(root), sources)) {
+                if (Stack::RawWorkspace::LoadCatalogSnapshot(Stack::RawWorkspace::BuildGalleryLayout(root), sources)) {
                     card.countKnown = true;
                     card.sourceCount = sources.size();
                     for (auto& source : sources) {

@@ -8,7 +8,7 @@ namespace Stack::Project {
 // Creates and commits a project without replacing an editor document.
 struct MultiFrameProjectCreation {
     std::filesystem::path path;
-    ProjectStorageKind storageKind = ProjectStorageKind::DirectoryBundle;
+    ProjectStorageKind storageKind = ProjectStorageKind::WorkingFile;
     std::string projectId;
     std::string projectName;
     std::string sourceSetName = "Captures";

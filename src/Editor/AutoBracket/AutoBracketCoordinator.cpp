@@ -125,6 +125,12 @@ bool AutoBracketCoordinator::IsPendingWorkEligible(const Item& item,const std::s
 }
 std::shared_ptr<Work> AutoBracketCoordinator::ConsumeCompleted(){auto result=std::move(completed_);completed_.reset();return result;}
 void AutoBracketCoordinator::Begin(Item& item,const Raw::OpenGlTaskExecutor& executor) {
+    if (!RawWorkspace::IsMarkedCloset(queue_.root / "Closet") && !RawWorkspace::EnsureManagedFolders(queue_.root, &error_)) {
+        storageBlocked_ = true;
+        queue_.paused = true;
+        ++revision_;
+        return;
+    }
     // The idle wait applies only after a user stop. Once resumed, continue
     // through the queue even while the user edits another project.
     queue_.paused=false;queue_.resumeWhenIdle=false;

@@ -1,3 +1,4 @@
+#include "Raw/RawGalleryInputPolicy.h"
 #include "AutoBracketQueue.h"
 #include "Raw/Bracketing/SourceSetIdentity.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
@@ -29,7 +30,7 @@ std::vector<Candidate> CollectCandidates(const std::vector<RawWorkspace::SourceR
         for(const auto& key:stack.sourceKeys) {
             const auto found=records.find(key);if(found==records.end())continue;
             const auto& source=*found->second;
-            if(source.fingerprint.empty()||!RawWorkspace::DefaultRawPathPredicate(source.absolutePath)||
+            if(source.fingerprint.empty()||!RawWorkspace::IsGalleryRawPath(source.absolutePath)||
                 !seen.insert(source.fingerprint).second)continue;
             candidate.sources.push_back({source.absolutePath,source.fingerprint,source.fileSizeBytes});
             if(candidate.name.empty())candidate.name=source.stem+" Bracket";
@@ -41,7 +42,7 @@ std::vector<Candidate> CollectCandidates(const std::vector<RawWorkspace::SourceR
 }
 bool LoadQueue(const std::filesystem::path& root,Queue& queue,std::string& error) {
     queue={};queue.root=root;
-    const auto path=RawWorkspace::BuildManagedLayout(root).catalogDirectory/"brackets.json";
+    const auto path=RawWorkspace::StorageIO::GalleryCatalogReadPath(RawWorkspace::BuildGalleryLayout(root),"brackets.json");
     std::error_code ec;if(!std::filesystem::exists(path,ec))return !ec;
     try {
         Project::json data;
@@ -76,7 +77,7 @@ bool SaveQueue(const Queue& queue,std::string& error) {
             {"error",item.error}});
     }
     return RawWorkspace::StorageIO::WriteJsonFile(
-        RawWorkspace::BuildManagedLayout(queue.root).catalogDirectory/"brackets.json",data,&error);
+        RawWorkspace::BuildGalleryLayout(queue.root).catalogDirectory/"brackets.json",data,&error);
 }
 void Reconcile(Queue& queue,const std::vector<Candidate>& candidates,
     const std::map<std::string,std::pair<std::string,std::filesystem::path>>& represented) {

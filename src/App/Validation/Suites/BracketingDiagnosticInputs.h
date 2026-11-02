@@ -32,6 +32,9 @@ inline bool LoadBracketingDiagnosticFolder(const std::filesystem::path& director
     }
     if(request.sources.empty()) {error="The diagnostic folder contains no RAW captures.";return false;}
     request.recipe=Project::SuggestBracketingGroups(snapshot,set);
+    // The folder diagnostics compare native mosaics or explicitly select the
+    // reconstruction under test after loading the sources.
+    request.recipe.reconstruction=Raw::Bracketing::ReconstructionMode::Standard;
     for(std::size_t i=0;i<request.recipe.groups.size();++i)
         request.recipe.groups[i].id="diagnostic-group-"+std::to_string(i);
     return true;

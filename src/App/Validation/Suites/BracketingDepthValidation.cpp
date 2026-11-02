@@ -141,31 +141,15 @@ void Focused() {
         Check(completed[24*64+31][1]<.3,"GPU completion invented depth between distinct surfaces.");
         Check(completed[24*64+15]==measured[24*64+15],"GPU completion altered a measured seed.");
     }
-    DepthSettings settings;settings.enabled=true;settings.focus=1;settings.blurRadius=8;
-    std::vector<float> blurred;std::string error;
-    Check(Depth::RenderDefocusGpu(rgb,64,48,map,settings,0,0,1,1,blurred,executor,{},error),error);
-    Check(std::abs(blurred[(24*64+31)*3]-.2)<1e-6,"Background blur leaked into a focused foreground edge");
-    Check(std::abs(blurred[(24*64+48)*3]-rgb[(24*64+48)*3])>.1,"Out-of-focus texture did not blur");
-    std::vector<float> cpuBlur;
-    Check(Depth::RenderDefocus(rgb,64,48,map,settings,0,0,1,1,cpuBlur,{},error),error);
-    for(unsigned i=0;i<blurred.size();++i)Check(std::abs(blurred[i]-cpuBlur[i])<2e-5,"GPU layered defocus disagrees with the CPU reference");
-    Check(Raw::SampleReconstructionDepth(map,31.5,24).confidence==0,"Depth interpolation invented an occlusion surface");
-    map.confidence.assign(64*48,0);
-    Check(Depth::RenderDefocusGpu(rgb,64,48,map,settings,0,0,1,1,blurred,executor,{},error)&&rgb==blurred,"Unknown depth changed the image");
-    map.confidence.assign(64*48,1);settings.blurRadius=0;
-    Check(Depth::RenderDefocusGpu(rgb,64,48,map,settings,0,0,1,1,blurred,executor,{},error)&&rgb==blurred,"Zero blur changed the image");
-    settings.blurRadius=8;rgb.assign(rgb.size(),2.5f);
-    Check(Depth::RenderDefocusGpu(rgb,64,48,map,settings,0,0,1,1,blurred,executor,{},error),error);
-    for(float v:blurred)Check(std::abs(v-2.5f)<1e-5,"Defocus changed constant HDR brightness");
-    Check(!Depth::RenderDefocusGpu(rgb,64,48,map,settings,0,0,1,1,blurred,executor,[]{return true;},error),"Defocus ignored cancellation");
-    ProcessingRequest request;request.recipe.originFrameId="a";request.recipe.groups={{"g","Group",true,{{"a"}}}};
-    request.recipe.knots=EqualCurves(1);request.recipe.depth=settings;
-    auto identity=AnalysisIdentity(request);request.recipe.depth.focus=.2;request.recipe.depth.blurRadius=20;
-    Check(AnalysisIdentity(request)==identity,"Focus changes invalidated geometry");
-    BracketingRecipe loaded;Check(Deserialize(Serialize(request.recipe),loaded,error)&&loaded.depth.focus==.2,error);
-    auto legacy=Serialize(request.recipe);legacy["version"]=6;legacy.erase("depth");
-    Check(Deserialize(legacy,loaded,error)&&!loaded.depth.enabled,"Old recipes enabled depth by default");
-    std::cout<<"Depth checks: image-only geometry, camera scale change, triangulation, stationary/planar rejection, focus edge, unknown fallback, HDR range, cancellation and recipe identity passed.\n"<<std::flush;
+    Raw::RawImageData raw;raw.reconstructedCameraRgb=true;raw.linearFloatBuffer=rgb;
+    raw.metadata.visibleWidth=64;raw.metadata.visibleHeight=48;
+    const auto masks=Depth::ExtractMasks(map,raw,{});
+    Check(masks.size()==2 && masks.front().name=="Near depth","Known depth planes did not yield two ordered masks.");
+    const auto near=masks.front().Read();
+    Check(masks.front().At(*near,16,24)==255 && !masks.front().At(*near,48,24),"Near mask crossed the known depth edge.");
+    map.confidence.assign(64*48,0);Check(Depth::ExtractMasks(map,raw,{}).empty(),"Unknown depth yielded a mask.");
+    std::cout<<"Image-only geometry, depth ordering and mask separation passed.\n";
+
 }
 }
 bool ValidateBracketingDepth(int argc,char** argv) {
@@ -186,7 +170,7 @@ bool ValidateBracketingDepth(int argc,char** argv) {
             Check(LoadBracketingDiagnosticFolder(input,request,error),error);
             const auto memory=Raw::Mfd::ResolveMfdProcessingMemoryBudget(0,Raw::Mfd::QueryPhysicalMemorySnapshot());
             request.memoryBudgetBytes=memory.budgetBytes;request.workerCount=std::min(14u,ResolveBracketingWorkerCount(memory.budgetBytes));
-            request.cacheDirectory=directory/"prepared";request.recipe.depth.enabled=true;
+            request.cacheDirectory=directory/"prepared";
             Check(Validate(request.recipe,error),error);
             request.executeOpenGlTask=[](Raw::OpenGlTask task,std::string& e){return task(e);};
             request.reportProgress=[&](double p,const std::string& stage){std::cout<<input.filename().string()<<" "<<int(p*100)<<"% "<<stage<<'\n'<<std::flush;};
@@ -214,13 +198,7 @@ bool ValidateBracketingDepth(int argc,char** argv) {
                 {"timings",result.analysis->stageSeconds},{"diagnostics",result.analysis->diagnostics}};
             if(depth->Available()) {
                 SaveDepth(directory,*depth);
-                for(const auto focus:{.8,.2}) {
-                    auto focused=result;focused.raw=std::make_shared<Raw::RawImageData>(*result.raw);
-                    request.recipe.depth.focus=focus;request.recipe.depth.blurRadius=32;
-                    Check(Depth::Finish(request,focused,error),error);
-                    SaveResult(directory/(focus>.5?"near-focus.png":"far-focus.png"),request,focused);
-                    report["defocusApplied"]=focused.raw->reconstructedCameraRgb;
-                }
+                report["graphMaskCount"]=depth->masks.size();
             }
             report["totalSeconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
             std::ofstream(directory/"report.json")<<report.dump(2);std::cout<<report.dump(2)<<'\n'<<std::flush;

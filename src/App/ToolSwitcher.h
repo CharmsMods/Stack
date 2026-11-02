@@ -12,6 +12,8 @@ struct Switcher {
     float progress = 0.f, fadeRemaining = 0.f;
     int hovered = -1;
     ImVec2 controlsMin{}, controlsMax{}, pointer{}, restoreCursor{};
+    ImVec2 graphCenter{};
+    float graphZoom = .65f;
     double lastPointerX = 0, lastPointerY = 0;
     bool Open() const { return held || mouseOpen; }
     bool Visible() const { return Open() || progress > 0.f; }
@@ -24,11 +26,12 @@ struct Switcher {
             : std::clamp(progress + (Open() ? 1.f : -1.f) * std::clamp(seconds, 0.f, .1f) / .18f, 0.f, 1.f);
     }
     Layout Geometry(float scale) const {
-        const float width = std::max(1.f, controlsMax.x - controlsMin.x);
-        const float height = std::max(1.f, controlsMax.y - controlsMin.y);
-        const float radius = std::max(30.f, std::min({width * .47f, height * .43f, 165.f * scale}));
-        return {ImVec2((controlsMin.x + controlsMax.x) * .5f,
-            (controlsMin.y + controlsMax.y) * .5f), radius, radius * .31f};
+        const auto* viewport=ImGui::GetMainViewport();
+        const float radius = std::max(1.f,std::min({viewport->WorkSize.x*.42f,viewport->WorkSize.y*.42f,240.f*scale}));
+        return {ImVec2(std::clamp((controlsMin.x+controlsMax.x)*.5f,viewport->WorkPos.x+radius,
+                viewport->WorkPos.x+viewport->WorkSize.x-radius),
+            std::clamp((controlsMin.y+controlsMax.y)*.5f,viewport->WorkPos.y+radius*.7f,
+                std::max(viewport->WorkPos.y+radius*.7f,viewport->WorkPos.y+viewport->WorkSize.y-radius*.7f-28.f))),radius,radius*.31f};
     }
     int Hit(ImVec2 delta, const Layout& layout) const {
         if (!HasChoices()) return -1;

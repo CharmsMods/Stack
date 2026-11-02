@@ -109,7 +109,8 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
         // variance scale keeps sums in a comfortable float32 range.
         const float base=m.z*headroom*1e-5f/(variance+std::max(0.f,m.w));
         const float w=f.detailPreference*base*std::exp(-.5f*(p.kernel.x*dx*dx+2*p.kernel.y*dx*dy+p.kernel.z*dy*dy));
-        const float bw=base*std::exp(-.5f*(dx*dx+dy*dy));
+        const auto& k=p.broadKernel;
+        const float bw=base*std::exp(-.5f*(k.x*dx*dx+2*k.y*dx*dy+k.z*dy*dy));
         auto& n=p.narrow[c];auto& b=p.broad[c];
         n.value+=w*s.x;n.weight+=w;n.noise+=w*w*variance;weights[c]+=w;
         b.value+=bw*s.x;b.weight+=bw;b.noise+=bw*bw*variance;broadWeights[c]+=bw;
@@ -144,13 +145,13 @@ bool AccumulateCpu(Tile& t,const FrameRegion& f,const std::function<bool()>& can
     if(canceled){error="Canceled";return false;}
     return true;
 }
-namespace {
 float ResolveAlpha(const PixelAccumulator& p,float samplingConfidence) {
     // Use the same continuous coverage decision for all colors. Switching a
     // sparse color independently between kernels creates false-color contours.
     // Uniformly distributed samples have narrow/broad mass equal to the ratio
     // of Gaussian areas. A deficit signals missing sampling phases.
-    const float area=1/std::sqrt(std::max(1e-12f,p.kernel.x*p.kernel.z-p.kernel.y*p.kernel.y));
+    const auto& k=p.broadKernel;
+    const float area=std::sqrt((k.x*k.z-k.y*k.y)/std::max(1e-12f,p.kernel.x*p.kernel.z-p.kernel.y*p.kernel.y));
     float confidence=std::isfinite(samplingConfidence)?std::clamp(samplingConfidence,0.f,1.f):0;
     for(unsigned c=0;c<3;++c) {
         const auto& nc=p.narrow[c];
@@ -162,7 +163,7 @@ float ResolveAlpha(const PixelAccumulator& p,float samplingConfidence) {
     }
     return confidence*confidence*(3-2*confidence);
 }
-ChannelResult ResolveChannel(const PixelAccumulator& p,unsigned channel,float alpha) {
+static ChannelResult ResolveChannel(const PixelAccumulator& p,unsigned channel,float alpha) {
     const auto& n=p.narrow[channel];const auto& b=p.broad[channel];
     if(!(b.weight>1e-12f))return {};
     const float a=n.weight>1e-12f?alpha/n.weight:0,beta=(1-alpha)/b.weight;
@@ -170,7 +171,6 @@ ChannelResult ResolveChannel(const PixelAccumulator& p,unsigned channel,float al
     const float frameSquared=a*a*n.frameWeightSquared+beta*beta*b.frameWeightSquared+2*a*beta*p.crossFrameWeight[channel];
     const float uncertainty=a*a*p.narrowUncertainty[channel]+beta*beta*p.broadUncertainty[channel]+2*a*beta*p.crossUncertainty[channel];
     return {a*n.value+beta*b.value,variance,1/std::max(1e-30f,frameSquared),true,uncertainty};
-}
 }
 ChannelResult Resolve(const PixelAccumulator& p,unsigned channel,float samplingConfidence) {
     return ResolveChannel(p,channel,ResolveAlpha(p,samplingConfidence));

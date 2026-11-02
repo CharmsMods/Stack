@@ -85,7 +85,7 @@ bool IsSupportedAssetExtension(const std::filesystem::path& path) {
 }
 
 bool IsSupportedProjectExtension(const std::filesystem::path& path) {
-    return Stack::Project::IsDirectoryProjectBundle(path);
+    return Stack::Project::IsWorkingProjectFile(path);
 }
 
 bool IsSupportedAssetMetadataExtension(const std::filesystem::path& path) {
@@ -95,7 +95,7 @@ bool IsSupportedAssetMetadataExtension(const std::filesystem::path& path) {
 
 std::string DefaultProjectExtensionForKind(const std::string& projectKind) {
     (void)projectKind;
-    return {};
+    return ".stack";
 }
 
 std::string EnsureProjectFileNameForKind(
@@ -109,7 +109,7 @@ std::string EnsureProjectFileNameForKind(
         : std::filesystem::path(fileName);
     return SanitizeFileStem(requested.stem().string().empty()
         ? requested.filename().string()
-        : requested.stem().string());
+        : requested.stem().string()) + ".stack";
 }
 
 std::string EnsureProjectFileName(const std::string& fileName, const std::string& fallbackName) {

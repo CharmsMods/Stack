@@ -505,6 +505,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             case EditorNodeGraph::NodeKind::CustomMask:
                 renderNode.kind = RenderGraphNodeKind::CustomMask;
                 renderNode.customMask = ToRenderCustomMaskPayload(node.customMask);
+                if (node.rawCoverage.contains("bracketDepthMask"))
+                    renderNode.rawCoverage = node.rawCoverage;
                 break;
             case EditorNodeGraph::NodeKind::MaskUtility:
                 renderNode.kind = RenderGraphNodeKind::MaskUtility;

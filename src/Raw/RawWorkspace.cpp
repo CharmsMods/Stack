@@ -1,6 +1,8 @@
+#include "Persistence/BracketMaster.h"
 #include "Raw/RawViewportSettings.h"
 #include "Raw/RawGalleryInputPolicy.h"
 #include "RawWorkspace.h"
+#include "RawGalleryCoverCache.h"
 #include "Raw/RawSourceFolders.h"
 #include "Raw/Internal/RawWorkspaceStorageIO.h"
 
@@ -81,6 +83,37 @@ std::int64_t FileTimeUnixSeconds(const std::filesystem::file_time_type& fileTime
         std::chrono::duration_cast<std::chrono::system_clock::duration>(age);
     return std::chrono::duration_cast<std::chrono::seconds>(
         systemTime.time_since_epoch()).count();
+}
+
+SourceRecord FileListingRecord(const std::filesystem::directory_entry& entry, const std::filesystem::path& root) {
+    SourceRecord record;
+    record.absolutePath = NormalizePath(entry.path());
+    record.relativePath = record.absolutePath.lexically_relative(root);
+    if (record.relativePath.empty()) {
+        record.relativePath = record.absolutePath.filename();
+    }
+    record.relativePathKey = GenericPathKey(record.relativePath);
+    record.fileName = record.absolutePath.filename().u8string();
+    record.stem = record.absolutePath.stem().u8string();
+    record.extension = record.absolutePath.extension().u8string();
+    record.parentFolderKey = record.relativePath.has_parent_path()
+        ? GenericPathKey(record.relativePath.parent_path())
+        : std::string();
+
+    std::error_code statEc;
+    record.fileSizeBytes = entry.file_size(statEc);
+    if (statEc) {
+        record.fileSizeBytes = 0;
+    }
+    statEc.clear();
+    const auto modifiedTime = entry.last_write_time(statEc);
+    if (statEc) {
+        record.modifiedTimeTicks = 0;
+    } else {
+        record.modifiedTimeTicks = FileTimeTicks(modifiedTime);
+        record.modifiedUnixSeconds = FileTimeUnixSeconds(modifiedTime);
+    }
+    return record;
 }
 
 std::int64_t UnixSecondsNow() {
@@ -264,6 +297,56 @@ nlohmann::json SerializeThumbnailSignature(const ThumbnailSignature& signature) 
     return value;
 }
 
+nlohmann::json CameraThumbnailJson(const CameraThumbnail& camera) {
+    if (!camera.bytes) return nullptr;
+    return {{"offset", camera.offset}, {"bytes", camera.bytes}, {"width", camera.width},
+        {"height", camera.height}, {"orientation", camera.orientation}};
+}
+
+CameraThumbnail ReadCameraThumbnailRef(const nlohmann::json& object, std::uintmax_t sourceSize) {
+    const auto value = FindJsonMember(object, "cameraJpeg");
+    if (!value || !value->is_object()) return {};
+    const auto offset = JsonInt64OrDefault(*value, "offset");
+    const auto bytes = JsonInt64OrDefault(*value, "bytes");
+    if (offset <= 0 || bytes <= 0 || bytes > UINT32_MAX) return {};
+    CameraThumbnail camera{static_cast<std::uint64_t>(offset), static_cast<std::uint32_t>(bytes),
+        JsonIntOrDefault(*value, "width"), JsonIntOrDefault(*value, "height"), JsonIntOrDefault(*value, "orientation")};
+    return camera.Fits(sourceSize) ? camera : CameraThumbnail{};
+}
+
+std::filesystem::path CameraSignatureRelativePath(const SourceRecord& source) {
+    // A camera RAW and its companion JPEG frequently have the same stem.
+    auto name = source.absolutePath.filename();
+    name += ".camera.json";
+    return std::filesystem::u8path(source.parentFolderKey) / name;
+}
+
+bool ReadCameraSignature(const ManagedLayout& layout, const SourceRecord& source,
+    const ThumbnailSignature& expected, nlohmann::json& value) {
+    return !IsGalleryRasterPath(source.absolutePath) &&
+        ReadJsonFile(layout.thumbnailsDirectory / CameraSignatureRelativePath(source), value) &&
+        ThumbnailSignatureMatches(expected, value) && ReadCameraThumbnailRef(value, source.fileSizeBytes).bytes;
+}
+
+void UseCameraThumbnail(ThumbnailInfo& info, const CameraThumbnail& camera, int maxDimension,
+    const ManagedLayout& layout, const SourceRecord& source) {
+    info.camera = camera;
+    info.signatureRelativePath = CameraSignatureRelativePath(source);
+    info.signaturePath = layout.thumbnailsDirectory / info.signatureRelativePath;
+    info.absolutePath.clear();
+    info.relativePath.clear();
+    camera.DisplaySize(maxDimension, info.width, info.height);
+}
+
+void UseOriginalRaster(ThumbnailInfo& info, const ManagedLayout& layout, const SourceRecord& source) {
+    auto signature = source.absolutePath.filename();
+    signature += ".raster.json";
+    info.signatureRelativePath = std::filesystem::u8path(source.parentFolderKey) / signature;
+    info.signaturePath = layout.thumbnailsDirectory / info.signatureRelativePath;
+    info.absolutePath.clear();
+    info.relativePath.clear();
+}
+
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height) {
     std::vector<unsigned char> pngBytes;
     if (pixels.empty() || width <= 0 || height <= 0) {
@@ -295,8 +378,61 @@ std::vector<std::filesystem::path> DeduplicateRecentRoots(const std::vector<std:
 
 } // namespace
 
+bool ReadGalleryOriginal(const std::filesystem::path& root, const std::filesystem::path& path,
+    SourceRecord& source, std::string& error, CancellationPredicate cancelled) {
+    const auto owner = root.empty() ? OwningPhotoRoot(path.parent_path()) : NormalizePath(root);
+    std::error_code ec;
+    const std::filesystem::directory_entry entry(path, ec);
+    if (ec || !entry.is_regular_file(ec) || !IsPathWithinRoot(path, owner)) {
+        error = "The original is no longer available in its photo folder.";
+        return false;
+    }
+    auto record = FileListingRecord(entry, owner);
+    const auto identity = Stack::RawEvidence::ComputeSourceIdentity(record.absolutePath, cancelled);
+    if (!identity.valid) {
+        error = identity.reason;
+        return false;
+    }
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (ec || FileTimeTicks(modified) != record.modifiedTimeTicks || identity.byteSize != record.fileSizeBytes) {
+        error = "The original changed while it was being opened. Open it again.";
+        return false;
+    }
+    record.fingerprint = identity.sha256;
+    record.sourceIdentityAlgorithmVersion = kSourceIdentityAlgorithmVersion;
+    record.sourceWorkspaceRoot = owner;
+    source = std::move(record);
+    return true;
+}
+
 bool DefaultRawPathPredicate(const std::filesystem::path& path) {
-    return IsGalleryRawPath(path);
+    return IsGalleryRawPath(path) || IsGalleryRasterPath(path);
+}
+
+bool LoadGalleryRasterThumbnail(const std::filesystem::path& path, int maxDimension,
+    std::vector<unsigned char>& rgba, int& width, int& height) {
+    if (maxDimension <= 0 || maxDimension > 4096) return false;
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    const auto length = input.tellg();
+    if (length <= 0 || length > INT_MAX) return false;
+    std::vector<unsigned char> encoded(static_cast<std::size_t>(length));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char*>(encoded.data()), length)) return false;
+    stbi_set_flip_vertically_on_load_thread(0);
+    int w=0,h=0,channels=0;
+    std::unique_ptr<unsigned char,decltype(&stbi_image_free)> pixels(encoded.size()<=INT_MAX ?
+        stbi_load_from_memory(encoded.data(),static_cast<int>(encoded.size()),&w,&h,&channels,4) : nullptr,stbi_image_free);
+    if (pixels && w>0 && h>0) {
+        const double scale=std::min(1.,double(maxDimension)/std::max(w,h));
+        width=std::max(1,int(w*scale)); height=std::max(1,int(h*scale));
+        rgba.resize(std::size_t(width)*height*4);
+        for (int y=0;y<height;++y) for (int x=0;x<width;++x) {
+            const auto offset=(std::size_t(y)*h/height*w+std::size_t(x)*w/width)*4;
+            std::copy_n(pixels.get()+offset,4,rgba.data()+(std::size_t(y)*width+x)*4);
+        }
+        return true;
+    }
+    return false;
 }
 
 ScanResult ScanWorkspace(
@@ -305,9 +441,11 @@ ScanResult ScanWorkspace(
     ScanProgressCallback progressCallback,
     CancellationPredicate shouldCancel,
     ScanSourceReadyCallback sourceReadyCallback,
-    SourceIdentityReuseCallback reuseSourceIdentity) {
+    SourceIdentityReuseCallback reuseSourceIdentity,
+    bool galleryBrowse,
+    std::function<void(const std::vector<SourceRecord>&)> listingReady) {
     ScanResult result;
-    result.layout = BuildManagedLayout(workspaceRoot);
+    result.layout = galleryBrowse ? BuildGalleryLayout(workspaceRoot) : BuildManagedLayout(workspaceRoot);
     result.progress.stage = ScanProgress::Stage::Preparing;
     result.progress.statusText = "Preparing folder scan...";
 
@@ -331,7 +469,7 @@ ScanResult ScanWorkspace(
     }
 
     std::string folderError;
-    if (!EnsureManagedFolders(result.layout.workspaceRoot, &folderError)) {
+    if (!galleryBrowse && !EnsureManagedFolders(result.layout.workspaceRoot, &folderError)) {
         result.errorMessage = folderError;
         return result;
     }
@@ -355,6 +493,7 @@ ScanResult ScanWorkspace(
         }
     };
 
+    auto& masters = result.bracketMasters;
     try {
         result.progress.stage = ScanProgress::Stage::Scanning;
         std::filesystem::recursive_directory_iterator it(
@@ -385,9 +524,18 @@ ScanResult ScanWorkspace(
                 ++result.progress.directoriesVisited;
                 result.progress.currentItem = entryPath.filename().u8string();
                 result.progress.statusText = "Scanning " + result.progress.currentItem;
-                const bool managed = ToLowerAscii(NormalizePath(entryPath).generic_u8string()) ==
-                    ToLowerAscii(result.layout.dataDirectory.generic_u8string());
-                if (managed) {
+                const auto name = ToLowerAscii(entryPath.filename().u8string());
+                const bool managed = name == "closet" && entryPath.parent_path() == result.layout.workspaceRoot &&
+                    (!galleryBrowse || IsMarkedCloset(entryPath));
+                const bool retired = name.rfind(".stack-merged-", 0) == 0 && IsMarkedCloset(entryPath);
+                const bool nested = !managed && name == "closet" && IsMarkedCloset(entryPath);
+                if (nested) {
+                    std::ifstream marker(entryPath/"workspace.json",std::ios::binary);
+                    const auto manifest=nlohmann::json::parse(marker,nullptr,false);
+                    if (manifest.is_object() && manifest.value("workingProjectFormat",0)==1)
+                        result.nestedClosets.push_back(entryPath);
+                }
+                if (managed || nested || retired) {
                     ++result.progress.managedDirectoriesSkipped;
                     it.disable_recursion_pending();
                 }
@@ -403,6 +551,17 @@ ScanResult ScanWorkspace(
 
             ++result.progress.filesVisited;
             result.progress.currentItem = entryPath.filename().u8string();
+            const auto extension = ToLowerAscii(entryPath.extension().u8string());
+            if (extension == ".dng" || extension == ".exr") {
+                const auto marker = Stack::Project::BracketMasterMetadata(entryPath);
+                if (marker.is_object() && marker.contains("resultId") && marker["resultId"].is_string()) {
+                    masters.push_back({{"relativePath",entryPath.lexically_relative(result.layout.workspaceRoot).generic_u8string()},
+                        {"fileSizeBytes",entry.file_size(ec)},{"modifiedTimeTicks",FileTimeTicks(entry.last_write_time(ec))},
+                        {"resultId",marker["resultId"]}, {"captures",marker.value("sources", nlohmann::json::array())}});
+                    reportProgress();
+                    continue;
+                }
+            }
             if (!isRawPath(entryPath)) {
                 reportProgress();
                 continue;
@@ -410,35 +569,18 @@ ScanResult ScanWorkspace(
 
             result.progress.stage = ScanProgress::Stage::Scanning;
 
-            SourceRecord record;
-            record.absolutePath = NormalizePath(entryPath);
-            std::error_code relEc;
-            record.relativePath = std::filesystem::relative(record.absolutePath, result.layout.workspaceRoot, relEc);
-            if (relEc || record.relativePath.empty()) {
-                record.relativePath = record.absolutePath.filename();
-            }
-            record.relativePathKey = GenericPathKey(record.relativePath);
-            record.fileName = record.absolutePath.filename().u8string();
-            record.stem = record.absolutePath.stem().u8string();
-            record.extension = record.absolutePath.extension().u8string();
-            record.parentFolderKey = record.relativePath.has_parent_path()
-                ? GenericPathKey(record.relativePath.parent_path())
-                : std::string();
-
-            std::error_code statEc;
-            record.fileSizeBytes = std::filesystem::file_size(record.absolutePath, statEc);
-            if (statEc) {
-                record.fileSizeBytes = 0;
-            }
-            statEc.clear();
-            const auto modifiedTime = std::filesystem::last_write_time(record.absolutePath, statEc);
-            if (statEc) {
-                record.modifiedTimeTicks = 0;
-            } else {
-                record.modifiedTimeTicks = FileTimeTicks(modifiedTime);
-                record.modifiedUnixSeconds = FileTimeUnixSeconds(modifiedTime);
-            }
-
+            auto record = FileListingRecord(entry, result.layout.workspaceRoot);
+            record.browsePreview = galleryBrowse;
+            result.sources.push_back(std::move(record));
+            result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
+            reportProgress();
+        }
+        std::sort(result.sources.begin(), result.sources.end(), [](const SourceRecord& a, const SourceRecord& b) {
+            return RawGalleryPathOrderKey(a.relativePathKey) < RawGalleryPathOrderKey(b.relativePathKey);
+        });
+        if (listingReady && !isCancelled()) listingReady(result.sources);
+        for (auto& record : result.sources) {
+            if (isCancelled()) { result.errorMessage = "Workspace scan canceled."; return result; }
             const bool identityReused = reuseSourceIdentity &&
                 reuseSourceIdentity(record) && !record.fingerprint.empty() &&
                 record.sourceIdentityAlgorithmVersion ==
@@ -468,6 +610,7 @@ ScanResult ScanWorkspace(
                 result.progress.verifiedRawBytes += identity.byteSize;
                 ++result.progress.hashedRawCount;
             }
+            if (IsGalleryRasterPath(record.absolutePath)) record.captureMetadataChecked=true;
             if (!record.captureMetadataChecked && !isCancelled()) {
                 Raw::RawMetadata metadata;
                 if (Raw::RawLoader::LoadMetadata(record.absolutePath.u8string(), metadata)) {
@@ -476,14 +619,15 @@ ScanResult ScanWorkspace(
                     record.captureMetadataChecked = true;
                 }
             }
-            result.sources.push_back(std::move(record));
-            result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
-            result.progress.statusText = "Discovered " + std::to_string(result.progress.discoveredRawCount) + " RAW files";
-            reportProgress(true);
-            if (sourceReadyCallback) {
-                sourceReadyCallback(
-                    result.layout, result.sources.back(), result.progress);
-            }
+            record.browsePreview = false;
+            if (sourceReadyCallback) sourceReadyCallback(result.layout, record, result.progress);
+        }
+        for (auto& master : masters) {
+            const auto path = result.layout.workspaceRoot / std::filesystem::u8path(master.at("relativePath").get<std::string>());
+            const auto identity = Stack::RawEvidence::ComputeSourceIdentity(path, isCancelled);
+            if (!identity.valid) { result.errorMessage = "Could not index bracket master."; return result; }
+            master["fingerprint"] = identity.sha256;
+            master["fileSizeBytes"] = identity.byteSize;
         }
     } catch (const std::exception& error) {
         result.errorMessage = error.what();
@@ -499,10 +643,13 @@ ScanResult ScanWorkspace(
         return result;
     }
 
-    std::sort(result.sources.begin(), result.sources.end(), [](const SourceRecord& a, const SourceRecord& b) {
-        return RawGalleryPathOrderKey(a.relativePathKey) < RawGalleryPathOrderKey(b.relativePathKey);
-    });
-
+    std::string cacheError;
+    if (!StorageIO::WriteCompactJsonFile(result.layout.catalogDirectory / "masters.json",
+            {{"schema","stack.bracket.catalog.v1"},{"sources",masters}},
+            [&]{return !isCancelled();}, &cacheError) && (!galleryBrowse || isCancelled())) {
+        result.errorMessage = cacheError;
+        return result;
+    }
     result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
     result.progress.currentItem.clear();
     result.progress.stage = ScanProgress::Stage::Complete;
@@ -514,11 +661,18 @@ ScanResult ScanWorkspace(
     return result;
 }
 
+SourceRecord* FindStandaloneMaster(const WorkspaceState& state, const std::string& sourceKey) {
+    for (const auto& project : state.sourceSetProjects)
+        if (project.masterSource && project.masterSource->relativePathKey == sourceKey)
+            return project.masterSource.get();
+    return nullptr;
+}
+
 bool SelectSourceByKey(WorkspaceState& state, const std::string& sourceKey) {
     const auto it = std::find_if(state.sources.begin(), state.sources.end(), [&](const SourceRecord& source) {
         return source.relativePathKey == sourceKey;
     });
-    if (it == state.sources.end()) {
+    if (it == state.sources.end() && !FindStandaloneMaster(state, sourceKey)) {
         return false;
     }
     state.selectedSourceKey = sourceKey;
@@ -600,45 +754,41 @@ ThumbnailStatus ClassifyThumbnailMetadata(
     int maxDimension) {
     source.thumbnail = BuildThumbnailInfo(layout, source, maxDimension);
 
-    std::error_code ec;
-    const bool pngExists =
-        std::filesystem::is_regular_file(source.thumbnail.absolutePath, ec) &&
-        !ec;
-    ec.clear();
-    const bool signatureExists = std::filesystem::is_regular_file(
-        source.thumbnail.signaturePath, ec) && !ec;
-    if (!pngExists && !signatureExists) {
-        source.thumbnail.status = ThumbnailStatus::Missing;
-        return source.thumbnail.status;
-    }
-    if (!pngExists || !signatureExists) {
-        source.thumbnail.status = ThumbnailStatus::Stale;
-        return source.thumbnail.status;
-    }
-    ec.clear();
-    const std::uintmax_t pngSize = std::filesystem::file_size(
-        source.thumbnail.absolutePath, ec);
-    if (ec || pngSize == 0) {
-        source.thumbnail.status = ThumbnailStatus::Stale;
-        source.thumbnail.errorMessage = "RAW thumbnail PNG is empty.";
-        return source.thumbnail.status;
-    }
-
     nlohmann::json signatureJson;
-    const ThumbnailSignature expected = BuildThumbnailSignature(
-        source, maxDimension);
-    if (!ReadJsonFile(source.thumbnail.signaturePath, signatureJson) ||
-        !ThumbnailSignatureMatches(expected, signatureJson)) {
-        source.thumbnail.status = ThumbnailStatus::Stale;
-        source.thumbnail.errorMessage =
-            "RAW thumbnail signature is missing or stale.";
+    const auto expected = BuildThumbnailSignature(source, maxDimension);
+    const bool raster = IsGalleryRasterPath(source.absolutePath);
+    if (raster) {
+        UseOriginalRaster(source.thumbnail, layout, source);
+        source.browsePreview = true;
+    }
+    const bool readCamera = ReadCameraSignature(layout, source, expected, signatureJson);
+    const bool readSignature = readCamera || ReadJsonFile(source.thumbnail.signaturePath, signatureJson);
+    const bool current = readSignature && ThumbnailSignatureMatches(expected, signatureJson);
+    const bool checkedCamera = current && signatureJson.contains("cameraJpeg");
+    CameraThumbnail camera = checkedCamera ? ReadCameraThumbnailRef(signatureJson, source.fileSizeBytes) : CameraThumbnail{};
+    if (!checkedCamera && !raster)
+        camera = FindCameraThumbnail(source.absolutePath, source.fileSizeBytes, maxDimension);
+    if (camera.bytes) UseCameraThumbnail(source.thumbnail, camera, maxDimension, layout, source);
+
+    if (!current) {
+        std::error_code ec;
+        const bool hadCache = readSignature || std::filesystem::is_regular_file(source.thumbnail.signaturePath, ec) ||
+            (!raster && !camera.bytes && std::filesystem::is_regular_file(source.thumbnail.absolutePath, ec));
+        source.thumbnail.status = hadCache ? ThumbnailStatus::Stale : ThumbnailStatus::Missing;
         return source.thumbnail.status;
     }
-
-    source.thumbnail.width = JsonIntOrDefault(
-        signatureJson, "thumbnailWidth");
-    source.thumbnail.height = JsonIntOrDefault(
-        signatureJson, "thumbnailHeight");
+    if (!camera.bytes) {
+        if (!raster) {
+            std::error_code ec;
+            const auto bytes = std::filesystem::file_size(source.thumbnail.absolutePath, ec);
+            if (ec || !bytes) {
+                source.thumbnail.status = ThumbnailStatus::Stale;
+                return source.thumbnail.status;
+            }
+        }
+        source.thumbnail.width = JsonIntOrDefault(signatureJson, "thumbnailWidth");
+        source.thumbnail.height = JsonIntOrDefault(signatureJson, "thumbnailHeight");
+    }
     const nlohmann::json* descriptorJson = FindJsonMember(
         signatureJson, "similarityDescriptor");
     const bool descriptorLoaded = descriptorJson != nullptr &&
@@ -653,6 +803,11 @@ ThumbnailStatus ClassifyThumbnailMetadata(
         return source.thumbnail.status;
     }
 
+    if (!checkedCamera || (camera.bytes && !readCamera)) {
+        // Reuse existing neutral analysis when adopting a camera preview.
+        signatureJson["cameraJpeg"] = CameraThumbnailJson(camera);
+        WriteJsonFile(source.thumbnail.signaturePath, signatureJson, nullptr);
+    }
     source.thumbnail.status = ThumbnailStatus::Valid;
     source.thumbnail.errorMessage.clear();
     return source.thumbnail.status;
@@ -662,28 +817,46 @@ ThumbnailStatus ClassifyThumbnail(
     const ManagedLayout& layout,
     SourceRecord& source,
     int maxDimension) {
+    if (IsGalleryRasterPath(source.absolutePath)) {
+        if (ClassifyThumbnailMetadata(layout, source, maxDimension) != ThumbnailStatus::Valid)
+            return source.thumbnail.status;
+        std::vector<unsigned char> pixels;
+        int width = 0, height = 0;
+        if (!DecodeRasterThumbnail(source.absolutePath, maxDimension, pixels, width, height) &&
+            !LoadGalleryRasterThumbnail(source.absolutePath, maxDimension, pixels, width, height))
+            source.thumbnail.status = ThumbnailStatus::Stale;
+        return source.thumbnail.status;
+    }
     source.thumbnail = BuildThumbnailInfo(layout, source, maxDimension);
 
-    std::error_code ec;
-    const bool pngExists = std::filesystem::exists(source.thumbnail.absolutePath, ec) && !ec;
-    ec.clear();
-    const bool signatureExists = std::filesystem::exists(source.thumbnail.signaturePath, ec) && !ec;
-    if (!pngExists && !signatureExists) {
-        source.thumbnail.status = ThumbnailStatus::Missing;
-        return source.thumbnail.status;
-    }
-    if (!pngExists || !signatureExists) {
-        source.thumbnail.status = ThumbnailStatus::Stale;
-        return source.thumbnail.status;
+    nlohmann::json signatureJson;
+    const auto expected = BuildThumbnailSignature(source, maxDimension);
+    if (!ReadCameraSignature(layout, source, expected, signatureJson)) {
+        std::error_code ec;
+        const bool png = std::filesystem::is_regular_file(source.thumbnail.absolutePath, ec);
+        const bool signature = std::filesystem::is_regular_file(source.thumbnail.signaturePath, ec);
+        if (!png && !signature) {
+            source.thumbnail.status = ThumbnailStatus::Missing;
+            return source.thumbnail.status;
+        }
+        if (!signature || !ReadJsonFile(source.thumbnail.signaturePath, signatureJson) ||
+            !ThumbnailSignatureMatches(expected, signatureJson)) {
+            source.thumbnail.status = ThumbnailStatus::Stale;
+            source.thumbnail.errorMessage = "RAW thumbnail signature is missing or stale.";
+            return source.thumbnail.status;
+        }
     }
 
-    nlohmann::json signatureJson;
-    const ThumbnailSignature expected = BuildThumbnailSignature(source, maxDimension);
-    if (!ReadJsonFile(source.thumbnail.signaturePath, signatureJson) ||
-        !ThumbnailSignatureMatches(expected, signatureJson)) {
-        source.thumbnail.status = ThumbnailStatus::Stale;
-        source.thumbnail.errorMessage =
-            "RAW thumbnail signature is missing or stale.";
+    const auto camera = ReadCameraThumbnailRef(signatureJson, source.fileSizeBytes);
+    if (camera.bytes) {
+        UseCameraThumbnail(source.thumbnail, camera, maxDimension, layout, source);
+        const auto* descriptor = FindJsonMember(signatureJson, "similarityDescriptor");
+        std::vector<unsigned char> pixels;
+        int width = 0, height = 0;
+        source.thumbnail.status = descriptor &&
+            DeserializeRawGallerySimilarityDescriptor(*descriptor, source.thumbnail.similarityDescriptor) &&
+            DecodeCameraThumbnail(source.absolutePath, camera, maxDimension, pixels, width, height)
+            ? ThumbnailStatus::Valid : ThumbnailStatus::Stale;
         return source.thumbnail.status;
     }
 
@@ -795,7 +968,7 @@ ThumbnailProgress BuildThumbnailProgress(const std::vector<SourceRecord>& source
         const bool standardReady =
             source.thumbnail.status == ThumbnailStatus::Valid ||
             source.thumbnail.status == ThumbnailStatus::Ready;
-        const bool quickReady = standardReady ||
+        const bool quickReady = standardReady || source.thumbnail.camera.bytes ||
             source.transientThumbnail.status == ThumbnailStatus::Ready;
         if (standardReady) ++progress.standardAvailable;
         if (quickReady) ++progress.quickAvailable;
@@ -839,6 +1012,10 @@ ThumbnailGenerationResult GenerateNeutralThumbnailImpl(
     result.thumbnail = fastPreview
         ? BuildTransientThumbnailInfo(layout, source, maxDimension)
         : BuildThumbnailInfo(layout, source, maxDimension);
+    if (source.thumbnail.camera.bytes && !fastPreview)
+        UseCameraThumbnail(result.thumbnail, source.thumbnail.camera, maxDimension, layout, source);
+    const bool raster = IsGalleryRasterPath(source.absolutePath);
+    if (raster && !fastPreview) UseOriginalRaster(result.thumbnail, layout, source);
     result.thumbnail.status = ThumbnailStatus::Generating;
     auto isCancelled = [&]() {
         return shouldCancel && shouldCancel();
@@ -854,29 +1031,22 @@ ThumbnailGenerationResult GenerateNeutralThumbnailImpl(
         return result;
     }
 
-    Raw::RawImageData raw;
-    if (!Raw::RawLoader::LoadFile(source.absolutePath.u8string(), raw, isCancelled)) {
-        if (isCancelled()) {
-            markCancelled();
+    std::vector<unsigned char> rgba;
+    int width=0, height=0;
+    bool built=false;
+    if (raster) {
+        built = LoadGalleryRasterThumbnail(source.absolutePath, maxDimension, rgba, width, height);
+    } else {
+        Raw::RawImageData raw;
+        if (!Raw::RawLoader::LoadFile(source.absolutePath.u8string(),raw,isCancelled)) {
+            if (isCancelled()) { markCancelled(); return result; }
+            result.errorMessage=raw.metadata.error.empty() ? "Image could not be decoded." : raw.metadata.error;
+            result.thumbnail.status=ThumbnailStatus::Failed;
+            result.thumbnail.errorMessage=result.errorMessage;
             return result;
         }
-        result.errorMessage = raw.metadata.error.empty()
-            ? "RAW file could not be decoded."
-            : raw.metadata.error;
-        result.thumbnail.status = ThumbnailStatus::Failed;
-        result.thumbnail.errorMessage = result.errorMessage;
-        return result;
+        built=BuildRawGalleryThumbnailPixels(raw,maxDimension,rgba,width,height,fastPreview,isCancelled);
     }
-    if (isCancelled()) {
-        markCancelled();
-        return result;
-    }
-
-    std::vector<unsigned char> rgba;
-    int width = 0;
-    int height = 0;
-    const bool built = BuildRawGalleryThumbnailPixels(
-        raw, maxDimension, rgba, width, height, fastPreview, isCancelled);
     if (isCancelled()) {
         markCancelled();
         return result;
@@ -894,31 +1064,24 @@ ThumbnailGenerationResult GenerateNeutralThumbnailImpl(
             width,
             height);
 
-    std::vector<unsigned char> pngBytes = EncodePngBytes(rgba, width, height);
-    if (isCancelled()) {
-        markCancelled();
-        return result;
-    }
-    if (pngBytes.empty()) {
-        result.errorMessage = "RAW thumbnail PNG encoding failed.";
-        result.thumbnail.status = ThumbnailStatus::Failed;
-        result.thumbnail.errorMessage = result.errorMessage;
-        return result;
-    }
-
     std::string writeError;
-    if (isCancelled()) {
-        markCancelled();
-        return result;
+    if (source.thumbnail.camera.bytes && !fastPreview) {
+        // The neutral samples above feed scene matching only. The displayed
+        // original is already stored as a JPEG inside the capture.
+        width = result.thumbnail.width;
+        height = result.thumbnail.height;
+    } else if (!raster || fastPreview) {
+        auto pngBytes = EncodePngBytes(rgba, width, height);
+        if (isCancelled()) { markCancelled(); return result; }
+        if (pngBytes.empty() || !WriteBinaryFile(result.thumbnail.absolutePath, pngBytes, &writeError)) {
+            result.errorMessage = pngBytes.empty() ? "RAW thumbnail PNG encoding failed." : writeError;
+            result.thumbnail.status = ThumbnailStatus::Failed;
+            result.thumbnail.errorMessage = result.errorMessage;
+            return result;
+        }
     }
-    if (!WriteBinaryFile(result.thumbnail.absolutePath, pngBytes, &writeError)) {
-        result.errorMessage = writeError;
-        result.thumbnail.status = ThumbnailStatus::Failed;
-        result.thumbnail.errorMessage = result.errorMessage;
-        return result;
-    }
-
     nlohmann::json signature = SerializeThumbnailSignature(BuildThumbnailSignature(source, maxDimension));
+    signature["cameraJpeg"] = CameraThumbnailJson(result.thumbnail.camera);
     signature["thumbnailRelativePath"] = result.thumbnail.relativePath.generic_u8string();
     signature["thumbnailWidth"] = width;
     signature["thumbnailHeight"] = height;
@@ -979,8 +1142,8 @@ bool RemoveTransientThumbnailCache(
     }
     const bool safeTarget =
         !layout.workspaceRoot.empty() &&
-        layout.transientThumbnailsDirectory ==
-            BuildManagedLayout(layout.workspaceRoot).transientThumbnailsDirectory;
+        (layout.transientThumbnailsDirectory == BuildManagedLayout(layout.workspaceRoot).transientThumbnailsDirectory ||
+         layout.transientThumbnailsDirectory == BuildGalleryLayout(layout.workspaceRoot).transientThumbnailsDirectory);
     if (!safeTarget) {
         if (outError != nullptr) {
             *outError = "Refused to remove an invalid transient thumbnail cache path.";
@@ -1001,12 +1164,15 @@ bool RemoveTransientThumbnailCache(
 }
 
 void FilterGalleryProjectCards(GalleryPresentation& presentation, GalleryContentMode mode) {
-    // Projects contains every saved document. Bracket is a narrower view of
-    // that population, not a separate home that hides projects elsewhere.
-    if (mode != GalleryContentMode::Bracket) return;
+    if (mode == GalleryContentMode::Gallery) return;
     auto& projects = presentation.projects;
     projects.erase(std::remove_if(projects.begin(), projects.end(),
-        [](const auto& project) { return !project.bracketingProject; }), projects.end());
+        [mode](const auto& project) {
+            if (mode == GalleryContentMode::Unlinked) return !project.unlinked;
+            if (project.standaloneMaster) return mode != GalleryContentMode::Bracket;
+            if (mode == GalleryContentMode::AllProjects) return false;
+            return mode == GalleryContentMode::Bracket ? !project.bracketingProject : project.untouchedAutomaticBracket;
+        }), projects.end());
 }
 
 std::string BuildGallerySourceIdentityKey(std::vector<std::string> identities) {
@@ -1082,7 +1248,10 @@ std::vector<GalleryCompletedBurstSourceSet> BuildGalleryCompletedBurstSourceSets
         members.erase(std::unique(members.begin(), members.end()), members.end());
         // A missing original must not turn a larger saved burst into a
         // smaller completed stack. Discovery will restore it when available.
-        if (members.size() == set.expectedCount && set.contentKnown) {
+        auto& content = set.contentIdentities;
+        std::sort(content.begin(), content.end());
+        content.erase(std::unique(content.begin(), content.end()), content.end());
+        if (content.size() == set.expectedCount && set.contentKnown) {
             // Same identity components as automatic candidate matching:
             // content fingerprint plus bytes, with duplicate aliases removed.
             set.completed.sourceContentKey = BuildGallerySourceIdentityKey(std::move(set.contentIdentities));
@@ -1113,6 +1282,7 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
             ? project.absolutePath.stem().u8string()
             : project.projectName;
         view.projectPath = project.absolutePath;
+        view.projectCoverKey = ProjectCoverKey(view.projectPath,view.projectId);
         view.coverThumbnailCachePath = project.coverThumbnailCachePath;
         view.referenceSourceKey = project.referenceSourceKey;
         if (view.referenceSourceKey.empty() && !project.sourceKeys.empty())
@@ -1122,7 +1292,10 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
         view.frameCount = project.totalFrameCount;
         view.status = project.status;
         view.multiFrameProject = project.multiFrameProject;
+        view.standaloneMaster = project.standaloneMaster;
+        view.unlinked = project.unlinked;
         view.bracketingProject = project.bracketingProject;
+        view.untouchedAutomaticBracket = project.untouchedAutomaticBracket;
         view.hasSavedBracketingResult = project.hasSavedBracketingResult;
         view.sourceKeys = project.sourceKeys;
         view.sourceIdentityKey = project.sourceIdentityKey;
@@ -1133,7 +1306,8 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
     std::unordered_map<std::string, const GalleryProjectView*> projectsByPath;
     for (const GalleryProjectView& project : presentation.projects) {
         if (!project.projectId.empty()) {
-            projectsById[project.projectId] = &project;
+            const auto inserted = projectsById.emplace(project.projectId, &project);
+            if (!inserted.second) inserted.first->second = nullptr;
         }
         if (!project.projectPath.empty()) {
             projectsByPath[ToLowerAscii(
@@ -1143,18 +1317,9 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
     const auto savedProjectKey = [](const GalleryProjectView* project,
                                     const std::string& fallbackId,
                                     const std::filesystem::path& fallbackPath) {
-        if (project != nullptr && !project->projectId.empty()) {
-            return std::string("id:") + ToLowerAscii(project->projectId);
-        }
-        if (!fallbackId.empty()) {
-            return std::string("id:") + ToLowerAscii(fallbackId);
-        }
-        const std::filesystem::path path =
-            project != nullptr ? project->projectPath : fallbackPath;
-        return path.empty()
-            ? std::string()
-            : std::string("path:") + ToLowerAscii(
-                  NormalizePath(path).generic_u8string());
+        if (project) return project->projectCoverKey;
+        if (fallbackPath.empty() && fallbackId.empty()) return std::string{};
+        return ProjectCoverKey(fallbackPath,fallbackId);
     };
 
     std::unordered_map<std::string, std::size_t> groupIndexes;
@@ -1193,15 +1358,13 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
         for (const SourceSetProjectMembership& membership :
              source.sourceSetProjectMemberships) {
             const GalleryProjectView* candidate = nullptr;
-            const auto byId = projectsById.find(membership.projectId);
-            if (byId != projectsById.end()) {
-                candidate = byId->second;
-            } else if (!membership.projectPath.empty()) {
-                const auto byPath = projectsByPath.find(ToLowerAscii(
-                    NormalizePath(membership.projectPath).generic_u8string()));
-                if (byPath != projectsByPath.end()) {
-                    candidate = byPath->second;
-                }
+            if (!membership.projectPath.empty()) {
+                const auto byPath = projectsByPath.find(ToLowerAscii(NormalizePath(membership.projectPath).generic_u8string()));
+                if (byPath != projectsByPath.end()) candidate = byPath->second;
+            }
+            if (!candidate) {
+                const auto byId = projectsById.find(membership.projectId);
+                if (byId != projectsById.end()) candidate = byId->second;
             }
             const std::string savedKey = savedProjectKey(
                 candidate, membership.projectId, membership.projectPath);
@@ -1228,6 +1391,7 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
             view.projectId = primaryProject->projectId;
             view.projectName = primaryProject->projectName;
             view.projectPath = primaryProject->projectPath;
+            view.projectCoverKey = primaryProject->projectCoverKey;
             view.projectCoverThumbnailCachePath =
                 primaryProject->coverThumbnailCachePath;
             view.projectStatus = primaryProject->status;
@@ -1476,6 +1640,7 @@ nlohmann::json SerializeSourceRecord(const SourceRecord& source) {
         { "height", source.thumbnail.height },
         { "error", source.thumbnail.errorMessage.empty() ? nlohmann::json() : nlohmann::json(source.thumbnail.errorMessage) }
     };
+    if (source.thumbnail.camera.bytes) item["thumbnail"]["cameraJpeg"] = CameraThumbnailJson(source.thumbnail.camera);
     item["project"] = {
         { "status", ProjectStatusToString(source.project.status) },
         { "relativePath", source.project.relativePath.empty() ? nlohmann::json() : nlohmann::json(source.project.relativePath.generic_u8string()) },
@@ -1521,6 +1686,7 @@ CatalogSourceRecord BuildCatalogSourceRecord(const SourceRecord& source) {
     record.captureTimestamp = source.captureTimestamp;
     record.captureMetadataChecked = source.captureMetadataChecked;
     record.fingerprint = source.fingerprint;
+    record.thumbnail.camera = source.thumbnail.camera;
     record.thumbnail.relativePath = source.thumbnail.relativePath;
     record.thumbnail.signatureRelativePath = source.thumbnail.signatureRelativePath;
     record.thumbnail.status = source.thumbnail.status;
@@ -1566,6 +1732,7 @@ nlohmann::json SerializeCatalogSourceRecord(const CatalogSourceRecord& source) {
     if (!source.thumbnail.errorMessage.empty()) {
         item["thumbnail"]["error"] = source.thumbnail.errorMessage;
     }
+    if (source.thumbnail.camera.bytes) item["thumbnail"]["cameraJpeg"] = CameraThumbnailJson(source.thumbnail.camera);
     item["project"] = {
         { "status", ProjectStatusToString(source.project.status) },
         { "mode", RawProjectModeToString(source.project.mode) }
@@ -1706,7 +1873,7 @@ bool LoadCatalogSnapshot(
     }
 
     nlohmann::json catalog;
-    if (!ReadJsonFile(layout.catalogPath, catalog)) {
+    if (!ReadJsonFile(StorageIO::GalleryCatalogReadPath(layout, layout.catalogPath.filename()), catalog)) {
         if (outError != nullptr) {
             *outError = "RAW Workspace catalog is missing or unreadable.";
         }
@@ -1835,6 +2002,15 @@ bool LoadCatalogSnapshot(
         }
 
         source.project = BuildExpectedProjectInfo(layout, source);
+        if (thumbnail && thumbnail->is_object()) {
+            const auto camera = ReadCameraThumbnailRef(*thumbnail, source.fileSizeBytes);
+            if (camera.bytes) UseCameraThumbnail(source.thumbnail, camera, kNeutralThumbnailMaxDimension, layout, source);
+            else if (IsGalleryRasterPath(source.absolutePath)) {
+                UseOriginalRaster(source.thumbnail, layout, source);
+                source.browsePreview = true;
+            }
+        }
+
         const nlohmann::json* project = FindJsonMember(item, "project");
         if (project != nullptr && project->is_object()) {
             const std::filesystem::path projectRelative = std::filesystem::u8path(
@@ -2044,7 +2220,7 @@ bool SaveAppStateIfCurrent(
     root["rawLabColorWarpLiveCloud"] = state.rawLabColorWarpLiveCloud;
     root["rawLabLastGalleryHost"] = state.rawLabLastGalleryHost == 3 ? 3 : 1;
     root["rawLabGalleryDisplayMode"] = std::clamp(state.rawLabGalleryDisplayMode, 0, 1);
-    root["rawLabGalleryContentMode"] = std::clamp(state.rawLabGalleryContentMode, 0, 2);
+    root["rawLabGalleryContentMode"] = std::clamp(state.rawLabGalleryContentMode, 0, 4);
     return WriteJsonFile(path, root, shouldCommit, outError);
 }
 
@@ -2210,7 +2386,7 @@ bool LoadAppState(const std::filesystem::path& path, AppState& outState, std::st
         if (rawLabGalleryContentMode != nullptr &&
             rawLabGalleryContentMode->is_number_integer()) {
             outState.rawLabGalleryContentMode = std::clamp(
-                rawLabGalleryContentMode->get<int>(), 0, 2);
+                rawLabGalleryContentMode->get<int>(), 0, 4);
         }
 
         const nlohmann::json* recent = FindJsonMember(root, "recentWorkspaces");

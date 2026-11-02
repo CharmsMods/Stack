@@ -29,9 +29,9 @@ def main():
     # controls base; include that separate declaration/reset block unchanged.
     fields += section(types, '    std::uint64_t colorWarpAreaAnalysisGeneration',
         '    int colorWarpDiagnosticTargetLongEdge')
-    submit = section(preview, '                const auto submitAreaAnalysis = [&]() {', '\n                if (colorUi.colorWarpAreaAnalysisState)')
-    poll = section(preview, '                if (colorUi.colorWarpAreaAnalysisState)', '\n                const ImVec2 mouse')
-    click = section(preview, '                        if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1', '} else if (!colorUi.colorWarpPendingCircleAppend)') + '}'
+    submit = section(preview, '    const auto submitAreaAnalysis = [&]() {', '\n    if (colorUi.colorWarpAreaAnalysisState)')
+    poll = section(preview, '    if (colorUi.colorWarpAreaAnalysisState)', '\n    const ImVec2 mouse')
+    click = section(preview, '            if (!wasInitial && colorUi.colorWarpPendingCircleEditKind == 1', '} else if (!colorUi.colorWarpPendingCircleAppend)') + '}'
     context_guard = section(preview, '    if (m_RawWorkspaceLabUi.colorWarpAreaOwner.Valid()', '    if (preview.identity.empty())')
     commit_guard = section(surface, '    const bool ownsPendingArea =', '    if ((!std::isfinite')
     commit = section(surface, '    if (ownsPendingArea && args.ui.colorWarpPendingCircleCommitRequested', '    constexpr float fullWheelExtent')
@@ -51,7 +51,7 @@ def main():
     assert preview.count('colorUi.colorWarpAreaOwner = areaOwner;') == 2
     assert 'args.ui.colorWarpAreaOwner = args.areaOwner;' in surface
     color = (root / 'src/Editor/Internal/RawLab/EditorModuleRawLabColor.cpp').read_text(encoding="utf-8")
-    assert 'args.areaOwner = {context.nodeTarget, previewIdentity,\n        RawViewportSourceHash()};' in color
+    assert 'const auto owner = ColorWarpAreaOwner(context);' in color and 'args.areaOwner = owner;' in color
     assert 'preview.edit.nodeTarget, preview.identity, RawViewportSourceHash()};' in preview
     text = r'''
 #include "Async/TaskGroup.h"
@@ -115,6 +115,7 @@ struct Fixture {
     Recipe a,b;
     Async::TaskGroup tasks;
     struct Scope {int width=1,height=1;std::vector<float> pixels{0.27f,-0.13f,0};}colorScope;
+    bool scopeReady=true;
     std::size_t colorScopePixelCount=1;
     struct PreviewRecipe {struct {Raw::RawWorkingSpace workingSpace=Raw::RawWorkingSpace::LinearSrgbD65;}technical;Recipe colorWarp;}previewRecipe;
     Async::TaskGroup& ProjectTasks(){return tasks;}
@@ -135,7 +136,7 @@ struct Fixture {
         submitAreaAnalysis();
     }
     void Poll() {auto& colorUi=m_RawWorkspaceLabUi;
-''' + poll + r'''
+''' + poll.replace('submitAreaAnalysis();','Submit();') + r'''
     }
     void Click() {auto& colorUi=m_RawWorkspaceLabUi;const bool wasInitial=false;const float dragDistance=0;
 ''' + click + r'''
@@ -264,6 +265,14 @@ int main() {
         try{test();std::cout<<"PASS "<<name<<'\n';}
         catch(const std::exception& e){ReleaseBlocked();++failures;std::cerr<<"FAIL "<<name<<": "<<e.what()<<'\n';}
     };
+    run("area drawn before input waits and analyzes when ready", [] {
+        Fixture f; f.scopeReady=false; f.Begin(); f.Submit();
+        Require(f.m_RawWorkspaceLabUi.colorWarpAreaWaitingForInput && !f.m_RawWorkspaceLabUi.colorWarpAreaAnalysisState,
+            "A missing input started an empty analysis or lost the pending circle");
+        f.scopeReady=true; f.Poll(); f.Drain();
+        Require(!f.m_RawWorkspaceLabUi.colorWarpAreaWaitingForInput && !f.m_RawWorkspaceLabUi.colorWarpAreaAnalysisResult.proposals.empty(),
+            "The pending area did not use the arriving input");
+    });
     run("owned success and nonselected card",SuccessAndNonselectedCard);
     run("completed A before B selection",CompletedBeforeSwitch);
     run("delayed A after B selection",CompletesAfterSwitch);

@@ -1,8 +1,23 @@
 #pragma once
 #include "Raw/MultiFrameDenoise/SameCfaSampler.h"
+#include <algorithm>
 #include <cmath>
 
 namespace Raw::Bracketing {
+// Headroom is a reliability in [0,1]. Use the magnitude of each
+// interpolation coefficient so negative cubic lobes cannot create headroom.
+inline double FootprintHeadroom(const Mfd::KeysBicubicFootprint& footprint,
+    const std::array<Mfd::SameCfaTapInput,Mfd::kSameCfaTapCount>& taps) {
+    double sum=0, total=0;
+    for(std::size_t i=0;i<taps.size();++i) {
+        const double weight=std::abs(footprint.coefficients[i]);
+        const double h=std::clamp((.995-taps[i].normalizedSample)/.045,0.,1.);
+        sum+=weight*h*h*(3-2*h);
+        total+=weight;
+    }
+    return sum/total;
+}
+
 struct CaptureFallback {
     double value=0;
     bool finite=false,clipped=false;

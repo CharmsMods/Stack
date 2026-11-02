@@ -395,8 +395,6 @@ endif()
 add_custom_target(StackRuntimePayload
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
-    COMMAND ${CMAKE_COMMAND} -E rm -f
-        "${STACK_DEPLOY_DIR}/Stack/App/Runtime/libraw.dll"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Resources"
     COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -454,10 +452,12 @@ add_custom_target(StackRuntimePayload
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/ZhangWu-BSD-2-Clause.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-GPL-3.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-NOTICE.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Darktable-GPL-3.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-Apache-2.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-COPYRIGHT.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-zlib.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-SoftFloat-FDLIBM.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenEXR-BSD.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-FLANN-BSD.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
     COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -491,6 +491,11 @@ if (STACK_ENABLE_LIBRAW)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${libraw_SOURCE_DIR}/COPYRIGHT"
             "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibRaw-COPYRIGHT.txt"
+        VERBATIM
+    )
+else()
+    add_custom_command(TARGET StackRuntimePayload POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${STACK_DEPLOY_DIR}/Stack/App/Runtime/libraw.dll"
         VERBATIM
     )
 endif()
@@ -527,7 +532,7 @@ endif()
 
 # Link OpenGL based on platform
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 comctl32 dwmapi shell32 ole32 shlwapi winhttp bcrypt)
+    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 comctl32 dwmapi shell32 ole32 shlwapi winhttp bcrypt windowscodecs)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework OpenGL")
 elseif (UNIX)
@@ -1188,7 +1193,9 @@ endif()
 option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
 if (STACK_BUILD_GRAPH_TESTS)
     add_executable(StackGraphBehaviorTests ${STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES})
-    target_link_libraries(StackGraphBehaviorTests PRIVATE stack_graph_routing_backend)
+    target_compile_definitions(StackGraphBehaviorTests PRIVATE STACK_READ_BRACKET_MASTERS=1)
+    target_sources(StackGraphBehaviorTests PRIVATE src/Persistence/BracketMasterRead.cpp src/Persistence/BracketDngMaster.cpp src/Raw/RawMetadataSerialization.cpp)
+    target_link_libraries(StackGraphBehaviorTests PRIVATE stack_graph_routing_backend StackBracketExr)
     if(MSVC)
         target_link_options(StackGraphBehaviorTests PRIVATE "/DELAYLOAD:libavoid.dll")
         target_link_libraries(StackGraphBehaviorTests PRIVATE delayimp)
@@ -1211,7 +1218,7 @@ if (STACK_BUILD_GRAPH_TESTS)
         endif()
     endif()
     if (WIN32)
-        target_link_libraries(StackGraphBehaviorTests PRIVATE shell32 ole32)
+        target_link_libraries(StackGraphBehaviorTests PRIVATE shell32 ole32 windowscodecs)
     endif()
 
     add_executable(StackRawEvidenceTests ${STACK_RAW_EVIDENCE_TEST_SOURCE_FILES})

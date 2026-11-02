@@ -520,15 +520,15 @@ ParameterSpace BuildParameterSpace(
         "Fixed x=0.50 Finish Tone output; graph constraints remain lexicographic.");
     SetRange(space, ParameterId::FinishY3, 0.0, 1.0, warm.finishY3, "normalized output", true,
         "Fixed x=0.75 Finish Tone output; graph constraints remain lexicographic.");
-    SetRange(space, ParameterId::DisplayBlackEv, -16.0, -kEpsilon, warm.displayBlackEv, "EV", true,
+    SetRange(space, ParameterId::DisplayBlackEv, -16.0, -kEpsilon, warm.displayBlackEv, "EV", false,
         "Visible View Transform black EV range.");
-    SetRange(space, ParameterId::DisplayWhiteEv, 0.0, 16.0, warm.displayWhiteEv, "EV", true,
+    SetRange(space, ParameterId::DisplayWhiteEv, 0.0, 16.0, warm.displayWhiteEv, "EV", false,
         "Visible View Transform white EV range.");
-    SetRange(space, ParameterId::DisplayMiddleGrey, 0.01, 1.0, warm.displayMiddleGrey, "linear", true,
+    SetRange(space, ParameterId::DisplayMiddleGrey, 0.01, 0.5, warm.displayMiddleGrey, "linear", true,
         "Visible View Transform middle-grey range; no universal target imposed.");
-    SetRange(space, ParameterId::DisplayShoulder, 0.05, 4.0, warm.displayShoulder, "control value", true,
+    SetRange(space, ParameterId::DisplayShoulder, 0.05, 4.0, warm.displayShoulder, "control value", false,
         "Visible View Transform shoulder range.");
-    SetRange(space, ParameterId::DisplayToe, 0.0, 1.0, warm.displayToe, "control value", true,
+    SetRange(space, ParameterId::DisplayToe, 0.0, 1.0, warm.displayToe, "control value", false,
         "Visible View Transform toe range.");
     return space;
 }
@@ -593,14 +593,10 @@ CandidateProposal BuildCandidateProposal(
             ? proposal.recipe.viewTransform.layerJson
             : RawRecipe::DefaultViewTransformJson();
         display["type"] = "ViewTransform";
-        // These fields are production float controls. Store their exact float
-        // representation so canonical serialize/deserialize identity does not
-        // reject a candidate solely for double-to-float JSON normalization.
-        display["blackEv"] = static_cast<float>(parameters.displayBlackEv);
-        display["whiteEv"] = static_cast<float>(parameters.displayWhiteEv);
+        // Only the still-active Sigmoid anchor participates in display fitting.
+        display["displayCurve"] = "sigmoid-v1";
         display["middleGrey"] = static_cast<float>(parameters.displayMiddleGrey);
-        display["shoulder"] = static_cast<float>(parameters.displayShoulder);
-        display["toe"] = static_cast<float>(parameters.displayToe);
+        for (const auto* key : {"blackEv","whiteEv","shoulder","toe"}) display.erase(key);
         proposal.recipe.viewTransform.layerJson = std::move(display);
     }
 

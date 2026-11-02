@@ -2,6 +2,7 @@
 #include "HdrColorFusion.h"
 #include "LocalDetail.h"
 #include "NativeDetailRegion.h"
+#include "SuperResolution/AdaptiveResolution.h"
 #include "Raw/RawProcessingMath.h"
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,10 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
     if(!request.analysis||!request.analysis->prepared) return {};
     if(request.analysis->identity!=AnalysisIdentity(request)) return {};
     const auto& analysis=*request.analysis;const auto& data=*analysis.prepared;
+    auto groupRequest=request;
+    const bool native=analysis.resolutionDecision?!analysis.resolutionDecision->reconstruct:
+        request.recipe.reconstruction==ReconstructionMode::Standard;
+    ResolveGroupReconstruction(groupRequest.recipe,native);
     const auto region=DetailInternal::ChooseRegion(data.width,data.height,centerX,centerY,size);
     const unsigned width=region.width,height=region.height,left=region.left,top=region.top;
     if(!width||!height)return {};
@@ -31,7 +36,7 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
     for(unsigned ty=top/tileSize;ty<=(top+height-1)/tileSize;++ty) for(unsigned tx=left/tileSize;tx<=(left+width-1)/tileSize;++tx) {
         if(request.shouldCancel&&request.shouldCancel()) return {};
         std::vector<std::vector<Observation>> observations;Mfd::PreparedRawTile tile;std::string error;
-        if(!ReadGroups(request,data,tx,ty,observations,tile,error)) throw std::runtime_error(error);
+        if(!ReadGroups(groupRequest,data,tx,ty,observations,tile,error)) throw std::runtime_error(error);
         ColorObservations colorInput;
         std::array<Pixel,4> color;
         std::vector<double> shares;
@@ -54,7 +59,8 @@ Preview RenderNativeDetail(const ProcessingRequest& request,unsigned centerX,uns
                 (!pixel.valid&&!pixel.clipped?Preview::Invalid:0)|
                 (pixel.localRejected?Preview::AlignmentRejected:0)|
                 (pixel.fallbackReason==MeasurementFallbackReason::FixedReference?Preview::FixedReference:0)|
-                (pixel.fallbackReason==MeasurementFallbackReason::ShortestExposure?Preview::ShortestExposure:0);
+                (pixel.fallbackReason==MeasurementFallbackReason::ShortestExposure?Preview::ShortestExposure:0)|
+                (pixel.fallbackReason==MeasurementFallbackReason::HighlightFallback?Preview::HighlightFallback:0);
             for(std::size_t g=0;g<groups;++g) out.contributions[i*groups+g]=static_cast<float>(pixel.actual[g]);
         }
     }

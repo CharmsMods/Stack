@@ -599,12 +599,15 @@ bool EditorModule::RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool() {
     const RawWorkspaceGraphScopeCacheEntry* cache = nullptr;
     if (const auto* node=SelectedEditingNode(); node && m_Project->nodeEditor &&
         node->kind==EditorNodeGraph::NodeKind::RawOperation &&
-        node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve) {
-        const auto& saved=m_RawWorkspaceFinishToneInputGraphScopeCache;
+        (node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
+         node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp)) {
+        const bool color = node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp;
+        const auto& saved=color ? m_RawWorkspaceColorWarpInputGraphScopeCache : m_RawWorkspaceFinishToneInputGraphScopeCache;
         const auto identity=Stack::Editor::NodeInputAnalysisIdentity(*m_Project->nodeEditor,
-            m_Project->editRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+            m_Project->editRevision + (color ? m_Project->rawLayers.ProcessingRevision() : 0),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
         if (saved.sourceKey==m_Project->nodeEditor->Key() && saved.inputFingerprint==identity && saved.readback.valid) {
-            m_RawWorkspaceGraphScopeReadback=saved.readback;
+            if (m_RawWorkspaceGraphScopeReadbackRevision!=saved.contentRevision || !m_RawWorkspaceGraphScopeReadback.valid)
+                m_RawWorkspaceGraphScopeReadback=saved.readback;
             m_RawWorkspaceGraphScopeReadbackRevision=saved.contentRevision;return true;
         }
         m_RawWorkspaceGraphScopeReadback={};return false;
@@ -751,6 +754,7 @@ void EditorModule::RefreshPendingMultiFrameProjectCover() {
         m_ProjectCoverEncodeInFlight ||
         !IsRawWorkspaceProjectActive() ||
         !m_Project->snapshot ||
+        !HasCurrentRawWorkspacePresentation() ||
         m_RawWorkspacePresentationTexture.texture == 0 ||
         m_RawWorkspacePresentationTexture.width <= 0 ||
         m_RawWorkspacePresentationTexture.height <= 0) {
@@ -765,13 +769,21 @@ void EditorModule::RefreshPendingMultiFrameProjectCover() {
         return;
     }
 
+    unsigned int coverTexture = 0;
+    int textureWidth = 0, textureHeight = 0;
+    bool complete = TryGetViewportPreviewOverview(coverTexture, textureWidth, textureHeight);
+    Stack::Renderer::ViewportPreviewGeometry geometry;
+    const bool partial = TryGetViewportPreviewGeometry(geometry) && geometry.resident.Partial();
+    if (!complete && !partial)
+        complete = TryGetActiveRawWorkspacePresentationTexture(coverTexture, textureWidth, textureHeight);
+    if (!complete) return;
     int width = 0;
     int height = 0;
     std::vector<unsigned char> pixels =
         m_Pipeline.GetExternalTexturePixels(
-            m_RawWorkspacePresentationTexture.texture,
-            m_RawWorkspacePresentationTexture.width,
-            m_RawWorkspacePresentationTexture.height,
+            coverTexture,
+            textureWidth,
+            textureHeight,
             width,
             height,
             320);
@@ -1663,7 +1675,9 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     }
     if (const auto* selected=SelectedEditingNode(); selected && m_Project->nodeEditor &&
         selected->kind==EditorNodeGraph::NodeKind::RawOperation &&
-        selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve && IsViewMode()) {
+        (selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
+         selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp) && IsViewMode()) {
+        const bool color = selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp;
         const auto compiled=std::find_if(snapshot.graph.nodes.begin(),snapshot.graph.nodes.end(),[&](const auto& node) {
             return node.authoredGraphId==m_Project->nodeEditor->layerId && node.authoredNodeUuid==m_Project->nodeEditor->nodeUuid;
         });
@@ -1677,10 +1691,11 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
                 snapshot.graph.rawLayerScopeOperationId=compiled->nodeId;
                 snapshot.graph.rawLayerScopeDescriptor=input->semanticDescriptor;
                 snapshot.rawWorkspace.analysisRequested=false;
-                snapshot.rawWorkspace.graphScopeStage=RawDevelopmentGraphScopeStage::FinishToneInput;
+                snapshot.rawWorkspace.graphScopeStage=color ? RawDevelopmentGraphScopeStage::ColorWarpInput :
+                    RawDevelopmentGraphScopeStage::FinishToneInput;
                 snapshot.rawWorkspace.graphScopeOwnerKey=m_Project->nodeEditor->Key();
                 snapshot.rawWorkspace.graphScopeInputFingerprint=Stack::Editor::NodeInputAnalysisIdentity(*m_Project->nodeEditor,
-                    m_Project->editRevision,CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+                    m_Project->editRevision + (color ? m_Project->rawLayers.ProcessingRevision() : 0),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
             }
         }
     }

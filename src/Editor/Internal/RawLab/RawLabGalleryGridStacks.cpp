@@ -28,6 +28,18 @@ void GalleryGridStacks::Reconcile(const std::string& workspace,
         if (current.find(cover->first) == current.end()) cover = m_Covers.erase(cover);
         else ++cover;
     }
+    if (groupCount) {
+        std::unordered_set<std::string> members;
+        for (const auto& stack : stacks) members.insert(stack.sourceKeys.begin(),stack.sourceKeys.end());
+        bool changed=false;
+        for (auto& group:groups) {
+            const auto previous=group.size();
+            group.erase(std::remove_if(group.begin(),group.end(),[&](const auto& key){return !members.count(key);}),group.end());
+            changed|=previous!=group.size();
+        }
+        if(groups[0].empty() && groups[1].empty())Close();
+        else if(changed)++navigationRevision;
+    }
     if (current.find(m_HoveredStack) == current.end()) {
         m_HoveredStack.clear();
         m_LastHoverFrame = -1;

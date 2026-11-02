@@ -87,7 +87,7 @@ void CheckPortableRaw(const std::filesystem::path& root, const std::filesystem::
     bootstrap.projectId = Project::GenerateStableUuid();
     bootstrap.projectName = "Portable RAW regression";
     bootstrap.projectKindHint = StackBinaryFormat::kRawProjectKind;
-    auto created = Project::CreateProjectStore(root / "single", Project::ProjectStorageKind::DirectoryBundle, bootstrap);
+    auto created = Project::CreateProjectStore(root / "single", Project::ProjectStorageKind::WorkingFile, bootstrap);
     CheckStage(bool(created), created.message);
     const auto transaction = created.store->BeginTransaction(created.snapshot.persistedStorageRevision);
     Project::EmbeddedAssetRecord asset;
@@ -233,7 +233,7 @@ bool ValidateProjectStageState(int argc, char** argv) {
         CheckStage(editor->HasPendingBracketingDraft(), "Pack cleared the active draft");
         const auto externalFolder = root.parent_path() / (root.filename().string() + "-exports");
         const auto externalCopy = externalFolder / "bracket-copy";
-        verifyCopy(externalCopy, Project::ProjectStorageKind::DirectoryBundle);
+        verifyCopy(externalCopy, Project::ProjectStorageKind::WorkingFile);
         const auto copyId = editor->GetActiveRawProjectSnapshot()->projectId;
         CheckStage(std::none_of(editor->GetRawWorkspaceState().sourceSetProjects.begin(),
             editor->GetRawWorkspaceState().sourceSetProjects.end(),

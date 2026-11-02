@@ -24,7 +24,7 @@ inline constexpr std::uint32_t kHdrOperationSchemaVersion = 1;
 inline constexpr const char* kRawProjectModelSourceSets = "source-sets";
 
 enum class ProjectStorageKind {
-    DirectoryBundle,
+    WorkingFile,
     PortableFile
 };
 
@@ -80,6 +80,7 @@ struct EmbeddedAssetRecord {
     std::string projectAssetPath;
     std::string originalSourcePath;
     std::string workspaceRelativeSourcePath;
+    bool linkedSource = false;
     std::string originalFileFingerprint;
     std::string originalFilename;
     std::string managedRole;

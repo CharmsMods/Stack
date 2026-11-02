@@ -74,6 +74,12 @@ bool CaptureRawEditAttributesFromProject(
     std::string resolveError;
     if (!ResolveRawProjectEditRecipe(
             opened.snapshot, sourceSetId, binding, &resolveError)) {
+        if (opened.snapshot.pipelineData.contains("nodeGraph")) {
+            bundle=Stack::RawRecipe::CaptureRawEditAttributeBundle(Stack::RawRecipe::MakeDefaultRecipe(""),
+                opened.snapshot.projectName,"graph");
+            Stack::RawRecipe::CaptureAuthoredLayers(bundle,opened.snapshot.pipelineData,projectPath.u8string());
+            if (bundle.authoredLayers) { if (errorMessage) errorMessage->clear();return true; }
+        }
         if (errorMessage) *errorMessage = std::move(resolveError);
         return false;
     }
@@ -91,6 +97,10 @@ bool CaptureRawEditAttributesFromProject(
         binding.sourceLabel,
         binding.sourceKind,
         binding.viewTransformPlacement);
+    if (opened.snapshot.pipelineData.contains("nodeGraph"))
+        Stack::RawRecipe::CaptureAuthoredLayers(bundle,opened.snapshot.pipelineData,projectPath.u8string());
+    else if (opened.snapshot.pipelineData.contains("rawLayerStack"))
+        Stack::RawRecipe::CaptureAuthoredLayers(bundle,opened.snapshot.pipelineData.at("rawLayerStack"),projectPath.u8string());
     if (errorMessage) errorMessage->clear();
     return true;
 }

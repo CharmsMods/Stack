@@ -1531,6 +1531,7 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow, bool waitForReady)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_StopRequested = false;
+        m_ThreadExited = false;
         m_HasPending = false;
         m_ActiveOpenGlTask.reset();
         m_InvalidBeforeGeneration = 0;
@@ -1564,6 +1565,11 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow, bool waitForReady)
                        "unknown exception.\n";
                 HandleThreadFailure("unknown worker-thread exception", currentRequest ? &*currentRequest : nullptr);
             }
+            currentRequest.reset();
+            // Idle rendering is not completed teardown: denoise draining and
+            // GL resource destruction must finish before the UI joins us.
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_ThreadExited = true;
         });
     } catch (const std::exception& error) {
         std::cerr << "[EditorRenderWorker] Could not start worker thread: "
@@ -1808,7 +1814,8 @@ void EditorRenderWorker::Shutdown() {
 
 bool EditorRenderWorker::HasPendingOrBusyForShutdown() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
-    return m_HasPending || !m_OpenGlTasks.empty() || m_Busy.load();
+    return (m_StopRequested && m_Thread.joinable() && !m_ThreadExited) ||
+        m_HasPending || !m_OpenGlTasks.empty() || m_Busy.load();
 }
 
 bool EditorRenderWorker::HasPendingSnapshotOrRender() const {

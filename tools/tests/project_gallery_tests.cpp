@@ -21,7 +21,7 @@ void TestProjectGalleryDiscovery() {
     const auto folder = root / "Photos";
     const auto layout = Gallery::BuildManagedLayout(folder);
     const auto create = [&](const auto& path, const char* id, bool raw, bool graph,
-                            Project::ProjectStorageKind kind = Project::ProjectStorageKind::DirectoryBundle) {
+                            Project::ProjectStorageKind kind = Project::ProjectStorageKind::WorkingFile) {
         Project::RawProjectSnapshot snapshot;
         snapshot.projectId = snapshot.projectName = id;
         snapshot.projectKindHint = raw ? StackBinaryFormat::kRawProjectKind : StackBinaryFormat::kEditorProjectKind;
@@ -38,12 +38,13 @@ void TestProjectGalleryDiscovery() {
         require(opened && opened.snapshot.pipelineData == snapshot.pipelineData,
             "The saved Graph/RAW project did not retain its authored data.");
     };
-    create(layout.projectsDirectory / "Raw", "raw", true, false);
-    create(folder / "Day 1" / "Nested" / "Graph", "graph", false, true);
-    create(folder / "Day 2" / "Closet" / "Projects" / "Combined", "raw-graph", true, true);
-    create(folder / "Day 1" / "portable.stack", "portable", false, true, Project::ProjectStorageKind::PortableFile);
-    create(root / "Other Photos" / "Outside", "outside", true, true);
-    create(layout.projectTrashDirectory / "Deleted", "deleted", true, false);
+    create(layout.projectsDirectory / "Raw.stack", "raw", true, false);
+    create(layout.projectsDirectory / "Graph.stack", "graph", false, true);
+    create(layout.projectsDirectory / "Combined.stack", "raw-graph", true, true);
+    create(folder / "Day 2" / "Closet" / "Projects" / "Nested.stack", "awaiting-merge", true, false);
+    create(layout.projectsDirectory / "portable.stack", "portable", false, true, Project::ProjectStorageKind::PortableFile);
+    create(root / "Other Photos" / "Outside.stack", "outside", true, true);
+    create(layout.projectTrashDirectory / "Deleted.stack", "deleted", true, false);
     std::vector<Gallery::SourceRecord> sources;
     std::vector<Gallery::SourceSetProjectCatalogEntry> projects;
     require(Gallery::DiscoverSourceSetProjects(layout, sources, projects), "Gallery discovery failed.");

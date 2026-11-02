@@ -19,10 +19,12 @@ inline void PlaceLayerMask(EditorNodeGraph::MaskGeneratorSettings& settings,
         // The press is zero coverage and the release is full coverage in the
         // generator shader: dot(uv-.5, direction)*scale + .5 + offset.
         settings.angle = std::atan2(dy,dx)*degrees;
+        settings.centerX = (start.x + point.x) * .5f;
+        settings.centerY = (start.y + point.y) * .5f;
         settings.scale = std::clamp(1.f/std::max(.01f,std::hypot(dx,dy)),.1f,100.f);
         const float angle = settings.angle/degrees;
-        settings.offset = -(((start.x+point.x)*.5f-.5f)*std::cos(angle)+
-            ((start.y+point.y)*.5f-.5f)*std::sin(angle))*settings.scale;
+        settings.offset = -((settings.centerX-.5f)*std::cos(angle)+
+            (settings.centerY-.5f)*std::sin(angle))*settings.scale;
     } else {
         settings.centerX = std::clamp(start.x,-2.f,3.f);
         settings.centerY = std::clamp(start.y,-2.f,3.f);

@@ -187,6 +187,9 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     }
     GraphOutputDescription output;
     output.descriptor = MakeUnknownDescriptor(declaredType);
+    const bool componentOperation = node.kind == NodeKind::RawOperation &&
+        (node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::ToneCurve ||
+         node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::Exposure);
     const auto input = [&](const std::string& id) -> const GraphOutputDescription* {
         const auto found = inputs.find(id);
         return found == inputs.end() ? nullptr : found->second;
@@ -413,7 +416,11 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 }
             SetComponents(output.descriptor, components);
             if (inputs.empty()) AddDiagnostic(output, node, socketId, "Connect an input");
-        } else use(kImageInputSocketId);
+        } else if (!use(kImageInputSocketId) && componentOperation) {
+            // The input determines whether this operation produces color or coverage.
+            // Disconnecting it leaves a draft branch whose existing mask wires can be kept.
+            output.descriptor = MakeUnknownDescriptor(LogicalValueType::Invalid);
+        }
         if (node.kind == NodeKind::RawOperation) output.descriptor.range = SemanticField<NumericRange>::Unknown();
         if (node.kind == NodeKind::Layer && node.layerType == LayerType::ViewTransform &&
             output.descriptor.logicalType == LogicalValueType::ColorImage) {
@@ -531,8 +538,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         output.descriptor.precision = SemanticField<LogicalPrecision>::Known(
             node.kind == NodeKind::CustomMask ||
             (node.kind == NodeKind::DataMath) ||
-            (node.kind==NodeKind::RawOperation && (node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
-                node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::Exposure))
+            componentOperation
             ? LogicalPrecision::Float32 : LogicalPrecision::Float16);
     }
     if (output.descriptor.logicalType == LogicalValueType::Channel && output.descriptor.channels.state == KnowledgeState::NotApplicable) {

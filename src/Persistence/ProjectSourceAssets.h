@@ -21,7 +21,7 @@ inline bool CollectRawSourceAssets(json& value, const ProjectStoreHandle& store,
             const auto fingerprint = ref.value("fingerprint", std::string{});
             const EmbeddedAssetRecord* match = nullptr;
             for (const auto& asset : snapshot.embeddedAssets) {
-                if (asset.inputFamily != MultiFrameInputFamily::Raw) continue;
+                if (!asset.linkedSource && asset.inputFamily != MultiFrameInputFamily::Raw) continue;
                 if (!fingerprint.empty() ? asset.sha256 == fingerprint :
                     (!path.empty() && (asset.originalSourcePath == path ||
                         store->ResolveAssetFile(asset.assetId).u8string() == path))) {
@@ -42,7 +42,7 @@ inline bool CollectRawSourceAssets(json& value, const ProjectStoreHandle& store,
                 // identity. Extra fields would invalidate their strict schema.
                 if (rawNode) ref["managedAssetId"] = match->assetId;
                 ref["fingerprint"] = match->sha256;
-                if (store->StorageKind() == ProjectStorageKind::DirectoryBundle)
+                if (store->StorageKind() == ProjectStorageKind::WorkingFile)
                     ref["sourcePath"] = ManagedAssetFilePath(store->StoragePath(), *match).u8string();
                 if (rawNode) {
                     value["sourcePath"] = ref.at("sourcePath");
@@ -67,7 +67,7 @@ inline bool RestoreRawSourceAssets(json& value, const ProjectStoreHandle& store,
             if (id.empty()) {
                 const auto fingerprint = ref.value("fingerprint", std::string{});
                 for (const auto& asset : snapshot.embeddedAssets)
-                    if (!fingerprint.empty() && asset.sha256 == fingerprint && asset.inputFamily == MultiFrameInputFamily::Raw) {
+                    if (!fingerprint.empty() && asset.sha256 == fingerprint && (asset.linkedSource || asset.inputFamily == MultiFrameInputFamily::Raw)) {
                         id = asset.assetId;
                         break;
                     }
@@ -76,8 +76,12 @@ inline bool RestoreRawSourceAssets(json& value, const ProjectStoreHandle& store,
                 const auto* asset = FindEmbeddedAsset(snapshot, id);
                 if (!asset) return false;
                 auto path = store->ResolveAssetFile(id);
-                if (path.empty()) {
-                    path = std::filesystem::temp_directory_path() / "Stack" / "ProjectSources" / ContentAssetName(*asset);
+                if (path.empty() && asset->linkedSource && store->StorageKind() == ProjectStorageKind::WorkingFile) {
+                    // Preserve offline graph bindings. A surviving bracket master
+                    // or a preset comparison source can still supply the pixels.
+                    path = ExpectedSourcePath(store->StoragePath(), *asset);
+                } else if (path.empty()) {
+                    path = std::filesystem::temp_directory_path() / "Stack" / "ProjectSources" / (asset->sha256 + std::filesystem::u8path(asset->originalFilename).extension().u8string());
                     if (!store->CopyAssetToFile(id, path)) return false;
                 }
                 ref["sourcePath"] = path.u8string();

@@ -150,7 +150,10 @@ struct RenderCustomMaskObject {
     float blur = 0.0f;
 };
 
+namespace Raw {struct DepthMask;}
 struct RenderCustomMaskPayload {
+    std::shared_ptr<const Raw::DepthMask> depthMask;
+    int depthOrientation=1;
     int width = 1024;
     int height = 1024;
     Stack::Assets::MaskRaster rasterLayer;

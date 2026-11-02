@@ -16,8 +16,7 @@ Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionO
             const auto project=std::find_if(projects.begin(),projects.end(),
                 [&](const auto& item){return item.projectPath==subject;});
             if(project!=projects.end()) {
-                key="project-overlay:"+(!project->projectId.empty()?project->projectId:
-                    project->projectPath.lexically_normal().generic_string());
+                key=project->projectCoverKey;
             }
         }
         if(key.empty() && ImGui::GetCurrentContext())key=m_RawWorkspaceGalleryLayoutAnimation.ImageAt(ImGui::GetIO().MousePos);

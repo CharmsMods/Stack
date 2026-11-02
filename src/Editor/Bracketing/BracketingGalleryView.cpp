@@ -13,14 +13,14 @@ void DrawBracketingGalleryStacks(const std::vector<RawWorkspace::RawGallerySimil
     for(const auto& stack:stacks) {
         if(stack.sourceKeys.empty())continue;
         const auto* first=find(stack.sourceKeys.front());if(!first)continue;
-        const auto key=stack.resultProjectId.empty()?stack.sourceKeys.front():stack.resultProjectId;
+        const auto& key=stack.resultProjectCoverKey.empty()?stack.sourceKeys.front():stack.resultProjectCoverKey;
         ImGui::PushID(key.c_str());
         const auto expandedKey=ImGui::GetID("expanded");
         bool expanded=ImGui::GetStateStorage()->GetBool(expandedKey,false);
         beginTile();
         auto card=*first;
         if(!stack.resultProjectPath.empty()) {
-            card.relativePathKey="project-overlay:"+stack.resultProjectId;
+            card.relativePathKey=stack.resultProjectCoverKey;
             card.fileName=stack.resultProjectName;
             if(!stack.resultCoverPath.empty()){card.thumbnail.absolutePath=stack.resultCoverPath;card.thumbnail.status=RawWorkspace::ThumbnailStatus::Ready;}
         }

@@ -11,7 +11,7 @@ struct Request {
     // Desired filename in an existing directory. Existing files are never
     // replaced: publication chooses a numbered sibling atomically.
     std::filesystem::path destination;
-    // Finished images use as-shot WB, shared RAW MHC/color development,
+    // Finished images use as-shot WB, shared Enhanced DCB/color development,
     // explicit exposure and sRGB encoding. DNG retains editable RAW samples;
     // exposureStops is a default-rendering metadata adjustment for DNG.
     float exposureStops = 0;

@@ -14,6 +14,8 @@ Private in-process Bracketing algorithm diagnostics require a separate CMake tre
 
 Burst reconstruction requires a working OpenGL compute backend. `--self-check` reports `gpuRequired`, `gpuAvailable`, `gpuCombiningAvailable` and `gpuMessage`; failure to initialize the required backend makes the check fail. A `--batch` manifest may omit `captureCombining` or set it to `"auto"`/`"gpu"`; legacy `"cpu"` requests are rejected rather than silently substituted. GPU initialization, shader, verification, resource and execution failures stop the job with diagnostics. CPU decoding, orchestration and scalar verification are still parts of the hybrid algorithm, not replacement GPU backends. Evidence-based selection of original-frame pixels for moving/unsupported regions remains distinct from backend failure. The measurement report records actual GPU tile counts and bounded GPU memory reservation. `Stack.exe --validate-burst-combining-cancellation <inputs-folder> <new-output-folder>` uses two to eight real captures and cancels through the normal client after the first combining tile completes, without running the larger worker-validation suite.
 
+For focused View Transform checks, run `.\build\Stack.exe --validate-hdr-display` and explicitly wait for the GUI executable as described below. Its hidden graphics context compares the actual GPU shader with the shared CPU Sigmoid finish, checks curve anchors, finite highlights, color/encoding controls, current recipe round trips and rejection of removed display modes. The command name is historical; no separate HDR display mapper is supported. It does not compare photographs or establish monitor-profile accuracy. The optional `StackViewTransformGraphTests` build target and `StackRaw.ViewTransformGraph` CTest cover native graph gestures and unchanged-draft drawing.
+
 For focused Color Calibration checks, run `.\build\Stack.exe --validate-color-calibration`. Optional RAW paths add real-image checks and write comparison previews to `outputs/validation/color-calibration/`. The first RAW also checks native preview against Editor export. The command uses a hidden graphics context and does not open or edit a user project.
 
 For RAW layer and mask checks, run `Stack.exe --validate-raw-layers <research-output-folder>` from `build/`, or supply its path from the repository root. This uses a hidden graphics context and creates a separate save/reopen project beneath the supplied folder. In PowerShell, use `Start-Process -WindowStyle Hidden -Wait -PassThru` to wait for this GUI executable and read its exit code. The focused model/history/dependency checks are in `_workspace/build-tree/stack/artifacts/StackGraphBehaviorTests.exe --raw-layers-only`. These commands do not test mouse interactions. The same layer checks cover scene-tone math and Detail Contrast settings. For a focused real-RAW tone/detail check, use `Stack.exe --validate-tone-detail <RAW-file> <research-output-folder>`. It compares source-scale detail across preview and native sizes, checks masked native preview against export, and saves two inspection PNGs.
@@ -54,16 +56,16 @@ evidence retains the median; this is not per-pixel multi-source guide fusion.
 GPU stages now fail explicitly rather than silently switching to CPU processing. Decoder CFA, orientation and black/white calibration
 are still required; missing information does not create recovered dynamic range.
 
-New, untouched Bracketing imports can initialize their default Local EV and Tone
-Curve nodes once. This is an editable starting look, not a change to reconstructed
-RAW or standalone output. It does not overwrite existing edits or run again after
-undo, reopening a saved project or reprocessing. Ordinary tone edits reuse the
-reconstruction and request display refinement, not another capture merge.
+New exposure brackets use the shared zero-EV Sigmoid display mapper. On the first
+accepted merge, manual and automatic bracket projects can initialize a neutral
+Tone Curve from the measured highlight range. The editable scene-luminance
+points keep midtone exposure fixed. Equal-exposure denoise and previously edited
+curves skip this fit. Ordinary tone edits reuse the reconstruction.
 
-Older saved finished results reopen as saved. **Explicitly process the bracket
-again to use the updated engine**; merely opening it or changing a tone node is
-not a reconstruction upgrade. Use a project copy when retaining an older result
-for comparison, and keep the original RAW inputs unchanged.
+Saved finished results in the current project format retain their saved pixels.
+**Explicitly process the bracket again to use the updated engine**; merely opening
+it or changing a tone node is not a reconstruction upgrade. Obsolete project
+formats are unsupported. Keep the original RAW inputs unchanged.
 
 ### Checks completed and remaining limits
 
@@ -227,10 +229,9 @@ passes add traffic beyond nominal full-coverage figures.
    bracket. Process explicitly into new outputs. Inspect fine edges, moving
    objects, shadow noise, highlight color and any capture-exclusion diagnostics.
    These are suggested checks, not results already verified on your images.
-3. For the automatic starting look, use a newly imported untouched default draft.
-   Check its editable Local EV/Tone Curve settings and undo. An older project is
-   expected to retain its authored look rather than automatically change.
-4. Confirm that an older finished project only gains the new reconstruction after
+3. For default display rendering, use a newly imported untouched draft. Check
+   its Sigmoid display and editable Local EV/Tone Curve settings and undo.
+4. Confirm that a current-format saved result only gains a new reconstruction after
    explicit processing. Retain the actual GPU tile-count and failure diagnostics;
    there is no production CPU fallback to hide an unavailable GPU backend.
 
@@ -260,6 +261,13 @@ Both products retain dependency license texts, the Adobe DNG notice and a matchi
 Both installers automatically register the native x64 Explorer command; there is no optional integration checkbox. On Windows 11 it appears under **Show more options**; modern top-level integration needs a signed app-identity package and is not supplied. ARM64 installations can use the x64 standalone window through supported emulation, but do not register this x64 in-process DLL in native ARM64 Explorer. ZIP extraction does not register shell integration. [BurstShellRegistration.iss](../installer/BurstShellRegistration.iss) owns one shared visible verb and distinct installation CLSIDs. It prefers standalone Burst, then full Stack, then their local-test variants; install/uninstall recomputes the provider without sharing uninstall-owned files. A common installation mutex prevents concurrent family installers from racing the registration. Locked shell DLL replacement/removal may require a restart.
 
 The adapter only transports the complete selected path array to its own sibling engine. The UTF-8 selection contract is `{"schemaVersion":1,"files":["absolute path", "..."]}`, limited to 100,000 files and 16 MiB, in `%TEMP%/StackBurst/Selections/<GUID>/selection.json`. The GUI reads and validates it, then removes only this owned manifest and empty directory. Menu construction does no file enumeration or processing; decoding, grouping and output stay outside Explorer. The standalone window supplies editable DNG and finished TIFF/JPEG/PNG output beside originals or in a new subfolder.
+
+The standalone window starts with Auto resolution enabled. Batch manifests
+can set `autoResolution` (default false). Omit `directionalDenoise` for the
+default of smoothing only super-resolution results. Explicit true or false
+continues to enable or disable it for all reconstructions.
+An editable DNG stores the Bayer result or three-channel floating-point
+LinearRaw when the engine reconstructs camera RGB.
 
 ## First-run settings and reinstall comparisons
 

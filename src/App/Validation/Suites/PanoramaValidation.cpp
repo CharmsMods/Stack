@@ -62,7 +62,7 @@ void SaveRoundTrip(const std::filesystem::path& directory,const ProcessingReques
     RawProjectSnapshot snapshot;snapshot.projectId=GenerateStableUuid();snapshot.projectName="Panorama validation";
     snapshot.sourceWidth=result.raw->metadata.visibleWidth;snapshot.sourceHeight=result.raw->metadata.visibleHeight;
     const auto path=directory/"panorama.stack";
-    auto opened=CreateProjectStore(path,ProjectStorageKind::DirectoryBundle,snapshot);Check(bool(opened),opened.message);
+    auto opened=CreateProjectStore(path,ProjectStorageKind::WorkingFile,snapshot);Check(bool(opened),opened.message);
     snapshot=opened.snapshot;auto transaction=opened.store->BeginTransaction(snapshot.persistedStorageRevision);
     MultiFrameSourceSet set;set.sourceSetId=GenerateStableUuid();set.name="Panorama";set.operationIntent=MultiFrameOperationIntent::RawBurstHdr;
     set.operationSchemaVersion=kHdrOperationSchemaVersion;set.settings=MakeDefaultHdrOperationSettings();

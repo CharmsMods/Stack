@@ -25,7 +25,7 @@ std::filesystem::path TilePath(const ProcessingRequest& request,const PreparedDa
     unsigned tx,unsigned ty) {
     const auto& origin=data.sources[data.origin].frame;
     const auto identity=Stack::NodeMath::Sha256ContentIdentity(AnalysisIdentity(request)+
-        "|motion="+data.motionIdentity+(data.depthIdentity.empty()?"":"|depth="+data.depthIdentity)+
+        "|motion="+data.motionIdentity+
         "|tile="+std::to_string(origin.tileRawPixels)+"|prepared="+origin.cacheKey);
     return data.directory/"group-measurements-v3"/identity.substr(7)/
         (std::to_string(tx)+"-"+std::to_string(ty)+"-temporal.bin");
@@ -97,9 +97,9 @@ bool ReadGroupTile(const ProcessingRequest& request,const PreparedDataset& data,
            !std::isfinite(p.support)||p.support<0||!std::isfinite(p.measurement)||
            (p.support>0&&p.measurement<0)||!std::isfinite(p.uncertainty)||p.uncertainty<0||
            !std::isfinite(p.headroom)||p.headroom<0||p.headroom>1||
-           !std::isfinite(p.fallback)||!std::isfinite(p.exposure)||p.exposure<0||p.flags>31) return false;
+           !std::isfinite(p.fallback)||!std::isfinite(p.exposure)||p.exposure<0||p.flags>=96) return false;
         groups[i/pixels][i%pixels]={p.value,p.variance,p.headroom,p.support,p.fallback,p.exposure,
-            bool(p.flags&1),bool(p.flags&2),bool(p.flags&4),bool(p.flags&8),p.measurement,p.uncertainty,bool(p.flags&16)};
+            bool(p.flags&1),bool(p.flags&2),bool(p.flags&4),bool(p.flags&8),p.measurement,p.uncertainty,bool(p.flags&16),static_cast<ClippedReference>(p.flags>>5)};
     }
     return true;
 }
@@ -118,7 +118,7 @@ bool WriteGroupTile(const ProcessingRequest& request,const PreparedDataset& data
             packed.push_back({float(o.value),float(o.variance),float(o.headroom),float(o.support),
             float(o.fallback),float(o.exposure),float(o.measurementVariance),float(o.uncertaintyVariance),
             unsigned(o.finite)|(unsigned(o.clipped)<<1)|(unsigned(o.localRejected)<<2)|(unsigned(o.fixedReference)<<3)|
-            (unsigned(o.fallbackClipped)<<4)});
+            (unsigned(o.fallbackClipped)<<4)|(unsigned(o.clippedReference)<<5)});
         }
     }
     Header header;header.width=width;header.height=height;header.groups=static_cast<unsigned>(groups.size());

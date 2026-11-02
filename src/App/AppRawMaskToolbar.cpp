@@ -1,4 +1,5 @@
 #include "AppShell.h"
+#include "Utils/HoverTextScope.h"
 #include "UiPerformanceTrace.h"
 #include "UiPerformanceProbe.h"
 #include "EdgeChrome.h"
@@ -190,6 +191,7 @@ void AppShell::RenderRawMaskToolbar() {
 }
 
 void AppShell::RenderSharedPanelToggle() {
+    ImGuiExtras::HoverTextScope noHoverText;
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const float amount = std::max(m_NavigationRail.revealAmount, m_RawMaskToolbar.revealAmount);
     const float scale = m_NavigationRail.scale;
@@ -210,6 +212,7 @@ void AppShell::RenderSharedPanelToggle() {
             Stack::Navigation::Glyph::Panel, false, true, scale, palette, m_NavigationRail.panelToggleMotion, nullptr,
             false, nullptr, false, {}))
         ToggleWorkspaceSectionPanel();
+    if (ImGui::IsItemHovered()) CancelProjectPillPreview();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::End();
     ImGui::PopStyleVar(2);

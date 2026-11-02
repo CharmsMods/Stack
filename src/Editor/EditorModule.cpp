@@ -614,7 +614,7 @@ float MaskPreviewValue(const EditorNodeGraph::Node& node, float u, float v) {
         const float dx = std::cos(radians);
         const float dy = std::sin(radians);
         value = ((u - 0.5f) * dx + (v - 0.5f) * dy) * settings.scale + 0.5f + settings.offset;
-        value = std::clamp(value, 0.0f, 1.0f);
+        value = SmoothStep(0.0f, 1.0f, value);
     } else if (node.maskKind == EditorNodeGraph::MaskGeneratorKind::RadialGradient) {
         const float dx = u - settings.centerX;
         const float dy = v - settings.centerY;
@@ -684,9 +684,23 @@ bool EditorModule::ClearDirtyIfRevision(std::uint64_t expectedRevision) {
 }
 
 void EditorModule::RequestWorkerShutdownForAppClose() {
+    m_Viewport.SuspendComparison();
     CancelFullQualityRenderRequest("Full-quality rendering was canceled because the project is closing.");
     m_RenderPresentation = {};
     m_Project->tasks.Stop();
+    // Stop reading photo files when the owner closes, including a hash in
+    // progress. Stopping new submissions alone lets a large intake run on.
+    {
+        std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+        ++m_RawWorkspaceScanGeneration;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_RawWorkspaceThumbnailMutex);
+        ++m_RawWorkspaceThumbnailGeneration;
+    }
+    ++m_RawWorkspaceThumbnailTextureResetGeneration;
+    ++m_RawWorkspaceSimilarityGeneration;
+    ++m_RawWorkspaceProjectLoadGeneration;
     if(m_Bracketing) {
         if(m_Bracketing->job)m_Bracketing->job->canceled=true;
         if(m_Bracketing->preparationJob)m_Bracketing->preparationJob->canceled=true;

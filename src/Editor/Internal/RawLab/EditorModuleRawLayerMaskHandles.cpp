@@ -110,8 +110,9 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         scale = std::max(settings.scale, .001f);
         centerU = settings.centerX; centerV = settings.centerY;
         if (kind == Kind::LinearGradient) {
-            centerU = .5f - cs * settings.offset / scale;
-            centerV = .5f - sn * settings.offset / scale;
+            const float correction = (centerU-.5f)*cs + (centerV-.5f)*sn + settings.offset/scale;
+            centerU -= cs*correction;
+            centerV -= sn*correction;
             handles[0] = screen(centerU, centerV);
             handles[1] = screen(centerU - cs * .5f / scale, centerV - sn * .5f / scale);
             handles[2] = screen(centerU + cs * .5f / scale, centerV + sn * .5f / scale);
@@ -165,17 +166,16 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         const float dx = point.x-start.x, dy = point.y-start.y;
         if (m_RawLayerMaskDrag == MaskPlacementDrag) PlaceLayerMask(changed,kind,start,point);
         else if (kind == Kind::LinearGradient) {
-            if (m_RawLayerMaskDrag == 0) changed.offset -= (dx*c+dy*s)*original.scale;
+            if (m_RawLayerMaskDrag == 0) {
+                changed.centerX += dx;
+                changed.centerY += dy;
+                changed.offset -= (dx*c+dy*s)*original.scale;
+            }
             else {
-                const float sign = m_RawLayerMaskDrag == 1 ? -1.0f : 1.0f;
-                const float cx = .5f-c*original.offset/original.scale;
-                const float cy = .5f-s*original.offset/original.scale;
-                const float ux = (point.x-cx)*sign;
-                const float uy = (point.y-cy)*sign;
-                changed.angle = std::atan2(uy,ux)*180/pi;
-                changed.scale = std::clamp(.5f/std::max(.001f,std::hypot(ux,uy)),.1f,100.0f);
-                changed.offset = -((cx-.5f)*std::cos(changed.angle*pi/180)+
-                    (cy-.5f)*std::sin(changed.angle*pi/180))*changed.scale;
+                const int fixedEnd = m_RawLayerMaskDrag == 1 ? 2 : 1;
+                const ImVec2 fixed = generatorPoint(handles[fixedEnd]);
+                if (fixedEnd == 1) PlaceLayerMask(changed, kind, fixed, point);
+                else PlaceLayerMask(changed, kind, point, fixed);
             }
         } else if (m_RawLayerMaskDrag == 0) {
             changed.centerX = std::clamp(original.centerX+dx,-2.0f,3.0f);
@@ -208,20 +208,19 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
     // Paint after applying the gesture so the outline follows this frame's
     // pointer position even while its GPU image result is still pending.
     auto* draw = ImGui::GetWindowDrawList();
-    draw->PushClipRect(minimum, maximum, true);
     const auto color = IM_COL32(255, 230, 145, 230);
     if (m_RawLayerMaskDrag == MaskAwaitingPlacement)
         draw->AddText({minimum.x+12,minimum.y+42},color,"Drag on the image to place this mask.");
     if (kind == Kind::LinearGradient) {
         draw->AddLine(handles[1], handles[2], color, 2);
-        for (int i = 1; i <= 2; ++i) {
-            const float d=(i==1 ? -.5f : .5f)/scale;
+        for (int i = 0; i < 3; ++i) {
+            const float d=(i==0 ? 0.f : (i==1 ? -.5f : .5f))/scale;
             const auto a=screen(centerU+cs*d-sn*.12f,centerV+sn*d+cs*.12f);
             const auto b=screen(centerU+cs*d+sn*.12f,centerV+sn*d-cs*.12f);
             draw->AddLine(a,b,color);
         }
     } else {
-        std::vector<ImVec2> outline;
+        std::array<ImVec2,64> outline;
         for (int i = 0; i < 64; ++i) {
             const float t = 2 * pi * float(i) / 64;
             float x = std::cos(t), y = std::sin(t);
@@ -231,7 +230,7 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
             }
             x *= settings.radius;
             y *= settings.radiusY;
-            outline.push_back(screen(centerU + cs*x-sn*y, centerV+sn*x+cs*y));
+            outline[i]=screen(centerU + cs*x-sn*y, centerV+sn*x+cs*y);
         }
         draw->AddPolyline(outline.data(), static_cast<int>(outline.size()), color, ImDrawFlags_Closed, 1.5f);
         draw->AddLine(handles[0], handles[3], color);
@@ -240,5 +239,4 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         draw->AddCircleFilled(handles[i], 5, IM_COL32(25, 25, 25, 230));
         draw->AddCircle(handles[i], 5, color, 0, 1.5f);
     }
-    draw->PopClipRect();
 }

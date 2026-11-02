@@ -69,13 +69,19 @@ Burst hosts share the same reconstruction quality plan. Limit background concurr
 for responsiveness; do not omit alignment/refinement because a different host supplies
 a smaller budget. Resource or execution failures must remain errors, distinct from
 evidence-based rejection of an unreliable match. Standalone finished outputs use the
-shared default [View Transform](../../src/Raw/ViewTransform.h); authored Stack edits
-can intentionally change the developed appearance. Newly imported Bracketing drafts
-can initialize the untouched default Local EV and Tone Curve nodes once, using
-accepted scene-linear analysis and the ordinary RAW-layer history transaction.
-This starting look changes neither reconstructed RAW nor standalone file output.
-It is session-owned, rejects changed document/source/node revisions or custom
-presentation, and does not rearm on undo, saved-project reopen or reprocessing.
+shared default [View Transform](../../src/Raw/ViewTransform.h): zero-skew SDR Sigmoid
+with no automatic exposure offset. Its CPU output and GPU layer share prepared
+curve coefficients; color mapping precedes output-primary conversion and encoding.
+The View graph caches samples by curve values, independently of its draw geometry.
+Sigmoid is the sole supported display mapper for singles and burst results.
+HDR project highlight fitting runs once at first fresh merge acceptance, using
+the bounded result overview and unclipped capture evidence. It writes ordinary
+editable scene-luminance points to the background Tone Curve before Sigmoid.
+The retired Standard/Photographic HDR algorithms, their controls and the
+Standard-only automatic starting-look planner are removed. Authored Stack edits
+can intentionally change the developed appearance. Color-domain contracts belong
+inside processing; they do not require persistent graph labels or user-authored
+conversion nodes.
 
 HDR admission checks decoded CFA, active-image size and resolved orientation, not
 camera/lens labels or exposure tags. The alignment initializer uses bounded image
@@ -193,6 +199,12 @@ the overlay and cursor probe must select the cell actually used by processing.
 Legacy inspection without stride remains readable, but its exact grid is
 unavailable rather than inferred by proportional scaling.
 
+In Automatic local, a verified patch supports its own footprint. Between
+patches, use surrounding verified centers. When the global warp cannot
+describe the scene across the frame, require local radiance agreement before
+using it in an ambiguous region. Compare exposure-matched, filtered CFA
+measurements against noise measured from the original captures.
+
 Super-resolution keeps categorical photometric rejection separate from its
 coarse geometric mapping. A cropped, authoritative reference-grid veto is sampled
 by cell before scalar or GPU accumulation; interpolating confidence at coarse
@@ -204,6 +216,46 @@ double-precision lookup; GPU consumers index that tile-bound mask rather than
 recomputing rational depth-cell boundaries. The no-depth and fixed-reference
 paths retain their existing behavior. Coarse motion/risk interpolation remains;
 these categorical vetoes are not dense geometric validation or a new depth model.
+
+Aligned non-panorama brackets estimate parallax on the processing worker.
+The resulting near-to-far bands and supported pieces are optional graph mask
+sources. Their coverage is registered to the sharp result and has no vote in
+capture fusion. Mask nodes resolve immutable result identities during graph
+lowering. Visible nodes show their grayscale coverage even when disconnected
+and unselected. The preview worker serves cached thumbnails on demand. A
+missing piece is an unavailable source. Users wire a mask to Gaussian Blur or
+another operation in Graph. A failure in optional depth extraction or storage must preserve a valid merged image and report why the masks are unavailable.
+
+New noise and HDR brackets publish native Bayer group measurements without
+directional smoothing. Super-resolution retains its directional guide, broad
+estimate and native fallback. Auto evaluates the same resolution evidence as
+explicitly enabling smoothing and uses unsmoothed groups and HDR weights when
+it selects native Bayer. The saved smoothing policy also applies to inspection.
+The optional all-results setting uses four same-CFA neighbour directions and
+a local range gate before HDR weighting. These measurements run on the worker.
+
+In native HDR and noise bursts, retain accepted CFA measurements when another channel in the
+cell has clipped. Use the fixed capture's saturation as a lower bound at that
+location, including when the reference exposure group is itself a noise burst.
+For an unsupported channel the worker can estimate display color from the
+nearby unclipped highlight boundary or a compatible shorter exposure. The
+estimate carries zero measurement support. When every reference channel is lost, first use a mapped shorter exposure if its exposure-normalized values satisfy all four clipping bounds. Prefer the capture with the most surviving sites and retain clipping flags on its lost channels. This fallback retains zero measurement support. If that evidence is unavailable, use the
+dimmest as-shot neutral consistent with the clipping bounds if camera white
+balance is available. The brightness stays marked unrecoverable. Use the same observations for the
+native preview, inspection and master.
+
+Auto resolution tests distributed textured regions using green RAW samples at
+their measured positions. Compare a multi-capture native estimate with a
+single training capture and verify higher bands against independently withheld
+captures. Select native Bayer, native RGB or a supported scale up to 4x per
+dimension. Apply HDR exposure decisions locally at the selected size and
+persist the actual scale and evaluated contribution maps for inspection. Old
+recipes keep their authored reconstruction and smoothing settings.
+
+For integer camera RAWs with padded codes, express the bracket clipping guard
+in occupied code steps. Verify the least-significant spacing across the
+decoded buffer before widening the guard. Keep the camera white calibration
+independent of the brightest pixel in a particular exposure.
 
 Resolved noise profiles already include quantization in their offset variance.
 Do not add that component again in reconstruction, alignment or presentation;

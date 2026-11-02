@@ -207,7 +207,7 @@ bool PreparedTileSampler::SampleSameCfa(
     Mfd::CfaSite site,
     const Mfd::SameCfaScalarParameters& parameters,
     Mfd::SameCfaSampleResult& result,
-    CaptureFallback& fallback,
+    CaptureFallback& fallback, double& headroom,
     std::string* error) {
     result = {};
     fallback = {};
@@ -228,6 +228,11 @@ bool PreparedTileSampler::SampleSameCfa(
 
     std::array<Mfd::SameCfaTapInput, Mfd::kSameCfaTapCount> taps;
     for (std::size_t index = 0; index < footprint.taps.size(); ++index) {
+        // Some cubic taps have zero weight in both the value and its gradient.
+        // Leave those taps at their neutral default so a neighboring clip that
+        // has no mathematical influence cannot reject the whole measurement.
+        if (footprint.coefficients[index] == 0 && footprint.derivativeXPlane[index] == 0 &&
+            footprint.derivativeYPlane[index] == 0) continue;
         const auto raw = layout.PlanePixelToRaw(footprint.taps[index]);
         if (!std::isfinite(raw.x) || !std::isfinite(raw.y) ||
             raw.x < 0 || raw.y < 0 ||
@@ -259,6 +264,7 @@ bool PreparedTileSampler::SampleSameCfa(
         fallback=InterpolateCaptureFallback(footprint,taps,parameters.exposureScale);
         return false;
     }
+    headroom=FootprintHeadroom(footprint,taps);
     evaluated.sourceRaw = sourceRaw;
     result = std::move(evaluated);
     return true;

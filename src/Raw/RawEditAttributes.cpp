@@ -1,3 +1,4 @@
+#include <set>
 #include "Raw/RawEditAttributes.h"
 
 #include <algorithm>
@@ -63,7 +64,6 @@ void CopyJsonMembers(
 bool IsViewValueAttribute(const std::string& key) {
     return key == "view.range" ||
         key == "view.contrast" ||
-        key == "view.rolloff" ||
         key == "view.color" ||
         key == "view.output" ||
         key == "view.diagnostics";
@@ -191,17 +191,12 @@ const std::vector<RawEditAttributeDescriptor>& RawEditAttributeDescriptors() {
         },
         {
             "view.range", "view", "View",
-            "Exposure Range", "View exposure, black, white, and middle-grey values.",
+            "Exposure and Grey", "View exposure and middle-grey values.",
             true, false
         },
         {
             "view.contrast", "view", "View",
             "Contrast and Pivot", "View contrast model, amount, and pivot.",
-            true, false
-        },
-        {
-            "view.rolloff", "view", "View",
-            "Toe and Shoulder", "View highlight and shadow rolloff values.",
             true, false
         },
         {
@@ -316,6 +311,75 @@ RawEditAttributeSelectionPlan PlanRawEditAttributeSelectionForTarget(
     return plan;
 }
 
+void CaptureAuthoredLayers(RawEditAttributeBundle& bundle, const nlohmann::json& stack,
+    const std::string& sourceProject) {
+    bundle.authoredLayers.reset();
+    if (!stack.is_object()) return;
+    auto edits = std::make_shared<AuthoredLayerEdits>();
+    if (stack.contains("nodeGraph")) {
+        if (!stack.at("nodeGraph").is_object() || !stack.at("nodeGraph").contains("nodes") ||
+            !stack.at("nodeGraph").at("nodes").is_array()) return;
+        auto graph=stack;
+        graph.erase("rawLayerStack");
+        const std::string parent="layer/@project";
+        edits->choices.push_back({parent,"Project graph",{}});
+        try {
+            std::set<int> inbound,outbound;
+            for (const auto& link:graph.at("nodeGraph").at("links")) {
+                if (link.at("toSocket")=="imageIn") inbound.insert(link.at("toNodeId").get<int>());
+                if (link.at("fromSocket")=="imageOut") outbound.insert(link.at("fromNodeId").get<int>());
+            }
+            for (auto& node : graph["nodeGraph"]["nodes"]) {
+                const auto kind=node.value("kind",std::string{});
+                const int id=node.at("id").get<int>();
+                if (kind=="Layer" || kind=="RawOperation" || (inbound.count(id) && outbound.count(id))) {
+                    const auto label=node.value("title",std::string{});
+                    edits->choices.push_back({parent+"/"+node.at("instanceUuid").get<std::string>(),
+                        label.empty() ? node.value("layerType",kind) : label,parent});
+                }
+                if (kind=="Image" || kind=="RawDevelopment" || kind=="RawSource" || kind=="RawProjectFrame" ||
+                    kind=="MultiFrameDenoise" || kind=="MultiFrameHdr") {
+                    // Only a source socket is reusable. Captures and input bytes stay in the source project.
+                    nlohmann::json socket;
+                    for (const auto* key : {"id","instanceUuid","kind","x","y"}) if (node.contains(key)) socket[key]=node.at(key);
+                    node=std::move(socket);
+                }
+            }
+        } catch (const nlohmann::json::exception&) { return; }
+        if (stack.contains("rawLayerStack")) {
+            CaptureAuthoredLayers(bundle,stack.at("rawLayerStack"),sourceProject);
+            if (!bundle.authoredLayers) return;
+            // A plain RAW source connected to Output adds no composition edits.
+            if (edits->choices.size()==1 && graph["nodeGraph"]["nodes"].size()==2) return;
+            graph["rawLayerStack"]=bundle.authoredLayers->stack;
+            const auto& choices=bundle.authoredLayers->choices;
+            edits->choices.insert(edits->choices.end(),choices.begin(),choices.end());
+        }
+        edits->stack=std::move(graph);
+        edits->sourceProject=sourceProject;
+        bundle.authoredLayers=std::move(edits);
+        return;
+    }
+    if (!stack.contains("background") || !stack.contains("layers") || !stack.at("layers").is_array()) return;
+    auto collect = [&](const nlohmann::json& layer) {
+        const auto key = "layer/" + layer.at("id").get<std::string>();
+        edits->choices.push_back({key, layer.at("name").get<std::string>(), {}});
+        for (const auto& node : layer.at("graph").at("nodeGraph").at("nodes")) {
+            if (!node.contains("rawOperation")) continue;
+            const auto& operation = node.at("rawOperation");
+            edits->choices.push_back({key + "/" + node.at("instanceUuid").get<std::string>(),
+                operation.at("kind").get<std::string>(), key});
+        }
+    };
+    try {
+        collect(stack.at("background"));
+        for (const auto& layer : stack.at("layers")) collect(layer);
+    } catch (const nlohmann::json::exception&) { return; }
+    edits->stack = stack;
+    edits->sourceProject = sourceProject;
+    bundle.authoredLayers = std::move(edits);
+}
+
 RawEditAttributeBundle CaptureRawEditAttributeBundle(
     const RawDevelopmentRecipe& recipe,
     std::string sourceLabel,
@@ -337,7 +401,7 @@ nlohmann::json SerializeRawEditAttributeBundle(
     RawDevelopmentRecipe portableRecipe =
         DeserializeRecipe(SerializeRecipe(bundle.recipe));
     portableRecipe.source = {};
-    return {
+    nlohmann::json result = {
         { "schema", kRawEditAttributeBundleSchema },
         { "version", kRawEditAttributeBundleVersion },
         { "sourceLabel", bundle.sourceLabel },
@@ -346,6 +410,12 @@ nlohmann::json SerializeRawEditAttributeBundle(
             bundle.viewTransformPlacement == "graph" ? "graph" : "internal" },
         { "recipe", SerializeRecipe(portableRecipe) }
     };
+    if (!bundle.copiedSelection.empty()) result["selection"] = bundle.copiedSelection;
+    if (bundle.authoredLayers) {
+        result["layerStack"] = bundle.authoredLayers->stack;
+        result["assetProject"] = bundle.authoredLayers->sourceProject;
+    }
+    return result;
 }
 
 bool DeserializeRawEditAttributeBundle(
@@ -381,6 +451,10 @@ bool DeserializeRawEditAttributeBundle(
             : "internal";
     loaded.recipe = DeserializeRecipe(*recipe);
     loaded.recipe.source = {};
+    if (value.contains("layerStack"))
+        CaptureAuthoredLayers(loaded, value.at("layerStack"), value.value("assetProject",std::string{}));
+    if (value.contains("selection") && value.at("selection").is_array())
+        for (const auto& key : value.at("selection")) if (key.is_string()) loaded.copiedSelection.push_back(key.get<std::string>());
     bundle = std::move(loaded);
     if (errorMessage) {
         errorMessage->clear();
@@ -495,19 +569,13 @@ RawEditAttributeApplyResult ApplyRawEditAttributeBundle(
         CopyJsonMembers(
             source.viewTransform.layerJson,
             targetRecipe.viewTransform.layerJson,
-            { "exposure", "blackEv", "whiteEv", "middleGrey" });
+            { "displayCurve", "exposure", "middleGrey" });
     }
     if (applied("view.contrast")) {
         CopyJsonMembers(
             source.viewTransform.layerJson,
             targetRecipe.viewTransform.layerJson,
             { "contrast", "contrastPivotEv", "contrastModel" });
-    }
-    if (applied("view.rolloff")) {
-        CopyJsonMembers(
-            source.viewTransform.layerJson,
-            targetRecipe.viewTransform.layerJson,
-            { "shoulder", "toe" });
     }
     if (applied("view.color")) {
         CopyJsonMembers(

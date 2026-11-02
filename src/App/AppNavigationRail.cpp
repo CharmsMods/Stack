@@ -5,6 +5,7 @@
 #include "EdgeChrome.h"
 #include "WorkspaceInputScope.h"
 #include "WorkspacePresentation.h"
+#include "Utils/HoverTextScope.h"
 #include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -137,6 +138,7 @@ void AppShell::LayoutNavigationRail() {
 }
 
 void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity) {
+    ImGuiExtras::HoverTextScope noHoverText;
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NavigationBars);
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Rail,
         Stack::UiPerformance::Probe::Key(m_NavigationRail.revealAmount));
@@ -149,8 +151,9 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     const float drawnWidth = width;
     ImGui::SetNextWindowSize(ImVec2(std::max(1.f,drawnWidth), viewport->Size.y));
     ImGui::SetNextWindowViewport(viewport->ID);
-    ImVec4 railTint = palette.caption;
-    railTint.w = 1.f;
+    const ImVec4 railTint = Stack::Header::ResolvePanelColor(
+        m_Editor ? m_Editor->GetWorkspaceBaseColor() : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg),
+        Stack::Header::ResolveSectionTintOpacity(rail.revealAmount));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, railTint);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.f * s, 7.f * s));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
@@ -166,7 +169,9 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
         ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, Stack::Animation::ControlMotion& motion, bool enabled = true) {
-        return Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion);
+        const bool clicked = Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) CancelProjectPillPreview();
+        return clicked;
     };
     using Stack::Navigation::Glyph;
     // Both bars reserve this slot; the shared sibling owns the only hit target.
@@ -207,6 +212,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
     ImGui::SetCursorScreenPos(ImVec2(rail.position.x + 7.f * s,
         viewport->Pos.y + viewport->Size.y - 41.f * s));
     RenderActivityIndicator(targetSize, 32.f * s, openActivity);
+    if (ImGui::IsItemHovered()) CancelProjectPillPreview();
     m_WorkspaceCompositor.KeepChrome(draw);
     ImGui::End();
     ImGui::PopStyleVar(5);

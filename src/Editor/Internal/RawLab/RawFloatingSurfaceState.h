@@ -12,6 +12,7 @@ namespace Stack::Editor::RawLabInternal {
 // independent of the image recipe, project history and saved RAW settings.
 struct FloatingSurfaceState {
     bool positioned = false;
+    bool userPlaced = false;
     float horizontalPlacement = 0.f; // Fraction of available horizontal travel, from 0 to 1.
     float horizontalTravel = 0.f;
     float verticalOffset = 0.f;
@@ -19,6 +20,9 @@ struct FloatingSurfaceState {
     ImVec2 minimum{}, maximum{};
     int frame = -2;
     bool imageNavigationMenuOpen = false;
+    bool forwardsImageWheel = false;
+    float imageWheel = 0.f;
+    ImVec2 imageWheelPointer{};
     std::map<std::string, float> contentHeights;
     ImGuiExtras::FloatingSurfaceInput input;
     RawFloatingTraceState trace;

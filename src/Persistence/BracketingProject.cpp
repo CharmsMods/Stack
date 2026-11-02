@@ -11,7 +11,9 @@ Raw::Bracketing::BracketingRecipe SuggestBracketingGroups(const RawProjectSnapsh
         if (asset) DeserializeRawCaptureCompatibilitySummary(asset->captureMetadataSummary,metadata,nullptr);
         captures.push_back({frame.frameId,metadata.exposureTimeSeconds,metadata.apertureFNumber,metadata.isoSpeed});
     }
-    return Raw::Bracketing::SuggestGroups(captures);
+    auto recipe=Raw::Bracketing::SuggestGroups(captures);
+    recipe.reconstruction=Raw::Bracketing::ReconstructionMode::Adaptive;
+    return recipe;
 }
 void InitializeBracketing(MultiFrameSourceSet& set,const RawProjectSnapshot& snapshot) {
     auto recipe=SuggestBracketingGroups(snapshot,set);

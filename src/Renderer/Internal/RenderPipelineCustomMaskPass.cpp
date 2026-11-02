@@ -1,3 +1,4 @@
+#include "Raw/DepthMask.h"
 #include "Assets/MaskResampling.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLStateGuards.h"
@@ -366,7 +367,25 @@ std::vector<float> FlattenCustomMaskPayload(const RenderCustomMaskPayload& paylo
     const int sourceH = std::max(1, payload.height);
     const bool hasRaster = payload.rasterLayer.size() >= static_cast<std::size_t>(sourceW) * static_cast<std::size_t>(sourceH);
 
-    if (hasRaster) values = Stack::Assets::ResampleMaskCoverage(
+    if(payload.depthMask) {
+        const auto& m=*payload.depthMask;auto coverage=m.Read();
+        std::vector<float> upright(std::size_t(sourceW)*sourceH);
+        for(int y=0;y<m.h;++y)for(int x=0;x<m.w;++x){
+            const int sx=x+m.x,sy=y+m.y;
+            int col=sx,row=sy;
+            switch(payload.depthOrientation) {
+                case 2: col=m.width-1-sx;break;
+                case 3: col=m.width-1-sx;row=m.height-1-sy;break;
+                case 4: row=m.height-1-sy;break;
+                case 5: col=sy;row=sx;break;
+                case 6: col=m.height-1-sy;row=sx;break;
+                case 7: col=m.height-1-sy;row=m.width-1-sx;break;
+                case 8: col=sy;row=m.width-1-sx;break;
+            }
+            upright[std::size_t(row)*sourceW+col]=(*coverage)[std::size_t(y)*m.w+x]/255.f;
+        }
+        values=Stack::Assets::ResampleMaskCoverage(upright.data(),sourceW,sourceH,width,height,true);
+    } else if (hasRaster) values = Stack::Assets::ResampleMaskCoverage(
         payload.rasterLayer.data(),sourceW,sourceH,width,height,true);
     else values.assign(pixelCount,0.f);
 
@@ -436,6 +455,8 @@ unsigned int RenderPipeline::GenerateCustomMaskTexture(const RenderCustomMaskPay
     try {
         values = FlattenCustomMaskPayload(payload, m_Width, m_Height);
     } catch (const std::bad_alloc&) {
+        return 0;
+    } catch (const std::runtime_error&) {
         return 0;
     } catch (const std::length_error&) {
         return 0;

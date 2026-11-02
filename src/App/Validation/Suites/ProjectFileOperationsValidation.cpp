@@ -38,6 +38,16 @@ void WaitForBoth(EditorModule& a, EditorModule& b,
         "Overlapping project operations did not both complete successfully within 15 seconds.");
 }
 
+// The saved store rehydrates byte assets, while the layer stack uses an
+// explicit byte wrapper in its text manifest. Compare the actual bytes.
+void NormalizeLayerBytes(nlohmann::json& value) {
+    if (value.is_object() && value.size() == 1 && value.contains("$rawLayerBytes")) {
+        value = nlohmann::json::binary(value.at("$rawLayerBytes").get<std::vector<std::uint8_t>>());
+    } else if (value.is_structured()) {
+        for (auto& child : value) NormalizeLayerBytes(child);
+    }
+}
+
 nlohmann::json Graph(const EditorModule& editor) {
     return EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), editor.GetNodeGraph());
 }
@@ -69,8 +79,10 @@ void ValidateOverlappingProjectFileOperations(
     b.AddOutputNodeAt({420, 120});
     const auto graphA = Graph(a);
     const auto graphB = Graph(b);
-    const auto pipelineA = a.SerializePipeline();
-    const auto pipelineB = b.SerializePipeline();
+    auto pipelineA = a.SerializePipeline();
+    auto pipelineB = b.SerializePipeline();
+    NormalizeLayerBytes(pipelineA);
+    NormalizeLayerBytes(pipelineB);
     const std::string idA = a.EnsureProjectDocumentId();
     const std::string idB = b.EnsureProjectDocumentId();
     Require(idA != idB && graphA != graphB, "The overlap check did not create distinct projects.");

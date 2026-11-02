@@ -1,3 +1,12 @@
+#include "Editor/Internal/RawLab/RawLayerMaskPlacement.h"
+#include "Editor/GalleryPresetPreview.h"
+#include "Editor/RawAttributeTargetProject.h"
+#include "Editor/RawRenderService.h"
+#include "Raw/RawTechnicalEvidence.h"
+#include "Raw/RawWorkspace.h"
+#include "Raw/RawLoader.h"
+#include "Async/TaskSystem.h"
+#include "Renderer/GLLoader.h"
 #include "Project/RawLayerStackSnapshot.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Persistence/ProjectStore.h"
@@ -203,6 +212,23 @@ void CheckPixelsAndView() {
             const auto linear = AddRawLocalAdjustment(localOffset,kRawBackgroundId,original,
                 EditorNodeGraph::MaskGeneratorKind::LinearGradient,error);
             Require(!linear.operationUuid.empty(),error);
+            {
+                const auto* output = FindRawMaskOutput(localOffset, linear.mask);
+                auto& shape = localOffset.background.graph.FindNode(output->nodeId)->maskSettings;
+                for (float end : {.625f, .875f}) {
+                    Editor::RawLabInternal::PlaceLayerMask(shape, EditorNodeGraph::MaskGeneratorKind::LinearGradient,
+                        {.125f, .25f}, {end, .25f});
+                    auto ramp = graph;
+                    Require(LowerRawLayerStack(ramp,localOffset,1,32,error),error);
+                    Require(ConfigureRawLayerThumbnail(ramp,kRawBackgroundId,linear.mask.outputId,error),error);
+                    const auto pixels = Render(pipeline,ramp);
+                    for (int x = 0; x < 4; ++x) {
+                        const float t = std::clamp((x * .25f) / (end - .125f), 0.f, 1.f);
+                        Require(std::abs(pixels[x*4] - t*t*(3.f-2.f*t)) < .004f,
+                            "The toolbar linear mask did not feather across the drawn endpoints.");
+                    }
+                }
+            }
             const auto radial = AddRawLocalAdjustment(localOffset,kRawBackgroundId,linear.operationUuid,
                 EditorNodeGraph::MaskGeneratorKind::RadialGradient,error);
             Require(!radial.operationUuid.empty(),error);
@@ -443,16 +469,19 @@ void CheckPixelsAndView() {
         const int maskCurveNode = maskGraph.AddRawOperationNode(Kind::ToneCurve, {160,0})->id;
         maskGraph.FindNode(maskCurveNode)->rawOperation.parameters=maskCurve;
         Require(maskGraph.TryConnectSockets(generator, "maskOut", maskCurveNode, "imageIn", &error), error);
-        Require(maskGraph.TryConnectSockets(maskCurveNode, "imageOut", shapedOutput, "imageIn", &error), error);
+        if (!maskGraph.TryConnectSockets(maskCurveNode, "imageOut", shapedOutput, "imageIn", &error))
+            throw std::runtime_error("Connecting the coverage curve to Mask Output: " + error);
         EditPhoto(maskOwner, Kind::Exposure, [](auto& r) { r.preToneExposureEv = 1.f; });
         Attach(graphEditedMask, first, Kind::Exposure, shaped);
         lowered = graph;
-        Require(LowerRawLayerStack(lowered, graphEditedMask, 1, 20, error), error);
+        if (!LowerRawLayerStack(lowered, graphEditedMask, 1, 20, error))
+            throw std::runtime_error("Lowering the connected coverage curve: " + error);
         const auto shapedValue = RawRecipe::EvaluateFinishTonePointCurveRgb(maskCurve, {.25f,.25f,.25f}, space);
         CompareGain(base, Render(pipeline, lowered), 1.0f + std::clamp(shapedValue[0], 0.0f, 1.0f));
         maskGraph.RemoveNode(generator);
         lowered = graph;
-        Require(LowerRawLayerStack(lowered, graphEditedMask, 1, 21, error), error);
+        if (!LowerRawLayerStack(lowered, graphEditedMask, 1, 21, error))
+            throw std::runtime_error("Lowering the disconnected coverage curve: " + error);
         ExpectUnavailableCoverage(pipeline,lowered);
         std::cout << "Mask graph curve and unavailable incomplete branch passed.\n";
         Attach(curved, first, Kind::ToneCurve, toneMask);
@@ -738,7 +767,7 @@ void CheckStore(const std::filesystem::path& folder) {
     initial.projectName = "Layer save/reopen validation";
     initial.pipelineData = {{"rawLayerStack", expected}};
     const auto path = folder / ("save-reopen-" + initial.projectId);
-    auto created = CreateProjectStore(path, ProjectStorageKind::DirectoryBundle, initial);
+    auto created = CreateProjectStore(path, ProjectStorageKind::WorkingFile, initial);
     Require(static_cast<bool>(created), "Cannot create layer project: " + created.message);
     auto transaction = created.store->BeginTransaction(created.snapshot.persistedStorageRevision);
     auto saved = created.snapshot;
@@ -760,6 +789,115 @@ void CheckStore(const std::filesystem::path& folder) {
     std::cout << "Disk project store save/reopen passed: " << path.string() << '\n';
 }
 } // namespace
+
+bool ValidateClosetEditing(const std::filesystem::path& root,const std::filesystem::path& original) {
+    if (!std::filesystem::create_directory(root) || !glfwInit()) return false;
+    glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
+    auto* window=glfwCreateWindow(32,32,"Closet validation",nullptr,nullptr);
+    if (!window) { glfwTerminate();return false; }
+    glfwMakeContextCurrent(window);
+    if (!LoadGLFunctions()) { glfwDestroyWindow(window);glfwTerminate();return false; }
+    Async::TaskSystem::Get().Initialize();
+    auto& render=EditorRendering::RawRenderService::Get();
+    auto client=render.Acquire(window);
+    bool ok=false;
+    try {
+        std::string error;
+        Require(RawWorkspace::EnsureManagedFolders(root,&error),error);
+        auto path=root/original.filename();
+        std::filesystem::copy_file(original,path);
+        auto scan=RawWorkspace::ScanWorkspace(root);
+        Require(scan.success && scan.sources.size()==1,scan.errorMessage);
+        auto& source=scan.sources.front();
+        auto recipe=RawRecipe::MakeDefaultRecipe(path.u8string(),source.fileName);
+        auto bundle=RawRecipe::CaptureRawEditAttributeBundle(recipe,"Mask transfer");
+        RawLayerStackState state;
+        const auto layer=AddRawAdjustmentLayer(state,"Local contrast");
+        const auto mask=AddRawShapeMask(state,layer,EditorNodeGraph::MaskGeneratorKind::Square,"Paint area");
+        FindRawAdjustmentLayer(state,layer)->layerMask=mask;
+        const auto extra=AddRawAdjustmentLayer(state,"Leave out");
+        RawRecipe::CaptureAuthoredLayers(bundle,SerializeRawLayerStack(state),{});
+        Require(bool(bundle.authoredLayers),"The clipboard missed the authored layer graph.");
+        std::vector<std::string> selection{"layer/"+layer};
+        auto target=EditorRawAttributes::CreateProjectAndPasteAttributes(root,source,bundle,selection);
+        Require(target.transfer.success && !target.transfer.skipped,target.transfer.errorMessage);
+        auto saved=OpenProjectStore(target.projectPath);
+        Require(bool(saved),saved.message);
+        RawLayerStackState restored;
+        Require(ReadRawLayersFromPipeline(saved.snapshot.pipelineData,restored,error,true),error);
+        const auto* kept=FindRawAdjustmentLayer(restored,layer);
+        Require(kept && kept->layerMask && kept->layerMask->outputId==mask.outputId &&
+            !FindRawAdjustmentLayer(restored,extra),"Selective paste lost a mask or included an unchecked layer.");
+        std::filesystem::rename(path,root/"offline.original");
+        const auto previews=scan.layout.thumbnailsDirectory;
+        const auto revision=saved.snapshot.persistedStorageRevision;
+        const auto png=GalleryPresets::Render(target.projectPath,revision,previews,{});
+        Require(std::filesystem::file_size(png)>64,"Missing fixed-pattern preset preview.");
+        const auto timestamp=std::filesystem::last_write_time(png);
+        Require(GalleryPresets::Render(target.projectPath,revision,previews,{})==png &&
+            std::filesystem::last_write_time(png)==timestamp,"Unchanged preview rendered again.");
+        auto custom=GalleryPresets::Comparison(original);
+        Require(GalleryPresets::Render(target.projectPath,revision,previews,custom)!=png,"Comparison image cache collision.");
+        std::vector<RawWorkspace::SourceSetProjectCatalogEntry> cards;
+        std::vector<RawWorkspace::SourceRecord> none;
+        Require(RawWorkspace::DiscoverWorkspaceProjects(scan.layout,none,cards) && cards.size()==1 && cards.front().unlinked,
+            "An offline edit is missing from Unlinked.");
+        auto rejected=EditorRawAttributes::CreateProjectAndPasteAttributes(root,source,bundle,selection);
+        Require(!rejected.transfer.success,"A missing target original was accepted.");
+        Require(OpenProjectStore(target.projectPath).snapshot.persistedStorageRevision==revision,"Browsing changed the project.");
+        // Use the same chooser for an ordinary raster graph and a RAW project
+        // that has both composition effects and authored adjustment layers.
+        namespace G=EditorNodeGraph;
+        G::Graph composition;
+        G::ImagePayload input;
+        input.sourcePath=original.u8string();
+        const auto* image=composition.AddImageNode(std::move(input),{});
+        const int inputId=image->id;
+        const auto inputUuid=image->instanceUuid;
+        const int first=composition.AddLayerNode(LayerType::Brightness,0,{})->id;
+        const auto* last=composition.AddLayerNode(LayerType::Contrast,1,{});
+        const int effect=last->id;
+        const auto keepEffect=last->instanceUuid;
+        const int output=composition.AddOutputNode({},true)->id;
+        for (const auto& edge:std::vector<std::pair<int,int>>{{inputId,first},{first,effect},{effect,output}})
+            Require(composition.TryConnectSockets(edge.first,"imageOut",edge.second,"imageIn",&error),error);
+        auto graph=G::SerializeGraphPayload(nlohmann::json::array(),composition);
+        graph["rawLayerSourceNodeUuid"]=inputUuid;
+        graph["rawLayerStack"]=SerializeRawLayerStack(state);
+        RawRecipe::CaptureAuthoredLayers(bundle,graph,target.projectPath.u8string());
+        auto selectedGraph=std::vector<std::string>{"layer/@project","layer/@project/"+keepEffect};
+        const auto rasterPath=root/"Target.png";
+        std::filesystem::copy_file(png,rasterPath);
+        auto rasterScan=RawWorkspace::ScanWorkspace(root);
+        const auto raster=std::find_if(rasterScan.sources.begin(),rasterScan.sources.end(),
+            [&](const auto& s){return s.absolutePath==rasterPath;});
+        Require(raster!=rasterScan.sources.end(),"PNG original was not indexed.");
+        auto graphTarget=EditorRawAttributes::CreateProjectAndPasteAttributes(root,*raster,bundle,selectedGraph);
+        Require(graphTarget.transfer.success && !graphTarget.transfer.skipped,graphTarget.transfer.errorMessage);
+        auto graphDoc=OpenProjectStore(graphTarget.projectPath);
+        Require(bool(graphDoc),graphDoc.message);
+        const auto& nodes=graphDoc.snapshot.pipelineData.at("nodeGraph").at("nodes");
+        Require(nodes.size()==3 && std::any_of(nodes.begin(),nodes.end(),[&](const auto& n){
+            return n.at("instanceUuid")==keepEffect && n.at("layerIndex")==0;}),
+            "Middle-effect bypass lost the selected effect or left an invalid adapter index.");
+        std::filesystem::rename(root/"offline.original",path);
+        selectedGraph.push_back("layer/"+layer);
+        auto combined=EditorRawAttributes::CreateProjectAndPasteAttributes(root,source,bundle,selectedGraph);
+        Require(combined.transfer.success && !combined.transfer.skipped,combined.transfer.errorMessage);
+        const auto combinedDoc=OpenProjectStore(combined.projectPath);
+        Require(bool(combinedDoc),combinedDoc.message);
+        Require(combinedDoc.snapshot.pipelineData.at("nodeGraph").at("nodes").size()==3 &&
+            ReadRawLayersFromPipeline(combinedDoc.snapshot.pipelineData,restored,error,true) &&
+            FindRawAdjustmentLayer(restored,layer),"Combined composition and RAW layer selection failed: "+error);
+        ok=true;
+        std::cout<<"Closet editing passed. Selected layer, mask dependency, omitted layer, offline preview, fixed/custom inputs, cache reuse, target rejection, PNG graph apply and mixed-layer composition.\n";
+    } catch (const std::exception& e) { std::cerr<<"Closet editing failed: "<<e.what()<<'\n'; }
+    render.Release(client);
+    Async::TaskSystem::Get().Shutdown();
+    glfwDestroyWindow(window);glfwTerminate();
+    return ok;
+}
 
 bool ValidateRawLayers(const std::filesystem::path& folder) {
     std::cout << std::unitbuf;

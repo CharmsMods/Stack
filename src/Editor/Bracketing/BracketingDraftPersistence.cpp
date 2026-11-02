@@ -137,8 +137,11 @@ bool EditorModule::CommitBracketingDraft(bool process,std::string* error) {
             });
             return false;
         }
+        std::string storageError;
+        if (!Stack::RawWorkspace::IsMarkedCloset(root / "Closet") &&
+            !Stack::RawWorkspace::EnsureManagedFolders(root, &storageError)) return fail(storageError);
         ui.awaitingProject=path;
-        if(!CreateMultiFrameRawProject(path,Stack::Project::ProjectStorageKind::DirectoryBundle,
+        if(!CreateMultiFrameRawProject(path,Stack::Project::ProjectStorageKind::WorkingFile,
             name,"Captures",Stack::Project::MultiFrameOperationIntent::RawCaptureSet,paths,0,&ui.status,ui.recipe.orientationOverrides)) {
             ui.awaitingProject.clear();return fail(ui.status);
         }

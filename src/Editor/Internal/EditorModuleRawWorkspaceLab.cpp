@@ -596,7 +596,7 @@ void EditorModule::UpdateRawWorkspaceNotificationDecisions() {
                 (m_Project->snapshot->projectName + "-copy.stack").c_str());
             if (destination.empty()) return N::ActionResult::Failure("No copy was saved. Choose a destination to continue.");
             std::string error;
-            if (!SaveActiveMultiFrameRawProjectAs(destination, Stack::Project::ProjectStorageKind::PortableFile, &error))
+            if (!SaveActiveMultiFrameRawProjectAs(std::filesystem::u8path(destination), Stack::Project::ProjectStorageKind::WorkingFile, &error))
                 return N::ActionResult::Failure(error.empty() ? "The project copy could not be saved." : error);
             notifier.Info("Project copy saved. The original storage conflict still needs a reload.");
             notifier.Dismiss(*event);
@@ -888,7 +888,8 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             ":" + m_RawWorkspaceLabUi.galleryProjectId;
         m_RawWorkspaceGalleryLayoutAnimation.BeginFrame(layoutKey,
             m_RawWorkspaceLabUi.galleryWorkspaceGrid, ImGui::GetFrameCount(), ImGui::GetTime(),
-            m_RawWorkspaceFilmstripOrganizationRevision, Stack::LibraryUi::ReducedMotion());
+            m_RawWorkspaceFilmstripOrganizationRevision + m_RawWorkspaceGalleryGridStacks.navigationRevision,
+            Stack::LibraryUi::ReducedMotion());
     } else {
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
@@ -1159,8 +1160,7 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                 Stack::RawWorkspace::GalleryContentMode::Gallery;
         const auto maximumFilmstripStackSize = [&]() {
             if (!normalGalleryFilmstrip) return std::size_t { 1u };
-            ResolveRawWorkspaceFilmstripStacks();
-            return m_RawWorkspaceFilmstripMaximumStackSizeCache;
+            return m_RawFilmstripHeight.maximum;
         };
         constexpr float kFilmstripStackGap = 10.0f;
         const float filmstripTileHeight = kRawLabFilmstripTileHeight *
@@ -1177,8 +1177,9 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         if (!drawerWasOpen &&
             m_RawWorkspaceLabFilmstripDrawerState.open) {
             m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
+            m_RawFilmstripHeight.target = 0.0f;
             m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight =
-                drawerHeightForCurrentStacks();
+                m_RawFilmstripHeight.Target(drawerHeightForCurrentStacks(), ImGui::GetTime());
         }
         if (!filmstripRequested) {
             m_RawWorkspaceLabFilmstripDrawerState = {};
@@ -1189,12 +1190,10 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             m_RawWorkspaceLabFilmstripDrawerSessionOrders.clear();
             m_RawWorkspaceLabFilmstripDragState = {};
         } else if (m_RawWorkspaceLabFilmstripDrawerState.open) {
-            // Similarity grouping is asynchronous. Do not leave a drawer at
-            // its initial singleton height when a larger stack arrives after
-            // the open transition has begun.
-            m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight = std::max(
-                m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight,
-                drawerHeightForCurrentStacks());
+            // Grow immediately for newly visible stacks. Briefly defer shrink
+            // while scrolling fast so the image does not repeatedly bounce.
+            m_RawWorkspaceLabFilmstripDrawerFrozenTargetHeight =
+                m_RawFilmstripHeight.Target(drawerHeightForCurrentStacks(), ImGui::GetTime());
             m_RawWorkspaceLabFilmstripDrawerAnimatedHeight =
                 AnimateRawLabDrawerHeight(
                     std::max(

@@ -1,3 +1,4 @@
+#include "App/ProjectSidebarEntry.h"
 #include "Editor/EditorModule.h"
 #include "Editor/AutoBracket/AutoBracketCoordinator.h"
 #include "Editor/AutoBracket/AutoBracketPresentation.h"
@@ -381,17 +382,18 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
         ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({1440, 900});
         ImGui::Begin("Project pill appearance", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
-        const auto palette = Header::ResolvePalette(appearance.GetClearColor());
         auto* draw = ImGui::GetWindowDrawList();
-        ImGui::SetCursorScreenPos({32, 28}); ImGui::TextUnformatted("Project pills: normal and automatic");
-        for (unsigned index = 0; index < 4; ++index) {
-            const float y = 80.f + index * 44.f;
-            const bool selected = index % 2 == 0, background = index >= 2;
-            Header::DrawProjectPill(draw, {32, y}, {112, y + 14}, 1.f, palette,
-                {selected, false, false, false, background});
-            draw->AddText({140, y - 1}, ImGui::GetColorU32(ImGuiCol_Text),
-                background ? (selected ? "Automatic - active" : "Automatic - inactive") :
-                    (selected ? "Normal - active" : "Normal - inactive"));
+        const float railWidth=38.f;
+        Check(Navigation::ProjectEntryHeight(railWidth,1.f,6000,120)==24.f &&
+            Navigation::ProjectEntryHeight(railWidth,1.f,120,6000)==76.f,
+            "Extreme image aspect ratio made a sidebar target disappear or crowd out its neighbors.");
+        ImGui::SetCursorScreenPos({32,28}); ImGui::TextUnformatted("Open workspaces without an image preview");
+        for (unsigned index=0;index<3;++index) {
+            const float y=78.f+index*48.f;
+            const char* label=index==0 ? "Auto" : index==1 ? "Draft" : "Night";
+            Navigation::DrawProjectEntry(draw,{32,y},{66,y+38.f},1.f,0,0,0,label,index==0,index==1);
+            draw->AddText({100,y},ImGui::GetColorU32(ImGuiCol_Text),
+                index==0 ? "Auto bracket, active" : index==1 ? "Draft, unsaved" : "Night");
         }
         ImGui::End(); ImGui::Render();
         glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, 1440, 900);

@@ -408,14 +408,10 @@ bool ValidateBracketing() {
         outputDepth->sensorWidth=hdr.raw->metadata.visibleWidth;outputDepth->sensorHeight=hdr.raw->metadata.visibleHeight;
         outputDepth->inverseDepth={0,0,1,1};outputDepth->confidence={1,1,1,1};outputDepth->measuredFraction=1;
         depthAnalysis->depth=outputDepth;defocused.analysis=depthAnalysis;
-        auto defocusRequest=hdrRequest;defocusRequest.recipe.depth.enabled=true;
-        defocusRequest.recipe.depth.focus=1;defocusRequest.recipe.depth.blurRadius=8;
-        Check(Depth::Finish(defocusRequest,defocused,error),error);
-        Check(defocused.raw->reconstructedCameraRgb&&!defocused.raw->normalizedMosaicBuffer&&
-            !defocused.raw->multiFrameMeasurementSidecars&&defocused.raw->reconstructionDepth==outputDepth,
-            "Defocus did not publish the camera RGB contract with depth evidence");
-        Check(!defocused.raw->metadata.hasDngNoiseProfile&&defocused.raw->metadata.dngNoiseProfile.empty(),
-            "Defocus retained an unfiltered sensor noise profile");
+        Check(Depth::Finish(hdrRequest,defocused,error),error);
+        Check(defocused.raw->normalizedMosaicBuffer==hdr.raw->normalizedMosaicBuffer &&
+            defocused.raw->multiFrameMeasurementSidecars==hdr.raw->multiFrameMeasurementSidecars,
+            "Depth extraction modified sharp measurements");
         Check(std::abs((*hdr.raw->normalizedMosaicBuffer)[110]-1.5)<.002,"HDR highlight recovery or mixed ISO scale failed");
         Check(hdr.raw->normalizedMosaicInputContract==Raw::NormalizedMosaicInputContract::BracketingPreGain,"Mosaic contract lost");
         {
@@ -554,7 +550,7 @@ bool ValidateBracketing() {
 
         using namespace Stack::Project;
         RawProjectSnapshot bootstrap;bootstrap.projectId=GenerateStableUuid();bootstrap.projectName="Bracket persistence validation";
-        auto store=CreateProjectStore(directory/"project",ProjectStorageKind::DirectoryBundle,bootstrap);Check(static_cast<bool>(store),store.message);
+        auto store=CreateProjectStore(directory/"project",ProjectStorageKind::WorkingFile,bootstrap);Check(static_cast<bool>(store),store.message);
         auto snapshot=store.snapshot;auto transaction=store.store->BeginTransaction(snapshot.persistedStorageRevision);
         MultiFrameSourceSet set;set.sourceSetId=GenerateStableUuid();set.name="Bracket";set.inputFamily=MultiFrameInputFamily::Raw;
         for(int i=0;i<3;++i) {
@@ -600,7 +596,7 @@ bool ValidateBracketing() {
         depth->message="Saved relative depth fixture";
         storedResult.raw=std::make_shared<Raw::RawImageData>(*storedResult.raw);
         storedResult.raw->reconstructionDepth=depth;storedResult.identity+="-depth";
-        storedRecipe.depth.enabled=true;storedRecipe.alignmentMode=AlignmentMode::AutomaticLocal;
+        storedRecipe.alignmentMode=AlignmentMode::AutomaticLocal;
         savedSnapshot.sourceSets.front().settings["bracketing"]=Serialize(storedRecipe);
         Check(SaveBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,storedResult,{},error),error);
         loadedResult={};
@@ -610,15 +606,6 @@ bool ValidateBracketing() {
             restoredDepth->confidence==depth->confidence&&restoredDepth->sensorWidth==depth->sensorWidth&&
             restoredDepth->sensorHeight==depth->sensorHeight&&restoredDepth->message==depth->message,
             "Saving and reopening lost relative depth or confidence");
-        storedResult.raw=defocused.raw;storedResult.identity+="-defocus";
-        storedRecipe.depth=defocusRequest.recipe.depth;
-        savedSnapshot.sourceSets.front().settings["bracketing"]=Serialize(storedRecipe);
-        Check(SaveBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,storedResult,{},error),error);
-        loadedResult={};
-        Check(RestoreBracketingResult(reopened.store,savedSnapshot,set.sourceSetId,loadedResult,error),error);
-        Check(loadedResult.raw->reconstructedCameraRgb&&loadedResult.raw->linearFloatBuffer==defocused.raw->linearFloatBuffer&&
-            loadedResult.raw->reconstructionDepth&&loadedResult.raw->reconstructionDepth->Available(),
-            "Saving and reopening lost depth-of-field pixels");
         std::error_code ec;std::filesystem::remove_all(directory,ec);
         std::cout<<"Bracketing curves, RAW alignment, noise averaging, clipping, mixed ISO, preview parity, persistence, identity, cancellation and memory checks passed.\n";return true;
     }catch(const std::exception& e) {std::cerr<<"Bracketing validation failed: "<<e.what()<<"\nFixtures: "<<directory<<'\n';return false;}

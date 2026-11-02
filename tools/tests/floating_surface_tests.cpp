@@ -66,6 +66,14 @@ void ValidateFloatingSurfaces() {
     };
     io.AddMousePosEvent(-100,-100); frame(); frame();
     const auto initial=document();
+    io.AddMousePosEvent(120,60); frame();
+    io.AddMouseButtonEvent(2,true); frame();
+    io.AddMousePosEvent(155,85); frame();
+    require(input.moving && position.x==35 && position.y==25 && document()==initial,
+        "Middle dragging did not move the tool without editing it");
+    io.AddMouseButtonEvent(2,false); frame(); frame();
+    require(!input.OwnsPointer(),"Middle release retained floating tool ownership");
+    position={}; frame(); frame();
     for(int first:{0,1}) {
         ImVec2 p(position.x+20,position.y+20); io.AddMousePosEvent(p.x,p.y); frame();
         io.AddMouseButtonEvent(first,true); frame();

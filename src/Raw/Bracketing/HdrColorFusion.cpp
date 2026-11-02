@@ -19,9 +19,12 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
     const auto groups=recipe.groups.size();
     if(sites<1||sites>4||groups>64||(!requested.empty()&&requested.size()!=groups))return result;
     for(unsigned s=0;s<sites;++s)if(samples[s].size()!=groups)return result;
-    // A denoise-only group keeps its established arithmetic and all sidecars.
+    // Equal-exposure bursts keep their existing measurement arithmetic. Only
+    // a marked, unsupported clipped site needs the native color fallback.
     if(groups<2) {
         for(unsigned s=0;s<sites;++s)result[s]=Blend(samples[s],requested,recipe);
+        if(groups==1&&sites==4&&std::any_of(result.begin(),result.end(),[](const Pixel& p){return !p.valid;}))
+            RecoverClippedBayerFallback(samples,recipe,result);
         return result;
     }
     std::array<double,64> headroom{};
@@ -56,13 +59,12 @@ std::array<Pixel,4> BlendColor(const ColorObservations& samples,const std::vecto
         for(unsigned s=0;s<sites;++s)
             result[s]=BlendWithWeights(samples[s],automatic?nullptr:requested.data(),
                 automatic?0:requested.size(),recipe);
-        // If a color has no accepted measurement, independent fallback can
-        // pair clipped-reference red/blue with a dark, displaced green from
-        // another exposure. Prefer one complete, unclipped exposure instead.
-        // localRejected records ANY discarded input, including captures that
-        // contribute no weight. It must not veto accepted measurements from
-        // the other captures. Replace colors together only when one is missing.
+        // For native clipped sites, keep every accepted color and respect the
+        // reference-coordinate bounds on the missing ones. Other incomplete
+        // cells use the established single-capture fallback. A rejected
+        // alternative alone must never disqualify an accepted observation.
         if(std::any_of(result.begin(),result.begin()+sites,[](const Pixel& p){return !p.valid;})) {
+            if(sites==4&&RecoverClippedBayerFallback(samples,recipe,result))return result;
             const bool needsClippedFallback=std::any_of(result.begin(),result.begin()+sites,
                 [](const Pixel& p){return !p.valid||p.fallback;});
             std::size_t selected=groups;double exposure=std::numeric_limits<double>::infinity();

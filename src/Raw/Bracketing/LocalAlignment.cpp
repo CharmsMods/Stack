@@ -8,6 +8,8 @@
 #include "GroupAlignment.h"
 #include "AlignmentExposureCohorts.h"
 #include "AlignmentAnchorEvidence.h"
+#include "LocalTranslationEvidence.h"
+#include "GlobalWarpPatch.h"
 
 #include "Raw/MultiFrameDenoise/GpuLocalMotion.h"
 #include "GpuMotionSession.h"
@@ -38,12 +40,41 @@ bool HardInvalid(std::uint8_t flags) {
         Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::DecoderRepaired);
 }
 
+bool SmallGlobalDisplacement(const Mfd::LocalMotionGrid& grid,double limit) {
+    if(!grid.referenceRawExtent.width||!grid.referenceRawExtent.height)return false;
+    for(double x:{0.,double(grid.referenceRawExtent.width-1)})for(double y:{0.,double(grid.referenceRawExtent.height-1)}) {
+        const auto mapped=grid.globalWarp.Map({x,y});
+        if(std::hypot(mapped.x-x,mapped.y-y)>limit)return false;
+    }
+    return true;
+}
+
+// A global match may describe just one depth plane. For a substantial warp,
+// require independent local matches across the frame before extending it to
+// ambiguous regions without a separate patch test. A measured local
+// disagreement requires the patch test even for a small camera movement.
+bool CanExtendGlobalWarp(const Mfd::LocalMotionGrid& grid,const Mfd::RegistrationParameters& registration) {
+    unsigned quadrants=0;
+    for(const auto& node:grid.nodes) {
+        if(node.state!=Mfd::MotionNodeState::Structured)continue;
+        if(std::hypot(node.residualRaw.x,node.residualRaw.y)>registration.motionDisagreementHardLimitRawPixels)
+            return false;
+        const unsigned quadrant=(node.centerRaw.x>=grid.referenceRawExtent.width*.5?1u:0u)+
+            (node.centerRaw.y>=grid.referenceRawExtent.height*.5?2u:0u);
+        quadrants|=1u<<quadrant;
+    }
+    return quadrants==15 || SmallGlobalDisplacement(grid,registration.forwardBackwardEuclideanHardLimitRawPixels);
+}
+
 std::size_t AddConservativeGlobalFallbackNodes(
-    Mfd::LocalMotionGrid& grid,bool globalAccepted,const Mfd::Parameters& parameters) {
+    Mfd::LocalMotionGrid& grid,bool globalAccepted,const Mfd::Parameters& parameters,
+    const Mfd::CfaPlanePyramid& reference,const Mfd::CfaPlanePyramid& source,
+    double scale,double relativeScaleSigma) {
     // A failed phase/affine solve leaves identity as a search seed, not an
     // observed camera transform. Photometric agreement in a dark, noisy patch
     // cannot turn that seed into geometric evidence.
     if(!globalAccepted) return 0;
+    const bool extend=CanExtendGlobalWarp(grid,parameters.registration);
     std::size_t converted=0;
     const double sigma=std::max(2.0,parameters.registration.flatSafeCovarianceRawPixels);
     for(auto& node:grid.nodes) {
@@ -67,6 +98,7 @@ std::size_t AddConservativeGlobalFallbackNodes(
         // Retain the already estimated global initializer with deliberately
         // broad covariance and low confidence; the photometric reliability
         // pass still rejects contradictory evidence at scene boundaries.
+        if(!extend&&!GlobalWarpPatchAgrees(reference,source,grid,node.centerRaw,scale,relativeScaleSigma))continue;
         node.state=Mfd::MotionNodeState::FlatSafe;
         node.residualRaw={};
         node.covarianceRaw={sigma*sigma,0,sigma*sigma};
@@ -326,17 +358,40 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             accepted=Mfd::EstimateBidirectionalLocalMotion(accelerated,motion,&localError);
             source.alignmentDiagnostic.backend="gpu-search/cpu-verified";
         }
-        if(motionRequest.forwardProposal&&!reuseMotion) {
+        if(motionRequest.forwardProposal&&!reuseMotion)
             source.alignmentDiagnostic.backend+="/external-proposal-raw-verified";
+        if(!reuseMotion) {
             std::array<unsigned,13> rejections{};
             for(const auto& node:motion.forward.nodes)if(node.state==Mfd::MotionNodeState::Rejected)
                 ++rejections[static_cast<unsigned>(node.rejectReason)];
             std::string rejected;
             for(unsigned r=0;r<rejections.size();++r)if(rejections[r])
                 rejected+=" "+std::string(Mfd::MotionNodeRejectReasonName(static_cast<Mfd::MotionNodeRejectReason>(r)))+"="+std::to_string(rejections[r]);
-            diagnostics.push_back(source.id+": proposal-assisted RAW verification before global fallback: structured="+
+            diagnostics.push_back(source.id+": Local RAW verification before global fallback: structured="+
                 std::to_string(motion.forward.structuredCount)+", flat-safe="+std::to_string(motion.forward.flatSafeCount)+
                 ", rejected="+std::to_string(motion.forward.rejectedCount)+rejected);
+        }
+        Mfd::RawCoordinate recoveredTranslation;
+        if(!reuseMotion&&!groupPair&&!source.globalAlignmentAccepted&&accepted&&
+           RecoverLocalTranslation(motion.forward,recoveredTranslation)) {
+            source.alignment.translationRaw=recoveredTranslation;
+            motion.forward.globalWarp=source.alignment;
+            for(auto& node:motion.forward.nodes) {
+                node.residualRaw.x-=recoveredTranslation.x;
+                node.residualRaw.y-=recoveredTranslation.y;
+                node.discreteResidualRaw.x-=recoveredTranslation.x;
+                node.discreteResidualRaw.y-=recoveredTranslation.y;
+            }
+            source.globalAlignmentAccepted=true;
+            source.alignmentDiagnostic.accepted=true;
+            source.alignmentDiagnostic.model=CaptureAlignment::Model::Translation;
+            source.alignmentDiagnostic.translationX=recoveredTranslation.x;
+            source.alignmentDiagnostic.translationY=recoveredTranslation.y;
+            source.alignmentDiagnostic.overlapFraction=
+                std::max(0.,1-std::abs(recoveredTranslation.x)/data.width)*
+                std::max(0.,1-std::abs(recoveredTranslation.y)/data.height);
+            diagnostics.push_back(source.id+": Global translation recovered from agreeing RAW-verified local matches: x="+
+                std::to_string(recoveredTranslation.x)+" y="+std::to_string(recoveredTranslation.y));
         }
         // Latch genuine registration evidence before fallback nodes, boundary
         // extension or composition can manufacture Structured node labels.
@@ -363,20 +418,22 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             globalFallback=true;motion={};
             groupPair=false;
             if(!BuildFixedMotion(source,parameters,motion.forward,error)) return false;
-            if(!source.globalAlignmentAccepted) {
+            if(!source.globalAlignmentAccepted || !SmallGlobalDisplacement(motion.forward,
+                parameters.registration.forwardBackwardEuclideanHardLimitRawPixels)) {
                 for(auto& node:motion.forward.nodes) {
                     node.state=Mfd::MotionNodeState::Rejected;node.confidence=0;
                 }
                 motion.forward.structuredCount=0;
                 motion.forward.rejectedCount=motion.forward.nodes.size();
-                diagnostics.push_back(source.id+": neither global nor local motion was established; capture correspondence remains rejected.");
+                diagnostics.push_back(source.id+": local motion was unverified and the global warp could not establish correspondence across the frame.");
             } else diagnostics.push_back(source.id+": local motion was ambiguous; the global warp is guarded by local reliability checks ("+localError+").");
         }
         const bool pairGlobalAccepted=source.globalAlignmentAccepted&&
             (!groupPair||data.sources[anchorIndex].globalAlignmentAccepted);
         if(!reuseMotion&&index!=anchorIndex&&!groupPair)source.exposureGroupMotion=false;
-        const auto globalFallbackNodes=reuseMotion?0:AddConservativeGlobalFallbackNodes(
-            motion.forward,pairGlobalAccepted,parameters);
+        const auto globalFallbackNodes=reuseMotion||globalFallback?0:AddConservativeGlobalFallbackNodes(
+            motion.forward,pairGlobalAccepted,parameters,referencePyramid,alternatePyramid,
+            motionRequest.exposureScale,std::sqrt(std::max(0.,source.scaleVariance))/source.scale);
         if(!reuseMotion) ExtendMotionBoundary(motion.forward);
         if(groupPair) {
             motion.forward=ComposeGroupMotion(data.sources[anchorIndex],source,motion.forward,motionRequest.options);
@@ -392,7 +449,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         ObserveMotion(request,source,motion.forward,false);
         if(globalFallbackNodes) diagnostics.push_back(source.id+": "+
             std::to_string(globalFallbackNodes)+
-            " texture-free motion nodes use the global initializer with reduced confidence.");
+            " ambiguous motion nodes retained the global warp with reduced confidence.");
         Mfd::LocalMotionOptions refinementOptions;refinementOptions.registration=parameters.registration;
         if(!reuseMotion) RefineLocallyRegisteredExposure(request,reference,source,referencePyramid,alternatePyramid,
             motion.forward,refinementOptions,diagnostics);

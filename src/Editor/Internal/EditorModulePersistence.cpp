@@ -16,6 +16,7 @@
 #include "Editor/Timeline/TimelinePersistence.h"
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
+#include "Persistence/BracketMaster.h"
 #include "NodeMath/PngMetadataWriter.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/PixelBufferUtils.h"
@@ -295,6 +296,20 @@ void EditorModule::ResetForPipelineDeserialization() {
     ClearTimelineLiveEditPreview();
 }
 
+void EditorModule::RestoreSingleMasterMaskNodes() {
+    if (m_Project->singleRawSource) {
+        OfferBracketGraphMasks(*m_Project->singleRawSource);
+    } else if (m_Project->rawPipelineActive && !IsBracketingActive()) {
+        try {
+            m_Project->singleMasterMaskSource = Stack::Project::ReadBracketMasterMaskSource(
+                std::filesystem::u8path(m_Project->rawRecipe.source.sourcePath));
+            if (m_Project->singleMasterMaskSource) OfferBracketGraphMasks(*m_Project->singleMasterMaskSource);
+        } catch (const std::exception& e) {
+            PostNotification(UiNotificationSeverity::Error, e.what(), "bracket-depth-masks");
+        }
+    }
+}
+
 bool EditorModule::DeserializeSinglePipelineLayer(const nlohmann::json& layerData) {
     std::string type = layerData.value("type", "");
     std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(type);
@@ -549,6 +564,7 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
            !projectData.rawProjectSnapshot->projectId.empty()
             ? projectData.rawProjectSnapshot->projectId
             : Stack::Project::GenerateStableUuid());
+    RestoreSingleMasterMaskNodes();
     // Bind the initial tool only after installing the document identity.
     // Otherwise the selection immediately becomes stale and RAW has no picker.
     SelectRawAdjustmentLayer({});
@@ -1111,6 +1127,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
                    !project.rawProjectSnapshot->projectId.empty()
                     ? project.rawProjectSnapshot->projectId
                     : Stack::Project::GenerateStableUuid());
+            RestoreSingleMasterMaskNodes();
             // The deferred load uses the same final identity as its RAW tools.
             SelectRawAdjustmentLayer({});
             m_Project->adoptionSourcePath = project.adoptedFrom;

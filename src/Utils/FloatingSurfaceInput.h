@@ -23,12 +23,12 @@ public:
     // A host may route before Begin() so its placement uses current input.
     // In that case supply the host's background capture ID explicitly.
     FloatingSurfaceInputScope(FloatingSurfaceInput& state, bool canStart,
-        ImGuiID backgroundCapture = 0);
+        ImGuiID backgroundCapture = 0, bool middleMoves = true);
     ~FloatingSurfaceInputScope();
     FloatingSurfaceInputScope(const FloatingSurfaceInputScope&) = delete;
     FloatingSurfaceInputScope& operator=(const FloatingSurfaceInputScope&) = delete;
 private:
-    struct Button { bool down, clicked, released, twice; float duration; unsigned short count; } saved[2];
+    struct Button { bool down, clicked, released, twice; float duration; unsigned short count; } saved[3];
     ImVec2 mouse, delta;
 };
 

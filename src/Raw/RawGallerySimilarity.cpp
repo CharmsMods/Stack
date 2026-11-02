@@ -1027,7 +1027,7 @@ float ComputeRawGalleryFilmstripDrawerTargetHeight(
         std::max(0.0f, naturalGap);
     const std::size_t riseCount = maximumStackSize > 1u
         ? maximumStackSize - 1u
-        : 1u;
+        : 0u;
     const float requested = safeCollapsed +
         interval * static_cast<float>(riseCount);
     const float cap = std::max(

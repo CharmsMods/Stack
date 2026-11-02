@@ -75,7 +75,13 @@ public:
         MultiFrameInputFamily inputFamily,
         const json& captureMetadataSummary,
         EmbeddedAssetRecord& record,
-        std::string* errorMessage = nullptr) = 0;
+        std::string* errorMessage = nullptr,
+        bool linkOriginal = true) = 0;
+
+    // Carry an existing verified source identity into a working-file transaction.
+    // An offline source remains a valid reference.
+    virtual bool StageSourceReference(const ProjectStoreTransaction& transaction,
+        const EmbeddedAssetRecord& record, std::string& error) = 0;
 
     virtual bool StageAssetStream(
         const ProjectStoreTransaction& transaction,
@@ -107,7 +113,7 @@ public:
 
 using ProjectStoreHandle = std::shared_ptr<ProjectStore>;
 
-bool IsDirectoryProjectBundle(const std::filesystem::path& path);
+bool IsWorkingProjectFile(const std::filesystem::path& path);
 bool IsPortableV3Project(const std::filesystem::path& path);
 std::filesystem::path ResolveProjectStoreRoot(const std::filesystem::path& path);
 std::filesystem::path WorkingProjectDocumentPath(const std::filesystem::path& projectRoot);
@@ -118,6 +124,9 @@ ProjectStoreOpenResult CreateProjectStore(
     const RawProjectSnapshot& initialSnapshot);
 
 ProjectStoreOpenResult OpenProjectStore(const std::filesystem::path& path);
+
+bool RelinkProjectSources(const std::filesystem::path& project,
+    const std::filesystem::path& folder, std::size_t& reconnected, std::string& error);
 
 ProjectStoreOpenResult ConvertProjectStore(
     const ProjectStoreHandle& sourceStore,

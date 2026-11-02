@@ -53,6 +53,8 @@ BatchResult RunBatch(const SelectionResult& plan,const BatchOptions& options,
                 if(!budget.valid)throw std::runtime_error(budget.message);
                 Raw::Bracketing::ProcessingRequest request;request.sources=set.sources;request.recipe=set.recipe;
                 request.recipe.aiAlignment=options.aiAlignment;
+                request.recipe.smoothing=options.smoothing;
+                if(options.autoResolution)request.recipe.reconstruction=Raw::Bracketing::ReconstructionMode::Adaptive;
                 request.memoryBudgetBytes=budget.budgetBytes;request.automaticMemoryBudget=true;
                 request.workerCount=Raw::Bracketing::ResolveBracketingWorkerCount(budget.budgetBytes);
                 request.preferGpuCombining=options.preferGpuCombining;

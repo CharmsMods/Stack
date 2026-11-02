@@ -2,9 +2,11 @@
 #include "Editor/EditorModule.h"
 #include "App/AppPaths.h"
 #include "Raw/Bracketing/Recipe.h"
+#include "Raw/RawGalleryCoverCache.h"
+#include "Raw/RawSourceFolders.h"
 #include "Persistence/BracketingResultStore.h"
+#include "Persistence/AutoBracketProvenance.h"
 #include <algorithm>
-#include <fstream>
 #include <unordered_set>
 
 namespace Stack::Editor {
@@ -14,25 +16,28 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
     if(!set||!set->settings.contains("bracketing"))return;
     Raw::Bracketing::BracketingRecipe recipe;std::string error;
     if(!Raw::Bracketing::Deserialize(set->settings["bracketing"],recipe,error))return;
-    auto entry=std::find_if(workspace.sourceSetProjects.begin(),workspace.sourceSetProjects.end(),[&](const auto& p){return p.projectId==snapshot.projectId;});
+    auto entry=std::find_if(workspace.sourceSetProjects.begin(),workspace.sourceSetProjects.end(),[&](const auto& p){return p.absolutePath.empty() ? p.projectId == snapshot.projectId : p.absolutePath == path;});
     if(entry==workspace.sourceSetProjects.end()){workspace.sourceSetProjects.emplace_back();entry=std::prev(workspace.sourceSetProjects.end());}
     entry->projectId=snapshot.projectId;entry->projectName=snapshot.projectName;entry->absolutePath=path;
     entry->bracketingProject=true;
     entry->hasSavedBracketingResult = false;
+    entry->untouchedAutomaticBracket = false;
     entry->sourceKeys.clear();
     entry->referenceSourceKey.clear();
     entry->multiFrameProject=true;entry->status=RawWorkspace::ProjectStatus::Existing;
     entry->totalFrameCount=entry->rawSetCount=entry->rasterSetCount=0;
     entry->sourceSetCount=snapshot.sourceSets.size();
-    if(!snapshot.coverThumbnailBytes.empty()&&entry->coverThumbnailBytes!=snapshot.coverThumbnailBytes) {
-        entry->coverThumbnailBytes=snapshot.coverThumbnailBytes;
-        const auto directory=AppPaths::GetCacheDirectory()/"BracketingCovers";
-        std::error_code ec;std::filesystem::create_directories(directory,ec);
-        std::uint64_t hash=14695981039346656037ull;
-        for(auto c:snapshot.coverThumbnailBytes){hash^=c;hash*=1099511628211ull;}
-        const auto target=directory/(snapshot.projectId+"-"+std::to_string(hash)+".png");
-        std::ofstream output(target,std::ios::binary);output.write(reinterpret_cast<const char*>(snapshot.coverThumbnailBytes.data()),snapshot.coverThumbnailBytes.size());
-        if(output)entry->coverThumbnailCachePath=target;
+    if (!snapshot.coverThumbnailBytes.empty() && (entry->coverThumbnailCachePath.empty() ||
+        entry->coverThumbnailBytes != snapshot.coverThumbnailBytes)) {
+        auto root = RawWorkspace::ResolveManagedProjectSourceFolder(path);
+        if (root.empty()) root = workspace.workspaceRoot;
+        const auto directory = root.empty() ? AppPaths::GetCacheDirectory()/"BracketingCovers" :
+            RawWorkspace::BuildManagedLayout(root).projectCoversDirectory;
+        const auto published = RawWorkspace::WriteProjectCoverCache(directory,snapshot.projectId,snapshot.coverThumbnailBytes);
+        if (!published.empty()) {
+            entry->coverThumbnailCachePath = published;
+            entry->coverThumbnailBytes = snapshot.coverThumbnailBytes;
+        }
     }
     struct PreparedSet {
         const Project::MultiFrameSourceSet* set = nullptr;
@@ -47,6 +52,8 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
         input.set = &sourceSet;
         input.completed = store && Project::HasSavedBracketingResult(store, snapshot, sourceSet);
         entry->hasSavedBracketingResult |= input.completed;
+        entry->untouchedAutomaticBracket |= input.completed && Project::MatchesAutomaticBracketRevision(
+            sourceSet, snapshot.projectId, snapshot.dirtyRevision, snapshot.persistedStorageRevision);
         if (sourceSet.inputFamily == Project::MultiFrameInputFamily::Raw) ++entry->rawSetCount;
         else ++entry->rasterSetCount;
         for (const auto& frame : sourceSet.frames) {
@@ -65,7 +72,7 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
     entry->sourceIdentityKey = RawWorkspace::BuildGallerySourceIdentityKey(std::move(identities));
     for(auto& source:workspace.sources) {
         auto& memberships=source.sourceSetProjectMemberships;
-        memberships.erase(std::remove_if(memberships.begin(),memberships.end(),[&](const auto& m){return m.projectId==snapshot.projectId;}),memberships.end());
+        memberships.erase(std::remove_if(memberships.begin(),memberships.end(),[&](const auto& m){return m.projectPath.empty() ? m.projectId == snapshot.projectId : m.projectPath == path;}),memberships.end());
         bool member = false;
         for (const auto& input : prepared) {
             const auto match = std::find_if(input.frames.begin(), input.frames.end(), [&](const auto& candidate) {
@@ -100,12 +107,13 @@ void AddBracketingResultStacks(std::vector<RawWorkspace::RawGallerySimilaritySta
     for(const auto& project:workspace.sourceSetProjects) {
         if(!project.multiFrameProject)continue;
         RawWorkspace::RawGallerySimilarityStack stack;
+        stack.resultProjectCoverKey=RawWorkspace::ProjectCoverKey(project.absolutePath,project.projectId);
         stack.resultProjectId=project.projectId;stack.resultProjectName=project.projectName;
         stack.resultProjectPath=project.absolutePath;stack.resultCoverPath=project.coverThumbnailCachePath;
         for(std::size_t i=0;i<workspace.sources.size();++i) {
             const auto& source=workspace.sources[i];
             if(std::none_of(source.sourceSetProjectMemberships.begin(),source.sourceSetProjectMemberships.end(),
-                [&](const auto& m){return m.projectId==project.projectId;}))continue;
+                [&](const auto& m){return m.projectPath.empty() ? m.projectId == project.projectId : m.projectPath == project.absolutePath;}))continue;
             if(stack.sourceKeys.empty()){stack.anchorCatalogIndex=i;stack.folderKey=source.parentFolderKey;}
             stack.sourceKeys.push_back(source.relativePathKey);assigned.insert(source.relativePathKey);
         }

@@ -4,7 +4,6 @@
 #include <imgui_internal.h>
 #include "ThirdParty/json.hpp"
 #include "Raw/ViewTransform.h"
-#include "Raw/HdrDisplayMapping.h"
 #include <array>
 #include <cstdio>
 #include <iostream>
@@ -13,7 +12,8 @@
 namespace {
 void Require(bool ok,const char* message) {if(!ok)throw std::runtime_error(message);}
 struct Fixture {
-    nlohmann::json view={{"blackEv",-8.f},{"whiteEv",4.f},{"contrastPivotEv",0.f}};
+    nlohmann::json view={{"displayCurve",Raw::SigmoidDisplay::Id},
+        {"middleGrey",Raw::SigmoidDisplay::MiddleGrey},{"contrastPivotEv",0.f}};
     int handle=0;bool disabled=false,show=true,changed=false,active=false,openModal=false;
     ImRect item;
     Fixture() {
@@ -45,7 +45,7 @@ struct Fixture {
     }
 };
 void Ordinary() {
-    for(int marker:{1,2,3}) {
+    for(int marker:{3}) {
         Fixture f;f.Press(f.Marker(marker));Require(f.handle==marker&&f.active,"native press chooses intended marker");
         const auto before=f.view;auto p=f.Marker(marker);p.x+=15;f.Move(p);
         Require(f.changed&&f.active&&f.view!=before,"ordinary drag edits while active");
@@ -53,11 +53,27 @@ void Ordinary() {
         Require(!f.active,"release closes native interaction");
     }
 }
+void Sigmoid() {
+    Fixture f;
+    f.view["displayCurve"]=Raw::SigmoidDisplay::Id;
+    f.view["middleGrey"]=Raw::SigmoidDisplay::MiddleGrey;
+    f.Frame();
+    auto otherSettings=f.view;otherSettings.erase("contrastPivotEv");
+    f.Press(f.Marker(1));
+    Require(f.handle==3&&f.active,"Sigmoid only exposes its middle-grey pivot");
+    auto p=f.Marker(3);p.x+=15;f.Move(p);
+    auto afterDrag=f.view;afterDrag.erase("contrastPivotEv");
+    Require(f.changed&&afterDrag==otherSettings,
+        "Sigmoid pivot drag must only edit the active pivot");
+    const auto released=f.view;f.Release();
+    f.RequireStopped(released,"Sigmoid release ends its gesture");
+    f.Frame();f.RequireStopped(released,"unchanged Sigmoid drawing must not edit the draft");
+}
 void Disabled() {
     Fixture f;f.Press(f.Marker(1));const auto before=f.view;auto p=f.Marker(1);p.x+=60;
     f.disabled=true;f.Move(p);f.RequireStopped(before,"disabled mid-drag must not mutate");Require(!f.active,"disabled ends native interaction");
     f.disabled=false;p.x+=20;f.Move(p);f.RequireStopped(before,"reenable must not replay held drag");
-    f.Release();f.Press(f.Marker(2));Require(f.handle==2&&f.active,"reenable fresh press starts normally");
+    f.Release();f.Press(f.Marker(2));Require(f.handle==3&&f.active,"reenable fresh press starts normally");
 }
 void LostOwner() {
     Fixture f;f.Press(f.Marker(1));const auto before=f.view;
@@ -72,7 +88,7 @@ void Hidden(bool sameItem,bool margin) {
         // New press arrives on the first frame the graph is submitted again.
         ImGui::GetIO().AddMousePosEvent(p.x,p.y);ImGui::GetIO().AddMouseButtonEvent(0,true);f.Frame();f.Frame();
         if(margin)f.RequireStopped(before,"fresh same-ID margin press cannot inherit hidden handle");
-        else Require(f.handle==2,"fresh same-ID valid press reselects marker");
+        else Require(f.handle==3,"fresh same-ID valid press reselects marker");
     } else {
         f.Press(f.Marker(1));const auto otherOwner=ImGui::GetCurrentContext()->ActiveId;
         Require(otherOwner!=0,"unrelated button owns press");
@@ -98,7 +114,7 @@ int main() {
     int failures=0;
     const auto run=[&](const char* name,auto test) {try {test();} catch(const std::exception& e) {
         ++failures;std::cerr<<name<<": "<<e.what()<<'\n';}};
-    run("ordinary",Ordinary);run("disabled",Disabled);run("lost owner",LostOwner);
+    run("ordinary",Ordinary);run("sigmoid",Sigmoid);run("disabled",Disabled);run("lost owner",LostOwner);
     run("hidden unrelated",[]{Hidden(false,false);});run("same-ID margin",[]{Hidden(true,true);});
     run("same-ID fresh marker",[]{Hidden(true,false);});run("modal",Modal);run("Escape",Escape);
     if(!failures)std::cout<<"View transform graph ownership passed\n";

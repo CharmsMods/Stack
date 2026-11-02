@@ -172,6 +172,7 @@ json SerializeAsset(const EmbeddedAssetRecord& asset) {
     value["projectAssetPath"] = asset.projectAssetPath;
     value["originalSourcePath"] = asset.originalSourcePath;
     value["workspaceRelativeSourcePath"] = asset.workspaceRelativeSourcePath;
+    value["linkedSource"] = asset.linkedSource;
     value["originalFileFingerprint"] = asset.originalFileFingerprint;
     value["originalFilename"] = asset.originalFilename;
     value["managedRole"] = asset.managedRole;
@@ -277,6 +278,7 @@ bool DeserializeAsset(const json& value, EmbeddedAssetRecord& asset, std::string
     asset.displayName = value.value("displayName", std::string());
     asset.projectAssetPath = value.value("projectAssetPath", std::string());
     asset.originalSourcePath = value.value("originalSourcePath", std::string());
+    asset.linkedSource = value.value("linkedSource", false);
     asset.workspaceRelativeSourcePath = value.value("workspaceRelativeSourcePath", std::string());
     asset.originalFileFingerprint = value.value(
         "originalFileFingerprint", std::string());
@@ -349,10 +351,10 @@ bool DeserializeSourceSet(const json& value, MultiFrameSourceSet& sourceSet, std
 
 const char* ProjectStorageKindName(ProjectStorageKind value) {
     switch (value) {
-        case ProjectStorageKind::DirectoryBundle: return "directory-bundle";
+        case ProjectStorageKind::WorkingFile: return "working-file-v1";
         case ProjectStorageKind::PortableFile: return "portable-file";
     }
-    return "directory-bundle";
+    return "working-file-v1";
 }
 
 const char* ProjectCreationOriginName(ProjectCreationOrigin value) {
@@ -449,8 +451,8 @@ json MakeDefaultHdrOperationSettings() {
 }
 
 bool ParseProjectStorageKind(const std::string& value, ProjectStorageKind& result) {
-    if (value == "directory-bundle") {
-        result = ProjectStorageKind::DirectoryBundle;
+    if (value == "working-file-v1") {
+        result = ProjectStorageKind::WorkingFile;
         return true;
     }
     if (value == "portable-file") {

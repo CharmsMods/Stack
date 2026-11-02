@@ -201,6 +201,11 @@ void DrawBracketingPreview(BracketingSession& ui,const ImVec2& available) {
     }
     const auto diagnostic=pixel<p.diagnostics.size()?p.diagnostics[pixel]:0;
     if(!hasDiagnostics)ImGui::TextDisabled("Historical clipping/fallback diagnostics unavailable.");
+    else if(diagnostic&Raw::Bracketing::Preview::HighlightFallback) {
+        if(diagnostic&Raw::Bracketing::Preview::Unrecoverable)
+            ImGui::TextUnformatted("Clipped highlight. The captures do not establish its full brightness.");
+        else ImGui::TextUnformatted("Highlight color estimated. Measured channels are preserved.");
+    }
     else if(diagnostic&Raw::Bracketing::Preview::Invalid)
         ImGui::TextUnformatted("No valid measurement for at least one sample here.");
     else if(diagnostic&Raw::Bracketing::Preview::Unrecoverable) {

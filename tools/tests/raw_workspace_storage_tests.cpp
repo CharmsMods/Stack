@@ -132,8 +132,8 @@ static void RunClosetWorkspaceStorage() {
         bootstrap.projectName = bootstrap.projectId;
         bootstrap.projectKindHint = StackBinaryFormat::kRawProjectKind;
         auto store = Project::CreateProjectStore(
-            scan.layout.projectsDirectory / "Collection" / bootstrap.projectName,
-            Project::ProjectStorageKind::DirectoryBundle, bootstrap);
+            scan.layout.projectsDirectory / "Collection" / (bootstrap.projectName+".stack"),
+            Project::ProjectStorageKind::WorkingFile, bootstrap);
         Check(bool(store), "Create nested project bundle");
         const auto transaction = store.store->BeginTransaction(store.snapshot.persistedStorageRevision);
         auto snapshot = store.snapshot;
@@ -254,8 +254,8 @@ static void RunClosetWorkspaceStorage() {
     const auto renamed = sandbox / "Renamed photos";
     std::filesystem::rename(root, renamed);
     auto layout = RW::BuildManagedLayout(renamed);
-    std::filesystem::rename(layout.projectsDirectory / "Collection" / "closet-project-1",
-        layout.projectsDirectory / "Collection" / "Renamed project");
+    std::filesystem::rename(layout.projectsDirectory / "Collection" / "closet-project-1.stack",
+        layout.projectsDirectory / "Collection" / "Renamed project.stack");
     auto moved = RW::ScanWorkspace(renamed);
     Check(moved.success && moved.sources.size() == 2, "Renamed workspace scan excludes project RAW copies");
     Check(RW::ClassifyThumbnails(moved.layout, moved.sources), "Validate relocated thumbnails");
@@ -354,7 +354,7 @@ static void TestSharedClosetAssetsAndPortablePayloads() {
     Project::RawProjectSnapshot bootstrap;
     bootstrap.projectId = Project::GenerateStableUuid();
     bootstrap.projectName = "First";
-    auto first = Project::CreateProjectStore(layout.projectsDirectory / "First", Project::ProjectStorageKind::DirectoryBundle, bootstrap);
+    auto first = Project::CreateProjectStore(layout.projectsDirectory / "First.stack", Project::ProjectStorageKind::WorkingFile, bootstrap);
     Check(static_cast<bool>(first), "Create shared asset project");
     const auto transaction = first.store->BeginTransaction(first.snapshot.persistedStorageRevision);
     Project::EmbeddedAssetRecord source;
@@ -368,11 +368,11 @@ static void TestSharedClosetAssetsAndPortablePayloads() {
     Check(static_cast<bool>(commit), "Commit shared project");
     first.snapshot.persistedStorageRevision = commit.committedStorageRevision;
     const auto sharedSource = first.store->ResolveAssetFile(source.assetId);
-    Check(sharedSource.parent_path() == layout.dataDirectory / "Assets", "Source must live in Closet Assets");
+    Check(sharedSource == root / "source.dng", "An ordinary save must reference the original");
     auto secondSnapshot = first.snapshot;
     secondSnapshot.projectId = Project::GenerateStableUuid();
     secondSnapshot.projectName = "Second";
-    auto second = Project::ConvertProjectStore(first.store, secondSnapshot, layout.projectsDirectory / "Second", Project::ProjectStorageKind::DirectoryBundle);
+    auto second = Project::ConvertProjectStore(first.store, secondSnapshot, layout.projectsDirectory / "Second.stack", Project::ProjectStorageKind::WorkingFile);
     Check(static_cast<bool>(second), "Create shared version");
     Check(second.store->ResolveAssetFile(source.assetId) == sharedSource, "Versions must share exactly one managed source");
     Check(!std::filesystem::exists(second.store->StoragePath() / source.projectAssetPath), "Version must not duplicate source bytes");
@@ -382,8 +382,12 @@ static void TestSharedClosetAssetsAndPortablePayloads() {
     const auto movedRoot = sandbox / "Moved Photos";
     std::filesystem::rename(root, movedRoot);
     std::filesystem::rename(movedRoot / "source.dng", movedRoot / "renamed.dng");
-    auto relocated = Project::OpenProjectStore(movedRoot / "Closet" / "Projects" / "First");
-    Check(static_cast<bool>(relocated) && relocated.store->ResolveAssetFile(source.assetId).parent_path() == movedRoot / "Closet" / "Assets", "Reopen must resolve shared assets from the new root");
+    auto relocated = Project::OpenProjectStore(movedRoot / "Closet" / "Projects" / "First.stack");
+    std::size_t matches = 0;
+    Check(relocated && Project::RelinkProjectSources(relocated.store->StoragePath(), movedRoot, matches, error) &&
+        matches == 1, "Locate renamed source by strong identity");
+    relocated = Project::OpenProjectStore(relocated.store->StoragePath());
+    Check(relocated.store->ResolveAssetFile(source.assetId) == movedRoot / "renamed.dng", "Relink must survive reopen");
     StackBinaryFormat::ProjectDocument restored;
     Check(StackBinaryFormat::ReadProjectFile(portable, restored), "Read self-contained export after relocating its source workspace");
     Check(restored.pipelineData["nested"]["mask"] == nlohmann::json::binary(bytes),

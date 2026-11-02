@@ -18,6 +18,7 @@ void TestProjectStoreOwnership();
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphCustomMaskSerialization.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
@@ -1721,7 +1722,7 @@ void TestOutputV2Persistence() {
     nlohmann::json saved =
         SerializeGraphPayload(nlohmann::json::array(), graph);
     Require(
-        saved["nodeGraph"].value("version", 0) == 9,
+        EditorNodeGraph::IsCurrentGraphPayload(saved),
         "Output v2 persistence uses the current graph schema");
     Graph loaded;
     DeserializeGraphPayload(saved, loaded, 0);
@@ -3301,10 +3302,24 @@ void TestCustomMaskSparseRasterPersistence() {
         sparseNode != nullptr && sparseNode->customMask.rasterLayer.empty(),
         "adding a sparse custom mask should preserve its lazy zero raster");
 
+    CustomMaskObject outline;
+    outline.id = 17;
+    outline.type = CustomMaskObjectType::FreeformPath;
+    outline.operation = CustomMaskOperation::Subtract;
+    outline.points = { { 0.125f, 0.25f }, { 0.5f, 0.75f }, { 0.8f, 0.9f } };
+    outline.feather = 0.125f;
+    sparse.objects.push_back(outline);
+    const auto authored = SerializeCustomMaskPayload(sparse);
+    const auto replay = DeserializeCustomMaskPayload(authored);
+    Require(replay.rasterLayer.empty() && replay.objects.size() == 1 &&
+            replay.objects.front().points.size() == outline.points.size() &&
+            SerializeCustomMaskPayload(replay)["objects"] == authored["objects"],
+        "A procedural mask should replay its points and settings without a raster");
+
     CustomMaskPayload painted;
     painted.width = 2;
     painted.height = 2;
-    painted.rasterLayer = std::vector<float>{ 0.0f, 0.25f, 0.5f, 1.0f };
+    painted.rasterLayer = std::vector<float>{ 0.000001f, 0.1234567f, 0.5f, 1.0f };
     const CustomMaskPayload restoredPainted =
         DeserializeCustomMaskPayload(SerializeCustomMaskPayload(painted));
     Require(
@@ -3314,11 +3329,8 @@ void TestCustomMaskSparseRasterPersistence() {
          index < restoredPainted.rasterLayer.size();
          ++index) {
         Require(
-            std::abs(
-                restoredPainted.rasterLayer[index] -
-                painted.rasterLayer[index]) <=
-                (1.0f / 65535.0f + 1.0e-7f),
-            "custom mask U16 persistence should preserve painted values");
+            restoredPainted.rasterLayer[index] == painted.rasterLayer[index],
+            "A saved mask must retain the exact authored float coverage");
     }
 
     nlohmann::json truncated = encodedSparse;
@@ -3585,17 +3597,17 @@ void TestRawWorkspaceProjectRootIsolation() {
         const Project::ProjectStoreOpenResult created =
             Project::CreateProjectStore(
                 path,
-                Project::ProjectStorageKind::DirectoryBundle,
+                Project::ProjectStorageKind::WorkingFile,
                 snapshot);
         Require(static_cast<bool>(created),
             "RAW workspace isolation test should create a project bundle");
     };
     createRawProject(
-        layoutA.projectsDirectory / "Workspace A Project",
+        layoutA.projectsDirectory / "Workspace A Project.stack",
         "workspace-a-project",
         "Workspace A Project");
     createRawProject(
-        layoutB.projectsDirectory / "Workspace B Project",
+        layoutB.projectsDirectory / "Workspace B Project.stack",
         "workspace-b-project",
         "Workspace B Project");
 
@@ -4400,7 +4412,7 @@ void TestRawWorkspaceProjectLifecycleModel() {
     Require(RawWorkspace::SelectSourceByKey(state, "Day 1/image_0001.DNG"),
         "RAW project lifecycle selection should succeed");
     Require(!std::filesystem::exists(
-            scan.layout.projectsDirectory / "image_0001" / "project.stack"),
+            scan.layout.projectsDirectory / "image_0001.stack"),
         "Preview selection should not create a RAW project");
 
     RawWorkspace::SourceRecord source = *sourceIt;
@@ -4432,31 +4444,30 @@ void TestRawWorkspaceProjectLifecycleModel() {
     document.pipelineData = downstreamGraph;
     Require(RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(source, recipe, downstreamGraph, document),
         "RAW project lifecycle should apply RAW metadata to a project document");
-    Require(document.rawWorkspaceData.value("rawWorkspaceMode", std::string()) == "recipe-backed",
-        "New RAW edit projects should be recipe-backed");
+    Require(document.rawWorkspaceData.value("rawWorkspaceMode", std::string()) == "unified-layer-graphs",
+        "New RAW edit projects should use the unified layer graph");
     Require(document.rawWorkspaceData["rawSourceRef"].value("linked", false),
         "New RAW edit projects should link RAW files by default");
-    Require(document.rawWorkspaceData.contains("managedRawSection") &&
-            document.rawWorkspaceData.contains("customRawSection"),
-        "RAW project data should reserve managed/custom mode fields");
-    document.rawWorkspaceData["readOnlyReason"] = "current read-only metadata";
+    Require(document.rawWorkspaceData.contains("rawRecipe"),
+        "The saved RAW project should own its development recipe");
+    document.rawWorkspaceData["originalFileFingerprint"] = source.fingerprint;
     document.rawWorkspaceData["futureRawWorkspaceKey"] = { { "sentinel", true } };
     Stack::RawRecipe::RawDevelopmentRecipe editedRecipe = recipe;
-    editedRecipe.preToneExposureEv = 1.5f;
+    editedRecipe.cropRotation.rotationDegrees = 90;
     Require(RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(source, editedRecipe, downstreamGraph, document),
         "RAW project lifecycle should update owned recipe metadata in place");
-    Require(document.rawWorkspaceData["managedRawSection"].is_null() &&
-            document.rawWorkspaceData["customRawSection"].is_null(),
-        "RAW project lifecycle saves should preserve current empty ownership sections");
-    Require(document.rawWorkspaceData.value("readOnlyReason", std::string()) == "current read-only metadata",
-        "RAW project lifecycle saves should preserve read-only metadata");
+    Require(!document.rawWorkspaceData.contains("managedRawSection") &&
+            !document.rawWorkspaceData.contains("customRawSection"),
+        "Unified layer projects should store their operations in the authored graph");
+    Require(document.rawWorkspaceData.value("originalFileFingerprint", std::string()) == source.fingerprint,
+        "RAW project lifecycle saves should preserve the original fingerprint");
     Require(!document.rawWorkspaceData.contains("futureRawWorkspaceKey"),
         "RAW project lifecycle saves should drop fields outside the current RAW workspace schema");
     recipe = editedRecipe;
 
     const std::filesystem::path projectRelative = RawWorkspace::BuildProjectRelativePathForSource(source);
-    Require(projectRelative.generic_string() == "image_0001",
-        "RAW project path should use one top-level working project folder");
+    Require(projectRelative.generic_string() == "image_0001.stack",
+        "RAW project path should use one named working project file");
     const std::filesystem::path projectPath = scan.layout.projectsDirectory / projectRelative;
     std::filesystem::create_directories(projectPath.parent_path());
     BindDocumentSourceAssetForInitialRawCommit(document);
@@ -4469,9 +4480,9 @@ void TestRawWorkspaceProjectLifecycleModel() {
         return candidate.relativePathKey == "Day 1/image_0001.DNG";
     });
     Require(sourceIt != scan.sources.end(), "RAW project lifecycle source should still exist after discovery");
-    Require(sourceIt->project.status == RawWorkspace::ProjectStatus::Embedded,
+    Require(sourceIt->project.status == RawWorkspace::ProjectStatus::Existing,
         "RAW project discovery should attach existing projects");
-    Require(sourceIt->project.relativePath.generic_string() == "image_0001",
+    Require(sourceIt->project.relativePath.generic_string() == "image_0001.stack",
         "RAW project discovery should report the relative project path");
 
     StackBinaryFormat::ProjectDocument loadedDocument;
@@ -4481,11 +4492,11 @@ void TestRawWorkspaceProjectLifecycleModel() {
     Stack::RawRecipe::RawDevelopmentRecipe loadedRecipe;
     Require(RawWorkspace::ReadProjectInfoFromDocument(loadedDocument, loadedInfo, &loadedRecipe),
         "RAW project lifecycle should parse project RAW metadata");
-    Require(!loadedInfo.linkedRaw && loadedInfo.embeddedRaw,
+    Require(loadedInfo.linkedRaw && !loadedInfo.embeddedRaw,
         "Reloaded RAW project should use its managed original");
     Require(loadedInfo.mode == RawWorkspace::RawProjectMode::UnifiedLayers,
-        "Reloaded RAW project should preserve recipe-backed mode");
-    Require(std::abs(loadedRecipe.preToneExposureEv - 1.5f) < 0.001f,
+        "Reloaded RAW project should preserve unified layer mode");
+    Require(loadedRecipe.cropRotation.rotationDegrees == 90,
         "Reloaded RAW project should preserve recipe edits");
     Require(loadedDocument.metadata.projectKind == StackBinaryFormat::kRawProjectKind,
         "RAW project lifecycle should identify the document as a RAW project");
@@ -8319,7 +8330,7 @@ void TestRawEditAttributeBundleContract() {
         RawRecipe::RawPointCurveChannel::Red,
         redCurve);
     source.viewTransform.layerJson["contrast"] = 1.42f;
-    source.viewTransform.layerJson["blackEv"] = -7.25f;
+    source.viewTransform.layerJson["exposure"] = -0.25f;
     source.viewTransform.layerJson["saturation"] = 1.18f;
     source.viewTransform.layerJson["enabled"] = false;
     source.cropRotation.cropEnabled = true;
@@ -8423,7 +8434,7 @@ void TestRawEditAttributeBundleContract() {
 
     RawRecipe::RawDevelopmentRecipe contrastOnly =
         RawRecipe::MakeDefaultRecipe("target-view.dng", "target-view.dng");
-    contrastOnly.viewTransform.layerJson["blackEv"] = -5.5f;
+    contrastOnly.viewTransform.layerJson["exposure"] = 0.5f;
     contrastOnly.viewTransform.layerJson["saturation"] = 0.82f;
     contrastOnly.viewTransform.layerJson["enabled"] = true;
     const auto contrastApplied = RawRecipe::ApplyRawEditAttributeBundle(
@@ -8432,7 +8443,7 @@ void TestRawEditAttributeBundleContract() {
             std::abs(contrastOnly.viewTransform.layerJson.value(
                 "contrast", 0.0f) - 1.42f) < 0.0001f &&
             std::abs(contrastOnly.viewTransform.layerJson.value(
-                "blackEv", 0.0f) + 5.5f) < 0.0001f &&
+                "exposure", 0.0f) - 0.5f) < 0.0001f &&
             std::abs(contrastOnly.viewTransform.layerJson.value(
                 "saturation", 0.0f) - 0.82f) < 0.0001f &&
             contrastOnly.viewTransform.layerJson.value("enabled", false),
@@ -8821,7 +8832,7 @@ void TestRawProjectAttributeTransferTransaction() {
     };
     Project::ProjectStoreOpenResult created = Project::CreateProjectStore(
         singleRoot,
-        Project::ProjectStorageKind::DirectoryBundle,
+        Project::ProjectStorageKind::WorkingFile,
         snapshot);
     Require(static_cast<bool>(created),
         "RAW attribute transaction fixture should create a directory project");
@@ -8911,7 +8922,7 @@ void TestRawProjectAttributeTransferTransaction() {
     const Project::ProjectStoreOpenResult mfdCreated =
         Project::CreateProjectStore(
             mfdRoot,
-            Project::ProjectStorageKind::DirectoryBundle,
+            Project::ProjectStorageKind::WorkingFile,
             mfdSnapshot);
     Require(static_cast<bool>(mfdCreated),
         "MFD attribute transaction fixture should create a directory project");
@@ -8979,7 +8990,7 @@ void TestRawProjectAttributeTransferTransaction() {
     const Project::ProjectStoreOpenResult hdrCreated =
         Project::CreateProjectStore(
             hdrRoot,
-            Project::ProjectStorageKind::DirectoryBundle,
+            Project::ProjectStorageKind::WorkingFile,
             hdrSnapshot);
     Require(static_cast<bool>(hdrCreated),
         "HDR attribute transaction fixture should create a directory project");
@@ -9777,104 +9788,14 @@ void TestRestormerDevelopmentPackageTrustContract() {
 }
 
 void TestRawLabViewTransformReferenceMatchesShaderFormula() {
-    auto shaderFormula = [](
-                             double input,
-                             double exposure,
-                             double blackEv,
-                             double whiteEv,
-                             double middleGrey,
-                             double shoulder,
-                             double toe,
-                             double contrast,
-                             double contrastPivotEv) {
-        const double black = middleGrey * std::exp2(blackEv);
-        const double white = middleGrey * std::exp2(whiteEv);
-        double x = std::max(0.0, input * std::exp2(exposure) - black);
-        double normalized = x / std::max(0.000001, white - black);
-        const double safeContrast = std::max(0.05, contrast);
-        const double pivotInput = middleGrey * std::exp2(contrastPivotEv);
-        const double pivotNormalized = std::max(
-            0.000001,
-            (pivotInput - black) / std::max(0.000001, white - black));
-        normalized = pivotNormalized * std::pow(
-            std::max(0.0, normalized) / pivotNormalized,
-            safeContrast);
-        const double clampedToe = std::clamp(toe, 0.0, 1.0);
-        normalized =
-            normalized * (1.0 - clampedToe) +
-            ((normalized + clampedToe * normalized / (normalized + 0.18)) /
-             (1.0 + clampedToe)) *
-                clampedToe;
-        const double safeShoulder = std::max(0.001, shoulder);
-        const double mapped = normalized / (normalized + safeShoulder);
-        const double whiteMapped = 1.0 / (1.0 + safeShoulder);
-        return std::clamp(mapped / std::max(0.0001, whiteMapped), 0.0, 1.0);
-    };
-
-    struct Sample {
-        float input;
-        float exposure;
-        float blackEv;
-        float whiteEv;
-        float middleGrey;
-        float shoulder;
-        float toe;
-        float contrast;
-        float contrastPivotEv;
-    };
-    const Sample samples[] = {
-        { 0.0f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f, 0.0f },
-        { 0.18f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f, 0.0f },
-        { 2.88f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f, 0.0f },
-        { 0.04f, 1.25f, -10.0f, 6.0f, 0.20f, 0.72f, 0.35f, 1.4f, -0.5f },
-        { 8.0f, -0.75f, -6.0f, 3.0f, 0.16f, 0.12f, 0.0f, 0.72f, 1.0f }
-    };
-    constexpr double tolerance = 2.0e-6;
-    for (const Sample& sample : samples) {
-        const float actual = Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
-            sample.input,
-            sample.exposure,
-            sample.blackEv,
-            sample.whiteEv,
-            sample.middleGrey,
-            sample.shoulder,
-            sample.toe,
-            sample.contrast,
-            sample.contrastPivotEv);
-        const double expected = shaderFormula(
-            sample.input,
-            sample.exposure,
-            sample.blackEv,
-            sample.whiteEv,
-            sample.middleGrey,
-            sample.shoulder,
-            sample.toe,
-            sample.contrast,
-            sample.contrastPivotEv);
-        Require(
-            std::abs(static_cast<double>(actual) - expected) <= tolerance,
-            "RAW Lab View graph CPU evaluator should match the shader contrast model within 2e-6");
-    }
-
-    const nlohmann::json defaultView =
-        Stack::RawRecipe::DefaultViewTransformJson();
-    Require(
-        defaultView.value("contrastModel", std::string()) ==
-                Stack::RawRecipe::kViewContrastModelPivotedLogV2 &&
-            std::abs(defaultView.value("contrastPivotEv", 99.0f)) < 0.0001f,
-        "new View Transforms should use a middle-grey pivoted contrast model");
-
-    const float pivotLowContrast =
-        Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
-            0.18f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f,
-            0.6f, 0.0f);
-    const float pivotHighContrast =
-        Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
-            0.18f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f,
-            1.8f, 0.0f);
-    Require(
-        std::abs(pivotLowContrast - pivotHighContrast) <= 2.0e-6f,
-        "pivoted View contrast should keep the authored pivot luminance fixed");
+    const auto grey=Stack::RawRecipe::DefaultViewTransformJson().at("middleGrey").get<float>();
+    Require(std::abs(Stack::RawRecipe::EvaluateViewTransformDisplayLuma(grey,0.f,grey,1.f)-grey)<2e-6f,
+        "Sigmoid must anchor middle grey at zero exposure");
+    Require(std::abs(Stack::RawRecipe::EvaluateViewTransformDisplayLuma(.018f,0.f,grey,1.f)-.007583f)<2e-6f,
+        "Sigmoid reference shadow value changed");
+    Require(Stack::RawRecipe::EvaluateViewTransformDisplayLuma(3.f,0.f,grey,1.f)<
+        Stack::RawRecipe::EvaluateViewTransformDisplayLuma(6.f,0.f,grey,1.f),
+        "Sigmoid must retain finite highlight separation");
 }
 
 void TestRawImageAnalysisPercentilesAndFallbackGuards() {
@@ -10162,8 +10083,9 @@ void TestRawAutoBaseViewTransformFit() {
     Stack::RawAutoBase::ApplyViewTransformFitToRecipe(recipe, normalDecision.fit);
     Require(std::abs(recipe.preToneExposureEv - 0.75f) < 0.001f,
         "RAW Auto Base application should leave RAW Exposure unchanged");
-    Require(std::abs(recipe.viewTransform.layerJson.value("middleGrey", 0.0f) - normalDecision.fit.middleGrey) < 0.001f,
-        "RAW Auto Base application should write the fitted View Transform middle grey");
+    Require(std::abs(recipe.viewTransform.layerJson.value("middleGrey", 0.0f) - 0.1845f) < 0.001f &&
+            !recipe.viewTransform.layerJson.contains("blackEv"),
+        "RAW Auto Base application should retain Sigmoid grey without retired controls");
 }
 
 void TestRawAutoBaseRecommendations() {
@@ -14885,7 +14807,7 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
         "loaded or programmatically injected non-finite Values should fail closed in lookup, completion, and validation");
 
     const nlohmann::json serialized = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), graph);
-    Require(serialized["nodeGraph"].value("version", 0) == 9,
+    Require(EditorNodeGraph::IsCurrentGraphPayload(serialized),
         "graphs should use the channel-first Output inspection schema version");
     EditorNodeGraph::Graph loaded;
     EditorNodeGraph::DeserializeGraphPayload(serialized, loaded, 0);
@@ -14904,26 +14826,24 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
     for (auto& item : invalidValueDocument["nodeGraph"]["nodes"]) {
         if (item.value("id", 0) == scalarId) item["value"]["payload"] = "not-a-number";
     }
-    EditorNodeGraph::Graph invalidValueGraph;
-    EditorNodeGraph::DeserializeGraphPayload(invalidValueDocument, invalidValueGraph, 0);
-    const EditorNodeGraph::Node* invalidValue = invalidValueGraph.FindNode(scalarId);
-    Require(invalidValue &&
-            invalidValue->value.value.logicalType == Stack::NodeMath::LogicalValueType::Scalar &&
-            invalidValue->value.value.availability == Stack::NodeMath::ValueAvailability::Missing,
-        "an invalid saved payload should become a typed Missing value rather than a guessed default");
+    const auto prior = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), loaded);
+    const auto preservesLiveGraph = [&](const nlohmann::json& malformed) {
+        try {
+            EditorNodeGraph::DeserializeGraphPayload(malformed, loaded, 0);
+        } catch (const std::runtime_error&) {
+            return EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), loaded) == prior;
+        }
+        return false;
+    };
+    Require(preservesLiveGraph(invalidValueDocument),
+        "A malformed scalar must be rejected without replacing the live graph.");
 
     nlohmann::json mismatchedDefinitionDocument = serialized;
     for (auto& item : mismatchedDefinitionDocument["nodeGraph"]["nodes"]) {
         if (item.value("id", 0) == scalarId) item["definition"]["contentHash"] = std::string(64, '0');
     }
-    EditorNodeGraph::Graph mismatchedDefinitionGraph;
-    EditorNodeGraph::DeserializeGraphPayload(mismatchedDefinitionDocument, mismatchedDefinitionGraph, 0);
-    const EditorNodeGraph::Node* mismatchedDefinition = mismatchedDefinitionGraph.FindNode(scalarId);
-    Require(mismatchedDefinition && !mismatchedDefinition->definitionResolved &&
-            !mismatchedDefinition->definitionResolutionError.empty(),
-        "a saved definition hash mismatch should remain explicitly unresolved without fallback");
-    Require(!mismatchedDefinitionGraph.Validate().valid,
-        "an unresolved exact definition should make graph validation fail explicitly");
+    Require(preservesLiveGraph(mismatchedDefinitionDocument),
+        "A mismatched definition hash must be rejected without replacing the live graph.");
 }
 
 void TestConstantChannelFoundation() {
@@ -15039,9 +14959,8 @@ void TestConstantChannelFoundation() {
         graph.IsScalarSocketStream(
             constantId,
             kChannelOutputSocketId) &&
-            graph.ResolveSocketChannel(
-                constantId,
-                kChannelOutputSocketId) == "a" &&
+            DescribeGraphOutput(graph, constantId, kChannelOutputSocketId).componentRole == "A" &&
+            graph.ResolveSocketChannel(constantId, kChannelOutputSocketId).empty() &&
             graph.IsOutputConnected() &&
             graph.Validate().valid,
         "generated opaque Constant Channel should retain Channel/Alpha identity in a valid output chain");
@@ -16201,11 +16120,11 @@ void TestRawGalleryTrashAndRevertActions() {
     snapshot.projectName = "Gallery Revert Project";
     const std::filesystem::path projectsRoot = RawWorkspace::BuildManagedLayout(root).projectsDirectory;
     const std::filesystem::path projectRoot = projectsRoot /
-        "Gallery Revert Project--revert01";
+        "Gallery Revert Project.stack";
     const Project::ProjectStoreOpenResult created =
         Project::CreateProjectStore(
             projectRoot,
-            Project::ProjectStorageKind::DirectoryBundle,
+            Project::ProjectStorageKind::WorkingFile,
             snapshot);
     Require(static_cast<bool>(created),
         "Gallery Revert fixture should create a complete managed project bundle");
@@ -16215,7 +16134,7 @@ void TestRawGalleryTrashAndRevertActions() {
     Require(reverted.moved == 1u && reverted.errors.empty() &&
             !std::filesystem::exists(projectRoot) &&
             reverted.destinations.size() == 1u &&
-            Project::IsDirectoryProjectBundle(reverted.destinations.front()),
+            Project::IsWorkingProjectFile(reverted.destinations.front()),
         "Gallery Revert should move the complete project bundle into recoverable project Trash");
     Require(std::filesystem::exists(original),
         "Gallery Revert should retain the original RAW source");
@@ -16226,11 +16145,11 @@ void TestRawGalleryTrashAndRevertActions() {
     snapshot.projectId = "gallery-delete-project";
     snapshot.projectName = "Gallery Delete Project";
     const std::filesystem::path deleteProjectRoot = projectsRoot /
-        "Gallery Delete Project--delete01";
+        "Gallery Delete Project.stack";
     const Project::ProjectStoreOpenResult deleteCreated =
         Project::CreateProjectStore(
             deleteProjectRoot,
-            Project::ProjectStorageKind::DirectoryBundle,
+            Project::ProjectStorageKind::WorkingFile,
             snapshot);
     Require(static_cast<bool>(deleteCreated),
         "Gallery Delete fixture should create a complete managed project bundle");
@@ -16242,7 +16161,7 @@ void TestRawGalleryTrashAndRevertActions() {
             std::filesystem::exists(deleteOriginal) && std::filesystem::exists(outside),
         "Project deletion must leave original RAW files untouched");
     Require(projectDeleted.destinations.size() == 1u &&
-            Project::IsDirectoryProjectBundle(projectDeleted.destinations.front()),
+            Project::IsWorkingProjectFile(projectDeleted.destinations.front()),
         "Project deletion must retain the complete bundle in project Trash");
 
     std::error_code cleanupError;
@@ -16484,7 +16403,7 @@ void RunGraphChannelOutputsTests();
 
 void TestProjectGalleryDiscovery();
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     if (argc == 2 && std::string(argv[1]) == "--channels-only") {
         try { RunGraphChannelOutputsTests(); }
         catch (const std::exception& e) { std::cerr << "Channel outputs: " << e.what() << '\n'; return 1; }
@@ -16512,6 +16431,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc == 2 && std::string(argv[1]) == "--project-persistence") {
+        TestCustomMaskSparseRasterPersistence();
         TestClosetWorkspaceStorage();
         TestProjectStoreOwnership();
         TestProjectSaveCoordinatorRevisionQueue();
@@ -16713,7 +16633,10 @@ int main(int argc, char** argv) {
     TestGraphInfoNoLayoutPayloadPreservesGraphOrderAndState();
     TestHdrMergeDeghostModeMediumRoundTrip();
 
-    std::cout << "Stack graph behavior tests passed.\n";
     TestRawViewportTimingLearning();
+    std::cout << "Stack graph behavior tests passed.\n";
     return 0;
+} catch (const std::exception& error) {
+    std::cerr << "Graph behavior validation failed: " << error.what() << '\n';
+    return 1;
 }

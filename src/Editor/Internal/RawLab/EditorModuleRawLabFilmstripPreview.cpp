@@ -28,10 +28,7 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
             if (project != gallery.projects.end() &&
                 !project->coverThumbnailCachePath.empty()) {
                 Stack::RawWorkspace::SourceRecord coverSource;
-                coverSource.relativePathKey = "project-overlay:" +
-                    (!project->projectId.empty()
-                        ? project->projectId
-                        : project->projectPath.lexically_normal().generic_string());
+                coverSource.relativePathKey = project->projectCoverKey;
                 coverSource.thumbnail.absolutePath =
                     project->coverThumbnailCachePath;
                 coverSource.thumbnail.status =
@@ -82,6 +79,14 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
     const ImVec2 minimum = ImGui::GetWindowPos();
     const ImVec2 size = ImGui::GetWindowSize();
     const ImVec2 maximum(minimum.x + size.x, minimum.y + size.y);
+    PreviewImage full = current;
+    if (currentReady && m_RawWorkspaceLabFilmstripHoverProjectPath.empty()) {
+        if (const auto* source = FindRawWorkspaceSourceByKey(m_RawWorkspaceLabFilmstripHoverSourceKey)) {
+            const ImVec2 area(std::max(1.f, size.x - 48.f), std::max(1.f, size.y - 48.f));
+            if (auto detail = GetGalleryOriginalDetail(*source, area, full.width, full.height))
+                full.texture = detail;
+        }
+    }
     ImDrawList* drawList = ImGui::GetForegroundDrawList(
         ImGui::GetWindowViewport());
     ImVec4 backdrop = GetWorkspaceBaseColor();
@@ -113,7 +118,7 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
         drawImage(previous, opacity);
     }
     if (currentReady) {
-        drawImage(current, opacity * blend);
+        drawImage(full, opacity * blend);
     }
     if (blend >= 1.0f) {
         m_RawWorkspaceLabFilmstripPreviousHoverSourceKey.clear();

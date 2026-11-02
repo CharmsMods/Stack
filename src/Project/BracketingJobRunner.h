@@ -24,6 +24,10 @@ struct BracketingJobRequest {
     std::uint32_t workerLimit = 0;
     std::function<void()> didRestoreResult;
 };
+// Open the committed measurement first. If it has disappeared, recover one
+// master per root and measurement even when several editors open it together.
+Raw::Bracketing::BracketingResult OpenOrRegenerateBracket(const BracketingJobRequest&);
+
 // Worker-only execution. No editor state, selection, or document adoption.
 Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest&);
 

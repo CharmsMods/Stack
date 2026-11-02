@@ -1,6 +1,7 @@
 #include "ProcessingInternal.h"
 #include "PresentationEvidence.h"
 #include "GroupTileStore.h"
+#include "HdrColorFusion.h"
 #include "LocalDetail.h"
 #include <algorithm>
 #include <chrono>
@@ -17,10 +18,12 @@ bool TemporalGroups(const ProcessingRequest& request,const PreparedDataset& data
     const auto read=std::chrono::steady_clock::now();
     const auto seconds=[](auto a,auto b){return std::chrono::duration<double>(b-a).count();};
     if(hit){data.groupMetrics.Add(0,0,seconds(start,read),true,{});return true;}
-    Mfd::PreparedRawTile unused;
-    if(!ReadTemporalGroups(request,data,tx,ty,groups,unused,error)) return false;
+    Mfd::PreparedRawTile origin;
+    if(!ReadTemporalGroups(request,data,tx,ty,groups,origin,error)) return false;
     const auto temporal=std::chrono::steady_clock::now();LocalDetailStats patches;
     if(!CombineLocalDetail(request,data,tx,ty,groups,error,&patches))return false;
+    if(request.recipe.reconstruction==ReconstructionMode::Standard&&
+        !PrepareHighlightFallback(request,data,origin,groups,error))return false;
     const auto detail=std::chrono::steady_clock::now();
     if(!CanonicalizeGroupTile(groups,error))return false;
     if(!WriteGroupTile(request,data,tx,ty,groups,error))return false;
