@@ -3,6 +3,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawViewportStageRequirements.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
+#include "NodeMath/ToneCurveParameters.h"
 #include <array>
 #include <vector>
 
@@ -83,6 +84,20 @@ inline std::size_t PostFinishToneCost(const Recipe& input) {
             if (channel.is_object() && channel.contains("points")) HashTypedValue(toneKey,channel["points"].size());
             if (channel.is_object() && channel.contains("interpolation")) HashTypedJson(toneKey,channel["interpolation"]);
         }
+    // A local curve executes a source traversal and four radius-dependent box
+    // passes. Keep its timing separate from a pointwise LUT; changing amount
+    // or EV range within the same active mode does not change that work.
+    const auto hashLocal = [&](const nlohmann::json& payload) {
+        if (!payload.is_object()) { HashTypedValue(toneKey,false); return; }
+        const auto scene = payload.contains("curveMode") ? Stack::NodeMath::EffectiveToneCurveSceneTone(payload) :
+            Stack::RawRecipe::ReadSceneTone(payload.value("luminanceTone",nlohmann::json::object()));
+        const bool local = Stack::RawRecipe::IsLocalSceneToneActive(scene);
+        HashTypedValue(toneKey,local);
+        if (local) HashTypedValue(toneKey,scene.localRadius);
+    };
+    hashLocal(tone);
+    for (const auto& gradient : input.toneGradients)
+        if (gradient.mask.enabled) hashLocal(gradient.curveJson);
     return toneKey;
 }
 inline std::size_t PostColorWarpCost(const Recipe& input) {

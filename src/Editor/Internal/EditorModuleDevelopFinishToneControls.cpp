@@ -11,20 +11,6 @@ namespace Stack::Editor::DevelopFinishToneControls {
 
 using Stack::Editor::DevelopDefaults::BuildDefaultIntegratedToneLayerJson;
 
-namespace {
-
-ToneCurveLayer BuildIntegratedDevelopToneLayer(const nlohmann::json& layerJson) {
-    ToneCurveLayer toneCurve;
-    if (layerJson.is_object()) {
-        toneCurve.Deserialize(layerJson);
-    } else {
-        toneCurve.Deserialize(BuildDefaultIntegratedToneLayerJson());
-    }
-    return toneCurve;
-}
-
-} // namespace
-
 bool RenderDevelopFinishToneControls(
     EditorModule& editor,
     int nodeId,
@@ -32,7 +18,10 @@ bool RenderDevelopFinishToneControls(
     bool upstreamDevelopSettingsChanged,
     float controlWidth,
     bool showAdvancedControls) {
-    ToneCurveLayer integratedTone = BuildIntegratedDevelopToneLayer(integratedToneLayerJson);
+    // Tone layers own GPU resources; populate the local owner without copying.
+    ToneCurveLayer integratedTone;
+    integratedTone.Deserialize(integratedToneLayerJson.is_object()
+        ? integratedToneLayerJson : BuildDefaultIntegratedToneLayerJson());
     editor.RestoreIntegratedToneTransientState(nodeId, integratedTone);
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));

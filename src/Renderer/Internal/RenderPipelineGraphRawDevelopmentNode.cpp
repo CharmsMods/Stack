@@ -9,6 +9,7 @@
 #include "Renderer/RawPreviewProxy.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 #include "Restormer/RestormerClient.h"
 #include "Utils/PixelBufferUtils.h"
 
@@ -1619,6 +1620,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
 
     ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostFinishTone, postLocalRangeFingerprint, node.nodeId);
     m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostFinishTone);
+    // A later local gradient depends on every preceding finish pass. A failed
+    // prerequisite must not silently skip that requested spatial adjustment.
+    const bool requiresLocalToneStage = Stack::Renderer::RecipeUsesLocalToneGuide(recipe);
     auto renderRecipeLayer = [&](const nlohmann::json& layerJson, const char* fallbackType,
         const Stack::RawRecipe::RawGradientMask* gradientMask = nullptr,
         const std::string& cacheSuffix = std::string{}) {
@@ -1631,6 +1635,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             authoredPayload.contains("type") && authoredPayload["type"].is_string()
                 ? authoredPayload["type"].get<std::string>()
                 : std::string(fallbackType);
+        const bool requiresLocalTone = type == "ToneCurve" && requiresLocalToneStage;
         const std::string layerCacheKey =
             std::to_string(node.nodeId) + ":__rawDevelopmentRecipeLayer:" + fallbackType + cacheSuffix;
         std::shared_ptr<LayerBase> layer;
@@ -1643,6 +1648,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 std::shared_ptr<LayerBase> replacement =
                     LayerRegistry::CreateLayerFromTypeId(type);
                 if (!replacement) {
+                    if (requiresLocalTone) throw std::runtime_error("Local Tone Curve layer is unavailable.");
                     return false;
                 }
 
@@ -1677,6 +1683,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 cacheIt->second.appliedPayload = layerPayload;
             }
         } catch (const std::exception& error) {
+            if (requiresLocalTone) throw;
             std::cerr << "[RenderPipeline] RAW Development " << type
                       << " recipe layer setup failed for node " << node.nodeId
                       << ": " << error.what() << "; passing input texture through.\n";
@@ -1684,16 +1691,26 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         }
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
             toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
+            toneCurve->SetProcessingCancellation(m_ShouldCancelRender);
         }
 
         const unsigned int inputTexture = result.texture;
         Stack::Renderer::ScopedGLTexture processed(
             CreateGraphRenderTargetTexture());
         const unsigned int sourceTexture = m_SourceTexture != 0 ? m_SourceTexture : inputTexture;
+        std::string localToneError;
         const bool renderedLayer = RenderIntoGraphTargetTexture(processed.Get(), [&](unsigned int) {
-            layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
+            try {
+                layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
+            } catch (const std::exception& error) {
+                if (requiresLocalTone) localToneError=error.what();
+                throw;
+            }
         });
         if (!renderedLayer || !processed) {
+            if (requiresLocalTone)
+                throw std::runtime_error(localToneError.empty()
+                    ? "Local Tone Curve rendering failed; the requested result was not produced." : localToneError);
             std::cerr << "[RenderPipeline] RAW Development " << type
                       << " finish pass failed for node " << node.nodeId
                       << "; passing input texture through.\n";
@@ -1715,6 +1732,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 IsImplausiblyDamagedTextureOutput(
                     inputStats,
                     outputStats)) {
+                if (requiresLocalTone)
+                    throw std::runtime_error("Local Tone Curve produced invalid output.");
                 std::cerr << "[RenderPipeline] RAW Development " << type
                           << " produced an invalid or collapsed output for node "
                           << node.nodeId << " (input p99 luma " << inputStats.p99Luma
@@ -1727,7 +1746,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         if (gradientMask) {
             Stack::Renderer::ScopedGLTexture blended(
                 RenderRawGradientBlend(inputTexture, processed.Get(), *gradientMask));
-            if (!blended) return false;
+            if (!blended) {
+                if (requiresLocalTone) throw std::runtime_error("Local Tone Curve mask rendering failed.");
+                return false;
+            }
             processed.Reset(blended.Release());
         }
         if (result.owned && inputTexture != 0) {

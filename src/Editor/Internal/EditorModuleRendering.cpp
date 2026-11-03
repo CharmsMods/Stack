@@ -23,6 +23,7 @@
 #include "Raw/RawLoader.h"
 #include "Raw/RawProcessingMath.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/RawGraphViewportWorkload.h"
 #include "Renderer/ScopedGLObjects.h"
@@ -1449,6 +1450,10 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
         kRawDevelopComplexPreviewMaxDimension;
     planInput.fullFrameWidth = fullFrameWidth;
     planInput.fullFrameHeight = fullFrameHeight;
+    planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuideWorkingBytes(snapshot.graph,fullFrameWidth,fullFrameHeight);
+    if (snapshot.rawWorkspace.hasRecipe && Stack::Renderer::RecipeUsesLocalToneGuide(snapshot.rawWorkspace.recipe))
+        planInput.additionalWorkingBytes = std::max(planInput.additionalWorkingBytes,
+            Stack::Renderer::LocalToneGuide::WorkingBytes(fullFrameWidth,fullFrameHeight));
     planInput.maximumTextureSize = m_RawWorkspaceGlMaxTextureSize;
     planInput.workingBudgetBytes =
         m_RawWorkspaceVramWorkingBudgetBytes;
@@ -1936,6 +1941,9 @@ bool EditorModule::TrySubmitRawRenderCommand(
         kRawDevelopComplexPreviewMaxDimension;
     planInput.fullFrameWidth = m_RawRenderSessionFullFrameWidth;
     planInput.fullFrameHeight = m_RawRenderSessionFullFrameHeight;
+    if (Stack::Renderer::RecipeUsesLocalToneGuide(command.rawWorkspace.recipe))
+        planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuide::WorkingBytes(
+            planInput.fullFrameWidth,planInput.fullFrameHeight);
     planInput.maximumTextureSize = m_RawWorkspaceGlMaxTextureSize;
     planInput.workingBudgetBytes =
         m_RawWorkspaceVramWorkingBudgetBytes;

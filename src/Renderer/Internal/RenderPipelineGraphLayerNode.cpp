@@ -167,6 +167,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
 
     if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
         toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
+        toneCurve->SetProcessingCancellation(m_ShouldCancelRender);
     }
 
     const bool scalarBlur=blurLayer && IsScalarRenderSocket(executionContext,input->fromNodeId,input->fromSocketId);
@@ -180,11 +181,17 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
     };
     Stack::Renderer::ScopedGLTexture processed(createTarget());
     const unsigned int sourceTexture = m_SourceTexture != 0 ? m_SourceTexture : inputTexture;
+    std::string toneError;
     const bool renderedLayer = RenderIntoGraphTargetTexture(processed.Get(), [&](unsigned int) {
-        layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
+        try {
+            layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
+        } catch (const std::exception& error) {
+            if (type=="ToneCurve") toneError=error.what();
+            throw;
+        }
     });
     if (!renderedLayer || !processed) {
-        return fail("Layer rendering failed; previous presentation retained.", !processed);
+        return fail(toneError.empty() ? "Layer rendering failed; previous presentation retained." : toneError.c_str(), !processed);
     }
 
     if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get());

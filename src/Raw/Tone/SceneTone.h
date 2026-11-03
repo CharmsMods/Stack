@@ -13,6 +13,11 @@ struct SceneTone {
     bool direct = true;
     std::vector<RawBezierCurvePoint> curve {{0,0,{1},{1}},{1,1,{1},{1}}};
     CurveAmountState curveAmount;
+    // Zero retains the existing pointwise curve. Spatial processing applies the
+    // curve to a regional luminance base while retaining the pixel's EV detail.
+    float localAmount = 0.0f;
+    float localRadius = 0.04f; // Fraction of the longer full-image side.
+    float localRangeEv = 0.5f;
     bool enabled = true;
     float anchorOffsetEv = 0.0f;
     float contrast = 1.0f;
@@ -31,13 +36,17 @@ SceneTone SanitizeSceneTone(SceneTone tone);
 SceneTone ReadSceneTone(const nlohmann::json& value);
 nlohmann::json SerializeSceneTone(const SceneTone& tone);
 bool IsSceneToneActive(const SceneTone& tone);
+bool IsLocalSceneToneActive(const SceneTone& tone);
 // Effective contrast can be smaller than requested to keep every slope
 // strictly positive. The editor must show the limit, never hide it.
 float EffectiveSceneToneContrast(const SceneTone& tone);
 float EvaluateSceneToneContrast(const SceneTone& tone, float ev);
+// Pointwise curve evaluation; these functions do not derive a spatial guide.
 float EvaluateSceneToneEv(const SceneTone& tone, float ev);
 std::array<float,3> ApplySceneTone(const SceneTone& tone,
     std::array<float,3> rgb, const std::array<float,3>& lumaWeights);
+// The image processor supplies a regional base in the same scene EV domain.
+float EvaluateLocalSceneToneEv(const SceneTone& tone, float ev, float baseEv);
 // Curve-view editing changes the same slope points. Returns the achieved EV
 // after enforcing the slope limits. The zero-EV point edits the anchor.
 float SetSceneToneOutput(SceneTone& tone, std::size_t point, float outputEv);

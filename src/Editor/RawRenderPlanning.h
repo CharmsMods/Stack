@@ -29,6 +29,8 @@ struct RawRenderPlanInput {
     double visibleAreaFraction = 1.0;
     int fullInputSurfaces = 7;
     int surfaceBytesPerPixel = 8;
+    // Bounded effect scratch that does not scale with a visible viewport crop.
+    std::uint64_t additionalWorkingBytes = 0;
 };
 
 struct RawRenderPlan {
@@ -148,6 +150,14 @@ inline RawRenderPlan BuildRawRenderPlan(
             plan.fullFrameDecision.allowed = !input.forceMinimumMemoryTiling &&
                 plan.fullFrameDecision.fitsTextureLimits && plan.fullFrameDecision.fitsWorkingBudget;
         }
+        if (input.additionalWorkingBytes > 0) {
+            auto& bytes = plan.fullFrameDecision.estimatedWorkingSetBytes;
+            bytes = input.additionalWorkingBytes > std::numeric_limits<std::uint64_t>::max() - bytes
+                ? std::numeric_limits<std::uint64_t>::max() : bytes + input.additionalWorkingBytes;
+            plan.fullFrameDecision.fitsWorkingBudget = input.workingBudgetBytes > 0 && bytes <= input.workingBudgetBytes;
+            plan.fullFrameDecision.allowed = !input.forceMinimumMemoryTiling &&
+                plan.fullFrameDecision.fitsTextureLimits && plan.fullFrameDecision.fitsWorkingBudget;
+        }
         plan.nativePresentationAllowed = plan.fullFrameDecision.allowed;
         plan.disableViewportTiling =
             plan.nativePresentationAllowed ||
@@ -184,6 +194,8 @@ inline RawRenderPlan BuildRawRenderPlan(
         input.surfaceBytesPerPixel);
     if (plan.purpose == RawRenderPurpose::ViewportRefinement && plan.nativePresentationAllowed)
         plan.activeWorkingSetBytes = plan.fullFrameDecision.estimatedWorkingSetBytes;
+    else plan.activeWorkingSetBytes = input.additionalWorkingBytes > std::numeric_limits<std::uint64_t>::max() - plan.activeWorkingSetBytes
+        ? std::numeric_limits<std::uint64_t>::max() : plan.activeWorkingSetBytes + input.additionalWorkingBytes;
     // Cache only from verified headroom left after the active render working
     // set. Native RAW boundaries are particularly valuable: retaining the
     // current CFA-denoised RawBase lets downstream tone/color/view edits avoid

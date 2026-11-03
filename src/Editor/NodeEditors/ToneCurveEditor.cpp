@@ -9,6 +9,7 @@
 #include "NodeMath/ToneCurveParameters.h"
 #include "NodeMath/ImageOperationInput.h"
 #include "Raw/Curves/CurveAuthoring.h"
+#include "Utils/ImGuiExtras.h"
 
 namespace Stack::Editor {
 namespace {
@@ -76,16 +77,38 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
     }
     if (mode=="luminance") {
         auto tone=RawRecipe::ReadSceneTone(parameters.at("luminanceTone"));tone.direct=true;
+        bool toneChanged=false;
         if (!settings) {
             ImVec2 size=ImGui::GetContentRegionAvail();size.y=std::min(size.y,250.f);
             const auto tonalDomain=ExposureTonalSliderDomain(-16.f,16.f);
-            if (DrawCurveCanvas("Luminance",tone.curve,tone.curveAmount,state.canvas[4],true,context.inputHistogram,size,64,nullptr,{},context.IsParameterDriven("luminance-amount"),
-                nullptr,false,true,&tonalDomain,context.inputHistogramRevision)) {
-                const auto serialized=RawRecipe::SerializeSceneTone(tone);
+            toneChanged=DrawCurveCanvas("Luminance",tone.curve,tone.curveAmount,state.canvas[4],true,context.inputHistogram,size,64,nullptr,{},context.IsParameterDriven("luminance-amount"),
+                nullptr,false,true,&tonalDomain,context.inputHistogramRevision);
+        }
+        const float width=ImGui::GetContentRegionAvail().x;
+        float amount=tone.localAmount*100;
+        if (ImGuiExtras::NodeSliderFloat("Preserve local contrast","##ToneLocalAmount",&amount,0,100,"%.0f%%",width)) {
+            tone.localAmount=amount/100; toneChanged=true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Apply the curve to regional brightness while retaining local detail. Zero uses the curve at each pixel.");
+        if (settings) {
+            ImGui::BeginDisabled(tone.localAmount<=0);
+            float radius=tone.localRadius*100;
+            if (ImGuiExtras::NodeSliderFloat("Region size","##ToneLocalRadius",&radius,.2f,25,"%.1f%%",width)) {
+                tone.localRadius=radius/100; toneChanged=true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Regional radius as a percentage of the full image's longer side. The same scale is used for preview and export.");
+            toneChanged|=ImGuiExtras::NodeSliderFloat("Detail range","##ToneLocalRange",&tone.localRangeEv,.05f,2,"%.2f EV",width);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Tone differences treated as local detail. Larger values preserve stronger texture but can soften region boundaries.");
+            ImGui::EndDisabled();
+        }
+        if (toneChanged) {
+            const auto serialized=RawRecipe::SerializeSceneTone(tone);
             for (const auto& field:serialized.items())
                 parameters["luminanceTone"][field.key()]=field.value();
             changed=true;
-            }
         }
         return changed;
     }

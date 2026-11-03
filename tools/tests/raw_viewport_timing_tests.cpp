@@ -4,6 +4,8 @@
 #include "Raw/RawViewportTimingHistory.h"
 #include "Raw/RawViewportDetail.h"
 #include "Renderer/RawGraphViewportWorkload.h"
+#include "Renderer/RenderTiling.h"
+#include "Renderer/LocalToneGuide.h"
 #include "Editor/RawRenderPlanning.h"
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Async/TaskSystem.h"
@@ -11,7 +13,138 @@
 #include <stdexcept>
 #include <thread>
 
+void TestLocalToneViewportPlanning() {
+    const auto require=[](bool ok,const char* message) { if (!ok) throw std::runtime_error(message); };
+    using namespace Stack::RawRecipe;
+    using namespace Stack::Renderer;
+    SceneTone tone;
+    tone.curve={{0,0},{.5f,.5f},{1,.625f}};
+    tone.localAmount=1;
+    const auto active=SerializeSceneTone(tone);
+    auto off=active;off["localAmount"]=0;
+
+    RenderGraphSnapshot graph;
+    RenderGraphNode source;source.nodeId=1;source.kind=RenderGraphNodeKind::Image;
+    source.image.width=1200;source.image.height=800;
+    RenderGraphNode curve;curve.nodeId=2;curve.kind=RenderGraphNodeKind::RawOperation;
+    curve.rawOperation=MakeGraphOperation(GraphOperationKind::ToneCurve);
+    curve.rawOperation.parameters["curveMode"]="luminance";
+    curve.rawOperation.parameters["luminanceTone"]=active;
+    RenderGraphNode output;output.nodeId=3;output.kind=RenderGraphNodeKind::Output;
+    graph.nodes={source,curve,output};
+    graph.links={{1,"imageOut",2,"imageIn"},{2,"imageOut",3,"imageIn"}};
+    graph.outputNodeId=3;graph.outputSocketId="imageOut";
+    const ImageRegion visible{1200,800,300,200,240,160};
+    const auto whole=WholeImageRegion(1200,800);
+    const ViewportPreviewRequest request{visible,1,1,true,false};
+    const auto plan=[&] { return RenderTiling::PlanGraphViewport(graph,1200,800,0,request); };
+    const auto checkRegion=[&](bool regional,const char* message) {
+        const auto planned=plan();
+        require(planned.valid,message);
+        const auto& stage=planned.stages.at({2,"imageOut"});
+        require(stage.regionalExecutable==regional && stage.demand==(regional?visible:whole) &&
+            stage.inputs.size()==1 && stage.inputs[0].demand==(regional?visible:whole),message);
+        require(planned.stages.at({3,"imageOut"}).demand==visible,
+            "A local tone dependency must retain the downstream viewport crop");
+    };
+    checkRegion(false,"Active local luminance must retain complete image coordinates and input support");
+    auto& parameters=graph.nodes[1].rawOperation.parameters;
+    parameters["luminanceTone"]=off;
+    checkRegion(true,"Turning local preservation off must restore regional pointwise tone execution");
+    parameters["luminanceTone"]=active;parameters["curveMode"]="components";
+    checkRegion(true,"Component mode must ignore a stashed active local luminance curve");
+    parameters["curveMode"]="luminance";graph.nodes[1].rawOperation.enabled=false;
+    checkRegion(true,"A disabled local tone operation must remain a regional bypass");
+    graph.nodes[1].rawOperation.enabled=true;
+    SceneTone slope;slope.contrast=.75f;slope.localAmount=1;
+    parameters["luminanceTone"]=SerializeSceneTone(slope);
+    checkRegion(true,"An identity direct curve must remain regional despite stashed slope controls");
+    parameters["curveMode"]="contrast";
+    checkRegion(false,"Contrast mode must classify its active slope rather than its stashed identity direct curve");
+    SceneTone locked;locked.localAmount=1;locked.curveAmount.locked=true;
+    locked.curveAmount.reference=tone.curve;locked.curveAmount.amount=1;
+    parameters["curveMode"]="luminance";parameters["luminanceTone"]=SerializeSceneTone(locked);
+    checkRegion(false,"An active locked curve reference must retain full input despite identity authored points");
+    parameters["luminanceTone"]["curveAmount"]["amount"]=0;
+    checkRegion(true,"Zero effective curve amount must not require a local guide");
+    parameters["curveMode"]="advanced";parameters["advanced"]={{"luminanceTone",active}};
+    checkRegion(false,"Advanced tone must retain the complete input when its local curve is active");
+
+    // Timing identities follow executed work. Ordinary edits within an active
+    // guide share measurements, while enabling it or changing radius does not.
+    const auto recipe=MakeDefaultRecipe("local-tone-viewport");
+    const auto graphKeys=[&] { return BuildRawGraphViewportWorkloadKeys(recipe,graph,2); };
+    parameters["curveMode"]="luminance";parameters["luminanceTone"]=off;
+    const auto offKeys=graphKeys();
+    parameters["luminanceTone"]=active;
+    const auto activeKeys=graphKeys();
+    require(activeKeys!=offKeys,"Enabling the local guide must retire pointwise graph timing estimates");
+    parameters["luminanceTone"]["localRadius"]=.12f;
+    const auto radiusKeys=graphKeys();
+    require(radiusKeys!=activeKeys,"A changed guide radius must have its own graph timing identity");
+    parameters["luminanceTone"]["localAmount"]=.5f;
+    parameters["luminanceTone"]["localRangeEv"]=1.f;
+    require(graphKeys()==radiusKeys,"Active amount and range edits must share the same guide workload");
+    parameters["curveMode"]="components";
+    const auto componentKeys=graphKeys();
+    parameters["luminanceTone"]["localRadius"]=.2f;
+    require(graphKeys()==componentKeys,"Stashed local settings cannot invalidate component-mode cost history");
+    parameters["luminanceTone"]=SerializeSceneTone(slope);parameters["curveMode"]="contrast";
+    const auto slopeKeys=graphKeys();
+    parameters["luminanceTone"]["localAmount"]=0;
+    require(graphKeys()!=slopeKeys,"Slope-mode guide activation must change timing despite identity direct points");
+    parameters["curveMode"]="luminance";parameters["luminanceTone"]=SerializeSceneTone(locked);
+    const auto lockedKeys=graphKeys();
+    parameters["luminanceTone"]["curveAmount"]["amount"]=0;
+    require(graphKeys()!=lockedKeys,"Zero locked-reference amount must retire the active-guide timing identity");
+
+    auto legacy=recipe;
+    constexpr auto toneStage=std::size_t(Raw::ViewportStage::PostFinishTone);
+    const auto region=[&] { return Raw::ViewportRegionRequirements(legacy,600,400,1200,800)[toneStage]; };
+    legacy.finishTone.layerJson["luminanceTone"]=active;
+    require(region().requirement==Raw::ViewportRegionRequirement::FullInput && region().materializeFullInput,
+        "The integrated local tone stage must retain full input before cropping");
+    legacy.finishTone.layerJson["luminanceTone"]=off;
+    require(region().requirement==Raw::ViewportRegionRequirement::Pointwise,
+        "Integrated local tone disabled must remain pointwise");
+    RawGradientToneAdjustment gradient;gradient.mask.enabled=true;
+    gradient.curveJson={{"luminanceTone",active}};legacy.toneGradients={gradient};
+    require(region().requirement==Raw::ViewportRegionRequirement::FullInput && region().materializeFullInput,
+        "An enabled local tone gradient must retain its full-image guide");
+    const auto gradientKeys=Raw::ViewportWorkloadKeys(legacy);
+    legacy.toneGradients[0].curveJson["luminanceTone"]["localRadius"]=.12f;
+    require(Raw::ViewportWorkloadKeys(legacy)!=gradientKeys,
+        "A local tone gradient radius change must invalidate its timing identity");
+    legacy.toneGradients[0].mask.enabled=false;
+    require(region().requirement==Raw::ViewportRegionRequirement::Pointwise,
+        "A disabled gradient must not force full-input tone processing");
+    const auto disabledGradientKeys=Raw::ViewportWorkloadKeys(legacy);
+    legacy.toneGradients[0].curveJson["luminanceTone"]["localRadius"]=.2f;
+    require(Raw::ViewportWorkloadKeys(legacy)==disabledGradientKeys,
+        "Disabled gradient settings must not change measured rendering work");
+
+    // With full-frame demand, all surface extents are identical. Only guide
+    // scratch changes; serial tone operations reserve one bounded peak.
+    parameters["curveMode"]="luminance";parameters["luminanceTone"]=active;
+    graph.nodes[2]=graph.nodes[1];graph.nodes[2].nodeId=3;
+    graph.nodes[2].rawOperation.parameters["luminanceTone"]=off;
+    const ViewportPreviewRequest fullRequest{whole,1,1,true,false};
+    const auto fullPlan=[&] { return RenderTiling::PlanGraphViewport(graph,1200,800,0,fullRequest); };
+    const auto oneGuide=fullPlan();
+    graph.nodes[2].rawOperation.parameters["luminanceTone"]=active;
+    const auto twoGuides=fullPlan();
+    graph.nodes[1].rawOperation.parameters["luminanceTone"]=off;
+    graph.nodes[2].rawOperation.parameters["luminanceTone"]=off;
+    const auto noGuide=fullPlan();
+    require(oneGuide.valid && twoGuides.valid && noGuide.valid && oneGuide.workingBytes==twoGuides.workingBytes &&
+        oneGuide.workingBytes-noGuide.workingBytes==LocalToneGuide::WorkingBytes(1200,800),
+        "Serial local tone nodes must reserve one guide peak, and pointwise nodes none");
+    require(LocalToneGuide::WorkingBytes(100000,100000)==12ull*1024*1024,
+        "The bounded three-field guide must never allocate more than 12 MiB");
+}
+
 void TestRawViewportTimingLearning() {
+    TestLocalToneViewportPlanning();
     const auto require = [](bool ok, const char* message) { if (!ok) throw std::runtime_error(message); };
     using namespace Stack::EditorRenderScheduling;
     auto recipe = Stack::RawRecipe::MakeDefaultRecipe("timing-test");

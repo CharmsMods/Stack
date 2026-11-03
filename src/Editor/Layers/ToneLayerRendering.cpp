@@ -4,6 +4,7 @@
 #include "Renderer/FullscreenQuad.h"
 #include "Renderer/GLStateGuards.h"
 #include "Renderer/CoverageSampling.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,32 @@
 #include <vector>
 
 namespace {
+
+// The local guide adds a third sampler and can fail before the final draw.
+// Restore borrowed bindings on every return, including cancellation/errors.
+struct ToneTextureBindings {
+    GLint active = GL_TEXTURE0;
+    std::array<GLint,3> textures{};
+    std::array<GLint,3> samplers{};
+    ToneTextureBindings() {
+        glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+        for(unsigned i=0;i<textures.size();++i) {
+            glActiveTexture(GL_TEXTURE0+i);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D,&textures[i]);
+            glGetIntegerv(GL_SAMPLER_BINDING,&samplers[i]);
+            glBindSampler(i,0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+    }
+    ~ToneTextureBindings() {
+        for(unsigned i=0;i<textures.size();++i) {
+            glActiveTexture(GL_TEXTURE0+i);
+            glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(textures[i]));
+            glBindSampler(i,static_cast<GLuint>(samplers[i]));
+        }
+        glActiveTexture(static_cast<GLenum>(active));
+    }
+};
 
 const char* kToneVert = R"(
 #version 330 core
@@ -94,6 +121,8 @@ layout (location = 0) out vec4 FragColor;
 uniform sampler2D uInputTex;
 uniform ivec2 uOutputSize;
 uniform sampler2D uCurveLut;
+uniform sampler2D uSceneToneGuide;
+uniform float uSceneToneLocalAmount;
 uniform int uSceneToneEnabled;
 uniform vec2 uSceneToneTails;
 uniform int uMode;
@@ -207,7 +236,7 @@ void accumulateBaseSample(
 }
 
 float localBaseLuma(vec2 uv, float centerLuma) {
-    vec2 radius = max(vec2(1.0), uTexelSize * max(1.0, uLocalBaselineRadius));
+    vec2 radius = uTexelSize * max(1.0, uLocalBaselineRadius);
     float weightedLuma = 0.0;
     float totalWeight = 0.0;
     accumulateBaseSample(weightedLuma, totalWeight, uv, vec2(0.0), 1.00, centerLuma);
@@ -272,6 +301,15 @@ float toneResponse(float x) {
     return curveCoordToScene(curve(coord));
 }
 
+float sceneToneEv(float ev) {
+    float position = clamp((ev + 40.0) / 80.0, 0.0, 1.0);
+    float size = float(textureSize(uCurveLut, 0).x);
+    float mapped = texture(uCurveLut, vec2((0.5 + position * (size - 1.0)) / size, 0.5)).a;
+    if (ev < -40.0) mapped += (ev + 40.0) * uSceneToneTails.x;
+    if (ev > 40.0) mapped += (ev - 40.0) * uSceneToneTails.y;
+    return mapped;
+}
+
 void main() {
     vec4 color = all(equal(textureSize(uInputTex, 0), uOutputSize))
         ? texelFetch(uInputTex, ivec2(gl_FragCoord.xy), 0)
@@ -303,13 +341,21 @@ void main() {
     }
     if (uSceneToneEnabled != 0) {
         float y = dot(rgb, uLumaWeights);
-        if (y > 0.0) {
-            float ev = log2(y / 0.18);
-            float position = clamp((ev + 40.0) / 80.0, 0.0, 1.0);
-            float size = float(textureSize(uCurveLut, 0).x);
-            float mapped = texture(uCurveLut, vec2((0.5 + position * (size - 1.0)) / size, 0.5)).a;
-            if (ev < -40.0) mapped += (ev + 40.0) * uSceneToneTails.x;
-            if (ev > 40.0) mapped += (ev - 40.0) * uSceneToneTails.y;
+        if (y > 0.0 && !isnan(y) && !isinf(y)) {
+            float ev = log2(y) - log2(0.18);
+            float mapped = sceneToneEv(ev);
+            float inputY = dot(color.rgb,uLumaWeights);
+            if (uSceneToneLocalAmount > 0.0 && color.a > 0.0 && inputY > 0.0 && !isnan(inputY) && !isinf(inputY)) {
+                // The guide is built from this operation's original input.
+                // Coverage-normalized coefficients are evaluated with the
+                // full-resolution luminance, preserving fine image detail.
+                vec3 guide = texture(uSceneToneGuide,vUV).rgb;
+                if (guide.b > 1e-8) {
+                    vec2 coefficients = guide.rg / guide.b;
+                    float base = coefficients.x * (log2(inputY) - log2(0.18)) + coefficients.y;
+                    mapped = mix(mapped,ev + sceneToneEv(base) - base,uSceneToneLocalAmount);
+                }
+            }
             rgb *= exp2(mapped - ev);
         }
     }
@@ -539,13 +585,7 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     if (m_ShaderProgram == 0) {
         InitializeGL();
     }
-    GLint previousTexture0 = 0;
-    GLint previousTexture1 = 0;
-    glActiveTexture(GL_TEXTURE0);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture0);
-    glActiveTexture(GL_TEXTURE1);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture1);
-    glActiveTexture(GL_TEXTURE0);
+    const ToneTextureBindings restoreTextures;
 
     ClearPendingAutoRewriteFeedback();
     if (m_AutoCalibratePending) {
@@ -568,12 +608,18 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     }
     UpdateLut();
     if (m_ShaderProgram == 0 || m_LutTexture == 0) {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture0));
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture1));
-        glActiveTexture(GL_TEXTURE0);
         throw std::runtime_error("Tone Curve program or authored LUT is unavailable.");
+    }
+    const std::array<float,3> luma = m_LumaIsRec2020
+        ? std::array<float,3>{.2627002f,.6779981f,.0593017f}
+        : (m_ExtendedSceneRange ? std::array<float,3>{.2126729f,.7151522f,.0721750f}
+                               : std::array<float,3>{.2126f,.7152f,.0722f});
+    Stack::Renderer::ScopedGLTexture guide;
+    if (Stack::RawRecipe::IsLocalSceneToneActive(m_SceneTone)) {
+        std::string error;
+        guide.Reset(m_LocalToneGuide.Render(inputTexture,width,height,luma,m_SceneTone.localRadius,
+            m_SceneTone.localRangeEv,quad,m_ShouldCancelProcessing,&error));
+        if (!guide) throw std::runtime_error(error.empty() ? "Local tone guide could not be rendered." : error);
     }
     const EffectiveLocalBaselineSettings localBaseline = ComputeEffectiveLocalBaselineSettings();
     const float toneAnchor = ComputeEffectiveToneAnchor();
@@ -589,6 +635,10 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_LutTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uCurveLut"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D,guide.Get());
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneGuide"),2);
+    glUniform1f(glGetUniformLocation(m_ShaderProgram,"uSceneToneLocalAmount"),guide ? m_SceneTone.localAmount : 0.f);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uSceneToneEnabled"),
         Stack::RawRecipe::IsSceneToneActive(m_SceneTone) ? 1 : 0);
     glUniform2f(glGetUniformLocation(m_ShaderProgram, "uSceneToneTails"),
@@ -604,19 +654,7 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glUniform1i(
         glGetUniformLocation(m_ShaderProgram, "uTruthfulV2SignedMath"),
         m_TruthfulV2SignedMath ? 1 : 0);
-    if (m_LumaIsRec2020) {
-        glUniform3f(
-            glGetUniformLocation(m_ShaderProgram, "uLumaWeights"),
-            0.2627002f,
-            0.6779981f,
-            0.0593017f);
-    } else {
-        glUniform3f(
-            glGetUniformLocation(m_ShaderProgram, "uLumaWeights"),
-            m_ExtendedSceneRange ? 0.2126729f : 0.2126f,
-            m_ExtendedSceneRange ? 0.7151522f : 0.7152f,
-            m_ExtendedSceneRange ? 0.0721750f : 0.0722f);
-    }
+    glUniform3fv(glGetUniformLocation(m_ShaderProgram,"uLumaWeights"),1,luma.data());
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDomain"), static_cast<int>(m_Domain));
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMinEv"), m_LogMinEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMaxEv"), m_LogMaxEv);
@@ -640,11 +678,6 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     if (drawError != GL_NO_ERROR) {
         std::cerr << "[ToneCurve] Draw failed with GL error " << drawError << "\n";
     }
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture0));
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture1));
-    glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
     if (drawError!=GL_NO_ERROR) throw std::runtime_error("Tone Curve GPU execution failed.");
 }

@@ -4,11 +4,13 @@
 #include "Editor/Layers/ToneLayers.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 
 #include <algorithm>
 #include <functional>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 
 using namespace Stack::Renderer::GraphExecution;
@@ -60,6 +62,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
     }
 
     if (wantsIntegratedFinal) {
+        const bool localTone = Stack::Renderer::TonePayloadUsesLocalGuide(node.rawDevelop.integratedToneLayerJson);
         const unsigned int preToneTexture = evalImage(node.nodeId, EditorNodeGraph::kPreFinishImageOutputSocketId);
         if (preToneTexture == 0) {
             return result;
@@ -69,6 +72,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
 
         std::shared_ptr<LayerBase> integratedToneLayer = LayerRegistry::CreateLayerFromTypeId("ToneCurve");
         if (!integratedToneLayer) {
+            if (localTone) throw std::runtime_error("The local Tone Curve executor is unavailable.");
             result.texture = preToneTexture;
             result.owned = false;
             return result;
@@ -77,6 +81,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
         integratedToneLayer->InitializeGL();
         integratedToneLayer->Deserialize(node.rawDevelop.integratedToneLayerJson);
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(integratedToneLayer.get())) {
+            toneCurve->SetProcessingCancellation(m_ShouldCancelRender);
             toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
             toneCurve->SetDevelopScenePrepToneBudget(
                 node.rawDevelop.scenePrepEnabled,
@@ -86,10 +91,18 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
 
         Stack::Renderer::ScopedGLTexture finishedResult(
             CreateGraphRenderTargetTexture());
+        std::string localToneError;
         const bool renderedIntegratedTone = RenderIntoGraphTargetTexture(finishedResult.Get(), [&](unsigned int) {
-            integratedToneLayer->ExecuteWithSource(preToneTexture, preToneTexture, m_Width, m_Height, m_Quad);
+            try {
+                integratedToneLayer->ExecuteWithSource(preToneTexture, preToneTexture, m_Width, m_Height, m_Quad);
+            } catch (const std::exception& error) {
+                if (localTone) localToneError=error.what();
+                throw;
+            }
         });
         bool useFinishedResult = renderedIntegratedTone && finishedResult;
+        if (!useFinishedResult && localTone)
+            throw std::runtime_error(localToneError.empty() ? "Integrated local Tone Curve rendering failed or was canceled." : localToneError);
         if (useFinishedResult) {
             const QuickTextureStats inputStats = ProbeTextureStats(preToneTexture, m_Width, m_Height);
             const QuickTextureStats outputStats = ProbeTextureStats(finishedResult.Get(), m_Width, m_Height);
@@ -99,6 +112,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
                 outputStats.p99Luma <= 0.000001f &&
                 outputStats.maxRgb <= 0.00001f;
             if (inputHasSignal && outputIsBlank) {
+                if (localTone) throw std::runtime_error("Integrated local Tone Curve produced an invalid blank result.");
                 finishedResult.Reset();
                 useFinishedResult = false;
                 std::cerr << "[RenderPipeline] Integrated Develop ToneCurve produced a blank output for RawDevelop node "
@@ -127,6 +141,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
             m_Width = preToneWidth;
             m_Height = preToneHeight;
             if (maskLink != nullptr && finishMaskTexture == 0) {
+                if (localTone) throw std::runtime_error("The connected local Tone Curve mask could not be rendered.");
                 glDeleteTextures(1, &result.texture);
                 result.texture = 0;
                 result.owned = false;
@@ -150,6 +165,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
                     result.texture = blended.Release();
                     result.owned = true;
                 } else {
+                    if (localTone) throw std::runtime_error("The local Tone Curve mask blend failed.");
                     glDeleteTextures(1, &result.texture);
                     result.texture = 0;
                     result.owned = false;

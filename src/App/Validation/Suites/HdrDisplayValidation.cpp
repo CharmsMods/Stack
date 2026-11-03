@@ -3,6 +3,7 @@
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/FullscreenQuad.h"
+#include "Renderer/ScopedGLObjects.h"
 #include "ThirdParty/stb_image_write.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace Stack::Validation {
@@ -44,11 +46,115 @@ std::vector<float> Render(const std::vector<float>& rgba,int width,int height,co
     glDeleteTextures(1,&input);glDeleteTextures(1,&output);
     return pixels;
 }
+
+std::vector<float> RenderLocalTone(const std::vector<float>& rgba,int width,int height,
+    const Stack::RawRecipe::SceneTone& curve,const std::function<bool()>& cancel={}) {
+    Stack::Renderer::ScopedGLTexture input(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));
+    Stack::Renderer::ScopedGLTexture output(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));
+    glBindTexture(GL_TEXTURE_2D,input.Get());
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,0,width,height,GL_RGBA,GL_FLOAT,rgba.data());
+    struct Target {
+        GLuint fbo=0;
+        Target() {glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);}
+        ~Target() {glBindFramebuffer(GL_FRAMEBUFFER,0);glDeleteFramebuffers(1,&fbo);}
+    } target;
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,output.Get(),0);
+    Check(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"Incomplete local tone target");
+    glViewport(0,0,width,height);
+    FullscreenQuad quad;quad.Initialize();ToneCurveLayer layer;
+    auto settings=Stack::RawRecipe::DefaultFinishToneJson();
+    settings.erase("pointCurves");settings.erase("pointCurveSetVersion");
+    settings["luminanceTone"]=Stack::RawRecipe::SerializeSceneTone(curve);
+    settings["inputWorkingSpace"]="linear-rec2020-d65";
+    settings["truthfulV2SignedMath"]=true;
+    layer.Deserialize(settings);layer.SetProcessingCancellation(cancel);
+    layer.Execute(input.Get(),width,height,quad);
+    std::vector<float> pixels(rgba.size());
+    glReadPixels(0,0,width,height,GL_RGBA,GL_FLOAT,pixels.data());
+    Check(glGetError()==GL_NO_ERROR,"Local tone render produced an OpenGL error");
+    return pixels;
+}
+
+void ValidateLocalTone() {
+    using namespace Stack::RawRecipe;
+    constexpr int width=128,height=64;
+    std::vector<float> input(width*height*4);
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        const float ev=(x<width/2?0.f:8.f)+((x/2)%2?.125f:-.125f);
+        const auto i=(y*width+x)*4;
+        input[i]=input[i+1]=input[i+2]=.18f*std::exp2(ev);input[i+3]=.75f;
+    }
+    // One bounded scene: weak texture on both sides of a large exposure edge.
+    // A linear 1/8 EV slope has an independent, analytic pointwise reference.
+    SceneTone curve;curve.curve={{0,.4375f},{1,.5625f}};
+    const auto global=RenderLocalTone(input,width,height,curve);
+    curve.localAmount=1;
+    const auto local=RenderLocalTone(input,width,height,curve);
+    const int dark=(height/2*width+24)*4,bright=(height/2*width+96)*4;
+    const float globalDetail=std::abs(std::log2(global[bright+8]/global[bright]));
+    const float localDetail=std::abs(std::log2(local[bright+8]/local[bright]));
+    Check(std::abs(globalDetail-.03125f)<.001f,"Pointwise tone lost the analytic EV slope");
+    Check(localDetail>.22f && localDetail<.255f,"Local tone lost or boosted fine highlight detail");
+    const float darkDetail=std::abs(std::log2(local[dark+8]/local[dark]));
+    Check(std::abs(localDetail-darkDetail)<.003f,"Log-domain guide changed its detail response with exposure");
+    for(std::size_t i=0;i<input.size();i+=4) {
+        Check(std::isfinite(local[i]) && local[i]>0,"Local tone produced an invalid scene value");
+        Check(local[i]==local[i+1] && local[i]==local[i+2],"Local luminance tone colored a neutral input");
+        Check(local[i+3]==input[i+3],"Local tone changed coverage");
+    }
+    SceneTone identity;identity.localAmount=1;
+    const auto unchanged=RenderLocalTone(input,width,height,identity);
+    for(std::size_t i=0;i<input.size();++i)
+        Check(std::abs(unchanged[i]-input[i])<1e-5f*std::max(1.f,std::abs(input[i])),"Identity local mode changed pixels");
+
+    // Compress a clean 8 EV edge without a large new rim. The tolerance is a
+    // bounded edge check, not a claim that guided filtering cannot make halos.
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        const auto i=(y*width+x)*4;
+        input[i]=input[i+1]=input[i+2]=x<width/2?.18f:.18f*256.f;
+    }
+    const auto edge=RenderLocalTone(input,width,height,curve);
+    float edgeExcursion=0;
+    for(int x=0;x<width;++x) {
+        const float ev=std::log2(edge[(height/2*width+x)*4]/.18f);
+        edgeExcursion=std::max(edgeExcursion,std::abs(ev-(x<width/2?0.f:1.f)));
+    }
+    Check(edgeExcursion<.12f,"Local tone introduced a large bright/dark edge rim");
+
+    // Hidden/invalid neighbors must not darken the guide of a uniform valid
+    // region. Signed scene RGB retains its component ratios and alpha.
+    const std::array<float,3> rgb={-.25f,1.f,3.f};
+    for(std::size_t i=0;i<input.size();i+=4) {
+        for(int c=0;c<3;++c) input[i+c]=rgb[c];
+        input[i+3]=.4f;
+    }
+    input[0]=std::numeric_limits<float>::quiet_NaN();input[3]=0;
+    for(int x=1;x<width/4;++x) {input[x*4]=1e20f;input[x*4+3]=0;}
+    const auto masked=RenderLocalTone(input,width,height,curve);
+    const auto expected=ApplySceneTone(curve,rgb,{.2627002f,.6779981f,.0593017f});
+    for(std::size_t i=0;i<input.size();i+=4) if(input[i+3]>0) {
+        for(int c=0;c<3;++c)
+            Check(std::isfinite(masked[i+c]) && std::abs(masked[i+c]-expected[c])<2e-4f,
+                "Invalid coverage contaminated the guide or signed RGB ratios");
+        Check(masked[i+3]==input[i+3],"Local tone changed partial alpha");
+    }
+    bool canceled=false;
+    int cancellationChecks=0;
+    try {RenderLocalTone(input,width,height,curve,[&]{return ++cancellationChecks>3;});}
+    catch(const std::exception& error) {canceled=std::string(error.what()).find("canceled")!=std::string::npos;}
+    Check(canceled && cancellationChecks==4,"Canceled local tone silently returned another image");
+    const auto recovered=RenderLocalTone(input,width,height,curve);
+    Check(std::abs(recovered[bright]-masked[bright])<1e-6f,"Local tone failed to recover after cancellation");
+    std::cout<<"Local tone: 0.25 EV input detail, pointwise "<<globalDetail<<" EV, preserved "<<localDetail
+        <<" EV; edge excursion "<<edgeExcursion
+        <<" EV; identity, exposure response, signed RGB, coverage and cancellation passed.\n";
+}
 }
 // Focused curve and actual display-shader parity checks.
 bool ValidateHdrDisplay(int argc,char** argv) {
     try {
         Context context;
+        ValidateLocalTone();
         const Raw::SigmoidDisplay::PreparedCurve sigmoid;
         Check(std::abs(sigmoid.Evaluate(Raw::SigmoidDisplay::MiddleGrey)-Raw::SigmoidDisplay::MiddleGrey)<2e-7f,
             "Sigmoid moved middle grey at zero exposure");
