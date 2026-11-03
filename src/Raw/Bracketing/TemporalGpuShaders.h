@@ -16,7 +16,7 @@ struct Accumulator {
     double weight,squared;
     double bw,dw,bs,ds,base,detail,bv,dv,cv,bu,du;
 };
-struct Mapping {double x,y,xx,xy,yy,confidence;double guideXX,guideXY,guideYY;};
+struct Mapping {double x,y,xx,xy,yy,confidence;double guideXX,guideXY,guideYY,modelVarianceFactor;};
 layout(std430,binding=0) readonly buffer Source {vec4 taps[];};
 layout(std430,binding=1) readonly buffer Motion {Mapping maps[];};
 layout(std430,binding=2) buffer Guides {dvec4 guides[];};
@@ -195,7 +195,7 @@ Observation sampleAt(int i,ivec2 p){
         Mapping guideMap=m;guideMap.xx=m.guideXX;guideMap.xy=m.guideXY;guideMap.yy=m.guideYY;
         double sceneRisk=risk(guides[i].yz,guideMap);if(sceneRisk>=0.LF)reg=sceneRisk;
     }
-    o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+scaleRisk+reg/max(.20LF,m.confidence);
+    o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+scaleRisk+reg/max(.20LF,m.confidence)+o.measurement*m.modelVarianceFactor;
     o.variance=o.measurement+o.uncertainty;o.headroom=safety/magnitude;o.support=1.LF;
     return o;
 }

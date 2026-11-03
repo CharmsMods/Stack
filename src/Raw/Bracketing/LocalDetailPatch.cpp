@@ -183,7 +183,7 @@ bool EvaluateLocalDetailPatch(const ProcessingRequest& request,const PreparedDat
                 auto* cached=reuse?reuse->SampleAt(f,rx,ry):nullptr;
                 if(cached&&cached->ready)sample=cached->observation;
                 else sample=ReadBurstSample(data,source,sampler,rx,ry,pilots[c][p],error,
-                        &gradients[(2*y+c/2)*rawSide+2*x+c%2]);
+                        &gradients[(2*y+c/2)*rawSide+2*x+c%2],request.recipe.reconstruction==ReconstructionMode::Standard);
                 if(!error.empty())return false;
                 // A partial patch cannot overrule a local rejection or a clip.
                 // It keeps the established per-pixel temporal fallback.

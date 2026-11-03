@@ -11,11 +11,12 @@
 namespace Raw::Bracketing {
 Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& layout,PreparedTileSampler& sampler,
     double referenceX,double referenceY,double referencePilot,
-    const Mfd::RawSignalGradient& sceneGradient,std::string& error) {
+    const Mfd::RawSignalGradient& sceneGradient,std::string& error,bool native) {
     Observation result;const auto site=layout.SiteAt(static_cast<std::int64_t>(referenceX),static_cast<std::int64_t>(referenceY));
     Mfd::RawMappingJacobian jacobian;
     const bool hasGuide=std::isfinite(sceneGradient.dxPerRawPixel)&&std::isfinite(sceneGradient.dyPerRawPixel);
-    const auto correspondence=EvaluateCaptureCorrespondence(source,{referenceX,referenceY},false,nullptr,hasGuide?&jacobian:nullptr);
+    const auto correspondence=native?EvaluateNativeCorrespondence(source,{referenceX,referenceY},hasGuide?&jacobian:nullptr):
+        EvaluateCaptureCorrespondence(source,{referenceX,referenceY},false,nullptr,hasGuide?&jacobian:nullptr);
     const auto mapped=correspondence.sourceRaw;
     const auto covariance=correspondence.covarianceRaw;
     const double confidence=correspondence.confidence;
@@ -66,7 +67,7 @@ Observation SampleAlignedCapture(const PreparedSource& source,Mfd::CfaLayout& la
     }
     result.measurementVariance=std::max(1e-12,sampled.interpolationVariance);
     result.uncertaintyVariance=sampled.residualModelVariance+sampled.exposureScaleVariance+
-        registrationRisk/std::max(kUncertainCaptureReliability,confidence);
+        registrationRisk/std::max(kUncertainCaptureReliability,confidence)+result.measurementVariance*correspondence.modelVarianceFactor;
     result.variance=result.measurementVariance+result.uncertaintyVariance;
     result.support=1;result.clipped=false;return result;
 }

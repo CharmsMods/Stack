@@ -25,10 +25,10 @@
 namespace Raw::Bracketing {
 namespace {
 struct Tap {float value,gain,flags,padding=0;};
-struct Mapping {double x,y,xx,xy,yy,confidence;double guideXX=-1,guideXY=0,guideYY=0;};
+struct Mapping {double x,y,xx,xy,yy,confidence;double guideXX=-1,guideXY=0,guideYY=0,modelVarianceFactor=0;};
 struct GpuObservation {double value,variance,headroom,support,fallback,exposure,measurement,uncertainty;std::uint32_t flags,padding;};
 struct Parameters {std::array<double,24> values{};std::uint32_t failed=0,padding=0;};
-static_assert(sizeof(Tap)==16&&sizeof(Mapping)==72&&sizeof(GpuObservation)==72&&sizeof(Parameters)==200);
+static_assert(sizeof(Tap)==16&&sizeof(Mapping)==80&&sizeof(GpuObservation)==72&&sizeof(Parameters)==200);
 constexpr std::size_t accumulatorBytes=176;
 struct Bindings {
     GLint program=0,buffer=0;std::array<GLint,6> indexed{};
@@ -325,10 +325,14 @@ public:
                         for(int x=0;x<width;++x){
                             Mfd::RawMappingJacobian jacobian;
                             const bool guideEnabled=request.recipe.alignmentMode==AlignmentMode::AutomaticLocal;
-                            const auto c=EvaluateCaptureCorrespondence(source,{double(left+x),double(top+y)},false,nullptr,
-                                guideEnabled?&jacobian:nullptr);
+                            const Mfd::RawCoordinate point{double(left+x),double(top+y)};
+                            auto* derivative=guideEnabled?&jacobian:nullptr;
+                            const auto c=request.recipe.reconstruction==ReconstructionMode::Standard?
+                                EvaluateNativeCorrespondence(source,point,derivative):
+                                EvaluateCaptureCorrespondence(source,point,false,nullptr,derivative);
                             mapping[std::size_t(y)*width+x]={c.sourceRaw.x,c.sourceRaw.y,c.covarianceRaw.xxRawPixelsSquared,
                                 c.covarianceRaw.xyRawPixelsSquared,c.covarianceRaw.yyRawPixelsSquared,c.confidence};
+                            mapping[std::size_t(y)*width+x].modelVarianceFactor=c.modelVarianceFactor;
                             Mfd::SymmetricRawCovariance guideCovariance;
                             if(guideEnabled&&TryGuideCovariance(c.covarianceRaw,jacobian,guideCovariance)) {
                                 auto& m=mapping[std::size_t(y)*width+x];

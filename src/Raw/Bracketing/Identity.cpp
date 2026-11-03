@@ -38,8 +38,10 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     j["temporalProfile"]="double-precision-gpu-temporal-v11-shared-radiance";
     j["srSupportProfile"]="categorical-reference-and-depth-v2";
     j["hdrProfile"]=kHdrColorFusionRevision;
-    if(request.recipe.reconstruction==ReconstructionMode::Standard||adaptive)
+    if(request.recipe.reconstruction==ReconstructionMode::Standard||adaptive) {
         j["nativeHighlightProfile"]=kNativeHighlightRevision;
+        j["nativeGlobalSupport"]="bounded-color-agreement-v1";
+    }
     if(recipe.alignmentMode!=AlignmentMode::FixedCoordinates)j["depthProfile"]="parallax-masks-v1";
     for(const auto& s:request.sources) j["sources"].push_back({s.frameId,s.sha256,s.bytes});
     // Native inspection uses the immutable prepared captures and does not

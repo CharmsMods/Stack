@@ -1,4 +1,5 @@
 #include "CaptureCorrespondence.h"
+#include "NativeGlobalSupport.h"
 #include "ProcessingInternal.h"
 #include "Raw/MultiFrameDenoise/MotionJacobian.h"
 #include <algorithm>
@@ -108,5 +109,19 @@ CaptureCorrespondence EvaluateCaptureCorrespondence(const PreparedSource& source
     } else result=global(source.alignmentDiagnostic.localApplied?0:1);
     if(result.confidence>0&&CaptureDepthRejects(source,point))result.confidence=0;
     return result;
+}
+CaptureCorrespondence EvaluateNativeCorrespondence(const PreparedSource& source,Mfd::RawCoordinate point,
+    Mfd::RawMappingJacobian* jacobian) {
+    if(source.globalAlignmentAccepted&&HasCurrentCaptureReliability(source)) {
+        double q=0;std::uint16_t bits=0;
+        constexpr auto verified=Mfd::ReliabilityRejectMask(Mfd::ReliabilityRejectBit::AlignmentInvalid)|kNativeGlobalVerified;
+        if(Mfd::ReadReliabilityStoreRawCoordinate(*source.reliability,point,q,&bits,nullptr)&&
+            bits==verified&&q>0&&!CaptureDepthRejects(source,point)) {
+            if(jacobian){jacobian->linear=source.alignment.linear;jacobian->valid=Mfd::FiniteMappingJacobian(*jacobian);}
+            constexpr double variance=kGlobalCheckRadiusRaw*kGlobalCheckRadiusRaw/3.;
+            return {source.alignment.Map(point),{variance,0,variance},q,1/(q*q)-1};
+        }
+    }
+    return EvaluateCaptureCorrespondence(source,point,false,nullptr,jacobian);
 }
 }

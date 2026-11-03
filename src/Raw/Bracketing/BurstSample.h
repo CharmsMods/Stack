@@ -7,5 +7,5 @@ namespace Raw::Bracketing {
 // The reference and identity captures are not interpolated.
 Observation ReadBurstSample(const PreparedDataset&,const PreparedSource&,
     PreparedTileSampler&,unsigned,unsigned,double,std::string&,
-    const Mfd::RawSignalGradient* sceneGradient=nullptr);
+    const Mfd::RawSignalGradient* sceneGradient=nullptr,bool native=false);
 }

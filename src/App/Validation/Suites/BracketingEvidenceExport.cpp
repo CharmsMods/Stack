@@ -1,4 +1,5 @@
 #include "Raw/Bracketing/HdrColorFusion.h"
+#include "Raw/Bracketing/CaptureCorrespondence.h"
 #include "BracketingEvidenceExport.h"
 #include "Raw/Bracketing/PreparedRegion.h"
 #include "Raw/Bracketing/SceneGradient.h"
@@ -138,14 +139,11 @@ void WriteBracketEvidence(const Raw::Bracketing::ProcessingRequest& request,
                         v.headroom=std::clamp((.995-direct.normalizedMosaic[p])/.045,0.,1.);
                         v.headroom=v.headroom*v.headroom*(3-2*v.headroom);
                     } else {
-                        v=SampleAlignedCapture(source,layout,sampler,left+x,top+y,pilot[p],gradients[p],error);
+                        v=SampleAlignedCapture(source,layout,sampler,left+x,top+y,pilot[p],gradients[p],error,nativeMosaic);
                         if(!error.empty()) throw std::runtime_error(error);
-                        covariance={.0025,0,.0025};
-                        if(source.localMotion) {
-                            Mfd::LocalMotionFieldSample motion;Mfd::LocalMotionOptions options;
-                            if(EvaluateCaptureMotion(source,{double(left+x),double(top+y)},options,motion))
-                                covariance=motion.covarianceRaw;
-                        }
+                        const Mfd::RawCoordinate point{double(left+x),double(top+y)};
+                        covariance=(nativeMosaic?EvaluateNativeCorrespondence(source,point,nullptr):
+                            EvaluateCaptureCorrespondence(source,point)).covarianceRaw;
                     }
                     values[p*8]=static_cast<float>(v.value);values[p*8+1]=static_cast<float>(v.measurementVariance);
                     values[p*8+2]=static_cast<float>(v.uncertaintyVariance);values[p*8+3]=v.finite&&v.support>0&&!v.clipped?1.f:0.f;

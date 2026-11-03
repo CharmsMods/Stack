@@ -224,6 +224,11 @@ patches, use surrounding verified centers. When the global warp cannot
 describe the scene across the frame, require local radiance agreement before
 using it in an ambiguous region. Compare exposure-matched, filtered CFA
 measurements against noise measured from the original captures.
+For native Bayer fusion, uncertain local geometry may use an independently accepted
+global transform after a separate, noise-aware four-site neighborhood check.
+Use the tested transform for sampling and propagate its positional and model
+uncertainty. Respect conflicting motion, depth, and clipping evidence. This
+worker-only permission does not promote the local motion field for depth or SR.
 
 Super-resolution keeps categorical photometric rejection separate from its
 coarse geometric mapping. A cropped, authoritative reference-grid veto is sampled

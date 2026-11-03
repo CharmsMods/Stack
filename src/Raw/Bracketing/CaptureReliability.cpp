@@ -1,4 +1,5 @@
 #include "CaptureReliability.h"
+#include "NativeGlobalSupport.h"
 #include "CaptureCorrespondence.h"
 #include "PhotometricReliability.h"
 #include "PresentationEvidence.h"
@@ -187,15 +188,23 @@ bool RefreshCaptureReliability(const ProcessingRequest& request,const PreparedSo
     Mfd::ReliabilityMap reliability;
     if(!BuildReliability(request,reference,source,parameters,referencePyramid,sourcePyramid,
         reportProgress,reliability,error))return false;
+    // Inspection describes the local-motion field. Native-only global evidence
+    // is consumed separately and must not promote a local match for SR.
+    auto inspection=MakeInspection(reliability);
+    if((request.recipe.reconstruction==ReconstructionMode::Standard||
+        request.recipe.reconstruction==ReconstructionMode::Adaptive)&&
+        !VerifyNativeGlobalSupport(request,source,referencePyramid,sourcePyramid,reliability)) {
+        error="Canceled.";return false;
+    }
     auto store=std::make_shared<Mfd::ReliabilityStore>();
     if(!Mfd::BuildReliabilityStore(reliability,Mfd::ReliabilityStorageFormat::Uint16Unorm,
         parameters.reliability.storageTileCells,*store,&error))return false;
-    auto inspection=MakeInspection(reliability);
     source.reliability=std::move(store);source.alignmentInspection=inspection;
     StampCaptureReliability(source);
-    std::size_t acceptedCells=0,uncertainCells=0,rejectedCells=0;
+    std::size_t acceptedCells=0,uncertainCells=0,rejectedCells=0,nativeGlobalCells=0;
     for(std::size_t i=0;i<reliability.cells.size();++i) {
         const auto& cell=reliability.cells[i];
+        if(cell.rejectionBits&kNativeGlobalVerified)++nativeGlobalCells;
         if(HardCaptureRejection(cell.rejectionBits)) ++rejectedCells;
         // Report the same confidence precision as the published inspection.
         // Interpolated 0.20-confidence fallback nodes can land a double ULP
@@ -217,6 +226,9 @@ bool RefreshCaptureReliability(const ProcessingRequest& request,const PreparedSo
         :source.alignmentDiagnostic.uncertainCoverage>.25
             ?"Automatic local alignment accepted with reduced weight in uncertain regions."
         :"Automatic local alignment accepted.";
+    if(nativeGlobalCells)
+        source.alignmentDiagnostic.message+=" Native merge verified the global alignment in "+
+            std::to_string(int(std::lround(100.*nativeGlobalCells/cellCount)))+"% of the frame.";
     return true;
 }
 }

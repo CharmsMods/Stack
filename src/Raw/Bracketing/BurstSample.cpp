@@ -6,12 +6,12 @@
 namespace Raw::Bracketing {
 Observation ReadBurstSample(const PreparedDataset& data,const PreparedSource& source,
     PreparedTileSampler& sampler,unsigned x,unsigned y,double pilot,std::string& error,
-    const Mfd::RawSignalGradient* sceneGradient) {
+    const Mfd::RawSignalGradient* sceneGradient,bool native) {
     Mfd::CfaLayout layout;Mfd::CfaLayout::TryCreate(source.frame.activeCfaPattern,layout);
     const bool reference=&source==&data.sources[data.origin];
     if(!reference&&(source.alignmentDiagnostic.model!=CaptureAlignment::Model::Identity||source.alignmentDiagnostic.localApplied))
         return SampleAlignedCapture(source,layout,sampler,x,y,pilot,
-            sceneGradient?*sceneGradient:Mfd::RawSignalGradient{std::numeric_limits<double>::quiet_NaN(),0},error);
+            sceneGradient?*sceneGradient:Mfd::RawSignalGradient{std::numeric_limits<double>::quiet_NaN(),0},error,native);
     Observation sample;Mfd::SameCfaTapInput tap;
     if(!sampler.ReadSample(source.frame,x,y,tap,&error))return sample;
     const double gain=tap.comparisonGain*source.scale;

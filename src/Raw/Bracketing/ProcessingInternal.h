@@ -85,7 +85,7 @@ class PreparedTileSampler;
 // Shared by production fusion and native measurement diagnostics. Diagnostics
 // must inspect the same registered measurements rather than another resampler.
 Observation SampleAlignedCapture(const PreparedSource&,Mfd::CfaLayout&,PreparedTileSampler&,
-    double,double,double,const Mfd::RawSignalGradient&,std::string&);
+    double,double,double,const Mfd::RawSignalGradient&,std::string&,bool native=false);
 bool Prepare(const ProcessingRequest&,PreparedDataset&,std::vector<std::string>&,std::string&);
 // Decode/normalize sources without computing merger-specific motion. Shared
 // by reconstruction and independent GPU geometry inspection.

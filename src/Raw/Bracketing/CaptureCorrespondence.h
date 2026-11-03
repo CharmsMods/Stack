@@ -12,7 +12,9 @@ struct CaptureCorrespondence {
     Mfd::RawCoordinate sourceRaw;
     Mfd::SymmetricRawCovariance covarianceRaw;
     double confidence=0;
+    double modelVarianceFactor=0;
 };
+CaptureCorrespondence EvaluateNativeCorrespondence(const PreparedSource&,Mfd::RawCoordinate,Mfd::RawMappingJacobian*);
 bool HardCaptureRejection(std::uint16_t bits);
 void StampCaptureReliability(PreparedSource&);
 bool HasCurrentCaptureReliability(const PreparedSource&);
