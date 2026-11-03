@@ -3,6 +3,7 @@
 #include "Renderer/ScopedGLObjects.h"
 #include "Renderer/GLHelpers.h"
 #include "NodeMath/ImageOperationInput.h"
+#include "NodeMath/ToneCurveParameters.h"
 #include "Raw/Curves/CurveAuthoring.h"
 
 #include <stdexcept>
@@ -82,13 +83,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
                 }
                 else {
                     tone.layerJson.erase("pointCurves");tone.layerJson.erase("pointCurveSetVersion");
-                    if (mode=="luminance") {
-                        auto scene=ReadSceneTone(tone.layerJson["luminanceTone"]);scene.direct=true;
-                        const float strength=tone.layerJson["luminanceTone"]["curveAmount"].value("amount",1.f);
-                        scene.curve=AttenuateCurve(scene.curveAmount.locked ? scene.curveAmount.reference : scene.curve,strength,true);
-                        tone.layerJson["luminanceTone"]=SerializeSceneTone(scene);
-                    }
-                    else tone.layerJson["luminanceTone"].erase("representation");
+                    tone.layerJson["luminanceTone"]=SerializeSceneTone(
+                        Stack::NodeMath::EffectiveToneCurveSceneTone(node.rawOperation.parameters));
                 }
             }
             std::array<float,3> components{};

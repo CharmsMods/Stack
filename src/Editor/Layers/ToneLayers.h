@@ -4,9 +4,12 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/MaskRenderTypes.h"
+#include "Renderer/LocalToneGuide.h"
 
 #include <array>
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <vector>
 
 struct RenderTextureStats;
@@ -234,6 +237,7 @@ public:
     bool HasAutoPreparedState() const { return m_LastAutoAuthoredStateValid || m_AutoSceneStatsValid; }
     void NotifyUpstreamDevelopChanged();
     void SetAutoRewriteRenderContext(int nodeId, std::uint64_t requestRevision);
+    void SetProcessingCancellation(std::function<bool()> cancel) { m_ShouldCancelProcessing = std::move(cancel); }
     void SetDevelopScenePrepToneBudget(bool scenePrepApplied, float strength, float maxEvBias);
     bool HasPendingAutoRewriteFeedback() const { return m_PendingAutoRewriteFeedback.valid; }
     ToneCurveAutoRewriteFeedback TakePendingAutoRewriteFeedback();
@@ -246,6 +250,8 @@ private:
     bool m_PointCurveSetEnabled = false;
     Stack::RawRecipe::RawPointCurveSet m_PointCurveSet;
     Stack::RawRecipe::SceneTone m_SceneTone;
+    Stack::Renderer::LocalToneGuide m_LocalToneGuide;
+    std::function<bool()> m_ShouldCancelProcessing;
     ToneCurveMode m_Mode = ToneCurveMode::RGB;
     ToneCurveDomain m_Domain = ToneCurveDomain::LogScene;
     ToneCurveOutputMode m_OutputMode = ToneCurveOutputMode::SceneLinear;

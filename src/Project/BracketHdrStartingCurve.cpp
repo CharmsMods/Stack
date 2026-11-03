@@ -9,6 +9,22 @@ namespace Stack::Project {
 namespace {
 using namespace Raw::Bracketing;
 
+bool IsUntouchedOperation(const RawRecipe::GraphOperation& operation) {
+    if (!operation.enabled) return false;
+    const auto defaults=RawRecipe::MakeGraphOperation(operation.kind).parameters;
+    auto parameters=operation.parameters;
+    if (operation.kind==RawRecipe::GraphOperationKind::ToneCurve &&
+        parameters.contains("luminanceTone") && parameters["luminanceTone"].is_object()) {
+        // Earlier current-format nodes omit these optional, off-by-default
+        // settings. Fill only those omissions; every authored value still has
+        // to equal its neutral default before the first merge may seed a look.
+        for (const char* key:{"localAmount","localRadius","localRangeEv"})
+            if (!parameters["luminanceTone"].contains(key))
+                parameters["luminanceTone"][key]=defaults.at("luminanceTone").at(key);
+    }
+    return parameters==defaults;
+}
+
 bool HasExposureBracket(const BracketingRecipe& recipe, const BracketingAnalysis& analysis) {
     double low=INFINITY, high=-INFINITY;
     unsigned count=0;
@@ -83,22 +99,22 @@ bool FitBracketStartingCurve(RawLayerStackState& state,const BracketingResult& r
     for (const auto& node : state.background.graph.GetNodes()) {
         if (node.kind==EditorNodeGraph::NodeKind::Layer) return false;
         if (node.kind!=EditorNodeGraph::NodeKind::RawOperation) continue;
-        const auto& op=node.rawOperation;
-        if (!op.enabled || op.parameters!=RawRecipe::MakeGraphOperation(op.kind).parameters) return false;
+        if (!IsUntouchedOperation(node.rawOperation)) return false;
     }
     auto* tone=FindRawOperation(state.background,RawRecipe::GraphOperationKind::ToneCurve);
     if (!tone) return false;
     const float white=CredibleWhiteEv(result.preview,recipe);
-    constexpr float knee=1.5f, target=4.f;
+    constexpr float knee=1.f, target=2.5f;
     if (!(white>target+.15f)) return false;
-    // Unit slope at the knee. Place measured scene white at +4 EV (about
-    // 93.5% linear display white with default Sigmoid) and retain a positive
-    // tail slope beyond it so isolated specular highlights keep their order.
+    // Place regional scene white below Sigmoid's crowded upper shoulder, while
+    // local contrast preserves detail around that base. Leave lower regional
+    // bases at their original exposure and keep a positive specular tail.
     const float a=(white-target)/((target-knee)*(white-knee));
     const float tailSlope=std::pow((target-knee)/(white-knee),2.f);
     RawRecipe::SceneTone curve;
+    curve.localAmount=1;
     curve.curve.clear();
-    for(float ev : {-16.f,knee,2.f,3.f,4.f,5.f,6.f,8.f,10.f,12.f,16.f}) {
+    for(float ev : {-16.f,knee,1.5f,2.f,2.5f,3.f,4.f,5.f,6.f,8.f,10.f,12.f,16.f}) {
         const float distance=ev-knee;
         const float mapped=ev<=knee?ev:(ev>white?target+(ev-white)*tailSlope:knee+distance/(1+a*distance));
         curve.curve.push_back({(ev+16)/32,(mapped+16)/32});

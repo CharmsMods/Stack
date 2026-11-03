@@ -1,6 +1,7 @@
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GraphViewportPlanner.h"
 #include "Renderer/RawPreviewProxy.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 #include "Raw/RawGraphOperation.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 
@@ -26,7 +27,9 @@ bool UniformOutput(const RenderGraphNode& node, const std::string& socket) {
 bool PointwiseTone(const nlohmann::json& tone) {
     return tone.is_object() && !tone.value("localBaselineEnabled", false) &&
         !tone.value("autoCalibratePending", false) && tone.value("targetScope", 0) == 0 &&
-        !tone.value("foundationAdaptiveAssist", false);
+        !tone.value("foundationAdaptiveAssist", false) &&
+        !Stack::RawRecipe::IsLocalSceneToneActive(Stack::RawRecipe::ReadSceneTone(
+            tone.value("luminanceTone", nlohmann::json::object())));
 }
 
 bool CanExecuteRegion(const RenderGraphNode& node, const std::string& socket) {
@@ -49,9 +52,15 @@ bool CanExecuteRegion(const RenderGraphNode& node, const std::string& socket) {
                 case Stack::RawRecipe::GraphOperationKind::Exposure:
                 case Stack::RawRecipe::GraphOperationKind::Calibration:
                     return true;
-                case Stack::RawRecipe::GraphOperationKind::ToneCurve:
-                    return node.rawOperation.parameters.value("curveMode",std::string("components"))!="advanced" ||
-                        PointwiseTone(node.rawOperation.parameters.at("advanced"));
+                case Stack::RawRecipe::GraphOperationKind::ToneCurve: {
+                    const auto& parameters = node.rawOperation.parameters;
+                    const auto mode = parameters.value("curveMode", std::string("components"));
+                    if (mode == "advanced") return PointwiseTone(parameters.at("advanced"));
+                    // Component mode does not execute the stashed luminance
+                    // settings. Local luminance processing needs the complete
+                    // image even when its consumer requests only a viewport.
+                    return !Stack::Renderer::NodeUsesLocalToneGuide(node);
+                }
                 case Stack::RawRecipe::GraphOperationKind::LocalEv: {
                     const auto recipe = Stack::RawRecipe::ReadGraphOperation(node.rawOperation);
                     return !Stack::RawRecipe::IsLocalRangeEnabled(recipe) && recipe.localRange.areas.empty();
@@ -253,7 +262,7 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         auto& stage = plan.stages.at(consumer);
         stage.demand = Stack::Renderer::WholeImageRegion(int(stage.spatial.fullWindow.width), int(stage.spatial.fullWindow.height));
     }
-    std::uint64_t largestRasterPixels = 0;
+    std::uint64_t largestRasterPixels = 0, localToneWorkingBytes = 0;
     for (auto it = order.rbegin(); it != order.rend(); ++it) {
         auto& stage = plan.stages.at(*it);
         if (!stage.demand.Valid()) continue;
@@ -280,6 +289,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         // Propagate dependencies first: FieldMean still consumes its complete
         // source field even though its own result is a single value.
         if (UniformOutput(node, it->socketId)) continue;
+        if (Stack::Renderer::NodeUsesLocalToneGuide(node) &&
+            !(node.kind == RenderGraphNodeKind::RawOperation && it->socketId == "inputImageOut"))
+            localToneWorkingBytes = std::max(localToneWorkingBytes,
+                Stack::Renderer::LocalToneGuide::WorkingBytes(stage.renderWidth, stage.renderHeight));
         const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand, stage.renderWidth, stage.renderHeight);
         const auto pixels = std::uint64_t(resident.width) * resident.height;
         const auto completePixels = std::uint64_t(stage.spatial.fullWindow.width) * stage.spatial.fullWindow.height;
@@ -336,7 +349,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     // Input sampling can preserve a float32 source even in an ordinary graph.
     const auto cropBytes = inputCropPixels > std::numeric_limits<std::uint64_t>::max() / 16u
         ? std::numeric_limits<std::uint64_t>::max() : inputCropPixels * 16u;
-    plan.workingBytes = SaturatingAdd(outputAndScratchBytes,cropBytes);
+    // The guide is float32 even in an ordinary float16 graph, so account for
+    // its three bounded fields explicitly rather than increasing every image
+    // surface estimate. Serial tone nodes reuse this peak, not their sum.
+    plan.workingBytes = SaturatingAdd(SaturatingAdd(outputAndScratchBytes,cropBytes),localToneWorkingBytes);
     plan.fingerprint = 1;
     const auto mix = [&](std::size_t value) { plan.fingerprint ^= value + std::size_t(0x9e3779b97f4a7c15ull) +
         (plan.fingerprint << 6u) + (plan.fingerprint >> 2u); };

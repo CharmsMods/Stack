@@ -77,6 +77,16 @@ Sigmoid is the sole supported display mapper for singles and burst results.
 HDR project highlight fitting runs once at first fresh merge acceptance, using
 the bounded result overview and unclipped capture evidence. It writes ordinary
 editable scene-luminance points to the background Tone Curve before Sigmoid.
+Fresh HDR fitting also enables that curve's optional local-contrast preservation:
+a bounded log-luminance guide selects regional exposure changes while the original
+pixels retain fine detail. Keep its guide in the actual working space, normalize
+valid coverage, and apply one common RGB gain before the display transform. Its
+radius uses the complete image's longer side; viewport crops must consume the
+complete local result. Include its bounded temporary fields in memory admission
+and local-filter cost in timing identities. Missing local settings mean pointwise
+tone processing, so previously saved edits retain their behavior. These authored
+project adjustments do not bake a look into the linear burst master or imply that
+standalone default finishes and diagnostic previews use the project graph.
 The retired Standard/Photographic HDR algorithms, their controls and the
 Standard-only automatic starting-look planner are removed. Authored Stack edits
 can intentionally change the developed appearance. Color-domain contracts belong

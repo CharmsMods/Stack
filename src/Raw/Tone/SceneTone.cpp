@@ -54,6 +54,9 @@ double ShapeIntegral(const SceneTone& t,double e) {
 }
 
 SceneTone SanitizeSceneTone(SceneTone t) {
+    t.localAmount=Finite(t.localAmount,0,0,1);
+    t.localRadius=Finite(t.localRadius,.04f,.002f,.25f);
+    t.localRangeEv=Finite(t.localRangeEv,.5f,.05f,2);
     t.anchorOffsetEv=Finite(t.anchorOffsetEv,0,-12,12);
     t.contrast=Finite(t.contrast,1,0.05f,4);
     t.pivotEv=Finite(t.pivotEv,0,-12,12);
@@ -77,6 +80,9 @@ SceneTone ReadSceneTone(const nlohmann::json& j) {
         t.curveAmount=ReadCurveAmount(j.value("curveAmount",nlohmann::json::object()));
     }
     if(j.contains("enabled")&&j["enabled"].is_boolean()) t.enabled=j["enabled"].get<bool>();
+    t.localAmount=Number(j,"localAmount",0);
+    t.localRadius=Number(j,"localRadius",.04f);
+    t.localRangeEv=Number(j,"localRangeEv",.5f);
     t.anchorOffsetEv=Number(j,"anchorOffsetEv",0); t.contrast=Number(j,"contrast",1);
     t.pivotEv=Number(j,"pivotEv",0); t.coreHalfWidthEv=Number(j,"coreHalfWidthEv",1);
     t.transitionEv=Number(j,"transitionEv",2); t.outerProtection=Number(j,"outerProtection",0);
@@ -92,7 +98,8 @@ SceneTone ReadSceneTone(const nlohmann::json& j) {
 nlohmann::json SerializeSceneTone(const SceneTone& input) {
     const auto t=SanitizeSceneTone(input);
     nlohmann::json j={{"enabled",t.enabled},{"anchorOffsetEv",t.anchorOffsetEv},{"contrast",t.contrast},
-        {"pivotEv",t.pivotEv},{"coreHalfWidthEv",t.coreHalfWidthEv},{"transitionEv",t.transitionEv},{"outerProtection",t.outerProtection}};
+        {"pivotEv",t.pivotEv},{"coreHalfWidthEv",t.coreHalfWidthEv},{"transitionEv",t.transitionEv},{"outerProtection",t.outerProtection},
+        {"localAmount",t.localAmount},{"localRadius",t.localRadius},{"localRangeEv",t.localRangeEv}};
     j["points"]=nlohmann::json::array();
     for(const auto& p:t.points) j["points"].push_back({{"ev",p.ev},{"contrast",p.contrast}});
     if(t.direct) {j["representation"]="points-v1";j["curve"]=CurvePointsJson(t.curve);j["curveAmount"]=CurveAmountJson(t.curveAmount);}
@@ -109,6 +116,9 @@ bool IsSceneToneActive(const SceneTone& t) {
     }
     return t.enabled && (std::abs(t.anchorOffsetEv)>1e-7f || std::abs(t.contrast-1)>1e-7f ||
         std::any_of(t.points.begin(),t.points.end(),[](auto p){return std::abs(p.contrast-1)>1e-7f;}));
+}
+bool IsLocalSceneToneActive(const SceneTone& t) {
+    return std::isfinite(t.localAmount) && t.localAmount>1e-7f && IsSceneToneActive(t);
 }
 float EffectiveSceneToneContrast(const SceneTone& t) {
     float minimum=8;
@@ -146,6 +156,13 @@ float EvaluateSceneToneEv(const SceneTone& t,float e) {
     }
     return float(t.anchorOffsetEv+BaseIntegral(t,e)-BaseIntegral(t,0)+
         (EffectiveSceneToneContrast(t)-1)*ShapeIntegral(t,e));
+}
+float EvaluateLocalSceneToneEv(const SceneTone& t,float e,float base) {
+    const float pointwise=EvaluateSceneToneEv(t,e);
+    if(!IsLocalSceneToneActive(t) || !std::isfinite(base)) return pointwise;
+    const float local=EvaluateSceneToneEv(t,base)+(e-base);
+    const float amount=std::clamp(t.localAmount,0.f,1.f);
+    return pointwise+amount*(local-pointwise);
 }
 std::array<float,3> ApplySceneTone(const SceneTone& t,std::array<float,3> rgb,const std::array<float,3>& weights) {
     if(!IsSceneToneActive(t)) return rgb;

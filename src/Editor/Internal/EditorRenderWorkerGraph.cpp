@@ -2,7 +2,9 @@
 #include "Editor/GraphRenderMemory.h"
 #include "Renderer/GpuMemoryBudget.h"
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 #include <algorithm>
+#include <unordered_set>
 
 void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     RenderPipeline& pipeline, Result& result) {
@@ -58,7 +60,13 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
         // scratch beyond their authored output endpoints.
         return rawStages ? AddBytes(bytes, bytes) : bytes;
     };
-    const auto completeWorking = targetBytes(width, height, AddBytes(surfaces, rawStages ? 7 : 3));
+    std::unordered_set<int> scheduledNodes;
+    if (schedule.valid) for (const auto& output : schedule.outputs) scheduledNodes.insert(output.nodeId);
+    const bool localTone = std::any_of(snapshot.graph.nodes.begin(), snapshot.graph.nodes.end(), [&](const auto& node) {
+        return (!schedule.valid || scheduledNodes.count(node.nodeId)) && Stack::Renderer::NodeUsesLocalToneGuide(node);
+    });
+    const auto guideWorking = localTone ? Stack::Renderer::LocalToneGuide::WorkingBytes(width, height) : 0;
+    const auto completeWorking = AddBytes(targetBytes(width, height, AddBytes(surfaces, rawStages ? 7 : 3)),guideWorking);
     std::uint64_t working = completeWorking;
     if (result.viewportPreview.enabled) {
         const auto mainPlan = RenderTiling::PlanGraphViewport(snapshot.graph,

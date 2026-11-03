@@ -38,6 +38,14 @@ inline ViewportStageRegion LocalRegion(const Stack::RawRecipe::RawDevelopmentRec
 }
 inline ViewportStageRegion ToneRegion(const Stack::RawRecipe::RawDevelopmentRecipe& r, int, int, int, int) {
     const auto& tone=r.finishTone.layerJson;
+    if (tone.is_object() && Stack::RawRecipe::IsLocalSceneToneActive(Stack::RawRecipe::ReadSceneTone(
+        tone.value("luminanceTone",nlohmann::json::object()))))
+        return {ViewportRegionRequirement::FullInput,0,true};
+    for (const auto& gradient : r.toneGradients)
+        if (gradient.mask.enabled && gradient.curveJson.is_object() &&
+            Stack::RawRecipe::IsLocalSceneToneActive(Stack::RawRecipe::ReadSceneTone(
+                gradient.curveJson.value("luminanceTone",nlohmann::json::object()))))
+            return {ViewportRegionRequirement::FullInput,0,true};
     if (tone.is_object() && (tone.value("localBaselineEnabled",false) || tone.value("autoCalibratePending",false) ||
         tone.value("targetScope",0)!=0 || tone.value("foundationAdaptiveAssist",false)))
         return {ViewportRegionRequirement::FullInput,0,false};

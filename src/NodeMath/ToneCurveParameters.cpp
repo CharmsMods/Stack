@@ -25,6 +25,23 @@ bool IsToneCurveParameterActive(const nlohmann::json& parameters,const std::stri
         id=="width" || id=="transition" || id=="protection";
     return false;
 }
+RawRecipe::SceneTone EffectiveToneCurveSceneTone(const nlohmann::json& parameters) {
+    const auto mode=parameters.value("curveMode",std::string("components"));
+    if (mode=="components") { RawRecipe::SceneTone scene;scene.enabled=false;return scene; }
+    if (mode=="advanced") {
+        const auto advanced=parameters.value("advanced",nlohmann::json::object());
+        return RawRecipe::ReadSceneTone(advanced.value("luminanceTone",nlohmann::json::object()));
+    }
+    const auto authored=parameters.value("luminanceTone",nlohmann::json::object());
+    auto scene=RawRecipe::ReadSceneTone(authored);
+    scene.direct=mode=="luminance";
+    if (scene.direct) {
+        const auto amount=authored.value("curveAmount",nlohmann::json::object());
+        scene.curve=RawRecipe::AttenuateCurve(scene.curveAmount.locked ? scene.curveAmount.reference : scene.curve,
+            amount.value("amount",1.f),true);
+    }
+    return scene;
+}
 nlohmann::json DefaultToneCurveParameters() {
     RawRecipe::RawPointCurveSet curves;
     for (auto& curve:curves.curves) curve.points={{0,0,1},{1,1,1}};
@@ -44,7 +61,8 @@ nlohmann::json CaptureToneCurveParameters(const nlohmann::json& value) {
         if (value.contains(key)) parameters[key]=value.at(key);
     if (value.contains("luminanceTone")) {
         const auto& luminance=value.at("luminanceTone");
-        for (const char* key:{"representation","enabled","curve","curveAmount","anchorOffsetEv","contrast","pivotEv","coreHalfWidthEv","transitionEv","outerProtection","points"})
+        for (const char* key:{"representation","enabled","curve","curveAmount","anchorOffsetEv","contrast","pivotEv","coreHalfWidthEv","transitionEv","outerProtection","points",
+                "localAmount","localRadius","localRangeEv"})
             if (luminance.contains(key)) parameters["luminanceTone"][key]=luminance.at(key);
     }
     return parameters;
@@ -110,6 +128,15 @@ bool ValidateToneCurveParameters(const nlohmann::json& value,std::string& error)
                 return fail("Invalid Tone Curve contrast parameters.");
         if (!luminance.at("enabled").is_boolean() || !amountValid(luminance.at("curveAmount")))
             return fail("Invalid Tone Curve luminance amount.");
+        // Optional additions preserve the pointwise meaning of older edits.
+        const auto optionalRange=[&](const char* key,float low,float high) {
+            const auto field=luminance.find(key);
+            return field==luminance.end() || (field->is_number() &&
+                field->get<float>()>=low && field->get<float>()<=high);
+        };
+        if (!optionalRange("localAmount",0,1) || !optionalRange("localRadius",.002f,.25f) ||
+            !optionalRange("localRangeEv",.05f,2))
+            return fail("Invalid Tone Curve local contrast parameters.");
         const auto& slopes=luminance.at("points");
         if (!slopes.is_array() || slopes.size()<2 || slopes.size()>32)
             return fail("Invalid Tone Curve contrast points.");
