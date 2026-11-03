@@ -32,6 +32,7 @@ bool EstimateDonor(const ColorObservations& samples,std::size_t g,const std::arr
     double colorError=0;
     for(unsigned s=0;s<4;++s) {
         const double estimate=scale*samples[s][g].fallback;
+        if(!(estimate>0)||!std::isfinite(estimate))return false;
         if(pixels[s].valid) {
             const auto& p=pixels[s];
             // Tolerate noise in a surviving channel, but reject an incompatible hue.
@@ -40,6 +41,57 @@ bool EstimateDonor(const ColorObservations& samples,std::size_t g,const std::arr
         } else if(estimate<.97*samples[s][reference].fallback)return false;
     }
     donor={g,scale,exposure,colorError,clippedSites};return true;
+}
+
+bool DonorColorLess(const ColorObservations& samples,const Donor& a,const Donor& b) {
+    for(unsigned s=0;s<4;++s) {
+        const double av=a.scale*samples[s][a.group].fallback,bv=b.scale*samples[s][b.group].fallback;
+        if(av!=bv)return av<bv;
+    }
+    // Equal bounds can still have different surviving channels. Keep the
+    // clipping mask deterministic too, including when neutral fill is needed.
+    for(unsigned s=0;s<4;++s) {
+        const bool ac=samples[s][a.group].fallbackClipped,bc=samples[s][b.group].fallbackClipped;
+        if(ac!=bc)return ac<bc;
+    }
+    return false;
+}
+bool PreferDonor(const ColorObservations& samples,const Donor& a,const Donor& b) {
+    if(a.colorError!=b.colorError)return a.colorError<b.colorError;
+    if(a.exposure!=b.exposure)return a.exposure>b.exposure;
+    return DonorColorLess(samples,a,b);
+}
+
+const Donor* CoherentDonor(const ColorObservations& samples,const std::array<Pixel,4>& pixels,
+    const std::array<Donor,64>& donors,std::size_t count) {
+    if(!count)return nullptr;
+    std::array<double,4> median{};
+    std::array<double,64> values{};
+    for(unsigned s=0;s<4;++s)if(!pixels[s].valid) {
+        for(std::size_t i=0;i<count;++i)
+            values[i]=donors[i].scale*samples[s][donors[i].group].fallback;
+        auto middle=values.begin()+count/2;
+        std::nth_element(values.begin(),middle,values.begin()+count);
+        median[s]=*middle;
+    }
+    // Use the channel medians only to rank whole donor colors. Selecting each
+    // missing channel's median independently assembles a hue no capture saw.
+    // Relative distances also keep the choice invariant to the radiance gauge.
+    const Donor* best=nullptr;double bestDistance=0;
+    for(std::size_t i=0;i<count;++i) {
+        const auto& donor=donors[i];double distance=0;
+        std::array<double,4> color{};
+        for(unsigned s=0;s<4;++s)if(!pixels[s].valid) {
+            color[s]=donor.scale*samples[s][donor.group].fallback;
+            const double delta=(color[s]-median[s])/std::max(color[s],median[s]);
+            distance+=delta*delta;
+        }
+        const bool betterTie=best&&distance==bestDistance&&PreferDonor(samples,donor,*best);
+        if(!best||distance<bestDistance||betterTie) {
+            best=&donor;bestDistance=distance;
+        }
+    }
+    return best;
 }
 }
 
@@ -75,9 +127,10 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
         // exposure-normalized capture that meets every saturation bound.
         // This is display fallback only and retains zero measurement support.
         const auto donor=std::max_element(donors.begin(),donors.begin()+n,
-            [](const Donor& a,const Donor& b){
+            [&](const Donor& a,const Donor& b){
                 if(a.clippedSites!=b.clippedSites)return a.clippedSites>b.clippedSites;
-                return a.clippedSites==4?a.exposure>b.exposure:a.exposure<b.exposure;
+                if(a.exposure!=b.exposure)return a.clippedSites==4?a.exposure>b.exposure:a.exposure<b.exposure;
+                return DonorColorLess(samples,b,a);
             });
         // If the shorter capture also clips, use its own saturation bounds.
         // Carry forward the as-shot neutral only for missing channels.
@@ -115,13 +168,14 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
                     const double av=a.scale*samples[s][a.group].fallback,bv=b.scale*samples[s][b.group].fallback;
                     agree&=std::abs(av-bv)<=.10*std::min(av,bv);
                 }
-                const auto& closer=a.colorError<b.colorError?a:b;
-                if(agree&&(!best||closer.colorError<best->colorError))best=&closer;
+                const auto& closer=PreferDonor(samples,a,b)?a:b;
+                if(agree&&(!best||PreferDonor(samples,closer,*best)))best=&closer;
             }
             if(best)donors[0]=*best;
             n=best?1:0;
         }
     }
+    const Donor* donor=CoherentDonor(samples,pixels,donors,n);
     for(unsigned s=0;s<4;++s) {
         auto& p=pixels[s];
         if(p.valid||samples[s][ref].clippedReference==ClippedReference::None)continue;
@@ -132,15 +186,12 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
         if(samples[s][ref].clippedReference==ClippedReference::EstimatedColor) {
             value=std::max(floor,samples[s][ref].value);
             estimated=anchors>0;
-        } else if(n) {
-            const auto brightness=[&](const Donor& d){return d.scale*samples[s][d.group].fallback;};
-            auto mid=donors.begin()+n/2;
-            std::nth_element(donors.begin(),mid,donors.begin()+n,
-                [&](const Donor& a,const Donor& b){return brightness(a)<brightness(b);});
+        } else if(donor) {
             // With only one surviving reference color a displaced donor has no
             // independent constraint on its chromaticity.
-            if(anchors>1||n>1||std::abs(mid->scale-1.)<=.10) {
-                chosen=mid->group;value=std::max(floor,brightness(*mid));estimated=true;
+            if(anchors>1||n>1||std::abs(donor->scale-1.)<=.10) {
+                chosen=donor->group;
+                value=std::max(floor,donor->scale*samples[s][chosen].fallback);estimated=true;
             }
         }
         const bool rejected=p.localRejected;p={};

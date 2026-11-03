@@ -3,7 +3,7 @@
 
 namespace Raw::Bracketing {
 inline constexpr const char* kHdrColorFusionRevision = "color-supported-hdr-v7-normalized-precision-retry";
-inline constexpr const char* kNativeHighlightRevision = "native-reference-highlight-v3-smooth-donor";
+inline constexpr const char* kNativeHighlightRevision = "native-reference-highlight-v4-coherent-donor";
 bool PrepareHighlightFallback(const ProcessingRequest&,const PreparedDataset&,const Mfd::PreparedRawTile&,
     std::vector<std::vector<Observation>>&,std::string&);
 using ColorObservations = std::array<std::vector<Observation>,4>;

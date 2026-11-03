@@ -130,7 +130,10 @@ bool PrepareSources(const ProcessingRequest& request,PreparedDataset& data,
         if(width!=data.width||height!=data.height||width%2||height%2) {error="Bracketing requires matching, even-sized Bayer active areas.";return false;}
         if(f.id==request.recipe.originFrameId) data.origin=data.sources.size();
         // Bound all original overview images together, independent of capture count.
-        const auto captureCount=std::max<std::size_t>(1,request.sources.size());
+        // Disabled inputs have no resident overview. Budget the captures that
+        // are actually prepared, including a disabled coordinate reference,
+        // so retaining a large source list cannot degrade a selected pair.
+        const auto captureCount=std::max<std::size_t>(1,captureTotal);
         unsigned previewStride=2;
         while(static_cast<std::uint64_t>((width+previewStride-1)/previewStride)*((height+previewStride-1)/previewStride)*14*captureCount>8*1024*1024) previewStride+=2;
         previewStride=std::min(previewStride,std::min(width,height));

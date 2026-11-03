@@ -117,8 +117,8 @@ public:
             if(!glDispatchCompute||!glGetBufferSubData||!glBindBufferBase||!glMemoryBarrier){e="OpenGL compute is unavailable.";return false;}
             Bindings restore;GLint limit=0;glGetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE,&limit);blockLimit=std::max(0,limit);
             const char* kernels[]={TemporalShaders::Prepare,TemporalShaders::Sample.c_str(),TemporalShaders::Accumulate.c_str(),
-                TemporalShaders::Finish,TemporalShaders::SampleAccumulate.c_str()};
-            const char* uniforms[]={"target","region","sensor","sites","aligned","reference","useBands","localGuide","groupIndex","groupCount","initializeGuide"};
+                TemporalShaders::Finish,TemporalShaders::SampleAccumulate.c_str(),TemporalShaders::ResolvePilot};
+            const char* uniforms[]={"target","region","sensor","sites","aligned","reference","useBands","localGuide","groupIndex","groupCount","initializeGuide","predictedHeadroom"};
             for(unsigned i=0;i<programs.size();++i){const std::string shader=std::string(TemporalShaders::Common)+kernels[i];
                 programs[i]=GLHelpers::CreateComputeProgram(shader.c_str());if(!programs[i]){e="Capture combining shader could not compile.";return false;}
                 for(unsigned j=0;j<uniformLocations[i].size();++j)uniformLocations[i][j]=glGetUniformLocation(programs[i],uniforms[j]);}
@@ -220,7 +220,8 @@ public:
             glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,GLsizeiptr(bytes),data);}
         void Bind(){for(unsigned i=0;i<buffers.size();++i)glBindBufferBase(GL_SHADER_STORAGE_BUFFER,i,buffers[i]);}
         void Dispatch(unsigned programIndex,int left,int top,int width,int height,const PreparedDataset& data,
-            int sx,int sy,int sw,int sh,const PreparedSource& source,bool aligned,bool bands,bool local,bool initializeGuide=true){
+            int sx,int sy,int sw,int sh,const PreparedSource& source,bool aligned,bool bands,bool local,
+            bool initializeGuide=true,bool predictedHeadroom=false){
             const auto program=owner.programs[programIndex];const auto& locations=owner.uniformLocations[programIndex];
             Bind();glUseProgram(program);
             glUniform4i(locations[0],left,top,width,height);
@@ -231,11 +232,13 @@ public:
             glUniform1i(locations[4],aligned);glUniform1i(locations[5],&source==&data.sources[data.origin]);
             glUniform1i(locations[6],bands);glUniform1i(locations[7],local);
             glUniform1i(locations[8],0);glUniform1i(locations[9],1);glUniform1i(locations[10],initializeGuide);
+            glUniform1i(locations[11],predictedHeadroom);
             glDispatchCompute((width*height+63)/64,1,1);glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
         }
         bool Status(std::string& e){std::uint32_t failure=0;glBindBuffer(GL_SHADER_STORAGE_BUFFER,buffers[5]);
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,192,4,&failure);
-            if(failure){e="A GPU capture sample exceeded its uploaded region.";return false;}return true;}
+            if(failure){e=(failure&2u)?"A GPU capture observation produced an invalid shared radiance pilot.":
+                "A GPU capture sample exceeded its uploaded region.";return false;}return true;}
     };
     bool Combine(const ProcessingRequest& request,const PreparedDataset& data,const Mfd::PreparedRawTile& origin,
         bool detailFusion,std::vector<std::vector<Observation>>& groups,std::string& error){
@@ -286,24 +289,31 @@ public:
         // Publish only after every group and final cancellation check succeed.
         std::vector<std::vector<Observation>> pendingGroups(request.recipe.groups.size());
         const auto referenceParameters=SourceParameters(reference);
-        for(std::size_t g=0;g<pendingGroups.size();++g){
-            // The reference pilot and scene gradient are identical for every
-            // exposure group. Later prepares only clear the group's sums.
-            if(!tile.Run([&](std::string& e){if(g==0)tile.Upload(0,referenceTaps.size()*sizeof(Tap),referenceTaps.data());
+        const bool refinePilot=std::count_if(data.sources.begin(),data.sources.end(),
+            [](const auto& source){return source.enabled;})>1;
+        const auto passes=pendingGroups.size()+(refinePilot?1u:0u);
+        for(std::size_t pass=0;pass<passes;++pass){
+            const bool preliminary=refinePilot&&pass==0;
+            const auto g=preliminary?0:pass-(refinePilot?1u:0u);
+            // A preliminary all-source pass replaces the reference-only noise
+            // pilot with admitted radiance. Group resets preserve that shared
+            // estimate and the original scene gradients. A single contributor
+            // keeps its established seed instead of weighting its own noise.
+            if(!tile.Run([&](std::string& e){if(pass==0)tile.Upload(0,referenceTaps.size()*sizeof(Tap),referenceTaps.data());
                 tile.Upload(5,sizeof(Parameters),&referenceParameters);
                 tile.Dispatch(0,left,top,width,height,data,left-guideHalo,top-guideHalo,width+2*guideHalo,height+2*guideHalo,
-                    reference,false,false,localGuide,g==0);
+                    reference,false,false,localGuide,pass==0);
                 // Later groups only clear sums; Prepare cannot sample or set
                 // failed when initializeGuide is false. Avoid a blocking flag
                 // readback here. The final Status still checks every Sample.
-                return g>0||tile.Status(e);},gpuError))break;
+                return pass>0||tile.Status(e);},gpuError))break;
             // The guide now resides in its SSBO and later groups reuse it.
             // Release the CPU-only staging copy before loading source regions.
-            if(g==0)std::vector<Tap>().swap(referenceTaps);
-            const bool bands=detailFusion&&std::any_of(data.sources.begin(),data.sources.end(),
+            if(pass==0)std::vector<Tap>().swap(referenceTaps);
+            const bool bands=!preliminary&&detailFusion&&std::any_of(data.sources.begin(),data.sources.end(),
                 [&](const auto& s){return s.enabled&&s.group==g&&s.detailPreference<.999;});
             for(const auto& source:data.sources){
-                if(!source.enabled||source.group!=g)continue;
+                if(!source.enabled||(!preliminary&&source.group!=g))continue;
                 if(Canceled(request)){error="Canceled";return false;}
                 const bool aligned=source.alignmentDiagnostic.model!=CaptureAlignment::Model::Identity||
                     (&source!=&reference&&source.alignmentDiagnostic.localApplied);
@@ -341,12 +351,19 @@ public:
                 if(!tile.Run([&](std::string&){tile.Upload(0,taps.size()*sizeof(Tap),taps.data());
                     if(aligned)tile.Upload(1,count*sizeof(Mapping),mapping.data());tile.Upload(5,192,&parameters);
                     if(bands){
-                        tile.Dispatch(1,left,top,width,height,data,sx,sy,sw,sh,source,aligned,true,false);
+                        tile.Dispatch(1,left,top,width,height,data,sx,sy,sw,sh,source,aligned,true,false,false,refinePilot);
                         tile.Dispatch(2,left,top,width,height,data,sx,sy,sw,sh,source,aligned,true,false);
-                    }else tile.Dispatch(4,left,top,width,height,data,sx,sy,sw,sh,source,aligned,false,false);
+                    }else tile.Dispatch(4,left,top,width,height,data,sx,sy,sw,sh,source,aligned,false,false,false,
+                        refinePilot&&!preliminary);
                     return true;},gpuError))break;
             }
             if(!gpuError.empty())break;
+            if(preliminary){
+                if(!tile.Run([&](std::string& e){
+                    tile.Dispatch(5,left,top,width,height,data,0,0,1,1,reference,false,false,false,false);
+                    return tile.Status(e);},gpuError))break;
+                continue;
+            }
             if(!tile.Run([&](std::string& e){tile.Dispatch(3,left,top,width,height,data,0,0,1,1,reference,false,bands,false);
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER,tile.buffers[3]);glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,count*sizeof(GpuObservation),output.data());return tile.Status(e);},gpuError))break;
             auto& group=pendingGroups[g];group.resize(count);
@@ -368,10 +385,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         analysis.diagnostics.push_back("Capture combining: "+std::to_string(gpuTiles)+" GPU tiles; GPU-only double-precision resampling, uncertainty and temporal/detail fusion; GPU peak reservation "+std::to_string(peak/(1024*1024))+" MiB; current reservation "+std::to_string(resident/(1024*1024))+
             " MiB; workspace allocations "+std::to_string(allocations)+", reuses "+std::to_string(reuses)+"."+
+            " Multi-capture estimates use a shared radiance pilot before final noise and headroom weighting."+
             (reason.empty()?"":" "+reason));
     }
-    Raw::OpenGlTaskExecutor execute;std::array<GLuint,5> programs{};
-    std::array<std::array<GLint,11>,5> uniformLocations{};bool available=false;
+    Raw::OpenGlTaskExecutor execute;std::array<GLuint,6> programs{};
+    std::array<std::array<GLint,12>,6> uniformLocations{};bool available=false;
     std::uint64_t budget=0,blockLimit=0,resident=0,peak=0,gpuTiles=0;
     Workspace idle;std::size_t operations=0;
     std::uint64_t allocations=0,reuses=0;

@@ -94,8 +94,18 @@ remain necessary to interpret sensor samples correctly. Temporal noise fitting
 requires calibrated image gain, accepted geometry and compatible measured noise
 profiles; ISO equality alone is not a sensor-noise model. The final generic prior
 remains uncalibrated and may use a finite ISO hint when image noise fitting fails;
-its precision must not be represented as measured noise confidence. Capture headroom weights
-apply before group averaging with matching CPU/GPU and detail-band arithmetic.
+its precision must not be represented as measured noise confidence. Multi-capture GPU
+combining first estimates a common scene signal from admitted observations, using
+observed headroom and without detail or authored group preferences. The final pass
+predicts each capture's noise and headroom from that signal at its calibrated gain;
+hard clipping, defects and correspondence rejection remain observation-specific.
+The extra sampling pass reuses the existing tile buffers. Single-capture combining
+and scalar guide consumers retain observed headroom because they have no refined
+common signal. Detail bands use the final pass's same capture headroom.
+Alignment proxies count and normalize valid samples independently per CFA color,
+require at least 99% channel coverage, and retain clipped-channel exclusion for
+exposure fitting. Their resolution budget counts prepared captures, including a
+disabled coordinate origin, rather than every entry in the saved source list.
 Alignment-only exposure cohorts and local-refit decisions use calibrated image
 gains, not saved UI groups. The 0.15 EV full-span convention selects work/anchors,
 not valid evidence; uncertain sources align directly to the origin. This never
@@ -238,8 +248,11 @@ In native HDR and noise bursts, retain accepted CFA measurements when another ch
 cell has clipped. Use the fixed capture's saturation as a lower bound at that
 location, including when the reference exposure group is itself a noise burst.
 For an unsupported channel the worker can estimate display color from the
-nearby unclipped highlight boundary or a compatible shorter exposure. The
-estimate carries zero measurement support. When every reference channel is lost, first use a mapped shorter exposure if its exposure-normalized values satisfy all four clipping bounds. Prefer the capture with the most surviving sites and retain clipping flags on its lost channels. This fallback retains zero measurement support. If that evidence is unavailable, use the
+nearby unclipped highlight boundary or a compatible shorter exposure. Missing
+channels that need a donor share one coherent donor color; per-channel medians
+rank candidate donors rather than constructing a color from different captures.
+Tied donor choices are stable under group reordering, including their clipping
+masks. The estimate carries zero measurement support. When every reference channel is lost, first use a mapped shorter exposure if its exposure-normalized values satisfy all four clipping bounds. Prefer the capture with the most surviving sites and retain clipping flags on its lost channels. This fallback retains zero measurement support. If that evidence is unavailable, use the
 dimmest as-shot neutral consistent with the clipping bounds if camera white
 balance is available. The brightness stays marked unrecoverable. Use the same observations for the
 native preview, inspection and master.

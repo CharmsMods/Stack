@@ -12,6 +12,44 @@
 #include <stdexcept>
 
 namespace Stack::Validation {
+inline void ValidateBracketingActiveReliabilityFootprint() {
+    using namespace Raw::Bracketing;using namespace Raw::Mfd;
+    const auto check=[](bool value,const std::string& message){if(!value)throw std::runtime_error(message);};
+    CfaLayout layout;check(CfaLayout::TryCreate(Raw::CfaPattern::RGGB,layout),"Reliability footprint CFA");
+    std::array<CfaPyramidBasePlane,4> base;
+    for(unsigned s=0;s<4;++s) {
+        auto& plane=base[s];plane.site=static_cast<CfaSite>(s);plane.extent={64,64};
+        plane.signal.assign(64*64,.2);plane.variance.assign(64*64,1e-6);plane.validMask.assign(64*64,1);
+    }
+    RegistrationParameters registration;registration.pyramidLevels=1;
+    CfaPlanePyramid reference;std::string error;
+    check(BuildCfaPlanePyramid(layout,{128,128},base,registration,reference,&error),error);
+    PreparedSource fixed,source;fixed.frame.activeExtent=source.frame.activeExtent={128,128};
+    fixed.frame.activeCfaPattern=source.frame.activeCfaPattern=Raw::CfaPattern::RGGB;
+    source.localMotion=std::make_shared<LocalMotionGrid>();auto& grid=*source.localMotion;
+    grid.valid=true;grid.width=grid.height=3;grid.spacingRawX=grid.spacingRawY=64;
+    grid.referenceRawExtent=grid.sourceRawExtent={128,128};grid.nodes.resize(9);
+    for(auto& node:grid.nodes){node.state=MotionNodeState::Structured;node.confidence=1;node.covarianceRaw={.0025,0,.0025};}
+    PreparedDataset data;data.width=data.height=128;const auto parameters=CaptureAlignmentParameters(data);
+    ProcessingRequest request;request.workerCount=1;request.memoryBudgetBytes=64*1024*1024;
+    for(unsigned scenario=0;scenario<3;++scenario) {
+        auto alternateBase=base;
+        for(auto& plane:alternateBase) {
+            if(scenario>0)plane.validMask[25*64+25]=0;
+            if(scenario==2)plane.signal[24*64+24]=.5;
+        }
+        CfaPlanePyramid alternate;
+        check(BuildCfaPlanePyramid(layout,{128,128},alternateBase,registration,alternate,&error),error);
+        check(RefreshCaptureReliability(request,fixed,source,parameters,reference,alternate,{},error),error);
+        const auto match=EvaluateCaptureCorrespondence(source,{48,48});
+        // The invalid diagonal is outside value and derivative support at this
+        // exact sample. It must neither reject matching evidence nor hide the
+        // actual contradictory central measurement from the patch gate.
+        check(scenario==2?match.confidence==0:match.confidence>.99,
+            "An inactive cubic tap changed or concealed valid radiometric evidence");
+    }
+}
+
 inline void ValidateBracketingReliabilityCoordinates() {
     using namespace Raw::Bracketing;using namespace Raw::Mfd;
     const auto check=[](bool value,const char* message){if(!value)throw std::runtime_error(message);};
@@ -147,6 +185,7 @@ inline void ValidateBracketingLocalAlignmentMemory() {
 }
 
 inline void ValidateBracketingBurstAlignment() {
+    ValidateBracketingActiveReliabilityFootprint();
     ValidateBracketingReliabilityCoordinates();
     ValidateBracketingLocalAlignmentMemory();
     using namespace Raw::Bracketing;using namespace Raw::Mfd;
