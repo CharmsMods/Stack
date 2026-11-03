@@ -2,6 +2,7 @@
 
 #include "Raw/Bracketing/AlignmentExposureCohorts.h"
 #include "Raw/Bracketing/AlignmentExposureSeed.h"
+#include "Raw/Bracketing/AlignmentProxy.h"
 #include "Raw/RawCaptureCompatibility.h"
 #include "Raw/Bracketing/ExposureGraph.h"
 
@@ -25,6 +26,36 @@ inline void Require(bool condition, const char* message) {
 
 inline bool Near(double a, double b, double tolerance = 1e-9) {
     return std::abs(a - b) <= tolerance;
+}
+
+inline void ValidateAlignmentProxySupport() {
+    using namespace Raw::Bracketing;
+    // One native Bayer block at each actual proxy size, with independent color
+    // support. No decoder repairs are admitted as measurements.
+    for(unsigned stride:{2u,16u,32u,80u})for(unsigned scenario=0;scenario<5;++scenario) {
+        AlignmentProxyAccumulator proxy(stride,stride,stride);
+        std::vector<float> rgb;std::vector<std::uint8_t> clipped,mask;
+        for(unsigned y=0;y<stride;++y)for(unsigned x=0;x<stride;++x) {
+            const unsigned channel=(y&1)?((x&1)?2:1):((x&1)?1:0);
+            const bool first=x==0&&y==0;
+            const bool invalid=(scenario==1&&first)||(scenario==2&&channel==0&&x==0);
+            const bool saturated=scenario==3&&first;
+            const double value=scenario==4&&first?std::numeric_limits<double>::quiet_NaN():
+                (channel==0?.2:channel==1?.4:.6);
+            proxy.Add(x,y,channel,value,saturated,invalid);
+        }
+        proxy.Finish(rgb,clipped,&mask);
+        Require(rgb.size()==3&&clipped.size()==1&&mask.size()==1,"Proxy shape changed");
+        Require(Near(rgb[1],.4,1e-7)&&Near(rgb[2],.6,1e-7)&&((mask[0]&6)==6),
+            "A red defect discarded independent green/blue evidence");
+        const bool sparse=scenario==1||scenario==4;
+        const bool redSupported=scenario!=2&&(!sparse||stride>=32);
+        Require(std::isfinite(rgb[0])==redSupported,"Proxy admitted insufficient color coverage");
+        if(redSupported)Require(Near(rgb[0],.2,1e-7),"A missing sample was counted as black");
+        Require(bool(mask[0]&1)==(redSupported&&scenario!=3),
+            "Clipping or unsupported color entered exposure calibration");
+        Require(bool(clipped[0])==(mask[0]!=7),"Luminance proxy lost its complete-color guard");
+    }
 }
 
 inline void ValidateExposureGraph() {
@@ -217,6 +248,7 @@ inline void ValidateImageFirstAdmission() {
 } // namespace BracketingScalarValidation
 
 inline void ValidateBracketingScalars() {
+    BracketingScalarValidation::ValidateAlignmentProxySupport();
     BracketingScalarValidation::ValidateExposureGraph();
     BracketingScalarValidation::ValidateExposureCohorts();
     BracketingScalarValidation::ValidateImageFirstAdmission();

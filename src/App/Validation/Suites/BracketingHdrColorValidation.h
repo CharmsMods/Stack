@@ -52,8 +52,92 @@ inline void ValidateBracketingWeightRetry() {
     std::cout<<"HDR weight retry: 1/2-group normal/tiny precision, zero/full headroom, authored and clipped controls passed.\n";
 }
 
+inline void ValidateBracketingHighlightDonor() {
+    using namespace Raw::Bracketing;
+    const auto check=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
+    BracketingRecipe recipe;recipe.groups.resize(4);
+    ColorObservations samples;
+    const double missing[3][2]={{1.1,1.4},{1.4,1.7},{1.7,1.1}};
+    for(unsigned s=0;s<4;++s) {
+        samples[s].resize(4);
+        for(unsigned g=0;g<3;++g) {
+            auto& donor=samples[s][g];donor.finite=true;donor.localRejected=true;
+            donor.exposure=std::exp2(-2.-g);
+            donor.fallback=s==0?.5:s==2?.6:missing[g][s==1?0:1];
+        }
+        auto& reference=samples[s][3];reference.finite=true;reference.exposure=1;
+        reference.value=reference.fallback=s==0?.5:s==2?.6:1.;
+        reference.clipped=reference.fallbackClipped=s==1||s==3;
+        reference.support=reference.clipped?0:1;reference.headroom=reference.support;
+        reference.variance=reference.measurementVariance=.001;
+        reference.fixedReference=reference.support>0;
+        if(reference.clipped)reference.clippedReference=ClippedReference::LowerBound;
+    }
+    // Independent channel medians can synthesize a color that no donor ever
+    // contained. A display fallback must keep one donor's chromaticity while
+    // leaving accepted reference measurements and their support intact.
+    const auto coherent=BlendColor(samples,{},recipe);
+    for(unsigned s:{0u,2u})check(coherent[s].valid&&coherent[s].actual[3]==1&&
+        coherent[s].value==samples[s][3].value,"Highlight donor replaced a measured color");
+    unsigned donor=4;
+    for(unsigned g=0;g<3;++g)if(coherent[1].actual[g]>0)donor=g;
+    check(donor<3&&coherent[3].actual[donor]==1&&
+        coherent[1].value==samples[1][donor].fallback&&coherent[3].value==samples[3][donor].fallback,
+        "Highlight fallback selected a different donor for each missing color");
+    for(unsigned s:{1u,3u})check(!coherent[s].valid&&coherent[s].support==0&&coherent[s].fallback&&
+        coherent[s].fallbackReason==MeasurementFallbackReason::HighlightFallback,
+        "Highlight color estimate acquired measurement support");
+    for(unsigned shift=1;shift<4;++shift) {
+        auto reordered=samples;
+        for(auto& site:reordered)std::rotate(site.begin(),site.begin()+shift,site.end());
+        const auto result=BlendColor(reordered,{},recipe);
+        for(unsigned s=0;s<4;++s)check(result[s].value==coherent[s].value&&
+            result[s].support==coherent[s].support&&result[s].valid==coherent[s].valid,
+            "Highlight donor color depended on input group order");
+    }
+    BracketingRecipe tiedRecipe;tiedRecipe.groups.resize(3);
+    for(bool neutral:{false,true}) {
+        ColorObservations tied;
+        const double colors[2][4]={{1.4,1.7,1.3,1.6},{1.2,1.9,1.5,1.4}};
+        for(unsigned s=0;s<4;++s) {
+            tied[s].resize(3);
+            for(unsigned g=0;g<2;++g) {
+                auto& donor=tied[s][g];donor.finite=true;donor.localRejected=true;donor.exposure=.25;
+                donor.fallback=neutral?(s==0?2.:1.2):colors[g][s];
+                donor.clipped=donor.fallbackClipped=!neutral||(g==0?s<2:s>=2);
+            }
+            auto& reference=tied[s][2];reference.finite=true;reference.exposure=1;
+            reference.value=reference.fallback=1;reference.clipped=reference.fallbackClipped=true;
+            reference.clippedReference=neutral?ClippedReference::EstimatedColor:ClippedReference::LowerBound;
+        }
+        // With no measured reference color, equal-exposure ties still need a
+        // stable whole donor. Identical colors with different clipping masks
+        // are distinguishable: neutral completion changes only clipped sites.
+        const auto expected=BlendColor(tied,{},tiedRecipe);
+        for(unsigned s=0;s<4;++s) {
+            check(expected[s].actual[1]==1,"No-anchor tie did not select its stable color/clip key");
+            check(!expected[s].valid&&expected[s].support==0&&expected[s].fallback&&
+                expected[s].fallbackReason==MeasurementFallbackReason::HighlightFallback,
+                "No-anchor donor acquired measured support");
+            const double value=neutral?(s==1?1.2:2.):colors[1][s];
+            check(expected[s].value==value&&expected[s].clipped==(!neutral||s>=2),
+                "No-anchor donor lost its clipping bounds or neutral completion");
+        }
+        for(unsigned shift=1;shift<3;++shift) {
+            auto reordered=tied;
+            for(auto& site:reordered)std::rotate(site.begin(),site.begin()+shift,site.end());
+            const auto result=BlendColor(reordered,{},tiedRecipe);
+            for(unsigned s=0;s<4;++s)check(result[s].value==expected[s].value&&
+                result[s].clipped==expected[s].clipped&&result[s].support==0&&!result[s].valid,
+                "No-anchor donor pixels or clipping depended on group order");
+        }
+    }
+    std::cout<<"HDR highlight fallback: coherent donor, accepted colors, zero estimated support and group-order checks passed.\n";
+}
+
 inline void ValidateBracketingHdrColor() {
     ValidateBracketingWeightRetry();
+    ValidateBracketingHighlightDonor();
     using namespace Raw::Bracketing;
     const auto check=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
     BracketingRecipe recipe;recipe.groups.resize(2);

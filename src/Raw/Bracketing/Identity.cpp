@@ -20,7 +20,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     if(guide)j["spatialGuide"]="independent-cfa-contrast-v1";
     // Sampling and clipping decisions feed reliability, the guide and cached
     // group tiles. Keep their revisions together when these decisions change.
-    j["alignmentProfile"]="automatic-local-v39-verified-warp-support";
+    j["alignmentProfile"]="automatic-local-v40-valid-proxy-active-footprint";
     if(recipe.aiAlignment)j["learnedAlignmentProfile"]=LearnedAlignment::Profile;
     if(!request.alignmentProposals.empty()) {
         j["alignmentProposalProfile"]="external-flow-seed-raw-verification-v1";
@@ -29,13 +29,13 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     }
     j["samplingProfile"]="local-bayer-phase-coverage-v1";
     j["integerSaturationProfile"]="verified-code-spacing-v1";
-    j["exposureProfile"]="image-only-overlap-v8-channel-support";
+    j["exposureProfile"]="image-only-overlap-v9-independent-channel-coverage";
     j["noiseProfile"]="temporal-burst-haar-v4-signed-signal";
     j["sourceVarianceProfile"]="resolved-single-quantization-v1";
     j["groupMemoryProfile"]="adaptive-prepared-tiles-v1";
     j["groupStorageProfile"]="finite-float-observations-v1";
     j["detailProfile"]=kLocalDetailRevision;
-    j["temporalProfile"]="double-precision-gpu-temporal-v10-active-footprint";
+    j["temporalProfile"]="double-precision-gpu-temporal-v11-shared-radiance";
     j["srSupportProfile"]="categorical-reference-and-depth-v2";
     j["hdrProfile"]=kHdrColorFusionRevision;
     if(request.recipe.reconstruction==ReconstructionMode::Standard||adaptive)

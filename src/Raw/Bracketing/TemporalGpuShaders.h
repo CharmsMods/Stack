@@ -27,7 +27,7 @@ uniform ivec4 region; // source left, top, width, height
 uniform ivec4 target; // output left, top, width, height
 uniform ivec2 sensor;
 uniform ivec4 sites;
-uniform int aligned,reference,groupIndex,useBands,localGuide,groupCount,initializeGuide;
+uniform int aligned,reference,groupIndex,useBands,localGuide,groupCount,initializeGuide,predictedHeadroom;
 const uint FINITE=1u,CLIPPED=2u,REJECTED=4u,REFERENCE=8u,FALLBACK_CLIP=16u;
 // Transient accumulator provenance; not exported as a measurement flag.
 const uint FALLBACK_REJECTED=32u;
@@ -50,6 +50,9 @@ double residualVariance(int site,double pilot){
 }
 bool badTap(vec4 t){return !finiteValue(double(t.x))||!finiteValue(double(t.y))||t.y<=0||((uint(t.z)&6u)!=0u);}
 double headroom(double v){double h=clamp((.995LF-v)/.045LF,0.LF,1.LF);return h*h*(3.LF-2.LF*h);}
+double captureHeadroom(double observed,double gain,double pilot){
+    return headroom(predictedHeadroom!=0?max(0.LF,pilot)/gain:observed);
+}
 double risk(dvec2 gradient,Mapping m){
     if(!finiteValue(m.xx)||!finiteValue(m.xy)||!finiteValue(m.yy))return -1.LF;
     double xx=max(0.LF,m.xx),yy=max(0.LF,m.yy),xy=m.xy;
@@ -134,7 +137,7 @@ Observation sampleAt(int i,ivec2 p){
         if((o.flags&(FINITE|CLIPPED))==FINITE){
             o.measurement=max(1e-12LF,noiseVariance(site,gain,pilot));
             o.uncertainty=residualVariance(site,pilot)+pilot*pilot*scaleVariance/(scale*scale);
-            o.variance=o.measurement+o.uncertainty;o.headroom=headroom(double(t.x));o.support=1.LF;
+            o.variance=o.measurement+o.uncertainty;o.headroom=captureHeadroom(double(t.x),gain,pilot);o.support=1.LF;
             if(reference!=0)o.flags|=REFERENCE;
         }
         return o;
@@ -169,7 +172,7 @@ Observation sampleAt(int i,ivec2 p){
         if(w==0.LF&&dx==0.LF&&dy==0.LF)continue;
         sum+=w;sumDx+=dx;sumDy+=dy;
         vec4 t=tapAt(txy*2+(p&1));double gain=scale*double(t.y),v=gain*double(t.x);
-        safety+=abs(w)*headroom(double(t.x));magnitude+=abs(w);
+        safety+=abs(w)*captureHeadroom(double(t.x),gain,pilot);magnitude+=abs(w);
         bool bad=badTap(t);if(bad||(uint(t.z)&9u)!=0u)valid=false;
         if(abs(w)>1e-12LF){if(bad)validFallback=false;
             fallback+=w*double(t.x)*double(t.y)*scale;clippedFallback=clippedFallback||((uint(t.z)&9u)!=0u);}
@@ -263,6 +266,26 @@ void main(){int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
 inline const std::string SampleAccumulate=std::string(SamplingFunctions)+AccumulationFunctions+R"GLSL(
 void main(){int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
     accumulateAt(i,sampleAt(i,target.xy+ivec2(i%target.z,i/target.z)),false);}
+)GLSL";
+
+// The preliminary accumulation includes every admitted exposure, without
+// detail-band preferences or authored group weights. Only its expected signal
+// informs the second pass: geometry, clipping flags and original samples stay
+// unchanged. A clipped origin is a lower bound, not the radiance of a highlight
+// measured by a shorter capture.
+inline const char* ResolvePilot=R"GLSL(
+void main(){
+    int i=int(gl_GlobalInvocationID.x);if(i>=target.z*target.w)return;
+    Accumulator a=sums[i];
+    if(!finiteValue(a.weight)||!finiteValue(a.o.value)||!finiteValue(a.o.variance)){
+        atomicOr(failed,2u);return;
+    }
+    if(a.weight>0.LF){
+        double pilot=a.o.value/a.weight;
+        if(!finiteValue(pilot)){atomicOr(failed,2u);return;}
+        guides[i].x=max(0.LF,pilot);
+    }
+}
 )GLSL";
 
 inline const char* Finish=R"GLSL(

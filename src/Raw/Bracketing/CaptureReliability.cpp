@@ -80,6 +80,11 @@ bool BuildReliability(const ProcessingRequest& request,
         double sourceValue=0,sourceVariance=0,gradientPlaneX=0,gradientPlaneY=0;
         double gradientNoiseXX=0,gradientNoiseXY=0,gradientNoiseYY=0;
         for(std::size_t tap=0;tap<Mfd::kSameCfaTapCount;++tap) {
+            // Match the reconstruction footprint. A tap outside both the
+            // interpolated value and its derivatives cannot invalidate local
+            // evidence merely because that unrelated sample clips or is bad.
+            if(footprint.coefficients[tap]==0&&footprint.derivativeXPlane[tap]==0&&
+               footprint.derivativeYPlane[tap]==0)continue;
             const auto& coordinate=footprint.taps[tap];
             const auto index=static_cast<std::size_t>(coordinate.y)*sourceLevel->extent.width+
                 static_cast<std::size_t>(coordinate.x);

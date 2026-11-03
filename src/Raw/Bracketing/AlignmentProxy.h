@@ -14,16 +14,18 @@ class AlignmentProxyAccumulator {
 public:
     AlignmentProxyAccumulator(unsigned rawWidth,unsigned rawHeight,unsigned stride)
         :width(rawWidth/stride),height(rawHeight/stride),stride(stride),
-         sums(static_cast<std::size_t>(width)*height),flags(sums.size()) {}
+         sums(static_cast<std::size_t>(width)*height),counts(sums.size()),flags(sums.size()) {}
 
     static double Center(unsigned stride) {return .5*(stride-1);}
 
     void Add(unsigned x,unsigned y,unsigned channel,double value,bool clipped,bool invalid) {
         const unsigned px=x/stride,py=y/stride;
-        if(px>=width||py>=height) return;
+        if(px>=width||py>=height||channel>=3) return;
         const auto p=static_cast<std::size_t>(py)*width+px;
-        if(invalid||!std::isfinite(value)) flags[p]|=8;
-        else sums[p][channel]+=value;
+        if(!invalid&&std::isfinite(value)) {
+            sums[p][channel]+=value;
+            ++counts[p][channel];
+        }
         if(clipped) flags[p]|=static_cast<std::uint8_t>(1u<<channel);
     }
 
@@ -33,17 +35,31 @@ public:
         if(calibrationMask) calibrationMask->resize(sums.size());
         const double sitesPerColor=double(stride)*stride/4;
         for(std::size_t p=0;p<sums.size();++p) {
-            clipped[p]=flags[p]!=0;
-            if(calibrationMask) (*calibrationMask)[p]=(flags[p]&8)?0:(7u & ~flags[p]);
-            for(unsigned c=0;c<3;++c)
-                rgb[p*3+c]=(flags[p]&8)?std::numeric_limits<float>::quiet_NaN():
-                    static_cast<float>(sums[p][c]/(sitesPerColor*(c==1?2:1)));
+            unsigned supported=0;
+            for(unsigned c=0;c<3;++c) {
+                const double expected=sitesPerColor*(c==1?2:1);
+                const auto count=counts[p][c];
+                // A sparse sensor defect must not erase a whole coarse block,
+                // or its other colors, as the proxy stride grows with a burst.
+                // Retain only nearly complete footprints (at most 1% missing)
+                // so partial coverage cannot stand in for a differently placed
+                // scene patch. Missing samples are never counted as black.
+                const bool usable=count>0&&count>=.99*expected;
+                rgb[p*3+c]=usable?static_cast<float>(sums[p][c]/count):
+                    std::numeric_limits<float>::quiet_NaN();
+                if(usable&&!(flags[p]&(1u<<c))) supported|=1u<<c;
+            }
+            // Luminance/affine callers require a complete unclipped color;
+            // exposure fitting may still use independently supported channels.
+            clipped[p]=supported!=7;
+            if(calibrationMask) (*calibrationMask)[p]=static_cast<std::uint8_t>(supported);
         }
     }
 
     const unsigned width,height,stride;
 private:
     std::vector<std::array<double,3>> sums;
+    std::vector<std::array<std::uint32_t,3>> counts;
     std::vector<std::uint8_t> flags;
 };
 } // namespace Raw::Bracketing
