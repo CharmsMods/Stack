@@ -18,6 +18,9 @@ struct SceneTone {
     float localAmount = 0.0f;
     float localRadius = 0.04f; // Fraction of the longer full-image side.
     float localRangeEv = 0.5f;
+    // Optional chromatic boundaries in the regional guide. Missing/zero keeps
+    // the original luminance-only filter, including in existing saved edits.
+    float localColorProtection = 0.0f;
     bool enabled = true;
     float anchorOffsetEv = 0.0f;
     float contrast = 1.0f;
@@ -37,6 +40,7 @@ SceneTone ReadSceneTone(const nlohmann::json& value);
 nlohmann::json SerializeSceneTone(const SceneTone& tone);
 bool IsSceneToneActive(const SceneTone& tone);
 bool IsLocalSceneToneActive(const SceneTone& tone);
+bool IsColorGuidedSceneToneActive(const SceneTone& tone);
 // Effective contrast can be smaller than requested to keep every slope
 // strictly positive. The editor must show the limit, never hide it.
 float EffectiveSceneToneContrast(const SceneTone& tone);

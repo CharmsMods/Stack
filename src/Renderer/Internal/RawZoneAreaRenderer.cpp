@@ -118,12 +118,13 @@ unsigned int RawZoneAreaRenderer::MaskTexture(const RawRecipe::RawZoneArea& area
 }
 
 unsigned int RawZoneAreaRenderer::Coverage(const RawRecipe::RawZoneArea& area, unsigned int reference,
-    int width, int height, Raw::RawWorkingSpace space, std::size_t revision, const std::function<bool()>& cancelled) {
+    int width, int height, Raw::RawWorkingSpace space, std::size_t revision, const std::function<bool()>& cancelled,
+    const SceneColorGuidance& guidance) {
     GLint binding = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
     struct Restore { GLint binding; ~Restore() { glBindTexture(GL_TEXTURE_2D, binding); } } restore{binding};
     auto recipe = RawRecipe::MakeDefaultRecipe({}); recipe.technical.workingSpace = space;
     const bool guided = RawRecipe::ZoneAreaUsesGuidance(area);
-    if (guided && (!reference || !PrepareGuide(reference, width, height, recipe, revision, true, cancelled))) return 0;
+    if (guided && (!reference || !PrepareGuide(reference, width, height, recipe, revision, true, cancelled, guidance))) return 0;
     std::shared_ptr<const RawRecipe::RawZoneAreaMaskPreview> preview;
     return MaskTexture(area, width, height, {}, cancelled, guided ? m_Guide.get() : nullptr, preview);
 }
@@ -131,7 +132,8 @@ unsigned int RawZoneAreaRenderer::Coverage(const RawRecipe::RawZoneArea& area, u
 unsigned int RawZoneAreaRenderer::Render(unsigned int input,unsigned int reference,int width,int height,
     const RawRecipe::RawDevelopmentRecipe& recipe,bool measure,bool fullResolution,
     std::vector<RawRecipe::RawZoneAreaStatistics>& statistics,const std::function<bool()>& cancelled,
-    std::size_t referenceRevision, const std::function<unsigned int(const std::string&)>& coverage) {
+    std::size_t referenceRevision, const std::function<unsigned int(const std::string&)>& coverage,
+    const SceneColorGuidance& guidance) {
     statistics.clear();
     struct Publication {
         std::vector<RawRecipe::RawZoneAreaStatistics>& statistics;
@@ -170,7 +172,7 @@ unsigned int RawZoneAreaRenderer::Render(unsigned int input,unsigned int referen
         }
     } state;
     const bool guided=std::any_of(recipe.localRange.areas.begin(),recipe.localRange.areas.end(),RawRecipe::ZoneAreaUsesGuidance);
-    if (((guided && !coverage) || measure) && !PrepareGuide(reference,width,height,recipe,referenceRevision,guided,cancelled)) return 0;
+    if (((guided && !coverage) || measure) && !PrepareGuide(reference,width,height,recipe,referenceRevision,guided,cancelled,guidance)) return 0;
     ScopedGLTexture gain(GLHelpers::CreateStorageTexture(width,height,GL_R32F));
     ScopedGLTexture curve(GLHelpers::CreateStorageTexture(4097,1,GL_R32F));
     ScopedGLTexture output(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));

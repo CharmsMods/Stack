@@ -6,6 +6,7 @@
 #include "ParallelProcessing.h"
 #include "PresentationEvidence.h"
 #include "GroupMemory.h"
+#include "SceneColorContract.h"
 #include <algorithm>
 #include <mutex>
 
@@ -21,7 +22,8 @@ bool ProcessTiles(const ProcessingRequest& request,const PreparedDataset& data,
     if(!total) {error="The prepared bracket contains no output tiles.";return false;}
     const std::uint64_t perWorker=GroupWorkerBytes(request.recipe.groups.size(),origin.tileRawPixels,
         data.sources.size(),request.memoryBudgetBytes);
-    const auto reserve=GroupOutputReserveBytes(static_cast<std::uint64_t>(data.width)*data.height);
+    const auto reserve=GroupOutputReserveBytes(static_cast<std::uint64_t>(data.width)*data.height)+
+        SceneColorEvidence::WorkingBytes(data.width,data.height,origin.tileRawPixels);
     if(!GroupWorkerFits(request.memoryBudgetBytes,reserve,perWorker)) {
         constexpr std::uint64_t mib=1024ull*1024;
         error="Full-resolution output and one group-processing worker need approximately "+

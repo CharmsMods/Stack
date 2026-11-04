@@ -68,6 +68,7 @@ void RenderPipeline::Shutdown() {
     }
     m_Shutdown = true;
     m_RawZoneAreaRenderer.Clear();
+    m_SceneColorGuideCache.Clear();
 
     // Externally bound continuations belong to the render worker's owner map.
     // Destroying a temporary pipeline must not cancel another owner's job.

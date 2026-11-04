@@ -25,6 +25,8 @@
 #include "Raw/RawProcessingMath.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/LocalToneGuidePlanning.h"
+#include "Renderer/SceneColorGuidePlanning.h"
+#include "Editor/GraphRenderMemory.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/RawGraphViewportWorkload.h"
 #include "Renderer/ScopedGLObjects.h"
@@ -1473,7 +1475,9 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuideWorkingBytes(snapshot.graph,fullFrameWidth,fullFrameHeight);
     if (snapshot.rawWorkspace.hasRecipe && Stack::Renderer::RecipeUsesLocalToneGuide(snapshot.rawWorkspace.recipe))
         planInput.additionalWorkingBytes = std::max(planInput.additionalWorkingBytes,
-            Stack::Renderer::LocalToneGuide::WorkingBytes(fullFrameWidth,fullFrameHeight));
+            Stack::Renderer::LocalToneGuideWorkingBytes(snapshot.rawWorkspace.recipe,fullFrameWidth,fullFrameHeight));
+    planInput.additionalWorkingBytes=Stack::GraphRendering::AddBytes(planInput.additionalWorkingBytes,
+        Stack::Renderer::SceneColorMaskGuideWorkingBytes(snapshot.graph,fullFrameWidth,fullFrameHeight));
     planInput.maximumTextureSize = m_RawWorkspaceGlMaxTextureSize;
     planInput.workingBudgetBytes =
         m_RawWorkspaceVramWorkingBudgetBytes;
@@ -1964,8 +1968,14 @@ bool EditorModule::TrySubmitRawRenderCommand(
     planInput.fullFrameWidth = m_RawRenderSessionFullFrameWidth;
     planInput.fullFrameHeight = m_RawRenderSessionFullFrameHeight;
     if (Stack::Renderer::RecipeUsesLocalToneGuide(command.rawWorkspace.recipe))
-        planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuide::WorkingBytes(
-            planInput.fullFrameWidth,planInput.fullFrameHeight);
+        planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuideWorkingBytes(
+            command.rawWorkspace.recipe,planInput.fullFrameWidth,planInput.fullFrameHeight);
+    // Compact session commands reuse a configured graph rather than carrying
+    // its source owner. Bracket area commands conservatively reserve guidance;
+    // the worker resolves actual source evidence before final admission.
+    if(m_Bracketing && !command.rawWorkspace.recipe.localRange.areas.empty())
+        planInput.additionalWorkingBytes=Stack::GraphRendering::AddBytes(planInput.additionalWorkingBytes,
+            Stack::Renderer::SceneColorMaskGuideWorkingBytes(planInput.fullFrameWidth,planInput.fullFrameHeight));
     planInput.maximumTextureSize = m_RawWorkspaceGlMaxTextureSize;
     planInput.workingBudgetBytes =
         m_RawWorkspaceVramWorkingBudgetBytes;

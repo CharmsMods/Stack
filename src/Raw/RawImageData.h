@@ -8,6 +8,7 @@
 
 namespace Raw {
 struct ReconstructionDepth;
+struct SceneColorGuide;
 
 enum class CfaPattern {
     Unknown,
@@ -492,6 +493,9 @@ struct RawImageData {
     // pointwise calibration. White balance and camera color conversion follow.
     bool reconstructedCameraRgb = false;
     std::shared_ptr<const ReconstructionDepth> reconstructionDepth;
+    // Source-neutral bracket color evidence, shared through reconstruction and
+    // preview resizing. Its coordinate/measurement contract is in SceneColorGuide.h.
+    std::shared_ptr<const SceneColorGuide> sceneColorGuide;
     // Geometric coverage, independent of sensor validity or clipping. Null is opaque.
     // Covered reconstructions store both color and coverage with row zero at the top.
     std::shared_ptr<const std::vector<float>> outputCoverage;

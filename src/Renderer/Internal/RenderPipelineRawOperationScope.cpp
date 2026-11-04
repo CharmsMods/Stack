@@ -72,9 +72,10 @@ void RenderPipeline::CaptureRawLayerLocalScope(
             return mask;
         };
         std::vector<RawZoneAreaStatistics> statistics;
+        const auto sceneColorGuide=ResolveSceneColorGuidance(context,operationId,"inputImageOut");
         Stack::Renderer::ScopedGLTexture measured(m_RawZoneAreaRenderer.Render(texture, texture, width, height,
             recipe, true, m_PreviewMaxDimension <= 0, statistics, m_ShouldCancelRender, fingerprint,
-            external ? std::function<unsigned int(const std::string&)>(coverage) : std::function<unsigned int(const std::string&)>{}));
+            external ? std::function<unsigned int(const std::string&)>(coverage) : std::function<unsigned int(const std::string&)>{},sceneColorGuide.view));
         if (!measured) throw std::runtime_error("Local EV area measurement is unavailable.");
         m_RawDevelopmentGraphScopeReadback.zoneAreas = std::move(statistics);
         m_RawDevelopmentGraphScopeReadback.zoneGuide = m_RawZoneAreaRenderer.PreviewGuide();

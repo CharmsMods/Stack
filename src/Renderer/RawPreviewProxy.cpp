@@ -1,6 +1,7 @@
 #include "Renderer/RawPreviewProxy.h"
 
 #include "Raw/RawProcessingMath.h"
+#include "Raw/SceneColorGuide.h"
 
 #include <algorithm>
 #include <cmath>
@@ -135,6 +136,7 @@ bool BuildLinearPreviewRawData(
 
     NormalizePreviewMetadata(source.metadata, previewWidth, previewHeight, preview.metadata);
     preview.reconstructedCameraRgb=source.reconstructedCameraRgb;
+    preview.sceneColorGuide=source.sceneColorGuide;
     preview.metadata.linearChannels = sourceChannels;
     preview.rawBuffer.clear();
     preview.linearUInt16Buffer.clear();
@@ -321,6 +323,7 @@ std::string BuildCacheKey(
             : 0u);
     key += ":normalized-hash:";
     key += std::to_string(rawData.normalizedMosaicContentHash);
+    if(rawData.sceneColorGuide)key += ":scene-color:"+rawData.sceneColorGuide->identity;
     return key;
 }
 

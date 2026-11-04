@@ -62,7 +62,7 @@ nlohmann::json CaptureToneCurveParameters(const nlohmann::json& value) {
     if (value.contains("luminanceTone")) {
         const auto& luminance=value.at("luminanceTone");
         for (const char* key:{"representation","enabled","curve","curveAmount","anchorOffsetEv","contrast","pivotEv","coreHalfWidthEv","transitionEv","outerProtection","points",
-                "localAmount","localRadius","localRangeEv"})
+                "localAmount","localRadius","localRangeEv","localColorProtection"})
             if (luminance.contains(key)) parameters["luminanceTone"][key]=luminance.at(key);
     }
     return parameters;
@@ -135,7 +135,7 @@ bool ValidateToneCurveParameters(const nlohmann::json& value,std::string& error)
                 field->get<float>()>=low && field->get<float>()<=high);
         };
         if (!optionalRange("localAmount",0,1) || !optionalRange("localRadius",.002f,.25f) ||
-            !optionalRange("localRangeEv",.05f,2))
+            !optionalRange("localRangeEv",.05f,2) || !optionalRange("localColorProtection",0,1))
             return fail("Invalid Tone Curve local contrast parameters.");
         const auto& slopes=luminance.at("points");
         if (!slopes.is_array() || slopes.size()<2 || slopes.size()>32)

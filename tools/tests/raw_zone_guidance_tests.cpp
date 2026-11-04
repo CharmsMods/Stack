@@ -87,6 +87,39 @@ void GeometryAndBoundaryTests() {
     const auto empty=Mask(a,uniform);
     Check(std::all_of(empty.begin(),empty.end(),[](float v){return v==0;}),"empty footprint has no selected region");
 }
+void ColorConfidenceTests() {
+    constexpr int w=128,h=64;
+    const auto area=Area();
+    auto colors=Guide(w,h,[=](int x,int) {
+        return x<w/2 ? std::array<float,3>{.3f,0,0} : std::array<float,3>{0,.3f*.2126729f/.7151522f,0};
+    });
+    const auto original=Mask(area,colors);
+    colors.colorConfidence.assign(colors.pixels.size(),1);
+    Check(Mask(area,colors)==original,"full color confidence preserves existing native boundary");
+    for (int y=0;y<h;++y) for (int x=w/2;x<w;++x) colors.colorConfidence[std::size_t(y)*w+x]=0;
+    Near(At(Mask(area,colors),w,h,.55f,.5f),1,1e-6f,"uncertain chroma alone cannot create a hard boundary");
+    auto brightness=Guide(w,h,[=](int x,int){return Gray(x<w/2 ? .1f : .8f);});
+    brightness.colorConfidence.assign(brightness.pixels.size(),0);
+    Near(At(Mask(area,brightness),w,h,.55f,.5f),0,1e-6f,"weak color retains independent luminance barrier");
+    auto noisy=Guide(w,h,[](int,int){return Gray(.1f);});
+    const auto clean=Mask(area,noisy);
+    noisy.colorConfidence.assign(noisy.pixels.size(),1);
+    const auto seed=std::size_t(h/2)*w+int(area.strokes[0].path[0].u*w);
+    noisy.pixels[seed].a+=100; noisy.pixels[seed].b-=100;
+    noisy.colorConfidence[seed]=0;
+    Check(Mask(area,noisy)==clean,"uncertain seed color does not fragment otherwise coherent coverage");
+    noisy.colorConfidence[seed]=std::numeric_limits<float>::quiet_NaN();
+    Check(Mask(area,noisy)==clean,"nonfinite confidence cannot create a color barrier");
+    noisy.colorConfidence.pop_back();
+    Check(!noisy.Valid() && Mask(area,noisy).empty(),"malformed evidence dimensions are unavailable");
+    auto thin=Guide(w,h,[=](int x,int) {
+        return x==w/2 ? std::array<float,3>{.3f,0,0} : Gray(.3f*.2126729f);
+    });
+    const auto nativeThin=Mask(area,thin);
+    thin.colorConfidence.assign(thin.pixels.size(),1);
+    Check(Mask(area,thin)==nativeThin,"supported one-pixel chroma boundary retains native geometry");
+    Near(At(nativeThin,w,h,.55f,.5f),0,1e-6f,"one-pixel color boundary separates equal-luminance regions");
+}
 void CorrectionAndRecipeTests() {
     auto a=Area();
     const auto guide=Guide(256,128,[](int,int){return Gray(.1f);});
@@ -160,8 +193,120 @@ void TransformAndResolutionTests() {
 }
 
 void ValidateRawZoneGuidanceCpu() {
-    GeometryAndBoundaryTests();CorrectionAndRecipeTests();TransformAndResolutionTests();
+    GeometryAndBoundaryTests();ColorConfidenceTests();CorrectionAndRecipeTests();TransformAndResolutionTests();
     std::cout<<"Zones guided brush CPU validation passed\n";
+}
+
+void ValidateRawZoneColorGuidanceGpu() {
+    using namespace Stack::Renderer;
+    constexpr int w=65,h=32,cw=7,ch=4;
+    const float gray=.3f*.2126729f;
+    std::vector<float> referencePixels(std::size_t(w)*h*4,1),colorPixels(std::size_t(cw)*ch*4,1);
+    std::vector<float> confidence(std::size_t(cw)*ch,1);
+    for (int y=0;y<h;++y) for (int x=0;x<w;++x) for (int c=0;c<3;++c)
+        referencePixels[(std::size_t(y)*w+x)*4+c]=x==w/2 ? (c==0 ? .3f : 0) : gray;
+    for (int y=0;y<ch;++y) for (int x=0;x<cw;++x) {
+        const double left=double(x)*w/cw,right=double(x+1)*w/cw;
+        const float fraction=float(std::max(0.0,std::min(right,double(w/2+1))-std::max(left,double(w/2)))/(right-left));
+        for (int c=0;c<3;++c) colorPixels[(std::size_t(y)*cw+x)*4+c]=
+            gray*(1-fraction)+(c==0 ? .3f : 0)*fraction;
+    }
+    const GLState::PixelUnpackState unpack;unpack.ConfigureTightCpuUpload();
+    ScopedGLTexture reference(GLHelpers::CreateStorageTexture(w,h,GL_RGBA32F));
+    ScopedGLTexture color(GLHelpers::CreateStorageTexture(cw,ch,GL_RGBA32F));
+    ScopedGLTexture trust(GLHelpers::CreateStorageTexture(cw,ch,GL_R32F));
+    const auto upload=[&](unsigned int texture,int width,int height,GLenum format,const float* pixels) {
+        glBindTexture(GL_TEXTURE_2D,texture);glTexSubImage2D(GL_TEXTURE_2D,0,0,0,width,height,format,GL_FLOAT,pixels);
+    };
+    upload(reference.Get(),w,h,GL_RGBA,referencePixels.data());
+    upload(color.Get(),cw,ch,GL_RGBA,colorPixels.data());
+    upload(trust.Get(),cw,ch,GL_RED,confidence.data());
+    const auto readMask=[&](unsigned int texture) {
+        Check(texture!=0,"color-guided mask is available");
+        std::vector<float> pixels(std::size_t(w)*h);
+        const GLState::PixelPackState pack;pack.ConfigureTightCpuReadback();
+        glBindTexture(GL_TEXTURE_2D,texture);glGetTexImage(GL_TEXTURE_2D,0,GL_RED,GL_FLOAT,pixels.data());
+        pack.Restore();return pixels;
+    };
+    RawZoneAreaRenderer renderer;
+    const auto area=Area();
+    SceneColorGuidance evidence{color.Get(),trust.Get(),1};
+    const auto native=readMask(renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,300,{}));
+    const auto supported=readMask(renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,300,{},evidence));
+    Check(supported==native,"compact color evidence retains supported native one-pixel boundary");
+    Near(At(supported,w,h,.55f,.5f),0,1e-6f,"supported thin chroma fence does not leak");
+    const auto guide=renderer.PreviewGuide();
+    Check(guide && guide->Valid() && std::all_of(guide->colorConfidence.begin(),guide->colorConfidence.end(),
+        [](float q){return q>.999f;}),"odd-sized native and compact footprints agree without shifted cells");
+    const auto masks=renderer.MaskBuildCount(),guides=renderer.GuideBuildCount();
+    renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,300,{},evidence);
+    Check(renderer.MaskBuildCount()==masks && renderer.GuideBuildCount()==guides,"immutable color evidence reuses guide and mask");
+    std::fill(confidence.begin(),confidence.end(),0);upload(trust.Get(),cw,ch,GL_RED,confidence.data());
+    ++evidence.revision;
+    const auto uncertain=readMask(renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,300,{},evidence));
+    Near(At(uncertain,w,h,.55f,.5f),1,1e-6f,"uncertain color falls back to luminance without lowering coverage");
+    Check(renderer.MaskBuildCount()==masks+1 && renderer.GuideBuildCount()==guides+1,"evidence revision invalidates derived guide and mask");
+    std::fill(confidence.begin(),confidence.end(),1);upload(trust.Get(),cw,ch,GL_RED,confidence.data());
+    for (std::size_t i=0;i<colorPixels.size();i+=4) {colorPixels[i]=0;colorPixels[i+1]=0;colorPixels[i+2]=.3f;}
+    upload(color.Get(),cw,ch,GL_RGBA,colorPixels.data());++evidence.revision;
+    const auto disagreement=readMask(renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,300,{},evidence));
+    Near(At(disagreement,w,h,.55f,.5f),1,1e-6f,"inconsistent source color cannot authorize a native color barrier");
+    const auto settledGuide=renderer.PreviewGuide();
+    const auto settledBuilds=renderer.GuideBuildCount();
+    int cancelledChecks=0;
+    Check(!renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,303,
+        [&]{return ++cancelledChecks>2;},evidence) && cancelledChecks>2,
+        "cancellation during evidence preparation publishes no partial mask");
+    Check(renderer.PreviewGuide()==settledGuide && renderer.GuideBuildCount()==settledBuilds,
+        "cancelled evidence leaves the accepted guide intact");
+    GLuint emptyName=0;glGenTextures(1,&emptyName);ScopedGLTexture emptyReference(emptyName);
+    glBindTexture(GL_TEXTURE_2D,emptyReference.Get());
+    GLint beforeRead=0,beforeDraw=0;glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&beforeRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&beforeDraw);
+    bool failedReadback=false;
+    try {renderer.Coverage(area,emptyReference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,304,{},evidence);}
+    catch (const std::runtime_error&) {failedReadback=true;}
+    GLint afterRead=0,afterDraw=0;glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&afterRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&afterDraw);
+    Check(failedReadback && beforeRead==afterRead && beforeDraw==afterDraw &&
+        renderer.PreviewGuide()==settledGuide && renderer.GuideBuildCount()==settledBuilds,
+        "unavailable reference readback restores state and preserves the accepted guide");
+    for (int y=0;y<h;++y) referencePixels[(std::size_t(y)*w+w/2)*4+3]=0;
+    upload(reference.Get(),w,h,GL_RGBA,referencePixels.data());
+    const auto hidden=readMask(renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,301,{}));
+    Near(At(hidden,w,h,.55f,.5f),0,1e-6f,"hidden coverage never bridges a guided mask");
+    Check(!std::isfinite(renderer.PreviewGuide()->pixels[std::size_t(h/2)*w+w/2].sceneEv),"zero alpha is not valid guide color");
+    for (int y=0;y<h;++y) referencePixels[(std::size_t(y)*w+w/2)*4+3]=std::numeric_limits<float>::quiet_NaN();
+    upload(reference.Get(),w,h,GL_RGBA,referencePixels.data());
+    renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,302,{});
+    Check(!std::isfinite(renderer.PreviewGuide()->pixels[std::size_t(h/2)*w+w/2].sceneEv),"nonfinite alpha is not valid guide color");
+    bool rejected=false;
+    try {renderer.Coverage(area,reference.Get(),w,h,Raw::RawWorkingSpace::LinearSrgbD65,302,{},SceneColorGuidance{color.Get(),0,4});}
+    catch (const std::runtime_error&) {rejected=true;}
+    Check(rejected,"incomplete color guidance cannot silently change its contract");
+    {
+        constexpr int nativeWidth=1024,nativeHeight=64;
+        std::vector<float> nativePixels(std::size_t(nativeWidth)*nativeHeight*4,.1f);
+        for (std::size_t i=3;i<nativePixels.size();i+=4) nativePixels[i]=1;
+        ScopedGLTexture large(GLHelpers::CreateStorageTexture(nativeWidth,nativeHeight,GL_RGBA32F));
+        upload(large.Get(),nativeWidth,nativeHeight,GL_RGBA,nativePixels.data());
+        std::fill(confidence.begin(),confidence.end(),0);upload(trust.Get(),cw,ch,GL_RED,confidence.data());
+        ++evidence.revision;
+        Check(renderer.Coverage(area,large.Get(),nativeWidth,nativeHeight,Raw::RawWorkingSpace::LinearSrgbD65,305,{},evidence)!=0,
+            "native color-guided coverage is available above preview size");
+        const auto preview=renderer.PreviewGuide();
+        Check(preview && preview->width==768 && preview->height==48 && preview->revision!=settledGuide->revision &&
+            preview->colorConfidence.size()==preview->pixels.size() &&
+            std::all_of(preview->colorConfidence.begin(),preview->colorConfidence.end(),[](float q){return q==0;}),
+            "bounded preview retains native evidence and revision");
+        const auto builds=renderer.GuideBuildCount();
+        renderer.Coverage(area,large.Get(),nativeWidth,nativeHeight,Raw::RawWorkingSpace::LinearSrgbD65,305,{},evidence);
+        Check(renderer.PreviewGuide()==preview && renderer.GuideBuildCount()==builds,
+            "native cache hit retains the same preview evidence object");
+    }
+    unpack.Restore();
+    Check(glGetError()==GL_NO_ERROR,"color guidance readback preserves valid GL execution");
+    std::cout<<"Zones source-color confidence GPU validation passed\n";
 }
 
 void ValidateRawZoneGuidanceGpu() {
@@ -236,6 +381,7 @@ void ValidateRawZoneGuidanceGpu() {
         Check(preview && preview->width==768,"first soft area prepares bounded neutral guide");
         Near(preview->pixels.back().sceneEv,ZoneAreaReferenceEv(.1f),1e-5f,"preview guide blit ignores unrelated scissor rectangle");
     }
+    ValidateRawZoneColorGuidanceGpu();
     Check(glGetError()==GL_NO_ERROR,"guided renderer preserves GL state");
     std::cout<<"Zones guided brush GPU and presentation validation passed\n";
 }

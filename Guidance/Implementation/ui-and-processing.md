@@ -79,12 +79,22 @@ the bounded result overview and unclipped capture evidence. It writes ordinary
 editable scene-luminance points to the background Tone Curve before Sigmoid.
 Fresh HDR fitting also enables that curve's optional local-contrast preservation:
 a bounded log-luminance guide selects regional exposure changes while the original
-pixels retain fine detail. Keep its guide in the actual working space, normalize
+pixels retain fine detail. New merges additionally retain a compact, source-neutral
+camera-color guide with uncertainty and source support. The renderer converts it
+with the actual white balance, color transform and orientation. Color protection
+uses this evidence for chroma boundaries while current input luminance remains the
+tone target; unsupported color falls back to luminance. Local EV area guidance keeps
+native color edges and uses the compact evidence to qualify their reliability.
+Neither confidence nor source-support fraction is geometric alpha. Keep guidance
+owned by its result and renderer, and stop propagation at unknown geometry or
+unrelated-source blends. Saved masters without evidence remain usable; rebuilding
+the bracket creates the new evidence. Keep guides in the actual working space, normalize
 valid coverage, and apply one common RGB gain before the display transform. Its
 radius uses the complete image's longer side; viewport crops must consume the
 complete local result. Include its bounded temporary fields in memory admission
 and local-filter cost in timing identities. Missing local settings mean pointwise
-tone processing, so previously saved edits retain their behavior. These authored
+tone processing, and missing color protection leaves the luminance-only local
+filter unchanged, so previously saved tone edits retain their behavior. These authored
 project adjustments do not bake a look into the linear burst master or imply that
 standalone default finishes and diagnostic previews use the project graph.
 The retired Standard/Photographic HDR algorithms, their controls and the

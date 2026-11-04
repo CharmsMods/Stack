@@ -1,5 +1,7 @@
 #include "Renderer/LocalToneGuide.h"
 #include "Renderer/Internal/LocalToneGuideShaders.h"
+#include "Renderer/Internal/LocalToneColorGuideShaders.h"
+#include "Renderer/Internal/SceneColorGuidanceGlsl.h"
 #include "Renderer/FullscreenQuad.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
@@ -15,7 +17,8 @@ namespace {
 // a destination framebuffer, shader, sampler or partial color mask installed.
 struct PassState {
     GLint framebuffer = 0, viewport[4]{}, program = 0, vao = 0;
-    GLint activeTexture = 0, texture = 0, sampler = 0, scissorBox[4]{}, polygonMode[2]{};
+    GLint activeTexture = 0, scissorBox[4]{}, polygonMode[2]{};
+    std::array<GLint,4> textures{}, samplers{};
     GLboolean colorMask[4]{};
     static constexpr GLenum capabilities[] = {
         GL_BLEND, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_STENCIL_TEST,
@@ -32,10 +35,13 @@ struct PassState {
         glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
         glGetIntegerv(GL_POLYGON_MODE, polygonMode);
         glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+        for (unsigned i=0;i<textures.size();++i) {
+            glActiveTexture(GL_TEXTURE0+i);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &textures[i]);
+            glGetIntegerv(GL_SAMPLER_BINDING, &samplers[i]);
+            glBindSampler(i, 0);
+        }
         glActiveTexture(GL_TEXTURE0);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
-        glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
-        glBindSampler(0, 0);
         for (std::size_t i = 0; i < sizeof(capabilities) / sizeof(capabilities[0]); ++i) {
             enabled[i] = glIsEnabled(capabilities[i]);
             glDisable(capabilities[i]);
@@ -49,9 +55,11 @@ struct PassState {
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         glUseProgram(static_cast<GLuint>(program));
         glBindVertexArray(static_cast<GLuint>(vao));
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
-        glBindSampler(0, static_cast<GLuint>(sampler));
+        for (unsigned i=0;i<textures.size();++i) {
+            glActiveTexture(GL_TEXTURE0+i);
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textures[i]));
+            glBindSampler(i, static_cast<GLuint>(samplers[i]));
+        }
         glActiveTexture(static_cast<GLenum>(activeTexture));
         glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
         glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
@@ -79,6 +87,8 @@ bool Fail(std::string* error, const std::string& reason) {
 LocalToneGuide::~LocalToneGuide() {
     if (m_InitializeProgram) glDeleteProgram(m_InitializeProgram);
     if (m_BoxProgram) glDeleteProgram(m_BoxProgram);
+    if (m_ColorInitializeProgram) glDeleteProgram(m_ColorInitializeProgram);
+    if (m_ColorBoxProgram) glDeleteProgram(m_ColorBoxProgram);
 }
 
 bool LocalToneGuide::Ensure(std::string* error) {
@@ -90,6 +100,21 @@ bool LocalToneGuide::Ensure(std::string* error) {
     if (!m_BoxProgram)
         m_BoxProgram = GLHelpers::CreateShaderProgram(S::Vertex, S::Box, &detail);
     if (!m_BoxProgram) return Fail(error, "Local tone guide box shader failed: " + detail);
+    return true;
+}
+
+bool LocalToneGuide::EnsureColor(std::string* error) {
+    namespace S = LocalToneGuideShaders;
+    std::string detail;
+    if (!m_ColorInitializeProgram) {
+        std::string fragment=S::ColorInitialize;
+        fragment.insert(fragment.find("void main()"),SceneColorGuidanceGlsl);
+        m_ColorInitializeProgram=GLHelpers::CreateShaderProgram(S::Vertex,fragment.c_str(),&detail);
+    }
+    if (!m_ColorInitializeProgram) return Fail(error,"Color tone guide initialization shader failed: "+detail);
+    if (!m_ColorBoxProgram)
+        m_ColorBoxProgram=GLHelpers::CreateShaderProgram(S::Vertex,S::ColorBox,&detail);
+    if (!m_ColorBoxProgram) return Fail(error,"Color tone guide regression shader failed: "+detail);
     return true;
 }
 
@@ -177,6 +202,127 @@ unsigned int LocalToneGuide::Render(unsigned int inputTexture, int width, int he
         !box(first.Get(), third.Get(), false, false) ||
         !box(second.Get(), first.Get(), true, false) || canceled()) return 0;
     return second.Release();
+}
+
+LocalToneGuide::ColorResult LocalToneGuide::RenderColor(unsigned int inputTexture, int width, int height,
+    const std::array<float,3>& lumaWeights, float radiusFraction, float rangeEv,
+    float colorProtection, const SceneColorGuidance& guidance,
+    FullscreenQuad& quad, const std::function<bool()>& shouldCancel, std::string* error) {
+    if (error) error->clear();
+    if (std::isfinite(colorProtection) && colorProtection<=0.f)
+        return {Render(inputTexture,width,height,lumaWeights,radiusFraction,rangeEv,quad,shouldCancel,error),0};
+    const auto canceled=[&] {
+        if (!shouldCancel || !shouldCancel()) return false;
+        Fail(error,"Color tone guide was canceled.");return true;
+    };
+    if (canceled()) return {};
+    if (!inputTexture || width<=0 || height<=0 || !std::isfinite(radiusFraction) ||
+        !std::isfinite(rangeEv) || !std::isfinite(colorProtection) ||
+        !std::all_of(lumaWeights.begin(),lumaWeights.end(),[](float v){return std::isfinite(v);}) ||
+        !(double(lumaWeights[0])+lumaWeights[1]+lumaWeights[2]>0.0)) {
+        Fail(error,"Color tone guide received an invalid image or parameter.");return {};
+    }
+    if ((guidance.colorTexture==0)!=(guidance.confidenceTexture==0)) {
+        Fail(error,"Color tone guide needs both evidence color and confidence textures.");return {};
+    }
+    radiusFraction=std::clamp(radiusFraction,.002f,.25f);
+    rangeEv=std::clamp(rangeEv,.05f,2.f);
+    colorProtection=std::clamp(colorProtection,0.f,1.f);
+    PassState state;
+    const auto textureExtent=[](GLuint texture) {
+        glBindTexture(GL_TEXTURE_2D,texture);
+        GLint w=0,h=0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_WIDTH,&w);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_HEIGHT,&h);
+        return std::pair<int,int>{w,h};
+    };
+    if (textureExtent(inputTexture)!=std::pair<int,int>{width,height}) {
+        Fail(error,"Color tone guide input extent does not match its texture.");return {};
+    }
+    if (guidance.IsAvailable()) {
+        const auto colorExtent=textureExtent(guidance.colorTexture);
+        if (colorExtent.first<=0 || colorExtent.second<=0 ||
+            colorExtent!=textureExtent(guidance.confidenceTexture)) {
+            Fail(error,"Color tone guide evidence textures need matching positive extents.");return {};
+        }
+    }
+    if (!EnsureColor(error)) return {};
+    const auto [analysisWidth,analysisHeight]=AnalysisExtent(width,height);
+    const int radius=std::max(1,int(std::lround(radiusFraction*std::max(analysisWidth,analysisHeight))));
+    // Four source moments, four ping/pong moments, two coefficient fields.
+    // Final averaging reuses moment surfaces: at most 40 MiB at 512x512.
+    std::array<ScopedGLTexture,4> first,second;
+    std::array<ScopedGLTexture,2> coefficients;
+    for (auto* fields:{&first,&second}) for (auto& texture:*fields)
+        texture.Reset(GLHelpers::CreateStorageTexture(analysisWidth,analysisHeight,GL_RGBA32F));
+    for (auto& texture:coefficients)
+        texture.Reset(GLHelpers::CreateStorageTexture(analysisWidth,analysisHeight,GL_RGBA32F));
+    Framebuffer framebuffer;
+    const auto allocated=[](const auto& fields) {
+        return std::all_of(fields.begin(),fields.end(),[](const auto& field){return bool(field);});
+    };
+    if (!allocated(first) || !allocated(second) || !allocated(coefficients) || !framebuffer.name) {
+        Fail(error,"Color tone guide could not allocate its analysis fields.");return {};
+    }
+    const auto handles=[](const auto& fields) {
+        std::array<GLuint,4> result{};
+        for (std::size_t i=0;i<fields.size();++i) result[i]=fields[i].Get();
+        return result;
+    };
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,framebuffer.name);
+    glViewport(0,0,analysisWidth,analysisHeight);
+    const auto render=[&](const std::array<GLuint,4>& targets,const std::array<GLuint,4>& inputs,
+                          GLuint program,int rows) {
+        if (canceled()) return false;
+        std::array<GLenum,4> buffers{};
+        for (unsigned i=0;i<targets.size();++i) {
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0+i,GL_TEXTURE_2D,targets[i],0);
+            buffers[i]=targets[i] ? GL_COLOR_ATTACHMENT0+i : GL_NONE;
+        }
+        glDrawBuffers(static_cast<GLsizei>(buffers.size()),buffers.data());
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)
+            return Fail(error,"Color tone guide framebuffer is incomplete.");
+        glUseProgram(program);
+        for (unsigned i=0;i<inputs.size();++i) {
+            glActiveTexture(GL_TEXTURE0+i);
+            glBindTexture(GL_TEXTURE_2D,inputs[i]);
+            glUniform1i(glGetUniformLocation(program,("uInput"+std::to_string(i)).c_str()),static_cast<GLint>(i));
+        }
+        for (int y=0;y<analysisHeight;y+=rows) {
+            if (canceled()) return false;
+            glScissor(0,y,analysisWidth,std::min(rows,analysisHeight-y));
+            quad.Draw();
+        }
+        const auto glError=glGetError();
+        return glError==GL_NO_ERROR || Fail(error,"Color tone guide GPU pass failed (GL error "+std::to_string(glError)+").");
+    };
+    glUseProgram(m_ColorInitializeProgram);
+    glUniform2i(glGetUniformLocation(m_ColorInitializeProgram,"uSourceSize"),width,height);
+    glUniform2i(glGetUniformLocation(m_ColorInitializeProgram,"uAnalysisSize"),analysisWidth,analysisHeight);
+    glUniform3fv(glGetUniformLocation(m_ColorInitializeProgram,"uLuma"),1,lumaWeights.data());
+    glUniform1i(glGetUniformLocation(m_ColorInitializeProgram,"uEvidenceColor"),1);
+    glUniform1i(glGetUniformLocation(m_ColorInitializeProgram,"uEvidenceConfidence"),2);
+    glUniform1i(glGetUniformLocation(m_ColorInitializeProgram,"uHasEvidence"),guidance.IsAvailable() ? 1 : 0);
+    const std::uint64_t pixelsPerRow=std::uint64_t(width)*((std::uint64_t(height)+analysisHeight-1)/analysisHeight);
+    const int initializationRows=int(std::clamp<std::uint64_t>((1024u*1024u)/pixelsPerRow,1,32));
+    if (!render(handles(first),{inputTexture,guidance.colorTexture,guidance.confidenceTexture,0},
+        m_ColorInitializeProgram,initializationRows)) return {};
+    const auto box=[&](const std::array<GLuint,4>& targets,const std::array<GLuint,4>& inputs,bool vertical,int mode) {
+        glUseProgram(m_ColorBoxProgram);
+        glUniform2i(glGetUniformLocation(m_ColorBoxProgram,"uDirection"),vertical ? 0 : 1,vertical ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_ColorBoxProgram,"uRadius"),radius);
+        glUniform1i(glGetUniformLocation(m_ColorBoxProgram,"uMode"),mode);
+        glUniform1f(glGetUniformLocation(m_ColorBoxProgram,"uEpsilon"),rangeEv*rangeEv);
+        glUniform1f(glGetUniformLocation(m_ColorBoxProgram,"uColorProtection"),colorProtection);
+        return render(targets,inputs,m_ColorBoxProgram,32);
+    };
+    const std::array<GLuint,4> firstPair{first[0].Get(),first[1].Get(),0,0};
+    const std::array<GLuint,4> secondPair{second[0].Get(),second[1].Get(),0,0};
+    if (!box(handles(second),handles(first),false,0) ||
+        !box(handles(coefficients),handles(second),true,1) ||
+        !box(firstPair,handles(coefficients),false,2) ||
+        !box(secondPair,firstPair,true,2) || canceled()) return {};
+    return {second[0].Release(),second[1].Release()};
 }
 
 } // namespace Stack::Renderer

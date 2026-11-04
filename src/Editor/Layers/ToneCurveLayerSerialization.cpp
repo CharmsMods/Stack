@@ -183,6 +183,7 @@ json ToneCurveLayer::Serialize() const {
 }
 
 void ToneCurveLayer::Deserialize(const json& j) {
+    m_ExecutionColorRelationships=j.value("executionColorRelationships",true);
     m_ExecutionComponents={1,1,1};
     if (j.contains("executionComponents")) m_ExecutionComponents=j.at("executionComponents").get<std::array<float,3>>();
     m_SceneTone = Stack::RawRecipe::ReadSceneTone(j.value("luminanceTone", json::object()));

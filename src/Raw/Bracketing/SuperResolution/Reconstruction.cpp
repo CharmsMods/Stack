@@ -7,6 +7,7 @@
 #include "AdaptiveResolution.h"
 #include "AdaptiveMerge.h"
 #include "Raw/RawProcessingMath.h"
+#include "Raw/SceneColorGuide.h"
 #include "NodeMath/Uuid.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
@@ -190,6 +191,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     // Float RGB, per-pixel evidence, the retained native result, and bounded
     // CPU/GPU tiles are all live during reconstruction.
     std::uint64_t analysisBytes=result.analysis->guideEv.capacity()*sizeof(float);
+    if(native.sceneColorGuide)analysisBytes+=native.sceneColorGuide->ResidentBytes();
     for(const auto& source:data.sources) {
         if(source.original)analysisBytes+=source.original->rgb.capacity()*sizeof(float)+source.original->clipped.capacity();
         if(source.refinedMotion)analysisBytes+=source.refinedMotion->cells.capacity()*sizeof(MotionCorrection);
@@ -223,6 +225,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
     const unsigned tileSide=memoryPlan.tileSide;
     const auto cacheCount=memoryPlan.cacheTiles;
     auto raw=std::make_shared<RawImageData>();raw->metadata=native.metadata;
+    raw->sceneColorGuide=native.sceneColorGuide;
     auto& metadata=raw->metadata;
     metadata.rawWidth=metadata.visibleWidth=width;metadata.rawHeight=metadata.visibleHeight=height;
     metadata.pixelLayout=RawPixelLayout::LinearRgb;metadata.mosaiced=false;metadata.cfaPattern=CfaPattern::Unknown;

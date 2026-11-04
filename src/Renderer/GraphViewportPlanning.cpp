@@ -2,6 +2,7 @@
 #include "Renderer/GraphViewportPlanner.h"
 #include "Renderer/RawPreviewProxy.h"
 #include "Renderer/LocalToneGuidePlanning.h"
+#include "Renderer/SceneColorGuidePlanning.h"
 #include "Raw/RawGraphOperation.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 
@@ -262,7 +263,8 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         auto& stage = plan.stages.at(consumer);
         stage.demand = Stack::Renderer::WholeImageRegion(int(stage.spatial.fullWindow.width), int(stage.spatial.fullWindow.height));
     }
-    std::uint64_t largestRasterPixels = 0, localToneWorkingBytes = 0;
+    std::uint64_t largestRasterPixels = 0, localToneWorkingBytes = 0, colorMaskWorkingBytes = 0;
+    const bool sourceColorGuide=Stack::Renderer::GraphHasSourceColorGuide(graph);
     for (auto it = order.rbegin(); it != order.rend(); ++it) {
         auto& stage = plan.stages.at(*it);
         if (!stage.demand.Valid()) continue;
@@ -289,10 +291,13 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         // Propagate dependencies first: FieldMean still consumes its complete
         // source field even though its own result is a single value.
         if (UniformOutput(node, it->socketId)) continue;
+        if(sourceColorGuide && Stack::Renderer::NodeMayUseColorMaskGuide(node))
+            colorMaskWorkingBytes=std::max(colorMaskWorkingBytes,
+                Stack::Renderer::SceneColorMaskGuideWorkingBytes(stage.renderWidth,stage.renderHeight));
         if (Stack::Renderer::NodeUsesLocalToneGuide(node) &&
             !(node.kind == RenderGraphNodeKind::RawOperation && it->socketId == "inputImageOut"))
             localToneWorkingBytes = std::max(localToneWorkingBytes,
-                Stack::Renderer::LocalToneGuide::WorkingBytes(stage.renderWidth, stage.renderHeight));
+                Stack::Renderer::LocalToneGuideWorkingBytes(node,stage.renderWidth,stage.renderHeight));
         const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand, stage.renderWidth, stage.renderHeight);
         const auto pixels = std::uint64_t(resident.width) * resident.height;
         const auto completePixels = std::uint64_t(stage.spatial.fullWindow.width) * stage.spatial.fullWindow.height;
@@ -350,9 +355,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     const auto cropBytes = inputCropPixels > std::numeric_limits<std::uint64_t>::max() / 16u
         ? std::numeric_limits<std::uint64_t>::max() : inputCropPixels * 16u;
     // The guide is float32 even in an ordinary float16 graph, so account for
-    // its three bounded fields explicitly rather than increasing every image
+    // its bounded fields explicitly rather than increasing every image
     // surface estimate. Serial tone nodes reuse this peak, not their sum.
-    plan.workingBytes = SaturatingAdd(SaturatingAdd(outputAndScratchBytes,cropBytes),localToneWorkingBytes);
+    plan.workingBytes = SaturatingAdd(SaturatingAdd(outputAndScratchBytes,cropBytes),
+        SaturatingAdd(localToneWorkingBytes,colorMaskWorkingBytes));
     plan.fingerprint = 1;
     const auto mix = [&](std::size_t value) { plan.fingerprint ^= value + std::size_t(0x9e3779b97f4a7c15ull) +
         (plan.fingerprint << 6u) + (plan.fingerprint >> 2u); };

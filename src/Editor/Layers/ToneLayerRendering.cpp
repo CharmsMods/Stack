@@ -5,6 +5,7 @@
 #include "Renderer/GLStateGuards.h"
 #include "Renderer/CoverageSampling.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Renderer/Internal/SceneColorGuidanceGlsl.h"
 
 #include <algorithm>
 #include <array>
@@ -15,12 +16,12 @@
 
 namespace {
 
-// The local guide adds a third sampler and can fail before the final draw.
+// The optional color guide borrows six samplers and can fail before final draw.
 // Restore borrowed bindings on every return, including cancellation/errors.
 struct ToneTextureBindings {
     GLint active = GL_TEXTURE0;
-    std::array<GLint,3> textures{};
-    std::array<GLint,3> samplers{};
+    std::array<GLint,6> textures{};
+    std::array<GLint,6> samplers{};
     ToneTextureBindings() {
         glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
         for(unsigned i=0;i<textures.size();++i) {
@@ -122,6 +123,12 @@ uniform sampler2D uInputTex;
 uniform ivec2 uOutputSize;
 uniform sampler2D uCurveLut;
 uniform sampler2D uSceneToneGuide;
+uniform sampler2D uSceneToneColorDelta;
+uniform sampler2D uSceneToneEvidenceColor;
+uniform sampler2D uSceneToneEvidenceConfidence;
+uniform int uSceneToneColorEnabled;
+uniform int uSceneToneHasEvidence;
+uniform float uSceneToneColorLimit;
 uniform float uSceneToneLocalAmount;
 uniform int uSceneToneEnabled;
 uniform vec2 uSceneToneTails;
@@ -352,7 +359,26 @@ void main() {
                 vec3 guide = texture(uSceneToneGuide,vUV).rgb;
                 if (guide.b > 1e-8) {
                     vec2 coefficients = guide.rg / guide.b;
-                    float base = coefficients.x * (log2(inputY) - log2(0.18)) + coefficients.y;
+                    float inputEv = log2(inputY) - log2(0.18);
+                    float base = coefficients.x * inputEv + coefficients.y;
+                    if (uSceneToneColorEnabled!=0) {
+                        vec2 chroma;
+                        bool usable;
+                        if (uSceneToneHasEvidence!=0) {
+                            vec3 evidence=sampleSceneColorChroma(uSceneToneEvidenceColor,
+                                uSceneToneEvidenceConfidence,vUV,uLumaWeights);
+                            chroma=evidence.xy;usable=evidence.z>1e-8;
+                        } else usable=sceneColorChroma(color.rgb,uLumaWeights,chroma);
+                        if (usable) {
+                            vec4 delta=texture(uSceneToneColorDelta,vUV)/guide.b;
+                            float correction=dot(delta,vec4(inputEv,chroma,1.0));
+                            // Bound an extrapolation from very unusual or noisy
+                            // chroma. Confidence belongs to the neighborhood's
+                            // fitted coefficients, never a noisy pixelwise gain.
+                            if (!isnan(correction) && !isinf(correction))
+                                base+=clamp(correction,-uSceneToneColorLimit,uSceneToneColorLimit);
+                        }
+                    }
                     mapped = mix(mapped,ev + sceneToneEv(base) - base,uSceneToneLocalAmount);
                 }
             }
@@ -580,10 +606,13 @@ ToneCurveLayer::~ToneCurveLayer() {
 void ToneCurveLayer::InitializeGL() {
     std::string fragment=kToneCurveFrag;
     fragment.insert(fragment.find("void accumulateBaseSample("),Stack::Renderer::CoverageSamplingGlsl);
+    fragment.insert(fragment.find("void accumulateBaseSample("),Stack::Renderer::SceneColorGuidanceGlsl);
     m_ShaderProgram = GLHelpers::CreateShaderProgram(kToneVert, fragment.c_str());
 }
 
 void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
+    const auto sceneColorGuidance=m_SceneColorGuidance;
+    m_SceneColorGuidance={}; // A borrowed guide belongs to this execution only.
     if (m_ShaderProgram == 0) {
         InitializeGL();
     }
@@ -617,10 +646,21 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
         : (m_ExtendedSceneRange ? std::array<float,3>{.2126729f,.7151522f,.0721750f}
                                : std::array<float,3>{.2126f,.7152f,.0722f});
     Stack::Renderer::ScopedGLTexture guide;
+    Stack::Renderer::ScopedGLTexture colorDelta;
     if (Stack::RawRecipe::IsLocalSceneToneActive(m_SceneTone)) {
         std::string error;
-        guide.Reset(m_LocalToneGuide.Render(inputTexture,width,height,luma,m_SceneTone.localRadius,
-            m_SceneTone.localRangeEv,quad,m_ShouldCancelProcessing,&error));
+        const bool color=m_ExecutionColorRelationships &&
+            std::all_of(m_ExecutionComponents.begin(),m_ExecutionComponents.end(),[](float v){return v==1.f;}) &&
+            Stack::RawRecipe::IsColorGuidedSceneToneActive(m_SceneTone);
+        if (color) {
+            const auto result=m_LocalToneGuide.RenderColor(inputTexture,width,height,luma,m_SceneTone.localRadius,
+                m_SceneTone.localRangeEv,m_SceneTone.localColorProtection,sceneColorGuidance,
+                quad,m_ShouldCancelProcessing,&error);
+            guide.Reset(result.scalar);colorDelta.Reset(result.colorDelta);
+        } else {
+            guide.Reset(m_LocalToneGuide.Render(inputTexture,width,height,luma,m_SceneTone.localRadius,
+                m_SceneTone.localRangeEv,quad,m_ShouldCancelProcessing,&error));
+        }
         if (!guide) throw std::runtime_error(error.empty() ? "Local tone guide could not be rendered." : error);
     }
     const EffectiveLocalBaselineSettings localBaseline = ComputeEffectiveLocalBaselineSettings();
@@ -641,6 +681,18 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glBindTexture(GL_TEXTURE_2D,guide.Get());
     glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneGuide"),2);
     glUniform1f(glGetUniformLocation(m_ShaderProgram,"uSceneToneLocalAmount"),guide ? m_SceneTone.localAmount : 0.f);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D,colorDelta.Get());
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneColorDelta"),3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D,colorDelta ? sceneColorGuidance.colorTexture : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneEvidenceColor"),4);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D,colorDelta ? sceneColorGuidance.confidenceTexture : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneEvidenceConfidence"),5);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneColorEnabled"),colorDelta ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneHasEvidence"),sceneColorGuidance.IsAvailable() ? 1 : 0);
+    glUniform1f(glGetUniformLocation(m_ShaderProgram,"uSceneToneColorLimit"),2.f*m_SceneTone.localRangeEv);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uSceneToneEnabled"),
         Stack::RawRecipe::IsSceneToneActive(m_SceneTone) ? 1 : 0);
     glUniform2f(glGetUniformLocation(m_ShaderProgram, "uSceneToneTails"),

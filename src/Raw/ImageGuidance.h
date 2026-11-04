@@ -17,8 +17,13 @@ struct ImageGuide {
     std::size_t revision = 0;
     std::size_t recipeFingerprint = 0;
     std::vector<ImageGuidePixel> pixels;
+    // Optional color-evidence suitability, independent of geometric coverage.
+    // Empty preserves the original color guidance. A weak value softens color
+    // boundaries only; luminance and the authored brush footprint remain valid.
+    std::vector<float> colorConfidence;
     bool Valid() const {
-        return width > 0 && height > 0 && pixels.size() == std::size_t(width) * height;
+        return width > 0 && height > 0 && pixels.size() == std::size_t(width) * height &&
+            (colorConfidence.empty() || colorConfidence.size() == pixels.size());
     }
 };
 

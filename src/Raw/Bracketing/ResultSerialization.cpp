@@ -2,6 +2,7 @@
 #include "Raw/DepthMaskManifest.h"
 #include "Raw/Bracketing/DepthMaskStorage.h"
 #include "Raw/RawMetadataSerialization.h"
+#include "Raw/SceneColorGuide.h"
 #include "Raw/Bracketing/Panorama/Panorama.h"
 #include "NodeMath/ContractTypes.h"
 #include <array>
@@ -71,8 +72,11 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
     const auto& raw=*result.raw;
     const auto& preview=result.preview;
     const auto sidecars=raw.multiFrameMeasurementSidecars;
+    const auto color=raw.sceneColorGuide;
+    if(color&&(!color->Valid()||result.panorama))
+        throw std::runtime_error("The bracket source color guide is invalid or has no output coordinate mapping.");
     json header={
-        {"version",raw.reconstructionDepth?5:result.panorama?2:1},{"storageInstance",auxiliaryOnly ? result.identity : StorageId()},{"externalPixels",auxiliaryOnly},{"identity",result.identity},{"contentIdentity",raw.contentIdentity},
+        {"version",color?6:raw.reconstructionDepth?5:result.panorama?2:1},{"storageInstance",auxiliaryOnly ? result.identity : StorageId()},{"externalPixels",auxiliaryOnly},{"identity",result.identity},{"contentIdentity",raw.contentIdentity},
         {"contentHash",raw.contentIdentityHash},{"mosaicHash",raw.normalizedMosaicContentHash},
         {"decoderVersion",raw.decoderIdentityVersion},{"cameraRgb",raw.reconstructedCameraRgb},
         {"metadata",Raw::Serialization::SerializeMetadata(raw.metadata)},
@@ -98,6 +102,9 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
             {"tiles",std::move(tiles)}};
     }
     if(result.panorama)header["panorama"]=Raw::Bracketing::Panorama::SerializeLayout(*result.panorama);
+    if(color)header["sceneColorGuide"]={{"width",color->width},{"height",color->height},
+        {"sensorWidth",color->sensorWidth},{"sensorHeight",color->sensorHeight},{"identity",color->identity},
+        {"domain","calibrated-camera-rgb-linear-v1"},{"coordinates","native-active-full-frame-v1"}};
     auto depth=raw.reconstructionDepth;
     std::vector<DepthMask::Bytes> encodedMasks;
     if(depth) {
@@ -158,6 +165,10 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
         WriteBlock(stream,raw.outputCoverage);WriteBlock(stream,preview.coverage);
         WriteBlock(stream,result.panorama->ownership);
     }
+    if(color) {
+        WriteBlock(stream,color->cameraRgb);WriteBlock(stream,color->variance);
+        WriteBlock(stream,color->reliability);WriteBlock(stream,color->coverage);
+    }
     if(depth) {
         WriteBlock(stream,depth->inverseDepth);WriteBlock(stream,depth->confidence);
         for(const auto& mask:encodedMasks)WriteBlock(stream,mask);
@@ -172,7 +183,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
     std::string text(static_cast<std::size_t>(headerBytes),'\0');reader.Bytes(text.data(),headerBytes);
     const auto header=json::parse(text);
     const int version=header.at("version");
-    if(version<1||version>5)throw std::runtime_error("The bracket result version is unsupported.");
+    if(version<1||version>6)throw std::runtime_error("The bracket result version is unsupported.");
     const bool panorama=version>=2&&header.contains("panorama");
     auto raw=std::make_shared<Raw::RawImageData>();
     raw->metadata=Raw::Serialization::DeserializeMetadata(header.at("metadata"));
@@ -289,6 +300,27 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
         for(float a:preview.coverage)if(a<0||a>1)throw std::runtime_error("Invalid panorama preview coverage.");
         result.panorama=std::move(layout);
     }
+    if(version>=6) {
+        const auto& saved=header.at("sceneColorGuide");auto color=std::make_shared<Raw::SceneColorGuide>();
+        color->width=saved.at("width");color->height=saved.at("height");
+        color->sensorWidth=saved.at("sensorWidth");color->sensorHeight=saved.at("sensorHeight");
+        color->identity=saved.at("identity");
+        if(panorama||!color->width||!color->height||color->width>SceneColorGuide::MaximumDimension||
+            color->height>SceneColorGuide::MaximumDimension||!color->sensorWidth||!color->sensorHeight||
+            saved.at("domain")!="calibrated-camera-rgb-linear-v1"||saved.at("coordinates")!="native-active-full-frame-v1"||
+            (result.reconstructionInspection?
+                color->sensorWidth!=result.reconstructionInspection->sensorWidth||color->sensorHeight!=result.reconstructionInspection->sensorHeight:
+                (!raw->reconstructedCameraRgb?(color->sensorWidth!=unsigned(raw->metadata.visibleWidth)||
+                    color->sensorHeight!=unsigned(raw->metadata.visibleHeight)):
+                    (std::uint64_t(color->sensorWidth)*raw->metadata.visibleHeight!=
+                        std::uint64_t(color->sensorHeight)*raw->metadata.visibleWidth))))
+            throw std::runtime_error("The saved bracket source color geometry is invalid.");
+        const auto count=std::uint64_t(color->width)*color->height;
+        color->cameraRgb=reader.Block<float>(count*3);color->variance=reader.Block<float>(count*3);
+        color->reliability=reader.Block<float>(count);color->coverage=reader.Block<float>(count);
+        if(!color->Valid())throw std::runtime_error("The saved bracket source color evidence is incomplete or invalid.");
+        raw->sceneColorGuide=std::move(color);
+    }
     if(version>=3&&header.contains("depth")) {
         // Depth is the final, optional section. All image data has already passed validation.
         try {
@@ -316,7 +348,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
             for(float v:d->confidence)if(v<0||v>1)throw std::runtime_error("Invalid saved depth confidence.");
             if(version>=4) {
                 d->masks=ReadDepthMaskManifest(saved.at("masks"));
-                if (version==5 && header.value("externalPixels",false)) {
+                if (version>=5 && header.value("externalPixels",false)) {
                     const auto master=raw->reconstructionDepth;
                     if(master && !master->Available() && master->masks.empty() && !master->message.empty()) {
                         d->masks.clear();
@@ -327,7 +359,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
                     if (master) d->masks=master->masks;
                 } else for(auto& mask:d->masks) {
                     const auto size=std::uint64_t(mask.w)*mask.h;
-                    if (version==5) {
+                    if (version>=5) {
                         auto encoded=reader.Block<std::uint8_t>(compressBound(static_cast<uLong>(size)));
                         if (encoded.empty()) throw std::runtime_error("Missing compressed depth mask.");
                         SetCompressedCoverage(mask,std::move(encoded));
