@@ -241,6 +241,7 @@ std::vector<Item> RenderQueueModel::ClaimForExport(const std::vector<Item>& requ
             (item->state != ItemState::Waiting && item->state != ItemState::Failed)) continue;
         item->state = ItemState::Queued;
         item->progress = 0.0f;
+        item->exportFormat = request.exportFormat;
         item->status = "Queued for export";
         item->outputPath.clear();
         claimed.push_back(*item);

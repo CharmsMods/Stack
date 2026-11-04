@@ -56,6 +56,30 @@ See Adobe-DNG-Notice.txt and the [DNG Specification patent license](https://help
 - Copyright: Copyright (c) 2017 Sean Barrett
 - Included license files: `stb-MIT-or-Public-Domain.txt`
 
+## Ultra HDR reference codec
+
+- Version: 1.4.0, commit d52a0d13814ca399fc8a07e23de1d2c63f0e8404
+- Upstream: https://github.com/google/libultrahdr
+- License: Apache-2.0 and BSD-3-Clause
+- Copyright: Android Open Source Project, Google and modp_b64 authors. This product includes Gain Map technology under license by Adobe.
+- Included license files: `UltraHDR-Apache-2.0.txt`, `ImageIO-Apache-2.0.txt`, `modp_b64-BSD.txt`, `Adobe-Gain-Map-Notice.txt`
+
+## libjpeg-turbo
+
+- Version: 3.1.2 (OpenCV source distribution)
+- Upstream: https://libjpeg-turbo.org/
+- License: IJG, BSD-3-Clause and Zlib
+- Copyright: This software is based in part on the work of the Independent JPEG Group.
+- Included license files: `libjpeg-turbo-LICENSE.txt`, `libjpeg-turbo-README-IJG.txt`
+
+## Little CMS
+
+- Version: 2.20, commit 7717fce0d85447ef3b2df0cca2e99207c15eeecd
+- Upstream: https://littlecms.com/
+- License: MIT
+- Copyright: Copyright (c) 2023 Marti Maria Saguer
+- Included license files: `LittleCMS-MIT.txt`
+
 ## OpenCV CPU panorama modules
 
 - Version: 4.13.0, commit 2e1f8da65e4f9fa1a98423e6ac223187438a4db8

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "Renderer/GlassChrome.h"
 #include "Renderer/GLLoader.h"
+#include "Hdr/UiTarget.h"
 #include <algorithm>
 namespace Stack::Renderer {
 void GlassChrome::EndInkCallback(const ImDrawList*, const ImDrawCmd*) {
@@ -19,6 +20,7 @@ void GlassChrome::DrawInk(const Ink& ink) {
     const float projection[16]={2.f/(right-left),0,0,0, 0,2.f/(top-bottom),0,0,
         0,0,-1,0, (right+left)/(left-right),(top+bottom)/(bottom-top),0,1};
     glUseProgram(programs[2]);
+    glUniform1i(Hdr::Ui::TargetUniform,Hdr::Ui::linearTarget);
     glUniformMatrix4fv(0,1,GL_FALSE,projection);
     glUniform1i(4,int(ink.slot));
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,inkBuffers[1]);

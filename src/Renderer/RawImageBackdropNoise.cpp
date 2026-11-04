@@ -1,3 +1,4 @@
+#include "Hdr/UiTarget.h"
 #include "RawImageBackdropNoise.h"
 #include "RawImageBackdropUniforms.h"
 #include "RawImageBackdrop.h"
@@ -154,6 +155,7 @@ bool RawImageBackdropNoise::Prepare(const RawImageBackdropFrame& frame) {
     if (!Ensure(w, h)) return false;
     profileValid = false;
     glUseProgram(analysisProgram);
+    glUniform1i(43,Hdr::Ui::linearTarget);
     glUniform1i(analysisUniforms.image, 0);
     glUniform1i(analysisUniforms.previous, 1);
     glUniform2f(analysisUniforms.nativeExtent, frame.nativeExtent.x, frame.nativeExtent.y);

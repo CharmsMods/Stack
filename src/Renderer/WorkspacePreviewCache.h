@@ -27,7 +27,7 @@ public:
     // Coordinates are framebuffer pixels with a bottom-left origin. The
     // calling compositor restores GL bindings after capture.
     void Capture(unsigned int sourceFramebuffer, std::uint64_t workspace,
-        int rootView, int left, int bottom, int right, int top);
+        int rootView, int left, int bottom, int right, int top,bool extended=false);
     void Forget(std::uint64_t workspace);
     void Clear();
 

@@ -1,3 +1,5 @@
+#include "Project/GraphSnapshotBrightness.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Project/GraphSnapshotBuilder.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
@@ -151,13 +153,6 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         }
         renderGraph = &expandedGraph;
     }
-    const EditorNodeGraph::Graph& graph = *renderGraph;
-    const std::vector<EditorNodeGraph::Node>& graphNodes = graph.GetNodes();
-    const std::vector<EditorNodeGraph::Link>& graphLinks = graph.GetLinks();
-    const GraphSnapshotInternal::Lookup graphLookup(graph);
-    snapshot.outputNodeId = stageOutputNodeId > 0 ? stageOutputNodeId : graph.ResolvePreviewOutputNodeId();
-    if (stageOutputNodeId > 0) snapshot.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
-    snapshot.executionInspectionEnabled = inputs.executionInspectionEnabled;
     const Stack::Timeline::TimelineFrameEvaluation frameEvaluation =
         Stack::Timeline::BuildTimelineFrameEvaluation(
             inputs.timeline,
@@ -172,6 +167,20 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         }
     }
 
+    EditorNodeGraph::Graph brightnessGraph;
+    EditorNodeGraph::GraphOutputDescriptions authoredWireIssues;
+    EditorNodeGraph::GraphOutputDescriptions blockedResults;
+    int resolvedStageId=stageOutputNodeId;
+    if (LowerBrightnessRecipes(*renderGraph, inputs, frameContext, brightnessGraph, expansion,
+                               authoredWireIssues, blockedResults, resolvedStageId))
+        renderGraph = &brightnessGraph;
+    const EditorNodeGraph::Graph& graph = *renderGraph;
+    const std::vector<EditorNodeGraph::Node>& graphNodes = graph.GetNodes();
+    const std::vector<EditorNodeGraph::Link>& graphLinks = graph.GetLinks();
+    const GraphSnapshotInternal::Lookup graphLookup(graph);
+    snapshot.outputNodeId = stageOutputNodeId > 0 ? resolvedStageId : graph.ResolvePreviewOutputNodeId();
+    if (stageOutputNodeId > 0) snapshot.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    snapshot.executionInspectionEnabled = inputs.executionInspectionEnabled;
     snapshot.nodes.reserve(graphNodes.size());
     for (const EditorNodeGraph::Node& node : graphNodes) {
         if (!node.definitionResolved) {
@@ -532,6 +541,10 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 renderNode.kind = RenderGraphNodeKind::DataMath;
                 renderNode.dataMathMode = static_cast<RenderDataMathMode>(node.dataMathMode);
                 renderNode.dataMathSettings = node.dataMathSettings;
+                if (NodeMath::Primitive(node.dataMathMode)) {
+                    Stack::Timeline::TryGetFrameParameterValue(frameContext,{node.id,"constant-a",inputs.graphId,node.instanceUuid},renderNode.dataMathSettings.constantA);
+                    Stack::Timeline::TryGetFrameParameterValue(frameContext,{node.id,"constant-b",inputs.graphId,node.instanceUuid},renderNode.dataMathSettings.constantB);
+                }
                 break;
             case EditorNodeGraph::NodeKind::TechnicalImage:
                 renderNode.kind = RenderGraphNodeKind::TechnicalImage;
@@ -581,7 +594,12 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                     std::holds_alternative<double>(node.value.value.payload))
                     renderNode.scalarValue = std::get<double>(node.value.value.payload);
                 else snapshot.unavailableOutputs[node.id] = node.value.value.message.empty()
-                    ? "The connected Scalar Value is unavailable." : node.value.value.message;
+                    ? "The connected Number is unavailable." : node.value.value.message;
+                {
+                    float animated=0;
+                    if (Stack::Timeline::TryGetFrameParameterValue(frameContext,{node.id,"value",inputs.graphId,node.instanceUuid},animated))
+                        renderNode.scalarValue=animated;
+                }
                 break;
             case EditorNodeGraph::NodeKind::Composite:
             case EditorNodeGraph::NodeKind::Scope:
@@ -613,6 +631,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         }
         if (renderNodeIds.count(link.fromNodeId) == 0 ||
             renderNodeIds.count(link.toNodeId) == 0) {
+            if (renderNodeIds.count(link.toNodeId))
+                snapshot.unavailableOutputs[link.toNodeId]="The connected operand has no executable source.";
             continue;
         }
         snapshot.links.push_back(RenderGraphLink{
@@ -623,7 +643,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         });
     }
 
-    EditorNodeGraph::GraphOutputContext outputContext;
+    EditorNodeGraph::GraphOutputContext outputContext =
+        inputs.outputContextOverrides ? *inputs.outputContextOverrides : EditorNodeGraph::GraphOutputContext{};
     for (const RenderGraphNode& node : snapshot.nodes) {
         auto descriptor = UnknownLiveImageDescriptor("source.render");
         bool source = false;
@@ -678,7 +699,14 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         for (const auto& entry : inputs.outputContextOverrides->sourceDescriptors)
             outputContext.sourceDescriptors[entry.first] = entry.second;
     }
+    if (!blockedResults.empty())
+        outputContext.resolveOutput=[&,previous=outputContext.resolveOutput](const auto& node,const auto& port)->std::optional<EditorNodeGraph::GraphOutputDescription> {
+            const auto issue=blockedResults.find(EditorNodeGraph::GraphOutputIdentity(node.id,port));
+            if (issue!=blockedResults.end()) return issue->second;
+            return previous ? previous(node,port) : std::nullopt;
+        };
     auto outputs = EditorNodeGraph::DescribeGraphOutputs(graph, outputContext);
+    for (const auto& [key,issue]:authoredWireIssues) outputs.insert_or_assign(key,issue);
     std::vector<std::string> fingerprints;
     for (RenderGraphNode& node : snapshot.nodes) {
         const auto* authored = graph.FindNode(node.nodeId);
@@ -687,13 +715,19 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         if (output != outputs.end()) {
             node.semanticDescriptor = output->second.descriptor;
             node.semanticDescriptorIdentity = Stack::NodeMath::DescriptorContentIdentity(node.semanticDescriptor);
-            if (node.kind==RenderGraphNodeKind::DataMath &&
-                node.semanticDescriptor.logicalType==NodeMath::LogicalValueType::Scalar)
-                node.dataMathSettings.domain=NodeMath::ArithmeticDomain::Values;
-            if (node.kind==RenderGraphNodeKind::DataMath || node.kind==RenderGraphNodeKind::ChannelCombine)
-                for (const auto& diagnostic : output->second.diagnostics)
+            if (node.kind==RenderGraphNodeKind::DataMath) {
+                if (node.semanticDescriptor.logicalType==NodeMath::LogicalValueType::Scalar)
+                    node.dataMathSettings.domain=NodeMath::ArithmeticDomain::Values;
+                else if (NodeMath::Primitive(node.dataMathMode))
+                    node.dataMathSettings.domain=EditorNodeGraph::IsSingleChannelValue(node.semanticDescriptor.logicalType)
+                        ? NodeMath::ArithmeticDomain::Channel : NodeMath::ArithmeticDomain::Spatial;
+            }
+            for (const auto& diagnostic : output->second.diagnostics)
                     if (diagnostic.severity==NodeMath::DiagnosticSeverity::HardError ||
                         diagnostic.severity==NodeMath::DiagnosticSeverity::RuntimeFault) {
+                        // Component selection can fail on one output while its siblings stay usable.
+                        if (node.kind == RenderGraphNodeKind::ChannelSplit && diagnostic.ruleId == "graph.wire" &&
+                            diagnostic.affectedIdentity == output->first) continue;
                         snapshot.unavailableOutputs[node.nodeId]=diagnostic.message;
                         break;
                     }
@@ -729,7 +763,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
     }
     BindGraphImageContracts(snapshot);
     if (stageOutputNodeId > 0) return result;
-    if (hasCompoundNode) EditorNodeGraph::BindCompoundOutputDescriptions(outputs, expansion);
+    if (!expansion.outputBindings.empty()) EditorNodeGraph::BindCompoundOutputDescriptions(outputs, expansion);
     result.outputDescriptions = std::move(outputs);
     result.publishSemantics = true;
     return result;

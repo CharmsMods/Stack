@@ -557,6 +557,7 @@ bool AssociateWorkspaceSourceSetProjects(
         entry.readOnlyRecovery = indexed.readOnlyRecovery;
         entry.conflict = indexed.readOnlyRecovery;
         entry.dirty = indexed.editRevision != indexed.storageRevision;
+        entry.persistedStorageRevision = indexed.storageRevision;
         entry.errorMessage = indexed.errorMessage;
         entry.multiFrameProject = indexed.multiFrameProject;
         entry.bracketingProject = std::any_of(indexed.sourceSets.begin(),indexed.sourceSets.end(),[](const auto& set){return set.settings.contains("bracketing");});

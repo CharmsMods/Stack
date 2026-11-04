@@ -12,7 +12,8 @@ root = Path(__file__).resolve().parents[2]
 s = (root / 'src/Editor/Internal/RawWorkspace/EditorModuleRawWorkspaceThumbnails.cpp').read_text()
 h = (root / 'src/Editor/EditorModule.h').read_text()
 record = h[h.index('    struct RawWorkspaceThumbnailTexture {'):h.index('    struct RawWorkspaceRecipePreviewCacheEntry')]
-constants = s[s.index('constexpr std::size_t kRawWorkspaceThumbnailTextureMaxResidentCount'):s.index('\n} // namespace')]
+constants = (s[s.index('constexpr std::size_t kRawWorkspaceThumbnailTextureMaxResidentCount'):s.index('bool NeedsCameraGroupingPreview')] +
+             s[s.index('std::size_t RawWorkspaceThumbnailResidentBytes'):s.index('\n} // namespace')])
 method = s[s.index('void EditorModule::TrimRawWorkspaceThumbnailTextureCache()'):s.index('\nvoid EditorModule::ClearRawWorkspaceThumbnailTextures')]
 fixture = (root / 'tools/tests/gallery_thumbnail_trim_tests.cpp').read_text()
 for marker, content in [('RECORD', record), ('CONSTANTS', constants), ('METHOD', method)]:

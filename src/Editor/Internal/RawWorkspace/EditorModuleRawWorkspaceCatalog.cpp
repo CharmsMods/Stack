@@ -641,6 +641,7 @@ void EditorModule::LoadRawWorkspaceAppState() {
     } else if (!appState.lastWorkspaceRoot.empty()) {
         RequestOpenRawWorkspace(appState.lastWorkspaceRoot);
     }
+    if (m_PermanentGalleryWorkspace) RequestRawWorkspaceFolderCardPreviews();
 }
 
 void EditorModule::SaveRawWorkspaceAppState() {

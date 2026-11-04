@@ -54,6 +54,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "LayerRegistry.h"
 #include "EditorRenderWorker.h"
 #include "RawRenderService.h"
+#include "Editor/GalleryHdrThumbnail.h"
 #include "NodeGraph/EditorNodeGraph.h"
 #include "Editor/ViewportPreviewState.h"
 #include "Editor/RenderPresentationState.h"
@@ -103,7 +104,6 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include <utility>
 #include <vector>
 
-#include "UI/EditorScopes.h"
 
 struct GLFWwindow;
 enum class ToneCurveSamplingBasis : int;
@@ -185,10 +185,6 @@ public:
     using CompositeSceneItem = Stack::EditorModuleTypes::CompositeSceneItem;
     using GraphPreviewPixels = Stack::EditorModuleTypes::GraphPreviewPixels;
     using GraphPerformanceStats = Stack::EditorModuleTypes::GraphPerformanceStats;
-    using HdrMergeRenderState = Stack::EditorModuleTypes::HdrMergeRenderState;
-    using HdrMergeInputSummary = Stack::EditorModuleTypes::HdrMergeInputSummary;
-    using HdrMergeNodeStatus = Stack::EditorModuleTypes::HdrMergeNodeStatus;
-    using HdrMergeConnectionTopology = Stack::EditorModuleTypes::HdrMergeConnectionTopology;
     using PersistedCompositeSceneEntry = Stack::EditorModuleTypes::PersistedCompositeSceneEntry;
     using LoadedProjectData = EditorLoadedProjectData;
     using NodeBrowserThumbnailView = Stack::EditorModuleTypes::NodeBrowserThumbnailView;
@@ -646,7 +642,6 @@ public:
         const EditorNodeGraph::DevelopAutoGuidance& candidateGuidance,
         const std::string& candidateId,
         EditorNodeGraph::DevelopAutoIntent intent);
-    bool ConvertRawDetailFusionToHybrid(int fusionNodeId);
     bool SplitLayerNodeIntoChannels(int layerNodeId);
     bool SplitImageAverageNodeIntoChannelAverages(int dataMathNodeId);
     bool ToggleOutputNodeEnabled(int outputNodeId);
@@ -668,11 +663,7 @@ public:
     bool DeleteSelectedGraphLink();
     bool RemoveGraphNode(int nodeId, bool reconnect = true);
     bool DeleteSelectedGraphNodes();
-    void AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition);
-    void AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combineMode, EditorNodeGraph::Vec2 graphPosition);
-    void AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition);
-    void AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition);
     void AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind generatorKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddDataMathNodeAt(EditorNodeGraph::DataMathMode mode, EditorNodeGraph::Vec2 graphPosition);
@@ -722,8 +713,6 @@ public:
     void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition);
-    void AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition);
-    void AddMfsrNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool CreateToneCurveSelectionMask(
@@ -747,7 +736,6 @@ public:
     void RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailFusionControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
-    void RenderHdrMergeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderLutControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderMaskTextureControls(EditorNodeGraph::Node& node, float controlWidth);
     void AutoLayoutGraph();
@@ -791,9 +779,9 @@ public:
         const std::function<void(LayerBase&)>& renderControls,
         const std::function<void(std::function<void()>)>& deferCommand = {});
     void MarkSelectedLayerRenderDirty();
-    void RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
     void MarkRenderDirty(int touchedNodeId = -1);
     void MarkRenderRefreshDirty();
+    unsigned int DisplayOutputTexture(unsigned int texture,bool hdr) const;
     RenderGraphSnapshot BuildGraphSnapshot() const;
     RenderGraphSnapshot BuildGraphSnapshotForTimelineFrame(int timelineFrame, int stageOutputNodeId = 0) const;
     bool UsesRawWorkspaceStageRender() const;
@@ -804,8 +792,11 @@ public:
         Stack::NodeMath::ValueDescriptor& descriptor) const;
     const EditorNodeGraph::GraphOutputDescription* GetGraphOutputDescription(
         int nodeId, const std::string& socketId) const;
-    // Returns presentation-only source facts for a wire. This never evaluates
-    // the graph and deliberately excludes destination diagnostics.
+    // Lookup in the already-published revision, after GetGraphOutputDescription.
+    void PrepareGraphOutputDescriptions() const;
+    const EditorNodeGraph::GraphOutputDescription* FindPublishedGraphDescription(
+        int nodeId,const std::string& socketId) const;
+    // Wire readout includes the source and any mismatch at its destination.
     bool TryGetGraphLinkWireReadoutInput(
         const EditorNodeGraph::Link& link,
         EditorNodeGraph::WireReadout::Input& input) const;
@@ -827,7 +818,6 @@ public:
     // Borrowed UI texture for this editor's live mask source. Calling marks it
     // visible so the render worker refreshes it after document changes.
     unsigned int GetRawMaskTexturePreview(const EditorNodeGraph::Node& node, int& width, int& height);
-    HdrMergeNodeStatus GetHdrMergeNodeStatus(int nodeId) const;
     bool GetGraphPerformancePopupEnabled() const { return m_ShowGraphPerformancePopup; }
     void SetGraphPerformancePopupEnabled(bool enabled) { m_ShowGraphPerformancePopup = enabled; }
     const GraphPerformanceStats& GetGraphPerformanceStats() const { return m_GraphPerformanceStats; }
@@ -839,8 +829,13 @@ public:
     bool ApplyLoadedProject(const LoadedProjectData& projectData);
     void RequestLoadSourceImage(const std::string& path);
     bool ExportImage(const std::string& path);
-    bool RequestExportImage(const std::string& path);
-    bool RequestQueueExportImage(const std::string& path);
+    bool CanExportGraphOutput(int outputNodeId) const;
+    bool RequestExportGraphOutput(int outputNodeId, const std::string& path,
+        Stack::Hdr::FileFormat format = Stack::Hdr::FileFormat::SdrPng);
+    bool RequestExportImage(const std::string& path,
+        Stack::Hdr::FileFormat format = Stack::Hdr::FileFormat::SdrPng);
+    bool RequestQueueExportImage(const std::string& path,
+        Stack::Hdr::FileFormat format = Stack::Hdr::FileFormat::SdrPng);
     bool CaptureSettledFullQualityPreviewRaster(
         std::vector<unsigned char>& outPixels,
         int& outW,
@@ -1019,10 +1014,6 @@ public:
         const std::string& sourceSetId,
         const std::string& frameId,
         int orientation,
-        std::string* errorMessage = nullptr);
-    bool SetMultiFrameInternalViewTransformEnabled(
-        const std::string& sourceSetId,
-        bool enabled,
         std::string* errorMessage = nullptr);
     bool RemoveMultiFrameFrame(
         const std::string& sourceSetId,
@@ -1211,7 +1202,7 @@ public:
     // reports whether the active RAW presentation has caught up with them.
     bool HasCurrentRawWorkspacePresentation() const;
     bool TryGetViewportPreviewGeometry(Stack::Renderer::ViewportPreviewGeometry& geometry) const;
-    bool TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height) const;
+    bool TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height, bool hdr = false) const;
     void UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
         ImVec2 clipMin, ImVec2 clipMax, bool navigationActive = false);
     void UpdateGraphBackdropViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
@@ -1268,7 +1259,7 @@ public:
         const Stack::RawWorkspace::SourceRecord& source,
         int* outWidth = nullptr,
         int* outHeight = nullptr,
-        bool prioritize = false, int detailEdge = 0);
+        bool prioritize = false, int detailEdge = 0, const std::string* presetCardKey = nullptr);
     unsigned int GetGalleryOriginalDetail(const Stack::RawWorkspace::SourceRecord& source, ImVec2 available,
         int& width, int& height);
     std::shared_ptr<const Raw::RawMetadata> GetRawWorkspaceThumbnailMetadata(
@@ -1436,14 +1427,16 @@ public:
     bool ValidateCompositePngExport(std::string& error);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     bool BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
-    void BeginPngExportWrite(
+    void BeginImageExportWrite(
         std::string path,
         std::vector<unsigned char> pixels,
         int width,
         int height,
         Stack::NodeMath::PngColorMetadataChunks colorChunks,
         std::uint64_t generation,
-        Stack::FileSave::ExportFileTarget target);
+        Stack::FileSave::ExportFileTarget target,
+        Stack::Hdr::FileFormat format = Stack::Hdr::FileFormat::SdrPng,
+        Stack::Hdr::Image hdrImage = {});
     void CompleteRawWorkspaceExportRender(
         EditorRenderWorker::Result& result,
         bool sourceMatchesActive);
@@ -1503,7 +1496,22 @@ private:
     std::unordered_map<unsigned int,std::weak_ptr<const Stack::Renderer::GalleryThumbnailLease>> m_GalleryThumbnailLeases;
     std::vector<RetiredGalleryThumbnail> m_RetiredGalleryThumbnails;
     std::size_t m_RetiredGalleryThumbnailBytes=0;
+    struct RawWorkspaceThumbnailTexture;
+    unsigned int GalleryThumbnailForDisplay(const std::string& cacheKey, RawWorkspaceThumbnailTexture& entry,
+        const Stack::RawWorkspace::SourceRecord& source, const std::string* presetCardKey, int* width, int* height);
+    void CancelObsoleteGalleryHdrJob();
+    void UploadGalleryHdrThumbnail();
+    void ReleaseGalleryHdrThumbnail(RawWorkspaceThumbnailTexture& entry);
+
+    std::shared_ptr<Stack::GalleryHdr::Job> m_GalleryHdrJob;
     struct RawWorkspaceThumbnailTexture {
+        unsigned int hdrTexture = 0;
+        int hdrWidth = 0, hdrHeight = 0;
+        int hdrDemandFrame = -1;
+        double hdrVisibleSince = 0;
+        std::uint64_t hdrProjectRevision = 0;
+        bool hdrAttempted = false;
+
         int lastDemandFrame = -1;
         std::shared_ptr<std::atomic<bool>> cancelTile;
         std::string sourceIdentity;
@@ -1654,7 +1662,6 @@ private:
 
     EditorSidebar m_Sidebar;
     EditorViewport m_Viewport;
-    EditorScopes m_Scopes;
     RenderPipeline m_Pipeline;
     EditorRenderWorker m_RenderWorker;
     Stack::EditorRendering::RawRenderService::ClientId
@@ -1686,7 +1693,6 @@ private:
     unsigned int m_ExportIconTexture = 0;
     unsigned int m_SettingsIconTexture = 0;
     unsigned int m_BackgroundRemoverIconTexture = 0;
-    unsigned int m_ColorGradeIconTexture = 0;
     unsigned int m_RawFolderIconTexture = 0;
     unsigned int m_RawRefreshIconTexture = 0;
     unsigned int m_RawClearIconTexture = 0;
@@ -2432,6 +2438,7 @@ private:
     bool m_RawWorkspaceExportRenderRequested = false;
     std::uint64_t m_RawWorkspaceExportRenderGeneration = 0;
     std::string m_RawWorkspaceExportPath;
+    Stack::Hdr::FileFormat m_RequestedExportFormat = Stack::Hdr::FileFormat::SdrPng;
     Stack::FileSave::ExportFileTarget m_RawWorkspaceExportFileTarget;
     Stack::NodeMath::PngColorMetadataChunks m_RawWorkspaceExportColorChunks;
     bool m_SuppressExportProjectCheckpoint = false;
@@ -2539,6 +2546,9 @@ private:
     using CompositeEdgeSnapMode = Stack::EditorModuleTypes::CompositeEdgeSnapMode;
     CompositeEdgeSnapMode m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
     CompositeEdgeSnapMode m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+    bool m_HdrPreviewRequested=false;
+    Raw::RawGpuImageLease m_HdrGraphOutput;
+    unsigned m_HdrGraphBase=0;
     bool m_DetachedPreviewActive = false;
     bool m_WorkspaceDetachedWindowsVisible = true;
     bool m_RestoreWorkspaceDetachedPreview = false;
@@ -2602,17 +2612,11 @@ private:
     bool m_CompositeExportBoundsEditMode = false;
     std::vector<PersistedCompositeSceneEntry> m_PersistedCompositeSceneEntries;
     mutable std::unordered_map<int, std::uint64_t> m_PreviewDisplayedRevisions;
-    mutable std::unordered_map<int, std::uint64_t> m_ScopeDisplayedRevisions;
     std::unordered_map<int, GraphPreviewPixels> m_PreviewPixelCache;
     std::unordered_map<int, std::uint64_t> m_PreviewRequestedGenerations;
     std::unordered_map<int, std::uint64_t> m_PreviewCompletedGenerations;
     mutable Stack::Editor::PreviewRequestCandidates m_PreviewRequestCandidates;
     std::uint64_t m_PreviewCachePruneGeneration = 0;
-    std::unordered_map<int, std::uint64_t> m_HdrMergeRequestedGenerations;
-    std::unordered_map<int, std::uint64_t> m_HdrMergeCompletedGenerations;
-    std::unordered_map<int, std::string> m_HdrMergeFailureMessages;
-    std::unordered_set<int> m_HdrMergeRenderingNodeIds;
-    std::unordered_map<std::uint64_t, std::vector<int>> m_HdrMergeSubmittedNodesByGeneration;
     mutable std::unordered_map<int, ToneCurveViewportInteractionCache> m_IntegratedToneViewportInteractionCache;
     std::unordered_map<std::string, NodeBrowserThumbnailRuntimeEntry> m_NodeBrowserThumbnailEntries;
     std::unordered_map<int, NodeBrowserPreviewRequestMeta> m_NodeBrowserPreviewRequestMeta;
@@ -2789,8 +2793,6 @@ private:
     bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition);
-    bool AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition);
-    bool AddMfsrNodeFromPayload(EditorNodeGraph::MfsrPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool StartAsyncGraphImageNodeImport(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool HasPendingGraphImageImports() const;
@@ -3232,7 +3234,6 @@ private:
         const Stack::RawRecipe::RawCropRotationRecipe& crop);
     void AppendRawAssetCaptureRequests(std::vector<EditorRenderWorker::PreviewRequest>& requests);
     void AdoptRawAssetCapture(EditorRenderWorker::PreviewResult& result);
-    bool AddRawAssetToGraph(const std::string& assetId);
     bool RawAssetCaptureInputMatches() const;
     bool QueueRawAssetCapture();
     bool RawCreatedAssetsEditable(std::string& error) const;
@@ -3464,9 +3465,6 @@ private:
     void ClearTrackedToneCurveProbe();
     bool CompletedChainSourceUsesScalableGenerator(int outputNodeId) const;
     bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
-    std::vector<int> CollectHdrMergeNodesForOutput(int outputNodeId) const;
-    HdrMergeConnectionTopology ResolveHdrMergeConnectionTopology(const EditorNodeGraph::Node& node) const;
-    HdrMergeNodeStatus BuildHdrMergeNodeStatus(const EditorNodeGraph::Node& node) const;
     void ResetToBlankProject();
     void ResetProjectInteractionState();
     void ResetRenderSubmissionState();

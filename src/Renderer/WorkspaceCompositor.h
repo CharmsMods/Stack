@@ -47,9 +47,10 @@ public:
     bool Render(ImDrawData* data, const Workspace::Switcher& switcher, const ImVec4& clear,
         const Tools::Switcher* tools = nullptr, int toolIndex = -1,
         std::uint64_t projectWorkspace = 0, bool retainProjectFrame = false,
-        const ProjectFrame* projectFrame = nullptr, unsigned int targetFramebuffer = 0);
+        const ProjectFrame* projectFrame = nullptr, unsigned int targetFramebuffer = 0, bool extended = false);
     void Shutdown();
 private:
+    bool extendedRange = false;
     bool Ensure(int width, int height);
     bool EnsureToolBlur(int width, int height);
     void BlurTools(float amount, const ImVec4& bounds, const ImVec2& feather, float pixelScale);

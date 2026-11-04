@@ -8,7 +8,7 @@ namespace Stack::NodeMath {
 // Their source descriptor records that decoded color value. Packed numerical
 // buffers have no such conversion: GL_RED and GL_RG do not create missing RGB.
 inline ValueDescriptor DescribeStoredImageValue(ValueDescriptor descriptor,
-    int storageChannels, int width, int height) {
+    int storageChannels, int width, int height, bool hasFloatMaster = false) {
     if (descriptor.logicalType == LogicalValueType::Invalid) {
         if (storageChannels == 1) {
             descriptor = MakeUnknownDescriptor(LogicalValueType::Channel);
@@ -34,7 +34,7 @@ inline ValueDescriptor DescribeStoredImageValue(ValueDescriptor descriptor,
         spatial.rasterOrigin = RasterOrigin::BottomLeft;
         spatial.pixelAspect = 1;
         descriptor.spatial = SemanticField<SpatialDescriptor>::Known(spatial);
-        descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::UInt8);
+        descriptor.precision = SemanticField<LogicalPrecision>::Known(hasFloatMaster ? LogicalPrecision::Float32 : LogicalPrecision::UInt8);
     }
     return descriptor;
 }

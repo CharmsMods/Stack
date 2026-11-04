@@ -7,6 +7,12 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#ifdef STACK_READ_BRACKET_MASTERS
+#include "Hdr/Color.h"
+#include "Hdr/RasterSource.h"
+#include <array>
+#include <cstring>
+#endif
 #ifdef STACK_ENABLE_LIBRAW
 #include <libraw/libraw.h>
 #endif
@@ -50,8 +56,30 @@ bool ReadJpegSize(std::ifstream& input, CameraThumbnail& candidate, std::uintmax
     return false;
 }
 #ifdef _WIN32
+#ifdef STACK_READ_BRACKET_MASTERS
+// WIC's ordinary format converter does not apply a PQ transfer. Inspect the
+// PNG chunks before image data without loading the full-size raster.
+bool PqThumbnailSource(const std::filesystem::path& path) {
+    if(_wcsicmp(path.extension().c_str(),L".png")!=0) return false;
+    std::ifstream input(path,std::ios::binary);
+    std::array<unsigned char,8> header{};
+    constexpr unsigned char signature[]{137,80,78,71,13,10,26,10};
+    if(!input.read(reinterpret_cast<char*>(header.data()),8) || std::memcmp(header.data(),signature,8)) return false;
+    while(input.read(reinterpret_cast<char*>(header.data()),8)) {
+        const auto length=(uint32_t(header[0])<<24)|(uint32_t(header[1])<<16)|(uint32_t(header[2])<<8)|header[3];
+        if(length>INT_MAX || !std::memcmp(header.data()+4,"IDAT",4)) return false;
+        if(!std::memcmp(header.data()+4,"cICP",4)) {
+            std::array<unsigned char,4> code{};
+            return length==4 && input.read(reinterpret_cast<char*>(code.data()),4) &&
+                code==std::array<unsigned char,4>{9,16,0,1};
+        }
+        input.seekg(std::streamoff(length)+4,std::ios::cur);
+    }
+    return false;
+}
+#endif
 bool DecodeScaledFrame(IWICImagingFactory* factory, IWICBitmapFrameDecode* frame, int edge,
-    std::vector<unsigned char>& pixels, int& width, int& height) {
+    std::vector<unsigned char>& pixels, int& width, int& height, bool pq=false) {
     UINT w = 0, h = 0;
     if (edge <= 0 || edge > 4096 || FAILED(frame->GetSize(&w, &h)) || !w || !h || w > 65535 || h > 65535) return false;
     CameraThumbnail size;
@@ -63,9 +91,24 @@ bool DecodeScaledFrame(IWICImagingFactory* factory, IWICBitmapFrameDecode* frame
     if (FAILED(factory->CreateBitmapScaler(&scaler)) ||
         FAILED(scaler->Initialize(frame, width, height, WICBitmapInterpolationModeFant)) ||
         FAILED(factory->CreateFormatConverter(&converter)) ||
-        FAILED(converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+        FAILED(converter->Initialize(scaler.Get(), pq ? GUID_WICPixelFormat64bppRGBA : GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
             nullptr, 0, WICBitmapPaletteTypeCustom))) return false;
     pixels.resize(static_cast<std::size_t>(width) * height * 4);
+#ifdef STACK_READ_BRACKET_MASTERS
+    if(pq) {
+        std::vector<std::uint16_t> words(pixels.size());
+        if(FAILED(converter->CopyPixels(nullptr,width*8,static_cast<UINT>(words.size()*2),
+            reinterpret_cast<BYTE*>(words.data())))) { pixels.clear(); return false; }
+        for(size_t i=0;i<pixels.size();i+=4) {
+            Stack::Hdr::Rgb linear{};
+            for(int c=0;c<3;++c) linear[c]=Stack::Hdr::Nits(words[i+c]/65535.f)/Stack::Hdr::ReferenceWhite;
+            linear=Stack::Hdr::To709(linear);
+            for(int c=0;c<3;++c) pixels[i+c]=Stack::Hdr::SdrPreviewByte(linear[c]);
+            pixels[i+3]=static_cast<unsigned char>((words[i+3]+128)/257);
+        }
+        return true;
+    }
+#endif
     if (SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()), pixels.data()))) return true;
     pixels.clear();
     return false;
@@ -148,9 +191,14 @@ bool DecodeRasterThumbnail(const std::filesystem::path& path, int maxEdge, std::
     Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
     Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
     Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+#ifdef STACK_READ_BRACKET_MASTERS
+    const bool pq=PqThumbnailSource(path);
+#else
+    const bool pq=false;
+#endif
     return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
         SUCCEEDED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) &&
-        SUCCEEDED(decoder->GetFrame(0, &frame)) && DecodeScaledFrame(factory.Get(), frame.Get(), maxEdge, rgba, width, height);
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && DecodeScaledFrame(factory.Get(), frame.Get(), maxEdge, rgba, width, height, pq);
 #else
     return false;
 #endif

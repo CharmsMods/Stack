@@ -1,3 +1,4 @@
+#include "NodeMath/ArithmeticContract.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
@@ -11,6 +12,8 @@ bool IsUniformRenderSocket(const GraphExecutionContext& context, int nodeId, std
     const auto found = context.nodes.find(nodeId);
     if (found == context.nodes.end() || !found->second) return false;
     const auto& node = *found->second;
+    if (node.kind == RenderGraphNodeKind::Output && socketId == EditorNodeGraph::kImageOutputSocketId)
+        return node.semanticDescriptor.logicalType == Stack::NodeMath::LogicalValueType::Scalar;
     return (node.kind == RenderGraphNodeKind::Value || node.kind == RenderGraphNodeKind::FieldMean)
         ? socketId == EditorNodeGraph::kValueOutputSocketId
         : node.kind == RenderGraphNodeKind::DataMath &&
@@ -125,6 +128,11 @@ bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nod
                 }
                 break;
             case RenderGraphNodeKind::DataMath:
+                if (Stack::NodeMath::Primitive(node.dataMathMode) &&
+                    node.semanticDescriptor.logicalType!=Stack::NodeMath::LogicalValueType::Invalid) {
+                    plan.result=Stack::NodeMath::ArithmeticChannel(node.semanticDescriptor.logicalType);
+                    break;
+                }
                 if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel) {plan.result=true;break;}
                 if (currentSocketId != EditorNodeGraph::kImageOutputSocketId) {
                     break;

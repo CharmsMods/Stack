@@ -309,7 +309,7 @@ bool RenderPipeline::RenderDataMath(
     RenderDataMathMode mode,
     const RenderDataMathSettings& settings,
     bool scalarOutput,
-    unsigned int targetFBO) {
+    unsigned int targetFBO, bool opaqueResult) {
     EnsureDataMathProgram();
     if (!m_DataMathProgram || !targetFBO ||
         (!textureA && hasA) || (!textureB && hasB)) {
@@ -341,7 +341,7 @@ bool RenderPipeline::RenderDataMath(
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uMaxValue"), maxValue);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMin"), settings.outMin);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMax"), settings.outMax);
-    glUniform1i(glGetUniformLocation(m_DataMathProgram, "uScalarOutput"), scalarOutput ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_DataMathProgram, "uScalarOutput"), scalarOutput ? 1 : (opaqueResult ? 2 : 0));
     ++m_LastGraphExecutionStats.dataMathDrawSubmissions;
     m_Quad.Draw();
 

@@ -1,13 +1,14 @@
 #pragma once
 
 #include "EditorNodeGraph.h"
+#include "GraphRole.h"
 #include "ThirdParty/json.hpp"
 #include <memory>
 #include <vector>
 
 namespace EditorNodeGraph {
 
-inline constexpr int kEditorNodeGraphSchemaVersion = 17;
+inline constexpr int kEditorNodeGraphSchemaVersion = 19;
 
 nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData);
 bool IsCurrentGraphPayload(const nlohmann::json& pipelineData);
@@ -19,6 +20,6 @@ void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData);
 void DeserializeGraphPayload(
     const nlohmann::json& pipelineData,
     Graph& graph,
-    int layerCount);
+    int layerCount, EditorNodeGraphDefinitions::LiveGraphRole role = EditorNodeGraphDefinitions::LiveGraphRole::Composition);
 
 } // namespace EditorNodeGraph

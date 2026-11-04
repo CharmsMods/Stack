@@ -15,8 +15,7 @@ bool PreviewRequestCandidates::Refresh(const EditorNodeGraph::Graph& graph,
     std::vector<int> candidates;
     for (const auto& node : nodes) {
         if (node.kind == EditorNodeGraph::NodeKind::Preview ||
-            node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-            node.kind == EditorNodeGraph::NodeKind::Scope) candidates.push_back(node.id);
+            node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) candidates.push_back(node.id);
     }
     std::string candidateDocument = document;
     m_Nodes = std::move(candidates);

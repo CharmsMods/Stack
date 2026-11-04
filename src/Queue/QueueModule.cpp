@@ -144,6 +144,9 @@ void QueueModule::Execute(ViewAction action) {
     case ViewCommand::OpenGallery:
         if (m_OpenGallery) m_OpenGallery();
         break;
+    case ViewCommand::ChooseFormat:
+        if (!m_ExportState.busy) m_ExportState.format = action.format;
+        break;
     case ViewCommand::ChooseDestination:
         if (!m_ExportState.busy) {
             const auto folder = FileDialogs::OpenFolderDialog("Choose Queue Export Folder");
@@ -160,6 +163,7 @@ void QueueModule::Execute(ViewAction action) {
             std::vector<Item> selected;
             for (const auto& item : m_Model.Snapshot())
                 if (item.selected && (item.state == ItemState::Waiting || item.state == ItemState::Failed)) selected.push_back(item);
+            for (auto& item : selected) item.exportFormat = m_ExportState.format;
             if (!selected.empty()) m_ExportRequest(m_Destination, selected);
         }
         break;

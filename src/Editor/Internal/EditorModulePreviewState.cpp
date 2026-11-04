@@ -62,8 +62,7 @@ std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
     
     const EditorNodeGraph::Link* input =
         m_Project->graph.FindAnyInputLink(previewNodeId,
-            node && node->kind == EditorNodeGraph::NodeKind::Scope
-                ? EditorNodeGraph::kScopeInputSocketId : EditorNodeGraph::kPreviewInputSocketId);
+            EditorNodeGraph::kPreviewInputSocketId);
     if (!input) {
         return 0;
     }

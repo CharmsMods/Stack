@@ -11,6 +11,9 @@
 #endif
 
 #include "AppShell.h"
+#include "Hdr/Presentation.h"
+#include "Hdr/UiTarget.h"
+#include "Hdr/UiColor.h"
 #include "HeaderActionRegistry.h"
 #include "AppHeaderStyle.h"
 #include "WorkspacePresentation.h"
@@ -1417,6 +1420,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 
     ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
     ImGui_ImplOpenGL3_Init("#version 430 core");
+    Stack::Hdr::InstallPlatformHooks();
     InstallDetachedPreviewPlatformHooks();
 
     m_EditorTabTexture = LoadEmbeddedPngTexture(
@@ -1544,6 +1548,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 
     Async::TaskSystem::Get().Initialize();
     InitializeProjectWorkspaces();
+    if(m_Appearance) Stack::Hdr::SetPreviewInSdr(m_Appearance->GetPreviewInSdr());
     m_QueueRenderer.Configure(m_Window, m_Appearance.get(), &m_Queue.Model());
     m_Queue.SetGalleryRequestHandler([this] {
         m_NavigationRail.galleryView = true;
@@ -1952,12 +1957,14 @@ void AppShell::Run() {
         }
         int display_w, display_h;
         glfwGetFramebufferSize(m_Window, &display_w, &display_h);
+        const unsigned hdrTarget = Stack::Hdr::BeginWindow(m_Window,display_w,display_h,true,
+            !m_StartupRevealVisual.HasTransparentBackdrop());
         const ImVec4 clearColor = m_Appearance ? m_Appearance->GetClearColor() : ImVec4(0.1f, 0.1f, 0.1f, 1.0f);
         {
             Stack::UiPerformance::Span targetTiming(Stack::UiPerformance::Stage::FrameTarget);
             // The shell owns the main-window presentation boundary. Subpasses
             // receive their destination explicitly and need not query old state.
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, hdrTarget);
             glUseProgram(0);
             glDisable(GL_SCISSOR_TEST);
             glViewport(0, 0, display_w, display_h);
@@ -1968,7 +1975,8 @@ void AppShell::Run() {
                 // alpha, otherwise the theme color leaks through as a full-window tint.
                 glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
             } else {
-                glClearColor(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
+                const auto targetColor=Stack::Hdr::Ui::TargetColor(clearColor,hdrTarget!=0);
+                glClearColor(targetColor.x,targetColor.y,targetColor.z,targetColor.w);
             }
             glClear(GL_COLOR_BUFFER_BIT);
         }
@@ -2024,11 +2032,14 @@ void AppShell::Run() {
         projectFrame.previewWorkspace = m_NavigationRail.previewProject;
         projectFrame.previewRootView = m_NavigationRail.previewRootView;
         projectFrame.previewAmount = m_NavigationRail.previewAmount;
-        if (!m_WorkspaceCompositor.Render(ImGui::GetDrawData(), m_WorkspaceSwitcher, clearColor,
-                &m_ToolSwitcher, m_Editor->GetRawLayerToolIndex(),
-                m_StartupRevealVisual.AllowsInput() && !m_CloseRequested ? m_ActiveProjectWorkspace : 0,
-                m_PendingWorkspaceRetirement == m_ActiveProjectWorkspace, &projectFrame))
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        {
+            Stack::Hdr::Ui::TargetScope drawTarget(hdrTarget!=0);
+            if (!m_WorkspaceCompositor.Render(ImGui::GetDrawData(), m_WorkspaceSwitcher, clearColor,
+                    &m_ToolSwitcher, m_Editor->GetRawLayerToolIndex(),
+                    m_StartupRevealVisual.AllowsInput() && !m_CloseRequested ? m_ActiveProjectWorkspace : 0,
+                    m_PendingWorkspaceRetirement == m_ActiveProjectWorkspace, &projectFrame,hdrTarget,hdrTarget!=0))
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
 
         Stack::UiDiagnostics::CaptureNodeOpenIfDue(*m_Editor, *ImGui::GetDrawData());
         CaptureDiagnosticWorkspaceSwitcher();
@@ -2052,7 +2063,7 @@ void AppShell::Run() {
         }
         const auto swapStarted = std::chrono::steady_clock::now();
         if(m_UiPerformanceCapture)m_UiPerformanceCapture->EndGpu();
-        glfwSwapBuffers(m_Window);
+        if (!Stack::Hdr::PresentWindow(m_Window)) glfwSwapBuffers(m_Window);
         if (m_StartupRevealWindowOpacityHidden) {
 #if defined(_WIN32)
             DwmFlush();
@@ -3590,6 +3601,7 @@ void AppShell::Shutdown() {
 #endif
     runPhase("imgui-shutdown", [&]() {
         GraphNativeCursor::Shutdown(m_Window);
+        Stack::Hdr::ShutdownPresentation(m_Window);
         m_WorkspaceCompositor.Shutdown();
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();

@@ -24,7 +24,7 @@ public:
         int width=0,height=0,mips=0;
         std::uint64_t allocation=0, revision=0;
         int captureX=0,captureY=0, hostFramebuffer=0,hostBuffer=0;
-        bool hostSrgb=false,ready=false,leased=false,composing=false;
+        bool hostSrgb=false,hostLinear=false,ready=false,leased=false,composing=false;
         int outputX=0,outputY=0,outputWidth=0,outputHeight=0;
         std::size_t bytes=0;
     };

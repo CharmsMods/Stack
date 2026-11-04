@@ -1,6 +1,7 @@
 #include "Editor/Internal/RawLab/RawGradingScopeRenderer.h"
 
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -59,7 +60,7 @@ bool RawGradingScopeRenderer::Upload(
     // Any replacement invalidates the previous packet, including partial upload failure.
     m_Packet.reset();
     if (m_Program == 0) {
-        m_Program = GLHelpers::CreateShaderProgram(kVertexShader, kFragmentShader);
+        m_Program = GLHelpers::CreateShaderProgram(kVertexShader, Stack::Hdr::Ui::Fragment(kFragmentShader,"fragColor").c_str());
         if (m_Program == 0) return false;
         m_PlotRectLocation = glGetUniformLocation(m_Program, "plotRect");
         m_DisplayRectLocation = glGetUniformLocation(m_Program, "displayRect");
@@ -143,6 +144,7 @@ void RawGradingScopeRenderer::DrawCallback(const ImDrawList*, const ImDrawCmd* c
     const bool pointSizeWasEnabled = glIsEnabled(GL_PROGRAM_POINT_SIZE) != GL_FALSE;
     glEnable(GL_PROGRAM_POINT_SIZE);
     glUseProgram(renderer.m_Program);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniform4f(renderer.m_PlotRectLocation, request.min.x, request.min.y,
         request.size.x, request.size.y);
     glUniform4f(renderer.m_DisplayRectLocation, request.displayPos.x, request.displayPos.y,

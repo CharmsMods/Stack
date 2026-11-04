@@ -1,3 +1,5 @@
+#include "Hdr/PhotoPreview.h"
+#include "Hdr/Presentation.h"
 #include "Renderer/ViewportTextureCopy.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/UiPerformanceProbe.h"
@@ -45,18 +47,6 @@ void EditorModule::SubmitRenderIfReady() noexcept {
         } catch (...) { /* The terminal phase is recorded before its diagnostic. */ }
         ResetIncompleteCompositeOutputRequestsForRetry();
         ResetIncompletePreviewRequestsForRetry();
-        const auto submitted =
-            m_HdrMergeSubmittedNodesByGeneration.find(
-                m_RenderGeneration);
-        if (submitted !=
-            m_HdrMergeSubmittedNodesByGeneration.end()) {
-            for (const int nodeId : submitted->second) {
-                m_HdrMergeRequestedGenerations.erase(nodeId);
-            }
-            m_HdrMergeSubmittedNodesByGeneration.erase(
-                submitted);
-        }
-        m_HdrMergeRenderingNodeIds.clear();
         m_RenderPending =
             IsAnyRenderBackendBusy();
         m_RenderDirty = true;
@@ -186,8 +176,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     const bool rawStage = UsesRawWorkspaceStageRender();
     const int activeOutputNodeId = rawStage
         ? ResolveRawWorkspaceStageOutputNodeId() : m_Project->graph.ResolvePreviewOutputNodeId();
-    const std::vector<int> activeHdrMergeNodeIds =
-        (!compositeMode && activeOutputNodeId > 0) ? CollectHdrMergeNodesForOutput(activeOutputNodeId) : std::vector<int>{};
     const auto submitPreviewOnlyRequests = [&](std::vector<EditorRenderWorker::PreviewRequest>& requests) {
         if (requests.empty() || !allowBackgroundRenderWorker) {
             m_RenderPending = false;
@@ -223,48 +211,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         if (!SubmitRenderSnapshot(std::move(snapshot))) {
             m_RenderPending = false;
         }
-    };
-    const auto recordHdrMergeSubmission = [&]() {
-        m_HdrMergeRenderingNodeIds.clear();
-        for (int nodeId : activeHdrMergeNodeIds) {
-            m_HdrMergeRequestedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);
-            m_HdrMergeFailureMessages.erase(nodeId);
-            m_HdrMergeRenderingNodeIds.insert(nodeId);
-        }
-        m_HdrMergeSubmittedNodesByGeneration[m_RenderGeneration] = activeHdrMergeNodeIds;
-    };
-    const auto blockInvalidHdrMergeOutput = [&]() -> bool {
-        if (activeHdrMergeNodeIds.empty()) {
-            return false;
-        }
-
-        bool blocked = false;
-        for (int nodeId : activeHdrMergeNodeIds) {
-            const HdrMergeNodeStatus status = GetHdrMergeNodeStatus(nodeId);
-            if (status.state != HdrMergeRenderState::BlockedMissingInput &&
-                status.state != HdrMergeRenderState::IncompatibleInput) {
-                continue;
-            }
-            const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-            const std::string nodeName = (node && !node->title.empty())
-                ? node->title
-                : std::string("HDR Merge");
-            PostNotification(
-                UiNotificationSeverity::Error,
-                nodeName + ": " + status.message,
-                "hdr-merge-invalid-" + std::to_string(nodeId));
-            blocked = true;
-        }
-        if (!blocked) {
-            return false;
-        }
-
-        FailFullQualityRenderRequest("Full-quality rendering is blocked by incompatible or missing HDR inputs.");
-        m_RenderDirty = false;
-        m_RenderPending = false;
-        m_HdrMergeRenderingNodeIds.clear();
-        submitPreviewOnlyRequests(previewRequests);
-        return true;
     };
 
     if (compositeMode) {
@@ -387,7 +333,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
         submitPreviewOnlyRequests(previewRequests);
-        m_HdrMergeRenderingNodeIds.clear();
         return;
     }
     m_LastOutputConnectionDiagnostic.clear();
@@ -395,9 +340,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         // Visible layer thumbnails become eligible after the main image has
         // settled. Their refresh must not require another document edit.
         submitPreviewOnlyRequests(previewRequests);
-        return;
-    }
-    if (blockInvalidHdrMergeOutput()) {
         return;
     }
 
@@ -419,14 +361,12 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         TrySubmitRawRenderCommand(
             m_RenderGeneration,
             previewRequests)) {
-        recordHdrMergeSubmission();
         m_RenderPending = true;
         m_GraphPerformanceStats.lastSnapshotBuildMs = 0.0;
         return;
     }
 
     if (allowBackgroundRenderWorker) {
-        recordHdrMergeSubmission();
         m_RenderPending = true;
         const auto snapshotBuildBegin = std::chrono::steady_clock::now();
         EditorRenderWorker::Snapshot snapshot;
@@ -437,12 +377,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             m_RenderDirty = true;
             m_LastSubmittedRenderRevision =
                 m_RenderRevision > 0 ? m_RenderRevision - 1 : 0;
-            m_HdrMergeSubmittedNodesByGeneration.erase(
-                m_RenderGeneration);
-            for (const int nodeId : activeHdrMergeNodeIds) {
-                m_HdrMergeRequestedGenerations.erase(nodeId);
-                m_HdrMergeRenderingNodeIds.erase(nodeId);
-            }
             return;
         }
         m_GraphPerformanceStats.lastSnapshotBuildMs =
@@ -457,11 +391,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             m_RenderDirty = true;
             m_LastSubmittedRenderRevision =
                 m_RenderRevision > 0 ? m_RenderRevision - 1 : 0;
-            m_HdrMergeSubmittedNodesByGeneration.erase(m_RenderGeneration);
-            for (const int nodeId : activeHdrMergeNodeIds) {
-                m_HdrMergeRequestedGenerations.erase(nodeId);
-                m_HdrMergeRenderingNodeIds.erase(nodeId);
-            }
         }
     } else {
         if (rawWorkspaceActive &&
@@ -537,7 +466,20 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             snapshot.generation,
             snapshot.rawWorkspace.sourceKey);
         const auto mainRenderBegin = std::chrono::steady_clock::now();
+        Raw::RawGpuImageLease hdrPhoto;
+        const auto& overlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
+        if (Stack::Hdr::AnyPreviewActive() &&
+            RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) &&
+            snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitInspection &&
+            (overlayMode.empty() || overlayMode == "none") &&
+            snapshot.rawWorkspace.recipe.rgbDenoise.diagnosticMode == Stack::RawRecipe::RawDenoiseDiagnosticMode::None) {
+            hdrPhoto = Stack::Hdr::RenderCompanion(m_Pipeline, snapshot.graph);
+        }
         m_Pipeline.ExecuteGraph(snapshot.graph);
+        if (!rawWorkspaceActive) {
+            m_HdrGraphOutput = std::move(hdrPhoto);
+            m_HdrGraphBase = m_Pipeline.GetOutputTexture();
+        }
         const auto graphExecuteEnd = std::chrono::steady_clock::now();
         const GraphExecutionStats& graphExecutionStats =
             m_Pipeline.GetLastGraphExecutionStats();
@@ -578,6 +520,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             !preserveRawPresentationForTargetHover &&
             m_Pipeline.GetOutputTexture() != 0) {
             EditorRenderWorker::SharedTextureResult publishedTexture;
+            publishedTexture.hdr = std::move(hdrPhoto);
             publishedTexture.texture =
                 m_Pipeline.PublishSharedOutputTexture(
                     publishedTexture.width,
@@ -937,12 +880,6 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         CompleteFullQualityRenderRequest(synchronousResult, synchronousResult.success && synchronousResult.error.empty());
         if (m_Pipeline.GetOutputTexture()!=0 && m_Pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty())
             ApplyToneCurveAutoRewriteFeedback(m_Pipeline.GetToneCurveAutoRewriteFeedback());
-        for (int nodeId : activeHdrMergeNodeIds) {
-            m_HdrMergeRequestedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);
-            m_HdrMergeCompletedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);
-            m_HdrMergeFailureMessages.erase(nodeId);
-        }
-        m_HdrMergeRenderingNodeIds.clear();
         m_LastCompletedRenderGeneration = m_RenderGeneration;
     }
 }

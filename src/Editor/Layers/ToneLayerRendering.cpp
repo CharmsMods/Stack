@@ -467,6 +467,8 @@ uniform int uDebugFalseColor;
 uniform int uInputIsRec2020;
 uniform int uEncodeSrgbOutput;
 uniform vec4 uSigmoidParameters;
+uniform float uHdrHeadroom;
+uniform int uDisplayLinearInput;
 
 )" ) + Raw::ViewTransform::ShaderFunctions() + R"(
 void main() {
@@ -865,6 +867,8 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDebugFalseColor"), m_DebugFalseColor ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputIsRec2020"), m_InputIsRec2020 ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDisplayLinearInput"), m_DisplayLinearInput);
+    glUniform1f(glGetUniformLocation(m_ShaderProgram, "uHdrHeadroom"), m_HdrHeadroom);
     const auto sigmoid = Raw::SigmoidDisplay::PreparedCurve(
         m_MiddleGrey, m_Contrast, m_Exposure, m_ContrastPivotEv).Coefficients();
     glUniform4f(glGetUniformLocation(m_ShaderProgram, "uSigmoidParameters"),

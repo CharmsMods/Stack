@@ -7,21 +7,6 @@
 
 namespace EditorNodeGraph {
 
-std::string ScopeKindToString(ScopeKind kind) {
-    switch (kind) {
-        case ScopeKind::Histogram: return "Histogram";
-        case ScopeKind::Vectorscope: return "Vectorscope";
-        case ScopeKind::RGBParade: return "RGBParade";
-    }
-    return "Histogram";
-}
-
-ScopeKind ScopeKindFromString(const std::string& value) {
-    if (value == "Vectorscope") return ScopeKind::Vectorscope;
-    if (value == "RGBParade") return ScopeKind::RGBParade;
-    return ScopeKind::Histogram;
-}
-
 std::string MaskGeneratorKindToString(MaskGeneratorKind kind) {
     switch (kind) {
         case MaskGeneratorKind::Solid: return "Solid";

@@ -45,12 +45,11 @@ bool LoadFixture(EditorModule& editor,const std::filesystem::path& path) {
     if(path.extension()==".stack" || std::filesystem::is_directory(path))return editor.RequestOpenProjectFromPath(path,true);
     if(!editor.GetPipeline().LoadSourceImage(path.u8string()) || !editor.AddImageNodeFromFile(path.u8string(),{20,30}))return false;
     auto& graph=editor.GetNodeGraph();const int source=graph.GetSelectedNodeId();
-    editor.AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation::AssignLinearSrgb,{290,30});const int linear=graph.GetSelectedNodeId();
+    editor.AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation::SrgbDecode,{290,30});const int linear=graph.GetSelectedNodeId();
     editor.AddLayerNodeAt(LayerType::Brightness,{540,30});const int brightness=graph.GetSelectedNodeId();
     editor.AddLayerNodeAt(LayerType::Contrast,{790,30});const int contrast=graph.GetSelectedNodeId();
     editor.AddLayerNodeAt(LayerType::ToneCurve,{20,330});const int curve=graph.GetSelectedNodeId();
     editor.AddPreviewNodeAt({290,330});const int preview=graph.GetSelectedNodeId();
-    editor.AddScopeNodeAt(EditorNodeGraph::ScopeKind::Histogram,{540,330});const int scope=graph.GetSelectedNodeId();
     editor.AddOutputNodeAt({790,330});const int output=graph.GetSelectedNodeId();
     std::string error;
     return editor.ConnectGraphSockets(source,"imageOut",linear,"imageIn",&error) &&
@@ -58,7 +57,6 @@ bool LoadFixture(EditorModule& editor,const std::filesystem::path& path) {
         editor.ConnectGraphSockets(brightness,"imageOut",contrast,"imageIn",&error) &&
         editor.ConnectGraphSockets(contrast,"imageOut",curve,"imageIn",&error) &&
         editor.ConnectGraphSockets(curve,"imageOut",preview,EditorNodeGraph::kPreviewInputSocketId,&error) &&
-        editor.ConnectGraphSockets(curve,"imageOut",scope,EditorNodeGraph::kScopeInputSocketId,&error) &&
         editor.ConnectGraphSockets(curve,"imageOut",output,"imageIn",&error);
 }
 }

@@ -159,6 +159,26 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
         };
         for (const auto& node : candidate.nodes)
             if (isTypedAlias(node.publishedType)) typedAliases.insert(node.nodeId);
+        // The same projection supplies layout facts to both recipe lowering and the canvas.
+        const auto projected = BuildRawProjectGraph(state, true);
+        EditorNodeGraph::GraphOutputContext projectionContext;
+        for (const auto& node : projected.graph.GetNodes()) {
+            if (node.id == projected.preparedSource || node.role == GraphModel::NodeRole::OriginalImage)
+                projectionContext.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(node.id,"imageOut")] = scene;
+        }
+        const auto projectedValues = EditorNodeGraph::DescribeGraphOutputs(projected.graph, projectionContext);
+        for (const auto& node : projected.graph.GetNodes()) {
+            for (const auto& socket : projected.graph.GetSockets(node,false)) {
+                const auto value = projectedValues.find(EditorNodeGraph::GraphOutputIdentity(node.id,socket.id));
+                if (value == projectedValues.end()) continue;
+                if (node.id == projected.preparedSource)
+                    layerDescriptions["raw/$raw-source/technical/"+socket.id] = value->second;
+                else if (node.id == projected.output)
+                    layerDescriptions["raw/$raw-output/"+socket.id] = value->second;
+                else if (!node.rawLayerOwnerId.empty())
+                    layerDescriptions["raw/"+node.rawLayerOwnerId+"/"+node.instanceUuid+"/"+socket.id] = value->second;
+            }
+        }
         const std::vector<std::shared_ptr<LayerBase>> noLayers;
         const std::unordered_map<int, std::uint64_t> noDirtyNodes;
         const std::shared_ptr<const Raw::RawImageData> noRaw;
@@ -172,11 +192,14 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             input.authoredRevision = source.authoredRevision;
             input.frame = {frame, duration, framesPerSecond};
             EditorNodeGraph::GraphOutputContext sources;
-            for (const auto& node : layer->graph.GetNodes())
-                if (node.role == GraphModel::NodeRole::OriginalImage ||
-                    node.role == GraphModel::NodeRole::CurrentImage ||
-                    (node.role == GraphModel::NodeRole::Reference && node.kind == EditorNodeGraph::NodeKind::Image))
-                    sources.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(node.id, "imageOut")] = scene;
+            sources.resolveOutput = [&](const EditorNodeGraph::Node& node, const std::string& port)
+                -> std::optional<EditorNodeGraph::GraphOutputDescription> {
+                if (node.role != GraphModel::NodeRole::OriginalImage && node.role != GraphModel::NodeRole::CurrentImage &&
+                    node.role != GraphModel::NodeRole::Reference) return std::nullopt;
+                const auto value = layerDescriptions.find("raw/"+layer->id+"/"+node.instanceUuid+"/"+port);
+                if (value != layerDescriptions.end()) return value->second;
+                return std::nullopt;
+            };
             input.outputContextOverrides = &sources;
             auto lowered = BuildGraphSnapshot(input);
             if (outputDescriptions) for (auto& [identity, description] : lowered.outputDescriptions)
@@ -392,6 +415,9 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
             }
         }
         pass(backgroundNodeId, mainOutput);
+        if (const auto mismatch = layerDescriptions.find("raw/$raw-output/imageIn");
+            mismatch != layerDescriptions.end() && mismatch->second.invalidWire && !mismatch->second.diagnostics.empty())
+            candidate.unavailableOutputs[backgroundNodeId] = mismatch->second.diagnostics.front().message;
         if (!mainOutput.node) candidate.unavailableOutputs[backgroundNodeId] = "Connect a color image result to the image output.";
         // The finished RAW stack remains scene-linear for outer composition.
         // The presentation transform runs once at the requested final output.
@@ -434,26 +460,6 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
         }
         BindGraphImageContracts(candidate);
         if (outputDescriptions) {
-            // Cross-layer references require the whole authored dependency
-            // graph to retain component identity. Analyze it once per compiled
-            // snapshot, with shared image storage and the actual source facts.
-            const auto projected=BuildRawProjectGraph(state,true);
-            EditorNodeGraph::GraphOutputContext context;
-            context.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(projected.preparedSource,"imageOut")]=scene;
-            const auto described=EditorNodeGraph::DescribeGraphOutputs(projected.graph,context);
-            for(const auto& node:projected.graph.GetNodes())for(const auto& socket:projected.graph.GetSockets(node,false)) {
-                if(socket.direction!=EditorNodeGraph::SocketDirection::Output)continue;
-                const auto description=described.find(EditorNodeGraph::GraphOutputIdentity(node.id,socket.id));
-                if(description==described.end())continue;
-                if(node.id==projected.preparedSource)
-                    layerDescriptions["raw/$raw-source/technical/"+socket.id]=description->second;
-                else if(!node.rawLayerOwnerId.empty()) {
-                    layerDescriptions["raw/"+node.rawLayerOwnerId+"/"+node.instanceUuid+"/"+socket.id]=description->second;
-                    const auto* layer=FindRawAdjustmentLayer(state,node.rawLayerOwnerId);
-                    for(const auto& owned:layer->graph.GetNodes())if(owned.instanceUuid==node.instanceUuid)
-                        layerDescriptions["raw/"+layer->id+"/"+EditorNodeGraph::GraphOutputIdentity(owned.id,socket.id)]=description->second;
-                }
-            }
             std::unordered_map<int, const RenderGraphNode*> boundNodes;
             std::unordered_map<std::string, const ValueDescriptor*> boundOutputs;
             for (const auto& node : candidate.nodes) boundNodes.emplace(node.nodeId, &node);
@@ -482,7 +488,6 @@ bool LowerRawLayerStack(RenderGraphSnapshot& snapshot, const RawLayerStackState&
                 // avoiding a layer-graph scan for each visible socket query.
                 for (const auto& node : capture.layer->graph.GetNodes())
                     for (const auto& socket : capture.layer->graph.GetSockets(node,false)) {
-                        if (socket.direction != EditorNodeGraph::SocketDirection::Output) continue;
                         const auto localKey = "raw/" + capture.layer->id + "/" +
                             EditorNodeGraph::GraphOutputIdentity(node.id,socket.id);
                         const auto description = layerDescriptions.find(localKey);

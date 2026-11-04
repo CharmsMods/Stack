@@ -62,7 +62,7 @@ std::shared_ptr<const DefinitionPlan> PrepareDefinition(const Stack::NodeMath::C
         }
     }
     auto plan = std::make_shared<DefinitionPlan>();
-    DeserializeGraphPayload(definition.canonicalGraph, plan->canonical, 0);
+    DeserializeGraphPayload(definition.canonicalGraph, plan->canonical, 0, EditorNodeGraphDefinitions::LiveGraphRole::Compound);
     if (plan->canonical.GetNodes().empty()) throw std::runtime_error("Compound canonical graph is empty.");
     if (plan->canonical.GetNodes().size() > kMaximumNodes || plan->canonical.GetLinks().size() > kMaximumLinks)
         throw std::runtime_error("Compound canonical graph exceeds the execution node/link budget.");

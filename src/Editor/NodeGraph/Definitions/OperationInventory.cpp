@@ -38,7 +38,10 @@ Node BuildOperationPrototype(NodeKind kind, int variant) {
         case NodeKind::MaskUtility: node.maskUtilityKind = static_cast<EditorNodeGraph::MaskUtilityKind>(variant); break;
         case NodeKind::ImageToMask: node.imageToMaskKind = static_cast<EditorNodeGraph::ImageToMaskKind>(variant); break;
         case NodeKind::ImageGenerator: node.imageGeneratorKind = static_cast<EditorNodeGraph::ImageGeneratorKind>(variant); break;
-        case NodeKind::DataMath: node.dataMathMode = static_cast<EditorNodeGraph::DataMathMode>(variant); break;
+        case NodeKind::DataMath:
+            node.dataMathMode=static_cast<EditorNodeGraph::DataMathMode>(variant);
+            if (const auto* op=Stack::NodeMath::Primitive(node.dataMathMode)) node.dataMathSettings.constantB=op->defaultB;
+            break;
         case NodeKind::Value:
             node.value.value = BuildDefaultFirstClassValue(static_cast<LogicalValueType>(variant));
             break;
@@ -59,6 +62,7 @@ const std::vector<OperationRegistration>& GetOperationInventory() {
         OperationDefinitions::AppendSourceOperations(result);
         OperationDefinitions::AppendImageEffectOperations(result);
         OperationDefinitions::AppendFieldOperations(result);
+        OperationDefinitions::AppendRawMaskOperations(result);
         return result;
     }();
     return operations;
@@ -66,6 +70,8 @@ const std::vector<OperationRegistration>& GetOperationInventory() {
 
 OperationDisposition GetOperationDisposition(NodeKind kind) {
     if (kind == NodeKind::Compound) return OperationDisposition::EmbeddedCompound;
+    if (kind == NodeKind::Scope || kind == NodeKind::HdrMerge || kind == NodeKind::Mfsr)
+        return OperationDisposition::UnavailableIdentity;
     return OperationDisposition::Builtin;
 }
 
@@ -77,7 +83,6 @@ bool ValidateOperationInventoryCoverage(std::vector<std::string>& errors) {
     };
     // These are constructor selector domains, not browser membership. A domain
     // such as Data Math Values/Spatial is authored settings within one variant.
-    variants(NodeKind::Scope, 0, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade));
     variants(NodeKind::MaskGenerator, 0, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::PaintedArea));
     for (auto shape : {EditorNodeGraph::MaskGeneratorKind::LinearGradient,
         EditorNodeGraph::MaskGeneratorKind::RadialGradient, EditorNodeGraph::MaskGeneratorKind::Square})
@@ -87,11 +92,15 @@ bool ValidateOperationInventoryCoverage(std::vector<std::string>& errors) {
     variants(NodeKind::ImageToMask, 0, static_cast<int>(EditorNodeGraph::ImageToMaskKind::SampledRange));
     variants(NodeKind::ImageGenerator, 0, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text));
     variants(NodeKind::DataMath, 0, static_cast<int>(EditorNodeGraph::DataMathMode::ImageAverage));
-    variants(NodeKind::Value, static_cast<int>(LogicalValueType::Boolean), static_cast<int>(LogicalValueType::Failure)-1);
-    variants(NodeKind::TechnicalImage, 0, static_cast<int>(Stack::NodeMath::TechnicalImageOperation::Unpremultiply));
+    expected.emplace(NodeKind::Value,static_cast<int>(LogicalValueType::Scalar));
+    variants(NodeKind::Value, static_cast<int>(LogicalValueType::Curve1D), static_cast<int>(LogicalValueType::Failure)-1);
+    variants(NodeKind::TechnicalImage, static_cast<int>(Stack::NodeMath::TechnicalImageOperation::SrgbDecode),
+        static_cast<int>(Stack::NodeMath::TechnicalImageOperation::Premultiply));
     variants(NodeKind::RawOperation, 0, static_cast<int>(Stack::RawRecipe::GraphOperationKind::Count)-1);
-    for (const auto& descriptor : LayerRegistry::GetAllDescriptors())
-        expected.emplace(NodeKind::Layer,static_cast<int>(descriptor.type));
+    for (const auto& descriptor : LayerRegistry::GetAllDescriptors()) {
+        if (descriptor.type != LayerType::ViewTransform)
+            expected.emplace(NodeKind::Layer,static_cast<int>(descriptor.type));
+    }
     for (int i=0; i<static_cast<int>(NodeKind::Count); ++i) {
         const auto kind=static_cast<NodeKind>(i);
         if (GetOperationDisposition(kind)!=OperationDisposition::Builtin) continue;

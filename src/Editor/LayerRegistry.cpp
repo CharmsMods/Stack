@@ -8,18 +8,15 @@
 #include "Layers/CellShadingLayer.h"
 #include "Layers/ClassicalRgbDenoiseLayer.h"
 #include "Layers/ChromaticAberrationLayer.h"
-#include "Layers/ColorGradeLayer.h"
 #include "Layers/GlareRaysLayer.h"
 #include "Layers/HalftoningLayer.h"
 #include "Layers/HankelBlurLayer.h"
-#include "Layers/LensDistortionLayer.h"
 #include "Layers/NoiseLayer.h"
 #include "Layers/PaletteReconstructorLayer.h"
 #include "Layers/SceneDenoiseLayer.h"
 #include "Layers/SplitAdjustmentsLayers.h"
 #include "Layers/SplitBlurLayers.h"
 #include "Layers/PixelationLayer.h"
-#include "Layers/SplitDenoisingLayers.h"
 #include "Layers/SplitTransformLayers.h"
 #include "Layers/TextOverlayLayer.h"
 #include "Layers/TiltShiftBlurLayer.h"
@@ -61,17 +58,13 @@ const std::vector<LayerDescriptor>& Descriptors() {
         { LayerType::Saturation, "Saturation", "Saturation", "Saturation", "Color", "Adjust image saturation.", {}, MakeLayer<SaturationLayer>, NeedsFix, FullImagePreferred, true, "", "Saturation is a color relationship and can be misleading on one channel.", { "color", "full-image-preferred" } },
         { LayerType::Warmth, "Warmth", "Warmth", "Warmth", "Color", "Shift the image warmer or cooler.", {}, MakeLayer<WarmthLayer>, NeedsFix, FullImagePreferred, true, "", "Warmth shifts red/blue balance and is ambiguous on one channel.", { "color", "full-image-preferred" } },
         { LayerType::Sharpen, "Sharpen", "Sharpen", "Sharpen", "Color", "Sharpen edges with threshold control.", {}, MakeLayer<SharpenLayer>, Stable, ChannelWarn, true, "", "Works on channels, but may amplify noise or ringing.", { "detail", "channel-warning" } },
-        { LayerType::ColorGrade, "ColorGrade", "3-Way Color Grade", "3-Way Color Grade", "Color", "Grade shadows, midtones, and highlights.", {}, MakeLayer<ColorGradeLayer>, Stable, FullImagePreferred, true, "", "Color wheels are full-image-first; channel streams use grayscale interpretation.", { "grade", "advanced-ui", "full-image-preferred" } },
-        { LayerType::ToneEqualizer, "ToneEqualizer", "Tone Equalizer", "Tone Equalizer", "Color / Tone", "Adjust dynamic exposure by scene luminance bands without clamping HDR values.", {}, MakeLayer<ToneEqualizerLayer>, Hidden, FullImagePreferred, false, "", "Scene-referred EV gain; should generally feed a View Transform.", { "tone", "dynamic-range", "scene-referred", "raw", "advanced-ui", "full-image-preferred" } },
-        { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Compress scene-linear RGB into display range for preview and output.", {}, MakeLayer<ViewTransformLayer>, Stable, FullImagePreferred, true, "", "Final display/output transform; place near the end of a scene-referred graph.", { "tone", "display", "view-transform", "scene-referred", "advanced-ui", "full-image-preferred" } },
+        { LayerType::ToneEqualizer, "ToneEqualizer", "Tone Equalizer", "Tone Equalizer", "Color / Tone", "Adjust dynamic exposure by scene luminance bands without clamping HDR values.", {}, MakeLayer<ToneEqualizerLayer>, Hidden, FullImagePreferred, false, "", "Scene-referred exposure gain.", { "tone", "dynamic-range", "scene-referred", "raw", "advanced-ui", "full-image-preferred" } },
+        { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Compress scene-linear RGB into display range for preview and output.", {}, MakeLayer<ViewTransformLayer>, Hidden, FullImagePreferred, false, "", "RAW display mapping uses this internal processing adapter.", { "tone", "display", "view-transform", "scene-referred", "advanced-ui", "full-image-preferred" } },
 
         { LayerType::BoxBlur, "BoxBlur", "Box Blur", "Box Blur", "Blur / Focus", "Apply a box blur.", {}, MakeLayer<BoxBlurLayer>, Stable, ChannelSafe, true, "", "Blur is valid for scalar channel streams.", { "blur", "channel-safe" } },
         { LayerType::GaussianBlur, "GaussianBlur", "Gaussian Blur", "Gaussian Blur", "Blur / Focus", "Apply a gaussian blur.", {}, MakeLayer<GaussianBlurLayer>, Stable, ChannelSafe, true, "", "Blur is valid for scalar channel streams.", { "blur", "channel-safe" } },
         { LayerType::ClassicalRgbDenoise, "ClassicalRgbDenoise", "Legacy Classical RGB Denoise", "Legacy Classical RGB Denoise", "Legacy", "Retired classical denoise experiment retained for saved-project loading.", {}, MakeLayer<ClassicalRgbDenoiseLayer>, Deprecated, FullImagePreferred, false, "Load-only compatibility node; no longer offered for new graphs.", "Existing projects retain their serialized node and behavior while the denoise workflow is rebuilt.", { "denoise", "classical", "legacy", "deprecated" } },
         { LayerType::SceneDenoise, "SceneDenoise", "Legacy Scene Denoise", "Legacy Scene Denoise", "Legacy", "Retired scene-denoise experiment retained for saved-project loading.", {}, MakeLayer<SceneDenoiseLayer>, Deprecated, FullImagePreferred, false, "Load-only compatibility node; no longer offered for new graphs.", "Existing projects retain their serialized node and behavior while the denoise workflow is rebuilt.", { "denoise", "scene-referred", "legacy", "deprecated" } },
-        { LayerType::NonLocalMeansDenoise, "NonLocalMeansDenoise", "Utility NLM Denoise", "Utility NLM Denoise", "Blur / Focus", "Simple utility non-local means filtering.", {}, MakeLayer<NonLocalMeansDenoiseLayer>, Stable, ChannelWarn, true, "", "Utility denoise; not the replacement photographic RAW denoise workflow.", { "denoise", "utility", "channel-warning" } },
-        { LayerType::MedianDenoise, "MedianDenoise", "Utility Median Denoise", "Utility Median Denoise", "Blur / Focus", "Simple median filter for speckle and channel/mask cleanup.", {}, MakeLayer<MedianDenoiseLayer>, Stable, ChannelSafe, true, "", "Utility denoise; useful for scalar channels and masks.", { "denoise", "utility", "channel-safe" } },
-        { LayerType::MeanDenoise, "MeanDenoise", "Utility Mean Denoise", "Utility Mean Denoise", "Blur / Focus", "Simple mean box filter for channel/mask smoothing.", {}, MakeLayer<MeanDenoiseLayer>, Stable, ChannelSafe, true, "", "Utility denoise for channels and masks; not the replacement photographic RAW denoise workflow.", { "denoise", "utility", "channel-safe" } },
         { LayerType::BilateralFilter, "BilateralFilter", "Bilateral Filter", "Bilateral Filter", "Blur / Focus", "Smooth detail while preserving edges.", {}, MakeLayer<BilateralFilterLayer>, Stable, ChannelWarn, true, "", "Edge-preserving behavior should be checked on scalar channels.", { "denoise", "edge", "channel-warning" } },
         { LayerType::Noise, "Noise", "Noise / Film Grain", "Noise / Film Grain", "Texture / Generate", "Simulate variable-radius film grains, optical filtering, density response and color-layer grain; retain legacy procedural noise.", {}, MakeLayer<NoiseLayer>, Stable, ChannelWarn, true, "", "Film grain supports scalar channels; color-layer controls apply to RGB inputs.", { "generate", "noise", "film", "grain", "channel-warning" } },
         { LayerType::TiltShiftBlur, "TiltShiftBlur", "Tilt-Shift Blur", "Tilt-Shift Blur", "Blur / Focus", "Apply directional depth-style blur.", {}, MakeLayer<TiltShiftBlurLayer>, Stable, ChannelWarn, true, "", "Focus blur can be applied to channels but may need canvas guides.", { "blur", "advanced-ui", "channel-warning" } },
@@ -87,7 +80,6 @@ const std::vector<LayerDescriptor>& Descriptors() {
         { LayerType::Vignette, "Vignette", "Vignette", "Vignette", "Effects / Damage", "Darken or focus the image edges.", {}, MakeLayer<VignetteLayer>, Stable, ChannelWarn, true, "", "On channels this acts as a spatial channel multiplier.", { "focus", "channel-warning" } },
         { LayerType::GlareRays, "GlareRays", "Glare Rays", "Glare Rays", "Effects / Damage", "Add directional glare rays.", {}, MakeLayer<GlareRaysLayer>, Stable, FullImagePreferred, true, "", "Highlight/glare behavior is full-image-first.", { "glare", "full-image-preferred" } },
         { LayerType::ChromaticAberration, "ChromaticAberration", "Chromatic Aberration", "Chromatic Aberration", "Effects / Damage", "Offset color channels for lens fringing.", {}, MakeLayer<ChromaticAberrationLayer>, NeedsFix, FullImagePreferred, true, "", "Chromatic offset is ambiguous on a single channel.", { "lens", "full-image-preferred" } },
-        { LayerType::LensDistortion, "LensDistortion", "Lens Distortion", "Lens Distortion", "Effects / Damage", "Warp the image with lens distortion.", {}, MakeLayer<LensDistortionLayer>, Stable, ChannelWarn, true, "", "Spatial warp is valid but can misregister recombined channels.", { "lens", "channel-warning" } },
         { LayerType::AiryBloom, "AiryBloom", "Airy Bloom", "Airy Bloom", "Blur / Focus", "Add airy disk bloom around highlights.", { "AiryDiskBloom" }, MakeLayer<AiryBloomLayer>, Stable, FullImagePreferred, true, "", "Highlight/bloom behavior is full-image-first.", { "bloom", "full-image-preferred" } },
     };
     return descriptors;

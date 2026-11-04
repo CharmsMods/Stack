@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "Editor/Internal/RawLab/RawLayerMaskPlacement.h"
 #include "Editor/GalleryPresetPreview.h"
 #include "Editor/RawAttributeTargetProject.h"
@@ -327,16 +328,16 @@ void CheckPixelsAndView() {
             std::cout << "Mask Value curve, absent red curve, unbounded Exposure and Field Mean passed.\n";
         }
         auto typed = state;
-        const auto scalarId = typed.layers.front().graph.AddValueNode(NodeMath::MakeUniformScalar(1.0),{0,600})->id;
+        const auto scalarId = Stack::Validation::AddUniformOperand(typed.layers.front().graph,1.f,{0,600});
         Require(PublishRawLayerResult(typed,RawLayerEndpoint(typed.layers.front(),
-            *typed.layers.front().graph.FindNode(scalarId),"valueOut"),kRawBackgroundId,error),error);
+            *typed.layers.front().graph.FindNode(scalarId),"imageOut"),kRawBackgroundId,error),error);
         const auto referenceId = typed.background.graph.GetNodes().back().id;
         Require(typed.background.graph.TryConnectSockets(referenceId,"imageOut",
             FindRawOperation(typed.background,Kind::Exposure)->id,"param:ev",&error),error);
         lowered = graph;
         Require(LowerRawLayerStack(lowered,typed,1,2,error),error);
         CompareGain(base,Render(pipeline,lowered),2.f);
-        typed.layers.front().graph.FindNode(scalarId)->value.value = NodeMath::MakeUniformScalar(-1.0);
+        typed.layers.front().graph.FindNode(scalarId)->dataMathSettings.constantA = -1.f;
         lowered = graph;
         Require(LowerRawLayerStack(lowered,typed,1,3,error),error);
         CompareGain(base,Render(pipeline,lowered),.5f);
@@ -345,13 +346,13 @@ void CheckPixelsAndView() {
         // survive lowering. The later layer's independent scalar is legal.
         auto compounded = state;
         auto& producer = compounded.layers.front();
-        const int scalarSource = producer.graph.AddValueNode(NodeMath::MakeUniformScalar(1.0),{0,600})->id;
+        const int scalarSource = Stack::Validation::AddUniformOperand(producer.graph,1.f,{0,600});
         EditorNodeGraph::Graph internal;
         internal.SetAllowNoOutput(true);
         auto* internalReference = internal.AddImageNode({},{});
         internalReference->role = GraphModel::NodeRole::Reference;
         internalReference->referenceType = NodeMath::LogicalValueType::Scalar;
-        internalReference->reference = RawLayerEndpoint(producer,*producer.graph.FindNode(scalarSource),"valueOut");
+        internalReference->reference = RawLayerEndpoint(producer,*producer.graph.FindNode(scalarSource),"imageOut");
         NodeMath::CompoundDefinition definition;
         definition.definitionUuid = NodeMath::GenerateCanonicalUuid();
         definition.identity.id = "project:compound/" + definition.definitionUuid;

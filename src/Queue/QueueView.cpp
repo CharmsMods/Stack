@@ -374,7 +374,18 @@ ViewAction QueueView::RenderWorkspace(const std::vector<Item>& items,
     if (destinationHovered && !output.destination.empty()) ImGui::SetTooltip("%s", output.destination.c_str());
     ImGui::SetCursorScreenPos(ImVec2(footer.x, footer.y + 54 * s));
     ImGui::PushFont(nullptr, 12 * s);
-    ImGui::TextColored(secondary, "PNG  /  Full quality  /  Unique filenames");
+    int format = static_cast<int>(output.format);
+    ImGui::BeginDisabled(output.busy);
+    ImGui::SetNextItemWidth(130 * s);
+    if (ImGui::Combo("##QueueExportFormat", &format, "SDR PNG\0HDR JPEG\0HDR PNG\0")) {
+        action.command = ViewCommand::ChooseFormat;
+        action.format = static_cast<Hdr::FileFormat>(format);
+    }
+    ImGui::EndDisabled();
+    if (width >= 420 * s) {
+        ImGui::SameLine();
+        ImGui::TextColored(secondary, "Full quality  /  Unique filenames");
+    }
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(ImVec2(compact ? footer.x : footer.x + width - controlsWidth,
         footer.y + (compact ? 82.f : 16.f) * s));

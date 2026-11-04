@@ -2,6 +2,7 @@
 
 #include "Editor/NodeGraph/NodeGraphModelTypes.h"
 #include "NodeMath/ChannelImageSemantics.h"
+#include "NodeMath/ArithmeticContract.h"
 #include "NodeMath/SourceImageSemantics.h"
 
 #include <algorithm>
@@ -169,7 +170,11 @@ GraphOutputDescription ExtractChannel(const Node& node, const std::string& socke
             if(role=="A" && opaqueAlpha) {
                 output.descriptor.range=SemanticField<NumericRange>::Known({1,1,false,false,NonFinitePolicy::Forbidden});
                 output.componentOrigin.clear();
-            } else AddDiagnostic(output,node,socketId,role+" component is absent");
+            } else {
+                AddDiagnostic(output,node,socketId,role+" component is absent. Choose an available component.");
+                output.diagnostics.back().ruleId = "graph.wire";
+                output.invalidWire = true;
+            }
         }
     }
     return output;
@@ -177,6 +182,9 @@ GraphOutputDescription ExtractChannel(const Node& node, const std::string& socke
 
 GraphOutputDescription Describe(const Node& node, const std::string& socketId, const Inputs& inputs,
     LogicalValueType declaredType, const GraphOutputContext& context) {
+    if (!node.rawLayerOwnerId.empty() && node.role == Stack::GraphModel::NodeRole::CurrentImage) {
+        if (const auto source = inputs.find(kImageInputSocketId); source != inputs.end()) return *source->second;
+    }
     if (node.role == Stack::GraphModel::NodeRole::Reference && node.referenceType != LogicalValueType::Invalid) {
         GraphOutputDescription reference;
         reference.descriptor = MakeUnknownDescriptor(node.referenceType);
@@ -213,7 +221,7 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     switch (node.kind) {
     case NodeKind::Image: {
         output.descriptor = DescribeStoredImageValue(node.image.sourceColorMetadata.descriptor,
-            node.image.channels, node.image.width, node.image.height);
+            node.image.channels, node.image.width, node.image.height, static_cast<bool>(node.image.hdrPixels));
         if (node.image.isLoading) AddDiagnostic(output, node, socketId, "Loading", DiagnosticSeverity::Information);
         rendered = false;
         break;
@@ -278,6 +286,38 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         break;
     }
     case NodeKind::DataMath: {
+        if (Primitive(node.dataMathMode)) {
+            const auto* a = input(kMixInputASocketId);
+            const auto* b = input(kMixInputBSocketId);
+            const auto rule = ResolveArithmetic(a ? &a->descriptor : nullptr, b ? &b->descriptor : nullptr);
+            output = MergeSignals(signals({kMixInputASocketId,kMixInputBSocketId}), rule.result, false);
+            output.descriptor.logicalType = rule.result;
+            const auto shape = rule.outputShape();
+            if (rule.result == LogicalValueType::ColorImage && output.descriptor.presentImageComponents.state != KnowledgeState::Known &&
+                (shape == ArithmeticShape::RGB || shape == ArithmeticShape::RGBA)) {
+                auto components = MakeImageComponentSet({ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue});
+                if (shape == ArithmeticShape::RGBA) AddImageComponent(components, ImageComponent::Alpha);
+                SetComponents(output.descriptor, components);
+            }
+            if (rule.result == LogicalValueType::Scalar) {
+                output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless,{}});
+                output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
+                rendered = false;
+            } else if ((rule.a == ArithmeticShape::RGBA || rule.b == ArithmeticShape::RGBA) &&
+                       output.descriptor.alpha.state == KnowledgeState::Known) {
+                // Alpha is an ordinary arithmetic component and can leave its input range.
+                output.descriptor.alpha = output.descriptor.alpha.value == AlphaMode::Premultiplied
+                    ? SemanticField<AlphaMode>::Unknown() : SemanticField<AlphaMode>::Known(AlphaMode::Straight);
+            }
+            if (!node.dataMathSettings.requiredLinearBasis.empty() && a &&
+                (a->descriptor.color.state != KnowledgeState::Known ||
+                 a->descriptor.color.value.identity != node.dataMathSettings.requiredLinearBasis ||
+                 a->descriptor.transfer.state != KnowledgeState::Known ||
+                 a->descriptor.transfer.value.kind != TransferKind::Linear ||
+                 (a->descriptor.alpha.state == KnowledgeState::Known && a->descriptor.alpha.value == AlphaMode::Premultiplied)))
+                AddDiagnostic(output,node,socketId,"Input needs straight linear RGB in " + node.dataMathSettings.requiredLinearBasis + ".");
+            break;
+        }
         if (node.dataMathSettings.domain == ArithmeticDomain::Values) {
             output.descriptor = MakeUnknownDescriptor(LogicalValueType::Scalar);
             output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
@@ -498,15 +538,19 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     case NodeKind::RawDevelop:
     case NodeKind::RawProjectSourceSet:
     case NodeKind::MultiFrameDenoise:
-    case NodeKind::MultiFrameHdr:
+    case NodeKind::MultiFrameHdr: {
         output.descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
-        SetComponents(output.descriptor, MakeImageComponentSet({ ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue }));
+        auto components = MakeImageComponentSet({ ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue });
+        if (node.kind == NodeKind::RawDevelopment || node.kind == NodeKind::RawProjectSourceSet)
+            AddImageComponent(components, ImageComponent::Alpha);
+        SetComponents(output.descriptor, components);
         output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float16);
         for (const auto& pair : inputs) {
             if (pair.second->descriptor.spatial.state == KnowledgeState::Known) output.descriptor.spatial = pair.second->descriptor.spatial;
             MergeDiagnostics(output, *pair.second);
         }
         break;
+    }
     default:
         // An unimplemented metadata rule preserves declared shape without
         // inventing color identity, extent, availability, or a processing failure.

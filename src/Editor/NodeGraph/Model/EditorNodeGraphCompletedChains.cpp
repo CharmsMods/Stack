@@ -302,7 +302,7 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                     }
                     // Uniform math has authored constant fallbacks for every
                     // operand. It is executable without a spatial source.
-                    plan.valid = node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
+                    plan.valid = (Stack::NodeMath::Primitive(node->dataMathMode) || node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) &&
                         node->dataMathMode != DataMathMode::ImageAverage;
                     plan.valid = plan.valid || (node->dataMathMode == DataMathMode::ImageAverage
                         ? inputCount >= 2 : inputCount >= 1);

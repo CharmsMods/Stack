@@ -1208,7 +1208,8 @@ private:
     bool RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO);
     bool RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO);
     bool RenderDataMath(unsigned int textureA, unsigned int textureB, bool hasA, bool hasB, bool scalarA, bool scalarB,
-                        RenderDataMathMode mode, const RenderDataMathSettings& settings, bool scalarOutput, unsigned int targetFBO);
+                        RenderDataMathMode mode, const RenderDataMathSettings& settings, bool scalarOutput, unsigned int targetFBO,
+                        bool opaqueResult = false);
     bool RenderTechnicalImage(
         unsigned int texture,
         Stack::NodeMath::TechnicalImageOperation operation,

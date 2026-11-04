@@ -549,6 +549,8 @@ json ViewTransformLayer::Serialize() const {
 }
 
 void ViewTransformLayer::Deserialize(const json& j) {
+    m_DisplayLinearInput = j.value("_displayLinearInput", false);
+    m_HdrHeadroom = std::clamp(j.value("_presentationHeadroom", 1.f), 1.f, 125.f);
     if (j.contains("displayCurve") && j.at("displayCurve") != Raw::SigmoidDisplay::Id)
         throw std::runtime_error("Unsupported View Transform display curve.");
     m_Exposure = j.value("exposure", m_Exposure);

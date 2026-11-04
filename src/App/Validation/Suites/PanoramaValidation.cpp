@@ -20,8 +20,7 @@ namespace {
 using namespace Raw::Bracketing;
 void Check(bool ok,const std::string& message){if(!ok)throw std::runtime_error(message);}
 nlohmann::json GraphAdjustment() {
-    return {{"type","ColorGrade"},{"strength",35},{"shadows",{1.,1.,1.}},
-        {"midtones",{1.02,1.,.98}},{"highlights",{1.,1.,1.}}};
+    return {{"type","Brightness"},{"brightness",0.12f}};
 }
 RawRecipe::RawDevelopmentRecipe EditedRecipe(const Raw::RawImageData& raw) {
     auto recipe=RawRecipe::MakeDefaultRecipe(raw.metadata.sourcePath,"Panorama");
@@ -80,7 +79,7 @@ void SaveRoundTrip(const std::filesystem::path& directory,const ProcessingReques
     EditorNodeGraph::Graph graph;
     EditorNodeGraph::MultiFrameHdrPayload payload;payload.sourceSetId=set.sourceSetId;payload.radiometricAnchorFrameId=set.referenceFrameId;
     const auto sourceNode=graph.AddMultiFrameHdrNode(payload,{0,0})->id;
-    const auto gradeNode=graph.AddLayerNode(LayerType::ColorGrade,0,{200,0})->id;
+    const auto gradeNode=graph.AddLayerNode(LayerType::Brightness,0,{200,0})->id;
     const auto outputNode=graph.AddOutputNode({400,0},true)->id;
     Check(graph.TryConnectSockets(sourceNode,"imageOut",gradeNode,"imageIn",&error),error);
     Check(graph.TryConnectSockets(gradeNode,"imageOut",outputNode,"imageIn",&error),error);

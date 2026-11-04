@@ -22,6 +22,7 @@ void BuildImagePayloadPreview(
     int& outHeight,
     int& outChannels,
     int maxDimension = 768);
+bool RotateManagedImagePayload(ImagePayload& payload, int turns);
 bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& payload);
 Stack::NodeMath::SourceColorMetadata InspectImageFileColorMetadata(
     const std::string& path,

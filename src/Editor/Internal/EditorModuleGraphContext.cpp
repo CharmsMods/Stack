@@ -1,3 +1,5 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
+#include "Editor/Internal/GraphConnectionContext.h"
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Project/RawLayerStack.h"
@@ -36,15 +38,22 @@ Stack::Editor::GraphEditorContext EditorModule::GetGraphEditorContext() {
             return !(IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive()) ||
                 Stack::Project::ValidateRawLayerStack(m_Project->rawLayers.State(),error,&graph,ResolveRawWorkspaceStageOutputNodeId());
         };
+        std::optional<EditorNodeGraph::ScopedGraphOutputAnalysis> descriptions;
+        if (endpoint) {
+            PrepareGraphOutputDescriptions();
+            descriptions.emplace(GetNodeGraph(),Stack::Editor::PublishedConnectionContext(*this));
+        }
         return Stack::GraphModel::QueryAvailableNodes(GetNodeGraph(),endpoint,
             IsEditingRawLayerMaskGraph() ? EditorNodeGraphDefinitions::LiveGraphRole::RawLayer : EditorNodeGraphDefinitions::LiveGraphRole::Composition,accepts);
     };
     context.canConnect = [this, stillOwned](int from, const std::string& output, int to, const std::string& input, std::string* reason) {
         if (!stillOwned()) return false;
+        PrepareGraphOutputDescriptions();
+        const auto published = Stack::Editor::PublishedConnectionContext(*this);
         const auto analysisGraph = GetNodeGraph().CloneForAnalysis();
         auto proposal = Stack::GraphModel::ProposeEdit(analysisGraph,GetNodeGraph().GetStructureRevision(),[&](auto& graph) {
             std::string error;
-            if (!graph.TryConnectSockets(from,output,to,input,&error)) throw std::runtime_error(error);
+            if (!EditorNodeGraph::ConnectAuthoredSockets(graph,from,output,to,input,&error,nullptr,&published)) throw std::runtime_error(error);
         });
         if (!proposal.analysis.valid) { if (reason) *reason = proposal.analysis.errors.front(); return false; }
         std::string error;

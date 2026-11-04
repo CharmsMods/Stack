@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "EditorNodeGraphDefinitions.h"
 
 #include "Editor/LayerRegistry.h"
@@ -7,15 +8,6 @@
 
 namespace EditorNodeGraphDefinitions {
 namespace {
-
-const char* ScopeTitle(EditorNodeGraph::ScopeKind kind) {
-    switch (kind) {
-        case EditorNodeGraph::ScopeKind::Histogram: return "Histogram";
-        case EditorNodeGraph::ScopeKind::Vectorscope: return "Vectorscope";
-        case EditorNodeGraph::ScopeKind::RGBParade: return "RGB Parade";
-    }
-    return "Scope";
-}
 
 const char* MaskTitle(EditorNodeGraph::MaskGeneratorKind kind) {
     switch (kind) {
@@ -90,7 +82,7 @@ const char* ValueTitle(Stack::NodeMath::LogicalValueType type) {
     switch (type) {
         case Type::Boolean: return "Boolean Value";
         case Type::Integer: return "Integer Value";
-        case Type::Scalar: return "Scalar Value";
+        case Type::Scalar: return "Number";
         case Type::Vector2: return "Vector 2 Value";
         case Type::Vector3: return "Vector 3 Value";
         case Type::Vector4: return "Vector 4 Value";
@@ -218,12 +210,6 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawDetailFusion:
             node.title = "Pre-Local Exposure";
             break;
-        case EditorNodeGraph::NodeKind::HdrMerge:
-            node.title = "HDR Merge";
-            break;
-        case EditorNodeGraph::NodeKind::Mfsr:
-            node.title = "MFSR";
-            break;
         case EditorNodeGraph::NodeKind::RawProjectFrame:
             node.title = node.rawProjectFrame.displayLabel.empty()
                 ? "RAW Frame"
@@ -264,10 +250,6 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Composite:
             node.title = "Composite";
             break;
-        case EditorNodeGraph::NodeKind::Scope:
-            node.title = ScopeTitle(node.scopeKind);
-            node.expanded = true;
-            break;
         case EditorNodeGraph::NodeKind::Preview:
             node.title = "Preview";
             node.expanded = true;
@@ -300,10 +282,10 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.title = "Blend Images";
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
-            node.title = "Channel Split";
+            node.title = EditorNodeGraph::kSplitChannelsTitle;
             break;
         case EditorNodeGraph::NodeKind::ChannelCombine:
-            node.title = "Image Combine";
+            node.title = EditorNodeGraph::kCombineChannelsTitle;
             break;
         case EditorNodeGraph::NodeKind::ConstantChannel:
             node.title = "Constant Channel";
@@ -376,22 +358,6 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Hybrid Mask", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Gain Mask", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::HdrMerge:
-            add(EditorNodeGraph::kHdrMergeInput1SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 1", false, true);
-            add(EditorNodeGraph::kHdrMergeInput2SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 2", true, true);
-            add(EditorNodeGraph::kHdrMergeInput3SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 3", true, true);
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Scene HDR", false, true);
-            break;
-        case EditorNodeGraph::NodeKind::Mfsr:
-            add(EditorNodeGraph::kMfsrReferenceInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Reference", false, true);
-            add(EditorNodeGraph::MfsrInputSocketId(1).c_str(), EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Frame 2", true, true);
-            for (int inputIndex = 2; inputIndex < EditorNodeGraph::kMaxMfsrInputCount; ++inputIndex) {
-                const std::string socketId = EditorNodeGraph::MfsrInputSocketId(inputIndex);
-                const std::string label = EditorNodeGraph::MfsrInputSocketLabel(inputIndex);
-                add(socketId.c_str(), EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, label.c_str(), true, false);
-            }
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::RawProjectFrame:
             add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "Mosaic RAW", false, true);
@@ -469,9 +435,6 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             break;
         case EditorNodeGraph::NodeKind::Composite:
             break;
-        case EditorNodeGraph::NodeKind::Scope:
-            add(EditorNodeGraph::kScopeInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Scope", false, true);
-            break;
         case EditorNodeGraph::NodeKind::Preview:
             add(EditorNodeGraph::kPreviewInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Image / Mask", false, true);
             break;
@@ -508,6 +471,12 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::DataMath:
+            if (Stack::NodeMath::Primitive(node.dataMathMode)) {
+                add("imageA", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "A", true, true);
+                add("imageB", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "B", true, true);
+                add("imageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Result", false, true);
+                break;
+            }
             add(EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data A", false, true);
             add(EditorNodeGraph::kMixInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data B", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Data Out", false, true);
@@ -582,10 +551,6 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             break;
         case EditorNodeGraph::NodeKind::FieldMean:
             return EditorNodeGraph::kReductionFieldInputSocketId;
-        case EditorNodeGraph::NodeKind::HdrMerge:
-            return EditorNodeGraph::kHdrMergeInput1SocketId;
-        case EditorNodeGraph::NodeKind::Mfsr:
-            return EditorNodeGraph::kMfsrReferenceInputSocketId;
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
             return node.multiFrameDenoise.frameBindings.empty()
                 ? std::string()
@@ -613,8 +578,6 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::DataMath:
         
             return EditorNodeGraph::kMixInputASocketId;
-        case EditorNodeGraph::NodeKind::Scope:
-            return EditorNodeGraph::kScopeInputSocketId;
         case EditorNodeGraph::NodeKind::Preview:
             return EditorNodeGraph::kPreviewInputSocketId;
         case EditorNodeGraph::NodeKind::MaskUtility:
@@ -654,8 +617,6 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailFusion:
-        case EditorNodeGraph::NodeKind::HdrMerge:
-        case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
         case EditorNodeGraph::NodeKind::MultiFrameHdr:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
@@ -696,7 +657,6 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
             return EditorNodeGraph::kMaskOutputSocketId;
         case EditorNodeGraph::NodeKind::Composite:
         case EditorNodeGraph::NodeKind::Output:
-        case EditorNodeGraph::NodeKind::Scope:
         case EditorNodeGraph::NodeKind::Preview:
         
             break;

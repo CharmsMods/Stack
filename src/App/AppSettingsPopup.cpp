@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "App/settings/PaletteWorkshop.h"
 #include "App/settings/ViewportQualityControls.h"
 #include "AppSettingsPopup.h"
@@ -541,6 +542,12 @@ void RenderViewportSection(StackAppearance::AppearanceManager* appearance, const
 
     RenderSectionIntro("VIEWPORT RENDERING", "Control tile-first rendering for the main single-output viewport.");
 
+    ImGui::Text("Windows display: %s", Stack::Hdr::MainDisplayStatus().c_str());
+    bool sdr=Stack::Hdr::PreviewInSdr();
+    if(ImGui::Checkbox("Preview in SDR",&sdr)) {
+        Stack::Hdr::SetPreviewInSdr(sdr);
+        appearance->SetPreviewInSdr(sdr);
+    }
     ViewportTilingSettings settings = appearance->GetViewportTilingSettings();
     ViewportTilingMode mode = settings.mode;
     ImGui::SetNextItemWidth(std::min(contentWidth, 260.0f));

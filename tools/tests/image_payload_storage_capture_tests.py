@@ -5,6 +5,7 @@ The generated method is unchanged production code. Link real graph analysis,
 history and byte-storage code; only the editor/project shell is reduced.
 """
 import argparse
+import re
 from pathlib import Path
 
 
@@ -25,7 +26,8 @@ def main():
     persistence=read('Editor/Internal/EditorModulePersistence.cpp')
     assert 'node->image.pngStorage.Invalidate();\n            node->image.pngBytes = std::move(pngBytes);' in image
     assert 'imageNode->image.pngStorage.Invalidate();\n                imageNode->image.pngBytes = std::move(pngBytes);' in persistence
-    assert image.index('node->image.pngStorage.Invalidate();\n    node->image.previewStorage.Invalidate();') < image.index('node->image.pngBytes.clear();')
+    invalidated = re.search(r'node->image\.pngStorage\.Invalidate\(\);\s*node->image\.previewStorage\.Invalidate\(\);', image)
+    assert invalidated and invalidated.start() < image.index('node->image.pngBytes.clear();')
     decoder=read('Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.cpp')
     assert decoder.index('payload.pngBytes.swap(encodedBytes);') < decoder.index('InvalidateImagePayloadRuntime(payload);') < decoder.index('return true;',decoder.index('InvalidateImagePayloadRuntime(payload);'))
     graph=read('Editor/NodeGraph/EditorNodeGraphCompound.cpp')

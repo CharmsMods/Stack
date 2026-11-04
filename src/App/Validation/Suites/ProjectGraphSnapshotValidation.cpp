@@ -103,7 +103,7 @@ void CheckCompiledSnapshotReuse(EditorModule& editor,
         stage.outputNodeId == rawId && editor.GetGraphOutputDescription(rawId,"imageOut"),
         "A generic stage request replaced ordinary compilation or published partial descriptions.");
 
-    project->graph.AddValueNode(Stack::NodeMath::MakeUniformScalar(1),{});
+    project->graph.AddDataMathNode(EditorNodeGraph::DataMathMode::Add,{});
     editor.BuildGraphSnapshot();
     RequireSnapshot(project->compiledGraphCache->ordinary->result != beforeStage,
         "A structural change reused stale compilation.");

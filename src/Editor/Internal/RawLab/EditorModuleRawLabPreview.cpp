@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "Editor/UI/ViewportNavigation.h"
 #include "Editor/EditorModule.h"
 #include "Editor/UI/ViewComparisonLayout.h"
@@ -148,6 +149,7 @@ bool DrawLabTileSet(
         return false;
     }
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
     const float drawWidth = std::max(1.0f, rect.GetWidth());
     const float drawHeight = std::max(1.0f, rect.GetHeight());
     drawList->PushClipRect(rect.Min, rect.Max, true);
@@ -180,7 +182,7 @@ bool DrawLabTileSet(
         const float bottomV = (localY + 0.5f) / tile.haloHeight;
         const float topV = (localY + tile.height - 0.5f) / tile.haloHeight;
         drawList->AddImage(
-            (ImTextureID)(intptr_t)tile.texture,
+            (ImTextureID)(intptr_t)tile.Display(hdr),
             ImVec2(tileMinX, tileMinY),
             ImVec2(tileMaxX, tileMaxY),
             ImVec2(u0, 1.0f - topV),
@@ -1316,9 +1318,11 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 ImVec2(imageRect.Min.x + imageRect.GetWidth() * (detail.x + detail.width) / detail.fullWidth,
                     imageRect.Min.y + imageRect.GetHeight() * (detail.y + detail.height) / detail.fullHeight));
         }
+        const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+        const auto photo = m_RawWorkspacePresentationTexture.Display(hdr);
         unsigned int overview = 0;
         int overviewWidth = 0, overviewHeight = 0;
-        if (region.Partial() && TryGetViewportPreviewOverview(overview, overviewWidth, overviewHeight)) {
+        if (region.Partial() && TryGetViewportPreviewOverview(overview, overviewWidth, overviewHeight, hdr)) {
             const auto uv = [&](ImVec2 point) {
                 return ImVec2((point.x - imageRect.Min.x) / imageRect.GetWidth(),
                     1.f - (point.y - imageRect.Min.y) / imageRect.GetHeight());
@@ -1347,11 +1351,11 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             m_Viewport.FrameTransition().Clear();
         DrawLabCoverageWithoutDetail(drawList, rasterMin, rasterMax, hasRetainedDetail ? &detailBounds : nullptr, [&] {
             const bool blended = !m_NodeOpenTransition.Active() && (UsesGraphViewportPreview()
-                ? m_Viewport.FrameTransition().Draw(drawList, m_RawWorkspacePresentationTexture.texture,
-                    rasterMin, rasterMax, ImGui::GetTime(), ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, 0)
+                ? m_Viewport.FrameTransition().Draw(drawList, photo,
+                    rasterMin, rasterMax, ImGui::GetTime(), ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, 0, photo != m_RawWorkspacePresentationTexture.texture)
                 : DrawRawViewportTransition(drawList, rasterMin, rasterMax));
             if (!blended) drawList->AddImage(
-                (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.texture,
+                (ImTextureID)(intptr_t)photo,
                 rasterMin, rasterMax, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
         });
         DrawRawViewportDetail(drawList, imageRect.Min, imageRect.Max);

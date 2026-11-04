@@ -6,7 +6,7 @@ namespace EditorNodeGraphDefinitions {
 
 // Families organize implementation ownership. Browser categories are separate
 // presentation metadata on each definition and can change independently.
-enum class OperationFamily { SourcePreparation, ImageEffects, FieldsAndValues };
+enum class OperationFamily { SourcePreparation, ImageEffects, FieldsAndValues, RawMasking };
 enum class OperationDisposition { Builtin, EmbeddedCompound, UnavailableIdentity };
 
 struct OperationRegistration {
@@ -30,6 +30,7 @@ LiveNodeDefinition MakeOperation(EditorNodeGraph::NodeKind kind, int variant,
 
 void AppendSourceOperations(std::vector<OperationRegistration>& operations);
 void AppendImageEffectOperations(std::vector<OperationRegistration>& operations);
+void AppendRawMaskOperations(std::vector<OperationRegistration>& operations);
 void AppendFieldOperations(std::vector<OperationRegistration>& operations);
 
 } // namespace OperationDefinitions

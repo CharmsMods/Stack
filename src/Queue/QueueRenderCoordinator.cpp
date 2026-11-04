@@ -3,7 +3,6 @@
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
 #include "Persistence/ProjectOpenCoordinator.h"
-#include "Raw/RawLoader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,13 +21,6 @@ Async::ActivityMetadata ExecutionActivity(const Notifications::Notifier& notifie
     metadata.operationId = activity.operationId;
     metadata.label = std::move(label);
     return metadata;
-}
-
-std::string SourceLoadPath(const std::filesystem::path& path) {
-    const std::string utf8 = path.u8string();
-    // RAW decoding accepts UTF-8. The current raster loader uses narrow ANSI
-    // filenames, so preserve its existing path conversion until it is updated.
-    return Raw::RawLoader::IsRawPath(utf8) ? utf8 : path.string();
 }
 
 std::string SanitizeStem(std::string value) {
@@ -324,7 +316,7 @@ void QueueRenderCoordinator::BeginInspection() {
     m_InspectionPhaseStartedAt = std::chrono::steady_clock::now();
     m_InspectionNotifier.UpdateActivity(m_InspectionActivity, "Loading original image");
     m_RenderEditor->RequestLoadSourceImage(
-        SourceLoadPath(m_CurrentInspection.sourcePath));
+        m_CurrentInspection.sourcePath.u8string());
 }
 
 void QueueRenderCoordinator::BeginInspectionProjectLoad() {
@@ -626,7 +618,7 @@ void QueueRenderCoordinator::BeginSourceLoad() {
         m_Model->UpdateState(
             m_Current.id, ItemState::Preparing, 0.12f, "Loading image");
     }
-    m_RenderEditor->RequestLoadSourceImage(SourceLoadPath(m_Current.path));
+    m_RenderEditor->RequestLoadSourceImage(m_Current.path.u8string());
 }
 
 bool QueueRenderCoordinator::BeginFullQualityRender(
@@ -668,14 +660,14 @@ bool QueueRenderCoordinator::BeginInspectionFullQualityRender() {
 std::filesystem::path QueueRenderCoordinator::BuildOutputPath(
     const Item& item) const {
     const std::string stem = SanitizeStem(item.displayName);
-    std::filesystem::path candidate = m_Destination / std::filesystem::u8path(stem + ".png");
+    std::filesystem::path candidate = m_Destination / std::filesystem::u8path(stem + Hdr::Extension(item.exportFormat));
     std::error_code error;
     bool exists = std::filesystem::exists(candidate, error);
     if (error) return {};
     if (!exists) return candidate;
     for (int version = 2; version < 10000; ++version) {
         candidate = m_Destination /
-            std::filesystem::u8path(stem + " " + std::to_string(version) + ".png");
+            std::filesystem::u8path(stem + " " + std::to_string(version) + Hdr::Extension(item.exportFormat));
         error.clear();
         exists = std::filesystem::exists(candidate, error);
         if (error) return {};
@@ -690,7 +682,7 @@ void QueueRenderCoordinator::BeginOutputWrite() {
         FailCurrent("A new output filename could not be chosen in the export folder. Existing files were preserved.");
         return;
     }
-    if (!m_RenderEditor->RequestQueueExportImage(output.u8string())) {
+    if (!m_RenderEditor->RequestQueueExportImage(output.u8string(), m_Current.exportFormat)) {
         FailCurrent(m_RenderEditor->GetExportStatusText().empty()
             ? "The full-quality Queue export could not be captured."
             : m_RenderEditor->GetExportStatusText());
@@ -701,7 +693,7 @@ void QueueRenderCoordinator::BeginOutputWrite() {
         "Writing " + output.filename().u8string() + "...");
     if (m_Model) {
         m_Model->UpdateState(
-            m_Current.id, ItemState::Writing, 0.82f, "Writing PNG");
+            m_Current.id, ItemState::Writing, 0.82f, "Writing image");
     }
 }
 
@@ -851,7 +843,7 @@ void QueueRenderCoordinator::Tick() {
         } else if (!m_RenderEditor->IsExportBusy()) {
             CompleteCurrent();
         } else if (PhaseTimedOut(std::chrono::minutes(10))) {
-            FailCurrent("Writing the PNG timed out.");
+            FailCurrent("Writing the image timed out.");
         }
         return;
     case Phase::Idle:

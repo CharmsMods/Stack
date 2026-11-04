@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "Editor/Internal/RawDemosaicControls.h"
 #include "Editor/AutoBracket/AutoBracketEditingScope.h"
 #include "Utils/UiBusyState.h"
@@ -1406,6 +1407,7 @@ bool DrawViewportTileSet(
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
     const float drawW = std::max(1.0f, rect.GetWidth());
     const float drawH = std::max(1.0f, rect.GetHeight());
     drawList->PushClipRect(rect.Min, rect.Max, true);
@@ -1425,7 +1427,7 @@ bool DrawViewportTileSet(
         const float bottomV = (localY + 0.5f) / static_cast<float>(tile.haloHeight);
         const float topV = (localY + static_cast<float>(tile.height) - 0.5f) / static_cast<float>(tile.haloHeight);
         drawList->AddImage(
-            (ImTextureID)(intptr_t)tile.texture,
+            (ImTextureID)(intptr_t)tile.Display(hdr),
             ImVec2(tileMinX, tileMinY),
             ImVec2(tileMaxX, tileMaxY),
             ImVec2(u0, 1.0f - topV),
@@ -2220,7 +2222,7 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
             ? (0.5f / static_cast<float>(m_RawWorkspacePresentationTexture.height))
             : 0.0f;
         drawList->AddImage(
-            (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.texture,
+            (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.Display(Stack::Hdr::PreviewActiveForCurrentWindow()),
             imageRect.Min,
             imageRect.Max,
             ImVec2(uInset, 1.0f - vInset),

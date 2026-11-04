@@ -258,30 +258,6 @@ Node* Graph::AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 positio
     return &m_Nodes.back();
 }
 
-Node* Graph::AddHdrMergeNode(HdrMergePayload payload, Vec2 position) {
-    Node node;
-    node.id = AllocateNodeId();
-    node.kind = NodeKind::HdrMerge;
-    node.position = position;
-    node.hdrMerge = std::move(payload);
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-    m_Nodes.push_back(std::move(node));
-    TouchStructure();
-    return &m_Nodes.back();
-}
-
-Node* Graph::AddMfsrNode(MfsrPayload payload, Vec2 position) {
-    Node node;
-    node.id = AllocateNodeId();
-    node.kind = NodeKind::Mfsr;
-    node.position = position;
-    node.mfsr = std::move(payload);
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-    m_Nodes.push_back(std::move(node));
-    TouchStructure();
-    return &m_Nodes.back();
-}
-
 Node* Graph::AddRawProjectFrameNode(
     RawProjectFramePayload payload,
     Vec2 position) {
@@ -375,6 +351,7 @@ Node* Graph::AddRawOperationNode(Stack::RawRecipe::GraphOperationKind kind, Vec2
 
 Node* Graph::AddLayerNode(LayerType type, int layerIndex, Vec2 position) {
     const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(type);
+    if (!descriptor || !EditorNodeGraphDefinitions::FindLiveNodeDefinition(NodeKind::Layer, static_cast<int>(type))) return nullptr;
 
     Node node;
     node.id = AllocateNodeId();
@@ -382,18 +359,6 @@ Node* Graph::AddLayerNode(LayerType type, int layerIndex, Vec2 position) {
     node.layerType = type;
     node.layerIndex = layerIndex;
     node.typeId = descriptor ? descriptor->typeId : "";
-    node.position = position;
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-    m_Nodes.push_back(std::move(node));
-    TouchStructure();
-    return &m_Nodes.back();
-}
-
-Node* Graph::AddScopeNode(ScopeKind scopeKind, Vec2 position) {
-    Node node;
-    node.id = AllocateNodeId();
-    node.kind = NodeKind::Scope;
-    node.scopeKind = scopeKind;
     node.position = position;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
@@ -523,6 +488,7 @@ Node* Graph::AddDataMathNode(DataMathMode mode, Vec2 position) {
     node.kind = NodeKind::DataMath;
     node.position = position;
     node.dataMathMode = mode;
+    if (const auto* op = Stack::NodeMath::Primitive(mode)) node.dataMathSettings.constantB = op->defaultB;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -530,6 +496,7 @@ Node* Graph::AddDataMathNode(DataMathMode mode, Vec2 position) {
 }
 
 Node* Graph::AddValueNode(Stack::NodeMath::FirstClassValue value, Vec2 position) {
+    if (!EditorNodeGraphDefinitions::FindLiveNodeDefinition(NodeKind::Value, static_cast<int>(value.logicalType))) return nullptr;
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::Value;
@@ -566,6 +533,7 @@ Node* Graph::AddReformatNode(Vec2 position) {
 Node* Graph::AddTechnicalImageNode(
     Stack::NodeMath::TechnicalImageOperation operation,
     Vec2 position) {
+    if (!EditorNodeGraphDefinitions::FindLiveNodeDefinition(NodeKind::TechnicalImage, static_cast<int>(operation))) return nullptr;
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::TechnicalImage;
@@ -1029,6 +997,9 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         return finalize(std::move(sockets));
     }
 
+    if (node.kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode))
+        return finalize(EditorNodeGraphDefinitions::BuildSockets(node, visibleOnly));
+
     if (node.kind == NodeKind::DataMath) {
         std::vector<SocketDefinition> sockets;
         auto add = [&](const std::string& id, SocketDirection direction, SocketType type, const std::string& label, bool optional, bool visible) {
@@ -1207,10 +1178,15 @@ bool Graph::FindSocket(int nodeId, const std::string& socketId, SocketDefinition
         }
         return true;
     }
-    for (const SocketDefinition& socket : GetSockets(*node)) {
+    // The three native LUT sockets exist independently of the current channel-pin presentation.
+    // Looking up these endpoints must not re-enter output analysis to decide which pins are visible.
+    const auto sockets = node->kind == NodeKind::Lut && !FindChannelOutput(*node, socketId)
+        ? EditorNodeGraphDefinitions::BuildSockets(*node, false) : GetSockets(*node);
+    for (const SocketDefinition& socket : sockets) {
         if (socket.id == socketId) {
             if (outSocket) {
                 *outSocket = socket;
+                if (node->kind == NodeKind::Lut) SocketPresentation::NormalizeSocketDefinition(node->kind, *outSocket);
             }
             return true;
         }

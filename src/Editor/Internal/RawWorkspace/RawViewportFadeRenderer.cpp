@@ -1,5 +1,6 @@
 #include "Editor/Internal/RawWorkspace/RawViewportFadeRenderer.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 
 namespace Raw {
 ViewportFadeRenderer::~ViewportFadeRenderer() { Shutdown(); }
@@ -22,7 +23,8 @@ out vec2 uv;
 out vec4 color;
 void main() { uv=UV; color=VertexColor ? Color : vec4(1); gl_Position=ProjMtx*vec4(Position,0,1); }
 )", R"(
-#version 330 core
+#version 430 core
+layout(location=48) uniform bool linearTarget;
 in vec2 uv;
 in vec4 color;
 uniform sampler2D Texture;
@@ -40,7 +42,8 @@ void main() {
     vec3 ar=Encoded!=0 ? decode(a.rgb) : a.rgb;
     vec3 br=Encoded!=0 ? decode(b.rgb) : b.rgb;
     vec3 rgb=alpha>0.000001 ? mix(ar*a.a,br*b.a,Amount)/alpha : vec3(0);
-    OutColor=color*vec4(Encoded!=0 ? encode(rgb) : rgb,alpha);
+    if (linearTarget) OutColor=vec4(decode(color.rgb)*(Encoded!=0 ? rgb : decode(rgb)),color.a*alpha);
+    else OutColor=color*vec4(Encoded!=0 ? encode(rgb) : rgb,alpha);
 }
 )");
     if (!m_Program) return false;
@@ -59,6 +62,7 @@ void main() {
 void ViewportFadeRenderer::Bind(unsigned int previous, float amount, bool encoded, const float* projection, bool vertexColor,
     ImVec2 previousOffset, ImVec2 previousScale) const {
     glUseProgram(m_Program);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniformMatrix4fv(m_Uniforms.projection,1,GL_FALSE,projection);
     glUniform1i(m_Uniforms.vertexColor,vertexColor ? 1 : 0);
     glUniform1i(m_Uniforms.texture,0);

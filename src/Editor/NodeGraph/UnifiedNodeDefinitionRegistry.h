@@ -3,6 +3,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeMath/NodeDefinition.h"
 #include "Graph/OutputDependencies.h"
+#include "Editor/NodeGraph/GraphRole.h"
 #include "ThirdParty/json.hpp"
 
 #include <string>
@@ -32,8 +33,6 @@ struct LiveParameterDefinition {
     LiveAnimationPolicy animation = LiveAnimationPolicy::NotAnimatable;
     std::string storageKey;
 };
-
-enum class LiveGraphRole : unsigned { Composition = 1, RawLayer = 2, Compound = 4 };
 
 struct LivePortContract {
     Stack::NodeMath::PortDefinition port;
@@ -103,23 +102,13 @@ struct NodeDecompositionCapability {
 };
 NodeDecompositionCapability GetNodeDecompositionCapability(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node);
-struct NativeDecompositionPortBinding {
-    Stack::NodeMath::PortDirection direction;
-    std::string nativeSocketId;
-    std::string recipePortId;
-};
-bool BuildNativeNodeDecomposition(const EditorNodeGraph::Graph& graph,
-    const EditorNodeGraph::Node& node, Stack::NodeMath::CompoundDefinition& definition,
-    std::string* error = nullptr,
-    std::vector<NativeDecompositionPortBinding>* portBindings = nullptr);
-
 void ApplyLiveDefinitionIdentity(EditorNodeGraph::Node& node);
 bool ResolveSavedLiveDefinition(
     EditorNodeGraph::Node& node,
     const std::string& savedId,
     const std::string& savedVersion,
     const std::string& savedHash,
-    std::string* error = nullptr);
+    std::string* error = nullptr, LiveGraphRole role = LiveGraphRole::Composition);
 bool ValidateUnifiedNodeDefinitionRegistry(std::vector<std::string>* errors = nullptr);
 std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition);
 

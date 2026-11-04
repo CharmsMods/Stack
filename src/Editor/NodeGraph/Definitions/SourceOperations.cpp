@@ -25,15 +25,10 @@ void AppendSourceOperations(std::vector<OperationRegistration>& operations) {
         operations.push_back({OperationFamily::SourcePreparation, std::move(definition)});
     };
     add(MakeOperation(EditorNodeGraph::NodeKind::Output, 0, "Output", "Input / Output", "output", NodeCatalogPreviewStrategy::FallbackOnly));
-    add(MakeOperation(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::Histogram), "Histogram", "Input / Output", "scope:histogram", NodeCatalogPreviewStrategy::FallbackOnly));
-    add(MakeOperation(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::Vectorscope), "Vectorscope", "Input / Output", "scope:vectorscope", NodeCatalogPreviewStrategy::FallbackOnly));
-    add(MakeOperation(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade), "RGB Parade", "Input / Output", "scope:rgbparade", NodeCatalogPreviewStrategy::FallbackOnly));
     add(MakeOperation(EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output", "preview", NodeCatalogPreviewStrategy::FallbackOnly));
     add(MakeOperation(EditorNodeGraph::NodeKind::RawDevelopment, 0, "RAW Development", "Input / Output", "raw-development", NodeCatalogPreviewStrategy::NoPreview, 1));
     add(MakeOperation(EditorNodeGraph::NodeKind::RawDecode, 0, "RAW Decode", "Input / Output", "raw-decode", NodeCatalogPreviewStrategy::NoPreview, 2));
     add(MakeOperation(EditorNodeGraph::NodeKind::RawDevelop, 0, "Develop (Advanced Auto)", "Advanced RAW", "develop", NodeCatalogPreviewStrategy::NoPreview, 2));
-    add(MakeOperation(EditorNodeGraph::NodeKind::HdrMerge, 0, "HDR Merge", "Input / Output", "hdr-merge", NodeCatalogPreviewStrategy::FallbackOnly));
-    add(MakeOperation(EditorNodeGraph::NodeKind::Mfsr, 0, "MFSR", "Input / Output", "mfsr", NodeCatalogPreviewStrategy::FallbackOnly));
     // Manifest/source ownership controls creation of these nodes. Hiding their
     // browser rows does not remove their canonical definitions.
     add(MakeOperation(NodeKind::Image, 0, "Image Source", "Internal", "source:image", NodeCatalogPreviewStrategy::NoPreview, 1, false));

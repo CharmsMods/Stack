@@ -1,6 +1,9 @@
+#include "Hdr/PhotoPreview.h"
+#include "Hdr/Presentation.h"
 #include "Renderer/RawCandidateRenderer.h"
 #include "Editor/CompositePixels.h"
 #include "EditorRenderWorker.h"
+#include "Editor/Internal/HdrExportRender.h"
 
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Editor/Internal/EditorRenderResultRetirement.h"
@@ -2395,7 +2398,7 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
                     static_cast<std::size_t>(
                       std::max(0, result.outputTexture.height)) * 8u
                 : 0u;
-        result.telemetry.readbackTransferredBytes = result.pixels.size();
+        result.telemetry.readbackTransferredBytes = result.pixels.size() + result.hdrExportImage.rgba.size() * sizeof(float);
         for (const SharedTextureTile& tile : result.outputTiles.tiles) {
             result.telemetry.publishedTextureBytes +=
                 static_cast<std::size_t>(std::max(0, tile.haloWidth)) *
@@ -2934,15 +2937,9 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     pipeline.SetPreviewMaxDimension(processingEdge);
                     continue;
                 }
-                previewResult.pixels = request.scopeAnalysis
-                    ? pipeline.GetScopesPixels(previewResult.width, previewResult.height)
-                    : layerThumbnail && !request.rawMaskId.empty()
-                        ? pipeline.GetMaskPreviewPixels(previewResult.width, previewResult.height, 128)
-                        : pipeline.GetPreviewPixels(previewResult.width, previewResult.height, layerThumbnail ? 128 : 512);
-                if (request.scopeAnalysis && !previewResult.pixels.empty()) {
-                    previewResult.scopeData = AnalyzeGraphScopePixels(
-                        previewResult.pixels, previewResult.width, previewResult.height);
-                }
+                previewResult.pixels = layerThumbnail && !request.rawMaskId.empty()
+                    ? pipeline.GetMaskPreviewPixels(previewResult.width, previewResult.height, 128)
+                    : pipeline.GetPreviewPixels(previewResult.width, previewResult.height, layerThumbnail ? 128 : 512);
                 previewResult.success = !previewResult.pixels.empty();
                 if (!previewResult.success) {
                     previewResult.error = RenderFailureReason(pipeline,
@@ -3181,7 +3178,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.mainRegionPlanReason = regionPlan.reason;
             const bool rawWorkspaceMainOutput = !snapshot.rawWorkspace.sourceKey.empty();
             const bool canTileGraph =
-                !rawWorkspaceMainOutput && !genericViewport &&
+                !rawWorkspaceMainOutput && !genericViewport && !authoritativeOutput &&
                 RenderTiling::ShouldUseTiling(tilingSettings, snapshot.width, snapshot.height, maxTextureSize) &&
                 regionPlan.valid && regionPlan.tileable;
             if (canTileGraph) {
@@ -3250,6 +3247,10 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                                 "Failed to prepare tiled graph images.";
                             return false;
                         }
+                        Raw::RawGpuImageLease hdrTile;
+                        if(Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic &&
+                            RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) && snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection)
+                            hdrTile=Stack::Hdr::RenderCompanion(pipeline,tileGraphBatch.Graph());
                         pipeline.ExecuteGraph(
                             tileGraphBatch.Graph(),
                             tileGraphBatch.Topology());
@@ -3272,6 +3273,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         }
                         SharedTextureTile sharedTile;
                         sharedTile.texture = tileTexture;
+                        sharedTile.hdr = std::move(hdrTile);
                         sharedTile.x = tile.x;
                         sharedTile.y = tile.y;
                         sharedTile.width = tile.width;
@@ -3334,6 +3336,18 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     return result;
                 }
             }
+            if (snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport &&
+                snapshot.rawWorkspace.exportFormat != Stack::Hdr::FileFormat::SdrPng) {
+                result.success = Stack::EditorRendering::ReadHdrExport(
+                    pipeline, snapshot.graph, snapshot.rawWorkspace.exportFormat, result);
+                result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
+                finishProgressStep(result.success ? "HDR image rendered." : "HDR export failed.");
+                return result;
+            }
+            if(Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic &&
+                (RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) || snapshot.rawRenderPurpose==RawRenderPurpose::ViewportOverview) &&
+                snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection)
+                result.outputTexture.hdr=Stack::Hdr::RenderCompanion(pipeline,snapshot.graph);
             pipeline.ExecuteGraph(snapshot.graph);
             // Keep the main image's completion state immutable: previews,
             // candidates and overview coverage may execute other graphs.

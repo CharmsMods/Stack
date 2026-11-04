@@ -377,8 +377,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             QueueViewportOutputTileSetRelease(result.outputTiles);
             QueueViewportOutputTextureRelease(
                 result.rawWorkspace.localRangeOverlayTexture);
-            m_HdrMergeSubmittedNodesByGeneration.erase(
-                result.generation);
             ResetIncompleteCompositeOutputRequestsForRetry();
             ResetIncompletePreviewRequestsForRetry();
             FailDeferredLoadedProjectApply(loadFailure);
@@ -386,13 +384,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         if (result.graphRequest.enabled)
             m_GraphAcceptedResultGeneration = result.generation;
-        const auto submittedIt = m_HdrMergeSubmittedNodesByGeneration.find(result.generation);
-        const std::vector<int> activeHdrMergeNodeIds =
-            submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()
-                ? submittedIt->second
-                : std::vector<int>{};
         m_RenderPending = IsAnyRenderBackendBusy();
-        m_HdrMergeRenderingNodeIds.clear();
         if (result.rawWorkspace.preciseSolveResult.has_value()) {
             // A precise solve returns only an isolated verified-recipe record.
             // Never let that worker result replace or clear the live viewport,
@@ -404,9 +396,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             QueueViewportOutputTileSetRelease(result.outputTiles);
             QueueViewportOutputTextureRelease(
                 result.rawWorkspace.localRangeOverlayTexture);
-            if (submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()) {
-                m_HdrMergeSubmittedNodesByGeneration.erase(submittedIt);
-            }
             continue;
         }
         m_GraphPerformanceStats.lastMainRenderMs = result.mainRenderMs;
@@ -484,14 +473,11 @@ void EditorModule::ConsumeRenderWorkerResults() {
         if (result.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
             CompleteRawWorkspaceExportRender(
                 result,
-                rawWorkspaceResultMatchesActive);
+                result.rawWorkspace.sourceKey.empty() ? !IsRawWorkspaceProjectActive() : rawWorkspaceResultMatchesActive);
             QueueViewportOutputTextureRelease(result.outputTexture);
             QueueViewportOutputTileSetRelease(result.outputTiles);
             QueueViewportOutputTextureRelease(
                 result.rawWorkspace.localRangeOverlayTexture);
-            if (submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()) {
-                m_HdrMergeSubmittedNodesByGeneration.erase(submittedIt);
-            }
             continue;
         }
         const auto& gradingScopePacket = result.rawWorkspace.gradingScopeVisualization;
@@ -798,14 +784,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
             m_LastGraphUniformOutputGeneration = result.generation;
             m_LastCompletedRenderGeneration = result.generation;
-            for (int nodeId : activeHdrMergeNodeIds) {
-                if (result.graphRequest.enabled && result.graphRequest.revision != m_RenderRevision)
-                    continue;
-                m_HdrMergeCompletedGenerations[nodeId] = std::max(
-                    m_HdrMergeCompletedGenerations[nodeId],
-                    m_HdrMergeRequestedGenerations.count(nodeId) ? m_HdrMergeRequestedGenerations[nodeId] : GetNodeDirtyGeneration(nodeId));
-                m_HdrMergeFailureMessages.erase(nodeId);
-            }
         };
         const bool rawWorkspaceSourceKeyMismatch =
             !result.rawWorkspace.sourceKey.empty() &&
@@ -952,7 +930,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 if (result.graphRequest.enabled) {
                     ClearRawViewportTransition();
                     if (blendGraphFrame && m_RawWorkspacePresentationTexture.EnsureLease())
-                        frameTransition.Retain(m_RawWorkspacePresentationTexture.lease);
+                        frameTransition.Retain(m_RawWorkspacePresentationTexture.lease, m_RawWorkspacePresentationTexture.hdr);
                 }
                 const bool adopted = result.graphRequest.enabled
                     ? AdoptRawWorkspacePresentationTexture(result.outputTexture,result.rawWorkspace.viewportRegion)
@@ -967,6 +945,8 @@ void EditorModule::ConsumeRenderWorkerResults() {
             } else {
                 // Replace leases without discarding this view's current demand,
                 // content identity, timing curve, overview or prepared fade.
+                const auto previousHdr = blendGraphFrame && m_HdrGraphBase == m_Pipeline.GetOutputTexture()
+                    ? m_HdrGraphOutput : Raw::RawGpuImageLease{};
                 if (result.viewportPreview.enabled) ReleaseViewportPresentationResources();
                 else ClearViewportOutputTiles();
                 const int adoptedWidth = result.outputTexture.width;
@@ -975,8 +955,10 @@ void EditorModule::ConsumeRenderWorkerResults() {
                     int previousWidth = 0, previousHeight = 0;
                     const auto previous = m_Pipeline.TakeExternalOutputTexture(
                         previousWidth, previousHeight, true);
-                    frameTransition.RetainOwned(previous, previousWidth, previousHeight);
+                    frameTransition.RetainOwned(previous, previousWidth, previousHeight, previousHdr);
                 }
+                m_HdrGraphOutput=std::move(result.outputTexture.hdr);
+                m_HdrGraphBase=result.outputTexture.texture;
                 const unsigned int adoptedTexture =
                     result.outputTexture.ReleaseTextureName();
                 m_Pipeline.AdoptExternalOutputTexture(
@@ -1042,19 +1024,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
         } else if (!m_Project->graph.IsOutputConnected()) {
             ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
-        } else if (!activeHdrMergeNodeIds.empty()) {
-            const std::string baseMessage = result.error.empty() ? "Render failed" : result.error;
-            for (int nodeId : activeHdrMergeNodeIds) {
-                const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
-                const std::string nodeName = (node && !node->title.empty())
-                    ? node->title
-                    : std::string("HDR Merge");
-                m_HdrMergeFailureMessages[nodeId] = baseMessage;
-                PostNotification(
-                    UiNotificationSeverity::Error,
-                    nodeName + ": " + baseMessage,
-                    "hdr-merge-render-failed-" + std::to_string(nodeId));
-            }
         }
         FinishViewportPreviewRequest(result, result.success && result.error.empty());
         CompleteFullQualityRenderRequest(result, acceptedMainFrame);
@@ -1076,7 +1045,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             QueueViewportOutputTileSetRelease(result.outputTiles);
             QueueViewportOutputTextureRelease(
                 result.rawWorkspace.localRangeOverlayTexture);
-            m_HdrMergeSubmittedNodesByGeneration.erase(result.generation);
             ResetIncompleteCompositeOutputRequestsForRetry();
             ResetIncompletePreviewRequestsForRetry();
             FailDeferredLoadedProjectApply(
@@ -1119,16 +1087,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         if (acceptedMainFrame) ApplyToneCurveAutoRewriteFeedback(result.toneCurveAutoRewrites);
         ApplyDevelopCandidateRenderFeedback(result.developCandidateRenders);
-        if (submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()) {
-            m_HdrMergeSubmittedNodesByGeneration.erase(submittedIt);
-        }
-        for (auto it = m_HdrMergeSubmittedNodesByGeneration.begin(); it != m_HdrMergeSubmittedNodesByGeneration.end();) {
-            if (it->first < result.generation) {
-                it = m_HdrMergeSubmittedNodesByGeneration.erase(it);
-            } else {
-                ++it;
-            }
-        }
 
         for (EditorRenderWorker::CompositeOutputResult& compositeResult : result.compositeOutputs) {
             if (!compositeResult.success || compositeResult.pixels.empty() || compositeResult.width <= 0 || compositeResult.height <= 0) {
@@ -1194,8 +1152,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             releaseDeferredResultResources(result);
             ResetIncompleteCompositeOutputRequestsForRetry();
             ResetIncompletePreviewRequestsForRetry();
-            m_HdrMergeSubmittedNodesByGeneration.erase(result.generation);
-            m_HdrMergeRenderingNodeIds.clear();
             m_RenderPending =
                 IsAnyRenderBackendBusy();
             m_RenderDirty = true;

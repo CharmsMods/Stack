@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
@@ -335,14 +336,14 @@ bool ValidateCanvas(EditorModule& editor) {
                 "Reset overwrote a driven compound fallback or retained an unlinked override.");
             require(!fallback.reset(editor,reset),"An unchanged compound reset reported an edit.");
             editor.OpenRawLayerMaskGraph({});
-            editor.AddValueNodeAt(Stack::NodeMath::MakeUniformScalar(2.0),{750,260});
+            Stack::Validation::AddUniformOperand(editor,2.0,{750,260});
             const int scalar=editor.GetNodeGraph().GetSelectedNodeId();
             const auto firstView=std::find_if(editor.GetNodeGraph().GetNodes().begin(),editor.GetNodeGraph().GetNodes().end(),
                 [&](const auto& node) { return node.instanceUuid==firstUuid; });
             require(firstView!=editor.GetNodeGraph().GetNodes().end(),"The first compound instance was lost.");
             const int firstViewId=firstView->id;
             const auto owner=firstView->rawLayerOwnerId;
-            require(editor.ConnectGraphSockets(scalar,"valueOut",firstViewId,"param:r",&error),error);
+            require(editor.ConnectGraphSockets(scalar,"imageOut",firstViewId,"param:r",&error),error);
             const auto driven=editor.GetUniformParameterState({editor.GetProjectDocumentId(),owner,firstUuid},"r");
             require(driven.available && driven.value==2.0,
                 "A compound's connected Scalar Value was not resolved through its definition.");

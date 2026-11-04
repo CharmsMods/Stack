@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "App/WorkspacePresentation.h"
 #include "App/UiPerformanceProbe.h"
 #include <iostream>
@@ -722,6 +723,7 @@ void EditorModule::RequestWorkerShutdownForAppClose() {
     m_RawEditAttributePasteGeneration.fetch_add(
         1, std::memory_order_relaxed);
     m_RawEditAttributePasteTaskState = Async::TaskState::Idle;
+    if(m_GalleryHdrJob) m_GalleryHdrJob->canceled.store(true);
     m_RenderWorker.RequestStopForShutdown();
     if (m_RawRenderClientId != 0) {
         Stack::EditorRendering::RawRenderService::Get().ClearSession(m_RawRenderClientId);
@@ -852,29 +854,6 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
 
     const int lutNodeId = lutNode->id;
     std::string errorMessage;
-    const EditorNodeGraph::Vec2 maskPosition{
-        graphPosition.x - 172.0f,
-        graphPosition.y + 78.0f
-    };
-    EditorNodeGraph::Node* solidMaskNode = m_Project->graph.AddMaskGeneratorNode(
-        EditorNodeGraph::MaskGeneratorKind::Solid,
-        maskPosition);
-    if (solidMaskNode) {
-        if (!ConnectGraphSockets(
-                solidMaskNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                lutNodeId,
-                EditorNodeGraph::kMaskInputSocketId,
-                &errorMessage) &&
-            !errorMessage.empty()) {
-            PostNotification(
-                UiNotificationSeverity::Error,
-                "Generated LUT mask auto-connect failed: " + errorMessage,
-                "generated-lut-mask-autoconnect");
-            errorMessage.clear();
-        }
-    }
-
     if (upstreamNodeId > 0) {
         if (!ConnectGraphSockets(
                 upstreamNodeId,
@@ -1281,10 +1260,9 @@ bool EditorModule::SubmitRenderSnapshot(
                     rawRecipeRevision;
             }
         }
-        if (submitted && purpose == RawRenderPurpose::ExplicitExport) {
-            m_RawWorkspaceExportRenderGeneration = generation;
-        }
     }
+    if (submitted && purpose == RawRenderPurpose::ExplicitExport)
+        m_RawWorkspaceExportRenderGeneration = generation;
     return submitted || submissionFailed();
 }
 
@@ -1331,7 +1309,6 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     m_CompositePreviewPipeline.Initialize();
     m_Sidebar.Initialize();
     m_Viewport.Initialize();
-    m_Scopes.Initialize();
     m_DeferredGraphWorkerWindow=sharedWindow;
     m_DeferredGraphWorkers=lightweightView && sharedWindow;
     m_RenderWorkerAvailable = !lightweightView && sharedWindow && m_RenderWorker.Initialize(sharedWindow);
@@ -1430,6 +1407,11 @@ void EditorModule::BeginLibraryLoadReveal() {
 
 
 void EditorModule::RenderUI() {
+    const bool hdr=Stack::Hdr::AnyPreviewActive();
+    if(hdr!=m_HdrPreviewRequested && !IsExportBusy()) {
+        m_HdrPreviewRequested=hdr;
+        if(hdr && !m_PermanentGalleryWorkspace) MarkRenderRefreshDirty();
+    }
     if (!m_PermanentGalleryWorkspace && IsViewMode()) {
         RenderViewWorkspace();
         return;

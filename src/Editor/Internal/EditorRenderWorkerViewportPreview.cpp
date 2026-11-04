@@ -1,3 +1,5 @@
+#include "Hdr/PhotoPreview.h"
+#include "Hdr/Presentation.h"
 #include "Editor/EditorRenderWorker.h"
 #include "Editor/RawRenderGraphOverlay.h"
 
@@ -96,6 +98,9 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
         // Restore this snapshot's source before rendering matching coverage.
         pipeline.LoadSourceFromSharedPixels(templateSnapshot.sourcePixels,
             templateSnapshot.width, templateSnapshot.height, templateSnapshot.channels);
+        SharedTextureResult overview;
+        if (Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic)
+            overview.hdr = Stack::Hdr::RenderCompanion(pipeline, graph);
         pipeline.ExecuteGraph(graph);
         if (canceled || ShouldAbortStaleSnapshot(snapshot)) return;
         const auto geometry = pipeline.GetGraphViewportGeometry();
@@ -105,7 +110,6 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
             std::max(geometry.storageWidth, geometry.storageHeight) > kViewportOverviewEdge ||
             !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty()) return;
 
-        SharedTextureResult overview;
         overview.texture = pipeline.PublishSharedOutputTexture(overview.width, overview.height,
             !snapshot.rawWorkspace.sourceKey.empty());
         if (!overview.texture || !overview.EnsureLease()) return;

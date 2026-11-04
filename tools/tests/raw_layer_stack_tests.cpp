@@ -627,78 +627,6 @@ void CheckCompoundOutputCompleteness() {
     checkRawEnd(*halation,templates,"Halation");
 }
 
-void CheckNativeDecomposition() {
-    using namespace Stack;
-    using namespace EditorNodeGraph;
-    for (const auto& definition:EditorNodeGraphDefinitions::GetUnifiedNodeDefinitionRegistry()) {
-        Check(definition.inspectability==NodeMath::Inspectability::OpaqueSpecialized ||
-            !definition.canonicalRecipeId.empty(),"A native operation claims graph inspectability without a recipe.");
-    }
-    for (bool enabled:{true,false}) {
-        Graph graph;graph.Clear();
-        const int source=graph.AddMaskGeneratorNode(MaskGeneratorKind::Solid,{})->id;
-        const int native=graph.AddMaskUtilityNode(MaskUtilityKind::Invert,{})->id;
-        graph.FindNode(native)->maskUtilitySettings.enabled=enabled;
-        graph.FindNode(native)->rawLayerOwnerId="native-owner";
-        const auto uuid=graph.FindNode(native)->instanceUuid;
-        const int end=graph.AddOutputNode({},true)->id;
-        std::string error;
-        Check(graph.TryConnectSockets(source,"maskOut",native,"maskIn",&error),error);
-        Check(graph.TryConnectSockets(native,"maskOut",end,"imageIn",&error),error);
-        const int maskedGain=graph.AddDataMathNode(DataMathMode::Multiply,{})->id;
-        Check(graph.TryConnectSockets(source,"maskOut",maskedGain,"imageA",&error),error);
-        Check(graph.TryConnectSockets(native,"maskOut",maskedGain,"maskIn",&error),error);
-        const auto nativeType=DescribeGraphOutput(graph,native,"maskOut").descriptor.logicalType;
-        const auto capability=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(graph,*graph.FindNode(native));
-        Check(capability.canDecompile && capability.inspectability==NodeMath::Inspectability::GraphDefinedOptimizedEquivalent,
-            "Native Invert Mask has no exact decomposition capability.");
-        NodeMath::CompoundDefinition first,second;
-        Check(EditorNodeGraphDefinitions::BuildNativeNodeDecomposition(graph,*graph.FindNode(native),first,&error),error);
-        graph.FindNode(native)->title="Renamed inversion";
-        Check(EditorNodeGraphDefinitions::BuildNativeNodeDecomposition(graph,*graph.FindNode(native),second,&error),error);
-        Check(NodeMath::SameDefinitionReference(first.identity,second.identity),"A UI title changed the native recipe identity.");
-        Check(first.ports.size()==2 && first.ports[0].id=="mask-in" && first.ports[1].id=="mask-out",
-            "A native recipe reused noncanonical native socket IDs as compound ports.");
-        std::vector<int> children;
-        std::vector<CompoundOutputBinding> bindings;
-        Check(graph.UnpackCompoundNode(native,&children,&error,&bindings),error);
-        Check(children.size()==1 && graph.FindNode(source),"Native decompilation duplicated its source or extra operations.");
-        Check(bindings.size()==1 && bindings.front().authoredNodeId==native &&
-            bindings.front().authoredSocketId=="maskOut" && bindings.front().expandedNodeId==children.front() &&
-            bindings.front().expandedSocketId=="imageOut",
-            "Native decompilation lost the authored output socket alias.");
-        auto* child=graph.FindNode(children.front());
-        Check(child && child->kind==NodeKind::DataMath && child->rawLayerOwnerId=="native-owner" &&
-            child->dataMathSettings.domain==NodeMath::ArithmeticDomain::Channel &&
-            child->dataMathMode==(enabled ? DataMathMode::Subtract : DataMathMode::Multiply),
-            "Native enabled/bypass setting or graph owner changed during decompilation.");
-        const auto* input=graph.FindAnyInputLink(child->id,enabled ? "imageB" : "imageA");
-        const auto* output=graph.FindAnyInputLink(end,"imageIn");
-        const auto* coverage=graph.FindAnyInputLink(maskedGain,"maskIn");
-        Check(input && output && coverage && input->fromNodeId==source &&
-            output->fromNodeId==child->id && coverage->fromNodeId==child->id,
-            "Native decompilation lost an exact external endpoint.");
-        Check(DescribeGraphOutput(graph,child->id,"imageOut").descriptor.logicalType==nativeType,
-            "A decomposed native Mask changed its logical type at an effect-mask consumer.");
-        const auto leaf=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(graph,*child);
-        Check(!leaf.canDecompile && !leaf.reason.empty(),"An arithmetic primitive is advertised as a fake compound.");
-        graph.EditNodes();
-        child=graph.FindNode(children.front());
-        if (enabled) child->dataMathSettings.constantA=2.f;
-        else child->dataMathSettings.constantB=2.f;
-        int repacked=-1;
-        Check(graph.GetGroups().size()==1 && graph.RepackCompoundGroup(graph.GetGroups().front().id,&repacked,&error),error);
-        Check(graph.FindNode(repacked)->instanceUuid==uuid,"Native repack lost the original instance identity.");
-        Graph restored;
-        DeserializeGraphPayload(SerializeGraphPayload(nlohmann::json::array(),graph),restored,0);
-        children.clear();
-        Check(restored.UnpackCompoundNode(repacked,&children,&error),error);
-        const auto* edited=restored.FindNode(children.front());
-        Check(edited && (enabled ? edited->dataMathSettings.constantA : edited->dataMathSettings.constantB)==2.f,
-            "Repacking/reloading a native decomposition restored the original recipe over an edit.");
-    }
-}
-
 void CheckMergedSourceHistory() {
     using namespace Stack;
     for (const auto intent : {MultiFrameOperationIntent::RawBurstDenoise,MultiFrameOperationIntent::RawBurstHdr}) {
@@ -1099,7 +1027,6 @@ void TestRawLayerStackContracts() {
     CheckViewportContentIdentity();
     CheckCompoundReferenceCycle();
     CheckCompoundOutputCompleteness();
-    CheckNativeDecomposition();
     CheckMergedSourceHistory();
     CheckViewportCoordinates();
     const auto offers = Stack::GraphModel::QueryAvailableNodes(RawLayerStackState{}.background.graph);

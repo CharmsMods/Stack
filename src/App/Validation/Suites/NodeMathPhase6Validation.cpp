@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "App/Validation/Suites/ProjectGraphSnapshotValidation.h"
 #include "App/Validation/ValidationSuites.h"
 #include "App/Validation/Suites/EditorRenderWorkerPreviewValidation.h"
@@ -166,7 +167,7 @@ bool BuildAuthoredPhase6BGraph(
     const int meanId = measuredExposure
         ? graph.AddFieldMeanNode({ 520.0f, 160.0f })->id : -1;
     const int constantId = !measuredExposure
-        ? graph.AddValueNode(NodeMath::MakeUniformScalar(0.5), { 520.0f, 160.0f })->id : -1;
+        ? Stack::Validation::AddUniformOperand(graph,0.5f,{520.0f,160.0f}) : -1;
     const int exposureId = graph.AddTechnicalImageNode(
         NodeMath::TechnicalImageOperation::Exposure, { 780.0f, 0.0f })->id;
     const int outputId = graph.AddOutputNode({ 1040.0f, 0.0f }, true)->id;
@@ -190,7 +191,7 @@ bool BuildAuthoredPhase6BGraph(
             return false;
         }
     } else if (!graph.TryConnectSockets(
-            constantId, EditorNodeGraph::kValueOutputSocketId,
+            constantId, EditorNodeGraph::kImageOutputSocketId,
             exposureId, EditorNodeGraph::kExposureValueInputSocketId, &error)) {
         return false;
     }

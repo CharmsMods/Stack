@@ -5,10 +5,11 @@ namespace Stack::Renderer::RawImageBackdropDisplayShaders {
 // The SDR window displays those numeric values directly. Decode its sRGB
 // transfer only for surround convolution, then encode once for presentation.
 inline constexpr const char* Functions = R"(
+layout(location=43) uniform bool extendedRange;
 vec3 backdropDisplayRange(vec3 rgb) {
     for (int i=0; i<3; ++i)
         if (isnan(rgb[i]) || isinf(rgb[i])) rgb[i]=0.0;
-    return clamp(rgb,vec3(0),vec3(1));
+    return extendedRange ? rgb : clamp(rgb,vec3(0),vec3(1));
 }
 vec3 backdropDisplayDecode(vec3 rgb) {
     vec3 a=abs(rgb);

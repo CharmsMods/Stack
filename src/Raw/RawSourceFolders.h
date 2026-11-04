@@ -5,7 +5,7 @@
 namespace Stack::RawWorkspace {
 
 // Windows path identity preserves Unicode, resolves available aliases and is
-// case-insensitive. Unavailable folders remain registered, not silently lost.
+// case-insensitive. Normalization alone does not check folder availability.
 std::string SourceFolderPathKey(const std::filesystem::path& path);
 std::vector<std::filesystem::path> NormalizeSourceFolders(
     const std::vector<std::filesystem::path>& folders);

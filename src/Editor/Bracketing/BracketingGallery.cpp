@@ -19,6 +19,7 @@ void UpdateBracketingGalleryProject(RawWorkspace::WorkspaceState& workspace,cons
     auto entry=std::find_if(workspace.sourceSetProjects.begin(),workspace.sourceSetProjects.end(),[&](const auto& p){return p.absolutePath.empty() ? p.projectId == snapshot.projectId : p.absolutePath == path;});
     if(entry==workspace.sourceSetProjects.end()){workspace.sourceSetProjects.emplace_back();entry=std::prev(workspace.sourceSetProjects.end());}
     entry->projectId=snapshot.projectId;entry->projectName=snapshot.projectName;entry->absolutePath=path;
+    entry->persistedStorageRevision = snapshot.persistedStorageRevision;
     entry->bracketingProject=true;
     entry->hasSavedBracketingResult = false;
     entry->untouchedAutomaticBracket = false;

@@ -3,6 +3,7 @@
 #include "Editor/Internal/EditorRenderPresentationHelpers.h"
 #include "Renderer/ViewportTextureCopy.h"
 #include "Editor/EditorModule.h"
+#include "Hdr/Presentation.h"
 #include "App/UiPerformanceProbe.h"
 #include "Project/RawLayerStackSnapshot.h"
 #include "Project/RawNodeEditing.h"
@@ -454,10 +455,6 @@ bool EditorModule::BuildSingleOutputTimelineFrameRaster(
 }
 
 
-void EditorModule::RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
-    m_Scopes.RenderScopeNode(this, scopeKind, sourceNodeId);
-}
-
 void EditorModule::MarkRenderDirty(int touchedNodeId) {
     CancelFullQualityRenderRequest("Full-quality rendering was canceled by a document edit.");
     // A real edit replaces optional native refinement with an interactive
@@ -501,10 +498,17 @@ void EditorModule::MarkRenderDirty(int touchedNodeId) {
         m_PreviewDisplayedRevisions.clear();
         m_PreviewRequestedGenerations.clear();
         m_PreviewCompletedGenerations.clear();
-        m_ScopeDisplayedRevisions.clear();
     }
 }
 
+unsigned EditorModule::DisplayOutputTexture(unsigned texture,bool hdr) const {
+    if(!hdr || !texture) return texture;
+    if(texture==m_RawWorkspacePresentationTexture.texture) return m_RawWorkspacePresentationTexture.Display(true);
+    if(texture==m_RawViewportDetailTexture.texture) return m_RawViewportDetailTexture.Display(true);
+    if(texture==m_RawViewportPreviousTexture.texture) return m_RawViewportPreviousTexture.Display(true);
+    if(texture==m_HdrGraphBase && m_HdrGraphOutput && texture==m_Pipeline.GetOutputTexture()) return m_HdrGraphOutput.Texture();
+    return texture;
+}
 void EditorModule::MarkRenderRefreshDirty() {
     // Some authored RAW edits use this presentation refresh path. Once the
     // explicit attempt is submitted its revision is immutable; before submit,
@@ -737,6 +741,15 @@ void EditorModule::ClearViewportOutputTiles() {
 }
 
 void EditorModule::ReleaseViewportPresentationResources() {
+    if (m_HdrGraphOutput) {
+        EditorRenderWorker::SharedTextureResult retired;
+        retired.texture = m_HdrGraphOutput.Texture();
+        retired.width = m_HdrGraphOutput.Width();
+        retired.height = m_HdrGraphOutput.Height();
+        retired.lease = std::move(m_HdrGraphOutput);
+        QueueViewportOutputTextureRelease(retired);
+    }
+    m_HdrGraphBase = 0;
     QueueViewportOutputTileSetRelease(m_ViewportOutputTiles);
     ClearRawWorkspacePresentationTexture();
     ClearRawWorkspaceLocalRangeOverlayState();
@@ -876,7 +889,7 @@ bool EditorModule::IsViewportTextureSafeForDrawing(unsigned int texture) const {
     // block the UI in the driver while the worker prepares unrelated native work.
     // Check the live owner, not a cache of GLuints that could outlive a resource.
     const auto retained = [texture](const EditorRenderWorker::SharedTextureResult& image) {
-        return image.texture == texture && image.lease.Texture() == texture &&
+        return ((image.texture == texture && image.lease.Texture() == texture) || image.hdr.Texture() == texture) &&
             image.width > 0 && image.height > 0 && !image.readyFence;
     };
     if (retained(m_RawWorkspacePresentationTexture) || retained(m_RawViewportPreviousTexture) ||
@@ -886,7 +899,7 @@ bool EditorModule::IsViewportTextureSafeForDrawing(unsigned int texture) const {
         if (retained(state.overview)) return true;
     // The ordinary Graph view transfers the accepted image into the UI
     // pipeline, whose output owner clears the name when releasing it.
-    if (texture == m_Pipeline.GetOutputTexture()) return true;
+    if (texture == m_Pipeline.GetOutputTexture() || (texture == m_HdrGraphOutput.Texture() && m_HdrGraphBase == m_Pipeline.GetOutputTexture())) return true;
     const bool trace = Stack::UiPerformance::Probe::Active();
     const auto started = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const bool valid = glIsTexture(texture) == GL_TRUE;
@@ -939,6 +952,13 @@ bool EditorModule::AdoptRawWorkspacePresentationTexture(
         overview.width = std::max(1,int(std::lround(previous.width*scale)));
         overview.height = std::max(1,int(std::lround(previous.height*scale)));
         overview.texture = Stack::Renderer::CopyViewportTexture(previous.texture,previous.width,previous.height,overview.width,overview.height);
+        if (overview.texture && previous.hdr) {
+            const auto companion = Stack::Renderer::CopyViewportTexture(previous.hdr.Texture(),previous.width,previous.height,overview.width,overview.height);
+            if (companion) {
+                try { overview.hdr = Raw::RawGpuImageLease::AdoptOwned(companion,overview.width,overview.height,Raw::RawGpuImageFamily::Presentation); }
+                catch (...) { glDeleteTextures(1,&companion); }
+            }
+        }
         if (overview.texture && overview.EnsureLease()) {
             QueueViewportOutputTextureRelease(m_RawViewportOverviewTexture);
             m_RawViewportOverviewTexture = std::move(overview);
@@ -1474,6 +1494,8 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     const Stack::EditorRendering::RawRenderPlan renderPlan =
         Stack::EditorRendering::BuildRawRenderPlan(planInput);
     snapshot.rawRenderPurpose = renderPlan.purpose;
+    if (renderPlan.purpose == RawRenderPurpose::ExplicitExport)
+        snapshot.rawWorkspace.exportFormat = m_RequestedExportFormat;
     snapshot.rawWorkspace.analysisRequested =
         snapshot.rawRenderPurpose == RawRenderPurpose::AnalysisScopes;
     if (!snapshot.rawWorkspace.analysisRequested) {
@@ -1970,6 +1992,8 @@ bool EditorModule::TrySubmitRawRenderCommand(
         }
     }
     command.targetEdge = renderPlan.targetEdge;
+    if (command.purpose == RawRenderPurpose::ExplicitExport)
+        command.rawWorkspace.exportFormat = m_RequestedExportFormat;
     command.telemetry.predictedMs=m_RawViewportDecision.predictedMs;
     command.telemetry.timingWorkload=m_RawViewportAdaptiveWorkload;
     command.telemetry.timingContext=Raw::ViewportFeedbackKey(m_RawViewportAdaptiveWorkload,m_RawViewportDecision.firstStage);

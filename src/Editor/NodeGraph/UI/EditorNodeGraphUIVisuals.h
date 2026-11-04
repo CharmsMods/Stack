@@ -119,6 +119,7 @@ struct LinkVisualStyle {
     std::string channel;
     bool dotted = false;
     bool scalarStream = false;
+    bool invalid = false;
 };
 
 // Shared by graph transitions only while a displayed value is changing.

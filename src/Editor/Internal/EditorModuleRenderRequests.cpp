@@ -64,14 +64,8 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
         const auto* candidate = graph.FindNode(nodeId);
         if (!candidate) continue;
         const auto& node = *candidate;
-        if (node.kind == EditorNodeGraph::NodeKind::Scope &&
-            !node.expanded) {
-            continue;
-        }
-        if (GetPreviewNodeRevision(node.id) == 0) {
-            continue;
-        }
         const std::uint64_t desiredRevision = GetPreviewNodeRevision(node.id);
+        if (desiredRevision == 0) continue;
         const auto displayedIt = m_PreviewDisplayedRevisions.find(node.id);
         const std::uint64_t displayedRevision = displayedIt != m_PreviewDisplayedRevisions.end() ? displayedIt->second : 0;
         if (desiredRevision != displayedRevision) {
@@ -231,19 +225,13 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         const auto* candidate = graph.FindNode(nodeId);
         if (!candidate) continue;
         const auto& node = *candidate;
-        if (node.kind == EditorNodeGraph::NodeKind::Scope &&
-            !node.expanded) {
-            continue;
-        }
 
         const bool generatedAutoMaskPreview = node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask;
         const EditorNodeGraph::Link* input = generatedAutoMaskPreview
             ? GetNodeGraph().FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
             : GetNodeGraph().FindAnyInputLink(
                 node.id,
-                (node.kind == EditorNodeGraph::NodeKind::Scope
-                        ? EditorNodeGraph::kScopeInputSocketId
-                        : EditorNodeGraph::kPreviewInputSocketId));
+                EditorNodeGraph::kPreviewInputSocketId);
         if (!input) {
             m_PreviewRequestedGenerations.erase(node.id);
             m_PreviewCompletedGenerations.erase(node.id);
@@ -277,7 +265,6 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
 
         EditorRenderWorker::PreviewRequest request;
         request.previewNodeId = node.id;
-        request.scopeAnalysis = node.kind == EditorNodeGraph::NodeKind::Scope;
         request.sourceNodeId = sourceNodeId;
         request.sourceSocketId = sourceSocketId;
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;

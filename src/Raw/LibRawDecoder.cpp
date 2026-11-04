@@ -97,13 +97,40 @@ CfaPattern PatternFromString(const std::string& pattern) {
     return CfaPattern::Unknown;
 }
 
-CfaPattern ExtractCfaPattern(LibRaw& processor, const libraw_data_t& image) {
+void ResolveSonyVisibleArea(const libraw_data_t& image, RawMetadata& metadata) {
+    // Some newer Sony models decode successfully before LibRaw has a model
+    // rule for their padded lossless-compression grid. LibRaw still exposes
+    // the file's DefaultCropOrigin/Size as a sensor-coordinate inset crop.
+    // Use that declared area only when the decoder left the entire storage
+    // grid visible; retain established decoder crops and all DNG handling.
+    if (image.idata.maker_index != LIBRAW_CAMERAMAKER_Sony ||
+        image.idata.dng_version != 0 || image.idata.filters == 0 ||
+        metadata.leftMargin != 0 || metadata.topMargin != 0 ||
+        metadata.visibleWidth != metadata.rawWidth ||
+        metadata.visibleHeight != metadata.rawHeight) {
+        return;
+    }
+    const auto& crop = image.sizes.raw_inset_crops[0];
+    const int left = crop.cleft, top = crop.ctop;
+    const int width = crop.cwidth, height = crop.cheight;
+    if (width <= 0 || height <= 0 || left >= metadata.rawWidth || top >= metadata.rawHeight ||
+        width > metadata.rawWidth - left || height > metadata.rawHeight - top) {
+        return;
+    }
+    metadata.leftMargin = left;
+    metadata.topMargin = top;
+    metadata.visibleWidth = width;
+    metadata.visibleHeight = height;
+}
+
+CfaPattern ExtractCfaPattern(LibRaw& processor, const libraw_data_t& image,
+    const RawMetadata& metadata) {
     if (image.idata.colors < 3 || image.idata.filters == 0) {
         return CfaPattern::Unknown;
     }
 
-    const int top = std::max(0, static_cast<int>(image.sizes.top_margin));
-    const int left = std::max(0, static_cast<int>(image.sizes.left_margin));
+    const int top = std::max(0, metadata.topMargin);
+    const int left = std::max(0, metadata.leftMargin);
     std::string pattern;
     pattern.reserve(4);
     for (int y = 0; y < 2; ++y) {
@@ -279,6 +306,7 @@ void ExtractMetadata(
     metadata.visibleHeight = image.sizes.height > 0 ? image.sizes.height : image.sizes.iheight;
     metadata.leftMargin = image.sizes.left_margin;
     metadata.topMargin = image.sizes.top_margin;
+    ResolveSonyVisibleArea(image, metadata);
     metadata.orientation = ExifOrientationFromLibRawFlip(image.sizes.flip);
     metadata.isDng = image.idata.dng_version != 0;
     metadata.whiteLevel = SafePositive(static_cast<float>(image.color.maximum), 65535.0f);
@@ -300,7 +328,7 @@ void ExtractMetadata(
     metadata.hasCaptureTimestamp = metadata.captureTimestamp > 0;
     metadata.mosaiced = image.idata.filters != 0 && image.idata.colors >= 3;
     metadata.pixelLayout = metadata.mosaiced ? RawPixelLayout::MosaicBayer : RawPixelLayout::Unknown;
-    metadata.cfaPattern = metadata.mosaiced ? ExtractCfaPattern(processor, image) : CfaPattern::Unknown;
+    metadata.cfaPattern = metadata.mosaiced ? ExtractCfaPattern(processor, image, metadata) : CfaPattern::Unknown;
     if (!metadata.mosaiced && image.idata.colors >= 3) {
         metadata.pixelLayout = RawPixelLayout::LinearRgb;
         metadata.linearChannels = std::clamp(image.idata.colors, 3, 4);

@@ -250,6 +250,9 @@ struct RenderGraphImagePayload {
     int height = 0;
     int channels = 4;
     Stack::NodeMath::ValueDescriptor sourceDescriptor;
+    std::shared_ptr<const std::vector<float>> hdrPixels;
+    std::size_t hdrFingerprint = 0;
+    bool useHdrPixels = false;
 };
 
 struct RenderGraphRawSourcePayload {

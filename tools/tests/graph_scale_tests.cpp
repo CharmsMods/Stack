@@ -1109,93 +1109,11 @@ void TestChannelReformatScenePathUsesTypedInputs() {
         "channel/reformat scene-path analysis should follow channel and reformat inputs");
 }
 
-void TestMfsrRejectsMixedFamiliesThroughChannelReformatChain() {
-    EditorNodeGraph::Graph graph;
-    const int rasterNodeId =
-        graph.AddImageGeneratorNode(
-            EditorNodeGraph::ImageGeneratorKind::SolidColor,
-            { 0.0f, -1.0f })->id;
-    const int mfsrNodeId =
-        graph.AddMfsrNode({}, { 6.0f, 0.0f })->id;
-
-    EditorNodeGraph::RawSourcePayload rawPayload;
-    const int rawSourceNodeId =
-        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 1.0f })->id;
-    EditorNodeGraph::RawDecodePayload decodePayload;
-    const int decodeNodeId =
-        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 1.0f })->id;
-    const int splitNodeId =
-        graph.AddChannelSplitNode({ 2.0f, 1.0f })->id;
-    const int firstReformatNodeId =
-        graph.AddReformatNode({ 3.0f, 1.0f })->id;
-    const int secondReformatNodeId =
-        graph.AddReformatNode({ 4.0f, 1.0f })->id;
-    const int combineNodeId =
-        graph.AddChannelCombineNode({ 5.0f, 1.0f })->id;
-
-    std::string error;
-    RequireScale(
-        graph.TryConnectSockets(
-            rasterNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            mfsrNodeId,
-            EditorNodeGraph::kMfsrReferenceInputSocketId,
-            &error),
-        "MFSR mixed-family fixture should connect its raster reference");
-    RequireScale(
-        graph.TryConnectSockets(
-            rawSourceNodeId,
-            EditorNodeGraph::kRawOutputSocketId,
-            decodeNodeId,
-            EditorNodeGraph::kRawInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            decodeNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            splitNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            splitNodeId,
-            "r",
-            firstReformatNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            firstReformatNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            secondReformatNodeId,
-            EditorNodeGraph::kImageInputSocketId,
-            &error) &&
-        graph.TryConnectSockets(
-            secondReformatNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            combineNodeId,
-            "r",
-            &error),
-        "MFSR mixed-family fixture should build its RAW channel/reformat chain");
-
-    error.clear();
-    RequireScale(
-        !graph.TryConnectSockets(
-            combineNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            mfsrNodeId,
-            EditorNodeGraph::MfsrInputSocketId(1),
-            &error),
-        "MFSR should reject RAW-derived channel/reformat output beside a raster reference");
-    RequireScale(
-        error.find("cannot mix RAW-derived and raster-derived") !=
-            std::string::npos,
-        "MFSR mixed-family rejection should explain the conflicting origins");
-}
-
 } // namespace
 
 void RunRetainedRoutingTests() {
     TestChannelReformatChainRetainsItsReferenceSource();
     TestChannelReformatScenePathUsesTypedInputs();
-    TestMfsrRejectsMixedFamiliesThroughChannelReformatChain();
 }
 
 void RunGraphScaleTests() {

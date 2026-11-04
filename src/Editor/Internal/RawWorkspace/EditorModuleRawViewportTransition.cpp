@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "Editor/EditorModule.h"
 #include <imgui.h>
 
@@ -42,7 +43,7 @@ void EditorModule::PrepareRawViewportTransition(const EditorRenderWorker::Result
     const bool keepBase = active && progress < 1 && m_RawViewportFadeBase.source == next.source &&
         m_RawViewportFadeBase.view == next.view && Raw::MapViewportFade(m_RawViewportFadeBase.region,next.region).valid;
     const auto& retained = keepBase ? m_RawViewportPreviousTexture : m_RawWorkspacePresentationTexture;
-    const auto bytes = std::uint64_t(std::max(0,retained.width))*std::max(0,retained.height)*8u;
+    const auto bytes = std::uint64_t(std::max(0,retained.width))*std::max(0,retained.height)*8u + retained.hdr.Bytes();
     const bool room = bytes > 0 && bytes <= m_RawWorkspaceVramWorkingBudgetBytes/8;
     if (GetSmoothRawViewportUpdates() && room && duration > 0) {
         if (!keepBase) {
@@ -81,10 +82,12 @@ bool EditorModule::DrawRawViewportTransition(ImDrawList* list, ImVec2 minimum, I
         return false;
     }
     const auto map = Raw::MapViewportFade(m_RawViewportFadeBase.region,m_RawViewportLastPresentation.region);
-    const bool drawn = m_RawViewportFadeRenderer.Draw(list, m_RawViewportPreviousTexture.texture,
-        m_RawWorkspacePresentationTexture.texture, minimum, maximum,
+    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow() && m_RawWorkspacePresentationTexture.hdr;
+    if (hdr && !m_RawViewportPreviousTexture.hdr) return false;
+    const bool drawn = m_RawViewportFadeRenderer.Draw(list, m_RawViewportPreviousTexture.Display(hdr),
+        m_RawWorkspacePresentationTexture.Display(hdr), minimum, maximum,
         static_cast<float>(std::clamp(elapsed / m_RawViewportFadeDuration, 0.0, 1.0)),
-        m_RawViewportLastPresentation.encodedSrgb,ImVec2(0,1),ImVec2(1,0),IM_COL32_WHITE,0,
+        hdr || m_RawViewportLastPresentation.encodedSrgb,ImVec2(0,1),ImVec2(1,0),IM_COL32_WHITE,0,
         ImVec2(float(map.x),float(map.y)),ImVec2(float(map.width),float(map.height)));
     // The whole-window photo may borrow this fade immediately afterward.
     // If the viewport fell back to an ordinary image, it must do the same.

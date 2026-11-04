@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "Editor/EditorModule.h"
 #include "App/AppHeaderStyle.h"
 #include <algorithm>
@@ -112,7 +113,9 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
         m_RawImageBackdrop.frame == ImGui::GetFrameCount()) return;
     auto& frame = m_RawImageBackdrop;
     const bool rawPresentation = IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive();
-    const auto presentationTexture = rawPresentation ? m_RawWorkspacePresentationTexture.texture : m_Pipeline.GetOutputTexture();
+    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+    const auto sdr = rawPresentation ? m_RawWorkspacePresentationTexture.texture : m_Pipeline.GetOutputTexture();
+    const auto presentationTexture = DisplayOutputTexture(sdr,hdr);
     frame.frame = ImGui::GetFrameCount();
     frame.presentationFingerprint = rawPresentation ? m_RawViewportPresentationContent : GetViewportOutputRenderGeneration();
     frame.patches.clear();
@@ -120,6 +123,7 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     frame.completePhotoCoverage = false;
     frame.sharpDrawList = nullptr;
     frame.imageMinimum = imageMin; frame.imageMaximum = imageMax;
+    frame.sharpViewport={viewMin.x,viewMin.y,viewMax.x,viewMax.y};
     // Floating tools and their contact with the photo never enable the surround.
     // The Alt selector owns its separate temporary control blur in the shell.
     frame.controlsMinimum=frame.controlsMaximum=ImVec2{};
@@ -154,7 +158,7 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     unsigned int fullTexture = presentationTexture;
     if (regional || tiled) {
         int overviewWidth = 0, overviewHeight = 0;
-        if (!TryGetViewportPreviewOverview(fullTexture, overviewWidth, overviewHeight)) fullTexture = 0;
+        if (!TryGetViewportPreviewOverview(fullTexture, overviewWidth, overviewHeight,hdr)) fullTexture = 0;
     }
     if (IsViewportTextureSafeForDrawing(fullTexture)) {
         frame.patches.push_back({fullTexture, imageMin, imageMax});
@@ -171,7 +175,7 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
                 imageMax.y - size.y * (tile.y + tile.height) / tiles.fullHeight);
             const ImVec2 max(imageMin.x + size.x * (tile.x + tile.width) / tiles.fullWidth,
                 imageMax.y - size.y * tile.y / tiles.fullHeight);
-            frame.patches.push_back({tile.texture, min, max,
+            frame.patches.push_back({tile.Display(hdr), min, max,
                 ImVec2((tile.x - tile.haloX + .5f) / tile.haloWidth,
                     1.f - (tile.y - tile.haloY + tile.height - .5f) / tile.haloHeight),
                 ImVec2((tile.x - tile.haloX + tile.width - .5f) / tile.haloWidth,
@@ -215,7 +219,7 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     // graph-backed output. Regional placement still follows rawStagePreview.
     if (rawPresentation && !tiled && m_RawViewportDetailContent &&
         m_RawViewportDetailContent == m_RawViewportPresentationContent)
-        addRegion(m_RawViewportDetailTexture.texture, m_RawViewportDetailRegion);
+        addRegion(m_RawViewportDetailTexture.Display(hdr), m_RawViewportDetailRegion);
     // Keep the complete accepted photo before detail cuts its overview into
     // disjoint visible patches. A different camera crop must not restart the
     // surround's Gaussian pyramid and noise-profile analysis.
@@ -234,23 +238,24 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
     // The renderer only borrows these textures for this frame.
     if (!m_NodeOpenTransition.Active() && !tiled && UsesGraphViewportPreview()) {
         GraphFrameTransition::BlendDescription blend;
-        if (m_Viewport.FrameTransition().DescribeBlend(now, blend)) {
+        if (m_Viewport.FrameTransition().DescribeBlend(now, blend, presentationTexture != sdr)) {
             ApplyBackdropBlend(frame.patches, presentationTexture, blend, imageMin, imageMax);
             ApplyBackdropBlend(frame.surroundPatches, presentationTexture, blend, imageMin, imageMax);
         }
     } else if (!m_NodeOpenTransition.Active() && !tiled && m_RawViewportFadeDuration > 0 && m_RawViewportFadeStarted >= 0 &&
         IsViewportTextureSafeForDrawing(m_RawViewportPreviousTexture.texture)) {
         const auto map = Raw::MapViewportFade(m_RawViewportFadeBase.region, m_RawViewportLastPresentation.region);
-        if (map.valid) {
+        const bool hdrBlend = presentationTexture != sdr;
+        if (map.valid && (!hdrBlend || m_RawViewportPreviousTexture.hdr)) {
             const auto blendPatches = [&](std::vector<BackdropPatch>& patches) {
                 for (auto& patch : patches) {
-                    if (patch.texture != m_RawWorkspacePresentationTexture.texture) continue;
-                    patch.previousTexture = m_RawViewportPreviousTexture.texture;
+                    if (patch.texture != presentationTexture) continue;
+                    patch.previousTexture = m_RawViewportPreviousTexture.Display(hdrBlend);
                     patch.previousOffset = ImVec2(float(map.x), float(map.y));
                     patch.previousScale = ImVec2(float(map.width), float(map.height));
                     patch.fadeAmount = float(std::clamp((ImGui::GetTime()-m_RawViewportFadeStarted) /
                         m_RawViewportFadeDuration, 0.0, 1.0));
-                    patch.encodedSrgb = m_RawViewportLastPresentation.encodedSrgb;
+                    patch.encodedSrgb = hdrBlend || m_RawViewportLastPresentation.encodedSrgb;
                 }
             };
             blendPatches(frame.patches);

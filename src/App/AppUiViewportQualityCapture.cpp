@@ -24,7 +24,7 @@ bool LoadUiViewportQualityFixture(EditorModule& editor, const std::filesystem::p
     }
     auto& graph=editor.GetNodeGraph();
     int upstream=graph.GetSelectedNodeId(), destination=-1;
-    editor.AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation::AssignLinearSrgb,{290,30});
+    editor.AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation::SrgbDecode,{290,30});
     const int linear=graph.GetSelectedNodeId();
     if (!editor.ConnectGraphSockets(upstream,"imageOut",linear,"imageIn")) return false;
     upstream=linear;

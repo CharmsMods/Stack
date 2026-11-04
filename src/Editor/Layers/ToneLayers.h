@@ -489,6 +489,8 @@ private:
     bool m_DebugFalseColor = false;
     bool m_InputIsRec2020 = false;
     bool m_EncodeSrgbOutput = false;
+    float m_HdrHeadroom = 1.f;
+    bool m_DisplayLinearInput = false;
     bool m_LastProbeValid = false;
     float m_LastMinRgb = 0.0f;
     float m_LastMaxRgb = 0.0f;

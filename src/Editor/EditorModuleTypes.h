@@ -1,7 +1,6 @@
 #pragma once
 #include "Editor/Internal/RawLab/DetailContrastEditor.h"
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
-#include "Editor/GraphScopeData.h"
 
 #include "Editor/LoadedProjectData.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
@@ -148,7 +147,6 @@ struct CompositeSceneItem {
 };
 
 struct GraphPreviewPixels {
-    std::shared_ptr<const GraphScopeData> scopeData;
     std::vector<unsigned char> pixels;
     int width = 0;
     int height = 0;
@@ -214,57 +212,6 @@ struct GraphPerformanceStats {
     std::size_t lastSliceImportPixelBytes = 0;
     std::size_t lastSliceImportEmbeddedBytes = 0;
     GraphExecutionStats lastMainGraphStats;
-};
-
-enum class HdrMergeRenderState {
-    Idle,
-    Ready,
-    Queued,
-    Rendering,
-    Rendered,
-    BlockedMissingInput,
-    IncompatibleInput,
-    Failed
-};
-
-struct HdrMergeInputSummary {
-    std::string socketId;
-    std::string label;
-    std::string sourceLabel;
-    std::string metadataSummary;
-    std::string normalizationSummary;
-    bool active = false;
-    bool connected = false;
-    bool compatible = true;
-    bool hasRawMetadata = false;
-    bool hasCaptureExposure = false;
-    int sourceNodeId = -1;
-    int width = 0;
-    int height = 0;
-};
-
-struct HdrMergeNodeStatus {
-    HdrMergeRenderState state = HdrMergeRenderState::Idle;
-    std::string message;
-    std::array<HdrMergeInputSummary, 3> inputs {};
-    Raw::HdrMergeDebugView debugView = Raw::HdrMergeDebugView::FinalImage;
-    bool feedsActiveOutput = false;
-    bool hasRenderedResult = false;
-    bool stale = false;
-    bool metadataNormalizationReady = false;
-    bool automaticReliabilityReady = false;
-    std::string normalizationMessage;
-    std::string reliabilityMessage;
-    std::string warningMessage;
-};
-
-struct HdrMergeConnectionTopology {
-    bool hasInput1 = false;
-    bool hasInput2 = false;
-    bool hasInput3 = false;
-    bool usesInput3 = false;
-    bool hasGap = false;
-    int activeInputCount = 0;
 };
 
 struct PersistedCompositeSceneEntry {

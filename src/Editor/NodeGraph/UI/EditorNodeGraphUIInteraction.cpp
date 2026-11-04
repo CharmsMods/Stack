@@ -198,7 +198,7 @@ void EditorNodeGraphUI::RenderChannelSplitConfirmPrompt(EditorModule* editor) {
         node &&
         node->kind == EditorNodeGraph::NodeKind::DataMath &&
         node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage;
-    const char* message = splittingImageAverage ? "Split Average Images?" : "Channel Split?";
+    const char* message = splittingImageAverage ? "Split Average Images?" : "Split Channels?";
     const char* helper = "Press G or Enter to confirm";
     const ImVec2 messageSize = ImGui::CalcTextSize(message);
     const ImVec2 helperSize = ImGui::CalcTextSize(helper);
@@ -489,7 +489,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     UiNotificationSeverity::Success,
                     splitImageAverage
                         ? "Image average split into channel averages."
-                        : "Channel split created.",
+                        : "Split Channels created.",
                     "editor-node-graph-split");
             } else {
                 PostNodeGraphNotification(
@@ -497,7 +497,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     UiNotificationSeverity::Error,
                     splitImageAverage
                         ? "Image average split failed."
-                        : "Channel split failed.",
+                        : "Split Channels failed.",
                     "editor-node-graph-split");
             }
             return;

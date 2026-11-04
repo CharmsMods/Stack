@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/UI/NodeCatalogCommand.h"
 #include "Utils/GraphCursor.h"
 #include "App/WorkspacePresentation.h"
 #include "App/WorkspaceInputScope.h"
@@ -154,112 +155,6 @@ bool InsertNewNodeOnExistingLink(
     return false;
 }
 
-int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry, const EditorNodeGraph::Vec2& graphPos) {
-    if (!editor) {
-        return -1;
-    }
-    const int firstNewNodeId = editor->GetNodeGraph().GetNextNodeId();
-    switch (entry.kind) {
-        case EditorNodeGraph::NodeKind::Output:
-            editor->AddOutputNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Layer:
-            editor->AddLayerNodeAt(static_cast<LayerType>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Scope:
-            editor->AddScopeNodeAt(static_cast<EditorNodeGraph::ScopeKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Preview:
-            editor->AddPreviewNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskTexture:
-        case EditorNodeGraph::NodeKind::MaskGenerator:
-            editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskCombine:
-            editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskUtility:
-            editor->AddMaskUtilityNodeAt(static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ImageToMask:
-            editor->AddImageToMaskNodeAt(static_cast<EditorNodeGraph::ImageToMaskKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ImageGenerator:
-            editor->AddImageGeneratorNodeAt(static_cast<EditorNodeGraph::ImageGeneratorKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Mix:
-            editor->AddMixNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::DataMath:
-            editor->AddDataMathNodeAt(static_cast<EditorNodeGraph::DataMathMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Value: {
-            EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-            editor->AddValueNodeAt(std::move(prototype.value.value), graphPos);
-            break;
-        }
-        case EditorNodeGraph::NodeKind::FieldMean:
-            editor->AddFieldMeanNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Reformat:
-            editor->AddReformatNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawOperation:
-            editor->AddRawOperationNodeAt(static_cast<Stack::RawRecipe::GraphOperationKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::TechnicalImage:
-            editor->AddTechnicalImageNodeAt(
-                static_cast<Stack::NodeMath::TechnicalImageOperation>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Compound:
-            editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ChannelSplit:
-            editor->AddChannelSplitNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ChannelCombine:
-            editor->AddChannelCombineNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ConstantChannel:
-            editor->AddConstantChannelNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDevelopment:
-            editor->AddRawDevelopmentNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDecode:
-            editor->AddRawDecodeNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDevelop:
-            editor->AddRawDevelopNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
-            editor->AddRawDetailAutoMaskNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDetailFusion:
-            editor->AddRawDetailFusionNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::HdrMerge:
-            editor->AddHdrMergeNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Mfsr:
-            editor->AddMfsrNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Lut:
-            editor->AddLutNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::RawSource:
-        case EditorNodeGraph::NodeKind::RawProjectFrame:
-        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
-        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
-        case EditorNodeGraph::NodeKind::Composite:
-            break;
-    }
-    const int selectedNodeId = editor->GetNodeGraph().GetSelectedNodeId();
-    return selectedNodeId >= firstNewNodeId ? selectedNodeId : -1;
-}
-
 } // namespace
 
 void EditorNodeGraphUI::Render(EditorModule* editor) {
@@ -269,9 +164,13 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
         ResetProjectInteractionState();
     }
     ObserveLayoutRevision(context);
+    const auto renderRevision = editor->GetRenderRevision();
     if (context.documentId != m_GraphContext.documentId || context.graphId != m_GraphContext.graphId ||
-        context.documentRevision != m_GraphContext.documentRevision || context.revision != m_GraphContext.revision)
+        context.documentRevision != m_GraphContext.documentRevision || context.revision != m_GraphContext.revision ||
+        renderRevision != m_ConnectionCapabilityRenderRevision) {
         m_ConnectionCapabilityCache.clear();
+        m_ConnectionCapabilityRenderRevision = renderRevision;
+    }
     m_GraphContext = context;
     AdvanceLayoutMotion(context);
     EditorNodeGraph::Graph& graph = *context.graph;
@@ -387,6 +286,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     const ImVec2& canvasMin,
     const ImVec2& canvasMax,
     const GraphRenderOptions& options) {
+    if (editor && &graph == &editor->GetNodeGraph() && !graph.GetNodes().empty()) editor->PrepareGraphOutputDescriptions();
     Stack::UiPerformance::Span canvasTiming(Stack::UiPerformance::Stage::GraphCanvas);
     Stack::UiPerformance::Add(Stack::UiPerformance::Counter::Nodes, graph.GetNodes().size());
     bool draggingMask = false;
@@ -673,7 +573,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         m_LinkHitTestFrame = -1;
         const auto graphPosition = ScreenToGraph(ToGraphVec2(deliveredPosition));
         const auto hoveredDropLink = FindLinkAt(graph, ToGraphVec2(deliveredPosition));
-        const int newNodeId = AddNodeFromBrowserEntry(editor, *deliveredEntry, graphPosition);
+        const int newNodeId = Stack::Editor::AddNodeFromBrowserEntry(editor, *deliveredEntry, graphPosition);
         if (newNodeId > 0 && hoveredDropLink.fromNodeId > 0 && hoveredDropLink.toNodeId > 0 &&
             hoveredDropLink.fromNodeId != newNodeId && hoveredDropLink.toNodeId != newNodeId) {
             InsertNewNodeOnExistingLink(this, editor, hoveredDropLink, newNodeId);

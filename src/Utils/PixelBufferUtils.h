@@ -149,8 +149,9 @@ inline bool FlipInterleavedRowsInPlace(
     return true;
 }
 
-inline std::vector<unsigned char> RotateInterleavedQuarterTurnsClockwise(
-    const std::vector<unsigned char>& pixels,
+template<typename Sample>
+inline std::vector<Sample> RotateInterleavedQuarterTurnsClockwise(
+    const std::vector<Sample>& pixels,
     int width,
     int height,
     int channels,
@@ -179,7 +180,7 @@ inline std::vector<unsigned char> RotateInterleavedQuarterTurnsClockwise(
         return {};
     }
 
-    std::vector<unsigned char> rotated;
+    std::vector<Sample> rotated;
     try {
         rotated.resize(outputByteCount);
     } catch (const std::bad_alloc&) {

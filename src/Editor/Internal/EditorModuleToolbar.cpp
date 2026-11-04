@@ -155,11 +155,6 @@ void EditorModule::LoadResourceTextures() {
         EmbeddedTabIcons::BackgroundRemover_png_size,
         "BackgroundRemover"
     );
-    m_ColorGradeIconTexture = LoadEditorResourceTexture(
-        EmbeddedTabIcons::ColorGrade_png_data,
-        EmbeddedTabIcons::ColorGrade_png_size,
-        "ColorGrade"
-    );
     m_RawFolderIconTexture = LoadEditorResourceTexture(
         EmbeddedTabIcons::RawFolder_png_data,
         EmbeddedTabIcons::RawFolder_png_size,
@@ -263,7 +258,6 @@ void EditorModule::UnloadResourceTextures() {
     deleteTexture(m_ExportIconTexture);
     deleteTexture(m_SettingsIconTexture);
     deleteTexture(m_BackgroundRemoverIconTexture);
-    deleteTexture(m_ColorGradeIconTexture);
     deleteTexture(m_RawFolderIconTexture);
     deleteTexture(m_RawRefreshIconTexture);
     deleteTexture(m_RawClearIconTexture);
@@ -477,8 +471,6 @@ void EditorModule::RenderFloatingToolbar() {
                 tex = g_LutIconTexture;
             } else if (btn.typeId == "BackgroundPatcher") {
                 tex = m_BackgroundRemoverIconTexture;
-            } else if (btn.typeId == "ColorGrade") {
-                tex = m_ColorGradeIconTexture;
             } else if (btn.typeId == "ToneCurve") {
                 tex = g_ToneCurveIconTexture;
             } else if (btn.typeId == "ViewTransform") {

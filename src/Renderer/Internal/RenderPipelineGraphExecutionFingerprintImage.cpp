@@ -194,6 +194,10 @@ void GraphExecutionRuntime::BindImageFingerprint() {
 
         if (node.kind == RenderGraphNodeKind::Image) {
             if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
+                if (node.image.useHdrPixels && node.image.hdrPixels) {
+                    HashCombine(fingerprint, HashValue(node.image.hdrFingerprint));
+                    HashCombine(fingerprint, HashValue(true));
+                }
                 HashCombine(fingerprint, HashValue(node.image.width));
                 HashCombine(fingerprint, HashValue(node.image.height));
                 HashCombine(fingerprint, HashValue(node.image.channels));

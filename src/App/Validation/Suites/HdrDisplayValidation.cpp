@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "Raw/ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Editor/Layers/ToneLayers.h"
@@ -13,6 +16,11 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include "WindowsHdrValidation.h"
+#include "HdrPhotoExportValidation.h"
+#include "HdrGalleryCheck.h"
+#include "Hdr/Presentation.h"
+#include "Hdr/ImageFile.h"
 
 namespace Stack::Validation {
 namespace {
@@ -150,6 +158,34 @@ void ValidateLocalTone() {
         <<" EV; identity, exposure response, signed RGB, coverage and cancellation passed.\n";
 }
 }
+bool ValidateHdrGallery(const char* raw) {
+    try {
+        Context context;
+        struct Cleanup {
+            GLFWwindow* window;
+            ~Cleanup() { Hdr::ShutdownPresentation(window); }
+        } cleanup{context.window};
+        if(!Hdr::BeginWindow(context.window,32,32,true))
+            throw std::runtime_error(Hdr::MainDisplayStatus());
+        CheckHdrGallery(context.window,std::filesystem::u8path(raw));
+        return true;
+    } catch(const std::exception& e) {
+        std::cerr<<"HDR Gallery validation failed: "<<e.what()<<'\n';
+        return false;
+    }
+}
+
+bool ValidateHdrGraphExport(const char* raw,const char* folder) {
+    try {
+        Context context;
+        ValidatePhotoExports(context.window,std::filesystem::u8path(raw),std::filesystem::u8path(folder),true);
+        return true;
+    } catch(const std::exception& error) {
+        std::cerr<<"HDR Graph export validation failed: "<<error.what()<<'\n';
+        return false;
+    }
+}
+
 // Focused curve and actual display-shader parity checks.
 bool ValidateHdrDisplay(int argc,char** argv) {
     try {
@@ -256,7 +292,50 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             !serialized.at("viewTransform").contains("shoulder"),"Retired controls leaked into the View recipe");
         std::cout<<"Sigmoid display: CPU/GPU maximum error "<<standardWorst
             <<", zero-EV anchors, monotonicity, signed color, alpha, native-size parity, round trips and removed-mode checks passed.\n";
-        if(argc)throw std::runtime_error("The removed display-curve comparison arguments are no longer supported.");
+        auto extended=standardSettings;
+        extended["_presentationHeadroom"]=Stack::Hdr::MasterHeadroom;
+        extended["encodeSrgbOutput"]=false;
+        Raw::ViewTransform::Parameters hdrParameters;
+        hdrParameters.hdrHeadroom=Stack::Hdr::MasterHeadroom; hdrParameters.encodeSrgbOutput=false;
+        Raw::ViewTransform::PreparedTransform master(hdrParameters);
+        auto rendered=Render(ramp,width,1,extended);
+        float worst=0.f,previous=-1.f;
+        for(unsigned x=0;x<width;++x) {
+            const float v=ramp[4*x]; const auto expected=master.Rgb({v,v,v});
+            Check(rendered[4*x]>=previous-1e-5f,"HDR grayscale reversed");
+            previous=rendered[4*x];
+            for(int c=0;c<3;++c) worst=std::max(worst,std::abs(rendered[4*x+c]-expected[c]));
+        }
+        auto colors=Render(patch,19,13,extended);
+        for(size_t i=0;i<patch.size();i+=4) {
+            const auto expected=master.Rgb({patch[i],patch[i+1],patch[i+2]});
+            for(int c=0;c<3;++c) worst=std::max(worst,std::abs(colors[i+c]-expected[c]));
+            Check(colors[i+3]==patch[i+3],"HDR changed image coverage");
+        }
+        Check(std::abs(master.Luma(grey)-grey)<2e-6f && previous>4.8f && previous<=Stack::Hdr::MasterHeadroom+.0001f &&
+            worst<.0001f,"HDR gray, highlight shoulder or CPU/GPU parity failed");
+        Check(std::abs(Stack::Hdr::Pq(100.f)-.50807842f)<.000001f &&
+              std::abs(Stack::Hdr::Nits(.75182710f)-1000.f)<.02f,
+              "PQ absolute luminance anchors failed");
+        Stack::Hdr::Image coverage{19,13,colors};
+        coverage.rgba[3]=.375f;
+        const auto png=Stack::Hdr::EncodePqPng(coverage);
+        const auto decoded=Stack::Hdr::DecodePqPng(png);
+        Check(png.size()>25 && png[24]==16 && Stack::Hdr::IsPqPng(png) &&
+            decoded.width==coverage.width && decoded.height==coverage.height &&
+            std::abs(decoded.rgba[3]-.375f)<1.f/65535.f,
+            "16-bit PQ PNG did not preserve straight alpha");
+        std::cout<<"HDR CPU/GPU max difference "<<worst<<", brightest neutral "<<previous<<" x diffuse white.\n";
+#ifdef _WIN32
+        CheckNativeHdrPresentation(context.window);
+#endif
+        if(argc==2) {
+            const auto raw=std::filesystem::u8path(argv[0]),dest=std::filesystem::u8path(argv[1]);
+            struct DisplayCleanup {GLFWwindow* w; ~DisplayCleanup(){Stack::Hdr::ShutdownPresentation(w);}} cleanup{context.window};
+            const auto target=Stack::Hdr::BeginWindow(context.window,32,32,true);
+            ValidatePhotoExports(context.window,raw,dest);
+            if(target) CheckHdrGallery(context.window,raw);
+        } else if(argc) throw std::runtime_error("Expected a RAW path and an output directory.");
         return true;
     }catch(const std::exception& e){std::cerr<<"HDR display validation failed: "<<e.what()<<'\n';return false;}
 }

@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
+#include "Editor/NodeGraph/UI/NodeCatalogCommand.h"
 #include "App/AppHeaderStyle.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/UiPerformanceProbe.h"
@@ -247,7 +248,9 @@ bool RenderBrowserCard(
 
 
 
-int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry, const EditorNodeGraph::Vec2& graphPos) {
+} // namespace
+
+int Stack::Editor::AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry, const EditorNodeGraph::Vec2& graphPos) {
     if (!editor) {
         return -1;
     }
@@ -259,24 +262,8 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Layer:
             editor->AddLayerNodeAt(static_cast<LayerType>(entry.value), graphPos);
             break;
-        case EditorNodeGraph::NodeKind::Scope:
-            editor->AddScopeNodeAt(static_cast<EditorNodeGraph::ScopeKind>(entry.value), graphPos);
-            break;
         case EditorNodeGraph::NodeKind::Preview:
             editor->AddPreviewNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskTexture:
-        case EditorNodeGraph::NodeKind::MaskGenerator:
-            editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskCombine:
-            editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::MaskUtility:
-            editor->AddMaskUtilityNodeAt(static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value), graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::ImageToMask:
-            editor->AddImageToMaskNodeAt(static_cast<EditorNodeGraph::ImageToMaskKind>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::ImageGenerator:
             editor->AddImageGeneratorNodeAt(static_cast<EditorNodeGraph::ImageGeneratorKind>(entry.value), graphPos);
@@ -326,34 +313,15 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::RawDevelop:
             editor->AddRawDevelopNodeAt(graphPos);
             break;
-        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
-            editor->AddRawDetailAutoMaskNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::RawDetailFusion:
-            editor->AddRawDetailFusionNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::HdrMerge:
-            editor->AddHdrMergeNodeAt(graphPos);
-            break;
-        case EditorNodeGraph::NodeKind::Mfsr:
-            editor->AddMfsrNodeAt(graphPos);
-            break;
         case EditorNodeGraph::NodeKind::Lut:
             editor->AddLutNodeAt(graphPos);
             break;
-        case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::RawSource:
-        case EditorNodeGraph::NodeKind::RawProjectFrame:
-        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
-        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
-        case EditorNodeGraph::NodeKind::Composite:
-            break;
+        default:
+            return -1;
     }
-    const std::vector<int>& selected = editor->GetNodeGraph().GetSelectedNodeIds();
-    return selected.empty() || selected.back() < firstNewNodeId ? -1 : selected.back();
+    const int selected = editor->GetNodeGraph().GetSelectedNodeId();
+    return selected >= firstNewNodeId ? selected : -1;
 }
-
-} // namespace
 
 void EditorNodeGraphUI::SetCatalogHost(const ImVec2& position, const ImVec2& size,
     bool expanded, float visibleWidth) {
@@ -969,7 +937,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                         (m_CanvasMin.x + m_CanvasMax.x) * 0.5f,
                         (m_CanvasMin.y + m_CanvasMax.y) * 0.5f});
             }
-            const int newNodeId = AddNodeFromBrowserEntry(editor, *activatedEntry, m_NodeBrowserGraphPos);
+            const int newNodeId = Stack::Editor::AddNodeFromBrowserEntry(editor, *activatedEntry, m_NodeBrowserGraphPos);
             if (newNodeId > 0) {
                 if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput) {
                     EditorNodeGraphUI::ConnectOutputToBestInput(editor, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, newNodeId);

@@ -1,105 +1,13 @@
 #include "Editor/NodeGraph/CompoundRecipes.h"
-#include "Editor/NodeGraph/EditorNodeGraph.h"
-#include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
-#include "Graph/LayerOperationParameters.h"
+#include "Editor/NodeGraph/CompoundRecipeBuilder.h"
 #include <array>
-#include <algorithm>
-#include <cstdio>
-#include <stdexcept>
 
 namespace EditorNodeGraphDefinitions {
 namespace {
 using namespace EditorNodeGraph;
 using namespace Stack::NodeMath;
 
-struct Recipe {
-    Graph graph;
-    CompoundDefinition definition;
-    int identity;
-    explicit Recipe(int identity, const char* id, const char* label) : identity(identity) {
-        graph.Clear(); graph.SetAllowNoOutput(true);
-        definition.definitionUuid = Uuid(0);
-        definition.identity.id = std::string("stack:compound/") + id;
-        definition.identity.version = {1,0,0};
-        definition.label = label;
-        definition.description = "Editable canonical graph of standalone operations.";
-        definition.source = CompoundDefinitionSource::ShippedTemplate;
-        definition.lifecycleNotes = "Decompile one level; repack the edited graph. No native specialization.";
-    }
-    std::string Uuid(int n) const {
-        char text[64]; std::snprintf(text,sizeof(text),"%08d-1019-4000-8000-%012d",identity,n); return text;
-    }
-    int Keep(Node* node) {
-        if (!node) throw std::runtime_error("Could not construct compound recipe node.");
-        node->instanceUuid=Uuid(node->id);
-        node->position={float((node->id-1)%6)*280.f,float((node->id-1)/6)*240.f};
-        if (node->kind==NodeKind::Compound) node->compound.instance.instanceUuid=node->instanceUuid;
-        return node->id;
-    }
-    Node& At(int id) { return *graph.FindNode(id); }
-    // Purpose notes are authored template data, copied with the node on decompile.
-    void Note(int id, const std::string& text) { At(id).notes = text; }
-    int Math(DataMathMode mode, float b=1.f, bool uniform=false) {
-        const int id=Keep(graph.AddDataMathNode(mode,{}));
-        At(id).dataMathSettings.constantB=b;
-        At(id).dataMathSettings.domain=uniform ? ArithmeticDomain::Values : ArithmeticDomain::Spatial;
-        return id;
-    }
-    int Identity() {return Math(DataMathMode::Multiply);}
-    int Split(int source) {const int id=Keep(graph.AddChannelSplitNode({})); Wire(source,"imageOut",id,"imageIn");return id;}
-    int Combine() {return Keep(graph.AddChannelCombineNode({}));}
-    void Wire(int a,const char* out,int b,const char* in) {
-        std::string error;
-        if (!graph.TryConnectSockets(a,out,b,in,&error))
-            throw std::runtime_error(definition.label+": "+error+" ("+std::to_string(a)+"."+out+" -> "+std::to_string(b)+"."+in+")");
-    }
-    void Wire(int a,int b,const char* in="imageA") {Wire(a,"imageOut",b,in);}
-    void Port(const char* id,const char* label,int node,const char* socket,LogicalValueType type,
-        bool output=false,bool optional=false,bool numeric=false) {
-        definition.ports.push_back({id,label,output?PortDirection::Output:PortDirection::Input,type,optional,At(node).instanceUuid,socket,numeric});
-    }
-    void Input(int node,const char* socket="imageA",bool numeric=true) {
-        Port("image-in","Image / data",node,socket,LogicalValueType::ColorImage,false,false,numeric);
-    }
-    void Output(int node,LogicalValueType type=LogicalValueType::ColorImage,const char* socket="imageOut",bool numeric=true) {
-        Port("image-out","Result",node,socket,type,true,false,numeric);
-    }
-    void Param(const char* id,const char* label,int node,const char* path,double value,
-        double minimum,double maximum,const char* units="unitless") {
-        CompoundParameterDefinition p;
-        p.id=id;p.label=label;p.defaultValue=value;p.hardDomain={true,minimum,maximum,true,true};
-        p.units=units;p.internalInstanceUuid=At(node).instanceUuid;p.internalParameterId=path;
-        definition.parameters.push_back(std::move(p));
-    }
-    int Control(const char* id,const char* label,double value,double low,double high,const char* units="unitless") {
-        const int n=Math(DataMathMode::Add,0,true);
-        At(n).dataMathSettings.constantA=float(value);
-        Param(id,label,n,"dataMathSettings.constantA",value,low,high,units);
-        const std::string port=ParameterInputSocketId(id);
-        Port(port.c_str(),label,n,"imageA",LogicalValueType::Scalar,false,true);
-        return n;
-    }
-    int Child(const CompoundDefinition& child) {
-        Graph embedded;
-        DeserializeGraphPayload(child.canonicalGraph,embedded,0);
-        for (const auto& d:embedded.GetCompoundDefinitions()) AddDependency(d);
-        AddDependency(child);
-        return Keep(graph.AddCompoundNode(child.identity,{}));
-    }
-    void AddDependency(const CompoundDefinition& child) {
-        std::string error;
-        if (!graph.AddCompoundDefinition(child,&error)) throw std::runtime_error(definition.label+": "+error);
-        if (std::none_of(definition.dependencies.begin(),definition.dependencies.end(),[&](const auto& r){return SameDefinitionReference(r,child.identity);}))
-            definition.dependencies.push_back(child.identity);
-    }
-    void Override(int n,const char* id,double value) {SetCompoundParameterOverride(At(n).compound.instance,id,value);}
-    CompoundDefinition Finish() {
-        Stack::GraphModel::ReindexLayerParameterRecords(graph);
-        definition.canonicalGraph=SerializeGraphPayload(nlohmann::json::array(),graph);
-        RefreshCompoundDefinitionContentHash(definition);
-        return definition;
-    }
-};
+using RecipeBuilding::Recipe;
 
 CompoundDefinition Percent() {
     Recipe r(101,"percent","Percent");
@@ -109,11 +17,18 @@ CompoundDefinition Percent() {
     r.Param("percent","Percent (%)",divide,"dataMathSettings.constantA",100,-100000,100000,"percent");
     r.Port("param:percent","Percentage",divide,"imageA",LogicalValueType::Scalar,false,true);
     const int multiply=r.Math(DataMathMode::Multiply);
-    r.Wire(divide,multiply,"imageB");r.Input(multiply);r.Output(multiply);
-    r.Port("mask-in","Effect strength mask",multiply,"maskIn",LogicalValueType::Channel,false,true);
+    // Scale only the change from unity by coverage; unwired coverage is one.
+    const int delta=r.Math(DataMathMode::Subtract,1), covered=r.Math(DataMathMode::Multiply,1);
+    const int coverage=r.Math(DataMathMode::Clamp), maskSource=r.Math(DataMathMode::Multiply,1);
+    r.At(maskSource).dataMathSettings.constantA=1;
+    const int factor=r.Math(DataMathMode::Add,1);
+    r.Wire(maskSource,coverage);r.Wire(coverage,covered,"imageB");
+    r.Wire(divide,delta);r.Wire(delta,covered);r.Wire(covered,factor);
+    r.Wire(factor,multiply,"imageB");r.Input(multiply);r.Output(multiply);
+    r.Port("mask-in","Effect strength mask",maskSource,"imageA",LogicalValueType::Channel,false,true);
     r.Note(divide,"Convert a percentage to a multiplier: 10% becomes 0.1.");
     r.Note(multiply,"Scale the input by that multiplier. A black effect mask keeps the original input.");
-    r.definition.description="Take P percent of the input: A × (P / 100). A black effect mask bypasses the gain.";
+    r.definition.description="Take P percent of the input: A Ã— (P / 100). A black effect mask bypasses the gain.";
     return r.Finish();
 }
 
@@ -161,7 +76,7 @@ CompoundDefinition SmoothCurve() {
     r.Note(complement,"Calculate 3 minus twice the ramp; this helps soften the bright end.");
     r.Note(product,"Combine the two curve terms to create a smooth S-shaped transition.");
     r.Note(bounded,"Keep the result between 0 and 1 so it can act as a mask.");
-    r.definition.description="Scalar curve t²(3−2t), with editable HDR input endpoints and constant 0/1 endpoint extension. Clamp explicitly converts the result to coverage.";
+    r.definition.description="Scalar curve tÂ²(3âˆ’2t), with editable HDR input endpoints and constant 0/1 endpoint extension. Clamp explicitly converts the result to coverage.";
     return r.Finish();
 }
 
@@ -209,7 +124,7 @@ CompoundDefinition Mixer() {
         r.Note(all,std::string("Add the blue contribution to finish output ")+names[row]+".");
     }
     r.Wire(split,"a",combine,"a");r.Output(combine,LogicalValueType::ColorImage,"imageOut",false);
-    r.definition.description="3×3 RGB matrix: each output row is the sum of three weighted input channels. Alpha passes through separately.";
+    r.definition.description="3Ã—3 RGB matrix: each output row is the sum of three weighted input channels. Alpha passes through separately.";
     return r.Finish();
 }
 
@@ -226,16 +141,6 @@ CompoundDefinition LinearMix() {
     r.Note(delta,"Find the difference between the second image and the base.");
     r.Note(scaled,"Keep the chosen fraction of that difference.");
     r.Note(out,"Add the scaled difference to the base to finish the blend.");
-    return r.Finish();
-}
-
-CompoundDefinition Invert() {
-    Recipe r(109,"invert-mask","Invert Mask (compound)");
-    const int bounded=r.Math(DataMathMode::Clamp),invert=r.Math(DataMathMode::Subtract);
-    r.At(bounded).dataMathSettings.boundedMask=true;r.Input(bounded);
-    r.At(invert).dataMathSettings.constantA=1;r.Wire(bounded,invert,"imageB");r.Output(invert,LogicalValueType::Channel);
-    r.Note(bounded,"Keep the input within the mask range, from 0 to 1.");
-    r.Note(invert,"Subtract the mask from 1: black becomes white, and white becomes black.");
     return r.Finish();
 }
 
@@ -319,8 +224,13 @@ CompoundDefinition Halation(int id,const char* name,const char* label,const char
     r.Note(tinted,"Reassemble the adjusted channels into the colored glow.");
     for(int i=0;i<3;++i){
         const int gain=r.Control(channels[i],gainLabels[i],defaults[i],-100,100),multiply=r.Math(DataMathMode::Multiply);
-        r.Wire(split,channels[i],multiply,"imageA");r.Wire(gain,multiply,"imageB");
-        if(i==0)r.Wire(mr,"imageOut",multiply,"maskIn");
+        int factor=gain;
+        if (i==0) {
+            const int delta=r.Math(DataMathMode::Subtract,1), covered=r.Math(DataMathMode::Multiply), gainWithCoverage=r.Math(DataMathMode::Add,1);
+            r.Wire(gain,delta);r.Wire(delta,covered);r.Wire(mr,covered,"imageB");
+            r.Wire(covered,gainWithCoverage);factor=gainWithCoverage;
+        }
+        r.Wire(split,channels[i],multiply,"imageA");r.Wire(factor,multiply,"imageB");
         r.Wire(multiply,"imageOut",tinted,channels[i]);
         r.Note(gain,gainNotes[i]);
         r.Note(multiply,tintNotes[i]);
@@ -342,12 +252,20 @@ CompoundDefinition Halation(int id,const char* name,const char* label,const char
     r.Note(protectionAmount,"Set protection strength: 0 gives none; 1 gives full protection.");
     r.Note(pScale,"Apply protection strength to the selected areas.");
     r.Note(p,"Turn protection into permission: protected areas receive less glow.");
-    const int protectedHalo=r.Math(DataMathMode::Multiply),strength=r.Child(percent),overall=r.Math(DataMathMode::Multiply),out=r.Math(DataMathMode::Add);
+    const int protectedHalo=r.Math(DataMathMode::Multiply),strength=r.Child(percent),overall=r.Math(DataMathMode::Multiply),out=r.Combine();
     r.Wire(tinted,protectedHalo);r.Wire(p,protectedHalo,"imageB");r.Wire(protectedHalo,"imageOut",strength,"image-in");r.Override(strength,"percent",10);
     r.Param("strength","Strength (%)",strength,"compound:percent",10,0,1000,"percent");
     r.Port("param:strength","Strength (%)",strength,"param:percent",LogicalValueType::Scalar,false,true);
     r.Wire(strength,"image-out",overall,"imageA");r.Port("mask-in","Overall destination mask",overall,"imageB",LogicalValueType::Channel,false,true,true);
-    r.Wire(original,out);r.Wire(overall,out,"imageB");r.Output(out,LogicalValueType::ColorImage,"imageOut",false);
+    const int haloChannels = r.Split(overall);
+    for (const char* component : {"r", "g", "b"}) {
+        const int add = r.Math(DataMathMode::Add, 0);
+        r.Wire(originalSplit, component, add, "imageA");
+        r.Wire(haloChannels, component, add, "imageB");
+        r.Wire(add, "imageOut", out, component);
+    }
+    r.Wire(originalSplit, "a", out, "a");
+    r.Output(out,LogicalValueType::ColorImage,"imageOut",false);
     r.Note(protectedHalo,"Apply destination protection to the colored glow.");
     r.Note(strength,"Set the overall glow strength as a percentage.");
     r.Note(overall,"Apply the external mask: black hides the glow; white keeps it.");
@@ -377,7 +295,7 @@ void AppendModularCompoundRecipes(std::vector<CompoundDefinition>& catalog) {
     const auto p3=Luminance(104,"luminance-display-p3","Luminance (linear Display P3)","display-p3-d65",{.2289745640697488,.6917385218365064,.079286914093745},percent);
     catalog.push_back(srgb);catalog.push_back(rec2020);catalog.push_back(p3);
     const auto curve=SmoothCurve();catalog.push_back(curve);
-    catalog.push_back(Colorize());catalog.push_back(Mixer());catalog.push_back(LinearMix());catalog.push_back(Invert());catalog.push_back(AverageThree());
+    catalog.push_back(Colorize());catalog.push_back(Mixer());catalog.push_back(LinearMix());catalog.push_back(AverageThree());
     catalog.push_back(Halation(110,"halation","Halation","rec2020-d65",rec2020,percent,curve));
     catalog.push_back(Halation(111,"halation-srgb","Halation (linear sRGB)","srgb-d65",srgb,percent,curve));
 }

@@ -24,6 +24,8 @@ inline void ResolveImageImportDecode(ProjectGraphHistory& history, const std::st
     reduced.label=payload.label; reduced.sourcePath=payload.sourcePath;
     reduced.managedAssetId=payload.managedAssetId; reduced.projectAssetPath=payload.projectAssetPath;
     reduced.width=payload.width; reduced.height=payload.height; reduced.channels=payload.channels;
+    reduced.hdrPixels=payload.hdrPixels; reduced.hdrFingerprint=payload.hdrFingerprint;
+    reduced.hdrStorageQuarterTurns=payload.hdrStorageQuarterTurns;
     reduced.originalChannels=payload.originalChannels; reduced.sourceColorMetadata=payload.sourceColorMetadata;
     reduced.previewWidth=payload.previewWidth; reduced.previewHeight=payload.previewHeight;
     reduced.previewChannels=payload.previewChannels;

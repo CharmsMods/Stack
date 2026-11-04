@@ -1,5 +1,6 @@
 #include "Editor/Internal/RawLab/RawLabColorWheelRenderer.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -74,7 +75,7 @@ void main() {
 bool RawLabColorWheelRenderer::Initialize() {
     if (m_InitializationAttempted) return m_Program != 0 && m_VertexArray != 0;
     m_InitializationAttempted = true;
-    m_Program = GLHelpers::CreateShaderProgram(kVertexShader, kFragmentShader);
+    m_Program = GLHelpers::CreateShaderProgram(kVertexShader, Stack::Hdr::Ui::Fragment(kFragmentShader,"fragColor").c_str());
     if (m_Program == 0) return false;
     glGenVertexArrays(1, &m_VertexArray);
     m_RectLocation = glGetUniformLocation(m_Program, "rect");
@@ -122,6 +123,7 @@ void RawLabColorWheelRenderer::DrawCallback(const ImDrawList*, const ImDrawCmd* 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(renderer.m_Program);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniform4f(renderer.m_RectLocation, request.min.x, request.min.y, request.size.x, request.size.y);
     glUniform4f(renderer.m_DisplayLocation, request.displayPos.x, request.displayPos.y,
         request.displaySize.x, request.displaySize.y);

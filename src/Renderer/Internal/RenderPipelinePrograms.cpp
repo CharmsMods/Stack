@@ -854,7 +854,18 @@ void RenderPipeline::EnsureDataMathProgram() {
         }
     )";
 
-    static const char* fragmentSrc = R"(
+    // Compile the same operators displayed by View Recipe. Construct the shader once.
+    static const std::string fragmentSrc = [] {
+        using namespace Stack::NodeMath;
+        std::string primitiveCases;
+        for (auto mode : {ArithmeticMode::Add, ArithmeticMode::Subtract, ArithmeticMode::Multiply, ArithmeticMode::Divide}) {
+            primitiveCases += "} else if (uMode == " + std::to_string(static_cast<int>(mode)) + ") {\n";
+            if (mode == ArithmeticMode::Divide)
+                primitiveCases += "for (int c = 0; c < 4; ++c) result[c] = b[c] == 0.0 ? 0.0 : a[c] / b[c];\n";
+            else
+                primitiveCases += std::string("result = a ") + Primitive(mode)->symbol + " b;\n";
+        }
+        return std::string(R"(
         #version 330 core
         in vec2 vTexCoord;
         out vec4 FragColor;
@@ -879,7 +890,7 @@ void RenderPipeline::EnsureDataMathProgram() {
             }
             vec4 value = texture(tex, vTexCoord);
             if (scalarInput != 0) {
-                return vec4(value.r, value.r, value.r, 1.0);
+                return vec4(value.r);
             }
             return value;
         }
@@ -891,15 +902,7 @@ void RenderPipeline::EnsureDataMathProgram() {
 
             if (uMode == 0) {
                 result = clamp(a, vec4(uMinValue), vec4(uMaxValue));
-            } else if (uMode == 1) {
-                result = a + b;
-            } else if (uMode == 2) {
-                result = a - b;
-            } else if (uMode == 3) {
-                result = a * b;
-            } else if (uMode == 4) {
-                for (int c = 0; c < 4; ++c)
-                    result[c] = b[c] == 0.0 ? 0.0 : a[c] / b[c];
+        )") + primitiveCases + R"(
             } else if (uMode == 5) {
                 result = (a + b) * 0.5;
             } else if (uMode == 6) {
@@ -913,19 +916,21 @@ void RenderPipeline::EnsureDataMathProgram() {
                 result = mix(vec4(uOutMin), vec4(uOutMax), clamp((a - vec4(uMinValue)) / span, 0.0, 1.0));
             }
 
-            if (uScalarOutput != 0) {
+            if (uScalarOutput == 1) {
                 float v = result.r;
                 FragColor = vec4(v, v, v, 1.0);
             } else {
-                result.a = uHasA != 0 && uScalarA == 0 ? a.a :
+                if (uScalarOutput == 2) result.a = 1.0;
+                else if (uMode < 1 || uMode > 4) result.a = uHasA != 0 && uScalarA == 0 ? a.a :
                     (uHasB != 0 && uScalarB == 0 ? b.a : 1.0);
                 FragColor = result;
             }
         }
     )";
+    }();
 
     if (!m_DataMathProgram) {
-        m_DataMathProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+        m_DataMathProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc.c_str());
     }
 }
 

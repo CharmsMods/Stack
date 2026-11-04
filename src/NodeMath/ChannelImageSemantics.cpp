@@ -105,7 +105,7 @@ ChannelImageDescription DescribeImageComponentExtraction(
             DiagnosticSeverity::HardError,
             operationIdentity,
             "component-extraction-type",
-            "Channel Split requires a Color Image.",
+            "Split Channels requires a Color Image.",
             "Connect an Image or use the matching typed operation."));
         return result;
     }
@@ -116,7 +116,7 @@ ChannelImageDescription DescribeImageComponentExtraction(
             DiagnosticSeverity::HardError,
             operationIdentity,
             "component-presence-unknown",
-            "Channel Split cannot prove which Image components are present.",
+            "Split Channels cannot prove which Image components are present.",
             "Repair or reconstruct the Image with explicit Channel inputs."));
         return result;
     }
@@ -188,7 +188,7 @@ ChannelImageDescription DescribeImageCombine(
             DiagnosticSeverity::HardError,
             operationIdentity,
             "color-missing",
-            "Image Combine requires at least one connected R, G, or B Channel.",
+            "Combine Channels requires at least one connected R, G, or B Channel.",
             "Connect a color Channel before using the Image."));
     }
 
@@ -205,7 +205,7 @@ ChannelImageDescription DescribeImageCombine(
                 DiagnosticSeverity::HardError,
                 operationIdentity,
                 "input-" + std::to_string(index),
-                "Image Combine accepts Channel inputs only."));
+                "Combine Channels accepts Channel inputs only."));
             continue;
         }
         if (input->spatial.state != KnowledgeState::Known ||
@@ -216,7 +216,7 @@ ChannelImageDescription DescribeImageCombine(
                 DiagnosticSeverity::HardError,
                 operationIdentity,
                 "extent-" + std::to_string(index),
-                "Image Combine requires a known finite extent for every connected Channel.",
+                "Combine Channels requires a known finite extent for every connected Channel.",
                 "Connect Match Extent or another Channel with a known extent."));
             continue;
         }
@@ -229,7 +229,7 @@ ChannelImageDescription DescribeImageCombine(
                 DiagnosticSeverity::HardError,
                 operationIdentity,
                 "extent-" + std::to_string(index),
-                "Image Combine inputs have different extents.",
+                "Combine Channels inputs have different extents.",
                 "Add an explicit Reformat to the mismatched Channel."));
         }
     }

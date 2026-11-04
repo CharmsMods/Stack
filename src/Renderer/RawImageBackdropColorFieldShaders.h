@@ -37,7 +37,7 @@ void main() {
     // outside the photo, including unusually wide panoramas.
     vec2 nearestCell = clamp(floor((p/photoAspect+.5)*16.0),vec2(0),vec2(15));
     vec2 nearest = ((nearestCell+.5)/16.0-.5)*photoAspect;
-    vec3 sum = vec3(0);
+    vec4 sum = vec4(0);
     float total = 0.0;
     for (int y=0; y<16; ++y) for (int x=0; x<16; ++x) {
         vec2 samplePoint = (vec2(x,y)+.5)/16.0;
@@ -45,9 +45,9 @@ void main() {
         float relativeSquaredDistance = max(0.0,dot(offset,offset)+2.0*dot(p-nearest,offset));
         float weight = exp(-.5*relativeSquaredDistance/variance);
         vec2 sourcePoint = mix(photoBounds.xy,photoBounds.zw,samplePoint);
-        sum += weight*textureLod(image,sourcePoint,0.0).rgb;
+        sum += weight*textureLod(image,sourcePoint,0.0);
         total += weight;
     }
-    color = vec4(sum/max(.000001,total),1);
+    color = sum/max(.000001,total);
 })";
 }

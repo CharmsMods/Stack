@@ -2,6 +2,7 @@
 #include "Renderer/GlassChrome.h"
 #include "Renderer/GlassChromeShaders.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 #include "Renderer/GLStateGuards.h"
 #include <algorithm>
 
@@ -70,7 +71,7 @@ void GlassChrome::DrawObject(const Object& o){
 }
 bool GlassChrome::EnsureInk(){
     if(programs[2])return true;
-    programs[2]=GLHelpers::CreateShaderProgram(GlassChromeShaders::InkVertex,GlassChromeShaders::InkFragment);
+    programs[2]=GLHelpers::CreateShaderProgram(GlassChromeShaders::InkVertex,Hdr::Ui::Fragment(GlassChromeShaders::InkFragment,"color").c_str());
     programs[3]=GLHelpers::CreateComputeProgram(GlassChromeShaders::InkMeasure);
     glGenBuffers(2,inkBuffers);glBindBuffer(GL_SHADER_STORAGE_BUFFER,inkBuffers[0]);
     glBufferData(GL_SHADER_STORAGE_BUFFER,MaxInkItems*32,nullptr,GL_DYNAMIC_DRAW);

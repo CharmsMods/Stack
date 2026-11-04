@@ -249,30 +249,6 @@ void EditorModule::AdoptRawAssetCapture(EditorRenderWorker::PreviewResult& resul
     if (capture.status=="Asset saved.") PostNotification(UiNotificationSeverity::Success,"Capture saved in Assets.","raw-asset-capture");
 }
 
-bool EditorModule::AddRawAssetToGraph(const std::string& assetId) {
-    if (!RawCreatedAssetsEditable(m_RawAssetCapture.status)) return false;
-    if (!CommitRawLayerMaskGraph()) return false;
-    auto candidate=m_Project->rawLayers.State();
-    const auto asset=std::find_if(candidate.assets.begin(),candidate.assets.end(),[&](const auto& a){return a.id==assetId;});
-    auto* layer=FindRawAdjustmentLayer(candidate,m_SelectedRawAdjustmentLayer);
-    if (asset==candidate.assets.end() || !layer || asset->kind!=Assets::Kind::Mask || !asset->data) return false;
-    auto payload=CapturedMaskPayload(asset->data);
-    const auto layerId=layer->id;
-    auto* node=layer->graph.AddCustomMaskNode(std::move(payload),{0,-480.f});
-    if (!node) return false;
-    node->title=asset->name;node->rawCoverage={{"canvas","project"}}; const auto uuid=node->instanceUuid;
-    RegisterRawMaskOutputs(candidate,layerId);
-    m_Project->rawLayers.EndGesture();
-    if (!ApplyRawLayerStackEdit(std::move(candidate))) return false;
-    OpenRawLayerMaskGraph(layerId);
-    for (const auto& projected:GetNodeGraph().GetNodes())
-        if (projected.rawLayerOwnerId==layerId && projected.instanceUuid==uuid) {
-            GetNodeGraph().SelectNode(projected.id); break;
-        }
-    m_RawAssetCapture.status="Added an independent mask texture to Graph.";
-    return true;
-}
-
 void EditorModule::RenderRawAssetsPanel() {
     using namespace Editor::RawLabInternal;
     auto& capture=m_RawAssetCapture;
@@ -343,9 +319,6 @@ void EditorModule::RenderRawAssetsPanel() {
                 for (auto& a:candidate.assets) if (a.id==asset.id) a.name=name;
                 changed=ApplyRawLayerStackEdit(std::move(candidate),false);
             }
-            if (!changed && asset.kind==Assets::Kind::Mask && BareTextButton("Add to Graph")) changed=AddRawAssetToGraph(id);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adds an independent texture at the capture's native resolution. Edit its result with Graph math nodes.");
-            ImGui::SameLine();
             if (!changed && BareTextButton("Delete")) {
                 auto candidate=m_Project->rawLayers.State();
                 candidate.assets.erase(std::remove_if(candidate.assets.begin(),candidate.assets.end(),[&](const auto& a){return a.id==id;}),candidate.assets.end());

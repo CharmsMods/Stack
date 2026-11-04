@@ -123,13 +123,14 @@ endif()
 # ==============================================================================
 FetchContent_GetProperties(imgui)
 include(cmake/StackGlfwMonitorCache.cmake)
+include(cmake/StackImGuiWindowColor.cmake)
 add_library(imgui_core STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${STACK_GLFW_BACKEND_SOURCE}
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    ${STACK_OPENGL_BACKEND_SOURCE}
 )
 target_include_directories(imgui_core PUBLIC
     ${imgui_SOURCE_DIR}
@@ -183,6 +184,7 @@ if(MSVC AND STACK_UI_PERF_LINK_MAP)
     target_link_options(${PROJECT_NAME} PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/StackUiPerformance.map")
 endif()
 include(cmake/StackPanorama.cmake)
+include(cmake/StackHdrCodecs.cmake)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${STACK_DEPLOY_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${STACK_DEPLOY_DIR}"
@@ -428,6 +430,27 @@ add_custom_target(StackRuntimePayload
         "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/THIRD_PARTY_NOTICES.md"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_ultrahdr_SOURCE_DIR}/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/UltraHDR-Apache-2.0.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_ultrahdr_SOURCE_DIR}/third_party/image_io/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/ImageIO-Apache-2.0.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_ultrahdr_SOURCE_DIR}/third_party/image_io/src/modp_b64/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/modp_b64-BSD.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_ultrahdr_SOURCE_DIR}/adobe-hdr-gain-map-license/NOTICE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/Adobe-Gain-Map-Notice.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_opencv_SOURCE_DIR}/3rdparty/libjpeg-turbo/LICENSE.md"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/libjpeg-turbo-LICENSE.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_opencv_SOURCE_DIR}/3rdparty/libjpeg-turbo/README.ijg"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/libjpeg-turbo-README-IJG.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${stack_lcms_SOURCE_DIR}/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LittleCMS-MIT.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${imgui_SOURCE_DIR}/LICENSE.txt"
         "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/DearImGui-MIT.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -664,7 +687,6 @@ if(BUILD_TESTING)
     include(cmake/StackGraphDropGeometryTests.cmake)
     include(cmake/StackUiFrameDataCacheTests.cmake)
     include(cmake/StackPresetPreviewWarmupTests.cmake)
-    include(cmake/StackScopeRectBatchTests.cmake)
     include(cmake/StackImagePayloadDecodeTransactionTests.cmake)
     include(cmake/StackArchiveExportTests.cmake)
     include(cmake/StackLibraryProjectExportTests.cmake)

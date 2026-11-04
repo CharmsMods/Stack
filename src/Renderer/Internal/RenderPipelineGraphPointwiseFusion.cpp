@@ -1,4 +1,5 @@
 #include "Renderer/RenderPipeline.h"
+#include "NodeMath/ArithmeticContract.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "NodeMath/TechnicalImageMath.h"
@@ -244,7 +245,8 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
             auto constantPixel = Splat(constantValue);
             // Neutral alpha operands retain the base alpha in the existing
             // vector IR, while RGB keeps the authored numeric operation.
-            constantPixel[3] = operation == PointwiseOperation::Multiply ? 1.0 :
+            const bool includesAlpha = Stack::NodeMath::ShapeOf(&node.semanticDescriptor) != Stack::NodeMath::ArithmeticShape::RGB;
+            if (!Stack::NodeMath::Primitive(node.dataMathMode) || !includesAlpha) constantPixel[3] = operation == PointwiseOperation::Multiply ? 1.0 :
                 operation == PointwiseOperation::Minimum ? 3.4028234663852886e38 :
                 operation == PointwiseOperation::Maximum ? -3.4028234663852886e38 : 0.0;
             const PointwiseValueId constant = Stack::NodeMath::AppendPointwiseConstant(

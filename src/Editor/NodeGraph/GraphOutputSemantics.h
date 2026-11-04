@@ -38,6 +38,8 @@ struct GraphOutputDescription {
     Stack::NodeMath::SemanticField<Stack::NodeMath::ReferenceState> channelReference =
         Stack::NodeMath::SemanticField<Stack::NodeMath::ReferenceState>::Unknown();
     std::vector<Stack::NodeMath::Diagnostic> diagnostics;
+    bool invalidWire = false;
+    bool usesArithmeticContract = false;
 };
 
 using GraphOutputDescriptions = std::unordered_map<std::string, GraphOutputDescription>;

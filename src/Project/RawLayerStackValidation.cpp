@@ -66,13 +66,15 @@ bool ValidateRawLayerStack(const RawLayerStackState& state, std::string& error,
         EditorNodeGraph::SocketDefinition socket;
         if (producer == owner->graph.GetNodes().end() ||
             !owner->graph.FindSocket(producer->id,route->portId,&socket) ||
-            socket.direction != EditorNodeGraph::SocketDirection::Output ||
-            socket.type != EditorNodeGraph::SocketType::Image ||
-            owner->graph.IsScalarSocketStream(producer->id,route->portId)) return false;
+            socket.direction != EditorNodeGraph::SocketDirection::Output) return false;
+        const auto value = EditorNodeGraph::DescribeGraphOutput(owner->graph,producer->id,route->portId);
+        if (value.usesArithmeticContract) return true; // A retained route can become unrenderable as operands change.
+        if (socket.type != EditorNodeGraph::SocketType::Image ||
+            EditorNodeGraph::IsSingleChannelValue(value.descriptor.logicalType)) return false;
         const auto* end = FindRawRole(*owner, Role::LayerResult);
         std::string contractError;
         return end && EditorNodeGraphDefinitions::ValidateInputDescriptor(owner->graph,*end,"imageIn",
-            EditorNodeGraph::DescribeGraphOutput(owner->graph,producer->id,route->portId).descriptor,contractError);
+            value.descriptor,contractError);
     };
     if (state.explicitRouting && !validRoute(state.imageOutput))
         return fail("The main image output requires a scene-linear color image result.");

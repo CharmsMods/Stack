@@ -26,7 +26,8 @@ const WorkspacePreviewCache::Entry* WorkspacePreviewCache::Use(
 }
 
 void WorkspacePreviewCache::Capture(unsigned int sourceFramebuffer,
-    std::uint64_t workspace, int rootView, int left, int bottom, int right, int top) {
+    std::uint64_t workspace, int rootView, int left, int bottom, int right, int top,bool extended) {
+    const unsigned bytesPerPixel=extended ? 8 : 4;
     const int sourceWidth = right - left, sourceHeight = top - bottom;
     if (!sourceFramebuffer || !workspace || rootView < 0 || sourceWidth <= 0 || sourceHeight <= 0)
         return;
@@ -41,18 +42,18 @@ void WorkspacePreviewCache::Capture(unsigned int sourceFramebuffer,
     const int w = sourceWidth, h = sourceHeight;
     if (entry->width != w || entry->height != h || !entry->framebuffer) {
         Release(*entry);
-        std::uint64_t total = std::uint64_t(w) * h * 4;
+        std::uint64_t total = std::uint64_t(w) * h * bytesPerPixel;
         for (const auto& cached : entries)
-            total += std::uint64_t(cached.width) * cached.height * 4;
+            total += std::uint64_t(cached.width) * cached.height * bytesPerPixel;
         while (total > ByteBudget) {
             Entry* oldest = nullptr;
             for (auto& cached : entries)
                 if (cached.texture && (!oldest || cached.used < oldest->used)) oldest = &cached;
             if (!oldest) break;
-            total -= std::uint64_t(oldest->width) * oldest->height * 4;
+            total -= std::uint64_t(oldest->width) * oldest->height * bytesPerPixel;
             Release(*oldest);
         }
-        entry->texture = GLHelpers::CreateTextureFromPixels(nullptr, w, h, 4, false);
+        entry->texture = extended ? GLHelpers::CreateEmptyTexture(w,h) : GLHelpers::CreateTextureFromPixels(nullptr, w, h, 4, false);
         entry->framebuffer = entry->texture ? GLHelpers::CreateFBO(entry->texture) : 0;
         if (!entry->framebuffer) { Release(*entry); return; }
         entry->width = w;

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/EditorModule.h"
 #include "Editor/RawLayerTools.h"
 #include "Project/RawNodeEditing.h"
@@ -184,7 +185,7 @@ void EditorModule::RefreshNodeEditorPanel() {
             auto group=std::find_if(panel.groups.begin(),panel.groups.end(),[&](const auto& value){return value.definitionId==id;});
             if (group==panel.groups.end()) {
                 NodeEditorPanelGroup item;item.definitionId=id;
-                item.label=resolved.builtin ? resolved.builtin->label : node->title;
+                item.label=resolved.builtin ? EditorNodeGraph::NodeDisplayLabel(node->kind, resolved.builtin->label) : node->title;
                 const auto previous=std::find_if(old.begin(),old.end(),[&](const auto& value){return value.definitionId==id;});
                 if (previous!=old.end()) {
                     item.selectedKey=previous->selectedKey;

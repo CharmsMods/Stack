@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 void EditorNodeGraphUI::ResetProjectInteractionState() {
+    m_RecipeInspection.clear();
     // The caller may already have replaced its graph. Do not restore the old
     // drawer's temporary offsets into unrelated nodes with reused integer IDs.
     m_PushedSourceNodeId = -1;

@@ -1,4 +1,5 @@
 #include "Renderer/RenderPipeline.h"
+#include "NodeMath/ArithmeticContract.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
@@ -251,8 +252,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
     const RenderGraphLink* inputA = executionContext.FindInputLink(node.nodeId, "imageA");
     const RenderGraphLink* inputB = executionContext.FindInputLink(node.nodeId, "imageB");
     RenderDataMathSettings settings = node.dataMathSettings;
-    const auto resolveUniform = [&](const RenderGraphLink*& input, float& value) {
-        if (!input || !IsUniformRenderSocket(executionContext, input->fromNodeId, input->fromSocketId)) return true;
+    using namespace Stack::NodeMath;
+    const bool primitive = Primitive(node.dataMathMode) != nullptr;
+    const auto operands = ResolveArithmetic(inputA ? &inputA->semanticDescriptor : nullptr,
+                                           inputB ? &inputB->semanticDescriptor : nullptr);
+    if (primitive && !operands.error.empty()) return result;
+    const auto resolveUniform = [&](const RenderGraphLink*& input, ArithmeticShape shape, float& value) {
+        if (!input || !(primitive ? shape == ArithmeticShape::Number :
+            IsUniformRenderSocket(executionContext, input->fromNodeId, input->fromSocketId))) return true;
         double resolved = 0;
         if (!evalScalar(input->fromNodeId, input->fromSocketId, resolved) ||
             !std::isfinite(resolved) || std::abs(resolved) > std::numeric_limits<float>::max()) return false;
@@ -260,9 +267,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
         input = nullptr;
         return true;
     };
-    if (!resolveUniform(inputA, settings.constantA) || !resolveUniform(inputB, settings.constantB)) return result;
-    const bool scalarA = inputA && IsScalarRenderSocket(executionContext, inputA->fromNodeId, inputA->fromSocketId);
-    const bool scalarB = inputB && IsScalarRenderSocket(executionContext, inputB->fromNodeId, inputB->fromSocketId);
+    if (!resolveUniform(inputA, operands.a, settings.constantA) || !resolveUniform(inputB, operands.b, settings.constantB)) return result;
+    const bool scalarA = inputA && (primitive ? operands.a == ArithmeticShape::Channel :
+        IsScalarRenderSocket(executionContext, inputA->fromNodeId, inputA->fromSocketId));
+    const bool scalarB = inputB && (primitive ? operands.b == ArithmeticShape::Channel :
+        IsScalarRenderSocket(executionContext, inputB->fromNodeId, inputB->fromSocketId));
     const unsigned int textureA = inputA
         ? (scalarA ? evalMask(inputA->fromNodeId, inputA->fromSocketId) : evalImage(inputA->fromNodeId, inputA->fromSocketId))
         : 0;
@@ -275,11 +284,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
         m_LastGraphExecutionStats.lastSpecializedFailureNodeId=node.nodeId;
         m_LastGraphExecutionStats.lastSpecializedFailure="Math inputs use different dimensions; insert an explicit Reformat.";
         return result;
-    }
-    if (node.dataMathMode == RenderDataMathMode::Divide &&
-        !inputB && settings.constantB == 0) {
-        m_LastGraphExecutionStats.lastSpecializedFailureNodeId=node.nodeId;
-        m_LastGraphExecutionStats.lastSpecializedFailure="Divide by zero: returned zero.";
     }
     if ((!inputA || textureA) && (!inputB || textureB)) {
         if (referenceWidthA > 0 && referenceHeightA > 0) {
@@ -300,7 +304,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                 node.dataMathMode,
                 settings,
                 scalarOutput,
-                fbo);
+                fbo, primitive && ShapeOf(&node.semanticDescriptor) == ArithmeticShape::RGB);
             }) &&
             passExecuted;
         if (!rendered && result.texture != 0) {

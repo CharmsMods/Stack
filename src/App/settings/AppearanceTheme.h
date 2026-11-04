@@ -122,6 +122,7 @@ struct AppearanceLibrary {
     GraphConnectionTextSizing graphConnectionTextSizing =
         GraphConnectionTextSizing::Fixed;
     bool graphConnectionTextOutline = false;
+    bool previewInSdr = false;
     bool experimentalIslandEnabled = false;
     bool glassChromeEnabled = false;
     ViewportTilingSettings viewportTiling;
@@ -253,6 +254,8 @@ public:
     bool SetGraphConnectionTextOutline(bool enabled);
     bool SetExperimentalIslandEnabled(bool enabled);
     [[nodiscard]] PreferenceMutationResult SetGlassChromeEnabled(bool enabled);
+    bool GetPreviewInSdr() const {return m_Library.previewInSdr;}
+    bool SetPreviewInSdr(bool enabled);
     bool SetViewportTilingSettings(const ViewportTilingSettings& settings);
     bool SetBackgroundImageEnabled(bool enabled);
     bool SetBackgroundImageStrength(float strength);

@@ -1359,7 +1359,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
                     EditorNodeGraphDefinitions::NodeCatalogEntry {
                         EditorNodeGraph::NodeKind::ChannelSplit,
                         0,
-                        "Channel Split",
+                        "Split Channels",
                         "Channels",
                         "channel-split",
                         1,

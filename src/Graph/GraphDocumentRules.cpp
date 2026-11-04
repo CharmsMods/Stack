@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
 #include "Graph/GraphDocumentRules.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Graph/GraphImageRules.h"
@@ -186,14 +187,19 @@ GraphAnalysis AnalyzeDocument(const DocumentView& document) {
                 const auto actual = value.descriptor.logicalType;
                 if (actual != Stack::NodeMath::LogicalValueType::Invalid && actual != declared &&
                     !(EditorNodeGraph::IsSingleChannelValue(actual) && EditorNodeGraph::IsSingleChannelValue(declared)))
-                    result.errors.push_back(view.id + "/" + node.title + ": the published value type does not match its declared port. Add an explicit conversion or publish a new output.");
+                {
+                    const std::string reason="The published value no longer matches its declared layout.";
+                    result.drafts.push_back({{view.id,node.instanceUuid,"imageOut"},reason});
+                }
             }
             for (const auto& node : view.graph->GetNodes()) if (node.kind == EditorNodeGraph::NodeKind::Mix) {
                 const auto a = describe({view.id,node.instanceUuid,"imageA"});
                 const auto b = describe({view.id,node.instanceUuid,"imageB"});
                 std::string error;
                 if (!ValidateImageCombination(a.descriptor,b.descriptor,error))
-                    result.errors.push_back(view.id + "/" + node.title + ": " + error);
+                {
+                    result.drafts.push_back({{view.id,node.instanceUuid,"imageOut"},error});
+                }
             }
             for (const auto& link : view.graph->GetLinks()) {
                 const auto* from = view.graph->FindNode(link.fromNodeId);
@@ -202,7 +208,9 @@ GraphAnalysis AnalyzeDocument(const DocumentView& document) {
                 const auto value = describe({view.id,from->instanceUuid,link.fromSocketId});
                 std::string error;
                 if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*view.graph,*to,link.toSocketId,value.descriptor,error))
-                    result.errors.push_back(view.id + "/" + to->title + "/" + link.toSocketId + ": " + error);
+                {
+                    result.drafts.push_back({{view.id,to->instanceUuid,link.toSocketId},error});
+                }
                 if (from->role == NodeRole::Reference && value.descriptor.logicalType == Stack::NodeMath::LogicalValueType::Invalid)
                     result.drafts.push_back({{view.id,from->instanceUuid,link.fromSocketId},"The published source is unresolved or unfinished."});
             }
@@ -342,13 +350,19 @@ std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> QueryAvailableNodes(
     entries.erase(std::remove_if(entries.begin(), entries.end(), [role](const auto& entry) {
         if (entry.kind == EditorNodeGraph::NodeKind::Compound)
             return EditorNodeGraphDefinitions::FindShippedCompoundTemplate(static_cast<std::size_t>(entry.value)) == nullptr;
-        const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(
-            EditorNodeGraphDefinitions::BuildPrototypeNode(entry));
+        const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(entry.kind, entry.value);
         return !definition || !EditorNodeGraphDefinitions::DefinitionSupportsGraphRole(*definition, role);
     }), entries.end());
     if (!dragged) return entries;
     EditorNodeGraph::SocketDefinition endpoint;
     if (!graph.FindSocket(dragged->first, dragged->second, &endpoint)) return {};
+    EditorNodeGraph::ScopedGraphOutputAnalysis sourceAnalysis(graph);
+    EditorNodeGraph::GraphOutputContext known;
+    known.resolveOutput = [&](const auto& node, const auto& port) -> std::optional<EditorNodeGraph::GraphOutputDescription> {
+        const auto* existing = graph.FindNode(node.id);
+        if (!existing || existing->instanceUuid != node.instanceUuid) return std::nullopt;
+        return EditorNodeGraph::DescribeGraphOutput(graph,node.id,port);
+    };
     entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const auto& entry) {
         auto candidate = graph.CloneForAnalysis();
         int id = 0;
@@ -374,8 +388,8 @@ std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> QueryAvailableNodes(
             if (socket.direction == endpoint.direction) continue;
             auto attempt = candidate;
             const bool connected = endpoint.direction == EditorNodeGraph::SocketDirection::Output
-                ? attempt.TryConnectSockets(dragged->first, dragged->second, id, socket.id)
-                : attempt.TryConnectSockets(id, socket.id, dragged->first, dragged->second);
+                ? EditorNodeGraph::ConnectAuthoredSockets(attempt,dragged->first, dragged->second, id, socket.id,nullptr,nullptr,&known)
+                : EditorNodeGraph::ConnectAuthoredSockets(attempt,id, socket.id, dragged->first, dragged->second,nullptr,nullptr,&known);
             if (connected && (!accepts || accepts(attempt))) return false;
         }
         return true;

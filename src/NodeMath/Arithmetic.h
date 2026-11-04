@@ -11,14 +11,32 @@ enum class ArithmeticMode {
     Clamp, Add, Subtract, Multiply, Divide, Average, Min, Max, Difference, Remap, ImageAverage
 };
 
-// Values is uniform arithmetic; Spatial retains the existing image/channel
-// computation. This authored domain keeps socket types stable on disconnect.
+struct PrimitiveArithmetic {
+    const char* name;
+    const char* symbol;
+    float defaultB;
+    double (*calculate)(double a, double b);
+};
+
+inline const PrimitiveArithmetic* Primitive(ArithmeticMode mode) {
+    static constexpr PrimitiveArithmetic add{"Add", "+", 0, [](double a, double b) { return a + b; }};
+    static constexpr PrimitiveArithmetic subtract{"Subtract", "-", 0, [](double a, double b) { return a - b; }};
+    static constexpr PrimitiveArithmetic multiply{"Multiply", "*", 1, [](double a, double b) { return a * b; }};
+    static constexpr PrimitiveArithmetic divide{"Divide", "/", 1, [](double a, double b) { return b == 0 ? 0.0 : a / b; }};
+    switch (mode) {
+    case ArithmeticMode::Add: return &add;
+    case ArithmeticMode::Subtract: return &subtract;
+    case ArithmeticMode::Multiply: return &multiply;
+    case ArithmeticMode::Divide: return &divide;
+    default: return nullptr;
+    }
+}
+
+// Execution uses the resolved domain for the four primitives. Other math nodes can author a domain.
 enum class ArithmeticDomain { Spatial, Values, Channel };
 
 struct ArithmeticSettings {
     ArithmeticDomain domain = ArithmeticDomain::Spatial;
-    // Current graphs use signed RGB math, base alpha, uniform broadcasting
-    // and an explicit zero-denominator result. Obsolete graph formats reject.
     std::string requiredLinearBasis;
     bool boundedMask = false;
     bool percentageInput = false;
@@ -46,16 +64,12 @@ inline bool EvaluateUniformArithmetic(ArithmeticMode mode, const ArithmeticSetti
         if (!std::isfinite(settings.minValue) || !std::isfinite(settings.maxValue) || settings.minValue > settings.maxValue)
             return fail("Clamp requires finite limits ordered from minimum to maximum.");
         result = std::clamp(a, double(settings.minValue), double(settings.maxValue)); break;
-    case ArithmeticMode::Add: result = a + b; break;
-    case ArithmeticMode::Subtract: result = a - b; break;
-    case ArithmeticMode::Multiply: result = a * b; break;
+    case ArithmeticMode::Add:
+    case ArithmeticMode::Subtract:
+    case ArithmeticMode::Multiply:
     case ArithmeticMode::Divide:
-        if (b == 0) {
-            result = 0;
-            error = "Divide by zero: returned zero.";
-            return true;
-        }
-        result = a / b; break;
+        result = Primitive(mode)->calculate(a, b);
+        break;
     case ArithmeticMode::Average:
         if (inputs.empty()) result = a;
         else {

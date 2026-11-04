@@ -1,0 +1,68 @@
+#include "GraphView.h"
+#include "Renderer/MaskRenderTypes.h"
+#include "NodeMath/DescriptorSerialization.h"
+#include <algorithm>
+namespace Stack::Hdr {
+bool ConfigureView(RenderGraphSnapshot& graph,float headroom,bool encodeSrgb) {
+    using namespace NodeMath;
+    using K=RenderGraphNodeKind;
+    auto& descriptor=graph.outputDescriptor;
+    if(descriptor.logicalType!=LogicalValueType::ColorImage || graph.outputNodeId<=0) return false;
+    int endpoint=graph.outputNodeId;
+    bool found=false;
+    for(size_t depth=0;depth<graph.nodes.size();++depth) {
+        auto it=std::find_if(graph.nodes.begin(),graph.nodes.end(),[&](const auto& n){return n.nodeId==endpoint;});
+        if(it==graph.nodes.end()) break;
+        auto& node=*it;
+        nlohmann::json* view=nullptr;
+        if(node.kind==K::Layer && node.layerJson.value("type",std::string{})=="ViewTransform") view=&node.layerJson;
+        if(node.kind==K::RawDevelopment && !graph.rawLayerBackgroundNodeId)
+            view=&node.rawDevelopment.recipe.viewTransform.layerJson;
+        if(view && view->is_object()) {
+            if(view->value("debugFalseColor",false)) return false;
+            if(view->value("enabled",true)) {
+                (*view)["_presentationHeadroom"]=headroom;
+                (*view)["encodeSrgbOutput"]=encodeSrgb;
+                found=true;
+            }
+            break;
+        }
+        if(node.kind!=K::Output && !(node.kind==K::Layer && node.layerJson.value("type",std::string{})=="RawOutputCrop")) break;
+        auto link=std::find_if(graph.links.begin(),graph.links.end(),[&](const auto& l){return l.toNodeId==endpoint && l.toSocketId=="imageIn";});
+        if(link==graph.links.end()) break;
+        endpoint=link->fromNodeId;
+    }
+    bool useMaster=headroom>1.f;
+    if(!found) {
+        const auto linear=descriptor.transfer.state==KnowledgeState::Known && descriptor.transfer.value.kind==TransferKind::Linear;
+        const bool alreadyHdr=descriptor.reference.value==ReferenceState::Display && descriptor.range.state==KnowledgeState::Known && descriptor.range.value.allowsAboveNominal;
+        if(!linear || descriptor.color.state!=KnowledgeState::Known || descriptor.reference.state!=KnowledgeState::Known ||
+            (!alreadyHdr && descriptor.reference.value!=ReferenceState::Scene)) return false;
+        const auto& basis=descriptor.color.value.identity;
+        if(basis!="srgb-d65" && basis!="linear-srgb-d65" && basis!="rec2020-d65" && basis!="linear-rec2020-d65") return false;
+        const bool hasBase=alreadyHdr && std::any_of(graph.nodes.begin(),graph.nodes.end(),[](const auto& n){return n.kind==K::Image && bool(n.image.hdrPixels);});
+        // The source decoder retains the encoded SDR rendition for gain-map
+        // JPEGs and prepares one for PQ PNGs. Use it directly for the base.
+        if(hasBase && !useMaster && encodeSrgb) {
+            for(auto& n:graph.nodes) if(n.kind==K::Image) n.image.useHdrPixels=false;
+            return true;
+        }
+        RenderGraphNode view;
+        for(const auto& n:graph.nodes) view.nodeId=std::max(view.nodeId,n.nodeId);
+        ++view.nodeId; view.kind=K::Layer;
+        view.layerJson={{"type","ViewTransform"},{"_displayLinearInput",true},{"_presentationHeadroom",headroom},
+            {"inputWorkingSpace",basis.find("2020")!=std::string::npos ? "linear-rec2020-d65":"linear-srgb-d65"},{"encodeSrgbOutput",encodeSrgb}};
+        RenderGraphLink link; link.fromNodeId=graph.outputNodeId; link.fromSocketId=graph.outputSocketId.empty()?"imageOut":graph.outputSocketId;
+        link.toNodeId=view.nodeId; link.toSocketId="imageIn";
+        graph.links.push_back(std::move(link)); graph.outputNodeId=view.nodeId; graph.outputSocketId="imageOut";
+        graph.nodes.push_back(std::move(view));
+    }
+    for(auto& node:graph.nodes) if(node.kind==K::Image && node.image.hdrPixels) node.image.useHdrPixels=useMaster;
+    descriptor.color=SemanticField<ColorIdentity>::Known({"srgb-d65",{},ColorRelation::Standard});
+    descriptor.transfer=SemanticField<TransferDescriptor>::Known({encodeSrgb ? TransferKind::Srgb:TransferKind::Linear,0.f,{}});
+    descriptor.reference=SemanticField<ReferenceState>::Known(ReferenceState::Display);
+    descriptor.range=SemanticField<NumericRange>::Known({0,1,true,true,NonFinitePolicy::Forbidden});
+    graph.outputDescriptorIdentity=DescriptorContentIdentity(descriptor);
+    return true;
+}
+}

@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "App/Validation/ValidationSuites.h"
 #include "App/UiPerformanceProbe.h"
 #include "App/UiPerformanceTrace.h"
@@ -149,12 +150,12 @@ Fixture Build(const char* id,bool impulse=true,int width=33,int height=33) {
         Wire(f.graph,f.source,"imageOut",split,"imageIn");Wire(f.graph,split,"r",f.effect,"image-in");
     } else if(std::string(id)=="average-three" || std::string(id)=="linear-mix") {
         Wire(f.graph,f.source,"imageOut",f.effect,"a");
-        const int b=f.graph.AddValueNode(MakeUniformScalar(0),{})->id;
-        f.graph.FindNode(b)->value.value.payload=std::string(id)=="linear-mix"?1.:0.;
-        Wire(f.graph,b,"valueOut",f.effect,"b");
+        const int b=Stack::Validation::AddUniformOperand(f.graph,0,{});
+        f.graph.FindNode(b)->dataMathSettings.constantA=std::string(id)=="linear-mix"?1.:0.;
+        Wire(f.graph,b,"imageOut",f.effect,"b");
         if(std::string(id)=="average-three") {
-            const int c=f.graph.AddValueNode(MakeUniformScalar(1),{})->id;
-            Wire(f.graph,c,"valueOut",f.effect,"c");
+            const int c=Stack::Validation::AddUniformOperand(f.graph,1,{});
+            Wire(f.graph,c,"imageOut",f.effect,"c");
         }
     } else Wire(f.graph,f.source,"imageOut",f.effect,"image-in");
     Wire(f.graph,f.effect,"image-out",f.output,"imageIn");
@@ -220,9 +221,9 @@ void Numerics(Checks& c) {
     {
         auto f=Build("average-three",false,1,1);Fill(f,{0,0,0,1});f.graph.RemoveNode(f.effect);
         const int split=f.graph.AddChannelSplitNode({})->id,average=f.graph.AddDataMathNode(DataMathMode::Average,{})->id;
-        const int zeroValue=f.graph.AddValueNode(MakeUniformScalar(0),{})->id,oneValue=f.graph.AddValueNode(MakeUniformScalar(1),{})->id;
+        const int zeroValue=Stack::Validation::AddUniformOperand(f.graph,0,{}),oneValue=Stack::Validation::AddUniformOperand(f.graph,1,{});
         Wire(f.graph,f.source,"imageOut",split,"imageIn");Wire(f.graph,split,"r",average,"imageA");
-        Wire(f.graph,zeroValue,"valueOut",average,"imageB");Wire(f.graph,oneValue,"valueOut",average,"imageC");Wire(f.graph,average,"imageOut",f.output,"imageIn");
+        Wire(f.graph,zeroValue,"imageOut",average,"imageB");Wire(f.graph,oneValue,"imageOut",average,"imageC");Wire(f.graph,average,"imageOut",f.output,"imageIn");
         const auto p=Render(f,f.graph);c.Check(p.size()==4,"N09.native-render","Variable-input Average mixes one spatial field with two uniform inputs");if(p.size()==4)c.Near(p[0],1./3,"N09.native");
     }
     c.Check(EvaluateUniformArithmetic(ArithmeticMode::Divide,settings,{1,0},value,error)&&value==0&&!error.empty(),"N08.diagnostic","Zero division returns zero with an explicit diagnostic");
@@ -267,16 +268,12 @@ void ContractsAndPersistence(Checks& c) {
     c.Check(std::any_of(recursiveIssues.begin(),recursiveIssues.end(),[](const auto& issue){return issue.message.find("cannot depend on itself")!=std::string::npos;}) &&
         !cycle.AddCompoundDefinition(recursive,&error),"G13.recursion","Self-referencing compound has an explicit recursion diagnostic and is rejected");
     auto percent=Build("percent",false,1,1);Fill(percent,{.4f,.4f,.4f,.3f});
-    int value=percent.graph.AddValueNode(MakeUniformScalar(50,{UnitKind::Percent,{}}),{})->id;
-    Wire(percent.graph,value,"valueOut",percent.effect,"param:percent");auto p=Render(percent,percent.graph);
-    c.Check(p.size()==4,"G16.percent-render","Explicit percentage constant connects to Percent");if(p.size()==4)c.Near(p[0],.2,"G16.percent");
-    auto integer=MakeUniformScalar(50);integer.logicalType=LogicalValueType::Integer;integer.payload=std::int64_t(50);
-    percent.graph.RemoveLink(value,"valueOut",percent.effect,"param:percent");
-    value=percent.graph.AddValueNode(integer,{})->id;Wire(percent.graph,value,"valueOut",percent.effect,"param:percent");p=Render(percent,percent.graph);
-    c.Check(p.size()==4 && std::abs(p[0]-.2)<1e-6,"G16.integer","Integer drives percentage division through uniform floating arithmetic");
+    int value=Stack::Validation::AddUniformOperand(percent.graph,50,{});
+    Wire(percent.graph,value,"imageOut",percent.effect,"param:percent");auto p=Render(percent,percent.graph);
+    c.Check(p.size()==4,"G16.percent-render","Uniform operand connects to Percent");if(p.size()==4)c.Near(p[0],.2,"G16.percent");
     auto mixed=Build("channel-mixer",false,1,1);mixed.graph.RemoveNode(mixed.effect);
     const int splitA=mixed.graph.AddChannelSplitNode({})->id,splitB=mixed.graph.AddChannelSplitNode({})->id;
-    const int assign=mixed.graph.AddTechnicalImageNode(TechnicalImageOperation::AssignLinearDisplayP3,{})->id;
+    const int assign=mixed.graph.AddTechnicalImageNode(TechnicalImageOperation::LinearSrgbToDisplayP3,{})->id;
     const int combine=mixed.graph.AddChannelCombineNode({})->id;
     Wire(mixed.graph,mixed.source,"imageOut",splitA,"imageIn");Wire(mixed.graph,mixed.source,"imageOut",assign,"imageIn");Wire(mixed.graph,assign,"imageOut",splitB,"imageIn");
     Wire(mixed.graph,splitA,"r",combine,"r");Wire(mixed.graph,splitB,"g",combine,"g");Wire(mixed.graph,splitA,"b",combine,"b");Wire(mixed.graph,combine,"imageOut",mixed.output,"imageIn");
@@ -432,8 +429,8 @@ void ColorAndSpatial(Checks& c) {
     descriptor.presentImageComponents=SemanticField<ImageComponentSet>::Known(components);descriptor.channels=SemanticField<ChannelDescriptor>::Known(MakeImageChannelDescriptor(components));
     descriptor.alpha=SemanticField<AlphaMode>::Known(AlphaMode::Absent);
     c.Check(Difference(rgbaPixels,Render(rgba,rgb))<2e-5,"H09.RGB","Declared RGB uses explicit opaque-alpha fallback and matches opaque RGBA");
-    const int overall=rgba.graph.AddValueNode(MakeUniformScalar(0),{})->id;
-    Wire(rgba.graph,overall,"valueOut",rgba.effect,"mask-in");auto masked=Render(rgba,rgba.graph);
+    const int overall=Stack::Validation::AddUniformOperand(rgba.graph,0,{});
+    Wire(rgba.graph,overall,"imageOut",rgba.effect,"mask-in");auto masked=Render(rgba,rgba.graph);
     c.Check(Difference(masked,rgba.linearPixels)<1e-6,"H02.mask","Black overall destination mask returns the original RGBA");
 }
 
@@ -582,7 +579,7 @@ void CanvasInteractionCase(Checks& c, bool raw) {
     for(int settle=0;settle<20;++settle)frame();
     const auto primaryPosition=editor.GetNodeGraph().FindNode(f.effect)->position;
     const auto primaryBounds=ui.MeasureNodeForLayout(editor.GetNodeGraph(),*editor.GetNodeGraph().FindNode(f.effect));
-    editor.AddValueNodeAt(MakeUniformScalar(1),{primaryPosition.x+primaryBounds.max.x+90,primaryPosition.y});
+    Stack::Validation::AddUniformOperand(editor,1,{primaryPosition.x+primaryBounds.max.x+90,primaryPosition.y});
     const int neighbor=editor.GetNodeGraph().GetSelectedNodeId();
     frame();frame();
     const auto neighborLocal=ui.MeasureNodeForLayout(editor.GetNodeGraph(),*editor.GetNodeGraph().FindNode(neighbor));
@@ -786,11 +783,11 @@ void CanvasInteractionCase(Checks& c, bool raw) {
     // footprint provider in both hosts. Keep the existing complex graph intact.
     std::string aUuid,bUuid,dUuid;int a=0,b=0,d=0;
     c.Check(Stack::Editor::ApplyGraphCommand(editor,[&](auto& g){
-        a=g.AddValueNode(MakeUniformScalar(1),{-4000,-2400})->id;
+        a=Stack::Validation::AddUniformOperand(g,1,{-4000,-2400});
         b=g.AddDataMathNode(DataMathMode::Multiply,{-3500,-2050})->id;
         d=g.AddDataMathNode(DataMathMode::Multiply,{-3000,-2400})->id;
         aUuid=g.FindNode(a)->instanceUuid;bUuid=g.FindNode(b)->instanceUuid;dUuid=g.FindNode(d)->instanceUuid;
-        Wire(g,a,"valueOut",b,"imageA");
+        Wire(g,a,"imageOut",b,"imageA");
     },&layoutError),prefix+"connect-layout-setup",layoutError);
     frame();for(int i=0;i<20;++i)frame();
     a=idFor(aUuid);b=idFor(bUuid);d=idFor(dUuid);const auto connectionBefore=serialized();
@@ -1008,10 +1005,10 @@ void ExpansionPlacement(Checks& c) {
     }
     {
         Graph geometry;geometry.Clear();
-        const int held=geometry.AddValueNode(MakeUniformScalar(0),{0,0})->id;
-        const int next=geometry.AddValueNode(MakeUniformScalar(1),{180,0})->id;
-        const int last=geometry.AddValueNode(MakeUniformScalar(2),{360,0})->id;
-        const int far=geometry.AddValueNode(MakeUniformScalar(3),{-6000,6000})->id;
+        const int held=Stack::Validation::AddUniformOperand(geometry,0,{0,0});
+        const int next=Stack::Validation::AddUniformOperand(geometry,1,{180,0});
+        const int last=Stack::Validation::AddUniformOperand(geometry,2,{360,0});
+        const int far=Stack::Validation::AddUniformOperand(geometry,3,{-6000,6000});
         const auto baseline=SerializeGraphPayload(nlohmann::json::array(),geometry);
         const auto small=[](const Graph&,const Node&){return GraphRect{{0,0},{120,80}};};
         Stack::GraphLayout::RoomGesture room;Stack::GraphLayout::PlacementEdit edit;std::string reason;
@@ -1035,8 +1032,8 @@ void ExpansionPlacement(Checks& c) {
             "Room.selection","A separated multi-selection stays rigid without reserving its empty middle space");
     }
     {
-        Graph g;g.Clear();const int held=g.AddValueNode(MakeUniformScalar(0),{})->id;
-        const int a=g.AddValueNode(MakeUniformScalar(1),{500,0})->id,b=g.AddValueNode(MakeUniformScalar(2),{700,0})->id;
+        Graph g;g.Clear();const int held=Stack::Validation::AddUniformOperand(g,0,{});
+        const int a=Stack::Validation::AddUniformOperand(g,1,{500,0}),b=Stack::Validation::AddUniformOperand(g,2,{700,0});
         g.AddGroup("Rigid after manual editing",{480,-30},{360,140});
         Stack::GraphLayout::RoomGesture room;Stack::GraphLayout::PlacementEdit edit;std::string error;
         const auto small=[](const Graph&,const Node&){return GraphRect{{0,0},{120,80}};};
@@ -1045,11 +1042,11 @@ void ExpansionPlacement(Checks& c) {
             "Room.rigid-rest","An obsolete per-member rest preference cannot deform an unheld sibling group");
     }
     {
-        Graph g;g.Clear();const int source=g.AddValueNode(MakeUniformScalar(1),{})->id;
+        Graph g;g.Clear();const int source=Stack::Validation::AddUniformOperand(g,1,{});
         const int mid=g.AddDataMathNode(DataMathMode::Multiply,{450,200})->id;
         const int end=g.AddDataMathNode(DataMathMode::Multiply,{1000,0})->id;
         const int side=g.AddDataMathNode(DataMathMode::Multiply,{500,-400})->id;
-        Wire(g,source,"valueOut",mid,"imageA");Wire(g,source,"valueOut",side,"imageA");Wire(g,mid,"imageOut",end,"imageA");
+        Wire(g,source,"imageOut",mid,"imageA");Wire(g,source,"imageOut",side,"imageA");Wire(g,mid,"imageOut",end,"imageA");
         std::string error;const auto small=[](const Graph&,const Node&){return GraphRect{{0,0},{120,80}};};
         c.Check(Stack::GraphLayout::ArrangeConnection(g,mid,end,small,error) && g.FindNode(source)->position.x==0 &&
             g.FindNode(source)->position.y==0 && g.FindNode(mid)->position.y==0 && g.FindNode(end)->position.y==0 &&
@@ -1059,8 +1056,8 @@ void ExpansionPlacement(Checks& c) {
     auto f=Build("halation-srgb");
     EditorModule editor;editor.SetDocumentPersistenceEnabled(false);editor.GetNodeGraph()=f.graph.CloneForAnalysis();
     auto& initial=editor.GetNodeGraph();
-    const int neighbor=initial.AddValueNode(MakeUniformScalar(1),{650,130})->id;
-    const int far=initial.AddValueNode(MakeUniformScalar(2),{-8000,7000})->id;
+    const int neighbor=Stack::Validation::AddUniformOperand(initial,1,{650,130});
+    const int far=Stack::Validation::AddUniformOperand(initial,2,{-8000,7000});
     const int sibling=initial.AddGroup("Keep together",{620,80},{400,320})->id;
     const auto siblingStart=initial.FindGroup(sibling)->position,neighborStart=initial.FindNode(neighbor)->position;
     const auto saved=SerializeGraphPayload(nlohmann::json::array(),initial);
@@ -1156,9 +1153,8 @@ void DescriptionCaching(Checks& c) {
 
 void SharedValuesAndHistory(Checks& c) {
     auto f=Build("colorize",false,1,1);Fill(f,{.2f,.2f,.2f,1});
-    const int driver=f.graph.AddValueNode(MakeUniformScalar(2),{})->id;
-    f.graph.FindNode(driver)->value.value.payload=2.;
-    Wire(f.graph,driver,"valueOut",f.effect,"param:r");Wire(f.graph,driver,"valueOut",f.effect,"param:g");Wire(f.graph,driver,"valueOut",f.effect,"param:b");
+    const int driver=Stack::Validation::AddUniformOperand(f.graph,2,{});
+    Wire(f.graph,driver,"imageOut",f.effect,"param:r");Wire(f.graph,driver,"imageOut",f.effect,"param:g");Wire(f.graph,driver,"imageOut",f.effect,"param:b");
     auto compact=Render(f,f.graph);c.Check(compact.size()==4,"G09.render","One uniform drives all three gains");if(compact.size()==4)for(int i=0;i<3;++i)c.Near(compact[i],.4,"G09.compact");
     {
         RenderPipeline cached;cached.Initialize();cached.LoadSourceFromPixels(f.pixels.data(),1,1,4);
@@ -1170,7 +1166,7 @@ void SharedValuesAndHistory(Checks& c) {
         };
         auto first=run(f.graph),again=run(f.graph);
         c.Check(Difference(first,again)<1e-6,"G14.cache-repeat","Unchanged snapshots retain identical output");
-        auto changed=f.graph.CloneForAnalysis();changed.FindNode(driver)->value.value.payload=3.;auto next=run(changed);
+        auto changed=f.graph.CloneForAnalysis();changed.FindNode(driver)->dataMathSettings.constantA=3.f;auto next=run(changed);
         c.Check(next.size()==4,"G09.cache-render","Changed shared control renders through persistent caches");if(next.size()==4)c.Near(next[0],.6,"G09.cache-invalidation");
     }
     c.Save(f.graph,"standalone-constant-driven-colorize.json");
@@ -1178,7 +1174,7 @@ void SharedValuesAndHistory(Checks& c) {
     const bool opened=expanded.UnpackCompoundNode(f.effect,&children,&error);
     c.Check(opened,"G09.expand",error);
     if(!opened || expanded.GetGroups().empty())return;
-    expanded.FindNode(driver)->value.value.payload=3.;auto edited=Render(f,expanded);
+    expanded.FindNode(driver)->dataMathSettings.constantA=3.f;auto edited=Render(f,expanded);
     c.Check(edited.size()==4,"G09.edit-render","Shared source remains executable after expansion");if(edited.size()==4)for(int i=0;i<3;++i)c.Near(edited[i],.6,"G09.edit");
     const int groupId=expanded.GetGroups().back().id;
     int internal=-1;for(int id:children)if(expanded.FindNode(id)->kind==NodeKind::ChannelCombine)internal=id;

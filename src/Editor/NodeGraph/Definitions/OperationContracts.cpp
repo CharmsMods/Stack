@@ -78,6 +78,37 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
     if (socket.type == EditorNodeGraph::SocketType::Mask || socket.type == EditorNodeGraph::SocketType::Channel ||
         socket.type == EditorNodeGraph::SocketType::ScalarField)
         result.port.acceptedLogicalTypes = {LogicalValueType::Channel,LogicalValueType::ScalarField,LogicalValueType::Mask};
+    if (node.kind == NodeKind::DataMath && EditorNodeGraph::IsDataMathInputSocketId(socketId)) {
+        if (Stack::NodeMath::Primitive(node.dataMathMode))
+            result.defaultValue = socketId == EditorNodeGraph::kMixInputASocketId
+                ? node.dataMathSettings.constantA : node.dataMathSettings.constantB;
+        if (Stack::NodeMath::Primitive(node.dataMathMode) || node.dataMathSettings.domain != Stack::NodeMath::ArithmeticDomain::Values) {
+            if (node.dataMathMode != EditorNodeGraph::DataMathMode::ImageAverage)
+                result.port.acceptedLogicalTypes = {LogicalValueType::Scalar,LogicalValueType::Channel,LogicalValueType::ColorImage};
+        }
+    }
+    if (node.kind == NodeKind::Output && node.outputSettings.maskOutput && socketId == "imageIn")
+        result.port.acceptedLogicalTypes = {LogicalValueType::Channel};
+    if ((node.kind == NodeKind::Mix && (socketId == "imageA" || socketId == "imageB")) ||
+        (node.kind == NodeKind::Reformat && socketId == "imageIn") ||
+        (node.kind == NodeKind::Scope && socketId == EditorNodeGraph::kScopeInputSocketId))
+        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage, LogicalValueType::Channel};
+    if (node.kind == NodeKind::Preview && socketId==EditorNodeGraph::kPreviewInputSocketId)
+        result.port.acceptedLogicalTypes={LogicalValueType::ColorImage,LogicalValueType::Channel};
+    if (node.kind == NodeKind::Compound) {
+        for (const auto& port : node.compound.instance.interfaceSnapshot)
+            if (port.id == socketId && port.numeric) {
+                result.port.acceptedLogicalTypes={LogicalValueType::Scalar,LogicalValueType::Channel};
+                if (port.logicalType==LogicalValueType::ColorImage) result.port.acceptedLogicalTypes.push_back(LogicalValueType::ColorImage);
+            }
+    }
+    if (node.kind == NodeKind::Output && socketId == "imageIn" && !node.outputSettings.maskOutput &&
+        node.role != Stack::GraphModel::NodeRole::LayerResult) {
+        const auto type = node.outputSettings.publishedType;
+        result.port.acceptedLogicalTypes = type == LogicalValueType::Invalid
+            ? std::vector<LogicalValueType>{LogicalValueType::ColorImage,LogicalValueType::Channel,LogicalValueType::Scalar}
+            : std::vector<LogicalValueType>{type};
+    }
     const auto* definition = FindLiveNodeDefinition(node);
     const bool sceneInput = (definition && definition->requiresSceneLinearRgb && socketId == "imageIn") ||
         (node.role == Stack::GraphModel::NodeRole::LayerResult && socketId == "imageIn");
@@ -97,10 +128,6 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
             UnitDescriptor unit; unit.kind = parameter.units == "unitless" ? UnitKind::Unitless : UnitKind::Custom; unit.customKey = parameter.units == "unitless" ? std::string{} : parameter.units;
             result.port.units = SemanticField<UnitDescriptor>::Known(unit);
         }
-    }
-    if (socket.type == EditorNodeGraph::SocketType::Mask) {
-        const auto* conversion = FindLiveNodeDefinition(NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance));
-        if (conversion) result.explicitConversions.push_back(conversion->identity);
     }
     return result;
 }

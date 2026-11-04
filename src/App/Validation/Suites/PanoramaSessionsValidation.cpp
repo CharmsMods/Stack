@@ -44,7 +44,7 @@ void ValidatePanoramaSessions(GLFWwindow* window,const std::filesystem::path& pa
                     EditorNodeGraph::Graph graph;EditorNodeGraph::MultiFrameHdrPayload payload;
                     payload.sourceSetId=snapshot.activeSourceSetId;payload.radiometricAnchorFrameId=recipe.originFrameId;
                     const int source=graph.AddMultiFrameHdrNode(payload,{0,0})->id;
-                    const int grade=graph.AddLayerNode(LayerType::ColorGrade,0,{200,0})->id;
+                    const int grade=graph.AddLayerNode(LayerType::Brightness,0,{200,0})->id;
                     const int target=graph.AddOutputNode({400,0},true)->id;
                     if(!graph.TryConnectSockets(source,"imageOut",grade,"imageIn",&error)||
                        !graph.TryConnectSockets(grade,"imageOut",target,"imageIn",&error))return false;
@@ -115,7 +115,7 @@ void ValidatePanoramaSessions(GLFWwindow* window,const std::filesystem::path& pa
         b->EnterBracketingRaw();frame();const auto graph=b->BuildGraphSnapshot();bool rawEdit=false,graphEdit=false;
         for(const auto& node:graph.nodes) {
             if(node.rawDevelopment.embeddedRawData)rawEdit=bool(node.rawDevelopment.embeddedRawData->outputCoverage)&&std::abs(node.rawDevelopment.recipe.preToneExposureEv-.3f)<1e-5;
-            if(node.kind==RenderGraphNodeKind::Layer&&node.layerJson.value("type",std::string())=="ColorGrade")graphEdit=true;
+            if(node.kind==RenderGraphNodeKind::Layer&&node.layerJson.value("type",std::string())=="Brightness")graphEdit=true;
         }
         check(rawEdit&&graphEdit,"Reopening lost the saved RAW or graph edit.");
         RenderPipeline renderer;renderer.Initialize();renderer.SetRawDevelopmentAnalysisEnabled(false);renderer.SetPreviewMaxDimension(0);renderer.ExecuteGraph(graph);

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/LayerRegistry.h"
 #include "ContinuousLinkStroke.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
@@ -628,9 +629,6 @@ std::string CompactAdvancedLayerLabel(const EditorNodeGraph::Node& node) {
     if (node.layerType == LayerType::BackgroundPatcher) {
         return "Remover";
     }
-    if (node.layerType == LayerType::ColorGrade) {
-        return "Grade";
-    }
 
     std::string label = node.title.empty() ? "Advanced" : node.title;
     const std::size_t space = label.find(' ');
@@ -780,7 +778,7 @@ LinkVisualStyle ResolveOutputVisualStyle(
     LinkVisualStyle style;
     EditorNodeGraph::GraphOutputDescription local;
     const bool owned = editor && &graph == &editor->GetNodeGraph();
-    const auto* output = owned ? editor->GetGraphOutputDescription(fromNodeId, fromSocketId) : nullptr;
+    const auto* output = owned ? editor->FindPublishedGraphDescription(fromNodeId, fromSocketId) : nullptr;
     // A missing description in the current owner's cache is an unavailable
     // output. Reanalyzing it while drawing cannot make it available.
     if (owned && !output) return style;
@@ -788,6 +786,7 @@ LinkVisualStyle ResolveOutputVisualStyle(
         local = EditorNodeGraph::DescribeGraphOutput(graph, fromNodeId, fromSocketId);
         output = &local;
     }
+    style.invalid = output->invalidWire;
     style.channel = EditorNodeGraph::OutputChannelColor(*output);
     style.scalarStream = EditorNodeGraph::IsSingleChannelValue(output->descriptor.logicalType);
     style.dotted = style.scalarStream;
@@ -803,7 +802,12 @@ LinkVisualStyle ResolveLinkVisualStyle(
     int toNodeId,
     const std::string& toSocketId,
     EditorModule* editor) {
-    return ResolveOutputVisualStyle(graph, fromNodeId, fromSocketId, editor);
+    auto style=ResolveOutputVisualStyle(graph,fromNodeId,fromSocketId,editor);
+    if (!style.invalid && editor && &graph==&editor->GetNodeGraph() && toNodeId>0) {
+        const auto* input=editor->FindPublishedGraphDescription(toNodeId,toSocketId);
+        style.invalid=input && input->invalidWire;
+    }
+    return style;
 }
 
 LinkVisualStyle ResolveLinkVisualStyle(
@@ -845,14 +849,23 @@ EditorNodeGraph::SocketDefinition ResolveSocketDisplayDefinition(
     if(socket.type!=Type::Image && socket.type!=Type::ImageOrChannel && socket.type!=Type::Channel &&
         socket.type!=Type::Mask && socket.type!=Type::ScalarField)return socket;
     const EditorNodeGraph::Link* link=isOutput?nullptr:graph.FindAnyInputLink(socket.nodeId,socket.id);
-    if(!isOutput && !link)return socket;
+    if (!isOutput && !link) {
+        const auto* node = graph.FindNode(socket.nodeId);
+        if (node && node->kind == EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode)) {
+            auto operand = socket;
+            operand.type = Type::Scalar;
+            operand.logicalType = LogicalType::Scalar;
+            return operand;
+        }
+        return socket;
+    }
     const int source=isOutput?socket.nodeId:link->fromNodeId;
     const std::string& port=isOutput?socket.id:link->fromSocketId;
 
     EditorNodeGraph::GraphOutputDescription localOutput;
     const EditorNodeGraph::GraphOutputDescription* output =
         editor && &graph == &editor->GetNodeGraph()
-            ? editor->GetGraphOutputDescription(source,port)
+            ? editor->FindPublishedGraphDescription(source,port)
             : nullptr;
     if (editor && &graph == &editor->GetNodeGraph() && !output) return socket;
     if (!output) {
@@ -861,7 +874,10 @@ EditorNodeGraph::SocketDefinition ResolveSocketDisplayDefinition(
         output = &localOutput;
     }
     EditorNodeGraph::SocketDefinition displaySocket = socket;
-    if(output->descriptor.logicalType==LogicalType::Mask)displaySocket.type=Type::Mask;
+    displaySocket.logicalType = output->descriptor.logicalType;
+    if (displaySocket.logicalType == LogicalType::Scalar) displaySocket.type = Type::Scalar;
+    else if (displaySocket.logicalType == LogicalType::Mask) displaySocket.type = Type::Mask;
+    else if (EditorNodeGraph::IsSingleChannelValue(displaySocket.logicalType)) displaySocket.type = Type::Channel;
     const auto channel=EditorNodeGraph::OutputChannelColor(*output);
     if(!channel.empty()) {
         displaySocket.declaredChannels=output->descriptor.channels;
@@ -933,12 +949,14 @@ ImU32 SocketColor(
 }
 
 ImVec4 LinkColorVec(const LinkVisualStyle& style, const GraphStyleTokens& tokens) {
+    if (style.invalid) return ImVec4(1.f,.23f,.22f,1.f);
     if (!style.channel.empty()) return WithAlpha(ChannelColorVec(style.channel, tokens), 0.95f);
     if (style.scalarStream) return tokens.mutedText;
     return tokens.enabled ? WithAlpha(tokens.text, 0.9f) : ImVec4(0.94f, 0.94f, 0.94f, 0.9f);
 }
 
 ImU32 LinkColorClassic(const LinkVisualStyle& style, bool selected) {
+    if (style.invalid) return ApplyStyleAlpha(IM_COL32(255,59,56,255));
     if (selected && style.channel.empty()) {
         return ApplyStyleAlpha(IM_COL32(255, 255, 255, 255));
     }
@@ -1195,6 +1213,7 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             return headerBlock + sectionGap +
                 row * 3.0f + gap * 2.0f + bottomPadding;
         case EditorNodeGraph::NodeKind::DataMath: {
+            if (Stack::NodeMath::Primitive(node.dataMathMode)) return headerBlock+sectionGap+2*row+gap+bottomPadding;
             // Both Domain and Mode are visible, followed by their explanation.
             // Values may also expose two local fallback sliders. Reserve those
             // controls before their first draw; measured content replaces this
@@ -1339,8 +1358,8 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Reformat: return "Geometry";
         case EditorNodeGraph::NodeKind::TechnicalImage: return "Technical Image";
         case EditorNodeGraph::NodeKind::Compound: return "Compound";
-        case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
-        case EditorNodeGraph::NodeKind::ChannelCombine: return "Image Combine";
+        case EditorNodeGraph::NodeKind::ChannelSplit: return EditorNodeGraph::kSplitChannelsTitle;
+        case EditorNodeGraph::NodeKind::ChannelCombine: return EditorNodeGraph::kCombineChannelsTitle;
         case EditorNodeGraph::NodeKind::ConstantChannel: return "Constant Channel";
     }
     return "Node";

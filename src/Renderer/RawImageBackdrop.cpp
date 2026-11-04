@@ -1,3 +1,4 @@
+#include "Hdr/UiTarget.h"
 #include "RawImageBackdrop.h"
 #include "RawImageBackdropShaders.h"
 #include "Renderer/GLHelpers.h"
@@ -132,6 +133,7 @@ bool RawImageBackdrop::Render(const RawImageBackdropFrame& frame, const ImDrawDa
         glViewport(0, 0, width, height);
         glClearColor(clear.x, clear.y, clear.z, 1.f); glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(copyProgram);
+        glUniform1i(43,Hdr::Ui::linearTarget);
         glUniform1i(BackdropUniforms::Copy::Image, 0);
         glUniform1i(BackdropUniforms::Copy::Previous, 1);
         glUniform1i(BackdropUniforms::Copy::VisibleColorOnly, 0);
@@ -173,6 +175,15 @@ bool RawImageBackdrop::Render(const RawImageBackdropFrame& frame, const ImDrawDa
     restoreDestination();
     glViewport(0, 0, w, h);
     glUseProgram(presentProgram);
+    glUniform1i(43,Hdr::Ui::linearTarget);
+    if(Hdr::Ui::linearTarget) {
+        const float inset=frame.sharpDrawList && frame.extensionOpacity>0.f ? frame.edgeOverlap : 0.f;
+        const ImVec2 lo(std::max(frame.sharpViewport.x,frame.imageMinimum.x+inset),
+                        std::max(frame.sharpViewport.y,frame.imageMinimum.y+inset));
+        const ImVec2 hi(std::min(frame.sharpViewport.z,frame.imageMaximum.x-inset),
+                        std::min(frame.sharpViewport.w,frame.imageMaximum.y-inset));
+        rectangle(44,lo,hi);
+    }
     glBindVertexArray(vao);
     glUniform1i(BackdropUniforms::Present::Image, 0);
     glActiveTexture(GL_TEXTURE0);

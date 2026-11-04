@@ -85,20 +85,34 @@ void EditorModule::RememberRawWorkspaceFolderCards(bool complete) {
 }
 
 void EditorModule::RequestRawWorkspaceFolderCardPreviews() {
-    std::vector<std::filesystem::path> roots;
-    for (const auto& root : m_RawWorkspace.registeredSourceFolders) {
-        const auto card = m_RawGallerySourceFolderCards.find(root.lexically_normal().generic_u8string());
-        if (card == m_RawGallerySourceFolderCards.end() || !card->second.countKnown) roots.push_back(root);
-    }
+    // Validate even warm cards when opening the chooser. Disk work stays on
+    // this explicit background request, never in the revisioned draw snapshot.
+    const auto roots = m_RawWorkspace.registeredSourceFolders;
     if (roots.empty()) return;
+    std::vector<bool> loadPreviews;
+    loadPreviews.reserve(roots.size());
+    for (const auto& root : roots) {
+        const auto card = m_RawGallerySourceFolderCards.find(root.lexically_normal().generic_u8string());
+        loadPreviews.push_back(card == m_RawGallerySourceFolderCards.end() || !card->second.countKnown);
+    }
     const auto generation = ++m_RawGalleryFolderCardLoadGeneration;
-    ProjectTasks().Submit("Loading source folder cards", [this, roots, generation] {
+    ProjectTasks().Submit("Loading source folder cards", [this, roots, loadPreviews, generation] {
         std::vector<Stack::RawWorkspace::SourceFolderCard> cards;
-        for (const auto& root : roots) {
+        std::vector<std::filesystem::path> missingRoots;
+        for (std::size_t index = 0; index < roots.size(); ++index) {
+            const auto& root = roots[index];
             Stack::RawWorkspace::SourceFolderCard card;
             card.root = root;
             std::error_code error;
-            if (std::filesystem::is_directory(root, error) && !error) {
+            const bool directory = std::filesystem::is_directory(root, error);
+            if (!directory && (!error || error == std::errc::no_such_file_or_directory ||
+                    error == std::errc::not_a_directory)) {
+                missingRoots.push_back(root);
+                continue;
+            }
+            if (!loadPreviews[index]) continue;
+            // Access failures do not prove that the folder has disappeared.
+            if (directory && !error) {
                 std::vector<Stack::RawWorkspace::SourceRecord> sources;
                 if (Stack::RawWorkspace::LoadCatalogSnapshot(Stack::RawWorkspace::BuildGalleryLayout(root), sources)) {
                     card.countKnown = true;
@@ -112,8 +126,27 @@ void EditorModule::RequestRawWorkspaceFolderCardPreviews() {
             }
             cards.push_back(std::move(card));
         }
-        ProjectTasks().PostToMain([this, generation, cards = std::move(cards)]() mutable {
+        ProjectTasks().PostToMain([this, generation, cards = std::move(cards),
+                missingRoots = std::move(missingRoots)]() mutable {
             if (generation != m_RawGalleryFolderCardLoadGeneration) return;
+            if (!missingRoots.empty()) {
+                const auto missing = [&](const auto& path) {
+                    return std::find(missingRoots.begin(), missingRoots.end(), path) != missingRoots.end();
+                };
+                auto& registered = m_RawWorkspace.registeredSourceFolders;
+                registered.erase(std::remove_if(registered.begin(), registered.end(), missing), registered.end());
+                auto& recent = m_RawWorkspace.recentWorkspaceRoots;
+                recent.erase(std::remove_if(recent.begin(), recent.end(), missing), recent.end());
+                for (const auto& root : missingRoots)
+                    m_RawGallerySourceFolderCards.erase(root.lexically_normal().generic_u8string());
+                if (registered.empty() || (!m_RawWorkspace.allSourceFolders && missing(m_RawWorkspace.workspaceRoot))) {
+                    ClearRawWorkspace();
+                } else if (m_RawWorkspace.allSourceFolders) {
+                    if (missing(m_RawWorkspace.workspaceRoot)) m_RawWorkspace.workspaceRoot = registered.front();
+                    RequestRawWorkspaceScan();
+                }
+                SaveRawWorkspaceAppState();
+            }
             for (auto& card : cards) {
                 const auto key = card.root.lexically_normal().generic_u8string();
                 const auto existing = m_RawGallerySourceFolderCards.find(key);

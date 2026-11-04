@@ -1,3 +1,4 @@
+#include "Hdr/ImageFile.h"
 #include "StackBinaryFormat.h"
 #include "Persistence/ProjectPayloadAssets.h"
 #include "Persistence/ProjectSourceAssets.h"
@@ -929,6 +930,12 @@ void GatherGraphImageNodes(json& value, std::vector<json*>& nodes) {
 bool OriginalRepresentsImage(const std::vector<std::uint8_t>& original,
     const std::vector<std::uint8_t>& savedPixels) {
     if (original == savedPixels) return true;
+#ifdef STACK_HDR_FILE_INPUT
+    // Identical SDR/base bytes cannot identify a gain map, PQ precision or an
+    // embedded profile. A managed photo is reusable only by exact identity.
+    if (Stack::Hdr::IsGainMapJpeg(original) || Stack::Hdr::IsGainMapJpeg(savedPixels) ||
+        Stack::Hdr::IsPqPng(original) || Stack::Hdr::IsPqPng(savedPixels)) return false;
+#endif
     constexpr auto maxBytes = static_cast<std::size_t>(std::numeric_limits<int>::max());
     if (original.empty() || savedPixels.empty() || original.size() > maxBytes || savedPixels.size() > maxBytes)
         return false;
@@ -993,7 +1000,9 @@ bool ExternalizeGraphImageAssets(
             std::ifstream originalFile(path, std::ios::binary);
             if (originalFile) {
                 std::vector<std::uint8_t> original{std::istreambuf_iterator<char>(originalFile), {}};
-                if (OriginalRepresentsImage(original, bytes)) {
+                const bool matches = node.value("preserveOriginalColorFile", false)
+                    ? original == bytes : OriginalRepresentsImage(original, bytes);
+                if (matches) {
                     const auto identity = Stack::RawEvidence::ComputeSourceIdentity(original);
                     Stack::Project::EmbeddedAssetRecord record;
                     if (!identity.valid || !store->StageAssetFile(transaction, path,

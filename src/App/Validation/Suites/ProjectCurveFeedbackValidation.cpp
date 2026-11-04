@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "App/Validation/Suites/ProjectCurveFeedbackValidation.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Layers/ToneLayers.h"
@@ -30,7 +31,7 @@ void ValidateProjectCurveFeedback(EditorModule& editor) {
         (std::filesystem::current_path()/"Assets/Splash/splash_banner.png").string(),width,height,4);
     auto& graph=editor.GetNodeGraph();
     const int source=graph.AddImageNode(std::move(image),{})->id;
-    editor.AddTechnicalImageNodeAt(NodeMath::TechnicalImageOperation::AssignLinearSrgb,{150,0});
+    editor.AddTechnicalImageNodeAt(NodeMath::TechnicalImageOperation::SrgbDecode,{150,0});
     const int linear=graph.GetSelectedNodeId();
     editor.AddLayerNodeAt(LayerType::ToneCurve,{300,0});
     const int curve=graph.GetSelectedNodeId();
@@ -43,10 +44,10 @@ void ValidateProjectCurveFeedback(EditorModule& editor) {
         editor.ConnectGraphSockets(linear,"imageOut",curve,"imageIn",&error) &&
         editor.ConnectGraphSockets(curve,"imageOut",downstream,"imageIn",&error) &&
         editor.ConnectGraphSockets(downstream,"imageOut",output,"imageIn",&error),error);
-    editor.AddValueNodeAt(NodeMath::MakeUniformScalar(10),{300,220});
+    Stack::Validation::AddUniformOperand(editor,10,{300,220});
     const int unusedValue=graph.GetSelectedNodeId();
     require(editor.SetNodeParameterExposed(curve,"contrast",true) && editor.ConnectGraphSockets(
-        unusedValue,"valueOut",curve,EditorNodeGraph::ParameterInputSocketId("contrast"),&error),error);
+        unusedValue,"imageOut",curve,EditorNodeGraph::ParameterInputSocketId("contrast"),&error),error);
     ToneCurveLayer advanced;
     auto request=advanced.Serialize();
     request["autoCalibratePending"]=true;request["autoCalibrateForceReanalysis"]=true;

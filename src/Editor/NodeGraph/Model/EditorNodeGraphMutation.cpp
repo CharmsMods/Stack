@@ -1,5 +1,7 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/ArithmeticWires.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
 
@@ -358,7 +360,8 @@ bool Graph::CanConnectSockets(
     int toNodeId,
     const std::string& toSocketId,
     std::string* normalizedToSocketId,
-    std::string* errorMessage) const {
+    std::string* errorMessage, bool retained, bool* insertRgbCombine) const {
+    if (insertRgbCombine) *insertRgbCombine = false;
     ScopedGraphOutputAnalysis outputAnalysis(*this);
     if (normalizedToSocketId) {
         *normalizedToSocketId = toSocketId;
@@ -388,6 +391,41 @@ bool Graph::CanConnectSockets(
         return false;
     }
 
+    auto source = DescribeGraphOutput(*this,fromNodeId,fromSocketId);
+    // Only an authoring gesture can request an adapter. Stored edges and ordinary
+    // programmatic links always validate their actual endpoints.
+    const bool combine = insertRgbCombine && DescribeRgbAdapter(*this, *to, toSocketId, source);
+    if (combine || IsFoundationNode(*from) || IsFoundationNode(*to) || source.usesArithmeticContract || source.invalidWire || IsLayoutSensitivePort(*to,toSocketId)) {
+        if (WouldCreateCycle(fromNodeId,fromSocketId,toNodeId,toSocketId)) {
+            if (errorMessage) *errorMessage = ConnectionRules::kCycleError;
+            return false;
+        }
+        if (retained) return true;
+        for (const auto& issue : source.diagnostics) {
+            if (issue.ruleId == "graph.wire" || (combine &&
+                (issue.severity == Stack::NodeMath::DiagnosticSeverity::HardError ||
+                 issue.severity == Stack::NodeMath::DiagnosticSeverity::RuntimeFault))) {
+                if (errorMessage) *errorMessage = issue.message;
+                return false;
+            }
+        }
+        std::optional<GraphOutputDescription> other;
+        if ((to->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(to->dataMathMode)) || to->kind == NodeKind::Mix) {
+            if (const auto* link = FindInputLink(toNodeId,toSocketId == kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId))
+                other = DescribeGraphOutput(*this,link->fromNodeId,link->fromSocketId);
+        }
+        auto issue = FoundationWireError(*this,*to,toSocketId,source.descriptor,other ? &other->descriptor : nullptr);
+        if (combine && issue.empty()) {
+            if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this,*to,toSocketId,source.descriptor,issue)) {
+                if (errorMessage) *errorMessage = issue;
+                return false;
+            }
+            *insertRgbCombine = true;
+        }
+        if (errorMessage) *errorMessage = issue;
+        return issue.empty();
+    }
+
     bool fromScalarStreamResolved = false;
     bool fromIsScalarStream = false;
     const auto isFromScalarStream = [&]() {
@@ -401,7 +439,7 @@ bool Graph::CanConnectSockets(
 
     if (to->kind == NodeKind::Output && to->outputSettings.maskOutput &&
         toSocketId == kImageInputSocketId) {
-        const auto description = DescribeGraphOutput(*this, fromNodeId, fromSocketId);
+        const auto& description = source;
         const bool coverage = fromSocket.type == SocketType::Mask ||
             fromSocket.type == SocketType::ScalarField || fromSocket.type == SocketType::Channel ||
             (fromSocket.type == SocketType::Image && (isFromScalarStream() ||
@@ -440,7 +478,7 @@ bool Graph::CanConnectSockets(
 
     std::string semanticError;
     if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this, *to, toSocketId,
-            DescribeGraphOutput(*this, fromNodeId, fromSocketId).descriptor, semanticError)) {
+            source.descriptor, semanticError)) {
         if (errorMessage) *errorMessage = semanticError;
         return false;
     }
@@ -572,7 +610,7 @@ bool Graph::CanConnectSockets(
             if (errorMessage) {
                 *errorMessage =
                     "A Channel connects only to a declared Channel-capable input, including single-channel roles such as Mask. "
-                    "Use Channel Split/Combine when converting between Image and Channel.";
+                    "Use Split Channels or Combine Channels when converting between Image and Channel.";
             }
             return false;
         }
@@ -666,7 +704,7 @@ bool Graph::CanConnectSockets(
             }
         } else {
             if (errorMessage) {
-                *errorMessage = "A full image cannot connect directly to this single-channel input. Add an explicit Luminance Mask, Channel Split, or another extraction node.";
+                *errorMessage = "A full image cannot connect directly to this single-channel input. Choose a channel output or use Split Channels.";
             }
             return false;
         }
@@ -701,16 +739,6 @@ bool Graph::CanConnectSockets(
     }
     if (to->kind == NodeKind::Layer && toSocketId != kImageInputSocketId) {
         if (errorMessage) *errorMessage = "Image links must target the layer image input.";
-        return false;
-    }
-    if (to->kind == NodeKind::Layer &&
-        to->layerType == LayerType::ViewTransform &&
-        toSocketId == kImageInputSocketId &&
-        AnalyzeScenePath(*this, fromNodeId).hasViewTransform) {
-        if (errorMessage) {
-            *errorMessage =
-                "This path already contains a View Transform. Turn Display Mapping off in the RAW View tab before adding a graph View Transform.";
-        }
         return false;
     }
     if (to->kind == NodeKind::Lut && toSocketId != kImageInputSocketId) {

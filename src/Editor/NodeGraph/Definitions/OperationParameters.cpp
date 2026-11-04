@@ -164,6 +164,11 @@ std::vector<LiveParameterDefinition> BuildOperationParameters(const Node& node) 
             parameters.push_back(NumericParameter("factor", "Factor", 0.5, 0.0, 1.0, "normalized", LiveAnimationPolicy::Linear, "mixFactor"));
             break;
         case NodeKind::DataMath:
+            if (const auto* op = Stack::NodeMath::Primitive(node.dataMathMode)) {
+                parameters.push_back(NumericParameter("constant-a", "A", 0, -65504, 65504, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantA"));
+                parameters.push_back(NumericParameter("constant-b", "B", op->defaultB, -65504, 65504, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantB"));
+                break;
+            }
             parameters.push_back(OpaqueSettingsParameter("domain", "Domain", "dataMathSettings.domain"));
             parameters.back().defaultValue = "spatial";
             parameters.back().uiHint = "choice";

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/Serialization/DisplayImageImport.h"
 #include "Editor/CompositePersistence.h"
 #include "Editor/LayerParameterPreflight.h"
 #include "Editor/Timeline/TimelinePersistence.h"
@@ -86,38 +87,8 @@ bool ValidateWorkspacePayload(const nlohmann::json& payload, std::string& error,
     return true;
 }
 
-struct DecodedImageData {
-    std::vector<unsigned char> pixels;
-    int width = 0;
-    int height = 0;
-    int channels = 4;
-    int originalChannels = 4;
-};
-
-bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
-    outImage = {};
-
-    stbi_set_flip_vertically_on_load_thread(1);
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
-    if (!pixels) {
-        return false;
-    }
-
-    outImage.width = width;
-    outImage.height = height;
-    outImage.channels = 4;
-    outImage.originalChannels = channels;
-    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
-        pixels, width, height, 4, outImage.pixels);
-    stbi_image_free(pixels);
-    if (!copied) {
-        outImage = {};
-    }
-    return copied;
-}
+using DecodedImageData = EditorNodeGraph::ImagePayload;
+using EditorNodeGraph::ReadImageFilePayload;
 
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
     return Stack::PngEncoding::EncodeInterleaved(
@@ -282,7 +253,6 @@ void EditorModule::ResetForPipelineDeserialization() {
     m_PreviewPixelCache.clear();
     m_PreviewRequestedGenerations.clear();
     m_PreviewCompletedGenerations.clear();
-    m_ScopeDisplayedRevisions.clear();
     m_Project->timeline = {};
     m_TimelineUi.selectedOutputNodeId = -1;
     m_TimelineUi.selectedParameterTarget = {};
@@ -1271,6 +1241,8 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
 }
 
 void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foreground) {
+    // Hidden workspaces still receive this pump after their last tile draw.
+    if(m_GalleryHdrJob && ImGui::GetCurrentContext()) CancelObsoleteGalleryHdrJob();
     if (!foreground || !IsViewMode()) m_Viewport.SuspendComparison();
     m_NodeOpenTransition.ReleaseSubmittedDraw();
     m_Viewport.FrameTransition().ReleaseSubmittedDraw();
@@ -1528,38 +1500,31 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             bool payloadQueued = false;
             try {
             DecodedImageData decoded;
-            const bool success = DecodeImageFromFile(path, decoded);
+            const bool success = ReadImageFilePayload(path, decoded);
 
-            EditorNodeGraph::ImagePayload payload;
-            std::vector<unsigned char> storagePixels;
+            EditorNodeGraph::ImagePayload payload=std::move(decoded);
+            std::vector<unsigned char> storagePixels, originalBytes;
             int width = 0;
             int height = 0;
             int channels = 4;
-            if (success && !decoded.pixels.empty()) {
+            if (success && !payload.pixels.empty()) {
                 payload.label = FileNameFromPath(path);
-                payload.sourcePath = path;
-                payload.width = decoded.width;
-                payload.height = decoded.height;
-                payload.channels = decoded.channels;
-                payload.originalChannels = decoded.originalChannels;
-                payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
-                    path, decoded.width, decoded.height, decoded.originalChannels);
                 EditorNodeGraph::BuildImagePayloadPreview(
-                    decoded.pixels,
-                    decoded.width,
-                    decoded.height,
-                    decoded.channels,
+                    payload.pixels,
+                    payload.width,
+                    payload.height,
+                    payload.channels,
                     payload.previewPixels,
                     payload.previewWidth,
                     payload.previewHeight,
                     payload.previewChannels);
-                payload.pixels = std::move(decoded.pixels);
                 payload.pngStorage.Invalidate();
                 payload.previewStorage.Invalidate();
                 payload.isEmbedding = true;
                 payload.importRequestId = generation;
                 payload.embeddingRequestId = generation;
-                storagePixels = payload.pixels;
+                if (payload.hdrPixels) originalBytes=std::move(payload.pngBytes);
+                else { payload.pngBytes.clear(); storagePixels=payload.pixels; }
                 width = payload.width;
                 height = payload.height;
                 channels = payload.channels;
@@ -1611,12 +1576,12 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 return;
             }
 
-            if (!success || storagePixels.empty()) {
+            if (!success || (storagePixels.empty() && originalBytes.empty())) {
                 return;
             }
 
             std::vector<unsigned char> pngBytes =
-                EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
+                originalBytes.empty() ? EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels) : std::move(originalBytes);
             ProjectTasks().PostToMain([
                 completeEmbedding,
                 pngBytes = std::move(pngBytes)
@@ -1648,24 +1613,26 @@ bool EditorModule::ExportImage(const std::string& path) {
     return RequestExportImage(path);
 }
 
-bool EditorModule::RequestQueueExportImage(const std::string& path) {
+bool EditorModule::RequestQueueExportImage(const std::string& path, Stack::Hdr::FileFormat format) {
     const bool previous = m_SuppressExportProjectCheckpoint;
     m_SuppressExportProjectCheckpoint = true;
-    const bool requested = RequestExportImage(path);
+    const bool requested = RequestExportImage(path, format);
     m_SuppressExportProjectCheckpoint = previous;
     return requested;
 }
 
-void EditorModule::BeginPngExportWrite(
+void EditorModule::BeginImageExportWrite(
     std::string path,
     std::vector<unsigned char> pixels,
     int width,
     int height,
     Stack::NodeMath::PngColorMetadataChunks colorChunks,
     std::uint64_t generation,
-    Stack::FileSave::ExportFileTarget target) {
+    Stack::FileSave::ExportFileTarget target,
+    Stack::Hdr::FileFormat format,
+    Stack::Hdr::Image hdrImage) {
     m_ExportTaskState = Async::TaskState::Running;
-    m_ExportStatusText = "Writing PNG export in the background...";
+    m_ExportStatusText = "Writing image export in the background...";
 
     bool submitted = false;
     try {
@@ -1677,26 +1644,33 @@ void EditorModule::BeginPngExportWrite(
             width,
             height,
             colorChunks = std::move(colorChunks),
+            format, hdrImage = std::move(hdrImage),
             pixels = std::move(pixels)
         ]() mutable {
             bool success = false;
             std::string errorMsg;
 
             try {
-                const std::vector<unsigned char> basePng =
-                    EncodePngBytes(pixels, width, height, 4);
-                std::vector<Stack::NodeMath::ContractIssue> metadataIssues;
-                const std::vector<unsigned char> outputPng =
-                    Stack::NodeMath::InsertPngColorMetadataChunks(
-                        basePng, colorChunks, metadataIssues);
-                if (outputPng.empty()) {
-                    errorMsg = metadataIssues.empty()
-                        ? "PNG encoding produced no data."
-                        : metadataIssues.front().message;
-                } else {
-                    success = Stack::FileSave::WriteExportFileAtomically(
-                        target, outputPng, errorMsg);
+                std::vector<unsigned char> encoded;
+                switch (format) {
+                case Stack::Hdr::FileFormat::GainMapJpeg:
+                    encoded = Stack::Hdr::EncodeGainMapJpeg(hdrImage, pixels);
+                    break;
+                case Stack::Hdr::FileFormat::PqPng:
+                    encoded = Stack::Hdr::EncodePqPng(hdrImage);
+                    break;
+                case Stack::Hdr::FileFormat::SdrPng: {
+                    const auto base = EncodePngBytes(pixels, width, height, 4);
+                    std::vector<Stack::NodeMath::ContractIssue> issues;
+                    encoded = Stack::NodeMath::InsertPngColorMetadataChunks(base, colorChunks, issues);
+                    if (!issues.empty()) errorMsg = issues.front().message;
+                    break;
                 }
+                }
+                if (!encoded.empty())
+                    success = Stack::FileSave::WriteExportFileAtomically(target, encoded, errorMsg);
+                else if (errorMsg.empty())
+                    errorMsg = "Image encoding produced no data.";
             } catch (const std::exception& e) {
                 errorMsg = std::string("Exception: ") + e.what();
             } catch (...) {
@@ -1731,7 +1705,7 @@ void EditorModule::BeginPngExportWrite(
                     m_ExportStatusText = "Could not export \"" +
                         FileNameFromPath(path) + "\": " +
                         (errorMsg.empty()
-                            ? std::string("The PNG could not be written.")
+                            ? std::string("The image could not be written.")
                             : errorMsg);
                     PostNotification(
                         UiNotificationSeverity::Error,
@@ -1767,7 +1741,8 @@ void EditorModule::CompleteRawWorkspaceExportRender(
     m_RawWorkspaceExportRenderGeneration = 0;
     const bool rasterValid = result.success && sourceMatchesActive &&
         Stack::PixelBuffer::HasCompletePixelBuffer(
-            result.pixels.size(), result.width, result.height, 4);
+            m_RequestedExportFormat == Stack::Hdr::FileFormat::SdrPng ? result.pixels.size() : result.hdrExportImage.rgba.size(),
+            result.width, result.height, 4);
     if (!rasterValid) {
         m_RawWorkspaceExportPath.clear();
         m_RawWorkspaceExportColorChunks = {};
@@ -1788,18 +1763,20 @@ void EditorModule::CompleteRawWorkspaceExportRender(
     Stack::NodeMath::PngColorMetadataChunks colorChunks =
         std::move(m_RawWorkspaceExportColorChunks);
     m_RawWorkspaceExportColorChunks = {};
-    BeginPngExportWrite(
+    BeginImageExportWrite(
         std::move(path),
         std::move(result.pixels),
         result.width,
         result.height,
         std::move(colorChunks),
         m_ExportGeneration,
-        std::move(m_RawWorkspaceExportFileTarget));
+        std::move(m_RawWorkspaceExportFileTarget),
+        m_RequestedExportFormat, std::move(result.hdrExportImage));
     m_RawWorkspaceExportFileTarget = {};
 }
 
-bool EditorModule::RequestExportImage(const std::string& path) {
+bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileFormat format) {
+    const bool hdr = format != Stack::Hdr::FileFormat::SdrPng;
     if(HasPendingBracketingDraft()) {
         m_ExportTaskState=Async::TaskState::Failed;
         m_ExportStatusText="Process or discard pending Bracketing input changes before export.";
@@ -1829,20 +1806,21 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     };
     protect(m_Project->rawRecipe.source.sourcePath);
     for (const auto& node : m_Project->graph.GetNodes()) {
+        protect(node.image.sourcePath);
         protect(node.rawSource.sourcePath);
         protect(node.rawSource.metadata.sourcePath);
         protect(node.rawDevelopment.recipe.source.sourcePath);
     }
     if (m_Project->snapshot) {
-        for (const auto& asset : m_Project->snapshot->embeddedAssets) {
-            if (asset.inputFamily == Stack::Project::MultiFrameInputFamily::Raw)
-                protect(asset.originalSourcePath);
-        }
+        for (const auto& asset : m_Project->snapshot->embeddedAssets)
+            protect(asset.originalSourcePath);
     }
     Stack::FileSave::ExportFileTarget target;
     std::string targetError;
+    const std::vector<std::string> extensions = format == Stack::Hdr::FileFormat::GainMapJpeg
+        ? std::vector<std::string>{".jpg", ".jpeg"} : std::vector<std::string>{".png"};
     if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(path),
-            protectedSources, {".png"}, target, targetError)) {
+            protectedSources, extensions, target, targetError)) {
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = targetError;
         PostNotification(UiNotificationSeverity::Error, targetError, "editor-export-image");
@@ -1858,7 +1836,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         !ResolveRawWorkspaceInteractionDraft(false)) {
         return false;
     }
-    if (IsRawWorkspaceProjectActive() &&
+    if (!hdr && IsRawWorkspaceProjectActive() &&
         !Stack::RawRecipe::IsViewTransformEnabled(
             m_Project->rawRecipe)) {
         PostNotification(
@@ -1868,7 +1846,23 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     }
 
     Stack::NodeMath::PngColorMetadataChunks colorChunks;
-    if (IsCompositeViewportMode()) {
+    if (hdr && IsCompositeViewportMode()) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = "HDR export requires a single color output. Select the image Output in the graph.";
+        PostNotification(UiNotificationSeverity::Error, m_ExportStatusText, "editor-export-semantic-policy");
+        return false;
+    }
+    if (hdr) {
+        // The renderer validates the resolved full-resolution graph, including its final View.
+        // Data visualizations and channels cannot be relabeled as HDR photos.
+        const auto snapshot = BuildGraphSnapshot();
+        if (m_Project->graph.IsOutputChannelInspection(snapshot.outputNodeId)) {
+            m_ExportTaskState = Async::TaskState::Failed;
+            m_ExportStatusText = "Connect an Image output to export an HDR photo.";
+            PostNotification(UiNotificationSeverity::Error, m_ExportStatusText, "editor-export-semantic-policy");
+            return false;
+        }
+    } else if (IsCompositeViewportMode()) {
         std::string policyError;
         if (!ValidateCompositePngExport(policyError)) {
             m_ExportTaskState = Async::TaskState::Failed;
@@ -1884,7 +1878,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText =
                 "A Channel can be inspected in Output, but PNG export "
-                "requires an Image. Connect the Channel to Image Combine "
+                "requires an Image. Connect the Channel to Combine Channels "
                 "first.";
             PostNotification(
                 UiNotificationSeverity::Error,
@@ -1936,11 +1930,11 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         }
     }
 
-    if (IsRawWorkspaceProjectActive() && !IsCompositeViewportMode()) {
-        if (m_RawRenderClientId == 0) {
+    if ((IsRawWorkspaceProjectActive() || hdr) && !IsCompositeViewportMode()) {
+        if (IsRawWorkspaceProjectActive() ? m_RawRenderClientId == 0 : !m_RenderWorkerAvailable) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText =
-                "The RAW render service is unavailable for authoritative export.";
+                "The render service is unavailable for full-resolution export.";
             PostNotification(
                 UiNotificationSeverity::Error,
                 m_ExportStatusText,
@@ -1959,10 +1953,11 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         m_RawWorkspaceExportRenderRequested = true;
         m_RawWorkspaceExportRenderGeneration = 0;
         m_RawWorkspaceExportPath = path;
+        m_RequestedExportFormat = format;
         m_RawWorkspaceExportFileTarget = std::move(target);
         m_RawWorkspaceExportColorChunks = std::move(colorChunks);
         m_ExportTaskState = Async::TaskState::Running;
-        m_ExportStatusText = "Rendering the authoritative RAW export...";
+        m_ExportStatusText = "Rendering the full-resolution export...";
         MarkRenderRefreshDirty();
         return true;
     }
@@ -2011,7 +2006,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
 
     ++m_ExportGeneration;
     const std::uint64_t generation = m_ExportGeneration;
-    BeginPngExportWrite(
+    BeginImageExportWrite(
         path,
         std::move(pixels),
         width,

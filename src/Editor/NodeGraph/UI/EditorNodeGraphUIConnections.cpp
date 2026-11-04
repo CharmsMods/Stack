@@ -1,3 +1,5 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
+#include "Editor/Internal/GraphConnectionContext.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
@@ -6,18 +8,6 @@
 #include <string>
 #include <unordered_set>
 
-namespace {
-EditorNodeGraph::GraphOutputContext CurrentOutputDescriptions(EditorModule& editor) {
-    EditorNodeGraph::GraphOutputContext context;
-    context.resolveOutput = [&editor](const auto& node,const auto& socket)
-        -> std::optional<EditorNodeGraph::GraphOutputDescription> {
-        if (const auto* value=editor.GetGraphOutputDescription(node.id,socket)) return *value;
-        return std::nullopt;
-    };
-    return context;
-}
-}
-
 bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId) {
     if (!editor) {
         return false;
@@ -25,7 +15,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     // Rank sockets using current local contracts. The selected connection's
     // command performs the one authoritative whole-document validation.
-    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,CurrentOutputDescriptions(*editor));
+    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,Stack::Editor::PublishedConnectionContext(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
     if (!from || !to) {
@@ -45,7 +35,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         fromScalarStream && fromSocket.type == EditorNodeGraph::SocketType::Image;
 
     // A scalar image stream is already data being processed as an image (for example,
-    // Channel Split -> Average).  When it is dropped onto an un-fed layer, keep it on
+    // Split Channels -> Average).  When it is dropped onto an un-fed layer, keep it on
     // the layer's image input so image-safe operations such as Contrast continue to
     // operate on the scalar field.  Routing it to the layer's optional Mask input
     // instead leaves the layer's image path full-RGB and later causes an unnecessary
@@ -56,11 +46,11 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         to->kind == EditorNodeGraph::NodeKind::Layer &&
         !targetImageInputIsConnected) {
         std::string error;
-        if (graph.CanConnectSockets(
+        if (EditorNodeGraph::CanAuthorConnection(graph,
                 fromNodeId,
                 fromSocketId,
                 toNodeId,
-                EditorNodeGraph::kImageInputSocketId, nullptr) &&
+                EditorNodeGraph::kImageInputSocketId) &&
             ConnectWithLayout(editor,
                 fromNodeId,
                 fromSocketId,
@@ -78,7 +68,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
                 continue;
             }
             std::string error;
-            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+            if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -88,7 +78,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Input && socket.id == channel) {
                 std::string error;
-                if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+                if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, fromSocketId, toNodeId, socket.id) &&
                     ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                     return true;
                 }
@@ -98,7 +88,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
 
     if (fromScalarStream && to->kind == EditorNodeGraph::NodeKind::Layer) {
         std::string error;
-        if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, nullptr) &&
+        if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId) &&
             ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, &error)) {
             return true;
         }
@@ -115,7 +105,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+            if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -128,7 +118,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id, nullptr) &&
+            if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 ConnectWithLayout(editor,fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -143,7 +133,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         return false;
     }
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,CurrentOutputDescriptions(*editor));
+    EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,Stack::Editor::PublishedConnectionContext(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
     if (!from || !to) {
@@ -159,7 +149,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Output && socket.id == toSocketId) {
                 std::string error;
-                if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+                if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, socket.id, toNodeId, toSocketId) &&
                     ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                     return true;
                 }
@@ -178,7 +168,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+            if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, socket.id, toNodeId, toSocketId) &&
                 ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
@@ -191,7 +181,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId, nullptr) &&
+            if (EditorNodeGraph::CanAuthorConnection(graph,fromNodeId, socket.id, toNodeId, toSocketId) &&
                 ConnectWithLayout(editor,fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }

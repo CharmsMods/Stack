@@ -1,9 +1,10 @@
+#include "Editor/NodeGraph/BrightnessRecipe.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Utils/UiBusyState.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
-#include "Editor/NodeGraph/UI/OutputCardPresentation.h"
 #include "NodeMath/ChannelImageSemantics.h"
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
@@ -59,6 +60,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         m_OpenSavePresetPopup = false;
     }
 
+    bool openRecipe=false;
     float popupAlpha = 1.0f;
     if (m_ContextMenuFadeActive) {
         const float elapsed = static_cast<float>(ImGui::GetTime() - m_ContextMenuOpenedAt);
@@ -80,7 +82,8 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             const bool hasImageOutput=std::any_of(nodeSockets.begin(),nodeSockets.end(),[](const auto& socket) {
                 return socket.direction==EditorNodeGraph::SocketDirection::Output && socket.logicalType==Stack::NodeMath::LogicalValueType::ColorImage;
             });
-            if(hasImageOutput && ImGui::BeginMenu("Channel outputs")) {
+            if(hasImageOutput && !(node->kind == EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode)) &&
+                ImGui::BeginMenu("Channel outputs")) {
                 for(const auto& socket:nodeSockets) {
                     if(socket.direction!=EditorNodeGraph::SocketDirection::Output ||
                         socket.logicalType!=Stack::NodeMath::LogicalValueType::ColorImage)continue;
@@ -236,31 +239,25 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                             input->fromNodeId,
                             input->fromSocketId);
                 }
-                const auto outputCard = Stack::Editor::NodeGraphUI::DescribeOutputCard(
-                    node->id, node->outputEnabled, editor->GetNodeGraph().GetCompletedChains(),
-                    !editor->IsEditingRawLayerMaskGraph() && !editor->IsCompositeViewportMode() &&
-                        !editor->IsAutoGainMaskPreviewActive());
-                ImGui::BeginDisabled(
-                    !outputCard.projectExportTargetsNode ||
-                    outputUsesChannel ||
-                    editor->IsExportBusy());
+                const bool canExport = editor->CanExportGraphOutput(node->id);
+                ImGui::BeginDisabled(!canExport || outputUsesChannel);
                 if (ImGui::MenuItem("Export")) {
-                    const std::string path = FileDialogs::SavePngFileDialog("Export Rendered Image", "rendered_output.png");
-                    if (!path.empty()) {
-                        editor->RequestExportImage(path);
-                    }
+                    pendingNodeAction = [editor, nodeId = node->id] {
+                        const auto target = FileDialogs::SaveRenderedImageDialog();
+                        if (!target.path.empty())
+                            editor->RequestExportGraphOutput(nodeId, target.path, target.format);
+                    };
                 }
                 if (outputUsesChannel &&
                     ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     ImGui::SetTooltip(
-                        "PNG export requires an Image. Connect this Channel "
-                        "to Image Combine first.");
-                } else if (outputCard.connected && !outputCard.projectExportTargetsNode &&
+                        "Photo export requires an Image. Connect this Channel "
+                        "to Combine Channels first.");
+                } else if (!canExport &&
                     ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     ImGui::SetTooltip(
-                        "This command exports the sole project output. Use the workspace "
-                        "Export controls for RAW graphs or composite outputs, and leave "
-                        "diagnostic mask preview before exporting an output node.");
+                        "Export the connected final Image Output. Finish any current "
+                        "export and leave diagnostic mask or composite preview first.");
                 }
                 ImGui::EndDisabled();
                 std::string queueReason;
@@ -271,7 +268,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 if (!canQueueOutput && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     ImGui::SetTooltip("%s", outputUsesChannel
-                        ? "Queue export requires an Image. Connect this Channel to Image Combine first."
+                        ? "Queue export requires an Image. Connect this Channel to Combine Channels first."
                         : !outputHasInput ? "Connect an image to this Output before adding it to Queue."
                         : queueReason.c_str());
                 }
@@ -324,6 +321,25 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                             PostNodeGraphContextNotification(editor,UiNotificationSeverity::Error,error,"compound-repack");
                     };
                 }
+            }
+            const bool hasRecipe = EditorNodeGraphDefinitions::IsBrightnessRecipe(*node) ||
+                (node->kind==EditorNodeGraph::NodeKind::Value && node->value.value.logicalType==Stack::NodeMath::LogicalValueType::Scalar) ||
+                (node->kind==EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode));
+            if (hasRecipe && ImGui::MenuItem("View Recipe")) {
+                auto type=Stack::NodeMath::MakeUnknownDescriptor(Stack::NodeMath::LogicalValueType::Invalid);
+                if (const auto* wire=editor->GetNodeGraph().FindInputLink(node->id,"imageIn")) {
+                    const auto* output=editor->GetGraphOutputDescription(wire->fromNodeId,wire->fromSocketId);
+                    if (output) type=output->descriptor;
+                }
+                EditorNodeGraph::GraphOutputContext descriptions;
+                descriptions.resolveOutput = [editor](const auto& source, const auto& socket)
+                    -> std::optional<EditorNodeGraph::GraphOutputDescription> {
+                    if (const auto* output = editor->FindPublishedGraphDescription(source.id,socket)) return *output;
+                    return std::nullopt;
+                };
+                EditorNodeGraph::ScopedGraphOutputAnalysis analysis(editor->GetNodeGraph(), std::move(descriptions));
+                m_RecipeInspection=node->title+"\n\n"+EditorNodeGraphDefinitions::InspectArithmeticRecipe(editor->GetNodeGraph(),*node,type);
+                openRecipe=true;
             }
             const auto decomposition=EditorNodeGraphDefinitions::GetNodeDecompositionCapability(editor->GetNodeGraph(),*node);
             ImGui::Separator();
@@ -415,156 +431,6 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
 
             if (ImGui::MenuItem("Add Node...")) {
                 OpenNodeBrowser(NodeBrowserMode::GeneralAdd, m_ContextGraphPos);
-            }
-            if (ImGui::BeginMenu("Scopes")) {
-                if (ImGui::MenuItem("Histogram")) {
-                    editor->AddScopeNodeAt(EditorNodeGraph::ScopeKind::Histogram, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Vectorscope")) {
-                    editor->AddScopeNodeAt(EditorNodeGraph::ScopeKind::Vectorscope, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("RGB Parade")) {
-                    editor->AddScopeNodeAt(EditorNodeGraph::ScopeKind::RGBParade, m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Analysis")) {
-                if (ImGui::MenuItem("Preview")) {
-                    editor->AddPreviewNodeAt(m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Mask")) {
-                if (ImGui::MenuItem("Solid Mask")) {
-                    editor->AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind::Solid, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Linear Gradient Mask")) {
-                    editor->AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind::LinearGradient, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Radial Gradient Mask")) {
-                    editor->AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind::RadialGradient, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Noise Mask")) {
-                    editor->AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind::Noise, m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Mask / Math")) {
-                if (ImGui::MenuItem("Add Mask")) {
-                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Add, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Subtract Mask")) {
-                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Subtract, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Intersect Mask")) {
-                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Intersect, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Difference Mask")) {
-                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Exclude, m_ContextGraphPos);
-                }
-                ImGui::Separator();
-                if (ImGui::MenuItem("Invert Mask")) {
-                    editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Invert, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Remap Mask")) {
-                    editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Levels, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Threshold Mask")) {
-                    editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Threshold, m_ContextGraphPos);
-                }
-                ImGui::Separator();
-                if (ImGui::MenuItem("Clamp")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Clamp, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Add")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Add, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Subtract")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Subtract, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Multiply")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Multiply, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Divide")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Divide, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Average")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Average, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Minimum")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Min, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Maximum")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Max, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Difference")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Difference, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Remap")) {
-                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Remap, m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::MenuItem("Average Images")) {
-                editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::ImageAverage, m_ContextGraphPos);
-            }
-            if (ImGui::BeginMenu("Generator")) {
-                if (ImGui::MenuItem("Luminance Mask")) {
-                    editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::Luminance, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Sampled Range Mask")) {
-                    editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::SampledRange, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Solid Color Image")) {
-                    editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::SolidColor, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Color Gradient Image")) {
-                    editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::ColorGradient, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Square")) {
-                    editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::Square, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Circle")) {
-                    editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::Circle, m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Text")) {
-                    editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::Text, m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Merge")) {
-                if (ImGui::MenuItem("Blend Images")) {
-                    editor->AddMixNodeAt(m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("HDR Merge")) {
-                    editor->AddHdrMergeNodeAt(m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("MFSR")) {
-                    editor->AddMfsrNodeAt(m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Image Operations")) {
-                if (ImGui::MenuItem("LUT")) {
-                    editor->AddLutNodeAt(m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Blend Images")) {
-                    editor->AddMixNodeAt(m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Channels")) {
-                if (ImGui::MenuItem("Channel Split")) {
-                    editor->AddChannelSplitNodeAt(m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Image Combine")) {
-                    editor->AddChannelCombineNodeAt(m_ContextGraphPos);
-                }
-                if (ImGui::MenuItem("Constant Channel")) {
-                    editor->AddConstantChannelNodeAt(
-                        m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
             }
             ImGui::EndMenu();
         }
@@ -686,6 +552,17 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
     // Graph commands may replace node storage. Finish all reads of the menu's
     // node before applying an action that invalidates it.
     if (pendingNodeAction) pendingNodeAction();
+    if (openRecipe) ImGui::OpenPopup("View Recipe##Graph");
+    if (ImGui::BeginPopupModal("View Recipe##Graph",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+ImGui::GetFontSize()*45.f);
+        ImGui::TextUnformatted(m_RecipeInspection.c_str());
+        ImGui::PopTextWrapPos();
+        if (ImGui::Button("Close") || m_RecipeInspection.empty()) {
+            ImGui::CloseCurrentPopup();
+            m_RecipeInspection.clear();
+        }
+        ImGui::EndPopup();
+    }
 
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("Rename Project##EditorNodeGraph", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {

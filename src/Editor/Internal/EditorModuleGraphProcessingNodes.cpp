@@ -303,36 +303,9 @@ bool EditorModule::AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailF
     return AddGraphNode(*this,[&](auto& graph) { return graph.AddRawDetailFusionNode(std::move(payload), graphPosition); }) > 0;
 }
 
-void EditorModule::AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddWithSelectedImage(*this,EditorNodeGraph::kHdrMergeInput1SocketId,[&](auto& graph) {
-        return graph.AddHdrMergeNode({},graphPosition);
-    });
-}
-
-bool EditorModule::AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    return AddGraphNode(*this,[&](auto& graph) { return graph.AddHdrMergeNode(std::move(payload), graphPosition); }) > 0;
-}
-
-void EditorModule::AddMfsrNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddWithSelectedImage(*this,EditorNodeGraph::kMfsrReferenceInputSocketId,[&](auto& graph) {
-        return graph.AddMfsrNode({},graphPosition);
-    });
-}
-
-bool EditorModule::AddMfsrNodeFromPayload(EditorNodeGraph::MfsrPayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    return AddGraphNode(*this,[&](auto& graph) { return graph.AddMfsrNode(std::move(payload), graphPosition); }) > 0;
-}
-
 void EditorModule::AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     const int nodeId = AddWithSelectedImage(*this,EditorNodeGraph::kImageInputSocketId,[&](auto& graph) {
-        const auto* lut = graph.AddLutNode({},graphPosition);
-        if (!lut) throw std::runtime_error("The LUT could not be created.");
-        const int id = lut->id;
-        const auto* mask = graph.AddMaskGeneratorNode(EditorNodeGraph::MaskGeneratorKind::Solid,
-            {graphPosition.x-172.f,graphPosition.y+78.f});
-        if (!mask) throw std::runtime_error("The LUT mask could not be created.");
-        ConnectCandidate(graph,mask->id,EditorNodeGraph::kMaskOutputSocketId,id,EditorNodeGraph::kMaskInputSocketId);
-        return graph.FindNode(id);
+        return graph.AddLutNode({},graphPosition);
     });
     if (nodeId > 0) SwitchToComplexNodeSubWindow(nodeId);
 }
@@ -341,38 +314,10 @@ bool EditorModule::AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, Ed
     return AddGraphNode(*this,[&](auto& graph) { return graph.AddLutNode(std::move(payload), graphPosition); }) > 0;
 }
 
-bool EditorModule::ConvertRawDetailFusionToHybrid(int fusionNodeId) {
-    int levelsId = 0;
-    std::string error;
-    const bool applied = ApplyGraphCommand(*this,[&](auto& graph) {
-        const auto* fusion = graph.FindNode(fusionNodeId);
-        const auto* input = graph.FindInputLink(fusionNodeId,EditorNodeGraph::kMaskInputSocketId);
-        const auto* automatic = input ? graph.FindNode(input->fromNodeId) : nullptr;
-        if (!fusion || fusion->kind != EditorNodeGraph::NodeKind::RawDetailFusion || !automatic ||
-            automatic->kind != EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-            input->fromSocketId != EditorNodeGraph::kMaskOutputSocketId)
-            throw std::runtime_error("Connect an automatic detail mask before adding manual levels.");
-        const int automaticId = automatic->id;
-        const EditorNodeGraph::Vec2 position{(automatic->position.x+fusion->position.x)*0.5f,automatic->position.y};
-        const auto* levels = graph.AddMaskUtilityNode(EditorNodeGraph::MaskUtilityKind::Levels,position);
-        if (!levels) throw std::runtime_error("The mask levels operation could not be created.");
-        levelsId = levels->id;
-        ConnectCandidate(graph,automaticId,EditorNodeGraph::kMaskOutputSocketId,levelsId,EditorNodeGraph::kMaskUtilityInputSocketId);
-        ConnectCandidate(graph,levelsId,EditorNodeGraph::kMaskOutputSocketId,fusionNodeId,EditorNodeGraph::kMaskInputSocketId);
-        graph.SelectNode(levelsId);
-    },&error);
-    if (!applied) { PostNotification(UiNotificationSeverity::Error,error,"detail-hybrid"); return false; }
-    SelectGraphNode(levelsId);
-    return true;
-}
-
 bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
     const auto* source = GetNodeGraph().FindNode(rawSourceNodeId);
     if (!source || source->kind != EditorNodeGraph::NodeKind::RawSource) return false;
     const int completedBefore = GetCompletedChainCount();
-    const int viewIndex = static_cast<int>(GetLayers().size());
-    const auto view = LayerRegistry::CreateLayer(LayerType::ViewTransform);
-    if (!view) return false;
     int outputId = 0;
     auto context = GetGraphEditorContext();
     auto proposal = Stack::GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& graph) {
@@ -387,15 +332,10 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
         const int decodeId = require(graph.AddRawDecodeNode(std::move(payload),{position.x+280.f,position.y}));
         const int toneId = require(graph.AddRawOperationNode(Stack::RawRecipe::GraphOperationKind::ToneCurve,
             {position.x+560.f,position.y}));
-        auto* viewNode = graph.AddLayerNode(LayerType::ViewTransform,viewIndex,{position.x+840.f,position.y});
-        const int viewId = require(viewNode);
-        viewNode->layerParameters = Stack::GraphModel::CaptureLayerParameters(*view);
-        viewNode->title = view->GetName();
-        outputId = require(graph.AddOutputNode({position.x+1120.f,position.y}));
+        outputId = require(graph.AddOutputNode({position.x+840.f,position.y}));
         ConnectCandidate(graph,rawSourceNodeId,EditorNodeGraph::kRawOutputSocketId,decodeId,EditorNodeGraph::kRawInputSocketId);
         ConnectCandidate(graph,decodeId,EditorNodeGraph::kImageOutputSocketId,toneId,EditorNodeGraph::kImageInputSocketId);
-        ConnectCandidate(graph,toneId,EditorNodeGraph::kImageOutputSocketId,viewId,EditorNodeGraph::kImageInputSocketId);
-        ConnectCandidate(graph,viewId,EditorNodeGraph::kImageOutputSocketId,outputId,EditorNodeGraph::kImageInputSocketId);
+        ConnectCandidate(graph,toneId,EditorNodeGraph::kImageOutputSocketId,outputId,EditorNodeGraph::kImageInputSocketId);
         graph.SetOutputNodeId(outputId);
         graph.SelectNode(outputId);
     });

@@ -1,4 +1,5 @@
 #include "WorkspaceCompositor.h"
+#include "Hdr/UiColor.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/WorkspaceSwitcher.h"
 #include "App/ToolSwitcher.h"
@@ -158,14 +159,14 @@ bool WorkspaceCompositor::Ensure(int w, int h) {
     if (presentedFramebuffer) glDeleteFramebuffers(1,&presentedFramebuffer);
     if (historyTexture) glDeleteTextures(1,&historyTexture);
     if (presentedTexture) glDeleteTextures(1,&presentedTexture);
-    historyTexture = GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
-    presentedTexture = GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
+    historyTexture = extendedRange ? GLHelpers::CreateEmptyTexture(w,h) : GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
+    presentedTexture = extendedRange ? GLHelpers::CreateEmptyTexture(w,h) : GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
     historyFramebuffer = historyTexture ? GLHelpers::CreateFBO(historyTexture) : 0;
     presentedFramebuffer = presentedTexture ? GLHelpers::CreateFBO(presentedTexture) : 0;
     historyValid = false;
     previewHistoryValid = false;
-    texture = GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
-    lowTexture = GLHelpers::CreateTextureFromPixels(nullptr,std::max(1,w/2),std::max(1,h/2),4,false);
+    texture = extendedRange ? GLHelpers::CreateEmptyTexture(w,h) : GLHelpers::CreateTextureFromPixels(nullptr,w,h,4,false);
+    lowTexture = extendedRange ? GLHelpers::CreateEmptyTexture(std::max(1,w/2),std::max(1,h/2)) : GLHelpers::CreateTextureFromPixels(nullptr,std::max(1,w/2),std::max(1,h/2),4,false);
     framebuffer = texture ? GLHelpers::CreateFBO(texture) : 0;
     lowFramebuffer = lowTexture ? GLHelpers::CreateFBO(lowTexture) : 0;
     width=w; height=h;
@@ -178,7 +179,7 @@ bool WorkspaceCompositor::EnsureToolBlur(int w, int h) {
     glDeleteFramebuffers(2, toolBlurFramebuffers);
     glDeleteTextures(2, toolBlurTextures);
     for (int i = 0; i < 2; ++i) {
-        toolBlurTextures[i] = GLHelpers::CreateTextureFromPixels(nullptr, lowW, lowH, 4, false);
+        toolBlurTextures[i] = extendedRange ? GLHelpers::CreateEmptyTexture(lowW, lowH) : GLHelpers::CreateTextureFromPixels(nullptr,lowW, lowH,4,false);
         toolBlurFramebuffers[i] = toolBlurTextures[i] ? GLHelpers::CreateFBO(toolBlurTextures[i]) : 0;
     }
     toolBlurWidth = lowW; toolBlurHeight = lowH;
@@ -212,7 +213,7 @@ void WorkspaceCompositor::CaptureLastProjectFrame() {
     if (lastProjectFrame.workspace) {
         previews.Capture(lastProjectFrame.framebuffer, lastProjectFrame.workspace,
             lastProjectFrame.rootView, lastProjectFrame.left, lastProjectFrame.bottom,
-            lastProjectFrame.right, lastProjectFrame.top);
+            lastProjectFrame.right, lastProjectFrame.top,extendedRange);
     }
     lastProjectFrame = {};
 }
@@ -245,7 +246,8 @@ bool WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
     glUniform1i(1, 1);
     SetBounds(2, bounds);
     SetBounds(3, ImVec4(x, y, x + fitWidth, y + fitHeight));
-    glUniform3f(4, clear.x, clear.y, clear.z);
+    const auto targetColor=Hdr::Ui::TargetColor(clear,extendedRange);
+    glUniform3f(4,targetColor.x,targetColor.y,targetColor.z);
     glUniform1f(5, std::clamp(frame.previewAmount, 0.f, 1.f));
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -254,7 +256,8 @@ bool WorkspaceCompositor::PresentProjectPreview(const ProjectFrame& frame,
 
 bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw, const ImVec4& clear,
     const Tools::Switcher* tools, int toolIndex, std::uint64_t projectWorkspace,
-    bool retainProjectFrame, const ProjectFrame* projectFrame, unsigned int targetFramebuffer) {
+    bool retainProjectFrame, const ProjectFrame* projectFrame, unsigned int targetFramebuffer,bool extended) {
+    if(extended!=extendedRange) { Shutdown(); extendedRange=extended; }
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::Compositor);
     if (!data) return false;
     const int w=static_cast<int>(data->DisplaySize.x*data->FramebufferScale.x);
@@ -349,7 +352,8 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     const bool directProjectFrame = projectMode && weight >= 1.0f;
     glBindFramebuffer(GL_FRAMEBUFFER, directProjectFrame ? presentedFramebuffer : framebuffer);
     glViewport(0,0,w,h); glDisable(GL_SCISSOR_TEST);
-    glClearColor(clear.x,clear.y,clear.z,1); glClear(GL_COLOR_BUFFER_BIT);
+    const auto targetColor=Hdr::Ui::TargetColor(clear,extendedRange);
+    glClearColor(targetColor.x,targetColor.y,targetColor.z,1); glClear(GL_COLOR_BUFFER_BIT);
     const bool photoComposited = rawBackdropFrame && rawBackdrop.Render(*rawBackdropFrame, *data, clear,
         directProjectFrame ? presentedFramebuffer : framebuffer);
     {
@@ -377,7 +381,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         const ImVec4 departure=projectFrame && projectFrame->navigationTransition ?
             NormalizedBounds(projectFrame->navigationDepartureLow,projectFrame->navigationDepartureHigh,*data) : ImVec4();
         glUniform4f(3,departure.x,departure.y,departure.z,departure.w);
-        glUniform3f(4,clear.x,clear.y,clear.z);
+        glUniform3f(4,targetColor.x,targetColor.y,targetColor.z);
         glDrawArrays(GL_TRIANGLES,0,3);
     }
     historyValid=true;

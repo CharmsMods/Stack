@@ -4,6 +4,9 @@
 #include "Persistence/BracketDngMaster.h"
 #include "Raw/ReconstructionDepth.h"
 #include "Raw/RawGalleryInputPolicy.h"
+#ifdef STACK_HDR_FILE_INPUT
+#include "Hdr/RasterSource.h"
+#endif
 #include "ThirdParty/stb_image.h"
 #include <cmath>
 #include <fstream>
@@ -41,6 +44,28 @@ bool ReadGalleryRaster(const std::filesystem::path& path, RawMetadata& metadata,
     metadata.cameraWhiteBalance={1,1,1,1}; metadata.whiteLevel=1.f;
     metadata.bitDepth=stbi_is_16_bit_from_memory(bytes.data(),int(bytes.size())) ? 16 : 8;
     if (!output) return true;
+    const auto sourceIdentity=Stack::RawEvidence::ComputeSourceIdentity(bytes);
+    if(!sourceIdentity.valid) { metadata.error="Could not verify raster source identity."; return false; }
+    metadata.sourceContentSha256=sourceIdentity.sha256;
+    metadata.sourceByteSize=sourceIdentity.byteSize;
+#ifdef STACK_HDR_FILE_INPUT
+    // Only explicit RAW-recipe operations arrive here. Ordinary Open creates
+    // a display-referred graph Image and keeps both the HDR and SDR renditions.
+    Stack::Hdr::Image managed;
+    if(Stack::Hdr::DecodeDisplaySource(bytes,managed)) {
+        if(managed.width!=w || managed.height!=h) { metadata.error="Unexpected raster dimensions."; return false; }
+        output->linearFloatBuffer.resize(size_t(w)*h*3);
+        for(size_t i=0;i<managed.rgba.size()/4;++i) {
+            if(managed.rgba[i*4+3]!=1.f) {
+                metadata.error="These RAW edits need opaque pixels. Open the image in the graph editor to preserve its alpha channel.";
+                return false;
+            }
+            std::copy_n(managed.rgba.data()+i*4,3,output->linearFloatBuffer.data()+i*3);
+        }
+        return true;
+    }
+#endif
+    stbi_set_flip_vertically_on_load_thread(0);
     std::unique_ptr<stbi_us,decltype(&stbi_image_free)> rgba(stbi_load_16_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels,4),stbi_image_free);
     if (!rgba) { metadata.error="Could not decode the raster original.";return false; }
     output->linearFloatBuffer.resize(std::size_t(w)*h*3);

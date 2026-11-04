@@ -734,6 +734,7 @@ bool ToneCurveLayer::RenderScopedMaskPanel(
     bool showDetails,
     bool embeddedInDevelop) {
     bool changed = false;
+    if (!editor || !editor->IsEditingRawLayerMaskGraph()) return false;
     ImGuiExtras::RichSectionLabel("Local Scope / Masking");
     const bool maskConnected = editor &&
         editor->GetNodeGraph().FindInputLink(nodeId, EditorNodeGraph::kMaskInputSocketId) != nullptr;

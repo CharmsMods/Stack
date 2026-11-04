@@ -426,6 +426,14 @@ bool PresetManager::SaveUserPreset(
     document.thumbnailBytes = thumbnailBytes;
     document.graphPayload = graphPayload;
     SanitizePresetGraphPayload(document.graphPayload);
+    try {
+        EditorNodeGraph::Graph graph;
+        EditorNodeGraph::DeserializeGraphPayload(document.graphPayload, graph,
+            static_cast<int>(EditorNodeGraph::ExtractLayerArray(document.graphPayload).size()));
+    } catch (const std::exception& exception) {
+        if (outError) *outError = exception.what();
+        return false;
+    }
     document.boundarySockets = boundarySockets;
 
     const std::filesystem::path path = m_PresetsPath / fileName;

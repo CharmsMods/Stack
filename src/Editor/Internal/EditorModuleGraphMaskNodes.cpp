@@ -25,28 +25,13 @@ EditorNodeGraph::MaskCombineMode ToGraphMaskCombineMode(ToneCurveScopeMaskAction
 
 } // namespace
 
-void EditorModule::AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddScopeNode(scopeKind, graphPosition); });
-}
-
 void EditorModule::AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition) {
-    const bool texture = IsEditingRawLayerMaskGraph() &&
+    if (!IsEditingRawLayerMaskGraph()) return;
+    const bool texture =
         (maskKind == EditorNodeGraph::MaskGeneratorKind::LinearGradient ||
          maskKind == EditorNodeGraph::MaskGeneratorKind::RadialGradient || maskKind == EditorNodeGraph::MaskGeneratorKind::Square);
     AddGraphNode(*this,[&](auto& graph) { return texture ? graph.AddMaskTextureNode(maskKind,graphPosition) :
         graph.AddMaskGeneratorNode(maskKind, graphPosition); });
-}
-
-void EditorModule::AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combineMode, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddMaskCombineNode(combineMode, graphPosition); });
-}
-
-void EditorModule::AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddMaskUtilityNode(utilityKind, graphPosition); });
-}
-
-void EditorModule::AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddImageToMaskNode(converterKind, graphPosition); });
 }
 
 bool EditorModule::CreateToneCurveSelectionMask(
@@ -65,6 +50,7 @@ bool EditorModule::CreateToneCurveSelectionMask(
     float edgeSensitivity,
     float localCoherence,
     ToneCurveScopeMaskAction action) {
+    if (!IsEditingRawLayerMaskGraph()) return false;
     const bool startNewScopedMask = action == ToneCurveScopeMaskAction::NewMask;
     bool appendedSample = false;
     bool duplicateSample = false;

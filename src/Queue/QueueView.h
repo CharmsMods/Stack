@@ -13,15 +13,17 @@ namespace StackAppearance { struct SurfaceColors; }
 namespace Stack::Queue {
 
 enum class ViewCommand { None, OpenGallery, ChooseDestination, Export, StopAfterCurrent,
-    SelectAll, SelectNone, ClearCompleted, Include, Remove, RevealOutput, RevealDestination };
+    SelectAll, SelectNone, ClearCompleted, ChooseFormat, Include, Remove, RevealOutput, RevealDestination };
 
 struct ViewAction {
     ViewCommand command = ViewCommand::None;
     std::uint64_t id = 0;
     bool included = false;
+    Hdr::FileFormat format = Hdr::FileFormat::SdrPng;
 };
 
 struct ExportPresentation {
+    Hdr::FileFormat format = Hdr::FileFormat::SdrPng;
     std::string destination;
     std::string status;
     bool busy = false;

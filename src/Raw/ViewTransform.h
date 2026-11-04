@@ -1,5 +1,6 @@
 #pragma once
 #include "SigmoidDisplayMapping.h"
+#include "Hdr/Color.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,6 +14,7 @@ struct Parameters {
     float contrast=1,contrastPivotEv=0,saturation=1;
     bool preserveHue=true,debugFalseColor=false,inputIsRec2020=true;
     bool encodeSrgbOutput=true;
+    float hdrHeadroom=1.f;
 };
 inline constexpr Parameters Defaults{};
 
@@ -22,7 +24,7 @@ class PreparedTransform {
 public:
     explicit PreparedTransform(const Parameters& parameters=Defaults):p_(parameters),
         sigmoid_(parameters.middleGrey,parameters.contrast,parameters.exposure,parameters.contrastPivotEv) {}
-    float Luma(float input) const {return sigmoid_.Evaluate(input);}
+    float Luma(float input) const {return Stack::Hdr::Extend(sigmoid_.Evaluate(input),p_.middleGrey,p_.hdrHeadroom);}
     std::array<float,3> Rgb(std::array<float,3> rgb) const {
         if(p_.debugFalseColor) {
             const float oldLuma=DisplayLuma(p_.inputIsRec2020?Rec2020ToSrgb(rgb):rgb);
@@ -35,6 +37,22 @@ public:
             return {1,.06f,.04f};
         }
         rgb=sigmoid_.Rgb(rgb,p_.preserveHue);
+        if(p_.hdrHeadroom>1.f) {
+            for(auto& v:rgb) v=Stack::Hdr::Extend(v,p_.middleGrey,p_.hdrHeadroom);
+            if(!p_.inputIsRec2020) rgb=Stack::Hdr::To2020(rgb);
+            const float y=std::clamp(.2627f*rgb[0]+.6780f*rgb[1]+.0593f*rgb[2],0.f,p_.hdrHeadroom);
+            // Limit saturation in the mastering gamut. Rec.709 transport
+            // coordinates can legitimately lie outside its unit RGB cube.
+            float chroma=std::max(0.f,p_.saturation);
+            for(float v:rgb) {
+                if(v>y) chroma=std::min(chroma,(p_.hdrHeadroom-y)/(v-y));
+                if(v<y) chroma=std::min(chroma,y/(y-v));
+            }
+            for(auto& v:rgb) v=y+(v-y)*chroma;
+            rgb=Rec2020ToSrgb(rgb);
+            if(p_.encodeSrgbOutput) for(auto& v:rgb) v=Stack::Hdr::Srgb(v);
+            return rgb;
+        }
         if(p_.inputIsRec2020)rgb=Rec2020ToSrgb(rgb);
         CompressGamut(rgb);
         const float luma=DisplayLuma(rgb),saturation=std::max(0.f,p_.saturation);
@@ -119,6 +137,10 @@ vec3 linearToSrgb(vec3 rgb) {
 }
 )GLSL")+SigmoidDisplay::ShaderFunctions()+R"GLSL(
 vec3 applyViewTransform(vec3 inputRgb) {
+    if(uDisplayLinearInput!=0) {
+        vec3 rgb=uInputIsRec2020!=0 ? rec2020ToLinearSrgb(inputRgb) : inputRgb;
+        return uEncodeSrgbOutput!=0 ? sign(rgb)*linearToSrgb(abs(rgb)) : rgb;
+    }
     if (uDebugFalseColor != 0) {
         vec3 displayInput = uInputIsRec2020 != 0 ? rec2020ToLinearSrgb(inputRgb) : inputRgb;
         float oldLuma = lumaOf(displayInput);
@@ -126,6 +148,20 @@ vec3 applyViewTransform(vec3 inputRgb) {
         return falseColor(ev);
     }
     vec3 rgb = sigmoidDisplayRgb(inputRgb);
+    if(uHdrHeadroom>1.0) {
+        vec3 x=max(rgb-vec3(uMiddleGrey),vec3(0));
+        rgb=min(rgb,vec3(uMiddleGrey))+x/(1.0-x*(1.0/(1.0-uMiddleGrey)-1.0/(uHdrHeadroom-uMiddleGrey)));
+        if(uInputIsRec2020==0) rgb=mat3(.627404,.069097,.016391,
+            .329283,.919540,.088013,.043313,.011363,.895596)*rgb;
+        float y=clamp(dot(rgb,vec3(.2627,.6780,.0593)),0.0,uHdrHeadroom);
+        float chroma=max(0.0,uSaturation);
+        for(int c=0;c<3;++c) {
+            if(rgb[c]>y) chroma=min(chroma,(uHdrHeadroom-y)/(rgb[c]-y));
+            if(rgb[c]<y) chroma=min(chroma,y/(y-rgb[c]));
+        }
+        rgb=rec2020ToLinearSrgb(vec3(y)+(rgb-y)*chroma);
+        return uEncodeSrgbOutput!=0 ? sign(rgb)*linearToSrgb(abs(rgb)) : rgb;
+    }
     if (uInputIsRec2020 != 0) rgb = rec2020ToLinearSrgb(rgb);
     rgb = compressDisplayGamut(rgb);
     float luma = lumaOf(rgb);

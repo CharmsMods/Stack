@@ -7,8 +7,6 @@
 
 namespace EditorNodeGraph {
 
-std::string ScopeKindToString(ScopeKind kind);
-ScopeKind ScopeKindFromString(const std::string& value);
 std::string MaskGeneratorKindToString(MaskGeneratorKind kind);
 MaskGeneratorKind MaskGeneratorKindFromString(const std::string& value);
 std::string MaskUtilityKindToString(MaskUtilityKind kind);

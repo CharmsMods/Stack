@@ -2,6 +2,7 @@
 #include "RawLabUiSupport.h"
 
 #include <imgui_internal.h>
+#include "Hdr/Presentation.h"
 
 void EditorModule::RecordRawWorkspaceGallerySlot(const Stack::RawWorkspace::SourceRecord& source,
     const ImVec2& minimum, const ImVec2& size, const ImRect& clip) {
@@ -9,8 +10,9 @@ void EditorModule::RecordRawWorkspaceGallerySlot(const Stack::RawWorkspace::Sour
     int width = source.thumbnail.width, height = source.thumbnail.height;
     const auto cached = m_RawWorkspaceThumbnailTextures.find(source.relativePathKey);
     if (cached != m_RawWorkspaceThumbnailTextures.end() && cached->second.width > 0) {
-        width = cached->second.width;
-        height = cached->second.height;
+        const bool hdr=cached->second.hdrTexture && Stack::Hdr::PreviewActiveForCurrentWindow();
+        width = hdr ? cached->second.hdrWidth : cached->second.width;
+        height = hdr ? cached->second.hdrHeight : cached->second.height;
     }
     if (width <= 0 || height <= 0) { width = 3; height = 2; }
     const ImVec2 fitted = Stack::Editor::RawLabInternal::FitLabImage(
@@ -34,8 +36,10 @@ bool EditorModule::RecordRawWorkspaceGalleryThumbnail(const std::string& key,
     if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && entry!=m_RawWorkspaceThumbnailTextures.end()) {
         ImRect displayed;ImVec2 uvLow(0,1),uvHigh(1,0);
         if(m_GalleryNavigationMotion->GalleryPhoto(entry->second.sourceIdentity,image,displayed,uvLow,uvHigh)) {
-            if(entry->second.texture)ImGui::GetWindowDrawList()->AddImage(
-                static_cast<ImTextureID>(entry->second.texture),displayed.Min,displayed.Max,uvLow,uvHigh,
+            const auto texture=entry->second.hdrTexture && Stack::Hdr::PreviewActiveForCurrentWindow()
+                ? entry->second.hdrTexture : entry->second.texture;
+            if(texture)ImGui::GetWindowDrawList()->AddImage(
+                static_cast<ImTextureID>(texture),displayed.Min,displayed.Max,uvLow,uvHigh,
                 ImGui::GetColorU32(ImVec4(1,1,1,opacity)));
             return true;
         }
@@ -66,6 +70,8 @@ void EditorModule::RenderRawWorkspaceGalleryLayoutTransition() {
             const auto entry = m_RawWorkspaceThumbnailTextures.find(key);
             if (entry == m_RawWorkspaceThumbnailTextures.end()) return {};
             entry->second.lastUseSerial = ++m_RawWorkspaceThumbnailTextureUseSerial;
+            if(entry->second.hdrTexture && Stack::Hdr::PreviewActiveForCurrentWindow())
+                return {entry->second.hdrTexture,entry->second.hdrWidth,entry->second.hdrHeight};
             return {entry->second.texture, entry->second.width, entry->second.height};
         });
     if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))

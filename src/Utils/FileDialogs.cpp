@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shobjidl.h>
+#include <wrl/client.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
@@ -336,6 +337,37 @@ std::string SaveLutFileDialog(const char* title, const char* defaultFileName) {
     (void)defaultFileName;
 #endif
     return "";
+}
+
+RenderedImageTarget SaveRenderedImageDialog() {
+#ifdef _WIN32
+    Stack::Win32::ScopedComApartment apartment(COINIT_APARTMENTTHREADED);
+    if (!apartment && apartment.Result() != RPC_E_CHANGED_MODE) return {};
+    Microsoft::WRL::ComPtr<IFileSaveDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return {};
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"SDR PNG", L"*.png"}, {L"HDR JPEG (gain map)", L"*.jpg;*.jpeg"},
+        {L"HDR PNG (16-bit PQ)", L"*.png"}
+    };
+    DWORD options = 0;
+    if (FAILED(dialog->GetOptions(&options)) ||
+        FAILED(dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_STRICTFILETYPES)) ||
+        FAILED(dialog->SetFileTypes(3, filters)) || FAILED(dialog->SetDefaultExtension(L"png")) ||
+        FAILED(dialog->SetFileName(L"rendered_output"))) return {};
+    dialog->SetTitle(L"Export Rendered Image");
+    const auto owner = ResolveDialogOwnerWindow("SaveRenderedImageDialog", "Export Rendered Image");
+    if (FAILED(dialog->Show(owner.effectiveOwner))) return {};
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    UINT index = 0;
+    PWSTR selected = nullptr;
+    if (FAILED(dialog->GetFileTypeIndex(&index)) || index < 1 || index > 3 ||
+        FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &selected))) return {};
+    const std::filesystem::path path(selected);
+    CoTaskMemFree(selected);
+    return {path.u8string(), static_cast<Stack::Hdr::FileFormat>(index - 1)};
+#else
+    return {};
+#endif
 }
 
 std::string SavePngFileDialog(const char* title, const char* defaultFileName) {

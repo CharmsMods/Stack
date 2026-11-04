@@ -186,7 +186,10 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
                 pipeline.m_Width = node.image.width;
                 pipeline.m_Height = node.image.height;
-                result = GLHelpers::CreateTextureFromPixels(
+                result = node.image.useHdrPixels && node.image.hdrPixels
+                    ? GLHelpers::CreateTextureFromData(node.image.hdrPixels->data(),node.image.width,node.image.height,
+                        GL_RGBA16F,GL_RGBA,GL_FLOAT,GL_LINEAR)
+                    : GLHelpers::CreateTextureFromPixels(
                     node.image.pixels.data(),
                     node.image.width,
                     node.image.height,

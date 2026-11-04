@@ -1567,6 +1567,7 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     root[kAppearanceKey]["creamVariants"] = json::array();
     for (const auto& variant : library.creamVariants)
         root[kAppearanceKey]["creamVariants"].push_back(EncodeCreamPalette(variant));
+    root[kAppearanceKey]["previewInSdr"] = library.previewInSdr;
     const ViewportTilingSettings viewportTiling = RenderTiling::NormalizeSettings(library.viewportTiling);
     root[kAppearanceKey][kActivePresetIdKey] = library.activePresetId.empty() ? std::string(kDefaultPresetToken) : library.activePresetId;
     root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
@@ -1692,6 +1693,7 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         kExperimentalIslandEnabledKey,
         false);
     outLibrary.glassChromeEnabled = appearance.value(kGlassChromeEnabledKey, false);
+    outLibrary.previewInSdr = appearance.value("previewInSdr",false);
     ViewportTilingSettings viewportTiling;
     const json viewportTilingJson = appearance.value(kViewportTilingKey, json::object());
     if (viewportTilingJson.is_object()) {
@@ -2748,6 +2750,13 @@ bool AppearanceManager::SetExperimentalIslandEnabled(bool enabled) {
         return true;
     }
     m_Library.experimentalIslandEnabled = enabled;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetPreviewInSdr(bool enabled) {
+    if(m_Library.previewInSdr==enabled) return true;
+    m_Library.previewInSdr=enabled;
     TouchRevision();
     return Save();
 }

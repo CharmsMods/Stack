@@ -34,6 +34,13 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
             return 0;
         }
         const RenderGraphNode& node = *nodeIt->second;
+        if (node.kind == RenderGraphNodeKind::Output && IsUniformRenderSocket(executionContext, nodeId, socketId)) {
+            const auto* input = findInputLink(nodeId, EditorNodeGraph::kImageInputSocketId);
+            const auto fingerprint = input ? fingerprintScalar(input->fromNodeId, input->fromSocketId) : 0;
+            scalarFingerprintCache[key] = fingerprint;
+            fingerprintingScalars.erase(key);
+            return fingerprint;
+        }
         if (node.kind == RenderGraphNodeKind::Value && socketId == EditorNodeGraph::kValueOutputSocketId) {
             auto fingerprint = HashValue(node.scalarValue);
             HashCombine(fingerprint,HashValue(node.definitionId));
@@ -49,16 +56,22 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
             std::size_t fingerprint = HashValue(node.definitionHash);
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
             const auto& settings = node.dataMathSettings;
-            HashCombine(fingerprint,HashValue(settings.percentageInput));
-            for (const auto value : {settings.constantA, settings.constantB, settings.minValue,
-                    settings.maxValue, settings.outMin, settings.outMax}) HashCombine(fingerprint, HashValue(value));
+            const bool primitive = Stack::NodeMath::Primitive(node.dataMathMode) != nullptr;
+            if (!primitive) {
+                HashCombine(fingerprint,HashValue(settings.percentageInput));
+                for (const auto value : {settings.constantA, settings.constantB, settings.minValue,
+                        settings.maxValue, settings.outMin, settings.outMax}) HashCombine(fingerprint, HashValue(value));
+            }
             const bool average = node.dataMathMode == RenderDataMathMode::Average;
             const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
             const int count = average ? EditorNodeGraph::kMaxDataMathInputCount : (unary ? 1 : 2);
             for (int i = 0; i < count; ++i) {
                 const auto* input = findInputLink(nodeId, EditorNodeGraph::DataMathInputSocketId(i));
                 HashCombine(fingerprint, HashValue(i));
-                HashCombine(fingerprint, input ? fingerprintScalar(input->fromNodeId, input->fromSocketId) : 0);
+                if (primitive && !input)
+                    HashCombine(fingerprint, HashValue(i == 0 ? settings.constantA : settings.constantB));
+                else
+                    HashCombine(fingerprint, input ? fingerprintScalar(input->fromNodeId, input->fromSocketId) : 0);
             }
             scalarFingerprintCache[key] = fingerprint;
             fingerprintingScalars.erase(key);

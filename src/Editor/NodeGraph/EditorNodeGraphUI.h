@@ -160,6 +160,7 @@ private:
     void RenderMaskTextureInspector(EditorModule* editor);
     ImGuiExtras::FloatingSliderState m_RawSliderState;
     Stack::Editor::GraphEditorContext m_GraphContext;
+    std::uint64_t m_ConnectionCapabilityRenderRevision = 0;
     mutable std::unordered_map<std::string,bool> m_ConnectionCapabilityCache;
     bool CanPreviewConnection(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
         int to, const std::string& input) const;
@@ -668,5 +669,6 @@ private:
     char m_RenameProjectBuffer[256] = {};
     char m_RenamePresetBuffer[128] = {};
     bool m_OpenSavePresetPopup = false;
+    std::string m_RecipeInspection;
     char m_SavePresetNameBuffer[128] = {};
 };

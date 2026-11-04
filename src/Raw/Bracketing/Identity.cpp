@@ -3,6 +3,7 @@
 #include "HdrColorFusion.h"
 #include "Panorama/Panorama.h"
 #include "LearnedAlignment.h"
+#include "Raw/RawTechnicalEvidence.h"
 
 namespace Raw::Bracketing {
 std::string AnalysisIdentity(const ProcessingRequest& request) {
@@ -16,6 +17,8 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     recipe.reconstruction=ReconstructionMode::Standard;
     for(auto& group:recipe.groups) {group.name.clear();group.colorSlot=-1;}
     auto j=Serialize(recipe);
+    // Prepared/group caches include the decoder's active-image interpretation.
+    j["decoderProfile"]=Stack::RawEvidence::kRawDecoderIdentityVersion;
     if(adaptive)j["resolutionDependentGroups"]=true;
     if(guide)j["spatialGuide"]="independent-cfa-contrast-v1";
     // Sampling and clipping decisions feed reliability, the guide and cached

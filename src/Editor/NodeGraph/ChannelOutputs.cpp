@@ -35,6 +35,10 @@ SocketDefinition ChannelOutputSocket(int nodeId, const ChannelOutput& output) {
     return socket;
 }
 bool ValidateChannelOutputs(const Node& node, const std::vector<SocketDefinition>& sockets, std::string& error) {
+    if (!node.channelOutputs.empty() && node.kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode)) {
+        error = "Arithmetic has one Result. Use Split Channels to select a component.";
+        return false;
+    }
     if (node.channelOutputs.size() > 256) { error="Too many component outputs on one node."; return false; }
     std::unordered_set<std::string> ids;
     for (const auto& output : node.channelOutputs) {
@@ -53,6 +57,8 @@ std::string ExposeChannelOutput(Graph& graph, int nodeId, const std::string& sou
     bool opaque, std::string* error) {
     const auto fail=[&](const char* message) {if(error)*error=message;return std::string{};};
     auto* node=graph.FindNode(nodeId);
+    if (node && node->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode))
+        return fail("Use Split Channels after the arithmetic Result.");
     SocketDefinition base;
     if (!node || !Component(component) || FindChannelOutput(*node,source) ||
         !graph.FindSocket(nodeId,source,&base) || !ImageOutput(base)) return fail("Choose an image output and an R, G, B or alpha component.");
@@ -98,7 +104,8 @@ std::vector<ChannelSplitFold> FoldChannelSplits(Graph& graph, const std::vector<
         const std::string sourceSocket=input->fromSocketId, splitUuid=split->instanceUuid, notes=split->notes;
         const bool opaque=split->splitMissingAlphaIsOpaque;
         const auto* source=graph.FindNode(producer);
-        if (!source || (source->rawLayerOwnerId!=split->rawLayerOwnerId &&
+        if (!source || (source->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(source->dataMathMode)) ||
+            (source->rawLayerOwnerId!=split->rawLayerOwnerId &&
             !(source->rawLayerOwnerId.empty() && source->role==Stack::GraphModel::NodeRole::OriginalImage))) continue;
         bool safe=true;
         for (const auto& group:graph.GetGroups()) {

@@ -1,5 +1,6 @@
 #include "Panorama.h"
 #include "../Processor.h"
+#include "Raw/RawTechnicalEvidence.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -9,6 +10,7 @@ std::string PreparationIdentity(const ProcessingRequest& request) {
     auto recipe=request.recipe;recipe.panorama={};recipe.knots=EqualCurves(recipe.groups.size());recipe.automatic=true;
     for(auto& group:recipe.groups){group.name.clear();group.colorSlot=-1;for(auto& f:group.frames){f.manualExposure=false;f.relativeEv=0;}}
     auto j=Serialize(recipe);j["panoramaRevision"]=Revision;
+    j["decoderProfile"]=Stack::RawEvidence::kRawDecoderIdentityVersion;
     for(const auto& s:request.sources)j["sources"].push_back({s.frameId,s.sha256,s.bytes});
     if(request.sources.empty()&&request.analysis) {
         const auto stored=nlohmann::json::parse(request.analysis->identity,nullptr,false);

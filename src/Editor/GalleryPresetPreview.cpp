@@ -1,4 +1,6 @@
 #include "Editor/GalleryPresetPreview.h"
+#include "Editor/GalleryPreviewGraph.h"
+#include "Editor/Timeline/TimelinePersistence.h"
 #include "Editor/RawRenderService.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
@@ -79,15 +81,8 @@ std::shared_ptr<const Raw::RawImageData> Comparison(const std::filesystem::path&
     }
     return image;
 }
-std::filesystem::path Render(const std::filesystem::path& project, std::uint64_t revision,
-    const std::filesystem::path& previews, const std::shared_ptr<const Raw::RawImageData>& comparison) {
-    auto opened=Project::OpenProjectStore(project);
-    if (!opened || revision!=opened.snapshot.persistedStorageRevision) throw std::runtime_error("The project changed during preview.");
-    const auto image=comparison ? comparison : Comparison({});
-    const auto key=NodeMath::Sha256ContentIdentity(opened.snapshot.projectId + "/" + std::to_string(revision) +
-        "/v2/" + project.generic_u8string() + "/" + image->contentIdentity + "/" + std::to_string(previewSize));
-    const auto path=previews/"Preset previews"/(key.substr(7)+".png");
-    if (std::filesystem::is_regular_file(path)) return path;
+RenderGraphSnapshot PrepareGraph(Project::ProjectStoreOpenResult& opened,
+    const std::shared_ptr<const Raw::RawImageData>& image, bool comparison, bool savedBracket) {
     auto& data=opened.snapshot.pipelineData;
     const auto read=[&](const std::string& id,std::vector<unsigned char>& bytes) {
         const auto* asset=Project::FindEmbeddedAsset(opened.snapshot,id);
@@ -110,21 +105,50 @@ std::filesystem::path Render(const std::filesystem::path& project, std::uint64_t
     EditorNodeGraph::DeserializeGraphPayload(data,composition,static_cast<int>(layers.size()));
     Project::RawProjectEditRecipeBinding binding;
     if (!Project::ResolveRawProjectEditRecipe(opened.snapshot,opened.snapshot.activeSourceSetId,binding))
-        binding.recipe=RawRecipe::MakeDefaultRecipe(image->metadata.sourcePath);
-    binding.recipe.source.sourcePath=image->metadata.sourcePath;
-    Timeline::TimelineAnimationState timeline;
+        binding.recipe=RawRecipe::MakeDefaultRecipe(image ? image->metadata.sourcePath : std::string{});
+    if(image) binding.recipe.source.sourcePath=image->metadata.sourcePath;
+    const auto timeline=Timeline::DeserializeTimelineDocument(data.value("editorTimeline",nlohmann::json::object()));
     std::unordered_map<int,std::uint64_t> generations;
     std::vector<Timeline::AnimatableParameterTarget> targets;
-    Project::GraphSnapshotInputs inputs{composition,layers,timeline,generations,binding.recipe,image,targets};
-    inputs.authoredRevision=revision;
-    auto graph=Project::BuildGraphSnapshot(inputs).snapshot;
-    const auto sourceUuid=data.value("rawLayerSourceNodeUuid",std::string{});
+    Project::GraphSnapshotInputs inputs{composition,layers,timeline.animation,generations,binding.recipe,image,targets};
+    inputs.frame=Timeline::NormalizeTimelineFrameRequest(timeline.currentFrame,timeline.durationFrames,timeline.framesPerSecond);
+    inputs.authoredRevision=opened.snapshot.persistedStorageRevision;
+    Project::HdrAdoptedRawResult adopted;
+    if (!comparison) inputs.rawProject=&opened.snapshot;
+    if (savedBracket && image) {
+        adopted.projectId=opened.snapshot.projectId;
+        adopted.sourceSetId=opened.snapshot.activeSourceSetId;
+        adopted.inputRevision=opened.snapshot.hdrInputRevision;
+        adopted.contentHash=image->contentIdentityHash;
+        adopted.rawData=image;
+        inputs.hdrResult=&adopted;
+    }
+    auto sourceUuid=data.value("rawLayerSourceNodeUuid",std::string{});
+    if(savedBracket) {
+        const auto* set=Project::FindSourceSet(opened.snapshot,opened.snapshot.activeSourceSetId);
+        if(set && !set->graphBindingNodeId.empty()) sourceUuid=set->graphBindingNodeId;
+    }
     int background=0;
+    int candidates=0;
+    for(const auto& node:composition.GetNodes()) {
+        if(!sourceUuid.empty() && node.instanceUuid==sourceUuid) { background=node.id; break; }
+        if(savedBracket && node.kind==EditorNodeGraph::NodeKind::MultiFrameHdr &&
+           node.multiFrameHdr.sourceSetId==opened.snapshot.activeSourceSetId) {
+            ++candidates;
+            background=candidates==1 ? node.id : 0;
+        }
+    }
+    EditorNodeGraph::GraphOutputContext layerContext;
+    if(data.contains("rawLayerStack") && background>0) {
+        layerContext.sourceDescriptors[EditorNodeGraph::GraphOutputIdentity(background,"imageOut")]=
+            Project::RawLayerSceneDescriptor(binding.recipe.technical.workingSpace);
+        inputs.outputContextOverrides=&layerContext;
+        if(!composition.IsOutputConnected()) inputs.stageOutputNodeId=background;
+    }
+    auto graph=Project::BuildGraphSnapshot(inputs).snapshot;
     for (auto& node : graph.nodes) {
-        const auto* authored=composition.FindNode(node.nodeId);
-        if (authored && authored->instanceUuid==sourceUuid) background=node.nodeId;
-        if (node.kind==RenderGraphNodeKind::RawDevelopment || node.kind==RenderGraphNodeKind::RawProjectSourceSet ||
-            node.kind==RenderGraphNodeKind::Image || node.kind==RenderGraphNodeKind::RawSource) {
+        if (comparison && image && (node.kind==RenderGraphNodeKind::RawDevelopment || node.kind==RenderGraphNodeKind::RawProjectSourceSet ||
+            node.kind==RenderGraphNodeKind::Image || node.kind==RenderGraphNodeKind::RawSource)) {
             node.kind=RenderGraphNodeKind::RawDevelopment;
             node.rawDevelopment.recipe=binding.recipe;
             node.rawDevelopment.embeddedRawData=image;
@@ -135,8 +159,22 @@ std::filesystem::path Render(const std::filesystem::path& project, std::uint64_t
     if (data.contains("rawLayerStack")) {
         Project::RawLayerStackState stack;
         if (!Project::ReadRawLayersFromPipeline(data,stack,error,true) ||
-            !Project::LowerRawLayerStack(graph,stack,background,revision,error,0,120,30,&composition)) throw std::runtime_error(error);
+            !Project::LowerRawLayerStack(graph,stack,background,opened.snapshot.persistedStorageRevision,error,
+                inputs.frame.frame,inputs.frame.durationFrames,inputs.frame.framesPerSecond,&composition,nullptr,comparison ? nullptr : image.get())) throw std::runtime_error(error);
     }
+    return graph;
+}
+std::filesystem::path Render(const std::filesystem::path& project, std::uint64_t revision,
+    const std::filesystem::path& previews, const std::shared_ptr<const Raw::RawImageData>& comparison) {
+    auto opened=Project::OpenProjectStore(project);
+    if (!opened || revision!=opened.snapshot.persistedStorageRevision) throw std::runtime_error("The project changed during preview.");
+    const auto image=comparison ? comparison : Comparison({});
+    const auto key=NodeMath::Sha256ContentIdentity(opened.snapshot.projectId + "/" + std::to_string(revision) +
+        "/v3/" + project.generic_u8string() + "/" + image->contentIdentity + "/" + std::to_string(previewSize));
+    const auto path=previews/"Preset previews"/(key.substr(7)+".png");
+    if (std::filesystem::is_regular_file(path)) return path;
+    auto graph=PrepareGraph(opened,image,true);
+    std::string error;
     std::vector<unsigned char> pixels;
     int w=0,h=0;
     const bool ok=EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking([&](std::string& failure) {

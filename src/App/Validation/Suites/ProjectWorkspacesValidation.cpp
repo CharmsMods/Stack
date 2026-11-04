@@ -1,3 +1,4 @@
+#include "GraphArithmeticFixture.h"
 #include "App/Validation/ValidationSuites.h"
 #include "App/Validation/Suites/HeaderActionRegistryValidation.h"
 #include "App/Validation/Suites/ProjectBracketingOwnershipValidation.h"
@@ -209,11 +210,11 @@ void ValidateUniformAdjustment(EditorModule& editor) {
     };
     std::cout<<"Uniform check: render manual\n";
     const float manual=sample();
-    editor.AddValueNodeAt(NodeMath::MakeUniformScalar(.25),{200,200});
+    Stack::Validation::AddUniformOperand(editor,.25,{200,200});
     const int producer=graph.GetSelectedNodeId();
     const auto port=EditorNodeGraph::ParameterInputSocketId("layer.brightness");
     RequireWorkspace(editor.SetNodeParameterExposed(adjustment,"layer.brightness",true) &&
-        editor.ConnectGraphSockets(producer,"valueOut",adjustment,port,&error),error);
+        editor.ConnectGraphSockets(producer,"imageOut",adjustment,port,&error),error);
     RequireWorkspace(editor.OpenRawProjectNodeEditor(adjustment) && editor.IsViewMode(),
         "The driven core node did not open in View.");
     const Project::NodeEditTarget target{editor.GetProjectDocumentId(),Project::kProjectGraphId,uuid};
@@ -223,7 +224,7 @@ void ValidateUniformAdjustment(EditorModule& editor) {
     const auto setValue=[&](double value) {
         auto context=editor.GetGraphEditorContext();
         auto edit=GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& candidate) {
-            candidate.FindNode(producer)->value.value=NodeMath::MakeUniformScalar(value);
+            candidate.FindNode(producer)->dataMathSettings.constantA=static_cast<float>(value);
         });
         RequireWorkspace(context.applyEdit(std::move(edit),error),error);
     };
@@ -239,7 +240,7 @@ void ValidateUniformAdjustment(EditorModule& editor) {
     RequireWorkspace(!state.available && !state.reason.empty() &&
         !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
         "An out-of-range uniform value was accepted or shown as editable in View.");
-    RequireWorkspace(editor.RemoveGraphLink(producer,"valueOut",adjustment,port) && std::abs(sample()-manual)<.0002f,
+    RequireWorkspace(editor.RemoveGraphLink(producer,"imageOut",adjustment,port) && std::abs(sample()-manual)<.0002f,
         "Disconnecting did not restore the authored manual parameter.");
     RequireWorkspace(editor.UndoProjectGraphEdit() &&
         std::abs(editor.GetLayers()[graph.FindNode(adjustment)->layerIndex]->Serialize()["brightness"].get<double>()-.125)<.00001 &&
@@ -259,7 +260,7 @@ void ValidateUniformAdjustment(EditorModule& editor) {
         RequireWorkspace(context.applyEdit(std::move(edit),error),error);
     };
     setArithmetic(EditorNodeGraph::DataMathMode::Multiply,2);
-    RequireWorkspace(editor.ConnectGraphSockets(producer,"valueOut",arithmetic,"imageA",&error) &&
+    RequireWorkspace(editor.ConnectGraphSockets(producer,"imageOut",arithmetic,"imageA",&error) &&
         editor.ConnectGraphSockets(arithmetic,"imageOut",adjustment,port,&error),error);
     RequireWorkspace(std::abs(sample()-manual-.375f)<.0002f,
         "The uniform arithmetic chain did not drive the real adjustment.");
@@ -274,7 +275,7 @@ void ValidateUniformAdjustment(EditorModule& editor) {
     RequireWorkspace(editor.RemoveGraphLink(arithmetic,"imageOut",adjustment,port) &&
         std::abs(sample()-manual)<.0002f,"Arithmetic disconnect did not restore the authored parameter.");
     setArithmetic(EditorNodeGraph::DataMathMode::Multiply,1);
-    RequireWorkspace(editor.RemoveGraphLink(producer,"valueOut",arithmetic,"imageA"),
+    RequireWorkspace(editor.RemoveGraphLink(producer,"imageOut",arithmetic,"imageA"),
         "Could not prepare the measured arithmetic input.");
     editor.AddChannelSplitNodeAt({100,300});
     const int split=graph.GetSelectedNodeId();

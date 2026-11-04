@@ -55,7 +55,7 @@ int main() {
     auto channel = straight;
     channel.logicalType = LogicalValueType::Channel;
     Check(!ValidateCompositePngInput(4, &channel, true, error) &&
-        error.find("Image Combine") != std::string::npos,
+        error.find("Combine Channels") != std::string::npos,
         "channel inspection reuses direct PNG type policy");
     Check(!ValidateCompositePngInput(5, nullptr, true, error) &&
         error.find("could not be validated") != std::string::npos,

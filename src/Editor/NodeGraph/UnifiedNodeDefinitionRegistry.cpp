@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/NodeGraph/Definitions/OperationInventory.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include <algorithm>
@@ -28,15 +29,14 @@ const std::vector<LiveNodeDefinition>& GetUnifiedNodeDefinitionRegistry() {
 std::vector<NodeCatalogEntry> BuildRegisteredNodeCatalogEntries() {
     std::vector<NodeCatalogEntry> entries;
     for (const LiveNodeDefinition& definition : GetUnifiedNodeDefinitionRegistry()) {
-        // Keep this definition and its saved hash unchanged. Its painting UI is
-        // retired; captures and saved assets create populated textures instead.
-        if (!definition.visibleInBrowser || definition.kind==NodeKind::CustomMask) continue;
+        if (!definition.visibleInBrowser) continue;
         NodeCatalogEntry entry;
         entry.kind = definition.kind;
         entry.value = definition.variant;
-        entry.label = definition.label;
+        entry.label = EditorNodeGraph::NodeDisplayLabel(definition.kind, definition.label);
         entry.category = definition.category;
         entry.searchAliases = definition.searchAliases;
+        if (entry.label != definition.label) entry.searchAliases += " " + definition.label;
         entry.previewKey = definition.previewKey;
         entry.previewRecipeVersion = definition.previewRecipeVersion;
         entry.previewStrategy = definition.previewStrategy;

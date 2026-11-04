@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/NodeGraph/Definitions/OperationInventory.h"
 
 namespace EditorNodeGraphDefinitions {
@@ -83,12 +84,15 @@ bool ResolveSavedLiveDefinition(
     const std::string& savedId,
     const std::string& savedVersion,
     const std::string& savedHash,
-    std::string* error) {
+    std::string* error, LiveGraphRole role) {
     const LiveNodeDefinition* definition = FindLiveNodeDefinition(node);
     const std::string currentVersion = definition ? VersionString(definition->identity.version) : std::string();
     if (!definition) {
         node.definitionResolved = false;
-        node.definitionResolutionError = "Saved node variant has no registered definition.";
+        node.definitionResolutionError = "No registered graph operation for " + savedId + ".";
+    } else if (!DefinitionSupportsGraphRole(*definition, role)) {
+        node.definitionResolved = false;
+        node.definitionResolutionError = std::string(EditorNodeGraph::NodeDisplayLabel(node.kind, definition->label)) + " is unavailable in this graph.";
     } else if (savedId.empty() || savedVersion.empty() || savedHash.empty()) {
         node.definitionResolved = false;
         node.definitionResolutionError = "Saved node is missing its exact definition ID, version, or content hash.";

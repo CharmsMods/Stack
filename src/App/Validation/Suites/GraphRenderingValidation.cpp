@@ -200,22 +200,6 @@ void ValidateWorker(GLFWwindow* window) {
         lastSeen = frame.generation;
         frame.outputTexture.Reset();
     }
-    snapshot.generation = snapshot.graphRequest.revision = 300;
-    snapshot.outputConnected = false;
-    EditorRenderWorker::PreviewRequest scope;
-    scope.previewNodeId = 5; scope.sourceNodeId = 3;
-    scope.sourceSocketId = "imageOut"; scope.directSourceOutput = true;
-    scope.scopeAnalysis = true; scope.dirtyGeneration = 300;
-    scope.sourcePixels = snapshot.sourcePixels;
-    scope.width = 1024; scope.height = 512;
-    snapshot.previews = {scope};
-    Require(worker.Submit(snapshot), "Scope submission failed");
-    auto scopeResult = WaitResult(worker);
-    Require(scopeResult.previews.size() == 1 && scopeResult.previews[0].success &&
-        scopeResult.previews[0].scopeData && scopeResult.previews[0].width <= 256 &&
-        !scopeResult.previews[0].scopeData->VectorPoints.empty(),
-        "Worker did not prepare scope analysis");
-    snapshot.previews.clear();
     snapshot.generation = snapshot.graphRequest.revision = 301;
     snapshot.outputConnected = true;
     Require(worker.Submit(snapshot), "Pre-switch submission failed");

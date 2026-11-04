@@ -131,12 +131,12 @@ bool EditorModule::TryGetViewportPreviewGeometry(ViewportPreviewGeometry& geomet
         region, texture.width, texture.height};
     return geometry.Valid();
 }
-bool EditorModule::TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height) const {
+bool EditorModule::TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height, bool hdr) const {
     texture = 0; width = height = 0;
     if (!UsesGraphViewportPreview()) {
         if (!m_RawViewportOverviewContent || m_RawViewportOverviewContent != m_RawViewportPresentationContent ||
             !IsViewportTextureSafeForDrawing(m_RawViewportOverviewTexture.texture)) return false;
-        texture = m_RawViewportOverviewTexture.texture;
+        texture = m_RawViewportOverviewTexture.Display(hdr);
         width = m_RawViewportOverviewTexture.width; height = m_RawViewportOverviewTexture.height;
         return true;
     }
@@ -144,7 +144,7 @@ bool EditorModule::TryGetViewportPreviewOverview(unsigned int& texture, int& wid
         if (state.acceptedGeneration != m_ViewportOutputRenderGeneration || !state.overviewContentIdentity ||
             state.overviewContentIdentity != state.acceptedContentIdentity ||
             !IsViewportTextureSafeForDrawing(state.overview.texture)) continue;
-        texture = state.overview.texture; width = state.overview.width; height = state.overview.height;
+        texture = state.overview.Display(hdr); width = state.overview.width; height = state.overview.height;
         return true;
     }
     return false;

@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include <algorithm>
+#include "Hdr/Presentation.h"
 
 Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionOrigin(
     const std::filesystem::path& subject,const std::string& explicitKey,const ImRect& explicitBounds) {
@@ -29,14 +30,18 @@ Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionO
     if(found==m_RawWorkspaceThumbnailTextures.end())return origin;
     const auto& cached=found->second;
     origin.sourceIdentity=cached.sourceIdentity;
-    if(!cached.texture || !cached.width || !cached.height)return origin;
-    auto lease=m_GalleryThumbnailLeases[cached.texture].lock();
+    const bool hdr=cached.hdrTexture && Stack::Hdr::PreviewActiveForCurrentWindow();
+    const auto texture=hdr ? cached.hdrTexture : cached.texture;
+    const int width=hdr ? cached.hdrWidth : cached.width;
+    const int height=hdr ? cached.hdrHeight : cached.height;
+    if(!texture || !width || !height)return origin;
+    auto lease=m_GalleryThumbnailLeases[texture].lock();
     if(!lease) {
         auto allocated=std::make_shared<Stack::Renderer::GalleryThumbnailLease>();
-        allocated->texture=cached.texture;allocated->width=cached.width;allocated->height=cached.height;
-        const std::size_t base=std::size_t(cached.width)*std::size_t(cached.height)*4;
+        allocated->texture=texture;allocated->width=width;allocated->height=height;
+        const std::size_t base=std::size_t(width)*height*(hdr ? 8 : 4);
         allocated->bytes=base+base/3;
-        lease=std::move(allocated);m_GalleryThumbnailLeases[cached.texture]=lease;
+        lease=std::move(allocated);m_GalleryThumbnailLeases[texture]=lease;
     }
     origin.thumbnail=std::move(lease);
     return origin;

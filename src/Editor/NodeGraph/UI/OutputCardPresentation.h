@@ -10,9 +10,9 @@ struct OutputCardPresentation {
     bool projectExportTargetsNode = false;
 };
 
-// The current export command has no endpoint argument. A node card may use it
-// only when that command's project graph has exactly this one completed output.
-// Connection and descriptor presentation remain useful for every output card.
+// Main-pipeline statistics belong to this card only for a sole completed output
+// in the same graph. Projected RAW cards resolve export ownership separately
+// through EditorModule::CanExportGraphOutput.
 inline OutputCardPresentation DescribeOutputCard(
     int nodeId, bool enabled,
     const std::vector<EditorNodeGraph::CompletedChainInfo>& completed,

@@ -19,32 +19,6 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
-bool IsUniformOrResourceSocketType(SocketType type) {
-    switch (type) {
-        case SocketType::Boolean:
-        case SocketType::Integer:
-        case SocketType::Scalar:
-        case SocketType::Vector2:
-        case SocketType::Vector3:
-        case SocketType::Vector4:
-        case SocketType::Matrix3:
-        case SocketType::Matrix4:
-        case SocketType::Curve:
-        case SocketType::Coordinate:
-        case SocketType::Histogram:
-        case SocketType::Statistics:
-        case SocketType::Metadata:
-        case SocketType::Handle:
-        case SocketType::Value:
-            return true;
-        default:
-            return false;
-    }
-}
-
-
-
-
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
     return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
         socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
@@ -456,7 +430,7 @@ ValidationResult Graph::Validate() const {
         std::string normalized;
         std::string reason;
         if (!CanConnectSockets(link.fromNodeId, link.fromSocketId,
-                link.toNodeId, link.toSocketId, &normalized, &reason) || normalized != link.toSocketId) {
+                link.toNodeId, link.toSocketId, &normalized, &reason, true) || normalized != link.toSocketId) {
             result.valid = false;
             // A feedback loop makes downstream socket descriptions unreliable.
             // Report the broken chain once instead of retraversing it for every wire.
@@ -543,7 +517,8 @@ LinkRole Graph::GetLinkRole(const Link& link) const {
 }
 
 bool Graph::IsRenderChainNode(const Node& node) const {
-    return node.kind == NodeKind::Image ||
+    return (node.kind == NodeKind::Value && node.value.value.logicalType == Stack::NodeMath::LogicalValueType::Scalar) ||
+        node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
         node.kind == NodeKind::RawDevelopment ||
         node.kind == NodeKind::RawDecode ||
@@ -575,64 +550,9 @@ bool Graph::IsRenderChainNode(const Node& node) const {
 }
 
 bool Graph::IsRenderLink(const Link& link) const {
-    if (GetLinkRole(link) != LinkRole::Render) {
-        return false;
-    }
-    const Node* from = FindNode(link.fromNodeId);
-    const Node* to = FindNode(link.toNodeId);
-    if (!from || !to) {
-        return false;
-    }
-
-    SocketDefinition fromSocket;
-    SocketDefinition toSocket;
-    if (!FindSocket(link.fromNodeId, link.fromSocketId, &fromSocket) ||
-        !FindSocket(link.toNodeId, link.toSocketId, &toSocket)) {
-        return false;
-    }
-
-    if (to->kind == NodeKind::Output && to->outputSettings.maskOutput &&
-        link.toSocketId == kImageInputSocketId) {
-        return fromSocket.type == SocketType::Mask ||
-            fromSocket.type == SocketType::ScalarField || fromSocket.type == SocketType::Channel ||
-            (fromSocket.type == SocketType::Image && IsScalarSocketStream(link.fromNodeId, link.fromSocketId));
-    }
-
-    if (fromSocket.type == SocketType::Raw && toSocket.type == SocketType::Raw) {
-        return true;
-    }
-    if ((fromSocket.type == SocketType::Channel) &&
-        fromSocket.type == toSocket.type) {
-        return true;
-    }
-    if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask) {
-        return true;
-    }
-    if ((fromSocket.type == SocketType::Mask || fromSocket.type == SocketType::ScalarField) &&
-        (toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField)) {
-        return true;
-    }
-    if (IsUniformOrResourceSocketType(fromSocket.type) &&
-        fromSocket.type == toSocket.type) {
-        return true;
-    }
-    if ((fromSocket.type == SocketType::Mask ||
-         fromSocket.type == SocketType::ScalarField) &&
-        toSocket.type == SocketType::Image) {
-        return true;
-    }
-    if (fromSocket.type == SocketType::Image &&
-        (toSocket.type == SocketType::Mask ||
-         toSocket.type == SocketType::ScalarField) &&
-        IsScalarSocketStream(link.fromNodeId, link.fromSocketId)) {
-        return true;
-    }
-    if (fromSocket.type == SocketType::Image && toSocket.type == SocketType::Image) {
-        return true;
-    }
-    return ConnectionRules::IsChannelProcessingBridge(
-        *this, link.fromNodeId, link.fromSocketId, fromSocket,
-        *to, link.toSocketId, toSocket);
+    // Wire role is structural. Retained incompatible operands still participate
+    // in dependency tracking, replacement, and dirty propagation.
+    return GetLinkRole(link) == LinkRole::Render && FindNode(link.fromNodeId) && FindNode(link.toNodeId);
 }
 
 const Link* Graph::FindInputLink(int nodeId, const std::string& socketId) const {

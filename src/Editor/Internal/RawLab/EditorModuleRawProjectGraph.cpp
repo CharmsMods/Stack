@@ -1,3 +1,5 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
+#include "Editor/Internal/GraphConnectionContext.h"
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/RawLayerTools.h"
@@ -42,6 +44,11 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
     };
     context.queryAvailableNodes = [this,owned,accepts](auto endpoint) {
         if (!owned()) return std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>{};
+        std::optional<EditorNodeGraph::ScopedGraphOutputAnalysis> descriptions;
+        if (endpoint) {
+            PrepareGraphOutputDescriptions();
+            descriptions.emplace(GetNodeGraph(),Stack::Editor::PublishedConnectionContext(*this));
+        }
         auto entries = Stack::GraphModel::QueryAvailableNodes(GetNodeGraph(),endpoint,
             EditorNodeGraphDefinitions::LiveGraphRole::RawLayer,[&](const auto& graph) {
                 std::string error;
@@ -59,7 +66,9 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
         if (!owned()) return false;
         auto graph = GetNodeGraph().CloneForAnalysis();
         std::string reason;
-        const bool valid = graph.TryConnectSockets(from,output,to,input,&reason) && accepts(graph,reason);
+        PrepareGraphOutputDescriptions();
+        const auto published = Stack::Editor::PublishedConnectionContext(*this);
+        const bool valid = EditorNodeGraph::ConnectAuthoredSockets(graph,from,output,to,input,&reason,nullptr,&published) && accepts(graph,reason);
         if (error) *error = std::move(reason);
         return valid;
     };

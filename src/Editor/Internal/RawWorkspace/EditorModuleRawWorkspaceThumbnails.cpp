@@ -42,9 +42,9 @@ bool NeedsCameraGroupingPreview(const Stack::RawWorkspace::SourceRecord& source)
         !source.transientThumbnail.similarityDescriptor.IsValid();
 }
 
-std::size_t RawWorkspaceThumbnailResidentBytes(int width, int height) {
+std::size_t RawWorkspaceThumbnailResidentBytes(int width, int height, unsigned bytesPerPixel = 4) {
     const std::size_t base = static_cast<std::size_t>(std::max(0, width)) *
-        static_cast<std::size_t>(std::max(0, height)) * 4u;
+        static_cast<std::size_t>(std::max(0, height)) * bytesPerPixel;
     // Full mip chains use approximately one third more memory than level 0.
     return base + base / 3u;
 }
@@ -138,6 +138,7 @@ unsigned int EditorModule::GetGalleryOriginalDetail(const Stack::RawWorkspace::S
         ++m_GalleryDetailRequest;
         const auto old = m_RawWorkspaceThumbnailTextures.find(kOriginalDetailKey);
         if (old != m_RawWorkspaceThumbnailTextures.end()) {
+            ReleaseGalleryHdrThumbnail(old->second);
             QueueRawWorkspaceThumbnailTextureDelete(old->second.texture);
             m_RawWorkspaceThumbnailTextures.erase(old);
         }
@@ -161,18 +162,26 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     const Stack::RawWorkspace::SourceRecord& source,
     int* outWidth,
     int* outHeight,
-    bool prioritize, int detailEdge) {
+    bool prioritize, int detailEdge, const std::string* presetCardKey) {
     bool preview=UsesGalleryPresetPreviews();
     if (source.relativePathKey.compare(0,16,"project-overlay:")==0) {
         if (!preview && m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket) {
             const auto card=m_GalleryPresetProjects.find(source.relativePathKey);
             preview=card!=m_GalleryPresetProjects.end() && card->second<m_RawWorkspace.sourceSetProjects.size() &&
                 m_RawWorkspace.sourceSetProjects[card->second].standaloneMaster;
+        } else if (preview && !source.thumbnail.absolutePath.empty()) {
+            const auto card=m_GalleryPresetProjects.find(source.relativePathKey);
+            if (card!=m_GalleryPresetProjects.end() && card->second<m_RawWorkspace.sourceSetProjects.size() &&
+                m_RawWorkspace.sourceSetProjects[card->second].hasSavedBracketingResult) {
+                // A saved merge already has its actual cover. Substituting a
+                // comparison image can disconnect its multi-frame source.
+                preview=false;
+            }
         }
     } else preview=false;
     if (preview) {
         if (const auto* preset=GalleryPresetThumbnail(source.relativePathKey))
-            return GetRawWorkspaceThumbnailTexture(*preset,outWidth,outHeight,prioritize);
+            return GetRawWorkspaceThumbnailTexture(*preset,outWidth,outHeight,prioritize,0,&source.relativePathKey);
         if (outWidth) *outWidth=0;
         if (outHeight) *outHeight=0;
         return 0;
@@ -209,6 +218,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     const auto clearCached = [&]() {
         auto it = m_RawWorkspaceThumbnailTextures.find(cacheKey);
         if (it != m_RawWorkspaceThumbnailTextures.end()) {
+            ReleaseGalleryHdrThumbnail(it->second);
             if (it->second.texture != 0) {
                 QueueRawWorkspaceThumbnailTextureDelete(it->second.texture);
                 it->second.texture = 0;
@@ -249,6 +259,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     if (existing != m_RawWorkspaceThumbnailTextures.end() && !sameSource(existing->second)) {
         // A file replacement or a different project reference cannot inherit
         // an earlier image's pixels or camera properties under the same key.
+        ReleaseGalleryHdrThumbnail(existing->second);
         QueueRawWorkspaceThumbnailTextureDelete(existing->second.texture);
         existing->second = {};
         setSource(existing->second);
@@ -272,6 +283,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             // Keep the currently visible quick texture alive while the final
             // file is decoded and uploaded. The request generation prevents a
             // superseded decode from replacing the newer target.
+            ReleaseGalleryHdrThumbnail(existing->second);
             existing->second.absolutePath = displayPath;
             existing->second.status = displayStatus;
             existing->second.requestGeneration =
@@ -290,13 +302,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                 m_RawWorkspaceThumbnailTextureUploadQueue.end());
         } else if (existing->second.texture != 0) {
             existing->second.status = displayStatus;
-            if (outWidth) {
-                *outWidth = existing->second.width;
-            }
-            if (outHeight) {
-                *outHeight = existing->second.height;
-            }
-            return existing->second.texture;
+            return GalleryThumbnailForDisplay(cacheKey,existing->second,source,presetCardKey,outWidth,outHeight);
         }
     }
 
@@ -733,7 +739,9 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
     TickRawWorkspacePreviewStaging();
     PumpRawWorkspaceThumbnailTextureDeletes();
 
-    if (m_RawWorkspaceThumbnailTextureUploadQueue.empty()) {
+    CancelObsoleteGalleryHdrJob();
+    const bool hdrReady=m_GalleryHdrJob && m_GalleryHdrJob->complete.load(std::memory_order_acquire);
+    if (m_RawWorkspaceThumbnailTextureUploadQueue.empty() && !hdrReady) {
         TrimRawWorkspaceThumbnailTextureCache();
         return;
     }
@@ -863,6 +871,13 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
             break;
         }
     }
+    // Quick tiles keep priority. The second rendition shares their per-frame
+    // transfer count, byte limit and elapsed upload allowance.
+    if (hdrReady && m_RawWorkspaceThumbnailTextureUploadsThisFrame < uploadLimit &&
+        m_RawWorkspaceThumbnailTextureUploadBytesThisFrame + m_GalleryHdrJob->pixels.size()*sizeof(float)
+            <= kRawWorkspaceThumbnailTextureUploadBytesPerFrame &&
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-uploadStarted).count()<uploadBudgetMs)
+        UploadGalleryHdrThumbnail();
     TrimRawWorkspaceThumbnailTextureCache();
 }
 
@@ -954,16 +969,18 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
         std::size_t bytes = 0;
     };
 
+    const auto cachedBytes=[](const RawWorkspaceThumbnailTexture& entry) {
+        return RawWorkspaceThumbnailResidentBytes(entry.width,entry.height) +
+            RawWorkspaceThumbnailResidentBytes(entry.hdrWidth,entry.hdrHeight,8);
+    };
     std::size_t residentCount = m_RetiredGalleryThumbnails.size();
     std::size_t residentBytes = m_RetiredGalleryThumbnailBytes;
     for (const auto& [key, entry] : m_RawWorkspaceThumbnailTextures) {
         if (entry.texture == 0 || entry.width <= 0 || entry.height <= 0) {
             continue;
         }
-        const std::size_t bytes = RawWorkspaceThumbnailResidentBytes(
-            entry.width,
-            entry.height);
-        ++residentCount;
+        const std::size_t bytes = cachedBytes(entry);
+        residentCount += entry.hdrTexture ? 2 : 1;
         residentBytes += bytes;
     }
     if (residentCount <= maxCount && residentBytes <= maxBytes) {
@@ -978,7 +995,7 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
             resident.push_back({
                 &key,
                 entry.lastUseSerial,
-                RawWorkspaceThumbnailResidentBytes(entry.width, entry.height)
+                cachedBytes(entry)
             });
         }
     }
@@ -996,18 +1013,21 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
             entry->second.texture == 0 || entry->second.uploadPending ||
             (m_GalleryThumbnailLeases.count(entry->second.texture) &&
                 !m_GalleryThumbnailLeases.at(entry->second.texture).expired()) ||
+            (m_GalleryThumbnailLeases.count(entry->second.hdrTexture) &&
+                !m_GalleryThumbnailLeases.at(entry->second.hdrTexture).expired()) ||
             (entry->second.lastVisibleFrame >= 0 &&
                 entry->second.lastVisibleFrame >= ImGui::GetFrameCount() - 1) ||
             m_RawWorkspaceGalleryLayoutAnimation.Protects(*candidate.key)) {
             continue;
         }
+        residentCount -= entry->second.hdrTexture ? 2 : 1;
+        ReleaseGalleryHdrThumbnail(entry->second);
         QueueRawWorkspaceThumbnailTextureDelete(entry->second.texture);
         entry->second.texture = 0;
         m_RawWorkspaceThumbnailTextures.erase(entry);
         residentBytes = residentBytes > candidate.bytes
             ? residentBytes - candidate.bytes
             : 0;
-        --residentCount;
     }
     // Protected visible/leased entries cannot be reclaimed now. Retry on the
     // next upload or lease retirement, instead of sorting the map every frame.
@@ -1015,6 +1035,7 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
 }
 
 void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {
+    if(m_GalleryHdrJob) m_GalleryHdrJob->canceled.store(true);
     m_RawWorkspaceGalleryLayoutAnimation.Reset();
     m_RawWorkspaceThumbnailTextureResetGeneration.fetch_add(1, std::memory_order_relaxed);
     ++m_RawWorkspaceThumbnailTextureRequestGeneration;
@@ -1038,6 +1059,7 @@ void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {
     }
     for (auto& [key, entry] : m_RawWorkspaceThumbnailTextures) {
         (void)key;
+        ReleaseGalleryHdrThumbnail(entry);
         if (entry.texture != 0) {
             QueueRawWorkspaceThumbnailTextureDelete(entry.texture);
             entry.texture = 0;

@@ -130,6 +130,49 @@
       ]
     },
     {
+      "id": "ultrahdr",
+      "name": "Ultra HDR reference codec",
+      "version": "1.4.0, commit d52a0d13814ca399fc8a07e23de1d2c63f0e8404",
+      "homepage": "https://github.com/google/libultrahdr",
+      "license": "Apache-2.0 and BSD-3-Clause",
+      "copyright": "Android Open Source Project, Google and modp_b64 authors. This product includes Gain Map technology under license by Adobe.",
+      "scope": "desktop",
+      "presence": "Stack.exe",
+      "licenseFiles": [
+        "UltraHDR-Apache-2.0.txt",
+        "ImageIO-Apache-2.0.txt",
+        "modp_b64-BSD.txt",
+        "Adobe-Gain-Map-Notice.txt"
+      ]
+    },
+    {
+      "id": "jpeg-turbo",
+      "name": "libjpeg-turbo",
+      "version": "3.1.2 (OpenCV source distribution)",
+      "homepage": "https://libjpeg-turbo.org/",
+      "license": "IJG, BSD-3-Clause and Zlib",
+      "copyright": "This software is based in part on the work of the Independent JPEG Group.",
+      "scope": "desktop",
+      "presence": "Stack.exe",
+      "licenseFiles": [
+        "libjpeg-turbo-LICENSE.txt",
+        "libjpeg-turbo-README-IJG.txt"
+      ]
+    },
+    {
+      "id": "lcms",
+      "name": "Little CMS",
+      "version": "2.20, commit 7717fce0d85447ef3b2df0cca2e99207c15eeecd",
+      "homepage": "https://littlecms.com/",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2023 Marti Maria Saguer",
+      "scope": "desktop",
+      "presence": "Stack.exe",
+      "licenseFiles": [
+        "LittleCMS-MIT.txt"
+      ]
+    },
+    {
       "id": "opencv",
       "name": "OpenCV CPU panorama modules",
       "version": "4.13.0, commit 2e1f8da65e4f9fa1a98423e6ac223187438a4db8",

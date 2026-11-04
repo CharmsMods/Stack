@@ -41,14 +41,6 @@ constexpr LayerParameterSpec kLayerParameters[] = {
     { LayerType::TiltShiftBlur, "layer.tiltShiftFocusX", "centerX", "Focus X", AnimatableValueType::Float, 0.5f, 0.0f, 1.0f },
     { LayerType::TiltShiftBlur, "layer.tiltShiftFocusY", "centerY", "Focus Y", AnimatableValueType::Float, 0.5f, 0.0f, 1.0f },
     { LayerType::Pixelation, "layer.corruptionScale", "resScale", "Quality Scale", AnimatableValueType::Float, 50.0f, 1.0f, 100.0f },
-    { LayerType::NonLocalMeansDenoise, "layer.denoiseSearchRadius", "searchRadius", "Search Radius", AnimatableValueType::Integer, 5.0f, 1.0f, 15.0f },
-    { LayerType::NonLocalMeansDenoise, "layer.denoisePatchRadius", "patchRadius", "Patch Radius", AnimatableValueType::Integer, 2.0f, 1.0f, 5.0f },
-    { LayerType::NonLocalMeansDenoise, "layer.denoiseFilterStrength", "h", "Filter Strength", AnimatableValueType::Float, 0.5f, 0.01f, 2.0f },
-    { LayerType::NonLocalMeansDenoise, "layer.denoiseBlendStrength", "strength", "Blend Strength", AnimatableValueType::Float, 100.0f, 0.0f, 100.0f },
-    { LayerType::MedianDenoise, "layer.denoiseSearchRadius", "searchRadius", "Search Radius", AnimatableValueType::Integer, 5.0f, 1.0f, 15.0f },
-    { LayerType::MedianDenoise, "layer.denoiseBlendStrength", "strength", "Blend Strength", AnimatableValueType::Float, 100.0f, 0.0f, 100.0f },
-    { LayerType::MeanDenoise, "layer.denoiseSearchRadius", "searchRadius", "Search Radius", AnimatableValueType::Integer, 5.0f, 1.0f, 15.0f },
-    { LayerType::MeanDenoise, "layer.denoiseBlendStrength", "strength", "Blend Strength", AnimatableValueType::Float, 100.0f, 0.0f, 100.0f },
     { LayerType::Crop, "layer.cropLeft", "cropLeft", "Crop Left", AnimatableValueType::Float, 0.0f, 0.0f, 50.0f },
     { LayerType::Crop, "layer.cropRight", "cropRight", "Crop Right", AnimatableValueType::Float, 0.0f, 0.0f, 50.0f },
     { LayerType::Crop, "layer.cropTop", "cropTop", "Crop Top", AnimatableValueType::Float, 0.0f, 0.0f, 50.0f },
@@ -100,7 +92,6 @@ constexpr LayerParameterSpec kLayerParameters[] = {
     { LayerType::Noise, "layer.grainSeed", "grainSeed", "Grain Seed", AnimatableValueType::Integer, 125775.0f, 0.0f, 16777215.0f },
     { LayerType::Noise, "layer.grainFrame", "grainFrame", "Grain Frame", AnimatableValueType::Integer, 0.0f, 0.0f, 1000000.0f },
     { LayerType::Noise, "layer.grainCompensateMean", "grainCompensateMean", "Compensate Density Mean", AnimatableValueType::Boolean, 1.0f, 0.0f, 1.0f },
-    { LayerType::ColorGrade, "layer.colorGradeStrength", "strength", "Strength", AnimatableValueType::Float, 100.0f, 0.0f, 100.0f },
     { LayerType::Vignette, "layer.vignetteIntensity", "intensity", "Intensity", AnimatableValueType::Float, 0.3f, 0.0f, 1.0f },
     { LayerType::Vignette, "layer.vignetteRadius", "radius", "Radius", AnimatableValueType::Float, 0.75f, 0.0f, 1.5f },
     { LayerType::Vignette, "layer.vignetteSoftness", "softness", "Softness", AnimatableValueType::Float, 0.45f, 0.0f, 1.0f },
@@ -112,8 +103,6 @@ constexpr LayerParameterSpec kLayerParameters[] = {
     { LayerType::ChromaticAberration, "layer.chromaticFalloff", "falloff", "Falloff", AnimatableValueType::Float, 50.0f, 0.0f, 100.0f },
     { LayerType::ChromaticAberration, "layer.chromaticCenterX", "center", "Center X", AnimatableValueType::Float, 0.5f, 0.0f, 1.0f, 0 },
     { LayerType::ChromaticAberration, "layer.chromaticCenterY", "center", "Center Y", AnimatableValueType::Float, 0.5f, 0.0f, 1.0f, 1 },
-    { LayerType::LensDistortion, "layer.lensDistortionAmount", "amount", "Distortion Amount", AnimatableValueType::Float, 0.0f, -100.0f, 100.0f },
-    { LayerType::LensDistortion, "layer.lensDistortionScale", "scale", "Scale Base", AnimatableValueType::Float, 100.0f, 50.0f, 150.0f },
     { LayerType::GlareRays, "layer.glareRaysIntensity", "intensity", "Intensity", AnimatableValueType::Float, 50.0f, 0.0f, 100.0f },
     { LayerType::GlareRays, "layer.glareRaysCount", "rays", "Ray Count", AnimatableValueType::Float, 4.0f, 2.0f, 12.0f },
     { LayerType::GlareRays, "layer.glareRaysLength", "length", "Ray Length", AnimatableValueType::Float, 50.0f, 1.0f, 100.0f },
@@ -293,6 +282,24 @@ std::vector<AnimatableParameterDefinition> CollectAnimatableParametersForNode(
                 definition.currentValue = definition.hasCurrentValue ? node.rawOperation.parameters.at(path).get<float>() : definition.defaultValue;
                 parameters.push_back(std::move(definition));
             }
+        return parameters;
+    }
+    if ((node.kind==EditorNodeGraph::NodeKind::Value && node.value.value.logicalType==Stack::NodeMath::LogicalValueType::Scalar) ||
+        (node.kind==EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode))) {
+        const auto add=[&](const char* id,const char* label,float value,float fallback) {
+            AnimatableParameterDefinition definition;
+            definition.target={node.id,id,graphId,node.instanceUuid};
+            definition.nodeLabel=ResolveNodeLabel(node);definition.parameterLabel=label;definition.storageKey=id;
+            definition.currentValue=value;definition.hasCurrentValue=true;definition.defaultValue=fallback;
+            definition.minValue=-65504;definition.maxValue=65504;
+            parameters.push_back(std::move(definition));
+        };
+        if (node.kind==EditorNodeGraph::NodeKind::Value) {
+            if (const auto* value=std::get_if<double>(&node.value.value.payload)) add("value","Number",float(*value),0);
+        } else {
+            add("constant-a","A",node.dataMathSettings.constantA,0);
+            add("constant-b","B",node.dataMathSettings.constantB,Stack::NodeMath::Primitive(node.dataMathMode)->defaultB);
+        }
         return parameters;
     }
     if (node.kind != EditorNodeGraph::NodeKind::Layer) return parameters;

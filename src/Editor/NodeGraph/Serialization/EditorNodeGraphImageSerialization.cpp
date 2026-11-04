@@ -1,4 +1,5 @@
 #include "EditorNodeGraphImageSerialization.h"
+#include "DisplayImageImport.h"
 
 #include "Library/LibraryManager.h"
 #include "ThirdParty/stb_image.h"
@@ -143,12 +144,32 @@ void BuildImagePayloadPreview(
     }
 }
 
+bool RotateManagedImagePayload(ImagePayload& p,int turns) {
+    if(!p.hdrPixels || turns<1 || turns>3) return false;
+    int w=0,h=0;
+    auto master=Stack::PixelBuffer::RotateInterleavedQuarterTurnsClockwise(*p.hdrPixels,p.width,p.height,4,turns,w,h);
+    auto base=Stack::PixelBuffer::RotateInterleavedQuarterTurnsClockwise(p.pixels,p.width,p.height,4,turns,w,h);
+    if(master.empty() || base.empty()) return false;
+    p.hdrPixels=std::make_shared<const std::vector<float>>(std::move(master));
+    p.pixels=std::move(base);
+    p.width=w; p.height=h;
+    p.hdrStorageQuarterTurns=(p.hdrStorageQuarterTurns+turns)%4;
+    auto& spatial=p.sourceColorMetadata.descriptor.spatial.value;
+    spatial.nativeWidth=w; spatial.nativeHeight=h; spatial.fullWindow=spatial.dataWindow={0,0,w,h};
+    InvalidateImagePayloadRuntime(p);
+    return true;
+}
+
 bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& payload) {
     if (pngBytes.empty() ||
         pngBytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return false;
     }
 
+#ifdef STACK_HDR_FILE_INPUT
+    try { if (DecodeManagedImagePayload(pngBytes,payload)) return true; }
+    catch (const std::exception&) { return false; }
+#endif
     // The editor stores image-node pixels in the same bottom-left-oriented layout
     // used by the render pipeline's GL uploads. Keep saved image payloads aligned
     // with fresh imports so reopening a project cannot flip the source image.
@@ -183,6 +204,9 @@ bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, Imag
         static_assert(std::is_nothrow_move_assignable_v<Stack::NodeMath::SourceColorMetadata>);
         payload.pngBytes.swap(encodedBytes);
         payload.pixels.swap(decodedPixels);
+        payload.hdrPixels.reset();
+        payload.hdrFingerprint=0;
+        payload.hdrStorageQuarterTurns=0;
         payload.sourceColorMetadata = std::move(metadata);
         payload.width = width;
         payload.height = height;

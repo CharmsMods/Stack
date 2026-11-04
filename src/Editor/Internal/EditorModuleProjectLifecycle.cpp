@@ -362,12 +362,6 @@ void EditorModule::ResetToBlankProject() {
     m_PreviewPixelCache.clear();
     m_PreviewRequestedGenerations.clear();
     m_PreviewCompletedGenerations.clear();
-    m_HdrMergeRequestedGenerations.clear();
-    m_HdrMergeCompletedGenerations.clear();
-    m_HdrMergeFailureMessages.clear();
-    m_HdrMergeRenderingNodeIds.clear();
-    m_HdrMergeSubmittedNodesByGeneration.clear();
-    m_ScopeDisplayedRevisions.clear();
     ResetNodeBrowserThumbnailState();
     ResetRenderSubmissionState();
     ClearViewportOutputTiles();
@@ -415,11 +409,6 @@ void EditorModule::ResetRenderSubmissionState() {
     m_RenderDirty = true;
     m_LastCompletedRenderGeneration = 0;
     m_LastSubmittedRenderRevision = 0;
-    m_HdrMergeRequestedGenerations.clear();
-    m_HdrMergeCompletedGenerations.clear();
-    m_HdrMergeFailureMessages.clear();
-    m_HdrMergeRenderingNodeIds.clear();
-    m_HdrMergeSubmittedNodesByGeneration.clear();
     m_Viewport.ResetSinglePreviewState();
     ClearViewportOutputTiles();
     m_HoverFade = 0.0f;

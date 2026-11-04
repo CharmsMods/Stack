@@ -49,6 +49,14 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end())
             return finishFailure(unavailable->second);
         const RenderGraphNode& node = *nodeIt->second;
+        if (node.kind == RenderGraphNodeKind::Output && IsUniformRenderSocket(executionContext, nodeId, socketId)) {
+            const auto* input = findInputLink(nodeId, EditorNodeGraph::kImageInputSocketId);
+            if (!input || !evalScalar(input->fromNodeId, input->fromSocketId, value))
+                return finishFailure(input ? pipeline.m_LastGraphExecutionStats.lastReductionFailure : "The published Number has no source.");
+            scalarCache[key] = value;
+            visitingScalars.erase(key);
+            return provenanceScope.Return(true);
+        }
         if (node.kind == RenderGraphNodeKind::Value && socketId == EditorNodeGraph::kValueOutputSocketId) {
             if (!std::isfinite(node.scalarValue)) return finishFailure("The connected value is not finite.");
             value = node.scalarValue;
@@ -60,6 +68,16 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         if (node.kind == RenderGraphNodeKind::DataMath &&
             node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
             socketId == EditorNodeGraph::kImageOutputSocketId) {
+            const auto fingerprint=fingerprintScalar(nodeId,socketId);
+            const auto cached=pipeline.m_GraphScalarCache.find(key);
+            if (fingerprint!=0 && cached!=pipeline.m_GraphScalarCache.end() && cached->second.fingerprint==fingerprint) {
+                value=cached->second.value;
+                denoiseProvenance.pending=cached->second.denoisePending;
+                cached->second.lastUseSerial=++pipeline.m_GraphResourceUseSerial;
+                scalarCache[key]=value;
+                visitingScalars.erase(key);
+                return provenanceScope.Return(true);
+            }
             std::vector<double> inputs;
             const bool average = node.dataMathMode == RenderDataMathMode::Average;
             const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
@@ -77,6 +95,11 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
             if (!error.empty()) {
                 pipeline.m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
                 pipeline.m_LastGraphExecutionStats.lastReductionFailure = error;
+            }
+            if (fingerprint!=0 && !denoiseProvenance.pending) {
+                auto& entry=pipeline.m_GraphScalarCache[key];
+                entry.fingerprint=fingerprint;entry.value=value;entry.sampleCount=0;
+                entry.denoisePending=false;entry.lastUseSerial=++pipeline.m_GraphResourceUseSerial;
             }
             scalarCache[key] = value;
             visitingScalars.erase(key);

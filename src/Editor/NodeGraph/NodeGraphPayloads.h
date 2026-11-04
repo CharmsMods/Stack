@@ -58,6 +58,10 @@ struct ImagePayload {
     // Complete preview-content identity, computed once after pixel mutation.
     // Metadata-only history/analysis clones deliberately start without it.
     mutable std::size_t previewContentFingerprint = 0;
+    // Finished color, straight RGBA in GL row order. Byte pixels supply its SDR rendition.
+    std::shared_ptr<const std::vector<float>> hdrPixels;
+    std::size_t hdrFingerprint = 0;
+    int hdrStorageQuarterTurns = 0;
 };
 
 inline void InvalidateImagePayloadRuntime(ImagePayload& payload) {

@@ -136,7 +136,7 @@ bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& r
             DecodeGraphBytes(graph);
             if (!EditorNodeGraph::IsCurrentGraphPayload(graph)) throw std::runtime_error("Unsupported layer graph version.");
             EditorNodeGraph::DeserializeGraphPayload(graph, layer.graph,
-                static_cast<int>(EditorNodeGraph::ExtractLayerArray(graph).size()));
+                static_cast<int>(EditorNodeGraph::ExtractLayerArray(graph).size()), EditorNodeGraphDefinitions::LiveGraphRole::RawLayer);
             const auto& saved = graph.at("nodeGraph");
             if (saved.at("nodes").size() != layer.graph.GetNodes().size() || saved.at("links").size() != layer.graph.GetLinks().size())
                 throw std::runtime_error("A layer graph could not be restored without dropping authored data.");

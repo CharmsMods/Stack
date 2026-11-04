@@ -1,6 +1,7 @@
 #include "Editor/Internal/RawLab/RawLabColorCloudRenderer.h"
 
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 
 #include <GLFW/glfw3.h>
 
@@ -113,7 +114,7 @@ void main() {
     std::string shaderError;
     const unsigned int program = GLHelpers::CreateShaderProgram(
         vertexShader,
-        fragmentShader,
+        Stack::Hdr::Ui::Fragment(fragmentShader,"fragColor").c_str(),
         &shaderError);
     if (program == 0) {
         return false;
@@ -202,6 +203,7 @@ void DrawRawLabColorCloudCallback(
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_PROGRAM_POINT_SIZE);
     glUseProgram(state->colorWarpCloudProgram);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniform2f(
         glGetUniformLocation(state->colorWarpCloudProgram, "uViewCenter"),
         state->colorWarpCloudViewCenterA,

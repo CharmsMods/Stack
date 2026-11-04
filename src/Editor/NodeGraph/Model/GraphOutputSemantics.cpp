@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
+#include "Editor/NodeGraph/ArithmeticWires.h"
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
@@ -129,8 +130,40 @@ public:
                 });
                 auto sockets = OutputSockets(graph, *node);
                 const auto socket = std::find_if(sockets.begin(), sockets.end(), [&](const auto& value) { return value.id == frame.socketId; });
-                if (socket != sockets.end())
-                    outputs[key] = OutputRules::Describe(*node, frame.socketId, inputs, socket->logicalType, context);
+                if (socket != sockets.end()) {
+                    auto result = OutputRules::Describe(*node, frame.socketId, inputs, socket->logicalType, context);
+                    result.usesArithmeticContract = IsFoundationNode(*node);
+                    for (const auto& [port, value] : inputs) {
+                        result.usesArithmeticContract |= value->usesArithmeticContract;
+                        const auto* wire = graph.FindAnyInputLink(node->id,port);
+                        const auto* from = wire ? graph.FindNode(wire->fromNodeId) : nullptr;
+                        if (!from) continue;
+                        const auto inherit = [&](const Diagnostic& issue) {
+                            result.invalidWire=true;
+                            if (std::none_of(result.diagnostics.begin(),result.diagnostics.end(),[&](const auto& d){
+                                return d.semanticFingerprint==issue.semanticFingerprint;
+                            })) result.diagnostics.push_back(issue);
+                        };
+                        for (const auto& issue : value->diagnostics)
+                            if (issue.ruleId=="graph.wire") inherit(issue);
+                        if (value->invalidWire || (!value->usesArithmeticContract && !IsFoundationNode(*node) && !IsLayoutSensitivePort(*node, port))) continue;
+                        const auto other = inputs.find(port==kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId);
+                        const auto reason = FoundationWireError(graph,*node,port,value->descriptor,
+                            other == inputs.end() ? nullptr : &other->second->descriptor);
+                        if (reason.empty()) continue;
+                        Diagnostic issue;
+                        issue.ruleId="graph.wire"; issue.stage=DiagnosticStage::Semantic;
+                        issue.severity=DiagnosticSeverity::HardError;
+                        issue.authoredSourceIdentity=from->instanceUuid;
+                        issue.affectedIdentity=GraphOutputIdentity(node->id,port);
+                        issue.message=node->title+" / "+port+": "+reason;
+                        issue.semanticFingerprint=issue.affectedIdentity+":"+reason;
+                        auto& endpoint=outputs[issue.affectedIdentity];
+                        endpoint.diagnostics={issue};endpoint.invalidWire=true;
+                        inherit(issue);
+                    }
+                    outputs[key]=std::move(result);
+                }
                 visiting.erase(key);
                 complete.insert(key);
                 pending.pop_back();

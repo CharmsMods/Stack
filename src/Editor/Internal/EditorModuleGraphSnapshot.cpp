@@ -183,6 +183,11 @@ bool EditorModule::TryGetGraphOutputSemanticDescriptor(
 
 const EditorNodeGraph::GraphOutputDescription* EditorModule::GetGraphOutputDescription(
     int nodeId, const std::string& socketId) const {
+    PrepareGraphOutputDescriptions();
+    return FindPublishedGraphDescription(nodeId,socketId);
+}
+
+void EditorModule::PrepareGraphOutputDescriptions() const {
     // Match the actual RAW render request. A generic stage request does not
     // publish composition semantics; this explicit RAW request may publish only
     // after complete layer lowering at the technical background boundary.
@@ -193,6 +198,10 @@ const EditorNodeGraph::GraphOutputDescription* EditorModule::GetGraphOutputDescr
     // owner's current complete render boundary. Publish failures too, replacing
     // old descriptions with the current empty result instead of stale feedback.
     PublishCompiledGraphSemantics(compiled);
+}
+
+const EditorNodeGraph::GraphOutputDescription* EditorModule::FindPublishedGraphDescription(
+    int nodeId,const std::string& socketId) const {
     if (IsEditingRawLayerMaskGraph()) {
         std::string key;
         if (m_RawLayerMaskWorkspace->projectCanvas) {
@@ -200,6 +209,8 @@ const EditorNodeGraph::GraphOutputDescription* EditorModule::GetGraphOutputDescr
             if (!selected) return nullptr;
             if(nodeId==m_RawLayerMaskWorkspace->projectCanvas->preparedSource)
                 key="raw/$raw-source/technical/"+socketId;
+            else if (nodeId == m_RawLayerMaskWorkspace->projectCanvas->output)
+                key = "raw/$raw-output/" + socketId;
             else {
                 if(selected->rawLayerOwnerId.empty())return nullptr;
                 key = "raw/" + selected->rawLayerOwnerId + "/" + selected->instanceUuid + "/" + socketId;
@@ -260,8 +271,10 @@ bool EditorModule::TryGetGraphLinkWireReadoutInput(
         }
     }
 
-    if (const auto* output = GetGraphOutputDescription(link.fromNodeId, link.fromSocketId)) {
+    if (const auto* output = FindPublishedGraphDescription(link.fromNodeId, link.fromSocketId)) {
         input.sourceDiagnostics = output->diagnostics;
     }
+    if (const auto* destination=FindPublishedGraphDescription(link.toNodeId,link.toSocketId))
+        input.sourceDiagnostics.insert(input.sourceDiagnostics.end(),destination->diagnostics.begin(),destination->diagnostics.end());
     return true;
 }

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/Serialization/DisplayImageImport.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/GraphEditorCommands.h"
 
@@ -33,38 +34,8 @@ void SetImportStatusNoThrow(
     }
 }
 
-struct DecodedImageData {
-    std::vector<unsigned char> pixels;
-    int width = 0;
-    int height = 0;
-    int channels = 4;
-    int originalChannels = 4;
-};
-
-bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
-    outImage = {};
-
-    stbi_set_flip_vertically_on_load_thread(1);
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
-    if (!pixels) {
-        return false;
-    }
-
-    outImage.width = width;
-    outImage.height = height;
-    outImage.channels = 4;
-    outImage.originalChannels = channels;
-    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
-        pixels, width, height, 4, outImage.pixels);
-    stbi_image_free(pixels);
-    if (!copied) {
-        outImage = {};
-    }
-    return copied;
-}
+using DecodedImageData = EditorNodeGraph::ImagePayload;
+using EditorNodeGraph::ReadImageFilePayload;
 
 bool ReadImageInfoFromFile(const std::string& path, int& outWidth, int& outHeight, int& outChannels) {
     outWidth = 0;
@@ -145,30 +116,21 @@ EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
     const std::string& path,
     DecodedImageData decoded,
     bool includeStoragePng = true) {
-    EditorNodeGraph::ImagePayload payload;
+    EditorNodeGraph::ImagePayload payload=std::move(decoded);
     payload.label = FileNameFromPath(path);
-    payload.sourcePath = path;
-    payload.width = decoded.width;
-    payload.height = decoded.height;
-    payload.channels = decoded.channels;
-    payload.originalChannels = decoded.originalChannels;
-    payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
-        path, decoded.width, decoded.height, decoded.originalChannels);
     EditorNodeGraph::BuildImagePayloadPreview(
-        decoded.pixels,
-        decoded.width,
-        decoded.height,
-        decoded.channels,
+        payload.pixels,
+        payload.width,
+        payload.height,
+        payload.channels,
         payload.previewPixels,
         payload.previewWidth,
         payload.previewHeight,
         payload.previewChannels);
-    if (includeStoragePng) {
-        payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
+    if (!payload.hdrPixels) {
+        if (includeStoragePng) payload.pngBytes = EncodePngBytesForImageStorage(payload.pixels,payload.width,payload.height,payload.channels);
+        else payload.pngBytes.clear();
     }
-    payload.pixels = std::move(decoded.pixels);
-    payload.pngStorage.Invalidate();
-    payload.previewStorage.Invalidate();
     return payload;
 }
 
@@ -204,7 +166,7 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
             return false;
         }
         DecodedImageData decoded;
-        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) return false;
+        if (!ReadImageFilePayload(path, decoded) || decoded.pixels.empty()) return false;
         auto payload=BuildImagePayloadFromDecoded(path,std::move(decoded));
         return Stack::Editor::AddGraphNode(*this,[&](auto& graph) {
             return graph.AddImageNode(std::move(payload),graphPosition);
@@ -219,7 +181,7 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
         return AddGraphRawChainFromFile(path, graphPosition);
     }
     DecodedImageData decoded;
-    if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
+    if (!ReadImageFilePayload(path, decoded) || decoded.pixels.empty()) {
         return false;
     }
 
@@ -305,7 +267,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         const double queueMs = MillisecondsSince(queuedAt);
         const auto decodeBegin = std::chrono::steady_clock::now();
         DecodedImageData decoded;
-        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
+        if (!ReadImageFilePayload(path, decoded) || decoded.pixels.empty()) {
             postImportFailure();
             return;
         }
@@ -323,7 +285,9 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         // pixels are handed to the main thread immediately. This moves the old
         // flip-and-encode work off the interaction path.
         const auto storageCopyBegin = std::chrono::steady_clock::now();
-        std::vector<unsigned char> storagePixels = payload.pixels;
+        std::vector<unsigned char> originalBytes = std::move(payload.pngBytes);
+        std::vector<unsigned char> storagePixels;
+        if (originalBytes.empty()) storagePixels = payload.pixels;
         const double storageCopyMs = MillisecondsSince(storageCopyBegin);
         const int width = payload.width;
         const int height = payload.height;
@@ -367,7 +331,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
 
         const auto embedBegin = std::chrono::steady_clock::now();
         std::vector<unsigned char> pngBytes =
-            EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
+            originalBytes.empty() ? EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels) : std::move(originalBytes);
         const double embedMs = MillisecondsSince(embedBegin);
         ProjectTasks().PostToMain([
             this,
@@ -548,7 +512,7 @@ bool EditorModule::StartGraphImageChainImport(
                 continue;
             }
             DecodedImageData decoded;
-            if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
+            if (!ReadImageFilePayload(path, decoded) || decoded.pixels.empty()) {
                 continue;
             }
             // Keep PNG embedding on the worker. The former main-thread payload
@@ -757,32 +721,37 @@ bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
         return normalizedTurns == 0;
     }
 
-    int rotatedWidth = node->image.width;
-    int rotatedHeight = node->image.height;
-    std::vector<unsigned char> rotatedPixels = RotateBottomLeftImagePixels(
-        node->image.pixels,
-        node->image.width,
-        node->image.height,
-        node->image.channels,
-        normalizedTurns,
-        rotatedWidth,
-        rotatedHeight);
-    if (rotatedPixels.empty()) {
-        return false;
-    }
+    if (node->image.hdrPixels) {
+        // Retain the encoded original, including its gain map and color profile.
+        if (!EditorNodeGraph::RotateManagedImagePayload(node->image,normalizedTurns)) return false;
+    } else {
+        int rotatedWidth = node->image.width;
+        int rotatedHeight = node->image.height;
+        std::vector<unsigned char> rotatedPixels = RotateBottomLeftImagePixels(
+            node->image.pixels,
+            node->image.width,
+            node->image.height,
+            node->image.channels,
+            normalizedTurns,
+            rotatedWidth,
+            rotatedHeight);
+        if (rotatedPixels.empty()) {
+            return false;
+        }
 
-    node->image.width = rotatedWidth;
-    node->image.height = rotatedHeight;
-    node->image.pixels = std::move(rotatedPixels);
-    // PNG compression can be expensive for large slices; rebuild storage bytes lazily on save/export.
-    node->image.pngStorage.Invalidate();
-    node->image.previewStorage.Invalidate();
-    node->image.pngBytes.clear();
-    node->image.managedAssetId.clear();
-    node->image.projectAssetPath.clear();
-    node->image.isEmbedding = false;
-    node->image.embeddingRequestId = 0;
-    EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
+        node->image.width = rotatedWidth;
+        node->image.height = rotatedHeight;
+        node->image.pixels = std::move(rotatedPixels);
+        // PNG compression can be expensive for large slices; rebuild storage bytes lazily on save/export.
+        node->image.pngStorage.Invalidate();
+        node->image.previewStorage.Invalidate();
+        node->image.pngBytes.clear();
+        node->image.managedAssetId.clear();
+        node->image.projectAssetPath.clear();
+        node->image.isEmbedding = false;
+        node->image.embeddingRequestId = 0;
+        EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
+    }
     EditorNodeGraph::BuildImagePayloadPreview(
         node->image.pixels,
         node->image.width,

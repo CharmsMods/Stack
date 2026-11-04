@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
+#include <atomic>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -30,7 +31,13 @@ struct EditorModule {
         std::unordered_set<std::string> protectedKeys;
         bool Protects(const std::string& key)const{return protectedKeys.count(key)!=0;}
     } m_RawWorkspaceGalleryLayoutAnimation;
-    std::vector<unsigned> deleted;
+    std::vector<unsigned> deleted, m_RetiredGalleryThumbnails;
+    std::size_t m_RetiredGalleryThumbnailBytes=0;
+    std::unordered_map<unsigned,std::weak_ptr<int>> m_GalleryThumbnailLeases;
+    void ReleaseGalleryHdrThumbnail(RawWorkspaceThumbnailTexture& entry) {
+        if(entry.hdrTexture) QueueRawWorkspaceThumbnailTextureDelete(entry.hdrTexture);
+        entry.hdrTexture=0;
+    }
     void QueueRawWorkspaceThumbnailTextureDelete(unsigned texture){deleted.push_back(texture);}
     void TrimRawWorkspaceThumbnailTextureCache();
 };
@@ -54,11 +61,11 @@ int main() {
     auto visible=Owner(true),untouched=Owner();
     for(int frame:{100,101}) {
         ImGui::frame=frame;
-        passed=Check(Trim(visible)==1,"Protected overbudget trim should allocate only its candidate vector")&&passed;
+        passed=Check(Trim(visible)==(frame==100 ? 1 : 0),"Protected overbudget trim should allocate only its candidate vector")&&passed;
         passed=Check(visible.deleted.empty()&&visible.m_RawWorkspaceThumbnailTextures.size()==300&&
-            visible.m_RawWorkspaceThumbnailTextureTrimNeeded,"Visible retention changed")&&passed;
+            !visible.m_RawWorkspaceThumbnailTextureTrimNeeded,"Visible retention changed")&&passed;
     }
-    ImGui::frame=102;Trim(visible);
+    ImGui::frame=102;visible.m_RawWorkspaceThumbnailTextureTrimNeeded=true;Trim(visible);
     passed=Check(visible.deleted.size()==12&&!visible.m_RawWorkspaceThumbnailTextureTrimNeeded,"Released visible entries did not trim to budget")&&passed;
     for(unsigned i=0;i<12&&i<visible.deleted.size();++i)passed=Check(visible.deleted[i]==i+1,"LRU eviction order changed")&&passed;
     for(int i=0;i<300;++i)passed=Check(visible.m_RawWorkspaceThumbnailTextures.count(Key(i))==(i>=12?1u:0u),"Wrong survivor identity")&&passed;
@@ -73,9 +80,21 @@ int main() {
     for(unsigned i=0;i<12&&i<partial.deleted.size();++i)passed=Check(partial.deleted[i]==i+21,"Protected/uploading entry was evicted")&&passed;
     auto moving=Owner();
     for(int i=0;i<300;++i)moving.m_RawWorkspaceGalleryLayoutAnimation.protectedKeys.insert(Key(i));
-    passed=Check(Trim(moving)==1&&Trim(moving)==1&&moving.deleted.empty(),"Motion-protected repeated trim changed")&&passed;
-    moving.m_RawWorkspaceGalleryLayoutAnimation.protectedKeys.clear();Trim(moving);
+    passed=Check(Trim(moving)==1&&Trim(moving)==0&&moving.deleted.empty(),"Motion-protected repeated trim changed")&&passed;
+    moving.m_RawWorkspaceGalleryLayoutAnimation.protectedKeys.clear();moving.m_RawWorkspaceThumbnailTextureTrimNeeded=true;Trim(moving);
     passed=Check(moving.deleted==visible.deleted,"Releasing motion changed eviction ordering")&&passed;
+    auto hdr=Owner();
+    auto lease=std::make_shared<int>();
+    for(auto& [key,entry]:hdr.m_RawWorkspaceThumbnailTextures) {
+        entry.hdrTexture=1000+entry.texture;entry.hdrWidth=entry.width;entry.hdrHeight=entry.height;
+    }
+    hdr.m_GalleryThumbnailLeases[1001]=lease;
+    Trim(hdr);
+    const auto perTile=RawWorkspaceThumbnailResidentBytes(512,341)+RawWorkspaceThumbnailResidentBytes(512,341,8);
+    passed=Check(hdr.m_RawWorkspaceThumbnailTextures.size()==kGalleryThumbnailMaxResidentBytes/perTile &&
+        hdr.m_RawWorkspaceThumbnailTextures.count(Key(0))==1 &&
+        hdr.deleted.size()==2*(300-hdr.m_RawWorkspaceThumbnailTextures.size()) && Trim(hdr)==0,
+        "HDR pairs must count both textures, preserve navigation leases, and settle")&&passed;
     auto tied=Owner();
     std::vector<std::pair<std::uint64_t,unsigned>> expectedOrder;
     for(auto& [key,entry]:tied.m_RawWorkspaceThumbnailTextures) {

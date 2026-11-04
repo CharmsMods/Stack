@@ -20,7 +20,8 @@ namespace Stack::Validation { bool ValidateProjectStageState(int,char**); }
 namespace Stack::Validation { bool ValidateAutoBracket(int,char**); }
 namespace Stack::Validation { bool ValidateAutoBracketReopen(const std::filesystem::path&); }
 namespace Stack::Validation { bool DiagnoseBracketingProject(int,char**); }
-namespace Stack::Validation { bool ValidateSuperResolution(int,char**); bool ValidateHdrDisplay(int,char**); }
+namespace Stack::Validation { bool ValidateSuperResolution(int,char**); bool ValidateHdrDisplay(int,char**); bool ValidateHdrGallery(const char*); }
+namespace Stack::Validation { bool ValidateHdrGraphExport(const char*,const char*); }
 namespace Stack::Validation { bool ValidateProcessingPresentation(const std::filesystem::path&,const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateColorCalibration(int, char**); }
 namespace Stack::Validation { bool ValidateFilmGrain(); }
@@ -219,6 +220,12 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if((argc==7||argc==8)&&std::strcmp(argv[1],"--validate-auto-bracket")==0) {
         exitCode=Stack::Validation::ValidateAutoBracket(argc-2,argv+2)?0:83;return true;
+    }
+    if(argc==3&&std::strcmp(argv[1],"--validate-hdr-gallery")==0) {
+        exitCode=Stack::Validation::ValidateHdrGallery(argv[2])?0:82;return true;
+    }
+    if(argc==4&&std::strcmp(argv[1],"--validate-hdr-graph-export")==0) {
+        exitCode=Stack::Validation::ValidateHdrGraphExport(argv[2],argv[3])?0:82;return true;
     }
     if(argc>1&&std::strcmp(argv[1],"--validate-hdr-display")==0) {
         exitCode=Stack::Validation::ValidateHdrDisplay(argc-2,argv+2)?0:82;return true;

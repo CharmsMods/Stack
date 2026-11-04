@@ -1,3 +1,5 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
+#include "Editor/Internal/GraphConnectionContext.h"
 #include "Editor/NodeEditors/FramingControls.h"
 #include "Utils/GraphCursor.h"
 #include "App/settings/NodeControlStyle.h"
@@ -1235,15 +1237,12 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
         case EditorNodeGraph::NodeKind::RawDetailFusion:
-        case EditorNodeGraph::NodeKind::HdrMerge:
-        case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::RawProjectFrame:
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
         case EditorNodeGraph::NodeKind::MultiFrameHdr:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::Scope:
             break;
         default:
             return false;
@@ -1361,55 +1360,6 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
         editor->RenderRawDetailAutoMaskControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
         editor->RenderRawDetailFusionControls(node, controlWidth, false);
-    } else if (node.kind == EditorNodeGraph::NodeKind::HdrMerge) {
-        const EditorModule::HdrMergeNodeStatus status = editor->GetHdrMergeNodeStatus(node.id);
-        for (const EditorModule::HdrMergeInputSummary& input : status.inputs) {
-            if (input.label.empty() || (!input.active && input.socketId == EditorNodeGraph::kHdrMergeInput3SocketId)) {
-                continue;
-            }
-            const std::string value = input.active
-                ? input.sourceLabel
-                : std::string("Inactive");
-            ImGui::TextDisabled("%s", input.label.c_str());
-            ImGui::TextWrapped("%s", value.c_str());
-            if (!input.metadataSummary.empty()) {
-                ImGui::TextDisabled("%s", input.metadataSummary.c_str());
-            }
-            if (!input.normalizationSummary.empty()) {
-                ImGui::TextDisabled("%s", input.normalizationSummary.c_str());
-            }
-        }
-        ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.45f));
-        ImGui::TextDisabled("Status");
-        if (status.state == EditorModule::HdrMergeRenderState::Failed ||
-            status.state == EditorModule::HdrMergeRenderState::IncompatibleInput) {
-            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "%s", status.message.c_str());
-        } else if (status.state == EditorModule::HdrMergeRenderState::BlockedMissingInput) {
-            ImGui::TextColored(ImVec4(0.92f, 0.76f, 0.42f, 1.0f), "%s", status.message.c_str());
-        } else {
-            ImGui::TextWrapped("%s", status.message.c_str());
-        }
-        if (!status.normalizationMessage.empty()) {
-            ImGui::TextDisabled("Normalization");
-            ImGui::TextWrapped("%s", status.normalizationMessage.c_str());
-        }
-        if (!status.reliabilityMessage.empty()) {
-            ImGui::TextDisabled("Reliability");
-            ImGui::TextWrapped("%s", status.reliabilityMessage.c_str());
-        }
-        if (!status.warningMessage.empty()) {
-            ImGui::TextColored(ImVec4(0.92f, 0.76f, 0.42f, 1.0f), "%s", status.warningMessage.c_str());
-        }
-    } else if (node.kind == EditorNodeGraph::NodeKind::Mfsr) {
-        ImGui::TextDisabled("Status");
-        if (!node.mfsr.errorMessage.empty()) {
-            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "%s", node.mfsr.errorMessage.c_str());
-        } else {
-            ImGui::TextWrapped("%s", node.mfsr.placeholderStatus.c_str());
-        }
-        ImGui::TextDisabled("%s", node.mfsr.hasPlaceholderCachedOutput
-            ? "Placeholder cache marked"
-            : "No MFSR render cache");
     } else if (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame) {
         ImGui::TextDisabled("Managed mosaic input");
         ImGui::TextWrapped("%s", node.rawProjectFrame.displayLabel.empty()
@@ -1527,7 +1477,7 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
                 "%s", diagnostic.message.c_str());
         }
         if (node.outputEnabled && editor->OutputPathNeedsViewTransform(node.id)) {
-            ImGui::TextWrapped("Scene-referred HDR input may clip at Output. Add or reconnect through View Transform for display compression.");
+            ImGui::TextWrapped("Scene-referred HDR input may clip on an SDR display.");
         }
         // Pipeline statistics belong to the accepted main image, not merely to
         // any connected output. Never borrow another card's or stale pixels.
@@ -1543,27 +1493,25 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
             ImGui::TextDisabled("Current output statistics unavailable.");
         }
         ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
-        ImGui::BeginDisabled(
-            !outputCard.projectExportTargetsNode ||
-            outputUsesChannel ||
-            editor->IsExportBusy());
+        const bool canExport = editor->CanExportGraphOutput(node.id);
+        ImGui::BeginDisabled(!canExport || outputUsesChannel);
         if (ImGui::Button("Export", ImVec2(controlWidth, 0.0f))) {
-            const std::string path = FileDialogs::SavePngFileDialog("Export Rendered Image", "rendered_output.png");
-            if (!path.empty()) {
-                editor->RequestExportImage(path);
-            }
+            context.pendingGraphAction = [editor, nodeId = node.id] {
+                const auto target = FileDialogs::SaveRenderedImageDialog();
+                if (!target.path.empty())
+                    editor->RequestExportGraphOutput(nodeId, target.path, target.format);
+            };
         }
         if (outputUsesChannel &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "PNG export requires an Image. Connect this Channel to "
-                "Image Combine first.");
-        } else if (outputCard.connected && !outputCard.projectExportTargetsNode &&
+                "Photo export requires an Image. Connect this Channel to "
+                "Combine Channels first.");
+        } else if (!canExport &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "This button exports the sole project output. Use the workspace "
-                "Export controls for RAW graphs or composite outputs, and leave "
-                "diagnostic mask preview before exporting an output card.");
+                "Export the connected final Image Output. Finish any current "
+                "export and leave diagnostic mask or composite preview first.");
         }
         ImGui::EndDisabled();
         if (ImGui::Button(node.outputEnabled ? "Deactivate Output" : "Activate Output", ImVec2(controlWidth, 0.0f))) {
@@ -1669,16 +1617,6 @@ bool EditorNodeGraphUI::RenderSourceNodeContent(
             editor->GetCompositeResizeMode() == EditorModule::CompositeResizeMode::Stretch ? "Stretch" : "Scale",
             editor->GetCompositeScaleOriginMode() == EditorModule::CompositeScaleOriginMode::Center ? "Center" : "Opposite");
 
-    } else if (node.kind == EditorNodeGraph::NodeKind::Scope) {
-        const EditorNodeGraph::Link* input = graph.FindScopeInputLink(node.id);
-        if (input) {
-            const EditorNodeGraph::Node* from = FindCachedNode(graph, input->fromNodeId);
-            ImGui::TextDisabled("Input: %s", from ? from->title.c_str() : "Missing");
-        } else {
-            ImGui::TextDisabled("No input");
-        }
-        ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.5f));
-        editor->RenderGraphScopeNode(node.scopeKind, input ? node.id : -1);
     }
     return true;
 }
@@ -1794,6 +1732,25 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::DataMath) {
         bool changed = false;
+        if (Stack::NodeMath::Primitive(node.dataMathMode)) {
+            const auto operand = [&](const char* socket, const char* label, float& value) {
+                if (const auto* wire = graph.FindInputLink(node.id,socket)) {
+                    const auto* source = graph.FindNode(wire->fromNodeId);
+                    ImGui::TextDisabled("%s: %s", label, source ? source->title.c_str() : "Unavailable");
+                } else {
+                    ImGui::SetNextItemWidth(controlWidth);
+                    float edited = value;
+                    if (ImGui::InputFloat(label,&edited,0,0,"%.7g") && std::isfinite(edited) && value != edited) {
+                        value = edited;
+                        changed = true;
+                    }
+                }
+            };
+            operand("imageA","A",node.dataMathSettings.constantA);
+            operand("imageB","B",node.dataMathSettings.constantB);
+            if (changed) editor->MarkGraphEdited(node.id);
+            return true;
+        }
         int domain = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values ? 1 : 0;
         const char* domains[] = {"Images / Channels", "Values"};
         if (ImGuiExtras::NodeCombo("Domain", "##MathDomain", &domain, domains, 2, controlWidth)) {
@@ -1813,14 +1770,12 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
                     std::min(-16.f, node.dataMathSettings.constantB), std::max(16.f, node.dataMathSettings.constantB));
         }
 
-        int mode = static_cast<int>(node.dataMathMode);
-        const char* modes[] = { "Clamp", "Add", "Subtract", "Multiply", "Divide", "Average", "Minimum", "Maximum", "Difference", "Remap", "Average Images" };
-        if (ImGuiExtras::NodeCombo("Mode", "##DataMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
-            changed |= editor->GetNodeGraph().SetDataMathMode(
-                node.id,
-                static_cast<EditorNodeGraph::DataMathMode>(
-                    std::clamp(mode, 0, 10)));
-        }
+        using Mode = EditorNodeGraph::DataMathMode;
+        constexpr Mode operations[] = {Mode::Clamp, Mode::Average, Mode::Min, Mode::Max, Mode::Difference, Mode::Remap, Mode::ImageAverage};
+        const char* modes[] = {"Clamp", "Average", "Minimum", "Maximum", "Difference", "Remap", "Average Images"};
+        int mode = static_cast<int>(std::find(std::begin(operations), std::end(operations), node.dataMathMode) - std::begin(operations));
+        if (ImGuiExtras::NodeCombo("Mode", "##DataMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth))
+            changed |= editor->GetNodeGraph().SetDataMathMode(node.id, operations[mode]);
         ImGui::TextDisabled("%s", node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values
             ? "Produces one uniform value."
             : node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage
@@ -1997,7 +1952,11 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
         } else if (value.logicalType == Logical::Scalar) {
             if (double* item = std::get_if<double>(&value.payload)) {
                 ImGui::SetNextItemWidth(controlWidth);
-                changed |= ImGui::InputDouble("##TypedScalar", item, 0.0, 0.0, "%.6f");
+                double edited = *item;
+                if (ImGui::InputDouble("##TypedScalar", &edited, 0.0, 0.0, "%.12g") && std::isfinite(edited)) {
+                    *item = edited;
+                    changed = true;
+                }
             }
         } else if (auto* item2 = std::get_if<std::array<double, 2>>(&value.payload)) {
             const char* labels[] = { "X", "Y" };
@@ -2177,7 +2136,7 @@ bool EditorNodeGraphUI::RenderUtilityNodeContent(
 
 bool EditorNodeGraphUI::CanPreviewConnection(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
     int to, const std::string& input) const {
-    if (m_GraphContext.graph != &graph || !m_GraphContext.canConnect) return graph.CanConnectSockets(from,output,to,input);
+    if (m_GraphContext.graph != &graph || !m_GraphContext.canConnect) return EditorNodeGraph::CanAuthorConnection(graph,from,output,to,input);
     const auto key = std::to_string(from)+"/"+output+"/"+std::to_string(to)+"/"+input;
     const auto cached = m_ConnectionCapabilityCache.find(key);
     if (cached != m_ConnectionCapabilityCache.end()) return cached->second;
@@ -2186,15 +2145,9 @@ bool EditorNodeGraphUI::CanPreviewConnection(const EditorNodeGraph::Graph& graph
     // the first drag frame. Reuse current owner semantics for local type and
     // cycle checks; ConnectGraphSockets still validates the full transaction
     // (including external references and layer boundaries) on release.
-    EditorNodeGraph::GraphOutputContext descriptions;
-    descriptions.resolveOutput = [this](const auto& node, const auto& socket)
-        -> std::optional<EditorNodeGraph::GraphOutputDescription> {
-        if (m_ActiveEditor)
-            if (const auto* output=m_ActiveEditor->GetGraphOutputDescription(node.id,socket)) return *output;
-        return std::nullopt;
-    };
-    EditorNodeGraph::ScopedGraphOutputAnalysis analysis(graph,std::move(descriptions));
-    const bool accepted = graph.CanConnectSockets(from,output,to,input);
+    EditorNodeGraph::ScopedGraphOutputAnalysis analysis(graph, m_ActiveEditor
+        ? Stack::Editor::PublishedConnectionContext(*m_ActiveEditor) : EditorNodeGraph::GraphOutputContext{});
+    const bool accepted = EditorNodeGraph::CanAuthorConnection(graph,from,output,to,input);
     m_ConnectionCapabilityCache.emplace(key,accepted);
     return accepted;
 }

@@ -6024,134 +6024,6 @@ void TestMfsrCacheKeyFingerprintsReactToInputsAndSettings() {
         "MFSR cache-key fingerprint should include input-set fingerprint");
 }
 
-void TestMfsrNodeShellSocketsAndConnections() {
-    using namespace EditorNodeGraph;
-
-    Graph graph;
-    const int imageAId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
-    const int imageBId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 180.0f }));
-    const int mfsrId = NodeId(graph.AddMfsrNode(MfsrPayload{}, { 260.0f, 0.0f }));
-    const int outputId = NodeId(graph.AddOutputNode({ 520.0f, 0.0f }, true));
-
-    const Node* mfsr = graph.FindNode(mfsrId);
-    Require(mfsr && mfsr->kind == NodeKind::Mfsr, "MFSR node shell should be created");
-    Require(mfsr->title == "MFSR", "MFSR node shell should have a stable visible title");
-    Require(graph.DefaultInputSocket(*mfsr) == kMfsrReferenceInputSocketId,
-        "MFSR default input should be the reference socket");
-    Require(graph.DefaultOutputSocket(*mfsr) == kImageOutputSocketId,
-        "MFSR default output should be the image socket");
-    Require(graph.FindSocket(mfsrId, kMfsrReferenceInputSocketId),
-        "MFSR should expose a reference input");
-    Require(graph.FindSocket(mfsrId, MfsrInputSocketId(1)),
-        "MFSR should expose a first support frame input");
-    Require(graph.FindSocket(mfsrId, kImageOutputSocketId),
-        "MFSR should expose an image output");
-
-    std::vector<SocketDefinition> visibleSockets = graph.GetSockets(*mfsr, true);
-    const auto visibleSocketCount = [&](const std::string& socketId) {
-        return std::count_if(visibleSockets.begin(), visibleSockets.end(), [&](const SocketDefinition& socket) {
-            return socket.id == socketId;
-        });
-    };
-    Require(visibleSocketCount(kMfsrReferenceInputSocketId) == 1,
-        "MFSR visible sockets should include Reference");
-    Require(visibleSocketCount(MfsrInputSocketId(1)) == 1,
-        "MFSR visible sockets should include Frame 2");
-    Require(visibleSocketCount(MfsrInputSocketId(2)) == 0,
-        "MFSR should not reveal Frame 3 before a support frame is connected");
-
-    Require(graph.TryConnectSockets(imageAId, kImageOutputSocketId, mfsrId, kMfsrReferenceInputSocketId),
-        "image should connect to MFSR reference input");
-    Require(graph.TryConnectSockets(imageBId, kImageOutputSocketId, mfsrId, MfsrInputSocketId(1)),
-        "image should connect to MFSR support input");
-    visibleSockets = graph.GetSockets(*graph.FindNode(mfsrId), true);
-    Require(std::any_of(visibleSockets.begin(), visibleSockets.end(), [&](const SocketDefinition& socket) {
-        return socket.id == MfsrInputSocketId(2);
-    }), "MFSR should reveal the next support input after Frame 2 is connected");
-
-    Require(graph.TryConnectSockets(mfsrId, kImageOutputSocketId, outputId, kImageInputSocketId),
-        "MFSR image output should connect downstream");
-    Require(graph.IsOutputConnected(), "MFSR with reference and support should complete an output chain");
-}
-
-void TestMfsrNodeShellRejectsScalarAndMixedFamilies() {
-    using namespace EditorNodeGraph;
-
-    Graph scalarGraph;
-    const int maskId = NodeId(scalarGraph.AddMaskGeneratorNode(MaskGeneratorKind::Solid, { 0.0f, 0.0f }));
-    const int layerId = NodeId(scalarGraph.AddLayerNode(LayerType::Brightness, 0, { 220.0f, 0.0f }));
-    const int mfsrScalarId = NodeId(scalarGraph.AddMfsrNode(MfsrPayload{}, { 440.0f, 0.0f }));
-    Require(scalarGraph.TryConnectSockets(maskId, kMaskOutputSocketId, layerId, kImageInputSocketId),
-        "test setup should connect scalar mask through a layer");
-    std::string scalarError;
-    Require(!scalarGraph.CanConnectSockets(layerId, kImageOutputSocketId, mfsrScalarId, kMfsrReferenceInputSocketId, nullptr, &scalarError),
-        "MFSR should reject scalar image streams");
-    Require(scalarError.find("full image") != std::string::npos,
-        "MFSR scalar rejection should explain the full-image requirement");
-
-    Graph mixedGraph;
-    RawSourcePayload rawPayload;
-    rawPayload.label = "RAW";
-    rawPayload.sourcePath = "burst-a.dng";
-    const int rawSourceId = NodeId(mixedGraph.AddRawSourceNode(rawPayload, { 0.0f, 0.0f }));
-    const int rawDevelopId = NodeId(mixedGraph.AddRawDevelopNode(RawDevelopPayload{}, { 220.0f, 0.0f }));
-    const int rasterId = NodeId(mixedGraph.AddImageNode(TestImagePayload(), { 0.0f, 220.0f }));
-    const int mfsrId = NodeId(mixedGraph.AddMfsrNode(MfsrPayload{}, { 440.0f, 0.0f }));
-
-    Require(mixedGraph.TryConnectSockets(rawSourceId, kRawOutputSocketId, rawDevelopId, kRawInputSocketId),
-        "test setup should connect RAW source to develop");
-    Require(mixedGraph.TryConnectSockets(rawDevelopId, kImageOutputSocketId, mfsrId, kMfsrReferenceInputSocketId),
-        "MFSR should accept a RAW-derived reference image");
-
-    std::string mixedError;
-    Require(!mixedGraph.CanConnectSockets(rasterId, kImageOutputSocketId, mfsrId, MfsrInputSocketId(1), nullptr, &mixedError),
-        "MFSR should reject mixed RAW-derived and raster-derived inputs");
-    Require(mixedError.find("RAW-derived") != std::string::npos &&
-            mixedError.find("raster-derived") != std::string::npos,
-        "MFSR mixed-family rejection should name RAW-derived and raster-derived inputs");
-}
-
-void TestMfsrNodeShellSerializesRoundTrip() {
-    using namespace EditorNodeGraph;
-
-    Graph graph;
-    const int imageAId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
-    const int imageBId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 180.0f }));
-    MfsrPayload payload;
-    payload.settings.scalePreset = Stack::Mfsr::MfsrScalePreset::Scale150;
-    payload.settings.qualityPreset = Stack::Mfsr::MfsrQualityPreset::Conservative;
-    payload.placeholderStatus = "Phase 2 placeholder";
-    const int mfsrId = NodeId(graph.AddMfsrNode(payload, { 260.0f, 0.0f }));
-    const int outputId = NodeId(graph.AddOutputNode({ 520.0f, 0.0f }, true));
-    Require(graph.TryConnectSockets(imageAId, kImageOutputSocketId, mfsrId, kMfsrReferenceInputSocketId),
-        "test setup should connect MFSR reference before serialization");
-    Require(graph.TryConnectSockets(imageBId, kImageOutputSocketId, mfsrId, MfsrInputSocketId(1)),
-        "test setup should connect MFSR support before serialization");
-    Require(graph.TryConnectSockets(mfsrId, kImageOutputSocketId, outputId, kImageInputSocketId),
-        "test setup should connect MFSR output before serialization");
-
-    const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
-
-    Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0);
-    const Node* loadedMfsr = nullptr;
-    for (const Node& node : loaded.GetNodes()) {
-        if (node.kind == NodeKind::Mfsr) {
-            loadedMfsr = &node;
-            break;
-        }
-    }
-    Require(loadedMfsr != nullptr, "MFSR node should survive graph serialization");
-    Require(loadedMfsr->title == "MFSR", "MFSR title should survive graph serialization");
-    Require(loadedMfsr->mfsr.settings.scalePreset == Stack::Mfsr::MfsrScalePreset::Scale150,
-        "MFSR scale setting should survive graph serialization");
-    Require(loadedMfsr->mfsr.settings.qualityPreset == Stack::Mfsr::MfsrQualityPreset::Conservative,
-        "MFSR quality setting should survive graph serialization");
-    Require(loadedMfsr->mfsr.placeholderStatus == "Phase 2 placeholder",
-        "MFSR placeholder status should survive graph serialization");
-    Require(loaded.IsOutputConnected(), "loaded MFSR graph should keep its completed output chain");
-}
-
 void TestRetiredNeuralDenoiseIsRejected() {
     using namespace EditorNodeGraph;
     Graph graph;graph.AddOutputNode({0,0},true);
@@ -6297,26 +6169,6 @@ void TestGraphInfoNoLayoutPayloadPreservesGraphOrderAndState() {
         linksJson[2].value("fromNodeId", -1) == mixId &&
         linksJson[2].value("toNodeId", -1) == outputId,
         "no-layout graph info should preserve authored connection order");
-}
-
-void TestHdrMergeDeghostModeMediumRoundTrip() {
-    using namespace EditorNodeGraph;
-
-    Graph graph;
-    HdrMergePayload payload;
-    payload.settings.deghostMode = Raw::HdrMergeDeghostMode::Medium;
-    const int hdrMergeId = NodeId(graph.AddHdrMergeNode(std::move(payload), { 180.0f, 110.0f }));
-
-    const nlohmann::json serialized = SerializeGraphPayload(nlohmann::json::array(), graph);
-
-    Graph loaded;
-    DeserializeGraphPayload(serialized, loaded, 0);
-
-    const Node* hdrMergeNode = loaded.FindNode(hdrMergeId);
-    Require(hdrMergeNode != nullptr, "HDR merge node should survive graph serialization");
-    Require(hdrMergeNode->kind == NodeKind::HdrMerge, "HDR merge node kind should survive graph serialization");
-    Require(hdrMergeNode->hdrMerge.settings.deghostMode == Raw::HdrMergeDeghostMode::Medium,
-        "HDR merge deghost mode Medium should survive graph serialization");
 }
 
 void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
@@ -16624,14 +16476,10 @@ int main(int argc, char** argv) try {
     TestMfsrValidationRejectsMixedAndUnknownInputs();
     TestMfsrValidationAllowsSingleFamilyWithReference();
     TestMfsrCacheKeyFingerprintsReactToInputsAndSettings();
-    TestMfsrNodeShellSocketsAndConnections();
-    TestMfsrNodeShellRejectsScalarAndMixedFamilies();
-    TestMfsrNodeShellSerializesRoundTrip();
     TestRetiredNeuralDenoiseIsRejected();
     TestTechnicalImageAndSourceMetadataSerializeRoundTrip();
     TestCompositeNodeSerializesRoundTrip();
     TestGraphInfoNoLayoutPayloadPreservesGraphOrderAndState();
-    TestHdrMergeDeghostModeMediumRoundTrip();
 
     TestRawViewportTimingLearning();
     std::cout << "Stack graph behavior tests passed.\n";

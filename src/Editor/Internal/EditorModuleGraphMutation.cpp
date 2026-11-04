@@ -1,3 +1,7 @@
+#include "Editor/NodeGraph/ChannelConnectionEdit.h"
+#include "Editor/Internal/GraphConnectionContext.h"
+#include "Editor/NodeGraph/BrightnessRecipe.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/GraphExpansionLayout.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
@@ -1035,11 +1039,17 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
     const std::function<EditorNodeGraph::GraphRect(const EditorNodeGraph::Graph&,const EditorNodeGraph::Node&)>& measure) {
     std::string error;
     int selectedSource=fromNodeId;
+    PrepareGraphOutputDescriptions();
     if (!ApplyGraphCommand(*this,[&](auto& candidate) {
-            if (!candidate.TryConnectSockets(fromNodeId,fromSocketId,toNodeId,toSocketId,&error))
+            const auto context = Stack::Editor::PublishedConnectionContext(*this);
+            int adapter = 0;
+            if (!EditorNodeGraph::ConnectAuthoredSockets(candidate,fromNodeId,fromSocketId,toNodeId,toSocketId,
+                                                       &error,&adapter,&context))
                 throw std::runtime_error(error);
-            const auto folds=EditorNodeGraph::FoldChannelSplits(candidate,{fromNodeId,toNodeId});
-            int placedFrom=fromNodeId,placedTo=toNodeId;
+            // A shortcut must leave the visible Combine and its three inputs in the graph.
+            const auto folds = adapter ? std::vector<EditorNodeGraph::ChannelSplitFold>{} :
+                EditorNodeGraph::FoldChannelSplits(candidate,{fromNodeId,toNodeId});
+            int placedFrom=adapter ? adapter : fromNodeId,placedTo=toNodeId;
             for(const auto& fold:folds) {
                 if(placedFrom==fold.split)placedFrom=fold.producer;
                 if(placedTo==fold.split)placedTo=fold.producer;
@@ -1392,12 +1402,25 @@ bool EditorModule::MakeCompoundNodeUnique(int nodeId, std::string* error) {
 bool EditorModule::UnpackCompoundNode(int nodeId, std::string* error,
     const Stack::GraphLayout::MeasureNode& measure,const Stack::GraphLayout::MeasureSocket& measureSocket) {
     const auto* source = GetNodeGraph().FindNode(nodeId);
-    if (source && std::any_of(GetGraphAnimation().tracks.begin(), GetGraphAnimation().tracks.end(),
-        [&](const auto& track) { return track.target.nodeUuid == source->instanceUuid; })) {
-        if (error) *error = "This node has animation tracks. Decompiling animated parameter bindings is not supported yet; the graph and tracks were kept unchanged.";
+    const bool brightness=source && EditorNodeGraphDefinitions::IsBrightnessRecipe(*source);
+    auto animation=GetGraphAnimation();
+    const auto ownsTrack=[&](const auto& track) {
+        return source && (track.target.nodeUuid==source->instanceUuid ||
+            (track.target.nodeUuid.empty() && track.target.nodeId==nodeId));
+    };
+    const bool animated=std::any_of(animation.tracks.begin(),animation.tracks.end(),ownsTrack);
+    if (animated && (!brightness || std::any_of(animation.tracks.begin(),animation.tracks.end(),[&](const auto& track) {
+            return ownsTrack(track) && track.target.parameterId!="layer.brightness";
+        }))) {
+        if (error) *error="This operation has animation tracks without a recipe binding.";
         return false;
     }
-    return ApplyGraphCommand(*this,[&](auto& graph) {
+    auto descriptor=Stack::NodeMath::MakeUnknownDescriptor(Stack::NodeMath::LogicalValueType::Invalid);
+    if (brightness) if (const auto* wire=GetNodeGraph().FindInputLink(nodeId,"imageIn")) {
+        if (const auto* resolved=GetGraphOutputDescription(wire->fromNodeId,wire->fromSocketId)) descriptor=resolved->descriptor;
+        else descriptor=EditorNodeGraph::DescribeGraphOutput(GetNodeGraph(),wire->fromNodeId,wire->fromSocketId).descriptor;
+    }
+    auto decompile=[&](auto& graph) {
         const auto* instance=graph.FindNode(nodeId);
         if(!instance)throw std::runtime_error("The node to decompile no longer exists.");
         const auto origin=instance->position;
@@ -1412,13 +1435,31 @@ bool EditorModule::UnpackCompoundNode(int nodeId, std::string* error,
         }
         std::vector<int> unpacked;
         std::string reason;
+        if (brightness && !EditorNodeGraphDefinitions::BindBrightnessRecipe(graph,nodeId,descriptor,instance->layerParameters,reason))
+            throw std::runtime_error(reason);
         if (!graph.UnpackCompoundNode(nodeId,&unpacked,&reason)) throw std::runtime_error(reason);
         EditorNodeGraph::FoldChannelSplits(graph,unpacked);
         unpacked.erase(std::remove_if(unpacked.begin(),unpacked.end(),[&](int id){return !graph.FindNode(id);}),unpacked.end());
         if(IsRawProjectCanvas())for(int id:unpacked)graph.FindNode(id)->expanded=true;
         if (!Stack::GraphLayout::ArrangeExpansion(graph,unpacked,origin,uuid,containingGroups,measure,reason,measureSocket))
             throw std::runtime_error(reason);
-    },error);
+        if (animated) {
+            for (const auto& group:graph.GetGroups()) {
+                if (!group.compoundBoundary.is_object() || group.compoundBoundary.value("instanceUuid",std::string{})!=uuid) continue;
+                if (!EditorNodeGraphDefinitions::RebindExpandedBrightnessAnimation(graph,group,*source,animation,reason))
+                    throw std::runtime_error(reason);
+                return;
+            }
+            throw std::runtime_error("Brightness animation has no expanded Number binding.");
+        }
+    };
+    if (!animated) return ApplyGraphCommand(*this,decompile,error);
+    auto context=GetGraphEditorContext();
+    auto proposal=Stack::GraphModel::ProposeEdit(*context.graph,context.revision,decompile);
+    std::string reason;
+    const bool committed=context.applyDocumentEdit(std::move(proposal),{},std::move(animation),reason);
+    if (error) *error=reason;
+    return committed;
 }
 
 bool EditorModule::RepackCompoundGroup(int groupId, std::string* error) {

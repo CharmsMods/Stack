@@ -275,57 +275,18 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
     EnsureViewTransform(context.recipe.viewTransform.layerJson);
     nlohmann::json& view = context.recipe.viewTransform.layerJson;
     bool enabled = Stack::RawRecipe::IsViewTransformEnabled(context.recipe);
-    bool controlsEnabled = enabled;
-    if (context.multiFrameResult) {
-        const Stack::Project::MultiFrameSourceSet* sourceSet =
-            m_Project->snapshot
-            ? Stack::Project::FindSourceSet(
-                  *m_Project->snapshot,
-                  context.multiFrameSourceSetId)
-            : nullptr;
-        bool internalPlacement = sourceSet == nullptr ||
-            sourceSet->settings.value(
-                "viewTransformPlacement",
-                std::string("internal")) != "graph";
-        if (sourceSet != nullptr && FramelessTextButton(
-                internalPlacement
-                    ? "Display Mapping On"
-                    : "Display Mapping Off",
-                internalPlacement)) {
-            std::string placementError;
-            if (!SetMultiFrameInternalViewTransformEnabled(
-                    sourceSet->sourceSetId,
-                    !internalPlacement,
-                    &placementError)) {
-                m_RawWorkspaceLabUi.multiFrameStatusText =
-                    placementError.empty()
-                    ? "Could not change View Transform placement."
-                    : placementError;
-            } else {
-                m_RawWorkspaceLabUi.multiFrameStatusText = internalPlacement
-                    ? "Scene-linear output is active; View Transform moved to the graph endpoint."
-                    : "View Transform moved back into the RAW workflow with its settings preserved.";
-            }
-            return false;
-        }
-        ImGui::TextDisabled(
-            internalPlacement
-                ? "The HDR/denoise merge stays scene-linear. This is the one display transform, applied after the RAW edits."
-                : "The merge and RAW edits stay scene-linear. One terminal graph View Transform owns display mapping.");
-        controlsEnabled = enabled && internalPlacement;
-    } else if (FramelessTextButton(
+    if (FramelessTextButton(
                    enabled ? "Display Mapping On" : "Display Mapping Off",
                    enabled)) {
         enabled = !enabled;
         view["enabled"] = enabled;
         changed = true;
-        controlsEnabled = enabled;
     }
-    if (!controlsEnabled) {
+    if (!enabled) {
         ImGui::TextWrapped(
-            "Scene-linear output is active. Add a View Transform node near the graph Output.");
+            "Scene-linear output is active.");
     }
-    ImGui::BeginDisabled(!controlsEnabled);
+    ImGui::BeginDisabled(!enabled);
     ImGui::TextDisabled("Sigmoid display mapping");
     const ImVec2 graphSize = CompactLabGraphSize(
         118.0f,
@@ -384,17 +345,6 @@ bool EditorModule::RenderRawWorkspaceLabViewSecondaryControls(
     EnsureViewTransform(context.recipe.viewTransform.layerJson);
     nlohmann::json& view = context.recipe.viewTransform.layerJson;
     bool enabled = Stack::RawRecipe::IsViewTransformEnabled(context.recipe);
-    if (context.multiFrameResult && m_Project->snapshot) {
-        const Stack::Project::MultiFrameSourceSet* sourceSet =
-            Stack::Project::FindSourceSet(
-                *m_Project->snapshot,
-                context.multiFrameSourceSetId);
-        enabled = enabled &&
-            (sourceSet == nullptr ||
-             sourceSet->settings.value(
-                 "viewTransformPlacement",
-                 std::string("internal")) != "graph");
-    }
     if (!enabled) {
         ImGui::TextWrapped(
             "Built-in View Transform is off; these settings are preserved but inactive.");

@@ -50,11 +50,14 @@ SharedPixelBuffer EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& p
 RenderGraphImagePayload BuildRenderImagePayload(const EditorNodeGraph::ImagePayload& payload) {
     RenderGraphImagePayload renderImage;
     renderImage.pixels = EnsureSharedImagePixels(payload);
+    renderImage.hdrPixels = payload.hdrPixels;
+    renderImage.hdrFingerprint = payload.hdrFingerprint;
+    if (payload.hdrPixels) StackHash::HashCombine(renderImage.hdrFingerprint, payload.hdrStorageQuarterTurns);
     renderImage.width = payload.width;
     renderImage.height = payload.height;
     renderImage.channels = payload.channels;
     renderImage.sourceDescriptor = Stack::NodeMath::DescribeStoredImageValue(payload.sourceColorMetadata.descriptor,
-        payload.channels, payload.width, payload.height);
+        payload.channels, payload.width, payload.height, static_cast<bool>(payload.hdrPixels));
     return renderImage;
 }
 

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/BrightnessRecipe.h"
 #include "Project/RawProjectGraph.h"
 #include "Editor/NodeGraph/CompoundInstantiation.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
@@ -137,6 +138,7 @@ RawProjectGraph BuildRawProjectGraph(const RawLayerStackState& state, bool analy
     auto* output = result.graph.AddOutputNode(state.outputCanvasPosition.value_or(Vec2{nextX,0}),true);
     output->instanceUuid = "bb276ad4-1b38-49b7-a9c5-34b977a28ec2";
     output->title = "Image output";
+    output->outputSettings.publishedType = Stack::NodeMath::LogicalValueType::ColorImage;
     output->notes = state.outputCanvasNotes;
     result.output = output->id;
     if (const auto input = RawMainOutputEndpoint(state)) connect(*input,result.output,"imageIn");
@@ -449,6 +451,18 @@ static bool BuildRawProjectGraphCandidate(const RawLayerStackState& source, cons
         GraphModel::ReindexLayerParameterRecords(layer->graph);
         layer->graph.SetNextNodeId(nextIds.at(layer->id));
         layer->graph.GetCompoundDefinitions() = edited.GetCompoundDefinitions();
+        // A projected node's canvas ID differs from the persisted layer-local ID.
+        // Transfer animation after the owned graph and boundary members are materialized.
+        if (!layer->animation.tracks.empty()) {
+            for (const auto& group : layer->graph.GetGroups()) {
+                if (!group.compoundBoundary.is_object()) continue;
+                const auto& originals = originalNodes.at(layer->id);
+                const auto parent = originals.find(group.compoundBoundary.value("instanceUuid", std::string{}));
+                if (parent != originals.end() && EditorNodeGraphDefinitions::IsBrightnessRecipe(*parent->second) &&
+                    !EditorNodeGraphDefinitions::RebindExpandedBrightnessAnimation(layer->graph,group,*parent->second,layer->animation,error))
+                    return false;
+            }
+        }
         RegisterRawMaskOutputs(candidate,layer->id);
     }
     std::vector<std::string> order;

@@ -2,7 +2,7 @@
 """Generate a CPU Output-card ownership regression.
 
 Copies the shipping card readout/Export and context-menu Export branches,
-single-output resolver, and
+terminal-ownership policy, single-output resolver, and
 accepted-presentation readiness checks unchanged. Completed graph chains,
 semantic descriptors, RAW source identity/hash accessors, ImGui, GPU statistics
 and native geometry are boundary doubles. No files are exported and no GPU/image
@@ -31,8 +31,10 @@ PREAMBLE = r'''
 #include "Renderer/OutputTextureStatsCache.h"
 #include <cstdarg>
 #include <cstdio>
+#include <functional>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -55,7 +57,8 @@ bool MenuItem(const char*){exportEnabled=!disabled;return click&&!disabled;}
 bool IsItemHovered(int){return true;}
 bool Has(const std::string& part){return std::any_of(text.begin(),text.end(),[&](const auto& line){return line.find(part)!=std::string::npos;});}
 }
-namespace FileDialogs {int opens=0;std::string SavePngFileDialog(const char*,const char*){++opens;return "not-written.png";}}
+namespace FileDialogs {struct Choice {std::string path; int format;}; int opens=0,format=0;
+Choice SaveRenderedImageDialog(){++opens;return {"not-written.png",format};}}
 namespace Stack::NodeMath {
 // Formatting is not under test; retain the real descriptor value type.
 std::string CompactDescriptorLabel(const ValueDescriptor& value) {
@@ -70,6 +73,15 @@ struct Pipeline {
 };
 struct FixtureGraph {
     int m_OutputNodeId=1;
+    struct Node {int id=0;EditorNodeGraph::NodeKind kind=EditorNodeGraph::NodeKind::Output;bool outputEnabled=true;};
+    std::map<int,Node> nodes;
+    bool channel=false;
+    EditorNodeGraph::Link link;
+    FixtureGraph(){for(int id:{1,2}){nodes[id].id=id;nodes[id].kind=EditorNodeGraph::NodeKind::Output;nodes[id].outputEnabled=true;}}
+    const auto* FindNode(int id)const{auto it=nodes.find(id);return it==nodes.end()?nullptr:&it->second;}
+    const EditorNodeGraph::Link* FindInputLink(int id,const std::string&)const{
+        return std::any_of(completed.begin(),completed.end(),[&](const auto& c){return c.outputNodeId==id;})?&link:nullptr;}
+    bool IsOutputChannelInspection(int)const{return channel;}
     std::vector<EditorNodeGraph::CompletedChainInfo> completed;
     const auto& GetCompletedChains()const{return completed;}
     std::vector<int> GetConnectedOutputNodeIds()const {std::vector<int> ids;for(const auto& c:completed)ids.push_back(c.outputNodeId);return ids;}
@@ -81,6 +93,10 @@ struct EditorModule {
     Project project;Project* m_Project=&project;
     Pipeline pipeline;
     bool rawProjection=false,composite=false,maskPreview=false,busy=false,native=true,exportBusy=false;
+    bool rawCanvas=false;
+    struct Canvas {int output=1;};
+    struct RawWorkspace {std::optional<Canvas> projectCanvas=Canvas{};} rawWorkspace;
+    RawWorkspace* m_RawLayerMaskWorkspace=&rawWorkspace;
     bool m_RenderDirty=false,m_RenderPending=false;
     std::uint64_t m_ViewportOutputRenderGeneration=1,m_RenderGeneration=1,m_LatestRawPresentationGeneration=0;
     std::size_t m_LatestRawPresentationRecipeRevision=0;
@@ -92,7 +108,8 @@ struct EditorModule {
     std::vector<Stack::NodeMath::Diagnostic> diagnostics;
     Stack::NodeMath::ValueDescriptor m_LastGraphOutputSemanticDescriptor;
     std::string m_LastGraphOutputSemanticDescriptorIdentity="global";
-    int exports=0,lastDescriptorNode=-1;
+    int exports=0,lastDescriptorNode=-1,lastExportFormat=-1;
+    bool IsRawProjectCanvas()const{return rawProjection&&rawCanvas;}
     bool IsEditingRawLayerMaskGraph()const{return rawProjection;}
     bool IsCompositeViewportMode()const{return composite;}
     bool IsAutoGainMaskPreviewActive()const{return maskPreview;}
@@ -101,6 +118,8 @@ struct EditorModule {
     bool IsExportBusy()const{return exportBusy;}
     Pipeline& GetPipeline(){return pipeline;}
     FixtureGraph& GetNodeGraph(){return project.graph;}
+    const FixtureGraph& GetNodeGraph()const{return project.graph;}
+    bool CanExportGraphOutput(int)const;
     bool OutputPathNeedsViewTransform(int)const{return false;}
     const auto& GetGraphSemanticDiagnostics()const{return diagnostics;}
     const EditorNodeGraph::GraphOutputDescription* GetGraphOutputDescription(int id,const std::string& socket){
@@ -108,7 +127,8 @@ struct EditorModule {
         lastDescriptorNode=id;const auto it=descriptions.find(id);return it==descriptions.end()?nullptr:&it->second;
     }
     bool TryGetGraphOutputSemanticDescriptor(Stack::NodeMath::ValueDescriptor& descriptor)const;
-    bool RequestExportImage(const std::string&){++exports;return true;}
+    bool RequestExportImage(const std::string&,int){++exports;return true;}
+    bool RequestExportGraphOutput(int id,const std::string&,int format){if(!CanExportGraphOutput(id))return false;++exports;lastExportFormat=format;return true;}
     auto CurrentGraphRenderTag()const{return current;}
     std::string GetActiveRawWorkspacePreviewIdentity()const{return rawSourceIdentity;}
     std::uint64_t RawViewportSourceHash()const{return rawSourceHash;}
@@ -134,20 +154,26 @@ struct EditorModule {
 struct Card {int id=1;bool outputEnabled=true;};
 void Draw(EditorModule* editor,Card node,bool outputUsesChannel=false) {
     auto& graph=editor->project.graph;
+    graph.nodes[node.id].outputEnabled=node.outputEnabled;graph.channel=outputUsesChannel;
+    struct Context {std::function<void()> pendingGraphAction;} context;
     struct Metrics {float itemGap=1;} metrics;
     const float uiScale=1,controlWidth=100;
     ImGui::text.clear();ImGui::disabled=false;ImGui::exportEnabled=false;
     CARD
+    if(context.pendingGraphAction)context.pendingGraphAction();
 }
 void DrawContext(EditorModule* editor, Card card, bool outputUsesChannel=false) {
     Card* node=&card;
+    editor->project.graph.nodes[card.id].outputEnabled=card.outputEnabled;editor->project.graph.channel=outputUsesChannel;
+    std::function<void()> pendingNodeAction;
     ImGui::text.clear();ImGui::disabled=false;ImGui::exportEnabled=false;
     CONTEXT_EXPORT
+    if(pendingNodeAction)pendingNodeAction();
 }
 int failures=0;
 void Require(bool condition,const char* message){if(!condition){++failures;std::cerr<<"FAIL: "<<message<<'\n';}}
 int main(){
-    for(int scenario=0;scenario<9;++scenario){EditorModule e;Card card;
+    for(int scenario=0;scenario<11;++scenario){EditorModule e;Card card;
         switch(scenario){
             case 1:card.id=2;break;
             case 2:card.outputEnabled=false;break;
@@ -156,13 +182,22 @@ int main(){
             case 5:e.composite=true;break;
             case 6:e.maskPreview=true;break;
             case 7:e.exportBusy=true;break;
+            case 9:e.rawProjection=e.rawCanvas=true;e.Complete({1,2});break;
+            case 10:e.rawProjection=e.rawCanvas=true;e.Complete({1,2});card.id=2;break;
         }
         const int opensBefore=FileDialogs::opens;
         ImGui::click=true;DrawContext(&e,card,scenario==8);ImGui::click=false;
-        Require(ImGui::exportEnabled==(scenario==0),"context export enabled for wrong endpoint/mode");
-        Require(e.exports==(scenario==0) && FileDialogs::opens-opensBefore==(scenario==0),
+        const bool allowed=scenario==0||scenario==9;
+        Require(ImGui::exportEnabled==allowed,"context export enabled for wrong endpoint/mode");
+        Require(e.exports==int(allowed) && FileDialogs::opens-opensBefore==int(allowed),
             "context menu opened export dialog or requested export for wrong endpoint/mode");
     }
+    for(int format:{0,1,2}){EditorModule e;e.rawProjection=e.rawCanvas=true;e.Complete({1,2});FileDialogs::format=format;
+        ImGui::click=true;Draw(&e,{1,true});ImGui::click=false;
+        Require(e.exports==1&&e.lastExportFormat==format&&e.pipeline.queries==0,"RAW final card lost selected format or borrowed main statistics");
+        ImGui::click=true;Draw(&e,{2,true});ImGui::click=false;
+        Require(e.exports==1,"RAW intermediate output exported the project");}
+    FileDialogs::format=0;
 
     {EditorModule e;Draw(&e,{1,true});Require(ImGui::exportEnabled&&ImGui::Has("Connected to output chain"),"sole A export/connectivity");
         Require(ImGui::Has("Direct result: Image")&&e.lastDescriptorNode==1,"sole A endpoint descriptor");
@@ -245,6 +280,8 @@ def main():
     export_start = context.index('                ImGui::BeginDisabled(', output_start)
     if '                const auto outputCard =' in context[output_start:export_start]:
         export_start = context.index('                const auto outputCard =', output_start)
+    elif '                const bool canExport =' in context[output_start:export_start]:
+        export_start = context.index('                const bool canExport =', output_start)
     context_export = context[export_start:export_end]
     header = (root / 'src/Editor/EditorModule.h').read_text(encoding="utf-8")
     readiness = block(header, 'bool IsRenderSettledForFullQualityExport() const')
@@ -252,10 +289,11 @@ def main():
     descriptor = block((root / 'src/Editor/Internal/EditorModuleGraphSnapshot.cpp').read_text(encoding="utf-8"), 'bool EditorModule::TryGetGraphOutputSemanticDescriptor(')
     resolver = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp').read_text(encoding="utf-8"), 'int Graph::ResolvePreviewOutputNodeId() const').replace('Graph::', 'FixtureGraph::')
     connected = block((root / 'src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp').read_text(encoding="utf-8"), 'bool Graph::IsOutputConnected() const').replace('Graph::', 'FixtureGraph::')
+    capability = block((root / 'src/Editor/Internal/Project/EditorModuleGraphExport.cpp').read_text(encoding="utf-8"), 'bool EditorModule::CanExportGraphOutput(')
     text = PREAMBLE.replace('    READINESS', '    '+readiness).replace('    CARD', card).replace('    CONTEXT_EXPORT', context_export)
     # Definitions must precede main but can follow the class declarations.
     insertion = text.index('struct Card {')
-    text = text[:insertion] + '\n'.join((presentation,descriptor,resolver,connected)) + '\n' + text[insertion:]
+    text = text[:insertion] + '\n'.join((presentation,descriptor,resolver,connected,capability)) + '\n' + text[insertion:]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(text, encoding="utf-8")
 

@@ -277,7 +277,9 @@ std::vector<ContractIssue> ValidateCompoundDefinition(const CompoundDefinition& 
 
     std::set<std::string> portIds;
     for (const CompoundPortDefinition& port : definition.ports) {
-        const bool validPortId = IsValidScopedId(port.id) ||
+        std::string spelling=port.id;
+        for (auto& ch:spelling) if (ch>='A' && ch<='Z') ch=char(ch-'A'+'a');
+        const bool validPortId = IsValidScopedId(spelling) ||
             (port.id.rfind("param:", 0) == 0 && IsValidScopedId(port.id.substr(6)));
         if (!validPortId || !portIds.insert(port.id).second) {
             issues.push_back({ "ports.id", "compound port IDs must be unique stable tokens" });

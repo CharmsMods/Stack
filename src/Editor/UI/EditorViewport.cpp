@@ -1,3 +1,4 @@
+#include "Hdr/Presentation.h"
 #include "Editor/UI/ViewportNavigation.h"
 #include "EditorViewport.h"
 #include "Notifications/NotificationPresenter.h"
@@ -9,6 +10,7 @@
 #include "EditorViewportPreviewState.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 #include "Renderer/GLStateGuards.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/FileDialogs.h"
@@ -988,6 +990,7 @@ void EditorViewport::DrawPixelInspectionCallback(
         scissorMaxY - scissorMinY);
 
     glUseProgram(draw->program);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glBindVertexArray(draw->vertexArray);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, draw->texture);
@@ -1106,7 +1109,7 @@ void EditorViewport::Initialize() {
     if (m_PixelInspectionProgram == 0) {
         m_PixelInspectionProgram = GLHelpers::CreateShaderProgram(
             kPixelInspectionVertexShader,
-            kPixelInspectionFragmentShader);
+            Stack::Hdr::Ui::Fragment(kPixelInspectionFragmentShader,"fragColor").c_str());
     }
     if (m_PixelInspectionProgram != 0 && m_PixelInspectionVertexArray == 0) {
         glGenVertexArrays(1, &m_PixelInspectionVertexArray);
@@ -2217,6 +2220,8 @@ void EditorViewport::RenderSingleImageMode(
     unsigned int outputTex = hasRawPresentationTexture
         ? rawPresentationTexture
         : pipeline.GetOutputTexture();
+    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+    const auto photoTexture = editor->DisplayOutputTexture(outputTex,hdr);
     unsigned int sourceTex = hasRawPresentationTexture
         ? 0
         : pipeline.GetCompareSourceTexture();
@@ -2227,7 +2232,7 @@ void EditorViewport::RenderSingleImageMode(
     const bool hasPreviewGeometry = editor->TryGetViewportPreviewGeometry(previewGeometry) && previewGeometry.Valid();
     unsigned int overviewTex = 0;
     int overviewWidth = 0, overviewHeight = 0;
-    const bool hasOverview = editor->TryGetViewportPreviewOverview(overviewTex, overviewWidth, overviewHeight);
+    const bool hasOverview = editor->TryGetViewportPreviewOverview(overviewTex, overviewWidth, overviewHeight, hdr);
     const EditorRenderWorker::SharedTextureTileSet& viewportTiles = editor->GetViewportOutputTiles();
     int imgW = hasViewportTiles
         ? viewportTiles.fullWidth
@@ -2461,7 +2466,7 @@ void EditorViewport::RenderSingleImageMode(
                 const float bottomV = (localY + 0.5f) / static_cast<float>(tile.haloHeight);
                 const float topV = (localY + static_cast<float>(tile.height) - 0.5f) / static_cast<float>(tile.haloHeight);
                 drawList->AddImage(
-                    (ImTextureID)(intptr_t)tile.texture,
+                    (ImTextureID)(intptr_t)tile.Display(hdr),
                     ImVec2(tileMinX, tileMinY),
                     ImVec2(tileMaxX, tileMaxY),
                     ImVec2(u0, 1.0f - topV),
@@ -2497,7 +2502,7 @@ void EditorViewport::RenderSingleImageMode(
                 const float patchU = editedOutput ? 0.f : uInset;
                 const float patchV = editedOutput ? 0.f : vInset;
                 drawList->AddImageRounded(
-                    (ImTextureID)(intptr_t)texture,
+                    (ImTextureID)(intptr_t)(editedOutput ? photoTexture : texture),
                     patch.first,
                     patch.second,
                     ImVec2(patchU, 1.0f - patchV),
@@ -3082,7 +3087,7 @@ void EditorViewport::RenderSingleImageMode(
             const float bottomV = (localY + 0.5f) / static_cast<float>(tile.haloHeight);
             const float topV = (localY + static_cast<float>(tile.height) - 0.5f) / static_cast<float>(tile.haloHeight);
             drawList->AddImage(
-                (ImTextureID)(intptr_t)tile.texture,
+                (ImTextureID)(intptr_t)tile.Display(hdr),
                 ImVec2(tileMinX, tileMinY),
                 ImVec2(tileMaxX, tileMaxY),
                 ImVec2(u0, 1.0f - topV),
@@ -3209,10 +3214,10 @@ void EditorViewport::RenderSingleImageMode(
     if (!drewPixelInspectionColors && hasViewportTiles) {
         drawViewportTileSet(imageMin, imageMax, viewportRevealAlpha);
     } else if (!drewPixelInspectionColors && (editor->IsNodeOpenTransitionActive() || !m_FrameTransition.Draw(
-        drawList, outputTex, outputPatch.first, outputPatch.second, ImGui::GetTime(),
+        drawList, photoTexture, outputPatch.first, outputPatch.second, ImGui::GetTime(),
         ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
-        outputTint, regionalOutput ? 0.f : kImageRounding))) {
-        drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, outputPatch.first, outputPatch.second,
+        outputTint, regionalOutput ? 0.f : kImageRounding, photoTexture != outputTex))) {
+        drawList->AddImageRounded((ImTextureID)(intptr_t)photoTexture, outputPatch.first, outputPatch.second,
                                   ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), outputTint,
                                   regionalOutput ? 0.f : kImageRounding);
     }

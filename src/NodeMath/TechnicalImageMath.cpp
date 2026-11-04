@@ -291,7 +291,7 @@ DirectOutputPolicy EvaluateDirectPngOutputPolicy(const ValueDescriptor& descript
         result.diagnostics.push_back(MakeDiagnostic(
             "nmr.output.channel-export-unsupported", DiagnosticSeverity::HardError, fingerprint,
             "A Channel can be inspected in Output, but PNG export requires an Image.",
-            "Connect the Channel to Image Combine, then export the resulting Image."));
+            "Connect the Channel to Combine Channels, then export the resulting Image."));
         return result;
     }
     if (descriptor.logicalType != LogicalValueType::ColorImage) {

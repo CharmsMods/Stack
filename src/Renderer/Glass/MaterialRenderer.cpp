@@ -2,6 +2,7 @@
 #include "MaterialRenderer.h"
 #include "Renderer/Glass/EmbeddedMaterial.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 #include "Renderer/GLStateGuards.h"
 #include <algorithm>
 #include <atomic>
@@ -113,17 +114,21 @@ bool MaterialRenderer::Capture(Target& t,int x,int y,std::uint64_t revision){
     const GLState::FramebufferState host(true);
     const bool srgb=glIsEnabled(GL_FRAMEBUFFER_SRGB)!=GL_FALSE;
     const bool same=revision&&t.ready&&revision==t.revision&&t.captureX==x&&t.captureY==y&&
-        t.hostFramebuffer==host.drawFramebuffer&&t.hostBuffer==host.drawBuffer&&t.hostSrgb==srgb;
-    t.captureX=x;t.captureY=y;t.hostFramebuffer=host.drawFramebuffer;t.hostBuffer=host.drawBuffer;t.hostSrgb=srgb;
+        t.hostFramebuffer==host.drawFramebuffer&&t.hostBuffer==host.drawBuffer&&t.hostSrgb==srgb&&t.hostLinear==Hdr::Ui::linearTarget;
+    t.captureX=x;t.captureY=y;t.hostFramebuffer=host.drawFramebuffer;t.hostBuffer=host.drawBuffer;t.hostSrgb=srgb;t.hostLinear=Hdr::Ui::linearTarget;
     if(same){++counters_.cacheHits;return true;}
     t.ready=false;
     glDisable(GL_FRAMEBUFFER_SRGB);glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);
     glBindFramebuffer(GL_READ_FRAMEBUFFER,host.drawFramebuffer);glReadBuffer(host.drawBuffer);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,t.encodedFbo);glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,t.hostLinear ? t.sourceFbo : t.encodedFbo);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glBlitFramebuffer(x,y,x+t.width,y+t.height,0,0,t.width,t.height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
-    glBindFramebuffer(GL_FRAMEBUFFER,t.sourceFbo);glViewport(0,0,t.width,t.height);
-    glActiveTexture(GL_TEXTURE0);glBindSampler(0,0);glBindTexture(GL_TEXTURE_2D,t.encoded);
-    glUseProgram(transfer_);glUniform1i(0,0);glUniform4f(1,0,0,1,1);glBindVertexArray(vao_);glDrawArrays(GL_TRIANGLES,0,3);
+    glActiveTexture(GL_TEXTURE0);glBindSampler(0,0);
+    if (!t.hostLinear) {
+        glBindFramebuffer(GL_FRAMEBUFFER,t.sourceFbo);glViewport(0,0,t.width,t.height);
+        glBindTexture(GL_TEXTURE_2D,t.encoded);
+        glUseProgram(transfer_);glUniform1i(0,0);glUniform4f(1,0,0,1,1);glBindVertexArray(vao_);glDrawArrays(GL_TRIANGLES,0,3);
+    }
     glBindTexture(GL_TEXTURE_2D,t.source);glGenerateMipmap(GL_TEXTURE_2D);
     ++counters_.captures;++counters_.mipBuilds;t.revision=revision;t.ready=true;
     host.Restore(true);if(srgb)glEnable(GL_FRAMEBUFFER_SRGB);
@@ -185,11 +190,19 @@ bool MaterialRenderer::EndComposition(Target& t){
     const int lx=x-t.captureX,ly=y-t.captureY;
     glDisable(GL_FRAMEBUFFER_SRGB);glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);
     glBindFramebuffer(GL_FRAMEBUFFER,t.hostFramebuffer);glDrawBuffer(t.hostBuffer);glViewport(x,y,w,h);
-    glActiveTexture(GL_TEXTURE0);glBindSampler(0,0);glBindVertexArray(vao_);
-    glBindTexture(GL_TEXTURE_2D,t.composite);glUseProgram(transfer_);glUniform1i(0,1);
-    glUniform4f(1,float(lx)/t.width,float(ly)/t.height,float(w)/t.width,float(h)/t.height);glDrawArrays(GL_TRIANGLES,0,3);
+    if (t.hostLinear) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,t.compositeFbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBlitFramebuffer(lx,ly,lx+w,ly+h,x,y,x+w,y+h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER,t.hostFramebuffer);
+    } else {
+        glActiveTexture(GL_TEXTURE0);glBindSampler(0,0);glBindVertexArray(vao_);
+        glBindTexture(GL_TEXTURE_2D,t.composite);glUseProgram(transfer_);glUniform1i(0,1);
+        glUniform4f(1,float(lx)/t.width,float(ly)/t.height,float(w)/t.width,float(h)/t.height);glDrawArrays(GL_TRIANGLES,0,3);
+        ++counters_.encodes;
+    }
     if(t.hostSrgb)glEnable(GL_FRAMEBUFFER_SRGB);
-    t.composing=false;++counters_.encodes;return true;
+    t.composing=false;return true;
 }
 void MaterialRenderer::Shutdown(){
     for(auto& t:targets_)Release(t);targets_.clear();used_=0;

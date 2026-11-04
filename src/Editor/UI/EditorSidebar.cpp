@@ -434,24 +434,6 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
         ImGui::EndChild();
         return;
     }
-    if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
-        editor->RenderHdrMergeControls(*node, controlWidth, true);
-        ImGui::EndChild();
-        return;
-    }
-    if (node->kind == EditorNodeGraph::NodeKind::Mfsr) {
-        ImGui::TextDisabled("Status");
-        if (!node->mfsr.errorMessage.empty()) {
-            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "%s", node->mfsr.errorMessage.c_str());
-        } else {
-            ImGui::TextWrapped("%s", node->mfsr.placeholderStatus.c_str());
-        }
-        ImGui::TextDisabled("%s", node->mfsr.hasPlaceholderCachedOutput
-            ? "Placeholder cache marked"
-            : "No MFSR render cache");
-        ImGui::EndChild();
-        return;
-    }
     if (node->kind == EditorNodeGraph::NodeKind::Lut) {
         editor->RenderLutControls(*node, controlWidth, true);
         ImGui::EndChild();

@@ -1,6 +1,7 @@
 #include "FolderPocketMaterial.h"
 #include "FolderPocketMaterialShaders.h"
 #include "Renderer/GLHelpers.h"
+#include "Hdr/UiTarget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +28,7 @@ bool FolderPocketMaterial::EnsureProgram() {
     if (m_Program) return true;
     if (m_Failed) return false;
     m_Program = GLHelpers::CreateShaderProgram(FolderPocketMaterialShaders::Vertex,
-        FolderPocketMaterialShaders::Fragment, &m_Error);
+        Hdr::Ui::Fragment(FolderPocketMaterialShaders::Fragment,"FragColor").c_str(), &m_Error);
     m_Failed = m_Program == 0;
     return !m_Failed;
 }
@@ -54,6 +55,7 @@ void FolderPocketMaterial::Bind(const ImDrawList*, const ImDrawCmd* command) {
     DrawParameters p;
     std::memcpy(&p, command->UserCallbackData, sizeof(p));
     glUseProgram(p.program);
+    glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniform4f(1, p.displayRect.x, p.displayRect.y, p.displayRect.z, p.displayRect.w);
     glUniform2f(2, p.sampleStep.x, p.sampleStep.y);
     glUniform4f(3, p.topTint.x, p.topTint.y, p.topTint.z, p.topTint.w);

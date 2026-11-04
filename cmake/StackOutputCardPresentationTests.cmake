@@ -8,6 +8,7 @@ add_custom_command(OUTPUT "${output_card_test}"
         src/Editor/NodeGraph/UI/OutputCardPresentation.h
         src/Editor/EditorModule.h
         src/Editor/Internal/EditorModuleGraphSnapshot.cpp
+        src/Editor/Internal/Project/EditorModuleGraphExport.cpp
         src/Editor/Internal/EditorModuleRenderPresentationState.cpp
         src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp
         src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp

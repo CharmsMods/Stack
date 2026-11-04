@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Raw/RawGalleryQueueRequest.h"
+#include "Hdr/ImageFile.h"
 #include "Queue/ProjectQueueRequest.h"
 
 #include <cstdint>
@@ -43,6 +44,7 @@ struct Item {
     ItemState state = ItemState::Waiting;
     float progress = 0.0f;
     std::string status;
+    Hdr::FileFormat exportFormat = Hdr::FileFormat::SdrPng;
 };
 
 class RenderQueueModel {

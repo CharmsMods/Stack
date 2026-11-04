@@ -51,6 +51,18 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
         }
 
         const RenderGraphNode& node = *it->second;
+        const int componentIndex = socketId == "g" ? 1 : socketId == "b" ? 2 : socketId == "a" ? 3 : 0;
+        if (node.kind == RenderGraphNodeKind::ChannelSplit && !(componentIndex == 3 && node.splitMissingAlphaIsOpaque)) {
+            const auto* input = findInputLink(node.nodeId, "imageIn");
+            if (input && input->semanticDescriptor.presentImageComponents.state == Stack::NodeMath::KnowledgeState::Known &&
+                !Stack::NodeMath::HasImageComponent(input->semanticDescriptor.presentImageComponents.value,
+                    static_cast<Stack::NodeMath::ImageComponent>(1u << componentIndex))) {
+                pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId = nodeId;
+                pipeline.m_LastGraphExecutionStats.lastSpecializedFailure = "The selected component is absent.";
+                visitingMasks.erase(key);
+                return 0;
+            }
+        }
         if (node.kind == RenderGraphNodeKind::Image ||
             node.kind == RenderGraphNodeKind::RawDevelopment ||
             node.kind == RenderGraphNodeKind::RawDecode ||
@@ -243,10 +255,7 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
             const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
             if (inputImage) {
                 result = createTarget();
-                int channelIdx = 0;
-                if (socketId == "g") channelIdx = 1;
-                else if (socketId == "b") channelIdx = 2;
-                else if (socketId == "a") channelIdx = 3;
+                int channelIdx = componentIndex;
                 if (channelIdx == 3 && node.splitMissingAlphaIsOpaque && input &&
                     input->semanticDescriptor.presentImageComponents.state == Stack::NodeMath::KnowledgeState::Known &&
                     !Stack::NodeMath::HasImageComponent(input->semanticDescriptor.presentImageComponents.value,Stack::NodeMath::ImageComponent::Alpha))

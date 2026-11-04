@@ -44,8 +44,6 @@ public:
     Node* AddRawDevelopNode(RawDevelopPayload payload, Vec2 position);
     Node* AddRawDetailAutoMaskNode(RawDetailAutoMaskPayload payload, Vec2 position);
     Node* AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 position);
-    Node* AddHdrMergeNode(HdrMergePayload payload, Vec2 position);
-    Node* AddMfsrNode(MfsrPayload payload, Vec2 position);
     Node* AddRawProjectFrameNode(RawProjectFramePayload payload, Vec2 position);
     Node* AddMultiFrameDenoiseNode(MultiFrameDenoisePayload payload, Vec2 position);
     Node* AddMultiFrameHdrNode(MultiFrameHdrPayload payload, Vec2 position);
@@ -54,7 +52,6 @@ public:
     Node* AddDefaultOperationNode(const Node& sourceType, Vec2 position);
     Node* AddRawOperationNode(Stack::RawRecipe::GraphOperationKind kind, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
-    Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);
     Node* AddMaskTextureNode(MaskGeneratorKind shape, Vec2 position);
     Node* AddMaskCombineNode(MaskCombineMode combineMode, Vec2 position);
@@ -182,7 +179,8 @@ public:
         int toNodeId,
         const std::string& toSocketId,
         std::string* normalizedToSocketId = nullptr,
-        std::string* errorMessage = nullptr) const;
+        std::string* errorMessage = nullptr, bool retained = false,
+        bool* insertRgbCombine = nullptr) const;
     bool IsScalarTargetSocket(int nodeId, const std::string& socketId) const;
     bool CanInsertImageToScalarExtractor(
         int fromNodeId,

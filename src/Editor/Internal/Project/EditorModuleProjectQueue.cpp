@@ -50,7 +50,7 @@ bool EditorModule::AddProjectOutputToQueue(int outputNodeId) {
     if (HasPendingGraphImageImports())
         return fail("Wait for the project's imported images to finish opening.");
     if (visibleGraph.IsOutputChannelInspection(outputNodeId))
-        return fail("Queue export requires an Image. Connect this Channel to Image Combine first.");
+        return fail("Queue export requires an Image. Connect this Channel to Combine Channels first.");
     if (!FinishWorkspaceInteraction())
         return fail("Finish the current edit before adding this Output to Queue.");
 

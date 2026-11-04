@@ -37,6 +37,7 @@ struct RawImageBackdropFrame {
     // Stable complete-photo inputs for derived surround resources. Visible
     // detail patches may change during navigation without changing this source.
     std::vector<Patch> surroundPatches;
+    ImVec4 sharpViewport{}; // Ordinary photo draw clip, in ImGui screen coordinates.
     const std::vector<Patch>& SurroundPatches() const {
         return surroundPatches.empty() ? patches : surroundPatches;
     }

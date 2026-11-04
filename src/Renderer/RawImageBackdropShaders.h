@@ -43,7 +43,10 @@ void main() {
     // Only the cached surround atlas changes to display-linear light; the
     // sharp copy retains exactly the window RGB representation.
     color.rgb = backdropDisplayRange(color.rgb);
-    if (visibleColorOnly) color.rgb = backdropDisplayDecode(color.rgb);
+    if (visibleColorOnly) {
+        color.rgb=backdropDisplayDecode(color.rgb);
+        if(extendedRange) color.rgb*=color.a;
+    }
 })";
 inline constexpr const char* Blur = R"(#version 430 core
 in vec2 uv; out vec4 color;
@@ -102,15 +105,21 @@ in vec2 uv; out vec4 color;
 + BackdropUniforms::Declare("vec2", "noisePhysicalSize", BackdropUniforms::Present::NoisePhysicalSize)
 + BackdropUniforms::Declare("vec2", "noiseNativeExtent", BackdropUniforms::Present::NoiseNativeExtent)
 + BackdropUniforms::Declare("bool", "noiseEnabled", BackdropUniforms::Present::NoiseEnabled) + RawImageBackdropDisplayShaders::Functions + RawImageBackdropColorFieldShaders::Coordinates + RawImageBackdropNoiseShaders::Synthesis + R"(
+layout(location=44) uniform vec4 sharpViewport;
+vec3 resolveBlur(vec4 sampleColor) {
+    // HDR Gaussian levels and color-field samples carry premultiplied
+    // linear light. Their coverage is filtered by the same kernel.
+    return extendedRange ? sampleColor.rgb+(1.-sampleColor.a)*backdropDisplayDecode(background) : sampleColor.rgb;
+}
 vec3 sampleLevel(int level, vec2 p) {
     // Constant sampler indices also work on drivers requiring uniform indices.
-    if (level == 0) return texture(blurred[0], p).rgb;
-    if (level == 1) return texture(blurred[1], p).rgb;
-    if (level == 2) return texture(blurred[2], p).rgb;
-    if (level == 3) return texture(blurred[3], p).rgb;
-    if (level == 4) return texture(blurred[4], p).rgb;
-    if (level == 5) return texture(blurred[5], p).rgb;
-    return texture(blurred[6], p).rgb;
+    if (level == 0) return resolveBlur(texture(blurred[0],p));
+    if (level == 1) return resolveBlur(texture(blurred[1],p));
+    if (level == 2) return resolveBlur(texture(blurred[2],p));
+    if (level == 3) return resolveBlur(texture(blurred[3],p));
+    if (level == 4) return resolveBlur(texture(blurred[4],p));
+    if (level == 5) return resolveBlur(texture(blurred[5],p));
+    return resolveBlur(texture(blurred[6],p));
 }
 vec3 gaussian(vec2 p, float sigma, vec3 sharp) {
     // Returns display-linear light. Only the optional sharp endpoint needs
@@ -150,7 +159,8 @@ void main() {
     if (photo.z >= 1.0) sides.z = -1e6;
     if (photo.w >= 1.0) sides.w = -1e6;
     float signedDistance = max(max(sides.x,sides.y),max(sides.z,sides.w));
-    if (distance > 0.0 && !extendImage) { color = vec4(background, 1.0); return; }
+    vec3 targetBackground=extendedRange ? backdropDisplayDecode(background) : background;
+    if (distance > 0.0 && !extendImage) { color = vec4(targetBackground, 1.0); return; }
     // The cached Gaussian includes padding around the complete photo. Keep
     // outside coordinates here: clamping before the Gaussian lookup stretches
     // one filtered edge row/column into persistent bands instead of sampling
@@ -161,8 +171,17 @@ void main() {
     // The copy already extends boundary texels. Clamping this sharp sample to
     // the geometric photo edge resampled a different subpixel position outside
     // the photo, exposing a thin line beside the ordinary image draw.
-    vec3 sharp = texture(image, uv).rgb;
-    vec3 result = sharp;
+    vec4 sharpSample=texture(image,uv);
+    vec3 sharp=sharpSample.rgb;
+    vec3 result=extendedRange ? backdropDisplayDecode(sharp) : sharp;
+    if(extendedRange && sharpSample.a<1.) {
+        vec3 flattened=mix(targetBackground,result,sharpSample.a);
+        // The ordinary image pass covers this rectangle after the backdrop.
+        // Leave its background clean to avoid applying fractional coverage twice.
+        bool foreground=all(greaterThanEqual(uv,sharpViewport.xy)) && all(lessThan(uv,sharpViewport.zw));
+        result=foreground ? targetBackground : flattened;
+        sharp=backdropDisplayEncode(flattened);
+    }
     float sigma = 0.0;
     float blurredWeight = 0.0;
     if (extendImage && signedDistance > -edgeOverlap) {
@@ -183,11 +202,11 @@ void main() {
         float fieldWeight = smoothstep(.05,.5,distance/max(.000001,shortEdge));
         if (fieldWeight > 0.0) {
             vec2 fieldPoint = colorFieldCoordinate(imagePoint,photoSize/shortEdge);
-            soft = mix(soft,texture(blurColorField,fieldPoint).rgb,fieldWeight);
+            soft = mix(soft,resolveBlur(texture(blurColorField,fieldPoint)),fieldWeight);
         }
         // Gaussian levels and the broad field contain display-linear light.
         // Rejoin the window RGB photo and measure/add grain in that domain.
-        soft = backdropDisplayEncode(soft);
+        if (!extendedRange) soft = backdropDisplayEncode(soft);
         // An edge entering the window on zoom-out gains its feather gradually
         // instead of suddenly softening a full strip at the window boundary.
         vec4 visibleMargins = vec4(photo.xy*screenSize, (vec2(1)-photo.zw)*screenSize);
@@ -197,17 +216,22 @@ void main() {
         // Window-entry feathering affects only the photo interior. Outside
         // color must not change when the same edge approaches a window border.
         blurredWeight = distance > 0.0 ? 1.0 : feather*extensionOpacity;
-        result = mix(sharp, soft, blurredWeight);
+        result = mix(result,soft,blurredWeight);
     }
     float coverage = controlBlurCoverage();
     if (coverage > 0.0) {
-        result = mix(result, backdropDisplayEncode(gaussian(p, max(sigma,64.0), sharp)), coverage);
+        vec3 soft=gaussian(p,max(sigma,64.0),sharp);
+        result = mix(result,extendedRange ? soft : backdropDisplayEncode(soft),coverage);
         blurredWeight = 1.0-(1.0-blurredWeight)*(1.0-coverage);
     }
-    result += matchedNoise(blurredWeight, coverage>0.0 ? max(sigma,64.0) : sigma,result);
+    if(noiseEnabled && blurredWeight>0.0) {
+        vec3 encoded=extendedRange ? backdropDisplayEncode(result) : result;
+        encoded+=matchedNoise(blurredWeight,coverage>0.0 ? max(sigma,64.0) : sigma,encoded);
+        result=extendedRange ? backdropDisplayDecode(encoded) : encoded;
+    }
     // Only the generated surround follows the presentation toggle. Real photo
     // pixels and their update fades remain independent of this appearance.
-    if (distance > 0.0) result = mix(background, result, extensionOpacity);
+    if (distance > 0.0) result = mix(targetBackground,result,extensionOpacity);
     color = vec4(result, 1.0);
 })";
 }

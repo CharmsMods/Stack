@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/NodeGraph/BrightnessRecipe.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
@@ -74,6 +75,8 @@ bool ApplyPromotedParameter(
         Stack::NodeMath::SetCompoundParameterOverride(node.compound.instance, parameterId.substr(9), value);
     } else if (node.kind == NodeKind::Layer && parameterId.rfind("layer:", 0) == 0) {
         node.layerParameters[parameterId.substr(6)] = converted;
+    } else if (node.kind == NodeKind::Value && parameterId == "value.payload") {
+        node.value.value=Stack::NodeMath::MakeUniformScalar(*scalar);
     } else if (parameterId == "constantChannelSettings.value") {
         node.constantChannelSettings.value = converted;
     } else if (parameterId == "mixFactor") {
@@ -105,6 +108,7 @@ std::optional<Stack::NodeMath::ParameterValue> ReadPromotedParameter(const Node&
     }
     if (id.rfind("layer:",0)==0 && node.layerParameters.contains(id.substr(6)) && node.layerParameters[id.substr(6)].is_number())
         return node.layerParameters[id.substr(6)].get<double>();
+    if (id=="value.payload" && node.kind==NodeKind::Value && std::holds_alternative<double>(node.value.value.payload)) return std::get<double>(node.value.value.payload);
     if (id=="constantChannelSettings.value") return double(node.constantChannelSettings.value);
     if (id=="mixFactor") return double(node.mixFactor);
     if (id=="dataMathSettings.constantA") return double(node.dataMathSettings.constantA);
@@ -274,6 +278,9 @@ Node CloneImageNodeForCompoundExpansion(const Node& source) {
     clone.image.channels = source.image.channels;
     clone.image.originalChannels = source.image.originalChannels;
     clone.image.sourceColorMetadata = source.image.sourceColorMetadata;
+    clone.image.hdrPixels = source.image.hdrPixels;
+    clone.image.hdrFingerprint = source.image.hdrFingerprint;
+    clone.image.hdrStorageQuarterTurns = source.image.hdrStorageQuarterTurns;
     clone.image.isLoading = source.image.isLoading;
     clone.image.isEmbedding = source.image.isEmbedding;
     clone.image.importRequestId = source.image.importRequestId;
@@ -296,7 +303,7 @@ bool ValidateCanonicalCompoundBindings(
     }
     Graph canonical;
     try {
-        DeserializeGraphPayload(definition.canonicalGraph, canonical, 0);
+        DeserializeGraphPayload(definition.canonicalGraph, canonical, 0, EditorNodeGraphDefinitions::LiveGraphRole::Compound);
     } catch (const std::exception& exception) {
         if (error) *error = "Compound canonical graph could not be read: " + std::string(exception.what());
         return false;
@@ -327,8 +334,13 @@ bool ValidateCanonicalCompoundBindings(
         const SocketDirection expectedDirection =
             port.direction == Stack::NodeMath::PortDirection::Input
                 ? SocketDirection::Input : SocketDirection::Output;
+        // A public socket can narrow a polymorphic internal arithmetic operand.
+        const bool primitiveOperand = expectedDirection == SocketDirection::Input &&
+            node->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode) &&
+            (port.logicalType == Stack::NodeMath::LogicalValueType::Scalar ||
+             IsSingleChannelValue(port.logicalType) || port.logicalType == Stack::NodeMath::LogicalValueType::ColorImage);
         if (socket.direction != expectedDirection ||
-            (!port.numeric && LogicalTypeForSocket(socket.type) != port.logicalType)) {
+            (!port.numeric && !primitiveOperand && LogicalTypeForSocket(socket.type) != port.logicalType)) {
             if (error) *error = "Compound port type or direction disagrees with its canonical internal socket.";
             return false;
         }
@@ -595,79 +607,16 @@ bool Graph::UnpackCompoundNode(
     std::vector<CompoundOutputBinding>* outputBindings,
     bool retainBoundary) {
     Node* instanceNode = FindNode(nodeId);
-    if (instanceNode && instanceNode->kind != NodeKind::Compound) {
-        Stack::NodeMath::CompoundDefinition recipe;
-        std::vector<EditorNodeGraphDefinitions::NativeDecompositionPortBinding> portBindings;
-        if (!EditorNodeGraphDefinitions::BuildNativeNodeDecomposition(*this,*instanceNode,recipe,error,&portBindings)) return false;
-        // Materialize the exact native recipe inside the existing transaction.
-        // Translate its native sockets to stable compound ports only within the
-        // candidate; the normal unpacker owns the real endpoints and repacking.
+    if (instanceNode && EditorNodeGraphDefinitions::IsBrightnessRecipe(*instanceNode)) {
         Graph candidate=*this;
-        const auto reference=recipe.identity;
-        if (!candidate.AddCompoundDefinition(std::move(recipe),error)) return false;
-        auto* wrapped=candidate.FindNode(nodeId);
-        const auto title=wrapped->title;
-        wrapped->kind=NodeKind::Compound;
-        wrapped->compound.instance.instanceUuid=wrapped->instanceUuid;
-        wrapped->compound.instance.definition=reference;
-        wrapped->compound.instance.interfaceSnapshot=candidate.FindCompoundDefinition(reference)->ports;
-        ResolveCompoundNodeState(*wrapped,candidate.m_CompoundDefinitions);
-        wrapped->title=title;
-        const auto recipePort = [&](const std::string& nativeSocket, Stack::NodeMath::PortDirection direction) -> const std::string* {
-            for (const auto& binding:portBindings)
-                if (binding.direction==direction && binding.nativeSocketId==nativeSocket) return &binding.recipePortId;
-            return nullptr;
-        };
-        std::unordered_map<std::string,std::string> translatedChannels;
-        for(auto& channel:wrapped->channelOutputs) {
-            const auto* base=recipePort(channel.sourceSocket,Stack::NodeMath::PortDirection::Output);
-            if(!base) {if(error)*error="The native recipe cannot retain this component output.";return false;}
-            const auto old=channel.id;channel.sourceSocket=*base;
-            channel.id=ChannelOutputId(*base,channel.component,channel.missingAlphaIsOpaque);
-            translatedChannels.emplace(old,channel.id);
-        }
-        for (auto& link:candidate.m_Links) {
-            if (link.toNodeId==nodeId) {
-                const auto* port=recipePort(link.toSocketId,Stack::NodeMath::PortDirection::Input);
-                if (!port) { if (error) *error="Native recipe cannot bind a connected input."; return false; }
-                link.toSocketId=*port;
-            }
-            if (link.fromNodeId==nodeId) {
-                if(const auto channel=translatedChannels.find(link.fromSocketId);channel!=translatedChannels.end()) {
-                    link.fromSocketId=channel->second;continue;
-                }
-                const auto* port=recipePort(link.fromSocketId,Stack::NodeMath::PortDirection::Output);
-                if (!port) { if (error) *error="Native recipe cannot bind a connected output."; return false; }
-                link.fromSocketId=*port;
-            }
-        }
-        // Retained ancestors refer to the native child's sockets too. Translate
-        // them before the normal unpacker substitutes the real internal endpoints.
-        for (auto& group:candidate.m_Groups) {
-            if (!group.compoundBoundary.is_object()) continue;
-            for (auto& port:group.compoundBoundary["ports"]) {
-                if (port.value("internalInstanceUuid",std::string{})!=wrapped->instanceUuid) continue;
-                const auto nativeSocket=port.value("internalSocketId",std::string{});
-                if(const auto channel=translatedChannels.find(nativeSocket);channel!=translatedChannels.end()) {
-                    port["internalSocketId"]=channel->second;continue;
-                }
-                for (const auto& binding:portBindings)
-                    if (binding.nativeSocketId==nativeSocket) { port["internalSocketId"]=binding.recipePortId; break; }
-            }
-        }
-        candidate.TouchStructure();
-        std::vector<CompoundOutputBinding> nativeOutputs;
-        if (!candidate.UnpackCompoundNode(nodeId,unpackedNodeIds,error,outputBindings ? &nativeOutputs : nullptr,retainBoundary)) return false;
-        if (outputBindings) {
-            for(auto& output:nativeOutputs)for(const auto& channel:translatedChannels)
-                if(output.authoredSocketId==channel.second)output.authoredSocketId=channel.first;
-            for (auto& output:nativeOutputs)
-                for (const auto& binding:portBindings)
-                    if (binding.direction==Stack::NodeMath::PortDirection::Output &&
-                        binding.recipePortId==output.authoredSocketId) {
-                        output.authoredSocketId=binding.nativeSocketId; break;
-                    }
-            *outputBindings=std::move(nativeOutputs);
+        const auto* input=FindInputLink(nodeId,kImageInputSocketId);
+        const auto type=input ? DescribeGraphOutput(*this,input->fromNodeId,input->fromSocketId).descriptor :
+            Stack::NodeMath::MakeUnknownDescriptor(Stack::NodeMath::LogicalValueType::Invalid);
+        std::string reason;
+        if (!EditorNodeGraphDefinitions::BindBrightnessRecipe(candidate,nodeId,type,instanceNode->layerParameters,reason) ||
+            !candidate.UnpackCompoundNode(nodeId,unpackedNodeIds,&reason,outputBindings,retainBoundary)) {
+            if (error) *error=reason;
+            return false;
         }
         *this=std::move(candidate);
         return true;
@@ -690,7 +639,7 @@ bool Graph::UnpackCompoundNode(
     }
 
     Graph internal;
-    DeserializeGraphPayload(definition->canonicalGraph, internal, 0);
+    DeserializeGraphPayload(definition->canonicalGraph, internal, 0, EditorNodeGraphDefinitions::LiveGraphRole::Compound);
     for (const Stack::NodeMath::CompoundDefinition& dependency : internal.GetCompoundDefinitions()) {
         bool present = false;
         for (const Stack::NodeMath::CompoundDefinition& existing : m_CompoundDefinitions) {
@@ -922,7 +871,7 @@ bool Graph::UnpackCompoundNode(
                     link.toNodeId,
                     link.toSocketId,
                     &normalizedTarget,
-                    &linkError);
+                    &linkError, true);
             } catch (const std::bad_alloc&) {
                 rollbackTransientExpansion();
                 SetCompoundErrorNoThrow(
@@ -1130,7 +1079,7 @@ bool Graph::ResolveCompoundOutputInputDependencies(
     }
 
     Graph canonical;
-    DeserializeGraphPayload(definition->canonicalGraph, canonical, 0);
+    DeserializeGraphPayload(definition->canonicalGraph, canonical, 0, EditorNodeGraphDefinitions::LiveGraphRole::Compound);
     std::unordered_map<int, const Node*> canonicalNodes;
     std::unordered_map<int, std::vector<SocketDefinition>> canonicalSockets;
     std::unordered_map<
@@ -1310,8 +1259,8 @@ bool Graph::ResolveCompoundOutputInputDependencies(
                             input.optional = true;
                         }
                         const bool imageAverage = internalNode->dataMathMode == DataMathMode::ImageAverage;
-                        const bool uniformDefaults = internalNode->dataMathSettings.domain ==
-                            Stack::NodeMath::ArithmeticDomain::Values && !imageAverage;
+                        const bool uniformDefaults = (Stack::NodeMath::Primitive(internalNode->dataMathMode) ||
+                            internalNode->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) && !imageAverage;
                         frame.valid = uniformDefaults || operandCount >= (imageAverage ? 2 : 1);
                     }
                 }

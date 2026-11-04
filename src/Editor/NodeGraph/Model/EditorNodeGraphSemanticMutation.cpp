@@ -52,6 +52,7 @@ bool Graph::SetDataMathMode(int nodeId, DataMathMode mode) {
     if (!node || node->kind != NodeKind::DataMath) {
         return false;
     }
+    if (Stack::NodeMath::Primitive(node->dataMathMode) || Stack::NodeMath::Primitive(mode)) return false;
     if (node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
         mode == DataMathMode::ImageAverage) return false;
 

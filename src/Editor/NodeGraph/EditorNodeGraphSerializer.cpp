@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "NodeMath/ToneCurveParameters.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Editor/LayerRegistry.h"
@@ -34,8 +35,6 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::RawDevelop: return "RawDevelop";
         case NodeKind::RawDetailAutoMask: return "RawDetailAutoMask";
         case NodeKind::RawDetailFusion: return "RawDetailFusion";
-        case NodeKind::HdrMerge: return "HdrMerge";
-        case NodeKind::Mfsr: return "MFSR";
         case NodeKind::RawProjectFrame: return "RawProjectFrame";
         case NodeKind::MultiFrameDenoise: return "MultiFrameDenoise";
         case NodeKind::MultiFrameHdr: return "MultiFrameHdr";
@@ -44,7 +43,6 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
-        case NodeKind::Scope: return "Scope";
         case NodeKind::MaskTexture: return "MaskTexture";
         case NodeKind::MaskGenerator: return "MaskGenerator";
         case NodeKind::MaskCombine: return "MaskCombine";
@@ -65,34 +63,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::TechnicalImage: return "TechnicalImage";
         case NodeKind::Compound: return "Compound";
         }
-    return "Layer";
-}
-
-nlohmann::json SerializeMfsrSettings(const Stack::Mfsr::MfsrSettings& settings) {
-    return {
-        { "schemaVersion", settings.schemaVersion },
-        { "algorithmVersion", settings.algorithmVersion },
-        { "scalePreset", Stack::Mfsr::MfsrScalePresetStableString(settings.scalePreset) },
-        { "qualityPreset", Stack::Mfsr::MfsrQualityPresetStableString(settings.qualityPreset) },
-        { "preferRawMosaicPath", settings.preferRawMosaicPath },
-        { "maxInputFrames", settings.maxInputFrames }
-    };
-}
-
-Stack::Mfsr::MfsrSettings DeserializeMfsrSettings(const nlohmann::json& value) {
-    Stack::Mfsr::MfsrSettings settings;
-    if (!value.is_object()) {
-        return settings;
-    }
-    settings.schemaVersion = value.value("schemaVersion", settings.schemaVersion);
-    settings.algorithmVersion = value.value("algorithmVersion", settings.algorithmVersion);
-    settings.scalePreset = Stack::Mfsr::MfsrScalePresetFromStableString(
-        value.value("scalePreset", std::string(Stack::Mfsr::MfsrScalePresetStableString(settings.scalePreset))));
-    settings.qualityPreset = Stack::Mfsr::MfsrQualityPresetFromStableString(
-        value.value("qualityPreset", std::string(Stack::Mfsr::MfsrQualityPresetStableString(settings.qualityPreset))));
-    settings.preferRawMosaicPath = value.value("preferRawMosaicPath", settings.preferRawMosaicPath);
-    settings.maxInputFrames = value.value("maxInputFrames", settings.maxInputFrames);
-    return settings;
+    throw std::runtime_error("Cannot serialize an unsupported graph node.");
 }
 
 nlohmann::json SerializeOutputSettings(const OutputSettings& settings) {
@@ -315,7 +286,6 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["x"] = node.position.x;
         item["y"] = node.position.y;
         item["expanded"] = node.expanded;
-        item["scopeKind"] = ScopeKindToString(node.scopeKind);
         item["maskKind"] = MaskGeneratorKindToString(node.maskKind);
         item["rawCoverage"] = node.rawCoverage;
         item["maskSettings"] = SerializeMaskSettings(node.maskSettings);
@@ -361,6 +331,8 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         if (node.kind == NodeKind::Image) {
             item["label"] = node.image.label;
             item["sourcePath"] = node.image.sourcePath;
+            if (node.image.hdrPixels) item["preserveOriginalColorFile"] = true;
+            if (node.image.hdrStorageQuarterTurns) item["imageQuarterTurns"] = node.image.hdrStorageQuarterTurns;
             item["width"] = node.image.width;
             item["height"] = node.image.height;
             item["channels"] = node.image.channels;
@@ -376,7 +348,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             }
             auto metadata = node.image.sourceColorMetadata;
             metadata.descriptor = Stack::NodeMath::DescribeStoredImageValue(metadata.descriptor,
-                node.image.channels, node.image.width, node.image.height);
+                node.image.channels, node.image.width, node.image.height, static_cast<bool>(node.image.hdrPixels));
             item["sourceColorMetadata"] = Stack::NodeMath::SerializeSourceColorMetadata(metadata);
         } else if (node.kind == NodeKind::Value) {
             item["value"] = Stack::NodeMath::SerializeFirstClassValue(node.value.value);
@@ -420,13 +392,6 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["rawDetailAutoMaskSettings"] = SerializeRawDetailFusionSettings(node.rawDetailAutoMask.settings);
         } else if (node.kind == NodeKind::RawDetailFusion) {
             item["rawDetailFusionSettings"] = SerializeRawDetailFusionSettings(node.rawDetailFusion.settings);
-        } else if (node.kind == NodeKind::HdrMerge) {
-            item["hdrMergeSettings"] = SerializeHdrMergeSettings(node.hdrMerge.settings);
-        } else if (node.kind == NodeKind::Mfsr) {
-            item["mfsrSettings"] = SerializeMfsrSettings(node.mfsr.settings);
-            item["mfsrHasPlaceholderCachedOutput"] = node.mfsr.hasPlaceholderCachedOutput;
-            item["mfsrPlaceholderStatus"] = node.mfsr.placeholderStatus;
-            item["mfsrError"] = node.mfsr.errorMessage;
         } else if (node.kind == NodeKind::RawProjectFrame) {
             item["sourceSetId"] = node.rawProjectFrame.sourceSetId;
             item["frameId"] = node.rawProjectFrame.frameId;
@@ -571,7 +536,7 @@ void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData) {
 void Serialization::ReadCurrentGraphPayload(
     const nlohmann::json& pipelineData,
     Graph& graph,
-    int layerCount) {
+    int layerCount, EditorNodeGraphDefinitions::LiveGraphRole graphRole) {
 
     graph.Clear();
 
@@ -652,7 +617,11 @@ void Serialization::ReadCurrentGraphPayload(
             if (!encodedImage.empty() && !DecodeImagePayloadPngBytes(encodedImage, node.image))
                 throw std::runtime_error("Embedded image data could not be decoded. Copy or import the image again.");
             node.image.originalChannels = item.value("originalChannels", node.image.originalChannels);
-            if (item.contains("sourceColorMetadata")) {
+            if (node.image.hdrPixels) {
+                const int turns=item.value("imageQuarterTurns",0);
+                if (turns && !RotateManagedImagePayload(node.image,turns))
+                    throw std::runtime_error("The stored image orientation is invalid.");
+            } else if (item.contains("sourceColorMetadata")) {
                 std::vector<Stack::NodeMath::ContractIssue> issues;
                 Stack::NodeMath::ParseSourceColorMetadata(
                     item["sourceColorMetadata"], node.image.sourceColorMetadata, issues);
@@ -718,17 +687,6 @@ void Serialization::ReadCurrentGraphPayload(
             node.kind = NodeKind::RawDetailFusion;
             node.rawDetailFusion.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailFusionSettings", nlohmann::json::object()));
             if (node.title.empty() || node.title == "RAW Detail Fusion" || node.title == "Auto Gain") node.title = "Pre-Local Exposure";
-        } else if (kind == "HdrMerge") {
-            node.kind = NodeKind::HdrMerge;
-            node.hdrMerge.settings = DeserializeHdrMergeSettings(item.value("hdrMergeSettings", nlohmann::json::object()));
-            if (node.title.empty()) node.title = "HDR Merge";
-        } else if (kind == "MFSR" || kind == "Mfsr") {
-            node.kind = NodeKind::Mfsr;
-            node.mfsr.settings = DeserializeMfsrSettings(item.value("mfsrSettings", nlohmann::json::object()));
-            node.mfsr.hasPlaceholderCachedOutput = item.value("mfsrHasPlaceholderCachedOutput", false);
-            node.mfsr.placeholderStatus = item.value("mfsrPlaceholderStatus", std::string(kMfsrPhase2PlaceholderStatus));
-            node.mfsr.errorMessage = item.value("mfsrError", std::string());
-            if (node.title.empty() || node.title == "Multi-Frame Super Resolution") node.title = "MFSR";
         } else if (kind == "RawProjectFrame") {
             node.kind = NodeKind::RawProjectFrame;
             node.rawProjectFrame.sourceSetId = item.value("sourceSetId", std::string());
@@ -826,12 +784,6 @@ void Serialization::ReadCurrentGraphPayload(
         } else if (kind == "Composite") {
             node.kind = NodeKind::Composite;
             if (node.title.empty()) node.title = "Composite";
-        } else if (kind == "Scope") {
-            node.kind = NodeKind::Scope;
-            node.scopeKind = ScopeKindFromString(item.value("scopeKind", std::string("Histogram")));
-            if (node.title.empty()) {
-                node.title = ScopeKindToString(node.scopeKind);
-            }
         } else if (kind == "MaskGenerator" || kind == "MaskTexture") {
             node.kind = kind == "MaskTexture" ? NodeKind::MaskTexture : NodeKind::MaskGenerator;
             node.maskKind = MaskGeneratorKindFromString(item.value("maskKind", std::string("Solid")));
@@ -972,8 +924,8 @@ void Serialization::ReadCurrentGraphPayload(
         } else if (kind == "ChannelSplit") {
             node.kind = NodeKind::ChannelSplit;
             node.splitMissingAlphaIsOpaque = item.value("missingAlphaIsOpaque",false);
-            if (node.title.empty()) {
-                node.title = "Channel Split";
+            if (node.title.empty() || node.title == "Channel Split") {
+                node.title = kSplitChannelsTitle;
             }
         } else if (kind == "ChannelCombine") {
             node.kind = NodeKind::ChannelCombine;
@@ -983,8 +935,8 @@ void Serialization::ReadCurrentGraphPayload(
                         "imageCombineSettings",
                         nlohmann::json::object()));
             if (node.title.empty() ||
-                node.title == "Channel Combine") {
-                node.title = "Image Combine";
+                node.title == "Channel Combine" || node.title == "Image Combine") {
+                node.title = kCombineChannelsTitle;
             }
         } else if (kind == "ConstantChannel") {
             node.kind = NodeKind::ConstantChannel;
@@ -1036,7 +988,7 @@ void Serialization::ReadCurrentGraphPayload(
                 savedDefinitionId,
                 savedDefinitionVersion,
                 savedDefinitionHash,
-                &error)) throw std::runtime_error(error);
+                &error, graphRole)) throw std::runtime_error(error);
         }
 
         maxNodeId = std::max(maxNodeId, node.id);

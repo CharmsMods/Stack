@@ -29,7 +29,7 @@ bool GraphFrameTransition::Prepare(const Stack::GraphRendering::FramePresentatio
     m_Last = next;
     if (m_Duration <= 0) { Clear(); return false; }
     const auto memory = Stack::Renderer::QueryGpuMemoryBudget();
-    const auto bytes = keepBase ? m_Previous.Bytes() :
+    const auto bytes = keepBase ? m_Previous.Bytes() + m_PreviousHdr.Bytes() :
         static_cast<std::uint64_t>(std::max(0, m_Base.width)) * std::max(0, m_Base.height) * 16u;
     if (memory.queryAvailable && Raw::ResolveRawGpuMemoryBudget(memory).workingBudgetBytes < bytes) {
         Clear();
@@ -40,12 +40,13 @@ bool GraphFrameTransition::Prepare(const Stack::GraphRendering::FramePresentatio
     return true;
 }
 
-void GraphFrameTransition::RetainOwned(unsigned int texture, int width, int height) {
+void GraphFrameTransition::RetainOwned(unsigned int texture, int width, int height, Raw::RawGpuImageLease hdr) {
     if (m_KeepBase) {
         if (texture) glDeleteTextures(1, &texture);
         return;
     }
     try {
+        m_PreviousHdr = std::move(hdr);
         m_Previous = Raw::RawGpuImageLease::AdoptOwned(texture, width, height,
             Raw::RawGpuImageFamily::Presentation);
     } catch (...) {
@@ -56,14 +57,17 @@ void GraphFrameTransition::RetainOwned(unsigned int texture, int width, int heig
 
 void GraphFrameTransition::Clear() {
     m_Previous.Reset();
+    m_PreviousHdr.Reset();
     m_Duration = 0;
     m_StartedAt = -1.0;
     m_KeepBase = false;
 }
 
 void GraphFrameTransition::ReleaseSubmittedDraw() {
-    if (!ImGui::GetCurrentContext() || ImGui::GetFrameCount() != m_DrawnFrame)
+    if (!ImGui::GetCurrentContext() || ImGui::GetFrameCount() != m_DrawnFrame) {
         m_DrawnPrevious.Reset();
+        m_DrawnHdr.Reset();
+    }
 }
 
 void GraphFrameTransition::Validate(const Stack::GraphRendering::RequestTag& identity, double now) {
@@ -74,10 +78,10 @@ void GraphFrameTransition::Validate(const Stack::GraphRendering::RequestTag& ide
 
 bool GraphFrameTransition::Draw(ImDrawList* list, unsigned int current,
     ImVec2 minimum, ImVec2 maximum, double now, ImVec2 uvMinimum, ImVec2 uvMaximum,
-    ImU32 tint, float rounding) {
+    ImU32 tint, float rounding, bool hdr) {
     if (!list || !current) return false;
     BlendDescription blend;
-    if (!DescribeBlend(now, blend)) return false;
+    if (!DescribeBlend(now, blend, hdr)) return false;
     const auto previous = NormalizedBounds(m_Base.region), next = NormalizedBounds(m_Last.region);
     const FrameBounds overlap{std::max(previous.left, next.left), std::max(previous.top, next.top),
         std::min(previous.right, next.right), std::min(previous.bottom, next.bottom)};
@@ -115,7 +119,7 @@ bool GraphFrameTransition::Draw(ImDrawList* list, unsigned int current,
     return true;
 }
 
-bool GraphFrameTransition::DescribeBlend(double now, BlendDescription& description) {
+bool GraphFrameTransition::DescribeBlend(double now, BlendDescription& description, bool hdr) {
     description = {};
     ReleaseSubmittedDraw();
     if (!m_Previous || m_Duration <= 0) return false;
@@ -126,7 +130,8 @@ bool GraphFrameTransition::DescribeBlend(double now, BlendDescription& descripti
     const FrameBounds overlap{std::max(previous.left, next.left), std::max(previous.top, next.top),
         std::min(previous.right, next.right), std::min(previous.bottom, next.bottom)};
     if (overlap.left >= overlap.right || overlap.top >= overlap.bottom) { Clear(); return false; }
-    description.previousTexture = m_Previous.Texture();
+    if (hdr && !m_PreviousHdr) return false;
+    description.previousTexture = hdr ? m_PreviousHdr.Texture() : m_Previous.Texture();
     description.previousOffset = ImVec2(float((next.left - previous.left) / (previous.right - previous.left)),
         float((previous.bottom - next.bottom) / (previous.bottom - previous.top)));
     description.previousScale = ImVec2(float((next.right - next.left) / (previous.right - previous.left)),
@@ -134,11 +139,12 @@ bool GraphFrameTransition::DescribeBlend(double now, BlendDescription& descripti
     description.imageBounds = ImVec4(float(overlap.left), float(1.0 - overlap.bottom),
         float(overlap.right), float(1.0 - overlap.top));
     description.amount = amount;
-    description.encoded = m_Last.encoded;
+    description.encoded = hdr || m_Last.encoded;
     // Backdrop composition and ordinary ImGui draws borrow the same old frame.
     // Navigation may clear the active blend later in this frame, so retain the
     // lease until all queued draws have reached the render backend.
     m_DrawnPrevious = m_Previous;
+    m_DrawnHdr = m_PreviousHdr;
     m_DrawnFrame = ImGui::GetFrameCount();
     return true;
 }

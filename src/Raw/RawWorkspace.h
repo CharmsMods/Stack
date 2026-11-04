@@ -191,6 +191,9 @@ struct SourceSetProjectCatalogEntry {
     std::vector<unsigned char> coverThumbnailBytes;
     std::filesystem::path coverThumbnailCachePath;
     std::string errorMessage;
+    // Identifies the committed pixels for derived project previews, including
+    // a freshly saved bracket before its next index scan.
+    std::uint64_t persistedStorageRevision = 0;
 };
 
 struct SourceRecord {

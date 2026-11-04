@@ -1,5 +1,5 @@
 #pragma once
-#include "Editor/GraphScopeData.h"
+#include "Hdr/ImageFile.h"
 #include "Raw/RawAssetCapture.h"
 #include "Editor/GraphRenderPolicy.h"
 
@@ -119,6 +119,7 @@ public:
         }
 
         void Reset() {
+            hdr.Reset();
             if (readyFence != nullptr) {
                 glDeleteSync(readyFence);
                 readyFence = nullptr;
@@ -138,6 +139,8 @@ public:
         int height = 0;
         GLsync readyFence = nullptr;
         Raw::RawGpuImageLease lease;
+        Raw::RawGpuImageLease hdr;
+        unsigned Display(bool active) const {return active && hdr ? hdr.Texture() : texture;}
 
     private:
         void MoveFrom(SharedTextureResult&& other) noexcept {
@@ -146,6 +149,7 @@ public:
             height = other.height;
             readyFence = other.readyFence;
             lease = std::move(other.lease);
+            hdr = std::move(other.hdr);
             other.texture = 0;
             other.width = 0;
             other.height = 0;
@@ -163,6 +167,8 @@ public:
         int haloY = 0;
         int haloWidth = 0;
         int haloHeight = 0;
+        Raw::RawGpuImageLease hdr;
+        unsigned Display(bool active) const {return active && hdr ? hdr.Texture() : texture;}
     };
 
     struct SharedTextureTileSet {
@@ -215,7 +221,6 @@ public:
         std::string sourceSocketId;
         bool maskInput = false;
         bool directSourceOutput = false;
-        bool scopeAnalysis = false;
         SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
@@ -234,7 +239,6 @@ public:
         int previewNodeId = -1;
         bool success = false;
         std::vector<unsigned char> pixels;
-        std::shared_ptr<const GraphScopeData> scopeData;
         int width = 0;
         int height = 0;
         std::uint64_t dirtyGeneration = 0;
@@ -442,6 +446,7 @@ public:
     };
 
     struct RawWorkspaceSnapshot {
+        Stack::Hdr::FileFormat exportFormat = Stack::Hdr::FileFormat::SdrPng;
         std::string sourceKey;
         std::uint64_t sourceHash = 0;
         std::size_t recipeRevision = 0;
@@ -623,6 +628,7 @@ public:
         // the pipeline output. Such pixels are not settled output even
         // when the worker is idle or a later continuation fails.
         bool denoisePending = false;
+        Stack::Hdr::Image hdrExportImage;
         std::vector<unsigned char> pixels;
         int width = 0;
         int height = 0;

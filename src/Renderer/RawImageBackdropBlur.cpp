@@ -1,3 +1,4 @@
+#include "Hdr/UiTarget.h"
 #include "RawImageBackdropBlur.h"
 #include "RawImageBackdrop.h"
 #include "RawImageBackdropShaders.h"
@@ -148,6 +149,7 @@ bool RawImageBackdropBlur::Prepare(const RawImageBackdropFrame& frame) {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer); glViewport(0, 0, width, height);
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(copyProgram);
+    glUniform1i(43,Hdr::Ui::linearTarget);
     glUniform1i(BackdropUniforms::Copy::Image, 0);
     glUniform1i(BackdropUniforms::Copy::Previous, 1);
     // Copy clips visible display texels before sampling, applies the accepted
