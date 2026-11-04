@@ -102,6 +102,12 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
             toneChanged|=ImGuiExtras::NodeSliderFloat("Detail range","##ToneLocalRange",&tone.localRangeEv,.05f,2,"%.2f EV",width);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Tone differences treated as local detail. Larger values preserve stronger texture but can soften region boundaries.");
+            float colorProtection=tone.localColorProtection*100;
+            if (ImGuiExtras::NodeSliderFloat("Protect color boundaries","##ToneLocalColor",&colorProtection,0,100,"%.0f%%",width)) {
+                tone.localColorProtection=colorProtection/100; toneChanged=true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Use reliable color differences to keep regional tone from crossing object boundaries. HDR bracket evidence is used when available; otherwise the current image guides the result. Zero uses luminance alone.");
             ImGui::EndDisabled();
         }
         if (toneChanged) {

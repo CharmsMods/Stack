@@ -93,7 +93,10 @@ inline std::size_t PostFinishToneCost(const Recipe& input) {
             Stack::RawRecipe::ReadSceneTone(payload.value("luminanceTone",nlohmann::json::object()));
         const bool local = Stack::RawRecipe::IsLocalSceneToneActive(scene);
         HashTypedValue(toneKey,local);
-        if (local) HashTypedValue(toneKey,scene.localRadius);
+        if (local) {
+            HashTypedValue(toneKey,scene.localRadius);
+            HashTypedValue(toneKey,Stack::RawRecipe::IsColorGuidedSceneToneActive(scene));
+        }
     };
     hashLocal(tone);
     for (const auto& gradient : input.toneGradients)

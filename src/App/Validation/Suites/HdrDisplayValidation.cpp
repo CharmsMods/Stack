@@ -56,7 +56,8 @@ std::vector<float> Render(const std::vector<float>& rgba,int width,int height,co
 }
 
 std::vector<float> RenderLocalTone(const std::vector<float>& rgba,int width,int height,
-    const Stack::RawRecipe::SceneTone& curve,const std::function<bool()>& cancel={}) {
+    const Stack::RawRecipe::SceneTone& curve,const std::function<bool()>& cancel={},
+    const Stack::Renderer::SceneColorGuidance& guidance={},bool colorRelationships=true) {
     Stack::Renderer::ScopedGLTexture input(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));
     Stack::Renderer::ScopedGLTexture output(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));
     glBindTexture(GL_TEXTURE_2D,input.Get());
@@ -75,12 +76,153 @@ std::vector<float> RenderLocalTone(const std::vector<float>& rgba,int width,int 
     settings["luminanceTone"]=Stack::RawRecipe::SerializeSceneTone(curve);
     settings["inputWorkingSpace"]="linear-rec2020-d65";
     settings["truthfulV2SignedMath"]=true;
+    settings["executionColorRelationships"]=colorRelationships;
     layer.Deserialize(settings);layer.SetProcessingCancellation(cancel);
+    layer.SetSceneColorGuidance(guidance);
     layer.Execute(input.Get(),width,height,quad);
     std::vector<float> pixels(rgba.size());
     glReadPixels(0,0,width,height,GL_RGBA,GL_FLOAT,pixels.data());
     Check(glGetError()==GL_NO_ERROR,"Local tone render produced an OpenGL error");
     return pixels;
+}
+
+void ValidateColorLocalTone() {
+    using namespace Stack::RawRecipe;
+    using Stack::Renderer::ScopedGLTexture;
+    constexpr int width=128,height=64;
+    constexpr std::array<float,3> luma{.2627002f,.6779981f,.0593017f};
+    std::vector<float> colored(width*height*4),neutral(colored.size()),evidence(colored.size());
+    std::vector<float> confidence(width*height,1.f);
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        const auto i=(y*width+x)*4;
+        const float luminance=.18f*std::exp2(x<width/2 ? 0.f : .4f);
+        const std::array<float,3> hue=x<width/2 ? std::array<float,3>{1,.06f,.02f} :
+            std::array<float,3>{.04f,.1f,1};
+        const float hueY=hue[0]*luma[0]+hue[1]*luma[1]+hue[2]*luma[2];
+        for(int c=0;c<3;++c) {
+            colored[i+c]=hue[c]*luminance/hueY;
+            neutral[i+c]=luminance;
+            evidence[i+c]=hue[c];
+        }
+        colored[i+3]=neutral[i+3]=.6f;
+        evidence[i+3]=0; // Evidence alpha is deliberately unrelated to confidence.
+    }
+    ScopedGLTexture colors(GLHelpers::CreateStorageTexture(width,height,GL_RGBA32F));
+    ScopedGLTexture reliability(GLHelpers::CreateStorageTexture(width,height,GL_R32F));
+    const auto upload=[&] {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,colors.Get());
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,width,height,GL_RGBA,GL_FLOAT,evidence.data());
+        glBindTexture(GL_TEXTURE_2D,reliability.Get());
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,width,height,GL_RED,GL_FLOAT,confidence.data());
+    };
+    upload();
+    const Stack::Renderer::SceneColorGuidance guidance{colors.Get(),reliability.Get(),1};
+    SceneTone curve;curve.curve={{0,.4375f},{1,.5625f}};curve.localAmount=1;
+    const auto scalar=RenderLocalTone(colored,width,height,curve);
+    const auto neutralScalar=RenderLocalTone(neutral,width,height,curve);
+    curve.localColorProtection=1;
+    const auto self=RenderLocalTone(colored,width,height,curve);
+    const auto external=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    const auto ev=[&](const std::vector<float>& image,int i) {
+        return std::log2((image[i]*luma[0]+image[i+1]*luma[1]+image[i+2]*luma[2])/.18f);
+    };
+    const auto boundaryError=[&](const std::vector<float>& image) {
+        float maximum=0;
+        for(int x=width/2-8;x<width/2+8;++x)
+            maximum=std::max(maximum,std::abs(ev(image,(height/2*width+x)*4)-(x<width/2 ? 0.f : .05f)));
+        return maximum;
+    };
+    const float scalarError=boundaryError(scalar),colorError=boundaryError(self),externalError=boundaryError(external);
+    Check(colorError<scalarError*.35f && colorError<.03f,"Color tone failed to protect a weak-luminance color boundary");
+    Check(externalError<scalarError*.35f && externalError<.03f,"Stable evidence failed to protect an edited neutral boundary");
+    for(std::size_t i=0;i<colored.size();i+=4) {
+        Check(self[i+3]==colored[i+3] && external[i+3]==neutral[i+3],"Color tone changed coverage");
+        const float gain=self[i]/colored[i];
+        for(int c=0;c<3;++c)
+            Check(std::isfinite(self[i+c]) && std::abs(self[i+c]-colored[i+c]*gain)<1e-5f,
+                "Color-guided luminance tone changed chromaticity");
+    }
+    // Evidence brightness and alpha cannot define the current operation's EV.
+    for(std::size_t i=0;i<evidence.size();i+=4) for(int c=0;c<3;++c)
+        evidence[i+c]*=(i/4)%2 ? 1e12f : 1e-12f;
+    upload();
+    const auto rescaled=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    for(std::size_t i=0;i<neutral.size();i+=4)
+        Check(std::abs(ev(rescaled,int(i))-ev(external,int(i)))<.0001f,"Evidence exposure leaked into local tone");
+
+    // An isolated evidence hole must fade the surrounding fitted models too;
+    // simply switching the final gain at that pixel would create a dark speck.
+    const int hole=height/2*width+width/2-1;
+    confidence[hole]=0;upload();
+    const auto withHole=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    Check(std::abs(ev(withHole,hole*4)-ev(neutralScalar,hole*4))<.00002f,
+        "A color-evidence hole did not abstain");
+    float holeStep=0;
+    for(int y=height/2-16;y<height/2+16;++y) {
+        const int p=(y*width+width/2-1)*4;
+        holeStep=std::max(holeStep,std::abs(ev(withHole,p)-ev(withHole,p+width*4)));
+    }
+    Check(holeStep<.02f,"Missing color evidence introduced an isolated tone speck");
+
+    std::fill(confidence.begin(),confidence.end(),0.f);
+    evidence[0]=std::numeric_limits<float>::quiet_NaN();upload();
+    const auto unsupported=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    const auto nonColor=RenderLocalTone(neutral,width,height,curve,{},guidance,false);
+    for(std::size_t i=0;i<neutral.size();i+=4) {
+        Check(std::abs(ev(unsupported,int(i))-ev(neutralScalar,int(i)))<.00002f,"Zero confidence did not recover scalar tone");
+        Check(std::abs(ev(nonColor,int(i))-ev(neutralScalar,int(i)))<.00002f,"Non-color input used color guidance");
+    }
+    // A guide with color texture but no luminance relationship cannot invent a
+    // brightness texture, even with spatially varying confidence and signed RGB.
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        const auto i=(y*width+x)*4;
+        neutral[i]=-.25f;neutral[i+1]=1;neutral[i+2]=3;
+        evidence[i]=(x+y)%2 ? 2.f : -.1f;
+        evidence[i+1]=.4f;evidence[i+2]=(x+y)%2 ? .02f : 1.f;
+        confidence[y*width+x]=(x/3+y/5)%2 ? 1.f : .1f;
+    }
+    upload();
+    const auto flat=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    const auto expected=ApplySceneTone(curve,{-.25f,1.f,3.f},luma);
+    for(std::size_t i=0;i<neutral.size();i+=4) for(int c=0;c<3;++c)
+        Check(std::isfinite(flat[i+c]) && std::abs(flat[i+c]-expected[c])<.0001f,
+            "Color guide texture or confidence imprinted on a flat signed input");
+
+    // Confidence holes explicitly abstain at full-resolution evaluation. A
+    // constant hue confined to one brightness region must also have zero effect.
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        const auto i=(y*width+x)*4;
+        const float value=.18f*std::exp2(x<width/2 ? 0.f : .4f);
+        neutral[i]=neutral[i+1]=neutral[i+2]=value;
+        evidence[i]=1;evidence[i+1]=.06f;evidence[i+2]=.02f;
+        confidence[y*width+x]=x<width/2 ? 1.f : 0.f;
+    }
+    upload();
+    const auto oneRegion=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    for(std::size_t i=0;i<neutral.size();i+=4)
+        Check(std::abs(ev(oneRegion,int(i))-ev(neutralScalar,int(i)))<.0001f,
+            "Reliability selection changed the regional brightness reference");
+
+    int checks=0;bool canceled=false;
+    try {RenderLocalTone(neutral,width,height,curve,[&]{return ++checks>6;},guidance);}
+    catch(const std::exception&) {canceled=true;}
+    Check(canceled && checks==7,"Color guide did not honor bounded cancellation");
+    const auto recovered=RenderLocalTone(neutral,width,height,curve,{},guidance);
+    Check(std::isfinite(recovered[0]),"Color tone did not recover after cancellation");
+
+    auto saved=SerializeSceneTone(curve);
+    Check(ReadSceneTone(saved).localColorProtection==1,"Color protection did not round-trip");
+    saved.erase("localColorProtection");
+    Check(ReadSceneTone(saved).localColorProtection==0,"Old edits enabled color protection");
+    saved["localColorProtection"]=std::numeric_limits<float>::quiet_NaN();
+    Check(ReadSceneTone(saved).localColorProtection==0,"Non-finite color protection was not sanitized");
+    Check(Stack::Renderer::LocalToneGuide::WorkingBytes(4096,4096,true)==40u*1024u*1024u &&
+        Stack::Renderer::LocalToneGuide::WorkingBytes(4096,4096)==12u*1024u*1024u,
+        "Local tone planning does not distinguish color scratch allocation");
+    std::cout<<"  Color local tone: boundary error "<<scalarError<<" -> "<<colorError<<
+        " EV; external "<<externalError<<" EV; evidence-hole step "<<holeStep<<
+        " EV; confidence/texture/signed/cancellation checks passed\n";
 }
 
 void ValidateLocalTone() {
@@ -156,6 +298,7 @@ void ValidateLocalTone() {
     std::cout<<"Local tone: 0.25 EV input detail, pointwise "<<globalDetail<<" EV, preserved "<<localDetail
         <<" EV; edge excursion "<<edgeExcursion
         <<" EV; identity, exposure response, signed RGB, coverage and cancellation passed.\n";
+    ValidateColorLocalTone();
 }
 }
 bool ValidateHdrGallery(const char* raw) {

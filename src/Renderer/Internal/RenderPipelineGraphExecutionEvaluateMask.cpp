@@ -154,8 +154,10 @@ void GraphExecutionRuntime::BindMaskEvaluation() {
                 } else {
                     const auto areas = Stack::RawRecipe::DeserializeZoneAreas(nlohmann::json::array({node.rawCoverage}));
                     if (!areas.empty()) {
+                        const auto sceneColorGuide=extent ? pipeline.ResolveSceneColorGuidance(
+                            executionContext,extent->fromNodeId,extent->fromSocketId) : Stack::Renderer::SceneColorGuideCache::Lease{};
                         const auto coverage = pipeline.m_RawZoneAreaRenderer.Coverage(areas.front(), reference,
-                            pipeline.m_Width, pipeline.m_Height, node.rawWorkingSpace, fingerprint, pipeline.m_ShouldCancelRender);
+                            pipeline.m_Width, pipeline.m_Height, node.rawWorkingSpace, fingerprint, pipeline.m_ShouldCancelRender,sceneColorGuide.view);
                         if (coverage) {
                             result = createTarget();
                             renderPassToTexture(result, [&](unsigned int fbo) { return pipeline.RenderChannelSplit(coverage, 0, fbo); });

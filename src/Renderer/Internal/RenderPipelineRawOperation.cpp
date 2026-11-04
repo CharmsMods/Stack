@@ -116,10 +116,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
             };
             if (HasZoneAreaGain(recipe.localRange) || (graphCoverage && recipe.localRange.enabled && !recipe.localRange.areas.empty())) {
                 std::vector<RawZoneAreaStatistics> statistics;
+                const auto sceneColorGuide=inputRegion.Partial() ? SceneColorGuideCache::Lease{} :
+                    ResolveSceneColorGuidance(context,inputLink->fromNodeId,inputLink->fromSocketId);
                 adopt(m_RawZoneAreaRenderer.Render(result.texture, input, width, height,
                     recipe, false, m_PreviewMaxDimension <= 0, statistics, m_ShouldCancelRender, fingerprint,
                     graphCoverage ? std::function<unsigned int(const std::string&)>([&](const auto& id) { return coverage("area:" + id); })
-                        : std::function<unsigned int(const std::string&)>{}));
+                        : std::function<unsigned int(const std::string&)>{},sceneColorGuide.view));
             }
             const auto gradientInput = result.texture;
             ScopedGLTexture accumulated;

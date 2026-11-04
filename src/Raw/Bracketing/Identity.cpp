@@ -1,6 +1,7 @@
 #include "Processor.h"
 #include "LocalDetail.h"
 #include "HdrColorFusion.h"
+#include "SceneColorContract.h"
 #include "Panorama/Panorama.h"
 #include "LearnedAlignment.h"
 #include "Raw/RawTechnicalEvidence.h"
@@ -41,6 +42,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     j["temporalProfile"]="double-precision-gpu-temporal-v11-shared-radiance";
     j["srSupportProfile"]="categorical-reference-and-depth-v2";
     j["hdrProfile"]=kHdrColorFusionRevision;
+    j["sceneColorProfile"]=kSceneColorEvidenceRevision;
     if(request.recipe.reconstruction==ReconstructionMode::Standard||adaptive) {
         j["nativeHighlightProfile"]=kNativeHighlightRevision;
         j["nativeGlobalSupport"]="bounded-color-agreement-v1";

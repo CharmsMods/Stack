@@ -62,12 +62,32 @@ Tone Curve from the measured highlight range. The editable scene-luminance
 points keep midtone exposure fixed. Equal-exposure denoise and previously edited
 curves skip this fit. Ordinary tone edits reuse the reconstruction.
 
+Fresh merges retain source-neutral camera-color evidence, uncertainty and
+support in the project result sidecar. Tone Curve's optional **Protect color
+boundaries** uses it to separate similarly bright regions without treating
+unreliable hue shifts as edges. Local EV area masks retain native edges and
+qualify their color reliability with the same evidence. Existing tone settings
+default to zero color protection; new untouched HDR starting curves enable it
+when evidence is available. Reprocess an older bracket to produce this evidence.
+The guide is bounded to 512 pixels on its long side. It does not classify objects
+or invent missing highlight colors, and standalone exported image files do not
+carry the project's auxiliary guidance.
+
 Saved finished results in the current project format retain their saved pixels.
 **Explicitly process the bracket again to use the updated engine**; merely opening
 it or changing a tone node is not a reconstruction upgrade. Obsolete project
 formats are unsupported. Keep the original RAW inputs unchanged.
 
 ### Checks completed and remaining limits
+
+- Source-color estimator checks cover 1/2/20 groups, exposure normalization,
+  clipping, missing support, model uncertainty and contribution independence.
+  Full/auxiliary result round trips preserve color evidence, compressed depth,
+  reconstructed native coordinates and proxy ownership. Production OpenGL
+  checks cover weak-luminance color edges, confidence holes, texture non-transfer,
+  signed RGB, image coverage, mask cache/preview behavior and cancellation.
+  These focused checks ran on Mesa llvmpipe; they do not replace Windows builds,
+  vendor GPU checks or visual comparisons on representative real RAW brackets.
 
 - SR now applies categorical native-grid support separately from its coarse
   mapping. Actual preparation and scalar/GPU regressions verify interior hard

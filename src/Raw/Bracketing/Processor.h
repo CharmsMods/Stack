@@ -76,6 +76,9 @@ struct BracketingAnalysis {
     // Kept with the worker's prepared inputs for Auto reblends and native inspection.
     std::shared_ptr<const Sr::ScaleEvidence> resolutionDecision;
     std::vector<float> guideEv;
+    // Same immutable owner as the accepted RawImageData. Worker-side reuse
+    // avoids recomputing source evidence when only contribution curves change.
+    std::shared_ptr<const SceneColorGuide> sceneColorGuide;
     std::vector<Knot> suggestion;
     std::array<float,256> histogram {};
     std::vector<std::string> diagnostics;

@@ -595,6 +595,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     const std::size_t calibratedNeutralFingerprint = stageFingerprints.calibratedNeutral;
     const auto calibration = Stack::RawRecipe::BuildColorCalibrationTransform(
         recipe.colorCalibration, recipe.technical.workingSpace);
+    const auto prepareSceneColorGuide=[&]() -> Stack::Renderer::SceneColorGuideCache::Lease {
+        if(m_RawViewportAppliedRegion.Partial())return {};
+        return m_SceneColorGuideCache.Prepare(rawData->sceneColorGuide,
+            Stack::Renderer::BuildSceneColorGuideTransform(rawData->metadata,settings,calibration),cancellationRequested);
+    };
     const std::size_t rawPlacementFingerprint =
         stageFingerprints.rawPlacement;
     const std::size_t neutralPlacementFingerprint =
@@ -1453,10 +1458,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         rawPlacementFingerprint, spatialSourceWidth, spatialSourceHeight));
                 if (localRangeResult && zoneAreaReference &&
                     Stack::RawRecipe::HasZoneAreaGain(recipe.localRange)) {
+                    const auto sceneColorGuide=prepareSceneColorGuide();
                     const unsigned int adjusted = m_RawZoneAreaRenderer.Render(
                         localRangeResult.Get(), zoneAreaReference.Get(), m_Width, m_Height,
                         recipe, m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput,
-                        m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint);
+                        m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint,{},sceneColorGuide.view);
                     if (!adjusted) {
                         if (cancellationRequested()) return result;
                         throw std::runtime_error("Zones area rendering failed");
@@ -1554,9 +1560,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     }
     if (zoneAreaReference && m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput) {
         if (zoneAreaStatistics.empty()) {
+            const auto sceneColorGuide=prepareSceneColorGuide();
             Stack::Renderer::ScopedGLTexture measured(m_RawZoneAreaRenderer.Render(
                 zoneAreaReference.Get(), zoneAreaReference.Get(), m_Width, m_Height,
-                recipe, true, m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint));
+                recipe, true, m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint,{},sceneColorGuide.view));
             if (!measured) {
                 if (cancellationRequested()) return result;
                 throw std::runtime_error("Zones area measurement failed");
@@ -1689,9 +1696,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                       << ": " << error.what() << "; passing input texture through.\n";
             return false;
         }
+        Stack::Renderer::SceneColorGuideCache::Lease sceneColorGuide;
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
             toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
             toneCurve->SetProcessingCancellation(m_ShouldCancelRender);
+            if(Stack::Renderer::TonePayloadUsesColorGuide(layerPayload))sceneColorGuide=prepareSceneColorGuide();
+            toneCurve->SetSceneColorGuidance(sceneColorGuide.view);
         }
 
         const unsigned int inputTexture = result.texture;

@@ -18,7 +18,7 @@ bool IsUntouchedOperation(const RawRecipe::GraphOperation& operation) {
         // Earlier current-format nodes omit these optional, off-by-default
         // settings. Fill only those omissions; every authored value still has
         // to equal its neutral default before the first merge may seed a look.
-        for (const char* key:{"localAmount","localRadius","localRangeEv"})
+        for (const char* key:{"localAmount","localRadius","localRangeEv","localColorProtection"})
             if (!parameters["luminanceTone"].contains(key))
                 parameters["luminanceTone"][key]=defaults.at("luminanceTone").at(key);
     }
@@ -113,6 +113,7 @@ bool FitBracketStartingCurve(RawLayerStackState& state,const BracketingResult& r
     const float tailSlope=std::pow((target-knee)/(white-knee),2.f);
     RawRecipe::SceneTone curve;
     curve.localAmount=1;
+    curve.localColorProtection=result.raw && result.raw->sceneColorGuide ? 1.f : 0.f;
     curve.curve.clear();
     for(float ev : {-16.f,knee,1.5f,2.f,2.5f,3.f,4.f,5.f,6.f,8.f,10.f,12.f,16.f}) {
         const float distance=ev-knee;

@@ -1,6 +1,7 @@
 #pragma once
 #include "Raw/RawZoneArea.h"
 #include "Raw/RawZoneAreaRasterizer.h"
+#include "Renderer/SceneColorGuidance.h"
 #include <unordered_map>
 
 namespace Stack::Renderer {
@@ -13,10 +14,12 @@ public:
         const RawRecipe::RawDevelopmentRecipe& recipe, bool measure, bool fullResolution,
         std::vector<RawRecipe::RawZoneAreaStatistics>& statistics,
         const std::function<bool()>& cancelled = {}, std::size_t referenceRevision = 0,
-        const std::function<unsigned int(const std::string&)>& coverage = {});
+        const std::function<unsigned int(const std::string&)>& coverage = {},
+        const SceneColorGuidance& guidance = {});
     // Borrowed mask texture, owned by this worker's mask cache.
     unsigned int Coverage(const RawRecipe::RawZoneArea& area, unsigned int reference, int width, int height,
-        Raw::RawWorkingSpace space, std::size_t referenceRevision, const std::function<bool()>& cancelled);
+        Raw::RawWorkingSpace space, std::size_t referenceRevision, const std::function<bool()>& cancelled,
+        const SceneColorGuidance& guidance = {});
     std::size_t MaskBuildCount() const { return m_MaskBuildCount; }
     std::size_t GuideBuildCount() const { return m_GuideBuildCount; }
     std::size_t StrokeEvaluationCount() const { return m_Rasterizer.StrokeEvaluations(); }
@@ -31,7 +34,7 @@ private:
         const RawRecipe::ImageGuide* guide, std::shared_ptr<const RawRecipe::RawZoneAreaMaskPreview>& preview);
     bool PrepareGuide(unsigned int reference, int width, int height,
         const RawRecipe::RawDevelopmentRecipe& recipe, std::size_t referenceRevision, bool native,
-        const std::function<bool()>& cancelled);
+        const std::function<bool()>& cancelled, const SceneColorGuidance& guidance);
     std::shared_ptr<const RawRecipe::ImageGuide> m_Guide, m_PreviewGuide;
     std::size_t m_GuideKey = 0, m_PreviewGuideKey = 0, m_GuideBuildCount = 0;
     unsigned int m_GainProgram = 0;

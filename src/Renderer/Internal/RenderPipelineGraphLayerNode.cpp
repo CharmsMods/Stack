@@ -1,6 +1,7 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
+#include "Renderer/LocalToneGuidePlanning.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/ToneLayers.h"
 #include "Editor/Layers/NoiseLayer.h"
@@ -46,6 +47,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         return RenderRawSpatialLayer(executionContext, node, inputTexture);
     const bool stylize=type=="CellShading" || type=="PaletteReconstructor" || type=="Halftoning";
     auto executionParameters=node.layerJson;
+    if(type=="ToneCurve")
+        executionParameters["executionColorRelationships"]=
+            Stack::NodeMath::DescribeImageOperationInput(input->semanticDescriptor).colorRelationships;
     if (stylize) {
         if (type=="Halftoning" && m_CurrentGraphImageGeometry.resident.Partial())
             return fail("Halftone requires the complete logical input grid.");
@@ -158,16 +162,22 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         // Other legacy effects can contain feedback state beyond parameters.
         // Keep their lifetime contract until each is deliberately migrated.
         layer=LayerRegistry::CreateLayerFromTypeId(type);
-        if(layer) {layer->InitializeGL();layer->Deserialize(node.layerJson);}
+        if(layer) {layer->InitializeGL();layer->Deserialize(executionParameters);}
     }
     if (!layer) {
         return result;
     }
     if(auto* noise=dynamic_cast<NoiseLayer*>(layer.get()))noise->SetFilmGrainInput(noiseInput);
 
+    Stack::Renderer::SceneColorGuideCache::Lease sceneColorGuide;
     if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
         toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
         toneCurve->SetProcessingCancellation(m_ShouldCancelRender);
+        if(Stack::Renderer::TonePayloadUsesColorGuide(executionParameters) &&
+            executionParameters.value("executionColorRelationships",false))
+            sceneColorGuide=ResolveSceneColorGuidance(executionContext,input->fromNodeId,input->fromSocketId);
+        // Retained layer instances must not reuse another source's borrowed map.
+        toneCurve->SetSceneColorGuidance(sceneColorGuide.view);
     }
 
     const bool scalarBlur=blurLayer && IsScalarRenderSocket(executionContext,input->fromNodeId,input->fromSocketId);

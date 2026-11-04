@@ -1,6 +1,7 @@
 #pragma once
 #include "Renderer/OutputTextureStatsCache.h"
 #include "Renderer/Internal/RawZoneAreaRenderer.h"
+#include "Renderer/SceneColorGuideCache.h"
 
 #include "Raw/RawGradingScope.h"
 #include "Renderer/Internal/RawGradingScopeGpu.h"
@@ -768,6 +769,10 @@ private:
     int m_RawDevelopmentGraphScopeReadbackMaxDimension = 0;
     RawDevelopmentGraphScopeReadback m_RawDevelopmentGraphScopeReadback;
     Stack::Renderer::RawZoneAreaRenderer m_RawZoneAreaRenderer;
+    Stack::Renderer::SceneColorGuideCache m_SceneColorGuideCache;
+    Stack::Renderer::SceneColorGuideCache::Lease ResolveSceneColorGuidance(
+        const Stack::Renderer::GraphExecution::GraphExecutionContext&,int nodeId,
+        const std::string& socketId);
     bool m_RawZoneAreasFloatOutput = false;
     RawDevelopmentGradingScopeSource m_RawDevelopmentGradingScopeSource =
         RawDevelopmentGradingScopeSource::None;

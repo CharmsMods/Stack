@@ -189,6 +189,12 @@ Json ResultSummary(const BracketingResult& r){
 void ApplyResultSummary(const Json& j,BracketingResult& r){
     r.version=j.at("version");const int status=j.at("status");if(status<0||status>int(BracketingResult::Status::Failed))throw std::runtime_error("Invalid burst result status.");
     r.status=static_cast<BracketingResult::Status>(status);r.identity=j.at("identity");r.message=j.at("message");r.fallbackSamples=j.at("fallbackSamples");r.unrecoverableSamples=j.at("unrecoverableSamples");r.invalidSamples=j.at("invalidSamples");
-    if(j.contains("analysis"))r.analysis=Analysis(j.at("analysis"));
+    if(j.contains("analysis")) {
+        auto analysis=Analysis(j.at("analysis"));
+        // Color evidence crosses the boundary once in the accepted result
+        // artifact. Reuse that owner instead of duplicating its planes in CBOR.
+        if(r.raw)analysis->sceneColorGuide=r.raw->sceneColorGuide;
+        r.analysis=std::move(analysis);
+    }
 }
 }

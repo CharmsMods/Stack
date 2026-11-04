@@ -5,6 +5,7 @@
 #include "Renderer/GLHelpers.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Renderer/LocalToneGuide.h"
+#include "Renderer/SceneColorGuidance.h"
 
 #include <array>
 #include <cstdint>
@@ -238,6 +239,7 @@ public:
     void NotifyUpstreamDevelopChanged();
     void SetAutoRewriteRenderContext(int nodeId, std::uint64_t requestRevision);
     void SetProcessingCancellation(std::function<bool()> cancel) { m_ShouldCancelProcessing = std::move(cancel); }
+    void SetSceneColorGuidance(const Stack::Renderer::SceneColorGuidance& guidance) { m_SceneColorGuidance = guidance; }
     void SetDevelopScenePrepToneBudget(bool scenePrepApplied, float strength, float maxEvBias);
     bool HasPendingAutoRewriteFeedback() const { return m_PendingAutoRewriteFeedback.valid; }
     ToneCurveAutoRewriteFeedback TakePendingAutoRewriteFeedback();
@@ -251,6 +253,8 @@ private:
     Stack::RawRecipe::RawPointCurveSet m_PointCurveSet;
     Stack::RawRecipe::SceneTone m_SceneTone;
     Stack::Renderer::LocalToneGuide m_LocalToneGuide;
+    Stack::Renderer::SceneColorGuidance m_SceneColorGuidance;
+    bool m_ExecutionColorRelationships = true;
     std::function<bool()> m_ShouldCancelProcessing;
     ToneCurveMode m_Mode = ToneCurveMode::RGB;
     ToneCurveDomain m_Domain = ToneCurveDomain::LogScene;

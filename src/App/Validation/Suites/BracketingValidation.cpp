@@ -15,6 +15,7 @@
 #include "BracketingTemporalPilotValidation.h"
 #include "BracketingTemporalOutputValidation.h"
 #include "BracketingNeutralGuideValidation.h"
+#include "BracketingSceneColorValidation.h"
 #include "BracketingDetailFusionValidation.h"
 #include "BracketingSavedDetailValidation.h"
 #include "BracketingSharpnessValidation.h"
@@ -141,6 +142,8 @@ bool ValidateBracketing() {
         ValidateBracketingGuideCoordinates();
         ValidateBracketingNeutralGuide();
         ValidateBracketingNeutralGuideCache(directory/"neutral-guide-cache");
+        ValidateBracketingSceneColor();
+        ValidateBracketingSceneColorStorage(directory/"scene-color");
         ValidateBracketingAnchorEvidence(directory/"anchor-evidence");
         // Backend faults must fail before decoding, never become CPU work.
         for(unsigned failure=0;failure<3;++failure) {

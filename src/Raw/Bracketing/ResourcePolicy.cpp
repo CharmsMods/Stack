@@ -1,5 +1,6 @@
 #include "Processor.h"
 #include "GroupMemory.h"
+#include "SceneColorContract.h"
 #include <algorithm>
 #include <limits>
 #include <thread>
@@ -23,7 +24,8 @@ std::uint64_t EstimateBracketingPeakResidentBytes(unsigned width,unsigned height
     const long double reliability=localAlignment?pixels*.25L*std::max<std::size_t>(1,sourceCount-1)*3:0;
     const long double tileWorkers=static_cast<long double>(std::max<std::uint32_t>(1,workerCount))*
         GroupWorkerBytes(groupCount,512,sourceCount);
-    return saturated(output+preparedTiles+pyramids+clippingEvidence+reliability+preview+tileWorkers+64.0L*1024*1024);
+    return saturated(output+preparedTiles+pyramids+clippingEvidence+reliability+preview+tileWorkers+
+        SceneColorEvidence::WorkingBytes(width,height,512)+64.0L*1024*1024);
 }
 
 std::uint32_t ResolveBracketingWorkerCount(

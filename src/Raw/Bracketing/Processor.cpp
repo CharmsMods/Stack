@@ -179,7 +179,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.analysis=analysis;
         analysis->identity=AnalysisIdentity(request);
         const bool reusePrepared=request.analysis&&request.analysis->identity==analysis->identity&&request.analysis->prepared;
-        const bool reuseGuide=reusePrepared;
+        const bool reuseGuide=reusePrepared&&request.analysis->sceneColorGuide;
         if(reusePrepared) *analysis=*request.analysis;
         else {
             auto prepared=std::make_shared<PreparedDataset>();
@@ -211,8 +211,9 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             data.sources.size(),groups,request.workerCount,
             request.recipe.alignmentMode==AlignmentMode::AutomaticLocal);
         const std::uint64_t tileBytes=static_cast<std::uint64_t>(origin.frame.tileRawPixels)*origin.frame.tileRawPixels*(groups*(sizeof(Observation)+2*sizeof(double))+80);
+        const auto colorWorkingBytes=SceneColorEvidence::WorkingBytes(data.width,data.height,origin.frame.tileRawPixels);
         if(pixels>std::numeric_limits<std::size_t>::max()/32 ||
-           pixels*36ull+tileBytes+32ull*1024*1024>request.memoryBudgetBytes)
+           static_cast<long double>(pixels)*36+tileBytes+colorWorkingBytes+32ull*1024*1024>request.memoryBudgetBytes)
             return fail("The output and tile buffers exceed the available bracketing memory budget.");
         const unsigned cellWidth=data.width/2,cellHeight=data.height/2;
         auto groupRequest=request;
@@ -226,6 +227,10 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
             analysis->guideEv.resize(static_cast<std::size_t>(cellWidth)*cellHeight);
             std::vector<std::vector<double>> histogram(256,std::vector<double>(groups));
             const auto tileCount=static_cast<std::size_t>(origin.frame.tileColumns)*origin.frame.tileRows;
+            // Retain the first source-neutral group pass even when Adaptive
+            // subsequently rebuilds luminance for a share-dependent native decision.
+            const bool buildColor=!analysis->sceneColorGuide;
+            std::vector<SceneColorEvidence::Tile> colorTiles(buildColor?tileCount:0);
             std::vector<std::array<float,256>> tileCounts(tileCount);
             std::vector<std::vector<double>> tileHistograms(tileCount);
             std::vector<double> tileGuideSeconds(tileCount);
@@ -242,11 +247,22 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
                     const auto index=static_cast<std::size_t>(ty)*origin.frame.tileColumns+tx;
                     const auto start=std::chrono::steady_clock::now();
                     const bool success=BuildNeutralGuideTile(request.recipe,guideLuminance,bounds(tx,ty),cellWidth,
-                        observations,analysis->guideEv,tileCounts[index],tileHistograms[index],tileError);
+                        observations,analysis->guideEv,tileCounts[index],tileHistograms[index],tileError,
+                        buildColor?&colorTiles[index]:nullptr);
                     tileGuideSeconds[index]=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
                     return success;
                 },error)) return false;
             if(!workspaceOperation.Finish(error))return false;
+            if(buildColor) {
+                auto neutralRequest=request;neutralRequest.recipe.automatic=true;
+                neutralRequest.recipe.knots=EqualCurves(groups);
+                const auto identity=Stack::NodeMath::Sha256ContentIdentity(std::string(kSceneColorEvidenceRevision)+"|"+
+                    AnalysisIdentity(neutralRequest)+data.motionIdentity+data.depthIdentity);
+                auto color=SceneColorEvidence::Finish(data.width,data.height,identity,colorTiles);
+                if(!color->Valid()){error="Source color guidance contains invalid measurements.";return false;}
+                if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
+                analysis->sceneColorGuide=std::move(color);
+            }
             analysis->stageSeconds["temporal_groups"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-groupStart).count();
             {
                 const auto& m=data.groupMetrics;std::lock_guard<std::mutex> lock(m.mutex);
@@ -420,7 +436,8 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         result.fallbackSamples=fallbackSamples.load(std::memory_order_relaxed);
         result.unrecoverableSamples=unrecoverableSamples.load(std::memory_order_relaxed);
         result.invalidSamples=invalidSamples.load(std::memory_order_relaxed);
-        result.identity=Stack::NodeMath::Sha256ContentIdentity("bracket-highlight-fallback-v2|"+analysis->identity+Identity(request.recipe)+data.motionIdentity+data.depthIdentity);
+        result.identity=Stack::NodeMath::Sha256ContentIdentity("bracket-highlight-fallback-v2|"+analysis->identity+Identity(request.recipe)+data.motionIdentity+data.depthIdentity+
+            analysis->sceneColorGuide->identity);
         auto raw=std::make_shared<RawImageData>();raw->metadata=origin.metadata;
         raw->metadata.sourcePath="bracketing://result";raw->metadata.sourceContentSha256=result.identity.substr(7);
         raw->metadata.sourceByteSize=pixels*sizeof(float);
@@ -432,6 +449,7 @@ BracketingResult Process(const ProcessingRequest& submittedRequest) {
         raw->normalizedMosaicBuffer=std::move(mosaic);raw->normalizedMosaicContentHash=Hash(result.identity);
         raw->normalizedMosaicInputContract=NormalizedMosaicInputContract::BracketingPreGain;
         raw->contentIdentity=result.identity;raw->contentIdentityHash=raw->normalizedMosaicContentHash;
+        raw->sceneColorGuide=analysis->sceneColorGuide;
         auto sidecars=std::make_shared<RawImageData::MultiFrameMeasurementSidecars>();
         sidecars->variance=std::move(variance);sidecars->effectiveSupport=std::move(support);
         sidecars->validity=std::move(validity);sidecars->clipping=std::move(clipping);
