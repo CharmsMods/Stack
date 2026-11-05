@@ -42,7 +42,9 @@ struct FrameRegion {
     float detailPreference=1;
     std::array<int,4> colors{}; // sensor parity to RGB channel
     // Original, unresampled samples: radiance, shot coefficient, read variance,
-    // headroom. Zero marks clipping; negative values mark absent/defective taps.
+    // headroom. Zero marks clipping: radiance is only an observed lower bound.
+    // -1 marks absent/defective taps; -2 marks known clipping whose decoder
+    // value cannot supply a trustworthy bound and retains strict rejection.
     std::vector<Vec4> samples;
     // Reference to source mapping and reliability: x, y, confidence, risk.
     std::vector<Vec4> mapping;

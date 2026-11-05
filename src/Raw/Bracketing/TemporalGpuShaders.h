@@ -1,4 +1,5 @@
 #pragma once
+#include "PartialCfaReconstructionShader.h"
 #include <string>
 
 namespace Raw::Bracketing::TemporalShaders {
@@ -123,9 +124,10 @@ void main(){
 }
 )GLSL";
 
-inline const char* SamplingFunctions=R"GLSL(
+inline const std::string SamplingFunctions=std::string(R"GLSL(
 double kernel(double d){double t=abs(d);if(t<=1.LF)return 1.5LF*t*t*t-2.5LF*t*t+1.LF;if(t<2.LF)return -.5LF*t*t*t+2.5LF*t*t-4.LF*t+2.LF;return 0.LF;}
 double derivative(double d){double t=abs(d);if(t==0.LF||t>=2.LF)return 0.LF;return sign(d)*(t<=1.LF?4.5LF*t*t-5.LF*t:-1.5LF*t*t+5.LF*t-4.LF);}
+)GLSL")+PartialCfaReconstruction+R"GLSL(
 Observation sampleAt(int i,ivec2 p){
     Observation o=emptyObservation();double scale=params[16],scaleVariance=params[17],pilot=guides[i].x;
     int site=siteAt(p);
@@ -158,6 +160,7 @@ Observation sampleAt(int i,ivec2 p){
     if(!interior&&(any(lessThan(plane,dvec2(0)))||any(greaterThan(plane,dvec2(extent-1)))||any(lessThan(extent,ivec2(2)))))return o;
     if(!interior)base=min(base,extent-2);
     double value=0.LF,variance=0.LF,gx=0.LF,gy=0.LF,fallback=0.LF,dark=0.LF,dn=0.LF;bool valid=true,validFallback=true,clippedFallback=false;
+    bool clippedSupport=false,badSupport=false;double reconstructionRisk=0.LF;
     double sum=0.LF,sumDx=0.LF,sumDy=0.LF,safety=0.LF,magnitude=0.LF;
     for(int k=0;k<16;++k){
         ivec2 txy;double w,dx,dy;
@@ -173,7 +176,9 @@ Observation sampleAt(int i,ivec2 p){
         sum+=w;sumDx+=dx;sumDy+=dy;
         vec4 t=tapAt(txy*2+(p&1));double gain=scale*double(t.y),v=gain*double(t.x);
         safety+=abs(w)*captureHeadroom(double(t.x),gain,pilot);magnitude+=abs(w);
-        bool bad=badTap(t);if(bad||(uint(t.z)&9u)!=0u)valid=false;
+        bool bad=badTap(t),clipped=(uint(t.z)&9u)!=0u;
+        badSupport=badSupport||bad;clippedSupport=clippedSupport||clipped;
+        if(bad||clipped)valid=false;
         if(abs(w)>1e-12LF){if(bad)validFallback=false;
             fallback+=w*double(t.x)*double(t.y)*scale;clippedFallback=clippedFallback||((uint(t.z)&9u)!=0u);}
         value+=w*v;gx+=dx*v;gy+=dy*v;
@@ -182,6 +187,17 @@ Observation sampleAt(int i,ivec2 p){
         if(!finiteValue(gain)||gain<=0.LF||!finiteValue(noise)||noise<0.LF)valid=false;
     }
     if(abs(sum-1.LF)>1e-12LF||abs(sumDx)>1e-12LF||abs(sumDy)>1e-12LF)valid=false;
+    // Preserve the strict ordinary stencil. Only clipping can request this
+    // measured-support alternative. Rejected geometry may retain its registered
+    // display fallback, but the confidence gate below still forbids support.
+    if(!valid&&interior&&clippedSupport&&!badSupport) {
+        PartialCfaResult recovered;
+        if(reconstructPartialCfa(site,base,plane,p&1,scale,pilot,m,recovered)) {
+            value=recovered.value;variance=recovered.variance;gx=recovered.gx;gy=recovered.gy;
+            dark=recovered.dark;dn=recovered.dn;reconstructionRisk=recovered.model;
+            safety=recovered.headroom;magnitude=1.LF;valid=true;
+        }
+    }
     double reg=risk(dvec2(gx,gy)*.5LF,m),scaleRisk=scaleVariance/(scale*scale)*value*value,residual=residualVariance(site,pilot);
     if(reg<0.LF||!finiteValue(value)||!finiteValue(variance)||variance<0.LF||!finiteValue(dn)||dn<=0.LF||
         !finiteValue(scaleRisk)||!finiteValue(residual)||!finiteValue(dark))valid=false;
@@ -195,7 +211,7 @@ Observation sampleAt(int i,ivec2 p){
         Mapping guideMap=m;guideMap.xx=m.guideXX;guideMap.xy=m.guideXY;guideMap.yy=m.guideYY;
         double sceneRisk=risk(guides[i].yz,guideMap);if(sceneRisk>=0.LF)reg=sceneRisk;
     }
-    o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+scaleRisk+reg/max(.20LF,m.confidence)+o.measurement*m.modelVarianceFactor;
+    o.value=value;o.measurement=max(1e-12LF,variance);o.uncertainty=residual+reconstructionRisk+scaleRisk+reg/max(.20LF,m.confidence)+o.measurement*m.modelVarianceFactor;
     o.variance=o.measurement+o.uncertainty;o.headroom=safety/magnitude;o.support=1.LF;
     return o;
 }

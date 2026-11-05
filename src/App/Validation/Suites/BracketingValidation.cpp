@@ -14,6 +14,7 @@
 #include "BracketingAnchorIntegrationValidation.h"
 #include "BracketingTemporalPilotValidation.h"
 #include "BracketingTemporalOutputValidation.h"
+#include "BracketingClippingValidation.h"
 #include "BracketingNeutralGuideValidation.h"
 #include "BracketingSceneColorValidation.h"
 #include "BracketingDetailFusionValidation.h"
@@ -162,6 +163,7 @@ bool ValidateBracketing() {
         ValidateBracketingAnchorIntegration(gl.Executor(),directory/"anchor-integration");
         ValidateBracketingTemporalPilot(gl.Executor(),directory/"temporal-pilot");
         ValidateBracketingTemporalOutput(gl.Executor(),directory/"temporal-output");
+        ValidateBracketingClipping(gl.Executor(),directory/"clipping-reconstruction");
         const auto Request=[&gl](const std::vector<Raw::RawImageData>& raws,
             const std::filesystem::path& path,bool grouped=false) {
             auto request=MakeRequest(raws,path,grouped);

@@ -1,9 +1,11 @@
 #include "Kernel.h"
+#include "ClippingReconstructionShader.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/ScopedComputeBindings.h"
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <string>
 
 #ifndef GL_BUFFER_UPDATE_BARRIER_BIT
 #define GL_BUFFER_UPDATE_BARRIER_BIT 0x00000200
@@ -13,7 +15,7 @@ namespace Raw::Bracketing::Sr {
 namespace {
 static_assert(sizeof(PixelAccumulator)==224);
 static_assert(sizeof(Vec4)==16);
-const char* shader=R"GLSL(
+const std::string shader=std::string(R"GLSL(
 #version 430 core
 layout(local_size_x=8,local_size_y=8) in;
 layout(std430,binding=0) readonly buffer Input { vec4 data[]; };
@@ -28,6 +30,7 @@ uniform vec4 supportGeometry; // reference origin, fixed raw step, categorical m
 uniform ivec2 supportSize;
 uniform vec2 supportDomain; // complete Bayer reference domain, not source extent
 uniform int depthSupportOffset; // packed per-output veto, -1 when not required
+)GLSL")+clippingReconstructionShader+R"GLSL(
 bool supported(vec2 xy,ivec4 region) {
     if(supportGeometry.w==0)return true;
     if(supportGeometry.w!=2||any(isnan(xy))||any(isinf(xy))||
@@ -61,13 +64,20 @@ void main() {
     ivec2 center=ivec2(floor(m.xy+.5));
     float headroom=1;bvec3 usable=bvec3(false);
     for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x) {
-        ivec2 loc=center+ivec2(x,y)-region.xy;
+        ivec2 q=center+ivec2(x,y),loc=q-region.xy;
         if(any(lessThan(loc,ivec2(0)))||any(greaterThanEqual(loc,region.zw)))continue;
-        float h=data[mapSize.x*mapSize.y+loc.y*region.z+loc.x].w;
+        vec4 s=data[mapSize.x*mapSize.y+loc.y*region.z+loc.x];float h=s.w;
+        if(h==-2.)return; // Known clipping without a trustworthy lower bound.
         if(h>=0)headroom=min(headroom,h);
-        if(h>0) {ivec2 q=center+ivec2(x,y);usable[colors[((q.y&1)<<1)|(q.x&1)]]=true;}
+        if(h>0)usable[colors[((q.y&1)<<1)|(q.x&1)]]=true;
     }
-    if(headroom<=0||!all(usable))return;
+    if(!all(usable))return;
+    BroadCorrection correction[3];
+    float recoveredHeadroom=headroom<1.?max(0.,clippingCoreHeadroom(region,m)-headroom):0.;
+    if(!reconstructClipped(region,colors,m,pixels[outi].broadKernel,pixels[outi].kernel.w,
+        recoveredHeadroom,correction))
+        for(int c=0;c<3;++c)correction[c]=BroadCorrection(vec3(0),0.,0.);
+    if(headroom<=0&&correction[0].mass<=0)return;
     vec3 weights=vec3(0),bwts=vec3(0);Pixel p=pixels[outi];
     for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x) {
         ivec2 q=center+ivec2(x,y),loc=q-region.xy;
@@ -78,7 +88,11 @@ void main() {
         float v=max(1e-10,s.y*max(0.,p.kernel.w)+s.z);
         float base=m.z*headroom*1e-5/(v+max(0.,m.w));
         float w=detailPreference*base*exp(-.5*(p.kernel.x*d.x*d.x+2*p.kernel.y*d.x*d.y+p.kernel.z*d.y*d.y));
-        float bw=base*exp(-.5*(p.broadKernel.x*d.x*d.x+2*p.broadKernel.y*d.x*d.y+p.broadKernel.z*d.y*d.y));
+        float broadSpatial=exp(-.5*(p.broadKernel.x*d.x*d.x+2*p.broadKernel.y*d.x*d.y+p.broadKernel.z*d.y*d.y));
+        float bw=base*broadSpatial;
+        if(correction[c].mass>0.)
+            bw+=clippingFitWeight(s,broadSpatial,v,max(0.,m.w))*
+                (correction[c].coefficients.x+correction[c].coefficients.y*d.x+correction[c].coefficients.z*d.y);
         p.narrow[c].xyz+=vec3(w*s.x,w,w*w*v);weights[c]+=w;
         p.broad[c].xyz+=vec3(bw*s.x,bw,bw*bw*v);bwts[c]+=bw;
         p.detailBroadWeight[c]+=bw*detailPreference;
@@ -86,10 +100,17 @@ void main() {
     }
     for(int c=0;c<3;++c) {
         p.narrow[c].w+=weights[c]*weights[c];p.broad[c].w+=bwts[c]*bwts[c];
-        p.narrowUncertainty[c]+=weights[c]*weights[c]*max(0.,m.w);
-        p.broadUncertainty[c]+=bwts[c]*bwts[c]*max(0.,m.w);
+        float risk=max(0.,m.w);
+        p.narrowUncertainty[c]+=weights[c]*weights[c]*risk;
         p.crossFrameWeight[c]+=weights[c]*bwts[c];
-        p.crossUncertainty[c]+=weights[c]*bwts[c]*max(0.,m.w);
+        if(correction[c].mass>0.) {
+            float broadSigma=bwts[c]*sqrt(risk)+correction[c].mass*sqrt(correction[c].modelVariance);
+            p.broadUncertainty[c]+=broadSigma*broadSigma;
+            p.crossUncertainty[c]+=weights[c]*sqrt(risk)*broadSigma;
+        } else {
+            p.broadUncertainty[c]+=bwts[c]*bwts[c]*risk;
+            p.crossUncertainty[c]+=weights[c]*bwts[c]*risk;
+        }
     }
     pixels[outi]=p;
 }
@@ -108,7 +129,7 @@ bool GpuKernel::Begin(const Tile& t,std::string& error) {
     if(major<4||(major==4&&minor<3)){error="Super-resolution needs OpenGL 4.3 for GPU execution.";return false;}
     Stack::Rendering::ScopedComputeBindings bindings;
     if(!program_) {
-        program_=GLHelpers::CreateComputeProgram(shader);
+        program_=GLHelpers::CreateComputeProgram(shader.c_str());
         if(program_) {
             const char* names[]={"outputSize","mapSize","target","mapGeometry","detailPreference","regionValue","colorValue",
                 "supportGeometry","supportSize","supportDomain","depthSupportOffset"};

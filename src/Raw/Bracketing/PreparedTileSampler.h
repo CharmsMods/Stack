@@ -10,7 +10,8 @@
 
 namespace Raw::Bracketing {
 
-// Bracketing evaluates every output sample through the shared same-CFA math.
+// Bracketing uses the shared strict same-CFA math for complete footprints and
+// a guarded measured-support reconstruction for partially clipped footprints.
 // This bounded view keeps prepared tiles resident and exposes their taps
 // directly, avoiding a full tile-vector copy for every 16-tap footprint.
 class PreparedTileSampler final : public Mfd::NormalizedTileCache {

@@ -3,6 +3,7 @@
 #include "Raw/Bracketing/ProcessingInternal.h"
 #include "BracketingDiagnosticInputs.h"
 #include "SuperResolutionContracts.h"
+#include "SuperResolutionClippingValidation.h"
 #include "SuperResolutionNoiseValidation.h"
 #include "SuperResolutionSupportValidation.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
@@ -114,6 +115,7 @@ bool ValidateSuperResolution(int argc,char** argv) {
     try {
         ValidateSuperResolutionNoisePreparation(root/"noise-preparation");
         ValidateSuperResolutionSupport(root/"support-preparation");
+        ValidateSuperResolutionClipping();
         std::string error;Sr::GpuKernel gpu;auto cpu=TestTile(),accelerated=cpu,single=cpu,flat=cpu,flatSingle=cpu;
         // Compare stationary noise with the same spatial footprint in both
         // runs. Otherwise a different reconstruction bandwidth changes variance.

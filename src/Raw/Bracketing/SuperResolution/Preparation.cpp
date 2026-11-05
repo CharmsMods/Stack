@@ -77,11 +77,9 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
         for(int x=0;x<out.width;++x) {
             Mfd::SameCfaTapInput tap;
             if(!sampler.ReadSample(source.frame,out.left+x,out.top+y,tap,&error))return false;
-            auto& s=out.samples[std::size_t(y)*out.width+x];s={0,0,0,-1};
-            if(Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Saturated)||
-               Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::ExplicitDecoderClip)) {
-                s.w=0;continue;
-            }
+            const bool clipped=Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Saturated)||
+                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::ExplicitDecoderClip);
+            auto& s=out.samples[std::size_t(y)*out.width+x];s={0,0,0,clipped?-2.f:-1.f};
             if(!std::isfinite(tap.normalizedSample)||!std::isfinite(tap.comparisonGain)||tap.comparisonGain<=0||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::Defective)||
                Mfd::HasSampleFlag(tap.sampleFlags,Mfd::PreparedSampleFlag::DecoderRepaired))continue;
@@ -93,7 +91,11 @@ bool BuildFrameRegion(const BracketingAnalysis& analysis,const PreparedSource& s
             // of the code-step variance (or a newly inferred noise model).
             const double offset=noise.offsetVariance+(noise.quantizationIncluded?0:noise.quantizationVariance);
             s.z=float(offset*gain*gain);
-            s.w=float(std::clamp((.995-tap.normalizedSample)/.045,0.,1.));s.w=s.w*s.w*(3-2*s.w);
+            // A clipped value is excluded from reconstruction, but its
+            // calibrated lower bound constrains a fit to nearby survivors.
+            // Defective/repaired decoder values retain the -2 veto above.
+            s.w=clipped?0.f:float(std::clamp((.995-tap.normalizedSample)/.045,0.,1.));
+            s.w=s.w*s.w*(3-2*s.w);
         }
     }
     return true;
