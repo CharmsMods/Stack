@@ -2,6 +2,7 @@
 #include "Raw/Bracketing/PhotometricReliability.h"
 #include "Raw/Bracketing/SuperResolution/SamplingCoverage.h"
 #include "Raw/Bracketing/SuperResolution/Kernel.h"
+#include "App/Validation/Suites/SuperResolutionClippingValidation.h"
 #include "Renderer/GLLoader.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
@@ -110,9 +111,19 @@ void KernelChecks() {
             for(float geometry:{0.f,.4f,1.f}) {
                 const auto a=Sr::Resolve(cpu.pixels[p],c,geometry),b=Sr::Resolve(accelerated.pixels[p],c,geometry);
                 Check(a.valid==b.valid,"CPU/GPU capture acceptance differs");
-                if(scenario>=2) {Check(!a.valid,"Incomplete/clipped colour footprint was accepted");continue;}
+                if(scenario==3) {Check(!a.valid,"A missing color was reconstructed without measurements");continue;}
+                if(scenario==2) {
+                    // Every shifted capture loses a nearest color at the first
+                    // output. Farther outputs retain a valid central footprint
+                    // and may recover the constant signal from its outer taps.
+                    if(p==0)Check(!a.valid,"A clipped central color was promoted to measurement support");
+                    if(p+1==cpu.pixels.size())Check(a.valid,"A distant clip still discarded every usable capture");
+                    if(!a.valid)continue;
+                }
                 Check(a.valid&&Near(a.value,.2+c*.05,2e-6),"Missing defect biased or discarded a constant scene");
-                Check(a.variance>0&&a.uncertainty>0&&a.support>1,"Noise or capture support was lost");
+                Check(a.variance>0&&a.uncertainty>0&&a.support>=1-1e-5&&a.support<=4.0001,
+                    "Noise was lost or neighboring taps claimed extra capture support");
+                if(scenario<2)Check(a.support>1,"Usable captures lost independent support");
                 maximumError=std::max(maximumError,double(std::abs(a.value-b.value)));
                 Check(Near(a.value,b.value,2e-6)&&Near(a.variance,b.variance,1e-8)&&
                     Near(a.support,b.support,2e-5)&&Near(a.uncertainty,b.uncertainty,1e-8),
@@ -141,7 +152,7 @@ int main() {
         window=glfwCreateWindow(32,32,"Burst quality checks",nullptr,nullptr);
         Check(window!=nullptr,"Could not create the focused OpenGL context");
         glfwMakeContextCurrent(window);Check(LoadGLFunctions(),"Could not load OpenGL functions");
-        KernelChecks();result=0;
+        KernelChecks();Stack::Validation::ValidateSuperResolutionClipping();result=0;
     }catch(const std::exception& error) {std::cerr<<error.what()<<'\n';}
     if(window)glfwDestroyWindow(window);glfwTerminate();return result;
 }

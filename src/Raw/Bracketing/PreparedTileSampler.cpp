@@ -1,5 +1,6 @@
 #include "PreparedTileSampler.h"
 #include "BorderSupport.h"
+#include "PartialCfaReconstruction.h"
 
 #include <algorithm>
 #include <cmath>
@@ -253,8 +254,8 @@ bool PreparedTileSampler::SampleSameCfa(
 
     const auto siteIndex = static_cast<std::size_t>(site);
     Mfd::SameCfaSampleResult evaluated;
-    if (siteIndex >= noiseModel.sites.size() ||
-        !Mfd::EvaluateSameCfaFootprintScalar(
+    if (siteIndex >= noiseModel.sites.size()) return false;
+    if (!Mfd::EvaluateSameCfaFootprintScalar(
             footprint,
             taps,
             noiseModel.sites[siteIndex],
@@ -262,9 +263,29 @@ bool PreparedTileSampler::SampleSameCfa(
             parameters,
             evaluated)) {
         fallback=InterpolateCaptureFallback(footprint,taps,parameters.exposureScale);
-        return false;
+        if(evaluated.failure!=Mfd::SameCfaSampleFailure::SaturatedTap&&
+            evaluated.failure!=Mfd::SameCfaSampleFailure::ExplicitDecoderClip)return false;
+        // A partial fit needs the actual footprint, including taps whose
+        // original cubic value/derivative coefficients were all zero. Read
+        // them only on this exceptional path; fabricated neutral tap defaults
+        // are not measurements for the slope fit.
+        for(std::size_t index=0;index<footprint.taps.size();++index) {
+            if(footprint.coefficients[index]!=0||footprint.derivativeXPlane[index]!=0||
+                footprint.derivativeYPlane[index]!=0)continue;
+            const auto raw=layout.PlanePixelToRaw(footprint.taps[index]);
+            if(!ReadSample(frame,static_cast<std::uint64_t>(raw.x),
+                static_cast<std::uint64_t>(raw.y),taps[index],error)) {
+                result.failure=Mfd::SameCfaSampleFailure::TileUnavailable;
+                result.message=error&&!error->empty()?*error:
+                    "A prepared RAW partial-reconstruction tile is unavailable.";
+                return false;
+            }
+        }
+        if(!ReconstructPartialCfaFootprint(footprint,taps,noiseModel.sites[siteIndex],
+            frame.calibration.usableSpanByCfaSite[siteIndex],parameters,evaluated,headroom))return false;
+    } else {
+        headroom=FootprintHeadroom(footprint,taps);
     }
-    headroom=FootprintHeadroom(footprint,taps);
     evaluated.sourceRaw = sourceRaw;
     result = std::move(evaluated);
     return true;

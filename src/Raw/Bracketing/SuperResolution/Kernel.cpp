@@ -1,4 +1,5 @@
 #include "Kernel.h"
+#include "ClippingReconstruction.h"
 #include <algorithm>
 #include <cmath>
 #include <atomic>
@@ -86,17 +87,21 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
     const auto m=Map(f,tile.originX+x*tile.step,tile.originY+y*tile.step);
     if(!std::isfinite(m.x)||!std::isfinite(m.y)||!std::isfinite(m.z)||!std::isfinite(m.w)||m.z<=0)return;
     const int cx=int(std::floor(m.x+.5f)),cy=int(std::floor(m.y+.5f));
-    // Reject a capture's incomplete color footprint as a whole. Dropping only
-    // clipped green taps while retaining red/blue sky taps reconstructs a
-    // magenta edge. The same shoulder weight must apply to every color too.
+    // The original shared shoulder still controls fine detail. A distant clip
+    // can only regain broad support through a checked, common-color local fit.
     float headroom=1;std::array<bool,3> usable{};
     for(int yy=cy-3;yy<=cy+3;++yy)for(int xx=cx-3;xx<=cx+3;++xx) {
         if(xx<f.left||yy<f.top||xx>=f.left+f.width||yy>=f.top+f.height)continue;
         const auto s=f.samples[std::size_t(yy-f.top)*f.width+xx-f.left];
+        if(s.w==-2)return; // Clipping with no trustworthy radiance bound.
         if(s.w>=0)headroom=std::min(headroom,s.w);
         if(s.w>0)usable[f.colors[((yy&1)<<1)|(xx&1)]]=true;
     }
-    if(headroom<=0||!usable[0]||!usable[1]||!usable[2])return;
+    if(!usable[0]||!usable[1]||!usable[2])return;
+    std::array<Clipping::BroadCorrection,3> correction{};
+    if(headroom<1)correction=Clipping::Reconstruct(
+        f,m,p.broadKernel,p.kernel.w,std::max(0.f,Clipping::CoreHeadroom(f,m)-headroom));
+    if(headroom<=0&&correction[0].mass<=0)return;
     std::array<float,3> weights{},broadWeights{};
     for(int yy=cy-3;yy<=cy+3;++yy) for(int xx=cx-3;xx<=cx+3;++xx) {
         if(xx<f.left||yy<f.top||xx>=f.left+f.width||yy>=f.top+f.height)continue;
@@ -110,7 +115,12 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
         const float base=m.z*headroom*1e-5f/(variance+std::max(0.f,m.w));
         const float w=f.detailPreference*base*std::exp(-.5f*(p.kernel.x*dx*dx+2*p.kernel.y*dx*dy+p.kernel.z*dy*dy));
         const auto& k=p.broadKernel;
-        const float bw=base*std::exp(-.5f*(k.x*dx*dx+2*k.y*dx*dy+k.z*dy*dy));
+        const float broadSpatial=std::exp(-.5f*(k.x*dx*dx+2*k.y*dx*dy+k.z*dy*dy));
+        float bw=base*broadSpatial;
+        if(correction[c].mass>0) {
+            const auto& a=correction[c].coefficients;
+            bw+=Clipping::FitWeight(s,broadSpatial,variance,std::max(0.f,m.w))*(a[0]+a[1]*dx+a[2]*dy);
+        }
         auto& n=p.narrow[c];auto& b=p.broad[c];
         n.value+=w*s.x;n.weight+=w;n.noise+=w*w*variance;weights[c]+=w;
         b.value+=bw*s.x;b.weight+=bw;b.noise+=bw*bw*variance;broadWeights[c]+=bw;
@@ -122,10 +132,21 @@ void AccumulatePixel(const Tile& tile,const FrameRegion& f,unsigned x,unsigned y
         p.broad[c].frameWeightSquared+=broadWeights[c]*broadWeights[c];
         // Registration and radiometric errors are shared by this capture's
         // neighboring taps, unlike independent sensor measurement noise.
-        p.narrowUncertainty[c]+=weights[c]*weights[c]*std::max(0.f,m.w);
-        p.broadUncertainty[c]+=broadWeights[c]*broadWeights[c]*std::max(0.f,m.w);
+        const float risk=std::max(0.f,m.w);
+        p.narrowUncertainty[c]+=weights[c]*weights[c]*risk;
         p.crossFrameWeight[c]+=weights[c]*broadWeights[c];
-        p.crossUncertainty[c]+=weights[c]*broadWeights[c]*std::max(0.f,m.w);
+        if(correction[c].mass>0) {
+            // The additional model residual is shared by this capture's fitted
+            // taps. Cauchy's bound avoids assuming it is independent of the
+            // existing registration/radiometric uncertainty.
+            const float broadSigma=broadWeights[c]*std::sqrt(risk)+
+                correction[c].mass*std::sqrt(correction[c].modelVariance);
+            p.broadUncertainty[c]+=broadSigma*broadSigma;
+            p.crossUncertainty[c]+=weights[c]*std::sqrt(risk)*broadSigma;
+        } else {
+            p.broadUncertainty[c]+=broadWeights[c]*broadWeights[c]*risk;
+            p.crossUncertainty[c]+=weights[c]*broadWeights[c]*risk;
+        }
     }
 }
 bool AccumulateCpu(Tile& t,const FrameRegion& f,const std::function<bool()>& cancel,std::string& error,unsigned workers) {

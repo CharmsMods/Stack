@@ -31,7 +31,7 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
         for(const auto& p:request.alignmentProposals)
             j["alignmentProposals"].push_back(AlignmentProposalIdentity(p));
     }
-    j["samplingProfile"]="local-bayer-phase-coverage-v1";
+    j["samplingProfile"]="local-bayer-phase-coverage-v2-partial-affine";
     j["integerSaturationProfile"]="verified-code-spacing-v1";
     j["exposureProfile"]="image-only-overlap-v9-independent-channel-coverage";
     j["noiseProfile"]="temporal-burst-haar-v4-signed-signal";
@@ -39,8 +39,9 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     j["groupMemoryProfile"]="adaptive-prepared-tiles-v1";
     j["groupStorageProfile"]="finite-float-observations-v1";
     j["detailProfile"]=kLocalDetailRevision;
-    j["temporalProfile"]="double-precision-gpu-temporal-v11-shared-radiance";
+    j["temporalProfile"]="double-precision-gpu-temporal-v12-partial-support";
     j["srSupportProfile"]="categorical-reference-and-depth-v2";
+    j["srReconstructionProfile"]="continuous-broad-partial-affine-v1";
     j["hdrProfile"]=kHdrColorFusionRevision;
     j["sceneColorProfile"]=kSceneColorEvidenceRevision;
     if(request.recipe.reconstruction==ReconstructionMode::Standard||adaptive) {

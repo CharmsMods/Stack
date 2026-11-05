@@ -213,6 +213,16 @@ derivative disables only guide substitution, not source support or GPU execution
 The CPU scalar consumer and GPU Mapping layout must retain the same convention;
 update memory accounting and measurement cache identity with layout/semantic changes.
 
+Native bracket sampling distinguishes measured radiance from the gradient used
+to estimate registration risk. A clipped outer stencil sample may request a
+bounded local-plane reconstruction, but every positive central-bilinear sample
+must remain measured. Preserve the original value when clipping affects only
+its gradient. Check conditioning, residuals, variance amplification and clipped
+lower bounds before accepting partial support; defects and missing resources
+retain their separate failure behavior. Reconstruction risk remains separate
+from sensor variance and survives shared-guide gradient substitution. Keep the
+strict shared MFD sampler contract unchanged for consumers that require it.
+
 Forward/reverse motion closure is measured in reference coordinates. Transport
 forward displacement covariance through the actual reverse-map Jacobian before
 combining it with reverse covariance. At a nonunique local-grid knot, require
@@ -253,6 +263,14 @@ double-precision lookup; GPU consumers index that tile-bound mask rather than
 recomputing rational depth-cell boundaries. The no-depth and fixed-reference
 paths retain their existing behavior. Coarse motion/risk interpolation remains;
 these categorical vetoes are not dense geometric validation or a new depth model.
+
+SR may retain broad, low-frequency evidence when clipping removes distant
+samples but supported local color remains. Fade that contribution through the
+highlight shoulder and coordinate its acceptance across colors. Combine its
+effective coefficients with the ordinary broad estimate before propagating
+variance, narrow/broad covariance and per-capture support; two estimates of
+the same capture are not independent evidence. Partial reconstruction does not
+claim additional narrow-kernel sampling phases or override geometry vetoes.
 
 Aligned non-panorama brackets estimate parallax on the processing worker.
 The resulting near-to-far bands and supported pieces are optional graph mask
