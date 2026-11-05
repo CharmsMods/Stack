@@ -413,80 +413,6 @@ void DrawGraphNodeSliderVisual(
     }
 }
 
-bool ApplyFloatSliderWheel(
-    float* v,
-    float vMin,
-    float vMax,
-    GraphSliderRangePolicy rangePolicy,
-    bool sliderHovered,
-    bool sliderActive,
-    ImGuiWindow* currentWindow,
-    float scrollYBefore,
-    float scrollXBefore) {
-    const float wheelDelta = GetSliderWheelDelta();
-    if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
-        return false;
-    }
-    g_SliderWheelConsumed = true;
-    const float span = std::max(std::abs(vMax - vMin), 0.0001f);
-    float step = std::max(span * 0.01f, 0.001f);
-    if (ImGui::GetIO().KeyShift) {
-        step *= 0.1f;
-    } else if (ImGui::GetIO().KeyCtrl) {
-        step *= 10.0f;
-    }
-    float next = *v + (wheelDelta * step);
-    if (rangePolicy == GraphSliderRangePolicy::Bounded) {
-        next = std::clamp(next, std::min(vMin, vMax), std::max(vMin, vMax));
-    }
-    if (currentWindow) {
-        currentWindow->Scroll.y = scrollYBefore;
-        currentWindow->Scroll.x = scrollXBefore;
-    }
-    if (std::abs(next - *v) <= 0.000001f) {
-        return false;
-    }
-    *v = next;
-    return true;
-}
-
-bool ApplyIntSliderWheel(
-    int* v,
-    int vMin,
-    int vMax,
-    GraphSliderRangePolicy rangePolicy,
-    bool sliderHovered,
-    bool sliderActive,
-    ImGuiWindow* currentWindow,
-    float scrollYBefore,
-    float scrollXBefore) {
-    const float wheelDelta = GetSliderWheelDelta();
-    if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
-        return false;
-    }
-    g_SliderWheelConsumed = true;
-    const int span = std::max(std::abs(vMax - vMin), 1);
-    int step = std::max(1, span / 100);
-    if (ImGui::GetIO().KeyShift) {
-        step = std::max(1, step / 2);
-    } else if (ImGui::GetIO().KeyCtrl) {
-        step = std::max(1, step * 5);
-    }
-    int next = *v + (wheelDelta > 0.0f ? step : -step);
-    if (rangePolicy == GraphSliderRangePolicy::Bounded) {
-        next = std::clamp(next, std::min(vMin, vMax), std::max(vMin, vMax));
-    }
-    if (currentWindow) {
-        currentWindow->Scroll.y = scrollYBefore;
-        currentWindow->Scroll.x = scrollXBefore;
-    }
-    if (next == *v) {
-        return false;
-    }
-    *v = next;
-    return true;
-}
-
 bool CommitGraphSliderFloatInput(
     GraphSliderEditState& state,
     float* value,
@@ -541,9 +467,6 @@ bool RenderGraphNodeSliderFloatLegacy(const char* label, float* v, float v_min, 
         : layout.screenPos.x + layout.labelWidth + layout.spacing;
     ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
     ImGui::SetNextItemWidth(layout.widgetWidth);
-    ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0, 0, 0, 0));
@@ -556,7 +479,6 @@ bool RenderGraphNodeSliderFloatLegacy(const char* label, float* v, float v_min, 
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyFloatSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
     char valBuf[64];
     std::snprintf(valBuf, sizeof(valBuf), format ? format : "%.2f", *v);
@@ -574,9 +496,6 @@ bool RenderGraphNodeSliderIntLegacy(const char* label, int* v, int v_min, int v_
         : layout.screenPos.x + layout.labelWidth + layout.spacing;
     ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
     ImGui::SetNextItemWidth(layout.widgetWidth);
-    ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0, 0, 0, 0));
@@ -589,7 +508,6 @@ bool RenderGraphNodeSliderIntLegacy(const char* label, int* v, int v_min, int v_
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyIntSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
     char valBuf[64];
     std::snprintf(valBuf, sizeof(valBuf), format ? format : "%d", *v);
@@ -607,8 +525,6 @@ bool RenderGraphNodeSliderFloatTextEditable(const char* label, float* v, float v
         : layout.screenPos.x + layout.labelWidth + layout.spacing;
     const GraphSliderRangePolicy rangePolicy = CurrentGraphSliderRangePolicy();
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     const ImGuiID sliderId = currentWindow ? currentWindow->GetID("##track") : 0;
     GraphSliderEditState& state = TouchGraphSliderState(sliderId, GraphSliderValueKind::Float);
     state.lastValidFloat = *v;
@@ -710,7 +626,6 @@ bool RenderGraphNodeSliderFloatTextEditable(const char* label, float* v, float v
         }
     }
 
-    changed |= ApplyFloatSliderWheel(v, v_min, v_max, rangePolicy, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     if (changed) {
         state.lastValidFloat = *v;
     }
@@ -734,8 +649,6 @@ bool RenderGraphNodeSliderIntTextEditable(const char* label, int* v, int v_min, 
         : layout.screenPos.x + layout.labelWidth + layout.spacing;
     const GraphSliderRangePolicy rangePolicy = CurrentGraphSliderRangePolicy();
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     const ImGuiID sliderId = currentWindow ? currentWindow->GetID("##track") : 0;
     GraphSliderEditState& state = TouchGraphSliderState(sliderId, GraphSliderValueKind::Int);
     state.lastValidInt = *v;
@@ -847,7 +760,6 @@ bool RenderGraphNodeSliderIntTextEditable(const char* label, int* v, int v_min, 
         }
     }
 
-    changed |= ApplyIntSliderWheel(v, v_min, v_max, rangePolicy, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     if (changed) {
         state.lastValidInt = *v;
     }
@@ -1065,12 +977,9 @@ bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, f
     ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
     ImGui::SetNextItemWidth(layout.widgetWidth);
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     bool changed = ImGuiExtras::GlassSliderFloat("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyFloatSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
 
     ImGui::SameLine(0.0f, 0.0f);
@@ -1114,12 +1023,9 @@ bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_m
     ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
     ImGui::SetNextItemWidth(layout.widgetWidth);
     ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
-    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
-    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
     bool changed = ImGuiExtras::GlassSliderInt("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyIntSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
 
     ImGui::SameLine(0.0f, 0.0f);

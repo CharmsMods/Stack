@@ -7,15 +7,22 @@
 #include <cmath>
 
 namespace Stack::Editor::RawLabInternal {
+namespace {
+bool SelectionToggle(const char* label,bool& value) {
+    if(!BareTextButton(label,value))return false;
+    value=!value;return true;
+}
+}
 bool DrawColorWarpRanges(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin& pin) {
     bool changed=false;
     const auto range=[&](const char* label,RawRecipe::RawColorWarpRange& r,float lo,float hi,float scale,const char* format) {
         ImGui::PushID(label);
-        bool edit=ImGui::Checkbox(label,&r.enabled);
+        bool edit=SelectionToggle(label,r.enabled);
         if(r.enabled) {
             float values[]{r.low*scale,r.high*scale,r.featherLow*scale,r.featherHigh*scale};
             const char* names[]{"Minimum","Maximum","Lower soft edge","Upper soft edge"};
             for(int i=0;i<4;++i) {
+                ImGui::TextUnformatted(names[i]);
                 edit|=ImGuiExtras::FloatingSliderFloat(names[i],names[i],&values[i],i<2?lo:0,hi,format,ImGui::GetContentRegionAvail().x,scale!=100);
                 args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
             }
@@ -39,26 +46,34 @@ bool DrawColorWarpRanges(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin
 bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args) {
     if(!args.state)return false;
     auto& colorWarp=args.colorWarp;bool changed=false;
-    changed|=ImGui::Checkbox("Include Color Warp",&colorWarp.enabled);
-    int combine=colorWarp.combine==RawRecipe::RawColorWarpCombine::Blend?1:0;
-    const char* modes[]{"Accumulate","Blend overlaps"};
-    if(ImGui::Combo("Combine edits",&combine,modes,2)) {
-        colorWarp.combine=combine?RawRecipe::RawColorWarpCombine::Blend:RawRecipe::RawColorWarpCombine::Accumulate;changed=true;
+    changed|=SelectionToggle("Color Warp enabled",colorWarp.enabled);
+    ImGui::TextUnformatted("Combine edits");
+    if(BareTextButton("Accumulate",colorWarp.combine==RawRecipe::RawColorWarpCombine::Accumulate)) {
+        changed|=colorWarp.combine!=RawRecipe::RawColorWarpCombine::Accumulate;
+        colorWarp.combine=RawRecipe::RawColorWarpCombine::Accumulate;
+    }
+    ContinueRawLabControlRow("Blend overlaps");
+    if(BareTextButton("Blend overlaps",colorWarp.combine==RawRecipe::RawColorWarpCombine::Blend)) {
+        changed|=colorWarp.combine!=RawRecipe::RawColorWarpCombine::Blend;
+        colorWarp.combine=RawRecipe::RawColorWarpCombine::Blend;
     }
     LabTooltip("Accumulate adds matching edits. Blend overlaps averages them where the total participating weight exceeds one. Untouched selections never dilute edits.");
     ImGui::BeginDisabled(args.strengthDriven);
     changed|=ImGuiExtras::FloatingSliderFloat("Overall strength","##strength",&colorWarp.strength,0,2,"%.2f",ImGui::GetContentRegionAvail().x);
     ImGui::EndDisabled();
-    if(ImGui::Checkbox("Show adjusted color cloud",&args.ui.colorWarpLiveCloud))args.saveAppState();
+    if(SelectionToggle("Adjusted color cloud",args.ui.colorWarpLiveCloud))args.saveAppState();
     if(colorWarp.pins.empty())return changed;
     args.ui.selectedColorWarpPin=std::clamp(args.ui.selectedColorWarpPin,0,int(colorWarp.pins.size())-1);
     auto& selected=colorWarp.pins[args.ui.selectedColorWarpPin];
-    ImGui::SeparatorText(selected.name.c_str());
-    changed|=ImGui::Checkbox("Protect this color",&selected.protectColor);
+    ImGui::Spacing();
+    ImGui::TextUnformatted(selected.name.c_str());
+    changed|=SelectionToggle("Protect this color",selected.protectColor);
     LabTooltip("Suppress overlapping edits here instead of adding a color adjustment.");
     if(selected.protectColor)changed|=ImGuiExtras::FloatingSliderFloat("Protection","##protection",&selected.strength,0,1,"%.2f",ImGui::GetContentRegionAvail().x);
-    if(ImGui::TreeNode("Selection ranges")){changed|=DrawColorWarpRanges(args,selected);ImGui::TreePop();}
-    ImGui::SeparatorText("Spatial restriction");
+    if(BareTextButton("Selection ranges",args.state->details))args.state->details=!args.state->details;
+    if(args.state->details)changed|=DrawColorWarpRanges(args,selected);
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Spatial restriction");
     if(BareTextButton("Choose area")) {
         args.ui.colorWarpAttachRegionPinId=selected.id;
         args.ui.colorWarpSamplingArmed=true;args.ui.colorWarpInspectionActive=false;

@@ -245,26 +245,6 @@ bool Numeric(const char* label, const char* id, T* value, T minimum, T maximum,
         FormatExact(state, *value);
     };
 
-    // Preserve Stack's modifier-wheel adjustment through its routed wheel API.
-    const bool localWheel = !nodeScope.graph && ImGui::IsWindowHovered() &&
-        ImGui::IsMouseHoveringRect(valueRect.Min, valueRect.Max);
-    const float wheel = eligible && (wheelFocused || localWheel) && !state.dragging &&
-        !IsSliderWheelConsumed() ? GetSliderWheelDelta() : 0.0f;
-    if (wheel != 0.0f) {
-        ConsumeSliderWheel();
-        double step = std::max(std::abs(static_cast<double>(maximum) - minimum) * 0.01,
-            std::is_integral_v<T> ? 1.0 : 0.001);
-        if (ImGui::GetIO().KeyShift) step *= 0.1;
-        else if (ImGui::GetIO().KeyCtrl) step *= 10.0;
-        double next = static_cast<double>(*value) + wheel * step;
-        if (config.rangePolicy == GraphSliderRangePolicy::Bounded)
-            next = std::clamp(next, static_cast<double>(std::min(minimum, maximum)), static_cast<double>(std::max(minimum, maximum)));
-        if (std::isfinite(next) && next >= std::numeric_limits<T>::lowest() && next <= std::numeric_limits<T>::max()) {
-            changed |= *value != static_cast<T>(next);
-            *value = static_cast<T>(next);
-        }
-    }
-
     const int valueVertexBegin = ImGui::GetWindowDrawList()->VtxBuffer.Size;
     bool rightClickConsumed = false;
     if (state.textMode) {

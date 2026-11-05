@@ -78,7 +78,7 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         case 0:
             if(std::hypot(dx,dy)>3)pin.hueShift=std::clamp(pin.hueShift+RawRecipe::ColorWarpHueDelta(pointerHue-state.lastHue),-180.f,180.f);
             state.lastHue=pointerHue;
-            pin.saturation=std::clamp(state.startSaturation+(pointerChroma-state.startChroma)/std::max(.01f,sourceChroma),-1.f,1.f);break;
+            pin.saturation=std::clamp(state.startSaturation+(pointerChroma-state.startChroma)/std::max(.01f,sourceChroma),-1.f,5.f);break;
         case 1:hue.low=std::min(relative,hue.high);break;
         case 2:hue.high=std::max(relative,hue.low);break;
         case 3:hue.featherLow=std::clamp(hue.low-unwrapped(hue.low-hue.featherLow),0.f,360.f);break;

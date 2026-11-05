@@ -96,29 +96,6 @@ Stack::RawRecipe::RawColorWarpInterpretationMode CycleColorWarpInterpretation(
     return choices[(index+(direction>=0?1:2))%3];
 }
 
-ImU32 PreviewColorWarpPinColor(
-    const Stack::RawRecipe::RawColorWarpPin& pin,
-    Raw::RawWorkingSpace workingSpace,
-    float alpha = 1.0f) {
-    Stack::RawRecipe::RawColorWarpCoordinate coordinate;
-    coordinate.lightness = 0.70f;
-    coordinate.a = pin.sourceA * coordinate.lightness;
-    coordinate.b = pin.sourceB * coordinate.lightness;
-    std::array<float, 3> rgb =
-        Stack::RawRecipe::ColorWarpCoordinateToWorkingRgb(
-            coordinate, workingSpace);
-    const float minimum = std::min({ rgb[0], rgb[1], rgb[2] });
-    if (minimum < 0.0f) {
-        for (float& channel : rgb) channel -= minimum;
-    }
-    const float peak = std::max({ rgb[0], rgb[1], rgb[2], 1.0f });
-    const auto display = [peak](float value) {
-        return std::pow(std::clamp(value / peak, 0.0f, 1.0f), 1.0f / 2.2f);
-    };
-    return ImGui::ColorConvertFloat4ToU32(ImVec4(
-        display(rgb[0]), display(rgb[1]), display(rgb[2]), alpha));
-}
-
 void DrawPreviewDashedCircle(
     ImDrawList* drawList,
     const ImVec2& center,
@@ -443,38 +420,11 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         selectedProjectActive &&
         m_ViewportOutputRawWorkspaceSourceKey == preview.identity;
 
-    const auto drawSavedColors = [&] {
-        if(!colorLayout)return;
-        const auto savedCursor=ImGui::GetCursorScreenPos();
-        constexpr float step=30.f;
-        for(std::size_t index=0;index<previewRecipe.colorWarp.pins.size();++index) {
-            const auto& pin=previewRecipe.colorWarp.pins[index];
-            const int row=int(index/8),column=int(index%8);
-            const ImVec2 center(layoutStart.x+available.x*.5f+(column-3.5f)*step,layoutStart.y+16+row*step);
-            ImGui::SetCursorScreenPos({center.x-12,center.y-12});ImGui::PushID(pin.id.c_str());
-            if(ImGui::InvisibleButton("##ViewColorSelection",{24,24})) {
-                m_RawWorkspaceLabUi.selectedColorWarpPin=int(index);
-                m_RawWorkspaceLabUi.colorWarpInspectedRegionId=pin.regionId;
-                m_RawWorkspaceLabUi.colorWarpInspectionActive=false;
-            }
-            drawList->AddCircleFilled(center,8,PreviewColorWarpPinColor(pin,previewRecipe.technical.workingSpace),24);
-            if(m_RawWorkspaceLabUi.selectedColorWarpPin==int(index))
-                drawList->AddCircle(center,11,IM_COL32(250,250,250,240),24,1.5f);
-            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",pin.name.c_str());
-            ImGui::PopID();
-        }
-        ImGui::SetCursorScreenPos(savedCursor);
-    };
-
     // Submit the chip visuals after the photograph, but reserve their input
     // before any direct image polling or deferred image-button routing.
     bool stripOwnsPointer = false;
     if (ImGui::IsWindowHovered()) {
-        if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
-            const float width = float(previewRecipe.colorWarp.pins.size())*33.f-9.f;
-            stripOwnsPointer = ImRect({layoutStart.x+(available.x-width)*.5f-3.f,layoutStart.y+3.f},
-                {layoutStart.x+(available.x+width)*.5f+3.f,layoutStart.y+33.f}).Contains(ImGui::GetIO().MousePos);
-        } else if (gradientLayout && preview.edit.canEdit &&
+        if (gradientLayout && preview.edit.canEdit &&
             preview.edit.resolvedMode != Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
             (m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones || preview.edit.rawAdjustmentLayerId.empty())) {
             const auto count = m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones
@@ -605,13 +555,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 (!m_RawWorkspaceLabUi.colorWarpPendingCircleActive &&
                  !(m_RawWorkspaceLabUi.colorWarpInspectionActive &&
                    (previewIo.KeyCtrl || previewIo.KeyShift))));
-            // Saved-color chips bind their wheel to inspection mode.
-            if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
-                const float stripWidth=float(previewRecipe.colorWarp.pins.size())*33.f-9.f;
-                navigationInput.wheelAllowed &= !ImRect(
-                    {layoutStart.x+(available.x-stripWidth)*.5f-3.f,layoutStart.y+3.f},
-                    {layoutStart.x+(available.x+stripWidth)*.5f+3.f,layoutStart.y+33.f}).Contains(previewIo.MousePos);
-            }
             const bool spaceStart = previewHovered && IsRawImageNavigationActive() &&
                 !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             if (spaceStart) ui.previewSpacePanning = true;
@@ -1224,7 +1167,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     imagePointerScope.reset();
     stripInput.reset();
     if (gradientLayout) RenderRawWorkspaceLabGradientDots(selectedSource, layoutStart, available.x);
-    drawSavedColors();
     if (IsViewMode() && !Stack::Workspace::IsPreview()) m_Viewport.DrawRawComparisonControls(layoutStart);
     ImGui::SetCursorScreenPos(layoutStart);
     ImGui::Dummy(ImVec2(
@@ -1391,6 +1333,14 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
         colorUi.colorWarpAreaWaitingForInput = !scopeReady;
         if (!scopeReady) {
             colorUi.colorWarpAreaStatus = "Waiting for image colors";
+            // A sample click is explicit analysis demand, even if an earlier
+            // optional scope request was skipped or exhausted its retries.
+            m_RawWorkspaceAnalysisPending = true;
+            m_RawWorkspaceAnalysisScopeRetryCount = 0;
+            m_RawWorkspaceAnalysisQuietUntilTime = ImGui::GetTime();
+            if (context.nodeTarget) {
+                m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(*context.nodeTarget).attemptedFingerprint = 0;
+            }
             return;
         }
         const auto failAnalysis = [&]() {

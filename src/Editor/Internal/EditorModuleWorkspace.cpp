@@ -64,6 +64,12 @@ void EditorModule::RenderViewWorkspace() {
             Stack::UiPerformance::Probe::Key(GetProjectDocumentId()) ^ reinterpret_cast<std::uintptr_t>(this));
     const auto& io = ImGui::GetIO();
     UpdateViewImageSurround();
+    // A released/hidden control can leave only the transaction open. It must
+    // not permanently own Escape or block optional input analysis.
+    if (m_Project->rawLayers.GestureActive() && !ImGui::IsAnyItemActive() && !ImGui::IsAnyMouseDown() &&
+        !m_RawWorkspaceLabUi.zoneAreas.active &&
+        !m_RawWorkspaceLabUi.colorWarpInteractionActive && !m_Project->rawInteractionDraft.active)
+        m_Project->rawLayers.EndGesture();
     const bool escapeOwned = ImGui::IsAnyItemActive() || ImGui::IsAnyMouseDown() ||
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) ||
         m_Project->rawLayers.GestureActive() || ImGui::GetIO().KeyAlt;

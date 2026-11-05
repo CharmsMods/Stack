@@ -14,6 +14,7 @@
 #include "Restormer/RestormerClient.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/FloatingSlider.h"
 #include "Utils/RawGallerySelectionVisuals.h"
 
 #include <GLFW/glfw3.h>
@@ -48,6 +49,7 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
         [this]() { SaveRawWorkspaceAppState(); }
     };
     if(!context.nodeTarget || !context.editorState)return false;
+    ImGuiExtras::FloatingSliderScope sliders(context.State<ImGuiExtras::FloatingSliderState>());
     args.state=&context.State<Stack::Editor::ColorWarpEditorState>();
     args.nodeRevision=context.nodeRevision;
     args.panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;

@@ -17,6 +17,14 @@ struct ColorWarpEditorState {
     int dragging=-1; // 0 adjustment; 1..8 core/soft range boundaries.
     float lastHue=0, startChroma=0, startSaturation=0;
     bool details=false;
+    int brightnessDrag=-1;
+    float brightnessPress=0, brightnessViewLow=-20, brightnessViewHigh=20;
+    RawRecipe::RawColorWarpRange brightnessStart;
+    std::size_t brightnessInputKey=0;
+    bool brightnessInputReady=false;
+    Raw::RawWorkingSpace brightnessSpace=Raw::RawWorkingSpace::LinearSrgbD65;
+    float brightnessInputLow=-8,brightnessInputHigh=8;
+
     std::uint64_t localRevision=0;
     std::uint64_t cloudRevision=~std::uint64_t(0),cloudLocalRevision=0;
     std::size_t inputKey=0,cloudFeedbackKey=0;

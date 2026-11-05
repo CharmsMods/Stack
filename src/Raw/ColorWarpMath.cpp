@@ -92,7 +92,7 @@ void SanitizeColorWarpPin(RawColorWarpPin& p) {
     SanitizeRange(p.hueRange,-180,180);SanitizeRange(p.saturationRange,0,100);
     SanitizeRange(p.exposureRange,-32,32);
     p.hueShift=std::clamp(Finite(p.hueShift,0),-180.f,180.f);
-    p.saturation=std::clamp(Finite(p.saturation,0),-1.f,1.f);
+    p.saturation=std::clamp(Finite(p.saturation,0),-1.f,5.f);
     p.exposureEv=std::clamp(Finite(p.exposureEv,0),-4.f,4.f);
     p.strength=std::clamp(Finite(p.strength,1),0.f,2.f);
 }

@@ -60,15 +60,15 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     auto& pin=recipe.pins[args.ui.selectedColorWarpPin];
     ImGui::TextUnformatted(pin.name.c_str());
     ImGui::SameLine();
-    changed|=ImGui::Checkbox("Enabled",&pin.enabled);
-    ImGui::SameLine();
+    if(BypassEyeButton("##selection-enabled",pin.enabled,"Bypass this selection","Enable this selection")) {pin.enabled=!pin.enabled;changed=true;}
+    ContinueRawLabControlRow("Reset");
     if(BareTextButton("Reset")) {
         pin.hueShift=pin.saturation=pin.exposureEv=0;
         changed=true;
     }
     LabTooltip("Reset this selection's Hue, Saturation, and Exposure. Keep its range.");
     if(pin.family<0) {
-        ImGui::SameLine();
+        ContinueRawLabControlRow("Delete");
         if(BareTextButton("Delete")) {
             const auto regionId=pin.regionId;
             recipe.pins.erase(recipe.pins.begin()+args.ui.selectedColorWarpPin);
@@ -84,23 +84,28 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     if(BareTextButton("Preview",args.ui.colorWarpDiagnosticLocked))
         args.ui.colorWarpDiagnosticLocked=!args.ui.colorWarpDiagnosticLocked;
     LabTooltip("Show where this selection matches the incoming image. Hold H for a temporary preview.");
-    const float size=std::clamp(ImGui::GetContentRegionAvail().y-150.f,160.f,
+    const float size=std::clamp(ImGui::GetContentRegionAvail().y-(state.selectRange?320.f:220.f),160.f,
         std::max(160.f,std::min(330.f,ImGui::GetContentRegionAvail().x)));
     changed|=DrawColorWarpWheel(args,pin,size);
+    if(state.selectRange)changed|=DrawColorWarpBrightness(args,pin);
     ImGui::BeginDisabled(pin.protectColor);
     const float width=ImGui::GetContentRegionAvail().x;
+    ImGui::TextUnformatted("Hue");
     changed|=ImGuiExtras::FloatingSliderFloat("Hue","##hue",&pin.hueShift,-180,180,"%+.1f deg",width);
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+    ImGui::TextUnformatted("Saturation");
     float saturation=pin.saturation*100.f;
-    if(ImGuiExtras::FloatingSliderFloat("Saturation","##sat",&saturation,-100,100,"%+.1f%%",width)) {
+    if(ImGuiExtras::FloatingSliderFloat("Saturation","##sat",&saturation,-100,500,"%+.1f%%",width)) {
         pin.saturation=saturation*.01f;changed=true;
     }
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+    ImGui::TextUnformatted("Exposure");
     changed|=ImGuiExtras::FloatingSliderFloat("Exposure","##ev",&pin.exposureEv,-4,4,"%+.2f EV",width);
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
     ImGui::EndDisabled();
-    if(state.selectRange && ImGui::TreeNode("Range details")) {
-        changed|=DrawColorWarpRanges(args,pin);ImGui::TreePop();
+    if(state.selectRange) {
+        if(BareTextButton("Range details",state.details))state.details=!state.details;
+        if(state.details)changed|=DrawColorWarpRanges(args,pin);
     }
     ImGui::BeginDisabled(RawRecipe::ColorWarpSampleCount(recipe)>=RawRecipe::kMaxRawColorWarpSamples);
     if(BareTextButton("Sample image",args.ui.colorWarpSamplingArmed)) {

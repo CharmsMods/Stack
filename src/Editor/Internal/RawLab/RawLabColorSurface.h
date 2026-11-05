@@ -34,6 +34,7 @@ bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args);
 bool CommitColorWarpSampling(RawLabColorSurfaceArgs& args);
 void DrawColorWarpCloud(RawLabColorSurfaceArgs& args, ImVec2 minimum, float size);
 bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args, RawRecipe::RawColorWarpPin& pin, float size);
+bool DrawColorWarpBrightness(RawLabColorSurfaceArgs& args, RawRecipe::RawColorWarpPin& pin);
 bool DrawColorWarpRanges(RawLabColorSurfaceArgs& args, RawRecipe::RawColorWarpPin& pin);
 
 } // namespace Stack::Editor::RawLabInternal

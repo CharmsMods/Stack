@@ -40,30 +40,9 @@ bool Slider(const char* label, const char* id, T* value, T minimum, T maximum,
     for (const auto color : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive,
              ImGuiCol_SliderGrab, ImGuiCol_SliderGrabActive, ImGuiCol_Border})
         ImGui::PushStyleColor(color, ImVec4(0,0,0,0));
-    auto wheelEdit=[&]() -> bool {
-    if (ImGui::IsItemHovered() && !ImGui::GetIO().KeyAlt && !IsSliderWheelConsumed() &&
-        ImGui::GetIO().MouseWheel != 0.f && !(ImGui::GetItemFlags() & ImGuiItemFlags_Disabled)) {
-        T next = *value;
-        if constexpr (std::is_integral_v<T>) {
-            if (ImGui::GetIO().MouseWheel>0 && next<maximum) ++next;
-            if (ImGui::GetIO().MouseWheel<0 && next>minimum) --next;
-        } else {
-            const double step = (static_cast<double>(maximum)-minimum) * (ImGui::GetIO().KeyShift ? .001 : .01);
-            next = static_cast<T>(std::clamp(static_cast<double>(*value) + ImGui::GetIO().MouseWheel*step,
-                static_cast<double>(minimum),static_cast<double>(maximum)));
-        }
-        const bool changed = next != *value;
-        *value = next;
-        ConsumeSliderWheel();
-        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-        return changed;
-    }
-        return false;
-    };
-    const SliderSemanticEdit semanticEdit{[](void* data) {return (*static_cast<decltype(wheelEdit)*>(data))();},&wheelEdit};
     constexpr auto scalarType=std::is_same_v<T,int>?ImGuiDataType_S32:std::is_same_v<T,float>?ImGuiDataType_Float:
         std::is_integral_v<T>?ImGuiDataType_S64:ImGuiDataType_Double;
-    bool changed=GlassSliderScalar("##value",scalarType,value,&minimum,&maximum,"",flags,&semanticEdit);
+    bool changed=GlassSliderScalar("##value",scalarType,value,&minimum,&maximum,"",flags);
     ImGui::PopStyleColor(6);
     ImGui::PopStyleVar(2);
     const ImVec2 low=ImGui::GetItemRectMin(),high=ImGui::GetItemRectMax();
