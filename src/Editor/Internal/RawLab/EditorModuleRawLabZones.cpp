@@ -181,7 +181,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
                 curveChanged=DrawCurveCanvas("LocalEV",points,localRange.curveAmount,state,false,
                     histogram,graphSize,12,canAdjustExposure?&exposureEv:nullptr,{},false,
                     &normalization,false,true,
-                    &tonalDomain,inputRevision);
+                    &tonalDomain,inputRevision,{true,false,true,minimumEv,maximumEv});
                 if(curveChanged && !Stack::RawRecipe::SameCurvePoints(points,
                     Stack::RawRecipe::RawLocalRangeBezierPoints(localRange))) {
                     localRange.points.clear();

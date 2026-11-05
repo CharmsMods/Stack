@@ -94,12 +94,11 @@ int RenderPipeline::FindReferenceSourceNode(const GraphExecutionContext& executi
                 break;
             case RenderGraphNodeKind::DataMath:
                 for (int inputIndex = 0;
-                     inputIndex < EditorNodeGraph::kMaxDataMathInputCount;
+                     inputIndex < Stack::NodeMath::ArithmeticInputCount(node.dataMathMode);
                      ++inputIndex) {
                     addInput(
                         EditorNodeGraph::DataMathInputSocketId(inputIndex));
                 }
-                addInput(EditorNodeGraph::kDataMathBaseInputSocketId);
                 break;
             case RenderGraphNodeKind::Output:
                 if (!addInput(EditorNodeGraph::kImageInputSocketId)) {

@@ -148,15 +148,6 @@ Fixture Build(const char* id,bool impulse=true,int width=33,int height=33) {
     if (std::string(id)=="colorize") {
         const int split=f.graph.AddChannelSplitNode({})->id;
         Wire(f.graph,f.source,"imageOut",split,"imageIn");Wire(f.graph,split,"r",f.effect,"image-in");
-    } else if(std::string(id)=="average-three" || std::string(id)=="linear-mix") {
-        Wire(f.graph,f.source,"imageOut",f.effect,"a");
-        const int b=Stack::Validation::AddUniformOperand(f.graph,0,{});
-        f.graph.FindNode(b)->dataMathSettings.constantA=std::string(id)=="linear-mix"?1.:0.;
-        Wire(f.graph,b,"imageOut",f.effect,"b");
-        if(std::string(id)=="average-three") {
-            const int c=Stack::Validation::AddUniformOperand(f.graph,1,{});
-            Wire(f.graph,c,"imageOut",f.effect,"c");
-        }
     } else Wire(f.graph,f.source,"imageOut",f.effect,"image-in");
     Wire(f.graph,f.effect,"image-out",f.output,"imageIn");
     return f;
@@ -217,16 +208,15 @@ void Numerics(Checks& c) {
     }
     auto zero=MathPixels(ArithmeticMode::Multiply,{0,0,0,1},100);if(zero.size()==4)c.Near(zero[0],0,"N12");
     ArithmeticSettings settings;settings.domain=ArithmeticDomain::Values;double value=0;std::string error;
-    c.Check(EvaluateUniformArithmetic(ArithmeticMode::Average,settings,{0,0,1},value,error),"N09","Uniform average evaluates");c.Near(value,1./3,"N09.value");
     {
-        auto f=Build("average-three",false,1,1);Fill(f,{0,0,0,1});f.graph.RemoveNode(f.effect);
-        const int split=f.graph.AddChannelSplitNode({})->id,average=f.graph.AddDataMathNode(DataMathMode::Average,{})->id;
+        auto f=Build("percent",false,1,1);Fill(f,{0,0,0,1});f.graph.RemoveNode(f.effect);
+        const int split=f.graph.AddChannelSplitNode({})->id,average=f.graph.AddDataMathNode(DataMathMode::Mix,{})->id;
         const int zeroValue=Stack::Validation::AddUniformOperand(f.graph,0,{}),oneValue=Stack::Validation::AddUniformOperand(f.graph,1,{});
         Wire(f.graph,f.source,"imageOut",split,"imageIn");Wire(f.graph,split,"r",average,"imageA");
         Wire(f.graph,zeroValue,"imageOut",average,"imageB");Wire(f.graph,oneValue,"imageOut",average,"imageC");Wire(f.graph,average,"imageOut",f.output,"imageIn");
         const auto p=Render(f,f.graph);c.Check(p.size()==4,"N09.native-render","Variable-input Average mixes one spatial field with two uniform inputs");if(p.size()==4)c.Near(p[0],1./3,"N09.native");
     }
-    c.Check(EvaluateUniformArithmetic(ArithmeticMode::Divide,settings,{1,0},value,error)&&value==0&&!error.empty(),"N08.diagnostic","Zero division returns zero with an explicit diagnostic");
+    c.Check(EvaluateUniformArithmetic(ArithmeticMode::Divide,settings,{1,0},value,error)&&value==0&&error.empty(),"N08.diagnostic","Zero division returns zero");
     for(double p:{0.,50.,100.,200.}) {auto f=Build("percent",false,1,1);Fill(f,{.4f,.4f,.4f,1});Set(f.graph,f.effect,"percent",p);auto pixels=Render(f,f.graph);if(pixels.size()==4)c.Near(pixels[0],.4*p/100,"N04");else c.Check(false,"N04","Percent does not render");}
     {auto f=Build("percent",false,1,1);Set(f.graph,f.effect,"percent",21.26);auto p=Render(f,f.graph);auto q=MathPixels(ArithmeticMode::Multiply,{1,1,1,1},.2126f);c.Check(Difference(p,q)<1e-6,"N05","Percent and fractional Multiply agree");}
     for(float v:{0.f,.25f,1.f}){auto f=Build("invert-mask",false,1,1);Fill(f,{v,v,v,1});auto p=Render(f,f.graph);if(p.size()==4)c.Near(p[0],1-v,"N10");else c.Check(false,"N10","No render");}
@@ -235,11 +225,7 @@ void Numerics(Checks& c) {
         c.Check(p.size()==4,"N13.render","Colorize renders");if(p.size()==4){c.Near(p[0],.2,"N13.R");c.Near(p[1],.05,"N13.G");c.Near(p[2],.01,"N13.B");}}
     {auto f=Build("channel-mixer",false,1,1);Fill(f,{0,1,0,.4f});Set(f.graph,f.effect,"rr",0);Set(f.graph,f.effect,"rg",1);auto p=Render(f,f.graph);
         c.Check(p.size()==4,"N14.render","Channel Mixer renders");if(p.size()==4){c.Near(p[0],1,"N14");c.Near(p[3],.4,"N14.alpha");}c.Save(f.graph,"standalone-channel-mixer.json");}
-    for(const char* id:{"average-three","linear-mix"}) {
-        auto f=Build(id,false,1,1);Fill(f,{0,0,0,1});if(std::string(id)=="linear-mix")Set(f.graph,f.effect,"factor",.25);
-        auto p=Render(f,f.graph);c.Check(p.size()==4,std::string("G18.")+id,"Standalone recipe with uniform operands renders");
-        if(p.size()==4)c.Near(p[0],std::string(id)=="average-three"?1./3:.25,std::string(id)=="average-three"?"N09.gpu":"G18.mix");
-    }
+
 }
 
 void ContractsAndPersistence(Checks& c) {
@@ -1227,7 +1213,7 @@ void Lifecycle(Checks& c) {
     c.Check(Difference(original,Render(fixture,expanded))<2e-5,"G05.deep","Nested partial expansion preserves pixels");
     Graph fully;CompoundExpansionResult expansion;c.Check(fixture.graph.ExpandAllCompoundNodes(fully,&expansion),"G05.lower",expansion.error);
     c.Check(Difference(original,Render(fixture,fully))<2e-5,"G05.full","Fully expanded graph preserves pixels");
-    int edit=-1;for(int id:children){auto* n=expanded.FindNode(id);if(n&&n->kind==NodeKind::DataMath&&n->dataMathSettings.domain==ArithmeticDomain::Values&&std::abs(n->dataMathSettings.constantA-1.8f)<.0001f){edit=id;n->dataMathSettings.constantA=3;break;}}
+    int edit=-1;for(int id:children){auto* n=expanded.FindNode(id);if(n&&n->kind==NodeKind::DataMath&&std::abs(n->dataMathSettings.constantA-1.8f)<.0001f){edit=id;n->dataMathSettings.constantA=3;break;}}
     c.Check(edit>0,"G06.edit","Edit the actual internal red-gain value");const auto changed=Render(fixture,expanded);
     c.Check(Difference(changed,original)>1e-7 && !changed.empty() && !original.empty(),"G06.changed","The edited gain changes actual rendered RGB");
     int packed=-1;c.Check(expanded.RepackCompoundGroup(parentGroup,&packed,&error),"G06.repack",error.empty()?"Repack current internals":error);

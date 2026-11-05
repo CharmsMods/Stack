@@ -1,3 +1,4 @@
+#include "NodeMath/ToneCurveParameters.h"
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GraphViewportPlanner.h"
 #include "Renderer/RawPreviewProxy.h"
@@ -55,7 +56,7 @@ bool CanExecuteRegion(const RenderGraphNode& node, const std::string& socket) {
                     return true;
                 case Stack::RawRecipe::GraphOperationKind::ToneCurve: {
                     const auto& parameters = node.rawOperation.parameters;
-                    const auto mode = parameters.value("curveMode", std::string("components"));
+                    const auto mode = Stack::NodeMath::ToneCurveMode(parameters);
                     if (mode == "advanced") return PointwiseTone(parameters.at("advanced"));
                     // Component mode does not execute the stashed luminance
                     // settings. Local luminance processing needs the complete

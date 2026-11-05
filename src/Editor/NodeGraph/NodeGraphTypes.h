@@ -12,7 +12,6 @@ inline constexpr const char* kImageInputSocketId = "imageIn";
 inline constexpr const char* kRawInputSocketId = "rawIn";
 inline constexpr const char* kMixInputASocketId = "imageA";
 inline constexpr const char* kMixInputBSocketId = "imageB";
-inline constexpr const char* kDataMathBaseInputSocketId = "baseIn";
 inline constexpr const char* kMixFactorSocketId = "factor";
 inline constexpr const char* kHdrMergeInput1SocketId = "image1";
 inline constexpr const char* kHdrMergeInput2SocketId = "image2";
@@ -40,7 +39,7 @@ inline constexpr const char* kMaskUtilityInputSocketId = "maskIn";
 inline constexpr const char* kImageToMaskInputSocketId = "imageIn";
 inline constexpr const char* kScopeInputSocketId = "scopeIn";
 inline constexpr const char* kPreviewInputSocketId = "previewIn";
-inline constexpr int kMaxDataMathInputCount = 8;
+inline constexpr int kMaxDataMathInputCount = Stack::NodeMath::kMixSlotCount;
 inline constexpr int kMaxMfsrInputCount = 8;
 
 inline int DataMathInputSocketIndex(const std::string& socketId) {

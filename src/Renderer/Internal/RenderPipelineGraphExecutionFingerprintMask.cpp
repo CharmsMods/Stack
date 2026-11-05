@@ -199,17 +199,18 @@ void GraphExecutionRuntime::BindMaskFingerprint() {
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
         } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            for (const DataMathInputLinkInfo& input : CollectDataMathAverageInputs(executionContext, node.nodeId)) {
-                HashCombine(fingerprint, HashValue(input.socketId));
-                HashCombine(fingerprint, fingerprintMask(input.link->fromNodeId, input.link->fromSocketId));
-            }
-            if (const RenderGraphLink* baseInput = findInputLink(node.nodeId, EditorNodeGraph::kDataMathBaseInputSocketId)) {
-                HashCombine(fingerprint, HashValue(std::string(EditorNodeGraph::kDataMathBaseInputSocketId)));
-                HashCombine(fingerprint, fingerprintMask(baseInput->fromNodeId, baseInput->fromSocketId));
-            }
-            if (const RenderGraphLink* maskInput = findInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId)) {
-                HashCombine(fingerprint, HashValue(std::string(EditorNodeGraph::kMaskInputSocketId)));
-                HashCombine(fingerprint, fingerprintMask(maskInput->fromNodeId, maskInput->fromSocketId));
+            for (const auto* port : {EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::kMixInputBSocketId}) {
+                const auto* operand = findInputLink(node.nodeId, port);
+                if (!operand) continue;
+                HashCombine(fingerprint, HashValue(std::string(port)));
+                const auto from = operand->fromNodeId;
+                const auto& output = operand->fromSocketId;
+                if (IsUniformRenderSocket(executionContext, from, output))
+                    HashCombine(fingerprint, fingerprintScalar(from, output));
+                else if (IsScalarRenderSocket(executionContext, from, output))
+                    HashCombine(fingerprint, fingerprintMask(from, output));
+                else
+                    HashCombine(fingerprint, fingerprintImage(from, output));
             }
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.requiredLinearBasis));

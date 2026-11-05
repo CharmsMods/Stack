@@ -111,7 +111,7 @@ RawColorWarpMaskFields BuildRawColorWarpMaskFields(
             }
             const float u = (static_cast<float>(x) + 0.5f) / guide.width;
             const RawColorWarpCoordinate& color = guide.pixels[index];
-            direct[index] = EvaluateColorWarpPinShapeWeight(pin, color.a, color.b) *
+            direct[index] = EvaluateColorWarpPinColorWeight(pin, color) *
                 EvaluateColorWarpPinLightnessWeight(pin, color.sceneEv);
             for (const RawColorWarpSampleCircle& circle : region->circles) {
                 if (!InCircle(circle, u, v)) continue;

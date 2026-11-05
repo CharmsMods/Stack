@@ -312,6 +312,9 @@ std::size_t EditorModule::BuildCompositeChainFingerprint(const EditorNodeGraph::
                 break;
             case EditorNodeGraph::NodeKind::DataMath:
                 HashCombine(fingerprint, HashValue(static_cast<int>(node->dataMathMode)));
+                if (node->dataMathMode == EditorNodeGraph::DataMathMode::Mix)
+                    for (const auto weight : node->dataMathSettings.mixWeights)
+                        HashCombine(fingerprint, HashValue(weight));
                 HashCombine(fingerprint, HashValue(node->dataMathSettings.constantA));
                 HashCombine(fingerprint, HashValue(node->dataMathSettings.constantB));
                 HashCombine(fingerprint, HashValue(node->dataMathSettings.minValue));

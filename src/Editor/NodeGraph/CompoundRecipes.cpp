@@ -11,7 +11,7 @@ using RecipeBuilding::Recipe;
 
 CompoundDefinition Percent() {
     Recipe r(101,"percent","Percent");
-    const int divide=r.Math(DataMathMode::Divide,100,true);
+    const int divide=r.Math(DataMathMode::Divide,100);
     r.At(divide).dataMathSettings.constantA=100;
     r.At(divide).dataMathSettings.percentageInput=true;
     r.Param("percent","Percent (%)",divide,"dataMathSettings.constantA",100,-100000,100000,"percent");
@@ -62,13 +62,15 @@ CompoundDefinition Luminance(int id,const char* name,const char* label,const cha
 CompoundDefinition SmoothCurve() {
     Recipe r(105,"smoothstep-curve","Smoothstep Tone Curve");
     const int t=r.Math(DataMathMode::Remap);
-    r.Input(t);r.At(t).dataMathSettings.minValue=.5f;r.At(t).dataMathSettings.maxValue=1;
+    r.Port("image-in", "Channel", t, "imageA", LogicalValueType::Channel);
+    r.At(t).dataMathSettings.minValue=.5f;r.At(t).dataMathSettings.maxValue=1;
     r.Param("low","Black endpoint (linear HDR)",t,"dataMathSettings.minValue",.5,-10000,10000);
     r.Param("high","White endpoint (linear HDR)",t,"dataMathSettings.maxValue",1,-10000,10000);
     const int squared=r.Math(DataMathMode::Multiply),twice=r.Math(DataMathMode::Multiply,2),complement=r.Math(DataMathMode::Subtract),product=r.Math(DataMathMode::Multiply),bounded=r.Math(DataMathMode::Clamp);
     r.At(complement).dataMathSettings.constantA=3;
     r.At(bounded).dataMathSettings.boundedMask=true;
-    r.Wire(t,squared);r.Wire(t,squared,"imageB");r.Wire(t,twice);r.Wire(twice,complement,"imageB");
+    const int ramp=r.Math(DataMathMode::Clamp);r.Wire(t,ramp);
+    r.Wire(ramp,squared);r.Wire(ramp,squared,"imageB");r.Wire(ramp,twice);r.Wire(twice,complement,"imageB");
     r.Wire(squared,product);r.Wire(complement,product,"imageB");r.Wire(product,bounded);r.Output(bounded,LogicalValueType::Mask);
     r.Note(t,"Map the chosen black and white endpoints onto a 0-to-1 ramp.");
     r.Note(squared,"Square the ramp to help the selection begin gently.");
@@ -82,7 +84,7 @@ CompoundDefinition SmoothCurve() {
 
 CompoundDefinition Colorize() {
     Recipe r(106,"colorize","Colorize");
-    const int entry=r.Identity();r.At(entry).dataMathSettings.domain=ArithmeticDomain::Channel;
+    const int entry=r.Identity();
     r.Port("image-in","Scalar signal",entry,"imageA",LogicalValueType::Channel);
     const int combine=r.Combine();
     r.Note(entry,"Pass the scalar signal through unchanged before giving it an RGB color.");
@@ -125,40 +127,6 @@ CompoundDefinition Mixer() {
     }
     r.Wire(split,"a",combine,"a");r.Output(combine,LogicalValueType::ColorImage,"imageOut",false);
     r.definition.description="3Ã—3 RGB matrix: each output row is the sum of three weighted input channels. Alpha passes through separately.";
-    return r.Finish();
-}
-
-CompoundDefinition LinearMix() {
-    Recipe r(108,"linear-mix","Linear Mix");
-    const int a=r.Identity(),b=r.Identity(),delta=r.Math(DataMathMode::Subtract),scaled=r.Math(DataMathMode::Multiply),out=r.Math(DataMathMode::Add);
-    r.Port("a","A / base",a,"imageA",LogicalValueType::ColorImage,false,false,true);
-    r.Port("b","B / processed",b,"imageA",LogicalValueType::ColorImage,false,false,true);
-    const int amount=r.Control("factor","Factor",.5,0,1);
-    r.Wire(b,delta);r.Wire(a,delta,"imageB");r.Wire(delta,scaled);r.Wire(amount,scaled,"imageB");r.Wire(a,out);r.Wire(scaled,out,"imageB");r.Output(out);
-    r.Note(a,"Pass the base image through unchanged. This is the result at factor 0.");
-    r.Note(b,"Pass the second image through unchanged. This is the result at factor 1.");
-    r.Note(amount,"Choose the blend: 0 uses the base; 1 uses the second image.");
-    r.Note(delta,"Find the difference between the second image and the base.");
-    r.Note(scaled,"Keep the chosen fraction of that difference.");
-    r.Note(out,"Add the scaled difference to the base to finish the blend.");
-    return r.Finish();
-}
-
-CompoundDefinition AverageThree() {
-    Recipe r(112,"average-three","Average (3 inputs)");
-    const int a=r.Identity(),b=r.Identity(),c=r.Identity();
-    r.Port("a","A",a,"imageA",LogicalValueType::ColorImage,false,false,true);
-    r.Port("b","B",b,"imageA",LogicalValueType::ColorImage,false,false,true);
-    r.Port("c","C",c,"imageA",LogicalValueType::ColorImage,false,false,true);
-    const int ab=r.Math(DataMathMode::Add),abc=r.Math(DataMathMode::Add),mean=r.Math(DataMathMode::Divide,3);
-    r.Wire(a,ab);r.Wire(b,ab,"imageB");r.Wire(ab,abc);r.Wire(c,abc,"imageB");r.Wire(abc,mean);r.Output(mean);
-    r.Note(a,"Pass the first input through unchanged into the average.");
-    r.Note(b,"Pass the second input through unchanged into the average.");
-    r.Note(c,"Pass the third input through unchanged into the average.");
-    r.Note(ab,"Add the first two inputs.");
-    r.Note(abc,"Add the third input to the running total.");
-    r.Note(mean,"Divide the total by 3 so all three inputs contribute equally.");
-    r.definition.description="Equal-weight mean of exactly three connected operands: (A+B+C)/3. Uniform numbers broadcast; the variable-count Average node remains available.";
     return r.Finish();
 }
 
@@ -295,7 +263,7 @@ void AppendModularCompoundRecipes(std::vector<CompoundDefinition>& catalog) {
     const auto p3=Luminance(104,"luminance-display-p3","Luminance (linear Display P3)","display-p3-d65",{.2289745640697488,.6917385218365064,.079286914093745},percent);
     catalog.push_back(srgb);catalog.push_back(rec2020);catalog.push_back(p3);
     const auto curve=SmoothCurve();catalog.push_back(curve);
-    catalog.push_back(Colorize());catalog.push_back(Mixer());catalog.push_back(LinearMix());catalog.push_back(AverageThree());
+    catalog.push_back(Colorize());catalog.push_back(Mixer());
     catalog.push_back(Halation(110,"halation","Halation","rec2020-d65",rec2020,percent,curve));
     catalog.push_back(Halation(111,"halation-srgb","Halation (linear sRGB)","srgb-d65",srgb,percent,curve));
 }

@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "GraphArithmeticFixture.h"
 #include "App/Validation/ValidationSuites.h"
 #include "App/Validation/Suites/HeaderActionRegistryValidation.h"
@@ -249,12 +250,12 @@ void ValidateUniformAdjustment(EditorModule& editor) {
     setValue(.25);
     editor.AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Multiply,{250,200});
     const int arithmetic=graph.GetSelectedNodeId();
-    RequireWorkspace(editor.SetDataMathDomain(arithmetic,NodeMath::ArithmeticDomain::Values),
-        "The shared math operation did not accept its Values domain.");
     const auto setArithmetic=[&](EditorNodeGraph::DataMathMode mode,float operand) {
         auto context=editor.GetGraphEditorContext();
         auto edit=GraphModel::ProposeEdit(*context.graph,context.revision,[&](auto& candidate) {
-            candidate.SetDataMathMode(arithmetic,mode);
+            auto& node = *candidate.FindNode(arithmetic);
+            node.dataMathMode = mode;
+            EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             candidate.FindNode(arithmetic)->dataMathSettings.constantB=operand;
         });
         RequireWorkspace(context.applyEdit(std::move(edit),error),error);
@@ -270,8 +271,8 @@ void ValidateUniformAdjustment(EditorModule& editor) {
         "Uniform division lost the sign of its divisor.");
     setArithmetic(EditorNodeGraph::DataMathMode::Divide,0);
     pipeline.ExecuteGraph(editor.BuildGraphSnapshot());
-    RequireWorkspace(!pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
-        "Uniform division by zero silently produced a parameter value.");
+    RequireWorkspace(pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty(),
+        "A zero denominator must produce zero.");
     RequireWorkspace(editor.RemoveGraphLink(arithmetic,"imageOut",adjustment,port) &&
         std::abs(sample()-manual)<.0002f,"Arithmetic disconnect did not restore the authored parameter.");
     setArithmetic(EditorNodeGraph::DataMathMode::Multiply,1);

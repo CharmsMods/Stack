@@ -57,48 +57,6 @@ bool IsUniformOrResourceSocketType(SocketType type) {
 
 
 
-bool IsDataMathImageInputSocketId(const std::string& socketId) {
-    return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
-        socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
-}
-
-bool IsScalarAverageNode(const EditorNodeGraph::Node& node) {
-    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
-        node.dataMathMode == EditorNodeGraph::DataMathMode::Average;
-}
-
-bool IsImageAverageNode(const EditorNodeGraph::Node& node) {
-    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
-        node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage;
-}
-
-bool DataMathAllowsScalarTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
-    if (node.kind != EditorNodeGraph::NodeKind::DataMath || IsImageAverageNode(node)) {
-        return false;
-    }
-    if (IsScalarAverageNode(node)) {
-        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
-    }
-    return socketId == EditorNodeGraph::kMaskInputSocketId;
-}
-
-bool DataMathAllowsScalarToImageTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
-    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
-        !IsScalarAverageNode(node) &&
-        !IsImageAverageNode(node) &&
-        IsDataMathImageInputSocketId(socketId);
-}
-
-bool DataMathAllowsFullImageTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
-    if (node.kind != EditorNodeGraph::NodeKind::DataMath || IsScalarAverageNode(node)) {
-        return false;
-    }
-    if (IsImageAverageNode(node)) {
-        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
-    }
-    return IsDataMathImageInputSocketId(socketId);
-}
-
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
     Link link;
     link.fromNodeId = fromNodeId;
@@ -246,7 +204,6 @@ MfsrGraphInputFamily ResolveMfsrGraphInputFamily(
                      ++inputIndex) {
                     addInput(DataMathInputSocketId(inputIndex));
                 }
-                addInput(kDataMathBaseInputSocketId);
                 break;
             case NodeKind::ChannelCombine:
                 if (!addInput(kImageInputSocketId)) {
@@ -409,12 +366,27 @@ bool Graph::CanConnectSockets(
                 return false;
             }
         }
-        std::optional<GraphOutputDescription> other;
-        if ((to->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(to->dataMathMode)) || to->kind == NodeKind::Mix) {
-            if (const auto* link = FindInputLink(toNodeId,toSocketId == kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId))
-                other = DescribeGraphOutput(*this,link->fromNodeId,link->fromSocketId);
+        std::string issue;
+        const int slot = DataMathInputSocketIndex(toSocketId);
+        if (to->kind == NodeKind::DataMath && slot >= 0) {
+            Stack::NodeMath::ArithmeticInputs operands{};
+            const int count = Stack::NodeMath::ArithmeticInputCount(to->dataMathMode);
+            std::array<std::optional<Stack::NodeMath::ValueDescriptor>, Stack::NodeMath::kMixSlotCount> peers;
+            operands[slot] = &source.descriptor;
+            ForEachIncomingLink(toNodeId, [&](const Link& link) {
+                const int i = DataMathInputSocketIndex(link.toSocketId);
+                if (i < 0 || i >= count || i == slot) return;
+                peers[i] = DescribeGraphOutput(*this, link.fromNodeId, link.fromSocketId).descriptor;
+                operands[i] = &*peers[i];
+            });
+            issue = Stack::NodeMath::ArithmeticInputError(operands, slot, count);
+        } else {
+            std::optional<GraphOutputDescription> other;
+            if (to->kind == NodeKind::Mix)
+                if (const auto* link = FindInputLink(toNodeId,toSocketId == kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId))
+                    other = DescribeGraphOutput(*this,link->fromNodeId,link->fromSocketId);
+            issue = FoundationWireError(*this,*to,toSocketId,source.descriptor,other ? &other->descriptor : nullptr);
         }
-        auto issue = FoundationWireError(*this,*to,toSocketId,source.descriptor,other ? &other->descriptor : nullptr);
         if (combine && issue.empty()) {
             if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this,*to,toSocketId,source.descriptor,issue)) {
                 if (errorMessage) *errorMessage = issue;
@@ -682,7 +654,7 @@ bool Graph::CanConnectSockets(
             const bool validScalarTarget =
                 to->kind == NodeKind::Compound || IsScalarTargetSocket(toNodeId, toSocketId);
             if (!validScalarSource || !validScalarTarget) {
-                if (errorMessage) *errorMessage = "Scalar outputs can connect to masks, mix factors, scalar utilities, Data Math masks, channels, or RGBA outputs.";
+                if (errorMessage) *errorMessage = "Scalar outputs can connect to masks, mix factors, scalar utilities, channels, or RGBA outputs.";
                 return false;
             }
         } else if (isScalarToImage) {
@@ -697,7 +669,7 @@ bool Graph::CanConnectSockets(
                 (to->kind == NodeKind::ImageToMask && toSocketId == kImageToMaskInputSocketId) ||
                 (to->kind == NodeKind::ChannelSplit && toSocketId == kImageInputSocketId) ||
                 to->kind == NodeKind::Compound ||
-                DataMathAllowsScalarToImageTarget(*to, toSocketId);
+                (to->kind == NodeKind::DataMath && IsDataMathInputSocketId(toSocketId));
             if (!validScalarSource || !validImageTarget) {
                 if (errorMessage) *errorMessage = "Scalar outputs can connect to image inputs, Reformat, Blend Images, Data Math, scalar converters, split nodes, or the output node.";
                 return false;
@@ -786,18 +758,6 @@ bool Graph::CanConnectSockets(
     }
 
 
-    if (to->kind == NodeKind::DataMath &&
-        IsImageAverageNode(*to) &&
-        isFromScalarStream()) {
-        if (errorMessage) *errorMessage = "Average Images inputs require full image streams.";
-        return false;
-    }
-    if (to->kind == NodeKind::DataMath && !DataMathAllowsFullImageTarget(*to, toSocketId)) {
-        if (errorMessage) *errorMessage = IsScalarAverageNode(*to)
-            ? "Average inputs require scalar masks or channel streams."
-            : "Image links must target a Data Math input or the masked Base input.";
-        return false;
-    }
     if (to->kind != NodeKind::RawOperation && to->kind != NodeKind::Compound && to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::TechnicalImage && to->kind != NodeKind::Reformat && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Mfsr && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath) {
         if (errorMessage) *errorMessage = "Image links must target a compatible compound, layer, LUT, Technical Image, HDR Merge, MFSR, blend node, data math node, split node, scalar converter, or the output.";
         return false;
@@ -828,7 +788,7 @@ bool Graph::IsScalarTargetSocket(int nodeId, const std::string& socketId) const 
         (to->kind == NodeKind::RawDetailFusion && socketId == kMaskInputSocketId) ||
         (to->kind == NodeKind::Mix && socketId == kMixFactorSocketId) ||
         (to->kind == NodeKind::FieldMean && socketId == kReductionFieldInputSocketId) ||
-        DataMathAllowsScalarTarget(*to, socketId) ||
+        (to->kind == NodeKind::DataMath && IsDataMathInputSocketId(socketId)) ||
         (to->kind == NodeKind::MaskCombine &&
             (socketId == kMaskCombineInputASocketId || socketId == kMaskCombineInputBSocketId)) ||
         (to->kind == NodeKind::MaskUtility && socketId == kMaskUtilityInputSocketId) ||

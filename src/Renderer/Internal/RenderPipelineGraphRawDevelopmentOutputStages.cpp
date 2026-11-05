@@ -1,3 +1,4 @@
+#include "Renderer/ColorWarpShader.h"
 #include "Renderer/RenderPipeline.h"
 
 #include "Raw/RawDevelopmentRecipe.h"
@@ -65,177 +66,6 @@ uniform sampler2D uInputTex;
 void main() { FragColor = texture(uInputTex, vUV); }
 )";
 
-const char* kRawColorWarpFrag = R"(
-#version 330 core
-in vec2 vUV;
-layout (location = 0) out vec4 FragColor;
-
-uniform sampler2D uInputTex;
-uniform int uInputIsRec2020;
-uniform int uUseRelativeChroma;
-uniform float uStrength;
-uniform int uPinCount;
-uniform vec4 uPinSourceTarget[8];
-uniform vec4 uPinShape[8];
-uniform vec4 uPinLight[8];
-uniform vec4 uPinQualifier[8];
-uniform sampler2D uEvCurves;
-uniform int uUseSpatialMasks;
-uniform sampler2DArray uGateMask;
-uniform sampler2DArray uSupportMask;
-uniform sampler2DArray uBoundaryMask;
-uniform sampler2D uMaskGuide;
-uniform float uPinSpatialSupport[8];
-
-float signedCbrt(float x) {
-    return sign(x) * pow(abs(x), 1.0 / 3.0);
-}
-
-vec3 workingToXyz(vec3 rgb) {
-    if (uInputIsRec2020 != 0) {
-        return vec3(
-            dot(rgb, vec3(0.6369580, 0.1446169, 0.1688809)),
-            dot(rgb, vec3(0.2627002, 0.6779981, 0.0593017)),
-            dot(rgb, vec3(0.0, 0.0280727, 1.0609851)));
-    }
-    return vec3(
-        dot(rgb, vec3(0.4124564, 0.3575761, 0.1804375)),
-        dot(rgb, vec3(0.2126729, 0.7151522, 0.0721750)),
-        dot(rgb, vec3(0.0193339, 0.1191920, 0.9503041)));
-}
-
-vec3 xyzToWorking(vec3 xyz) {
-    if (uInputIsRec2020 != 0) {
-        return vec3(
-            dot(xyz, vec3(1.7166512, -0.3556708, -0.2533663)),
-            dot(xyz, vec3(-0.6666844, 1.6164812, 0.0157685)),
-            dot(xyz, vec3(0.0176399, -0.0427706, 0.9421031)));
-    }
-    return vec3(
-        dot(xyz, vec3(3.2404542, -1.5371385, -0.4985314)),
-        dot(xyz, vec3(-0.9692660, 1.8760108, 0.0415560)),
-        dot(xyz, vec3(0.0556434, -0.2040259, 1.0572252)));
-}
-
-vec3 xyzToOklab(vec3 xyz) {
-    vec3 lms = vec3(
-        dot(xyz, vec3(0.8190224380, 0.3619062601, -0.1288737815)),
-        dot(xyz, vec3(0.0329836539, 0.9292868616, 0.0361446664)),
-        dot(xyz, vec3(0.0481771894, 0.2642395318, 0.6335478285)));
-    lms = vec3(signedCbrt(lms.x), signedCbrt(lms.y), signedCbrt(lms.z));
-    return vec3(
-        dot(lms, vec3(0.2104542553, 0.7936177850, -0.0040720468)),
-        dot(lms, vec3(1.9779984951, -2.4285922050, 0.4505937099)),
-        dot(lms, vec3(0.0259040371, 0.7827717662, -0.8086757660)));
-}
-
-vec3 oklabToXyz(vec3 lab) {
-    vec3 roots = vec3(
-        lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
-        lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
-        lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z);
-    vec3 lms = roots * roots * roots;
-    return vec3(
-        dot(lms, vec3(1.2268798734, -0.5578149966, 0.2813910502)),
-        dot(lms, vec3(-0.0405757626, 1.1122868294, -0.0717110667)),
-        dot(lms, vec3(-0.0763729497, -0.4214933240, 1.5869240244)));
-}
-
-float pinLightnessWeight(float ev, int pinIndex) {
-    float samplePosition = clamp((ev + 16.0) / 32.0, 0.0, 1.0) * 256.0;
-    float curveX = (samplePosition + 0.5) / 257.0;
-    float curveY = (float(pinIndex) + 0.5) / max(1.0, float(uPinCount));
-    return texture(uEvCurves, vec2(curveX, curveY)).r;
-}
-
-float pinShapeDistance(vec2 delta, float radius, vec4 qualifier) {
-    float radialDistance = length(delta);
-    float circularDistance = radialDistance / max(0.005, radius);
-    float directionality = clamp(qualifier.x, 0.0, 1.0);
-    if (directionality <= 0.000001 || radialDistance <= 0.000001) {
-        return circularDistance;
-    }
-    vec2 direction = vec2(cos(qualifier.y), sin(qualifier.y));
-    float cosine = clamp(dot(delta, direction) / radialDistance, -1.0, 1.0);
-    float forward = (cosine + 1.0) * 0.5;
-    float aperture = clamp(qualifier.z, 0.10, 1.0);
-    float lobePower = 1.0 + 4.0 * (1.0 - aperture);
-    float directionalReach = max(
-        0.05,
-        aperture + (1.0 - aperture) * pow(forward, lobePower));
-    float directionalDistance = circularDistance / directionalReach;
-    return mix(circularDistance, directionalDistance, directionality);
-}
-
-void main() {
-    vec4 inputColor = texture(uInputTex, vUV);
-    vec3 xyz = workingToXyz(inputColor.rgb);
-    vec3 lab = xyzToOklab(xyz);
-    float chromaScale = max(0.001, abs(lab.x));
-    vec2 chroma = uUseRelativeChroma != 0
-        ? lab.yz / chromaScale
-        : lab.yz;
-    float sceneEv = log2(max(xyz.y, 0.000001) / 0.18);
-    vec2 displacement = vec2(0.0);
-    float lightnessDelta = 0.0;
-    float totalWeight = 0.0;
-    for (int index = 0; index < 8; ++index) {
-        if (index >= uPinCount) break;
-        vec4 sourceTarget = uPinSourceTarget[index];
-        vec4 shape = uPinShape[index];
-        vec4 light = uPinLight[index];
-        vec4 qualifier = uPinQualifier[index];
-        if (shape.z <= 0.0001) continue;
-        float radius = max(0.005, shape.x);
-        float shapeDistance = pinShapeDistance(
-            chroma - sourceTarget.xy,
-            radius,
-            qualifier);
-        if (shapeDistance >= 1.0) continue;
-        float innerBoundary = max(0.0, 1.0 - clamp(shape.y, 0.0, 1.0));
-        float radial = shapeDistance <= innerBoundary
-            ? 1.0
-            : 1.0 - smoothstep(innerBoundary, 1.0, shapeDistance);
-        float direct = radial * pinLightnessWeight(sceneEv, index);
-        float gate = 1.0;
-        float support = 0.0;
-        float boundary = 1.0;
-        if (uUseSpatialMasks != 0) {
-            float layer = float(index);
-            vec3 maskUv = vec3(vUV, layer);
-            vec3 guide = texture(uMaskGuide, vUV).rgb;
-            float guideDistance = length(lab.yz - guide.xy) * 36.0 +
-                abs(sceneEv - guide.z) * 0.28;
-            float guided = clamp(exp(-guideDistance), 0.04, 1.0);
-            gate = texture(uGateMask, maskUv).r * guided;
-            support = texture(uSupportMask, maskUv).r * guided;
-            boundary = texture(uBoundaryMask, maskUv).r;
-        }
-        float directContribution = direct * gate;
-        float spatialContribution = support * uPinSpatialSupport[index];
-        float weight = max(directContribution, spatialContribution) *
-            boundary * shape.z;
-        if (weight <= 0.000001) continue;
-        totalWeight += weight;
-        if (shape.w < 0.5) {
-            displacement += (sourceTarget.zw - sourceTarget.xy) * weight;
-            lightnessDelta += light.w * weight;
-        }
-    }
-    if (totalWeight > 0.000001) {
-        float denominator = max(1.0, totalWeight);
-        chroma += uStrength * displacement / denominator;
-        lab.yz = uUseRelativeChroma != 0
-            ? chroma * chromaScale
-            : chroma;
-        vec3 outputRgb = xyzToWorking(oklabToXyz(lab));
-        outputRgb *= exp2(uStrength * lightnessDelta / denominator);
-        FragColor = vec4(outputRgb, inputColor.a);
-    } else {
-        FragColor = inputColor;
-    }
-}
-)";
 
 template <typename T>
 void HashColorWarpMaskValue(std::size_t& seed, const T& value) {
@@ -275,7 +105,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     if (m_RawDevelopmentColorWarpProgram == 0) {
         m_RawDevelopmentColorWarpProgram = GLHelpers::CreateShaderProgram(
             kRawOutputStageVert,
-            kRawColorWarpFrag);
+            Stack::Renderer::ColorWarp::Fragment);
     }
     if (m_RawDevelopmentColorWarpProgram == 0) {
         std::cerr << "[RenderPipeline] RAW Color Warp shader compilation failed; "
@@ -297,104 +127,38 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     // reserve during a high-resolution RAW render.
     constexpr std::size_t colorWarpPinLimit =
         Stack::RawRecipe::kMaxRawColorWarpPins;
-    std::vector<float> sourceTarget(colorWarpPinLimit * 4u, 0.0f);
-    std::vector<float> shape(colorWarpPinLimit * 4u, 0.0f);
-    std::vector<float> light(colorWarpPinLimit * 4u, 0.0f);
-    std::vector<float> qualifier(colorWarpPinLimit * 4u, 0.0f);
-    std::vector<float> evCurves(
-        colorWarpPinLimit * Stack::RawRecipe::kRawColorWarpEvCurveSampleCount,
-        1.0f);
-    std::vector<float> spatialSupport(colorWarpPinLimit, 0.0f);
-    std::vector<const Stack::RawRecipe::RawColorWarpPin*> activePins;
-    activePins.reserve(colorWarpPinLimit);
-    int pinCount = 0;
-    for (const Stack::RawRecipe::RawColorWarpPin& pin : colorWarp.pins) {
-        if (!pin.enabled || pinCount >= static_cast<int>(colorWarpPinLimit)) {
-            continue;
-        }
-        const std::size_t offset = static_cast<std::size_t>(pinCount) * 4u;
-        sourceTarget[offset + 0u] = pin.sourceA;
-        sourceTarget[offset + 1u] = pin.sourceB;
-        sourceTarget[offset + 2u] = pin.targetA;
-        sourceTarget[offset + 3u] = pin.targetB;
-        shape[offset + 0u] = pin.radius;
-        shape[offset + 1u] = pin.softness;
-        shape[offset + 2u] = pin.strength;
-        shape[offset + 3u] = pin.protectColor ? 1.0f : 0.0f;
-        light[offset + 3u] = pin.lightnessDeltaEv;
-        for (std::size_t sampleIndex = 0;
-             sampleIndex < Stack::RawRecipe::kRawColorWarpEvCurveSampleCount;
-             ++sampleIndex) {
-            evCurves[
-                static_cast<std::size_t>(pinCount) *
-                    Stack::RawRecipe::kRawColorWarpEvCurveSampleCount +
-                sampleIndex] = pin.evCurve.samples[sampleIndex];
-        }
-        qualifier[offset + 0u] = pin.qualifierDirectionality;
-        qualifier[offset + 1u] = pin.qualifierOrientationRadians;
-        qualifier[offset + 2u] = pin.qualifierAperture;
-        const auto region = std::find_if(
-            colorWarp.regions.begin(),
-            colorWarp.regions.end(),
-            [&](const Stack::RawRecipe::RawColorWarpRegion& candidate) {
-                return candidate.id == pin.regionId;
-            });
-        if (region != colorWarp.regions.end()) {
-            spatialSupport[static_cast<std::size_t>(pinCount)] =
-                region->spatialSupport;
-        }
-        activePins.push_back(&pin);
-        ++pinCount;
+    std::vector<std::array<float,4>> params,adjustments,hueRanges,saturationRanges,exposureRanges;
+    std::vector<float> spatialSupport;
+    std::vector<const Stack::RawRecipe::RawColorWarpPin*> spatialPins;
+    const auto packedRange=[](const Stack::RawRecipe::RawColorWarpRange& r) -> std::array<float,4> {
+        return r.enabled?std::array<float,4>{r.low-r.featherLow,r.low,r.high,r.high+r.featherHigh}:
+            std::array<float,4>{-1e20f,-1e20f,1e20f,1e20f};
+    };
+    for(const auto& pin:colorWarp.pins) {
+        if(params.size()>=colorWarpPinLimit)break;
+        // Keep the selection-field layer order stable when adjustments become
+        // zero or a selection is disabled. Their fields remain reusable.
+        params.push_back({Stack::RawRecipe::ColorWarpHue(pin.sourceA,pin.sourceB),
+            pin.enabled?pin.strength:0.f,pin.protectColor?1.f:0.f,
+            Stack::RawRecipe::ColorWarpParticipates(pin)?1.f:0.f});
+        const auto region=std::find_if(colorWarp.regions.begin(),colorWarp.regions.end(),[&](const auto& r){return r.id==pin.regionId;});
+        const bool spatial=region!=colorWarp.regions.end() && region->spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;
+        adjustments.push_back({pin.hueShift,pin.saturation,pin.exposureEv,spatial?float(spatialPins.size()+1):0.f});
+        hueRanges.push_back(packedRange(pin.hueRange));
+        saturationRanges.push_back(packedRange(pin.saturationRange));
+        exposureRanges.push_back(packedRange(pin.exposureRange));
+        spatialSupport.push_back(Stack::RawRecipe::ColorWarpPinSpatialSupport(colorWarp,pin));
+        if(spatial)spatialPins.push_back(&pin);
     }
-    if (pinCount == 0) {
-        return true;
-    }
-
-    Stack::Renderer::ScopedGLTexture evCurveTexture;
-    {
-        while (glGetError() != GL_NO_ERROR) {
-        }
-        unsigned int texture = 0u;
-        glGenTextures(1, &texture);
-        if (texture != 0u) {
-            const Stack::Renderer::GLState::TextureBinding savedTexture(
-                GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
-            const Stack::Renderer::GLState::PixelUnpackState savedUnpack;
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            savedUnpack.ConfigureTightCpuUpload();
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_R32F,
-                static_cast<int>(Stack::RawRecipe::kRawColorWarpEvCurveSampleCount),
-                pinCount,
-                0,
-                GL_RED,
-                GL_FLOAT,
-                evCurves.data());
-            savedUnpack.Restore();
-            savedTexture.Restore();
-            if (glGetError() == GL_NO_ERROR) {
-                evCurveTexture.Reset(texture);
-            } else {
-                glDeleteTextures(1, &texture);
-            }
-        }
-    }
-    if (!evCurveTexture) {
-        std::cerr << "[RenderPipeline] RAW Color Warp EV curve upload failed; "
-                     "passing input texture through.\n";
-        return false;
-    }
+    const int pinCount=static_cast<int>(params.size());
+    const int layerCount=static_cast<int>(spatialPins.size());
+    if(pinCount==0)return true;
 
     const bool hasSpatialRegions = std::any_of(
-        activePins.begin(),
-        activePins.end(),
+        spatialPins.begin(),
+        spatialPins.end(),
         [&](const Stack::RawRecipe::RawColorWarpPin* pin) {
+            if(!Stack::RawRecipe::ColorWarpParticipates(*pin))return false;
             const auto region = std::find_if(
                 colorWarp.regions.begin(),
                 colorWarp.regions.end(),
@@ -429,10 +193,10 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             m_Height);
         auto& cache = m_RawDevelopmentColorWarpMaskCache;
         const bool cachedLayersMatch =
-            cache.layers == pinCount &&
-            cache.pinIds.size() == activePins.size() &&
+            cache.layers == layerCount &&
+            cache.pinIds.size() == spatialPins.size() &&
             std::equal(
-                activePins.begin(), activePins.end(), cache.pinIds.begin(),
+                spatialPins.begin(), spatialPins.end(), cache.pinIds.begin(),
                 [](const Stack::RawRecipe::RawColorWarpPin* pin,
                    const std::string& cachedId) {
                     return pin != nullptr && pin->id == cachedId;
@@ -522,10 +286,10 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             std::vector<std::vector<std::uint8_t>> boundaryLayers;
             bool cancelled = false;
             if (proxyReady) {
-                gateLayers.reserve(activePins.size());
-                supportLayers.reserve(activePins.size());
-                boundaryLayers.reserve(activePins.size());
-                for (const auto* pin : activePins) {
+                gateLayers.reserve(spatialPins.size());
+                supportLayers.reserve(spatialPins.size());
+                boundaryLayers.reserve(spatialPins.size());
+                for (const auto* pin : spatialPins) {
                     const auto region = std::find_if(
                         colorWarp.regions.begin(),
                         colorWarp.regions.end(),
@@ -567,16 +331,16 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             Stack::Renderer::ScopedGLTexture supportTexture;
             Stack::Renderer::ScopedGLTexture boundaryTexture;
             Stack::Renderer::ScopedGLTexture guideTexture;
-            if (proxyReady && gateLayers.size() == activePins.size()) {
+            if (proxyReady && gateLayers.size() == spatialPins.size()) {
                 gateTexture.Reset(GLHelpers::CreateTextureArray(
-                    proxyWidth, proxyHeight, pinCount, GL_R8));
+                    proxyWidth, proxyHeight, layerCount, GL_R8));
                 supportTexture.Reset(GLHelpers::CreateTextureArray(
-                    proxyWidth, proxyHeight, pinCount, GL_R8));
+                    proxyWidth, proxyHeight, layerCount, GL_R8));
                 boundaryTexture.Reset(GLHelpers::CreateTextureArray(
-                    proxyWidth, proxyHeight, pinCount, GL_R8));
+                    proxyWidth, proxyHeight, layerCount, GL_R8));
                 guideTexture.Reset(GLHelpers::CreateEmptyTexture(proxyWidth, proxyHeight));
                 if (gateTexture && supportTexture && boundaryTexture && guideTexture) {
-                    for (int layer = 0; layer < pinCount; ++layer) {
+                    for (int layer = 0; layer < layerCount; ++layer) {
                         GLHelpers::UploadTextureArrayLayer(
                             gateTexture.Get(), layer, proxyWidth, proxyHeight,
                             GL_RED, GL_UNSIGNED_BYTE,
@@ -616,18 +380,18 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                 cache.inputKey = inputKey;
                 cache.width = proxyWidth;
                 cache.height = proxyHeight;
-                cache.layers = pinCount;
+                cache.layers = layerCount;
                 cache.gateTexture = gateTexture.Release();
                 cache.supportTexture = supportTexture.Release();
                 cache.boundaryTexture = boundaryTexture.Release();
                 cache.guideTexture = guideTexture.Release();
                 cache.pinIds.clear();
-                cache.pinIds.reserve(activePins.size());
-                for (const auto* pin : activePins) {
+                cache.pinIds.reserve(spatialPins.size());
+                for (const auto* pin : spatialPins) {
                     cache.pinIds.push_back(pin->id);
                 }
                 cache.retainedBytes = static_cast<std::uint64_t>(proxyWidth) *
-                    proxyHeight * (static_cast<std::uint64_t>(pinCount) * 3u + 8u);
+                    proxyHeight * (static_cast<std::uint64_t>(layerCount) * 3u + 8u);
             }
             m_LastGraphExecutionStats.colorWarpMaskBuildMs +=
                 std::chrono::duration<double, std::milli>(
@@ -689,8 +453,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                 glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uInputIsRec2020"),
                 recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 ? 1 : 0);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uUseRelativeChroma"),
-                colorWarp.version <= 1 ? 1 : 0);
+                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uBlendOverlaps"),
+                colorWarp.combine==Stack::RawRecipe::RawColorWarpCombine::Blend ? 1 : 0);
             glUniform1f(
                 glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uStrength"),
                 colorWarp.strength);
@@ -700,11 +464,6 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             glUniform1i(
                 glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uUseSpatialMasks"),
                 useSpatialMasks ? 1 : 0);
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_2D, evCurveTexture.Get());
-            glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uEvCurves"),
-                5);
             if (useSpatialMasks) {
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(
@@ -736,29 +495,12 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                     4);
                 glActiveTexture(GL_TEXTURE0);
             }
-            for (int index = 0; index < static_cast<int>(colorWarpPinLimit); ++index) {
-                const std::size_t offset = static_cast<std::size_t>(index) * 4u;
-                const std::string suffix = "[" + std::to_string(index) + "]";
-                glUniform4f(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, ("uPinSourceTarget" + suffix).c_str()),
-                    sourceTarget[offset + 0u], sourceTarget[offset + 1u],
-                    sourceTarget[offset + 2u], sourceTarget[offset + 3u]);
-                glUniform4f(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, ("uPinShape" + suffix).c_str()),
-                    shape[offset + 0u], shape[offset + 1u],
-                    shape[offset + 2u], shape[offset + 3u]);
-                glUniform4f(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, ("uPinLight" + suffix).c_str()),
-                    light[offset + 0u], light[offset + 1u],
-                    light[offset + 2u], light[offset + 3u]);
-                glUniform4f(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, ("uPinQualifier" + suffix).c_str()),
-                    qualifier[offset + 0u], qualifier[offset + 1u],
-                    qualifier[offset + 2u], qualifier[offset + 3u]);
-                glUniform1f(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, ("uPinSpatialSupport" + suffix).c_str()),
-                    spatialSupport[static_cast<std::size_t>(index)]);
-            }
+            const auto upload=[&](const char* name,const auto& values) {
+                glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,name),pinCount,values.front().data());
+            };
+            upload("uPinParams",params);upload("uPinAdjust",adjustments);
+            upload("uHueRange",hueRanges);upload("uSaturationRange",saturationRanges);upload("uExposureRange",exposureRanges);
+            glUniform1fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPinSpatialSupport"),pinCount,spatialSupport.data());
             glActiveTexture(GL_TEXTURE0);
             m_Quad.Draw();
             glUseProgram(0);

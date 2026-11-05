@@ -10,10 +10,11 @@ namespace Stack::Editor::RawLabInternal {
 struct CurveCanvasPlotContext {
     ImRect box;
     GraphUI::GraphPlotStyle style;
-    RawLabToneGraphViewRange view;
+    CurveAxisMapping xAxis,yAxis;
+    CurveCanvasViewOptions viewOptions;
     Animation::ControlInput input;
     ImVec2 mouse;
-    float offset=0,yMinimum=0,yMaximum=1;
+    float offset=0;
     bool diagonal=false,amountDriven=false,hovered=false;
     int hoveredPoint=-1;
     bool geometryChanged=false;

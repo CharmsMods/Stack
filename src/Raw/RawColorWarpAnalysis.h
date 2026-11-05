@@ -16,9 +16,9 @@ struct RawColorWarpAnalysisSample {
 };
 
 struct RawColorWarpAreaProposal {
+    float sourceLightness = 0.0f;
     float sourceA = 0.0f;
     float sourceB = 0.0f;
-    RawColorWarpEvCurve evCurve;
     std::size_t supportingPixelCount = 0;
 };
 

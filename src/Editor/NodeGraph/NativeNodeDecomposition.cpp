@@ -1,6 +1,8 @@
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 
+#include "Editor/NodeGraph/MathRecipes.h"
+
 namespace EditorNodeGraphDefinitions {
 namespace {
 using namespace EditorNodeGraph;
@@ -34,7 +36,7 @@ NodeDecompositionCapability GetNodeDecompositionCapability(const EditorNodeGraph
     const EditorNodeGraph::Node& node) {
     const auto resolved=ResolveNodeDefinition(graph,node);
     if (!resolved) return {Inspectability::OpaqueSpecialized,false,"The exact node definition is unresolved."};
-    if (node.kind==NodeKind::Layer && node.layerType==LayerType::Brightness)
+    if (IsMathRecipe(node) || (node.kind==NodeKind::Layer && node.layerType==LayerType::Brightness))
         return {Inspectability::TransparentGraph,true,{}};
     if (resolved.compound) {
         const auto& definition=*resolved.compound;

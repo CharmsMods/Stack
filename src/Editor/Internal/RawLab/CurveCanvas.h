@@ -2,6 +2,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
 #include "Editor/Internal/RawLab/CurveModeSelector.h"
+#include "Editor/Internal/RawLab/CurveCanvasMapping.h"
 #include <imgui.h>
 #include <array>
 #include <cstdint>
@@ -14,6 +15,10 @@ struct CurveCanvasGeometryCache {
     std::vector<RawRecipe::RawBezierCurvePoint> source;
     std::vector<RawRecipe::RawBezierSegment> segments;
     bool valid = false;
+    CurveAxisMapping xAxis,yAxis;
+    float offset=0;
+    bool mapped=false;
+    std::vector<ImVec2> mappedPoints,screenPoints;
 };
 struct CurveCanvasState {
     void EndInteraction() {
@@ -23,6 +28,7 @@ struct CurveCanvasState {
     }
     CurveGestureMode mode = CurveGestureMode::Points;
     CurveModeSelectorState modeSelector;
+    CurveCanvasFraming framing;
     std::vector<bool> selected;
     std::vector<RawRecipe::RawBezierCurvePoint> before;
     ImVec2 press{};
@@ -51,11 +57,13 @@ struct CurveCanvasState {
     std::vector<RawRecipe::RawBezierCurvePoint> normalizationSource;
     float normalizationMean = 0;
     bool normalizationCached = false;
+    float viewOffset = 0;
+    bool viewOffsetReady = false;
     std::vector<RawRecipe::RawBezierCurvePoint> effectiveSource, effectivePoints;
     float effectiveAmount = -1;
     bool effectiveDiagonal = false;
     std::array<float,kRawLabHistogramBinCount> histogramSource{}, histogramBins{};
-    RawLabToneGraphViewRange histogramView{};
+    CurveAxisMapping histogramAxis{};
     std::uint64_t histogramRevision = 0;
     bool histogramCached = false, histogramValid = false;
     float histogramPeak = 0;
@@ -70,5 +78,6 @@ bool DrawCurveCanvas(const char* id, std::vector<RawRecipe::RawBezierCurvePoint>
     float* normalization = nullptr, bool normalizationDriven = false,
     bool normalizationAvailable = true,
     const CurveTonalSliderDomain* tonalSliders = nullptr,
-    std::uint64_t histogramRevision = 0);
+    std::uint64_t histogramRevision = 0,
+    CurveCanvasViewOptions viewOptions = {});
 }

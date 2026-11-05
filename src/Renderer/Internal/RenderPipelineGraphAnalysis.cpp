@@ -21,27 +21,6 @@ bool IsUniformRenderSocket(const GraphExecutionContext& context, int nodeId, std
             socketId == EditorNodeGraph::kImageOutputSocketId;
 }
 
-std::vector<DataMathInputLinkInfo> CollectDataMathAverageInputs(
-    const GraphExecutionContext& executionContext,
-    int nodeId) {
-    std::vector<DataMathInputLinkInfo> inputs;
-    inputs.reserve(EditorNodeGraph::kMaxDataMathInputCount);
-    for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
-        const std::string socketId = EditorNodeGraph::DataMathInputSocketId(inputIndex);
-        if (const RenderGraphLink* input = executionContext.FindInputLink(nodeId, socketId)) {
-            inputs.push_back(DataMathInputLinkInfo{ input, socketId });
-        }
-    }
-    return inputs;
-}
-
-const RenderGraphLink* FindFirstDataMathAverageInput(const GraphExecutionContext& executionContext, int nodeId) {
-    for (const DataMathInputLinkInfo& input : CollectDataMathAverageInputs(executionContext, nodeId)) {
-        return input.link;
-    }
-    return nullptr;
-}
-
 bool IsChannelSocketId(std::string_view socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
@@ -128,36 +107,8 @@ bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nod
                 }
                 break;
             case RenderGraphNodeKind::DataMath:
-                if (Stack::NodeMath::Primitive(node.dataMathMode) &&
-                    node.semanticDescriptor.logicalType!=Stack::NodeMath::LogicalValueType::Invalid) {
-                    plan.result=Stack::NodeMath::ArithmeticChannel(node.semanticDescriptor.logicalType);
-                    break;
-                }
-                if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel) {plan.result=true;break;}
-                if (currentSocketId != EditorNodeGraph::kImageOutputSocketId) {
-                    break;
-                }
-                if (node.dataMathMode == RenderDataMathMode::Average) {
-                    plan.result =
-                        FindFirstDataMathAverageInput(
-                            executionContext,
-                            node.nodeId) != nullptr;
-                    break;
-                }
-                if (node.dataMathMode == RenderDataMathMode::ImageAverage) {
-                    break;
-                }
-                for (const DataMathInputLinkInfo& input :
-                        CollectDataMathAverageInputs(
-                            executionContext,
-                            node.nodeId)) {
-                    plan.dependencies.push_back(input.link);
-                }
-                if (!plan.dependencies.empty()) {
-                    optionalInput(EditorNodeGraph::kDataMathBaseInputSocketId);
-                    optionalInput(EditorNodeGraph::kMaskInputSocketId);
-                    plan.immediate = false;
-                }
+                plan.result = Stack::NodeMath::ArithmeticChannel(node.semanticDescriptor.logicalType) ||
+                    node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel;
                 break;
             default:
                 break;

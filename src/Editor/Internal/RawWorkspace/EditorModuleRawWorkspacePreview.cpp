@@ -1597,24 +1597,6 @@ void EditorModule::ClearRawWorkspaceLivePreviewState() {
         m_ExportStatusText =
             "RAW export canceled because the source or project changed.";
     }
-    if (m_RawWorkspaceLabUi.colorWarpCloudVertexBuffer != 0) {
-        glDeleteBuffers(
-            1,
-            &m_RawWorkspaceLabUi.colorWarpCloudVertexBuffer);
-    }
-    if (m_RawWorkspaceLabUi.colorWarpCloudVertexArray != 0) {
-        glDeleteVertexArrays(
-            1,
-            &m_RawWorkspaceLabUi.colorWarpCloudVertexArray);
-    }
-    if (m_RawWorkspaceLabUi.colorWarpCloudProgram != 0) {
-        glDeleteProgram(m_RawWorkspaceLabUi.colorWarpCloudProgram);
-    }
-    m_RawWorkspaceLabUi.colorWarpCloudProgram = 0;
-    m_RawWorkspaceLabUi.colorWarpCloudVertexArray = 0;
-    m_RawWorkspaceLabUi.colorWarpCloudVertexBuffer = 0;
-    m_RawWorkspaceLabUi.colorWarpCloudGpuFingerprint = 0;
-    m_RawWorkspaceLabUi.colorWarpCloudGpuPointCount = 0;
     if (m_RawWorkspaceLabUi.colorWarpAffectedOverlayTexture != 0) {
         glDeleteTextures(
             1,

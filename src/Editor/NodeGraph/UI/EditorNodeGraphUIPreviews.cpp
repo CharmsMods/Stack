@@ -92,6 +92,7 @@ void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
     m_NodeNotes.InvalidateLayouts();
     m_WireRoutes.reset();m_PreparedWireWorldRevision=0;++m_WireWorldRevision;m_WireGraph=nullptr;
     m_NodeLayoutCache.clear();
+    m_MixBars.clear();
     m_NodeOrderCacheGraph = nullptr;
     m_NodeOrderCacheNodes = nullptr;
     m_LinkHitTestFrame = -1;
@@ -177,6 +178,7 @@ void EditorNodeGraphUI::SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& g
     pruneKeyedMap(m_NodeContentOverflow);
     pruneKeyedMap(m_NodeFrontOrder);
     pruneKeyedMap(m_NodeLayoutCache);
+    pruneKeyedMap(m_MixBars);
     for (auto it = m_RevealedAdvancedInputNodes.begin(); it != m_RevealedAdvancedInputNodes.end();) {
         if (liveNodeIds.count(*it)) ++it;
         else it = m_RevealedAdvancedInputNodes.erase(it);

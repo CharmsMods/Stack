@@ -35,7 +35,7 @@ SocketDefinition ChannelOutputSocket(int nodeId, const ChannelOutput& output) {
     return socket;
 }
 bool ValidateChannelOutputs(const Node& node, const std::vector<SocketDefinition>& sockets, std::string& error) {
-    if (!node.channelOutputs.empty() && node.kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode)) {
+    if (!node.channelOutputs.empty() && node.kind == NodeKind::DataMath) {
         error = "Arithmetic has one Result. Use Split Channels to select a component.";
         return false;
     }
@@ -57,7 +57,7 @@ std::string ExposeChannelOutput(Graph& graph, int nodeId, const std::string& sou
     bool opaque, std::string* error) {
     const auto fail=[&](const char* message) {if(error)*error=message;return std::string{};};
     auto* node=graph.FindNode(nodeId);
-    if (node && node->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode))
+    if (node && node->kind == NodeKind::DataMath)
         return fail("Use Split Channels after the arithmetic Result.");
     SocketDefinition base;
     if (!node || !Component(component) || FindChannelOutput(*node,source) ||
@@ -104,7 +104,7 @@ std::vector<ChannelSplitFold> FoldChannelSplits(Graph& graph, const std::vector<
         const std::string sourceSocket=input->fromSocketId, splitUuid=split->instanceUuid, notes=split->notes;
         const bool opaque=split->splitMissingAlphaIsOpaque;
         const auto* source=graph.FindNode(producer);
-        if (!source || (source->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(source->dataMathMode)) ||
+        if (!source || (source->kind == NodeKind::DataMath) ||
             (source->rawLayerOwnerId!=split->rawLayerOwnerId &&
             !(source->rawLayerOwnerId.empty() && source->role==Stack::GraphModel::NodeRole::OriginalImage))) continue;
         bool safe=true;

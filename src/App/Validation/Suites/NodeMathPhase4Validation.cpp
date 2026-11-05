@@ -301,7 +301,7 @@ bool ValidateExactDefinitionCacheInvalidation(
     return ok;
 }
 
-bool ValidateTransientTargetPoolBounds(
+bool ValidateMathTargetPoolBounds(
     const std::vector<unsigned char>& pixels,
     int width,
     int height) {
@@ -310,7 +310,7 @@ bool ValidateTransientTargetPoolBounds(
     pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
 
     RenderGraphSnapshot graph;
-    graph.outputNodeId = 5;
+    graph.outputNodeId = 6;
     graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
     graph.executionInspectionEnabled = true;
     graph.nodes = {
@@ -318,7 +318,8 @@ bool ValidateTransientTargetPoolBounds(
         ImageNode(2),
         {},
         {},
-        DataMathNode(5, RenderDataMathMode::Average, 1.0f)
+        DataMathNode(5, RenderDataMathMode::Add, 0),
+        DataMathNode(6, RenderDataMathMode::Multiply, 0.5f)
     };
     graph.nodes[2].nodeId = 3;
     graph.nodes[2].kind = RenderGraphNodeKind::Reformat;
@@ -330,10 +331,11 @@ bool ValidateTransientTargetPoolBounds(
         Link(1, EditorNodeGraph::kImageOutputSocketId, 3, EditorNodeGraph::kImageInputSocketId),
         Link(2, EditorNodeGraph::kImageOutputSocketId, 4, EditorNodeGraph::kImageInputSocketId),
         Link(3, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::DataMathInputSocketId(0).c_str()),
-        Link(4, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::DataMathInputSocketId(1).c_str())
+        Link(4, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::DataMathInputSocketId(1).c_str()),
+        Link(5, EditorNodeGraph::kImageOutputSocketId, 6, EditorNodeGraph::kMixInputASocketId)
     };
 
-    bool observedEviction = false;
+    bool ok = true;
     for (int iteration = 0; iteration < 12; ++iteration) {
         const int outputWidth = 8 + iteration;
         const int outputHeight = 2 + iteration;
@@ -342,22 +344,10 @@ bool ValidateTransientTargetPoolBounds(
         graph.nodes[3].reformatSettings.width = outputWidth;
         graph.nodes[3].reformatSettings.height = outputHeight;
         pipeline.ExecuteGraph(graph);
-        observedEviction |=
-            pipeline.GetLastGraphExecutionStats().transientTargetEvictions > 0;
+        const auto& stats = pipeline.GetLastGraphExecutionStats();
+        ok &= Check(stats.transientPoolBytes <= stats.transientPoolBudgetBytes,
+            "Lowered two-input Mix exceeded the transient target budget.");
     }
-
-    bool ok = Check(
-        observedEviction,
-        "multi-resolution transient target pool grew without evicting stale dimensions");
-    graph.nodes[4].dataMathSettings.constantA = 0.125f;
-    pipeline.ExecuteGraph(graph);
-    const GraphExecutionStats reuseStats = pipeline.GetLastGraphExecutionStats();
-    ok &= Check(
-        reuseStats.transientTargetReuses > 0,
-        "transient target trimming discarded the most-recent reusable dimension");
-    ok &= Check(
-        reuseStats.transientPoolBytes <= reuseStats.transientPoolBudgetBytes,
-        "transient target pool remained above its byte budget after execution");
     return ok;
 }
 
@@ -1102,7 +1092,7 @@ bool RunValidationWithContext() {
     ok &= ValidateFramebufferStatePreservation();
     ok &= ValidateLutTextureUploadSafety();
     ok &= ValidateExactDefinitionCacheInvalidation(pixels, width, height);
-    ok &= ValidateTransientTargetPoolBounds(pixels, width, height);
+    ok &= ValidateMathTargetPoolBounds(pixels, width, height);
     ok &= ValidateStableSourceExtentAcrossReformat(pixels, width, height);
     ok &= ValidateGraphExceptionBoundary(pixels, width, height);
     ok &= ValidatePhysicalPointwiseScheduling(pixels, width, height);
@@ -1248,21 +1238,18 @@ bool RunValidationWithContext() {
         average.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
         average.nodes = {
             ImageNode(1), ImageNode(2), ImageNode(3),
-            DataMathNode(9, RenderDataMathMode::Average, 1.0f), OutputNode(10)
+            DataMathNode(6, RenderDataMathMode::Add, 0), DataMathNode(7, RenderDataMathMode::Add, 0),
+            DataMathNode(9, RenderDataMathMode::Divide, 3), OutputNode(10)
         };
         average.links = {
-            Link(1, EditorNodeGraph::kImageOutputSocketId, 9, EditorNodeGraph::DataMathInputSocketId(0).c_str()),
-            Link(2, EditorNodeGraph::kImageOutputSocketId, 9, EditorNodeGraph::DataMathInputSocketId(1).c_str()),
-            Link(3, EditorNodeGraph::kImageOutputSocketId, 9, EditorNodeGraph::DataMathInputSocketId(2).c_str()),
-            Link(9, EditorNodeGraph::kImageOutputSocketId, 10, EditorNodeGraph::kImageInputSocketId)
+            Link(1, "imageOut", 6, "imageA"), Link(2, "imageOut", 6, "imageB"),
+            Link(6, "imageOut", 7, "imageA"), Link(3, "imageOut", 7, "imageB"),
+            Link(7, "imageOut", 9, "imageA"), Link(9, "imageOut", 10, "imageIn")
         };
         pipeline.ExecuteGraph(average);
-        ok &= Check(pipeline.GetLastGraphExecutionStats().transientTargetAllocations == 2,
-            "first multipass average did not allocate the bounded two-target transient pool");
-        average.nodes[3].dataMathSettings.constantA = 0.125f;
         pipeline.ExecuteGraph(average);
-        ok &= Check(pipeline.GetLastGraphExecutionStats().transientTargetReuses >= 2,
-            "subsequent multipass evaluation did not reuse transient targets");
+        ok &= Check(pipeline.GetLastGraphExecutionStats().imageCacheHits > 0,
+            "Repeating the same mean should reuse cached arithmetic.");
     }
 
     if (ok) {

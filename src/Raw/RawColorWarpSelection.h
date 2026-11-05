@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Raw/RawColorWarpMask.h"
+#include "Raw/ColorWarpMath.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -20,11 +21,11 @@ struct RawColorWarpMaskSample {
 inline float EvaluateColorWarpPinWeight(const RawColorWarpPin& pin,
     const RawColorWarpCoordinate& input, const RawColorWarpMaskSample& mask = {},
     float spatialSupport = 0.0f) {
-    if (!pin.enabled || pin.strength <= 0.0001f ||
-        EvaluateColorWarpPinShapeDistance(pin, input.a, input.b) >= 1.0f) return 0.0f;
-    const float direct = EvaluateColorWarpPinShapeWeight(pin, input.a, input.b) *
+    const float colorWeight=EvaluateColorWarpPinColorWeight(pin,input);
+    if (!pin.enabled || pin.strength <= 0.0f || colorWeight <= 0.0f) return 0.0f;
+    const float direct = colorWeight *
         EvaluateColorWarpPinLightnessWeight(pin, input.sceneEv);
-    return std::max(direct * mask.gate, mask.support * spatialSupport) *
+    return direct * std::max(mask.gate, mask.support * spatialSupport) *
         mask.boundary * pin.strength;
 }
 
@@ -38,7 +39,7 @@ inline float ColorWarpPinSpatialSupport(const RawColorWarpRecipe& recipe,
 inline float ColorWarpEffectiveSelectionWeight(const RawColorWarpRecipe& recipe,
     float selectedWeight, float totalWeight) {
     return recipe.enabled ? std::clamp(recipe.strength * selectedWeight /
-        std::max(1.0f, totalWeight), 0.0f, 1.0f) : 0.0f;
+        (recipe.combine==RawColorWarpCombine::Blend?std::max(1.0f,totalWeight):1.f), 0.0f, 1.0f) : 0.0f;
 }
 
 // Includes only membership/field inputs. Destinations, lightness shifts,
@@ -53,13 +54,10 @@ inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recip
     hash(recipe.version);
     hash(recipe.pins.size());
     for (const auto& pin : recipe.pins) {
-        hash(pin.enabled);
-        hash(pin.id);
-        if (!pin.enabled) continue;
-        hash(pin.sourceA); hash(pin.sourceB); hash(pin.radius); hash(pin.softness);
-        hash(pin.qualifierDirectionality); hash(pin.qualifierOrientationRadians);
-        hash(pin.qualifierAperture); hash(pin.regionId);
-        for (const float sample : pin.evCurve.samples) hash(sample);
+        hash(pin.id);hash(pin.sourceA);hash(pin.sourceB);hash(pin.regionId);
+        for(const auto* range:{&pin.hueRange,&pin.saturationRange,&pin.exposureRange}) {
+            hash(range->enabled);hash(range->low);hash(range->high);hash(range->featherLow);hash(range->featherHigh);
+        }
     }
     hash(recipe.regions.size());
     for (const auto& region : recipe.regions) {

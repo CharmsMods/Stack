@@ -1357,13 +1357,11 @@ bool ValidateDevelopNodeSmoke() {
             adoptedColorPin.id = "synthetic-spatial-color";
             adoptedColorPin.sourceA = 0.0f;
             adoptedColorPin.sourceB = 0.0f;
-            adoptedColorPin.targetA = 0.04f;
-            adoptedColorPin.targetB = 0.025f;
-            adoptedColorPin.radius = 0.75f;
+            adoptedColorPin.sourceA=.3f;adoptedColorPin.hueRange.enabled=false;adoptedColorPin.hueShift=( 0.04f)*100.f;
+            adoptedColorPin.saturation= 0.025f;
+
             adoptedColorPin.regionId = "synthetic-spatial-region";
-            adoptedColorPin.evCurve =
-                Stack::RawRecipe::MakeColorWarpEvCurveHump(
-                    -1.0f, 7.0f, 1.0f);
+            adoptedColorPin.exposureRange={-6,4,1,1,true};
             Stack::RawRecipe::RawColorWarpRegion adoptedColorRegion;
             adoptedColorRegion.id = adoptedColorPin.regionId;
             adoptedColorRegion.spatialMode =
@@ -2180,15 +2178,13 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             smokeColorPin.name = "Real RAW smoke color";
             smokeColorPin.sourceA = 0.0f;
             smokeColorPin.sourceB = 0.0f;
-            smokeColorPin.targetA = 0.12f;
-            smokeColorPin.targetB = 0.08f;
-            smokeColorPin.radius = 0.75f;
-            smokeColorPin.softness = 0.6f;
-            smokeColorPin.evCurve =
-                Stack::RawRecipe::MakeColorWarpEvCurveHump(
-                    -1.0f, 5.0f, 0.75f);
+            smokeColorPin.sourceA=.3f;smokeColorPin.hueRange.enabled=false;smokeColorPin.hueShift=( 0.12f)*100.f;
+            smokeColorPin.saturation= 0.08f;
+
+
+            smokeColorPin.exposureRange={-6,4,1,1,true};
             smokeColorPin.regionId = "real-raw-smoke-region";
-            smokeColorPin.lightnessDeltaEv = 0.15f;
+            smokeColorPin.exposureEv = 0.15f;
             activeColorWarpRecipe.colorWarp.pins = { smokeColorPin };
             Stack::RawRecipe::RawColorWarpRegion smokeColorRegion;
             smokeColorRegion.id = smokeColorPin.regionId;
@@ -2231,7 +2227,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 repeatedColorWarpStats,
                 repeatedColorWarpMs);
             auto targetDraggedColorWarpRecipe = activeColorWarpRecipe;
-            targetDraggedColorWarpRecipe.colorWarp.pins.front().targetA = 0.10f;
+            targetDraggedColorWarpRecipe.colorWarp.pins.front().hueShift = 10.f;
             const bool targetDraggedColorWarpRenderOk = runRawWorkspaceGraph(
                 targetDraggedColorWarpRecipe,
                 false,

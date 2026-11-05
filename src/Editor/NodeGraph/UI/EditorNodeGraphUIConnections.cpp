@@ -15,6 +15,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     // Rank sockets using current local contracts. The selected connection's
     // command performs the one authoritative whole-document validation.
+    editor->PrepareGraphOutputDescriptions();
     EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,Stack::Editor::PublishedConnectionContext(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
@@ -133,6 +134,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         return false;
     }
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    editor->PrepareGraphOutputDescriptions();
     EditorNodeGraph::ScopedGraphOutputAnalysis descriptions(graph,Stack::Editor::PublishedConnectionContext(*editor));
     const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
     const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);

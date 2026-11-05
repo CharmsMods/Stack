@@ -467,16 +467,24 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             snapshot.rawWorkspace.sourceKey);
         const auto mainRenderBegin = std::chrono::steady_clock::now();
         Raw::RawGpuImageLease hdrPhoto;
+        std::string hdrError;
         const auto& overlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
         if (Stack::Hdr::AnyPreviewActive() &&
             RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) &&
             snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitInspection &&
             (overlayMode.empty() || overlayMode == "none") &&
             snapshot.rawWorkspace.recipe.rgbDenoise.diagnosticMode == Stack::RawRecipe::RawDenoiseDiagnosticMode::None) {
-            hdrPhoto = Stack::Hdr::RenderCompanion(m_Pipeline, snapshot.graph);
+            hdrPhoto = Stack::Hdr::RenderCompanion(m_Pipeline, snapshot.graph, hdrError);
         }
-        m_Pipeline.ExecuteGraph(snapshot.graph);
-        if (!rawWorkspaceActive) {
+        if (hdrError.empty()) m_Pipeline.ExecuteGraph(snapshot.graph);
+        else {
+            // The synchronous graph uses the pipeline's own output. Withhold
+            // the failed result; RAW retains its separately owned presentation.
+            m_Pipeline.ClearOutput();
+            if (!rawWorkspaceActive)
+                PostNotification(UiNotificationSeverity::Error, hdrError, "hdr-preview-failed");
+        }
+        if (!rawWorkspaceActive && hdrError.empty()) {
             m_HdrGraphOutput = std::move(hdrPhoto);
             m_HdrGraphBase = m_Pipeline.GetOutputTexture();
         }
@@ -542,7 +550,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         } else if (rawWorkspaceActive &&
                    m_Pipeline.GetOutputTexture() == 0) {
             m_RawWorkspaceStaleRenderStatusText =
-                !rawRgbDenoiseError.empty()
+                !hdrError.empty() ? hdrError : !rawRgbDenoiseError.empty()
                     ? rawRgbDenoiseError
                     : (!graphExecutionStats.lastSpecializedFailure.empty()
                         ? graphExecutionStats.lastSpecializedFailure
@@ -730,7 +738,8 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         synchronousResult.previewMaxDimension = snapshot.previewMaxDimension;
         synchronousResult.denoisePending = m_Pipeline.IsOutputDenoisePending();
         synchronousResult.success = rawWorkspaceActive ? publishedRawPresentation : m_Pipeline.GetOutputTexture() != 0;
-        synchronousResult.error = !rawRgbDenoiseError.empty() ? rawRgbDenoiseError : graphExecutionStats.lastSpecializedFailure;
+        synchronousResult.error = !hdrError.empty() ? hdrError :
+            !rawRgbDenoiseError.empty() ? rawRgbDenoiseError : graphExecutionStats.lastSpecializedFailure;
         if (rawWorkspaceActive) {
             if (publishedRawPresentation) {
                 m_RawWorkspacePreviewOutputKind =

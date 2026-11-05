@@ -269,12 +269,11 @@ std::string DataMathModeToString(DataMathMode mode) {
         case DataMathMode::Subtract: return "Subtract";
         case DataMathMode::Multiply: return "Multiply";
         case DataMathMode::Divide: return "Divide";
-        case DataMathMode::Average: return "Average";
+        case DataMathMode::Mix: return "Mix";
         case DataMathMode::Min: return "Min";
         case DataMathMode::Max: return "Max";
         case DataMathMode::Difference: return "Difference";
         case DataMathMode::Remap: return "Remap";
-        case DataMathMode::ImageAverage: return "ImageAverage";
     }
     return "Clamp";
 }
@@ -284,20 +283,17 @@ DataMathMode DataMathModeFromString(const std::string& value) {
     if (value == "Subtract") return DataMathMode::Subtract;
     if (value == "Multiply") return DataMathMode::Multiply;
     if (value == "Divide") return DataMathMode::Divide;
-    if (value == "Average") return DataMathMode::Average;
+    if (value == "Mix") return DataMathMode::Mix;
     if (value == "Min") return DataMathMode::Min;
     if (value == "Max") return DataMathMode::Max;
     if (value == "Difference") return DataMathMode::Difference;
     if (value == "Remap") return DataMathMode::Remap;
-    if (value == "ImageAverage") {
-        return DataMathMode::ImageAverage;
-    }
-    return DataMathMode::Clamp;
+    if (value == "Clamp") return DataMathMode::Clamp;
+    throw std::runtime_error("Unknown math operation.");
 }
 
 nlohmann::json SerializeDataMathSettings(const DataMathSettings& settings) {
     nlohmann::json value = {
-        { "domain", settings.domain == Stack::NodeMath::ArithmeticDomain::Values ? "values" : settings.domain == Stack::NodeMath::ArithmeticDomain::Channel ? "channel" : "spatial" },
         { "constantA", settings.constantA },
         { "constantB", settings.constantB },
         { "minValue", settings.minValue },
@@ -306,6 +302,7 @@ nlohmann::json SerializeDataMathSettings(const DataMathSettings& settings) {
         { "outMax", settings.outMax }
     };
     if (!settings.requiredLinearBasis.empty()) value["requiredLinearBasis"] = settings.requiredLinearBasis;
+    if (settings.mixWeights != DataMathSettings{}.mixWeights) value["mixWeights"] = settings.mixWeights;
     if (settings.boundedMask) value["boundedMask"] = true;
     if (settings.percentageInput) value["percentageInput"] = true;
     return value;
@@ -317,9 +314,15 @@ DataMathSettings DeserializeDataMathSettings(const nlohmann::json& value) {
     settings.requiredLinearBasis = value.value("requiredLinearBasis", std::string{});
     settings.boundedMask = value.value("boundedMask", false);
     settings.percentageInput = value.value("percentageInput", false);
-    const auto domain = value.value("domain", std::string("spatial"));
-    if (domain != "values" && domain != "spatial" && domain != "channel") throw std::runtime_error("Unknown arithmetic domain.");
-    settings.domain = domain == "values" ? Stack::NodeMath::ArithmeticDomain::Values : domain == "channel" ? Stack::NodeMath::ArithmeticDomain::Channel : Stack::NodeMath::ArithmeticDomain::Spatial;
+    if (value.contains("mixWeights")) {
+        const auto& weights = value.at("mixWeights");
+        if (!weights.is_array() || weights.size() != settings.mixWeights.size())
+            throw std::runtime_error("Invalid Mix contribution count.");
+        weights.get_to(settings.mixWeights);
+        for (double weight : settings.mixWeights)
+            if (!std::isfinite(weight) || weight < 0 || weight > Stack::NodeMath::kMixSlotCount)
+                throw std::runtime_error("Invalid Mix contribution.");
+    }
     settings.constantA = value.value("constantA", settings.constantA);
     settings.constantB = value.value("constantB", settings.constantB);
     settings.minValue = value.value("minValue", settings.minValue);

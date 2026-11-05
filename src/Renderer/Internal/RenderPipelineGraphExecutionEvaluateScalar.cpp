@@ -79,15 +79,14 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
                 return provenanceScope.Return(true);
             }
             std::vector<double> inputs;
-            const bool average = node.dataMathMode == RenderDataMathMode::Average;
-            const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
-            const int count = average ? EditorNodeGraph::kMaxDataMathInputCount : (unary ? 1 : 2);
+            if (node.dataMathMode == RenderDataMathMode::Mix) return finishFailure("Mix recipe was not expanded.");
+            const int count = Stack::NodeMath::ArithmeticInputCount(node.dataMathMode);
             for (int i = 0; i < count; ++i) {
                 const auto* link = findInputLink(nodeId, EditorNodeGraph::DataMathInputSocketId(i));
                 double operand = i == 0 ? node.dataMathSettings.constantA : node.dataMathSettings.constantB;
                 if (link && !evalScalar(link->fromNodeId, link->fromSocketId, operand))
                     return finishFailure(pipeline.m_LastGraphExecutionStats.lastReductionFailure);
-                if (!average || link) inputs.push_back(operand);
+                inputs.push_back(operand);
             }
             std::string error;
             if (!Stack::NodeMath::EvaluateUniformArithmetic(node.dataMathMode, node.dataMathSettings, inputs, value, error))

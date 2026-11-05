@@ -167,7 +167,7 @@ inline bool ColorProbe(Recipe& r) {
     r.colorWarp.enabled = true;
     r.colorWarp.strength = 1.0f;
     Stack::RawRecipe::RawColorWarpPin pin;
-    pin.id = "viewport-probe"; pin.sourceA = 0.03f; pin.targetA = 0.04f;
+    pin.id = "viewport-probe"; pin.sourceA = 0.3f; pin.hueShift = 10.f;
     r.colorWarp.pins = {pin};
     return true;
 }

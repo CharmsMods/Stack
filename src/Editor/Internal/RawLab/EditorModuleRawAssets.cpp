@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/ToneCurveEditorState.h"
 #include "Project/RawCapturedMask.h"
 #include "Editor/Internal/RawLab/CurveCanvas.h"
 #include "Editor/EditorModule.h"
@@ -178,13 +179,15 @@ void EditorModule::AdoptRawAssetCapture(EditorRenderWorker::PreviewResult& resul
     }
     auto asset=std::move(*result.capturedAsset);
     if(capture.useCurve && asset.samples && m_Project->nodeEditor) {
-        auto& state=m_NodeEditorState.Get<Editor::RawLabInternal::CurveCanvasState>(*m_Project->nodeEditor);
         const auto* layer=FindRawAdjustmentLayer(m_Project->rawLayers.State(),capture.target->layerId);
         const auto* node=SelectedEditingNode();
         if(layer && node && node->kind==EditorNodeGraph::NodeKind::RawOperation) {
             const auto recipe=ReadRawLayerOperation(*layer,node->instanceUuid);
             const bool tone=node->rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve;
             const auto t=RawRecipe::ReadSceneTone(recipe.finishTone.layerJson.value("luminanceTone",nlohmann::json::object()));
+            if (tone) m_NodeEditorState.Get<Editor::ToneCurveEditorState>(*m_Project->nodeEditor).photoChannel = 0;
+            auto& state = tone ? m_NodeEditorState.Get<Editor::ToneCurveEditorState>(*m_Project->nodeEditor).canvas[4] :
+                m_NodeEditorState.Get<Editor::RawLabInternal::CurveCanvasState>(*m_Project->nodeEditor);
             const auto points=tone?t.curve:RawRecipe::RawLocalRangeBezierPoints(recipe.localRange);
             const float low=tone?-16.f:recipe.localRange.minEv,high=tone?16.f:recipe.localRange.maxEv;
             state.samples.clear();state.selected.assign(points.size(),false);

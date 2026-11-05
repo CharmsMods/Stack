@@ -684,10 +684,10 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D,colorDelta.Get());
     glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneColorDelta"),3);
-    glActiveTexture(GL_TEXTURE4);
+    glActiveTexture(GL_TEXTURE0 + 4);
     glBindTexture(GL_TEXTURE_2D,colorDelta ? sceneColorGuidance.colorTexture : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneEvidenceColor"),4);
-    glActiveTexture(GL_TEXTURE5);
+    glActiveTexture(GL_TEXTURE0 + 5);
     glBindTexture(GL_TEXTURE_2D,colorDelta ? sceneColorGuidance.confidenceTexture : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneEvidenceConfidence"),5);
     glUniform1i(glGetUniformLocation(m_ShaderProgram,"uSceneToneColorEnabled"),colorDelta ? 1 : 0);

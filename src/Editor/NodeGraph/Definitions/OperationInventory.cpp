@@ -91,7 +91,7 @@ bool ValidateOperationInventoryCoverage(std::vector<std::string>& errors) {
     variants(NodeKind::MaskUtility, 0, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Threshold));
     variants(NodeKind::ImageToMask, 0, static_cast<int>(EditorNodeGraph::ImageToMaskKind::SampledRange));
     variants(NodeKind::ImageGenerator, 0, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text));
-    variants(NodeKind::DataMath, 0, static_cast<int>(EditorNodeGraph::DataMathMode::ImageAverage));
+    variants(NodeKind::DataMath, 0, static_cast<int>(EditorNodeGraph::DataMathMode::Remap));
     expected.emplace(NodeKind::Value,static_cast<int>(LogicalValueType::Scalar));
     variants(NodeKind::Value, static_cast<int>(LogicalValueType::Curve1D), static_cast<int>(LogicalValueType::Failure)-1);
     variants(NodeKind::TechnicalImage, static_cast<int>(Stack::NodeMath::TechnicalImageOperation::SrgbDecode),

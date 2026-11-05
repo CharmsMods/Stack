@@ -13,7 +13,6 @@
 #include "Editor/Internal/RawLab/RawDenoiseMapEditor.h"
 #include "Editor/Internal/RawLab/RawLabColorWheelRenderer.h"
 #include "Editor/Timeline/TimelineAnimation.h"
-#include "Raw/RawColorCloudPacket.h"
 #include "Raw/RawColorWarpAnalysis.h"
 #include "Raw/RawImageData.h"
 #include "Renderer/RenderPipeline.h"
@@ -297,7 +296,6 @@ enum class RawGalleryNavigationMode {
     MultiFrameCreation = 2
 };
 
-using RawWorkspaceColorCloudPoint = Raw::RawColorCloudSample;
 
 struct RawWorkspaceColorWarpAreaOwner {
     std::optional<Stack::Project::NodeEditTarget> nodeTarget;
@@ -433,7 +431,7 @@ struct RawNodePrimaryUiState {
         }
         colorWarpDraggingSource=colorWarpDraggingProvisional=colorWarpInteractionActive=false;
         colorWarpPendingCircleDrawing=colorWarpPendingCircleRefining=false;
-        colorWarpGestureOwner=colorWarpEvGesture=colorWarpQualifierDragHandle=0;
+        colorWarpGestureOwner=colorWarpQualifierDragHandle=0;
     }
     Editor::RawExposureHistory exposureHistory;
     bool zonesTargetedView = false;
@@ -441,8 +439,8 @@ struct RawNodePrimaryUiState {
     RawCurveGraphUiState zonesCurveGraph;
     std::array<RawCurveGraphUiState, 4> toneCurveGraphs;
     int selectedColorWarpPin = -1;
-    std::string selectedColorWarpGroupId;
-    int colorWarpGroupOperation = 0;
+    bool colorWarpSamplingArmed = false;
+    std::string colorWarpAttachRegionPinId;
     bool colorWarpDraggingSource = false;
     int colorWarpQualifierDragHandle = 0;
     bool colorWarpDraggingProvisional = false;
@@ -475,33 +473,13 @@ struct RawNodePrimaryUiState {
     bool colorWarpInspectionActive = false;
     bool colorWarpDiagnosticIsolateSelected = false;
     int colorWarpHoveredSelection = -1;
-    int colorWarpTemporaryViewMode = 0;
-    std::unordered_map<std::string, int> colorWarpSelectionViewModes;
     std::string colorWarpInspectedRegionId;
     float colorWarpRegionReachWheelDelta = 0.0f;
     float colorWarpRegionFeatherWheelDelta = 0.0f;
     int colorWarpGestureOwner = 0;
     int colorWarpWorkingRange = 0;
-    int colorWarpEvEditMode = 0; // 0 Draw, 1 Smart.
-    float colorWarpEvBrushWidth = 2.5f;
-    int colorWarpEvGesture = 0;
-    std::string colorWarpEvGesturePinId;
-    ImVec2 colorWarpEvGesturePress { 0.0f, 0.0f };
-    ImVec2 colorWarpEvGestureLast { 0.0f, 0.0f };
-    Stack::RawRecipe::RawColorWarpEvCurve colorWarpEvGestureStartCurve;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartSelection;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartHoverSelection;
-    RawWorkspaceColorWarpSmartSelectionState colorWarpSmartGestureStart;
     bool colorWarpLightnessRangePreviewActive = false;
-    float colorWarpViewCenterA = 0.0f;
-    float colorWarpViewCenterB = 0.0f;
-    float colorWarpViewExtent = 0.45f;
-    float colorWarpViewTargetCenterA = 0.0f;
-    float colorWarpViewTargetCenterB = 0.0f;
-    float colorWarpViewTargetExtent = 0.45f;
-    bool colorWarpViewAnimationInitialized = false;
-    bool colorWarpViewNeedsFit = true;
-    std::string colorWarpViewSourceKey;
+
 };
 
 struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
@@ -639,42 +617,11 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
     }
     // Captured on pointer-down so pin, qualifier, pan, and zoom gestures
     // cannot steal one another until every pressed pointer is released.
-    std::string colorWarpCloudSourceKey;
-    std::size_t colorWarpCloudInputFingerprint = 0;
-    int colorWarpCloudWorkingSpace = -1;
-    std::vector<RawWorkspaceColorCloudPoint> colorWarpCloud;
     unsigned int colorWarpAffectedOverlayTexture = 0;
     int colorWarpAffectedOverlayWidth = 0;
     int colorWarpAffectedOverlayHeight = 0;
     std::size_t colorWarpAffectedOverlayFingerprint = 0;
     std::string colorWarpAffectedOverlaySourceKey;
-    Stack::Editor::RawLabInternal::RawLabColorWheelRenderer colorWarpWheelRenderer;
-    // The bounded cloud packet is uploaded to this persistent point-sprite
-    // buffer.  A single in-order ImGui GPU callback draws it directly over
-    // the disc, so ordinary pan/zoom does not allocate GPU objects or expand
-    // the command list per sample.
-    unsigned int colorWarpCloudProgram = 0;
-    unsigned int colorWarpCloudVertexArray = 0;
-    unsigned int colorWarpCloudVertexBuffer = 0;
-    std::size_t colorWarpCloudGpuFingerprint = 0;
-    int colorWarpCloudGpuPointCount = 0;
-    float colorWarpCloudCanvasMinX = 0.0f;
-    float colorWarpCloudCanvasMinY = 0.0f;
-    float colorWarpCloudCanvasWidth = 0.0f;
-    float colorWarpCloudCanvasHeight = 0.0f;
-    float colorWarpCloudDisplayPosX = 0.0f;
-    float colorWarpCloudDisplayPosY = 0.0f;
-    float colorWarpCloudDisplayWidth = 0.0f;
-    float colorWarpCloudDisplayHeight = 0.0f;
-    float colorWarpCloudFramebufferScaleX = 1.0f;
-    float colorWarpCloudFramebufferScaleY = 1.0f;
-    float colorWarpCloudViewCenterA = 0.0f;
-    float colorWarpCloudViewCenterB = 0.0f;
-    float colorWarpCloudViewHalfWidth = 1.0f;
-    float colorWarpCloudViewHalfHeight = 1.0f;
-    float colorWarpCloudPointScale = 1.0f;
-    int colorWarpCloudWorkingRange = 0;
-    bool colorWarpCloudShowSelectedCatch = false;
     std::string multiFrameStatusText;
 };
 

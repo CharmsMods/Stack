@@ -21,5 +21,5 @@ inline bool CanAuthorConnection(const Graph& graph, int from, const std::string&
 // replacement, the visible adapter and all four wires share one history entry.
 bool ConnectAuthoredSockets(Graph& candidate, int from, const std::string& output,
                             int to, const std::string& input, std::string* error = nullptr,
-                            int* insertedNode = nullptr, const GraphOutputContext* published = nullptr);
+                            int* adapterNode = nullptr, const GraphOutputContext* published = nullptr);
 }

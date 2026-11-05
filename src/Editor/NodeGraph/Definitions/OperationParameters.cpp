@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/Definitions/OperationInventory.h"
 #include "Editor/Timeline/TimelineAnimation.h"
 #include "Raw/RawGraphParameters.h"
+#include <limits>
 
 namespace EditorNodeGraphDefinitions {
 namespace {
@@ -163,22 +164,22 @@ std::vector<LiveParameterDefinition> BuildOperationParameters(const Node& node) 
         case NodeKind::Mix:
             parameters.push_back(NumericParameter("factor", "Factor", 0.5, 0.0, 1.0, "normalized", LiveAnimationPolicy::Linear, "mixFactor"));
             break;
-        case NodeKind::DataMath:
+        case NodeKind::DataMath: {
             if (const auto* op = Stack::NodeMath::Primitive(node.dataMathMode)) {
                 parameters.push_back(NumericParameter("constant-a", "A", 0, -65504, 65504, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantA"));
                 parameters.push_back(NumericParameter("constant-b", "B", op->defaultB, -65504, 65504, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantB"));
                 break;
             }
-            parameters.push_back(OpaqueSettingsParameter("domain", "Domain", "dataMathSettings.domain"));
-            parameters.back().defaultValue = "spatial";
-            parameters.back().uiHint = "choice";
-            parameters.push_back(NumericParameter("constant-a", "Constant A", 0.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantA"));
-            parameters.push_back(NumericParameter("constant-b", "Constant B", 1.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.constantB"));
-            parameters.push_back(NumericParameter("minimum", "Minimum", 0.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.minValue"));
-            parameters.push_back(NumericParameter("maximum", "Maximum", 1.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.maxValue"));
-            parameters.push_back(NumericParameter("out-minimum", "Output Minimum", 0.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.outMin"));
-            parameters.push_back(NumericParameter("out-maximum", "Output Maximum", 1.0, -65504.0, 65504.0, "inherits-input", LiveAnimationPolicy::Linear, "dataMathSettings.outMax"));
+            if (!Stack::NodeMath::UnaryArithmetic(node.dataMathMode)) break;
+            const bool remap = node.dataMathMode == EditorNodeGraph::DataMathMode::Remap;
+            const double limit = std::numeric_limits<float>::max();
+            parameters.push_back(NumericParameter("minimum", remap ? "Input start" : "Minimum", 0.0, -limit, limit, "inherits-input", LiveAnimationPolicy::NotAnimatable, "dataMathSettings.minValue"));
+            parameters.push_back(NumericParameter("maximum", remap ? "Input end" : "Maximum", 1.0, -limit, limit, "inherits-input", LiveAnimationPolicy::NotAnimatable, "dataMathSettings.maxValue"));
+            if (!remap) break;
+            parameters.push_back(NumericParameter("out-minimum", "Output start", 0.0, -limit, limit, "inherits-input", LiveAnimationPolicy::NotAnimatable, "dataMathSettings.outMin"));
+            parameters.push_back(NumericParameter("out-maximum", "Output end", 1.0, -limit, limit, "inherits-input", LiveAnimationPolicy::NotAnimatable, "dataMathSettings.outMax"));
             break;
+        }
         case NodeKind::MaskTexture:
         case NodeKind::MaskGenerator:
             parameters.push_back(NumericParameter("value", "Value", 1.0, 0.0, 1.0, "normalized", LiveAnimationPolicy::Linear, "maskSettings.value"));

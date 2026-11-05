@@ -493,24 +493,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
              gradingScopePacket->generation > m_RawWorkspaceGradingScopeVisualization->generation)) {
             m_RawWorkspaceGradingScopeVisualization = gradingScopePacket;
         }
-        const auto adoptColorWarpCloudPacket = [&]() {
-            Raw::RawColorCloudPacket& packet =
-                result.rawWorkspace.colorWarpCloudPacket;
-            if (!rawWorkspaceResultMatchesActive ||
-                packet.sourceKey != activePreviewIdentity ||
-                packet.samples.empty()) {
-                return;
-            }
-            m_RawWorkspaceLabUi.colorWarpCloudSourceKey =
-                packet.sourceKey;
-            m_RawWorkspaceLabUi.colorWarpCloudInputFingerprint =
-                packet.inputFingerprint;
-            m_RawWorkspaceLabUi.colorWarpCloudWorkingSpace =
-                packet.workingSpace * 10 + packet.colorWarpVersion;
-            m_RawWorkspaceLabUi.colorWarpCloud =
-                std::move(packet.samples);
-            m_RawWorkspaceLabUi.colorWarpCloudGpuFingerprint = 0;
-        };
         bool rawPresentationAdopted = false;
         bool acceptedMainFrame=false;
         auto markMainOutputAccepted = [&](RawWorkspacePreviewOutputKind outputKind) {
@@ -600,7 +582,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
                         result.rawWorkspace.graphScopeOwnerKey.empty() ? result.rawWorkspace.sourceKey : result.rawWorkspace.graphScopeOwnerKey,
                         result.rawWorkspace.graphScopeInputFingerprint,
                         result.rawWorkspace.graphScopeReadback);
-                    adoptColorWarpCloudPacket();
                     bool graphScopeRestored = true;
                     if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones ||
                         m_RawWorkspaceLabUi.activeTool == RawLabTool::Tone ||
@@ -840,7 +821,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
                         result.rawWorkspace.graphScopeOwnerKey.empty() ? result.rawWorkspace.sourceKey : result.rawWorkspace.graphScopeOwnerKey,
                         result.rawWorkspace.graphScopeInputFingerprint,
                         result.rawWorkspace.graphScopeReadback);
-                    adoptColorWarpCloudPacket();
                     const bool graphScopeRestored =
                         RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool();
                     m_RawWorkspaceStartPointDiagnostics =

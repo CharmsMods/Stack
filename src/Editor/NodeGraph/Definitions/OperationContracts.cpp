@@ -1,14 +1,28 @@
+#include "Graph/PhotoOperationInput.h"
 #include "Editor/NodeGraph/Definitions/OperationInventory.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 #include "Graph/GraphImageRules.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Raw/RawGraphParameters.h"
+#include "NodeMath/StylizeInput.h"
+#include "Editor/LayerRegistry.h"
 #include <algorithm>
 
 namespace EditorNodeGraphDefinitions {
 using EditorNodeGraph::Node;
 using EditorNodeGraph::NodeKind;
 using Stack::NodeMath::LogicalValueType;
+
+namespace {
+bool HasColorModeRequirement(const Node& node) {
+    return node.kind == NodeKind::Layer && (node.layerType == LayerType::PaletteReconstructor ||
+        node.layerType == LayerType::CellShading || node.layerType == LayerType::Halftoning);
+}
+
+bool ValidateColorMode(const Node& node, const Stack::NodeMath::ImageOperationInput& input, std::string& reason) {
+    return Stack::NodeMath::ValidateStylizeInput(node.typeId, node.layerParameters, input, reason);
+}
+}
 
 std::vector<EditorNodeGraph::SocketDefinition> BuildRegisteredSockets(
     const Node& node,
@@ -82,19 +96,29 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
         if (Stack::NodeMath::Primitive(node.dataMathMode))
             result.defaultValue = socketId == EditorNodeGraph::kMixInputASocketId
                 ? node.dataMathSettings.constantA : node.dataMathSettings.constantB;
-        if (Stack::NodeMath::Primitive(node.dataMathMode) || node.dataMathSettings.domain != Stack::NodeMath::ArithmeticDomain::Values) {
-            if (node.dataMathMode != EditorNodeGraph::DataMathMode::ImageAverage)
-                result.port.acceptedLogicalTypes = {LogicalValueType::Scalar,LogicalValueType::Channel,LogicalValueType::ColorImage};
-        }
+        result.port.acceptedLogicalTypes = {LogicalValueType::Scalar,LogicalValueType::Channel,LogicalValueType::ColorImage};
     }
     if (node.kind == NodeKind::Output && node.outputSettings.maskOutput && socketId == "imageIn")
         result.port.acceptedLogicalTypes = {LogicalValueType::Channel};
     if ((node.kind == NodeKind::Mix && (socketId == "imageA" || socketId == "imageB")) ||
-        (node.kind == NodeKind::Reformat && socketId == "imageIn") ||
-        (node.kind == NodeKind::Scope && socketId == EditorNodeGraph::kScopeInputSocketId))
+        ((node.kind == NodeKind::Reformat || node.kind == NodeKind::Lut) && socketId == "imageIn") ||
+        (node.kind == NodeKind::Scope && socketId == EditorNodeGraph::kScopeInputSocketId) ||
+        (node.kind == NodeKind::Preview && socketId == EditorNodeGraph::kPreviewInputSocketId))
         result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage, LogicalValueType::Channel};
-    if (node.kind == NodeKind::Preview && socketId==EditorNodeGraph::kPreviewInputSocketId)
-        result.port.acceptedLogicalTypes={LogicalValueType::ColorImage,LogicalValueType::Channel};
+    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::Layer) {
+        const auto* layer = LayerRegistry::GetDescriptor(node.layerType);
+        if (layer && layer->channelPolicy == LayerChannelPolicy::FullImageOnly)
+            result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+    }
+    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::RawOperation &&
+        Stack::GraphModel::PhotoInputFor(node.rawOperation) != Stack::GraphModel::PhotoInput::Components)
+        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+    if (socketId == EditorNodeGraph::kImageInputSocketId && HasColorModeRequirement(node)) {
+        ImageOperationInput channel;
+        channel.scalar = true;
+        std::string reason;
+        if (!ValidateColorMode(node, channel, reason)) result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+    }
     if (node.kind == NodeKind::Compound) {
         for (const auto& port : node.compound.instance.interfaceSnapshot)
             if (port.id == socketId && port.numeric) {
@@ -177,6 +201,13 @@ bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node, const std::string& socketId,
     const Stack::NodeMath::ValueDescriptor& value, std::string& error) {
     using namespace Stack::NodeMath;
+    if (node.kind == NodeKind::RawOperation && socketId == EditorNodeGraph::kImageInputSocketId) {
+        error = Stack::GraphModel::PhotoInputError(Stack::GraphModel::PhotoInputFor(node.rawOperation), value, false);
+        return error.empty();
+    }
+    if (socketId == EditorNodeGraph::kImageInputSocketId && value.logicalType != LogicalValueType::Invalid &&
+        HasColorModeRequirement(node) &&
+        !ValidateColorMode(node, DescribeImageOperationInput(value), error)) return false;
     const bool single = value.logicalType == LogicalValueType::Channel || value.logicalType == LogicalValueType::Mask || value.logicalType == LogicalValueType::ScalarField;
     if (node.kind == NodeKind::Mix && (socketId == "imageA" || socketId == "imageB")) {
         const auto* other = graph.FindInputLink(node.id,socketId == "imageA" ? "imageB" : "imageA");

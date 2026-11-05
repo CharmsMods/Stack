@@ -332,10 +332,9 @@ ScenePathState AnalyzeScenePathFromNode(
             mergeInput(EditorNodeGraph::kMixInputBSocketId);
             break;
         case EditorNodeGraph::NodeKind::DataMath:
-            for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+            for (int inputIndex = 0; inputIndex < Stack::NodeMath::ArithmeticInputCount(node->dataMathMode); ++inputIndex) {
                 mergeInput(EditorNodeGraph::DataMathInputSocketId(inputIndex));
             }
-            mergeInput(EditorNodeGraph::kDataMathBaseInputSocketId);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             mergeInput(EditorNodeGraph::kImageInputSocketId);
@@ -450,7 +449,7 @@ std::optional<GraphReconnectPlan> BuildReconnectSourcePlan(
         case EditorNodeGraph::NodeKind::DataMath: {
             const EditorNodeGraph::Link* selectedInput = nullptr;
             int connectedInputCount = 0;
-            for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+            for (int inputIndex = 0; inputIndex < Stack::NodeMath::ArithmeticInputCount(node.dataMathMode); ++inputIndex) {
                 if (const EditorNodeGraph::Link* input = graph.FindInputLink(node.id, EditorNodeGraph::DataMathInputSocketId(inputIndex))) {
                     ++connectedInputCount;
                     selectedInput = input;
@@ -587,8 +586,7 @@ bool ConnectionUsesImageAsRenderSource(
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::DataMath &&
-        (EditorNodeGraph::IsDataMathInputSocketId(toSocketId) ||
-         toSocketId == EditorNodeGraph::kDataMathBaseInputSocketId)) {
+        EditorNodeGraph::IsDataMathInputSocketId(toSocketId)) {
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::ChannelSplit &&
@@ -784,7 +782,6 @@ void EditorModule::Shutdown() {
     m_RawGalleryFolderCards.Shutdown();
     m_RawLayerPanel.Clear();
     ClearRawWorkspaceLabGradingScope();
-    m_RawWorkspaceLabUi.colorWarpWheelRenderer.Shutdown();
     m_RawAssetCapture.feedbackRenderer.Shutdown();
     m_RawAssetPreviews.Clear();
     m_RawAssetCapture.feedback.reset();

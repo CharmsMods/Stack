@@ -1,3 +1,4 @@
+#include "Graph/PhotoOperationInput.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 #include "NodeMath/ImageOperationInput.h"
 #include "NodeMath/StylizeInput.h"
@@ -169,19 +170,11 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
             }
         }
         if ((node.kind == K::RawOperation || node.kind == K::MaskGenerator) && source) {
-            const bool curve=node.kind==K::RawOperation && node.rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve;
-            const bool componentMath=curve || (node.kind==K::RawOperation && node.rawOperation.kind==RawRecipe::GraphOperationKind::Exposure);
-            if (curve) {
-                const auto capability=DescribeImageOperationInput(*source);
-                if (node.rawOperation.parameters.value("curveMode",std::string("components"))!="components" && !capability.colorRelationships)
-                    graph.unavailableOutputs[id]=capability.colorUnavailableReason;
-            } else if (node.kind==K::RawOperation && !componentMath &&
-                ((value.transfer.state==KnowledgeState::Known && value.transfer.value.kind!=TransferKind::Linear) ||
-                 (value.reference.state==KnowledgeState::Known && value.reference.value!=ReferenceState::Scene)))
-                graph.unavailableOutputs[id]="This photo operation needs scene-linear RGB. Add an explicit conversion.";
-            if (const auto space=RawOperationInputWorkingSpace(*source)) node.rawWorkingSpace=*space;
-            else if (node.kind==K::RawOperation && !componentMath)
-                graph.unavailableOutputs[id]="This photo operation needs a declared scene-linear sRGB or Rec.2020 input. Add an explicit color conversion.";
+            if (node.kind == K::RawOperation) {
+                const auto issue = GraphModel::PhotoInputError(GraphModel::PhotoInputFor(node.rawOperation), *source, true);
+                if (!issue.empty()) graph.unavailableOutputs[id] = issue;
+            }
+            if (const auto space = RawOperationInputWorkingSpace(*source)) node.rawWorkingSpace = *space;
         }
         if (node.kind==K::Layer && source) {
             const auto type=node.layerJson.value("type",std::string{});
@@ -215,7 +208,7 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
         node.uniformParameters.clear();
         for (const auto& parameter:RawRecipe::GraphParameters(node.rawOperation)) {
             bool active=IsToneCurveParameterActive(node.rawOperation.parameters,parameter.id);
-            if (active && node.rawOperation.parameters.value("curveMode",std::string{})=="components")
+            if (active && ToneCurveMode(node.rawOperation.parameters)=="components")
                 for (int channel=1;channel<4;++channel)
                     if (parameter.id==std::string("amount-")+RawRecipe::RawPointCurveChannelKey(
                         static_cast<RawRecipe::RawPointCurveChannel>(channel)) &&

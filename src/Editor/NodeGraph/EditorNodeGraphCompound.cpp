@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/BrightnessRecipe.h"
+#include "Editor/NodeGraph/MathRecipes.h"
 #include "Editor/NodeGraph/ChannelOutputs.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
@@ -227,8 +228,7 @@ void PromoteSupportedParameters(
                     prefix + "-maximum", node.title + " Maximum",
                     node.dataMathSettings.maxValue, -65504.0, 65504.0, node,
                     "dataMathSettings.maxValue"));
-            } else if (node.dataMathMode != DataMathMode::Average &&
-                       node.dataMathMode != DataMathMode::ImageAverage &&
+            } else if (node.dataMathMode != DataMathMode::Mix &&
                        node.dataMathMode != DataMathMode::Remap) {
                 parameters.push_back(ScalarParameter(
                     prefix + "-value", node.title + " Value",
@@ -335,12 +335,12 @@ bool ValidateCanonicalCompoundBindings(
             port.direction == Stack::NodeMath::PortDirection::Input
                 ? SocketDirection::Input : SocketDirection::Output;
         // A public socket can narrow a polymorphic internal arithmetic operand.
-        const bool primitiveOperand = expectedDirection == SocketDirection::Input &&
-            node->kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode) &&
+        const bool arithmeticOperand = expectedDirection == SocketDirection::Input &&
+            node->kind == NodeKind::DataMath && IsDataMathInputSocketId(port.internalSocketId) &&
             (port.logicalType == Stack::NodeMath::LogicalValueType::Scalar ||
              IsSingleChannelValue(port.logicalType) || port.logicalType == Stack::NodeMath::LogicalValueType::ColorImage);
         if (socket.direction != expectedDirection ||
-            (!port.numeric && !primitiveOperand && LogicalTypeForSocket(socket.type) != port.logicalType)) {
+            (!port.numeric && !arithmeticOperand && LogicalTypeForSocket(socket.type) != port.logicalType)) {
             if (error) *error = "Compound port type or direction disagrees with its canonical internal socket.";
             return false;
         }
@@ -607,13 +607,16 @@ bool Graph::UnpackCompoundNode(
     std::vector<CompoundOutputBinding>* outputBindings,
     bool retainBoundary) {
     Node* instanceNode = FindNode(nodeId);
-    if (instanceNode && EditorNodeGraphDefinitions::IsBrightnessRecipe(*instanceNode)) {
+    if (instanceNode && (EditorNodeGraphDefinitions::IsBrightnessRecipe(*instanceNode) || EditorNodeGraphDefinitions::IsMathRecipe(*instanceNode))) {
         Graph candidate=*this;
         const auto* input=FindInputLink(nodeId,kImageInputSocketId);
         const auto type=input ? DescribeGraphOutput(*this,input->fromNodeId,input->fromSocketId).descriptor :
             Stack::NodeMath::MakeUnknownDescriptor(Stack::NodeMath::LogicalValueType::Invalid);
         std::string reason;
-        if (!EditorNodeGraphDefinitions::BindBrightnessRecipe(candidate,nodeId,type,instanceNode->layerParameters,reason) ||
+        const bool bound = EditorNodeGraphDefinitions::IsMathRecipe(*instanceNode)
+            ? EditorNodeGraphDefinitions::BindMathRecipe(candidate, nodeId, reason)
+            : EditorNodeGraphDefinitions::BindBrightnessRecipe(candidate,nodeId,type,instanceNode->layerParameters,reason);
+        if (!bound ||
             !candidate.UnpackCompoundNode(nodeId,unpackedNodeIds,&reason,outputBindings,retainBoundary)) {
             if (error) *error=reason;
             return false;
@@ -1258,10 +1261,7 @@ bool Graph::ResolveCompoundOutputInputDependencies(
                             // connected or publicly bound operands.
                             input.optional = true;
                         }
-                        const bool imageAverage = internalNode->dataMathMode == DataMathMode::ImageAverage;
-                        const bool uniformDefaults = (Stack::NodeMath::Primitive(internalNode->dataMathMode) ||
-                            internalNode->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) && !imageAverage;
-                        frame.valid = uniformDefaults || operandCount >= (imageAverage ? 2 : 1);
+                        frame.valid = Stack::NodeMath::Primitive(internalNode->dataMathMode) || operandCount > 0;
                     }
                 }
             }

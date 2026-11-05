@@ -33,7 +33,7 @@ void RunGraphOutputSemanticsTests() {
     pixels.pixels.resize(16 * 8 * 3, 128);
     const int image = graph.AddImageNode(std::move(pixels), {})->id;
     const int split = graph.AddChannelSplitNode({})->id;
-    const int average = graph.AddDataMathNode(DataMathMode::Average, {})->id;
+    const int average = graph.AddDataMathNode(DataMathMode::Mix, {})->id;
     const int contrast = graph.AddLayerNode(LayerType::Contrast, 0, {})->id;
     const int combine = graph.AddChannelCombineNode({})->id;
     Check(graph.TryConnectSockets(image, kImageOutputSocketId, split, kImageInputSocketId), "image to split");
@@ -111,7 +111,7 @@ void RunGraphOutputSemanticsTests() {
     WireReadout::Build(inspection);
     Check(inspection.descriptor == before, "F readout must not modify carried values or their description");
 
-    const int onlyB = graph.AddDataMathNode(DataMathMode::Average, {})->id;
+    const int onlyB = graph.AddDataMathNode(DataMathMode::Mix, {})->id;
     Check(graph.TryConnectSockets(split, "b", onlyB, DataMathInputSocketId(1)), "Average can start with input B");
     Check(DescribeGraphOutput(graph, onlyB, kImageOutputSocketId).diagnostics.empty(), "input B must satisfy Average without a synthetic missing image input");
 

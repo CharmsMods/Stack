@@ -67,12 +67,11 @@ const char* DataMathTitle(EditorNodeGraph::DataMathMode mode) {
         case EditorNodeGraph::DataMathMode::Subtract: return "Subtract";
         case EditorNodeGraph::DataMathMode::Multiply: return "Multiply";
         case EditorNodeGraph::DataMathMode::Divide: return "Divide";
-        case EditorNodeGraph::DataMathMode::Average: return "Average";
+        case EditorNodeGraph::DataMathMode::Mix: return "Mix";
         case EditorNodeGraph::DataMathMode::Min: return "Minimum";
         case EditorNodeGraph::DataMathMode::Max: return "Maximum";
-        case EditorNodeGraph::DataMathMode::Difference: return "Difference";
-        case EditorNodeGraph::DataMathMode::Remap: return "Remap";
-        case EditorNodeGraph::DataMathMode::ImageAverage: return "Average Images";
+        case EditorNodeGraph::DataMathMode::Difference: return "Absolute Difference";
+        case EditorNodeGraph::DataMathMode::Remap: return "Remap Range";
     }
     return "Math";
 }
@@ -317,16 +316,16 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
 
 std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGraph::Node& node, bool visibleOnly) {
     std::vector<EditorNodeGraph::SocketDefinition> sockets;
-    auto add = [&](const char* id,
+    auto add = [&](std::string_view id,
                    EditorNodeGraph::SocketDirection direction,
                    EditorNodeGraph::SocketType type,
-                   const char* label,
+                   std::string_view label,
                    bool optional,
                    bool visible) {
         if (visibleOnly && !visible) {
             return;
         }
-        sockets.push_back(EditorNodeGraph::SocketDefinition{ id, node.id, direction, type, label, optional, visible });
+        sockets.push_back(EditorNodeGraph::SocketDefinition{ std::string(id), node.id, direction, type, std::string(label), optional, visible });
     };
 
     switch (node.kind) {
@@ -471,15 +470,15 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::DataMath:
-            if (Stack::NodeMath::Primitive(node.dataMathMode)) {
-                add("imageA", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "A", true, true);
-                add("imageB", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "B", true, true);
-                add("imageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Result", false, true);
-                break;
+            {
+                using namespace EditorNodeGraph;
+                const bool unary = Stack::NodeMath::UnaryArithmetic(node.dataMathMode);
+                const int count = Stack::NodeMath::ArithmeticInputCount(node.dataMathMode);
+                for (int i = 0; i < count; ++i)
+                    add(DataMathInputSocketId(i), SocketDirection::Input, SocketType::Image,
+                        unary ? "Data" : std::string(1, char('A' + i)), !unary, true);
+                add(kImageOutputSocketId, SocketDirection::Output, SocketType::Image, "Result", false, true);
             }
-            add(EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data A", false, true);
-            add(EditorNodeGraph::kMixInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data B", true, true);
-            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Data Out", false, true);
             break;
         case EditorNodeGraph::NodeKind::Value: {
             const EditorNodeGraph::SocketType socketType = ValueSocketType(node.value.value.logicalType);

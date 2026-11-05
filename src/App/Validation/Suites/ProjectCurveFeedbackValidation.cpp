@@ -105,7 +105,7 @@ void ValidateProjectCurveFeedback(EditorModule& editor) {
     require(NodeMath::ValidateToneCurveParameters(graph.FindNode(curve)->rawOperation.parameters,error),error);
     const auto completedParameters=graph.FindNode(curve)->rawOperation.parameters;
     require(editor.UndoProjectGraphEdit() &&
-        graph.FindNode(curve)->rawOperation.parameters.value("curveMode",std::string{})=="components" &&
+        graph.FindNode(curve)->rawOperation.parameters.at("curveMode")==NodeMath::kDefaultToneCurveMode &&
         !graph.FindNode(curve)->rawOperation.parameters.at("advanced").value("autoCalibratePending",false) &&
         editor.RedoProjectGraphEdit() && graph.FindNode(curve)->rawOperation.parameters==completedParameters,
         "Canonical Auto Curve completion did not participate in the project history.");

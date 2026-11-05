@@ -62,9 +62,7 @@ void GraphExecutionRuntime::BindScalarFingerprint() {
                 for (const auto value : {settings.constantA, settings.constantB, settings.minValue,
                         settings.maxValue, settings.outMin, settings.outMax}) HashCombine(fingerprint, HashValue(value));
             }
-            const bool average = node.dataMathMode == RenderDataMathMode::Average;
-            const bool unary = node.dataMathMode == RenderDataMathMode::Clamp || node.dataMathMode == RenderDataMathMode::Remap;
-            const int count = average ? EditorNodeGraph::kMaxDataMathInputCount : (unary ? 1 : 2);
+            const int count = Stack::NodeMath::ArithmeticInputCount(node.dataMathMode);
             for (int i = 0; i < count; ++i) {
                 const auto* input = findInputLink(nodeId, EditorNodeGraph::DataMathInputSocketId(i));
                 HashCombine(fingerprint, HashValue(i));

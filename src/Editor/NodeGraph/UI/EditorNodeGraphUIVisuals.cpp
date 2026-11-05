@@ -100,7 +100,7 @@ NodeLayoutFamily LayoutFamilyForNode(const EditorNodeGraph::Node& node) {
 NodeFamily CompoundFamily(std::string_view id) {
     // Stable definition identities, never editable labels or executable-body scans.
     if (id == "stack:compound/add-then-multiply" ||
-        id == "stack:compound/percent" || id == "stack:compound/average-three")
+        id == "stack:compound/percent")
         return NodeFamily::Math;
     if (id == "stack:compound/invert-mask") return NodeFamily::Mask;
     if (id == "stack:compound/exposure-then-premultiply" ||
@@ -109,7 +109,7 @@ NodeFamily CompoundFamily(std::string_view id) {
         id == "stack:compound/luminance-display-p3" ||
         id == "stack:compound/smoothstep-curve" ||
         id == "stack:compound/colorize" || id == "stack:compound/channel-mixer" ||
-        id == "stack:compound/linear-mix" || id == "stack:compound/halation" ||
+        id == "stack:compound/halation" ||
         id == "stack:compound/halation-srgb") return NodeFamily::ImageProcessing;
     return NodeFamily::Utility;
 }
@@ -1214,21 +1214,11 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
                 row * 3.0f + gap * 2.0f + bottomPadding;
         case EditorNodeGraph::NodeKind::DataMath: {
             if (Stack::NodeMath::Primitive(node.dataMathMode)) return headerBlock+sectionGap+2*row+gap+bottomPadding;
-            // Both Domain and Mode are visible, followed by their explanation.
-            // Values may also expose two local fallback sliders. Reserve those
-            // controls before their first draw; measured content replaces this
-            // conservative contract afterward, including connected-input hiding.
-            float height=headerBlock+sectionGap+3*row+2*gap+bottomPadding;
-            if(node.dataMathSettings.domain==Stack::NodeMath::ArithmeticDomain::Values)
-                height+=3*(row+gap);
-            if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
-                height+=2*(row+gap+sliderRow+gap);
-            }
-            if (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap) {
-                height+=4*(row+gap+sliderRow+gap);
-            }
-            if(node.dataMathMode==EditorNodeGraph::DataMathMode::Average || node.dataMathMode==EditorNodeGraph::DataMathMode::ImageAverage)
-                height+=row+gap;
+            float height = headerBlock + sectionGap + bottomPadding;
+            if (node.dataMathMode == EditorNodeGraph::DataMathMode::Mix)
+                height += (3 * row + 2 * gap);
+            else
+                height += (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap ? 4 : 2) * (row + gap);
             return height;
         }
         case EditorNodeGraph::NodeKind::Value:
@@ -1452,12 +1442,11 @@ const char* DataMathLabel(EditorNodeGraph::DataMathMode mode) {
         case EditorNodeGraph::DataMathMode::Subtract: return "Subtract";
         case EditorNodeGraph::DataMathMode::Multiply: return "Multiply";
         case EditorNodeGraph::DataMathMode::Divide: return "Divide";
-        case EditorNodeGraph::DataMathMode::Average: return "Average";
+        case EditorNodeGraph::DataMathMode::Mix: return "Mix";
         case EditorNodeGraph::DataMathMode::Min: return "Minimum";
         case EditorNodeGraph::DataMathMode::Max: return "Maximum";
-        case EditorNodeGraph::DataMathMode::Difference: return "Difference";
-        case EditorNodeGraph::DataMathMode::Remap: return "Remap";
-        case EditorNodeGraph::DataMathMode::ImageAverage: return "Average Images";
+        case EditorNodeGraph::DataMathMode::Difference: return "Absolute Difference";
+        case EditorNodeGraph::DataMathMode::Remap: return "Remap Range";
     }
     return "Clamp";
 }

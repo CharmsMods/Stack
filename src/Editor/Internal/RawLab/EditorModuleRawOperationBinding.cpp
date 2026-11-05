@@ -1,3 +1,5 @@
+#include "Editor/NodeEditors/ToneCurveEditorState.h"
+#include "NodeMath/ToneCurveParameters.h"
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
@@ -96,13 +98,14 @@ void EditorModule::BindRawOperationContext(RawWorkspaceEditContext& context) con
         }
         if (analysis && analysis->valid && analysis->stage==RawDevelopmentGraphScopeStage::FinishToneInput) {
             const auto& parameters=selected->rawOperation.parameters;
-            const auto mode=parameters.value("curveMode",std::string("components"));
+            const auto mode=Stack::NodeMath::ToneCurveMode(parameters);
             auto& cache=m_NodeEditorState.Get<Stack::Editor::NodeInputPresentationCache>(*context.nodeTarget);
-            const bool components=mode=="components";
+            const bool components=mode=="components" || (mode=="luminance" &&
+                m_NodeEditorState.Get<Stack::Editor::ToneCurveEditorState>(*context.nodeTarget).photoChannel != 0);
             const int domain=components?parameters.value("domain",0):1;
             const float minimum=components?parameters.value("logMinEv",-10.f):-16.f;
             const float maximum=components?parameters.value("logMaxEv",6.f):16.f;
-            const float grey=parameters.value("middleGrey",.18f);
+            const float grey=components ? parameters.value("middleGrey",.18f) : .18f;
             const Stack::Editor::NodeInputPresentationCache::HistogramKey key{
                 analysisRevision,components,domain,minimum,maximum,grey};
             if (!cache.histogramValid || cache.histogramKey!=key ||

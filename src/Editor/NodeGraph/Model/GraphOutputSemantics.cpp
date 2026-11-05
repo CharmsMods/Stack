@@ -133,6 +133,13 @@ public:
                 if (socket != sockets.end()) {
                     auto result = OutputRules::Describe(*node, frame.socketId, inputs, socket->logicalType, context);
                     result.usesArithmeticContract = IsFoundationNode(*node);
+                    ArithmeticInputs operands{};
+                    if (node->kind == NodeKind::DataMath) {
+                        for (const auto& [port, value] : inputs) {
+                            const int slot = DataMathInputSocketIndex(port);
+                            if (slot >= 0) operands[slot] = &value->descriptor;
+                        }
+                    }
                     for (const auto& [port, value] : inputs) {
                         result.usesArithmeticContract |= value->usesArithmeticContract;
                         const auto* wire = graph.FindAnyInputLink(node->id,port);
@@ -148,8 +155,11 @@ public:
                             if (issue.ruleId=="graph.wire") inherit(issue);
                         if (value->invalidWire || (!value->usesArithmeticContract && !IsFoundationNode(*node) && !IsLayoutSensitivePort(*node, port))) continue;
                         const auto other = inputs.find(port==kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId);
-                        const auto reason = FoundationWireError(graph,*node,port,value->descriptor,
-                            other == inputs.end() ? nullptr : &other->second->descriptor);
+                        const int slot = DataMathInputSocketIndex(port);
+                        const auto reason = node->kind == NodeKind::DataMath && slot >= 0
+                            ? ArithmeticInputError(operands, slot, ArithmeticInputCount(node->dataMathMode))
+                            : FoundationWireError(graph,*node,port,value->descriptor,
+                                other == inputs.end() ? nullptr : &other->second->descriptor);
                         if (reason.empty()) continue;
                         Diagnostic issue;
                         issue.ruleId="graph.wire"; issue.stage=DiagnosticStage::Semantic;

@@ -826,20 +826,9 @@ void Serialization::ReadCurrentGraphPayload(
             }
         } else if (kind == "DataMath") {
             node.kind = NodeKind::DataMath;
-            node.dataMathMode = DataMathModeFromString(item.value("dataMathMode", std::string("Clamp")));
+            node.dataMathMode = DataMathModeFromString(item.at("dataMathMode").get<std::string>());
             node.dataMathSettings = DeserializeDataMathSettings(item.value("dataMathSettings", nlohmann::json::object()));
-            if (node.title.empty() ||
-                node.title == "Clamp Data" ||
-                node.title == "Add Data" ||
-                node.title == "Subtract Data" ||
-                node.title == "Multiply Data" ||
-                node.title == "Divide Data" ||
-                node.title == "Average Data" ||
-                node.title == "Average Images Data" ||
-                node.title == "Minimum Data" ||
-                node.title == "Maximum Data" ||
-                node.title == "Difference Data" ||
-                node.title == "Remap Data") {
+            if (node.title.empty()) {
                 EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             }
         } else if (kind == "Value") {

@@ -1,3 +1,4 @@
+#include "NodeMath/ToneCurveParameters.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabImageMapping.h"
 #include "Project/GraphImageContracts.h"
@@ -95,7 +96,7 @@ void EditorModule::RenderRawAssetCaptureOverlay(const ImVec2& minimum,const ImVe
         if(node && node->kind==EditorNodeGraph::NodeKind::RawOperation &&
            (node->rawOperation.kind==RawRecipe::GraphOperationKind::LocalEv ||
             (node->rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve &&
-             RawRecipe::ReadSceneTone(node->rawOperation.parameters).direct)))
+             NodeMath::ToneCurveMode(node->rawOperation.parameters)=="luminance")))
             choose("Select these tones on the curve",RawAssetCapture::Output::Samples,true);
         choose("Save sampled pixels",RawAssetCapture::Output::Samples);
         ImGui::Separator();

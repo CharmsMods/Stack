@@ -19,38 +19,6 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
-bool IsDataMathImageInputSocketId(const std::string& socketId) {
-    return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
-        socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
-}
-
-bool IsScalarAverageNode(const Node& node) {
-    return node.kind == NodeKind::DataMath &&
-        node.dataMathMode == DataMathMode::Average;
-}
-
-bool IsImageAverageNode(const Node& node) {
-    return node.kind == NodeKind::DataMath &&
-        node.dataMathMode == DataMathMode::ImageAverage;
-}
-
-bool DataMathAllowsScalarToImageTarget(const Node& node, const std::string& socketId) {
-    return node.kind == NodeKind::DataMath &&
-        !IsScalarAverageNode(node) &&
-        !IsImageAverageNode(node) &&
-        IsDataMathImageInputSocketId(socketId);
-}
-
-bool DataMathAllowsFullImageTarget(const Node& node, const std::string& socketId) {
-    if (node.kind != NodeKind::DataMath || IsScalarAverageNode(node)) {
-        return false;
-    }
-    if (IsImageAverageNode(node)) {
-        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
-    }
-    return IsDataMathImageInputSocketId(socketId);
-}
-
 bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
     return std::any_of(nodes.begin(), nodes.end(), [id](const Node& node) {
         return node.id == id;

@@ -47,7 +47,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     CurveAmountState& amount,CurveCanvasState& s,bool diagonal,
     const RawLabGraphHistogram& histogram,ImVec2 size,int maximumPoints,float* exposure,
     RawLabToneGraphViewRange view,bool amountDriven,float* normalization,bool normalizationDriven,bool normalizationAvailable,
-    const CurveTonalSliderDomain* tonalSliders,std::uint64_t histogramRevision) {
+    const CurveTonalSliderDomain* tonalSliders,std::uint64_t histogramRevision,CurveCanvasViewOptions viewOptions) {
     if(points.size()<2) return false;
     const int frame=ImGui::GetFrameCount();
     if(s.lastFrame>=0 && s.lastFrame+1<frame) {
@@ -60,12 +60,13 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const float surfaceScreenX=ImGui::GetCursorScreenPos().x;
     bool changed=false;
     const auto style=GraphUI::ResolveGraphPlotStyle();
+    const float axisHeight=viewOptions.automatic ? ImGui::GetFontSize()+style.controlGap : 0;
     const float controlsHeight=style.controlHeight+ImGui::GetStyle().ItemSpacing.y;
     size.x=std::max(1.f,size.x);size.y=std::max(12.f*style.scale,size.y-controlsHeight);
     ImGui::InvisibleButton("curve",size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
     const float inset=std::min(style.inset,std::min(size.x,size.y)*.2f);
     const ImRect box(ImVec2(ImGui::GetItemRectMin().x+inset,ImGui::GetItemRectMin().y+inset),
-        ImVec2(ImGui::GetItemRectMax().x-inset,ImGui::GetItemRectMax().y-inset));
+        ImVec2(ImGui::GetItemRectMax().x-inset,ImGui::GetItemRectMax().y-inset-std::min(axisHeight,size.y*.25f)));
     const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
     const bool plotVisible=ImGui::IsItemVisible();
     const auto plotInput=UiMotion::LastItemInput();
@@ -76,17 +77,22 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         s.tonalSliderGesture=false;s.activeTonalSlider=0;
     }
     const auto mouse=ImGui::GetIO().MousePos;
-    const float span=std::max(.0001f,view.maximum-view.minimum);
-    // Keep the display offset stable while dragging authored points. At release
-    // the new curve mean becomes the normalization reference.
-    const float offset=(plotVisible || s.gesture) && normalization
-        ? NormalizationMean(s,s.gesture?s.before:points) : 0.f;
+    const bool interacting=s.gesture || s.amountGesture || s.tonalSliderGesture ||
+        ImGui::IsMouseDown(0) || ImGui::IsMouseReleased(0);
+    const auto xAxis=ResolveCurveCanvasAxis(s.framing,viewOptions,histogram,histogramRevision,interacting,view);
+    // All gestures share one fixed view, including amount and tonal sliders.
+    // Release/cancel completes in those same coordinates; refit on the next frame.
+    if(normalization && (plotVisible || s.gesture) && (!s.viewOffsetReady || !interacting)) {
+        s.viewOffset=NormalizationMean(s,points);s.viewOffsetReady=true;
+    }
+    const float offset=normalization?s.viewOffset:0.f;
     const float yMinimum=normalization ? std::min(0.f,-offset) : view.minimum;
     const float yMaximum=normalization ? std::max(1.f,1.f-offset) : view.maximum;
-    const float ySpan=std::max(.0001f,yMaximum-yMinimum);
-    const auto screen=[&](float x,float y){return ImVec2(box.Min.x+(x-view.minimum)/span*box.GetWidth(),box.Max.y-(y-offset-yMinimum)/ySpan*box.GetHeight());};
-    const auto mouseX=[&]{return std::clamp(view.minimum+(mouse.x-box.Min.x)/box.GetWidth()*span,0.f,1.f);};
-    const auto mouseY=[&]{return std::clamp(offset+yMinimum+(box.Max.y-mouse.y)/box.GetHeight()*ySpan,0.f,1.f);};
+    const CurveAxisMapping yAxis=diagonal && !normalization ? xAxis :
+        CurveAxisMapping{yMinimum,yMaximum,yMinimum,yMaximum,false};
+    const auto screen=[&](float x,float y){return ImVec2(box.Min.x+xAxis.ToView(x)*box.GetWidth(),box.Max.y-yAxis.ToView(y-offset)*box.GetHeight());};
+    const auto mouseX=[&]{return std::clamp(xAxis.FromView((mouse.x-box.Min.x)/box.GetWidth()),0.f,1.f);};
+    const auto mouseY=[&]{return std::clamp(offset+yAxis.FromView((box.Max.y-mouse.y)/box.GetHeight()),0.f,1.f);};
     auto* d=ImGui::GetWindowDrawList();
     s.selected.resize(points.size(),false);
     int nearest=-1;float best=16*16.f*style.scale*style.scale;
@@ -139,7 +145,14 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
             s.gesture=false;s.exposureGesture=false;
             if(active)ImGui::ClearActiveID();
         } else if(ImGui::IsMouseDown(0) || ImGui::IsMouseReleased(0)) {
-            const float dx=(mouse.x-s.press.x)/box.GetWidth()*span,dy=(s.press.y-mouse.y)/box.GetHeight()*ySpan;
+            // Invert the same mapping used by the plot. Anchor a selected point
+            // at its original position so an off-center grab cannot jump it.
+            const float anchorX=s.dragged>=0?s.before[s.dragged].x:
+                xAxis.FromView((s.press.x-box.Min.x)/box.GetWidth());
+            const float anchorY=s.dragged>=0?s.before[s.dragged].y:
+                offset+yAxis.FromView((box.Max.y-s.press.y)/box.GetHeight());
+            const float dx=xAxis.FromView(xAxis.ToView(anchorX)+(mouse.x-s.press.x)/box.GetWidth())-anchorX;
+            const float dy=offset+yAxis.FromView(yAxis.ToView(anchorY-offset)+(s.press.y-mouse.y)/box.GetHeight())-anchorY;
             s.gestureMoved |= std::hypot(mouse.x-s.press.x,mouse.y-s.press.y)>1.5f;
             if(s.gestureMoved && (!s.gestureApplied || dx!=s.appliedGestureDelta.x ||
                 dy!=s.appliedGestureDelta.y || s.radius!=s.appliedGestureRadius)) {
@@ -179,7 +192,9 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
                 } else {
                     auto& next=s.gesturePoints;next=s.before;
                     // Helpers leave ordinary points, with no second effect after release.
-                    for(float x:{std::max(.001f,s.pivot-s.radius),s.pivot,std::min(.999f,s.pivot+s.radius)}) {
+                    const float pivotView=xAxis.ToView(s.pivot);
+                    for(float x:{std::max(.001f,xAxis.FromView(pivotView-s.radius)),s.pivot,
+                        std::min(.999f,xAxis.FromView(pivotView+s.radius))}) {
                         if(int(next.size())>=maximumPoints) break;
                         if(std::none_of(next.begin(),next.end(),[&](const auto& p){return std::abs(p.x-x)<.015f;})) {
                             const float y=EvaluateRawBezierCurve(s.before,x);
@@ -188,7 +203,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
                     }
                     std::sort(next.begin(),next.end(),[](const auto& a,const auto& b){return a.x<b.x;});
                     for(auto& p:next) {
-                        const float distance=std::abs(p.x-s.pivot)/s.radius;
+                        const float distance=std::abs(xAxis.ToView(p.x)-pivotView)/s.radius;
                         const float w=distance<1?std::pow(1-distance*distance,2.f):0;
                         p.y+=dy*w;
                         p.y=std::clamp(p.y,0.f,1.f);
@@ -273,14 +288,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
         s.tonalSliderGesture=false;s.activeTonalSlider=0;
     }
     if(plotVisible) {
-        // Authoring is complete, including tonal sliders, amount and cancel.
-        // Recompute only the normalization mapping affected by this edit.
-        const float displayOffset=changed && normalization
-            ? NormalizationMean(s,s.gesture?s.before:points)
-            : offset;
-        const float displayMin=normalization?std::min(0.f,-displayOffset):view.minimum;
-        const float displayMax=normalization?std::max(1.f,1.f-displayOffset):view.maximum;
-        DrawCurveCanvasPlot({box,style,view,plotInput,mouse,displayOffset,displayMin,displayMax,
+        DrawCurveCanvasPlot({box,style,xAxis,yAxis,viewOptions,plotInput,mouse,offset,
             diagonal,amountDriven,hovered,nearest,changed},points,amount,s,histogram,histogramRevision);
     }
     ImGui::PopID();return changed;

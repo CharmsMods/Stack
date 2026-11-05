@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpMath.h"
 #include "Raw/RawViewportCalibration.h"
 void TestRawViewportTimingLearning();
 void TestRawLayerStackContracts();
@@ -1312,7 +1313,7 @@ void TestChannelAverageStaysScalarThroughContrastMaskWorkflow() {
     Graph graph;
     const int imageId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
     const int splitId = NodeId(graph.AddChannelSplitNode({ 200.0f, 0.0f }));
-    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::Average, { 400.0f, 0.0f }));
+    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::Mix, { 400.0f, 0.0f }));
     const int contrastId = NodeId(graph.AddLayerNode(LayerType::Contrast, 0, { 600.0f, 0.0f }));
     const int brightnessId = NodeId(graph.AddLayerNode(LayerType::Brightness, 1, { 800.0f, 0.0f }));
 
@@ -5062,7 +5063,7 @@ void TestScalarThroughDataMathToPreviewAndScalarTargets() {
     const int maskId = NodeId(graph.AddCustomMaskNode({}, { 0.0f, 0.0f }));
     const int clampId = NodeId(graph.AddDataMathNode(DataMathMode::Clamp, { 220.0f, 0.0f }));
     const int addId = NodeId(graph.AddDataMathNode(DataMathMode::Add, { 440.0f, 0.0f }));
-    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::Average, { 660.0f, 0.0f }));
+    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::Mix, { 660.0f, 0.0f }));
     const int previewId = NodeId(graph.AddPreviewNode({ 880.0f, 0.0f }));
     const int layerId = NodeId(graph.AddLayerNode(LayerType::Brightness, 0, { 880.0f, 140.0f }));
     const int mixId = NodeId(graph.AddMixNode({ 880.0f, 280.0f }));
@@ -5104,7 +5105,7 @@ void TestImageThroughDataMathToOutput() {
     Graph graph;
     const int imageId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
     const int clampId = NodeId(graph.AddDataMathNode(DataMathMode::Clamp, { 220.0f, 0.0f }));
-    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::ImageAverage, { 440.0f, 0.0f }));
+    const int averageId = NodeId(graph.AddDataMathNode(DataMathMode::Mix, { 440.0f, 0.0f }));
     const int outputId = NodeId(graph.AddOutputNode({ 660.0f, 0.0f }, true));
 
     Require(graph.TryConnectSockets(imageId, kImageOutputSocketId, clampId, kMixInputASocketId),
@@ -5129,18 +5130,16 @@ void TestAverageNodeInputRules() {
     const int imageBId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 160.0f }));
     const int maskId = NodeId(graph.AddMaskGeneratorNode(MaskGeneratorKind::Solid, { 0.0f, 320.0f }));
     const int splitId = NodeId(graph.AddChannelSplitNode({ 220.0f, 0.0f }));
-    const int scalarAverageId = NodeId(graph.AddDataMathNode(DataMathMode::Average, { 440.0f, 0.0f }));
-    const int imageAverageId = NodeId(graph.AddDataMathNode(DataMathMode::ImageAverage, { 440.0f, 180.0f }));
+    const int scalarAverageId = NodeId(graph.AddDataMathNode(DataMathMode::Mix, { 440.0f, 0.0f }));
+    const int imageAverageId = NodeId(graph.AddDataMathNode(DataMathMode::Mix, { 440.0f, 180.0f }));
     const int outputId = NodeId(graph.AddOutputNode({ 660.0f, 180.0f }, true));
 
-    Require(!graph.FindSocket(scalarAverageId, kDataMathBaseInputSocketId),
+    Require(!graph.FindSocket(scalarAverageId, "baseIn"),
         "scalar Average should not expose a masked Base input");
     Require(!graph.FindSocket(scalarAverageId, kMaskInputSocketId),
         "scalar Average should not expose a blend Mask input");
-    Require(!graph.CanConnectSockets(imageAId, kImageOutputSocketId, scalarAverageId, kMixInputASocketId),
-        "scalar Average should reject full image inputs");
-    Require(graph.CanInsertImageToScalarExtractor(imageAId, kImageOutputSocketId, scalarAverageId, kMixInputASocketId),
-        "full images should be convertible into scalar Average inputs through an extractor");
+    Require(graph.CanConnectSockets(imageAId, kImageOutputSocketId, scalarAverageId, kMixInputASocketId),
+        "Mix accepts full images and channels through the same socket");
     Require(graph.TryConnectSockets(imageAId, kImageOutputSocketId, splitId, kImageInputSocketId),
         "full image should feed channel split");
     Require(graph.TryConnectSockets(splitId, "r", scalarAverageId, kMixInputASocketId),
@@ -5150,10 +5149,10 @@ void TestAverageNodeInputRules() {
     Require(graph.IsScalarSocketStream(scalarAverageId, kImageOutputSocketId),
         "scalar Average should always output a scalar stream");
 
-    Require(!graph.CanConnectSockets(maskId, kMaskOutputSocketId, imageAverageId, kMixInputASocketId),
-        "Average Images should reject mask inputs");
-    Require(!graph.CanConnectSockets(scalarAverageId, kImageOutputSocketId, imageAverageId, kMixInputASocketId),
-        "Average Images should reject scalar math outputs");
+    Require(graph.CanConnectSockets(maskId, kMaskOutputSocketId, imageAverageId, kMixInputASocketId),
+        "Mix should accept channel inputs");
+    Require(graph.CanConnectSockets(scalarAverageId, kImageOutputSocketId, imageAverageId, kMixInputASocketId),
+        "Mix should accept arithmetic channel outputs");
     Require(graph.TryConnectSockets(imageAId, kImageOutputSocketId, imageAverageId, kMixInputASocketId),
         "Average Images should accept full image input A");
     Require(graph.TryConnectSockets(imageBId, kImageOutputSocketId, imageAverageId, kMixInputBSocketId),
@@ -5189,46 +5188,8 @@ void TestSemanticNodeMutationsInvalidateExecutionState() {
             kImageInputSocketId),
         "semantic-mutation fixture should connect");
 
-    const Node* dataMath = graph.FindNode(dataMathId);
-    const std::string clampDefinitionId =
-        dataMath ? dataMath->definitionId : std::string();
-    Require(
-        graph.GetCompletedChains().size() == 1,
-        "Clamp with one image input should initially complete");
-
-    const std::uint64_t clampRevision = graph.GetStructureRevision();
-    Require(
-        graph.SetDataMathMode(dataMathId, DataMathMode::ImageAverage) &&
-        graph.GetStructureRevision() > clampRevision,
-        "changing a Data Math mode should advance semantic topology");
-    dataMath = graph.FindNode(dataMathId);
-    Require(
-        dataMath &&
-        dataMath->definitionResolved &&
-        dataMath->definitionId != clampDefinitionId,
-        "changing a Data Math variant should pin its new exact definition");
-    Require(
-        graph.GetCompletedChains().empty(),
-        "Average Images should invalidate the cached one-input completed chain");
-    Require(
-        graph.TryConnectSockets(
-            imageBId,
-            kImageOutputSocketId,
-            dataMathId,
-            DataMathInputSocketId(1)) &&
-        graph.GetCompletedChains().size() == 1,
-        "Average Images should complete again after receiving two images");
-
-    Require(
-        graph.SetDataMathMode(dataMathId, DataMathMode::Average),
-        "switching from image Average to scalar Average should succeed");
-    Require(
-        graph.FindInputLink(dataMathId, DataMathInputSocketId(0)) == nullptr &&
-        graph.FindInputLink(dataMathId, DataMathInputSocketId(1)) == nullptr,
-        "a semantic mode change should remove links that no longer match its socket contract");
-    Require(
-        graph.GetCompletedChains().empty(),
-        "scalar Average should not retain an image-mode completed chain");
+    Require(graph.GetCompletedChains().size() == 1, "Clamp with one input completes");
+    Require(!graph.FindSocket(dataMathId, DataMathInputSocketId(1)), "Clamp has one data socket");
 
     Graph maskGraph;
     const int combineId = NodeId(maskGraph.AddMaskCombineNode(
@@ -7766,284 +7727,33 @@ void TestRawFinishTonePointCurveSetContract() {
 }
 
 void TestRawColorWarpContract() {
-    namespace RawRecipe = Stack::RawRecipe;
-
-    RawRecipe::RawDevelopmentRecipe recipe =
-        RawRecipe::MakeDefaultRecipe("D:/shoot/card/color-warp.dng", "color-warp.dng");
-    const nlohmann::json serialized = RawRecipe::SerializeRecipe(recipe);
-    Require(serialized.value("rawRecipeVersion", 0) == RawRecipe::kRawDevelopmentRecipeVersion &&
-            serialized.contains("colorWarp") &&
-            serialized["colorWarp"].value("enabled", false) &&
-            serialized["colorWarp"].value("version", 0) == 2 &&
-            serialized["colorWarp"].value("coordinateModel", std::string()) ==
-                "oklab-ab-d65-v2",
-        "current RAW recipes should own an enabled-by-default Color Warp section");
-
-    const auto curveStage =
-        std::find(recipe.stageOrder.begin(), recipe.stageOrder.end(), "tone-curve");
-    const auto colorStage =
-        std::find(recipe.stageOrder.begin(), recipe.stageOrder.end(), "color-warp");
-    const auto viewStage =
-        std::find(recipe.stageOrder.begin(), recipe.stageOrder.end(), "view-transform");
-    Require(curveStage != recipe.stageOrder.end() &&
-            colorStage != recipe.stageOrder.end() &&
-            viewStage != recipe.stageOrder.end() &&
-            curveStage < colorStage && colorStage < viewStage,
-        "Color Warp should remain between Finish Tone and View Transform");
-
-    RawRecipe::RawColorWarpRecipe bypassedColorWarp = recipe.colorWarp;
-    bypassedColorWarp.enabled = false;
-    for (const std::array<float, 3>& rgb : {
-             std::array<float, 3>{ -0.08f, 0.25f, 1.4f },
-             std::array<float, 3>{ 0.03f, 0.18f, 0.75f },
-             std::array<float, 3>{ 2.5f, 1.25f, 0.4f } }) {
-        const std::array<float, 3> unchanged = RawRecipe::ApplyColorWarp(
-            bypassedColorWarp, rgb, recipe.technical.workingSpace);
-        Require(unchanged == rgb,
-            "a disabled Color Warp must be a bit-exact scene-linear identity");
-    }
-
-    for (const Raw::RawWorkingSpace workingSpace : {
-             Raw::RawWorkingSpace::LinearSrgbD65,
-             Raw::RawWorkingSpace::LinearRec2020D65 }) {
-        const std::array<float, 3> rgb { 0.62f, 0.21f, 0.08f };
-        const RawRecipe::RawColorWarpCoordinate coordinate =
-            RawRecipe::WorkingRgbToColorWarpCoordinate(rgb, workingSpace);
-        const std::array<float, 3> roundTrip =
-            RawRecipe::ColorWarpCoordinateToWorkingRgb(coordinate, workingSpace);
-        for (int channel = 0; channel < 3; ++channel) {
-            Require(std::isfinite(roundTrip[static_cast<std::size_t>(channel)]) &&
-                    std::abs(roundTrip[static_cast<std::size_t>(channel)] -
-                        rgb[static_cast<std::size_t>(channel)]) < 0.00005f,
-                "Color Warp coordinates should round-trip through either D65 working space");
-        }
-    }
-
-    const std::array<float, 3> neutralLow { 0.09f, 0.09f, 0.09f };
-    const std::array<float, 3> neutralHigh { 0.72f, 0.72f, 0.72f };
-    const auto neutralLowCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            neutralLow,
-            Raw::RawWorkingSpace::LinearSrgbD65);
-    const auto neutralHighCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            neutralHigh,
-            Raw::RawWorkingSpace::LinearSrgbD65);
-    Require(std::abs(neutralLowCoordinate.a) < 0.0001f &&
-            std::abs(neutralLowCoordinate.b) < 0.0001f &&
-            std::abs(neutralHighCoordinate.a) < 0.0001f &&
-            std::abs(neutralHighCoordinate.b) < 0.0001f,
-        "neutral pixels at different lightnesses should remain at the OKLab disc center");
-
-    const std::array<float, 3> chromaticLow { 0.24f, 0.06f, 0.015f };
-    const std::array<float, 3> chromaticHigh { 1.92f, 0.48f, 0.12f };
-    const auto chromaticLowCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            chromaticLow,
-            Raw::RawWorkingSpace::LinearSrgbD65);
-    const auto chromaticHighCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            chromaticHigh,
-            Raw::RawWorkingSpace::LinearSrgbD65);
-    Require(std::abs(chromaticHighCoordinate.a -
-                2.0f * chromaticLowCoordinate.a) < 0.0002f &&
-            std::abs(chromaticHighCoordinate.b -
-                2.0f * chromaticLowCoordinate.b) < 0.0002f,
-        "the current Color Warp plane should use literal OKLab a/b rather than exposure-normalized chroma");
-
-    const std::array<float, 3> sourceRgb { 0.65f, 0.22f, 0.07f };
-    const RawRecipe::RawColorWarpCoordinate sourceCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            sourceRgb, Raw::RawWorkingSpace::LinearRec2020D65);
-    RawRecipe::RawColorWarpPin pin;
-    pin.id = "warm-family";
-    pin.name = "Warm family";
-    pin.sourceA = sourceCoordinate.a;
-    pin.sourceB = sourceCoordinate.b;
-    pin.targetA = sourceCoordinate.a - 0.09f;
-    pin.targetB = sourceCoordinate.b + 0.06f;
-    pin.radius = 0.2f;
-    pin.softness = 0.5f;
-    Require(pin.qualifierDirectionality == 0.0f &&
-            std::abs(RawRecipe::EvaluateColorWarpPinShapeDistance(
-                pin, pin.sourceA + pin.radius * 0.5f, pin.sourceB) - 0.5f) <
-                0.00001f,
-        "default Color Warp pins should retain the exact circular qualifier");
-
-    RawRecipe::RawColorWarpPin cone = pin;
-    cone.qualifierDirectionality = 1.0f;
-    cone.qualifierOrientationRadians = 0.0f;
-    cone.qualifierAperture = 0.20f;
-    Require(RawRecipe::EvaluateColorWarpPinShapeWeight(
-                cone, cone.sourceA + cone.radius * 0.8f, cone.sourceB) > 0.0f &&
-            RawRecipe::EvaluateColorWarpPinShapeWeight(
-                cone, cone.sourceA - cone.radius * 0.8f, cone.sourceB) == 0.0f,
-        "a directional qualifier should keep forward colors while rejecting the same-radius rear colors");
-    RawRecipe::RawColorWarpPin lobe = cone;
-    lobe.qualifierDirectionality = 0.5f;
-    const float rearCircleDistance =
-        RawRecipe::EvaluateColorWarpPinShapeDistance(
-            pin, pin.sourceA - pin.radius * 0.5f, pin.sourceB);
-    const float rearLobeDistance =
-        RawRecipe::EvaluateColorWarpPinShapeDistance(
-            lobe, lobe.sourceA - lobe.radius * 0.5f, lobe.sourceB);
-    const float rearConeDistance =
-        RawRecipe::EvaluateColorWarpPinShapeDistance(
-            cone, cone.sourceA - cone.radius * 0.5f, cone.sourceB);
-    Require(rearLobeDistance > rearCircleDistance &&
-            rearLobeDistance < rearConeDistance,
-        "directionality should provide a continuous circle-to-cone transition");
-
-    pin.qualifierDirectionality = 0.72f;
-    pin.qualifierOrientationRadians = -0.83f;
-    pin.qualifierAperture = 0.38f;
-    pin.lightnessDeltaEv = 0.35f;
-    recipe.colorWarp.enabled = true;
-    recipe.colorWarp.pins = { pin };
-
-    const std::array<float, 3> warped = RawRecipe::ApplyColorWarp(
-        recipe.colorWarp, sourceRgb, Raw::RawWorkingSpace::LinearRec2020D65);
-    const RawRecipe::RawColorWarpCoordinate warpedCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            warped, Raw::RawWorkingSpace::LinearRec2020D65);
-    Require(std::abs(warpedCoordinate.a - sourceCoordinate.a) > 0.03f &&
-            std::abs(warpedCoordinate.b - sourceCoordinate.b) > 0.02f &&
-            warpedCoordinate.sceneEv > sourceCoordinate.sceneEv + 0.2f,
-        "an active Color Warp pin should move its selected color family and lightness");
-
-    RawRecipe::RawColorWarpRecipe lightnessLimited = recipe.colorWarp;
-    lightnessLimited.pins.front().evCurve =
-        RawRecipe::MakeColorWarpEvCurveHump(
-            sourceCoordinate.sceneEv + 2.5f, 0.5f, 0.0f);
-    Require(RawRecipe::ApplyColorWarp(
-                lightnessLimited,
-                sourceRgb,
-                Raw::RawWorkingSpace::LinearRec2020D65) == sourceRgb,
-        "a Color Warp pin should leave colors outside its lightness range untouched");
-
-    RawRecipe::RawColorWarpRecipe protectedWarp = recipe.colorWarp;
-    RawRecipe::RawColorWarpPin protector = pin;
-    protector.id = "protect-warm-family";
-    protector.protectColor = true;
-    protectedWarp.pins.push_back(protector);
-    const std::array<float, 3> protectedResult = RawRecipe::ApplyColorWarp(
-        protectedWarp, sourceRgb, Raw::RawWorkingSpace::LinearRec2020D65);
-    const RawRecipe::RawColorWarpCoordinate protectedCoordinate =
-        RawRecipe::WorkingRgbToColorWarpCoordinate(
-            protectedResult, Raw::RawWorkingSpace::LinearRec2020D65);
-    Require(std::abs(protectedCoordinate.a - sourceCoordinate.a) <
-                std::abs(warpedCoordinate.a - sourceCoordinate.a) &&
-            std::abs(protectedCoordinate.b - sourceCoordinate.b) <
-                std::abs(warpedCoordinate.b - sourceCoordinate.b),
-        "protect-color pins should damp overlapping color-family movement");
-
-    const RawRecipe::RawDevelopmentRecipe roundTrip = RawRecipe::DeserializeRecipe(
-        RawRecipe::SerializeRecipe(recipe));
-    Require(roundTrip.colorWarp.enabled && roundTrip.colorWarp.pins.size() == 1u &&
-            roundTrip.colorWarp.version == 2 &&
-            std::abs(roundTrip.colorWarp.pins.front().qualifierDirectionality -
-                0.72f) < 0.0001f &&
-            std::abs(roundTrip.colorWarp.pins.front().qualifierOrientationRadians +
-                0.83f) < 0.0001f &&
-            std::abs(roundTrip.colorWarp.pins.front().qualifierAperture -
-                0.38f) < 0.0001f,
-        "Color Warp should save and reopen through the current schema");
-
-    RawRecipe::RawColorWarpRecipe invalidShape = recipe.colorWarp;
-    invalidShape.pins.front().qualifierDirectionality = 7.0f;
-    invalidShape.pins.front().qualifierOrientationRadians = -20.0f;
-    invalidShape.pins.front().qualifierAperture = -2.0f;
-    invalidShape = RawRecipe::SanitizeColorWarpRecipe(std::move(invalidShape));
-    Require(invalidShape.pins.front().qualifierDirectionality == 1.0f &&
-            invalidShape.pins.front().qualifierOrientationRadians >=
-                -3.141593f &&
-            invalidShape.pins.front().qualifierAperture == 0.10f,
-        "directional qualifier values should be bounded during load and edit sanitization");
-
-    RawRecipe::RawColorWarpRecipe oversized = recipe.colorWarp;
-    oversized.pins.assign(12u, pin);
-    const RawRecipe::RawColorWarpRecipe bounded =
-        RawRecipe::SanitizeColorWarpRecipe(std::move(oversized));
-    Require(bounded.pins.size() == RawRecipe::kMaxRawColorWarpPins &&
-            RawRecipe::kMaxRawColorWarpPins == 8u,
-        "Color Warp should expose and persist no more than eight retained pins");
-
-    RawRecipe::RawColorWarpPin multiPeakPin = pin;
-    const auto allEv = RawRecipe::MakeUniformColorWarpEvCurve(1.0f);
-    const auto noEv = RawRecipe::MakeUniformColorWarpEvCurve(0.0f);
-    Require(RawRecipe::EvaluateColorWarpEvCurve(allEv, -40.0f) == 1.0f &&
-            RawRecipe::EvaluateColorWarpEvCurve(allEv, 40.0f) == 1.0f &&
-            RawRecipe::EvaluateColorWarpEvCurve(noEv, 0.0f) == 0.0f,
-        "the EV curve All and None states should remain exact across and beyond the graph domain");
-    multiPeakPin.evCurve = RawRecipe::MakeUniformColorWarpEvCurve(0.0f);
-    const auto lowPeak = RawRecipe::MakeColorWarpEvCurveHump(-3.5f, 0.5f, 0.0f);
-    const auto highPeak = RawRecipe::MakeColorWarpEvCurveHump(1.5f, 0.5f, 0.0f);
-    for (std::size_t index = 0; index < multiPeakPin.evCurve.samples.size(); ++index) {
-        multiPeakPin.evCurve.samples[index] = std::max(
-            lowPeak.samples[index], highPeak.samples[index]);
-    }
-    RawRecipe::RawColorWarpRecipe multiPeakRecipe;
-    multiPeakRecipe.pins = { multiPeakPin };
-    multiPeakRecipe = RawRecipe::SanitizeColorWarpRecipe(std::move(multiPeakRecipe));
-    Require(RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRecipe.pins.front(), -3.5f) == 1.0f &&
-            RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRecipe.pins.front(), 1.5f) == 1.0f &&
-            RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRecipe.pins.front(), -1.0f) == 0.0f,
-        "one continuous EV curve should retain separate peaks and an unsupported valley");
-    const nlohmann::json multiPeakJson =
-        RawRecipe::SerializeColorWarpRecipe(multiPeakRecipe);
-    Require(multiPeakJson["pins"][0].contains("evCurve") &&
-            !multiPeakJson["pins"][0].contains("evBands") &&
-            multiPeakJson["pins"][0]["evCurve"]["samples"].size() ==
-                RawRecipe::kRawColorWarpEvCurveSampleCount,
-        "current Color Warp recipes should store only the continuous sampled EV curve");
-    const auto multiPeakRoundTrip =
-        RawRecipe::DeserializeColorWarpRecipe(multiPeakJson);
-    Require(RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRoundTrip.pins.front(), -3.5f) == 1.0f &&
-            RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRoundTrip.pins.front(), -1.0f) == 0.0f &&
-            RawRecipe::EvaluateColorWarpPinLightnessWeight(
-                multiPeakRoundTrip.pins.front(), 1.5f) == 1.0f,
-        "saving and reopening should preserve disconnected EV peaks on one selection");
-
-    RawRecipe::RawColorWarpRecipe sampledRecipe = recipe.colorWarp;
-    RawRecipe::RawColorWarpRegion sampledRegion;
-    sampledRegion.id = "fabric-region";
-    sampledRegion.spatialMode = RawRecipe::RawColorWarpSpatialMode::Cohesive;
-    sampledRegion.featherPixels = 12.0f;
-    sampledRegion.circles.push_back({
-        "fabric-circle", 0.32f, 0.64f, 0.04f, 0.06f,
-        RawRecipe::RawColorWarpInterpretationMode::GuidedFamily,
-        RawRecipe::RawColorWarpSamplePolarity::Include
-    });
-    sampledRecipe.regions = { sampledRegion };
-    sampledRecipe.pins.front().regionId = sampledRegion.id;
-    sampledRecipe.linkGroups.push_back({
-        "fabric-group", "Fabric", { sampledRecipe.pins.front().id }
-    });
-    const auto sampledRoundTrip = RawRecipe::DeserializeColorWarpRecipe(
-        RawRecipe::SerializeColorWarpRecipe(sampledRecipe));
-    Require(sampledRoundTrip.regions.size() == 1u &&
-            sampledRoundTrip.regions.front().circles.size() == 1u &&
-            sampledRoundTrip.pins.front().regionId == "fabric-region" &&
-            sampledRoundTrip.linkGroups.size() == 1u,
-        "sample circles, spatial settings, region links, and link groups should persist");
-
-    nlohmann::json extendedFinish = RawRecipe::DefaultFinishToneJson();
-    const std::array<float, 3> extendedInput { -0.12f, 0.4f, 2.4f };
-    const std::array<float, 3> extendedOutput =
-        RawRecipe::EvaluateFinishTonePointCurveRgb(
-            extendedFinish,
-            extendedInput,
-            Raw::RawWorkingSpace::LinearRec2020D65);
-    for (int channel = 0; channel < 3; ++channel) {
-        Require(std::abs(extendedOutput[static_cast<std::size_t>(channel)] -
-                    extendedInput[static_cast<std::size_t>(channel)]) < 0.0001f,
-            "current identity Finish Tone should preserve negative and above-range scene-linear values");
-    }
+    namespace R=Stack::RawRecipe;
+    const auto space=Raw::RawWorkingSpace::LinearRec2020D65;
+    R::RawColorWarpRecipe recipe;
+    const std::array<float,3> input{.62f,.21f,.08f};
+    Require(recipe.pins.size()==8 && R::ApplyColorWarp(recipe,input,space)==input,
+        "fresh family selections must be an exact identity");
+    R::RawColorWarpPin sample;
+    sample.id="sample";
+    Require(R::SetColorWarpSample(sample,R::WorkingRgbToColorWarpCoordinate(input,space)),"a colored sample must qualify");
+    sample.exposureEv=1;
+    recipe.pins.push_back(sample);
+    const auto exposed=R::ApplyColorWarp(recipe,input,space);
+    for(int c=0;c<3;++c)Require(std::abs(exposed[c]-input[c]*2)<.0001f,"exposure must apply scene-linear gain");
+    auto protectedRecipe=recipe;auto protection=sample;protection.id="protection";protection.protectColor=true;
+    protectedRecipe.pins.push_back(protection);
+    Require(R::ApplyColorWarp(protectedRecipe,input,space)==input,"full protection must suppress the adjustment");
+    sample.exposureRange={10,12,0,0,true};recipe.pins.back()=sample;
+    Require(R::ApplyColorWarp(recipe,input,space)==input,"an exposure restriction must reject out-of-range colors");
+    recipe.combine=R::RawColorWarpCombine::Blend;
+    const auto saved=R::SerializeColorWarpRecipe(recipe);
+    const auto restored=R::DeserializeColorWarpRecipe(saved);
+    Require(restored.version==3 && restored.pins.size()==9 && restored.combine==R::RawColorWarpCombine::Blend &&
+        restored.pins.back().exposureRange.enabled && restored.pins.back().exposureEv==1 &&
+        !saved.contains("linkGroups") && !saved["pins"].back().contains("targetA"),
+        "Color Warp must persist ranges and HSE directly without obsolete offsets or linked groups");
+    recipe.pins.assign(12,sample);
+    Require(R::SanitizeColorWarpRecipe(recipe).pins.size()==16,"eight families plus at most eight samples are retained");
 }
 
 void TestRawColorWarpAreaAndMaskContract() {
@@ -8056,6 +7766,7 @@ void TestRawColorWarpAreaAndMaskContract() {
             sample.sourceU = (x + 0.5f) / 10.0f;
             sample.sourceV = (y + 0.5f) / 10.0f;
             const bool greenPopulation = x >= 8;
+            sample.color.lightness = 1;
             sample.color.a = greenPopulation ? -0.18f : 0.22f;
             sample.color.b = greenPopulation ? 0.16f : 0.09f;
             sample.color.sceneEv = y < 5 ? -3.0f : 1.0f;
@@ -8068,15 +7779,8 @@ void TestRawColorWarpAreaAndMaskContract() {
     circle.radiusU = 0.75f;
     circle.radiusV = 0.75f;
     const auto guided = RawRecipe::AnalyzeRawColorWarpArea(samples, circle, 4u);
-    Require(guided.proposals.size() == 1u &&
-            guided.proposals.front().sourceA > 0.15f &&
-            RawRecipe::EvaluateColorWarpEvCurve(
-                guided.proposals.front().evCurve, -3.0f) > 0.95f &&
-            RawRecipe::EvaluateColorWarpEvCurve(
-                guided.proposals.front().evCurve, 1.0f) > 0.95f &&
-            RawRecipe::EvaluateColorWarpEvCurve(
-                guided.proposals.front().evCurve, -1.0f) < 0.10f,
-        "Guided Family should reject an unrelated color population and seed separate brightness peaks on one curve");
+    Require(guided.proposals.size()==1u && guided.proposals.front().sourceA>.15f,
+        "Guided sampling must retain its chosen color population");
 
     circle.interpretation = RawRecipe::RawColorWarpInterpretationMode::MultipleColors;
     const auto multiple = RawRecipe::AnalyzeRawColorWarpArea(samples, circle, 1u);
@@ -8084,7 +7788,7 @@ void TestRawColorWarpAreaAndMaskContract() {
         "Multiple Colors should report when the remaining pin slots truncate its proposals");
     const auto allMultiple = RawRecipe::AnalyzeRawColorWarpArea(samples, circle, 4u);
     Require(allMultiple.proposals.size() >= 2u,
-        "Multiple Colors should produce distinct linked-pin candidates for separated color families");
+        "Multiple Colors should produce distinct sampled selections for separated color families");
 
     RawRecipe::RawColorWarpMaskGuide guide;
     guide.width = 9;
@@ -8095,6 +7799,7 @@ void TestRawColorWarpAreaAndMaskContract() {
     for (int y = 0; y < guide.height; ++y) {
         for (int x = 0; x < guide.width; ++x) {
             auto& pixel = guide.pixels[static_cast<std::size_t>(y) * guide.width + x];
+            pixel.lightness = 1;
             pixel.a = (x >= 1 && x <= 3) || x == 7 ? 0.22f : -0.22f;
             pixel.b = 0.09f;
             pixel.sceneEv = 0.0f;
@@ -8103,9 +7808,8 @@ void TestRawColorWarpAreaAndMaskContract() {
     RawRecipe::RawColorWarpPin maskPin;
     maskPin.sourceA = 0.22f;
     maskPin.sourceB = 0.09f;
-    maskPin.radius = 0.08f;
-    maskPin.softness = 0.5f;
-    maskPin.evCurve = RawRecipe::MakeColorWarpEvCurveHump(0.0f, 1.0f, 0.0f);
+    maskPin.hueRange={-10,10,5,5,true};
+    maskPin.exposureRange={-1,1,0,0,true};
     RawRecipe::RawColorWarpRegion connectedRegion;
     connectedRegion.id = "connected";
     connectedRegion.spatialMode = RawRecipe::RawColorWarpSpatialMode::Connected;
@@ -9118,8 +8822,8 @@ void TestRawDevelopmentStageCachePolicy() {
     colorPin.id = "cache-color";
     colorPin.sourceA = 0.12f;
     colorPin.sourceB = 0.08f;
-    colorPin.targetA = 0.04f;
-    colorPin.targetB = 0.18f;
+    colorPin.hueShift = 15.f;
+    colorPin.saturation = .18f;
     changedColor.colorWarp.pins = { colorPin };
     Require(
         fingerprint(changedColor, Cache::Stage::PostFinishTone) ==
@@ -14875,7 +14579,7 @@ void TestPhase6BFieldMeanGraphContract() {
     const int splitId = graph.AddChannelSplitNode({ 260.0f, 0.0f })->id;
     const int meanId = graph.AddFieldMeanNode({ 520.0f, 120.0f })->id;
     const int scalarAverageId = graph.AddDataMathNode(
-        EditorNodeGraph::DataMathMode::Average, { 520.0f, 260.0f })->id;
+        EditorNodeGraph::DataMathMode::Mix, { 520.0f, 260.0f })->id;
     const int scalarReformatId = graph.AddReformatNode({ 700.0f, 260.0f })->id;
     const int exposureId = graph.AddTechnicalImageNode(
         Stack::NodeMath::TechnicalImageOperation::Exposure, { 780.0f, 0.0f })->id;

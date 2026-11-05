@@ -643,7 +643,6 @@ public:
         const std::string& candidateId,
         EditorNodeGraph::DevelopAutoIntent intent);
     bool SplitLayerNodeIntoChannels(int layerNodeId);
-    bool SplitImageAverageNodeIntoChannelAverages(int dataMathNodeId);
     bool ToggleOutputNodeEnabled(int outputNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
@@ -668,7 +667,6 @@ public:
     void AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddDataMathNodeAt(EditorNodeGraph::DataMathMode mode, EditorNodeGraph::Vec2 graphPosition);
     void AddValueNodeAt(Stack::NodeMath::FirstClassValue value, EditorNodeGraph::Vec2 graphPosition);
-    bool SetDataMathDomain(int nodeId, Stack::NodeMath::ArithmeticDomain domain);
     bool SetNodeParameterExposed(int nodeId, const std::string& parameterId, bool exposed);
     void AddFieldMeanNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddReformatNodeAt(EditorNodeGraph::Vec2 graphPosition);
@@ -3194,8 +3192,6 @@ private:
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe) const;
     int GetRawWorkspaceColorWarpViewMode(
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe) const;
-    void ApplyRawWorkspaceColorWarpViewOverride(
-        Stack::RawRecipe::RawDevelopmentRecipe& recipe) const;
     void ApplyRawWorkspaceDenoiseViewOverride(
         Stack::RawRecipe::RawDevelopmentRecipe& recipe) const;
     bool RenderRawWorkspaceLabCommandStrip();

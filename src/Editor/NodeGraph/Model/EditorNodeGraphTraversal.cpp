@@ -354,7 +354,6 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
                      ++inputIndex) {
                     addInput(DataMathInputSocketId(inputIndex));
                 }
-                addInput(kDataMathBaseInputSocketId);
                 break;
             case NodeKind::ChannelSplit:
                 addInput(kImageInputSocketId);

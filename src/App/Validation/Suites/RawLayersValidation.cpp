@@ -307,6 +307,7 @@ void CheckPixelsAndView() {
             const auto generator=authored.FindInputLink(FindRawMaskOutput(scalar,mask)->nodeId,"imageIn")->fromNodeId;
             const int curveId=authored.AddRawOperationNode(Kind::ToneCurve,{0,700})->id;
             auto curveRecipe=RawRecipe::ReadGraphOperation(authored.FindNode(curveId)->rawOperation);
+            curveRecipe.finishTone.layerJson["curveMode"]="components";
             RawRecipe::RawPointCurveComponent valueCurve;valueCurve.points={{0,0},{.5f,.75f},{1,1}};
             RawRecipe::StorePointCurveComponentInFinishToneJson(curveRecipe.finishTone.layerJson,RawRecipe::RawPointCurveChannel::Composite,valueCurve);
             // A previously authored red curve cannot affect a scalar rewire.
@@ -455,7 +456,7 @@ void CheckPixelsAndView() {
         auto* toneLayer = FindRawAdjustmentLayer(curved, first);
         RawRecipe::RawPointCurveComponent curve;
         curve.points = {{0,0}, {.5f,.57f}, {1,1}};
-        EditPhoto(*toneLayer, Kind::ToneCurve, [&](auto& r) { RawRecipe::StorePointCurveComponentInFinishToneJson(r.finishTone.layerJson,
+        EditPhoto(*toneLayer, Kind::ToneCurve, [&](auto& r) { r.finishTone.layerJson["curveMode"]="components"; RawRecipe::StorePointCurveComponentInFinishToneJson(r.finishTone.layerJson,
             RawRecipe::RawPointCurveChannel::Composite, curve); });
         // A curve inside a mask graph changes coverage, independently of the
         // photo curve owned by RAW. Then break its input while keeping Output.

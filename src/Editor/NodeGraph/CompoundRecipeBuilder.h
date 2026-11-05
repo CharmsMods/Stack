@@ -47,10 +47,9 @@ struct Recipe {
     void Note(int id, const std::string &text) {
         At(id).notes = text;
     }
-    int Math(DataMathMode mode, float b = 1.f, bool uniform = false) {
+    int Math(DataMathMode mode, float b = 1.f) {
         const int id = Keep(graph.AddDataMathNode(mode, {}));
         At(id).dataMathSettings.constantB = b;
-        At(id).dataMathSettings.domain = uniform ? ArithmeticDomain::Values : ArithmeticDomain::Spatial;
         return id;
     }
     int Identity() {
@@ -98,7 +97,7 @@ struct Recipe {
     }
     int Control(const char *id, const char *label, double value, double low, double high,
                 const char *units = "unitless") {
-        const int n = Math(DataMathMode::Add, 0, true);
+        const int n = Math(DataMathMode::Add, 0);
         At(n).dataMathSettings.constantA = float(value);
         Param(id, label, n, "dataMathSettings.constantA", value, low, high, units);
         const std::string port = ParameterInputSocketId(id);

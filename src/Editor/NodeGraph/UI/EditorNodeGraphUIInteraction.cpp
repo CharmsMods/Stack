@@ -85,21 +85,6 @@ bool EditorNodeGraphUI::CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph&
         return hasImageOutput;
     }
 
-    if (node->kind == EditorNodeGraph::NodeKind::DataMath &&
-        node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage) {
-        int imageInputCount = 0;
-        for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
-            const EditorNodeGraph::Link* input = graph.FindAnyInputLink(
-                nodeId,
-                EditorNodeGraph::DataMathInputSocketId(inputIndex));
-            if (input && !Stack::Editor::NodeGraphUIVisuals::ResolveOutputVisualStyle(
-                    graph, input->fromNodeId, input->fromSocketId, m_ActiveEditor).scalarStream) {
-                ++imageInputCount;
-            }
-        }
-        return imageInputCount >= 2;
-    }
-
     return false;
 }
 
@@ -193,12 +178,7 @@ void EditorNodeGraphUI::RenderChannelSplitConfirmPrompt(EditorModule* editor) {
     const float elapsed = static_cast<float>(now - m_ChannelSplitConfirmStartTime);
     const float appearT = std::clamp(elapsed / 0.18f, 0.0f, 1.0f);
     const float appearEase = 1.0f - std::pow(1.0f - appearT, 3.0f);
-    const EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(m_ChannelSplitConfirmNodeId);
-    const bool splittingImageAverage =
-        node &&
-        node->kind == EditorNodeGraph::NodeKind::DataMath &&
-        node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage;
-    const char* message = splittingImageAverage ? "Split Average Images?" : "Split Channels?";
+    const char* message = "Split Channels?";
     const char* helper = "Press G or Enter to confirm";
     const ImVec2 messageSize = ImGui::CalcTextSize(message);
     const ImVec2 helperSize = ImGui::CalcTextSize(helper);
@@ -474,30 +454,19 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     !graphHotkeysBlockedByNodeControls &&
                     ImGui::IsKeyPressed(ImGuiKey_Enter, false))) {
             const int confirmNodeId = m_ChannelSplitConfirmNodeId;
-            const EditorNodeGraph::Node* confirmNode = graph.FindNode(confirmNodeId);
-            const bool splitImageAverage =
-                confirmNode &&
-                confirmNode->kind == EditorNodeGraph::NodeKind::DataMath &&
-                confirmNode->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage;
             CancelChannelSplitConfirm();
-            const bool splitOk = splitImageAverage
-                ? editor->SplitImageAverageNodeIntoChannelAverages(confirmNodeId)
-                : editor->SplitLayerNodeIntoChannels(confirmNodeId);
+            const bool splitOk = editor->SplitLayerNodeIntoChannels(confirmNodeId);
             if (splitOk) {
                 PostNodeGraphNotification(
                     editor,
                     UiNotificationSeverity::Success,
-                    splitImageAverage
-                        ? "Image average split into channel averages."
-                        : "Split Channels created.",
+                    "Split Channels created.",
                     "editor-node-graph-split");
             } else {
                 PostNodeGraphNotification(
                     editor,
                     UiNotificationSeverity::Error,
-                    splitImageAverage
-                        ? "Image average split failed."
-                        : "Split Channels failed.",
+                    "Split Channels failed.",
                     "editor-node-graph-split");
             }
             return;

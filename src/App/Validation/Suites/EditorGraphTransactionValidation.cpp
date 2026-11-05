@@ -165,7 +165,7 @@ EditorNodeGraph::ImagePayload MakeSentinelImage(
     return payload;
 }
 
-bool ValidateImageAverageRollback() {
+bool ValidateMixRollback() {
     TransactionEditor editor;
     EditorNodeGraph::Graph& graph = editor.GetNodeGraph();
     graph.Clear();
@@ -177,7 +177,7 @@ bool ValidateImageAverageRollback() {
         MakeSentinelImage("Average B", 224u),
         { 0.0f, 100.0f })->id;
     const int averageId = graph.AddDataMathNode(
-        EditorNodeGraph::DataMathMode::ImageAverage,
+        EditorNodeGraph::DataMathMode::Mix,
         { 280.0f, 0.0f })->id;
     const int outputId = graph.AddOutputNode(
         { 560.0f, 0.0f },
@@ -203,7 +203,7 @@ bool ValidateImageAverageRollback() {
             &error)) {
         return TransactionCheck(
             false,
-            "could not author the Image Average rollback fixture: " +
+            "could not author the Mix rollback fixture: " +
                 error);
     }
 
@@ -228,35 +228,35 @@ bool ValidateImageAverageRollback() {
         graph.FindNode(sourceAId)->image.pixels.data();
 
     const bool split =
-        editor.SplitImageAverageNodeIntoChannelAverages(
+        editor.UnpackCompoundNode(
             averageId);
     const EditorNodeGraph::Link* selectedLink =
         graph.GetSelectedLink();
     return TransactionCheck(
         !split,
-        "a malformed late Image Average output unexpectedly split") &&
+        "a malformed late Mix output unexpectedly split") &&
         TransactionCheck(
             graph.GetNodes().size() == nodeCountBefore &&
             graph.GetNextNodeId() == nextNodeIdBefore &&
             graph.FindNode(averageId) != nullptr,
-            "failed Image Average expansion changed nodes or IDs") &&
+            "failed Mix expansion changed nodes or IDs") &&
         TransactionCheck(
             LinkVectorsMatch(graph.GetLinks(), linksBefore),
-            "failed Image Average expansion changed link order") &&
+            "failed Mix expansion changed link order") &&
         TransactionCheck(
             PositionsMatch(graph, positionsBefore),
-            "failed Image Average expansion moved downstream nodes") &&
+            "failed Mix expansion moved downstream nodes") &&
         TransactionCheck(
             selectedLink &&
             LinksMatch(*selectedLink, linksBefore[2]),
-            "failed Image Average expansion lost link selection") &&
+            "failed Mix expansion lost link selection") &&
         TransactionCheck(
             graph.FindNode(sourceAId)->image.pixels.data() ==
                 pixelsBefore,
-            "failed Image Average expansion replaced embedded pixels");
+            "failed Mix expansion replaced embedded pixels");
 }
 
-bool ValidateImageAverageSuccess() {
+bool ValidateMixSuccess() {
     TransactionEditor editor;
     EditorNodeGraph::Graph& graph = editor.GetNodeGraph();
     graph.Clear();
@@ -268,7 +268,7 @@ bool ValidateImageAverageSuccess() {
         MakeSentinelImage("Average success B", 192u),
         { 0.0f, 100.0f })->id;
     const int averageId = graph.AddDataMathNode(
-        EditorNodeGraph::DataMathMode::ImageAverage,
+        EditorNodeGraph::DataMathMode::Mix,
         { 280.0f, 0.0f })->id;
     const int outputId = graph.AddOutputNode(
         { 560.0f, 0.0f },
@@ -290,13 +290,13 @@ bool ValidateImageAverageSuccess() {
             EditorNodeGraph::kImageInputSocketId)) {
         return TransactionCheck(
             false,
-            "could not author the Image Average success fixture");
+            "could not author the Mix success fixture");
     }
 
     const unsigned char* pixelsBefore =
         graph.FindNode(sourceAId)->image.pixels.data();
     const bool split =
-        editor.SplitImageAverageNodeIntoChannelAverages(
+        editor.UnpackCompoundNode(
             averageId);
     const EditorNodeGraph::Link* outputInput =
         graph.FindInputLink(
@@ -308,16 +308,16 @@ bool ValidateImageAverageSuccess() {
             : nullptr;
     return TransactionCheck(
         split && graph.FindNode(averageId) == nullptr,
-        "valid Image Average expansion failed") &&
+        "valid Mix expansion failed") &&
         TransactionCheck(
             outputSource &&
             outputSource->kind ==
-                EditorNodeGraph::NodeKind::ChannelCombine,
-            "Image Average expansion did not reconnect its output") &&
+                EditorNodeGraph::NodeKind::DataMath,
+            "Mix expansion did not reconnect its output") &&
         TransactionCheck(
             graph.FindNode(sourceAId)->image.pixels.data() ==
                 pixelsBefore,
-            "Image Average expansion replaced source pixels");
+            "Mix expansion replaced source pixels");
 }
 
 bool AuthorLayerSplitFixture(
@@ -1678,8 +1678,8 @@ bool ValidateEditorGraphTransactions() {
     };
     const bool ok =
         run("View connections",ValidateRawDevelopmentViewTransformConnectionContract) &&
-        run("Average rollback",ValidateImageAverageRollback) &&
-        run("Average expansion",ValidateImageAverageSuccess) &&
+        run("Average rollback",ValidateMixRollback) &&
+        run("Average expansion",ValidateMixSuccess) &&
         run("Layer split rollback",ValidateLayerSplitRollback) &&
         run("Layer split",ValidateLayerSplitSuccess) &&
         run("Save revisions and recovery",ValidateAsyncProjectSaveKeepsNewerEditsDirty) &&

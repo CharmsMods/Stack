@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpMath.h"
 #include "Raw/RawColorWarpAnalysis.h"
 
 #include <algorithm>
@@ -53,87 +54,16 @@ std::size_t RobustMedoid(
     return best;
 }
 
-RawColorWarpEvCurve BuildEvCurve(
-    const std::vector<RawColorWarpAnalysisSample>& samples,
-    const std::vector<std::size_t>& members,
-    bool constrainBrightness) {
-    if (!constrainBrightness) {
-        return MakeUniformColorWarpEvCurve();
-    }
-    std::vector<float> evs;
-    evs.reserve(members.size());
-    for (const std::size_t index : members) {
-        if (std::isfinite(samples[index].color.sceneEv)) {
-            evs.push_back(std::clamp(
-                samples[index].color.sceneEv,
-                kRawColorWarpEvMinimum,
-                kRawColorWarpEvMaximum));
-        }
-    }
-    if (evs.empty()) return MakeColorWarpEvCurveHump(0.0f);
-    std::sort(evs.begin(), evs.end());
-    if (evs.size() < 4u) {
-        return MakeColorWarpEvCurveHump(evs[evs.size() / 2u]);
-    }
-
-    RawColorWarpEvCurve curve = MakeUniformColorWarpEvCurve(0.0f);
-    std::vector<float> histogram(curve.samples.size(), 0.0f);
-    for (const float ev : evs) {
-        const float normalized = (ev - kRawColorWarpEvMinimum) /
-            (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
-        const std::size_t bin = std::min(
-            histogram.size() - 1u,
-            static_cast<std::size_t>(std::round(
-                normalized * static_cast<float>(histogram.size() - 1u))));
-        histogram[bin] += 1.0f;
-    }
-
-    constexpr float sigmaEv = 0.50f;
-    const float samplesPerEv = static_cast<float>(histogram.size() - 1u) /
-        (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
-    const float sigmaSamples = sigmaEv * samplesPerEv;
-    const int radius = static_cast<int>(std::ceil(sigmaSamples * 3.0f));
-    float maximum = 0.0f;
-    for (std::size_t destination = 0; destination < curve.samples.size(); ++destination) {
-        float weighted = 0.0f;
-        float kernelWeight = 0.0f;
-        for (int offset = -radius; offset <= radius; ++offset) {
-            const int source = static_cast<int>(destination) + offset;
-            if (source < 0 || source >= static_cast<int>(histogram.size())) continue;
-            const float distance = static_cast<float>(offset) / sigmaSamples;
-            const float weight = std::exp(-0.5f * distance * distance);
-            weighted += histogram[static_cast<std::size_t>(source)] * weight;
-            kernelWeight += weight;
-        }
-        curve.samples[destination] = kernelWeight > 0.0f
-            ? weighted / kernelWeight
-            : 0.0f;
-        maximum = std::max(maximum, curve.samples[destination]);
-    }
-    if (maximum <= 0.000001f) {
-        return MakeColorWarpEvCurveHump(evs[evs.size() / 2u]);
-    }
-    const float noiseFloor = maximum * 0.025f;
-    const float normalization = std::max(0.000001f, maximum - noiseFloor);
-    for (float& value : curve.samples) {
-        value = std::pow(
-            std::clamp((value - noiseFloor) / normalization, 0.0f, 1.0f),
-            0.72f);
-    }
-    return curve;
-}
-
 RawColorWarpAreaProposal BuildProposal(
     const std::vector<RawColorWarpAnalysisSample>& samples,
-    const std::vector<std::size_t>& members,
-    bool constrainBrightness) {
+    const std::vector<std::size_t>& members) {
     RawColorWarpAreaProposal proposal;
     if (members.empty()) return proposal;
     std::vector<std::size_t> memberCopy = members;
     const std::size_t medoid = RobustMedoid(samples, memberCopy);
+    proposal.sourceLightness = samples[medoid].color.lightness;
     proposal.sourceA = samples[medoid].color.a;
     proposal.sourceB = samples[medoid].color.b;
-    proposal.evCurve = BuildEvCurve(samples, members, constrainBrightness);
     proposal.supportingPixelCount = members.size();
     return proposal;
 }
@@ -282,23 +212,24 @@ std::vector<std::size_t> ConnectedPopulation(
 } // namespace
 
 RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
-    const std::vector<RawColorWarpAnalysisSample>& samples,
+    const std::vector<RawColorWarpAnalysisSample>& inputSamples,
     const RawColorWarpSampleCircle& circle,
     std::size_t availablePinSlots,
     const std::function<bool()>& isCancelled) {
     RawColorWarpAreaAnalysisResult result;
+    std::vector<RawColorWarpAnalysisSample> samples;
     std::vector<std::size_t> inside;
     std::vector<std::size_t> inner;
-    inside.reserve(samples.size());
-    inner.reserve(samples.size());
+    inside.reserve(std::min<std::size_t>(4096,inputSamples.size()));
+    inner.reserve(std::min<std::size_t>(4096,inputSamples.size()));
     const float radiusU = std::max(0.000001f, circle.radiusU);
     const float radiusV = std::max(0.000001f, circle.radiusV);
-    for (std::size_t index = 0; index < samples.size(); ++index) {
+    for (std::size_t index = 0; index < inputSamples.size(); ++index) {
         if (isCancelled && (index & 255u) == 0u && isCancelled()) {
             result.cancelled = true;
             return result;
         }
-        const auto& sample = samples[index];
+        auto sample = inputSamples[index];
         const float du = (sample.sourceU - circle.centerU) / radiusU;
         const float dv = (sample.sourceV - circle.centerV) / radiusV;
         const float distanceSquared = du * du + dv * dv;
@@ -308,8 +239,14 @@ RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
             ++result.rejectedPixelCount;
             continue;
         }
-        inside.push_back(index);
-        if (distanceSquared <= 0.25f) inner.push_back(index);
+        const auto normalized=ColorWarpSelectionCoordinate(sample.color);
+        if(std::abs(sample.color.lightness)<.000001f || std::hypot(normalized[0],normalized[1])<.01f) {
+            ++result.rejectedPixelCount;continue;
+        }
+        sample.color.a=normalized[0];sample.color.b=normalized[1];sample.color.lightness=1;
+        inside.push_back(samples.size());
+        if(distanceSquared<=.25f)inner.push_back(samples.size());
+        samples.push_back(sample);
     }
     result.sampledPixelCount = inside.size();
     if (inside.empty() || availablePinSlots == 0u) {
@@ -359,8 +296,6 @@ RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
         if (!family.empty()) populations.push_back(std::move(family));
     }
 
-    const bool constrainBrightness =
-        circle.interpretation != RawColorWarpInterpretationMode::ColorOnly;
     const std::size_t proposalLimit = std::min<std::size_t>(
         4u,
         availablePinSlots);
@@ -369,7 +304,7 @@ RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
          index < populations.size() && result.proposals.size() < proposalLimit;
          ++index) {
         result.proposals.push_back(
-            BuildProposal(samples, populations[index], constrainBrightness));
+            BuildProposal(samples, populations[index]));
     }
     return result;
 }

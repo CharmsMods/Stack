@@ -1,104 +1,74 @@
 #include "Editor/Internal/RawLab/RawLabColorSurface.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
+#include "Editor/NodeEditors/ColorWarpEditorState.h"
+#include "Raw/ColorWarpMath.h"
+#include "Utils/FloatingSlider.h"
 #include <algorithm>
 #include <cmath>
-#include <unordered_set>
-#include <utility>
 
 namespace Stack::Editor::RawLabInternal {
+bool DrawColorWarpRanges(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin& pin) {
+    bool changed=false;
+    const auto range=[&](const char* label,RawRecipe::RawColorWarpRange& r,float lo,float hi,float scale,const char* format) {
+        ImGui::PushID(label);
+        bool edit=ImGui::Checkbox(label,&r.enabled);
+        if(r.enabled) {
+            float values[]{r.low*scale,r.high*scale,r.featherLow*scale,r.featherHigh*scale};
+            const char* names[]{"Minimum","Maximum","Lower soft edge","Upper soft edge"};
+            for(int i=0;i<4;++i) {
+                edit|=ImGuiExtras::FloatingSliderFloat(names[i],names[i],&values[i],i<2?lo:0,hi,format,ImGui::GetContentRegionAvail().x,scale!=100);
+                args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+            }
+            if(edit) {
+                r.low=values[0]/scale;r.high=std::max(r.low,values[1]/scale);
+                r.featherLow=values[2]/scale;r.featherHigh=values[3]/scale;
+            }
+        }
+        ImGui::PopID();return edit;
+    };
+    changed|=range("Hue range",pin.hueRange,-180,180,1,"%.1f deg");
+    LabTooltip("Degrees on either side of the selected source hue. Soft edges fade beyond the full-strength range.");
+    changed|=range("Restrict saturation",pin.saturationRange,0,100,100,"%.1f%%");
+    LabTooltip("Exposure-normalized chroma: OKLab chroma divided by lightness. This range stays put when exposure changes.");
+    changed|=range("Restrict exposure",pin.exposureRange,-32,32,1,"%.2f EV");
+    LabTooltip("Input exposure relative to 18% gray. Disabled means all exposures, including HDR.");
+    if(changed)RawRecipe::SanitizeColorWarpPin(pin);
+    return changed;
+}
 
 bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args) {
-    using RawRecipe::RawColorWarpPin;
-    constexpr float pi = 3.14159265358979323846f;
-    args.colorWarp = RawRecipe::SanitizeColorWarpRecipe(std::move(args.colorWarp));
-    auto& colorWarp = args.colorWarp;
-    bool changed = false;
-    if (BypassEyeButton(
-            "##RawLabColorWarpBypass",
-            colorWarp.enabled,
-            "Color Warp is included in every output. Click to bypass it without losing any settings.",
-            "Color Warp is bypassed in every output. Click to include the preserved edit again.")) {
-        colorWarp.enabled = !colorWarp.enabled;
-        changed = true;
+    if(!args.state)return false;
+    auto& colorWarp=args.colorWarp;bool changed=false;
+    changed|=ImGui::Checkbox("Include Color Warp",&colorWarp.enabled);
+    int combine=colorWarp.combine==RawRecipe::RawColorWarpCombine::Blend?1:0;
+    const char* modes[]{"Accumulate","Blend overlaps"};
+    if(ImGui::Combo("Combine edits",&combine,modes,2)) {
+        colorWarp.combine=combine?RawRecipe::RawColorWarpCombine::Blend:RawRecipe::RawColorWarpCombine::Accumulate;changed=true;
     }
-    if (BareTextButton(
-            "Static",
-            !args.ui.colorWarpLiveCloud)) {
-        if (args.ui.colorWarpLiveCloud) {
-            args.ui.colorWarpLiveCloud = false;
-            args.saveAppState();
-        }
+    LabTooltip("Accumulate adds matching edits. Blend overlaps averages them where the total participating weight exceeds one. Untouched selections never dilute edits.");
+    ImGui::BeginDisabled(args.strengthDriven);
+    changed|=ImGuiExtras::FloatingSliderFloat("Overall strength","##strength",&colorWarp.strength,0,2,"%.2f",ImGui::GetContentRegionAvail().x);
+    ImGui::EndDisabled();
+    if(ImGui::Checkbox("Show adjusted color cloud",&args.ui.colorWarpLiveCloud))args.saveAppState();
+    if(colorWarp.pins.empty())return changed;
+    args.ui.selectedColorWarpPin=std::clamp(args.ui.selectedColorWarpPin,0,int(colorWarp.pins.size())-1);
+    auto& selected=colorWarp.pins[args.ui.selectedColorWarpPin];
+    ImGui::SeparatorText(selected.name.c_str());
+    changed|=ImGui::Checkbox("Protect this color",&selected.protectColor);
+    LabTooltip("Suppress overlapping edits here instead of adding a color adjustment.");
+    if(selected.protectColor)changed|=ImGuiExtras::FloatingSliderFloat("Protection","##protection",&selected.strength,0,1,"%.2f",ImGui::GetContentRegionAvail().x);
+    if(ImGui::TreeNode("Selection ranges")){changed|=DrawColorWarpRanges(args,selected);ImGui::TreePop();}
+    ImGui::SeparatorText("Spatial restriction");
+    if(BareTextButton("Choose area")) {
+        args.ui.colorWarpAttachRegionPinId=selected.id;
+        args.ui.colorWarpSamplingArmed=true;args.ui.colorWarpInspectionActive=false;
     }
-    LabTooltip(
-        "Keep every dot at its original pre-Color OKLab coordinate while edits change the photograph.");
-    ImGui::SameLine(0.0f, 2.0f);
-    if (BareTextButton(
-            "Live",
-            args.ui.colorWarpLiveCloud)) {
-        if (!args.ui.colorWarpLiveCloud) {
-            args.ui.colorWarpLiveCloud = true;
-            args.saveAppState();
-        }
-    }
-    LabTooltip(
-        "Continuously reproject the same retained dots through the current Color Warp edit.");
-    if (colorWarp.pins.empty() || args.ui.colorWarpProvisionalPinValid) {
-        ImGui::TextWrapped("Select a retained pin on the photograph or Color Warp graph to edit its settings.");
-        return changed;
-    }
-    args.ui.selectedColorWarpPin = std::clamp(args.ui.selectedColorWarpPin, 0, int(colorWarp.pins.size()) - 1);
-    ImGui::TextUnformatted("Pin");
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##ColorWarpPin", colorWarp.pins[args.ui.selectedColorWarpPin].name.c_str())) {
-        for (int i = 0; i < int(colorWarp.pins.size()); ++i) {
-            ImGui::PushID(colorWarp.pins[i].id.c_str());
-            if (ImGui::Selectable(colorWarp.pins[i].name.c_str(), args.ui.selectedColorWarpPin == i)) {
-                args.ui.selectedColorWarpPin = i;
-                args.ui.colorWarpEvGesture = 0;
-                args.ui.colorWarpSmartSelection = {};
-            }
-            ImGui::PopID();
-        }
+    LabTooltip("Draw a sample circle on the image to restrict this selection to its connected region.");
+    if(!colorWarp.regions.empty() && ImGui::BeginCombo("Sample reference",selected.regionId.empty()?"None":selected.regionId.c_str())) {
+        if(ImGui::Selectable("None",selected.regionId.empty())){selected.regionId.clear();changed=true;}
+        for(const auto& region:colorWarp.regions)if(ImGui::Selectable(region.id.c_str(),region.id==selected.regionId)){selected.regionId=region.id;changed=true;}
         ImGui::EndCombo();
     }
-    auto& selected = colorWarp.pins[args.ui.selectedColorWarpPin];
-    if (BareTextButton("Draw", args.ui.colorWarpEvEditMode == 0)) {
-        args.ui.colorWarpEvEditMode = 0;
-        args.ui.colorWarpEvGesture = 0;
-        args.ui.colorWarpSmartSelection = {};
-        args.ui.colorWarpSmartHoverSelection = {};
-    }
-    ImGui::SameLine(0.0f, 2.0f);
-    if (BareTextButton("Smart", args.ui.colorWarpEvEditMode == 1)) {
-        args.ui.colorWarpEvEditMode = 1;
-        args.ui.colorWarpEvGesture = 0;
-    }
-    ImGui::TextDisabled(
-        args.ui.colorWarpEvEditMode == 0
-            ? "Brush radius %.1f EV"
-            : (args.ui.colorWarpSmartSelection.active &&
-                       args.ui.colorWarpSmartSelection.pinId == selected.id
-                   ? "Selected %.1f to %.1f EV"
-                   : "Click a shape"),
-        args.ui.colorWarpEvEditMode == 0
-            ? args.ui.colorWarpEvBrushWidth
-            : args.ui.colorWarpSmartSelection.leftEv,
-        args.ui.colorWarpSmartSelection.rightEv);
-    ImGui::BeginDisabled(selected.protectColor);
-    float lightnessOutput = selected.lightnessDeltaEv;
-    if (BareSliderFloat(
-            "Lightness output",
-            "RawLabColorWarpLightnessOutput",
-            &lightnessOutput,
-            -4.0f,
-            4.0f,
-            "%+.2f EV")) {
-        selected.lightnessDeltaEv = lightnessOutput;
-        changed = true;
-    }
-    ImGui::EndDisabled();
-    LabTooltip(
-        "Changes output lightness after qualification. It does not reshape the EV curve.");
     auto selectedRegion = std::find_if(
         colorWarp.regions.begin(), colorWarp.regions.end(),
         [&](const auto& region) { return region.id == selected.regionId; });
@@ -110,7 +80,7 @@ bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args) {
             const char* description;
         } spatialModes[] = {
             { "All", Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches,
-              "Affects every pixel matching this pin's color and EV qualifier." },
+              "Affects every pixel matching this selection's color and exposure ranges." },
             { "Connected", Stack::RawRecipe::RawColorWarpSpatialMode::Connected,
               "Keeps only qualifying pixels connected to the sampled circle." },
             { "Cohesive", Stack::RawRecipe::RawColorWarpSpatialMode::Cohesive,
@@ -193,196 +163,8 @@ bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args) {
             LabTooltip(directions[directionIndex].description);
         }
     }
-    const auto selectedGroup = std::find_if(
-        colorWarp.linkGroups.begin(), colorWarp.linkGroups.end(),
-        [&](const auto& group) {
-            return group.id == args.ui.selectedColorWarpGroupId;
-        });
-    if (selectedGroup != colorWarp.linkGroups.end()) {
-        ImGui::TextDisabled("Linked targets · %zu colors", selectedGroup->pinIds.size());
-        const char* operationLabels[] = {
-            "Move", "Rotate", "Spread", "Pull", "Chroma"
-        };
-        const char* operationDescriptions[] = {
-            "Translate every linked destination by the same a/b offset.",
-            "Rotate linked destinations together around their target centroid while preserving separation.",
-            "Spread or compress linked destinations around their target centroid.",
-            "Move linked destinations toward the chosen group target.",
-            "Scale every linked destination's chroma around neutral while preserving its hue."
-        };
-        for (int operation = 0; operation < 5; ++operation) {
-            if (operation > 0) ContinueRawLabControlRow(operationLabels[operation]);
-            if (BareTextButton(
-                    operationLabels[operation],
-                    args.ui.colorWarpGroupOperation == operation)) {
-                args.ui.colorWarpGroupOperation = operation;
-            }
-            LabTooltip(operationDescriptions[operation]);
-        }
-        const auto applyHarmony = [&](int harmony) {
-            std::vector<RawColorWarpPin*> members;
-            for (auto& pin : colorWarp.pins) {
-                if (std::find(selectedGroup->pinIds.begin(), selectedGroup->pinIds.end(), pin.id) !=
-                    selectedGroup->pinIds.end()) members.push_back(&pin);
-            }
-            if (members.empty()) return;
-            const float baseHue = std::atan2(members.front()->targetB, members.front()->targetA);
-            for (std::size_t index = 0; index < members.size(); ++index) {
-                auto& pin = *members[index];
-                const float chroma = std::hypot(pin.targetA, pin.targetB);
-                float offset = 0.0f;
-                if (harmony == 0) {
-                    offset = (static_cast<float>(index) -
-                        static_cast<float>(members.size() - 1u) * 0.5f) *
-                        (3.14159265358979323846f / 6.0f);
-                } else if (harmony == 1) {
-                    offset = (index & 1u) == 0u ? 0.0f : 3.14159265358979323846f;
-                } else {
-                    offset = static_cast<float>(index % 3u) *
-                        (2.0f * 3.14159265358979323846f / 3.0f);
-                }
-                const ImVec2 templateTarget(
-                    std::cos(baseHue + offset) * chroma,
-                    std::sin(baseHue + offset) * chroma);
-                pin.targetA += (templateTarget.x - pin.targetA) * 0.35f;
-                pin.targetB += (templateTarget.y - pin.targetB) * 0.35f;
-            }
-        };
-        if (BareTextButton("Analogous")) {
-            applyHarmony(0);
-            changed = true;
-        }
-        LabTooltip(
-            "Move linked destinations 35% toward an analogous hue template "
-            "centered on the first group target.");
-        ContinueRawLabControlRow("Complement");
-        if (BareTextButton("Complement")) {
-            applyHarmony(1);
-            changed = true;
-        }
-        LabTooltip(
-            "Move linked destinations 35% toward alternating complementary "
-            "hues while retaining each destination's chroma.");
-        ContinueRawLabControlRow("Triad");
-        if (BareTextButton("Triad")) {
-            applyHarmony(2);
-            changed = true;
-        }
-        LabTooltip(
-            "Move linked destinations 35% toward a three-way, 120-degree hue "
-            "template while retaining each destination's chroma.");
-    }
-    if (BareTextButton("Enabled", selected.enabled)) {
-        selected.enabled = !selected.enabled;
-        changed = true;
-    }
-    LabTooltip(
-        "Enable or bypass only the selected pin. Its stored source, target, "
-        "EV curve, and sampled region remain unchanged while bypassed.");
-    ContinueRawLabControlRow("Protect");
-    if (BareTextButton("Protect", selected.protectColor)) {
-        selected.protectColor = !selected.protectColor;
-        if (selected.protectColor) {
-            selected.targetA = selected.sourceA;
-            selected.targetB = selected.sourceB;
-            selected.lightnessDeltaEv = 0.0f;
-        }
-        changed = true;
-    }
-    LabTooltip(
-        "Protect the selected color instead of warping it. Protection returns "
-        "the destination to the source and resets its lightness shift.");
-    ContinueRawLabControlRow("Duplicate");
-    if (BareTextButton(
-            "Duplicate",
-            false,
-            colorWarp.pins.size() < Stack::RawRecipe::kMaxRawColorWarpPins)) {
-        RawColorWarpPin duplicate = selected;
-        duplicate.id = "color-" + std::to_string(colorWarp.pins.size() + 1u);
-        std::unordered_set<std::string> ids;
-        for (const RawColorWarpPin& existing : colorWarp.pins) ids.insert(existing.id);
-        while (ids.find(duplicate.id) != ids.end()) duplicate.id += "-copy";
-        duplicate.name = "Color " + std::to_string(colorWarp.pins.size() + 1u);
-        colorWarp.pins.push_back(std::move(duplicate));
-        args.ui.selectedColorWarpPin =
-            static_cast<int>(colorWarp.pins.size() - 1u);
-        return true;
-    }
-    LabTooltip(
-        "Create another pin with the selected pin's qualifier, target, EV "
-        "curve, strength, and region reference. The eight-pin limit applies.",
-        ImGuiHoveredFlags_AllowWhenDisabled);
-    ContinueRawLabControlRow("Delete");
-    if (BareTextButton("Delete")) {
-        colorWarp.pins.erase(
-            colorWarp.pins.begin() + args.ui.selectedColorWarpPin);
-        args.ui.selectedColorWarpPin = colorWarp.pins.empty()
-            ? -1
-            : std::min(
-                  args.ui.selectedColorWarpPin,
-                  static_cast<int>(colorWarp.pins.size() - 1u));
-        return true;
-    }
-    LabTooltip(
-        "Permanently remove the selected pin. Other pins and independently "
-        "referenced sampled regions remain available.");
 
-    float directionality = selected.qualifierDirectionality;
-    if (BareSliderFloat(
-            "Shape",
-            "RawLabColorWarpQualifierDirectionality",
-            &directionality,
-            0.0f,
-            1.0f,
-            "%.2f")) {
-        selected.qualifierDirectionality = directionality;
-        changed = true;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Circle at 0; rounded directional cone at 1. "
-            "Ctrl+wheel adjusts this on the surface.");
-    }
-    float aperture = selected.qualifierAperture;
-    if (BareSliderFloat(
-            "Aperture",
-            "RawLabColorWarpQualifierAperture",
-            &aperture,
-            0.10f,
-            1.0f,
-            "%.2f")) {
-        selected.qualifierAperture = aperture;
-        selected.qualifierDirectionality = std::max(
-            selected.qualifierDirectionality,
-            0.5f);
-        changed = true;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Controls the directional cone's side and rear reach. "
-            "Drag either square handle to adjust aperture.");
-    }
-    float directionDegrees =
-        selected.qualifierOrientationRadians * 180.0f / pi;
-    if (BareSliderFloat(
-            "Direction",
-            "RawLabColorWarpQualifierDirection",
-            &directionDegrees,
-            -180.0f,
-            180.0f,
-            "%.0f deg")) {
-        selected.qualifierOrientationRadians = directionDegrees * pi / 180.0f;
-        selected.qualifierDirectionality = std::max(
-            selected.qualifierDirectionality,
-            0.5f);
-        changed = true;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Drag the round qualifier handle or use Direction to change orientation.");
-    }
-
+    if(changed)++args.state->localRevision;
     return changed;
 }
-
-} // namespace Stack::Editor::RawLabInternal
+}

@@ -185,9 +185,8 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
                 case RenderDataMathMode::Max: operation = PointwiseOperation::Maximum; break;
                 case RenderDataMathMode::Difference: operation = PointwiseOperation::AbsoluteDifference; break;
                 case RenderDataMathMode::Divide:
-                case RenderDataMathMode::Average:
+                case RenderDataMathMode::Mix:
                 case RenderDataMathMode::Remap:
-                case RenderDataMathMode::ImageAverage:
                     return finish(false);
             }
             if (node.dataMathMode != RenderDataMathMode::Clamp) {
@@ -230,8 +229,8 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
         } else if (operation == PointwiseOperation::Clamp) {
             auto lowPixel = Splat(std::min(node.dataMathSettings.minValue, node.dataMathSettings.maxValue));
             auto highPixel = Splat(std::max(node.dataMathSettings.minValue, node.dataMathSettings.maxValue));
-            lowPixel[3] = -3.4028234663852886e38;
-            highPixel[3] = 3.4028234663852886e38;
+            if (Stack::NodeMath::ShapeOf(&node.semanticDescriptor) == Stack::NodeMath::ArithmeticShape::RGB)
+                lowPixel[3] = highPixel[3] = 1.0;
             const PointwiseValueId low = Stack::NodeMath::AppendPointwiseConstant(
                 program, lowPixel, source);
             const PointwiseValueId high = Stack::NodeMath::AppendPointwiseConstant(
@@ -246,7 +245,7 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
             // Neutral alpha operands retain the base alpha in the existing
             // vector IR, while RGB keeps the authored numeric operation.
             const bool includesAlpha = Stack::NodeMath::ShapeOf(&node.semanticDescriptor) != Stack::NodeMath::ArithmeticShape::RGB;
-            if (!Stack::NodeMath::Primitive(node.dataMathMode) || !includesAlpha) constantPixel[3] = operation == PointwiseOperation::Multiply ? 1.0 :
+            if (!includesAlpha) constantPixel[3] = operation == PointwiseOperation::Multiply ? 1.0 :
                 operation == PointwiseOperation::Minimum ? 3.4028234663852886e38 :
                 operation == PointwiseOperation::Maximum ? -3.4028234663852886e38 : 0.0;
             const PointwiseValueId constant = Stack::NodeMath::AppendPointwiseConstant(

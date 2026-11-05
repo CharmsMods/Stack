@@ -1,23 +1,27 @@
 #include "Project/GraphSnapshotBrightness.h"
 #include "Editor/NodeGraph/BrightnessRecipe.h"
+#include "Editor/NodeGraph/MathRecipes.h"
 #include <algorithm>
 
 namespace Stack::Project::GraphSnapshotInternal {
-bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const GraphSnapshotInputs& inputs,
+bool LowerNativeRecipes(const EditorNodeGraph::Graph& sourceGraph, const GraphSnapshotInputs& inputs,
                             const Timeline::FrameEvaluationContext& frameContext,
-                            EditorNodeGraph::Graph& brightnessGraph,
+                            EditorNodeGraph::Graph& recipeGraph,
                             EditorNodeGraph::CompoundExpansionResult& expansion,
                             EditorNodeGraph::GraphOutputDescriptions& authoredWireIssues,
                             EditorNodeGraph::GraphOutputDescriptions& blockedResults, int& resolvedStageId) {
+    const auto nativeRecipe = [](const auto& node) {
+        return EditorNodeGraphDefinitions::IsBrightnessRecipe(node) || EditorNodeGraphDefinitions::IsMathRecipe(node);
+    };
     if (std::none_of(sourceGraph.GetNodes().begin(), sourceGraph.GetNodes().end(),
-                     EditorNodeGraphDefinitions::IsBrightnessRecipe))
+                     nativeRecipe))
         return false;
     bool lowered = false;
     const auto descriptions = EditorNodeGraph::DescribeGraphOutputs(
         sourceGraph,
         inputs.outputContextOverrides ? *inputs.outputContextOverrides : EditorNodeGraph::GraphOutputContext{});
     auto recipes = sourceGraph.CloneForAnalysis();
-    const auto blockBrightness = [&](const EditorNodeGraph::Node& node, const std::string& reason) {
+    const auto blockRecipe = [&](const EditorNodeGraph::Node& node, const std::string& reason) {
         const auto key = EditorNodeGraph::GraphOutputIdentity(node.id, EditorNodeGraph::kImageOutputSocketId);
         if (const auto first = authoredWireIssues.find(key); first != authoredWireIssues.end()) {
             blockedResults[key] = first->second;
@@ -27,7 +31,7 @@ bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const Gra
         failure.descriptor = NodeMath::MakeUnknownDescriptor(NodeMath::LogicalValueType::Invalid);
         failure.usesArithmeticContract = true;
         NodeMath::Diagnostic issue;
-        issue.ruleId = "graph.brightness";
+        issue.ruleId = "graph.recipe";
         issue.stage = NodeMath::DiagnosticStage::Lowering;
         issue.severity = NodeMath::DiagnosticSeverity::HardError;
         issue.authoredSourceIdentity = node.instanceUuid;
@@ -38,7 +42,7 @@ bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const Gra
         blockedResults[key] = std::move(failure);
     };
     for (const auto& leaf : sourceGraph.GetNodes()) {
-        if (!EditorNodeGraphDefinitions::IsBrightnessRecipe(leaf))
+        if (!nativeRecipe(leaf))
             continue;
         for (const auto& socket : sourceGraph.GetSockets(leaf, false)) {
             const auto key = EditorNodeGraph::GraphOutputIdentity(leaf.id, socket.id);
@@ -46,12 +50,18 @@ bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const Gra
             if (found != descriptions.end() && found->second.invalidWire)
                 authoredWireIssues.emplace(key, found->second);
         }
+        if (EditorNodeGraphDefinitions::IsMathRecipe(leaf)) {
+            std::string reason;
+            if (!EditorNodeGraphDefinitions::BindMathRecipe(recipes, leaf.id, reason))
+                blockRecipe(leaf, reason);
+            continue;
+        }
         const auto* wire = sourceGraph.FindInputLink(leaf.id, "imageIn");
         const auto source =
             wire ? descriptions.find(EditorNodeGraph::GraphOutputIdentity(wire->fromNodeId, wire->fromSocketId))
                  : descriptions.end();
         if (!wire || source == descriptions.end()) {
-            blockBrightness(leaf, "Connect a Channel, RGB or RGBA input to Brightness.");
+            blockRecipe(leaf, "Connect a Channel, RGB or RGBA input to Brightness.");
             continue;
         }
         auto settings = leaf.layerParameters;
@@ -60,17 +70,17 @@ bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const Gra
         std::string reason;
         if (!EditorNodeGraphDefinitions::BindBrightnessRecipe(recipes, leaf.id, source->second.descriptor,
                                                               settings, reason))
-            blockBrightness(leaf, reason);
+            blockRecipe(leaf, reason);
     }
-    EditorNodeGraph::CompoundExpansionResult brightness;
-    if (!recipes.ExpandAllCompoundNodes(brightnessGraph, &brightness)) {
+    EditorNodeGraph::CompoundExpansionResult loweredRecipes;
+    if (!recipes.ExpandAllCompoundNodes(recipeGraph, &loweredRecipes)) {
         for (const auto& leaf : sourceGraph.GetNodes())
-            if (EditorNodeGraphDefinitions::IsBrightnessRecipe(leaf))
-                blockBrightness(leaf, brightness.error);
+            if (nativeRecipe(leaf))
+                blockRecipe(leaf, loweredRecipes.error);
     } else {
         lowered = true;
     }
-    for (const auto& binding : brightness.outputBindings) {
+    for (const auto& binding : loweredRecipes.outputBindings) {
         const auto native =
             EditorNodeGraph::GraphOutputIdentity(binding.authoredNodeId, binding.authoredSocketId);
         if (const auto issue = authoredWireIssues.find(native); issue != authoredWireIssues.end())
@@ -86,8 +96,8 @@ bool LowerBrightnessRecipes(const EditorNodeGraph::Graph& sourceGraph, const Gra
         if (binding.authoredNodeId == inputs.stageOutputNodeId && binding.authoredSocketId == "imageOut")
             resolvedStageId = binding.expandedNodeId;
     }
-    expansion.outputBindings.insert(expansion.outputBindings.end(), brightness.outputBindings.begin(),
-                                    brightness.outputBindings.end());
+    expansion.outputBindings.insert(expansion.outputBindings.end(), loweredRecipes.outputBindings.begin(),
+                                    loweredRecipes.outputBindings.end());
     for (const auto& binding : expansion.outputBindings)
         if (binding.authoredNodeId == inputs.stageOutputNodeId && binding.authoredSocketId == "imageOut")
             resolvedStageId = binding.expandedNodeId;

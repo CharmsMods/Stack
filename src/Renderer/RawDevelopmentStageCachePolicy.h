@@ -1,4 +1,5 @@
 #pragma once
+#include "Raw/RawColorWarpSelection.h"
 #include "Raw/RawZoneArea.h"
 
 #include "Raw/RawDevelopmentRecipe.h"
@@ -256,55 +257,15 @@ inline void HashLocalRange(
 inline void HashColorWarp(
     std::size_t& fingerprint,
     const Stack::RawRecipe::RawColorWarpRecipe& value) {
-    HashTypedValue(fingerprint, value.version);
+    HashTypedValue(fingerprint, Stack::RawRecipe::ColorWarpSelectionFingerprint(value));
     HashTypedValue(fingerprint, value.enabled);
-    if (!value.enabled) return;
     HashTypedValue(fingerprint, value.strength);
-    HashTypedValue(fingerprint, value.pins.size());
-    for (const auto& pin : value.pins) {
-        HashTypedValue(fingerprint, pin.id);
-        HashTypedValue(fingerprint, pin.enabled);
-        HashTypedValue(fingerprint, pin.protectColor);
-        HashTypedValue(fingerprint, pin.sourceA);
-        HashTypedValue(fingerprint, pin.sourceB);
-        HashTypedValue(fingerprint, pin.targetA);
-        HashTypedValue(fingerprint, pin.targetB);
-        HashTypedValue(fingerprint, pin.radius);
-        HashTypedValue(fingerprint, pin.softness);
-        HashTypedValue(fingerprint, pin.qualifierDirectionality);
-        HashTypedValue(fingerprint, pin.qualifierOrientationRadians);
-        HashTypedValue(fingerprint, pin.qualifierAperture);
-        HashTypedValue(fingerprint, pin.strength);
-        HashTypedValue(fingerprint, pin.regionId);
-        HashTypedValue(fingerprint, pin.evCurve.samples.size());
-        for (const float sample : pin.evCurve.samples) {
-            HashTypedValue(fingerprint, sample);
-        }
-        HashTypedValue(fingerprint, pin.lightnessDeltaEv);
+    HashTypedValue(fingerprint, static_cast<int>(value.combine));
+    for(const auto& pin:value.pins) {
+        HashTypedValue(fingerprint,pin.enabled);HashTypedValue(fingerprint,pin.protectColor);
+        HashTypedValue(fingerprint,pin.strength);HashTypedValue(fingerprint,pin.hueShift);
+        HashTypedValue(fingerprint,pin.saturation);HashTypedValue(fingerprint,pin.exposureEv);
     }
-    HashTypedValue(fingerprint, value.regions.size());
-    for (const auto& region : value.regions) {
-        HashTypedValue(fingerprint, region.id);
-        HashTypedValue(fingerprint, region.spatialMode);
-        HashTypedValue(fingerprint, region.reachPixels);
-        HashTypedValue(fingerprint, region.spatialSupport);
-        HashTypedValue(fingerprint, region.edgeStop);
-        HashTypedValue(fingerprint, region.featherPixels);
-        HashTypedValue(fingerprint, region.featherDirection);
-        HashTypedValue(fingerprint, region.circles.size());
-        for (const auto& circle : region.circles) {
-            HashTypedValue(fingerprint, circle.id);
-            HashTypedValue(fingerprint, circle.centerU);
-            HashTypedValue(fingerprint, circle.centerV);
-            HashTypedValue(fingerprint, circle.radiusU);
-            HashTypedValue(fingerprint, circle.radiusV);
-            HashTypedValue(fingerprint, circle.interpretation);
-            HashTypedValue(fingerprint, circle.polarity);
-        }
-    }
-    // Link groups are UI-side organization. Final rendering depends only on
-    // the resolved pin sources and targets, so group membership is not part of
-    // the Post-Color-Warp fingerprint.
 }
 
 // Spatial Color Warp pixels also depend on this runtime rendering policy,

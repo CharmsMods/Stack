@@ -45,7 +45,7 @@ LiveNodeDefinition MakeOperation(NodeKind kind, int variant,
     } else definition.identity.id = "stack:graph/" + StableToken(operationKey);
     const bool v2 = kind == NodeKind::Reformat || kind == NodeKind::Output || kind == NodeKind::ChannelCombine || kind == NodeKind::RawOperation || kind == NodeKind::Layer;
     definition.identity.version = kind==NodeKind::RawOperation && variant==static_cast<int>(Stack::RawRecipe::GraphOperationKind::ToneCurve)
-        ? Stack::NodeMath::SemanticVersion{3,0,0}
+        ? Stack::NodeMath::SemanticVersion{4,0,0}
         : v2 ? Stack::NodeMath::SemanticVersion{2,0,0} : Stack::NodeMath::SemanticVersion{1,0,0};
     definition.label = std::move(label);
     definition.category = std::move(category);

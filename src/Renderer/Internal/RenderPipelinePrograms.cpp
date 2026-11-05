@@ -903,8 +903,6 @@ void RenderPipeline::EnsureDataMathProgram() {
             if (uMode == 0) {
                 result = clamp(a, vec4(uMinValue), vec4(uMaxValue));
         )") + primitiveCases + R"(
-            } else if (uMode == 5) {
-                result = (a + b) * 0.5;
             } else if (uMode == 6) {
                 result = min(a, b);
             } else if (uMode == 7) {
@@ -912,8 +910,8 @@ void RenderPipeline::EnsureDataMathProgram() {
             } else if (uMode == 8) {
                 result = abs(a - b);
             } else if (uMode == 9) {
-                float span = max(uMaxValue - uMinValue, 0.00001);
-                result = mix(vec4(uOutMin), vec4(uOutMax), clamp((a - vec4(uMinValue)) / span, 0.0, 1.0));
+                float span = uMaxValue - uMinValue;
+                result = vec4(uOutMin) + ((a - vec4(uMinValue)) / span) * (uOutMax - uOutMin);
             }
 
             if (uScalarOutput == 1) {
@@ -921,8 +919,6 @@ void RenderPipeline::EnsureDataMathProgram() {
                 FragColor = vec4(v, v, v, 1.0);
             } else {
                 if (uScalarOutput == 2) result.a = 1.0;
-                else if (uMode < 1 || uMode > 4) result.a = uHasA != 0 && uScalarA == 0 ? a.a :
-                    (uHasB != 0 && uScalarB == 0 ? b.a : 1.0);
                 FragColor = result;
             }
         }

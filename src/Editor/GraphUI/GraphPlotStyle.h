@@ -29,6 +29,8 @@ void DrawGraphReference(ImDrawList& draw, ImVec2 start, ImVec2 end,
 void DrawGraphBezier(ImDrawList& draw, ImVec2 start, ImVec2 outgoing,
     ImVec2 incoming, ImVec2 end, ImU32 color, const GraphPlotStyle& style,
     bool hovered = false, bool selected = false);
+void DrawGraphPolyline(ImDrawList& draw,const ImVec2* points,int count,
+    ImU32 color,const GraphPlotStyle& style);
 void DrawGraphPoint(ImDrawList& draw, ImVec2 point, const GraphPlotStyle& style,
     bool selected = false, bool filled = false, ImGuiID identity = 0,
     bool hovered = false, bool held = false, const Animation::ControlInput* nativeInput = nullptr);

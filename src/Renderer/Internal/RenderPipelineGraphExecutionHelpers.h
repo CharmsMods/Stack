@@ -80,11 +80,6 @@ float EstimateHdrMergeRangeStep(const Raw::RawMetadata& metadata);
 std::string MakeNodeSocketKey(int nodeId, std::string_view socketId);
 int ExtractNodeIdFromCacheKey(const std::string& key);
 
-struct DataMathInputLinkInfo {
-    const RenderGraphLink* link = nullptr;
-    std::string socketId;
-};
-
 bool IsUniformRenderSocket(const struct GraphExecutionContext& context, int nodeId, std::string_view socketId);
 
 struct GraphExecutionContext {
@@ -112,8 +107,6 @@ struct GraphExecutionContext {
     std::unordered_set<std::string> fingerprintingMasks;
 };
 
-std::vector<DataMathInputLinkInfo> CollectDataMathAverageInputs(const GraphExecutionContext& executionContext, int nodeId);
-const RenderGraphLink* FindFirstDataMathAverageInput(const GraphExecutionContext& executionContext, int nodeId);
 bool IsChannelSocketId(std::string_view socketId);
 bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nodeId, std::string_view socketId);
 

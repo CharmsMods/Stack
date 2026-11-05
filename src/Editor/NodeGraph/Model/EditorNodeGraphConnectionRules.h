@@ -89,8 +89,7 @@ inline bool IsChannelProcessingBridge(
     const bool channelToDataProcessor =
         fromSocket.type == SocketType::Channel &&
         toSocket.type == SocketType::Image &&
-        ((to.kind == NodeKind::DataMath && to.dataMathMode != DataMathMode::ImageAverage &&
-          (IsDataMathInputSocketId(toSocketId) || toSocketId == kDataMathBaseInputSocketId)) ||
+        ((to.kind == NodeKind::DataMath && IsDataMathInputSocketId(toSocketId)) ||
          (to.kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
          (to.kind == NodeKind::Reformat && toSocketId == kImageInputSocketId));
     if (channelToDataProcessor) return true;

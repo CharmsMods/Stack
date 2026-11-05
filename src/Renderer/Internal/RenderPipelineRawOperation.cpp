@@ -8,6 +8,64 @@
 
 #include <stdexcept>
 
+namespace {
+RenderGraphNode BuildToneLayer(const RenderGraphNode& node, const Stack::NodeMath::ValueDescriptor& input) {
+    using namespace Stack::RawRecipe;
+    const auto capability=Stack::NodeMath::DescribeImageOperationInput(input);
+    const auto mode=Stack::NodeMath::ToneCurveMode(node.rawOperation.parameters);
+    if (mode!="components" && !capability.colorRelationships)
+        throw std::runtime_error(capability.colorUnavailableReason);
+    auto tone = node;
+    tone.kind = RenderGraphNodeKind::Layer;
+    tone.layerJson = mode=="advanced" ? node.rawOperation.parameters.at("advanced") : DefaultFinishToneJson();
+    if (mode!="advanced") {
+        for (const auto& value:node.rawOperation.parameters.items()) tone.layerJson[value.key()]=value.value();
+        auto scene = Stack::NodeMath::EffectiveToneCurveSceneTone(node.rawOperation.parameters);
+        tone.layerJson["luminanceTone"] = SerializeSceneTone(scene);
+        if (mode=="components" || mode=="luminance") {
+            // Photo curves run in one pass: luminance gain, then R/G/B.
+            // The numerical master belongs exclusively to Numeric channels.
+            RawPointCurveComponent identity; identity.points={{0,0,1},{1,1,1}};
+            for (int channel=0;channel<4;++channel) {
+                const auto curveChannel=static_cast<RawPointCurveChannel>(channel);
+                if (mode == "luminance" && channel == 0) {
+                    StorePointCurveComponentInFinishToneJson(tone.layerJson,curveChannel,identity);
+                    continue;
+                }
+                const auto key=RawPointCurveChannelKey(curveChannel);
+                const auto amount=ReadCurveAmount(tone.layerJson["curveAmounts"][key]);
+                const float strength=tone.layerJson["curveAmounts"][key].value("amount",1.f);
+                auto component=PointCurveComponentFromFinishToneJson(tone.layerJson,curveChannel);
+                const auto points=AttenuateCurve(amount.locked ? amount.reference : RawPointCurveBezierPoints(component),strength,true);
+                component.points.clear();
+                for (const auto& point:points) component.points.push_back({point.x,point.y,1,point.incoming,point.outgoing,point.tonal});
+                StorePointCurveComponentInFinishToneJson(tone.layerJson,curveChannel,component);
+            }
+            // The stored component curves survive rewiring. Only real input
+            // components participate in this execution; scalar uses Value.
+            for (int channel=1;channel<4;++channel)
+                if (!Stack::NodeMath::HasImageComponent(capability.components,
+                    static_cast<Stack::NodeMath::ImageComponent>(1u<<(channel-1))))
+                    StorePointCurveComponentInFinishToneJson(tone.layerJson,
+                        static_cast<RawPointCurveChannel>(channel),identity);
+        }
+        else {
+            tone.layerJson.erase("pointCurves");tone.layerJson.erase("pointCurveSetVersion");
+        }
+    }
+    std::array<float,3> components{};
+    for (int i=0;i<3;++i) components[i]=capability.scalar ? (i==0 ? 1.f : 0.f) :
+        Stack::NodeMath::HasImageComponent(capability.components,
+            static_cast<Stack::NodeMath::ImageComponent>(1u<<i)) ? 1.f : 0.f;
+    tone.layerJson["executionComponents"]=components;
+    tone.layerJson["type"] = "ToneCurve";
+    tone.layerJson["enabled"] = true;
+    tone.layerJson["truthfulV2SignedMath"] = true;
+    tone.layerJson["inputWorkingSpace"] = capability.lumaWeights[0]>.25f ? "linear-rec2020-d65" : "linear-srgb-d65";
+    return tone;
+}
+}
+
 RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
     const Stack::Renderer::GraphExecution::GraphExecutionContext& context,
     const RenderGraphNode& node,
@@ -16,6 +74,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
     using namespace Stack::RawRecipe;
     using namespace Stack::Renderer;
     const auto* inputLink = context.FindInputLink(node.nodeId, "imageIn");
+    if (inputLink && node.rawOperation.enabled && node.rawOperation.kind == GraphOperationKind::ToneCurve) {
+        // The layer owns input evaluation and the single coverage blend.
+        return RenderLayerGraphNode(context, BuildToneLayer(node, inputLink->semanticDescriptor), evalImage, evalMask);
+    }
     const unsigned int input = inputLink ? evalImage(inputLink->fromNodeId, inputLink->fromSocketId) : 0;
     if (!input) return {};
     GraphNodeRenderResult result;
@@ -48,57 +110,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
         case GraphOperationKind::Exposure:
             if (recipe.preToneExposureEv != 0) adopt(RenderRawDevelopmentExposure(input, recipe.preToneExposureEv));
             break;
-        case GraphOperationKind::ToneCurve: {
-            const auto capability=Stack::NodeMath::DescribeImageOperationInput(inputLink->semanticDescriptor);
-            const auto mode=node.rawOperation.parameters.value("curveMode",std::string("components"));
-            if (mode!="components" && !capability.colorRelationships)
-                throw std::runtime_error(capability.colorUnavailableReason);
-            auto tone = node;
-            tone.kind = RenderGraphNodeKind::Layer;
-            tone.layerJson = mode=="advanced" ? node.rawOperation.parameters.at("advanced") : DefaultFinishToneJson();
-            if (mode!="advanced") {
-                for (const auto& value:recipe.finishTone.layerJson.items()) tone.layerJson[value.key()]=value.value();
-                if (mode=="components") {
-                    SceneTone disabled; disabled.enabled=false;
-                    tone.layerJson["luminanceTone"]=SerializeSceneTone(disabled);
-                    for (int channel=0;channel<4;++channel) {
-                        const auto curveChannel=static_cast<RawPointCurveChannel>(channel);
-                        const auto key=RawPointCurveChannelKey(curveChannel);
-                        const auto amount=ReadCurveAmount(tone.layerJson["curveAmounts"][key]);
-                        const float strength=tone.layerJson["curveAmounts"][key].value("amount",1.f);
-                        auto component=PointCurveComponentFromFinishToneJson(tone.layerJson,curveChannel);
-                        const auto points=AttenuateCurve(amount.locked ? amount.reference : RawPointCurveBezierPoints(component),strength,true);
-                        component.points.clear();
-                        for (const auto& point:points) component.points.push_back({point.x,point.y,1,point.incoming,point.outgoing,point.tonal});
-                        StorePointCurveComponentInFinishToneJson(tone.layerJson,curveChannel,component);
-                    }
-                    // The stored component curves survive rewiring. Only real input
-                    // components participate in this execution; scalar uses Value.
-                    RawPointCurveComponent identity; identity.points={{0,0,1},{1,1,1}};
-                    for (int channel=1;channel<4;++channel)
-                        if (!Stack::NodeMath::HasImageComponent(capability.components,
-                            static_cast<Stack::NodeMath::ImageComponent>(1u<<(channel-1))))
-                            StorePointCurveComponentInFinishToneJson(tone.layerJson,
-                                static_cast<RawPointCurveChannel>(channel),identity);
-                }
-                else {
-                    tone.layerJson.erase("pointCurves");tone.layerJson.erase("pointCurveSetVersion");
-                    tone.layerJson["luminanceTone"]=SerializeSceneTone(
-                        Stack::NodeMath::EffectiveToneCurveSceneTone(node.rawOperation.parameters));
-                }
-            }
-            std::array<float,3> components{};
-            for (int i=0;i<3;++i) components[i]=capability.scalar ? (i==0 ? 1.f : 0.f) :
-                Stack::NodeMath::HasImageComponent(capability.components,
-                    static_cast<Stack::NodeMath::ImageComponent>(1u<<i)) ? 1.f : 0.f;
-            tone.layerJson["executionComponents"]=components;
-            tone.layerJson["type"] = "ToneCurve";
-            tone.layerJson["enabled"] = true;
-            tone.layerJson["truthfulV2SignedMath"] = true;
-            tone.layerJson["inputWorkingSpace"] = capability.lumaWeights[0]>.25f ? "linear-rec2020-d65" : "linear-srgb-d65";
-            // The existing curve executor also applies this node's mask.
-            return RenderLayerGraphNode(context, tone, evalImage, evalMask);
-        }
         case GraphOperationKind::LocalEv: {
             if (recipe.preToneExposureEv != 0.f) adopt(RenderRawDevelopmentExposure(input,recipe.preToneExposureEv));
             const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(node.nodeId, "imageOut");

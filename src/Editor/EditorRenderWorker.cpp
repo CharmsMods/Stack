@@ -311,119 +311,6 @@ void CaptureRawWorkspaceViewTransformInputStats(
     result.rawWorkspace.stageStatsReadbacks = pipeline.GetRawDevelopmentStageStatsReadbacks();
     result.rawWorkspace.graphScopeReadback =
         pipeline.GetRawDevelopmentGraphScopeReadback();
-    result.rawWorkspace.colorWarpCloudPacket = {};
-    const RawDevelopmentGraphScopeReadback& colorScope =
-        result.rawWorkspace.graphScopeReadback;
-    const std::size_t scopePixelCount = colorScope.valid &&
-            colorScope.stage == RawDevelopmentGraphScopeStage::ColorWarpInput &&
-            colorScope.width > 0 && colorScope.height > 0
-        ? static_cast<std::size_t>(colorScope.width) *
-            static_cast<std::size_t>(colorScope.height)
-        : 0u;
-    if (snapshot.rawWorkspace.hasRecipe && scopePixelCount > 0u &&
-        colorScope.pixels.size() >= scopePixelCount * 3u) {
-        constexpr std::size_t kBinColumns = 48u;
-        constexpr std::size_t kBinRows = 48u;
-        constexpr std::size_t kBinCount = kBinColumns * kBinRows;
-        constexpr std::size_t kMaximumSamples = 4096u;
-        std::array<std::size_t, kBinCount> counts {};
-        const auto buildSample = [&](std::size_t index,
-                                     Raw::RawColorCloudSample& sample) {
-            const std::size_t offset = index * 3u;
-            sample.rgb = {
-                colorScope.pixels[offset + 0u],
-                colorScope.pixels[offset + 1u],
-                colorScope.pixels[offset + 2u]
-            };
-            if (!std::isfinite(sample.rgb[0]) ||
-                !std::isfinite(sample.rgb[1]) ||
-                !std::isfinite(sample.rgb[2])) {
-                return false;
-            }
-            const Stack::RawRecipe::RawColorWarpCoordinate coordinate =
-                Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
-                    sample.rgb,
-                    snapshot.rawWorkspace.recipe.technical.workingSpace);
-            sample.a = coordinate.a;
-            sample.b = coordinate.b;
-            sample.sceneEv = coordinate.sceneEv;
-            sample.u = (static_cast<float>(index % colorScope.width) + 0.5f) / colorScope.width;
-            sample.v = (static_cast<float>(index / colorScope.width) + 0.5f) / colorScope.height;
-            return std::isfinite(sample.a) &&
-                std::isfinite(sample.b) &&
-                std::isfinite(sample.sceneEv);
-        };
-        const auto binForSample = [&](const Raw::RawColorCloudSample& sample) {
-            const float normalizedA = std::clamp(
-                (sample.a + 1.0f) * 0.5f,
-                0.0f,
-                0.999999f);
-            const float normalizedB = std::clamp(
-                (sample.b + 1.0f) * 0.5f,
-                0.0f,
-                0.999999f);
-            return static_cast<std::size_t>(
-                       normalizedB * static_cast<float>(kBinRows)) *
-                    kBinColumns +
-                static_cast<std::size_t>(
-                    normalizedA * static_cast<float>(kBinColumns));
-        };
-        Raw::RawColorCloudSample candidate;
-        for (std::size_t index = 0; index < scopePixelCount; ++index) {
-            if (buildSample(index, candidate)) {
-                ++counts[binForSample(candidate)];
-            }
-        }
-        std::array<std::size_t, kBinCount> quotas {};
-        std::size_t totalQuota = 0u;
-        for (std::size_t bin = 0; bin < kBinCount; ++bin) {
-            if (counts[bin] == 0u) continue;
-            quotas[bin] = std::min(
-                counts[bin],
-                std::max<std::size_t>(
-                    1u,
-                    static_cast<std::size_t>(std::ceil(
-                        std::sqrt(static_cast<float>(counts[bin])) * 3.0f))));
-            totalQuota += quotas[bin];
-        }
-        if (totalQuota > kMaximumSamples) {
-            const float scale = static_cast<float>(kMaximumSamples) /
-                static_cast<float>(totalQuota);
-            totalQuota = 0u;
-            for (std::size_t bin = 0; bin < kBinCount; ++bin) {
-                if (quotas[bin] == 0u) continue;
-                quotas[bin] = std::max<std::size_t>(
-                    1u,
-                    static_cast<std::size_t>(std::floor(
-                        static_cast<float>(quotas[bin]) * scale)));
-                totalQuota += quotas[bin];
-            }
-        }
-        Raw::RawColorCloudPacket& packet =
-            result.rawWorkspace.colorWarpCloudPacket;
-        packet.sourceKey = result.rawWorkspace.sourceKey;
-        packet.inputFingerprint = colorScope.graphInputFingerprint
-            ? colorScope.graphInputFingerprint : snapshot.rawWorkspace.graphScopeInputFingerprint;
-        packet.workingSpace = static_cast<int>(
-            snapshot.rawWorkspace.recipe.technical.workingSpace);
-        packet.colorWarpVersion =
-            snapshot.rawWorkspace.recipe.colorWarp.version;
-        packet.samples.reserve(std::min(totalQuota, kMaximumSamples));
-        std::array<std::size_t, kBinCount> seen {};
-        std::array<std::size_t, kBinCount> selected {};
-        for (std::size_t index = 0;
-             index < scopePixelCount && packet.samples.size() < kMaximumSamples;
-             ++index) {
-            if (!buildSample(index, candidate)) continue;
-            const std::size_t bin = binForSample(candidate);
-            const std::size_t binSeen = ++seen[bin];
-            const std::size_t desired =
-                (binSeen * quotas[bin]) / counts[bin];
-            if (desired <= selected[bin]) continue;
-            ++selected[bin];
-            packet.samples.push_back(candidate);
-        }
-    }
     result.rawWorkspace.startPointDiagnostics =
         pipeline.BuildRawDevelopmentStartPointDiagnostics(result.rawWorkspace.sourceKey);
     result.rawWorkspace.analysis =
@@ -3249,8 +3136,10 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         }
                         Raw::RawGpuImageLease hdrTile;
                         if(Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic &&
-                            RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) && snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection)
-                            hdrTile=Stack::Hdr::RenderCompanion(pipeline,tileGraphBatch.Graph());
+                            RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) && snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection) {
+                            hdrTile=Stack::Hdr::RenderCompanion(pipeline,tileGraphBatch.Graph(),result.error);
+                            if(!result.error.empty()) return false;
+                        }
                         pipeline.ExecuteGraph(
                             tileGraphBatch.Graph(),
                             tileGraphBatch.Topology());
@@ -3346,8 +3235,19 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             }
             if(Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic &&
                 (RawRenderPurposeMayPublishPresentation(snapshot.rawRenderPurpose) || snapshot.rawRenderPurpose==RawRenderPurpose::ViewportOverview) &&
-                snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection)
-                result.outputTexture.hdr=Stack::Hdr::RenderCompanion(pipeline,snapshot.graph);
+                snapshot.rawRenderPurpose!=RawRenderPurpose::ExplicitInspection) {
+                result.outputTexture.hdr=Stack::Hdr::RenderCompanion(pipeline,snapshot.graph,result.error);
+                if(shouldAbortStaleWork()) {
+                    reportSupersededWork();
+                    result.error="Render superseded by a newer snapshot.";
+                    return result;
+                }
+                if(!result.error.empty()) {
+                    result.mainGraphStats=pipeline.GetLastGraphExecutionStats();
+                    finishProgressStep("HDR preview failed.");
+                    return result;
+                }
+            }
             pipeline.ExecuteGraph(snapshot.graph);
             // Keep the main image's completion state immutable: previews,
             // candidates and overview coverage may execute other graphs.

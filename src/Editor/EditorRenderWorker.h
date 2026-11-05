@@ -8,7 +8,6 @@
 #include "Raw/RawViewportCalibration.h"
 #include "Raw/RawViewportRegion.h"
 #include "Raw/RawAutoStartPoint.h"
-#include "Raw/RawColorCloudPacket.h"
 #include "Raw/RawGpuImageLease.h"
 #include "Raw/RawImageAnalysis.h"
 #include "Raw/RawPreciseNativeRuntime.h"
@@ -533,7 +532,6 @@ public:
         std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
         RawDevelopmentGraphScopeReadback graphScopeReadback;
         std::string graphScopeOwnerKey;
-        Raw::RawColorCloudPacket colorWarpCloudPacket;
         std::shared_ptr<const RawGradingScopeVisualization> gradingScopeVisualization;
         std::size_t graphScopeInputFingerprint = 0;
         Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics startPointDiagnostics;

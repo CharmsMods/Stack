@@ -1,4 +1,5 @@
 #pragma once
+#include "Editor/NodeGraph/MixContributions.h"
 
 #include "Editor/GraphCapture.h"
 #include "Editor/UI/NodeOpenTransition.h"
@@ -599,6 +600,13 @@ private:
     bool m_DetailCardInteractionAllowed = false;
     std::unordered_map<int, float> m_GroupEmphasisAnim;
     std::unordered_map<int, std::uint64_t> m_NodeFrontOrder;
+    struct MixBarCache {
+        std::uint64_t revision = 0;
+        Stack::NodeMath::MixWeights weights{};
+        std::optional<EditorNodeGraph::MixContributions> contributions;
+    };
+    std::unordered_map<int, MixBarCache> m_MixBars;
+    bool RenderMixControls(NodeContentRenderContext& context);
     mutable std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
     mutable std::uint64_t m_NodeProjectionRevision = 0;
     mutable std::uint64_t m_WireWorldRevision = 1;

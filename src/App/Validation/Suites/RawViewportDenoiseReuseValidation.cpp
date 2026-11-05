@@ -50,7 +50,7 @@ bool ValidateRawViewportDenoiseReuse() {
         if (view == 1) {
             recipe.colorWarp.enabled = true;
             RawRecipe::RawColorWarpPin pin;
-            pin.id = "reuse"; pin.targetA = 0.02f + generation*0.0001f;
+            pin.id = "reuse"; pin.sourceA=.3f;pin.hueRange.enabled=false;pin.hueShift=( 0.02f + generation*0.0001f)*100.f;
             recipe.colorWarp.pins = {pin};
         }
         if (view == 2) {

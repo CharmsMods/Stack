@@ -22,8 +22,8 @@ bool DescribeRgbAdapter(const Graph& graph, const Node& target, const std::strin
 
 bool ConnectAuthoredSockets(Graph& candidate, int from, const std::string& output,
                             int to, const std::string& input, std::string* error,
-                            int* insertedNode, const GraphOutputContext* published) {
-    if (insertedNode) *insertedNode = 0;
+                            int* adapterNode, const GraphOutputContext* published) {
+    if (adapterNode) *adapterNode = 0;
     bool combine = false;
     {
         std::optional<ScopedGraphOutputAnalysis> scope;
@@ -32,6 +32,21 @@ bool ConnectAuthoredSockets(Graph& candidate, int from, const std::string& outpu
         if (!combine) return candidate.TryConnectSockets(from, output, to, input, error);
     }
 
+    // Repeating the drop onto an already replicated input must not leave an orphan node.
+    if (const auto* current = candidate.FindInputLink(to, input)) {
+        const auto* existing = candidate.FindNode(current->fromNodeId);
+        if (existing && existing->kind == NodeKind::ChannelCombine && current->fromSocketId == kImageOutputSocketId &&
+            !candidate.FindAnyInputLink(existing->id, "a")) {
+            const auto matches = [&](const char* component) {
+                const auto* wire = candidate.FindAnyInputLink(existing->id, component);
+                return wire && wire->fromNodeId == from && wire->fromSocketId == output;
+            };
+            if (matches("r") && matches("g") && matches("b")) {
+                if (adapterNode) *adapterNode = existing->id;
+                return true;
+            }
+        }
+    }
     const auto* source = candidate.FindNode(from);
     const auto* destination = candidate.FindNode(to);
     const auto owner = source->rawLayerOwnerId.empty() ? destination->rawLayerOwnerId : source->rawLayerOwnerId;
@@ -50,7 +65,7 @@ bool ConnectAuthoredSockets(Graph& candidate, int from, const std::string& outpu
     for (const auto* component : {"r", "g", "b"})
         if (!wire(from, output, id, component)) return false;
     if (!wire(id, kImageOutputSocketId, to, input)) return false;
-    if (insertedNode) *insertedNode = id;
+    if (adapterNode) *adapterNode = id;
     return true;
 }
 }

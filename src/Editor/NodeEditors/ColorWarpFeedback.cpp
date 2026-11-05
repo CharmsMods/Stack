@@ -35,14 +35,13 @@ void ColorWarpFeedbackData::SampleMasks(const RawRecipe::RawColorWarpRecipe& rec
         std::abs(input.sceneEv - ev) * 0.28f;
     const float guided = std::clamp(std::exp(-distance), 0.04f, 1.0f);
     const auto byte = [](std::uint8_t value) { return value / 255.0f; };
-    // The image shader uses guide attenuation for every active layer when
-    // any layer is spatial, including otherwise unrestricted layers.
+    // Guide attenuation belongs only to selections with a spatial restriction.
     const bool spatial = std::any_of(fields.begin(), fields.end(),
         [](const auto& field) { return field.spatialAvailable; });
     if (!spatial) return;
     for (std::size_t index = 0; index < fields.size() && index < samples.size(); ++index) {
         const auto& field = fields[index];
-        if (field.gate.empty()) continue;
+        if (!field.spatialAvailable || field.gate.empty()) continue;
         samples[index] = { Sample(guide, field.gate, u, v, byte) * guided,
             Sample(guide, field.support, u, v, byte) * guided,
             Sample(guide, field.boundary, u, v, byte) };
@@ -52,27 +51,31 @@ void ColorWarpFeedbackData::SampleMasks(const RawRecipe::RawColorWarpRecipe& rec
 void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
     const std::string& targetIdentity, std::size_t inputFingerprint,
     const RawRecipe::RawColorWarpRecipe& recipe, Raw::RawWorkingSpace workingSpace,
-    const std::function<bool(std::function<void()>)>& submit) {
+    const std::function<bool(std::function<void()>)>& submit, std::uint64_t nodeRevision) {
     const std::size_t count = scope.width > 0 && scope.height > 0
         ? std::size_t(scope.width) * scope.height : 0u;
     if (!scope.valid || scope.stage != RawDevelopmentGraphScopeStage::ColorWarpInput ||
         count == 0 || scope.pixels.size() < count * 3u) {
-        m_DesiredKey = 0;
-        m_FailedKey = 0;
-        if (m_Request) m_Request->cancelled = true;
-        return;
+        return; // Keep the last settled presentation while its replacement input is pending.
     }
-    std::size_t key = RawRecipe::ColorWarpSelectionFingerprint(recipe);
-    Hash(key, targetIdentity);
-    Hash(key, scope.graphInputFingerprint ? scope.graphInputFingerprint : inputFingerprint);
-    Hash(key, static_cast<int>(workingSpace));
-    Hash(key, scope.width); Hash(key, scope.height);
-    Hash(key, scope.sourceWidth); Hash(key, scope.sourceHeight);
-    // A readback without a content identity must not share a universal key.
-    if (!scope.graphInputFingerprint && !inputFingerprint) {
-        for (const float pixel : scope.pixels) Hash(key, pixel);
+    const std::size_t inputKey=scope.graphInputFingerprint?scope.graphInputFingerprint:inputFingerprint;
+    if(!inputKey)return; // Analysis must have an input identity; never hash an image during drawing.
+    const bool selectionChanged=!m_Valid || m_NodeRevision!=nodeRevision;
+    if(selectionChanged) {
+        m_SelectionKey=RawRecipe::ColorWarpSelectionFingerprint(recipe);
+        m_NodeRevision=nodeRevision;
     }
-    m_DesiredKey = key == 0 ? 1u : key;
+    if(!m_Valid || m_InputKey!=inputKey || m_Width!=scope.width || m_Height!=scope.height ||
+        m_SourceWidth!=scope.sourceWidth || m_SourceHeight!=scope.sourceHeight || m_WorkingSpace!=int(workingSpace) ||
+        m_DesiredKey==0 || selectionChanged) {
+        // This bounded key uses retained selection analysis, never pixel data.
+        std::size_t key=m_SelectionKey;
+        Hash(key,inputKey);Hash(key,int(workingSpace));
+        Hash(key,scope.width);Hash(key,scope.height);Hash(key,scope.sourceWidth);Hash(key,scope.sourceHeight);
+        m_DesiredKey=key?key:1;
+        m_InputKey=inputKey;m_Width=scope.width;m_Height=scope.height;
+        m_SourceWidth=scope.sourceWidth;m_SourceHeight=scope.sourceHeight;m_WorkingSpace=int(workingSpace);m_Valid=true;
+    }
     if (m_FailedKey == m_DesiredKey) return;
     if (m_Request && m_Request->key == m_DesiredKey && !m_Request->cancelled) return;
     // One job at a time; a superseded request cancels cooperatively before
@@ -106,11 +109,10 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
                     data->fields.resize(recipe.pins.size());
                     for (std::size_t index = 0; index < recipe.pins.size() && !cancelled(); ++index) {
                         const auto& pin = recipe.pins[index];
-                        if (!pin.enabled) continue;
                         const auto region = std::find_if(recipe.regions.begin(), recipe.regions.end(),
                             [&](const auto& candidate) { return candidate.id == pin.regionId; });
-                        data->fields[index] = RawRecipe::BuildRawColorWarpMaskFields(guide, pin,
-                            region == recipe.regions.end() ? nullptr : &*region, cancelled);
+                        if(region!=recipe.regions.end() && region->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches)
+                            data->fields[index]=RawRecipe::BuildRawColorWarpMaskFields(guide,pin,&*region,cancelled);
                     }
                     if (!cancelled()) {
                         std::lock_guard<std::mutex> lock(request->mutex);
@@ -166,35 +168,34 @@ std::vector<unsigned char> BuildColorWarpFeedbackOverlay(const ColorWarpFeedback
             [&](const auto& candidate) { return candidate.id == recipe.pins[pin].id; });
         spatialSupport[pin] = RawRecipe::ColorWarpPinSpatialSupport(recipe, recipe.pins[pin]);
     }
+    auto memberships=recipe.pins;
+    for(auto& pin:memberships){pin.enabled=true;pin.strength=1;}
     const auto& guide = data.guide;
     std::vector<unsigned char> pixels(guide.pixels.size() * 4u, 0u);
     for (std::size_t index = 0; index < guide.pixels.size(); ++index) {
-        float total = 0.0f, selected = 0.0f, strongest = 0.0f;
+        float selected = 0.0f, strongest = 0.0f;
         std::array<float, 3> color {48.0f, 210.0f, 224.0f};
         for (std::size_t pinIndex = 0; pinIndex < recipe.pins.size(); ++pinIndex) {
-            const auto& pin = recipe.pins[pinIndex];
+            if(!inspected[pinIndex])continue;
+            const auto& pin=memberships[pinIndex];
             const auto& field = data.fields[pinIndex];
-            if (field.gate.empty()) continue;
-            const RawRecipe::RawColorWarpMaskSample mask {
+            const RawRecipe::RawColorWarpMaskSample mask = field.gate.empty()?RawRecipe::RawColorWarpMaskSample{}:RawRecipe::RawColorWarpMaskSample{
                 field.gate[index] / 255.0f, field.support[index] / 255.0f,
                 field.boundary[index] / 255.0f };
             const auto& input = guide.pixels[index];
             const float weight = RawRecipe::EvaluateColorWarpPinWeight(pin, input, mask,
                 spatialSupport[pinIndex]);
-            total += weight;
             if (!inspected[pinIndex]) continue;
-            selected += weight;
+            selected = std::max(selected,weight);
             if (weight <= strongest) continue;
             strongest = weight;
-            const float direct = RawRecipe::EvaluateColorWarpPinShapeWeight(pin, input.a, input.b) *
-                RawRecipe::EvaluateColorWarpPinLightnessWeight(pin, input.sceneEv) * mask.gate;
-            if (field.edge[index] != 0u || mask.boundary < 0.98f)
+            if ((!field.edge.empty() && field.edge[index] != 0u) || mask.boundary < 0.98f)
                 color = {174.0f, 104.0f, 242.0f};
-            else if (mask.support * spatialSupport[pinIndex] > direct)
+            else if (mask.support * spatialSupport[pinIndex] > mask.gate)
                 color = {238.0f, 160.0f, 62.0f};
             else color = {48.0f, 210.0f, 224.0f};
         }
-        const float influence = RawRecipe::ColorWarpEffectiveSelectionWeight(recipe, selected, total);
+        const float influence = std::clamp(selected,0.f,1.f);
         for (std::size_t channel = 0; channel < 3u; ++channel)
             pixels[index * 4u + channel] = static_cast<unsigned char>(std::lround(color[channel] * influence));
         pixels[index * 4u + 3u] = static_cast<unsigned char>(std::lround(205.0f + 13.0f * influence));

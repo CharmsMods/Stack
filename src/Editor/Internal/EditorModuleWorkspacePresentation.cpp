@@ -18,7 +18,7 @@ void CopyLayout(Stack::EditorModuleTypes::RawWorkspaceLabUiState& to,
     COPY(previewPanning);
     COPY(previewLayout);
     COPY(activePointCurve); COPY(selectedZonePoint); COPY(selectedTonePoint);
-    COPY(selectedColorWarpPin); COPY(selectedColorWarpGroupId); COPY(colorWarpLiveCloud);
+    COPY(selectedColorWarpPin); COPY(colorWarpLiveCloud);
 #undef COPY
 }
 }

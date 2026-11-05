@@ -1751,50 +1751,25 @@ bool EditorNodeGraphUI::RenderMaskDataNodeContent(
             if (changed) editor->MarkGraphEdited(node.id);
             return true;
         }
-        int domain = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values ? 1 : 0;
-        const char* domains[] = {"Images / Channels", "Values"};
-        if (ImGuiExtras::NodeCombo("Domain", "##MathDomain", &domain, domains, 2, controlWidth)) {
-            context.pendingGraphAction = [editor, nodeId = node.id, domain] {
-                editor->SetDataMathDomain(nodeId, domain == 1 ? Stack::NodeMath::ArithmeticDomain::Values : Stack::NodeMath::ArithmeticDomain::Spatial);
-            };
-        }
-        if (node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) {
-            ImGui::TextDisabled("Uniform values can drive parameters.");
-            if (!graph.FindAnyInputLink(node.id, EditorNodeGraph::kMixInputASocketId))
-                changed |= renderSlider("Value A", "##MathA", &node.dataMathSettings.constantA,
-                    std::min(-16.f, node.dataMathSettings.constantA), std::max(16.f, node.dataMathSettings.constantA));
-            if (!graph.FindAnyInputLink(node.id, EditorNodeGraph::kMixInputBSocketId) &&
-                node.dataMathMode != EditorNodeGraph::DataMathMode::Clamp && node.dataMathMode != EditorNodeGraph::DataMathMode::Remap &&
-                node.dataMathMode != EditorNodeGraph::DataMathMode::Average)
-                changed |= renderSlider("Value B", "##MathB", &node.dataMathSettings.constantB,
-                    std::min(-16.f, node.dataMathSettings.constantB), std::max(16.f, node.dataMathSettings.constantB));
-        }
-
-        using Mode = EditorNodeGraph::DataMathMode;
-        constexpr Mode operations[] = {Mode::Clamp, Mode::Average, Mode::Min, Mode::Max, Mode::Difference, Mode::Remap, Mode::ImageAverage};
-        const char* modes[] = {"Clamp", "Average", "Minimum", "Maximum", "Difference", "Remap", "Average Images"};
-        int mode = static_cast<int>(std::find(std::begin(operations), std::end(operations), node.dataMathMode) - std::begin(operations));
-        if (ImGuiExtras::NodeCombo("Mode", "##DataMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth))
-            changed |= editor->GetNodeGraph().SetDataMathMode(node.id, operations[mode]);
-        ImGui::TextDisabled("%s", node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values
-            ? "Produces one uniform value."
-            : node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage
-            ? "Averages 2+ full image inputs only."
-            : "Works on scalar fields or images.");
-        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Average &&
-            node.dataMathSettings.domain != Stack::NodeMath::ArithmeticDomain::Values) {
-            ImGui::TextDisabled("Outputs one scalar field from any number of scalar inputs.");
-        } else if (node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage) {
-            ImGui::TextDisabled("Press G to split into per-channel averages.");
-        }
-        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
-            changed |= renderSlider("Min", "##DataMathMin", &node.dataMathSettings.minValue, -4.0f, 4.0f);
-            changed |= renderSlider("Max", "##DataMathMax", &node.dataMathSettings.maxValue, -4.0f, 4.0f);
+        const auto endpoint = [&](const char* label, const char* id, float& value) {
+            float edited = value;
+            if (ImGuiExtras::NodeInputFloat(label, id, &edited, 0, 0, "%.7g", controlWidth) &&
+                std::isfinite(edited) && edited != value) {
+                value = edited;
+                changed = true;
+            }
+            captureIfActive();
+        };
+        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Mix) {
+            changed = RenderMixControls(context);
+        } else if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
+            endpoint("Minimum", "##DataMathMin", node.dataMathSettings.minValue);
+            endpoint("Maximum", "##DataMathMax", node.dataMathSettings.maxValue);
         } else if (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap) {
-            changed |= renderSlider("In Min", "##DataMathInMin", &node.dataMathSettings.minValue, -4.0f, 4.0f);
-            changed |= renderSlider("In Max", "##DataMathInMax", &node.dataMathSettings.maxValue, -4.0f, 4.0f);
-            changed |= renderSlider("Out Min", "##DataMathOutMin", &node.dataMathSettings.outMin, -4.0f, 4.0f);
-            changed |= renderSlider("Out Max", "##DataMathOutMax", &node.dataMathSettings.outMax, -4.0f, 4.0f);
+            endpoint("Input start", "##DataMathInMin", node.dataMathSettings.minValue);
+            endpoint("Input end", "##DataMathInMax", node.dataMathSettings.maxValue);
+            endpoint("Output start", "##DataMathOutMin", node.dataMathSettings.outMin);
+            endpoint("Output end", "##DataMathOutMax", node.dataMathSettings.outMax);
         }
         if (changed) {
             editor->MarkGraphEdited(node.id);

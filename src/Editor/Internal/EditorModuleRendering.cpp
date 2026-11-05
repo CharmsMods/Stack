@@ -733,8 +733,6 @@ void EditorModule::ClearRawWorkspaceGraphScopeReadbackCaches() {
     m_RawWorkspaceColorWarpInputGraphScopeCache = {};
     m_RawWorkspaceGraphScopeReadback = {};
     m_RawWorkspaceGraphScopeReadbackRevision = 0;
-    m_RawWorkspaceLabUi.colorWarpCloudInputFingerprint = 0;
-    m_RawWorkspaceLabUi.colorWarpCloud.clear();
 }
 
 void EditorModule::ClearViewportOutputTiles() {
@@ -1279,8 +1277,6 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             UpdateRawViewportEditTiming(snapshot.rawWorkspace.recipe);
             snapshot.rawWorkspace.editStage = m_RawViewportEditStage;
             ApplyRawWorkspaceDenoiseViewOverride(
-                snapshot.rawWorkspace.recipe);
-            ApplyRawWorkspaceColorWarpViewOverride(
                 snapshot.rawWorkspace.recipe);
             Stack::EditorRendering::ApplyRawRecipeOverlayToRenderGraph(
                 snapshot.graph,
@@ -1842,7 +1838,6 @@ bool EditorModule::TrySubmitRawRenderCommand(
     UpdateRawViewportEditTiming(command.rawWorkspace.recipe);
     command.rawWorkspace.editStage = m_RawViewportEditStage;
     ApplyRawWorkspaceDenoiseViewOverride(command.rawWorkspace.recipe);
-    ApplyRawWorkspaceColorWarpViewOverride(command.rawWorkspace.recipe);
     if (m_Project->rawMode ==
         Stack::RawWorkspace::RawProjectMode::ManagedDecomposed) {
         command.rawWorkspace.managedRawDecodeNodeId =

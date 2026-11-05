@@ -60,7 +60,7 @@ bool ValidateRawViewportRegions() {
             recipe.technical.mosaicDenoise.lumaStrength = 0.25f;
             recipe.colorWarp.enabled = true;
             RawRecipe::RawColorWarpPin pin;
-            pin.id = "test"; pin.targetA = 0.04f;
+            pin.id = "test"; pin.sourceA=.3f;pin.hueRange.enabled=false;pin.hueShift=( 0.04f)*100.f;
             recipe.colorWarp.pins = {pin};
         }
         if (variant == 6) {
@@ -103,7 +103,7 @@ bool ValidateRawViewportRegions() {
             region.id = "spatial-test"; region.featherPixels = 4;
             region.circles = {{"circle",0.5f,0.5f,0.1f,0.1f}};
             RawRecipe::RawColorWarpPin pin;
-            pin.id = "pin"; pin.targetA = 0.03f; pin.regionId = region.id;
+            pin.id = "pin"; pin.sourceA=.3f;pin.hueRange.enabled=false;pin.hueShift=( 0.03f)*100.f; pin.regionId = region.id;
             recipe.colorWarp.pins = {pin}; recipe.colorWarp.regions = {region};
         }
         graph.nodes[0].rawDevelopment.recipe = recipe;

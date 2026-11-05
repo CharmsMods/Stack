@@ -1,7 +1,7 @@
 # Full native editor and real tone math. Section elimination keeps unrelated
 # recipe processing services out of this bounded UI-only test executable.
 add_executable(StackSceneToneOwnerTests tools/tests/scene_tone_owner_tests.cpp
-    src/Raw/Tone/SceneTone.cpp src/Raw/RawDevelopmentRecipe.cpp)
+    src/Raw/Tone/SceneTone.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp)
 target_include_directories(StackSceneToneOwnerTests PRIVATE src)
 target_link_libraries(StackSceneToneOwnerTests PRIVATE imgui_core)
 if(MSVC)

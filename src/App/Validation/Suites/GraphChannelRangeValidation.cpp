@@ -74,8 +74,8 @@ bool ValidateGraphChannelRangesWithContext() {
     processed.nodeId = 5;
     processed.dataMathSettings.constantB = 24;
     auto amount = Node(6, RenderGraphNodeKind::ConstantChannel);
-    auto average = Node(7, RenderGraphNodeKind::DataMath);
-    average.dataMathMode = RenderDataMathMode::ImageAverage;
+    auto average = Node(7, RenderGraphNodeKind::Mix);
+    average.mixFactor = 1;
     auto output = Node(8, RenderGraphNodeKind::Output);
     graph.outputNodeId = 8;
     graph.outputSocketId = kImageOutputSocketId;
@@ -85,10 +85,9 @@ bool ValidateGraphChannelRangesWithContext() {
         { 2, kImageOutputSocketId, 3, kImageInputSocketId },
         { 1, kImageOutputSocketId, 5, kMixInputASocketId },
         { 3, "r", 6, kMatchExtentInputSocketId },
-        { 5, kImageOutputSocketId, 7, kMixInputASocketId },
+        { 2, kImageOutputSocketId, 7, kMixInputASocketId },
         { 5, kImageOutputSocketId, 7, kMixInputBSocketId },
-        { 2, kImageOutputSocketId, 7, kDataMathBaseInputSocketId },
-        { 6, kChannelOutputSocketId, 7, kMaskInputSocketId },
+        { 6, kChannelOutputSocketId, 7, kMixFactorSocketId },
         { 7, kImageOutputSocketId, 8, kImageInputSocketId }
     };
     for (float influence : { -0.5f, 0.5f, 2.0f }) {

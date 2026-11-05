@@ -99,8 +99,11 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
         pipeline.LoadSourceFromSharedPixels(templateSnapshot.sourcePixels,
             templateSnapshot.width, templateSnapshot.height, templateSnapshot.channels);
         SharedTextureResult overview;
-        if (Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic)
-            overview.hdr = Stack::Hdr::RenderCompanion(pipeline, graph);
+        if (Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic) {
+            std::string hdrError;
+            overview.hdr = Stack::Hdr::RenderCompanion(pipeline, graph, hdrError);
+            if (!hdrError.empty()) return;
+        }
         pipeline.ExecuteGraph(graph);
         if (canceled || ShouldAbortStaleSnapshot(snapshot)) return;
         const auto geometry = pipeline.GetGraphViewportGeometry();

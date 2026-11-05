@@ -35,6 +35,10 @@ class ColorWarpFeedback {
         std::shared_ptr<const ColorWarpFeedbackData> data;
     };
     std::size_t m_DesiredKey = 0;
+    std::size_t m_InputKey=0,m_SelectionKey=0;
+    std::uint64_t m_NodeRevision=~std::uint64_t(0);
+    int m_Width=0,m_Height=0,m_SourceWidth=0,m_SourceHeight=0,m_WorkingSpace=-1;
+    bool m_Valid=false;
     // Preparation/rejected submission has no Request to retain its failure.
     // Keep the input identity before allocating or copying job inputs.
     std::size_t m_FailedKey = 0;
@@ -44,7 +48,7 @@ public:
     void Update(const RawDevelopmentGraphScopeReadback& scope,
         const std::string& targetIdentity, std::size_t inputFingerprint,
         const RawRecipe::RawColorWarpRecipe& recipe, Raw::RawWorkingSpace workingSpace,
-        const std::function<bool(std::function<void()>)>& submit);
+        const std::function<bool(std::function<void()>)>& submit, std::uint64_t nodeRevision);
     std::shared_ptr<const ColorWarpFeedbackData> Current() const;
     bool Failed() const;
     void RetryFailed();

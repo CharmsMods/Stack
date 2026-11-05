@@ -14,6 +14,8 @@
 #include "Utils/Utf8Text.h"
 
 #include <algorithm>
+#include <array>
+#include <string_view>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -29,17 +31,50 @@ const std::vector<NodeBrowserEntry>& CachedNodeBrowserEntries() {
     return entries;
 }
 
-bool ContainsCaseInsensitive(const std::string& haystack, const std::string& needle) {
-    if (needle.empty()) return true;
+std::string Lower(std::string text) {
+    for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return text;
+}
 
-    auto lower = [](std::string value) {
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        return value;
-    };
+// One missing, extra, substituted or transposed letter in a whole word.
+bool NearWord(std::string_view query, std::string_view word) {
+    if (query.size() < 4 || query.size() + 1 < word.size() || word.size() + 1 < query.size()) return false;
+    const auto i = std::mismatch(query.begin(), query.end(), word.begin(), word.end()).first - query.begin();
+    if (query.size() < word.size()) return query.substr(i) == word.substr(i + 1);
+    if (word.size() < query.size()) return query.substr(i + 1) == word.substr(i);
+    if (i == query.size() || query.substr(i + 1) == word.substr(i + 1)) return true;
+    return i + 1 < query.size() && query[i] == word[i + 1] && query[i + 1] == word[i] &&
+        query.substr(i + 2) == word.substr(i + 2);
+}
 
-    return lower(haystack).find(lower(needle)) != std::string::npos;
+int SearchRank(const NodeBrowserEntry& entry, const std::string& query) {
+    if (query.empty()) return 0;
+    const auto label = Lower(entry.label), aliases = Lower(entry.searchAliases);
+    if (label == query) return 0;
+    if (label.find(query) != std::string::npos) return 1;
+    int rank = -1;
+    std::string_view intents = aliases;
+    while (!intents.empty()) {
+        const auto end = intents.find('|');
+        const auto intent = intents.substr(0, end);
+        if (intent == query) return 2;
+        if (NearWord(query, intent)) rank = 4;
+        if (end == intents.npos) break;
+        intents.remove_prefix(end + 1);
+    }
+    if (aliases.find(query) != std::string::npos) return 3;
+    if (Lower(entry.category).find(query) != std::string::npos) return 3;
+    if (rank >= 0) return rank;
+    for (const auto* field : {&label, &aliases}) {
+        std::string_view words = *field;
+        while (!words.empty()) {
+            const auto end = words.find_first_of(" ,-|()/");
+            if (NearWord(query, words.substr(0, end))) return 5;
+            if (end == words.npos) break;
+            words.remove_prefix(end + 1);
+        }
+    }
+    return -1;
 }
 
 std::string EntryKey(const NodeBrowserEntry& entry) {
@@ -688,20 +723,15 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                     for (const auto& entry : available) m_NodeBrowserAvailableKeys.insert(EntryKey(entry));
                 }
 
+                const auto query = Lower(search);
+                std::array<std::vector<std::size_t>, 6> ranked;
                 for (std::size_t index = 0; index < entries.size(); ++index) {
-                    const NodeBrowserEntry& entry = entries[index];
-                    const bool matchesSearch =
-                        ContainsCaseInsensitive(entry.label, search) ||
-                        ContainsCaseInsensitive(entry.category, search) ||
-                        ContainsCaseInsensitive(entry.searchAliases, search);
-                    if (!matchesSearch) {
-                        continue;
-                    }
-
                     if (!m_NodeBrowserAvailableKeys.count(entryKeys[index])) continue;
-
-                    m_NodeBrowserFilteredEntryIndices.push_back(index);
+                    const int rank = SearchRank(entries[index], query);
+                    if (rank >= 0) ranked[rank].push_back(index);
                 }
+                for (const auto& matches : ranked)
+                    m_NodeBrowserFilteredEntryIndices.insert(m_NodeBrowserFilteredEntryIndices.end(), matches.begin(), matches.end());
 
                 m_NodeBrowserFilterCacheValid = true;
                 m_NodeBrowserFilterCacheGraphRevision = graphRevision;

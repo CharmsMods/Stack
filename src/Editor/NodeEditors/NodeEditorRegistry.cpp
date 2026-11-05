@@ -102,10 +102,12 @@ struct NodeEditorRegistration {
         add(Kind::ColorWarp,Tool::Color,{400,560},
             [](EditorModule& e,RawWorkspaceEditContext& c){return e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Graph);},
             [](EditorModule& e,RawWorkspaceEditContext& c){
-                bool changed=e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Settings);
-                changed|=e.RenderRawWorkspaceLabColorSecondaryControls(c);return changed;
+                return e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Settings);
             },[](EditorModule& e,RawWorkspaceEditContext& c){
                 c.recipe.colorWarp={};e.m_RawWorkspaceLabUi.selectedColorWarpPin=-1;
+                e.m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+                e.m_RawWorkspaceLabUi.colorWarpSamplingArmed=false;
+                e.m_RawWorkspaceLabUi.colorWarpAttachRegionPinId.clear();
                 e.m_RawWorkspaceLabUi.colorWarpProvisionalPinValid=false;
                 e.m_RawWorkspaceLabUi.colorWarpProvisionalSceneEvValid=false;
                 e.m_RawWorkspaceLabUi.colorWarpDraggingProvisional=false;return true;

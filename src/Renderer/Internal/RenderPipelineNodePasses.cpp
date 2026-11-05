@@ -328,8 +328,6 @@ bool RenderPipeline::RenderDataMath(
     glBindTexture(GL_TEXTURE_2D, textureB);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uDataB"), 1);
 
-    const float minValue = std::min(settings.minValue, settings.maxValue);
-    const float maxValue = std::max(settings.minValue, settings.maxValue);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uHasA"), hasA ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uHasB"), hasB ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uScalarA"), scalarA ? 1 : 0);
@@ -337,8 +335,8 @@ bool RenderPipeline::RenderDataMath(
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uMode"), static_cast<int>(mode));
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uConstantA"), settings.constantA);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uConstantB"), settings.constantB);
-    glUniform1f(glGetUniformLocation(m_DataMathProgram, "uMinValue"), minValue);
-    glUniform1f(glGetUniformLocation(m_DataMathProgram, "uMaxValue"), maxValue);
+    glUniform1f(glGetUniformLocation(m_DataMathProgram, "uMinValue"), settings.minValue);
+    glUniform1f(glGetUniformLocation(m_DataMathProgram, "uMaxValue"), settings.maxValue);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMin"), settings.outMin);
     glUniform1f(glGetUniformLocation(m_DataMathProgram, "uOutMax"), settings.outMax);
     glUniform1i(glGetUniformLocation(m_DataMathProgram, "uScalarOutput"), scalarOutput ? 1 : (opaqueResult ? 2 : 0));

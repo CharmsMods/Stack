@@ -4,7 +4,7 @@ add_custom_command(OUTPUT "${view_transform_graph_test}"
         --output "${view_transform_graph_test}"
     DEPENDS tools/tests/view_transform_graph_tests.py tools/tests/view_transform_graph_tests.cpp
         src/Editor/Internal/RawLab/EditorModuleRawLabView.cpp
-        src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp src/Raw/RawDevelopmentRecipe.cpp
+        src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
     VERBATIM)
 add_executable(StackViewTransformGraphTests "${view_transform_graph_test}")
 target_include_directories(StackViewTransformGraphTests PRIVATE src)

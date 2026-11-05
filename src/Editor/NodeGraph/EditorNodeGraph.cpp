@@ -25,41 +25,12 @@ bool SupportsDynamicChannelInputs(const EditorNodeGraph::Node& node) {
     return node.kind == EditorNodeGraph::NodeKind::Lut;
 }
 
-bool IsAverageMaskPreviewActive(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
-    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
-        node.dataMathMode == EditorNodeGraph::DataMathMode::Average &&
-        graph.GetSocketPreviewIntent(node.id) == EditorNodeGraph::SocketPreviewIntent::MaskConnection;
-}
-
-bool IsAverageImagePreviewActive(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
-    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
-        node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage &&
-        graph.GetSocketPreviewIntent(node.id) == EditorNodeGraph::SocketPreviewIntent::ImageConnection;
-}
-
-bool IsDataMathAverageMode(EditorNodeGraph::DataMathMode mode) {
-    return mode == EditorNodeGraph::DataMathMode::Average ||
-        mode == EditorNodeGraph::DataMathMode::ImageAverage;
-}
-
 const char* ChannelLabel(const std::string& socketId) {
     if (socketId == "r") return "R";
     if (socketId == "g") return "G";
     if (socketId == "b") return "B";
     if (socketId == "a") return "A";
     return "";
-}
-
-std::string ScalarInputSocketLabel(int index) {
-    if (index < 0) {
-        return "Scalar";
-    }
-    if (index < 26) {
-        std::string label = "Scalar ";
-        label.push_back(static_cast<char>('A' + index));
-        return label;
-    }
-    return "Scalar";
 }
 
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
@@ -997,79 +968,18 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         return finalize(std::move(sockets));
     }
 
-    if (node.kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode))
-        return finalize(EditorNodeGraphDefinitions::BuildSockets(node, visibleOnly));
-
     if (node.kind == NodeKind::DataMath) {
-        std::vector<SocketDefinition> sockets;
-        auto add = [&](const std::string& id, SocketDirection direction, SocketType type, const std::string& label, bool optional, bool visible) {
-            if (visibleOnly && !visible) {
-                return;
-            }
-            sockets.push_back(SocketDefinition{ id, node.id, direction, type, label, optional, visible });
-        };
-
-        int highestConnectedInputIndex = 1;
-        bool hasBaseLink = false;
-        bool hasMaskLink = false;
-        ForEachIncomingLink(node.id, [&](const Link& link) {
-            const int inputIndex = DataMathInputSocketIndex(link.toSocketId);
-            if (inputIndex >= 0) {
-                highestConnectedInputIndex = std::max(highestConnectedInputIndex, inputIndex);
-            } else if (link.toSocketId == kDataMathBaseInputSocketId) {
-                hasBaseLink = true;
-            } else if (link.toSocketId == kMaskInputSocketId) {
-                hasMaskLink = true;
-            }
-        });
-
-        const bool uniformValues = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values;
-        const bool channelValues = node.dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Channel;
-        const bool averageMode = IsDataMathAverageMode(node.dataMathMode);
-        const bool scalarAverageMode = node.dataMathMode == DataMathMode::Average;
-        const bool imageAverageMode = node.dataMathMode == DataMathMode::ImageAverage;
-        int visibleInputCount = 2;
-        if (averageMode) {
-            visibleInputCount = std::max(3, highestConnectedInputIndex + 2);
-        } else if (highestConnectedInputIndex >= 2) {
-            visibleInputCount = highestConnectedInputIndex + 1;
+        auto sockets = EditorNodeGraphDefinitions::BuildSockets(node, false);
+        if (node.dataMathMode == DataMathMode::Mix) {
+            int highest = -1;
+            ForEachIncomingLink(node.id, [&](const Link& edge) {
+                highest = std::max(highest, DataMathInputSocketIndex(edge.toSocketId));
+            });
+            const int last = std::max(1, highest + 1);
+            for (auto& socket : sockets) socket.visible = DataMathInputSocketIndex(socket.id) <= last;
+            if (visibleOnly) sockets.erase(std::remove_if(sockets.begin(), sockets.end(),
+                [](const auto& socket) { return !socket.visible; }), sockets.end());
         }
-        if ((scalarAverageMode && IsAverageMaskPreviewActive(*this, node)) ||
-            (imageAverageMode && IsAverageImagePreviewActive(*this, node))) {
-            visibleInputCount += 1;
-        }
-        visibleInputCount = std::clamp(visibleInputCount, 2, kMaxDataMathInputCount);
-
-        for (int inputIndex = 0; inputIndex < visibleInputCount; ++inputIndex) {
-            add(
-                DataMathInputSocketId(inputIndex),
-                SocketDirection::Input,
-                uniformValues ? SocketType::Scalar : (channelValues ? SocketType::Channel : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image)),
-                scalarAverageMode ? ScalarInputSocketLabel(inputIndex) : DataMathInputSocketLabel(inputIndex),
-                uniformValues || inputIndex != 0,
-                true);
-        }
-
-        const bool revealMaskAwareSockets =
-            hasBaseLink ||
-            hasMaskLink;
-        if (!uniformValues && !scalarAverageMode && !imageAverageMode) {
-            add(
-                kDataMathBaseInputSocketId,
-                SocketDirection::Input,
-                SocketType::Image,
-                "Base",
-                true,
-                revealMaskAwareSockets);
-            add(
-                kMaskInputSocketId,
-                SocketDirection::Input,
-                SocketType::Channel,
-                "Mask",
-                true,
-                revealMaskAwareSockets);
-        }
-        add(kImageOutputSocketId, SocketDirection::Output, uniformValues ? SocketType::Scalar : (channelValues ? SocketType::Channel : (scalarAverageMode ? SocketType::ScalarField : SocketType::Image)), uniformValues ? "Value" : (scalarAverageMode ? "Scalar Out" : "Data Out"), false, true);
         return finalize(std::move(sockets));
     }
 

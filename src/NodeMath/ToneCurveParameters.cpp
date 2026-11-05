@@ -18,15 +18,15 @@ void ClearPendingToneCurveAnalysis(nlohmann::json& parameters) {
     if (advanced.contains("autoCalibrateForceReanalysis")) advanced["autoCalibrateForceReanalysis"]=false;
 }
 bool IsToneCurveParameterActive(const nlohmann::json& parameters,const std::string& id) {
-    const auto mode=parameters.value("curveMode",std::string("components"));
+    const auto mode=Stack::NodeMath::ToneCurveMode(parameters);
     if (mode=="components") return id.rfind("amount-",0)==0;
-    if (mode=="luminance") return id=="luminance-amount";
+    if (mode=="luminance") return id=="luminance-amount" || id=="amount-red" || id=="amount-green" || id=="amount-blue";
     if (mode=="contrast") return id=="contrast" || id=="pivot" || id=="anchor" ||
         id=="width" || id=="transition" || id=="protection";
     return false;
 }
 RawRecipe::SceneTone EffectiveToneCurveSceneTone(const nlohmann::json& parameters) {
-    const auto mode=parameters.value("curveMode",std::string("components"));
+    const auto mode=Stack::NodeMath::ToneCurveMode(parameters);
     if (mode=="components") { RawRecipe::SceneTone scene;scene.enabled=false;return scene; }
     if (mode=="advanced") {
         const auto advanced=parameters.value("advanced",nlohmann::json::object());
@@ -45,7 +45,7 @@ RawRecipe::SceneTone EffectiveToneCurveSceneTone(const nlohmann::json& parameter
 nlohmann::json DefaultToneCurveParameters() {
     RawRecipe::RawPointCurveSet curves;
     for (auto& curve:curves.curves) curve.points={{0,0,1},{1,1,1}};
-    auto parameters=nlohmann::json{{"schemaVersion",1},{"curveMode","components"},
+    auto parameters=nlohmann::json{{"schemaVersion",2},{"curveMode",kDefaultToneCurveMode},
         {"domain",0},{"logMinEv",-10.f},{"logMaxEv",6.f},{"middleGrey",.18f},
         {"luminanceTone",RawRecipe::SerializeSceneTone(RawRecipe::SceneTone{})},
         {"advanced",nlohmann::json::object()}};
@@ -70,7 +70,7 @@ nlohmann::json CaptureToneCurveParameters(const nlohmann::json& value) {
 bool ValidateToneCurveParameters(const nlohmann::json& value,std::string& error) {
     const auto fail=[&](const char* reason){error=reason;return false;};
     try {
-        if (!value.is_object() || value.value("schemaVersion",0)!=1 || !Finite(value))
+        if (!value.is_object() || value.value("schemaVersion",0)!=2 || !Finite(value))
             return fail("Unsupported or non-finite Tone Curve parameters.");
         const auto mode=value.value("curveMode",std::string{});
         if (mode!="components" && mode!="luminance" && mode!="contrast" && mode!="advanced")

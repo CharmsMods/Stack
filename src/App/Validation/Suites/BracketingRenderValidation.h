@@ -53,7 +53,7 @@ struct BracketingRenderValidationAccess {
                 }
             } else {
                 context.recipe.colorWarp.enabled=true;
-                Stack::RawRecipe::RawColorWarpPin pin;pin.id="bracket-settle-test";pin.targetA=.025f;
+                Stack::RawRecipe::RawColorWarpPin pin;pin.id="bracket-settle-test";pin.sourceA=.3f;pin.hueRange.enabled=false;pin.hueShift=(.025f)*100.f;
                 context.recipe.colorWarp.pins={pin};
             }
             ImGui::NewFrame();e.CommitRawWorkspaceEditContext(context,true,true);ImGui::EndFrame();

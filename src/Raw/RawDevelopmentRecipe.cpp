@@ -4,6 +4,7 @@
 #include "Raw/Curves/CurveAuthoring.h"
 #include "Raw/RawZoneArea.h"
 #include "Raw/RawColorWarpSelection.h"
+#include "Raw/ColorWarpMath.h"
 
 #include <algorithm>
 #include <array>
@@ -46,18 +47,15 @@ nlohmann::json SerializeBezierHandle(const RawBezierHandleState& input);
 float JsonFloat(const nlohmann::json& value, const char* key, float fallback);
 
 bool HasPreparedColorWarpEffect(const RawColorWarpRecipe& colorWarp) {
-    if (!colorWarp.enabled || colorWarp.strength <= 0.0001f) {
+    if (!colorWarp.enabled || colorWarp.strength <= 0.f) {
         return false;
     }
     return std::any_of(
         colorWarp.pins.begin(),
         colorWarp.pins.end(),
         [](const RawColorWarpPin& pin) {
-            return pin.enabled && pin.strength > 0.0001f &&
-                (pin.protectColor ||
-                    std::abs(pin.targetA - pin.sourceA) > 0.000001f ||
-                    std::abs(pin.targetB - pin.sourceB) > 0.000001f ||
-                    std::abs(pin.lightnessDeltaEv) > 0.000001f);
+            return pin.enabled && pin.strength > 0.f &&
+                (!pin.protectColor && ColorWarpHasAdjustment(pin));
         });
 }
 
@@ -416,78 +414,6 @@ std::int64_t JsonInt64(const nlohmann::json& value, const char* key, std::int64_
 }
 
 } // namespace
-
-RawColorWarpEvCurve MakeUniformColorWarpEvCurve(float qualification) {
-    RawColorWarpEvCurve curve;
-    curve.samples.assign(
-        kRawColorWarpEvCurveSampleCount,
-        std::clamp(std::isfinite(qualification) ? qualification : 1.0f, 0.0f, 1.0f));
-    return curve;
-}
-
-RawColorWarpEvCurve MakeColorWarpEvCurveHump(
-    float centerEv,
-    float coreHalfWidthEv,
-    float featherEv) {
-    centerEv = std::clamp(
-        std::isfinite(centerEv) ? centerEv : 0.0f,
-        kRawColorWarpEvMinimum,
-        kRawColorWarpEvMaximum);
-    coreHalfWidthEv = std::clamp(
-        std::isfinite(coreHalfWidthEv) ? coreHalfWidthEv : 0.75f,
-        0.0f,
-        16.0f);
-    featherEv = std::clamp(
-        std::isfinite(featherEv) ? featherEv : 0.75f,
-        0.0f,
-        16.0f);
-    RawColorWarpEvCurve curve = MakeUniformColorWarpEvCurve(0.0f);
-    const float low = centerEv - coreHalfWidthEv;
-    const float high = centerEv + coreHalfWidthEv;
-    for (std::size_t index = 0; index < curve.samples.size(); ++index) {
-        const float t = static_cast<float>(index) /
-            static_cast<float>(curve.samples.size() - 1u);
-        const float ev = kRawColorWarpEvMinimum +
-            t * (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
-        const float lowWeight = featherEv <= 0.0001f
-            ? (ev >= low ? 1.0f : 0.0f)
-            : SmoothStep(low - featherEv, low, ev);
-        const float highWeight = featherEv <= 0.0001f
-            ? (ev <= high ? 1.0f : 0.0f)
-            : 1.0f - SmoothStep(high, high + featherEv, ev);
-        curve.samples[index] = lowWeight * highWeight;
-    }
-    return curve;
-}
-
-float EvaluateColorWarpEvCurve(
-    const RawColorWarpEvCurve& curve,
-    float sceneEv) {
-    if (curve.samples.empty()) {
-        return 1.0f;
-    }
-    const float normalized = std::clamp(
-        (sceneEv - kRawColorWarpEvMinimum) /
-            (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum),
-        0.0f,
-        1.0f);
-    const float position = normalized *
-        static_cast<float>(curve.samples.size() - 1u);
-    const std::size_t lower = std::min(
-        curve.samples.size() - 1u,
-        static_cast<std::size_t>(std::floor(position)));
-    const std::size_t upper = std::min(curve.samples.size() - 1u, lower + 1u);
-    const float fraction = position - static_cast<float>(lower);
-    const float low = std::clamp(
-        std::isfinite(curve.samples[lower]) ? curve.samples[lower] : 1.0f,
-        0.0f,
-        1.0f);
-    const float high = std::clamp(
-        std::isfinite(curve.samples[upper]) ? curve.samples[upper] : low,
-        0.0f,
-        1.0f);
-    return low + (high - low) * fraction;
-}
 
 const std::vector<std::string>& DefaultStageOrder() {
     static const std::vector<std::string> kOrder = {
@@ -1490,403 +1416,22 @@ RawColorWarpFeatherDirection RawColorWarpFeatherDirectionFromStableString(
     return RawColorWarpFeatherDirection::Centered;
 }
 
-RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp) {
-    colorWarp.version = 2;
-    colorWarp.strength = ClampFinite(colorWarp.strength, 1.0f, 0.0f, 2.0f);
-    if (colorWarp.pins.size() > kMaxRawColorWarpPins) {
-        colorWarp.pins.resize(kMaxRawColorWarpPins);
-    }
-    if (colorWarp.regions.size() > kMaxRawColorWarpRegions) {
-        colorWarp.regions.resize(kMaxRawColorWarpRegions);
-    }
-    if (colorWarp.linkGroups.size() > kMaxRawColorWarpLinkGroups) {
-        colorWarp.linkGroups.resize(kMaxRawColorWarpLinkGroups);
-    }
-
-    std::unordered_set<std::string> usedRegionIds;
-    for (std::size_t regionIndex = 0; regionIndex < colorWarp.regions.size(); ++regionIndex) {
-        RawColorWarpRegion& region = colorWarp.regions[regionIndex];
-        if (region.id.empty() || usedRegionIds.find(region.id) != usedRegionIds.end()) {
-            region.id = "region-" + std::to_string(regionIndex + 1u);
-            while (usedRegionIds.find(region.id) != usedRegionIds.end()) {
-                region.id += "-copy";
-            }
-        }
-        usedRegionIds.insert(region.id);
-        if (region.circles.size() > kMaxRawColorWarpSampleCircles) {
-            region.circles.resize(kMaxRawColorWarpSampleCircles);
-        }
-        std::unordered_set<std::string> usedCircleIds;
-        for (std::size_t circleIndex = 0; circleIndex < region.circles.size(); ++circleIndex) {
-            RawColorWarpSampleCircle& circle = region.circles[circleIndex];
-            if (circle.id.empty() || usedCircleIds.find(circle.id) != usedCircleIds.end()) {
-                circle.id = "sample-" + std::to_string(circleIndex + 1u);
-                while (usedCircleIds.find(circle.id) != usedCircleIds.end()) {
-                    circle.id += "-copy";
-                }
-            }
-            usedCircleIds.insert(circle.id);
-            circle.centerU = ClampFinite(circle.centerU, 0.5f, 0.0f, 1.0f);
-            circle.centerV = ClampFinite(circle.centerV, 0.5f, 0.0f, 1.0f);
-            circle.radiusU = ClampFinite(circle.radiusU, 0.02f, 0.000001f, 1.0f);
-            circle.radiusV = ClampFinite(circle.radiusV, 0.02f, 0.000001f, 1.0f);
-        }
-        region.reachPixels = ClampFinite(region.reachPixels, 24.0f, 0.0f, 4096.0f);
-        region.spatialSupport = ClampFinite(region.spatialSupport, 1.0f, 0.0f, 1.0f);
-        region.edgeStop = ClampFinite(region.edgeStop, 0.65f, 0.0f, 1.0f);
-        region.featherPixels = ClampFinite(region.featherPixels, 0.0f, 0.0f, 4096.0f);
-    }
-
-    std::unordered_set<std::string> usedIds;
-    for (std::size_t index = 0; index < colorWarp.pins.size(); ++index) {
-        RawColorWarpPin& pin = colorWarp.pins[index];
-        if (pin.id.empty() || usedIds.find(pin.id) != usedIds.end()) {
-            pin.id = "color-" + std::to_string(index + 1u);
-            while (usedIds.find(pin.id) != usedIds.end()) {
-                pin.id += "-copy";
-            }
-        }
-        usedIds.insert(pin.id);
-        if (pin.name.empty()) {
-            pin.name = pin.protectColor
-                ? "Protected Color " + std::to_string(index + 1u)
-                : "Color " + std::to_string(index + 1u);
-        }
-        pin.sourceA = ClampFinite(pin.sourceA, 0.0f, -1.0f, 1.0f);
-        pin.sourceB = ClampFinite(pin.sourceB, 0.0f, -1.0f, 1.0f);
-        pin.targetA = ClampFinite(pin.targetA, pin.sourceA, -1.0f, 1.0f);
-        pin.targetB = ClampFinite(pin.targetB, pin.sourceB, -1.0f, 1.0f);
-        pin.radius = ClampFinite(pin.radius, 0.12f, 0.005f, 1.0f);
-        pin.softness = ClampFinite(pin.softness, 0.55f, 0.0f, 1.0f);
-        pin.qualifierDirectionality = ClampFinite(
-            pin.qualifierDirectionality, 0.0f, 0.0f, 1.0f);
-        pin.qualifierOrientationRadians = ClampFinite(
-            pin.qualifierOrientationRadians,
-            0.0f,
-            -3.14159265358979323846f,
-            3.14159265358979323846f);
-        pin.qualifierAperture = ClampFinite(
-            pin.qualifierAperture, 0.45f, 0.10f, 1.0f);
-        pin.strength = ClampFinite(pin.strength, 1.0f, 0.0f, 2.0f);
-        if (usedRegionIds.find(pin.regionId) == usedRegionIds.end()) {
-            pin.regionId.clear();
-        }
-        if (pin.evCurve.samples.empty()) {
-            pin.evCurve = MakeUniformColorWarpEvCurve();
-        } else if (pin.evCurve.samples.size() !=
-                   kRawColorWarpEvCurveSampleCount) {
-            const RawColorWarpEvCurve original = pin.evCurve;
-            pin.evCurve = MakeUniformColorWarpEvCurve();
-            for (std::size_t sampleIndex = 0;
-                 sampleIndex < pin.evCurve.samples.size();
-                 ++sampleIndex) {
-                const float t = static_cast<float>(sampleIndex) /
-                    static_cast<float>(pin.evCurve.samples.size() - 1u);
-                const float ev = kRawColorWarpEvMinimum +
-                    t * (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
-                pin.evCurve.samples[sampleIndex] =
-                    EvaluateColorWarpEvCurve(original, ev);
-            }
-        }
-        for (float& sample : pin.evCurve.samples) {
-            sample = ClampFinite(sample, 1.0f, 0.0f, 1.0f);
-        }
-        pin.lightnessDeltaEv = ClampFinite(
-            pin.lightnessDeltaEv, 0.0f, -4.0f, 4.0f);
-    }
-
-    std::unordered_set<std::string> usedGroupIds;
-    for (std::size_t groupIndex = 0; groupIndex < colorWarp.linkGroups.size(); ++groupIndex) {
-        RawColorWarpLinkGroup& group = colorWarp.linkGroups[groupIndex];
-        if (group.id.empty() || usedGroupIds.find(group.id) != usedGroupIds.end()) {
-            group.id = "group-" + std::to_string(groupIndex + 1u);
-            while (usedGroupIds.find(group.id) != usedGroupIds.end()) {
-                group.id += "-copy";
-            }
-        }
-        usedGroupIds.insert(group.id);
-        if (group.name.empty()) {
-            group.name = "Color Group " + std::to_string(groupIndex + 1u);
-        }
-        std::unordered_set<std::string> groupPinIds;
-        group.pinIds.erase(
-            std::remove_if(
-                group.pinIds.begin(),
-                group.pinIds.end(),
-                [&](const std::string& pinId) {
-                    return usedIds.find(pinId) == usedIds.end() ||
-                        !groupPinIds.insert(pinId).second;
-                }),
-            group.pinIds.end());
-    }
-    colorWarp.linkGroups.erase(
-        std::remove_if(
-            colorWarp.linkGroups.begin(),
-            colorWarp.linkGroups.end(),
-            [](const RawColorWarpLinkGroup& group) { return group.pinIds.empty(); }),
-        colorWarp.linkGroups.end());
-    return colorWarp;
-}
-
-nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
-    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
-    nlohmann::json result = nlohmann::json::object();
-    result["version"] = colorWarp.version;
-    result["enabled"] = colorWarp.enabled;
-    result["strength"] = colorWarp.strength;
-    result["coordinateModel"] = "oklab-ab-d65-v2";
-    result["regions"] = nlohmann::json::array();
-    for (const RawColorWarpRegion& region : colorWarp.regions) {
-        nlohmann::json item = nlohmann::json::object();
-        item["id"] = region.id;
-        item["spatialMode"] = RawColorWarpSpatialModeStableString(region.spatialMode);
-        item["reachPixels"] = region.reachPixels;
-        item["spatialSupport"] = region.spatialSupport;
-        item["edgeStop"] = region.edgeStop;
-        item["featherPixels"] = region.featherPixels;
-        item["featherDirection"] =
-            RawColorWarpFeatherDirectionStableString(region.featherDirection);
-        item["circles"] = nlohmann::json::array();
-        for (const RawColorWarpSampleCircle& circle : region.circles) {
-            nlohmann::json circleItem = nlohmann::json::object();
-            circleItem["id"] = circle.id;
-            circleItem["centerU"] = circle.centerU;
-            circleItem["centerV"] = circle.centerV;
-            circleItem["radiusU"] = circle.radiusU;
-            circleItem["radiusV"] = circle.radiusV;
-            circleItem["interpretationMode"] =
-                RawColorWarpInterpretationModeStableString(circle.interpretation);
-            circleItem["polarity"] = circle.polarity == RawColorWarpSamplePolarity::Exclude
-                ? "exclude"
-                : "include";
-            item["circles"].push_back(std::move(circleItem));
-        }
-        result["regions"].push_back(std::move(item));
-    }
-    result["pins"] = nlohmann::json::array();
-    for (const RawColorWarpPin& pin : colorWarp.pins) {
-        nlohmann::json item = nlohmann::json::object();
-        item["id"] = pin.id;
-        item["name"] = pin.name;
-        item["enabled"] = pin.enabled;
-        item["protectColor"] = pin.protectColor;
-        item["sourceA"] = pin.sourceA;
-        item["sourceB"] = pin.sourceB;
-        item["targetA"] = pin.targetA;
-        item["targetB"] = pin.targetB;
-        item["radius"] = pin.radius;
-        item["softness"] = pin.softness;
-        item["qualifierDirectionality"] = pin.qualifierDirectionality;
-        item["qualifierOrientationRadians"] = pin.qualifierOrientationRadians;
-        item["qualifierAperture"] = pin.qualifierAperture;
-        item["strength"] = pin.strength;
-        item["regionId"] = pin.regionId;
-        item["evCurve"] = {
-            { "minimumEv", kRawColorWarpEvMinimum },
-            { "maximumEv", kRawColorWarpEvMaximum },
-            { "samples", pin.evCurve.samples }
-        };
-        item["lightnessDeltaEv"] = pin.lightnessDeltaEv;
-        result["pins"].push_back(std::move(item));
-    }
-    result["linkGroups"] = nlohmann::json::array();
-    for (const RawColorWarpLinkGroup& group : colorWarp.linkGroups) {
-        nlohmann::json item = nlohmann::json::object();
-        item["id"] = group.id;
-        item["name"] = group.name;
-        item["pinIds"] = group.pinIds;
-        result["linkGroups"].push_back(std::move(item));
-    }
-    return result;
-}
-
-RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
-    RawColorWarpRecipe result;
-    if (!value.is_object()) {
-        return result;
-    }
-    if (value.value("version", 0) != 2 ||
-        value.value("coordinateModel", std::string()) !=
-            "oklab-ab-d65-v2") {
-        return result;
-    }
-    result.version = 2;
-    result.enabled = value.value("enabled", true);
-    result.strength = JsonFloat(value, "strength", 1.0f);
-    const nlohmann::json regions = value.value("regions", nlohmann::json::array());
-    if (regions.is_array()) {
-        for (const nlohmann::json& item : regions) {
-            if (!item.is_object()) continue;
-            RawColorWarpRegion region;
-            region.id = item.value("id", std::string());
-            region.spatialMode = RawColorWarpSpatialModeFromStableString(
-                item.value("spatialMode", std::string("cohesive")));
-            region.reachPixels = JsonFloat(item, "reachPixels", 24.0f);
-            region.spatialSupport = JsonFloat(item, "spatialSupport", 1.0f);
-            region.edgeStop = JsonFloat(item, "edgeStop", 0.65f);
-            region.featherPixels = JsonFloat(item, "featherPixels", 0.0f);
-            region.featherDirection = RawColorWarpFeatherDirectionFromStableString(
-                item.value("featherDirection", std::string("centered")));
-            const nlohmann::json circles = item.value("circles", nlohmann::json::array());
-            if (circles.is_array()) {
-                for (const nlohmann::json& circleItem : circles) {
-                    if (!circleItem.is_object()) continue;
-                    RawColorWarpSampleCircle circle;
-                    circle.id = circleItem.value("id", std::string());
-                    circle.centerU = JsonFloat(circleItem, "centerU", 0.5f);
-                    circle.centerV = JsonFloat(circleItem, "centerV", 0.5f);
-                    circle.radiusU = JsonFloat(circleItem, "radiusU", 0.02f);
-                    circle.radiusV = JsonFloat(circleItem, "radiusV", 0.02f);
-                    circle.interpretation = RawColorWarpInterpretationModeFromStableString(
-                        circleItem.value(
-                            "interpretationMode",
-                            std::string("guided-family")));
-                    circle.polarity = circleItem.value(
-                        "polarity", std::string("include")) == "exclude"
-                        ? RawColorWarpSamplePolarity::Exclude
-                        : RawColorWarpSamplePolarity::Include;
-                    region.circles.push_back(std::move(circle));
-                }
-            }
-            result.regions.push_back(std::move(region));
-        }
-    }
-    const nlohmann::json pins = value.value("pins", nlohmann::json::array());
-    if (pins.is_array()) {
-        for (const nlohmann::json& item : pins) {
-            if (!item.is_object()) {
-                continue;
-            }
-            RawColorWarpPin pin;
-            pin.id = item.value("id", std::string());
-            pin.name = item.value("name", std::string());
-            pin.enabled = item.value("enabled", true);
-            pin.protectColor = item.value("protectColor", false);
-            pin.sourceA = JsonFloat(item, "sourceA", 0.0f);
-            pin.sourceB = JsonFloat(item, "sourceB", 0.0f);
-            pin.targetA = JsonFloat(item, "targetA", pin.sourceA);
-            pin.targetB = JsonFloat(item, "targetB", pin.sourceB);
-            pin.radius = JsonFloat(item, "radius", 0.12f);
-            pin.softness = JsonFloat(item, "softness", 0.55f);
-            pin.qualifierDirectionality =
-                JsonFloat(item, "qualifierDirectionality", 0.0f);
-            pin.qualifierOrientationRadians =
-                JsonFloat(item, "qualifierOrientationRadians", 0.0f);
-            pin.qualifierAperture =
-                JsonFloat(item, "qualifierAperture", 0.45f);
-            pin.strength = JsonFloat(item, "strength", 1.0f);
-            pin.regionId = item.value("regionId", std::string());
-            const nlohmann::json evCurve = item.value(
-                "evCurve", nlohmann::json::object());
-            if (evCurve.is_object()) {
-                const nlohmann::json samples = evCurve.value(
-                    "samples", nlohmann::json::array());
-                if (samples.is_array()) {
-                    pin.evCurve.samples.reserve(samples.size());
-                    for (const nlohmann::json& sample : samples) {
-                        if (sample.is_number()) {
-                            pin.evCurve.samples.push_back(sample.get<float>());
-                        }
-                    }
-                }
-            }
-            pin.lightnessDeltaEv = JsonFloat(item, "lightnessDeltaEv", 0.0f);
-            result.pins.push_back(std::move(pin));
-        }
-    }
-    const nlohmann::json linkGroups = value.value("linkGroups", nlohmann::json::array());
-    if (linkGroups.is_array()) {
-        for (const nlohmann::json& item : linkGroups) {
-            if (!item.is_object()) continue;
-            RawColorWarpLinkGroup group;
-            group.id = item.value("id", std::string());
-            group.name = item.value("name", std::string());
-            const nlohmann::json pinIds = item.value("pinIds", nlohmann::json::array());
-            if (pinIds.is_array()) {
-                for (const nlohmann::json& pinId : pinIds) {
-                    if (pinId.is_string()) group.pinIds.push_back(pinId.get<std::string>());
-                }
-            }
-            result.linkGroups.push_back(std::move(group));
-        }
-    }
-    return SanitizeColorWarpRecipe(std::move(result));
-}
-
 bool IsColorWarpEnabled(const RawColorWarpRecipe& input) {
-    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
-    return HasPreparedColorWarpEffect(colorWarp);
+    return HasPreparedColorWarpEffect(input);
 }
 
 bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& input) {
     if (!input.enabled || input.pins.empty() || input.regions.empty()) return false;
-    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
+    const auto& colorWarp = input;
     if (!HasPreparedColorWarpEffect(colorWarp)) return false;
     return std::any_of(colorWarp.pins.begin(), colorWarp.pins.end(),
         [&](const RawColorWarpPin& pin) {
-            if (!pin.enabled) return false;
+            if (!ColorWarpParticipates(pin)) return false;
             const auto region = std::find_if(colorWarp.regions.begin(), colorWarp.regions.end(),
                 [&](const RawColorWarpRegion& candidate) { return candidate.id == pin.regionId; });
             return region != colorWarp.regions.end() &&
                 region->spatialMode != RawColorWarpSpatialMode::AllMatches;
         });
-}
-
-float EvaluateColorWarpPinShapeDistance(
-    const RawColorWarpPin& pin,
-    float a,
-    float b) {
-    const float da = a - pin.sourceA;
-    const float db = b - pin.sourceB;
-    const float radius = std::max(0.005f, pin.radius);
-    const float radialDistance = std::sqrt(da * da + db * db);
-    const float circularDistance = radialDistance / radius;
-    const float directionality = std::clamp(
-        pin.qualifierDirectionality,
-        0.0f,
-        1.0f);
-    if (directionality <= 0.000001f || radialDistance <= 0.000001f) {
-        return circularDistance;
-    }
-    const float orientation = pin.qualifierOrientationRadians;
-    const float directionA = std::cos(orientation);
-    const float directionB = std::sin(orientation);
-    const float cosine = std::clamp(
-        (da * directionA + db * directionB) / radialDistance,
-        -1.0f,
-        1.0f);
-    const float forward = (cosine + 1.0f) * 0.5f;
-    const float aperture = std::clamp(pin.qualifierAperture, 0.10f, 1.0f);
-    const float lobePower = 1.0f + 4.0f * (1.0f - aperture);
-    const float directionalReach = std::max(
-        0.05f,
-        aperture + (1.0f - aperture) * std::pow(forward, lobePower));
-    const float directionalDistance = circularDistance / directionalReach;
-    return circularDistance +
-        (directionalDistance - circularDistance) * directionality;
-}
-
-float EvaluateColorWarpPinShapeWeight(
-    const RawColorWarpPin& pin,
-    float a,
-    float b) {
-    const float distance = EvaluateColorWarpPinShapeDistance(pin, a, b);
-    if (distance >= 1.0f) {
-        return 0.0f;
-    }
-    const float innerBoundary = std::max(
-        0.0f,
-        1.0f - std::clamp(pin.softness, 0.0f, 1.0f));
-    if (distance <= innerBoundary) {
-        return 1.0f;
-    }
-    return 1.0f - SmoothStep(innerBoundary, 1.0f, distance);
-}
-
-float EvaluateColorWarpPinLightnessWeight(
-    const RawColorWarpPin& pin,
-    float sceneEv) {
-    return EvaluateColorWarpEvCurve(pin.evCurve, sceneEv);
 }
 
 RawColorWarpCoordinate WorkingRgbToColorWarpCoordinate(
@@ -1965,41 +1510,30 @@ std::array<float, 3> ApplyPreparedColorWarp(
         WorkingRgbToColorWarpCoordinate(
             sceneRgb,
             workingSpace);
-    float weightedA = 0.0f;
-    float weightedB = 0.0f;
-    float weightedLightnessEv = 0.0f;
-    float totalWeight = 0.0f;
-    for (std::size_t index = 0; index < colorWarp.pins.size(); ++index) {
-        const auto& pin = colorWarp.pins[index];
-        const auto mask = masks && index < masks->size()
-            ? (*masks)[index] : RawColorWarpMaskSample{};
-        const float weight = EvaluateColorWarpPinWeight(pin, coordinate, mask,
-            masks ? ColorWarpPinSpatialSupport(colorWarp, pin) : 0.0f);
-        if (weight <= 0.000001f) {
-            continue;
-        }
-        totalWeight += weight;
-        if (!pin.protectColor) {
-            weightedA += (pin.targetA - pin.sourceA) * weight;
-            weightedB += (pin.targetB - pin.sourceB) * weight;
-            weightedLightnessEv += pin.lightnessDeltaEv * weight;
-        }
+    float hue=0, saturation=0, exposure=0, totalWeight=0, protection=0;
+    for (std::size_t index=0;index<colorWarp.pins.size();++index) {
+        const auto& pin=colorWarp.pins[index];
+        if(!ColorWarpParticipates(pin))continue;
+        const auto mask=masks && index<masks->size()?(*masks)[index]:RawColorWarpMaskSample{};
+        const float weight=EvaluateColorWarpPinWeight(pin,coordinate,mask,
+            masks?ColorWarpPinSpatialSupport(colorWarp,pin):0.f);
+        if(pin.protectColor) { protection=std::max(protection,std::clamp(weight,0.f,1.f));continue; }
+        totalWeight+=weight;hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;exposure+=pin.exposureEv*weight;
     }
-    if (totalWeight <= 0.000001f) {
-        return sceneRgb;
+    const float denominator=colorWarp.combine==RawColorWarpCombine::Blend?std::max(1.f,totalWeight):1.f;
+    const float amount=colorWarp.strength*(1.f-protection)/denominator;
+    hue*=amount;saturation*=amount;exposure*=amount;
+    if(hue==0 && saturation==0 && exposure==0)return sceneRgb;
+    auto output=sceneRgb;
+    if(hue!=0 || saturation!=0) {
+        const float radians=hue*3.14159265358979323846f/180.f;
+        const float c=std::cos(radians),s=std::sin(radians),gain=std::max(0.f,1.f+saturation);
+        const float a=coordinate.a,b=coordinate.b;
+        coordinate.a=(c*a-s*b)*gain;coordinate.b=(s*a+c*b)*gain;
+        output=ColorWarpCoordinateToWorkingRgb(coordinate,workingSpace);
     }
-    const float denominator = std::max(1.0f, totalWeight);
-    coordinate.a += colorWarp.strength * weightedA / denominator;
-    coordinate.b += colorWarp.strength * weightedB / denominator;
-    std::array<float, 3> output =
-        ColorWarpCoordinateToWorkingRgb(
-            coordinate,
-            workingSpace);
-    const float lightnessGain = std::exp2(
-        colorWarp.strength * weightedLightnessEv / denominator);
-    for (float& channel : output) {
-        channel *= lightnessGain;
-    }
+    const float gain=std::exp2(exposure);
+    for(float& channel:output)channel*=gain;
     return output;
 }
 

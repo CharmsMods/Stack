@@ -286,109 +286,60 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
         break;
     }
     case NodeKind::DataMath: {
-        if (Primitive(node.dataMathMode)) {
-            const auto* a = input(kMixInputASocketId);
-            const auto* b = input(kMixInputBSocketId);
-            const auto rule = ResolveArithmetic(a ? &a->descriptor : nullptr, b ? &b->descriptor : nullptr);
-            output = MergeSignals(signals({kMixInputASocketId,kMixInputBSocketId}), rule.result, false);
-            output.descriptor.logicalType = rule.result;
-            const auto shape = rule.outputShape();
-            if (rule.result == LogicalValueType::ColorImage && output.descriptor.presentImageComponents.state != KnowledgeState::Known &&
-                (shape == ArithmeticShape::RGB || shape == ArithmeticShape::RGBA)) {
-                auto components = MakeImageComponentSet({ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue});
-                if (shape == ArithmeticShape::RGBA) AddImageComponent(components, ImageComponent::Alpha);
-                SetComponents(output.descriptor, components);
+        const bool binary = Primitive(node.dataMathMode) != nullptr;
+        const bool unary = UnaryArithmetic(node.dataMathMode);
+        std::vector<const GraphOutputDescription*> values;
+        ArithmeticInputs operands{};
+        for (int i = 0; i < ArithmeticInputCount(node.dataMathMode); ++i) {
+            if (const auto* value = input(DataMathInputSocketId(i))) {
+                values.push_back(value);
+                operands[i] = &value->descriptor;
             }
-            if (rule.result == LogicalValueType::Scalar) {
-                output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless,{}});
-                output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
-                rendered = false;
-            } else if ((rule.a == ArithmeticShape::RGBA || rule.b == ArithmeticShape::RGBA) &&
-                       output.descriptor.alpha.state == KnowledgeState::Known) {
-                // Alpha is an ordinary arithmetic component and can leave its input range.
-                output.descriptor.alpha = output.descriptor.alpha.value == AlphaMode::Premultiplied
-                    ? SemanticField<AlphaMode>::Unknown() : SemanticField<AlphaMode>::Known(AlphaMode::Straight);
-            }
-            if (!node.dataMathSettings.requiredLinearBasis.empty() && a &&
-                (a->descriptor.color.state != KnowledgeState::Known ||
-                 a->descriptor.color.value.identity != node.dataMathSettings.requiredLinearBasis ||
-                 a->descriptor.transfer.state != KnowledgeState::Known ||
-                 a->descriptor.transfer.value.kind != TransferKind::Linear ||
-                 (a->descriptor.alpha.state == KnowledgeState::Known && a->descriptor.alpha.value == AlphaMode::Premultiplied)))
-                AddDiagnostic(output,node,socketId,"Input needs straight linear RGB in " + node.dataMathSettings.requiredLinearBasis + ".");
-            break;
         }
-        if (node.dataMathSettings.domain == ArithmeticDomain::Values) {
-            output.descriptor = MakeUnknownDescriptor(LogicalValueType::Scalar);
+        const auto resolved = ResolveArithmeticInputs(node.dataMathMode, operands);
+        const auto type = resolved.result;
+        const auto shape = resolved.outputShape();
+        output = MergeSignals(values, type, false);
+        output.descriptor.logicalType = type;
+        const auto* a = input(kMixInputASocketId);
+        if (!binary && values.empty())
+            AddDiagnostic(output, node, socketId, "Connect a data input.");
+        if (unary) {
+            if (auto reason = ArithmeticLimitsError(node.dataMathMode, node.dataMathSettings))
+                AddDiagnostic(output, node, socketId, reason);
+        }
+        if (type == LogicalValueType::ColorImage && output.descriptor.presentImageComponents.state != KnowledgeState::Known &&
+            (shape == ArithmeticShape::RGB || shape == ArithmeticShape::RGBA)) {
+            auto components = MakeImageComponentSet({ImageComponent::Red, ImageComponent::Green, ImageComponent::Blue});
+            if (shape == ArithmeticShape::RGBA) AddImageComponent(components, ImageComponent::Alpha);
+            SetComponents(output.descriptor, components);
+        }
+        if (type == LogicalValueType::Scalar) {
+            output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless,{}});
             output.descriptor.precision = SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float64);
-            output.descriptor.units = SemanticField<UnitDescriptor>::Known({UnitKind::Unitless, {}});
-            if (node.dataMathMode == DataMathMode::ImageAverage)
-                AddDiagnostic(output, node, socketId, "Average Images requires the spatial domain");
-            for (int i = 0; i < kMaxDataMathInputCount; ++i) {
-                const auto* value = input(DataMathInputSocketId(i));
-                if (!value) continue;
-                MergeDiagnostics(output, *value);
-                if (value->descriptor.logicalType != LogicalValueType::Scalar &&
-                    value->descriptor.logicalType != LogicalValueType::Integer)
-                    AddDiagnostic(output, node, socketId, "Values require uniform Scalar inputs");
-                else if (!(value->descriptor.logicalType == LogicalValueType::Integer &&
-                           value->descriptor.units.state == KnowledgeState::NotApplicable) &&
-                    (value->descriptor.units.state != KnowledgeState::Known ||
-                    (value->descriptor.units.value.kind != UnitKind::Unitless &&
-                     !(i==0 && node.dataMathSettings.percentageInput && value->descriptor.units.value.kind==UnitKind::Percent))))
-                    AddDiagnostic(output, node, socketId, "Value Math requires unitless inputs");
-            }
             rendered = false;
-            break;
+        } else if (shape == ArithmeticShape::RGBA &&
+                   output.descriptor.alpha.state == KnowledgeState::Known) {
+            // Alpha is an ordinary arithmetic component and can leave its input range.
+            output.descriptor.alpha = output.descriptor.alpha.value == AlphaMode::Premultiplied
+                ? SemanticField<AlphaMode>::Unknown() : SemanticField<AlphaMode>::Known(AlphaMode::Straight);
         }
-        std::vector<std::string> ports;
-        for (int i = 0; i < kMaxDataMathInputCount; ++i) ports.push_back(DataMathInputSocketId(i));
-        ports.push_back(kDataMathBaseInputSocketId);
-        auto values = signals(ports);
-        output = MergeSignals(values, node.dataMathMode == DataMathMode::Average ? LogicalValueType::Channel : declaredType,
-            node.dataMathMode == DataMathMode::Average);
-        {
-            const GraphOutputDescription* extent = nullptr;
-            const GraphOutputDescription* color = nullptr;
-            for (const auto* value : values) {
-                if ((value->descriptor.logicalType==LogicalValueType::Scalar || value->descriptor.logicalType==LogicalValueType::Integer) &&
-                    value->descriptor.units.state==KnowledgeState::Known && value->descriptor.units.value.kind!=UnitKind::Unitless)
-                    AddDiagnostic(output,node,socketId,"Ordinary arithmetic requires unitless values; use an explicit unit conversion or Percent.");
-                if (value->descriptor.spatial.state == KnowledgeState::Known) {
-                    if (extent && extent->descriptor.spatial != value->descriptor.spatial)
-                        AddDiagnostic(output,node,socketId,"Input dimensions or coordinate grids differ; insert an explicit Reformat.");
-                    else extent = value;
-                }
-                if (value->descriptor.logicalType == LogicalValueType::ColorImage && value->descriptor.color.state == KnowledgeState::Known) {
-                    if (color && (color->descriptor.color != value->descriptor.color || color->descriptor.transfer != value->descriptor.transfer))
-                        AddDiagnostic(output,node,socketId,"RGB operands use different color spaces or transfer functions; convert explicitly.");
-                    else color = value;
-                }
-            }
-            if ((node.dataMathMode == DataMathMode::Remap && node.dataMathSettings.minValue >= node.dataMathSettings.maxValue) ||
-                (node.dataMathMode == DataMathMode::Clamp && node.dataMathSettings.minValue > node.dataMathSettings.maxValue))
-                AddDiagnostic(output,node,socketId,"The input limits must be in increasing order.");
-        }
-        if (values.empty()) AddDiagnostic(output, node, socketId, "Connect a data input");
-        if (node.dataMathMode == DataMathMode::Average || node.dataMathSettings.domain == ArithmeticDomain::Channel) SetChannel(output);
-        if (!node.dataMathSettings.requiredLinearBasis.empty()) {
-            const auto* source = input(kMixInputASocketId);
-            if (source && (source->descriptor.color.state != KnowledgeState::Known ||
-                source->descriptor.color.value.identity != node.dataMathSettings.requiredLinearBasis ||
-                source->descriptor.transfer.state != KnowledgeState::Known ||
-                source->descriptor.transfer.value.kind != TransferKind::Linear))
-                AddDiagnostic(output, node, socketId, "Requires linear " + node.dataMathSettings.requiredLinearBasis +
-                    "; convert the input or choose the matching Luminance/Halation definition.");
-            if (source && source->descriptor.alpha.state == KnowledgeState::Known &&
-                source->descriptor.alpha.value == AlphaMode::Premultiplied)
-                AddDiagnostic(output,node,socketId,"Requires straight RGB for luminance and emission; insert explicit Unpremultiply before this operation.");
-        }
+        if (!node.dataMathSettings.requiredLinearBasis.empty() && a &&
+            (a->descriptor.color.state != KnowledgeState::Known ||
+             a->descriptor.color.value.identity != node.dataMathSettings.requiredLinearBasis ||
+             a->descriptor.transfer.state != KnowledgeState::Known ||
+             a->descriptor.transfer.value.kind != TransferKind::Linear ||
+             (a->descriptor.alpha.state == KnowledgeState::Known && a->descriptor.alpha.value == AlphaMode::Premultiplied)))
+            AddDiagnostic(output,node,socketId,"Input needs straight linear RGB in " + node.dataMathSettings.requiredLinearBasis + ".");
+        if (node.dataMathMode == DataMathMode::Clamp && a && !ArithmeticLimitsError(node.dataMathMode, node.dataMathSettings))
+            output.descriptor.range = SemanticField<NumericRange>::Known({node.dataMathSettings.minValue,
+                node.dataMathSettings.maxValue, false, false, a->descriptor.range.state == KnowledgeState::Known ?
+                    a->descriptor.range.value.nonFinite : NonFinitePolicy::Unknown});
         if (node.dataMathSettings.boundedMask && node.dataMathMode == DataMathMode::Clamp &&
             node.dataMathSettings.minValue == 0 && node.dataMathSettings.maxValue == 1) {
-            SetChannel(output, {}, LogicalValueType::Mask);
-            output.descriptor.range = SemanticField<NumericRange>::Known({0,1,false,false,NonFinitePolicy::Forbidden});
+            if (IsSingleChannelValue(type)) SetChannel(output, {}, LogicalValueType::Mask);
+            else AddDiagnostic(output, node, socketId, "Coverage needs one spatial Channel.");
         }
-        if (const auto* mask = input(kMaskInputSocketId)) MergeDiagnostics(output, *mask);
         break;
     }
     case NodeKind::Mix:

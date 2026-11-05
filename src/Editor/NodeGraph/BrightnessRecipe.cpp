@@ -4,6 +4,7 @@
 #include "Editor/NodeGraph/CompoundRecipeBuilder.h"
 #include "NodeMath/ArithmeticContract.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
+#include "Editor/NodeGraph/MixContributions.h"
 #include <array>
 #include <iomanip>
 #include <mutex>
@@ -175,12 +176,35 @@ std::string InspectArithmeticRecipe(const Graph &graph, const Node &node, const 
     if (node.kind == NodeKind::Value && std::holds_alternative<double>(node.value.value.payload))
         return "Result = " + literal(std::get<double>(node.value.value.payload)) + " (one Number)";
     if (node.kind == NodeKind::DataMath) {
+        if (node.dataMathMode == DataMathMode::Mix) {
+            const MixContributions mix(graph, node);
+            if (!mix.count) return "Connect at least one input to Mix.";
+            std::string result = "Result = ";
+            for (int i = 0; i < mix.count; ++i) {
+                if (i) result += " + ";
+                result += endpoint(DataMathInputSocketId(mix.slots[i]), 0) + " * " + literal(mix.shares[i]);
+            }
+            return result;
+        }
+        if (UnaryArithmetic(node.dataMathMode)) {
+            const auto& s = node.dataMathSettings;
+            if (const char* issue = ArithmeticLimitsError(node.dataMathMode, s)) return issue;
+            if (!graph.FindAnyInputLink(node.id, "imageA")) return "Connect a data input.";
+            const auto x = endpoint("imageA", 0);
+            if (node.dataMathMode == DataMathMode::Clamp)
+                return "Result = clamp(" + x + ", " + literal(s.minValue) + ", " + literal(s.maxValue) + ")";
+            return "t = (" + x + " - " + literal(s.minValue) + ") / (" + literal(s.maxValue) + " - " +
+                literal(s.minValue) + ")\nResult = " + literal(s.outMin) + " + t * (" + literal(s.outMax) +
+                " - " + literal(s.outMin) + ")";
+        }
         const auto *op = Primitive(node.dataMathMode);
         if (!op)
             return {};
+        const std::string expression = node.dataMathMode == DataMathMode::Difference ? "abs(A - B)" :
+            node.dataMathMode == DataMathMode::Min ? "min(A, B)" : node.dataMathMode == DataMathMode::Max ?
+            "max(A, B)" : std::string("A ") + op->symbol + " B";
         std::string text = "A = " + endpoint("imageA", node.dataMathSettings.constantA) +
-                           "\nB = " + endpoint("imageB", node.dataMathSettings.constantB) + "\nResult = A " +
-                           op->symbol + " B";
+            "\nB = " + endpoint("imageB", node.dataMathSettings.constantB) + "\nResult = " + expression;
         const auto describe = [&](const char *port) -> std::optional<GraphOutputDescription> {
             const auto *wire = graph.FindAnyInputLink(node.id, port);
             if (!wire)

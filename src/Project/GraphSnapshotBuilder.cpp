@@ -167,13 +167,13 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         }
     }
 
-    EditorNodeGraph::Graph brightnessGraph;
+    EditorNodeGraph::Graph recipeGraph;
     EditorNodeGraph::GraphOutputDescriptions authoredWireIssues;
     EditorNodeGraph::GraphOutputDescriptions blockedResults;
     int resolvedStageId=stageOutputNodeId;
-    if (LowerBrightnessRecipes(*renderGraph, inputs, frameContext, brightnessGraph, expansion,
+    if (LowerNativeRecipes(*renderGraph, inputs, frameContext, recipeGraph, expansion,
                                authoredWireIssues, blockedResults, resolvedStageId))
-        renderGraph = &brightnessGraph;
+        renderGraph = &recipeGraph;
     const EditorNodeGraph::Graph& graph = *renderGraph;
     const std::vector<EditorNodeGraph::Node>& graphNodes = graph.GetNodes();
     const std::vector<EditorNodeGraph::Link>& graphLinks = graph.GetLinks();
@@ -718,7 +718,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             if (node.kind==RenderGraphNodeKind::DataMath) {
                 if (node.semanticDescriptor.logicalType==NodeMath::LogicalValueType::Scalar)
                     node.dataMathSettings.domain=NodeMath::ArithmeticDomain::Values;
-                else if (NodeMath::Primitive(node.dataMathMode))
+                else
                     node.dataMathSettings.domain=EditorNodeGraph::IsSingleChannelValue(node.semanticDescriptor.logicalType)
                         ? NodeMath::ArithmeticDomain::Channel : NodeMath::ArithmeticDomain::Spatial;
             }

@@ -17,18 +17,18 @@
 
 namespace Stack::RawRecipe {
 
-inline constexpr int kRawDevelopmentRecipeVersion = 28;
+inline constexpr int kRawDevelopmentRecipeVersion = 29;
 inline constexpr std::size_t kMaxRawGradientAdjustments = 16;
 inline constexpr std::size_t kMaxRawPointCurvePoints = 12;
 inline constexpr std::size_t kMaxRawLocalRangeTargetZones = 32;
 inline constexpr std::size_t kMaxRawLocalRangeTargetSeeds = 32;
-inline constexpr std::size_t kMaxRawColorWarpPins = 8;
+inline constexpr std::size_t kRawColorWarpFamilyCount = 8;
+inline constexpr std::size_t kMaxRawColorWarpSamples = 8;
+inline constexpr std::size_t kMaxRawColorWarpPins = kRawColorWarpFamilyCount + kMaxRawColorWarpSamples;
 inline constexpr std::size_t kMaxRawColorWarpSampleCircles = 16;
-inline constexpr std::size_t kMaxRawColorWarpRegions = 8;
-inline constexpr std::size_t kMaxRawColorWarpLinkGroups = 8;
+inline constexpr std::size_t kMaxRawColorWarpRegions = kMaxRawColorWarpPins;
 inline constexpr float kRawColorWarpEvMinimum = -16.0f;
 inline constexpr float kRawColorWarpEvMaximum = 16.0f;
-inline constexpr std::size_t kRawColorWarpEvCurveSampleCount = 257;
 inline constexpr const char* kFinishToneRangeExtendedSceneV1 =
     "extended-scene-v1";
 inline constexpr const char* kRestormerDenoisePackageId =
@@ -320,13 +320,6 @@ enum class RawColorWarpFeatherDirection {
     Outward
 };
 
-struct RawColorWarpEvCurve {
-    // Samples are uniformly spaced from -16 EV through +16 EV. An empty
-    // vector is the in-memory shorthand for the neutral all-EV curve and is
-    // expanded by recipe sanitization before evaluation or serialization.
-    std::vector<float> samples;
-};
-
 // Coordinates are in the oriented, full pre-output-crop Color Warp domain.
 // radiusU/radiusV encode one source-pixel radius in normalized coordinates so
 // a recalled sample stays circular even when source pixels are not square in
@@ -345,7 +338,7 @@ struct RawColorWarpSampleCircle {
 struct RawColorWarpRegion {
     std::string id;
     std::vector<RawColorWarpSampleCircle> circles;
-    RawColorWarpSpatialMode spatialMode = RawColorWarpSpatialMode::Cohesive;
+    RawColorWarpSpatialMode spatialMode = RawColorWarpSpatialMode::AllMatches;
     float reachPixels = 24.0f;
     float spatialSupport = 1.0f;
     float edgeStop = 0.65f;
@@ -354,15 +347,15 @@ struct RawColorWarpRegion {
         RawColorWarpFeatherDirection::Centered;
 };
 
-struct RawColorWarpLinkGroup {
-    std::string id;
-    std::string name;
-    std::vector<std::string> pinIds;
+struct RawColorWarpRange {
+    float low = 0.0f, high = 1.0f;
+    float featherLow = 0.0f, featherHigh = 0.0f;
+    bool enabled = false;
 };
+enum class RawColorWarpCombine { Accumulate, Blend };
 
-// Color Warp is authored in the two-dimensional OKLab opponent plane.
-// source/target A/B are the actual OKLab a/b coordinates; lightness remains a
-// separate qualifier/adjustment and is never encoded into the disc position.
+// Selection coordinates are OKLab a/abs(L), b/abs(L), independent of exposure.
+// Destination positions are derived from the three authored adjustments.
 struct RawColorWarpPin {
     std::string id;
     std::string name;
@@ -370,28 +363,25 @@ struct RawColorWarpPin {
     bool protectColor = false;
     float sourceA = 0.0f;
     float sourceB = 0.0f;
-    float targetA = 0.0f;
-    float targetB = 0.0f;
-    float radius = 0.12f;
-    float softness = 0.55f;
-    // Zero directionality is the exact historical circular qualifier.
-    // At one, orientation/aperture form a rounded directional cone.
-    float qualifierDirectionality = 0.0f;
-    float qualifierOrientationRadians = 0.0f;
-    float qualifierAperture = 0.45f;
+    int family = -1; // -1 is a sampled selection; 0..7 are the named families.
+    RawColorWarpRange hueRange {-7.5f, 7.5f, 7.5f, 7.5f, true}; // Degrees relative to source hue.
+    RawColorWarpRange saturationRange;
+    RawColorWarpRange exposureRange {-16.0f, 16.0f, 1.0f, 1.0f, false};
+    float hueShift = 0.0f; // Signed degrees.
+    float saturation = 0.0f; // Relative chroma change, -1 through +1.
     float strength = 1.0f;
     std::string regionId;
-    RawColorWarpEvCurve evCurve;
-    float lightnessDeltaEv = 0.0f;
+    float exposureEv = 0.0f;
 };
 
 struct RawColorWarpRecipe {
-    int version = 2;
+    RawColorWarpRecipe();
+    int version = 3;
     bool enabled = true;
     float strength = 1.0f;
     std::vector<RawColorWarpPin> pins;
     std::vector<RawColorWarpRegion> regions;
-    std::vector<RawColorWarpLinkGroup> linkGroups;
+    RawColorWarpCombine combine = RawColorWarpCombine::Accumulate;
 };
 
 struct RawColorWarpCoordinate {
@@ -494,14 +484,6 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value);
 RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp);
 bool IsColorWarpEnabled(const RawColorWarpRecipe& colorWarp);
 bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& colorWarp);
-RawColorWarpEvCurve MakeUniformColorWarpEvCurve(float qualification = 1.0f);
-RawColorWarpEvCurve MakeColorWarpEvCurveHump(
-    float centerEv,
-    float coreHalfWidthEv = 0.75f,
-    float featherEv = 0.75f);
-float EvaluateColorWarpEvCurve(
-    const RawColorWarpEvCurve& curve,
-    float sceneEv);
 const char* RawColorWarpInterpretationModeStableString(
     RawColorWarpInterpretationMode mode);
 RawColorWarpInterpretationMode RawColorWarpInterpretationModeFromStableString(
@@ -513,14 +495,7 @@ const char* RawColorWarpFeatherDirectionStableString(
     RawColorWarpFeatherDirection direction);
 RawColorWarpFeatherDirection RawColorWarpFeatherDirectionFromStableString(
     const std::string& value);
-float EvaluateColorWarpPinShapeDistance(
-    const RawColorWarpPin& pin,
-    float a,
-    float b);
-float EvaluateColorWarpPinShapeWeight(
-    const RawColorWarpPin& pin,
-    float a,
-    float b);
+float EvaluateColorWarpPinColorWeight(const RawColorWarpPin& pin, const RawColorWarpCoordinate& input);
 float EvaluateColorWarpPinLightnessWeight(
     const RawColorWarpPin& pin,
     float sceneEv);

@@ -7,7 +7,7 @@
 namespace EditorNodeGraph {
 inline bool IsFoundationNode(const Node& node) {
     return (node.kind == NodeKind::Layer && node.layerType == LayerType::Brightness) ||
-           (node.kind == NodeKind::DataMath && Stack::NodeMath::Primitive(node.dataMathMode)) ||
+           node.kind == NodeKind::DataMath ||
            (node.kind == NodeKind::Value &&
             node.value.value.logicalType == Stack::NodeMath::LogicalValueType::Scalar);
 }
@@ -21,6 +21,7 @@ inline bool IsLayoutSensitivePort(const Node& node, const std::string& port) {
                node.outputSettings.publishedType != Stack::NodeMath::LogicalValueType::Invalid;
     if (port != kImageInputSocketId)
         return false;
+    if (node.kind == NodeKind::RawOperation) return true;
     const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(node);
     return definition && definition->requiresSceneLinearRgb;
 }
@@ -32,9 +33,6 @@ inline std::string FoundationWireError(const Graph& graph, const Node& target, c
                                        const Stack::NodeMath::ValueDescriptor* other) {
     using namespace Stack::NodeMath;
     using T = LogicalValueType;
-    if (target.kind == NodeKind::DataMath && Primitive(target.dataMathMode))
-        return port == kMixInputASocketId ? ResolveArithmetic(&source, other).error
-                                          : ResolveArithmetic(other, &source).error;
     if (source.logicalType == T::Invalid)
         return {};
     if (target.kind == NodeKind::Layer && target.layerType == LayerType::Brightness &&
@@ -47,6 +45,11 @@ inline std::string FoundationWireError(const Graph& graph, const Node& target, c
         std::string reason;
         if (!Stack::GraphModel::ValidateImageCombination(source, *other, reason))
             return reason;
+    }
+    if (target.kind == NodeKind::RawOperation && port == kImageInputSocketId) {
+        std::string error;
+        EditorNodeGraphDefinitions::ValidateInputDescriptor(graph, target, port, source, error);
+        return error;
     }
     auto contract = EditorNodeGraphDefinitions::GetLivePortContract(graph, target, port);
     if (!contract)

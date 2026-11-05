@@ -291,7 +291,7 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                 case NodeKind::DataMath: {
                     int inputCount = 0;
                     for (int inputIndex = 0;
-                         inputIndex < kMaxDataMathInputCount;
+                         inputIndex < Stack::NodeMath::ArithmeticInputCount(node->dataMathMode);
                          ++inputIndex) {
                         const Link* input =
                             findInput(key.nodeId, DataMathInputSocketId(inputIndex));
@@ -300,12 +300,7 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                             ++inputCount;
                         }
                     }
-                    // Uniform math has authored constant fallbacks for every
-                    // operand. It is executable without a spatial source.
-                    plan.valid = (Stack::NodeMath::Primitive(node->dataMathMode) || node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values) &&
-                        node->dataMathMode != DataMathMode::ImageAverage;
-                    plan.valid = plan.valid || (node->dataMathMode == DataMathMode::ImageAverage
-                        ? inputCount >= 2 : inputCount >= 1);
+                    plan.valid = Stack::NodeMath::Primitive(node->dataMathMode) || inputCount > 0;
                     break;
                 }
                 case NodeKind::ChannelCombine:

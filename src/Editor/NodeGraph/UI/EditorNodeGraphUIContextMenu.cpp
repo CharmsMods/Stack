@@ -82,7 +82,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             const bool hasImageOutput=std::any_of(nodeSockets.begin(),nodeSockets.end(),[](const auto& socket) {
                 return socket.direction==EditorNodeGraph::SocketDirection::Output && socket.logicalType==Stack::NodeMath::LogicalValueType::ColorImage;
             });
-            if(hasImageOutput && !(node->kind == EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode)) &&
+            if(hasImageOutput && node->kind != EditorNodeGraph::NodeKind::DataMath &&
                 ImGui::BeginMenu("Channel outputs")) {
                 for(const auto& socket:nodeSockets) {
                     if(socket.direction!=EditorNodeGraph::SocketDirection::Output ||
@@ -324,7 +324,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             }
             const bool hasRecipe = EditorNodeGraphDefinitions::IsBrightnessRecipe(*node) ||
                 (node->kind==EditorNodeGraph::NodeKind::Value && node->value.value.logicalType==Stack::NodeMath::LogicalValueType::Scalar) ||
-                (node->kind==EditorNodeGraph::NodeKind::DataMath && Stack::NodeMath::Primitive(node->dataMathMode));
+                node->kind==EditorNodeGraph::NodeKind::DataMath;
             if (hasRecipe && ImGui::MenuItem("View Recipe")) {
                 auto type=Stack::NodeMath::MakeUnknownDescriptor(Stack::NodeMath::LogicalValueType::Invalid);
                 if (const auto* wire=editor->GetNodeGraph().FindInputLink(node->id,"imageIn")) {

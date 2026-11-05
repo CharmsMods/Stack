@@ -22,14 +22,23 @@
 
 namespace Stack::Editor::RawLabInternal {
 
+void ShutdownColorWarpCloud(ColorWarpCloudRenderState& state) {
+    if(state.colorWarpCloudVertexBuffer)glDeleteBuffers(1,&state.colorWarpCloudVertexBuffer);
+    if(state.colorWarpCloudVertexArray)glDeleteVertexArrays(1,&state.colorWarpCloudVertexArray);
+    if(state.colorWarpCloudProgram)glDeleteProgram(state.colorWarpCloudProgram);
+    state={};
+}
+
 bool EnsureRawLabColorCloudRenderer(
-    EditorModuleTypes::RawWorkspaceLabUiState& state) {
+    ColorWarpCloudRenderState& state) {
     if (state.colorWarpCloudProgram != 0 &&
         state.colorWarpCloudVertexArray != 0 &&
         state.colorWarpCloudVertexBuffer != 0) {
         return true;
     }
 
+    if(state.initializationAttempted)return false;
+    state.initializationAttempted=true;
     static constexpr const char* vertexShader = R"GLSL(
 #version 330 core
 layout(location = 0) in vec2 inAb;
@@ -159,6 +168,16 @@ void main() {
     glBindBuffer(GL_ARRAY_BUFFER, static_cast<unsigned int>(previousArrayBuffer));
     glBindVertexArray(static_cast<unsigned int>(previousVertexArray));
 
+    state.locations[0]=glGetUniformLocation(program,"uViewCenter");
+    state.locations[1]=glGetUniformLocation(program,"uViewHalfExtent");
+    state.locations[2]=glGetUniformLocation(program,"uCanvasMin");
+    state.locations[3]=glGetUniformLocation(program,"uCanvasSize");
+    state.locations[4]=glGetUniformLocation(program,"uDisplayPos");
+    state.locations[5]=glGetUniformLocation(program,"uDisplaySize");
+    state.locations[6]=glGetUniformLocation(program,"uFramebufferScale");
+    state.locations[7]=glGetUniformLocation(program,"uPointScale");
+    state.locations[8]=glGetUniformLocation(program,"uWorkingRange");
+    state.locations[9]=glGetUniformLocation(program,"uShowSelectedCatch");
     state.colorWarpCloudProgram = program;
     state.colorWarpCloudVertexArray = vertexArray;
     state.colorWarpCloudVertexBuffer = vertexBuffer;
@@ -168,7 +187,7 @@ void main() {
 void DrawRawLabColorCloudCallback(
     const ImDrawList*,
     const ImDrawCmd* command) {
-    auto* state = static_cast<EditorModuleTypes::RawWorkspaceLabUiState*>(
+    auto* state = static_cast<ColorWarpCloudRenderState*>(
         command == nullptr ? nullptr : command->UserCallbackData);
     if (state == nullptr ||
         state->colorWarpCloudProgram == 0 ||
@@ -200,46 +219,45 @@ void DrawRawLabColorCloudCallback(
         std::max(0, static_cast<int>(std::ceil(clipMaxX - clipMinX))),
         std::max(0, static_cast<int>(std::ceil(clipMaxY - clipMinY))));
     glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_PROGRAM_POINT_SIZE);
     glUseProgram(state->colorWarpCloudProgram);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uViewCenter"),
+        state->locations[0],
         state->colorWarpCloudViewCenterA,
         state->colorWarpCloudViewCenterB);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uViewHalfExtent"),
+        state->locations[1],
         state->colorWarpCloudViewHalfWidth,
         state->colorWarpCloudViewHalfHeight);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uCanvasMin"),
+        state->locations[2],
         state->colorWarpCloudCanvasMinX,
         state->colorWarpCloudCanvasMinY);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uCanvasSize"),
+        state->locations[3],
         state->colorWarpCloudCanvasWidth,
         state->colorWarpCloudCanvasHeight);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uDisplayPos"),
+        state->locations[4],
         state->colorWarpCloudDisplayPosX,
         state->colorWarpCloudDisplayPosY);
     glUniform2f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uDisplaySize"),
+        state->locations[5],
         state->colorWarpCloudDisplayWidth,
         state->colorWarpCloudDisplayHeight);
-    glUniform2f(glGetUniformLocation(state->colorWarpCloudProgram, "uFramebufferScale"),
+    glUniform2f(state->locations[6],
         state->colorWarpCloudFramebufferScaleX, state->colorWarpCloudFramebufferScaleY);
     glUniform1f(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uPointScale"),
+        state->locations[7],
         state->colorWarpCloudPointScale);
     glUniform1i(
-        glGetUniformLocation(state->colorWarpCloudProgram, "uWorkingRange"),
+        state->locations[8],
         state->colorWarpCloudWorkingRange);
     glUniform1i(
-        glGetUniformLocation(
-            state->colorWarpCloudProgram,
-            "uShowSelectedCatch"),
+        state->locations[9],
         state->colorWarpCloudShowSelectedCatch ? 1 : 0);
     glBindVertexArray(state->colorWarpCloudVertexArray);
     glDrawArrays(

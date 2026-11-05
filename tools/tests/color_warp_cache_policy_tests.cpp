@@ -23,8 +23,8 @@ RawDevelopmentRecipe SpatialRecipe() {
     RawColorWarpPin pin;
     pin.id = "pin";
     pin.regionId = region.id;
-    pin.targetA = 0.1f;
-    recipe.colorWarp.pins.push_back(pin);
+    pin.sourceA = .3f;pin.hueShift = 10.f;
+    recipe.colorWarp.pins={pin};
     return recipe;
 }
 
@@ -74,7 +74,7 @@ void UnaffectedRecipes() {
             case 0: recipe.colorWarp.enabled = false; break;
             case 1: recipe.colorWarp.strength = 0; break;
             case 2: recipe.colorWarp.pins.front().enabled = false; break;
-            case 3: recipe.colorWarp.pins.front().targetA = 0; break;
+            case 3: recipe.colorWarp.pins.front().hueShift = 0; break;
             case 4: recipe.colorWarp.regions.front().spatialMode = RawColorWarpSpatialMode::AllMatches; break;
         }
         Require(!UsesColorWarpSpatialMasks(recipe.colorWarp), "inactive/non-spatial recipe uses mask policy");

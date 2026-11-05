@@ -122,4 +122,35 @@ inline ArithmeticResolution ResolveArithmetic(const ValueDescriptor *left, const
     return {result, {}, a, b};
 }
 
+using ArithmeticInputs = std::array<const ValueDescriptor*, kMixSlotCount>;
+
+// A mismatch belongs to the endpoint being checked. Ignore unrelated existing
+// failures so a user can repair one operand at a time.
+inline std::string ArithmeticInputError(const ArithmeticInputs& inputs, int slot, int count) {
+    const auto* candidate = inputs[slot];
+    auto error = ResolveArithmetic(candidate, nullptr).error;
+    for (int i = 0; error.empty() && i < count; ++i)
+        if (i != slot && inputs[i]) error = ResolveArithmetic(candidate, inputs[i]).error;
+    return error;
+}
+
+inline ArithmeticResolution ResolveArithmeticInputs(ArithmeticMode mode, const ArithmeticInputs& inputs) {
+    if (Primitive(mode)) return ResolveArithmetic(inputs[0], inputs[1]);
+    const int count = ArithmeticInputCount(mode);
+    auto result = ResolveArithmetic(nullptr, nullptr);
+    bool connected = false;
+    for (int i = 0; i < count; ++i) {
+        if (!inputs[i]) continue;
+        connected = true;
+        const auto operand = ResolveArithmetic(inputs[i], nullptr);
+        auto error = ArithmeticInputError(inputs, i, count);
+        if (!error.empty()) return {LogicalValueType::Invalid, std::move(error), operand.a, operand.b};
+        if (operand.result == LogicalValueType::ColorImage || result.result == LogicalValueType::Scalar ||
+            (operand.result == LogicalValueType::Invalid && result.result != LogicalValueType::ColorImage))
+            result = operand;
+    }
+    if (!connected) result.result = LogicalValueType::Invalid;
+    return result;
+}
+
 } // namespace Stack::NodeMath

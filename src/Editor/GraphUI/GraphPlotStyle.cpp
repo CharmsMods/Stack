@@ -80,15 +80,25 @@ void DrawGraphBezier(ImDrawList& draw, ImVec2 start, ImVec2 outgoing,
     ImGuiExtras::GlassBackgroundScope background(draw);
     const float width=selected ? style.selectedWidth : hovered ? style.hoveredWidth : style.curveWidth;
     if(!style.liquidPoints) {draw.AddBezierCubic(start,outgoing,incoming,end,color,width);return;}
-    // Tessellate once. Two faint wider strokes add a narrow halo without an
-    // offscreen blur, another image pass, or re-evaluating the authored curve.
     draw.PathLineTo(start);draw.PathBezierCubicCurveTo(outgoing,incoming,end);
+    auto lineStyle=style;lineStyle.curveWidth=width;
+    DrawGraphPolyline(draw,draw._Path.Data,draw._Path.Size,color,lineStyle);
+    draw.PathClear();
+}
+
+void DrawGraphPolyline(ImDrawList& draw,const ImVec2* points,int count,
+    ImU32 color,const GraphPlotStyle& style) {
+    if(count<2)return;
+    ImGuiExtras::GlassBackgroundScope background(draw);
+    const float width=style.curveWidth;
+    // Reuse prepared points for every stroke, including nonlinear curve views.
+    if(!style.liquidPoints) {draw.AddPolyline(points,count,color,0,width);return;}
     auto glow=ImGui::ColorConvertU32ToFloat4(color);
     glow.w*=.045f;
-    draw.AddPolyline(draw._Path.Data,draw._Path.Size,ImGui::ColorConvertFloat4ToU32(glow),0,width+6.f*style.scale);
+    draw.AddPolyline(points,count,ImGui::ColorConvertFloat4ToU32(glow),0,width+6.f*style.scale);
     glow.w*=2.2f;
-    draw.AddPolyline(draw._Path.Data,draw._Path.Size,ImGui::ColorConvertFloat4ToU32(glow),0,width+3.f*style.scale);
-    draw.PathStroke(color,0,width);
+    draw.AddPolyline(points,count,ImGui::ColorConvertFloat4ToU32(glow),0,width+3.f*style.scale);
+    draw.AddPolyline(points,count,color,0,width);
 }
 
 void DrawGraphPoint(ImDrawList& draw, ImVec2 point, const GraphPlotStyle& style,

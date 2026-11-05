@@ -153,8 +153,7 @@ bool ConnectionUsesImageAsRenderSource(
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::DataMath &&
-        (EditorNodeGraph::IsDataMathInputSocketId(toSocketId) ||
-         toSocketId == EditorNodeGraph::kDataMathBaseInputSocketId)) {
+        EditorNodeGraph::IsDataMathInputSocketId(toSocketId)) {
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::ImageToMask &&
@@ -655,57 +654,6 @@ bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
     return true;
 }
 
-bool EditorModule::SplitImageAverageNodeIntoChannelAverages(int dataMathNodeId) {
-    const auto& graph = GetNodeGraph();
-    const auto* original = graph.FindNode(dataMathNodeId);
-    if (!original || original->kind != EditorNodeGraph::NodeKind::DataMath ||
-        original->dataMathMode != EditorNodeGraph::DataMathMode::ImageAverage) return false;
-    const auto position = original->position;
-    std::vector<EditorNodeGraph::Link> inputs, outputs;
-    for (int i=0;i<EditorNodeGraph::kMaxDataMathInputCount;++i) {
-        const auto* link = graph.FindInputLink(dataMathNodeId,EditorNodeGraph::DataMathInputSocketId(i));
-        if (!link) continue;
-        if (graph.IsScalarSocketStream(link->fromNodeId,link->fromSocketId)) return false;
-        inputs.push_back(*link);
-    }
-    if (inputs.size()<2) return false;
-    for (const auto& link : graph.GetLinks())
-        if (link.fromNodeId==dataMathNodeId && link.fromSocketId=="imageOut") outputs.push_back(link);
-    int combineId=0;
-    auto proposal=Stack::GraphModel::ProposeEdit(graph,graph.GetStructureRevision(),[&](auto& candidate) {
-        std::string error;
-        const auto connect=[&](int from,const std::string& out,int to,const std::string& in) {
-            if (!candidate.TryConnectSockets(from,out,to,in,&error)) throw std::runtime_error(error);
-        };
-        for (int id : graph.GetDownstreamRenderNodeIds(dataMathNodeId))
-            if (id!=dataMathNodeId) if (auto* node=candidate.FindNode(id)) node->position.x+=520;
-        std::vector<int> splits;
-        for (std::size_t i=0;i<inputs.size();++i) {
-            const int id=candidate.AddChannelSplitNode({position.x-360,position.y-float(inputs.size()-1)*84+float(i)*168})->id;
-            splits.push_back(id);
-            connect(inputs[i].fromNodeId,inputs[i].fromSocketId,id,"imageIn");
-        }
-        combineId=candidate.AddChannelCombineNode({position.x+360,position.y})->id;
-        const char* channels[]{"r","g","b","a"};
-        for (int channel=0;channel<4;++channel) {
-            const int id=candidate.AddDataMathNode(EditorNodeGraph::DataMathMode::Average,
-                {position.x,position.y-210+float(channel)*140})->id;
-            for (std::size_t i=0;i<splits.size();++i)
-                connect(splits[i],channels[channel],id,EditorNodeGraph::DataMathInputSocketId(static_cast<int>(i)));
-            connect(id,"imageOut",combineId,channels[channel]);
-        }
-        for (const auto& link:outputs) connect(combineId,"imageOut",link.toNodeId,link.toSocketId);
-        if (!candidate.RemoveNode(dataMathNodeId)) throw std::runtime_error("The original average could not be replaced.");
-        candidate.SelectNode(combineId);
-    });
-    std::string error;
-    if (!GetGraphEditorContext().applyEdit(std::move(proposal),error)) {
-        PostNotification(UiNotificationSeverity::Error,error,"graph-average-split");
-        return false;
-    }
-    SelectGraphNode(combineId);
-    return true;
-}
 bool EditorModule::ToggleOutputNodeEnabled(int outputNodeId) {
     EditorNodeGraph::Node* outputNode = GetNodeGraph().FindNode(outputNodeId);
     if (!outputNode || outputNode->kind != EditorNodeGraph::NodeKind::Output) {
@@ -1046,6 +994,10 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
             if (!EditorNodeGraph::ConnectAuthoredSockets(candidate,fromNodeId,fromSocketId,toNodeId,toSocketId,
                                                        &error,&adapter,&context))
                 throw std::runtime_error(error);
+            if (adapter && GetNodeGraph().FindNode(adapter)) {
+                selectedSource = adapter;
+                return;
+            }
             // A shortcut must leave the visible Combine and its three inputs in the graph.
             const auto folds = adapter ? std::vector<EditorNodeGraph::ChannelSplitFold>{} :
                 EditorNodeGraph::FoldChannelSplits(candidate,{fromNodeId,toNodeId});
@@ -1635,30 +1587,5 @@ bool EditorModule::SetNodeParameterExposed(int nodeId, const std::string& parame
             throw std::runtime_error("The parameter connection could not be changed.");
     }, &error);
     if (!applied) PostNotification(UiNotificationSeverity::Error, error, "graph-parameter-exposed");
-    return applied;
-}
-
-
-bool EditorModule::SetDataMathDomain(int nodeId, Stack::NodeMath::ArithmeticDomain domain) {
-    if (m_NodeEditorDrawingContext && m_NodeEditorDrawingContext->nodeDraft &&
-        m_NodeEditorDrawingContext->nodeDraft->id==nodeId &&
-        m_NodeEditorDrawingContext->nodeDraft->kind==EditorNodeGraph::NodeKind::DataMath) {
-        auto& node=*m_NodeEditorDrawingContext->nodeDraft;
-        if (domain==Stack::NodeMath::ArithmeticDomain::Values && node.dataMathMode==EditorNodeGraph::DataMathMode::ImageAverage)
-            return false;
-        node.dataMathSettings.domain=domain;
-        m_NodeEditorDrawingContext->draftChanged=true;
-        return true;
-    }
-    std::string error;
-    const bool applied = ApplyGraphCommand(*this, [&](auto& graph) {
-        auto* node = graph.FindNode(nodeId);
-        if (!node || node->kind != EditorNodeGraph::NodeKind::DataMath)
-            throw std::runtime_error("The math node is unavailable.");
-        if (domain == Stack::NodeMath::ArithmeticDomain::Values && node->dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage)
-            throw std::runtime_error("Average Images requires spatial image inputs.");
-        node->dataMathSettings.domain = domain;
-    }, &error);
-    if (!applied) PostNotification(UiNotificationSeverity::Error, error, "graph-math-domain");
     return applied;
 }

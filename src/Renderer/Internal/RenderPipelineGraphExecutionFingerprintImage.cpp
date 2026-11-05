@@ -583,37 +583,19 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(fingerprint, HashValue(pipeline.m_Width));
             HashCombine(fingerprint, HashValue(pipeline.m_Height));
         } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            for (const DataMathInputLinkInfo& input : CollectDataMathAverageInputs(executionContext, node.nodeId)) {
-                const bool scalarInput = IsScalarRenderSocket(executionContext, input.link->fromNodeId, input.link->fromSocketId);
-                HashCombine(fingerprint, HashValue(input.socketId));
-                HashCombine(
-                    fingerprint,
-                    IsUniformRenderSocket(executionContext, input.link->fromNodeId, input.link->fromSocketId)
-                        ? fingerprintScalar(input.link->fromNodeId, input.link->fromSocketId)
-                        : scalarInput
-                        ? fingerprintMask(input.link->fromNodeId, input.link->fromSocketId)
-                        : fingerprintImage(input.link->fromNodeId, input.link->fromSocketId));
-                HashCombine(fingerprint, HashValue(scalarInput));
+            for (const auto* port : {EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::kMixInputBSocketId}) {
+                const auto* operand = findInputLink(node.nodeId, port);
+                if (!operand) continue;
+                HashCombine(fingerprint, HashValue(std::string(port)));
+                const auto from = operand->fromNodeId;
+                const auto& output = operand->fromSocketId;
+                if (IsUniformRenderSocket(executionContext, from, output))
+                    HashCombine(fingerprint, fingerprintScalar(from, output));
+                else if (IsScalarRenderSocket(executionContext, from, output))
+                    HashCombine(fingerprint, fingerprintMask(from, output));
+                else
+                    HashCombine(fingerprint, fingerprintImage(from, output));
             }
-            if (const RenderGraphLink* baseInput = findInputLink(node.nodeId, EditorNodeGraph::kDataMathBaseInputSocketId)) {
-                const bool scalarBase = IsScalarRenderSocket(executionContext, baseInput->fromNodeId, baseInput->fromSocketId);
-                HashCombine(fingerprint, HashValue(std::string(EditorNodeGraph::kDataMathBaseInputSocketId)));
-                HashCombine(
-                    fingerprint,
-                    scalarBase
-                        ? fingerprintMask(baseInput->fromNodeId, baseInput->fromSocketId)
-                        : fingerprintImage(baseInput->fromNodeId, baseInput->fromSocketId));
-                HashCombine(fingerprint, HashValue(scalarBase));
-            } else {
-                HashCombine(fingerprint, HashValue(false));
-            }
-            if (const RenderGraphLink* maskInput = findInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId)) {
-                HashCombine(fingerprint, HashValue(std::string(EditorNodeGraph::kMaskInputSocketId)));
-                HashCombine(fingerprint, fingerprintMask(maskInput->fromNodeId, maskInput->fromSocketId));
-            } else {
-                HashCombine(fingerprint, std::size_t{ 0 });
-            }
-            HashCombine(fingerprint, HashValue(IsScalarRenderSocket(executionContext, node.nodeId, socketId)));
             HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.constantA));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.requiredLinearBasis));

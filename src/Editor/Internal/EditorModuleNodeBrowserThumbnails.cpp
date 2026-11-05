@@ -1277,8 +1277,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
                     case EditorNodeGraph::DataMathMode::Subtract: prototype.dataMathSettings.constantB = 0.16f; break;
                     case EditorNodeGraph::DataMathMode::Multiply: prototype.dataMathSettings.constantB = 1.35f; break;
                     case EditorNodeGraph::DataMathMode::Divide: prototype.dataMathSettings.constantB = 0.80f; break;
-                    case EditorNodeGraph::DataMathMode::Average: prototype.dataMathSettings.constantB = 0.64f; break;
-                    case EditorNodeGraph::DataMathMode::ImageAverage: prototype.dataMathSettings.constantB = 0.64f; break;
+                    case EditorNodeGraph::DataMathMode::Mix: break; // Uses the catalog fallback.
                     case EditorNodeGraph::DataMathMode::Min: prototype.dataMathSettings.constantB = 0.72f; break;
                     case EditorNodeGraph::DataMathMode::Max: prototype.dataMathSettings.constantB = 0.36f; break;
                     case EditorNodeGraph::DataMathMode::Difference: prototype.dataMathSettings.constantB = 0.32f; break;

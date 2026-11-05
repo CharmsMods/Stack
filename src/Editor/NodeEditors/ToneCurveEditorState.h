@@ -11,13 +11,10 @@ struct ToneCurveEditorState {
         for (auto& value:canvas) value.EndInteraction();
         if (advanced) {advanced->ClearViewportProbe();advanced->EndViewportTargetDrag();}
     }
+    int photoChannel=0; // White selects luminance. This is presentation state only.
     int component=0, selected=-1, dragging=-1;
     float minimum=-16, maximum=16;
     std::array<RawLabInternal::CurveCanvasState,5> canvas;
-    std::array<RawLabInternal::RawLabToneGraphViewRange,5> fitted;
-    std::array<std::uint64_t,5> fittedRevision {};
-    std::array<bool,5> fittedValid {};
-    float zoom=0;
     std::shared_ptr<ToneCurveLayer> advanced;
     nlohmann::json appliedAdvanced;
 };

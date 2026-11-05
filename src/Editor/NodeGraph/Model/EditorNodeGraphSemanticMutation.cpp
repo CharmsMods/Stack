@@ -47,50 +47,6 @@ bool MetadataChanged(const NodeMetadataState& before, const Node& after) {
 
 } // namespace
 
-bool Graph::SetDataMathMode(int nodeId, DataMathMode mode) {
-    Node* node = FindNode(nodeId);
-    if (!node || node->kind != NodeKind::DataMath) {
-        return false;
-    }
-    if (Stack::NodeMath::Primitive(node->dataMathMode) || Stack::NodeMath::Primitive(mode)) return false;
-    if (node->dataMathSettings.domain == Stack::NodeMath::ArithmeticDomain::Values &&
-        mode == DataMathMode::ImageAverage) return false;
-
-    const DataMathMode previousMode = node->dataMathMode;
-    const NodeMetadataState before = CaptureMetadataState(*node);
-    node->dataMathMode = mode;
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(*node);
-
-    std::vector<Link> invalidLinks;
-    if (previousMode != mode) {
-        ForEachIncomingLink(nodeId, [&](const Link& link) {
-            if (!CanConnectSockets(
-                    link.fromNodeId,
-                    link.fromSocketId,
-                    link.toNodeId,
-                    link.toSocketId)) {
-                invalidLinks.push_back(link);
-            }
-        });
-    }
-    for (const Link& link : invalidLinks) {
-        RemoveLink(
-            link.fromNodeId,
-            link.fromSocketId,
-            link.toNodeId,
-            link.toSocketId);
-    }
-
-    const bool changed =
-        previousMode != mode ||
-        MetadataChanged(before, *node) ||
-        !invalidLinks.empty();
-    if (changed) {
-        TouchStructure();
-    }
-    return changed;
-}
-
 bool Graph::SetMaskCombineMode(int nodeId, MaskCombineMode mode) {
     Node* node = FindNode(nodeId);
     if (!node || node->kind != NodeKind::MaskCombine) {

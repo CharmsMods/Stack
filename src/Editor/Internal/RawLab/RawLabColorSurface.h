@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-namespace Stack::Editor { class ColorWarpFeedback; }
+namespace Stack::Editor { class ColorWarpFeedback; struct ColorWarpEditorState; }
 
 namespace Stack::Editor::RawLabInternal {
 
@@ -25,9 +25,15 @@ struct RawLabColorSurfaceArgs {
     EditorModuleTypes::RawWorkspaceColorWarpAreaOwner areaOwner;
     bool areaEditingAllowed = false;
     bool panel = false;
+    ColorWarpEditorState* state = nullptr;
+    std::uint64_t nodeRevision = 0;
 };
 
 bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args);
 bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args);
+bool CommitColorWarpSampling(RawLabColorSurfaceArgs& args);
+void DrawColorWarpCloud(RawLabColorSurfaceArgs& args, ImVec2 minimum, float size);
+bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args, RawRecipe::RawColorWarpPin& pin, float size);
+bool DrawColorWarpRanges(RawLabColorSurfaceArgs& args, RawRecipe::RawColorWarpPin& pin);
 
 } // namespace Stack::Editor::RawLabInternal

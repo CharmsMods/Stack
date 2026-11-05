@@ -10,8 +10,13 @@ using TechnicalOperation = Stack::NodeMath::TechnicalImageOperation;
 void AppendFieldOperations(std::vector<OperationRegistration>& operations) {
     const auto add = [&](LiveNodeDefinition definition) {
         if (definition.kind == NodeKind::DataMath) {
-            const int inputs = Stack::NodeMath::Primitive(static_cast<EditorNodeGraph::DataMathMode>(definition.variant))
-                ? 2 : EditorNodeGraph::kMaxDataMathInputCount;
+            const auto mode = static_cast<EditorNodeGraph::DataMathMode>(definition.variant);
+            const int inputs = Stack::NodeMath::ArithmeticInputCount(mode);
+            if (mode == EditorNodeGraph::DataMathMode::Mix || mode == EditorNodeGraph::DataMathMode::Remap) {
+                definition.inspectability = Stack::NodeMath::Inspectability::TransparentGraph;
+                definition.canonicalRecipeId = mode == EditorNodeGraph::DataMathMode::Mix ? "stack:recipe/mix" : "stack:recipe/remap-range";
+                definition.decompositionReason.clear();
+            }
             for (int i=0; i<inputs; ++i)
                 definition.bypassBindings.push_back({"imageOut", EditorNodeGraph::DataMathInputSocketId(i)});
         }
@@ -22,12 +27,12 @@ void AppendFieldOperations(std::vector<OperationRegistration>& operations) {
     add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Subtract), "Subtract", "Math", "data-math:subtract"));
     add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Multiply), "Multiply", "Math", "data-math:multiply"));
     add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Divide), "Divide", "Math", "data-math:divide"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Average), "Average", "Math", "data-math:average"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Min), "Minimum", "Math", "data-math:min"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Max), "Maximum", "Math", "data-math:max"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Difference), "Difference", "Math", "data-math:difference"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Remap), "Remap", "Math", "data-math:remap"));
-    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::ImageAverage), "Average Images", "Image Operations", "data-math:image-average"));
+    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Mix), "Mix", "Math", "data-math:mix", NodeCatalogPreviewStrategy::FallbackOnly));
+    operations.back().definition.searchAliases = "average|mean|weighted average|blend";
+    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Min), "Minimum", "Math", "data-math:min", NodeCatalogPreviewStrategy::FallbackOnly, 1, false));
+    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Max), "Maximum", "Math", "data-math:max", NodeCatalogPreviewStrategy::FallbackOnly, 1, false));
+    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Difference), "Absolute Difference", "Math", "data-math:difference"));
+    add(MakeOperation(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Remap), "Remap Range", "Math", "data-math:remap"));
     add(MakeOperation(NodeKind::Value, static_cast<int>(LogicalValue::Scalar), "Number", "Math", "number", NodeCatalogPreviewStrategy::FallbackOnly));
     add(MakeOperation(EditorNodeGraph::NodeKind::Value, static_cast<int>(LogicalValue::Curve1D), "Curve Value", "Values", std::string("value:") + Stack::NodeMath::SerializeFirstClassValue(BuildDefaultFirstClassValue(LogicalValue::Curve1D)).value("logicalType", "invalid"), NodeCatalogPreviewStrategy::FallbackOnly));
     // Imported first-class resources and unavailable values use the same exact
@@ -41,6 +46,7 @@ void AppendFieldOperations(std::vector<OperationRegistration>& operations) {
             "value:" + type, NodeCatalogPreviewStrategy::NoPreview, 1, false));
     }
     add(MakeOperation(EditorNodeGraph::NodeKind::FieldMean, 0, "Field Mean", "Analysis / Measure", "analysis:field-mean", NodeCatalogPreviewStrategy::FallbackOnly));
+    operations.back().definition.searchAliases = "average pixels|mean of a channel";
     add(MakeOperation(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::SolidColor), "Solid Color Image", "Texture / Generate", "image-generator:solid-color"));
     add(MakeOperation(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::ColorGradient), "Color Gradient Image", "Texture / Generate", "image-generator:color-gradient"));
     add(MakeOperation(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Square), "Square", "Texture / Generate", "image-generator:square"));

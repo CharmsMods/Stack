@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpMath.h"
 #include "Hdr/Presentation.h"
 #include "Editor/UI/ViewportNavigation.h"
 #include "Editor/EditorModule.h"
@@ -88,10 +89,11 @@ const char* ColorWarpInterpretationLabel(
 Stack::RawRecipe::RawColorWarpInterpretationMode CycleColorWarpInterpretation(
     Stack::RawRecipe::RawColorWarpInterpretationMode mode,
     int direction) {
-    constexpr int count = 7;
-    int index = static_cast<int>(mode);
-    index = (index + (direction >= 0 ? 1 : count - 1)) % count;
-    return static_cast<Stack::RawRecipe::RawColorWarpInterpretationMode>(index);
+    using Mode=Stack::RawRecipe::RawColorWarpInterpretationMode;
+    constexpr Mode choices[]{Mode::GuidedFamily,Mode::DominantFamily,Mode::MultipleColors};
+    int index=0;
+    for(int i=0;i<3;++i)if(choices[i]==mode)index=i;
+    return choices[(index+(direction>=0?1:2))%3];
 }
 
 ImU32 PreviewColorWarpPinColor(
@@ -100,8 +102,8 @@ ImU32 PreviewColorWarpPinColor(
     float alpha = 1.0f) {
     Stack::RawRecipe::RawColorWarpCoordinate coordinate;
     coordinate.lightness = 0.70f;
-    coordinate.a = pin.sourceA;
-    coordinate.b = pin.sourceB;
+    coordinate.a = pin.sourceA * coordinate.lightness;
+    coordinate.b = pin.sourceB * coordinate.lightness;
     std::array<float, 3> rgb =
         Stack::RawRecipe::ColorWarpCoordinateToWorkingRgb(
             coordinate, workingSpace);
@@ -215,11 +217,6 @@ void DrawLabCoverageWithoutDetail(ImDrawList* list, ImVec2 minimum, ImVec2 maxim
 
 int EditorModule::GetRawWorkspaceColorWarpDisplayedPin(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe) const {
-    const int hovered = m_RawWorkspaceLabUi.colorWarpHoveredSelection;
-    if (hovered >= 0 &&
-        hovered < static_cast<int>(recipe.colorWarp.pins.size())) {
-        return hovered;
-    }
     if (m_RawWorkspaceLabUi.selectedColorWarpPin >= 0 &&
         m_RawWorkspaceLabUi.selectedColorWarpPin <
             static_cast<int>(recipe.colorWarp.pins.size())) {
@@ -230,33 +227,7 @@ int EditorModule::GetRawWorkspaceColorWarpDisplayedPin(
 
 int EditorModule::GetRawWorkspaceColorWarpViewMode(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe) const {
-    const int displayed = GetRawWorkspaceColorWarpDisplayedPin(recipe);
-    if (displayed < 0) return 0;
-    if (m_RawWorkspaceLabUi.colorWarpHoveredSelection >= 0 &&
-        displayed != m_RawWorkspaceLabUi.selectedColorWarpPin) {
-        return std::clamp(
-            m_RawWorkspaceLabUi.colorWarpTemporaryViewMode, 0, 2);
-    }
-    const std::string& pinId = recipe.colorWarp.pins[
-        static_cast<std::size_t>(displayed)].id;
-    const auto retained =
-        m_RawWorkspaceLabUi.colorWarpSelectionViewModes.find(pinId);
-    return retained == m_RawWorkspaceLabUi.colorWarpSelectionViewModes.end()
-        ? 0
-        : std::clamp(retained->second, 0, 2);
-}
-
-void EditorModule::ApplyRawWorkspaceColorWarpViewOverride(
-    Stack::RawRecipe::RawDevelopmentRecipe& recipe) const {
-    if (m_RawWorkspaceLabUi.activeTool != RawLabTool::Color ||
-        GetRawWorkspaceColorWarpViewMode(recipe) != 1) {
-        return;
-    }
-    const int displayed = GetRawWorkspaceColorWarpDisplayedPin(recipe);
-    if (displayed >= 0 &&
-        displayed < static_cast<int>(recipe.colorWarp.pins.size())) {
-        recipe.colorWarp.pins[static_cast<std::size_t>(displayed)].enabled = false;
-    }
+    return GetRawWorkspaceColorWarpDisplayedPin(recipe)>=0 && m_RawWorkspaceLabUi.colorWarpDiagnosticLocked?2:0;
 }
 
 void EditorModule::RenderRawWorkspacePreviewCanvas(
@@ -473,142 +444,26 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         m_ViewportOutputRawWorkspaceSourceKey == preview.identity;
 
     const auto drawSavedColors = [&] {
-    if (colorLayout && !previewRecipe.colorWarp.pins.empty()) {
-        constexpr float circleRadius = 12.0f;
-        constexpr float circleSpacing = 9.0f;
-        const float totalWidth =
-            static_cast<float>(previewRecipe.colorWarp.pins.size()) *
-                circleRadius * 2.0f +
-            static_cast<float>(previewRecipe.colorWarp.pins.size() - 1u) *
-                circleSpacing;
-        const float firstCenterX = layoutStart.x +
-            (available.x - totalWidth) * 0.5f + circleRadius;
-        const float centerY = layoutStart.y + 18.f;
-        const int previousHovered =
-            m_RawWorkspaceLabUi.colorWarpHoveredSelection;
-        int hovered = -1;
-        bool viewChanged = false;
-        const ImVec2 savedCursor = ImGui::GetCursorScreenPos();
-        for (std::size_t index = 0;
-             index < previewRecipe.colorWarp.pins.size();
-             ++index) {
-            const float centerX = firstCenterX +
-                static_cast<float>(index) *
-                    (circleRadius * 2.0f + circleSpacing);
-            const ImVec2 center(centerX, centerY);
-            ImGui::SetCursorScreenPos(ImVec2(
-                center.x - circleRadius - 3.0f,
-                center.y - circleRadius - 3.0f));
-            ImGui::PushID(static_cast<int>(index));
-            ImGui::InvisibleButton(
-                "##ColorWarpSelection",
-                ImVec2((circleRadius + 3.0f) * 2.0f,
-                       (circleRadius + 3.0f) * 2.0f));
-            const bool itemHovered = ImGui::IsItemHovered();
-            if (itemHovered) hovered = static_cast<int>(index);
-            const auto& pin = previewRecipe.colorWarp.pins[index];
-            const bool selectedPin =
-                static_cast<int>(index) ==
-                m_RawWorkspaceLabUi.selectedColorWarpPin;
-            if (itemHovered &&
-                previousHovered != static_cast<int>(index) &&
-                !selectedPin) {
-                m_RawWorkspaceLabUi.colorWarpTemporaryViewMode = 0;
+        if(!colorLayout)return;
+        const auto savedCursor=ImGui::GetCursorScreenPos();
+        constexpr float step=30.f;
+        for(std::size_t index=0;index<previewRecipe.colorWarp.pins.size();++index) {
+            const auto& pin=previewRecipe.colorWarp.pins[index];
+            const int row=int(index/8),column=int(index%8);
+            const ImVec2 center(layoutStart.x+available.x*.5f+(column-3.5f)*step,layoutStart.y+16+row*step);
+            ImGui::SetCursorScreenPos({center.x-12,center.y-12});ImGui::PushID(pin.id.c_str());
+            if(ImGui::InvisibleButton("##ViewColorSelection",{24,24})) {
+                m_RawWorkspaceLabUi.selectedColorWarpPin=int(index);
+                m_RawWorkspaceLabUi.colorWarpInspectedRegionId=pin.regionId;
+                m_RawWorkspaceLabUi.colorWarpInspectionActive=false;
             }
-            int mode = 0;
-            const auto retained =
-                m_RawWorkspaceLabUi.colorWarpSelectionViewModes.find(pin.id);
-            if (retained !=
-                m_RawWorkspaceLabUi.colorWarpSelectionViewModes.end()) {
-                mode = std::clamp(retained->second, 0, 2);
-            }
-            if (itemHovered && !selectedPin) {
-                mode = std::clamp(
-                    m_RawWorkspaceLabUi.colorWarpTemporaryViewMode, 0, 2);
-            }
-            if (itemHovered && std::abs(ImGui::GetIO().MouseWheel) > 0.0001f) {
-                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-                const int direction = ImGui::GetIO().MouseWheel > 0.0f ? 1 : 2;
-                mode = (mode + direction) % 3;
-                if (selectedPin) {
-                    m_RawWorkspaceLabUi.colorWarpSelectionViewModes[pin.id] = mode;
-                } else {
-                    m_RawWorkspaceLabUi.colorWarpTemporaryViewMode = mode;
-                }
-                viewChanged = true;
-            }
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                m_RawWorkspaceLabUi.selectedColorWarpPin =
-                    static_cast<int>(index);
-                m_RawWorkspaceLabUi.selectedColorWarpGroupId.clear();
-                m_RawWorkspaceLabUi.colorWarpInspectionActive = true;
-                m_RawWorkspaceLabUi.colorWarpInspectedRegionId = pin.regionId;
-                viewChanged = true;
-            }
-            const ImU32 fill = PreviewColorWarpPinColor(
-                pin,
-                previewRecipe.technical.workingSpace);
-            drawList->AddCircleFilled(center, circleRadius, fill, 32);
-            drawList->AddCircle(
-                center,
-                circleRadius + (selectedPin ? 2.0f : 0.0f),
-                selectedPin
-                    ? IM_COL32(250, 250, 250, 245)
-                    : ImGui::GetColorU32(ImGuiCol_Border),
-                32,
-                selectedPin ? 2.0f : 1.0f);
-            if (mode == 1) {
-                drawList->AddLine(
-                    ImVec2(center.x - 8.0f, center.y + 8.0f),
-                    ImVec2(center.x + 8.0f, center.y - 8.0f),
-                    IM_COL32(250, 250, 250, 235),
-                    2.0f);
-            } else if (mode == 2) {
-                DrawPreviewDashedCircle(
-                    drawList,
-                    center,
-                    circleRadius + 4.0f,
-                    IM_COL32(90, 224, 238, 235),
-                    1.5f);
-            }
-            if (itemHovered) {
-                const char* modeName = mode == 1
-                    ? "Selection hidden"
-                    : mode == 2 ? "Qualification mask" : "Adjusted result";
-                ImGui::SetTooltip(
-                    "%s\n%s\nWheel changes the viewport view%s.",
-                    pin.name.c_str(),
-                    modeName,
-                    selectedPin ? " and keeps it" : " temporarily");
-            }
+            drawList->AddCircleFilled(center,8,PreviewColorWarpPinColor(pin,previewRecipe.technical.workingSpace),24);
+            if(m_RawWorkspaceLabUi.selectedColorWarpPin==int(index))
+                drawList->AddCircle(center,11,IM_COL32(250,250,250,240),24,1.5f);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",pin.name.c_str());
             ImGui::PopID();
         }
         ImGui::SetCursorScreenPos(savedCursor);
-        if (hovered != previousHovered) {
-            m_RawWorkspaceLabUi.colorWarpHoveredSelection = hovered;
-            if (hovered >= 0 &&
-                hovered != m_RawWorkspaceLabUi.selectedColorWarpPin) {
-                m_RawWorkspaceLabUi.colorWarpTemporaryViewMode = 0;
-                const auto& pin = previewRecipe.colorWarp.pins[
-                    static_cast<std::size_t>(hovered)];
-                m_RawWorkspaceLabUi.colorWarpInspectionActive = true;
-                m_RawWorkspaceLabUi.colorWarpInspectedRegionId = pin.regionId;
-            } else if (hovered < 0 &&
-                       m_RawWorkspaceLabUi.selectedColorWarpPin >= 0 &&
-                       m_RawWorkspaceLabUi.selectedColorWarpPin <
-                           static_cast<int>(previewRecipe.colorWarp.pins.size())) {
-                const auto& pin = previewRecipe.colorWarp.pins[
-                    static_cast<std::size_t>(
-                        m_RawWorkspaceLabUi.selectedColorWarpPin)];
-                m_RawWorkspaceLabUi.colorWarpInspectedRegionId = pin.regionId;
-            }
-            viewChanged = true;
-        }
-        if (viewChanged) MarkRenderRefreshDirty();
-    } else if (m_RawWorkspaceLabUi.colorWarpHoveredSelection != -1) {
-        m_RawWorkspaceLabUi.colorWarpHoveredSelection = -1;
-        MarkRenderRefreshDirty();
-    }
     };
 
     // Submit the chip visuals after the photograph, but reserve their input
@@ -880,6 +735,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             if (colorUi.colorWarpPendingCircleActive) {
                 colorUi.ResetColorWarpAreaRequest();
             }
+            colorUi.colorWarpSamplingArmed=false;
+            colorUi.colorWarpAttachRegionPinId.clear();
             colorUi.colorWarpInspectionActive = false;
             colorUi.colorWarpDiagnosticLocked = false;
             colorUi.ResetColorWarpDiagnosticRequest();
@@ -973,21 +830,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 const bool isolate =
                     m_RawWorkspaceLabUi.colorWarpDiagnosticIsolateSelected ||
                     colorWarpSelectionViewMode == 2;
-                const std::vector<std::string>* groupPinIds = nullptr;
-                if (!isolate) {
-                    for (const auto& group : previewRecipe.colorWarp.linkGroups) {
-                        if (std::find(group.pinIds.begin(), group.pinIds.end(), selectedPin.id) !=
-                            group.pinIds.end()) {
-                            groupPinIds = &group.pinIds;
-                            break;
-                        }
-                    }
-                }
-                const auto inspectPin = [&](const auto& pin) {
-                    return pin.id == selectedPin.id || (groupPinIds &&
-                        std::find(groupPinIds->begin(), groupPinIds->end(), pin.id) !=
-                            groupPinIds->end());
-                };
+                const auto inspectPin = [&](const auto& pin) { return pin.id == selectedPin.id; };
                 Stack::Editor::ColorWarpFeedback* feedbackCache = preview.edit.nodeTarget
                     ? &m_NodeEditorState.Get<Stack::Editor::ColorWarpFeedback>(*preview.edit.nodeTarget)
                     : nullptr;
@@ -998,7 +841,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                         previewRecipe.colorWarp, previewRecipe.technical.workingSpace,
                         [this](std::function<void()> job) {
                             return ProjectTasks().SubmitHighPriority("Analyzing colors", std::move(job));
-                        });
+                        }, preview.edit.nodeRevision);
                 }
                 const auto feedback = feedbackCache ? feedbackCache->Current() : nullptr;
                 std::size_t overlayFingerprint = feedbackCache ? feedbackCache->Key() : 0u;
@@ -1586,15 +1429,15 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                     previewRecipe.colorWarp.pins.begin(),
                     previewRecipe.colorWarp.pins.end(),
                     [&](const auto& pin) {
-                        return pin.regionId ==
+                        return pin.family < 0 && pin.regionId ==
                             colorUi.colorWarpPendingReplaceRegionId;
                     }));
             }
             const std::size_t occupiedSlots =
-                previewRecipe.colorWarp.pins.size() - reclaimedSlots;
+                Stack::RawRecipe::ColorWarpSampleCount(previewRecipe.colorWarp) - reclaimedSlots;
             const std::size_t availableSlots =
-                Stack::RawRecipe::kMaxRawColorWarpPins > occupiedSlots
-                    ? Stack::RawRecipe::kMaxRawColorWarpPins - occupiedSlots
+                Stack::RawRecipe::kMaxRawColorWarpSamples > occupiedSlots
+                    ? Stack::RawRecipe::kMaxRawColorWarpSamples - occupiedSlots
                     : 0u;
             auto state = std::make_shared<
                 Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
@@ -1648,7 +1491,7 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                 colorUi.colorWarpAreaStatus =
                     colorUi.colorWarpAreaAnalysisResult.capacityLimited
                     ? "No pin slots available"
-                    : "No usable pixels";
+                    : "Choose a distinguishable color; neutrals have no hue";
             } else if (colorUi.colorWarpAreaAnalysisResult.capacityLimited) {
                 colorUi.colorWarpAreaStatus = "Result limited by remaining pin slots";
             } else {
@@ -1679,7 +1522,7 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
             (mouse.y - imageRect.Min.y) / std::max(1.0f, imageRect.GetHeight()),
             0.0f, 0.999999f);
         const ImVec2 source = displayToSource(displayU, displayV);
-        if (!colorUi.colorWarpPendingCircleActive && !colorUi.colorWarpInspectionActive) {
+        if (colorUi.colorWarpSamplingArmed && !colorUi.colorWarpPendingCircleActive && !colorUi.colorWarpInspectionActive) {
             drawList->AddCircle(mouse, 12.f, IM_COL32(15, 15, 15, 200), 32, 3.f);
             drawList->AddCircle(mouse, 12.f, IM_COL32(245, 245, 245, 225), 32, 1.f);
         }
@@ -1730,7 +1573,7 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
             colorUi.colorWarpPendingCircleActive) {
             colorUi.ResetColorWarpAreaRequest();
         }
-        if (!colorUi.colorWarpPendingCircleActive &&
+        if ((colorUi.colorWarpSamplingArmed || colorUi.colorWarpInspectionActive) && !colorUi.colorWarpPendingCircleActive &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             bool recalledCircleHit = false;
             const bool inspectingRecalledRegion =

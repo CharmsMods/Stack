@@ -187,7 +187,7 @@ bool ValidateLargeFirstEdits(Service& service, Service::ClientId client) {
             if (edit == 2) {
                 snapshot.rawWorkspace.recipe.colorWarp.enabled = true;
                 RawRecipe::RawColorWarpPin pin;
-                pin.id = "first-edit"; pin.targetA = 0.02f + fps*0.001f;
+                pin.id = "first-edit"; pin.sourceA=.3f;pin.hueRange.enabled=false;pin.hueShift=( 0.02f + fps*0.001f)*100.f;
                 snapshot.rawWorkspace.recipe.colorWarp.pins = {pin};
             }
             if (edit == 3) snapshot.rawWorkspace.recipe.viewTransform.layerJson["exposure"] = 0.1f + fps*0.01f;

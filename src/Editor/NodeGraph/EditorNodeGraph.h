@@ -191,7 +191,6 @@ public:
     bool TryConnectSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
     bool SetOutputNodeEnabled(int nodeId, bool enabled);
     bool SetParameterExposed(int nodeId, const std::string& parameterId, bool exposed);
-    bool SetDataMathMode(int nodeId, DataMathMode mode);
     bool SetMaskCombineMode(int nodeId, MaskCombineMode mode);
     bool SetImageToMaskKind(int nodeId, ImageToMaskKind kind);
     bool SetLayerNodeType(int nodeId, LayerType type);
