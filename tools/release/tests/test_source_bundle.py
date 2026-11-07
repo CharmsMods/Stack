@@ -95,6 +95,21 @@ class SourceBundleTests(unittest.TestCase):
         self.write("README.md", b"changed\n")
         self.assert_rejected("not clean")
 
+    def test_windows_line_endings_do_not_change_source_archive(self):
+        self.git("config", "core.autocrlf", "true")
+        self.git("config", "core.eol", "crlf")
+        self.write(".gitattributes", b"* text=auto\n")
+        self.write("README.md", b"Windows checkout\r\nSecond line\r\n")
+        self.commit()
+        self.assertTrue(self.run_bundle("--check-only")["clean"])
+        result = self.run_bundle()
+        with zipfile.ZipFile(Path(result["output"]) / "source.zip") as archive:
+            self.assertEqual(archive.read("source/README.md"),
+                             b"Windows checkout\nSecond line\n")
+        self.assertEqual(self.git("config", "core.autocrlf").strip(), "true")
+        self.assertEqual(self.git("config", "core.eol").strip(), "crlf")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_staged_rejected(self):
         self.write("README.md", b"changed\n")
         self.git("add", "README.md")

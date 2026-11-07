@@ -110,6 +110,13 @@ class Git:
                               + dirty.replace(b"\0", b"; ").decode(errors="replace")[:1000])
         return commit
 
+    def write_archive(self, path, commit):
+        # git archive applies the host's checkout line endings. Keep the source
+        # ZIP in repository form without changing status checks or user config.
+        self.run("-c", "core.autocrlf=false", "-c", "core.eol=lf",
+                 "archive", "--format=zip", "--prefix=source/",
+                 "--output=" + str(path), commit)
+
     def snapshot(self, commit):
         tree = self.run("rev-parse", commit + "^{tree}").decode().strip()
         entries = []
@@ -304,7 +311,7 @@ def run(args):
     if args.check_only:
         with tempfile.TemporaryDirectory(prefix="stack-source-check-") as temporary:
             archive = Path(temporary) / "source.zip"
-            git.run("archive", "--format=zip", "--prefix=source/", "--output=" + str(archive), commit)
+            git.write_archive(archive, commit)
             validate_archive(archive, manifest)
         git.clean_commit(commit)
         return {"commit": commit, "tree": manifest["tree"], "clean": True,
@@ -326,7 +333,7 @@ def run(args):
         bundle = Path(temporary) / "bundle"
         bundle.mkdir()
         archive = bundle / "source.zip"
-        git.run("archive", "--format=zip", "--prefix=source/", "--output=" + str(archive), commit)
+        git.write_archive(archive, commit)
         validate_archive(archive, manifest)
         write_json(bundle / "source-manifest.json", manifest)
         dependencies = [add_dependency(item, index, bundle)
