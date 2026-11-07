@@ -21,7 +21,7 @@ void operator delete(void* p,std::size_t)noexcept{std::free(p);}
 namespace Raw {struct RawMetadata;}
 namespace Stack::RawWorkspace {enum class ThumbnailStatus {Unknown};}
 namespace Async {enum class TaskState {Idle};}
-namespace ImGui {int frame=100;int GetFrameCount(){return frame;}}
+namespace ImGui {void* GetCurrentContext(){return reinterpret_cast<void*>(1);} int frame=100;int GetFrameCount(){return frame;}}
 // PRODUCTION_CONSTANTS
 struct EditorModule {
 // PRODUCTION_RECORD

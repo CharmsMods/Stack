@@ -52,10 +52,12 @@ ImVec2 HandlePoint(const RawGradientMask& mask, int handle,
         const float d = handle == 1 ? mask.lowBoundary :
             handle == 2 ? mask.highBoundary : 0.0f;
         if (handle == 3) return ImagePoint(minimum, size, mapping, mask, -sn * 0.25f, cs * 0.25f);
-        const float tangent = handle == 1 ? 0.14f : -0.14f;
+        const float tangent = 0.f;
         return ImagePoint(minimum, size, mapping, mask,
             cs * d - sn * tangent, sn * d + cs * tangent);
     }
+    if(handle==5)return ImagePoint(minimum,size,mapping,mask,-cs*mask.radiusX,-sn*mask.radiusX);
+    if(handle==6)return ImagePoint(minimum,size,mapping,mask,sn*mask.radiusY,-cs*mask.radiusY);
     const float radius = handle == 3 ? mask.radiusX * std::max(mask.innerScale, 0.08f) :
         handle == 4 ? mask.radiusX + 25.f / std::max(1.f,Distance(
             ImagePoint(minimum,size,mapping,mask,0,0),ImagePoint(minimum,size,mapping,mask,1,0))) : mask.radiusX;
@@ -67,8 +69,9 @@ ImVec2 HandlePoint(const RawGradientMask& mask, int handle,
 void DrawGuides(ImDrawList* draw, const ImVec2& minimum, const ImVec2& maximum,
     const RawGradientMask& mask, const CanvasMapping& mapping) {
     const ImVec2 size(maximum.x - minimum.x, maximum.y - minimum.y);
+    // Guides belong to the View canvas, not the image coverage rectangle.
     const ImU32 lineColor = IM_COL32(255, 255, 255, 205);
-    const ImU32 innerColor = IM_COL32(210, 235, 255, 170);
+    const ImU32 innerColor = IM_COL32(255, 255, 255, 140);
     if (mask.shape == RawGradientShape::Linear) {
         const float cs = std::cos(mask.angleRadians), sn = std::sin(mask.angleRadians);
         const float extent = std::max(size.x, size.y) / std::max(size.y, 1.0f) * 2.0f;
@@ -99,11 +102,12 @@ void DrawGuides(ImDrawList* draw, const ImVec2& minimum, const ImVec2& maximum,
             }
         }
     }
-    const int handleCount = mask.shape == RawGradientShape::Linear ? 4 : 5;
+    const int handleCount = mask.shape == RawGradientShape::Linear ? 4 : 7;
     for (int handle = 0; handle < handleCount; ++handle) {
         const ImVec2 center = HandlePoint(mask, handle, minimum, size, mapping);
-        draw->AddCircleFilled(center, 5.0f, IM_COL32(32, 36, 42, 240));
-        draw->AddCircle(center, 5.0f, lineColor, 16, 1.5f);
+        if(handle==4 && mask.shape==RawGradientShape::Radial)continue;
+        draw->AddCircleFilled(center, handle==0?5.f:3.5f, IM_COL32(32, 36, 42, 240));
+        draw->AddCircle(center, handle==0?5.f:3.5f, lineColor, 16, 1.5f);
     }
 }
 
@@ -423,7 +427,10 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
     if (size.x <= 1.0f || size.y <= 1.0f) return;
     const ImRect imageRect(minimum, maximum);
     const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const bool inImage = imageRect.Contains(mouse) && ImGui::IsWindowHovered();
+    const auto* canvasDraw = ImGui::GetWindowDrawList();
+    const bool inCanvas = ImGui::IsWindowHovered() && !RawFloatingSurfaceOwnsPointer() &&
+        ImRect(canvasDraw->GetClipRectMin(), canvasDraw->GetClipRectMax()).Contains(mouse);
+    const bool inImage = imageRect.Contains(mouse) && inCanvas;
     if (!context.rawAdjustmentLayerId.empty() && m_GraphOutputDescriptionRenderRevision != m_RenderRevision)
         BuildGraphSnapshot();
     const auto mappingFor = [&](const RawGradientMask* mask) -> std::optional<CanvasMapping> {
@@ -502,9 +509,14 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
         ? (ev ? &context.recipe.evGradients[static_cast<std::size_t>(selected)].mask
             : &context.recipe.toneGradients[static_cast<std::size_t>(selected)].mask)
         : nullptr;
-    if (selectedMask && ui.gradientDrawShape < 0 && ImGui::IsWindowHovered() &&
+    if(selectedMask && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive()) {
+        if(ImGui::IsKeyPressed(ImGuiKey_O,false))ui.gradientOverlayVisible=!ui.gradientOverlayVisible;
+        if(ImGui::IsKeyPressed(ImGuiKey_H,false))ui.gradientGuidesVisible=!ui.gradientGuidesVisible;
+        if(ImGui::IsKeyPressed(ImGuiKey_Apostrophe,false)){selectedMask->inverted=!selectedMask->inverted;changed=true;}
+    }
+    if (selectedMask && ui.gradientGuidesVisible && ui.gradientDrawShape < 0 && inCanvas && !ImGui::IsAnyItemActive() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        const int handles = selectedMask->shape == RawGradientShape::Linear ? 4 : 5;
+        const int handles = selectedMask->shape == RawGradientShape::Linear ? 4 : 7;
         for (int handle = 0; handle < handles; ++handle) {
             if (Distance(mouse, HandlePoint(*selectedMask, handle, minimum, size, mapping)) < 12.0f) {
                 ui.gradientDragHandle = handle;
@@ -513,6 +525,24 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
                 break;
             }
         }
+    }
+    if(selectedMask && ui.gradientGuidesVisible && ui.gradientDrawShape<0 && ui.gradientDragHandle<0 && inCanvas &&
+        !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const auto& mask=*selectedMask;
+        const float cs=std::cos(mask.angleRadians),sn=std::sin(mask.angleRadians);
+        const float dx=(u-mask.centerU)*aspect,dy=v-mask.centerV;
+        const float axial=dx*cs+dy*sn,across=-dx*sn+dy*cs;
+        const float tolerance=8.f/std::max(1.f,size.y);
+        int handle=-1;
+        if(mask.shape==RawGradientShape::Linear) {
+            if(std::abs(axial-mask.lowBoundary)<tolerance)handle=1;
+            else if(std::abs(axial-mask.highBoundary)<tolerance)handle=2;
+            else if(std::abs(axial)<tolerance)handle=3;
+        } else {
+            const float radius=std::hypot(axial/std::max(.001f,mask.radiusX),across/std::max(.001f,mask.radiusY));
+            if(radius>1.f && radius<1.f+tolerance/std::max(.001f,std::min(mask.radiusX,mask.radiusY)))handle=4;
+        }
+        if(handle>=0){ui.gradientDragHandle=handle;ui.gradientDragStart=mouse;ui.gradientDragOriginal=mask;}
     }
     if (selectedMask && ui.gradientDragHandle >= 0 &&
         ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -526,6 +556,10 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
         case 0:
             selectedMask->centerU = original.centerU + dx / aspect;
             selectedMask->centerV = original.centerV + dy;
+            if (ImGui::GetIO().KeyShift) {
+                if (std::abs(dx) > std::abs(dy)) selectedMask->centerV = original.centerV;
+                else selectedMask->centerU = original.centerU;
+            }
             break;
         case 1:
             if (selectedMask->shape == RawGradientShape::Linear)
@@ -542,8 +576,7 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
             break;
         case 3:
             if (selectedMask->shape == RawGradientShape::Linear) {
-                selectedMask->angleRadians = std::atan2(v-original.centerV,
-                    (u-original.centerU)*aspect) - 1.57079632679f;
+                selectedMask->angleRadians = original.angleRadians + std::atan2(v-original.centerV,(u-original.centerU)*aspect) - std::atan2(start.y-original.centerV,(start.x-original.centerU)*aspect);
             } else {
                 selectedMask->innerScale = std::clamp(
                     original.innerScale + axial / std::max(original.radiusX, 0.005f),
@@ -552,10 +585,11 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
             break;
         case 4:
             {
-                selectedMask->angleRadians = std::atan2(v-original.centerV,
-                    (u-original.centerU)*aspect);
+                selectedMask->angleRadians = original.angleRadians + std::atan2(v-original.centerV,(u-original.centerU)*aspect) - std::atan2(start.y-original.centerV,(start.x-original.centerU)*aspect);
             }
             break;
+        case 5:selectedMask->radiusX=std::max(.005f,original.radiusX-axial);break;
+        case 6:selectedMask->radiusY=std::max(.005f,original.radiusY+dx*sn-dy*cs);break;
         case 100:
             if (selectedMask->shape == RawGradientShape::Linear) {
                 selectedMask->centerU = (u + original.centerU) * 0.5f;
@@ -563,11 +597,32 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
                 selectedMask->angleRadians = std::atan2(dy, dx);
                 selectedMask->lowBoundary = -std::max(0.01f, std::hypot(dx, dy) * 0.5f);
                 selectedMask->highBoundary = -selectedMask->lowBoundary;
+                if (ImGui::GetIO().KeyAlt) {
+                    selectedMask->centerU = original.centerU;
+                    selectedMask->centerV = original.centerV;
+                    selectedMask->lowBoundary *= 2.f;
+                    selectedMask->highBoundary *= 2.f;
+                }
             } else {
                 selectedMask->radiusX = std::max(0.01f, std::abs(dx));
                 selectedMask->radiusY = std::max(0.01f, std::abs(dy));
+                if (ImGui::GetIO().KeyAlt) {
+                    selectedMask->centerU = (u+original.centerU)*.5f;
+                    selectedMask->centerV = (v+original.centerV)*.5f;
+                    selectedMask->radiusX *= .5f;
+                    selectedMask->radiusY *= .5f;
+                }
             }
             break;
+        }
+        if(ImGui::GetIO().KeyShift) {
+            if(selectedMask->shape==RawGradientShape::Linear && ui.gradientDragHandle!=0)selectedMask->angleRadians=std::round(selectedMask->angleRadians/0.261799388f)*0.261799388f;
+            else if (ui.gradientDragHandle == 100)
+                selectedMask->radiusY = selectedMask->radiusX;
+            else if (ui.gradientDragHandle == 1 || ui.gradientDragHandle == 5)
+                selectedMask->radiusY = selectedMask->radiusX * original.radiusY / std::max(original.radiusX, .005f);
+            else if (ui.gradientDragHandle == 2 || ui.gradientDragHandle == 6)
+                selectedMask->radiusX = selectedMask->radiusY * original.radiusX / std::max(original.radiusY, .005f);
         }
         selectedMask->centerU = std::clamp(selectedMask->centerU, -2.0f, 3.0f);
         selectedMask->centerV = std::clamp(selectedMask->centerV, -2.0f, 3.0f);
@@ -579,7 +634,7 @@ void EditorModule::RenderRawWorkspaceLabGradientImage(
         changed = true;
     }
     const bool released = ui.gradientDragHandle >= 0 &&
-        ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left);
     if (released) {
         ui.gradientDragHandle = -1;
         ui.gradientDrawShape = -1;

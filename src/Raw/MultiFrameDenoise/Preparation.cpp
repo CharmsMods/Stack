@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "Raw/MultiFrameDenoise/Preparation.h"
 
 #include "Raw/RawProcessingMath.h"
@@ -6,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -24,6 +26,23 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 bool SetError(std::string* error, const std::string& message) {
     if (error) *error = message;
     return false;
+}
+
+std::string TileWriteError(const std::filesystem::path& directory, int writeError) {
+    std::error_code spaceError;
+    const auto space = std::filesystem::space(directory, spaceError);
+    std::string message = writeError == ENOSPC
+        ? "Not enough disk space to write the bracket working cache."
+        : "The bracket working cache could not finish writing a tile.";
+    message += " Cache: " + directory.u8string() + ".";
+    if (!spaceError)
+        message += " Available space: " + std::to_string(space.available / (1024u * 1024u)) + " MiB.";
+    if (writeError != 0 && writeError != ENOSPC)
+        message += " " + std::generic_category().message(writeError) + ".";
+    message += writeError == ENOSPC
+        ? " Free space on this drive and retry; original captures are unchanged."
+        : " Check free space and write access, then retry; original captures are unchanged.";
+    return message;
 }
 
 bool IsCanceled(const PreparationOptions& options) {
@@ -730,7 +749,7 @@ bool DirectoryNormalizedTileCache::Write(
     static std::atomic<std::uint64_t> temporaryCounter { 0 };
     std::filesystem::path temporary = path;
     temporary += ".tmp-" + std::to_string(temporaryCounter.fetch_add(1u));
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    Stack::Storage::ScratchBudget::Output output(temporary, std::ios::binary | std::ios::trunc);
     const std::uint64_t sampleCount = tile.normalizedMosaic.size();
     const std::uint64_t checksum = HashTile(tile);
     output.write(kTileMagic.data(), static_cast<std::streamsize>(kTileMagic.size()));
@@ -740,10 +759,11 @@ bool DirectoryNormalizedTileCache::Write(
         !WritePod(output, tile.originX) || !WritePod(output, tile.originY) ||
         !WritePod(output, tile.extent.width) || !WritePod(output, tile.extent.height) ||
         !WritePod(output, sampleCount) || !WritePod(output, checksum)) {
+        const auto message = TileWriteError(path.parent_path(), errno);
         output.close();
         std::error_code cleanupError;
         std::filesystem::remove(temporary, cleanupError);
-        return SetError(error, "MFD tile cache could not write a tile header.");
+        return SetError(error, message);
     }
     output.write(
         reinterpret_cast<const char*>(tile.normalizedMosaic.data()),
@@ -756,11 +776,13 @@ bool DirectoryNormalizedTileCache::Write(
         static_cast<std::streamsize>(tile.sampleFlags.size()));
     output.flush();
     const bool writeSucceeded = static_cast<bool>(output);
+    const int writeError = writeSucceeded ? 0 : errno;
     output.close();
-    if (!writeSucceeded) {
+    if (!writeSucceeded || !output) {
+        const auto message = TileWriteError(path.parent_path(), writeSucceeded ? errno : writeError);
         std::error_code cleanupError;
         std::filesystem::remove(temporary, cleanupError);
-        return SetError(error, "MFD tile cache could not write a complete tile payload.");
+        return SetError(error, message);
     }
 
     std::error_code replaceError;

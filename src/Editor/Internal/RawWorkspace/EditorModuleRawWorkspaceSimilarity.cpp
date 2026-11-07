@@ -83,7 +83,9 @@ bool EditorModule::MergeRawWorkspaceFilmstripStack(
 bool EditorModule::MergeRawWorkspaceFilmstripStackMembers(
     const std::vector<std::string>& sourceKeys,
     const std::vector<std::string>& targetMembers) {
-    if(RequestAutoBracketForeground("change these stacks",[this,sourceKeys,targetMembers]{MergeRawWorkspaceFilmstripStackMembers(sourceKeys,targetMembers);}))return true;
+    // Organization is independent of an automatic bracket's captured inputs.
+    // Queue reconciliation handles future candidates; no foreground takeover
+    // is needed for merge, detach, or reorder operations.
     if (!CanEditRawWorkspaceFilmstripOrganization() ||
         sourceKeys.empty() || targetMembers.empty() ||
         std::any_of(
@@ -121,7 +123,6 @@ bool EditorModule::ReorderRawWorkspaceFilmstripSources(
         visibleStacks,
     std::size_t insertionStackIndex,
     bool detachSingleMember) {
-    if(RequestAutoBracketForeground("reorder these stacks",[this,sourceKeys,visibleStacks,insertionStackIndex,detachSingleMember]{ReorderRawWorkspaceFilmstripSources(sourceKeys,visibleStacks,insertionStackIndex,detachSingleMember);}))return true;
     if (!CanEditRawWorkspaceFilmstripOrganization() || sourceKeys.empty() ||
         std::any_of(
             sourceKeys.begin(),
@@ -227,7 +228,6 @@ void EditorModule::NormalizeRawWorkspaceFilmstripOrganization() {
 
 bool EditorModule::DetachRawWorkspaceFilmstripStackMember(
     const std::string& sourceKey) {
-    if(RequestAutoBracketForeground("change this stack",[this,sourceKey]{DetachRawWorkspaceFilmstripStackMember(sourceKey);}))return true;
     if (!CanEditRawWorkspaceFilmstripOrganization() || sourceKey.empty() ||
         FindRawWorkspaceSourceByKey(sourceKey) == nullptr) {
         return false;
@@ -256,12 +256,18 @@ bool EditorModule::DetachRawWorkspaceFilmstripStackMember(
     return true;
 }
 
-void EditorModule::ResetRawWorkspaceSimilarityStacks() {
+void EditorModule::ResetRawWorkspaceSimilarityStacks(bool preserveCurrentStacks) {
     m_RawWorkspaceSimilarityGeneration.fetch_add(1, std::memory_order_relaxed);
     m_RawWorkspaceSimilarityPublishedGeneration = 0;
-    if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
-    m_RawWorkspaceSimilarityWorkspaceKey.clear();
-    m_RawWorkspaceSimilarityStacks.clear();
+    m_RawWorkspacePendingSimilarityResult.reset();
+    // A rescan invalidates requests, not the last accepted presentation.
+    // ApplyRawGalleryManualGrouping filters removed keys against the catalog.
+    if (!preserveCurrentStacks || m_RawWorkspace.sources.empty() ||
+        m_RawWorkspaceSimilarityWorkspaceKey != GetRawWorkspaceGalleryScopeKey()) {
+        if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
+        m_RawWorkspaceSimilarityWorkspaceKey.clear();
+        m_RawWorkspaceSimilarityStacks.clear();
+    }
     m_RawWorkspaceSimilarityRebuildPending = false;
     m_RawWorkspaceSimilarityActiveSourceCount = 0;
     m_RawWorkspaceSimilarityLastStackCount = 0;
@@ -289,6 +295,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
         return;
     }
 
+    m_RawWorkspacePendingSimilarityResult.reset();
     m_RawWorkspaceSimilarityWorkerActive = true;
     m_RawWorkspaceSimilarityRebuildPending = false;
     m_RawWorkspaceSimilarityActiveSourceCount = m_RawWorkspace.sources.size();
@@ -339,24 +346,10 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                             m_RawWorkspaceSimilarityGeneration.load(
                                 std::memory_order_relaxed),
                             GetRawWorkspaceGalleryScopeKey());
-                    if (current) {
-                        m_RawWorkspaceSimilarityPublishedGeneration =
-                            result.generation;
-                        // Automatic grouping changes the same displayed order
-                        // as manual organization, without persisting a manual edit.
-                        const bool sameOrder = std::equal(result.stacks.begin(), result.stacks.end(),
-                            m_RawWorkspaceSimilarityStacks.begin(), m_RawWorkspaceSimilarityStacks.end(),
-                            [](const auto& a, const auto& b) {
-                                return a.anchorCatalogIndex == b.anchorCatalogIndex &&
-                                    a.folderKey == b.folderKey && a.sourceKeys == b.sourceKeys;
-                            });
-                        if (!sameOrder) ++m_RawWorkspaceFilmstripOrganizationRevision;
-                        m_RawWorkspaceSimilarityWorkspaceKey =
-                            result.workspaceKey;
-                        m_RawWorkspaceSimilarityStacks =
-                            std::move(result.stacks);
-                        m_RawWorkspaceSimilarityLastStackCount =
-                            m_RawWorkspaceSimilarityStacks.size();
+                    // Superseded work never briefly replaces the displayed
+                    // stacks. One completed snapshot waits for input to settle.
+                    if (current && !m_RawWorkspaceSimilarityRebuildPending) {
+                        m_RawWorkspacePendingSimilarityResult = std::move(result);
                     }
                     m_RawWorkspaceSimilarityWorkerActive = false;
                     if (m_RawWorkspaceSimilarityRebuildPending) {
@@ -373,11 +366,31 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
         generation == m_RawWorkspaceSimilarityGeneration.load(
             std::memory_order_relaxed)) {
         m_RawWorkspaceSimilarityWorkerActive = false;
-        m_RawWorkspaceSimilarityPublishedGeneration = generation;
-        if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
-        m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
-        m_RawWorkspaceSimilarityStacks.clear();
+        // Retain presentation without claiming this generation is ready for
+        // automatic processing when its grouping could not be computed.
     } else if (!submitted) {
         m_RawWorkspaceSimilarityWorkerActive = false;
     }
+}
+
+void EditorModule::ApplyPendingRawWorkspaceSimilarityResult() {
+    if (!m_RawWorkspacePendingSimilarityResult) return;
+    // Called by the non-rendering pump after presentation releases its input;
+    // no borrowed stack/view references survive this publication boundary.
+    auto result = std::move(*m_RawWorkspacePendingSimilarityResult);
+    m_RawWorkspacePendingSimilarityResult.reset();
+    if (!Stack::RawWorkspace::IsRawGallerySimilarityResultCurrent(result,
+            m_RawWorkspaceSimilarityGeneration.load(std::memory_order_relaxed),
+            GetRawWorkspaceGalleryScopeKey())) return;
+    const bool sameOrder = std::equal(result.stacks.begin(), result.stacks.end(),
+        m_RawWorkspaceSimilarityStacks.begin(), m_RawWorkspaceSimilarityStacks.end(),
+        [](const auto& a, const auto& b) {
+            return a.anchorCatalogIndex == b.anchorCatalogIndex &&
+                a.folderKey == b.folderKey && a.sourceKeys == b.sourceKeys;
+        });
+    if (!sameOrder) ++m_RawWorkspaceFilmstripOrganizationRevision;
+    m_RawWorkspaceSimilarityPublishedGeneration = result.generation;
+    m_RawWorkspaceSimilarityWorkspaceKey = std::move(result.workspaceKey);
+    m_RawWorkspaceSimilarityStacks = std::move(result.stacks);
+    m_RawWorkspaceSimilarityLastStackCount = m_RawWorkspaceSimilarityStacks.size();
 }

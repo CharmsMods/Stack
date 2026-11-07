@@ -63,9 +63,18 @@ struct SourceRecord {std::string relativePathKey; struct {std::filesystem::path 
 }
 namespace ImGui {double time=1;struct IO {float DeltaTime=.016f;} io;double GetTime(){return time;} IO& GetIO(){return io;}}
 void Require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
-struct ProjectView {std::filesystem::path projectPath,coverThumbnailCachePath;std::string projectId,referenceSourceKey,projectCoverKey;bool standaloneMaster=false;};
+struct ProjectView {
+    std::filesystem::path projectPath,coverThumbnailCachePath;
+    std::string projectId,referenceSourceKey;
+    std::string projectCoverKey="project-overlay:path:"+projectPath.lexically_normal().generic_string();
+    bool standaloneMaster=false;std::size_t projectIndex=0;
+};
 struct Fixture {
-    struct {std::string selectedSourceKey;} m_RawWorkspace;
+    struct Card {std::shared_ptr<const Stack::RawWorkspace::SourceRecord> thumbnailOriginal,linkedOriginal,masterSource;};
+    struct {std::string selectedSourceKey;std::vector<Card> sourceSetProjects;} m_RawWorkspace;
+    bool m_GalleryComparisonEnabled=false;
+    struct Cover {bool transparentCover=false;};
+    std::unordered_map<std::string,Cover> m_RawWorkspaceThumbnailTextures;
     struct Project {std::string rawSourceKey;} project;
     Project* m_Project=&project;
     std::string m_RawWorkspaceLabFilmstripHoverSourceKey;
@@ -84,7 +93,29 @@ struct Fixture {
     bool UsesGalleryPresetPreviews() const {return false;}
     const auto& GetRawWorkspaceGalleryPresentation(){return gallery;}
     unsigned int GetRawWorkspaceThumbnailTexture(const Stack::RawWorkspace::SourceRecord& source,int* width,int* height,bool) {
-        if(width)*width=400;if(height)*height=300;return textures[source.thumbnail.absolutePath.generic_string()];
+        const auto pixels=[&](const std::filesystem::path& path) {
+            const auto found=textures.find(path.generic_string());
+            const unsigned texture=found==textures.end()?0:found->second;
+            if(width)*width=texture?400:0;if(height)*height=texture?300:0;
+            return texture;
+        };
+        if(source.relativePathKey.rfind("project-overlay:",0)!=0)
+            return pixels(source.thumbnail.absolutePath);
+        const auto project=std::find_if(gallery.projects.begin(),gallery.projects.end(),[&](const auto& item) {
+            return item.projectCoverKey==source.relativePathKey;
+        });
+        if(project==gallery.projects.end())return pixels(source.thumbnail.absolutePath);
+        const auto cover=m_RawWorkspaceThumbnailTextures.find(source.relativePathKey);
+        const bool transparent=cover!=m_RawWorkspaceThumbnailTextures.end()&&cover->second.transparentCover;
+        if(!transparent && !project->coverThumbnailCachePath.empty())
+            if(const auto texture=pixels(project->coverThumbnailCachePath))return texture;
+        const auto* original=FindRawWorkspaceSourceByKey(project->referenceSourceKey);
+        if(!original && project->projectIndex<m_RawWorkspace.sourceSetProjects.size()) {
+            const auto& card=m_RawWorkspace.sourceSetProjects[project->projectIndex];
+            original=card.thumbnailOriginal?card.thumbnailOriginal.get():
+                card.linkedOriginal?card.linkedOriginal.get():card.masterSource.get();
+        }
+        return original?GetRawWorkspaceThumbnailTexture(*original,width,height,true):pixels({});
     }
     std::shared_ptr<const Raw::RawMetadata> GetRawWorkspaceThumbnailMetadata(const std::string&){return {};}
     struct Result {unsigned int current,previous;bool available;};
@@ -142,6 +173,10 @@ int main() try {
     Require(f.step().current==1 && f.preview.projectPath=="fallback","source-backed project fallback regressed");
     const auto projectCover=f.filmstrip("", "A");
     Require(projectCover.current==2 && projectCover.available,"filmstrip cover required an original");
+    f.m_RawWorkspaceThumbnailTextures[f.gallery.projects[0].projectCoverKey].transparentCover=true;
+    Require(!f.filmstrip("","A").available,
+        "a transparent saved cover remained an invisible loading image");
+    f.m_RawWorkspaceThumbnailTextures[f.gallery.projects[0].projectCoverKey].transparentCover=false;
     Require(f.filmstrip("raw", "fallback").current==1,"filmstrip source fallback regressed");
     Require(!f.filmstrip("", "missing").available,"filmstrip unavailable project became an original");
     f.m_RawWorkspaceLabFilmstripHoverProjectPath="B";

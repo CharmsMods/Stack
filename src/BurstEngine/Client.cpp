@@ -1,6 +1,8 @@
 #include "Client.h"
+#include "ScratchDirectory.h"
 #include "Protocol.h"
 #include "WireData.h"
+#include "Storage/ScratchBudget.h"
 #include "Raw/Bracketing/ResultSerialization.h"
 #include "App/AppPaths.h"
 #include <atomic>
@@ -31,10 +33,10 @@ std::filesystem::path Executable(){
 // remains visible while the worker is executing or publishing progress.
 class CancellationWatch {
 public:
-    CancellationWatch(HANDLE cancel,HANDLE process,std::function<bool()> callback,std::chrono::milliseconds deadline={}):
+    CancellationWatch(HANDLE cancel,HANDLE process,std::function<bool()> callback,std::chrono::milliseconds deadline={},bool immediate=false):
         stop_(CreateEventW(nullptr,TRUE,FALSE,nullptr)){
         if(!stop_)throw std::runtime_error(WindowsError("Could not create burst cancellation monitor"));
-        thread_=std::thread([this,cancel,process,callback=std::move(callback),deadline]{
+        thread_=std::thread([this,cancel,process,callback=std::move(callback),deadline,immediate]{
             const auto started=std::chrono::steady_clock::now();auto canceledAt=started;bool sent=false;
             while(WaitForSingleObject(stop_.Get(),40)==WAIT_TIMEOUT){
                 const auto now=std::chrono::steady_clock::now();
@@ -42,7 +44,7 @@ public:
                 // A crashed driver or noncooperative child must not hold a
                 // canceled project/shutdown forever. Only this private process
                 // is terminated; other projects own separate leases/processes.
-                if(sent&&now-canceledAt>=std::chrono::seconds(8)){TerminateProcess(process,ERROR_CANCELLED);break;}
+                if(sent&&(immediate || now-canceledAt>=std::chrono::seconds(8))){TerminateProcess(process,ERROR_CANCELLED);break;}
             }
         });
     }
@@ -58,18 +60,19 @@ struct Lease final:ProcessingSessionLease {
 class Session final {
 public:
     Session(){
-        directory_=AppPaths::GetCacheDirectory()/"BurstSessions"/UniqueId();std::filesystem::create_directories(directory_);
-        try{Launch();}catch(...){job_.Reset();if(process_)WaitForSingleObject(process_.Get(),1000);std::error_code error;std::filesystem::remove_all(directory_,error);throw;}
+        scratch_=std::make_shared<ScratchDirectory>(AppPaths::GetCacheDirectory(),ScratchKind::Worker);
+        directory_=scratch_->Path();
+        try {
+            Launch();
+            if(!SetHandleInformation(scratch_->LockHandle(),HANDLE_FLAG_INHERIT,0))
+                throw std::runtime_error(WindowsError("Could not restrict bracket scratch ownership"));
+        } catch(...) {job_.Reset();if(process_)WaitForSingleObject(process_.Get(),1000);throw;}
     }
     ~Session(){
         // Closing the job kills this session's worker immediately. The process
         // wait and directory cleanup run away from the releasing/UI thread.
         input_.Reset();job_.Reset();output_.Reset();cancel_.Reset();
-        const auto process=process_.Release();auto directory=std::move(directory_);
-        try{std::thread([process,directory=std::move(directory)]{
-            Handle child(process);if(child&&WaitForSingleObject(child.Get(),5000)==WAIT_TIMEOUT){TerminateProcess(child.Get(),ERROR_CANCELLED);WaitForSingleObject(child.Get(),1000);}
-            std::error_code error;std::filesystem::remove_all(directory,error);
-        }).detach();}catch(...){if(process)CloseHandle(process);}
+        ScheduleScratchCleanup();
     }
     const std::filesystem::path& Directory()const{return directory_;}
     bool Alive()const{return process_&&WaitForSingleObject(process_.Get(),0)==WAIT_TIMEOUT;}
@@ -78,19 +81,21 @@ public:
         std::unique_lock<std::timed_mutex> lock(mutex_,std::defer_lock);
         while(!lock.try_lock_for(std::chrono::milliseconds(40)))if(Canceled(request.shouldCancel))throw std::runtime_error("Canceled");
         if(Canceled(request.shouldCancel))throw std::runtime_error("Canceled");
-        if(WaitForSingleObject(process_.Get(),0)==WAIT_OBJECT_0)throw std::runtime_error("The burst engine session exited. Process the captures again.");
+        if(!Alive())throw std::runtime_error("The burst engine session exited. Process the captures again.");
         const auto id=++sequence_;ResetEvent(cancel_.Get());
         Json command=extra.is_object()?std::move(extra):Json::object();command["protocol"]=ProtocolVersion;command["id"]=id;
         command["operation"]=operation;command["base"]=base;command["request"]=Wire::Request(request);
         const auto importKey=std::make_pair(base,import?import->identity:std::string());
         if(import)command["resultIdentity"]=import->identity;
+        try {
         if(import&&!imports_.count(importKey)){
             if(!import->raw)throw std::runtime_error("The burst result contains no pixels to inspect.");
             if(!Serialization::WriteResultFile(Artifact(directory_,"input-",id,".bracket"),*import))throw std::runtime_error("Could not transfer saved burst pixels.");
             WriteDocument(Artifact(directory_,"input-",id,".cbor"),Wire::ResultSummary(*import));command["importResult"]=true;
         }
         if(seedPreview){WriteDocument(Artifact(directory_,"preview-",id,".cbor"),Wire::Preview(*seedPreview));command["importOverview"]=true;}
-        CancellationWatch watcher(cancel_.Get(),process_.Get(),request.shouldCancel);
+        } catch(...) { RemoveInputs(id);throw; }
+        CancellationWatch watcher(cancel_.Get(),process_.Get(),request.shouldCancel,{},request.terminateOnCancel);
         bool terminalConsumed=false;
         try{
             WriteMessage(input_.Get(),command);
@@ -107,7 +112,11 @@ public:
         }catch(...){
             // Never reuse a pipe with unread messages after a failed callback or
             // invalid response. Otherwise another job could adopt its result.
-            if(!terminalConsumed)TerminateProcess(process_.Get(),ERROR_PROCESS_ABORTED);RemoveInputs(id);throw;
+            if(!terminalConsumed)TerminateProcess(process_.Get(),ERROR_PROCESS_ABORTED);
+            RemoveInputs(id);
+            RemoveOutput(id);
+            if(!terminalConsumed || !Alive())ScheduleScratchCleanup();
+            throw;
         }
         if(import)imports_.insert(importKey);
         RemoveInputs(id);return id;
@@ -115,7 +124,7 @@ public:
     void Release(std::uint64_t key)noexcept{
         try{
             std::lock_guard<std::timed_mutex> lock(mutex_);
-            if(WaitForSingleObject(process_.Get(),0)==WAIT_OBJECT_0)return;
+            if(!Alive())return;
             const auto id=++sequence_;
             CancellationWatch watcher(cancel_.Get(),process_.Get(),{},std::chrono::seconds(2));
             WriteMessage(input_.Get(),{{"protocol",ProtocolVersion},{"id",id},{"operation","release"},{"base",key}});
@@ -126,11 +135,27 @@ public:
     }
     Json Output(std::uint64_t id)const{return ReadDocument(Artifact(directory_,"output-",id,".cbor"));}
     void RemoveOutput(std::uint64_t id)const noexcept{
-        std::error_code error;std::filesystem::remove(Artifact(directory_,"output-",id,".cbor"),error);std::filesystem::remove(Artifact(directory_,"output-",id,".bracket"),error);
+        Storage::ScratchBudget::RemoveTransferFile(Artifact(directory_,"output-",id,".cbor"));
+        Storage::ScratchBudget::RemoveTransferFile(Artifact(directory_,"output-",id,".bracket"));
     }
 private:
+    void ScheduleScratchCleanup() noexcept {
+        if(!scratch_)return;
+        HANDLE duplicate=nullptr;
+        if(process_ && !DuplicateHandle(GetCurrentProcess(),process_.Get(),GetCurrentProcess(),&duplicate,0,FALSE,DUPLICATE_SAME_ACCESS))return;
+        try { std::thread([child=Handle(duplicate),owner=std::move(scratch_)]() mutable {
+            if(child && WaitForSingleObject(child.Get(),5000)==WAIT_TIMEOUT) {
+                TerminateProcess(child.Get(),ERROR_CANCELLED);WaitForSingleObject(child.Get(),1000);
+            }
+            // Explicit cleanup avoids large synchronous deletion if thread creation fails.
+            try { owner->Cleanup(); } catch(...) { /* Next startup retries. */ }
+            owner.reset();
+        }).detach(); } catch(...) { /* Marked storage is recovered on next startup. */ }
+    }
     void RemoveInputs(std::uint64_t id)const noexcept{
-        std::error_code error;std::filesystem::remove(Artifact(directory_,"input-",id,".bracket"),error);std::filesystem::remove(Artifact(directory_,"input-",id,".cbor"),error);std::filesystem::remove(Artifact(directory_,"preview-",id,".cbor"),error);
+        Storage::ScratchBudget::RemoveTransferFile(Artifact(directory_,"input-",id,".bracket"));
+        Storage::ScratchBudget::RemoveTransferFile(Artifact(directory_,"input-",id,".cbor"));
+        Storage::ScratchBudget::RemoveTransferFile(Artifact(directory_,"preview-",id,".cbor"));
     }
     void Launch(){
         SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};HANDLE requestRead=nullptr,requestWrite=nullptr,responseRead=nullptr,responseWrite=nullptr;
@@ -147,7 +172,7 @@ private:
         auto* list=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
         if(!InitializeProcThreadAttributeList(list,1,0,&bytes))throw std::runtime_error(WindowsError("Could not configure burst process handles"));
         struct AttributeCleanup{LPPROC_THREAD_ATTRIBUTE_LIST value;~AttributeCleanup(){DeleteProcThreadAttributeList(value);}} cleanup{list};
-        HANDLE inherited[]={childInput.Get(),childOutput.Get(),cancel_.Get()};
+        HANDLE inherited[]={childInput.Get(),childOutput.Get(),cancel_.Get(),scratch_->LockHandle()};
         if(!UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),nullptr,nullptr))throw std::runtime_error(WindowsError("Could not restrict burst handle inheritance"));
         const auto executable=Executable();std::wstring command=Quote(executable.wstring())+L" --worker "+
             std::to_wstring(reinterpret_cast<std::uintptr_t>(childInput.Get()))+L" "+std::to_wstring(reinterpret_cast<std::uintptr_t>(childOutput.Get()))+L" "+
@@ -164,6 +189,7 @@ private:
         if(hello.value("type",std::string())!="hello"||hello.value("product",std::string())!="StackBurst"||hello.value("protocol",0u)!=ProtocolVersion)
             throw std::runtime_error("StackBurst.exe has an incompatible protocol. Install a matching engine.");
     }
+    std::shared_ptr<ScratchDirectory> scratch_;
     std::filesystem::path directory_;Handle input_,output_,cancel_,job_,process_;std::timed_mutex mutex_;std::uint64_t sequence_=0;
     std::set<std::pair<std::uint64_t,std::string>> imports_;
 };
@@ -198,7 +224,9 @@ BracketingResult Process(const ProcessingRequest& request){
         const auto summary=session->Output(id);
         if(summary.value("hasPixels",false)){
             const auto path=Artifact(session->Directory(),"output-",id,".bracket");std::ifstream stream(path,std::ios::binary);
-            Serialization::ReadResult(stream,std::filesystem::file_size(path),request.recipe.groups.size(),result,AppPaths::GetCacheDirectory()/"BracketInspection");
+            Serialization::ReadResult(stream,std::filesystem::file_size(path),request.recipe.groups.size(),result,session->Directory()/"inspection");
+            if(result.reconstructionInspection)
+                std::const_pointer_cast<BracketingResult::ReconstructionInspection>(result.reconstructionInspection)->storageOwner=session;
         }
         Wire::ApplyResultSummary(summary,result);
         if(result.analysis){auto analysis=std::const_pointer_cast<BracketingAnalysis>(result.analysis);auto lease=std::make_shared<Lease>();lease->session=session;lease->key=id;lease->resultIdentity=result.identity;lease->hasOverview=result.preview.width>0;analysis->sessionLease=std::move(lease);}

@@ -495,6 +495,7 @@ uniform int uEncodeSrgbOutput;
 uniform vec4 uSigmoidParameters;
 uniform float uHdrHeadroom;
 uniform int uDisplayLinearInput;
+uniform vec3 uSdrTrim;
 
 )" ) + Raw::ViewTransform::ShaderFunctions() + R"(
 void main() {
@@ -921,6 +922,7 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDisplayLinearInput"), m_DisplayLinearInput);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uHdrHeadroom"), m_HdrHeadroom);
+    glUniform3f(glGetUniformLocation(m_ShaderProgram, "uSdrTrim"), m_SdrBrightness, m_SdrHighlightDetail, m_SdrSaturation);
     const auto sigmoid = Raw::SigmoidDisplay::PreparedCurve(
         m_MiddleGrey, m_Contrast, m_Exposure, m_ContrastPivotEv).Coefficients();
     glUniform4f(glGetUniformLocation(m_ShaderProgram, "uSigmoidParameters"),

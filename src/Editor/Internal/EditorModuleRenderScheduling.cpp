@@ -43,6 +43,12 @@ void EditorModule::SubmitRenderIfReady() noexcept {
         SubmitRenderIfReadyImpl();
     } catch (...) {
         try {
+            if (m_RawWorkspaceExportRenderRequested && m_RawWorkspaceExportRenderGeneration == 0) {
+                EditorRenderWorker::Result failed;
+                failed.rawRenderPurpose = RawRenderPurpose::ExplicitExport;
+                failed.error = "The full-resolution export could not be prepared or submitted safely.";
+                CompleteRawWorkspaceExportRender(failed, false);
+            }
             FailFullQualityRenderRequest("The full-quality render could not be prepared or submitted safely.");
         } catch (...) { /* The terminal phase is recorded before its diagnostic. */ }
         ResetIncompleteCompositeOutputRequestsForRetry();
@@ -56,6 +62,14 @@ void EditorModule::SubmitRenderIfReady() noexcept {
 }
 
 void EditorModule::SubmitRenderIfReadyImpl() {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) m_RawCurveDragCleanupPending = true;
+    else if (m_RawCurveDragCleanupPending && !ImGui::IsAnyItemActive())
+        ClearRawCurveDragState();
+    // An export owns one captured, full-resolution render. Edits remain dirty
+    // for the next preview, rather than replacing the capture every frame or
+    // turning optional scope work into another export submission.
+    if (m_RawWorkspaceExportRenderRequested &&
+        m_RawWorkspaceExportRenderGeneration != 0) return;
     const bool rawWorkspaceActive = IsRawWorkspaceProjectActive();
     // A newly opened photo tab can be waiting for its first source. Keep its
     // dirty revision for when an output is attached and a worker is needed.
@@ -94,18 +108,15 @@ void EditorModule::SubmitRenderIfReadyImpl() {
             ? m_RawRenderClientId != 0
             : m_RenderWorkerAvailable;
     const double now = ImGui::GetTime();
-    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) m_RawCurveDragCleanupPending = true;
-    else if (m_RawCurveDragCleanupPending && !ImGui::IsAnyItemActive())
-        ClearRawCurveDragState();
     if (m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
         m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive()) {
         return;
     }
-    if (UsesGraphViewportPreview()) {
+    if (!m_RawWorkspaceExportRenderRequested && UsesGraphViewportPreview()) {
         UpdateViewportPreviewRefinement(now);
         if (TrySubmitGraphViewportAnalysis(now)) return;
     }
-    else if (m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
+    else if (!m_RawWorkspaceExportRenderRequested && m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
     if (rawWorkspaceActive &&
         allowBackgroundRenderWorker &&
         !m_RawAssetCapture.pending && !m_RawAssetCapture.armed && TrySubmitRawWorkspaceCachePrewarm(now)) {

@@ -24,10 +24,12 @@ bool EditorModule::HasUnsavedBracketingDraft() const {
 }
 
 bool EditorModule::NeedsWorkspaceSaveBeforeTransition() const {
-    if (IsDirty() || HasUnsavedBracketingDraft()) return true;
+    if (HasUnsavedBracketingDraft()) return true;
+    if (!HasProjectContent()) return false;
+    if (IsDirty()) return true;
     const auto kind = GetProjectSessionKind();
     return kind != ProjectSessionKind::Empty && kind != ProjectSessionKind::RawPreview &&
-        HasProjectContent() && GetCurrentProjectFileName().empty();
+        GetCurrentProjectFileName().empty();
 }
 
 bool EditorModule::RequestSaveWorkspaceBeforeClose(std::function<void(bool)> onComplete) {

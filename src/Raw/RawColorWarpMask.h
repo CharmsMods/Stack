@@ -33,6 +33,9 @@ struct RawColorWarpMaskFields {
     // resulting strength is already folded into support and boundary.
     std::vector<std::uint8_t> edge;
     bool spatialAvailable = false;
+    // Floating point influence avoids quantization bands under large EV changes.
+    std::vector<float> smoothGate, smoothSupport;
+    bool smoothed = false;
     bool cancelled = false;
 };
 

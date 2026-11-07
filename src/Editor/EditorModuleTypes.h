@@ -512,8 +512,8 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
     float previewPanY = 0.0f;
     bool previewPanning = false;
     bool previewSpacePanning = false;
-    bool previewSurroundEnabled = true;
-    float previewSurroundOpacity = 1.f;
+    bool previewSurroundEnabled = false;
+    float previewSurroundOpacity = 0.f;
     int previewSurroundShortcutFrame = -1;
     std::string previewViewSourceKey;
     RawPreviewLayoutState previewLayout;

@@ -26,6 +26,7 @@ std::array<float,2> ColorWarpSelectionCoordinate(const RawColorWarpCoordinate& i
     return {input.a*scale,input.b*scale};
 }
 std::array<float,2> ColorWarpDestination(const RawColorWarpPin& pin) {
+    if(pin.hueShift==0 && pin.saturation==0)return {pin.sourceA,pin.sourceB};
     const float angle=(ColorWarpHue(pin.sourceA,pin.sourceB)+pin.hueShift)*pi/180.f;
     const float chroma=std::hypot(pin.sourceA,pin.sourceB)*std::max(0.f,1.f+pin.saturation);
     return {chroma*std::cos(angle),chroma*std::sin(angle)};
@@ -46,12 +47,13 @@ float EvaluateColorWarpPinColorWeight(const RawColorWarpPin& pin,const RawColorW
     const auto c=ColorWarpSelectionCoordinate(input);
     const float chroma=std::hypot(c[0],c[1]);
     // A continuous neutral guard prevents undefined hue from selecting gray.
-    const float neutral=Smooth((chroma-.001f)/.009f);
+    const float neutral=pin.sampleRadius>0 ? 1.f : Smooth((chroma-.001f)/.009f);
     const float hue=ColorWarpHueDelta(ColorWarpHue(c[0],c[1])-ColorWarpHue(pin.sourceA,pin.sourceB));
     // Test adjacent turns as well so feathered ranges remain continuous at red.
     const float hueWeight=std::max({ColorWarpRangeWeight(pin.hueRange,hue),
         ColorWarpRangeWeight(pin.hueRange,hue-360.f),ColorWarpRangeWeight(pin.hueRange,hue+360.f)});
-    return neutral*hueWeight*ColorWarpRangeWeight(pin.saturationRange,chroma);
+    const float radial=pin.sampleRadius>0 ? 1.f-Smooth((std::hypot(c[0]-pin.sourceA,c[1]-pin.sourceB)/pin.sampleRadius-.25f)/.75f) : 1.f;
+    return radial*neutral*hueWeight*ColorWarpRangeWeight(pin.saturationRange,chroma);
 }
 float EvaluateColorWarpPinLightnessWeight(const RawColorWarpPin& pin,float ev) {
     return ColorWarpRangeWeight(pin.exposureRange,ev);
@@ -59,10 +61,13 @@ float EvaluateColorWarpPinLightnessWeight(const RawColorWarpPin& pin,float ev) {
 bool SetColorWarpSample(RawColorWarpPin& pin,const RawColorWarpCoordinate& input) {
     const auto c=ColorWarpSelectionCoordinate(input);
     const float chroma=std::hypot(c[0],c[1]);
-    if(!std::isfinite(chroma) || chroma<.01f || std::abs(input.lightness)<.000001f)return false;
+    if(!std::isfinite(chroma) || std::abs(input.lightness)<.000001f)return false;
     pin.sourceA=c[0];pin.sourceB=c[1];pin.family=-1;
     pin.hueRange={-7.5f,7.5f,7.5f,7.5f,true};
     pin.saturationRange={chroma*.75f,chroma*1.25f,chroma*.25f,chroma*.25f,true};
+    pin.sampleRadius=std::max(.04f,chroma*.4f);
+    pin.hueRange.enabled=pin.saturationRange.enabled=false;
+    pin.smoothSelection=.65f;
     pin.exposureRange.enabled=false;
     return true;
 }
@@ -92,6 +97,8 @@ void SanitizeColorWarpPin(RawColorWarpPin& p) {
     SanitizeRange(p.hueRange,-180,180);SanitizeRange(p.saturationRange,0,100);
     SanitizeRange(p.exposureRange,-32,32);
     p.hueShift=std::clamp(Finite(p.hueShift,0),-180.f,180.f);
+    p.sampleRadius=std::clamp(Finite(p.sampleRadius,0),0.f,2.f);
+    p.smoothSelection=std::clamp(Finite(p.smoothSelection,0),0.f,1.f);
     p.saturation=std::clamp(Finite(p.saturation,0),-1.f,5.f);
     p.exposureEv=std::clamp(Finite(p.exposureEv,0),-4.f,4.f);
     p.strength=std::clamp(Finite(p.strength,1),0.f,2.f);

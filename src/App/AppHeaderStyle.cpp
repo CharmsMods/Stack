@@ -18,7 +18,8 @@ ImVec4 ResolvePanelColor(ImVec4 workspace, float opacity) {
     workspace.w = 1.0f;
     const float luminance = workspace.x * .2126f + workspace.y * .7152f + workspace.z * .0722f;
     ImVec4 panel = Blend(workspace, luminance < .5f
-        ? ImVec4(0, 0, 0, 1) : ImVec4(1, 1, 1, 1), .13f);
+        ? ImVec4(0, 0, 0, 1) : ImVec4(1, 1, 1, 1),
+        .13f * std::clamp((luminance - 2.f/255.f) / (4.f/255.f), 0.f, 1.f));
     panel.w = std::clamp(opacity, 0.0f, 1.0f);
     return panel;
 }

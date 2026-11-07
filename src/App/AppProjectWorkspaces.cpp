@@ -312,10 +312,7 @@ void AppShell::TickProjectWorkspaces() {
         auto* editor = workspace->editor.get();
         const GalleryTabOpen& target = *m_PendingGalleryTabOpen;
         if (target.kind == GalleryTabOpen::Kind::Bracket) {
-            editor->BeginBracketingDraft(true);
-            editor->AddBracketingDraftFiles(target.bracketSources);
-            editor->OpenBracketingTool();
-            editor->RequestOpenRawLabTab();
+            editor->CreateBracketingCaptureSet(target.bracketSources);
         } else if (target.kind == GalleryTabOpen::Kind::Project) {
             // The queue releases this file before its editor reads a snapshot.
             // Other bracket jobs and tabs continue while this one cancels.
@@ -364,11 +361,9 @@ void AppShell::TickProjectWorkspaces() {
                 [id](const auto& workspace) { return workspace->id == id; });
             if (closing != m_ProjectWorkspaces.end()) {
                 auto& editor = *(*closing)->editor;
-                if (!editor.GetProjectFileCommandContext().busy &&
+                if (editor.FinishWorkspaceInteraction() && !editor.GetProjectFileCommandContext().busy &&
                     !editor.NeedsWorkspaceSaveBeforeTransition() &&
-                    !editor.HasUnsavedBracketingDraft() &&
-                    (editor.GetProjectSessionKind() == EditorModule::ProjectSessionKind::Empty ||
-                     editor.CloseCurrentProject(false))) {
+                    !editor.HasUnsavedBracketingDraft()) {
                     m_PendingWorkspaceRetirement = id;
                     return;
                 }

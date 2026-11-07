@@ -181,7 +181,7 @@ struct FakeZoneRenderer {
     int calls=0;
     template<class Cancel>
     unsigned int Render(unsigned int,unsigned int,int,int,const Stack::RawRecipe::RawDevelopmentRecipe&,
-        bool,bool,std::vector<int>&,const Cancel&,std::size_t) {
+        bool,bool,std::vector<int>&,const Cancel&,std::size_t,const Raw::ViewportRegion& = {},int = 0) {
         ++calls; return succeeds ? ++nextTexture : 0;
     }
 };
@@ -212,14 +212,17 @@ struct ScopedGLTexture {
 namespace Stack::NodeMath {
 enum class ArithmeticDomain { Images, Values };
 enum class KnowledgeState { Unknown, Known };
-enum class ImageComponent { Alpha };
-bool HasImageComponent(int components, ImageComponent) { return components==4; }
+enum class ImageComponent { Red=1, Green=2, Blue=4, Alpha=8 };
+bool HasImageComponent(int components, ImageComponent component) {
+    return component != ImageComponent::Alpha || components==4;
+}
 }
 struct Descriptor {
     struct { Stack::NodeMath::KnowledgeState state=Stack::NodeMath::KnowledgeState::Known; int value=3; } presentImageComponents;
 };
 namespace EditorNodeGraph {
 const std::string kValueOutputSocketId="valueOut", kImageOutputSocketId="imageOut",
+    kImageInputSocketId="imageIn",
     kPreFinishImageOutputSocketId="preFinish", kMatchExtentInputSocketId="extent",
     kReductionFieldInputSocketId="field";
 std::string ParameterInputSocketId(const std::string& id) { return "uniform:"+id; }
@@ -276,6 +279,9 @@ struct GraphExecutionContext {
 bool IsScalarRenderSocket(const GraphExecutionContext&, int, const std::string& socket) {
     return socket=="maskOut" || socket=="field";
 }
+bool IsUniformRenderSocket(const GraphExecutionContext&, int, const std::string& socket) {
+    return socket=="valueOut";
+}
 std::string MakeNodeSocketKey(int id,const std::string& socket) {
     return std::to_string(id)+":"+socket;
 }
@@ -310,6 +316,8 @@ pipeline = r'''
     struct OwnerState { bool pending=true, deferred=true; } owner;
     bool m_RawZoneAreasFloatOutput=true,localRangeSucceeds=true,damagedLocalRange=false;
     int localRangeCalls=0;
+    struct SceneGuide { int view=0; };
+    SceneGuide prepareSceneColorGuide() { return {}; }
     FakeZoneRenderer m_RawZoneAreaRenderer;
     RawDevelopmentGraphScopeStage m_RawDevelopmentGraphScopeStage=RawDevelopmentGraphScopeStage::None;
     Raw::ViewportRegion m_RawViewportAppliedRegion;
@@ -448,6 +456,7 @@ public:
     std::unordered_map<int,const RenderGraphNode*> nodes;
     GraphExecutionContext executionContext{nodes};
     bool rawDevelopmentSideEffectsRequested=false;
+    int referenceSourceNodeId=-1;
     std::unordered_map<std::string,unsigned int> imageCache,maskCache;
     std::unordered_map<std::string,double> scalarCache;
     std::unordered_map<std::string,bool> imageDenoisePending,maskDenoisePending,scalarDenoisePending;
@@ -485,6 +494,7 @@ public:
     std::pair<int,int> ProjectMaskCanvasExtent(const RenderGraphNode&) const { return {4,4}; }
     void RecordViewportGeometry(int,const std::string&,bool) {}
     void PreparePhysicalSchedule() {}
+    void PruneCachedDependencies() {}
     unsigned int createTarget() { return ++nextTexture; }
     template<class Callback> bool renderPassToTexture(unsigned int&,Callback&& callback) { return callback(1u); }
     template<class Callback> bool renderToTexture(unsigned int&,Callback&& callback) { callback(1u); return true; }

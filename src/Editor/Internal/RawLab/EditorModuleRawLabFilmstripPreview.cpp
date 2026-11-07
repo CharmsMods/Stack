@@ -25,8 +25,15 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
                         candidate.projectPath.lexically_normal() ==
                             normalizedProjectPath;
                 });
+            if (project != gallery.projects.end() && !source &&
+                project->projectIndex < m_RawWorkspace.sourceSetProjects.size()) {
+                const auto& card = m_RawWorkspace.sourceSetProjects[project->projectIndex];
+                source = card.thumbnailOriginal ? card.thumbnailOriginal.get() :
+                    card.linkedOriginal ? card.linkedOriginal.get() : card.masterSource.get();
+            }
             if (project != gallery.projects.end() &&
-                !project->coverThumbnailCachePath.empty()) {
+                (!project->coverThumbnailCachePath.empty() ||
+                 (m_GalleryComparisonEnabled && UsesGalleryPresetPreviews()))) {
                 Stack::RawWorkspace::SourceRecord coverSource;
                 coverSource.relativePathKey = project->projectCoverKey;
                 coverSource.thumbnail.absolutePath =
@@ -36,6 +43,9 @@ void EditorModule::RenderRawWorkspaceLabFilmstripPreviewOverlay() {
                 image.available = true;
                 image.texture = GetRawWorkspaceThumbnailTexture(
                     coverSource, &image.width, &image.height, true);
+                const auto cover = m_RawWorkspaceThumbnailTextures.find(project->projectCoverKey);
+                if (!source && cover != m_RawWorkspaceThumbnailTextures.end() && cover->second.transparentCover &&
+                    !(m_GalleryComparisonEnabled && UsesGalleryPresetPreviews())) image.available = false;
                 return image;
             }
         }

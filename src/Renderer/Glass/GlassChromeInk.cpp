@@ -21,6 +21,7 @@ void GlassChrome::DrawInk(const Ink& ink) {
         0,0,-1,0, (right+left)/(left-right),(top+bottom)/(bottom-top),0,1};
     glUseProgram(programs[2]);
     glUniform1i(Hdr::Ui::TargetUniform,Hdr::Ui::linearTarget);
+    glUniform1f(Hdr::Ui::HeadroomUniform,Hdr::CurrentTargetHeadroom());
     glUniformMatrix4fv(0,1,GL_FALSE,projection);
     glUniform1i(4,int(ink.slot));
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,inkBuffers[1]);

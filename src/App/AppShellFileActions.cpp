@@ -342,13 +342,20 @@ bool AppShell::ExecutePendingFileAction(bool discardCurrent, EditorModule* owner
             break;
         }
         case PendingFileAction::CloseCurrent:
-            success = owner->CloseCurrentProject(discardCurrent);
+            // The whole tab is retiring. Keep its document/resources intact
+            // until its own workers have drained instead of resetting the
+            // editor synchronously and then destroying it a second time.
+            success = owner->GetProjectSessionKind() != EditorModule::ProjectSessionKind::Empty &&
+                owner->FinishWorkspaceInteraction() &&
+                !owner->GetProjectFileCommandContext().busy &&
+                (discardCurrent || !owner->NeedsWorkspaceSaveBeforeTransition());
             if (success && workspaceId != m_GalleryWorkspaceId) m_PendingWorkspaceRetirement = workspaceId;
             break;
         case PendingFileAction::CloseWorkspace:
             if (owner->HasUnsavedBracketingDraft() && !discardCurrent) return false;
-            success = owner->GetProjectSessionKind() == EditorModule::ProjectSessionKind::Empty ||
-                owner->CloseCurrentProject(discardCurrent);
+            success = owner->FinishWorkspaceInteraction() &&
+                !owner->GetProjectFileCommandContext().busy &&
+                (discardCurrent || !owner->NeedsWorkspaceSaveBeforeTransition());
             if (success && workspaceId != m_GalleryWorkspaceId) m_PendingWorkspaceRetirement = workspaceId;
             break;
         case PendingFileAction::None:

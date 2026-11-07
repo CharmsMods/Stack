@@ -1242,6 +1242,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
 
 void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foreground) {
     // Hidden workspaces still receive this pump after their last tile draw.
+    if(!foreground)CancelRawWorkspaceThumbnailDemand();
     if(m_GalleryHdrJob && ImGui::GetCurrentContext()) CancelObsoleteGalleryHdrJob();
     if (!foreground || !IsViewMode()) m_Viewport.SuspendComparison();
     m_NodeOpenTransition.ReleaseSubmittedDraw();
@@ -1325,6 +1326,17 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foregr
     }
 
     if (foreground) RenderRawWorkspaceLifecyclePopups();
+    // Adopt background grouping between gestures, never underneath a held
+    // source or its drop target. Hidden owners do not wait on another tab's UI.
+    if (m_RawWorkspacePendingSimilarityResult &&
+        (!foreground || !m_RawWorkspaceLabUi.galleryWorkspaceOpen || !ImGui::GetCurrentContext() ||
+         (!ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+          !ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+          !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+          !m_RawWorkspaceGalleryLayoutAnimation.Active() &&
+          m_RawWorkspaceLabFilmstripDragState.phase == RawGalleryFilmstripDragPhase::Idle))) {
+        ApplyPendingRawWorkspaceSimilarityResult();
+    }
     TickRawWorkspacePersistence();
     TickRawWorkspacePreviewStaging();
     TickDeferredLoadedProjectApply(projectApplyBudgetMs);
@@ -1739,10 +1751,16 @@ void EditorModule::CompleteRawWorkspaceExportRender(
 
     m_RawWorkspaceExportRenderRequested = false;
     m_RawWorkspaceExportRenderGeneration = 0;
-    const bool rasterValid = result.success && sourceMatchesActive &&
+    const bool rasterValid = result.success && !result.telemetry.superseded &&
+        result.error.empty() && sourceMatchesActive &&
         Stack::PixelBuffer::HasCompletePixelBuffer(
             m_RequestedExportFormat == Stack::Hdr::FileFormat::SdrPng ? result.pixels.size() : result.hdrExportImage.rgba.size(),
-            result.width, result.height, 4);
+            result.width, result.height, 4) &&
+        (m_RequestedExportFormat != Stack::Hdr::FileFormat::GainMapJpeg ||
+            (result.hdrExportImage.width == result.width &&
+             result.hdrExportImage.height == result.height &&
+             Stack::PixelBuffer::HasCompletePixelBuffer(
+                 result.pixels.size(), result.width, result.height, 4)));
     if (!rasterValid) {
         m_RawWorkspaceExportPath.clear();
         m_RawWorkspaceExportColorChunks = {};
@@ -2020,6 +2038,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
 bool EditorModule::BuildProjectDocumentForSave(
     const std::string& displayName,
     StackFormat::ProjectDocument& outDocument) {
+    if (!HasProjectContent()) return false;
     const std::string trimmedName = displayName.empty() ? "Untitled Project" : displayName;
     const StackFormat::json pipeline = SerializePipeline();
 

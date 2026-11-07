@@ -31,5 +31,5 @@ void EditorModule::RetainRawViewportDetail(const EditorRenderWorker::Result& res
 void EditorModule::DrawRawViewportDetail(ImDrawList* list, ImVec2 minimum, ImVec2 maximum) {
     if (!m_RawViewportDetailContent || m_RawViewportDetailContent != m_RawViewportPresentationContent ||
         !IsViewportTextureSafeForDrawing(m_RawViewportDetailTexture.texture)) return;
-    Raw::DrawViewportDetail(*list, m_RawViewportDetailTexture.Display(Stack::Hdr::PreviewActiveForCurrentWindow()), m_RawViewportDetailRegion, minimum, maximum);
+    Raw::DrawViewportDetail(*list, m_RawViewportDetailTexture.Display(IsHdrOutputPreview()), m_RawViewportDetailRegion, minimum, maximum);
 }

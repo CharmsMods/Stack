@@ -158,6 +158,8 @@ struct SourceSetProjectCatalogEntry {
     std::string masterCaptureSetIdentity;
     // Verified input for edits linked outside Originals (including result-backed edits).
     std::shared_ptr<const SourceRecord> linkedOriginal;
+    // Presentation fallback only; a listed path is not verified action input.
+    std::shared_ptr<const SourceRecord> thumbnailOriginal;
     // Discovery provenance. Never a destination inferred from the active Gallery.
     std::filesystem::path sourceWorkspaceRoot;
     std::string projectId;
@@ -228,6 +230,7 @@ struct SourceRecord {
 
 struct SourceFolderCard {
     std::filesystem::path root;
+    bool offline = false;
     std::size_t sourceCount = 0;
     bool countKnown = false;
     std::vector<SourceRecord> previews;
@@ -555,18 +558,23 @@ bool DiscoverProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     CancellationPredicate shouldCancel = {});
+// BrowseListing associates exact source paths/sizes for presentation only; it
+// does not hash originals. Opening a project still verifies its source assets.
+enum class ProjectDiscoveryMode { VerifiedSources, BrowseListing };
 bool DiscoverSourceSetProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
-    CancellationPredicate shouldCancel = {});
+    CancellationPredicate shouldCancel = {},
+    ProjectDiscoveryMode mode = ProjectDiscoveryMode::VerifiedSources);
 // Discover both source associations and Gallery project cards with one scan.
 bool DiscoverWorkspaceProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
     CancellationPredicate shouldCancel = {},
-    const nlohmann::json* scannedMasters = nullptr);
+    const nlohmann::json* scannedMasters = nullptr,
+    ProjectDiscoveryMode mode = ProjectDiscoveryMode::VerifiedSources);
 nlohmann::json BuildRawSourceRefJson(const SourceRecord& source, bool linkedRaw = true);
 nlohmann::json BuildRawProjectData(
     const SourceRecord& source,

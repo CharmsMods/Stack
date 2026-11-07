@@ -1,3 +1,4 @@
+#include "Raw/GalleryBrowseMetadata.h"
 #include "Raw/RawGalleryInputPolicy.h"
 #include "App/WorkspacePresentation.h"
 #include "Editor/EditorModule.h"
@@ -438,8 +439,11 @@ bool EditorModule::IsRawWorkspaceThumbnailBusy() const {
 }
 
 bool EditorModule::CanEditRawWorkspaceFilmstripOrganization() const {
-    std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
-    return m_RawWorkspaceScanSnapshot.completedSuccessfully && !Async::IsBusy(m_RawWorkspaceScanSnapshot.state);
+    // Organization edits use published source identities, not the scanner's
+    // private work. Each action revalidates its members before committing.
+    // The main-thread catalog also remains usable after a failed refresh.
+    return !m_RawWorkspace.sources.empty() &&
+        (!m_RawWorkspace.workspaceRoot.empty() || m_RawWorkspace.allSourceFolders);
 }
 
 void EditorModule::InvalidateRawWorkspaceGalleryPresentation(bool navigatorContentsChanged) {
@@ -817,7 +821,11 @@ void EditorModule::FlushRawWorkspacePersistenceForShutdown() {
             : (appStateError.empty() ? "RAW Workspace state could not be saved." : appStateError);
     }
 
-    if (!m_RawWorkspace.workspaceRoot.empty() && !m_RawWorkspace.allSourceFolders &&
+    // A retired project tab has already handed catalog publication to Gallery
+    // and disabled persistence. Never revisit its photo drive synchronously
+    // while releasing the editor on the UI thread.
+    if (m_WorkspaceAppStatePersistenceEnabled &&
+        !m_RawWorkspace.workspaceRoot.empty() && !m_RawWorkspace.allSourceFolders &&
         GetRawWorkspaceScanSnapshot().completedSuccessfully) {
         const Stack::RawWorkspace::ManagedLayout layout =
             Stack::RawWorkspace::BuildGalleryLayout(m_RawWorkspace.workspaceRoot);
@@ -850,35 +858,61 @@ void EditorModule::FlushRawWorkspacePersistenceForShutdown() {
 }
 
 void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& selectedFolder) {
-    const auto workspaceRoot = Stack::RawWorkspace::OwningPhotoRoot(selectedFolder);
-    if(RequestAutoBracketForeground("open another folder",[this,workspaceRoot]{RequestOpenRawWorkspace(workspaceRoot);}))return;
-    if (workspaceRoot.empty()) {
-        return;
+    if(selectedFolder.empty())return;
+    if(RequestAutoBracketForeground("open another folder",[this,selectedFolder]{RequestOpenRawWorkspace(selectedFolder);}))return;
+    const auto generation=++m_RawWorkspaceFolderOpenGeneration;
+    auto prepare=[this,selectedFolder,generation,roots=m_RawWorkspace.registeredSourceFolders,
+                        gallery=m_PermanentGalleryWorkspace]() mutable {
+        std::filesystem::path root;
+        Stack::RawWorkspace::RawGalleryManualGrouping grouping;
+        std::string error;
+        bool ready=true;
+        try {
+            root=Stack::RawWorkspace::OwningPhotoRoot(selectedFolder);
+            if(!gallery && !Stack::RawWorkspace::EnsureManagedFolders(root,&error))ready=false;
+            const auto layout=Stack::RawWorkspace::BuildManagedLayout(root);
+            if(ready && Stack::RawWorkspace::IsMarkedCloset(layout.dataDirectory) &&
+                !Stack::RawWorkspace::LoadGalleryState(layout,grouping,&error))ready=gallery;
+            roots.push_back(root);roots=Stack::RawWorkspace::NormalizeSourceFolders(roots);
+        }catch(const std::exception& e){error=e.what();ready=false;}
+        auto apply=[this,generation,root,grouping=std::move(grouping),roots=std::move(roots),error,ready]() mutable {
+            if(generation!=m_RawWorkspaceFolderOpenGeneration)return;
+            if(!error.empty())PostNotification(ready?UiNotificationSeverity::Warning:UiNotificationSeverity::Error,error,"gallery-state-load");
+            if(ready)ApplyRawWorkspaceFolder(root,std::move(grouping),std::move(roots));
+            else {
+                std::lock_guard lock(m_RawWorkspaceScanMutex);
+                m_RawWorkspaceScanSnapshot.state=Async::TaskState::Failed;
+                m_RawWorkspaceScanSnapshot.statusText=error;
+            }
+        };
+        if(gallery)ProjectTasks().PostToMain(std::move(apply));else apply();
+    };
+    if(!m_PermanentGalleryWorkspace){prepare();return;}
+    {
+        std::lock_guard lock(m_RawWorkspaceScanMutex);
+        ++m_RawWorkspaceScanGeneration;
+        m_RawWorkspaceScanSnapshot.state=Async::TaskState::Queued;
+        m_RawWorkspaceScanSnapshot.sourcesPublished=!m_RawWorkspace.sources.empty();
+        m_RawWorkspaceScanSnapshot.statusText="Opening source folder...";
     }
-    std::string storageError;
-    if (!m_PermanentGalleryWorkspace && !Stack::RawWorkspace::EnsureManagedFolders(workspaceRoot, &storageError)) {
-        PostNotification(UiNotificationSeverity::Error, storageError, "workspace-storage");
-        return;
+    if(!ProjectTasks().SubmitHighPriority("Opening source folder",std::move(prepare))) {
+        std::lock_guard lock(m_RawWorkspaceScanMutex);
+        m_RawWorkspaceScanSnapshot.state=Async::TaskState::Failed;
+        m_RawWorkspaceScanSnapshot.statusText="The folder could not be scheduled for opening.";
+        PostNotification(UiNotificationSeverity::Error,m_RawWorkspaceScanSnapshot.statusText,"gallery-folder-open");
     }
-    Stack::RawWorkspace::RawGalleryManualGrouping grouping;
-    const auto managedLayout = Stack::RawWorkspace::BuildManagedLayout(workspaceRoot);
-    if (Stack::RawWorkspace::IsMarkedCloset(managedLayout.dataDirectory) &&
-        !Stack::RawWorkspace::LoadGalleryState(managedLayout, grouping, &storageError)) {
-        PostNotification(UiNotificationSeverity::Warning, storageError, "gallery-state-load");
-        if (!m_PermanentGalleryWorkspace) return;
-    }
+}
+
+void EditorModule::ApplyRawWorkspaceFolder(const std::filesystem::path& workspaceRoot,
+    Stack::RawWorkspace::RawGalleryManualGrouping grouping,std::vector<std::filesystem::path> roots) {
     PreserveActiveRawProjectSourceForLibraryNavigation();
     RememberRawWorkspaceFolderCards();
     m_RawGallerySourceFoldersOpen = false;
     m_RawWorkspace.allSourceFolders = false;
     m_RawWorkspace.nestedClosets.clear();
 
-    std::error_code ec;
-    const std::filesystem::path normalized = std::filesystem::absolute(workspaceRoot, ec).lexically_normal();
-    m_RawWorkspace.workspaceRoot = ec ? workspaceRoot.lexically_normal() : normalized;
-    auto roots = m_RawWorkspace.registeredSourceFolders;
-    roots.push_back(m_RawWorkspace.workspaceRoot);
-    m_RawWorkspace.registeredSourceFolders = Stack::RawWorkspace::NormalizeSourceFolders(roots);
+    m_RawWorkspace.workspaceRoot = workspaceRoot;
+    m_RawWorkspace.registeredSourceFolders = std::move(roots);
     ++m_RawGalleryFolderCardRevision;
     m_RawWorkspaceManualGroupings[m_RawWorkspace.workspaceRoot.generic_string()] = std::move(grouping);
     // A newly opened folder contains RAW sources before it has any saved
@@ -948,12 +982,16 @@ void EditorModule::RequestRawWorkspaceScan() {
 }
 
 void EditorModule::RequestRawWorkspaceScanImpl() {
+    // An explicit reconnect/rescan retries failed tiles without discarding
+    // successful resident images. No recurring drive polling is necessary.
+    for(auto& item:m_RawWorkspaceThumbnailTextures)
+        if(item.second.decodeState==Async::TaskState::Failed)item.second.decodeState=Async::TaskState::Idle;
     if (m_RawWorkspace.allSourceFolders) { RequestRawWorkspaceAggregateScan(); return; }
     if (m_RawWorkspace.workspaceRoot.empty()) {
         return;
     }
 
-    ResetRawWorkspaceSimilarityStacks();
+    ResetRawWorkspaceSimilarityStacks(true);
 
     const std::filesystem::path workspaceRoot = m_RawWorkspace.workspaceRoot;
     const bool allowCatalogWarmStart = m_RawWorkspace.sources.empty();
@@ -1149,6 +1187,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                     if (existing->fingerprint == source.fingerprint || (existing->fingerprint.empty() && existing->browsePreview &&
                                         existing->absolutePath == source.absolutePath && existing->fileSizeBytes == source.fileSizeBytes &&
                                         existing->modifiedTimeTicks == source.modifiedTimeTicks)) {
+                                        if(!source.thumbnail.camera.bytes) source.thumbnail.camera=existing->thumbnail.camera;
                                         source.project = std::move(existing->project);
                                         source.sourceSetProjectMemberships = std::move(existing->sourceSetProjectMemberships);
                                         if (!source.thumbnail.similarityDescriptor.IsValid())
@@ -1236,14 +1275,16 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         &progressiveBatch,
                         &flushProgressiveBatch,
                         &firstSourcePublication,
-                        &lastSourcePublication
+                        &lastSourcePublication,
+                        &isScanCancelled
                     ](
                         const Stack::RawWorkspace::ManagedLayout& layout,
                         Stack::RawWorkspace::SourceRecord& source,
                         Stack::RawWorkspace::ScanProgress& progress) {
                         progress.stage = Stack::RawWorkspace::ScanProgress::
                             Stage::CheckingSavedPreviews;
-                        Stack::RawWorkspace::ClassifyThumbnailMetadata(
+                        if(galleryBrowse) Stack::RawWorkspace::RefreshGalleryBrowseMetadata(layout,source,isScanCancelled);
+                        else Stack::RawWorkspace::ClassifyThumbnailMetadata(
                             layout,
                             source,
                             Stack::RawWorkspace::
@@ -1296,8 +1337,22 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                     };
 
                     std::function<void(const std::vector<Stack::RawWorkspace::SourceRecord>&)> publishListing;
-                    if (galleryBrowse) publishListing = [this, generation](const auto& sources) {
-                        if (!ProjectTasks().PostToMain([this, generation, listed = sources]() mutable {
+                    if (galleryBrowse) publishListing = [this, generation, workspaceRoot, &isScanCancelled](const auto& sources) {
+                        // Discover manifests before hashing every original. These
+                        // path/size associations are browsing hints, not asset
+                        // verification or permission to process a source.
+                        auto listed = sources;
+                        std::vector<Stack::RawWorkspace::SourceSetProjectCatalogEntry> projects;
+                        if (!Stack::RawWorkspace::DiscoverWorkspaceProjects(
+                                Stack::RawWorkspace::BuildGalleryLayout(workspaceRoot),
+                                listed, projects, isScanCancelled, nullptr,
+                                Stack::RawWorkspace::ProjectDiscoveryMode::BrowseListing)) {
+                            if (!isScanCancelled())
+                                throw std::runtime_error("Could not discover saved projects.");
+                            return;
+                        }
+                        if (!ProjectTasks().PostToMain([this, generation, listed = std::move(listed),
+                                projects = std::move(projects)]() mutable {
                             {
                                 std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
                                 if (generation != m_RawWorkspaceScanGeneration) return;
@@ -1311,9 +1366,14 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                 const auto old = previous.find(source.relativePathKey);
                                 if (old != previous.end() && old->second->absolutePath == source.absolutePath &&
                                     old->second->fileSizeBytes == source.fileSizeBytes && old->second->modifiedTimeTicks == source.modifiedTimeTicks)
+                                {
+                                    auto memberships = std::move(source.sourceSetProjectMemberships);
                                     source = std::move(*old->second);
+                                    source.sourceSetProjectMemberships = std::move(memberships);
+                                }
                             }
                             m_RawWorkspace.sources = std::move(listed);
+                            m_RawWorkspace.sourceSetProjects = std::move(projects);
                             InvalidateRawWorkspaceGalleryPresentation();
                         })) throw std::runtime_error("Could not publish the Gallery file list.");
                     };
@@ -1547,7 +1607,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
 
                             PersistRawWorkspaceCatalog();
                             SaveRawWorkspaceAppState();
-                            RequestRawWorkspaceThumbnailGeneration();
+                            if (!m_PermanentGalleryWorkspace) RequestRawWorkspaceThumbnailGeneration();
 
                             std::lock_guard<std::mutex> lock(
                                 m_RawWorkspaceScanMutex);
@@ -1686,6 +1746,9 @@ void EditorModule::FailRawWorkspaceThumbnailGeneration(
 }
 
 void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
+    // Permanent Gallery pixels are demand-driven and use the bounded local
+    // tile cache. Never start a second catalog-wide RAW generation pass.
+    if(m_PermanentGalleryWorkspace)return;
     if (m_RawWorkspace.workspaceRoot.empty() || m_RawWorkspace.sources.empty()) {
         std::lock_guard<std::mutex> lock(m_RawWorkspaceThumbnailMutex);
         ++m_RawWorkspaceThumbnailGeneration;
@@ -2091,6 +2154,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
 }
 
 void EditorModule::ClearRawWorkspace() {
+    ++m_RawWorkspaceFolderOpenGeneration;
     RememberRawWorkspaceFolderCards();
     m_RawWorkspace.allSourceFolders = false;
     PreserveActiveRawProjectSourceForLibraryNavigation();

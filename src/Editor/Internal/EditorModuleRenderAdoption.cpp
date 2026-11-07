@@ -49,6 +49,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
         // result behind an unsignaled fence does not call this cleanup path.
         // Diagnostic allocation must not prevent releasing result resources.
         try { CompleteFullQualityRenderRequest(result, false); } catch (...) {}
+        try { CompleteRawWorkspaceExportRender(result, false); } catch (...) {}
         FinishViewportPreviewRequest(result, false);
         QueueViewportOutputTextureRelease(result.outputTexture);
         QueueViewportOutputTextureRelease(result.viewportOverview);
@@ -176,6 +177,15 @@ void EditorModule::ConsumeRenderWorkerResults() {
         for (auto& preview : result.previews)
             if (preview.assetCapture) AdoptRawAssetCapture(preview);
         if (result.timingOnly) { ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result); continue; }
+        if (result.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
+            // The captured operation's generation, not the current viewport,
+            // owns these CPU renditions. Navigation or a later edit cannot
+            // discard a completed export and leave its destination unwritten.
+            CompleteRawWorkspaceExportRender(result, true);
+            releaseDeferredResultResources(result);
+            m_RenderPending = IsAnyRenderBackendBusy();
+            continue;
+        }
         if (result.rawRenderPurpose == RawRenderPurpose::ViewportOverview ||
             result.generation == m_RawViewportMaintenanceGeneration) {
             ObserveRawViewportTiming(result);
@@ -343,10 +353,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 HandleRawWorkspacePreciseSolveResult(
                     *result.rawWorkspace.preciseSolveResult);
             }
-            if (result.rawRenderPurpose ==
-                    RawRenderPurpose::ExplicitExport) {
-                CompleteRawWorkspaceExportRender(result, false);
-            }
             QueueViewportOutputTextureRelease(result.outputTexture);
             QueueViewportOutputTileSetRelease(result.outputTiles);
             QueueViewportOutputTextureRelease(
@@ -470,16 +476,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
             Stack::EditorModuleTypes::RawStartingPointSourceHashesCompatible(
                 result.rawWorkspace.sourceHash,
                 activeRawWorkspaceSourceHash);
-        if (result.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
-            CompleteRawWorkspaceExportRender(
-                result,
-                result.rawWorkspace.sourceKey.empty() ? !IsRawWorkspaceProjectActive() : rawWorkspaceResultMatchesActive);
-            QueueViewportOutputTextureRelease(result.outputTexture);
-            QueueViewportOutputTileSetRelease(result.outputTiles);
-            QueueViewportOutputTextureRelease(
-                result.rawWorkspace.localRangeOverlayTexture);
-            continue;
-        }
         const auto& gradingScopePacket = result.rawWorkspace.gradingScopeVisualization;
         const auto expectedGradingScopeSource = m_RawWorkspaceLabUi.gradingScopesShowInput
             ? RawDevelopmentGradingScopeSource::NeutralScene

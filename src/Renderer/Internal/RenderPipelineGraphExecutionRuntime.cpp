@@ -72,7 +72,8 @@ GraphExecutionRuntime::GraphExecutionRuntime(
         for (const auto& node : graph.nodes) if (node.kind == RenderGraphNodeKind::RawDevelopment)
             completeConsumers.push_back({node.nodeId, "imageOut"});
     viewportPlan = RenderTiling::PlanGraphViewport(graph, pipeline.m_BaseCanvasWidth, pipeline.m_BaseCanvasHeight,
-        pipeline.m_PreviewMaxDimension, pipeline.m_GraphViewportRequest, completeConsumers);
+        pipeline.m_PreviewMaxDimension, pipeline.m_GraphViewportRequest, completeConsumers,
+        pipeline.HasFloat32GraphDependencies());
     if (pipeline.m_GraphViewportRequest.enabled && !pipeline.m_GraphViewportRequest.empty && !viewportPlan.valid)
         throw std::runtime_error(viewportPlan.reason);
     if (viewportPlan.valid) {
@@ -91,7 +92,9 @@ GraphExecutionRuntime::GraphExecutionRuntime(
 }
 
 void GraphExecutionRuntime::Execute() {
+    referenceSourceNodeId = pipeline.FindReferenceSourceNode(executionContext, graph.outputNodeId);
     PreparePhysicalSchedule();
+    PruneCachedDependencies();
     for (const ScheduledGraphOutput& scheduled :
             physicalOutputs) {
         const auto scheduledNode = nodes.find(scheduled.nodeId);
@@ -188,7 +191,6 @@ void GraphExecutionRuntime::Execute() {
     pipeline.m_OutputTexture = finalTexture ? finalTexture : 0;
     pipeline.m_OutputDenoisePending = finalDenoisePending;
     pipeline.m_GraphSourceTexture = 0;
-    const int referenceSourceNodeId = pipeline.FindReferenceSourceNode(executionContext, graph.outputNodeId);
     if (referenceSourceNodeId > 0) {
         const auto referenceIt = nodes.find(referenceSourceNodeId);
         if (referenceIt != nodes.end() &&

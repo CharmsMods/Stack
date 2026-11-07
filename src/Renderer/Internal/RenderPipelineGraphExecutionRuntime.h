@@ -118,6 +118,7 @@ private:
     void BindScalarEvaluation();
     void BindImageEvaluation();
     void PreparePhysicalSchedule();
+    void PruneCachedDependencies();
     bool ApplyUniformInputs(const RenderGraphNode& authored, RenderGraphNode& evaluated);
     std::pair<int,int> ProjectMaskCanvasExtent(const RenderGraphNode& node) const;
     void BindViewportEvaluation();
@@ -138,6 +139,7 @@ private:
     const GraphTopologyIndex& topology;
     const GraphEvaluationSchedule& evaluationSchedule;
     bool rawDevelopmentSideEffectsRequested = false;
+    int referenceSourceNodeId = -1;
     GraphExecutionContext executionContext;
     const GraphTopologyIndex::NodeLookup& nodes;
     std::unordered_map<std::string, unsigned int>& imageCache;

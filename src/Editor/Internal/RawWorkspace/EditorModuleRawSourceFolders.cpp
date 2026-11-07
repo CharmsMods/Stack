@@ -98,21 +98,16 @@ void EditorModule::RequestRawWorkspaceFolderCardPreviews() {
     const auto generation = ++m_RawGalleryFolderCardLoadGeneration;
     ProjectTasks().Submit("Loading source folder cards", [this, roots, loadPreviews, generation] {
         std::vector<Stack::RawWorkspace::SourceFolderCard> cards;
-        std::vector<std::filesystem::path> missingRoots;
         for (std::size_t index = 0; index < roots.size(); ++index) {
             const auto& root = roots[index];
             Stack::RawWorkspace::SourceFolderCard card;
             card.root = root;
             std::error_code error;
             const bool directory = std::filesystem::is_directory(root, error);
-            if (!directory && (!error || error == std::errc::no_such_file_or_directory ||
-                    error == std::errc::not_a_directory)) {
-                missingRoots.push_back(root);
-                continue;
-            }
-            if (!loadPreviews[index]) continue;
+            card.offline = !directory || bool(error);
+            if (!loadPreviews[index]) {cards.push_back(std::move(card));continue;}
             // Access failures do not prove that the folder has disappeared.
-            if (directory && !error) {
+            { // The application catalog is useful even while the source drive is offline.
                 std::vector<Stack::RawWorkspace::SourceRecord> sources;
                 if (Stack::RawWorkspace::LoadCatalogSnapshot(Stack::RawWorkspace::BuildGalleryLayout(root), sources)) {
                     card.countKnown = true;
@@ -126,33 +121,15 @@ void EditorModule::RequestRawWorkspaceFolderCardPreviews() {
             }
             cards.push_back(std::move(card));
         }
-        ProjectTasks().PostToMain([this, generation, cards = std::move(cards),
-                missingRoots = std::move(missingRoots)]() mutable {
+        ProjectTasks().PostToMain([this, generation, cards = std::move(cards)]() mutable {
             if (generation != m_RawGalleryFolderCardLoadGeneration) return;
-            if (!missingRoots.empty()) {
-                const auto missing = [&](const auto& path) {
-                    return std::find(missingRoots.begin(), missingRoots.end(), path) != missingRoots.end();
-                };
-                auto& registered = m_RawWorkspace.registeredSourceFolders;
-                registered.erase(std::remove_if(registered.begin(), registered.end(), missing), registered.end());
-                auto& recent = m_RawWorkspace.recentWorkspaceRoots;
-                recent.erase(std::remove_if(recent.begin(), recent.end(), missing), recent.end());
-                for (const auto& root : missingRoots)
-                    m_RawGallerySourceFolderCards.erase(root.lexically_normal().generic_u8string());
-                if (registered.empty() || (!m_RawWorkspace.allSourceFolders && missing(m_RawWorkspace.workspaceRoot))) {
-                    ClearRawWorkspace();
-                } else if (m_RawWorkspace.allSourceFolders) {
-                    if (missing(m_RawWorkspace.workspaceRoot)) m_RawWorkspace.workspaceRoot = registered.front();
-                    RequestRawWorkspaceScan();
-                }
-                SaveRawWorkspaceAppState();
-            }
             for (auto& card : cards) {
                 const auto key = card.root.lexically_normal().generic_u8string();
                 const auto existing = m_RawGallerySourceFolderCards.find(key);
                 // A newer accepted live scan is more authoritative than this cache.
                 if (existing == m_RawGallerySourceFolderCards.end() || !existing->second.countKnown)
                     m_RawGallerySourceFolderCards[key] = std::move(card);
+                else existing->second.offline = card.offline;
             }
             ++m_RawGalleryFolderCardRevision;
         });
@@ -191,6 +168,7 @@ const std::vector<Stack::RawWorkspace::SourceFolderCard>& EditorModule::GetRawWo
 }
 
 void EditorModule::ResetRawWorkspaceBrowseSources() {
+    ++m_RawWorkspaceFolderOpenGeneration;
     RememberRawWorkspaceFolderCards();
     m_RawWorkspace.sources.clear();
     m_RawWorkspace.sourceSetProjects.clear();
@@ -244,7 +222,7 @@ void EditorModule::SetRawWorkspaceAllFolders(bool allFolders) {
 }
 
 void EditorModule::RequestRawWorkspaceAggregateScan() {
-    ResetRawWorkspaceSimilarityStacks();
+    ResetRawWorkspaceSimilarityStacks(true);
     const auto roots = m_RawWorkspace.registeredSourceFolders;
     std::uint64_t generation;
     {

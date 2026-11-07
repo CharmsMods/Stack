@@ -119,7 +119,7 @@ void DrawPreviewDashedCircle(
 
 bool DrawLabTileSet(
     const EditorRenderWorker::SharedTextureTileSet& tiles,
-    const ImRect& rect) {
+    const ImRect& rect, bool hdr) {
     if (!tiles.tiled ||
         !tiles.complete ||
         tiles.tiles.empty() ||
@@ -128,7 +128,6 @@ bool DrawLabTileSet(
         return false;
     }
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
     const float drawWidth = std::max(1.0f, rect.GetWidth());
     const float drawHeight = std::max(1.0f, rect.GetHeight());
     drawList->PushClipRect(rect.Min, rect.Max, true);
@@ -794,8 +793,12 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 };
                 hashFeedback(previewRecipe.colorWarp.enabled);
                 hashFeedback(std::hash<float>{}(previewRecipe.colorWarp.strength));
-                for (const auto& pin : previewRecipe.colorWarp.pins)
+                hashFeedback(static_cast<std::size_t>(previewRecipe.colorWarp.combine));
+                for (const auto& pin : previewRecipe.colorWarp.pins) {
                     hashFeedback(std::hash<float>{}(pin.strength));
+                    hashFeedback(pin.enabled);hashFeedback(pin.protectColor);
+                    hashFeedback(pin.hueShift!=0 || pin.saturation!=0 || pin.exposureEv!=0);
+                }
                 for (const auto& pin : previewRecipe.colorWarp.pins)
                     if (inspectPin(pin)) hashFeedback(std::hash<std::string>{}(pin.id));
                 overlayFingerprint ^= std::hash<std::string> {}(selectedPin.id) +
@@ -1063,7 +1066,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             static_cast<float>(tiles.fullHeight));
         publishImageRect(imageRect);
         const int firstPhotoCommand = beginPhoto(imageRect);
-        drewPreview = DrawLabTileSet(tiles, imageRect);
+        drewPreview = DrawLabTileSet(tiles, imageRect, IsHdrOutputPreview());
         endPhoto(imageRect, firstPhotoCommand, drewPreview);
     }
     if (!drewPreview &&
@@ -1104,7 +1107,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 ImVec2(imageRect.Min.x + imageRect.GetWidth() * (detail.x + detail.width) / detail.fullWidth,
                     imageRect.Min.y + imageRect.GetHeight() * (detail.y + detail.height) / detail.fullHeight));
         }
-        const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+        const bool hdr = IsHdrOutputPreview();
         const auto photo = m_RawWorkspacePresentationTexture.Display(hdr);
         unsigned int overview = 0;
         int overviewWidth = 0, overviewHeight = 0;

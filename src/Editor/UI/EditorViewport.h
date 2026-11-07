@@ -41,6 +41,7 @@ private:
     Stack::Editor::ViewComparisonPreview m_Comparison;
     bool m_ShowSplitCompare = false;
     float m_RawSplitProgress = 0.f;
+    bool m_RawComparisonAfterRight = false;
     ImVec2 m_RawComparisonBeforeMin{}, m_RawComparisonBeforeMax{};
     enum class ExportHandleType {
         None,

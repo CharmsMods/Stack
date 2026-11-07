@@ -122,14 +122,14 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
                 m_Bracketing->detailJob||m_Bracketing->inspectionJob||!m_Bracketing->awaitingProject.empty()||
                 (m_Bracketing->pending&&m_Bracketing->publishRequested)));
     }
-    const bool busy=externalBusy||m_AutoBracketWorkspaceClosing||m_AutoBracketPresentation->animation.active||
+    const bool busy=externalBusy||m_AutoBracketWorkspaceClosing||
         (!m_IsAutoBracketWorkspace&&!m_PermanentGalleryWorkspace&&editingBusy);
     const auto foregroundProjectId=m_IsAutoBracketWorkspace?std::string():
         (m_Project->snapshot?m_Project->snapshot->projectId:std::string());
     // The document editor only schedules. The shell transfers its ready queue into a
     // separate workspace before any worker can change a project on disk.
     m_AutoBracketWorkspaceRequested=!m_IsAutoBracketWorkspace&&coordinator.CanStartWork(now,ready,busy,foregroundProjectId);
-    coordinator.Tick(now,ready,busy||!m_IsAutoBracketWorkspace,[](Raw::OpenGlTask task,std::string& error) {
+    coordinator.Tick(now,ready&&m_IsAutoBracketWorkspace,busy,[](Raw::OpenGlTask task,std::string& error) {
         return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(
             std::move(task),error,Raw::OpenGlTaskPriority::Background);
     },foregroundProjectId);

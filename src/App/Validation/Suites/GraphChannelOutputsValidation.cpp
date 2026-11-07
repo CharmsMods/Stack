@@ -71,9 +71,8 @@ void Pixels() {
         const int source=graph.AddImageNode(std::move(image),{})->id;
         int producer=source;
         if(component=="r") {
-            producer=graph.AddDataMathNode(DataMathMode::Multiply,{150,0})->id;
-            graph.FindNode(producer)->dataMathSettings.constantB=1;
-            Wire(graph,source,"imageOut",producer,"imageA");
+            producer=graph.AddRawOperationNode(Stack::RawRecipe::GraphOperationKind::Exposure,{150,0})->id;
+            Wire(graph,source,"imageOut",producer,"imageIn");
         }
         const int split=graph.AddChannelSplitNode({300,0})->id;
         graph.FindNode(split)->splitMissingAlphaIsOpaque=channels==3;
@@ -93,12 +92,8 @@ void Pixels() {
         Check(Same(before,Render(reopened,pixels,channels)),"Reopened component output matches baseline GPU pixels exactly");
         if(component=="r") {
             std::string error;int packed=0;
-            Check(graph.CreateCompoundFromSelection({producer},"Direct component",&packed,&error),error);
-            Check(Same(before,Render(graph,pixels,channels)),"Packing a producer with component outputs preserves GPU pixels");
-            std::vector<int> children;Check(graph.UnpackCompoundNode(packed,&children,&error),error);
-            Check(Same(before,Render(graph,pixels,channels)),"Decompiling the component-output producer preserves GPU pixels");
-            Check(graph.RepackCompoundGroup(graph.GetGroups().back().id,&packed,&error),error);
-            Check(Same(before,Render(graph,pixels,channels)),"Repacking the component-output producer preserves GPU pixels");
+            Check(!graph.CreateCompoundFromSelection({producer},"Direct component",&packed,&error),
+                "RAW operation remains outside mathematical compounds");
         }
         const int index=component=="r"?0:component=="g"?1:component=="b"?2:-1;
         for(std::size_t i=0;i<before.size();i+=4) {

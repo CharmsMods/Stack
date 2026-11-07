@@ -1826,8 +1826,8 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         factoryThemes.begin(),
         factoryThemes.end(),
         [](const ThemeDefinition& theme) { return theme.id == kSolarizedLightPresetId; });
-    if (factoryProfile.activePresetId != kPhotoshopGrayscalePresetId ||
-        factoryProfile.savedCreamPalette.id != kMonochromeGrayPaletteId ||
+    if (factoryProfile.activePresetId != kMonochromeDarkPaletteId ||
+        factoryProfile.savedCreamPalette.id != kMonochromeDarkPaletteId ||
         factoryProfile.savedCreamPalette.colorPolicy != PaletteColorPolicy::Monochrome ||
         solarizedDark == factoryThemes.end() ||
         solarizedLight == factoryThemes.end() ||
@@ -1838,7 +1838,7 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         factoryProfile.graphSpotlightHaloOutlines ||
         factoryProfile.graphDottedMaskLinks ||
         factoryProfile.graphStraightLinks ||
-        std::abs(factoryProfile.graphLineOpacity - 0.20f) > 0.0005f ||
+        std::abs(factoryProfile.graphLineOpacity) > 0.0005f ||
         std::abs(factoryProfile.graphPanSensitivity - 0.40f) > 0.0005f ||
         std::abs(factoryProfile.graphNodeSliderDragSensitivity - 0.10f) > 0.0005f ||
         factoryProfile.graphConnectionLabels != GraphConnectionLabelVisibility::Adaptive ||
@@ -2031,10 +2031,11 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
     }
 
     AppearanceLibrary creamLibrary=factoryProfile;
-    creamLibrary.savedCreamPalette=FactoryCreamPalettes()[1];
+    creamLibrary.savedCreamPalette=FactoryCreamPalettes().front();
+    creamLibrary.savedCreamPalette.brightness=0.65f;
     creamLibrary.savedCreamPalette.numberAccent=NodeAccent::Olive;
     creamLibrary.savedCreamPalette.resetAccent=NodeAccent::Blue;
-    creamLibrary.creamVariants.push_back(FactoryCreamPalettes()[2]);
+    creamLibrary.creamVariants.push_back(CreamPalette{});
     creamLibrary.customPresets.push_back(BuildDarkTheme());
     creamLibrary.backgroundImageStrength=0.37f;
     AppearanceLibrary creamDecoded;
@@ -2057,8 +2058,10 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         return false;
     }
     AppearanceManager previewAppearance;
-    previewAppearance.PreviewCreamPalette(FactoryCreamPalettes()[1]);
-    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetLibrary().savedCreamPalette.id!=kMonochromeGrayPaletteId) {
+    auto brightnessPreview=FactoryCreamPalettes().front();
+    brightnessPreview.brightness=1.f;
+    previewAppearance.PreviewCreamPalette(brightnessPreview);
+    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetLibrary().savedCreamPalette.id!=kMonochromeDarkPaletteId) {
         if (errorMessage) *errorMessage="Palette preview modified saved settings.";
         return false;
     }
@@ -2091,10 +2094,25 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
     const auto monochromeIt=std::find_if(factoryPalettes.begin(),factoryPalettes.end(),[](const CreamPalette& palette) {
         return palette.id==kMonochromeDarkPaletteId;
     });
-    if (monochromeIt==factoryPalettes.end() || monochromeIt->name!="Dark" ||
+    if (monochromeIt==factoryPalettes.end() || monochromeIt->name!="Neutral" ||
         monochromeIt->colorPolicy!=PaletteColorPolicy::Monochrome) {
         if (errorMessage) *errorMessage="The Dark factory palette is missing or has an invalid identity.";
         return false;
+    }
+    for (const float brightness : {0.f, .005f, .01f, .015f, .02f, 0.5f, 1.f}) {
+        auto neutral=*monochromeIt;
+        neutral.brightness=brightness;
+        CreamPalette decoded;
+        const auto resolved=ResolveCreamPalette(neutral);
+        if (!DecodeCreamPalette(EncodeCreamPalette(neutral),decoded) ||
+            !EqualCreamPalettes(neutral,decoded) ||
+            std::abs(resolved.canvas.x-std::round(brightness*36.f)/255.f)>0.00001f ||
+            resolved.panel.background.x!=resolved.canvas.x ||
+            resolved.popup.background.x<=resolved.canvas.x ||
+            !CreamPaletteHasReadableText(resolved)) {
+            if (errorMessage) *errorMessage="Neutral brightness persistence, surface hierarchy or text contrast failed.";
+            return false;
+        }
     }
     const ResolvedCreamPalette monochrome=ResolveCreamPalette(*monochromeIt);
     for (const ImVec4& color : monochrome.colors) {
@@ -2140,9 +2158,9 @@ ThemeDefinition MakeFactoryPremiumDarkStudioTheme() {
 
 AppearanceLibrary MakeFirstRunAppearanceLibrary() {
     AppearanceLibrary library;
-    library.activePresetId = kPhotoshopGrayscalePresetId;
+    library.activePresetId = kMonochromeDarkPaletteId;
     for (const auto& palette : FactoryCreamPalettes()) {
-        if (palette.id == kMonochromeGrayPaletteId) {
+        if (palette.id == kMonochromeDarkPaletteId) {
             library.savedCreamPalette = palette;
             break;
         }
@@ -2378,8 +2396,12 @@ bool AppearanceManager::Load() {
         return false;
     }
 
-    m_CreamVariantThemes=MakeCreamThemes(m_Library.creamVariants);
+    // Retired theme selections open in the single neutral theme. Old records
+    // have no brightness value and therefore start at the black default.
     PreviewCreamPalette(m_Library.savedCreamPalette);
+    m_Library.savedCreamPalette=GetCreamPalette();
+    m_Library.activePresetId=kMonochromeDarkPaletteId;
+    m_CreamVariantThemes.clear();
     TouchRevision();
     return true;
 }

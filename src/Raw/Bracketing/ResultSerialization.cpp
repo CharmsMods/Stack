@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "ResultSerialization.h"
 #include "Raw/DepthMaskManifest.h"
 #include "Raw/Bracketing/DepthMaskStorage.h"
@@ -121,7 +122,7 @@ bool WriteResultFile(const std::filesystem::path& path,const Raw::Bracketing::Br
         }
     }
     const auto text=header.dump();
-    std::ofstream stream(path,std::ios::binary|std::ios::trunc);
+    Stack::Storage::ScratchBudget::Output stream(path,std::ios::binary|std::ios::trunc);
     stream.write(magic.data(),magic.size());Write(stream,static_cast<std::uint64_t>(text.size()));
     stream.write(text.data(),text.size());
     if (!auxiliaryOnly) {
@@ -281,7 +282,7 @@ void ReadResult(std::istream& stream,std::uint64_t bytes,std::size_t groups,Raw:
             if(values.size()!=count||checksum!=Stack::NodeMath::Sha256ContentIdentity(std::vector<std::string_view>{
                 {reinterpret_cast<const char*>(values.data()),values.size()*sizeof(float)}}))
                 throw std::runtime_error("Saved reconstruction measurements failed verification.");
-            std::ofstream file(inspection->directory/(std::to_string(x)+"-"+std::to_string(y)+".bin"),std::ios::binary);
+            Stack::Storage::ScratchBudget::Output file(inspection->directory/(std::to_string(x)+"-"+std::to_string(y)+".bin"),std::ios::binary);
             file.write(reinterpret_cast<const char*>(values.data()),values.size()*sizeof(float));file.close();
             if(!file)throw std::runtime_error("Could not restore reconstruction inspection data.");
         }

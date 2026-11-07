@@ -2,6 +2,7 @@
 #include "Raw/Bracketing/Recipe.h"
 #include "Raw/RawRecipeCompatibility.h"
 #include "Persistence/RawProjectModel.h"
+#include "Project/BracketHdrStartingCurve.h"
 
 #include "Raw/MultiFrameDenoise/Contracts.h"
 #include "Raw/MultiFrameDenoise/SharedBurst.h"
@@ -108,6 +109,13 @@ bool ValidateCurrentRecipeVersions(
         if (recipeVersion != value.end()) {
             if (!Stack::RawRecipe::IsCanonicalRawRecipeDocument(value)) {
                 error = path + " is not a canonical supported RAW recipe.";
+                if(recipeVersion->is_number_integer() && recipeVersion->get<int>()!=Stack::RawRecipe::kRawDevelopmentRecipeVersion)
+                    error += " Stored RAW recipe version "+std::to_string(recipeVersion->get<int>())+
+                        "; supported version "+std::to_string(Stack::RawRecipe::kRawDevelopmentRecipeVersion)+".";
+                else if(recipeVersion->is_number_integer()) {
+                    const auto difference=FirstJsonDifference(Stack::RawRecipe::CanonicalRawRecipeForComparison(value),value,path);
+                    if(!difference.empty())error += " First differing field: "+difference+".";
+                }
                 return false;
             }
         }
@@ -1109,12 +1117,15 @@ ModelValidationResult ValidateRawProjectSnapshot(const RawProjectSnapshot& snaps
                     "viewTransformPlacement", "result",
                     "processingImplemented", "graphViewTransformNodeUuid",
                     "graphViewTransformSettings", "bracketing", "bracketingDraft", "bracketingSelection", "bracketingDraftSelection",
-                    "identicalCaptureExclusions", "bracketingResult", "autoBracket" })) {
+                    "identicalCaptureExclusions", "bracketingResult", "autoBracket", kBracketToneFitConsidered })) {
                 fail("HDR settings do not match the current operation schema exactly.");
             }
             if((sourceSet.settings.contains("bracketingResult")||sourceSet.settings.contains("autoBracket"))&&
                 !sourceSet.settings.contains("bracketing"))
                 fail("Saved bracket results and automatic processing require a bracket recipe.");
+            if(const auto toneFit=sourceSet.settings.find(kBracketToneFitConsidered);toneFit!=sourceSet.settings.end() &&
+                (!sourceSet.settings.contains("bracketing") || !toneFit->is_boolean()))
+                fail("Bracket starting-curve initialization must be a boolean attached to a bracket recipe.");
             // A derived result can be missing or invalid without invalidating its
             // originals. BracketingResultStore verifies its descriptor and bytes
             // when the result is opened; the capture model remains recoverable.

@@ -1,8 +1,12 @@
 #include "ViewComparisonPreview.h"
+#include "Hdr/Color.h"
+#include "Hdr/Presentation.h"
+#include "Renderer/RawPreviewProxy.h"
 #include "Async/TaskSystem.h"
 #include "BurstEngine/Client.h"
 #include "Editor/RawRenderService.h"
 #include "Raw/RawGraphOperation.h"
+#include "Raw/RawLoader.h"
 #include "Raw/Bracketing/InspectionImage.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "Renderer/GLHelpers.h"
@@ -13,20 +17,23 @@
 #include <cmath>
 #include <stdexcept>
 
+
 namespace Stack::Editor {
 struct ViewComparisonPreview::Job {
     std::atomic<bool> canceled{false}, done{false};
-    std::vector<unsigned char> pixels;
+    std::vector<float> pixels;
     int width = 0, height = 0;
     std::string error;
+    bool quick = false;
 };
 
 namespace {
-RawRecipe::RawDevelopmentRecipe Baseline(const RawRecipe::RawDevelopmentRecipe& current) {
+RawRecipe::RawDevelopmentRecipe Baseline(const RawRecipe::RawDevelopmentRecipe& current, bool hdr) {
     auto recipe = RawRecipe::BuildUneditedSourceRecipe(current);
     // Restore only the standard display encoding, never the authored View curve.
     recipe.viewTransform.layerJson = RawRecipe::DefaultViewTransformJson();
     recipe.technical.encodeSrgbOutput = true;
+    recipe.viewTransform.layerJson["_presentationHeadroom"]=hdr?Hdr::MasterHeadroom:1.f;
     // Geometry must agree with the processed image being compared.
     recipe.cropRotation = current.cropRotation;
     return recipe;
@@ -81,7 +88,7 @@ void ViewComparisonPreview::Invalidate() {
     Suspend();
     RetireTexture();
     m_Texture = 0; m_Width = m_Height = 0;
-    m_Dirty = true; m_Status.clear();
+    m_Dirty = true; m_QuickShown=false; m_Status.clear();
 }
 void ViewComparisonPreview::Reset() {
     Suspend();
@@ -91,8 +98,8 @@ void ViewComparisonPreview::Reset() {
     m_Dirty = true; m_Status.clear();
     m_Job.reset(); m_Source.reset(); m_Bracket.reset();
     m_Captures.clear(); m_Selected.clear(); m_RecipeKey.clear();
-    m_Revision = ~std::uint64_t(0); m_Edge = 0; m_Matched = false;
-    m_ControlChanged = false; m_SelectedLabel.clear();
+    m_Revision = ~std::uint64_t(0); m_Edge = 0; m_Matched = true;
+    m_ControlChanged = false; m_QuickShown=false; m_SelectedLabel.clear();
 }
 void ViewComparisonPreview::SetUnavailable(const char* reason) {
     if (m_Texture || m_Job) Invalidate();
@@ -109,16 +116,19 @@ void ViewComparisonPreview::Poll() {
     auto job = std::move(m_Job);
     if (job->canceled) return;
     m_Status = job->error;
+
     if (!job->pixels.empty() && job->width > 0 && job->height > 0) {
-        m_Texture = GLHelpers::CreateTextureFromPixels(job->pixels.data(), job->width, job->height, 4);
+        RetireTexture();
+        m_Texture = GLHelpers::CreateTextureFromData(job->pixels.data(), job->width, job->height, GL_RGBA16F,GL_RGBA,GL_FLOAT,GL_LINEAR);
         m_Width = job->width; m_Height = job->height;
         if (!m_Texture) m_Status = "Could not upload the before image.";
+        if(job->quick && m_Texture){m_QuickShown=true;m_Dirty=true;}
     } else if (m_Status.empty()) m_Status = "The before image is unavailable.";
 }
 void ViewComparisonPreview::UpdateRaw(const std::shared_ptr<const Raw::RawImageData>& source,
     const RawRecipe::RawDevelopmentRecipe& recipe, std::uint64_t revision, int edge) {
     if (m_Bracket || m_Source != source || m_Revision != revision || m_Edge != edge) {
-        const auto baseline = Baseline(recipe);
+        const auto baseline = Baseline(recipe,m_HdrOutput);
         const auto key = RawRecipe::SerializeRecipe(baseline).dump();
         if (m_Bracket || m_Source != source || m_RecipeKey != key || m_Edge != edge) {
             Invalidate(); m_Recipe = baseline; m_RecipeKey = key;
@@ -135,7 +145,7 @@ void ViewComparisonPreview::UpdateBracket(
     const RawRecipe::RawDevelopmentRecipe& development, std::uint64_t revision, int edge) {
     if (m_ControlChanged) { Invalidate(); m_ControlChanged = false; }
     if (m_Bracket != result || m_Revision != revision) {
-        auto baseline = Baseline(development);
+        auto baseline = Baseline(development,m_HdrOutput);
         const auto key = RawRecipe::SerializeRecipe(baseline).dump();
         if (m_RecipeKey != key) { Invalidate(); m_Recipe = std::move(baseline); m_RecipeKey = key; }
         m_Revision = revision;
@@ -188,7 +198,16 @@ void ViewComparisonPreview::Start(std::shared_ptr<const Raw::RawImageData> raw,
     const auto bracketRecipe = m_BracketRecipe;
     const bool matched = m_Matched;
     const int edge = m_Edge;
-    if (!Async::TaskSystem::Get().SubmitHighPriority("Preparing comparison", [job, raw, recipe, bracket, capture, bracketRecipe, matched, edge]() mutable {
+
+    std::shared_ptr<const Raw::Bracketing::CapturePreview> quick;
+    if(bracket && !bracket->panorama && !m_QuickShown && bracket->analysis) {
+        const auto found=bracket->analysis->originals.find(capture);
+        if(found!=bracket->analysis->originals.end())quick=found->second;
+        if(quick && (!quick->width || !quick->height ||
+            quick->rgb.size()!=std::size_t(quick->width)*quick->height*3))quick.reset();
+    }
+    job->quick=bool(quick);
+    if (!Async::TaskSystem::Get().SubmitHighPriority("Preparing comparison", [job, raw, recipe, bracket, capture, bracketRecipe, matched, edge, quick]() mutable {
         try {
             if (bracket && !job->canceled) {
                 Raw::Bracketing::ProcessingRequest request;
@@ -196,11 +215,20 @@ void ViewComparisonPreview::Start(std::shared_ptr<const Raw::RawImageData> raw,
                 const auto budget = Raw::Mfd::ResolveMfdProcessingMemoryBudget(0, Raw::Mfd::QueryPhysicalMemorySnapshot());
                 request.memoryBudgetBytes = budget.valid ? budget.budgetBytes : 0;
                 request.shouldCancel = [job] { return job->canceled.load(); };
-                auto image = BurstEngine::RenderInspectionImage(request, *bracket,
+                auto image = quick ? quick : BurstEngine::RenderInspectionImage(request, *bracket,
                     Raw::Bracketing::InspectionImageKind::Capture, capture, 0, unsigned(edge));
                 if (!image || !bracket->raw) throw std::runtime_error("This original is not available in the prepared bracket.");
                 raw = CaptureRaw(*image, bracket->raw->metadata,
                     "view-before/" + bracket->identity + "/" + capture + (matched ? "/matched" : "/captured"), matched);
+            }
+            if (!raw && !bracket && !job->canceled) {
+                // Gallery opens may leave the decoded source with the renderer.
+                // Resolve it on the CPU lane, never while holding the GL owner.
+                auto loaded=std::make_shared<Raw::RawImageData>();
+                if(!Raw::RawLoader::LoadFile(recipe.source.sourcePath,*loaded,
+                    [job]{return job->canceled.load();}) && !job->canceled)
+                    throw std::runtime_error(loaded->metadata.error.empty() ? "Could not load the original source." : loaded->metadata.error);
+                raw=std::move(loaded);
             }
             if (!job->canceled) {
                 EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(
@@ -209,6 +237,10 @@ void ViewComparisonPreview::Start(std::shared_ptr<const Raw::RawImageData> raw,
                         RenderPipeline pipeline;
                         pipeline.Initialize();
                         pipeline.SetPreviewMaxDimension(edge);
+                        if(!raw) {error="Original source is unavailable.";return false;}
+                        const auto extent=Renderer::RawPreviewProxy::FitPreviewExtent(
+                            Raw::DisplayWidth(raw->metadata),Raw::DisplayHeight(raw->metadata),edge);
+                        pipeline.Resize(extent.first,extent.second);
                         pipeline.SetRawDevelopmentAnalysisEnabled(false);
                         pipeline.SetRawDevelopmentInteractivePreview(true);
                         pipeline.SetRenderCancellationContext(1, [job] { return job->canceled.load(); });
@@ -223,10 +255,10 @@ void ViewComparisonPreview::Start(std::shared_ptr<const Raw::RawImageData> raw,
                         graph.links.push_back({1, "imageOut", 2, "imageIn"});
                         graph.outputNodeId = 2; graph.outputSocketId = "imageOut";
                         pipeline.ExecuteGraph(graph);
-                        if (!job->canceled) job->pixels = pipeline.GetOutputPixels(job->width, job->height);
+                        if (!job->canceled) job->pixels = pipeline.GetOutputFloatPixels(job->width, job->height,edge);
                         if (job->pixels.empty()) error = "Could not render the before image.";
                         return !job->pixels.empty();
-                    }, job->error, Raw::OpenGlTaskPriority::Background);
+                    }, job->error, Raw::OpenGlTaskPriority::Foreground);
             }
         } catch (const std::exception& error) { job->error = error.what(); }
         catch (...) { job->error = "Could not prepare the before image."; }

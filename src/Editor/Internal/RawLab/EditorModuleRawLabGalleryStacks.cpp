@@ -132,42 +132,53 @@ EditorModule::ResolveRawWorkspaceGalleryProjectStacks() {
         m_RawWorkspaceGalleryProjectStacksFolder == folder) return m_RawWorkspaceGalleryProjectStacks;
     m_RawWorkspaceGalleryProjectStacks = Stack::RawWorkspace::BuildGalleryProjectStacks(
         presentation, ResolveRawWorkspaceFilmstripStacks());
-    if (!UsesGalleryPresetPreviews()) {
-        auto& families = m_RawWorkspaceGalleryProjectStacks;
-        for (auto& family : families) {
-            auto& indices = family.projectIndices;
-            indices.erase(std::remove_if(indices.begin(), indices.end(), [&](std::size_t index) {
-                const auto& project = presentation.projects[index];
-                if (project.standaloneMaster) {
-                    const auto preview = m_GalleryPresetThumbnails.find(project.projectCoverKey);
-                    const auto& master = m_RawWorkspace.sourceSetProjects[project.projectIndex].masterSource;
-                    return preview != m_GalleryPresetThumbnails.end() && master &&
-                        preview->second.revision == static_cast<std::uint64_t>(master->modifiedTimeTicks) &&
-                        !preview->second.error.empty();
-                }
-                if (!project.coverThumbnailCachePath.empty()) return false;
-                const auto failed = m_RawWorkspaceThumbnailTextures.find(project.projectCoverKey);
-                if (failed != m_RawWorkspaceThumbnailTextures.end() && !failed->second.texture &&
-                    failed->second.decodeState == Async::TaskState::Failed && !failed->second.sourcePath.empty() &&
-                    project.referenceSourceIndex < m_RawWorkspace.sources.size()) {
-                    const auto& original = m_RawWorkspace.sources[project.referenceSourceIndex];
-                    if (failed->second.sourcePath == original.absolutePath &&
-                        failed->second.sourceModified == original.modifiedTimeTicks &&
-                        failed->second.sourceBytes == original.fileSizeBytes) return true;
-                }
-                if (project.referenceSourceIndex < m_RawWorkspace.sources.size()) return false;
-                return project.projectIndex >= m_RawWorkspace.sourceSetProjects.size() ||
-                    !m_RawWorkspace.sourceSetProjects[project.projectIndex].linkedOriginal;
-            }), indices.end());
+    m_RawFilmstripHeight.first = -1;
+    m_RawWorkspaceGalleryProjectMaximumVersions = 1u;
+    for (const auto& family : m_RawWorkspaceGalleryProjectStacks)
+        m_RawWorkspaceGalleryProjectMaximumVersions = std::max(
+            m_RawWorkspaceGalleryProjectMaximumVersions, family.projectIndices.size());
+    // A preview is disposable. Its absence or decoder failure must never hide
+    // an authoritative saved document or prevent the user from opening it.
+    auto& tiles = m_RawWorkspaceGalleryProjectTileSources;
+    auto& projectIndices = m_RawWorkspaceGalleryProjectIndices;
+    tiles.clear();
+    projectIndices.clear();
+    tiles.reserve(presentation.projects.size());
+    for (const auto& project : presentation.projects) {
+        projectIndices.emplace(project.projectCoverKey, tiles.size());
+        const Stack::RawWorkspace::SourceRecord* reference = nullptr;
+        if (project.referenceSourceIndex < m_RawWorkspace.sources.size())
+            reference = &m_RawWorkspace.sources[project.referenceSourceIndex];
+        else if (project.projectIndex < m_RawWorkspace.sourceSetProjects.size()) {
+            const auto& entry = m_RawWorkspace.sourceSetProjects[project.projectIndex];
+            reference = entry.thumbnailOriginal ? entry.thumbnailOriginal.get() : entry.linkedOriginal.get();
         }
-        families.erase(std::remove_if(families.begin(), families.end(), [](const auto& family) {
-            return family.projectIndices.empty();
-        }), families.end());
+        tiles.push_back(reference ? *reference : Stack::RawWorkspace::SourceRecord{});
+        auto& tile = tiles.back();
+        tile.relativePathKey = project.projectCoverKey;
+        tile.fileName = project.projectName;
+        tile.stem = project.projectName;
+        if (!project.coverThumbnailCachePath.empty()) {
+            tile.thumbnail.absolutePath = project.coverThumbnailCachePath;
+            tile.thumbnail.status = Stack::RawWorkspace::ThumbnailStatus::Ready;
+        }
     }
     auto& covers = m_RawWorkspaceGalleryProjectCoverIds;
     std::unordered_set<std::string> catalogIds;
     for (const auto& project : m_RawWorkspace.sourceSetProjects) catalogIds.insert(Stack::RawWorkspace::ProjectCoverKey(project.absolutePath,project.projectId));
     for (const auto& project : presentation.projects) catalogIds.insert(project.projectCoverKey);
+    if (m_RawWorkspaceGalleryGridStacks.projectGroups) {
+        auto& browse = m_RawWorkspaceGalleryGridStacks;
+        bool changed = false;
+        for (auto& group : browse.groups) {
+            const auto previous = group.size();
+            group.erase(std::remove_if(group.begin(), group.end(),
+                [&](const auto& key) { return !catalogIds.count(key); }), group.end());
+            changed |= previous != group.size();
+        }
+        if (browse.groups[0].empty() && browse.groups[1].empty()) browse.Close();
+        else if (changed) ++browse.navigationRevision;
+    }
     for (auto cover = covers.begin(); cover != covers.end();) {
         if (!catalogIds.count(cover->first) || !catalogIds.count(cover->second)) cover = covers.erase(cover);
         else ++cover;

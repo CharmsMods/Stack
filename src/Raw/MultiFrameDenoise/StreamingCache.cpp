@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "Raw/MultiFrameDenoise/Streaming.h"
 
 #include <algorithm>
@@ -522,7 +523,7 @@ bool DirectoryFusionTileCache::Write(
     static std::atomic<std::uint64_t> temporaryCounter { 0u };
     std::filesystem::path temporary = path;
     temporary += ".tmp-" + std::to_string(temporaryCounter.fetch_add(1u));
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    Stack::Storage::ScratchBudget::Output output(temporary, std::ios::binary | std::ios::trunc);
     const std::uint64_t sampleCount = tile.normalizedMosaic.size();
     const std::uint64_t checksum = HashFusionTile(tile);
     output.write(

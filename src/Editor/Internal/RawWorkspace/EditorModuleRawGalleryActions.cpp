@@ -12,6 +12,7 @@
 #include <imgui_internal.h>
 #include <algorithm>
 #include <array>
+#include <map>
 #include <cwctype>
 #include <unordered_map>
 #include <unordered_set>
@@ -293,6 +294,7 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
                     "The Gallery folder changed before the items could be moved. Select them again.", "raw-gallery-action-stale");
                 return;
             }
+            std::vector<std::pair<Kind,std::pair<std::filesystem::path,std::filesystem::path>>> jobs;
             Stack::RawGalleryFileActions::Result result;
             bool protectedProject = false;
             for (const auto& item : context.items) {
@@ -309,13 +311,22 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
                     result.errors.push_back("Could not identify the source folder for " + item.path.u8string());
                     continue;
                 }
-                auto moved = item.kind == Kind::Source
-                    ? Stack::RawGalleryFileActions::DeleteSourcesToTrash(owner, {item.path})
-                    : Stack::RawGalleryFileActions::DeleteProjectsToTrash(owner, {item.path});
-                result.moved += moved.moved;
-                result.errors.insert(result.errors.end(), moved.errors.begin(), moved.errors.end());
+                jobs.push_back({item.kind,{owner,item.path}});
             }
-            if (result.moved) RefreshRawGalleryAfterFileMove(context.workspaceRoot);
+            if (!ProjectTasks().Submit("Moving Gallery items to Trash",[this,context,document,jobs=std::move(jobs),result=std::move(result),protectedProject]() mutable {
+                std::map<std::pair<std::filesystem::path,Kind>,std::vector<std::filesystem::path>> batches;
+                for(const auto& job:jobs)batches[{job.second.first,job.first}].push_back(job.second.second);
+                for(const auto& [batch,paths]:batches) {
+                    try {
+                        auto moved=batch.second==Kind::Source ?
+                            Stack::RawGalleryFileActions::DeleteSourcesToTrash(batch.first,paths) :
+                            Stack::RawGalleryFileActions::DeleteProjectsToTrash(batch.first,paths);
+                        result.moved+=moved.moved;
+                        result.errors.insert(result.errors.end(),moved.errors.begin(),moved.errors.end());
+                    } catch(const std::exception& error) {result.errors.push_back(error.what());}
+                }
+                ProjectTasks().PostToMain([this,context,document,result=std::move(result),protectedProject]() mutable {
+            if (result.moved && GetProjectDocumentId()==document && SameRoot(context.workspaceRoot,m_RawWorkspace.workspaceRoot)) RefreshRawGalleryAfterFileMove(context.workspaceRoot);
             Stack::Notifications::NoticeSpec notice;
             notice.severity = !result.errors.empty() || protectedProject ? UiNotificationSeverity::Warning :
                 result.moved ? UiNotificationSeverity::Success : UiNotificationSeverity::Error;
@@ -328,6 +339,8 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
             notice.dedupeKey = "raw-gallery-delete-project";
             for (const auto& error : result.errors) notice.details += error + "\n";
             GetNotifier().Post(std::move(notice));
+                });
+            })) PostNotification(UiNotificationSeverity::Error,"Could not schedule Gallery deletion.","raw-gallery-delete-project");
         };
         if (!RequestAutoBracketForeground("move these items to Trash", remove)) remove();
         return true;

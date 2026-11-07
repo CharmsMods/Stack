@@ -42,6 +42,11 @@ public:
         auto tracked = Track(std::move(task), true);
         return tracked && TaskSystem::Get().PostToMain(std::move(tracked));
     }
+    bool SubmitThumbnail(std::shared_ptr<std::atomic<bool>> canceled, Task task) {
+        auto tracked = Track(std::move(task), false);
+        return tracked && TaskSystem::Get().SubmitThumbnail(Metadata("Loading thumbnails"),
+            std::move(canceled), std::move(tracked));
+    }
     bool PostToMain(ActivityMetadata activity, Task task) {
         auto tracked = Track(std::move(task), true);
         return tracked && TaskSystem::Get().PostToMain(std::move(activity), std::move(tracked));

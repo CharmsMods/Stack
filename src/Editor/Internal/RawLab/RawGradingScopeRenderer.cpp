@@ -145,6 +145,7 @@ void RawGradingScopeRenderer::DrawCallback(const ImDrawList*, const ImDrawCmd* c
     glEnable(GL_PROGRAM_POINT_SIZE);
     glUseProgram(renderer.m_Program);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
+    glUniform1f(Stack::Hdr::Ui::HeadroomUniform,Stack::Hdr::CurrentTargetHeadroom());
     glUniform4f(renderer.m_PlotRectLocation, request.min.x, request.min.y,
         request.size.x, request.size.y);
     glUniform4f(renderer.m_DisplayRectLocation, request.displayPos.x, request.displayPos.y,

@@ -178,6 +178,10 @@ nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
     value["debugFalseColor"] = value.value("debugFalseColor", false);
     value["inputWorkingSpace"] = value.value("inputWorkingSpace", std::string("linear-rec2020-d65"));
     value["encodeSrgbOutput"] = value.value("encodeSrgbOutput", true);
+    // Additive output trims: absence preserves an existing recipe's finish.
+    value["sdrBrightness"] = ClampFinite(input.value("sdrBrightness",0.f),0.f,-3.f,3.f);
+    value["sdrHighlightDetail"] = ClampFinite(input.value("sdrHighlightDetail",0.f),0.f,0.f,1.f);
+    value["sdrSaturation"] = ClampFinite(input.value("sdrSaturation",1.f),1.f,0.f,2.f);
     return value;
 }
 
@@ -1421,12 +1425,13 @@ bool IsColorWarpEnabled(const RawColorWarpRecipe& input) {
 }
 
 bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& input) {
-    if (!input.enabled || input.pins.empty() || input.regions.empty()) return false;
+    if (!input.enabled || input.pins.empty()) return false;
     const auto& colorWarp = input;
     if (!HasPreparedColorWarpEffect(colorWarp)) return false;
     return std::any_of(colorWarp.pins.begin(), colorWarp.pins.end(),
         [&](const RawColorWarpPin& pin) {
             if (!ColorWarpParticipates(pin)) return false;
+            if (pin.smoothSelection>0) return true;
             const auto region = std::find_if(colorWarp.regions.begin(), colorWarp.regions.end(),
                 [&](const RawColorWarpRegion& candidate) { return candidate.id == pin.regionId; });
             return region != colorWarp.regions.end() &&
@@ -1510,7 +1515,7 @@ std::array<float, 3> ApplyPreparedColorWarp(
         WorkingRgbToColorWarpCoordinate(
             sceneRgb,
             workingSpace);
-    float hue=0, saturation=0, exposure=0, totalWeight=0, protection=0;
+    float hue=0, saturation=0, exposure=0, totalWeight=0, protection=0, moveA=0, moveB=0;
     for (std::size_t index=0;index<colorWarp.pins.size();++index) {
         const auto& pin=colorWarp.pins[index];
         if(!ColorWarpParticipates(pin))continue;
@@ -1518,18 +1523,23 @@ std::array<float, 3> ApplyPreparedColorWarp(
         const float weight=EvaluateColorWarpPinWeight(pin,coordinate,mask,
             masks?ColorWarpPinSpatialSupport(colorWarp,pin):0.f);
         if(pin.protectColor) { protection=std::max(protection,std::clamp(weight,0.f,1.f));continue; }
-        totalWeight+=weight;hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;exposure+=pin.exposureEv*weight;
+        totalWeight+=weight;exposure+=pin.exposureEv*weight;
+        if(pin.moveColors) {
+            const auto destination=ColorWarpDestination(pin);
+            moveA+=(destination[0]-pin.sourceA)*weight;
+            moveB+=(destination[1]-pin.sourceB)*weight;
+        } else {hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;}
     }
     const float denominator=colorWarp.combine==RawColorWarpCombine::Blend?std::max(1.f,totalWeight):1.f;
     const float amount=colorWarp.strength*(1.f-protection)/denominator;
-    hue*=amount;saturation*=amount;exposure*=amount;
-    if(hue==0 && saturation==0 && exposure==0)return sceneRgb;
+    hue*=amount;saturation*=amount;exposure*=amount;moveA*=amount;moveB*=amount;
+    if(hue==0 && saturation==0 && exposure==0 && moveA==0 && moveB==0)return sceneRgb;
     auto output=sceneRgb;
-    if(hue!=0 || saturation!=0) {
+    if(hue!=0 || saturation!=0 || moveA!=0 || moveB!=0) {
         const float radians=hue*3.14159265358979323846f/180.f;
         const float c=std::cos(radians),s=std::sin(radians),gain=std::max(0.f,1.f+saturation);
         const float a=coordinate.a,b=coordinate.b;
-        coordinate.a=(c*a-s*b)*gain;coordinate.b=(s*a+c*b)*gain;
+        coordinate.a=(c*a-s*b)*gain+moveA*std::max(std::abs(coordinate.lightness),.000001f);coordinate.b=(s*a+c*b)*gain+moveB*std::max(std::abs(coordinate.lightness),.000001f);
         output=ColorWarpCoordinateToWorkingRgb(coordinate,workingSpace);
     }
     const float gain=std::exp2(exposure);
@@ -1552,7 +1562,10 @@ nlohmann::json DefaultViewTransformJson() {
         { "preserveHue", p.preserveHue },
         { "debugFalseColor", p.debugFalseColor },
         { "inputWorkingSpace", "linear-rec2020-d65" },
-        { "encodeSrgbOutput", p.encodeSrgbOutput }
+        { "encodeSrgbOutput", p.encodeSrgbOutput },
+        { "sdrBrightness", 0.f },
+        { "sdrHighlightDetail", 1.f },
+        { "sdrSaturation", 1.f }
     };
 }
 

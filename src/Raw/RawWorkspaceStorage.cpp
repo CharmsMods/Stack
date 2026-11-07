@@ -25,6 +25,10 @@ std::filesystem::path GalleryCatalogReadPath(const ManagedLayout& layout, const 
     const auto managed = BuildManagedLayout(layout.workspaceRoot);
     if (layout.catalogDirectory == managed.catalogDirectory && layout.thumbnailsDirectory != managed.thumbnailsDirectory)
         return layout.thumbnailsDirectory.parent_path() / "Catalog" / filename;
+    if (layout.catalogDirectory != managed.catalogDirectory) {
+        const auto legacy=managed.catalogDirectory/filename;
+        if(std::filesystem::exists(legacy,ec) && !ec)return legacy;
+    }
     return path;
 }
 
@@ -232,20 +236,13 @@ ManagedLayout BuildManagedLayout(const std::filesystem::path& workspaceRoot) {
 
 ManagedLayout BuildGalleryLayout(const std::filesystem::path& root) {
     auto layout = BuildManagedLayout(root);
-    const bool managed = IsMarkedCloset(layout.dataDirectory);
     const auto key = Stack::NodeMath::Sha256ContentIdentity(layout.workspaceRoot.generic_u8string()).substr(7);
     const auto cache = AppPaths::GetCacheDirectory() / "PhotoBrowser" / key;
-    std::error_code ec;
-    if (!managed || std::filesystem::is_directory(cache, ec)) {
-        // Keep the warm original previews when the first project creates a Closet.
-        layout.thumbnailsDirectory = cache / "Standard";
-        layout.transientThumbnailsDirectory = cache / "Quick";
-    }
-    if (!managed) {
-        layout.catalogDirectory = cache / "Catalog";
-        layout.catalogPath = layout.catalogDirectory / kCatalogFileName;
-        layout.ratingsPath = layout.catalogDirectory / kRatingsFileName;
-    }
+    layout.thumbnailsDirectory = cache / "Standard";
+    layout.transientThumbnailsDirectory = cache / "Quick";
+    layout.catalogDirectory = cache / "Catalog";
+    layout.catalogPath = layout.catalogDirectory / kCatalogFileName;
+    layout.ratingsPath = layout.catalogDirectory / kRatingsFileName;
     return layout;
 }
 

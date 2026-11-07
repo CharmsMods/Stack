@@ -1,6 +1,7 @@
 #include "Editor/EditorRenderWorker.h"
 #include "Editor/GraphRenderMemory.h"
 #include "Renderer/GpuMemoryBudget.h"
+#include "Renderer/GraphResourcePolicy.h"
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
 #include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/SceneColorGuidePlanning.h"
@@ -11,10 +12,29 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     RenderPipeline& pipeline, Result& result) {
     if (!snapshot.graphRequest.enabled && !result.viewportPreview.enabled) return;
     using namespace Stack::GraphRendering;
+    using namespace Stack::Renderer::GraphExecution;
+    std::vector<ScheduledGraphOutput> roots;
+    for (const auto& output : snapshot.compositeOutputs)
+        roots.push_back({output.outputNodeId, "imageOut"});
+    for (const auto& preview : snapshot.previews)
+        roots.push_back({preview.sourceNodeId, preview.sourceSocketId});
+    if (snapshot.graph.rawLayerScopeNodeId > 0)
+        roots.push_back({snapshot.graph.rawLayerScopeNodeId, snapshot.graph.rawLayerScopeSocketId});
+    if (snapshot.graph.rawWorkspaceLocalRangeTargetSampleRequested ||
+        (!snapshot.graph.rawWorkspaceLocalRangeOverlayMode.empty() &&
+         snapshot.graph.rawWorkspaceLocalRangeOverlayMode != "none"))
+        for (const auto& node : snapshot.graph.nodes)
+            if (node.kind == RenderGraphNodeKind::RawDevelopment) roots.push_back({node.nodeId, "imageOut"});
+    const auto schedule = BuildGraphEvaluationSchedule(snapshot.graph,
+        {snapshot.graph.outputNodeId, snapshot.graph.outputSocketId}, roots);
+    std::unordered_set<int> scheduledNodes;
+    if (schedule.valid) for (const auto& output : schedule.outputs) scheduledNodes.insert(output.nodeId);
+    Stack::Renderer::GraphResourcePolicy resources;
     int width = std::max(snapshot.width, snapshot.rawWorkspace.fullFrameWidth);
     int height = std::max(snapshot.height, snapshot.rawWorkspace.fullFrameHeight);
-    bool rawStages = snapshot.rawWorkspace.hasRecipe;
     for (const auto& node : snapshot.graph.nodes) {
+        if (schedule.valid && !scheduledNodes.count(node.nodeId)) continue;
+        resources.Include(node, snapshot.graph.rawLayerBackgroundNodeId > 0);
         width = std::max(width, node.image.width);
         height = std::max(height, node.image.height);
         if (node.kind == RenderGraphNodeKind::Reformat) {
@@ -29,11 +49,6 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
             width = std::max(width, Raw::DisplayWidth(node.rawDevelopment.embeddedRawData->metadata));
             height = std::max(height, Raw::DisplayHeight(node.rawDevelopment.embeddedRawData->metadata));
         }
-        rawStages |= node.kind == RenderGraphNodeKind::RawSource ||
-            node.kind == RenderGraphNodeKind::RawDevelopment ||
-            node.kind == RenderGraphNodeKind::RawProjectSourceSet ||
-            node.kind == RenderGraphNodeKind::RawDevelop ||
-            node.kind == RenderGraphNodeKind::RawDecode;
     }
     for (const auto& output : snapshot.compositeOutputs) {
         width = std::max(width, output.width);
@@ -43,28 +58,19 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
         width = std::max(width, preview.width);
         height = std::max(height, preview.height);
     }
-    using namespace Stack::Renderer::GraphExecution;
-    std::vector<ScheduledGraphOutput> roots;
-    for (const auto& output : snapshot.compositeOutputs)
-        roots.push_back({output.outputNodeId, "imageOut"});
-    for (const auto& preview : snapshot.previews)
-        roots.push_back({preview.sourceNodeId, preview.sourceSocketId});
-    const auto schedule = BuildGraphEvaluationSchedule(snapshot.graph,
-        {snapshot.graph.outputNodeId, snapshot.graph.outputSocketId}, roots);
     // The executor can retain an image for each scheduled output until the
     // pass ends. Reserve that conservative peak plus ping/pong and publication,
     // rather than applying RAW's fixed seven-surface estimate to a branched graph.
     const auto surfaces = schedule.valid ? schedule.outputs.size() : snapshot.graph.nodes.size();
+    const bool retainedFloat32 = pipeline.HasFloat32GraphDependencies();
+    const bool rawStages = resources.rawStages;
     const auto targetBytes = [&](int w, int h, std::uint64_t count) {
         const auto bytes = ImageBytes(w, h, count);
-        // RAW graphs use float32 targets and have internal reconstruction
-        // scratch beyond their authored output endpoints.
-        return rawStages ? AddBytes(bytes, bytes) : bytes;
+        // RAW also retains its existing allowance for internal reconstruction.
+        return rawStages || resources.TargetBytesPerPixel(retainedFloat32) == 16u ? AddBytes(bytes, bytes) : bytes;
     };
-    std::unordered_set<int> scheduledNodes;
-    if (schedule.valid) for (const auto& output : schedule.outputs) scheduledNodes.insert(output.nodeId);
     std::uint64_t guideWorking=0,colorMaskWorking=0;
-    const bool sourceColorGuide=Stack::Renderer::GraphHasSourceColorGuide(snapshot.graph);
+    const bool sourceColorGuide=resources.sourceColorGuide;
     for (const auto& node:snapshot.graph.nodes) if (!schedule.valid || scheduledNodes.count(node.nodeId)) {
         guideWorking=std::max(guideWorking,Stack::Renderer::LocalToneGuideWorkingBytes(node,width,height));
         if(sourceColorGuide && Stack::Renderer::NodeMayUseColorMaskGuide(node))
@@ -75,7 +81,7 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     std::uint64_t working = completeWorking;
     if (result.viewportPreview.enabled) {
         const auto mainPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
-            snapshot.width, snapshot.height, snapshot.previewMaxDimension, result.viewportPreview);
+            snapshot.width, snapshot.height, snapshot.previewMaxDimension, result.viewportPreview, {}, retainedFloat32);
         if (mainPlan.valid) {
             working = mainPlan.workingBytes;
             std::uint64_t publishedMain = 0;
@@ -95,7 +101,7 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
                 overview.visible = {};
                 overview.empty = false;
                 const auto overviewPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
-                    snapshot.width, snapshot.height, 512, overview);
+                    snapshot.width, snapshot.height, 512, overview, {}, retainedFloat32);
                 const auto overviewWorking = overviewPlan.valid ? overviewPlan.workingBytes : completeWorking;
                 working = std::max(working, AddBytes(overviewWorking, publishedMain));
             }

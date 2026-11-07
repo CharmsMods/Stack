@@ -48,6 +48,7 @@ void TaskSystem::Initialize() {
         // as Add Slice. The normal pool is often busy with library scans,
         // thumbnails, or saves, and priority alone cannot pre-empt
         // already-running work.
+        m_ThumbnailWorker = std::thread([this]() { WorkerLoop(false, true); });
         m_InteractiveWorker =
             std::thread([this]() { WorkerLoop(true); });
     } catch (...) {
@@ -62,6 +63,7 @@ void TaskSystem::Initialize() {
             }
         }
         m_Workers.clear();
+        if (m_ThumbnailWorker.joinable()) m_ThumbnailWorker.join();
         if (m_InteractiveWorker.joinable()) {
             m_InteractiveWorker.join();
         }
@@ -93,15 +95,18 @@ void TaskSystem::Shutdown() {
         }
     }
     m_Workers.clear();
+    if (m_ThumbnailWorker.joinable()) m_ThumbnailWorker.join();
     if (m_InteractiveWorker.joinable()) {
         m_InteractiveWorker.join();
     }
 
+    std::deque<ThumbnailTask> discardedThumbnails;
     std::queue<Task> discardedHighPriority;
     std::queue<Task> discardedWork;
     std::queue<Task> discardedMain;
     {
         std::lock_guard<std::mutex> workLock(m_WorkMutex);
+        m_ThumbnailQueue.swap(discardedThumbnails);
         m_HighPriorityWorkQueue.swap(discardedHighPriority);
         m_WorkQueue.swap(discardedWork);
     }
@@ -125,11 +130,13 @@ void TaskSystem::RequestStopDiscardQueued() {
         return;
     }
 
+    std::deque<ThumbnailTask> discardedThumbnails;
     std::queue<Task> discardedHighPriority;
     std::queue<Task> discardedWork;
     {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
         m_StopRequested = true;
+        m_ThumbnailQueue.swap(discardedThumbnails);
         m_HighPriorityWorkQueue.swap(discardedHighPriority);
         m_WorkQueue.swap(discardedWork);
     }
@@ -146,7 +153,7 @@ bool TaskSystem::IsDrainedForShutdown() const {
 bool TaskSystem::HasPendingWork() {
     std::scoped_lock lock(m_WorkMutex, m_MainMutex);
     return m_ActiveWorkers.load(std::memory_order_acquire) != 0 ||
-        !m_WorkQueue.empty() || !m_HighPriorityWorkQueue.empty() || !m_MainQueue.empty();
+        !m_WorkQueue.empty() || !m_HighPriorityWorkQueue.empty() || !m_ThumbnailQueue.empty() || !m_MainQueue.empty();
 }
 
 bool TaskSystem::Submit(Task task) {
@@ -288,8 +295,32 @@ bool TaskSystem::SubmitHighPriority(Task task) {
     } catch (...) {
         return false;
     }
-    m_WorkCv.notify_one();
+    m_WorkCv.notify_all();
     return true;
+}
+
+bool TaskSystem::SubmitThumbnail(ActivityMetadata activity, std::shared_ptr<std::atomic<bool>> canceled, Task task) {
+    if (!task || !canceled) return false;
+    // Destroy retired owner leases outside the scheduler lock.
+    std::deque<ThumbnailTask> retired;
+    try {
+        if (!m_Initialized) Initialize();
+        auto tracked = TrackActivity(std::move(activity), std::move(task));
+        {
+            std::lock_guard<std::mutex> lock(m_WorkMutex);
+            if (m_StopRequested) return false;
+            for (auto it=m_ThumbnailQueue.begin(); it!=m_ThumbnailQueue.end();) {
+                if (it->canceled->load(std::memory_order_relaxed)) {
+                    retired.push_back(std::move(*it));
+                    it=m_ThumbnailQueue.erase(it);
+                } else ++it;
+            }
+            if (m_ThumbnailQueue.size()>=24) return false;
+            m_ThumbnailQueue.push_back({std::move(canceled),std::move(tracked)});
+        }
+        m_WorkCv.notify_all();
+        return true;
+    } catch (...) { return false; }
 }
 
 bool TaskSystem::PostToMain(Task task) {
@@ -364,25 +395,34 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMillisecond
     }
 }
 
-void TaskSystem::WorkerLoop(bool interactiveOnly) {
+void TaskSystem::WorkerLoop(bool interactiveOnly, bool thumbnailOnly) {
     while (true) {
         Task task;
+        bool thumbnail = false;
         {
             std::unique_lock<std::mutex> lock(m_WorkMutex);
-            m_WorkCv.wait(lock, [this, interactiveOnly]() {
+            m_WorkCv.wait(lock, [this, interactiveOnly, thumbnailOnly]() {
                 return m_StopRequested ||
-                    !m_HighPriorityWorkQueue.empty() ||
-                    (!interactiveOnly && !m_WorkQueue.empty());
+                    (!thumbnailOnly && !m_HighPriorityWorkQueue.empty()) ||
+                    (thumbnailOnly && !m_ThumbnailActive && !m_ThumbnailQueue.empty()) ||
+                    (!interactiveOnly && !thumbnailOnly && !m_WorkQueue.empty());
             });
 
             if (m_StopRequested) {
                 return;
             }
 
-            if (!m_HighPriorityWorkQueue.empty()) {
+            if (!thumbnailOnly && !m_HighPriorityWorkQueue.empty()) {
                 task = std::move(m_HighPriorityWorkQueue.front());
                 m_HighPriorityWorkQueue.pop();
-            } else if (!interactiveOnly) {
+            } else if (thumbnailOnly && !m_ThumbnailActive && !m_ThumbnailQueue.empty()) {
+                auto next=std::move(m_ThumbnailQueue.front());
+                m_ThumbnailQueue.pop_front();
+                task=[next=std::move(next)] {
+                    if(!next.canceled->load(std::memory_order_relaxed))next.task();
+                };
+                thumbnail = m_ThumbnailActive = true;
+            } else if (!interactiveOnly && !m_WorkQueue.empty()) {
                 task = std::move(m_WorkQueue.front());
                 m_WorkQueue.pop();
             }
@@ -408,6 +448,11 @@ void TaskSystem::WorkerLoop(bool interactiveOnly) {
         // A task's captured objects can own cleanup work too. Do not report
         // the pool drained while those destructors still use application data.
         task = {};
+        if (thumbnail) {
+            std::lock_guard<std::mutex> lock(m_WorkMutex);
+            m_ThumbnailActive = false;
+            m_WorkCv.notify_all();
+        }
         m_ActiveWorkers.fetch_sub(1, std::memory_order_release);
     }
 }

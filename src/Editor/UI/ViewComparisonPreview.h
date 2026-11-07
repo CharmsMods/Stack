@@ -16,6 +16,7 @@ public:
     ViewComparisonPreview() = default;
     ~ViewComparisonPreview();
     void Reset();
+    void SetHdrOutput(bool enabled) {m_HdrOutput=enabled;}
     void Suspend();
     void UpdateRaw(const std::shared_ptr<const Raw::RawImageData>& source,
         const RawRecipe::RawDevelopmentRecipe& recipe, std::uint64_t revision, int edge);
@@ -52,7 +53,9 @@ private:
     unsigned m_Texture = 0;
     struct RetiredTexture { unsigned texture; int frame; };
     std::vector<RetiredTexture> m_RetiredTextures;
-    bool m_Matched = false, m_Dirty = true;
+    bool m_Matched = true, m_Dirty = true;
     bool m_ControlChanged = false;
+    bool m_QuickShown = false;
+    bool m_HdrOutput = true;
 };
 }

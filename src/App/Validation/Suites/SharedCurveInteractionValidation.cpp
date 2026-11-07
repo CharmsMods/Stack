@@ -181,11 +181,15 @@ static void RunSharedCurveInteractions(bool glass) {
     resetPoints();frame();
     const auto insertedAt=screen(.45f,.8f);
     const auto countBeforeInsert=points.size();
+    const auto shapeBeforeInsert=points;
     click(insertedAt);
     io.AddMouseButtonEvent(0,true);frame();
     require(points.size()==countBeforeInsert+1 && state.gesture && state.dragged>=0,
         "Double-click insertion did not retain the new point for dragging.");
     const auto inserted=points[state.dragged];
+    for(int sample=0;sample<=32;++sample)
+        require(std::abs(EvaluateRawBezierCurve(points,sample/32.f)-EvaluateRawBezierCurve(shapeBeforeInsert,sample/32.f))<.00001f,
+            "Double-click insertion changed the curve before dragging.");
     io.AddMousePosEvent(insertedAt.x+18,insertedAt.y-16);frame();
     require(points[state.dragged].x>inserted.x && points[state.dragged].y>inserted.y && exposure==0,
         "Holding the second click failed to drag the new point or changed exposure.");

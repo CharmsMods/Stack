@@ -35,16 +35,22 @@ std::vector<unsigned char> EncodeGainMapJpeg(const Image& im,const std::vector<u
     Check(uhdr_enc_set_raw_image(enc.get(),&hdr,UHDR_HDR_IMG));
     Check(uhdr_enc_set_raw_image(enc.get(),&base,UHDR_SDR_IMG));
     Check(uhdr_enc_set_using_multi_channel_gainmap(enc.get(),1));
+    Check(uhdr_enc_set_quality(enc.get(),95,UHDR_BASE_IMG));
+    Check(uhdr_enc_set_quality(enc.get(),95,UHDR_GAIN_MAP_IMG));
+    Check(uhdr_enc_set_gainmap_scale_factor(enc.get(),2));
     Check(uhdr_enc_set_target_display_peak_brightness(enc.get(),PeakNits));
     Check(uhdr_encode(enc.get()));
-    auto result=uhdr_get_encoded_stream(enc.get()); auto bytes=static_cast<unsigned char*>(result->data);
+    auto result=uhdr_get_encoded_stream(enc.get());
+    if(!result || !result->data || result->data_sz==0) throw std::runtime_error("HDR JPEG encoder returned no image.");
+    auto bytes=static_cast<unsigned char*>(result->data);
     return {bytes,bytes+result->data_sz};
 }
-Image DecodeGainMapJpeg(const std::vector<unsigned char>& b) {
+Image DecodeGainMapJpeg(const std::vector<unsigned char>& b,float displayHeadroom) {
     std::unique_ptr<uhdr_codec_private_t,decltype(&uhdr_release_decoder)> dec(uhdr_create_decoder(),uhdr_release_decoder);
     if(!dec) throw std::bad_alloc();
     uhdr_compressed_image_t input{const_cast<unsigned char*>(b.data()),b.size(),b.size(),UHDR_CG_UNSPECIFIED,UHDR_CT_UNSPECIFIED,UHDR_CR_UNSPECIFIED};
     Check(uhdr_dec_set_image(dec.get(),&input));
+    if(displayHeadroom>0.f) Check(uhdr_dec_set_out_max_display_boost(dec.get(),displayHeadroom));
     Check(uhdr_dec_set_out_color_transfer(dec.get(),UHDR_CT_PQ));
     Check(uhdr_dec_set_out_img_format(dec.get(),UHDR_IMG_FMT_32bppRGBA1010102));
     Check(uhdr_decode(dec.get()));

@@ -1,4 +1,5 @@
 #include "Editor/UI/GraphFrameTransition.h"
+#include "Hdr/PhotoPairs.h"
 #include "Renderer/GpuMemoryBudget.h"
 #include "Raw/RawGpuMemoryBudget.h"
 
@@ -131,7 +132,7 @@ bool GraphFrameTransition::DescribeBlend(double now, BlendDescription& descripti
         std::min(previous.right, next.right), std::min(previous.bottom, next.bottom)};
     if (overlap.left >= overlap.right || overlap.top >= overlap.bottom) { Clear(); return false; }
     if (hdr && !m_PreviousHdr) return false;
-    description.previousTexture = hdr ? m_PreviousHdr.Texture() : m_Previous.Texture();
+    description.previousTexture = hdr ? Stack::Hdr::RegisterPhotoPair(m_Previous.Texture(),m_PreviousHdr.Texture()) : m_Previous.Texture();
     description.previousOffset = ImVec2(float((next.left - previous.left) / (previous.right - previous.left)),
         float((previous.bottom - next.bottom) / (previous.bottom - previous.top)));
     description.previousScale = ImVec2(float((next.right - next.left) / (previous.right - previous.left)),

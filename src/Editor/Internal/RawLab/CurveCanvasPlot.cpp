@@ -15,6 +15,7 @@ void Geometry(CurveCanvasGeometryCache& cache,
     }
     if(cache.mapped && cache.xAxis==xAxis && cache.yAxis==yAxis && cache.offset==offset) return;
     cache.xAxis=xAxis;cache.yAxis=yAxis;cache.offset=offset;cache.mapped=true;
+    cache.screenMapped=false;
     cache.mappedPoints.clear();
     const auto mapped=[&](const RawBezierSegment& segment,float t) {
         const float u=1-t,a=u*u*u,b=3*u*u*t,c=3*u*t*t,e=t*t*t;
@@ -28,6 +29,7 @@ void Geometry(CurveCanvasGeometryCache& cache,
         return std::hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);
     };
     for(const auto& segment:cache.segments) {
+        if(segment.right.x<xAxis.minimum || segment.left.x>xAxis.maximum)continue;
         const auto left=mapped(segment,0),right=mapped(segment,1);
         if(cache.mappedPoints.empty())cache.mappedPoints.push_back(left);
         // Transform evaluated geometry, never the cubic's handles alone.
@@ -87,9 +89,13 @@ void DrawCurveCanvasPlot(const CurveCanvasPlotContext& context,
     }
     const auto paint=[&](const auto& curve,ImU32 color,float thickness,int cacheIndex) {
         auto& cache=s.geometry[cacheIndex];Geometry(cache,curve,xAxis,yAxis,offset);
-        for(size_t i=0;i<cache.mappedPoints.size();++i) {
-            const auto p=cache.mappedPoints[i];
-            cache.screenPoints[i]={box.Min.x+p.x*box.GetWidth(),box.Max.y-p.y*box.GetHeight()};
+        if(!cache.screenMapped || cache.screenMinimum.x!=box.Min.x || cache.screenMinimum.y!=box.Min.y ||
+            cache.screenMaximum.x!=box.Max.x || cache.screenMaximum.y!=box.Max.y) {
+            cache.screenMapped=true;cache.screenMinimum=box.Min;cache.screenMaximum=box.Max;
+            for(size_t i=0;i<cache.mappedPoints.size();++i) {
+                const auto p=cache.mappedPoints[i];
+                cache.screenPoints[i]={box.Min.x+p.x*box.GetWidth(),box.Max.y-p.y*box.GetHeight()};
+            }
         }
         auto curveStyle=style;curveStyle.curveWidth=thickness;
         GraphUI::DrawGraphPolyline(*d,cache.screenPoints.data(),int(cache.screenPoints.size()),color,curveStyle);
@@ -123,19 +129,22 @@ void DrawCurveCanvasPlot(const CurveCanvasPlotContext& context,
     float best=16.f*16.f*style.scale*style.scale;
     for(int i=0;context.geometryChanged && hovered && i<int(points.size());++i) {
         const auto p=screen(points[i].x,points[i].y);
+        if(p.x<box.Min.x || p.x>box.Max.x || p.y<box.Min.y || p.y>box.Max.y)continue;
         const float dx=mouse.x-p.x,dy=mouse.y-p.y,dist=dx*dx+dy*dy;
         if(dist<best){best=dist;nearest=i;}
     }
     const int pointCount=int(points.size());
     const auto pointGroup=ImHashData(&pointCount,sizeof(pointCount),input.identity);
     for(int i=0;i<int(points.size());++i) {
-        const auto p=screen(points[i].x,points[i].y);const float dist=std::hypot(mouse.x-p.x,mouse.y-p.y);
+        const auto p=screen(points[i].x,points[i].y);
+        if(p.x<box.Min.x || p.x>box.Max.x || p.y<box.Min.y || p.y>box.Max.y)continue;
+        const float dist=std::hypot(mouse.x-p.x,mouse.y-p.y);
         if(hovered)GraphUI::DrawGraphPointHalo(*d,p,dist,style);
         GraphUI::DrawGraphPoint(*d,p,style,s.selected[i],false,ImHashData(&i,sizeof(i),pointGroup),
             hovered && nearest==i,s.gesture && (s.dragged==i || (s.mode==CurveGestureMode::Select && s.selected[i])),&input);
     }
     d->PopClipRect();
-    if(context.viewOptions.automatic && s.framing.initialized) {
+    if(context.viewOptions.stableScale && s.framing.initialized) {
         // Labels follow the inverse view map, so a fitted graph still exposes
         // real input values. Formatting is cached with the accepted input fit.
         float previousRight=box.Min.x;
@@ -150,9 +159,11 @@ void DrawCurveCanvasPlot(const CurveCanvasPlotContext& context,
         if(hovered && nearest>=0) {
             const auto& options=context.viewOptions;
             const auto& point=points[nearest];
-            const float inputValue=options.domainMinimum+point.x*(options.domainMaximum-options.domainMinimum);
+            float inputValue=options.domainMinimum+point.x*(options.domainMaximum-options.domainMinimum);
+            if(options.exposureAsLinearLabels)inputValue=.18f*std::exp2(inputValue);
             if(diagonal) {
-                const float outputValue=options.domainMinimum+point.y*(options.domainMaximum-options.domainMinimum);
+                float outputValue=options.domainMinimum+point.y*(options.domainMaximum-options.domainMinimum);
+                if(options.exposureAsLinearLabels)outputValue=.18f*std::exp2(outputValue);
                 ImGui::SetTooltip(options.exposureUnits?"Input: %+.2f EV\nOutput: %+.2f EV":"Input: %.5g\nOutput: %.5g",inputValue,outputValue);
             } else ImGui::SetTooltip("Input: %+.2f EV\nAdjustment: %+.2f EV",inputValue,-4.f+8.f*point.y);
         }

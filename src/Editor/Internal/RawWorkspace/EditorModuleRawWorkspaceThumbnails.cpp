@@ -1,3 +1,4 @@
+#include "Async/ForegroundIO.h"
 #include "Editor/EditorModule.h"
 
 #include "Async/TaskSystem.h"
@@ -6,6 +7,7 @@
 #include "App/UiFrameBudget.h"
 #include "Utils/DisplayRefreshRate.h"
 #include "Raw/RawLoader.h"
+#include "Raw/GalleryTileCache.h"
 #include "Raw/RawGalleryInputPolicy.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
@@ -59,7 +61,10 @@ bool EditorModule::UsesGalleryPresetPreviews() const {
 void EditorModule::ChooseGalleryComparison(const std::filesystem::path& path) {
     const auto generation=++m_GalleryComparisonGeneration;
     m_GalleryPresetThumbnails.clear();
-    if (path.empty()) { m_GalleryComparisonImage.reset(); m_GalleryComparisonName.clear(); return; }
+    if (path.empty()) {
+        m_GalleryComparisonEnabled = true;
+        m_GalleryComparisonImage.reset(); m_GalleryComparisonName.clear(); return;
+    }
     const auto owner=m_Project;
     ProjectTasks().Submit("Loading comparison image",[this,owner,generation,path] {
         std::shared_ptr<const Raw::RawImageData> image;
@@ -69,6 +74,7 @@ void EditorModule::ChooseGalleryComparison(const std::filesystem::path& path) {
             if (generation!=m_GalleryComparisonGeneration) return;
             if (!image) { PostNotification(UiNotificationSeverity::Error,error,"preset-comparison"); return; }
             ++m_GalleryComparisonGeneration;
+            m_GalleryComparisonEnabled = true;
             m_GalleryComparisonImage=image; m_GalleryComparisonName=path.filename().u8string();
             m_GalleryPresetThumbnails.clear();
         });
@@ -76,6 +82,7 @@ void EditorModule::ChooseGalleryComparison(const std::filesystem::path& path) {
 }
 
 const Stack::RawWorkspace::SourceRecord* EditorModule::GalleryPresetThumbnail(const std::string& key) {
+    if (!m_GalleryComparisonEnabled) return nullptr;
     const auto it=m_GalleryPresetProjects.find(key);
     if (it==m_GalleryPresetProjects.end() || it->second>=m_RawWorkspace.sourceSetProjects.size()) return nullptr;
     const auto& doc=m_RawWorkspace.sourceSetProjects[it->second];
@@ -163,29 +170,41 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     int* outWidth,
     int* outHeight,
     bool prioritize, int detailEdge, const std::string* presetCardKey) {
-    bool preview=UsesGalleryPresetPreviews();
-    if (source.relativePathKey.compare(0,16,"project-overlay:")==0) {
-        if (!preview && m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket) {
-            const auto card=m_GalleryPresetProjects.find(source.relativePathKey);
-            preview=card!=m_GalleryPresetProjects.end() && card->second<m_RawWorkspace.sourceSetProjects.size() &&
-                m_RawWorkspace.sourceSetProjects[card->second].standaloneMaster;
-        } else if (preview && !source.thumbnail.absolutePath.empty()) {
-            const auto card=m_GalleryPresetProjects.find(source.relativePathKey);
-            if (card!=m_GalleryPresetProjects.end() && card->second<m_RawWorkspace.sourceSetProjects.size() &&
-                m_RawWorkspace.sourceSetProjects[card->second].hasSavedBracketingResult) {
-                // A saved merge already has its actual cover. Substituting a
-                // comparison image can disconnect its multi-frame source.
-                preview=false;
-            }
+    if (source.relativePathKey.rfind("project-overlay:", 0) != 0)
+        return GetRawWorkspaceSourceThumbnailTexture(source, outWidth, outHeight,
+            prioritize, detailEdge, presetCardKey);
+
+    const auto found = m_GalleryPresetProjects.find(source.relativePathKey);
+    const auto* project = found != m_GalleryPresetProjects.end() && found->second < m_RawWorkspace.sourceSetProjects.size()
+        ? &m_RawWorkspace.sourceSetProjects[found->second] : nullptr;
+    const auto* original = project ? (project->thumbnailOriginal ? project->thumbnailOriginal.get() :
+        project->linkedOriginal ? project->linkedOriginal.get() : project->masterSource.get()) : nullptr;
+    // Comparison rendering is an explicit user action. Merely browsing Saved
+    // Projects, Brackets or Unlinked never loads and evaluates their graphs.
+    if (project && m_GalleryComparisonEnabled && UsesGalleryPresetPreviews() &&
+        !project->masterSource && !project->hasSavedBracketingResult) {
+        if (const auto* preset = GalleryPresetThumbnail(source.relativePathKey)) {
+            if (const auto texture = GetRawWorkspaceSourceThumbnailTexture(*preset,
+                    outWidth, outHeight, prioritize, 0, &source.relativePathKey)) return texture;
         }
-    } else preview=false;
-    if (preview) {
-        if (const auto* preset=GalleryPresetThumbnail(source.relativePathKey))
-            return GetRawWorkspaceThumbnailTexture(*preset,outWidth,outHeight,prioritize,0,&source.relativePathKey);
-        if (outWidth) *outWidth=0;
-        if (outHeight) *outHeight=0;
-        return 0;
     }
+    if (!project || !project->coverThumbnailCachePath.empty()) {
+        if (const auto texture = GetRawWorkspaceSourceThumbnailTexture(source,
+                outWidth, outHeight, prioritize, detailEdge, presetCardKey)) return texture;
+    }
+    // Use the original's canonical cache key, so a resident original appears
+    // immediately and different saved versions share one decode/upload.
+    if (original && original->relativePathKey != source.relativePathKey)
+        return GetRawWorkspaceSourceThumbnailTexture(*original, outWidth, outHeight,
+            prioritize, detailEdge, nullptr);
+    if (outWidth) *outWidth = 0;
+    if (outHeight) *outHeight = 0;
+    return 0;
+}
+
+unsigned int EditorModule::GetRawWorkspaceSourceThumbnailTexture(
+    const Stack::RawWorkspace::SourceRecord& source, int* outWidth, int* outHeight,
+    bool prioritize, int detailEdge, const std::string* presetCardKey) {
     // Grid, strip and folder cards all represent current viewport demand.
     // A stream of ordinary card completions must not jump an older visible
     // tile in the upload queue or bypass the per-frame request limit.
@@ -205,9 +224,8 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     const Stack::RawWorkspace::ThumbnailInfo* displayThumbnail = nullptr;
     // A camera JPEG is immediately displayable, even while neutral similarity
     // analysis is pending. Explicit project covers always own their pixels.
-    const bool cameraBacked = ((source.browsePreview && !isDisplayable(source.thumbnail)) ||
-        (source.thumbnail.camera.bytes && source.thumbnail.absolutePath.empty())) &&
-        !source.absolutePath.empty();
+    const bool cameraBacked = !isDisplayable(source.thumbnail) &&
+        !isDisplayable(source.transientThumbnail) && !source.absolutePath.empty();
     if (cameraBacked || isDisplayable(source.thumbnail)) {
         displayThumbnail = &source.thumbnail;
     } else if (isDisplayable(source.transientThumbnail)) {
@@ -218,6 +236,8 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     const auto clearCached = [&]() {
         auto it = m_RawWorkspaceThumbnailTextures.find(cacheKey);
         if (it != m_RawWorkspaceThumbnailTextures.end()) {
+            if(it->second.cancelTile)it->second.cancelTile->store(true);
+            m_GalleryPendingThumbnailKeys.erase(cacheKey);
             ReleaseGalleryHdrThumbnail(it->second);
             if (it->second.texture != 0) {
                 QueueRawWorkspaceThumbnailTextureDelete(it->second.texture);
@@ -244,7 +264,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         if (projectCover) return texture.absolutePath == displayPath;
         return texture.sourcePath.native() == source.absolutePath.native() &&
             texture.sourceModified == source.modifiedTimeTicks && texture.sourceBytes == source.fileSizeBytes &&
-            (texture.sourceFingerprint == source.fingerprint || (texture.sourceFingerprint.empty() && !source.fingerprint.empty()));
+            (texture.sourceFingerprint == source.fingerprint || texture.sourceFingerprint.empty() || source.fingerprint.empty());
     };
     const auto setSource = [&](RawWorkspaceThumbnailTexture& entry) {
         entry.absolutePath = displayPath;
@@ -261,6 +281,8 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         // an earlier image's pixels or camera properties under the same key.
         ReleaseGalleryHdrThumbnail(existing->second);
         QueueRawWorkspaceThumbnailTextureDelete(existing->second.texture);
+        if(existing->second.cancelTile)existing->second.cancelTile->store(true);
+        m_GalleryPendingThumbnailKeys.erase(cacheKey);
         existing->second = {};
         setSource(existing->second);
         m_RawWorkspaceThumbnailTextureUploadQueue.erase(
@@ -269,7 +291,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             m_RawWorkspaceThumbnailTextureUploadQueue.end());
     }
     if (existing != m_RawWorkspaceThumbnailTextures.end()) {
-        if (existing->second.cancelTile || existing->second.uploadPending) existing->second.lastDemandFrame = demandFrame;
+        existing->second.lastDemandFrame = demandFrame;
         if (existing->second.sourceFingerprint.empty() && !source.fingerprint.empty())
             existing->second.sourceFingerprint = source.fingerprint;
         existing->second.lastUseSerial =
@@ -291,6 +313,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             existing->second.decodeState = Async::TaskState::Idle;
             existing->second.uploadPending = false;
             existing->second.uploadQueued = false;
+            existing->second.transparentCover = false;
             existing->second.decodedPixels.clear();
             existing->second.decodedWidth = 0;
             existing->second.decodedHeight = 0;
@@ -306,7 +329,16 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         }
     }
 
+    if (ImGui::GetCurrentContext()) {
+        const int frame = ImGui::GetFrameCount();
+        if (frame != m_RawWorkspaceThumbnailTextureRequestFrame) {
+            m_RawWorkspaceThumbnailTextureRequestFrame = frame;
+            m_RawWorkspaceThumbnailTextureRequestsThisFrame = 0;
+        }
+    }
     if (existing == m_RawWorkspaceThumbnailTextures.end()) {
+        if(m_GalleryPendingThumbnailKeys.size()>=kRawWorkspaceThumbnailTextureMaxActiveDecodes ||
+            m_RawWorkspaceThumbnailTextureRequestsThisFrame>=kRawWorkspaceThumbnailTextureDecodeRequestsPerFrame)return 0;
         RawWorkspaceThumbnailTexture entry;
         setSource(entry);
         entry.priority = prioritize;
@@ -334,6 +366,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     if (entry.decodeState == Async::TaskState::Failed) {
         return returnResidentTexture();
     }
+    if (entry.transparentCover) return 0;
     const bool foregroundGestureActive =
         IsRawWorkspaceUiInteractionActive() ||
         (ImGui::GetCurrentContext() && ImGui::IsAnyItemActive());
@@ -341,57 +374,16 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         return returnResidentTexture();
     }
 
-    if (ImGui::GetCurrentContext()) {
-        const int frame = ImGui::GetFrameCount();
-        if (frame != m_RawWorkspaceThumbnailTextureRequestFrame) {
-            m_RawWorkspaceThumbnailTextureRequestFrame = frame;
-            m_RawWorkspaceThumbnailTextureRequestsThisFrame = 0;
-        }
-    }
     if (!prioritize &&
         m_RawWorkspaceThumbnailTextureRequestsThisFrame >=
         kRawWorkspaceThumbnailTextureDecodeRequestsPerFrame) {
         return returnResidentTexture();
     }
-    auto activeDecodes = static_cast<std::size_t>(std::count_if(
-        m_RawWorkspaceThumbnailTextures.begin(),
-        m_RawWorkspaceThumbnailTextures.end(),
-        [](const auto& item) {
-            const RawWorkspaceThumbnailTexture& texture = item.second;
-            return texture.decodeState == Async::TaskState::Queued ||
-                texture.decodeState == Async::TaskState::Running ||
-                texture.decodeState == Async::TaskState::Applying ||
-                texture.uploadPending;
-        }));
-    if (activeDecodes >= kRawWorkspaceThumbnailTextureMaxActiveDecodes && m_PermanentGalleryWorkspace && demandFrame >= 0) {
-        // Release slots from the old viewport before admitting its replacement.
-        bool discardedUploads = false;
-        for (auto& item : m_RawWorkspaceThumbnailTextures) {
-            auto& old = item.second;
-            if (old.lastDemandFrame + 1 >= demandFrame ||
-                (!old.uploadPending && !(old.decodeState == Async::TaskState::Queued && old.cancelTile))) continue;
-            if (old.cancelTile) old.cancelTile->store(true);
-            old.cancelTile.reset();
-            if (old.uploadPending) {
-                discardedUploads = true;
-                old.uploadPending = old.uploadQueued = false;
-                std::vector<unsigned char>().swap(old.decodedPixels);
-            }
-            old.requestGeneration = ++m_RawWorkspaceThumbnailTextureRequestGeneration;
-            old.decodeState = Async::TaskState::Idle;
-            --activeDecodes;
-        }
-        if (discardedUploads) {
-            auto& queue = m_RawWorkspaceThumbnailTextureUploadQueue;
-            queue.erase(std::remove_if(queue.begin(), queue.end(), [&](const auto& key) {
-                const auto pending = m_RawWorkspaceThumbnailTextures.find(key);
-                return pending == m_RawWorkspaceThumbnailTextures.end() || !pending->second.uploadQueued;
-            }), queue.end());
-        }
-    }
+    const auto activeDecodes = m_GalleryPendingThumbnailKeys.size();
     if (activeDecodes >= kRawWorkspaceThumbnailTextureMaxActiveDecodes) {
         return returnResidentTexture();
     }
+    Async::ForegroundIO::Demand();
     ++m_RawWorkspaceThumbnailTextureRequestsThisFrame;
 
     const std::uint64_t requestGeneration = ++m_RawWorkspaceThumbnailTextureRequestGeneration;
@@ -400,6 +392,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
     entry.requestGeneration = requestGeneration;
     entry.lastDemandFrame = demandFrame;
     entry.decodeState = Async::TaskState::Queued;
+    m_GalleryPendingThumbnailKeys.insert(cacheKey);
     entry.uploadQueued = false;
     entry.decodedPixels.clear();
     entry.decodedWidth = 0;
@@ -421,8 +414,10 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             sourceKey,
             sourcePath,
             detailEdge,
+            projectCover,
             direct = cameraBacked,
             bytes = source.fileSizeBytes,
+            modified = source.modifiedTimeTicks,
             cancelTile = entry.cancelTile,
             analyzeTile = !detailEdge && cameraBacked && cacheKey.rfind("project-overlay:", 0) != 0 &&
                 cacheKey.rfind("bracket-sidebar:", 0) != 0 && NeedsCameraGroupingPreview(source),
@@ -438,6 +433,8 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             return;
         }
 
+        if(!Async::ForegroundIO::WaitForOpen(resetRequested))return;
+        Async::ForegroundIO::TileRead foregroundRead;
         int width = 0;
         int height = 0;
         int channels = 0;
@@ -446,18 +443,25 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         try {
             if (direct) {
                 using namespace Stack::RawWorkspace;
-                const int edge = detailEdge ? detailEdge : kNeutralThumbnailMaxDimension;
-                if (IsGalleryRasterPath(sourcePath)) {
+                const int edge = detailEdge ? detailEdge : std::min(512, kNeutralThumbnailMaxDimension);
+                const auto tileKey = detailEdge ? std::string{} : Stack::GalleryTileCache::Key(sourcePath, bytes, modified, edge);
+                const bool cached = !detailEdge && Stack::GalleryTileCache::Read(tileKey, decodedPixels, width, height);
+                if (cached) {
+                    // The tile is local: no original-drive probes on a warm hit.
+                } else if (IsGalleryRasterPath(sourcePath)) {
                     if (!DecodeRasterThumbnail(sourcePath, edge, decodedPixels, width, height))
                         LoadGalleryRasterThumbnail(sourcePath, edge, decodedPixels, width, height);
                 } else {
                     if (!camera.bytes) {
                         std::error_code ec;
                         const auto length = bytes ? bytes : std::filesystem::file_size(sourcePath, ec);
-                        if (!ec) camera = FindCameraThumbnail(sourcePath, length, edge);
+                        if (!ec) camera = FindCameraThumbnail(sourcePath, length, edge, resetRequested);
                     }
                     LoadOriginalGalleryPixels(sourcePath, camera, edge, detailEdge != 0, decodedPixels, width, height, resetRequested);
                 }
+                if (resetRequested()) return;
+                if (!cached && !detailEdge && !decodedPixels.empty())
+                    Stack::GalleryTileCache::Write(tileKey, decodedPixels, width, height);
                 if (!decodedPixels.empty()) {
                     // The matcher expects display orientation, before the GL row flip.
                     if (analyzeTile)
@@ -506,6 +510,18 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             return;
         }
 
+        // Empty documents may legitimately save a fully transparent cover.
+        // Detect it once on the decode worker; drawing then uses a visible
+        // project placeholder or borrows the original instead of an invisible
+        // image. This does not alter or reject the saved document.
+        bool transparentCover = projectCover && !decodedPixels.empty();
+        if (transparentCover) {
+            for (std::size_t alpha = 3; alpha < decodedPixels.size(); alpha += 4) {
+                if (decodedPixels[alpha] != 0) { transparentCover = false; break; }
+            }
+            if (transparentCover) decodedPixels.clear();
+        }
+
         ProjectTasks().PostToMain([
                 this,
                 requestGeneration,
@@ -514,6 +530,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                 thumbnailStatus,
                 width,
                 height,
+                transparentCover,
                 camera, groupingPreview = std::move(groupingPreview),
                 decodedPixels = std::move(decodedPixels)
             ]() mutable {
@@ -527,7 +544,21 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                     target.status != thumbnailStatus) {
                     return;
                 }
+                if (transparentCover) {
+                    m_GalleryPendingThumbnailKeys.erase(sourceKey);
+                    target.cancelTile.reset();
+                    target.transparentCover = true;
+                    target.decodeState = Async::TaskState::Ready;
+                    target.uploadPending = target.uploadQueued = false;
+                    QueueRawWorkspaceThumbnailTextureDelete(target.texture);
+                    target.texture = 0;
+                    target.width = target.height = 0;
+                    m_RawWorkspaceThumbnailTextureTrimNeeded = true;
+                    return;
+                }
                 if (decodedPixels.empty() || width <= 0 || height <= 0) {
+                    m_GalleryPendingThumbnailKeys.erase(sourceKey);
+                    m_RawWorkspaceThumbnailTextureTrimNeeded = true;
                     target.decodeState = Async::TaskState::Failed;
                     target.uploadPending = false;
                     target.uploadQueued = false;
@@ -578,6 +609,8 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
                     target.decodeState = Async::TaskState::Applying;
                     target.uploadPending = true;
                 } catch (...) {
+                    m_GalleryPendingThumbnailKeys.erase(sourceKey);
+                    m_RawWorkspaceThumbnailTextureTrimNeeded = true;
                     target.decodeState = Async::TaskState::Failed;
                     target.uploadPending = false;
                     target.uploadQueued = false;
@@ -588,8 +621,7 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
             });
 
         };
-        submitted = m_PermanentGalleryWorkspace ? ProjectTasks().SubmitHighPriority("Loading thumbnails", std::move(decode))
-            : ProjectTasks().Submit("Loading thumbnails", std::move(decode));
+        submitted = ProjectTasks().SubmitThumbnail(entry.cancelTile, std::move(decode));
     } catch (...) {
         submitted = false;
     }
@@ -597,9 +629,12 @@ unsigned int EditorModule::GetRawWorkspaceThumbnailTexture(
         auto rejected = m_RawWorkspaceThumbnailTextures.find(sourceKey);
         if (rejected != m_RawWorkspaceThumbnailTextures.end() &&
             rejected->second.requestGeneration == requestGeneration) {
-            rejected->second.decodeState = Async::TaskState::Failed;
+            rejected->second.decodeState = Async::TaskState::Idle;
+            rejected->second.cancelTile.reset();
+            m_GalleryPendingThumbnailKeys.erase(sourceKey);
             rejected->second.uploadPending = false;
             rejected->second.uploadQueued = false;
+            if(!rejected->second.texture) {m_RawWorkspaceThumbnailTextures.erase(rejected);return 0;}
         }
     }
 
@@ -734,11 +769,54 @@ void EditorModule::HandleRawWorkspaceThumbnailDecodeFailure(
     QueueRawWorkspaceThumbnailRepair(sourceKey);
 }
 
+void EditorModule::CancelRawWorkspaceThumbnailDemand() {
+    if(m_GalleryPendingThumbnailKeys.empty())return;
+    for(const auto& key:m_GalleryPendingThumbnailKeys) {
+        const auto found=m_RawWorkspaceThumbnailTextures.find(key);
+        if(found==m_RawWorkspaceThumbnailTextures.end())continue;
+        auto& entry=found->second;
+        if(entry.cancelTile)entry.cancelTile->store(true);
+        entry.cancelTile.reset();
+        entry.requestGeneration=++m_RawWorkspaceThumbnailTextureRequestGeneration;
+        entry.uploadPending=entry.uploadQueued=false;entry.decodeState=Async::TaskState::Idle;
+        std::vector<unsigned char>().swap(entry.decodedPixels);
+        if(!entry.texture)m_RawWorkspaceThumbnailTextures.erase(found);
+    }
+    m_GalleryPendingThumbnailKeys.clear();
+    m_RawWorkspaceThumbnailTextureUploadQueue.clear();
+}
+
 void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
     TickRawWorkspacePersistence();
     TickRawWorkspacePreviewStaging();
     PumpRawWorkspaceThumbnailTextureDeletes();
 
+    // Once per frame, visit only outstanding demand (at most 24 entries).
+    // Old queued/running reads observe the token; old decoded packets are freed
+    // before new requests are admitted. No catalog or resident-cache scan.
+    const int demandFrame = ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
+    if (demandFrame >= 0 && demandFrame != m_GalleryThumbnailRetireFrame) {
+        m_GalleryThumbnailRetireFrame = demandFrame;
+        for (auto pending=m_GalleryPendingThumbnailKeys.begin(); pending!=m_GalleryPendingThumbnailKeys.end();) {
+            auto found=m_RawWorkspaceThumbnailTextures.find(*pending);
+            if(found==m_RawWorkspaceThumbnailTextures.end()) {pending=m_GalleryPendingThumbnailKeys.erase(pending);continue;}
+            auto& entry=found->second;
+            if(entry.lastDemandFrame+2>=demandFrame) {++pending;continue;}
+            if(entry.cancelTile) entry.cancelTile->store(true);
+            entry.cancelTile.reset();
+            entry.requestGeneration=++m_RawWorkspaceThumbnailTextureRequestGeneration;
+            entry.uploadPending=entry.uploadQueued=false;
+            entry.decodeState=Async::TaskState::Idle;
+            std::vector<unsigned char>().swap(entry.decodedPixels);
+            if(!entry.texture) m_RawWorkspaceThumbnailTextures.erase(found);
+            pending=m_GalleryPendingThumbnailKeys.erase(pending);
+        }
+        auto& uploads=m_RawWorkspaceThumbnailTextureUploadQueue;
+        uploads.erase(std::remove_if(uploads.begin(),uploads.end(),[&](const auto& key){
+            const auto it=m_RawWorkspaceThumbnailTextures.find(key);
+            return it==m_RawWorkspaceThumbnailTextures.end()||!it->second.uploadQueued;
+        }),uploads.end());
+    }
     CancelObsoleteGalleryHdrJob();
     const bool hdrReady=m_GalleryHdrJob && m_GalleryHdrJob->complete.load(std::memory_order_acquire);
     if (m_RawWorkspaceThumbnailTextureUploadQueue.empty() && !hdrReady) {
@@ -845,6 +923,7 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
         std::vector<unsigned char>().swap(pendingEntry.decodedPixels);
         pendingEntry.uploadPending = false;
         if (texture == 0) {
+            m_GalleryPendingThumbnailKeys.erase(sourceKey);
             pendingEntry.decodeState = Async::TaskState::Failed;
             pendingEntry.decodedWidth = 0;
             pendingEntry.decodedHeight = 0;
@@ -860,6 +939,7 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
         pendingEntry.height = pendingEntry.decodedHeight;
         pendingEntry.decodedWidth = 0;
         pendingEntry.decodedHeight = 0;
+        m_GalleryPendingThumbnailKeys.erase(sourceKey);
         pendingEntry.decodeState = Async::TaskState::Idle;
         pendingEntry.priority = false;
         ++m_RawWorkspaceThumbnailTextureUploadsThisFrame;
@@ -956,6 +1036,12 @@ void EditorModule::TrimRawWorkspaceThumbnailTextureCache() {
     // Only an upload can increase residency. Once within budget, ordinary
     // drawing/hovering must not rescan the entire thumbnail map every frame.
     if (!m_RawWorkspaceThumbnailTextureTrimNeeded) return;
+    for(auto it=m_RawWorkspaceThumbnailTextures.begin();it!=m_RawWorkspaceThumbnailTextures.end();) {
+        const auto& entry=it->second;
+        if(!entry.texture && !entry.cancelTile && !entry.uploadPending &&
+            ImGui::GetCurrentContext() && entry.lastDemandFrame+2<ImGui::GetFrameCount())it=m_RawWorkspaceThumbnailTextures.erase(it);
+        else ++it;
+    }
     // Gallery keeps a browsing history across both layouts. The byte limit
     // matters more than count for portrait and unusually large thumbnails.
     const std::size_t maxCount = m_PermanentGalleryWorkspace
@@ -1064,10 +1150,12 @@ void EditorModule::ClearRawWorkspaceThumbnailTextures(bool immediate) {
             QueueRawWorkspaceThumbnailTextureDelete(entry.texture);
             entry.texture = 0;
         }
+        if(entry.cancelTile) entry.cancelTile->store(true);
         entry.decodedPixels.clear();
         entry.uploadPending = false;
     }
     m_RawWorkspaceThumbnailTextures.clear();
+    m_GalleryPendingThumbnailKeys.clear();
     if (immediate) {
         PumpRawWorkspaceThumbnailTextureDeletes(true);
     }

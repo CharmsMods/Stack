@@ -991,6 +991,7 @@ void EditorViewport::DrawPixelInspectionCallback(
 
     glUseProgram(draw->program);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
+    glUniform1f(Stack::Hdr::Ui::HeadroomUniform,Stack::Hdr::CurrentTargetHeadroom());
     glBindVertexArray(draw->vertexArray);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, draw->texture);
@@ -2220,7 +2221,7 @@ void EditorViewport::RenderSingleImageMode(
     unsigned int outputTex = hasRawPresentationTexture
         ? rawPresentationTexture
         : pipeline.GetOutputTexture();
-    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+    const bool hdr = editor->IsHdrOutputPreview();
     const auto photoTexture = editor->DisplayOutputTexture(outputTex,hdr);
     unsigned int sourceTex = hasRawPresentationTexture
         ? 0

@@ -71,6 +71,8 @@ void EnsureViewTransform(nlohmann::json& viewTransform) {
         return;
     }
     const nlohmann::json defaults = Stack::RawRecipe::DefaultViewTransformJson();
+    // Viewing an existing node must not opt it into a new output adjustment.
+    if(!viewTransform.contains("sdrHighlightDetail")) viewTransform["sdrHighlightDetail"]=0.f;
     for (auto it = defaults.begin(); it != defaults.end(); ++it) {
         if (!viewTransform.contains(it.key())) {
             viewTransform[it.key()] = it.value();
@@ -167,17 +169,19 @@ bool DrawViewTransformGraph(nlohmann::json& view, const ImVec2& size, int& dragg
     // Geometry, hover and dragging do not repeat curve preparation/evaluation.
     struct Samples {
         bool valid = false;
-        std::array<float, 8> key {};
+        std::array<float, 11> key {};
         std::array<float, sampleCount> actual {}, reference {};
         float pivot = 0;
     };
     static thread_local Samples samples;
-    const std::array<float, 8> key {exposure,middleGrey,contrast,contrastPivotEv,
-        float(encodeSrgb),graphMinEv,graphMaxEv,graphSpan};
+    const std::array<float, 11> key {exposure,middleGrey,contrast,contrastPivotEv,
+        float(encodeSrgb),graphMinEv,graphMaxEv,graphSpan,
+        JsonFloat(view,"sdrBrightness",0.f),JsonFloat(view,"sdrHighlightDetail",0.f),JsonFloat(view,"sdrSaturation",1.f)};
     if (!samples.valid || samples.key != key) {
         Raw::ViewTransform::Parameters p;
         p.exposure=exposure;p.middleGrey=middleGrey;
         p.contrast=contrast;p.contrastPivotEv=contrastPivotEv;
+        p.sdr={key[8],key[9],key[10]};
         const Raw::ViewTransform::PreparedTransform actual(p);
         p.contrast=1.f;
         const Raw::ViewTransform::PreparedTransform reference(p);
@@ -334,6 +338,29 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
             std::max(180.0f, ImGui::GetContentRegionAvail().x - 110.0f))) {
         view["saturation"] = saturation;
         changed = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::Separator();
+    bool proof=IsSdrOutputProof();
+    if(ImGui::Checkbox("Preview SDR",&proof)) SetSdrOutputProof(proof);
+    LabTooltip("Show the SDR export on this display. Your HDR edit is unchanged.");
+    ImGui::BeginDisabled(!enabled);
+    const float width=std::max(180.f,ImGui::GetContentRegionAvail().x-110.f);
+    if(FramelessTextButton("Match HDR appearance")) {
+        view["sdrBrightness"]=0.f;view["sdrHighlightDetail"]=1.f;view["sdrSaturation"]=1.f;
+        SetSdrOutputProof(true);changed=true;
+    }
+    float brightness=JsonFloat(view,"sdrBrightness",0.f);
+    if(BareSliderFloat("SDR brightness","SdrBrightness",&brightness,-3.f,3.f,"%+.2f EV",width)) {
+        view["sdrBrightness"]=brightness;changed=true;
+    }
+    float detail=JsonFloat(view,"sdrHighlightDetail",0.f);
+    if(BareSliderFloat("Highlight detail","SdrDetail",&detail,0.f,1.f,"%.2f",width)) {
+        view["sdrHighlightDetail"]=detail;changed=true;
+    }
+    float color=JsonFloat(view,"sdrSaturation",1.f);
+    if(BareSliderFloat("SDR color","SdrColor",&color,0.f,2.f,"%.2f",width)) {
+        view["sdrSaturation"]=color;changed=true;
     }
     ImGui::EndDisabled();
     return changed;

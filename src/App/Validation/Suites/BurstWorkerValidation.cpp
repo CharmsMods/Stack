@@ -39,6 +39,7 @@ bool ValidateBurstWorker(const std::filesystem::path& inputs, const std::filesys
         std::atomic<bool> cancel{false};
         std::atomic<unsigned> progressEvents{0}, presentationEvents{0};
         request.shouldCancel = [&] { return cancel.load(); };
+        request.terminateOnCancel = !combiningCancellationOnly;
         std::chrono::steady_clock::time_point canceledAt;
         request.reportProgress = [&](double, const std::string& stage) {
             if ((!combiningCancellationOnly || stage == "Combining exposure groups") && !cancel.exchange(true))
@@ -59,6 +60,7 @@ bool ValidateBurstWorker(const std::filesystem::path& inputs, const std::filesys
             return true;
         }
         cancel = false;
+        request.terminateOnCancel = false;
         request.cacheDirectory = output / "process-cache";
         request.reportProgress = [&](double fraction, const std::string& stage) {
             if (progressEvents.fetch_add(1) % 12 == 0)

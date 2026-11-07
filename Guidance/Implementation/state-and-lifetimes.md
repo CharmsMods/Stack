@@ -30,6 +30,8 @@ Cancellation may require cooperative work to drain. Define when the owner is saf
 
 Shared GPU execution may serialize access for correctness or memory limits. That does not justify sharing one project's mutable continuation or busy flag with another. Closing A should wait for A's necessary cleanup, not unrelated work in B, unless a documented shared-resource dependency makes that unavoidable.
 
+Closing a project tab retires its existing editor after the save/discard decision; it does not first reset that editor to a blank document. Retirement cancels its workers, keeps its owner alive until they drain, and disables its final synchronous browsing-state writes. The permanent Gallery remains the browsing-state owner.
+
 For node-owned RAW resources, absence proves removal only in an explicitly complete compiled graph snapshot. Stage/dependency snapshots retain absent owners so auxiliary views do not repeatedly discard live sensor uploads or decoded data. A present incompatible node kind can release its obsolete resources. Retire borrowed output handles before releasing those owners on their execution context; publication leases remain independent. Stage-only absence may therefore retain resources until a complete request or teardown.
 
 Render worker and service completion queues detach discarded results while locked, then release their GPU resources and large payloads after unlocking on the same valid GL context. Keep retirement scopes inside context lifetime, preserve other owners and terminal cancellation acknowledgements, and clear transferred raw tile fence handles explicitly. Moving cleanup out of a scheduling lock must not create an unbounded retirement backlog.

@@ -32,14 +32,13 @@ void AppShell::TickAutoBracketWorkspaces() {
     };
     for (const auto& workspace : m_ProjectWorkspaces) protectWorkspace(workspace);
     for (const auto& workspace : m_RetiredProjectWorkspaces) protectWorkspace(workspace);
-    // User-started first processing, imports and saves get the next admission
-    // slot. An already running automatic bracket retains its own owner and
-    // continues at background CPU/IO priority, with foreground GPU batches
-    // selected before its next batch. Ordinary edits do not stop that work.
+    // Foreground rendering, gestures and explicit jobs preempt disposable
+    // automatic work. Its coordinator cancels and waits for a quiet interval.
     const auto foregroundWork = [](const auto& workspace) {
         const auto& editor = *workspace->editor;
         return !editor.IsAutoBracketWorkspace() &&
-            (editor.IsUserStartedProcessingBusy() || editor.IsGraphDropImportBusy() ||
+            (editor.IsEditorRenderBusy() || editor.IsRawWorkspaceUiInteractionActive() ||
+             editor.IsUserStartedProcessingBusy() || editor.IsGraphDropImportBusy() ||
              editor.IsSourceLoadBusy() || editor.IsRawWorkspaceProjectLoadBusy() || editor.IsExportBusy() ||
              editor.IsProjectFileSaveBusy() || editor.IsRawWorkspaceProjectSaveBusy());
     };

@@ -60,16 +60,26 @@ struct ProjectOpenCompletion {
 } // namespace
 
 bool EditorModule::HasProjectContent() const {
-    return !m_Project->name.empty() ||
-        !m_Project->fileName.empty() ||
+    // A draft/tool may reserve an identity or name before it has any content.
+    // Only authored content, a real source, or an existing saved document can
+    // be persisted. Keep loaded documents saveable after their content is
+    // deliberately removed; never infer this from thumbnail pixels or size.
+    return IsRawWorkspaceProjectActive() ||
+        m_Project->store != nullptr ||
+        m_Project->snapshot != nullptr ||
+        m_Project->savedFileStamp.has_value() ||
         !m_Project->layers.empty() ||
         !m_Project->graph.GetNodes().empty() ||
         !m_Project->graph.GetLinks().empty() ||
+        !m_Project->timeline.tracks.empty() ||
+        !m_CompositeSceneItems.empty() ||
         m_Pipeline.HasSourceImage();
 }
 
 bool EditorModule::HasOpenProjectSession() const {
     return HasProjectContent() ||
+        !m_Project->name.empty() ||
+        !m_Project->fileName.empty() ||
         !m_Project->documentId.empty() ||
         !m_Project->lifecycle.ProjectId().empty() ||
         m_Project->store != nullptr ||
@@ -181,13 +191,14 @@ EditorModule::GetProjectFileCommandContext() const {
     // Save is the one command that remains available while a save is active:
     // Ctrl+S joins the single-writer queue and completes only after its
     // requested revision is durable. Loading/importing still cannot be saved.
-    context.canSave = (hasSession || HasUnsavedBracketingDraft()) &&
+    const bool hasContent = HasProjectContent();
+    context.canSave = (hasContent || HasUnsavedBracketingDraft()) &&
         !m_ProjectCopyPending &&
         m_DocumentPersistenceEnabled &&
         !projectLoadBusy && !importBusy && !lifecycleLoadBusy &&
         !lifecycleImportBusy && !mfdProcessingBusy && !bracketProcessingBusy &&
         !context.conflict && !context.readOnlyRecovery;
-    context.canSaveAs = hasSession && !context.busy;
+    context.canSaveAs = hasContent && !context.busy;
     context.canClose = hasSession && !context.busy;
     context.canOpen = !context.busy;
     context.canCreateEditorProject = !context.busy;
@@ -204,7 +215,7 @@ bool EditorModule::CloseCurrentProject(bool discardUnsavedChanges) {
         kind == ProjectSessionKind::RawProject) {
         return CloseActiveRawWorkspaceProject(discardUnsavedChanges);
     }
-    if (IsDirty() && !discardUnsavedChanges) {
+    if (IsDirty() && HasProjectContent() && !discardUnsavedChanges) {
         return false;
     }
     ResetToBlankProject();
@@ -344,6 +355,9 @@ void EditorModule::ResetToBlankProject() {
     m_SourceLoadTaskState = Async::TaskState::Idle;
     m_SourceLoadStatusText.clear();
     m_Project->layers.clear();
+    m_Project->rawLayers.Reset();
+    m_Project->timeline = {};
+    m_TimelineUi = {};
     m_SelectedLayerIndex = -1;
     m_Project->graph.ResetFromLayers(0, false);
     ClearCompositeRuntimeState();
@@ -1943,7 +1957,7 @@ bool EditorModule::EnqueueCurrentProjectSave(
         if (onComplete) onComplete(false);
         return false;
     }
-    if (GetProjectSessionKind() == ProjectSessionKind::Empty) {
+    if (!HasProjectContent()) {
         if (onComplete) onComplete(false);
         return false;
     }
@@ -1978,7 +1992,7 @@ bool EditorModule::EnqueueCurrentProjectSave(
     auto write = [this, projectId, projectName, reason](
         Stack::Project::ProjectSaveCoordinator::Completion completion,
         bool requireNewStore) mutable {
-        if (projectId != m_Project->documentId) {
+        if (projectId != m_Project->documentId || !HasProjectContent()) {
             Stack::Project::ProjectSaveResult result;
             result.status = Stack::Project::ProjectSaveStatus::Canceled;
             result.projectId = projectId;
@@ -2165,7 +2179,7 @@ bool EditorModule::RequestSaveProjectAs(
         }
         return false;
     }
-    if (GetProjectSessionKind() == ProjectSessionKind::Empty) {
+    if (!HasProjectContent()) {
         PostNotification(
             UiNotificationSeverity::Error,
             "There is no open project to save.",
@@ -2405,7 +2419,7 @@ bool EditorModule::PackCurrentProject(
         return success;
     };
     if (requestedDestination.empty() ||
-        GetProjectSessionKind() == ProjectSessionKind::Empty) {
+        !HasProjectContent()) {
         return finish(false, "No project is available to pack.");
     }
     if (IsUnifiedProjectStoreActive()) {

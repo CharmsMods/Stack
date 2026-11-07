@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
 #include "Utils/GlassControls.h"
 #include "App/settings/AppearanceTheme.h"
 #include "App/UiPerformanceTrace.h"
@@ -27,7 +28,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     auto& surface = m_RawFloatingSurface;
     surface.forwardsImageWheel = false;
     UpdateNodeEditorPanelVisibility();
-    if (m_NodeEditorPanel.visible) {
+    if (m_NodeEditorPanel.visible || m_RawToolPickerAmount >= 1.f) {
         surface.input={};surface.frame=-2;m_RawActiveControlFrame=-2;
         m_RawToolGlass->BeginFrame(false,{});
         return;
@@ -43,7 +44,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         return;
     }
     UpdateNodeOpenTransition();
-    const float openingOpacity = m_NodeOpenTransition.ControlsOpacity(ImGui::GetTime()) *
+    const float openingOpacity = (1.f-m_RawToolPickerAmount) * m_NodeOpenTransition.ControlsOpacity(ImGui::GetTime()) *
         m_NodeEditorPanel.Reveal(ImGui::GetTime(),Stack::LibraryUi::ReducedMotion()) *
         (m_GalleryNavigationMotion ? m_GalleryNavigationMotion->ImageControls(m_GalleryNavigationWorkspace) : 1.f);
     if (openingOpacity <= .001f) {
@@ -165,7 +166,34 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         ImGui::PushID(key.c_str());
         {
             ImGuiExtras::GlassControlScope glass(*m_RawToolGlass,openingOpacity,false,ImGuiExtras::GlassElements::FloatingTools);
-            RenderRawWorkspaceActiveControls(context);
+            bool switched=false;
+            if(context.nodeTarget) {
+                RefreshNodeEditorPanel();
+                for(auto& group:m_NodeEditorPanel.groups) {
+                    if(group.instances.size()<2)continue;
+                    const auto current=std::find_if(group.instances.begin(),group.instances.end(),
+                        [&](const auto& instance){return instance.target==*context.nodeTarget;});
+                    if(current==group.instances.end())continue;
+                    if(group.selectedKey!=current->key)group.selectedKey=current->key;
+                    bool unusedToggle=false;
+                    const int activated=Stack::Editor::DrawControlsPanelHeader(group,
+                        ImGui::GetContentRegionAvail().x,nullptr,unusedToggle);
+                    if(activated>=0 && activated<int(group.instances.size()) &&
+                        group.instances[activated].target!=*context.nodeTarget && FinishWorkspaceInteraction()) {
+                        const auto target=group.instances[activated].target;
+                        switched=ActivateNodeEditorPanelTarget(target);
+                        if(switched) {group.selectedKey=group.instances[activated].key;group.measuredHeight=0;}
+                    }
+                    break;
+                }
+            }
+            // The incoming instance receives a fresh context on the next frame.
+            if(!switched) {
+                RenderRawWorkspaceActiveControls(context);
+                const auto* window=ImGui::GetCurrentWindow();
+                surface.contentHeights[key]=std::max(80.f,
+                    window->DC.CursorMaxPos.y-window->DC.CursorStartPos.y+16.f);
+            }
         }
         ImGui::PopID();
         trace("control");

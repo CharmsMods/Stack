@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -104,14 +105,15 @@ std::string EntryDateTimeLabel(
 
 void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     float scrollX, float scrollMaxX, float viewportWidth) {
-    constexpr float height = 54.0f;
-    constexpr float tileWidth = 124.0f;
-    constexpr float gap = 10.0f;
+    constexpr float height = Stack::Editor::RawLabInternal::kRawLabFilmstripTimelineHeight;
+    auto& slots = m_RawWorkspaceGalleryGridStacks.filmstripSlots;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-    ImGui::Dummy(ImVec2(width, 32.0f));
-    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 32.0f));
-    ImGui::InvisibleButton("##RawLabFilmstripTimeline", ImVec2(width, height - 32.0f));
+    const float width = slots.enabled ? slots.width : std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::Dummy(ImVec2(width, 18.0f));
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 18.0f));
+    ImGui::InvisibleButton("##RawLabFilmstripTimeline", ImVec2(width, height - 18.0f));
+    slots.dragging = slots.enabled && ImGui::IsItemActive();
+    if (slots.enabled) { scrollMaxX = slots.maximum; viewportWidth = slots.width; }
     if (m_RawWorkspaceLabFilmstripTimelineEntries.empty()) return;
 
     const bool trackHovered = ImGui::IsItemHovered();
@@ -122,25 +124,22 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     const float left = origin.x + 10.0f;
     const float right = std::max(left + 1.0f, origin.x + width - 10.0f);
     const float span = std::max(1.0f, right - left);
-    const float rulerY = origin.y + 27.0f;
-    const float trackTop = origin.y + 40.0f;
-    const float trackBottom = origin.y + 45.0f;
+    const float trackTop = origin.y + 23.0f;
+    const float trackBottom = origin.y + 28.0f;
     const float trackCenterY = (trackTop + trackBottom) * 0.5f;
     const float scaledTileWidth =
-        tileWidth * m_RawWorkspaceLabUi.galleryThumbnailScale;
-    const float tileStep = scaledTileWidth + gap;
+        slots.enabled ? slots.tile : 124.f * m_RawWorkspaceLabUi.galleryThumbnailScale;
+    const float tileStep = slots.enabled ? slots.stride : scaledTileWidth + 10.f;
     const float contentOffset =
         m_RawWorkspaceLabFilmstripTimelineContentOriginX - origin.x;
     const float itemContentWidth = contentOffset +
-        static_cast<float>(m_RawWorkspaceLabFilmstripTimelineEntries.size() - 1u) *
-            tileStep + scaledTileWidth;
+        (slots.enabled ? slots.Position(slots.count ? slots.count-1 : 0) + slots.ItemWidth(slots.count ? slots.count-1 : 0) : static_cast<float>(m_RawWorkspaceLabFilmstripTimelineEntries.size() - 1u) * tileStep + scaledTileWidth);
     const float contentWidth = std::max({
         1.0f, viewportWidth, viewportWidth + scrollMaxX, itemContentWidth
     });
     const auto imageCenterX = [&](std::size_t index) {
         return origin.x + contentOffset +
-            static_cast<float>(index) * tileStep +
-            scaledTileWidth * 0.5f - scrollX;
+            (slots.enabled ? slots.Position(index) + slots.ItemWidth(index) * .5f : static_cast<float>(index) * tileStep + scaledTileWidth * .5f) - scrollX;
     };
     // Search the same rounded centers used for drawing. Inverting the affine
     // position can lose an inclusive boundary at large scroll offsets.
@@ -171,12 +170,6 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImU32 trackFill = ImGui::GetColorU32(ImGuiCol_Text, 0.08f);
     const ImU32 thumbFill = ImGui::GetColorU32(ImGuiCol_Text, dragging ? 0.50f : trackHovered ? 0.40f : 0.28f);
-    const ImU32 pointColor = ImGui::GetColorU32(ImGuiCol_Text, 0.55f);
-    const ImU32 selectedPointColor =
-        ImGui::GetColorU32(ImGuiCol_Text, 0.95f);
-    draw->AddLine(
-        ImVec2(left, rulerY), ImVec2(right, rulerY),
-        ImGui::GetColorU32(ImGuiCol_Border), 1.0f);
     draw->AddRectFilled(
         ImVec2(left, trackTop), ImVec2(right, trackBottom),
         trackFill, 3.0f);
@@ -214,38 +207,7 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     if (hoveredIndex >= m_RawWorkspaceLabFilmstripTimelineEntries.size()) {
         hoveredIndex = std::numeric_limits<std::size_t>::max();
     }
-    bool hoveredPoint = false;
-    if (ImGui::IsWindowHovered() && !dragging &&
-        std::abs(ImGui::GetIO().MousePos.y - rulerY) <= 5.0f) {
-        float nearestDistance = 7.0f;
-        const float mouseX = ImGui::GetIO().MousePos.x;
-        const auto hoverEntries = entryRange(mouseX - nearestDistance, mouseX + nearestDistance);
-        for (std::size_t index = hoverEntries.first;
-             index < hoverEntries.second;
-             ++index) {
-            const float distance = std::abs(
-                ImGui::GetIO().MousePos.x - imageCenterX(index));
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                hoveredIndex = index;
-                hoveredPoint = true;
-            }
-        }
-    }
-
-    for (std::size_t index = visibleEntries.first;
-         index < visibleEntries.second;
-         ++index) {
-        const bool highlighted = index == hoveredIndex;
-        const float alignedX = imageCenterX(index);
-        if (alignedX >= left && alignedX <= right) {
-            draw->AddCircleFilled(
-                ImVec2(alignedX, rulerY),
-                highlighted ? 3.0f : 2.0f,
-                highlighted ? selectedPointColor : pointColor,
-                12);
-        }
-    }
+    const bool hoveredPoint = false; // Ruler dots and their hit targets are hidden.
 
     const bool labelHovered = hoveredIndex < m_RawWorkspaceLabFilmstripTimelineEntries.size();
     const float labelStep = std::clamp(ImGui::GetIO().DeltaTime / 0.18f, 0.0f, 1.0f);

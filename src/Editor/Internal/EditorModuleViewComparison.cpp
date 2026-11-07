@@ -1,8 +1,11 @@
 #include "Editor/EditorModule.h"
 #include "Editor/Bracketing/BracketingSession.h"
 #include <cstdio>
+#include "Hdr/Presentation.h"
 
 void EditorModule::UpdateViewComparisonPreview(Stack::Editor::ViewComparisonPreview& preview, int edge) {
+    preview.SetHdrOutput(IsHdrOutputPreview());
+    const auto revision=m_Project->editRevision ^ (IsHdrOutputPreview() ? (std::uint64_t{1}<<63) : 0);
     if (m_Bracketing && IsMultiFrameRawProjectActive()) {
         const auto& bracket = *m_Bracketing;
         if (!bracket.result || !bracket.result->analysis || !bracket.result->raw) {
@@ -36,10 +39,10 @@ void EditorModule::UpdateViewComparisonPreview(Stack::Editor::ViewComparisonPrev
             }
         }
         preview.UpdateBracket(bracket.result, recipe, captures, m_Project->rawRecipe,
-            m_Project->editRevision, edge);
+            revision, edge);
     } else if (IsRawWorkspaceProjectActive()) {
         preview.UpdateRaw(m_Project->singleRawSource, m_Project->rawRecipe,
-            m_Project->editRevision, edge);
+            revision, edge);
     } else {
         preview.SetUnavailable("The original source is unavailable.");
     }

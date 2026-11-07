@@ -1,6 +1,9 @@
 #include "Editor/Internal/RawLab/RawLabGalleryHitTesting.h"
+#include "Editor/Internal/RawLab/RawLabFilmstripSlots.h"
 #include <iostream>
 #include <string>
+#include <filesystem>
+#include <cstdint>
 #include <vector>
 #include <limits>
 #include <cmath>
@@ -38,6 +41,8 @@ bool Scenario(int kind, bool reorder, bool sameFileName) {
         io.AddMousePosEvent(270, 140);
         if (frame == 4) io.AddMouseButtonEvent(0, true);
         if (frame == 5) io.AddMouseButtonEvent(0, false);
+        if (kind >= 4 && frame == 6) io.AddMouseButtonEvent(0, true);
+        if (kind >= 4 && frame == 7) io.AddMouseButtonEvent(0, false);
         ImGui::NewFrame(); ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({700, 400});
         ImGui::Begin("Gallery");
         for (int submitted = 0; submitted < 2; ++submitted) {
@@ -45,12 +50,21 @@ bool Scenario(int kind, bool reorder, bool sameFileName) {
             const std::string key = sameFileName
                 ? (i ? "B###same/frame.raw" : "A###same/frame.raw")
                 : (i ? "B###same.raw" : "A###same.raw");
-            if (kind == 0) {
+            if (kind == 0 || kind >= 3) {
                 const struct { std::string animationKey; } item{"stack:" + key};
                 // PRODUCTION_STACK_SCOPE
                 // Permanent stacks use nullptr, so the stack scope must remain
                 // distinct even as their cover record changes.
-                const void* itemId = nullptr;
+                const void* itemId = kind >= 3
+                    ? reinterpret_cast<const void*>(static_cast<std::uintptr_t>(100 + frame * 2 + i)) : nullptr;
+                const bool compactFilmstrip = kind == 3 || kind == 5;
+                const bool m_PermanentGalleryWorkspace = true;
+                const std::filesystem::path projectPath = kind >= 4 ? std::filesystem::path(key) : std::filesystem::path{};
+                const struct { std::string relativePathKey; } source{kind == 5 ? key + ":cover:" + std::to_string(frame) : key};
+                const struct ProjectIdentity {std::string projectCoverKey;} projectIdentity{key};
+                const struct {std::vector<ProjectIdentity> projects;} presentation{{projectIdentity}};
+                const std::vector<std::size_t> family{0u};
+                const auto* projectFamily = kind == 5 ? &family : nullptr;
                 // PRODUCTION_THUMBNAIL_SCOPE
                 ImGui::SetCursorScreenPos({50.f + 170.f * i, 100});
                 if (Stack::Editor::RawLabInternal::GalleryThumbnailButton("##tile",
@@ -74,7 +88,7 @@ bool Scenario(int kind, bool reorder, bool sameFileName) {
             const ImGuiID id = ImGui::GetItemID();
             if (frame == 0) originalIds[i] = id;
             passed = Check(id == originalIds[i], "identity survives submission reorder") && passed;
-            if (kind == 0) { ImGui::PopID(); ImGui::PopID(); }
+            if (kind == 0 || kind >= 3) { ImGui::PopID(); ImGui::PopID(); }
             ImGui::PopID();
         }
         passed = Check(originalIds[0] != originalIds[1], "literal path prefixes remain distinct before ###") && passed;
@@ -87,7 +101,7 @@ bool Scenario(int kind, bool reorder, bool sameFileName) {
         ImGui::PopID(); ImGui::PopID();
         ImGui::End(); ImGui::Render();
     }
-    passed = Check(clicks[0] == 0 && clicks[1] == 1, "second path selects exactly once without touching first") && passed;
+    passed = Check(clicks[0] == 0 && clicks[1] == (kind >= 4 ? 2 : 1), "literal saved/original target retains click and double-click ownership across catalog relocation") && passed;
     ImGui::DestroyContext();
     return passed;
 }
@@ -282,10 +296,45 @@ bool FitTextTests() {
     return passed;
 }
 
+bool FilmstripGeometryTests() {
+    Stack::Editor::RawLabInternal::FilmstripSlots slots;
+    slots.enabled = true;
+    bool passed = Check(slots.SetContent("originals", 1, 1, 0), "initial filmstrip scope is new");
+    slots.Update(530.f, 124.f, 12, 1.f, 74.f);
+    for (std::size_t i = 0; i < slots.count; ++i)
+        slots.Report(i, i % 3 == 0 ? 300 : i % 3 == 1 ? 600 : 900, 600);
+    slots.Update(530.f, 124.f, 12, 1.f, 74.f);
+    const auto checkTail = [&] {
+        slots.Frame(slots.maximum);
+        const float lastRight = slots.Position(slots.count - 1u) + slots.ItemWidth(slots.count - 1u) - slots.maximum;
+        return Check(std::abs(lastRight + slots.gap - slots.width) < .01f &&
+            slots.width <= slots.available + .01f && slots.Snap(slots.maximum + 5000.f) == slots.maximum,
+            "final filmstrip stop ends at the final real image with only its normal gap");
+    };
+    passed = checkTail() && passed;
+    const auto portrait = slots.ratios.front();
+    passed = Check(!slots.SetContent("originals", 1, 1, 0) && slots.ratios.front() == portrait,
+        "unchanged/selection frames retain measured aspect ratios") && passed;
+    passed = Check(slots.SetContent("projects", 1, 1, 0) && slots.ratios.empty(),
+        "same-count category changes discard unrelated aspect ratios") && passed;
+    slots.Update(530.f, 124.f, 12, 1.f, 74.f);
+    passed = Check(slots.ratios.front() == 1.5f, "new cards start with their own provisional geometry") && passed;
+    slots.Report(0, 300, 600);
+    slots.SetContent("projects", 1, 2, 0);
+    passed = Check(slots.ratios.empty(), "same-count sort/group changes discard index-bound measurements") && passed;
+    slots.Update(530.f, 124.f, 3, 1.f, 74.f);
+    passed = checkTail() && passed;
+    passed = Check(slots.maximum == 0.f, "short collections have no trailing scroll range") && passed;
+    slots.Update(530.f, 124.f, 0, 1.f, 74.f);
+    passed = Check(slots.maximum == 0.f && slots.offsets.empty(), "empty collections release stale scroll extent") && passed;
+    return passed;
+}
+
 int main() {
-    bool passed = FitTextTests();
+    bool passed = FilmstripGeometryTests();
+    passed = FitTextTests() && passed;
     passed = ListRows() && passed;
-    for (int kind = 0; kind < 3; ++kind)
+    for (int kind = 0; kind < 6; ++kind)
         for (bool reorder : {false, true})
             for (bool sameFileName : {false, true})
                 passed = Scenario(kind, reorder, sameFileName) && passed;

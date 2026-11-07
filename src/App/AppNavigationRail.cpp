@@ -96,35 +96,66 @@ void AppShell::LayoutNavigationRail() {
     const bool railActive = (context->ActiveId && (belongsToRail(context->ActiveIdWindow) || belongsToToggle(context->ActiveIdWindow))) ||
         (Stack::Navigation::NavigationInputActive() && (belongsToRail(context->NavWindow) || belongsToToggle(context->NavWindow)));
     const bool railPopup = rail.menuOpen || m_NotificationPresenter.PanelOpen();
+    // Closing by dragging toward the edge must not immediately reveal the rail
+    // on release. Rearm only after a deliberate return into the window.
+    if (rail.suppressEdgeRevealUntilLeave && !rail.galleryResizeActive &&
+        !ImGui::IsAnyMouseDown() && inHeight &&
+        io.MousePos.x > viewport->Pos.x + 8.f * rail.scale &&
+        io.MousePos.x < viewport->Pos.x + viewport->Size.x)
+        rail.suppressEdgeRevealUntilLeave = false;
+    const bool otherControlActive = !railActive && (context->ActiveId || ImGui::IsAnyMouseDown());
+    if (otherControlActive && atEdge) rail.suppressEdgeRevealUntilLeave = true;
+    const bool allowPointerReveal = !rail.suppressEdgeRevealUntilLeave && !otherControlActive;
     Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
-        atEdge, overRail, railActive, railPopup, Stack::Notifications::SystemReducedMotion());
+        atEdge && allowPointerReveal, overRail && allowPointerReveal,
+        railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
     rail.position = ImVec2(viewport->Pos.x - width + rail.visibleWidth,
         viewport->Pos.y);
-    const float available = std::max(0.f, viewport->Size.x - rail.visibleWidth);
     const bool gallery = m_ActiveProjectWorkspace == m_GalleryWorkspaceId && IsRaw(m_CurrentTabId);
+    // Leave a permanent rail lane in Gallery once the panel closes. Blend the
+    // reservation with panel motion, never with the rail's hover reveal.
+    const float reservedRailWidth = gallery
+        ? rail.visibleWidth + (width - rail.visibleWidth) * (1.f - rail.panelAmount)
+        : rail.visibleWidth;
+    const float available = std::max(0.f, viewport->Size.x - reservedRailWidth);
     const bool queue = m_CurrentTabId == Queue;
-    if (rail.galleryResizeActive && ((rail.galleryResizeForQueue ? !queue : !gallery) ||
+    if (rail.galleryResizeActive && ((rail.editorResize ? (queue || gallery) : rail.galleryResizeForQueue ? !queue : !gallery) ||
             !rail.panelOpen || !io.MouseDown[0] || Stack::Workspace::IsPreview()))
         Stack::Navigation::FinishGalleryNavigatorResize(rail);
-    const float panelWidth = std::min((gallery ? rail.galleryPanelWidth : queue ? rail.queuePanelWidth : 360.f) * rail.scale, available * .38f);
+    auto& preferredPanelWidth = gallery ? rail.galleryPanelWidth : queue ? rail.queuePanelWidth : rail.editorPanelWidth;
+    // If the minimum panel width forces its right edge outward, retain that
+    // extent. Rail retreat then reveals space on the left instead of undoing
+    // the expansion. Explicit resizing can still choose a smaller extent.
+    if (rail.panelOpen && rail.panelAmount == 1.f && !rail.galleryResizeActive &&
+        !processing && !Stack::Workspace::IsPreview())
+        preferredPanelWidth = std::max(preferredPanelWidth,
+            std::min(640.f, 240.f + rail.visibleWidth / rail.scale));
+    const float preferredRight = std::min(preferredPanelWidth * rail.scale,
+        viewport->Size.x * .6f);
+    const float panelWidth = std::min(std::max(240.f * rail.scale, preferredRight - rail.visibleWidth), available * .6f);
     const float target = !processing && rail.panelOpen ? 1.f : 0.f;
     if (processing || Stack::Notifications::SystemReducedMotion()) rail.panelAmount = target;
-    else Stack::Header::ApproachMotion(rail.panelAmount, target, .28f);
+    else if (!rail.galleryResizeActive) Stack::Header::ApproachMotion(rail.panelAmount, target, .28f);
     rail.visiblePanelWidth = panelWidth * rail.panelAmount;
-    // Each animated column reserves its visible width. Revealing the rail
-    // shifts the panel and narrows the workspace without changing panel state.
+    // The rail consumes the panel's left edge. Only the minimum-width clamp
+    // can move its right edge; its expanded extent survives sidebar retreat.
     const float toolbarHeight = m_RawMaskToolbar.visibleHeight;
     rail.panelPosition = ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight);
     rail.panelSize = ImVec2(panelWidth, std::max(1.f, viewport->Size.y - toolbarHeight));
     const bool graphBody = m_CurrentTabId == Graph && !m_Editor->IsViewMode();
     const float top = processing ? 0.f : graphBody ? toolbarHeight : std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
-    rail.bodyPosition = ImVec2(rail.panelPosition.x + rail.visiblePanelWidth, viewport->Pos.y + top);
+    rail.bodyPosition = ImVec2(viewport->Pos.x + reservedRailWidth + rail.visiblePanelWidth, viewport->Pos.y + top);
     rail.bodySize = ImVec2(std::max(1.f, available - rail.visiblePanelWidth), std::max(1.f, viewport->Size.y - top));
+    // Graph chrome overlays a stable canvas instead of translating its camera.
+    if (graphBody) {
+        rail.bodyPosition.x = viewport->Pos.x;
+        rail.bodySize.x = viewport->Size.x;
+    }
     m_GalleryNavigationMotion->Viewport(m_ActiveProjectWorkspace,
         {rail.bodyPosition,{rail.bodyPosition.x+rail.bodySize.x,rail.bodyPosition.y+rail.bodySize.y}});
     m_Editor->SetGraphReturnBounds(
-        ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight),
+        ImVec2(viewport->Pos.x, viewport->Pos.y + toolbarHeight),
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
     // Blend the two reveal paths at their shared corner. Switching the input
     // owner must not teleport the button between horizontal and vertical paths.
@@ -242,14 +273,19 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
     const bool graphMode = renderTab == Graph && !m_Editor->IsViewMode();
     m_Editor->SetGraphCatalogHost(graphMode ? rail.panelPosition : ImVec2(),
         graphMode ? rail.panelSize : ImVec2(), rail.panelOpen, rail.visiblePanelWidth);
+    if ((rail.panelAmount == 1.f || rail.galleryResizeActive) &&
+        !Stack::Workspace::IsPreview()) {
+        if (m_ActiveProjectWorkspace == m_GalleryWorkspaceId)
+            Stack::Navigation::RenderGalleryNavigatorResize(m_NavigationRail);
+        else if (renderTab == Queue) Stack::Navigation::RenderQueueNavigatorResize(m_NavigationRail);
+        else Stack::Navigation::RenderEditorNavigatorResize(m_NavigationRail);
+    }
     if (IsRaw(renderTab) || (renderTab == Graph && m_Editor->IsViewMode())) {
         m_Editor->RenderRawWorkspaceSectionPanel(rail.panelPosition, rail.panelSize, rail.visiblePanelWidth,
             [this] { RenderLibraryViewSwitch(); });
-        if (m_ActiveProjectWorkspace == m_GalleryWorkspaceId && rail.panelAmount == 1.f &&
-            !Stack::Workspace::IsPreview()) Stack::Navigation::RenderGalleryNavigatorResize(m_NavigationRail);
         return;
     }
-    if (renderTab == Graph || rail.visiblePanelWidth < 1.f) return;
+    if (renderTab == Graph || (rail.visiblePanelWidth < 1.f && !rail.galleryResizeActive)) return;
     ImGui::SetNextWindowPos(rail.panelPosition);
     ImGui::SetNextWindowSize(ImVec2(rail.visiblePanelWidth, rail.panelSize.y));
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
@@ -287,6 +323,4 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
     ImGui::End();
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
-    if (queue && rail.panelAmount == 1.f && !Stack::Workspace::IsPreview())
-        Stack::Navigation::RenderQueueNavigatorResize(m_NavigationRail);
 }

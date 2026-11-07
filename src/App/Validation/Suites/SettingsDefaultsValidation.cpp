@@ -20,10 +20,12 @@ Json ReadJson(const std::filesystem::path& path) {
 }
 void CheckAppearance(const StackAppearance::AppearanceLibrary& value) {
     using namespace StackAppearance;
-    Require(value.savedCreamPalette.id == kMonochromeGrayPaletteId &&
+    Require(value.savedCreamPalette.id == kMonochromeDarkPaletteId &&
         value.savedCreamPalette.colorPolicy == PaletteColorPolicy::Monochrome,
-        "The first-run palette must be Gray.");
-    Require(std::abs(value.graphLineOpacity - .20f) < 1e-6f &&
+        "The first-run palette must be neutral.");
+    Require(std::abs(value.savedCreamPalette.brightness - .15f) < 1e-6f,
+        "The first-run brightness must be 15 percent.");
+    Require(std::abs(value.graphLineOpacity) < 1e-6f &&
         std::abs(value.graphPanSensitivity - .40f) < 1e-6f &&
         std::abs(value.graphNodeSliderDragSensitivity - .10f) < 1e-6f &&
         value.graphConnectionTextSize == 11 &&

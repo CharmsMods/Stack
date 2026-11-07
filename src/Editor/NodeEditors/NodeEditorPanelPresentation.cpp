@@ -147,7 +147,7 @@ int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width,const 
     return activated;
 }
 
-bool BeginControlsPanelBody() {
+bool BeginControlsPanelBody(bool transitioning) {
     auto* host=ImGui::GetCurrentWindow();
     const auto windowId=host->GetID("ControlsScrollWindow");
     auto* body=ImGui::FindWindowByID(static_cast<ImGuiID>(host->StateStorage.GetInt(windowId)));
@@ -155,15 +155,30 @@ bool BeginControlsPanelBody() {
     const auto currentId=ImHashStr("ControlsScrollCurrent");
     const auto appliedId=ImHashStr("ControlsScrollApplied");
     const auto frameId=ImHashStr("ControlsScrollFrame");
+    const auto transitionId=ImHashStr("ControlsScrollTransition");
+    const auto retainedScrollId=ImHashStr("ControlsRetainedScroll");
+    const auto retainedHeightId=ImHashStr("ControlsRetainedHeight");
     auto& gui=*ImGui::GetCurrentContext();
     bool direct=true;
     if(body) {
         auto& state=body->StateStorage;
+        const bool wasTransitioning=state.GetBool(transitionId);
+        if (transitioning && !wasTransitioning) {
+            state.SetFloat(retainedScrollId,body->Scroll.y);
+            state.SetFloat(retainedHeightId,body->ContentSize.y);
+        }
+        if (transitioning || wasTransitioning) {
+            // Clipped children may submit no controls. Keep their scroll range
+            // through closing/reopening and the first fully visible frame.
+            ImGui::SetNextWindowContentSize(ImVec2(0,state.GetFloat(retainedHeightId)));
+            ImGui::SetNextWindowScroll(ImVec2(0,state.GetFloat(retainedScrollId)));
+        }
+        if (transitioning != wasTransitioning) state.SetBool(transitionId,transitioning);
         // NewFrame routes wheel input through native item/window ownership.
         // Filter only that accepted request, before BeginChild lays out controls.
         const bool wheel=gui.WheelingWindow==body && gui.WheelingWindowScrolledFrame==gui.FrameCount &&
             body->ScrollTarget.y<FLT_MAX && body->ScrollTargetCenterRatio.y==0.f;
-        direct=Stack::Notifications::SystemReducedMotion() || state.GetInt(frameId,-2)!=gui.FrameCount-1 ||
+        direct=transitioning || wasTransitioning || Stack::Notifications::SystemReducedMotion() || state.GetInt(frameId,-2)!=gui.FrameCount-1 ||
             body->Scroll.y!=state.GetFloat(appliedId,body->Scroll.y) ||
             (body->ScrollTarget.y<FLT_MAX && !wheel) ||
             gui.ActiveId==host->GetID("ControlsOverlayScroll");

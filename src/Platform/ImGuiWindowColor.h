@@ -1,5 +1,7 @@
 #pragma once
 #include "Hdr/UiTarget.h"
+#include "Hdr/PhotoPairs.h"
+#include "Hdr/GainMapPreview.h"
 
 namespace Stack::Platform {
 // Same attribute locations, atlas binding and alpha convention as the
@@ -23,11 +25,23 @@ in vec2 Frag_UV;
 in vec4 Frag_Color;
 uniform sampler2D Texture;
 uniform bool StackLinearTarget;
+uniform sampler2D StackPhotoBase;
+uniform bool StackHasPhotoBase;
+uniform float StackPhotoHeadroom;
 layout(location=0) out vec4 Out_Color;
-)") + Hdr::Ui::DecodeShader + R"(
+)") + Hdr::Ui::DecodeShader + Hdr::SdrFinishShader + Hdr::GainMapPreviewShader + R"(
 void main() {
     vec4 texel=texture(Texture,Frag_UV);
-    if(StackLinearTarget) texel.rgb=stackUiLinear(texel.rgb);
+    if(StackLinearTarget) {
+        texel.rgb=stackUiLinear(texel.rgb);
+        if(StackPhotoHeadroom<1000.0/203.0) {
+            if(StackHasPhotoBase)
+                texel.rgb=stackGainMapPreview(stackUiLinear(texture(StackPhotoBase,Frag_UV).rgb),texel.rgb,StackPhotoHeadroom);
+            else if(max(texel.r,max(texel.g,texel.b))>1.0) {
+                texel.rgb=stackUnpairedHdrPreview(texel.rgb,StackPhotoHeadroom);
+            }
+        }
+    }
     Out_Color=Frag_Color*texel;
 })";
 }

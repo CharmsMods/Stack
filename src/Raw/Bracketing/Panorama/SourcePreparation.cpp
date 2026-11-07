@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "Internal.h"
 #include "Raw/RawLoader.h"
 #include "Raw/RawProcessingMath.h"
@@ -126,7 +127,7 @@ std::shared_ptr<Prepared> Prepare(const ProcessingRequest& request) {
         cv::Mat pixels=Upright(sensor,ResolveOrientation(request.recipe,raw.metadata.orientation));
         capture.width=unsigned(pixels.cols);capture.height=unsigned(pixels.rows);
         capture.pixels=data->directory/(std::to_string(data->captures.size())+".rgb");
-        std::ofstream out(capture.pixels,std::ios::binary|std::ios::trunc);
+        Stack::Storage::ScratchBudget::Output out(capture.pixels,std::ios::binary|std::ios::trunc);
         for(int y=0;y<pixels.rows;++y){CheckCanceled(request);out.write(reinterpret_cast<const char*>(pixels.ptr<float>(y)),std::streamsize(pixels.cols)*PixelChannels*sizeof(float));}
         out.close();if(!out.good())throw std::runtime_error("Could not cache panorama pixels.");
         const double proxyPixels=std::min(1500000.0,double(request.memoryBudgetBytes)/std::max<std::size_t>(1,enabled.size())/160);

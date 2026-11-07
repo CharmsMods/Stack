@@ -20,6 +20,7 @@ bool DrawCurveControlGlyph(int index,bool active,const char* tip,const GraphUI::
     case 1:for(float x:{-4.f,4.f}) for(float y:{-4.f,4.f})d->AddCircle(p(x,y),2*style.scale,color,0,style.scale);break;
     case 2:d->AddBezierCubic(p(-7,4),p(-4,-8),p(4,-8),p(7,4),color,1.5f*style.scale);break;
     case 3:d->AddRect(p(-5,-1),p(5,6),color,2*style.scale,0,style.scale);d->AddCircle(p(0,-3),4*style.scale,color,0,style.scale);break;
+    case 5:d->AddCircle(p(-2,-2),5.f*style.scale,color,0,style.scale);d->AddLine(p(2,2),p(7,7),color,style.scale);break;
     case 4:for(float y:{-5.f,0.f,5.f}) {d->AddLine(p(-7,y),p(7,y),color,style.scale);const float x=y==0?3.f:-3.f;d->AddCircleFilled(p(x,y),2.f*style.scale,color);}break;
     }
     if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);

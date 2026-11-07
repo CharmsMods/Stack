@@ -15,52 +15,78 @@ float Unspace(float value,bool brightness) {
     return brightness ? std::copysign(std::expm1(brightnessLog*std::abs(value))/brightnessStrength,value) : value;
 }
 }
-CurveAxisMapping::CurveAxisMapping(float min,float max,float focusMin,float focusMax,bool brightness)
-    :minimum(min),maximum(max),focusMinimum(focusMin),focusMaximum(focusMax),brightnessSpacing(brightness) {
-    const float span=std::max(.0001f,maximum-minimum);
-    focusStart=Space((focusMinimum-minimum)/span,brightnessSpacing);
-    focusEnd=Space((focusMaximum-minimum)/span,brightnessSpacing);
-    // Never compress the useful interval. Allocate at most ten percent to
-    // either tail, retaining the complete authored domain and its endpoints.
-    viewStart=std::min(.1f,focusStart);viewEnd=1.f-std::min(.1f,1.f-focusEnd);
-}
+CurveAxisMapping::CurveAxisMapping(float min,float max,bool brightness)
+    :minimum(min),maximum(max),brightnessSpacing(brightness),
+    spacedMinimum(Space(min,brightness)),
+    spacedSpan(std::max(.000001f,Space(max,brightness)-spacedMinimum)) {}
 float CurveAxisMapping::ToView(float value) const {
-    const float normalized=Space((value-minimum)/std::max(.0001f,maximum-minimum),brightnessSpacing);
-    if(normalized<focusStart && focusStart>0) return normalized*viewStart/focusStart;
-    if(normalized>focusEnd && focusEnd<1) return viewEnd+(normalized-focusEnd)*(1-viewEnd)/(1-focusEnd);
-    return viewStart+(normalized-focusStart)*(viewEnd-viewStart)/std::max(.0001f,focusEnd-focusStart);
+    return (Space(value,brightnessSpacing)-spacedMinimum)/spacedSpan;
 }
 float CurveAxisMapping::FromView(float position) const {
-    float normalized;
-    if(position<viewStart && viewStart>0) normalized=position*focusStart/viewStart;
-    else if(position>viewEnd && viewEnd<1) normalized=focusEnd+(position-viewEnd)*(1-focusEnd)/(1-viewEnd);
-    else normalized=focusStart+(position-viewStart)*(focusEnd-focusStart)/std::max(.0001f,viewEnd-viewStart);
-    return minimum+Unspace(normalized,brightnessSpacing)*(maximum-minimum);
+    return Unspace(spacedMinimum+position*spacedSpan,brightnessSpacing);
 }
 CurveAxisMapping ResolveCurveCanvasAxis(CurveCanvasFraming& state,
-    const CurveCanvasViewOptions& options,const RawLabGraphHistogram& histogram,
-    std::uint64_t revision,bool interacting,RawLabToneGraphViewRange fallback) {
-    if(!options.automatic) return {fallback.minimum,fallback.maximum,fallback.minimum,fallback.maximum,false};
-    const bool sameOptions=state.initialized && state.options==options;
-    if(sameOptions && interacting) return state.axis;
-    // An unavailable replacement is not a new measurement. Keep the last fit
-    // while the owning analysis lane prepares the next accepted input packet.
-    if(sameOptions && !histogram.valid) return state.axis;
-    if(sameOptions && state.histogramValid==histogram.valid && state.revision==revision &&
-        (revision || state.source==histogram.luma)) return state.axis;
-    state.options=options;state.revision=revision;state.initialized=true;
-    state.histogramValid=histogram.valid;state.source=histogram.luma;
-    auto fitted=BuildRawLabToneGraphViewRange(histogram,0,1);
-    const float padding=.08f*(fitted.maximum-fitted.minimum);
-    fitted.minimum=std::max(0.f,fitted.minimum-padding);
-    fitted.maximum=std::min(1.f,fitted.maximum+padding);
-    state.axis={0,1,fitted.minimum,fitted.maximum,options.brightnessSpacing};
+    const CurveCanvasViewOptions& options,RawLabToneGraphViewRange fallback) {
+    if(!options.stableScale) return {fallback.minimum,fallback.maximum,false};
+    // A changed domain starts fully zoomed out. Histogram publications refresh
+    // the distribution without moving the user's viewport.
+    if(state.initialized && state.options==options) return state.axis;
+    state={};state.options=options;state.initialized=true;
+    SetCurveCanvasView(state,{},{});
+    return state.axis;
+}
+void SetCurveCanvasView(CurveCanvasFraming& state,RawLabToneGraphViewRange horizontal,
+    RawLabToneGraphViewRange vertical) {
+    const auto bounded=[](RawLabToneGraphViewRange range) {
+        const float span=std::clamp(range.maximum-range.minimum,1.f/256,1.f);
+        const float minimum=std::clamp(range.minimum,0.f,1.f-span);
+        return RawLabToneGraphViewRange{minimum,minimum+span};
+    };
+    horizontal=bounded(horizontal);vertical=bounded(vertical);
+    if(state.labels[0][0] && horizontal.minimum==state.horizontal.minimum && horizontal.maximum==state.horizontal.maximum &&
+        vertical.minimum==state.vertical.minimum && vertical.maximum==state.vertical.maximum)return;
+    state.horizontal=horizontal;state.vertical=vertical;
+    const auto& options=state.options;
+    const CurveAxisMapping full{0,1,options.brightnessSpacing};
+    state.axis={full.FromView(state.horizontal.minimum),full.FromView(state.horizontal.maximum),options.brightnessSpacing};
+    state.outputAxis={full.FromView(state.vertical.minimum),full.FromView(state.vertical.maximum),options.brightnessSpacing};
     for(int i=0;i<3;++i) {
         const float coordinate=state.axis.FromView(.1f+.4f*i);
-        const float value=options.domainMinimum+coordinate*(options.domainMaximum-options.domainMinimum);
+        float value=options.domainMinimum+coordinate*(options.domainMaximum-options.domainMinimum);
+        if(options.exposureAsLinearLabels)value=.18f*std::exp2(value);
         std::snprintf(state.labels[i].data(),state.labels[i].size(),options.exposureUnits?"%+.1f EV":"%.3g",value);
     }
-    return state.axis;
+}
+void FitCurveCanvasView(CurveCanvasFraming& state,const RawLabGraphHistogram& histogram,
+    std::uint64_t revision,const std::vector<RawRecipe::RawBezierCurvePoint>& points,bool diagonal) {
+    if(!state.fitPending || !histogram.valid) return;
+    if(state.fitAttempted && state.fitRevision==revision &&
+        (revision || state.fitSource==histogram.luma)) return;
+    state.fitAttempted=true;state.fitRevision=revision;
+    if(!revision)state.fitSource=histogram.luma;
+    if(std::none_of(histogram.luma.begin(),histogram.luma.end(),[](float v){return v>0 && std::isfinite(v);}))return;
+    const auto fitted=BuildRawLabToneGraphViewRange(histogram,0,1.f);
+    const CurveAxisMapping full{0,1,state.options.brightnessSpacing};
+    RawLabToneGraphViewRange horizontal{full.ToView(fitted.minimum),full.ToView(fitted.maximum)};
+    auto vertical=horizontal;
+    if(diagonal) {
+        // Keep an already edited curve visible over the fitted input interval.
+        for(int i=0;i<=64;++i) {
+            const float x=fitted.minimum+(fitted.maximum-fitted.minimum)*i/64.f;
+            const float y=full.ToView(RawRecipe::EvaluateRawBezierCurve(points,x));
+            vertical.minimum=std::min(vertical.minimum,y);vertical.maximum=std::max(vertical.maximum,y);
+        }
+        for(const auto& p:points)if(p.x>=fitted.minimum && p.x<=fitted.maximum) {
+            const float y=full.ToView(p.y);
+            vertical.minimum=std::min(vertical.minimum,y);vertical.maximum=std::max(vertical.maximum,y);
+        }
+    }
+    const auto padded=[](RawLabToneGraphViewRange range) {
+        const float padding=(range.maximum-range.minimum)*.08f;
+        return RawLabToneGraphViewRange{std::max(0.f,range.minimum-padding),std::min(1.f,range.maximum+padding)};
+    };
+    SetCurveCanvasView(state,padded(horizontal),padded(vertical));
+    state.fitPending=false;
 }
 std::array<float,kRawLabHistogramBinCount> MapCurveHistogram(
     const std::array<float,kRawLabHistogramBinCount>& source,const CurveAxisMapping& axis) {

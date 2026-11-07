@@ -179,7 +179,12 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
                     indexed = !item->fingerprint.empty();
                 });
             }
-            if (!texture || !width || !height) throw std::runtime_error("Distant Gallery tile did not become resident.");
+            if (!texture || !width || !height) {
+                report();
+                std::cout << "Jump root=" << editor->GetRawWorkspaceState().workspaceRoot
+                    << " scan status=" << editor->GetRawWorkspaceScanProgress().statusText << '\n';
+                throw std::runtime_error("Distant Gallery tile did not become resident.");
+            }
             std::cout << "Distant tile " << width << "x" << height << " resident "
                 << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-requested).count()
                 << " ms after request, verified identity=" << indexed << ", scan busy=" << editor->IsRawWorkspaceScanBusy() << ".\n";
@@ -314,13 +319,15 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
                     editor->HasActiveRawWorkspacePresentationForValidation();
             }, "The clicked original never rendered.");
             const auto& records = editor->GetRawWorkspaceState().sources;
-            if (records.size() != 1 || records.front().absolutePath != input || records.front().fingerprint.empty() ||
+            // The transient listing no longer pre-hashes the original. Source
+            // verification belongs to the decoder, which produced this frame.
+            if (records.size() != 1 || records.front().absolutePath != input ||
                 editor->IsRawWorkspaceScanBusy() || editor->GetRawWorkspaceScanProgress().filesVisited != 0 ||
                 std::filesystem::exists(root / "Closet")) throw std::runtime_error("Opening the original scanned or wrote the photo root.");
             for (const auto& notice : notices->Snapshot())
                 if (notice.content.severity == Notifications::Severity::Error)
                     throw std::runtime_error(notice.content.message);
-            std::cout << "PASS immediate Gallery open: verified selected original, rendered output, no error notification or Closet.\n";
+            std::cout << "PASS immediate Gallery open: selected original rendered, no folder rescan, error notification or Closet.\n";
             gallery->SetRawGalleryOpenSelectionHandler({});
         } else if (!profileOnly) {
         if (bracketCaptures) {
@@ -391,6 +398,8 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
             const auto began=std::chrono::steady_clock::now();
             while(!shown && std::chrono::steady_clock::now()-began<std::chrono::seconds(30))compareFrame();
             if(!shown)throw std::runtime_error("Requested split comparison never published its before image");
+            std::cout << "Original comparison ready in " << std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now()-began).count() << " ms\n" << std::flush;
             for(int i=0;i<20;++i)compareFrame();
             ImVec2 left{},right{},deltaA={12,8},deltaB=deltaA;
             frame([&] {

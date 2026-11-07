@@ -495,6 +495,7 @@ private:
     bool m_EncodeSrgbOutput = false;
     float m_HdrHeadroom = 1.f;
     bool m_DisplayLinearInput = false;
+    float m_SdrBrightness = 0.f, m_SdrHighlightDetail = 1.f, m_SdrSaturation = 1.f;
     bool m_LastProbeValid = false;
     float m_LastMinRgb = 0.0f;
     float m_LastMaxRgb = 0.0f;

@@ -16,16 +16,17 @@ struct RawColorWarpMaskSample {
     float gate = 1.0f;
     float support = 0.0f;
     float boundary = 1.0f;
+    bool absoluteInfluence = false;
 };
 
 inline float EvaluateColorWarpPinWeight(const RawColorWarpPin& pin,
     const RawColorWarpCoordinate& input, const RawColorWarpMaskSample& mask = {},
     float spatialSupport = 0.0f) {
     const float colorWeight=EvaluateColorWarpPinColorWeight(pin,input);
-    if (!pin.enabled || pin.strength <= 0.0f || colorWeight <= 0.0f) return 0.0f;
-    const float direct = colorWeight *
+    if (!pin.enabled || pin.strength <= 0.0f) return 0.0f;
+    const float direct = mask.absoluteInfluence ? 1.f : colorWeight *
         EvaluateColorWarpPinLightnessWeight(pin, input.sceneEv);
-    return direct * std::max(mask.gate, mask.support * spatialSupport) *
+    return std::min(1.f,direct * std::max(mask.gate, mask.support * spatialSupport)) *
         mask.boundary * pin.strength;
 }
 
@@ -42,6 +43,25 @@ inline float ColorWarpEffectiveSelectionWeight(const RawColorWarpRecipe& recipe,
         (recipe.combine==RawColorWarpCombine::Blend?std::max(1.0f,totalWeight):1.f), 0.0f, 1.0f) : 0.0f;
 }
 
+// Preview potential influence for an unadjusted selected pin, while honoring
+// all enabled protection and overlap settings on the same immutable input.
+inline float ColorWarpPreviewInfluence(const RawColorWarpRecipe& recipe, std::size_t selected,
+    const RawColorWarpCoordinate& input, const std::vector<RawColorWarpMaskSample>& masks) {
+    if(selected>=recipe.pins.size() || !recipe.enabled)return 0.f;
+    float selectedWeight=0,total=0,protection=0;
+    for(std::size_t i=0;i<recipe.pins.size();++i) {
+        const auto& pin=recipe.pins[i];
+        if(i!=selected && !ColorWarpParticipates(pin))continue;
+        const float w=EvaluateColorWarpPinWeight(pin,input,i<masks.size()?masks[i]:RawColorWarpMaskSample{},
+            ColorWarpPinSpatialSupport(recipe,pin));
+        if(i==selected)selectedWeight=w;
+        if(pin.protectColor)protection=std::max(protection,std::clamp(w,0.f,1.f));
+        else total+=w;
+    }
+    if(recipe.pins[selected].protectColor)return std::clamp(recipe.strength*selectedWeight,0.f,1.f);
+    return ColorWarpEffectiveSelectionWeight(recipe,selectedWeight*(1.f-protection),total);
+}
+
 // Includes only membership/field inputs. Destinations, lightness shifts,
 // protection and strength do not change the spatial fields.
 inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recipe) {
@@ -54,7 +74,7 @@ inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recip
     hash(recipe.version);
     hash(recipe.pins.size());
     for (const auto& pin : recipe.pins) {
-        hash(pin.id);hash(pin.sourceA);hash(pin.sourceB);hash(pin.regionId);
+        hash(pin.sampleRadius);hash(pin.smoothSelection);hash(pin.id);hash(pin.sourceA);hash(pin.sourceB);hash(pin.regionId);
         for(const auto* range:{&pin.hueRange,&pin.saturationRange,&pin.exposureRange}) {
             hash(range->enabled);hash(range->low);hash(range->high);hash(range->featherLow);hash(range->featherHigh);
         }

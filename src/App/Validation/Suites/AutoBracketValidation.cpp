@@ -151,7 +151,8 @@ bool ValidateAutoBracket(int argc,char** argv) {
         Check(queue.CanStartWork(0,true,false),"Automatic queue did not become eligible immediately");
         queue.RunNow();queue.Tick(59,false,false,executor);Check(!queue.HasWork(),"Run now bypassed readiness");
         queue.Tick(59,true,true,executor);Check(!queue.HasWork(),"Run now competed with foreground work");
-        queue.Tick(59,true,false,executor);Check(queue.HasWork(),"Run now did not start");
+        queue.Tick(59,true,false,executor);Check(!queue.HasWork(),"Resource cooldown was bypassed");
+        queue.Tick(62,true,false,executor);Check(queue.HasWork(),"Run now did not start after resource recovery");
         auto first=queue.Current();
         AutoBracket::Queue reserved;Check(LoadQueue(root,reserved,error)&&reserved.items.front().projectId==first->item.projectId,
             "Project identity was not reserved before work");
@@ -170,7 +171,7 @@ bool ValidateAutoBracket(int argc,char** argv) {
         };
         first=finish(60);Check(first->outcome==State::Completed,first->status);Check(continued,"Finish takeover was lost");
         checkForeground();presentation.Complete(first,60);
-        Check(presentation.animation.active&&presentation.texture!=0,"Saved completion presentation is unavailable");
+        Check(!presentation.animation.active&&presentation.texture==0,"Completed work retained an animated presentation");
         ImGui::NewFrame();DrawPresentation(presentation,queue);ImGui::EndFrame();presentation.Tick(120);
         Check(!presentation.animation.active,"Completion animation did not finish");
         Check(first->mailbox->Read()->progress.stage==Raw::Bracketing::ProcessingStage::Completed,"Completion preceded durable saving");

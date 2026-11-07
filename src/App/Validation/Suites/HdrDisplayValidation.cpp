@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include "WindowsHdrValidation.h"
 #include "HdrPhotoExportValidation.h"
+#include "HdrRenditionValidation.h"
 #include "HdrGalleryCheck.h"
 #include "Hdr/Presentation.h"
 #include "Hdr/ImageFile.h"
@@ -407,6 +408,27 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             }
         }
         ViewTransformLayer saved;saved.Deserialize(standardSettings);
+        for(float detail:{0.f,1.f}) {
+            auto trimSettings=standardSettings;
+            trimSettings["sdrBrightness"]=-.65f;trimSettings["sdrHighlightDetail"]=detail;
+            trimSettings["sdrSaturation"]=.85f;
+            Raw::ViewTransform::Parameters parameters;parameters.sdr={-.65f,detail,.85f};
+            const Raw::ViewTransform::PreparedTransform expected(parameters);
+            const auto pixels=Render(patch,19,13,trimSettings);
+            for(std::size_t i=0;i<patch.size();i+=4) {
+                const auto rgb=expected.Rgb({patch[i],patch[i+1],patch[i+2]});
+                for(int c=0;c<3;++c) Check(std::abs(pixels[i+c]-rgb[c])<3e-5f,"SDR trim CPU/GPU mismatch");
+            }
+        }
+        auto unchanged=standardSettings;
+        unchanged.erase("sdrBrightness");unchanged.erase("sdrHighlightDetail");unchanged.erase("sdrSaturation");
+        Raw::ViewTransform::Parameters originalParameters;originalParameters.sdr={0,0,1};
+        const Raw::ViewTransform::PreparedTransform originalFinish(originalParameters);
+        const auto originalPixels=Render(patch,19,13,unchanged);
+        for(std::size_t i=0;i<patch.size();i+=4) {
+            const auto expected=originalFinish.Rgb({patch[i],patch[i+1],patch[i+2]});
+            for(int c=0;c<3;++c) Check(std::abs(originalPixels[i+c]-expected[c])<3e-5f,"Absent SDR trim changed a saved finish");
+        }
         ViewTransformLayer loaded;loaded.Deserialize(saved.Serialize());
         Check(loaded.Serialize()==saved.Serialize(),"Sigmoid layer settings did not round-trip");
         auto recipe=Stack::RawRecipe::MakeDefaultRecipe("fixture.dng","Display fixture");
@@ -450,6 +472,10 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             for(int c=0;c<3;++c) worst=std::max(worst,std::abs(rendered[4*x+c]-expected[c]));
         }
         auto colors=Render(patch,19,13,extended);
+        auto trimmedHdr=extended;trimmedHdr["sdrBrightness"]=-2.f;trimmedHdr["sdrSaturation"]=.5f;
+        trimmedHdr["sdrHighlightDetail"]=0.f;
+        const auto unchangedHdr=Render(patch,19,13,trimmedHdr);
+        Check(unchangedHdr==colors,"SDR adjustments changed the HDR master");
         for(size_t i=0;i<patch.size();i+=4) {
             const auto expected=master.Rgb({patch[i],patch[i+1],patch[i+2]});
             for(int c=0;c<3;++c) worst=std::max(worst,std::abs(colors[i+c]-expected[c]));
@@ -478,7 +504,9 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             const auto target=Stack::Hdr::BeginWindow(context.window,32,32,true);
             ValidatePhotoExports(context.window,raw,dest);
             if(target) CheckHdrGallery(context.window,raw);
-        } else if(argc) throw std::runtime_error("Expected a RAW path and an output directory.");
+        } else if(argc==4 && std::string(argv[0])=="--renditions") {
+            ValidateHdrRenditionPair(std::filesystem::u8path(argv[1]),std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]));
+        } else if(argc) throw std::runtime_error("Expected a RAW path and output directory, or --renditions HDR-PNG SDR-PNG new-output-directory.");
         return true;
     }catch(const std::exception& e){std::cerr<<"HDR display validation failed: "<<e.what()<<'\n';return false;}
 }

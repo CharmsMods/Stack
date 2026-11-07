@@ -633,7 +633,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
             std::string error;
             if (!reopenOnly) {
                 RequireBracketSurface(owner->CommitBracketingDraft(true, &error), error);
-                RequireBracketSurface(owner->IsBracketingPresentationActive(), "Process did not lock its owning project.");
+                RequireBracketSurface(!owner->IsBracketingPresentationActive(), "Processing unexpectedly locked its owning project.");
                 RequireBracketSurface(!owner->SetWorkspaceMode(Project::WorkspaceMode::Graph),
                     "A processing project allowed Graph editing.");
                 for (unsigned index = 0; index < 8; ++index) frame();
@@ -728,7 +728,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                     group.frames.end(), [](const auto& frame) { return frame.enabled; }); });
             if (enabledGroups < 2) RequireBracketSurface(!owner->HasBracketingContributionTool(),
                 "A single enabled exposure group exposed a contribution editor.");
-            std::cout << "PASS " << (reopenOnly ? "saved-result recapture" : "one bracket Process and owning-project lock")
+            std::cout << "PASS " << (reopenOnly ? "saved-result recapture" : "one bracket Process with editable controls")
                 << ", independent project switch, normal View/Graph/panel captures, compact source, contribution eligibility, save and reopen ("
                 << frames << " submitted frames)\nCaptures and project: " << root << '\n' << std::flush;
             success = true;

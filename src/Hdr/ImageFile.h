@@ -15,5 +15,5 @@ bool IsGainMapJpeg(const std::vector<unsigned char>& bytes);
 std::vector<unsigned char> EncodePqPng(const Image& image);
 std::vector<unsigned char> EncodeGainMapJpeg(const Image& image,const std::vector<unsigned char>& sdr);
 Image DecodePqPng(const std::vector<unsigned char>& bytes);
-Image DecodeGainMapJpeg(const std::vector<unsigned char>& bytes);
+Image DecodeGainMapJpeg(const std::vector<unsigned char>& bytes,float displayHeadroom=0.f);
 }

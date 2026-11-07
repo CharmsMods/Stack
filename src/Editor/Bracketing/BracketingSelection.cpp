@@ -56,6 +56,15 @@ void EditorModule::BeginBracketingDraft(bool fresh) {
     m_Bracketing->status="Select captures in the filmstrip or Gallery, then press Process.";
     SyncBracketingSelection();
 }
+void EditorModule::CreateBracketingCaptureSet(const std::vector<std::filesystem::path>& paths) {
+    BeginBracketingDraft(true);
+    AddBracketingDraftFiles(paths);
+    if(!m_Bracketing)return;
+    m_Bracketing->processWhenMetadataReady=true;
+    m_Bracketing->status="Reading captures before processing...";
+    OpenBracketingTool();
+    RequestOpenRawLabTab();
+}
 void EditorModule::RestoreBracketingSelection() {
     if(!m_Bracketing||m_Bracketing->selectionRestored||m_Bracketing->newProject||!IsBracketingActive())return;
     auto& ui=*m_Bracketing;
@@ -107,11 +116,16 @@ void EditorModule::RestoreBracketingSelection() {
         auto store=m_Project->store;
         if(!ProjectTasks().Submit([job,store,materialize=std::move(materialize)]()mutable {
             for(auto& item:materialize) {
-                std::error_code ec;std::filesystem::create_directories(item.second.path.parent_path(),ec);
-                if (store->StorageKind() == Stack::Project::ProjectStorageKind::WorkingFile) {
-                    item.second.path = store->ResolveAssetFile(item.first);
-                    if (item.second.path.empty()) item.second.error = "Locate this original to reprocess the bracket.";
-                } else store->CopyAssetToFile(item.first,item.second.path,&item.second.error);
+                if(job->canceled)break;
+                try {
+                    if (store->StorageKind() == Stack::Project::ProjectStorageKind::WorkingFile) {
+                        item.second.path = store->ResolveAssetFile(item.first);
+                        if (item.second.path.empty()) item.second.error = "Locate this original to reprocess the bracket.";
+                    } else {
+                        std::error_code ec;std::filesystem::create_directories(item.second.path.parent_path(),ec);
+                        store->CopyAssetToFile(item.first,item.second.path,&item.second.error);
+                    }
+                } catch(const std::exception& error) { item.second.error=error.what(); }
                 job->sources.push_back(std::move(item.second));
             }
             job->done=true;
@@ -150,9 +164,9 @@ void EditorModule::SyncBracketingSelection() {
     Stack::Editor::RegroupBracketingDraft(ui);
     ui.processRequired=true;
     CommitBracketingEdit();
-    ui.processRequired=true;ui.pending=false;ui.publishRequested=false;
+    ui.processRequired=true;ui.pending=!ui.newProject;ui.publishRequested=ui.pending;
     ui.status=ui.newProject?"Draft ready. Press Process to merge the selected captures.":
-        "Selection changed. Press Process to update the result.";
+        "Updating bracket inputs...";
     for(const auto& source:ui.sources)ui.frameLabels[source.frameId]=source.path.filename().string();
 }
 void EditorModule::SelectBracketingSources(const std::vector<std::string>& keys,bool toggle,bool range) {
@@ -238,6 +252,7 @@ void EditorModule::TickBracketingDraft() {
             ui.metadataJob=job;
             if(!ProjectTasks().Submit("Reading capture details",[job] {
                 for(auto& source:job->sources) {
+                    if(job->canceled)break;
                     try {
                         Raw::RawMetadata metadata;
                         if(Raw::RawLoader::LoadMetadata(source.path.string(),metadata)) {
@@ -250,5 +265,12 @@ void EditorModule::TickBracketingDraft() {
                 job->done=true;
             })) {ui.metadataJob.reset();ui.metadataCheckedRevision=std::numeric_limits<std::uint64_t>::max();ui.status="Could not inspect captures. Retry selection.";}
         }
+    }
+    if(ui.processWhenMetadataReady && !ui.metadataJob && !ui.sources.empty() &&
+        std::all_of(ui.sources.begin(),ui.sources.end(),[](const auto& source){return source.inspected;})) {
+        ui.processWhenMetadataReady=false;
+        const auto rejected=std::find_if(ui.sources.begin(),ui.sources.end(),[](const auto& source){return !source.error.empty();});
+        if(rejected!=ui.sources.end())ui.status=rejected->error;
+        else CommitBracketingDraft(true,nullptr);
     }
 }

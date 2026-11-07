@@ -263,7 +263,7 @@ inline void HashColorWarp(
     HashTypedValue(fingerprint, static_cast<int>(value.combine));
     for(const auto& pin:value.pins) {
         HashTypedValue(fingerprint,pin.enabled);HashTypedValue(fingerprint,pin.protectColor);
-        HashTypedValue(fingerprint,pin.strength);HashTypedValue(fingerprint,pin.hueShift);
+        HashTypedValue(fingerprint,pin.strength);HashTypedValue(fingerprint,pin.moveColors);HashTypedValue(fingerprint,pin.hueShift);
         HashTypedValue(fingerprint,pin.saturation);HashTypedValue(fingerprint,pin.exposureEv);
     }
 }

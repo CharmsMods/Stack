@@ -2,6 +2,7 @@
 #include "App/settings/PaletteWorkshop.h"
 #include "App/settings/ViewportQualityControls.h"
 #include "AppSettingsPopup.h"
+#include "App/settings/StorageControls.h"
 #include "Raw/RawViewportSettings.h"
 
 #include "AppVersion.h"
@@ -965,10 +966,10 @@ void RenderContents(
         ImVec2(railWidth, 0.0f),
         ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar);
-    constexpr float categoryHeights[] = { 32.0f, 32.0f, 32.0f, 32.0f, 32.0f, 36.0f, 32.0f, 32.0f, 32.0f };
+    constexpr float categoryHeights[] = { 32.0f, 32.0f, 32.0f, 32.0f, 32.0f, 36.0f, 32.0f, 32.0f, 32.0f, 32.0f };
     float categoryListHeight = 0.0f;
     for (float height : categoryHeights) categoryListHeight += height;
-    categoryListHeight += kSettingsItemGap * 8.0f;
+    categoryListHeight += kSettingsItemGap * 9.0f;
     ImGui::SetCursorPosY(std::max(
         ImGui::GetCursorPosY(),
         (ImGui::GetWindowHeight() - categoryListHeight) * 0.5f));
@@ -995,6 +996,9 @@ void RenderContents(
     }
     if (RenderCategoryButton(appearance, "Updates", state.activeCategory == Category::Updates, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Updates;
+    }
+    if (RenderCategoryButton(appearance, "Storage", state.activeCategory == Category::Storage, ImVec2(-1.0f, 32.0f))) {
+        state.activeCategory = Category::Storage;
     }
     if (RenderCategoryButton(appearance, "Legal", state.activeCategory == Category::Legal, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Legal;
@@ -1068,6 +1072,9 @@ void RenderContents(
         break;
     case Category::Updates:
         RenderUpdatesSection(updateManager, state, detailWidth);
+        break;
+    case Category::Storage:
+        Stack::Settings::RenderStorageControls();
         break;
     case Category::Legal:
         RenderLegalSection(legalManager, state, detailWidth);

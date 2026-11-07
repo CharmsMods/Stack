@@ -206,7 +206,6 @@ foreach ($inventoryName in @("Stack.spdx.json", "StackBurst.spdx.json")) {
     }
 }
 
-if ($Product -eq "Stack") { Copy-OptionalFfmpegProvider -Paths $paths -StageDir $stageDir | Out-Null }
 
 if ($LocalTestPackage) {
     $localTestMarker = Join-Path $stageDir ("Stack\App\" + $productDefinition.artifactName + "LocalTestBuild.marker")

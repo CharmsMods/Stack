@@ -20,9 +20,9 @@ set(STACK_BURST_CONTRACT_SOURCE_FILES
 )
 set(STACK_BURST_INTERNAL_VALIDATION_NAMES
     BracketingDepthValidation BracketingEvidenceExport BracketingUpgradeComparison
-    BracketingProjectDiagnostic BracketingPresentationBenchmark BracketingUiValidation
+    BracketingProjectDiagnostic BracketingUiValidation
     BracketingValidation PanoramaValidation PanoramaSessionsValidation
-    ProcessingPresentationFocusedValidation SuperResolutionValidation
+    SuperResolutionValidation
 )
 if (NOT STACK_BUILD_BURST_DIAGNOSTICS)
     list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/Raw/Bracketing/.*\\.cpp$")
@@ -39,6 +39,7 @@ list(FILTER STACK_APP_SOURCE_FILES EXCLUDE REGEX "/src/GraphRoutingBackend/.*\\.
 list(APPEND STACK_APP_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/OutputDng.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Client.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/ScratchDirectory.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Protocol.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/WireData.cpp")
 
@@ -143,6 +144,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawSourceFolders.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGalleryThumbnailPixels.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawCameraThumbnail.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/GalleryBrowseMetadata.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceStorage.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceManagedGraph.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspaceProjects.cpp"

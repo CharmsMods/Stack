@@ -28,7 +28,7 @@ void GalleryGridStacks::Reconcile(const std::string& workspace,
         if (current.find(cover->first) == current.end()) cover = m_Covers.erase(cover);
         else ++cover;
     }
-    if (groupCount) {
+    if (groupCount && !projectGroups) {
         std::unordered_set<std::string> members;
         for (const auto& stack : stacks) members.insert(stack.sourceKeys.begin(),stack.sourceKeys.end());
         bool changed=false;

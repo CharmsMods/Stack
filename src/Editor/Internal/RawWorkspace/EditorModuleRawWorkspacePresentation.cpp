@@ -1400,14 +1400,13 @@ bool DrawToneCurveWidget(std::vector<Stack::RawRecipe::RawToneCurvePoint>& point
 
 bool DrawViewportTileSet(
     const EditorRenderWorker::SharedTextureTileSet& tiles,
-    const ImRect& rect) {
+    const ImRect& rect, bool hdr) {
     if (!tiles.tiled || !tiles.complete || tiles.tiles.empty() ||
         tiles.fullWidth <= 0 || tiles.fullHeight <= 0) {
         return false;
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
     const float drawW = std::max(1.0f, rect.GetWidth());
     const float drawH = std::max(1.0f, rect.GetHeight());
     drawList->PushClipRect(rect.Min, rect.Max, true);
@@ -2189,7 +2188,7 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
             bounds.Min.x + (imageBounds.x - imageSize.x) * 0.5f,
             bounds.Min.y + std::max(0.0f, (imageBounds.y - imageSize.y) * 0.48f));
         const ImRect imageRect(imageMin, ImVec2(imageMin.x + imageSize.x, imageMin.y + imageSize.y));
-        drewRecipePreview = DrawViewportTileSet(tiles, imageRect);
+        drewRecipePreview = DrawViewportTileSet(tiles, imageRect, IsHdrOutputPreview());
         if (drewRecipePreview) {
             drawLocalRangeOverlay(imageRect);
             drawList->AddRect(imageRect.Min, imageRect.Max, ImGui::GetColorU32(ImGuiCol_Border), 4.0f);
@@ -2222,7 +2221,7 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
             ? (0.5f / static_cast<float>(m_RawWorkspacePresentationTexture.height))
             : 0.0f;
         drawList->AddImage(
-            (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.Display(Stack::Hdr::PreviewActiveForCurrentWindow()),
+            (ImTextureID)(intptr_t)m_RawWorkspacePresentationTexture.Display(IsHdrOutputPreview()),
             imageRect.Min,
             imageRect.Max,
             ImVec2(uInset, 1.0f - vInset),

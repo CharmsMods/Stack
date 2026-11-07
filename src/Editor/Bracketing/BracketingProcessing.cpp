@@ -68,6 +68,11 @@ void EditorModule::CommitBracketingEdit() {
         IsBracketingActive()?m_Project->snapshot.get():nullptr,
         ImGui::IsAnyItemActive(),ImGui::GetTime());
     if(!outcome.changed)return;
+    if(ui.waitingForMemory) {
+        ui.waitingForMemory=false;
+        ui.activityNotifier.CancelActivity(ui.activity,"Bracket inputs changed while waiting for memory.");
+        ui.activityLease.reset();
+    }
     ++ui.controlsRevision;
     ui.requestDetail=false;
     ui.textureIdentity.clear();
@@ -105,22 +110,23 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
         meaningful = !Raw::Bracketing::Deserialize(nlohmann::json::parse(ui.completedRecipe), completed, recipeError, true) ||
             Stack::Project::BracketingInputsChanged(completed, ui.recipe);
     }
+    const bool resumingMemoryWait=ui.waitingForMemory;
     const auto notifier = GetNotifier();
-    const auto activity = notifier.BeginActivity("Processing frames", meaningful);
+    const auto activity = resumingMemoryWait ? ui.activity : notifier.BeginActivity("Processing frames", meaningful);
     m_MultiFrameProcessingActivity = activity;
     ui.activityNotifier = notifier; ui.activity = activity; ui.activityMeaningful = meaningful;
-    const auto completionLease = Stack::Notifications::RetainAsyncActivity(notifier, activity);
+    const auto completionLease = resumingMemoryWait ? ui.activityLease : Stack::Notifications::RetainAsyncActivity(notifier, activity);
     ui.activityLease = completionLease;
     const auto activityMetadata = Stack::Notifications::ForAsyncActivity(notifier, activity, "Processing frames");
     if(m_RawRenderClientId!=0)request.executeOpenGlTask=[](Raw::OpenGlTask task,std::string& taskError) {
         return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(std::move(task),taskError);
     };
-    BindBracketingSourceNodeEditor();
-    RequestRawSettingsPanel();
-    m_NodeOpenTransition.Reset();
-    m_RawImageViewTransition.Reset();
-    SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
-    RequestOpenRawLabTab();
+    if (!ui.result) {
+        BindBracketingSourceNodeEditor();
+        RequestRawSettingsPanel();
+        SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
+        RequestOpenRawLabTab();
+    }
     m_BracketingImageMin=m_BracketingImageMax=ImVec2{};
     request.didRestoreResult=[job]{job->restoredFromProject=true;};
     request.shouldCancel=[job]{return job->canceled.load();};
@@ -129,42 +135,15 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
         {std::lock_guard<std::mutex> lock(job->mutex);job->message=message;}
         notifier.UpdateActivity(activity, message);
     };
-    // All editor entry points have the same owned presentation. Its scene
-    // textures are allocated only while this project is actually visible.
-    {
-    static std::atomic<std::uint64_t> nextPresentation{0};
-    auto presentation=std::make_shared<Stack::Editor::ProcessingPresentation>();
-    presentation->generation=++nextPresentation;presentation->projectId=snapshot.projectId;
-    presentation->recipeIdentity=ui.storedRecipe;presentation->began=ImGui::GetTime();presentation->active=true;
-    presentation->mailbox=std::make_shared<Stack::Editor::ProcessingMailbox>(presentation->generation,ui.recipe.originFrameId);
-    for(std::size_t g=0;g<ui.recipe.groups.size();++g)for(const auto& frame:ui.recipe.groups[g].frames) {
-        if((!frame.enabled||!ui.recipe.groups[g].enabled)&&frame.id!=ui.recipe.originFrameId)continue;
-        Stack::Editor::ProcessingCard card;card.id=frame.id;card.group=static_cast<unsigned>(g);
-        card.label=ui.frameLabels.count(frame.id)?ui.frameLabels[frame.id]:"Capture";
-        card.color=Stack::Editor::BracketColor(ui.recipe,g);
-        presentation->cards.push_back(std::move(card));
-    }
-    std::stable_sort(presentation->cards.begin(),presentation->cards.end(),[&](const auto& a,const auto& b){
-        return a.id==ui.recipe.originFrameId && b.id!=ui.recipe.originFrameId;
-    });
-    if(request.analysis && ui.presentation)if(auto previous=ui.presentation->mailbox->Read())
-        for(const auto& [id,image]:previous->images) {
-            Raw::Bracketing::ProcessingProgress event;event.thumbnail=image;presentation->mailbox->Publish(event);
-        }
-    job->presentation=presentation->mailbox;ui.presentation=presentation;
-    }
-    request.reportPresentation=[mailbox=job->presentation,notifier,activity](const Raw::Bracketing::ProcessingProgress& event){
-        if(mailbox)mailbox->Publish(event);
-        if(event.evidenceOnly || event.thumbnail)return;
-        std::optional<Stack::Notifications::Progress> progress;
-        if(event.total>0)progress=Stack::Notifications::Progress{double(event.completed),double(event.total),{}};
-        notifier.UpdateActivity(activity, Raw::Bracketing::ProcessingStageTitle(event.stage), progress);
-    };
-    ui.job=job;ui.pending=false;ui.failed=false;ui.status="Preparing bracket...";
+    ui.job=job;ui.pending=false;ui.failed=false;ui.waitingForMemory=false;ui.status="Preparing bracket...";
     m_MultiFrameGraphProcessingTaskState=Async::TaskState::Running;
     const bool submitted=ProjectTasks().SubmitHighPriority(activityMetadata,[request=std::move(request),job,notifier,activity,completionLease]() mutable {
         job->result = Stack::AutoBracket::RunForegroundBurst(
-            [&] { return Stack::Project::RunBracketingJob(request); }, request.shouldCancel,
+            [&] {
+                job->memoryAtAttempt=Raw::Mfd::QueryPhysicalMemorySnapshot();
+                job->memoryCompletionGeneration=Stack::AutoBracket::ForegroundBurstCompletionGeneration();
+                return Stack::Project::RunBracketingJob(request);
+            }, request.shouldCancel,
             [&](const char* message) { request.reportProgress(0, message); });
         Raw::Bracketing::ProcessingProgress terminal;
         terminal.stage=job->canceled?Raw::Bracketing::ProcessingStage::Canceled:
@@ -337,6 +316,21 @@ void EditorModule::TickBracketing(bool foreground) {
                 ui.activityNotifier.CompleteActivity(ui.activity,
                     ui.recipe.reconstruction==Raw::Bracketing::ReconstructionMode::Panorama ? "Panorama RAW result ready." : "Bracket RAW result ready.",
                     ui.activityMeaningful && !job->restoredFromProject);
+            } else if(job->result.status==Raw::Bracketing::BracketingResult::Status::Failed &&
+                Stack::AutoBracket::IsBurstMemoryFailure(ui.status)) {
+                ui.waitingForMemory=true;ui.failed=false;ui.pending=true;
+                ui.nextMemoryRetryCheck=ImGui::GetTime()+1.;
+                ui.memoryAtFailure=job->memoryAtAttempt;
+                const bool graphicsMemory=ui.status.find("GL_OUT_OF_MEMORY")!=std::string::npos ||
+                    ui.status.find("GPU")!=std::string::npos;
+                // Estimates are advisory: a smaller gain or device-only
+                // recovery can be sufficient even without a headroom trigger.
+                ui.memoryRetryProbeAt=ImGui::GetTime()+30.;
+                ui.memoryCompletionGeneration=job->memoryCompletionGeneration;
+                ui.status=graphicsMemory ? "Waiting for graphics memory. Processing will retry automatically.":
+                    "Waiting for memory. Processing will resume when other work releases memory.";
+                ui.activityNotifier.UpdateActivity(ui.activity,ui.status);
+                m_MultiFrameGraphProcessingTaskState=Async::TaskState::Running;
             } else {
                 m_MultiFrameGraphProcessingTaskState=Async::TaskState::Failed;
                 ui.activityNotifier.FailActivity(ui.activity,
@@ -356,7 +350,7 @@ void EditorModule::TickBracketing(bool foreground) {
                 if(ui.interactiveRaw){ui.interactiveRaw.reset();ClearRawWorkspaceGraphScopeReadbackCaches();MarkRenderRefreshDirty();}
             }
         }
-        ui.activityLease.reset();
+        if(!ui.waitingForMemory)ui.activityLease.reset();
     }
     if(Stack::Project::RefreshBracketingInteractivePreview(ui)) {
         ui.textureIdentity.clear();
@@ -436,6 +430,31 @@ void EditorModule::TickBracketing(bool foreground) {
     }
     // A superseded job can finish after navigation has left Bracketing. RAW
     // must start the requested revision without depending on that tab drawing.
+    if (ui.processRequired && ui.pending && !ui.newProject && !ui.job && !ui.metadataJob &&
+        !ui.failed && ui.awaitingProject.empty() && ImGui::GetTime()-ui.changedAt>.4 &&
+        !(foreground && ImGui::IsAnyItemActive())) {
+        ui.pending=false;
+        CommitBracketingDraft(true,nullptr);
+        return;
+    }
+    if(ui.waitingForMemory) {
+        const auto now=ImGui::GetTime();
+        if(now<ui.nextMemoryRetryCheck)return;
+        ui.nextMemoryRetryCheck=now+1.;
+        const auto memory=Raw::Mfd::QueryPhysicalMemorySnapshot();
+        const auto gained=[](std::uint64_t before,std::uint64_t after) {
+            return after>before && after-before>=256ull*1024*1024;
+        };
+        const bool anotherCompleted=Stack::AutoBracket::ForegroundBurstCompletionGeneration()>ui.memoryCompletionGeneration;
+        const bool gainedPhysical=memory.valid && (!ui.memoryAtFailure.valid ||
+            gained(ui.memoryAtFailure.availablePhysicalBytes,memory.availablePhysicalBytes));
+        const bool gainedCommit=memory.commitLimitKnown && (!ui.memoryAtFailure.commitLimitKnown ||
+            gained(ui.memoryAtFailure.availableCommitBytes,memory.availableCommitBytes));
+        const bool probeReady=ui.memoryRetryProbeAt>0 && now>=ui.memoryRetryProbeAt;
+        const bool physicalReady=gainedPhysical || gainedCommit || anotherCompleted || probeReady;
+        const bool commitReady=!memory.commitLimitKnown || memory.availableCommitBytes>=512ull*1024*1024;
+        if(!physicalReady || !commitReady)return;
+    }
     if(Stack::Project::ShouldStartPendingBracketing(ui,ImGui::GetTime(),foreground && ImGui::IsAnyItemActive())) {
         ui.pending=false;
         StartBracketingProcessing(true,nullptr);

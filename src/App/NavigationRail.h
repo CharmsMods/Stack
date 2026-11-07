@@ -17,6 +17,7 @@ struct RailState {
     float panelAmount = 1.0f;
     float revealAmount = 0.0f;
     double visibleUntil = 0.0;
+    bool suppressEdgeRevealUntilLeave = false;
     float scale = 1.0f;
     ImVec2 position{};
     float visibleWidth = 0.0f;
@@ -24,6 +25,9 @@ struct RailState {
     float visiblePanelWidth = 0.0f;
     float galleryPanelWidth = 288.f;
     float queuePanelWidth = 288.f;
+    float editorPanelWidth = 360.f;
+    bool editorResize = false;
+    float resizeAmount = 1.f;
     float galleryResizeStartWidth = 288.f, galleryResizeStartX = 0.f;
     float galleryResizeOriginalWidth = 288.f;
     bool galleryResizeActive = false;
@@ -46,6 +50,7 @@ void DrawGlyph(ImDrawList* draw, Glyph glyph, ImVec2 minimum, float size, ImU32 
 void RegisterGalleryNavigatorSettings(RailState& state);
 void RenderGalleryNavigatorResize(RailState& state);
 void RenderQueueNavigatorResize(RailState& state);
+void RenderEditorNavigatorResize(RailState& state);
 void FinishGalleryNavigatorResize(RailState& state);
 
 } // namespace Stack::Navigation

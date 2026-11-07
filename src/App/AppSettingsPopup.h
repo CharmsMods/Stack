@@ -20,7 +20,8 @@ enum class Category {
     CanvasComposition = 5,
     Experimental = 6,
     Updates = 7,
-    Legal = 8
+    Legal = 8,
+    Storage = 9
 };
 
 struct State {

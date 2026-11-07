@@ -700,12 +700,7 @@ void EditorModule::RequestWorkerShutdownForAppClose() {
     ++m_RawWorkspaceThumbnailTextureResetGeneration;
     ++m_RawWorkspaceSimilarityGeneration;
     ++m_RawWorkspaceProjectLoadGeneration;
-    if(m_Bracketing) {
-        if(m_Bracketing->job)m_Bracketing->job->canceled=true;
-        if(m_Bracketing->preparationJob)m_Bracketing->preparationJob->canceled=true;
-        if(m_Bracketing->detailJob)m_Bracketing->detailJob->canceled=true;
-        if(m_Bracketing->inspectionJob)m_Bracketing->inspectionJob->canceled=true;
-    }
+    if (m_Bracketing) m_Bracketing->CancelJobs();
     CancelMfdExperimentalProcessing(
         "MFD processing canceled for application shutdown.");
     CancelHdrProcessing("HDR processing canceled for application shutdown.");

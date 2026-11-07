@@ -1,4 +1,5 @@
 #include "GLLoader.h"
+#include "Renderer/GlDeviceIdentity.h"
 
 #include <iostream>
 
@@ -170,6 +171,7 @@ bool LoadGLFunctions() {
     #undef LOAD
 
     if (ok) {
+        Stack::Renderer::RefreshGlDeviceIdentity();
         std::cout << "[GLLoader] All required OpenGL 4.3 symbols loaded successfully.\n";
     }
 

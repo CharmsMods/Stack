@@ -43,8 +43,11 @@ ImVec4 AppearanceManager::ResolveSemanticUiColor(SemanticUiColor role, ImVec4 fu
 void AppearanceManager::PreviewCreamPalette(const CreamPalette& palette) {
     m_ThemeTransitionActive=false;
     m_WorkingTheme.creamPalette=palette;
-    m_WorkingTheme.id=palette.id;
-    m_WorkingTheme.displayName=palette.name;
+    m_WorkingTheme.creamPalette.id=kMonochromeDarkPaletteId;
+    m_WorkingTheme.creamPalette.name="Neutral";
+    m_WorkingTheme.creamPalette.colorPolicy=PaletteColorPolicy::Monochrome;
+    m_WorkingTheme.id=kMonochromeDarkPaletteId;
+    m_WorkingTheme.displayName="Neutral";
     m_WorkingTheme.colors=ResolveCreamPalette(palette).colors;
     TouchRevision();
 }

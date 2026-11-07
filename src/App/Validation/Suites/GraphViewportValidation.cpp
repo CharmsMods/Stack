@@ -46,6 +46,93 @@ RenderGraphSnapshot ViewportGraph() {
     return graph;
 }
 
+void ValidateGraphCacheDemandAndPrecision() {
+    auto graph = ViewportGraph();
+    // Two real processing boundaries: evict the first blur while retaining
+    // the second, then edit only the final exposure.
+    RenderGraphNode second = graph.nodes[1];
+    second.nodeId = 5;
+    second.layerJson["amount"] = 1.5f;
+    graph.nodes.push_back(second);
+    graph.links[1] = {2,"imageOut",5,"imageIn"};
+    graph.links.push_back({5,"imageOut",3,"imageIn"});
+    Project::BindGraphImageContracts(graph);
+    RenderPipeline pipeline;
+    pipeline.Initialize();
+    pipeline.Resize(96,64);
+    ViewportPreviewRequest request; request.enabled = true;
+    pipeline.SetGraphViewportRequest(request);
+    pipeline.ExecuteGraph(graph);
+    // Source + second blur + final exposure fit; the first blur is oldest.
+    constexpr std::uint64_t surface = 96u * 64u * 8u;
+    pipeline.SetGraphCacheBudget(3 * surface * 11 / 8, 0, false);
+    RequireViewport(pipeline.GetLastGraphExecutionStats().persistentCacheEvictions > 0,
+        "Cache demand check did not exercise an actual budget eviction");
+    graph.nodes[2].technicalExposureValue = 0.5f;
+    pipeline.ExecuteGraph(graph);
+    const auto stats = pipeline.GetLastGraphExecutionStats();
+    RequireViewport(stats.cachePrunedOutputs >= 1 && stats.imageCacheMisses == 2,
+        "A retained downstream image did not stop evicted upstream work");
+    int width = 0, height = 0;
+    const auto reused = pipeline.GetOutputFloatPixels(width, height);
+    RenderPipeline reference;
+    reference.Initialize();
+    reference.Resize(96,64);
+    reference.SetGraphViewportRequest(request);
+    reference.ExecuteGraph(graph);
+    const auto cold = reference.GetOutputFloatPixels(width, height);
+    RequireViewport(!cold.empty() && reused == cold,
+        "Cache-pruned output differs from a complete cold evaluation");
+
+    const auto plan = RenderTiling::PlanGraphViewport(graph,96,64,0,request);
+    RenderGraphNode unused; unused.nodeId = 20; unused.kind = RenderGraphNodeKind::DataMath;
+    graph.nodes.push_back(unused);
+    unused.nodeId = 21; unused.kind = RenderGraphNodeKind::RawDevelopment;
+    graph.nodes.push_back(unused);
+    const auto disconnectedPlan = RenderTiling::PlanGraphViewport(graph,96,64,0,request);
+    RequireViewport(plan.valid && disconnectedPlan.valid && plan.workingBytes == disconnectedPlan.workingBytes,
+        "Disconnected RAW/math changed the active memory budget");
+    pipeline.ExecuteGraph(graph);
+    const auto unchanged = pipeline.GetOutputFloatPixels(width, height);
+    const GLState::TextureBinding savedTexture(GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+    glBindTexture(GL_TEXTURE_2D, pipeline.GetOutputTexture());
+    GLint format = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_INTERNAL_FORMAT,&format);
+    savedTexture.Restore();
+    RequireViewport(format == GL_RGBA16F && unchanged == cold &&
+        pipeline.GetLastGraphExecutionStats().cachePrunedOutputs > 0,
+        "Disconnected nodes changed precision, pixels, or reusable caches");
+
+    graph.nodes[1].layerJson["amount"] = 5.f;
+    pipeline.ExecuteGraph(graph);
+    const auto upstreamEdit = pipeline.GetOutputFloatPixels(width,height);
+    reference.ExecuteGraph(graph);
+    RequireViewport(!upstreamEdit.empty() && upstreamEdit != cold &&
+        upstreamEdit == reference.GetOutputFloatPixels(width,height),
+        "An upstream edit retained stale downstream pixels");
+    graph.nodes[1].layerJson["amount"] = 3.f;
+
+    graph.nodes.resize(5);
+    graph.nodes[2].kind = RenderGraphNodeKind::DataMath;
+    graph.nodes[2].dataMathMode = RenderDataMathMode::Multiply;
+    graph.nodes[2].dataMathSettings.constantB = 1.25;
+    graph.links.back().toSocketId = "imageA";
+    Project::BindGraphImageContracts(graph);
+    const auto mathPlan = RenderTiling::PlanGraphViewport(graph,96,64,0,request);
+    RequireViewport(mathPlan.valid && mathPlan.workingBytes == 2 * plan.workingBytes,
+        "Non-RAW math did not budget float32 graph surfaces");
+    pipeline.ExecuteGraph(graph);
+    glBindTexture(GL_TEXTURE_2D,pipeline.GetOutputTexture());
+    glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_INTERNAL_FORMAT,&format);
+    savedTexture.Restore();
+    RequireViewport(format == GL_RGBA32F, "Connected math lost its required float32 precision");
+    const auto mathPixels = pipeline.GetOutputFloatPixels(width,height);
+    reference.ExecuteGraph(graph);
+    RequireViewport(!mathPixels.empty() && mathPixels == reference.GetOutputFloatPixels(width,height),
+        "Precision transition changed the mathematical output");
+    std::cout << "Cache demand: evicted upstream skipped; cold/warm pixels exact; disconnected policy and float32 budget passed.\n";
+}
+
 void CompareViewportCrop(RenderPipeline& pipeline, const RenderGraphSnapshot& graph,
     const std::vector<float>& full, int fullWidth, int fullHeight, const ImageRegion& requested,
     int logicalWidth, int logicalHeight) {
@@ -142,8 +229,8 @@ void ValidateViewportPlans() {
     const auto controlPlan = RenderTiling::PlanGraphViewportRegions(controlled,96,64,request,48);
     RequireViewport(controlPlan.valid && controlPlan.stages.count({5,"valueOut"}) &&
         controlPlan.stages.count({6,"imageOut"}) && controlPlan.completePixels == plan.completePixels &&
-        controlPlan.regionalPixels == plan.regionalPixels && controlPlan.workingBytes == plan.workingBytes,
-        "Uniform Value/arithmetic controls were charged as image outputs or cropped textures");
+        controlPlan.regionalPixels == plan.regionalPixels && controlPlan.workingBytes > plan.workingBytes,
+        "Uniform arithmetic added image outputs or omitted the executor's float32 target precision");
     auto reduced = graph;
     RenderGraphNode field; field.nodeId = 5; field.kind = RenderGraphNodeKind::ImageToMask;
     reduced.nodes.push_back(field); reduced.links.push_back({2,"imageOut",5,"imageIn"});
@@ -179,6 +266,7 @@ void ValidateViewportPlans() {
 }
 
 bool ValidateGraphViewportRendering() {
+    ValidateGraphCacheDemandAndPrecision();
     ValidateViewportPlans();
     ValidateViewportGraph(ViewportGraph(),96,64,true);
 

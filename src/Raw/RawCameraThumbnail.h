@@ -18,9 +18,9 @@ struct CameraThumbnail {
     void DisplaySize(int maxEdge, int& outWidth, int& outHeight) const;
 };
 
-CameraThumbnail FindCameraThumbnail(const std::filesystem::path& path, std::uintmax_t fileSize, int targetEdge);
+CameraThumbnail FindCameraThumbnail(const std::filesystem::path& path, std::uintmax_t fileSize, int targetEdge, const std::function<bool()>& cancelled = {});
 bool DecodeCameraThumbnail(const std::filesystem::path& path, const CameraThumbnail& preview,
-    int maxEdge, std::vector<unsigned char>& rgba, int& width, int& height);
+    int maxEdge, std::vector<unsigned char>& rgba, int& width, int& height, const std::function<bool()>& cancelled = {});
 bool DecodeRasterThumbnail(const std::filesystem::path& path, int maxEdge,
     std::vector<unsigned char>& rgba, int& width, int& height);
 enum class GalleryPixelSource { Unavailable, CameraJpeg, RawSamples };

@@ -67,6 +67,10 @@ function Test-StackProductPayload {
             throw "$relative is version '$($binary.VersionInfo.ProductVersion)', expected '$Version'. Rebuild this product before packaging."
         }
     }
+    # Old build folders must not reintroduce the retired optional provider.
+    if (Test-Path -LiteralPath (Resolve-StackPayloadPath $StageDir "Stack/App/Tools/FFmpeg")) {
+        throw "FFmpeg is disabled and must not be included in Stack packages. Remove the stale provider from the build folder before packaging."
+    }
     foreach ($relative in @("Stack/User", "Stack/Temp", "Stack Projects")) {
         if (Test-Path -LiteralPath (Resolve-StackPayloadPath $StageDir $relative)) {
             throw "Product payload must not contain user or temporary data: $relative"

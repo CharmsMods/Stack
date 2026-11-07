@@ -37,13 +37,21 @@ void ColorWarpFeedbackData::SampleMasks(const RawRecipe::RawColorWarpRecipe& rec
     const auto byte = [](std::uint8_t value) { return value / 255.0f; };
     // Guide attenuation belongs only to selections with a spatial restriction.
     const bool spatial = std::any_of(fields.begin(), fields.end(),
-        [](const auto& field) { return field.spatialAvailable; });
+        [](const auto& field) { return field.spatialAvailable || field.smoothed; });
     if (!spatial) return;
     for (std::size_t index = 0; index < fields.size() && index < samples.size(); ++index) {
         const auto& field = fields[index];
-        if (!field.spatialAvailable || field.gate.empty()) continue;
-        samples[index] = { Sample(guide, field.gate, u, v, byte) * guided,
-            Sample(guide, field.support, u, v, byte) * guided,
+        if (field.gate.empty()) continue;
+        const float multiplier=field.spatialAvailable?guided:1.f;
+        if(field.smoothed) {
+            const auto value=[](float v){return v;};
+            samples[index]={Sample(guide,field.smoothGate,u,v,value)*multiplier,
+                Sample(guide,field.smoothSupport,u,v,value)*multiplier,
+                Sample(guide,field.boundary,u,v,byte),true};
+            continue;
+        }
+        samples[index] = { Sample(guide, field.gate, u, v, byte) * multiplier,
+            Sample(guide, field.support, u, v, byte) * multiplier,
             Sample(guide, field.boundary, u, v, byte) };
     }
 }
@@ -111,8 +119,8 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
                         const auto& pin = recipe.pins[index];
                         const auto region = std::find_if(recipe.regions.begin(), recipe.regions.end(),
                             [&](const auto& candidate) { return candidate.id == pin.regionId; });
-                        if(region!=recipe.regions.end() && region->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches)
-                            data->fields[index]=RawRecipe::BuildRawColorWarpMaskFields(guide,pin,&*region,cancelled);
+                        if(pin.smoothSelection>0 || (region!=recipe.regions.end() && region->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches))
+                            data->fields[index]=RawRecipe::BuildRawColorWarpMaskFields(guide,pin,region!=recipe.regions.end()?&*region:nullptr,cancelled);
                     }
                     if (!cancelled()) {
                         std::lock_guard<std::mutex> lock(request->mutex);
@@ -168,24 +176,23 @@ std::vector<unsigned char> BuildColorWarpFeedbackOverlay(const ColorWarpFeedback
             [&](const auto& candidate) { return candidate.id == recipe.pins[pin].id; });
         spatialSupport[pin] = RawRecipe::ColorWarpPinSpatialSupport(recipe, recipe.pins[pin]);
     }
-    auto memberships=recipe.pins;
-    for(auto& pin:memberships){pin.enabled=true;pin.strength=1;}
+    std::vector<RawRecipe::RawColorWarpMaskSample> samples;
     const auto& guide = data.guide;
     std::vector<unsigned char> pixels(guide.pixels.size() * 4u, 0u);
     for (std::size_t index = 0; index < guide.pixels.size(); ++index) {
+        const float u=(float(index%guide.width)+.5f)/guide.width;
+        const float v=(float(index/guide.width)+.5f)/guide.height;
+        data.SampleMasks(recipe,guide.pixels[index],u,v,samples);
         float selected = 0.0f, strongest = 0.0f;
         std::array<float, 3> color {48.0f, 210.0f, 224.0f};
         for (std::size_t pinIndex = 0; pinIndex < recipe.pins.size(); ++pinIndex) {
             if(!inspected[pinIndex])continue;
-            const auto& pin=memberships[pinIndex];
             const auto& field = data.fields[pinIndex];
             const RawRecipe::RawColorWarpMaskSample mask = field.gate.empty()?RawRecipe::RawColorWarpMaskSample{}:RawRecipe::RawColorWarpMaskSample{
                 field.gate[index] / 255.0f, field.support[index] / 255.0f,
                 field.boundary[index] / 255.0f };
             const auto& input = guide.pixels[index];
-            const float weight = RawRecipe::EvaluateColorWarpPinWeight(pin, input, mask,
-                spatialSupport[pinIndex]);
-            if (!inspected[pinIndex]) continue;
+            const float weight = RawRecipe::ColorWarpPreviewInfluence(recipe,pinIndex,input,samples);
             selected = std::max(selected,weight);
             if (weight <= strongest) continue;
             strongest = weight;

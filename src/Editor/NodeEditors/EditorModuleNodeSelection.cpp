@@ -5,6 +5,7 @@
 #include "Project/RawNodeEditing.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "imgui_internal.h"
+#include <unordered_set>
 
 using namespace Stack::Project;
 
@@ -82,6 +83,32 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
         m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
         ClearRawWorkspaceGraphScopeReadbackCaches();
     }
+    if(changed) {
+        const auto& state=m_Project->rawLayers.State();
+        if(const auto* layer=FindRawAdjustmentLayer(state,layerId)) {
+            std::vector<int> pending{node->id};
+            std::unordered_set<int> visited;
+            for(std::size_t i=0;i<pending.size() && !m_EditingRawLayerMask;++i) {
+                const int id=pending[i];
+                if(!visited.insert(id).second)continue;
+                const auto* upstream=layer->graph.FindNode(id);
+                if(!upstream)continue;
+                m_EditingRawLayerMask=GetRawOperationMask(state,*layer,upstream->instanceUuid);
+                if(!m_EditingRawLayerMask)for(const auto& output:layer->maskOutputs) {
+                    const auto* published=FindRawPublishedNode(*layer,output);
+                    if(published && published->id==id) {
+                        m_EditingRawLayerMask=RawMaskReference{layerId,output.id};break;
+                    }
+                }
+                for(const auto& link:layer->graph.GetLinks())
+                    if(link.toNodeId==id && link.toSocketId!="matchExtent" &&
+                        (id!=node->id || link.toSocketId=="maskIn" ||
+                         node->kind==EditorNodeGraph::NodeKind::MaskGenerator ||
+                         node->kind==EditorNodeGraph::NodeKind::MaskTexture))
+                        pending.push_back(link.fromNodeId);
+            }
+        }
+    }
     m_Project->nodeEditor=target;
     m_Project->layerNodeSelection[layerId]=uuid;
     m_SelectedRawAdjustmentLayer=layerId==kRawBackgroundId?std::string{}:layerId;
@@ -95,6 +122,7 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
 }
 
 void EditorModule::BindRequestedRawNodeEditor() {
+    m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
     m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
     m_Project->nodeEditor.reset();
     const auto* node=SelectedEditingNode();

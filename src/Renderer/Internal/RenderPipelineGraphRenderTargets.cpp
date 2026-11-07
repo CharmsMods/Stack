@@ -14,15 +14,18 @@ void RenderPipeline::EnsureGraphFloat32Targets() {
     ConfigureGraphTargetPrecision(true);
 }
 
-void RenderPipeline::ConfigureGraphTargetPrecision(bool requiredFloat32) {
-    bool seededFloat32 = false;
+bool RenderPipeline::HasFloat32GraphDependencies() const {
     for (const auto& [key, entries] : m_RawDevelopStageImageCache) {
         (void)key;
-        seededFloat32 = seededFloat32 || std::any_of(entries.begin(), entries.end(),
-            [](const auto& entry) { return entry.texture && entry.requiresFloat32Seed; });
+        if (std::any_of(entries.begin(), entries.end(),
+            [](const auto& entry) { return entry.texture && entry.requiresFloat32Seed; })) return true;
     }
+    return false;
+}
+
+void RenderPipeline::ConfigureGraphTargetPrecision(bool requiredFloat32) {
     Stack::Renderer::ReconfigureGraphTargetPrecision(m_GraphFloat32Targets,
-        requiredFloat32, seededFloat32, [&] {
+        requiredFloat32, HasFloat32GraphDependencies(), [&] {
             // These caches do not all include target format in their key.
             // Clear borrowed handles before releasing the resources they name;
             // separately owned source/external output textures remain owned.

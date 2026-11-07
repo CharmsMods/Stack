@@ -44,6 +44,9 @@ function Show-StackMenuHeader {
     if ($Product -eq "Burst") {
         Write-Host "Standalone Burst window; installer adds Explorer's Show more options command." -ForegroundColor DarkGray
     }
+    else {
+        Write-Host "Full Stack includes Stack.exe, StackBurst.exe, and their required runtimes." -ForegroundColor DarkGray
+    }
     Write-Host "--------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Build and package"
@@ -51,7 +54,7 @@ function Show-StackMenuHeader {
     Write-StackMenuChoice "2" "Build and launch"
     Write-StackMenuChoice "3" "Create installer + portable ZIP (unsigned)" -Highlight
     Write-StackMenuChoice "4" "Signed public release"
-    Write-StackMenuChoice "5" "Local test installer (isolated profile)"
+    Write-StackMenuChoice "5" "Local test installer + ZIP (isolated profile)"
     Write-Host ""
     Write-StackMenuChoice "M" "More tools (checks, version, paths, maintenance)"
     Write-Host ""
@@ -87,25 +90,12 @@ function Invoke-StackValidation {
         Write-Host "Layer registry validation failed with exit code $LASTEXITCODE."
     }
 
-    & $exePath --validate-ffmpeg-provider
-    if ($LASTEXITCODE -ne 0) {
-        $allPassed = $false
-        Write-Host "FFmpeg provider validation failed with exit code $LASTEXITCODE."
-    }
-
     if ($allPassed) {
         Write-Host "Validation passed."
     }
     else {
         Write-Host "Validation failed."
     }
-}
-
-function Show-OptionalFfmpegProviderStatus {
-    param([object]$Paths)
-
-    $status = Get-StackFfmpegProviderStatus -ProviderDir $Paths.FfmpegProviderSourceDir
-    Show-StackFfmpegProviderStatus -Status $status
 }
 
 function Invoke-ExtraBuildFolderArchive {
@@ -224,7 +214,6 @@ while ($true) {
         Write-Host ""
         Write-StackMenuChoice "6" "Validate selected build"
         Write-StackMenuChoice "10" "Archive old build folders"
-        Write-StackMenuChoice "11" "FFmpeg provider status (full Stack)"
         Write-StackMenuChoice "12" "Version and full paths"
         Write-StackMenuChoice "V" "Change shared release version"
         $moreChoice = Read-Host "Tool (Enter to go back)"
@@ -289,10 +278,6 @@ while ($true) {
                 Invoke-ExtraBuildFolderArchive -Root $Root
                 Pause-StackMenu
             }
-            "11" {
-                Show-OptionalFfmpegProviderStatus -Paths $paths
-                Pause-StackMenu
-            }
             "12" {
                 $versionInfo = Get-StackVersionInfo -VersionFile $paths.VersionFile
                 $suggestedVersion = Get-NextStackPatchVersion -Version $versionInfo.Version
@@ -310,8 +295,6 @@ while ($true) {
                 Write-Host "Local test output:      $(Join-Path $paths.LocalTestReleaseDir $selectedProduct)"
                 Write-Host "Release archive:        $($paths.ReleaseArchiveDir)"
                 Write-Host "Extra build archive:    $($paths.ExtraBuildArchiveRoot)"
-                Write-Host "FFmpeg provider source: $($paths.FfmpegProviderSourceDir)"
-                Write-Host "FFmpeg package path:    $($paths.FfmpegProviderStageRelativeDir)"
                 Pause-StackMenu
             }
             "Q" {

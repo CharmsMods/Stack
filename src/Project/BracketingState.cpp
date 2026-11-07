@@ -6,6 +6,9 @@ namespace Stack::Project {
 BracketingState::~BracketingState() { CancelJobs(); }
 
 void BracketingState::CancelJobs() {
+    processWhenMetadataReady=false;
+    waitingForMemory=false;pending=false;publishRequested=false;
+    if (metadataJob) metadataJob->canceled = true;
     if (job) job->canceled = true;
     if (preparationJob) preparationJob->canceled = true;
     if (detailJob) detailJob->canceled = true;
@@ -65,11 +68,11 @@ BracketingEditOutcome CommitBracketingEdit(BracketingState& state,
     if (state.detailJob) state.detailJob->canceled = true;
     state.failed = false;
     state.changedAt = now;
-    state.pending = !state.processRequired;
+    state.pending = true;
     state.publishRequested = state.pending;
     state.previewDirty = state.pending;
     state.status = state.processRequired
-        ? "Changes pending. Press Process to update the result."
+        ? "Updating bracket inputs..."
         : "Updating bracket output...";
     if (!document || state.newProject) return outcome;
     auto* set = FindSourceSet(*document, state.setId);

@@ -78,7 +78,15 @@ bool ValidateProjectGallery(const std::filesystem::path& folder) {
     state.workspaceRoot = layout.workspaceRoot;
     // Read project manifests only. No camera decoding, image processing or
     // project writes are needed to check what the filmstrip will display.
-    if (!RawWorkspace::DiscoverSourceSetProjects(layout, sources, state.sourceSetProjects)) return false;
+    if (!RawWorkspace::DiscoverSourceSetProjects(layout, sources, state.sourceSetProjects,
+            {}, RawWorkspace::ProjectDiscoveryMode::BrowseListing)) return false;
+    for (const auto& project : state.sourceSetProjects) {
+        if (project.linkedOriginal || (project.thumbnailOriginal &&
+                !project.thumbnailOriginal->fingerprint.empty())) {
+            std::cerr << "FAIL browsing advertised an unverified original as verified input\n";
+            return false;
+        }
+    }
     // Link a distinct probe source to each on-disk copy, including copies
     // that retained the same document ID when saved to different paths.
     for (const auto& project : state.sourceSetProjects) {

@@ -1106,25 +1106,26 @@ bool EditorModule::CommitActiveMultiFrameMutation(
     if (const auto* active = Stack::Project::FindSourceSet(snapshot,snapshot.activeSourceSetId))
         snapshot.pipelineData["rawLayerSourceNodeUuid"] = active->graphBindingNodeId;
     UpdateWorkspaceManifestFields(snapshot);
-    if (!StackBinaryFormat::ExternalizeManagedProjectAssets(
-            m_Project->store, transaction, snapshot)) {
-        m_Project->store->Abort(transaction);
-        if (importInProgress) {
-            m_Project->lifecycle.CompleteImport(false);
+    // In-memory source-set edits abort this transaction below. Externalizing
+    // first would replace live payloads with references to aborted assets and
+    // can hash/write a complete bracket from an ordinary UI action.
+    if (importInProgress || !noteEdit) {
+        if (!StackBinaryFormat::ExternalizeManagedProjectAssets(
+                m_Project->store, transaction, snapshot)) {
+            m_Project->store->Abort(transaction);
+            if (importInProgress) m_Project->lifecycle.CompleteImport(false);
+            return Finish(outError, "Could not stage the project's managed image assets.", false);
         }
-        return Finish(
-            outError,
-            "Could not stage the project's managed image assets.",
-            false);
-    }
-    if(m_Bracketing && m_Bracketing->result &&
-        m_Bracketing->projectId==snapshot.projectId && m_Bracketing->completedRevision==snapshot.hdrInputRevision) {
-        auto* resultSet=Stack::Project::FindSourceSet(snapshot,m_Bracketing->setId);
-        std::string resultError;
-        if(resultSet && resultSet->settings["bracketing"].dump()==m_Bracketing->completedRecipe &&
-            !Stack::Project::StageBracketingResult(m_Project->store,transaction,snapshot,m_Bracketing->setId,
-                *m_Bracketing->result,{},resultError)) {
-            m_Project->store->Abort(transaction);return Finish(outError,resultError,false);
+        if (m_Bracketing && m_Bracketing->result &&
+            m_Bracketing->projectId == snapshot.projectId && m_Bracketing->completedRevision == snapshot.hdrInputRevision) {
+            auto* resultSet = Stack::Project::FindSourceSet(snapshot, m_Bracketing->setId);
+            std::string resultError;
+            if (resultSet && resultSet->settings["bracketing"].dump() == m_Bracketing->completedRecipe &&
+                !Stack::Project::StageBracketingResult(m_Project->store, transaction, snapshot, m_Bracketing->setId,
+                    *m_Bracketing->result, {}, resultError)) {
+                m_Project->store->Abort(transaction);
+                return Finish(outError, resultError, false);
+            }
         }
     }
     const Stack::Project::ModelValidationResult validation =
@@ -2571,18 +2572,9 @@ void EditorModule::StartManagedProjectSaveAsync(
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - snapshotCaptureBegin).count();
 
-    // Capture a reduced, complete output from this exact editor revision.
-    // Encoding stays on the save worker; a pending image never blocks saving.
-    std::vector<unsigned char> coverPixels;
-    int coverWidth=0,coverHeight=0,textureWidth=0,textureHeight=0;
-    unsigned coverTexture=0;
-    if (rawProject && HasCurrentRawWorkspacePresentation()) {
-        bool complete=TryGetViewportPreviewOverview(coverTexture,textureWidth,textureHeight);
-        Stack::Renderer::ViewportPreviewGeometry geometry;
-        const bool partial=TryGetViewportPreviewGeometry(geometry) && geometry.resident.Partial();
-        if (!complete && !partial) complete=TryGetActiveRawWorkspacePresentationTexture(coverTexture,textureWidth,textureHeight);
-        if (complete) coverPixels=m_Pipeline.GetExternalTexturePixels(coverTexture,textureWidth,textureHeight,coverWidth,coverHeight,320);
-    }
+    // Reuse the latest prepared cover in the captured snapshot. Settled render
+    // adoption owns cover refresh; saving/closing must not perform a synchronous
+    // GPU readback behind another project's compute work.
 
     const Stack::Project::ProjectSaveToken saveToken =
         m_Project->lifecycle.BeginSave();
@@ -2640,7 +2632,6 @@ void EditorModule::StartManagedProjectSaveAsync(
     work->snapshot = std::move(snapshot);
 
     auto saveWork = [
-        coverPixels=std::move(coverPixels),coverWidth,coverHeight,
         owner, bracketDraft = std::move(bracketDraft), adoptionWorkspace,
         sourceStore,
         bracketResult, bracketSetId,
@@ -2657,11 +2648,6 @@ void EditorModule::StartManagedProjectSaveAsync(
     ]() mutable {
         const auto commitBegin = std::chrono::steady_clock::now();
         try {
-        if (!coverPixels.empty()) {
-            auto encoded=Stack::PngEncoding::EncodeInterleaved(coverPixels,coverWidth,coverHeight,4);
-            if(!encoded.empty())work->snapshot.coverThumbnailBytes=std::move(encoded);
-            coverPixels.clear();
-        }
         if (adopting) {
             if (!adoptionWorkspace.empty() &&
                 !Stack::RawWorkspace::EnsureManagedFolders(adoptionWorkspace, &work->error))
@@ -2820,9 +2806,13 @@ void EditorModule::StartManagedProjectSaveAsync(
                                 if(!liveSet || !savedSet.settings.contains("bracketingResult") ||
                                     liveSet->settings.value("bracketing",nlohmann::json())!=savedSet.settings.value("bracketing",nlohmann::json()))continue;
                                 liveSet->settings["bracketingResult"]=savedSet.settings.at("bracketingResult");
-                                const auto* asset=Stack::Project::FindEmbeddedAsset(work->snapshot,
-                                    savedSet.settings.at("bracketingResult").at("assetId").get<std::string>());
-                                if(asset&&!Stack::Project::FindEmbeddedAsset(current,asset->assetId))current.embeddedAssets.push_back(*asset);
+                                const auto& savedResult = savedSet.settings.at("bracketingResult");
+                                for (const char* field : {"assetId", "masterAssetId"}) {
+                                    const auto assetId = savedResult.value(field, std::string{});
+                                    const auto* asset = Stack::Project::FindEmbeddedAsset(work->snapshot, assetId);
+                                    if (asset && !Stack::Project::FindEmbeddedAsset(current, asset->assetId))
+                                        current.embeddedAssets.push_back(*asset);
+                                }
                             }
                         }
                         if (adopting) {

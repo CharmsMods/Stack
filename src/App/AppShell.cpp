@@ -1,3 +1,5 @@
+#include "BurstEngine/ScratchDirectory.h"
+#include "Raw/GalleryTileCache.h"
 #include "GraphNativeCursor.h"
 #include "App/NodeTransitionCapture.h"
 #include "Utils/GraphCursor.h"
@@ -1547,6 +1549,12 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     glfwSetDropCallback(m_Window, OnFileDrop);
 
     Async::TaskSystem::Get().Initialize();
+    Async::ActivityMetadata scratchMaintenance;
+    scratchMaintenance.label="Cleaning abandoned bracket cache";scratchMaintenance.maintenance=true;
+    Async::TaskSystem::Get().Submit(std::move(scratchMaintenance),[root=AppPaths::GetCacheDirectory()] {
+        Stack::BurstEngine::RecoverAbandonedScratch(root);
+        Stack::GalleryTileCache::Initialize();
+    });
     InitializeProjectWorkspaces();
     if(m_Appearance) Stack::Hdr::SetPreviewInSdr(m_Appearance->GetPreviewInSdr());
     m_QueueRenderer.Configure(m_Window, m_Appearance.get(), &m_Queue.Model());
@@ -2787,7 +2795,8 @@ void AppShell::RenderUI() {
     inputRegions.emplace_back(viewport->Pos, ImVec2(viewport->Pos.x + std::max(
         2.f * m_NavigationRail.scale, m_NavigationRail.visibleWidth), viewport->Pos.y + viewport->Size.y));
     inputRegions.emplace_back(m_NavigationRail.panelPosition,
-        ImVec2(m_NavigationRail.bodyPosition.x, viewport->Pos.y + viewport->Size.y));
+        ImVec2(m_NavigationRail.panelPosition.x + m_NavigationRail.visiblePanelWidth,
+            viewport->Pos.y + viewport->Size.y));
     inputRegions.emplace_back(m_NavigationRail.bodyPosition,
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
     if (m_RawMaskToolbar.enabled) {
@@ -3045,7 +3054,7 @@ void AppShell::RenderUI() {
                 m_WorkspaceCompositor.KeepChrome(headerWindow->DrawList);
             }
     }
-    if(bracketPresentation) {
+    {
         if(glfwGetWindowAttrib(m_Window,GLFW_ICONIFIED)!=GLFW_TRUE)
             m_Editor->RenderBracketingPresentation(
                 m_Appearance?m_Appearance->GetClearColor():ImVec4(.08f,.08f,.08f,1),

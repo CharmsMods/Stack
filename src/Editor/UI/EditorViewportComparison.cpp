@@ -40,9 +40,22 @@ bool EditorViewport::PrepareRawSplitComparison(EditorModule* editor, const ImVec
         m_ShowStaticSingleCompare = false; m_StaticSingleCompareBlend = 0.f;
         m_StaticCompareRectsInitialized = false;
     }
+    if (m_ShowSplitCompare || m_RawSplitProgress > 0.f) {
+    const auto preferences=editor->GetRawWorkspacePresentationPreferences();
+    if(preferences.viewSectionOpen && preferences.viewSectionTab==1) m_RawComparisonAfterRight=false;
+    else {
+        ImVec2 toolMin,toolMax;
+        if(editor->GetRawActiveControlBounds(toolMin,toolMax)) {
+            const auto bounds=ComparisonBounds();
+            const float fraction=((toolMin.x+toolMax.x)*.5f-bounds.Min.x)/std::max(1.f,bounds.GetWidth());
+            if(fraction<1.f/3.f)m_RawComparisonAfterRight=false;
+            else if(fraction>2.f/3.f)m_RawComparisonAfterRight=true;
+        }
+    }
+    }
     if (m_ShowSplitCompare && editor->IsViewMode()) {
         // One bounded original raster survives panel resizing and navigation.
-        const int edge = 4096;
+        const int edge = 1536;
         editor->UpdateViewComparisonPreview(m_Comparison, edge);
     }
     const bool shown = m_ShowSplitCompare && editor->IsViewMode() && m_Comparison.Texture();
@@ -60,10 +73,10 @@ void EditorViewport::PresentRawComparison(ImVec2& minimum, ImVec2& maximum,
     if (m_RawSplitProgress <= 0.f) return;
     const auto layout = ComparisonLayout(
         viewMinimum,viewMaximum,fittedSize,m_RawSplitProgress);
-    m_RawComparisonBeforeMin = layout.Present(minimum,false);
-    m_RawComparisonBeforeMax = layout.Present(maximum,false);
-    minimum = layout.Present(minimum,true);
-    maximum = layout.Present(maximum,true);
+    m_RawComparisonBeforeMin = layout.Present(minimum,!m_RawComparisonAfterRight);
+    m_RawComparisonBeforeMax = layout.Present(maximum,!m_RawComparisonAfterRight);
+    minimum = layout.Present(minimum,m_RawComparisonAfterRight);
+    maximum = layout.Present(maximum,m_RawComparisonAfterRight);
 }
 
 void EditorViewport::MapRawComparisonInput(ImVec2& mouse, ImVec2& delta,
@@ -83,8 +96,8 @@ void EditorViewport::PushRawComparisonClip(ImDrawList* list, ImVec2 minimum, ImV
     const float blend = t*t*(3.f-2.f*t);
     const float center = (minimum.x+maximum.x)*.5f;
     const float gap = 1.f;
-    if (after) minimum.x += (center+gap*.5f-minimum.x)*blend;
-    else maximum.x = center-gap*.5f;
+    if (after==m_RawComparisonAfterRight) minimum.x += (center+gap*.5f-minimum.x)*blend;
+    else maximum.x += (center-gap*.5f-maximum.x)*(after?blend:1.f);
     list->PushClipRect(minimum,maximum,true);
 }
 
@@ -93,7 +106,7 @@ void EditorViewport::DrawRawComparisonBefore(ImDrawList* list, ImVec2 minimum, I
     const float t=m_RawSplitProgress;
     PushRawComparisonClip(list,minimum,maximum,false);
     list->AddImage((ImTextureID)(intptr_t)m_Comparison.Texture(),
-        m_RawComparisonBeforeMin, m_RawComparisonBeforeMax, ImVec2(0, 0), ImVec2(1, 1),
+        m_RawComparisonBeforeMin, m_RawComparisonBeforeMax, ImVec2(0, 1), ImVec2(1, 0),
         ImGui::GetColorU32(ImVec4(1,1,1,t*t*(3.f-2.f*t))));
     list->PopClipRect();
     const auto visible = ComparisonBounds();

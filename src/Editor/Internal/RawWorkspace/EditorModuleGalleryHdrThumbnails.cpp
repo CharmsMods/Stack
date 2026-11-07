@@ -16,6 +16,12 @@ unsigned int EditorModule::GalleryThumbnailForDisplay(const std::string& cacheKe
     const std::string* presetCardKey,int* width,int* height) {
     if(width) *width=entry.width;
     if(height) *height=entry.height;
+    // Gallery tiles retain their SDR rendition. Refining each tile from RAW
+    // changes its appearance after loading and spends rendering work on the
+    // browsing strip/grid. Only explicitly requested large detail previews
+    // may use the HDR refinement path.
+    if (entry.detailEdge == 0 || presetCardKey || cacheKey.rfind("project-overlay:", 0) == 0)
+        return entry.texture;
     if(!entry.texture || !ImGui::GetCurrentContext() || !Stack::Hdr::PreviewActiveForCurrentWindow()) return entry.texture;
     const Stack::RawWorkspace::SourceSetProjectCatalogEntry* card=nullptr;
     if(presetCardKey || cacheKey.compare(0,16,"project-overlay:")==0) {

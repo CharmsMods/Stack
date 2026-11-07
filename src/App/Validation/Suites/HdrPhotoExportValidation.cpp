@@ -150,18 +150,21 @@ void CheckFile(const std::filesystem::path& path, Hdr::FileFormat format, const 
     Require(Hdr::DecodeDisplaySource(bytes,image,&detected) && detected==format, "HDR export did not reopen in its declared format.");
     CheckHdrFileReopen(bytes,image);
     Require(image.width==reference.width && image.height==reference.height,"HDR export lost native dimensions.");
-    double worst=0,mean=0,peak=0;
+    double worst=0,mean=0,peak=0,referencePeak=0;
     for(const auto& sample:reference.samples) for(int k=0;k<3;++k) {
         const float value=image.rgba[sample.offset+k];
         const double delta=std::abs(value-sample.linear[k]);
         Require(std::isfinite(delta),"Non-finite reopened HDR sample.");
         worst=std::max(worst,delta); mean+=delta;
         peak=std::max(peak,double(value));
+        referencePeak=std::max(referencePeak,double(sample.linear[k]));
     }
     mean/=3.0*reference.samples.size();
-    Require(peak>1.05,"The exported photo contains no recovered above-white highlights.");
+    // An unedited dark capture need not contain above-white pixels. Require
+    // them when the actual rendered reference has them; never invent exposure.
+    Require(referencePeak<=1.05 || peak>1.0,"The export lost the reference's above-white highlights.");
     std::cout<<path.u8string()<<": "<<image.width<<"x"<<image.height<<", linear RGB mean/worst error "
-        <<mean<<"/"<<worst<<", sampled channel peak "<<peak<<" x diffuse white\n"<<std::flush;
+        <<mean<<"/"<<worst<<", sampled channel peak "<<peak<<" (reference "<<referencePeak<<") x diffuse white\n"<<std::flush;
     if(format==Hdr::FileFormat::PqPng) {
         Require(worst<.005,"Lossless HDR PNG differs from quantized native HDR render.");
         return;
@@ -245,12 +248,13 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
         for(bool viewMode:{false,true}) {
             if(viewMode) editor.SetWorkspaceMode(Project::WorkspaceMode::View);
             for(bool hdr:{true,false}) {
-                Hdr::SetPreviewInSdr(!hdr);
+                editor.SetSdrOutputProof(!hdr);
                 // Wait ends its own maintenance frame before checking another real UI draw.
                 check.Wait([&]{return drawsPhoto(viewMode,hdr);},viewMode ? "View HDR/SDR photo draw" : "Viewport HDR/SDR photo draw");
             }
         }
         Hdr::SetPreviewInSdr(false);
+        editor.SetSdrOutputProof(false);
         std::cout<<"Viewport and View drew their accepted HDR texture and SDR counterpart.\n"<<std::flush;
     }
     const auto graph=editor.BuildGraphSnapshot();

@@ -29,10 +29,25 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
     const auto white=ImGui::GetColorU32(ImGuiCol_Text);
     draw->AddLine(source,target,white,1.5f);
     draw->AddCircle(source,4,white,20,1.2f);
+    draw->AddCircleFilled(target,6.5f,IM_COL32(0,0,0,150));
     draw->AddCircleFilled(target,5,white);
     const auto rangePoint=[&](float angle,float radius) {return ImVec2(center.x+std::cos(angle*radians)*radius,center.y-std::sin(angle*radians)*radius);};
     std::array<ImVec2,8> handles{};
-    if(state.selectRange) {
+    ImVec2 reachHandle{};
+    if(state.selectRange && pin.sampleRadius>0) {
+        std::array<ImVec2,65> outline{};
+        for(int i=0;i<=64;++i) {
+            const float angle=i*2.f*3.14159265359f/64.f;
+            const auto q=ProjectColorDisc((pin.sourceA+pin.sampleRadius*std::cos(angle))*.7f,
+                (pin.sourceB+pin.sampleRadius*std::sin(angle))*.7f);
+            const ImVec2 point(center.x+q.x/ColorDiscExtent*size*.5f,center.y-q.y/ColorDiscExtent*size*.5f);
+            outline[i]=point;if(i==0)reachHandle=point;
+        }
+        draw->AddPolyline(outline.data(),int(outline.size()),IM_COL32(0,0,0,150),ImDrawFlags_Closed,3.f);
+        draw->AddPolyline(outline.data(),int(outline.size()),white,ImDrawFlags_Closed,1.f);
+        draw->AddCircleFilled(reachHandle,5.5f,IM_COL32(0,0,0,150));
+        draw->AddCircleFilled(reachHandle,4.f,white);
+    } else if(state.selectRange) {
         const float lo=sourceHue+pin.hueRange.low, hi=sourceHue+pin.hueRange.high;
         const float angles[]={lo,hi,lo-pin.hueRange.featherLow,hi+pin.hueRange.featherHigh};
         for(int i=0;i<4;++i) {
@@ -59,7 +74,9 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
     const auto raw=UnprojectColorDisc(radius,0);
     const float pointerChroma=raw.x/.7f;
     if(ImGui::IsItemActivated()) {
-        if(state.selectRange) {
+        if(state.selectRange && pin.sampleRadius>0) {
+            state.dragging=std::hypot(reachHandle.x-io.MousePos.x,reachHandle.y-io.MousePos.y)<14.f?9:-1;
+        } else if(state.selectRange) {
             float nearest=14.f;state.dragging=-1;
             for(int i=0;i<(pin.saturationRange.enabled?8:4);++i) {
                 const float d=std::hypot(handles[i].x-io.MousePos.x,handles[i].y-io.MousePos.y);
@@ -67,6 +84,8 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
             }
         } else if(!pin.protectColor && std::hypot(dx,dy)<size*.5f) {
             state.dragging=0;state.lastHue=pointerHue;state.startChroma=pointerChroma;state.startSaturation=pin.saturation;
+            state.movePress={pointerChroma*std::cos(pointerHue*radians),pointerChroma*std::sin(pointerHue*radians)};
+            const auto destination=RawRecipe::ColorWarpDestination(pin);state.moveStart={destination[0],destination[1]};
         }
     }
     bool changed=false;
@@ -76,9 +95,18 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         const auto unwrapped=[&](float reference){return reference+RawRecipe::ColorWarpHueDelta(relative-reference);};
         switch(state.dragging) {
         case 0:
-            if(std::hypot(dx,dy)>3)pin.hueShift=std::clamp(pin.hueShift+RawRecipe::ColorWarpHueDelta(pointerHue-state.lastHue),-180.f,180.f);
+            if(pin.moveColors) {
+                const float a=state.moveStart.x+.15f*(pointerChroma*std::cos(pointerHue*radians)-state.movePress.x);
+                const float b=state.moveStart.y+.15f*(pointerChroma*std::sin(pointerHue*radians)-state.movePress.y);
+                pin.hueShift=RawRecipe::ColorWarpHueDelta(RawRecipe::ColorWarpHue(a,b)-sourceHue);
+                pin.saturation=std::clamp(std::hypot(a,b)/std::max(.01f,sourceChroma)-1.f,-1.f,5.f);
+                break;
+            }
+            if(std::hypot(dx,dy)>3)pin.hueShift=std::clamp(pin.hueShift+.15f*RawRecipe::ColorWarpHueDelta(pointerHue-state.lastHue),-180.f,180.f);
             state.lastHue=pointerHue;
-            pin.saturation=std::clamp(state.startSaturation+(pointerChroma-state.startChroma)/std::max(.01f,sourceChroma),-1.f,5.f);break;
+            pin.saturation=std::clamp(state.startSaturation+.15f*(pointerChroma-state.startChroma)/std::max(.01f,sourceChroma),-1.f,5.f);break;
+        case 9:pin.sampleRadius=std::clamp(std::hypot(pointerChroma*std::cos(pointerHue*radians)-pin.sourceA,
+            pointerChroma*std::sin(pointerHue*radians)-pin.sourceB),.01f,1.f);break;
         case 1:hue.low=std::min(relative,hue.high);break;
         case 2:hue.high=std::max(relative,hue.low);break;
         case 3:hue.featherLow=std::clamp(hue.low-unwrapped(hue.low-hue.featherLow),0.f,360.f);break;

@@ -118,7 +118,8 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
     std::array<Donor,64> donors;
     std::size_t n=0;
     const bool needDonor=!anchors||std::any_of(samples.begin(),samples.end(),[&](const auto& site){
-        return site[ref].clippedReference==ClippedReference::LowerBound;
+        return site[ref].clippedReference==ClippedReference::LowerBound||
+            site[ref].clippedReference==ClippedReference::NeutralCompletion;
     });
     for(std::size_t g=0;needDonor&&g<recipe.groups.size();++g)
         if(recipe.groups[g].enabled&&EstimateDonor(samples,g,pixels,ref,anchors,donors[n]))++n;
@@ -193,6 +194,12 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
                 chosen=donor->group;
                 value=std::max(floor,donor->scale*samples[s][chosen].fallback);estimated=true;
             }
+        }
+        if(!estimated&&samples[s][ref].clippedReference==ClippedReference::NeutralCompletion) {
+            // Prefer a constrained donor whenever available. Neutral completion
+            // only prevents an unresolved clipped channel becoming false color;
+            // keep it clipped and unsupported, even with surviving anchors.
+            value=std::max(floor,samples[s][ref].value);
         }
         const bool rejected=p.localRejected;p={};
         p.value=value;p.actual[chosen]=1;p.fallback=true;p.localRejected=rejected;p.clipped=!estimated;

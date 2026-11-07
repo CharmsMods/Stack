@@ -681,10 +681,12 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, searchBgHovered);
         ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
         ImGui::PushStyleColor(ImGuiCol_TextDisabled, colPassiveText);
+        ImGui::PushStyleColor(ImGuiCol_InputTextCursor, colTitleText);
+        ImGui::PushStyleColor(ImGuiCol_Border, ColorWithAlpha(themeText,alpha*(m_NodeBrowserSearchFocused?.35f:.12f)));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
-        ImGui::PushItemWidth(contentWidth);
+        ImGui::PushItemWidth(std::max(1.f,contentWidth-38.f));
         ImGuiInputTextFlags searchFlags = isOpen ? ImGuiInputTextFlags_None : ImGuiInputTextFlags_ReadOnly;
         ImGui::InputTextWithHint("##NodesPanelSearch", prompt, m_NodeBrowserSearchBuffer, sizeof(m_NodeBrowserSearchBuffer), searchFlags);
         // Search edits and Enter can arrive together. Resolve the current input
@@ -784,7 +786,16 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         m_NodeBrowserSearchFocused = ImGui::IsItemActive();
         ImGui::PopItemWidth();
         ImGui::PopStyleVar(3);
-        ImGui::PopStyleColor(5);
+        ImGui::PopStyleColor(7);
+        ImGui::SameLine(0,6.f);
+        ImGui::BeginDisabled(!m_NodeBrowserSearchBuffer[0]);
+        if(ImGui::Button("X##ClearNodeSearch",ImVec2(32.f,ImGui::GetFontSize()+16.f))) {
+            m_NodeBrowserSearchBuffer[0]='\0';
+            m_NodeBrowserScrollY=0.f;m_NodeBrowserRestoreScroll=true;
+            m_NodeBrowserFocusSearch=true;
+        }
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Clear search");
+        ImGui::EndDisabled();
 
         ImGui::Dummy(ImVec2(0.0f, 16.0f));
 
@@ -969,6 +980,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             }
             const int newNodeId = Stack::Editor::AddNodeFromBrowserEntry(editor, *activatedEntry, m_NodeBrowserGraphPos);
             if (newNodeId > 0) {
+                m_NodeBrowserSearchBuffer[0]='\0';
+                m_NodeBrowserScrollY=0.f;m_NodeBrowserRestoreScroll=true;
                 if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput) {
                     EditorNodeGraphUI::ConnectOutputToBestInput(editor, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, newNodeId);
                 } else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput) {

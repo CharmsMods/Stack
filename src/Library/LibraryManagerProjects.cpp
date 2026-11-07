@@ -244,7 +244,7 @@ void LibraryManager::RequestSaveProjectImpl(
     const std::filesystem::path& absoluteDestination,
     std::function<void(bool)> onComplete,
     bool requireNewStore) {
-    if (!editor) {
+    if (!editor || !editor->HasProjectContent()) {
         if (onComplete) onComplete(false);
         return;
     }

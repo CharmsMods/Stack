@@ -1,6 +1,7 @@
 #include "NodeMath/ToneCurveParameters.h"
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GraphViewportPlanner.h"
+#include "Renderer/GraphResourcePolicy.h"
 #include "Renderer/RawPreviewProxy.h"
 #include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/SceneColorGuidePlanning.h"
@@ -177,8 +178,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     if (!visit(plan.output)) return plan;
     for (const auto& consumer : completeRoots) if (!visit(consumer)) return plan;
 
+    Stack::Renderer::GraphResourcePolicy resources;
     for (const auto& endpoint : order) {
         const auto& node = *nodes.at(endpoint.nodeId);
+        resources.Include(node, graph.rawLayerBackgroundNodeId > 0);
         Stage stage;
         const auto capability = m_RegionalCapabilities.find(endpoint);
         stage.regionalExecutable = capability != m_RegionalCapabilities.end() ? capability->second :
@@ -265,7 +268,7 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         stage.demand = Stack::Renderer::WholeImageRegion(int(stage.spatial.fullWindow.width), int(stage.spatial.fullWindow.height));
     }
     std::uint64_t largestRasterPixels = 0, localToneWorkingBytes = 0, colorMaskWorkingBytes = 0;
-    const bool sourceColorGuide=Stack::Renderer::GraphHasSourceColorGuide(graph);
+    const bool sourceColorGuide=resources.sourceColorGuide;
     for (auto it = order.rbegin(); it != order.rend(); ++it) {
         auto& stage = plan.stages.at(*it);
         if (!stage.demand.Valid()) continue;
@@ -308,13 +311,10 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     }
     plan.valid = true;
     plan.fullInputPixels = plan.completePixels;
-    const bool raw = graph.rawLayerBackgroundNodeId > 0 ||
-        std::any_of(graph.nodes.begin(), graph.nodes.end(), [](const auto& node) {
-            return node.kind == RenderGraphNodeKind::RawSource || node.kind == RenderGraphNodeKind::RawDecode ||
-                node.kind == RenderGraphNodeKind::RawDevelop || node.kind == RenderGraphNodeKind::RawDevelopment ||
-                node.kind == RenderGraphNodeKind::RawProjectSourceSet || node.kind == RenderGraphNodeKind::RawOperation;
-        });
-    const std::uint64_t bytesPerPixel = raw ? 16u : 8u;
+    const bool raw = resources.rawStages;
+    // Retain the established conservative RAW internal-surface reserve even
+    // for legacy RAW graphs whose outer graph targets are half-float.
+    const std::uint64_t bytesPerPixel = raw ? 16u : resources.TargetBytesPerPixel(m_RetainedFloat32);
     // Cropped inputs are cached until execution ends, independently of their
     // endpoint outputs. Count each source/target crop once, as ViewportInput's
     // execution-local cache does, including a complete output's final crop.
@@ -374,6 +374,6 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
 RenderGraphViewportPlan RenderTiling::PlanGraphViewport(
     const RenderGraphSnapshot& graph, int fullWidth, int fullHeight, int previewMaxDimension,
     const Stack::Renderer::ViewportPreviewRequest& request,
-    const std::vector<RenderGraphViewportEndpoint>& completeConsumers) {
-    return GraphViewportPlanner(graph).Plan(fullWidth, fullHeight, previewMaxDimension, request, completeConsumers);
+    const std::vector<RenderGraphViewportEndpoint>& completeConsumers, bool retainedFloat32) {
+    return GraphViewportPlanner(graph, retainedFloat32).Plan(fullWidth, fullHeight, previewMaxDimension, request, completeConsumers);
 }

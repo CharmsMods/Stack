@@ -12,6 +12,7 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#include <deque>
 
 namespace Async {
 
@@ -50,6 +51,9 @@ public:
     bool SubmitHighPriority(Task task);
     bool SubmitHighPriority(std::string activityLabel, Task task);
     bool SubmitHighPriority(ActivityMetadata activity, Task task);
+    // Replaceable visual demand: bounded queue, one active decode, and no use
+    // of the worker reserved for explicit open/import actions.
+    bool SubmitThumbnail(ActivityMetadata activity, std::shared_ptr<std::atomic<bool>> canceled, Task task);
     bool PostToMain(Task task);
     bool PostToMain(ActivityMetadata activity, Task task);
     // A positive time limit stops between callbacks. One callback can exceed
@@ -64,7 +68,7 @@ private:
     TaskSystem(const TaskSystem&) = delete;
     TaskSystem& operator=(const TaskSystem&) = delete;
 
-    void WorkerLoop(bool interactiveOnly = false);
+    void WorkerLoop(bool interactiveOnly = false, bool thumbnailOnly = false);
     Task TrackActivity(ActivityMetadata activity, Task task);
     std::size_t ResolveWorkerCount() const;
 
@@ -75,8 +79,12 @@ private:
     std::condition_variable m_WorkCv;
     std::queue<Task> m_HighPriorityWorkQueue;
     std::queue<Task> m_WorkQueue;
+    struct ThumbnailTask { std::shared_ptr<std::atomic<bool>> canceled; Task task; };
+    std::deque<ThumbnailTask> m_ThumbnailQueue;
+    bool m_ThumbnailActive = false;
     std::vector<std::thread> m_Workers;
     std::thread m_InteractiveWorker;
+    std::thread m_ThumbnailWorker;
     std::atomic<std::size_t> m_ActiveWorkers = 0;
 
     std::mutex m_MainMutex;

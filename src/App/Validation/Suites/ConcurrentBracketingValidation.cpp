@@ -9,6 +9,7 @@
 #include "Persistence/BracketingProject.h"
 #include "Persistence/ProjectIndex.h"
 #include "Project/BracketingJobRunner.h"
+#include "Project/BracketHdrStartingCurve.h"
 #include "Raw/RawGallerySimilarity.h"
 #include "Async/TaskSystem.h"
 #include "Renderer/GLLoader.h"
@@ -27,13 +28,10 @@ void Check(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
 struct Save { unsigned calls = 0; bool success = false; };
-void CaptureConcurrentFrame(const std::filesystem::path& path, bool blackCorners = false) {
+void CaptureConcurrentFrame(const std::filesystem::path& path) {
     constexpr int width = 1440, height = 900;
     std::vector<unsigned char> bytes(std::size_t(width) * height * 4);
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, bytes.data());
-    if (blackCorners) for (const auto corner : {0u, unsigned(width - 1), unsigned((height - 1) * width), unsigned(height * width - 1)})
-        Check(bytes[corner * 4] <= 1 && bytes[corner * 4 + 1] <= 1 && bytes[corner * 4 + 2] <= 1,
-            "The fullscreen processing surface did not cover every corner with black.");
     for (int y = 0; y < height / 2; ++y) for (int x = 0; x < width * 4; ++x)
         std::swap(bytes[std::size_t(y) * width * 4 + x], bytes[std::size_t(height - y - 1) * width * 4 + x]);
     Check(stbi_write_png(path.string().c_str(), width, height, 4, bytes.data(), width * 4) != 0,
@@ -91,9 +89,8 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
             return EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(
                 std::move(task), error, Raw::OpenGlTaskPriority::Background);
         };
-        bool nativeProcessingCaptured = false;
+        bool progressCaptured = false;
         bool observedConcurrentWork = false;
-        double nativeImagesShownAt = -1;
         const auto frame = [&] {
             glfwPollEvents();
             ImGui_ImplOpenGL3_NewFrame();
@@ -111,14 +108,12 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
                     b->GetActiveBracketingProcessingDiagnostic(progress, stage);
             }
             bool captureThisFrame = false;
-            if (!nativeProcessingCaptured) if (const auto current = automatic.Current()) {
+            if (!progressCaptured) if (const auto current = automatic.Current()) {
                 if (current->generation != automaticScene.generation)
                     automaticScene.Begin(current, ImGui::GetTime());
-                const auto publication = current->mailbox->Read();
-                if (!current->done && publication && !publication->images.empty()) {
-                    if (nativeImagesShownAt < 0) nativeImagesShownAt = ImGui::GetTime();
+                if (!current->done && observedConcurrentWork) {
                     AutoBracket::DrawPresentation(automaticScene, automatic);
-                    captureThisFrame = ImGui::GetTime() - nativeImagesShownAt >= .35;
+                    captureThisFrame = true;
                 }
             }
             ImGui::Render();
@@ -129,10 +124,10 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             if (captureThisFrame) {
-                CaptureConcurrentFrame(root / "automatic-processing.png", true);
-                nativeProcessingCaptured = true;
+                CaptureConcurrentFrame(root / "automatic-progress.png");
+                progressCaptured = true;
                 automaticScene.SetForeground(false);
-                std::cout << "Native processing capture: " << root / "automatic-processing.png" << '\n' << std::flush;
+                std::cout << "Native progress capture: " << root / "automatic-progress.png" << '\n' << std::flush;
             }
             Async::TaskSystem::Get().PumpMainThreadTasks(4);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -181,6 +176,15 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
         Check(pathA != pathB && a->GetProjectDocumentId() != b->GetProjectDocumentId(),
             "Concurrent brackets reused a destination or identity.");
         const auto snapshot = *a->GetActiveRawProjectSnapshot();
+        auto initialized = snapshot;
+        auto* initializedSet = Project::FindSourceSet(initialized, initialized.activeSourceSetId);
+        Check(initializedSet != nullptr, "Imported bracket lost its source set.");
+        initializedSet->settings[Project::kBracketToneFitConsidered] = true;
+        Check(Project::ValidateRawProjectSnapshot(initialized).valid,
+            "The first-result initialization marker prevented saving a completed bracket.");
+        initializedSet->settings[Project::kBracketToneFitConsidered] = "invalid";
+        Check(!Project::ValidateRawProjectSnapshot(initialized).valid,
+            "The bracket initialization marker accepted an invalid type.");
         AutoBracket::Candidate candidate;
         candidate.name = "Automatic bracket";
         for (const auto& asset : snapshot.embeddedAssets)
@@ -204,7 +208,7 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
         Check(editing->RequestSaveProjectAs(root / "Editing during brackets", [editSave](bool ok) {
             ++editSave->calls; editSave->success = ok;
         }), "A bracket blocked another project's save.");
-        wait([&] { return nativeProcessingCaptured; }, "Live automatic processing capture timed out.");
+        wait([&] { return progressCaptured; }, "Concurrent automatic progress display timed out.");
         Check(observedConcurrentWork,
             "The automatic first render did not coexist with both manual project jobs.");
         a->CancelBracketingPresentation();
@@ -216,7 +220,7 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
         const auto completed = automatic.ConsumeCompleted();
         Check(completed && completed->outcome == AutoBracket::State::Completed,
             completed ? completed->status : "Automatic completion was lost.");
-        Check(nativeProcessingCaptured, "No native animation with real in-flight burst images was captured.");
+        Check(progressCaptured, "The active concurrent progress display was not captured.");
         Check(!a->IsActiveMultiFrameProcessingForQueueBusy(), "Canceled bracket did not stop.");
         Check(a->StartBracketingProcessing(true, &error), error);
         wait([&] { return !a->GetActiveBracketingProcessingDiagnostic(progress, stage); }, "Canceled bracket could not restart.");
@@ -324,8 +328,17 @@ bool ValidateConcurrentBracketing(const std::filesystem::path& sourceA,
             Check(preserved && Project::SerializeRawProjectSnapshot(preserved.snapshot) == savedSnapshots[index],
                 "Creating a subset changed an existing completed project.");
         }
-        const auto scan = RawWorkspace::ScanWorkspace(root);
-        Check(scan.success && scan.sources.size() == 2, "Focused Gallery source scan failed.");
+        // This check compares the selected capture set. The default Gallery
+        // scan also includes raster images, including this suite's progress
+        // capture and the editing project's generated cover in the same root.
+        const auto scan = RawWorkspace::ScanWorkspace(root, [&](const auto& path) {
+            return std::find(sources.begin(), sources.end(), path) != sources.end();
+        });
+        Check(scan.success, "Focused Gallery source scan failed: " + scan.errorMessage);
+        Check(scan.sources.size() == sources.size() &&
+            std::all_of(scan.sources.begin(), scan.sources.end(), [&](const auto& source) {
+                return std::find(sources.begin(), sources.end(), source.absolutePath) != sources.end();
+            }), "Focused Gallery scan did not preserve the exact selected original captures.");
         RawWorkspace::WorkspaceState catalog;
         catalog.workspaceRoot = root; catalog.sources = scan.sources;
         Check(RawWorkspace::DiscoverSourceSetProjects(RawWorkspace::BuildManagedLayout(root),

@@ -510,7 +510,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         drawList->AddRectFilled(canvasMin, canvasMax, ColorToU32(canvasBg));
     }
 
-    if (options.showGrid && !graphStyle.spotlightSurface) {
+    if (options.showGrid && !graphStyle.spotlightSurface && graphStyle.gridLineOpacity>0.f) {
         const float gridStep = std::max(8.0f, 32.0f * m_Zoom);
         const float luminance = 0.2126f * workspaceBg.x + 0.7152f * workspaceBg.y + 0.0722f * workspaceBg.z;
         const float gridOpacity = std::clamp(graphStyle.gridLineOpacity, 0.0f, 1.0f);

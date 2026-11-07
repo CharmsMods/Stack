@@ -1,5 +1,7 @@
+#include "Storage/ScratchBudget.h"
 #include "BracketingJobRunner.h"
 #include "BurstEngine/Client.h"
+#include "BurstEngine/ScratchDirectory.h"
 #include "Persistence/BracketingResultStore.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "Persistence/BracketMaster.h"
@@ -90,13 +92,14 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
         // Background work limits concurrency, never the alignment quality plan.
         request.memoryBudgetBytes=budget.budgetBytes;
         request.automaticMemoryBudget=true;
+        request.terminateOnCancel=job.backgroundProcessing;
         request.workerCount=ResolveBracketingWorkerCount(request.memoryBudgetBytes,job.workerLimit);
         request.preferGpuRegistration=true;request.executeOpenGlTask=job.executeOpenGlTask;
         request.shouldCancel=job.shouldCancel;request.reportProgress=job.reportProgress;
         request.reportPresentation=job.reportPresentation;
         request.removeCacheOnRelease=true;
-        request.cacheDirectory=job.cacheRoot/"Bracketing"/job.snapshot.projectId.substr(0,12)/
-            Project::GenerateStableUuid().substr(0,12)/"prepared";
+        auto sourceScratch=std::make_shared<BurstEngine::ScratchDirectory>(job.cacheRoot,BurstEngine::ScratchKind::Sources);
+        request.cacheDirectory=sourceScratch->Path()/"prepared";
         sourcesDirectory=request.cacheDirectory.parent_path()/"sources";
         for(const auto& frame:set->frames) {
             if(!std::any_of(job.recipe.groups.begin(),job.recipe.groups.end(),[&](const auto& group){
@@ -122,8 +125,11 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
                 ReportPresentation(request,ProcessingStage::Assets,copied++,request.sources.size(),source.frameId);
                 const auto frame=std::find_if(set->frames.begin(),set->frames.end(),[&](const auto& f){return f.frameId==source.frameId;});
                 std::string error;
-                if(job.store->StorageKind()==Project::ProjectStorageKind::PortableFile &&
-                    !job.store->CopyAssetToFile(frame->assetId,source.path,&error))throw std::runtime_error(error);
+                if(job.store->StorageKind()==Project::ProjectStorageKind::PortableFile) {
+                    if(!Stack::Storage::ScratchBudget::ReserveFile(source.path, source.bytes))
+                        throw std::runtime_error(Stack::Storage::ScratchBudget::Failure);
+                    if(!job.store->CopyAssetToFile(frame->assetId,source.path,&error))throw std::runtime_error(error);
+                }
             }
         }
         result=Stack::BurstEngine::Process(request);
@@ -145,7 +151,6 @@ Raw::Bracketing::BracketingResult RunBracketingJob(const BracketingJobRequest& j
             result.message+=" Close other memory-heavy work and retry; automatic bursts use the same quality requirements as foreground processing.";
     }catch(const std::exception& error){result.status=BracketingResult::Status::Failed;result.message=error.what();}
     if(job.shouldCancel&&job.shouldCancel())result.status=BracketingResult::Status::Canceled;
-    if(!sourcesDirectory.empty()){std::error_code ec;std::filesystem::remove_all(sourcesDirectory,ec);}
     return result;
 }
 }

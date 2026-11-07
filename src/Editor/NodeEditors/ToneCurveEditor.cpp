@@ -42,7 +42,6 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
     auto& parameters=context.recipe.finishTone.layerJson;
     auto& state=context.State<ToneCurveEditorState>();
     const auto input=NodeMath::DescribeImageOperationInput(context.inputDescriptor);
-    auto mode=Stack::NodeMath::ToneCurveMode(parameters);
     bool changed=false;
     for (const auto& id:context.drivenParameters) {
         if (!NodeMath::IsToneCurveParameterActive(parameters,id)) continue;
@@ -52,66 +51,21 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
         else ImGui::TextWrapped("%s",feedback==context.uniformParameters.end()
             ? "Waiting for the connected curve parameter." : feedback->second.reason.c_str());
     }
-    if (settings) {
-        struct Choice { const char* id; const char* label; };
-        constexpr Choice choices[] = {{"luminance","Luminance + RGB"}, {"components","Numeric channels"},
-            {"contrast","Contrast by tone"}, {"advanced","Advanced tone controls"}};
-        const char* label = choices[0].label;
-        for (const auto& choice : choices) if (mode == choice.id) label = choice.label;
-        if (ImGui::BeginCombo("Curve mode",label)) {
-            for (const auto& choice : choices) {
-                if (ImGui::Selectable(choice.label, mode == choice.id) && mode != choice.id) {
-                    mode = choice.id;
-                    parameters["curveMode"] = mode;
-                    state.EndInteraction();
-                    changed = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-    }
-    if (mode!="components" && !input.colorRelationships) {
-        ImGui::TextWrapped("%s Use Numeric channels in Settings to edit individual values.", input.colorUnavailableReason.c_str());
+    if (!input.colorRelationships) {
+        ImGui::TextWrapped("%s", input.colorUnavailableReason.c_str());
         return changed;
     }
-    if (mode=="advanced") {
-        if (!state.advanced) state.advanced=std::make_shared<ToneCurveLayer>();
-        if (state.appliedAdvanced!=parameters.at("advanced")) {
-            ToneCurveLayer defaults;
-            state.advanced->Deserialize(defaults.Serialize());
-            state.advanced->Deserialize(parameters.at("advanced"));
-            state.appliedAdvanced=parameters.at("advanced");
-        }
-        const auto before=state.advanced->Serialize();
-        NodeSurfaceContext surface;
-        surface.nodeId=context.presentationNodeId;
-        surface.availableWidth=surface.safeContentWidth=ImGui::GetContentRegionAvail().x;
-        surface.logicalAvailableWidth=surface.logicalSafeContentWidth=surface.safeContentWidth;
-        surface.focused=true;
-        state.advanced->RenderExpandedNodeSurface(&editor,surface);
-        const auto after=state.advanced->Serialize();
-        if (before!=after) {parameters["advanced"]=after;state.appliedAdvanced=after;changed=true;}
-        return changed;
-    }
-    if (mode=="contrast") {
-        auto tone=RawRecipe::ReadSceneTone(parameters.at("luminanceTone"));tone.direct=false;
-        if (DrawSceneToneEditor(tone,true,state.selected,state.dragging,state.minimum,state.maximum,context.inputHistogram,
-            [&](const auto& id){return context.IsParameterDriven(id);},settings ? RawLabControlSection::Settings : RawLabControlSection::Graph)) {
-            const auto serialized=RawRecipe::SerializeSceneTone(tone);
-            for (const auto& field:serialized.items())
-                parameters["luminanceTone"][field.key()]=field.value();
-            changed=true;
-        }
-        return changed;
-    }
-    const bool photo = mode == "luminance";
-    if (photo && !settings) DrawPhotoChannels(state);
-    if (photo && !settings && state.photoChannel == 0) {
+    const int previousChannel=state.photoChannel;
+    if (!settings) DrawPhotoChannels(state);
+    // Input analysis was prepared before the channel button. Wait for its
+    // matching domain on the next frame before displaying or fitting it.
+    if(previousChannel!=state.photoChannel)context.inputHistogram.valid=false;
+    if (!settings && state.photoChannel == 0) {
         auto tone=RawRecipe::ReadSceneTone(parameters.at("luminanceTone"));tone.direct=true;
         ImVec2 size=ImGui::GetContentRegionAvail();size.y=std::min(size.y,250.f);
         const auto tonalDomain=ExposureTonalSliderDomain(-16.f,16.f);
         const bool toneChanged=DrawCurveCanvas("Luminance",tone.curve,tone.curveAmount,state.canvas[4],true,context.inputHistogram,size,64,nullptr,{},context.IsParameterDriven("luminance-amount"),
-            nullptr,false,true,&tonalDomain,context.inputHistogramRevision,{true,false,true,-16,16});
+            nullptr,false,true,&tonalDomain,context.inputHistogramRevision,{true,false,parameters.value("domain",0)==1,-16,16,parameters.value("domain",0)==0});
         if (toneChanged) {
             const auto serialized=RawRecipe::SerializeSceneTone(tone);
             for (const auto& field:serialized.items())
@@ -120,28 +74,18 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
         }
         return changed;
     }
-    int& activeChannel = photo ? state.photoChannel : state.component;
+    int& activeChannel = state.photoChannel;
     if (settings) {
         int domain=parameters.value("domain",0);
-        if (ImGui::Combo("Channel curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Changes how channel curves affect the image. Graph spacing fits the incoming tones automatically.");
+        if (ImGui::Combo("Curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Changes how channel curves affect the image. The graph initially fits the image's tonal range; zooming only changes the view.");
         if (domain==1) {
             float low=parameters.at("logMinEv"),high=parameters.at("logMaxEv"),grey=parameters.at("middleGrey");
             if (ImGui::InputFloat("Minimum EV",&low) && low<high) {parameters["logMinEv"]=low;changed=true;}
             if (ImGui::InputFloat("Maximum EV",&high) && high>low) {parameters["logMaxEv"]=high;changed=true;}
             if (ImGui::InputFloat("Middle grey",&grey) && grey>0) {parameters["middleGrey"]=grey;changed=true;}
         }
-        if (photo) return changed;
-        const char* labels[]{input.scalar ? "Channel" : "RGB master","Red","Green","Blue"};
-        ImGui::TextWrapped("%s",input.scalar ? "Map the incoming channel directly." :
-            "RGB master applies the same curve to each channel. Red, Green and Blue then adjust individual channels.");
-        for (int component=0;component<4;++component) {
-            if (component && !NodeMath::HasImageComponent(input.components,
-                static_cast<NodeMath::ImageComponent>(1u<<(component-1)))) continue;
-            if (component) ImGui::SameLine();
-            if (ImGui::Selectable(labels[component],activeChannel==component,ImGuiSelectableFlags_None,{70,0}))
-                activeChannel=component;
-        }
+        return changed;
     }
     if (activeChannel && !NodeMath::HasImageComponent(input.components,
         static_cast<NodeMath::ImageComponent>(1u<<(activeChannel-1)))) activeChannel=0;

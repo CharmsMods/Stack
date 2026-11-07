@@ -1,3 +1,5 @@
+#include "BurstEngine/ScratchDirectory.h"
+#include "Storage/ScratchBudget.h"
 #include "BracketingResultStore.h"
 #include "Persistence/BracketMaster.h"
 #include "Raw/ReconstructionDepth.h"
@@ -17,12 +19,24 @@
 #include <limits>
 #include <type_traits>
 #include <stdexcept>
+#include <thread>
 
 namespace Stack::Project {
 namespace {
+std::shared_ptr<BurstEngine::ScratchDirectory> TemporaryOwner() {
+    return {new BurstEngine::ScratchDirectory(AppPaths::GetCacheDirectory(),BurstEngine::ScratchKind::Sources),
+        [](auto* owner) {
+            try {std::thread([owner]{delete owner;}).detach();}
+            catch(...) {delete owner;}
+        }};
+}
 struct Temporary {
+    std::shared_ptr<BurstEngine::ScratchDirectory> owner = TemporaryOwner();
     std::filesystem::path path;
-    ~Temporary() { if(!path.empty()) {std::error_code ec;std::filesystem::remove(path,ec);} }
+    Temporary() = default;
+    explicit Temporary(const std::filesystem::path& requested):path(owner->Path()/requested.filename()) {}
+
+    // The scratch owner retires both the transfer and its sibling metadata.
 };
 std::string RecipeIdentity(const MultiFrameSourceSet& set) {
     const auto found=set.settings.find("bracketing");
@@ -64,7 +78,7 @@ bool StageBracketingResult(const ProjectStoreHandle& store,const ProjectStoreTra
                     const auto directory=AppPaths::GetCacheDirectory()/"BracketTransfer";
                     std::filesystem::create_directories(directory);
                     Temporary copy{directory/(GenerateStableUuid()+".bracket")};
-                    if(store->CopyAssetToFile(asset->assetId,copy.path))identity=RawEvidence::ComputeSourceIdentity(copy.path);
+                    if(Storage::ScratchBudget::ReserveFile(copy.path,asset->byteLength) && store->CopyAssetToFile(asset->assetId,copy.path))identity=RawEvidence::ComputeSourceIdentity(copy.path);
                 }
                 if(identity.valid&&identity.sha256==asset->sha256&&identity.byteSize==asset->byteLength) {
                     if(!cover.empty())snapshot.coverThumbnailBytes=cover;
@@ -161,7 +175,8 @@ bool RestoreBracketingResult(const ProjectStoreHandle& store,const RawProjectSna
         if(store->StorageKind()==ProjectStorageKind::WorkingFile)path=store->ResolveAssetFile(asset->assetId);
         else {
             const auto directory=AppPaths::GetCacheDirectory()/"BracketTransfer";std::filesystem::create_directories(directory);
-            temporary.path=directory/(GenerateStableUuid()+".bracket");path=temporary.path;
+            temporary.path=temporary.owner->Path()/(GenerateStableUuid()+".bracket");path=temporary.path;
+            if(!Storage::ScratchBudget::ReserveFile(path,asset->byteLength))throw std::runtime_error(Storage::ScratchBudget::Failure);
             if(!store->CopyAssetToFile(asset->assetId,path,&error))return false;
         }
         if(shouldCancel&&shouldCancel())return false;
@@ -171,13 +186,15 @@ bool RestoreBracketingResult(const ProjectStoreHandle& store,const RawProjectSna
         if(shouldCancel&&shouldCancel())return false;
         const auto decode=[&](std::istream& stream) {
             Raw::Bracketing::Serialization::ReadResult(stream,saved.value("auxiliaryBytes",identity.byteSize),set->settings.at("bracketing").at("groups").size(),
-            result,AppPaths::GetCacheDirectory()/"BracketInspection",[&](Raw::RawImageData& raw) {
+            result,temporary.owner->Path()/"inspection",[&](Raw::RawImageData& raw) {
                 const auto master=saved.value("masterAssetId",std::string{});
                 auto file=store->ResolveAssetFile(master);
                 std::shared_ptr<Temporary> embedded;
                 if (file.empty() && store->StorageKind()==ProjectStorageKind::PortableFile) {
                     embedded=std::make_shared<Temporary>();
-                    embedded->path=temporary.path.parent_path()/(GenerateStableUuid()+".master");
+                    embedded->path=embedded->owner->Path()/(GenerateStableUuid()+".master");
+                    const auto* masterAsset=FindEmbeddedAsset(snapshot,master);
+                    if(!masterAsset||!Storage::ScratchBudget::ReserveFile(embedded->path,masterAsset->byteLength))throw std::runtime_error(Storage::ScratchBudget::Failure);
                     if (!store->CopyAssetToFile(master,embedded->path,&error)) throw std::runtime_error(error);
                     file=embedded->path;
                 }
@@ -194,6 +211,8 @@ bool RestoreBracketingResult(const ProjectStoreHandle& store,const RawProjectSna
         };
         if (saved.value("auxiliaryCodec",std::string{})=="gzip-v1") BracketAuxiliaryStorage::Read(path,decode);
         else { std::ifstream stream(path,std::ios::binary); decode(stream); }
+        if(result.reconstructionInspection)
+            std::const_pointer_cast<Raw::Bracketing::BracketingResult::ReconstructionInspection>(result.reconstructionInspection)->storageOwner=temporary.owner;
         if(result.identity!=saved.at("identity").get<std::string>())throw std::runtime_error("The saved result belongs to another bracket revision.");
         return true;
     }catch(const std::exception& exception){result={};error=exception.what();return false;}

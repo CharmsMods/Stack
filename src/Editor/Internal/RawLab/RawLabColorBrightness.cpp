@@ -61,7 +61,7 @@ bool DrawColorWarpBrightness(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWar
     }
     if(active && state.brightnessDrag>=0 && ImGui::GetIO().MouseDelta.x!=0) {
         const auto& start=state.brightnessStart;
-        const float delta=ev(ImGui::GetIO().MousePos.x)-state.brightnessPress;
+        const float delta=.15f*(ev(ImGui::GetIO().MousePos.x)-state.brightnessPress);
         switch(state.brightnessDrag) {
         case 0:range.featherLow=std::clamp(start.featherLow-delta,0.f,std::min(64.f,range.low-state.brightnessViewLow));break;
         case 1:range.low=std::clamp(start.low+delta,std::max(-32.f,state.brightnessViewLow+range.featherLow),range.high);break;

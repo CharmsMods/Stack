@@ -16,6 +16,7 @@ struct ColorWarpEditorState {
     bool selectRange=false;
     int dragging=-1; // 0 adjustment; 1..8 core/soft range boundaries.
     float lastHue=0, startChroma=0, startSaturation=0;
+    ImVec2 movePress{},moveStart{};
     bool details=false;
     int brightnessDrag=-1;
     float brightnessPress=0, brightnessViewLow=-20, brightnessViewHigh=20;

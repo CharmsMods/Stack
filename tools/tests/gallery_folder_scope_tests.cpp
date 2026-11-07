@@ -17,6 +17,7 @@ bool IsWorkingProjectFile(const std::filesystem::path&) { return false; }
 }
 
 namespace Stack::RawWorkspace {
+void RefreshGalleryBrowseMetadata(const ManagedLayout&,SourceRecord&,const CancellationPredicate&) {}
 ManagedLayout BuildManagedLayout(const std::filesystem::path& path) {
     ManagedLayout layout;
     layout.workspaceRoot = std::filesystem::absolute(path).lexically_normal();
@@ -30,9 +31,11 @@ ThumbnailStatus ClassifyThumbnailMetadata(const ManagedLayout&, SourceRecord&, i
     return ThumbnailStatus::Missing;
 }
 bool DiscoverWorkspaceProjects(const ManagedLayout&, std::vector<SourceRecord>&,
-    std::vector<SourceSetProjectCatalogEntry>&, CancellationPredicate) { return true; }
+    std::vector<SourceSetProjectCatalogEntry>&, CancellationPredicate, const nlohmann::json*) { return true; }
+ManagedLayout BuildGalleryLayout(const std::filesystem::path& path) { return BuildManagedLayout(path); }
 ScanResult ScanWorkspace(const std::filesystem::path& root, RawPathPredicate,
-    ScanProgressCallback, CancellationPredicate, ScanSourceReadyCallback, SourceIdentityReuseCallback) {
+    ScanProgressCallback, CancellationPredicate, ScanSourceReadyCallback, SourceIdentityReuseCallback,
+    bool, std::function<void(const std::vector<SourceRecord>&)>) {
     ScanResult result;
     result.success = true;
     result.layout = BuildManagedLayout(root);

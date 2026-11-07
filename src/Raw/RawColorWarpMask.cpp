@@ -1,5 +1,6 @@
 #include "Raw/RawColorWarpMask.h"
 #include "Raw/ImageGuidance.h"
+#include "Raw/ColorWarpMath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -75,6 +76,40 @@ int RawColorWarpMaskLongEdge(RawColorWarpMaskQualityTier tier) {
     return 384;
 }
 
+// Smooth influence, never RGB. Spatial gates/boundaries remain authoritative.
+static void SmoothSelectionFields(const RawColorWarpMaskGuide& guide,const RawColorWarpPin& pin,
+    RawColorWarpMaskFields& fields,const std::function<bool()>& cancelled) {
+    if(pin.smoothSelection<=0)return;
+    std::vector<float> weights(guide.pixels.size());
+    fields.smoothGate.resize(weights.size());fields.smoothSupport.resize(weights.size());
+    for(std::size_t i=0;i<weights.size();++i) {
+        if(Cancelled(cancelled,i)){fields.cancelled=true;return;}
+        weights[i]=EvaluateColorWarpPinColorWeight(pin,guide.pixels[i])*
+            EvaluateColorWarpPinLightnessWeight(pin,guide.pixels[i].sceneEv);
+        if (!std::isfinite(weights[i])) weights[i] = 0.f;
+    }
+    for(int y=0;y<guide.height;++y)for(int x=0;x<guide.width;++x) {
+        const auto i=std::size_t(y)*guide.width+x;
+        if(Cancelled(cancelled,i)){fields.cancelled=true;return;}
+        const auto center=ColorWarpSelectionCoordinate(guide.pixels[i]);
+        float sum=0,total=0;
+        for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx) {
+            const int nx=std::clamp(x+dx,0,guide.width-1),ny=std::clamp(y+dy,0,guide.height-1);
+            const auto j=std::size_t(ny)*guide.width+nx;
+            const auto neighbor=ColorWarpSelectionCoordinate(guide.pixels[j]);
+            const float da=center[0]-neighbor[0],db=center[1]-neighbor[1];
+            const float de=(guide.pixels[i].sceneEv-guide.pixels[j].sceneEv)/.5f;
+            const float w=std::exp(-(da*da+db*db)/(.025f*.025f)-de*de-.5f*(dx*dx+dy*dy));
+            if (!std::isfinite(w)) continue;
+            sum+=weights[j]*w;total+=w;
+        }
+        const float influence=std::clamp(weights[i]+(sum/std::max(total,1e-6f)-weights[i])*pin.smoothSelection,0.f,1.f);
+        fields.smoothGate[i]=fields.gate[i]/255.f*influence;
+        fields.smoothSupport[i]=fields.support[i]/255.f*influence;
+    }
+    fields.smoothed=true;
+}
+
 RawColorWarpMaskFields BuildRawColorWarpMaskFields(
     const RawColorWarpMaskGuide& guide,
     const RawColorWarpPin& pin,
@@ -93,6 +128,7 @@ RawColorWarpMaskFields BuildRawColorWarpMaskFields(
     result.boundary.assign(pixelCount, 255u);
     result.edge.assign(pixelCount, 0u);
     if (region == nullptr || region->spatialMode == RawColorWarpSpatialMode::AllMatches) {
+        SmoothSelectionFields(guide,pin,result,isCancelled);
         return result;
     }
     result.spatialAvailable = true;
@@ -352,6 +388,7 @@ RawColorWarpMaskFields BuildRawColorWarpMaskFields(
             }
         }
     }
+    SmoothSelectionFields(guide,pin,result,isCancelled);
     return result;
 }
 

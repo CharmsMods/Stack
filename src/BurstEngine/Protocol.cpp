@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "Protocol.h"
 #include <algorithm>
 #include <fstream>
@@ -20,9 +21,10 @@ std::filesystem::path TextPath(const std::string& text){return std::filesystem::
 void WriteDocument(const std::filesystem::path& path,const Json& value){
     const auto bytes=Json::to_cbor(value);
     if(bytes.size()>MaximumMessageBytes)throw std::runtime_error("Burst metadata exceeds the protocol limit.");
-    std::ofstream stream(path,std::ios::binary|std::ios::trunc);
+    Stack::Storage::ScratchBudget::Output stream(path,std::ios::binary|std::ios::trunc);
     stream.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());stream.close();
-    if(!stream)throw std::runtime_error("Could not write burst transfer metadata.");
+    if(!stream)throw std::runtime_error(stream.BudgetExceeded()?Stack::Storage::ScratchBudget::Failure:
+        "Could not write burst transfer metadata. Check free disk space and write access to temporary storage.");
 }
 Json ReadDocument(const std::filesystem::path& path){
     const auto size=std::filesystem::file_size(path);

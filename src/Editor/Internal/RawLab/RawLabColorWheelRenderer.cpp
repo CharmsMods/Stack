@@ -124,6 +124,7 @@ void RawLabColorWheelRenderer::DrawCallback(const ImDrawList*, const ImDrawCmd* 
     glDisable(GL_CULL_FACE);
     glUseProgram(renderer.m_Program);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
+    glUniform1f(Stack::Hdr::Ui::HeadroomUniform,Stack::Hdr::CurrentTargetHeadroom());
     glUniform4f(renderer.m_RectLocation, request.min.x, request.min.y, request.size.x, request.size.y);
     glUniform4f(renderer.m_DisplayLocation, request.displayPos.x, request.displayPos.y,
         request.displaySize.x, request.displaySize.y);

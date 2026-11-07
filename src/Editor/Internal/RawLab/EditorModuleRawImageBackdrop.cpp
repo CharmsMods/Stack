@@ -113,7 +113,7 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
         m_RawImageBackdrop.frame == ImGui::GetFrameCount()) return;
     auto& frame = m_RawImageBackdrop;
     const bool rawPresentation = IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive();
-    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow();
+    const bool hdr = IsHdrOutputPreview();
     const auto sdr = rawPresentation ? m_RawWorkspacePresentationTexture.texture : m_Pipeline.GetOutputTexture();
     const auto presentationTexture = DisplayOutputTexture(sdr,hdr);
     frame.frame = ImGui::GetFrameCount();

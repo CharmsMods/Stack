@@ -180,6 +180,7 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
         const NodeEditTarget target{GetProjectDocumentId(),kProjectGraphId,node->instanceUuid};
         if (!m_Project->nodeEditor || *m_Project->nodeEditor != target)
             m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+        m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
         m_Project->nodeEditor=target;
         const auto& editor = Stack::Editor::FindNodeEditor(*node);
         m_RawWorkspaceLabUi.activeTool=editor.legacyTool.value_or(RawLabTool::GraphNode);
@@ -284,6 +285,7 @@ void EditorModule::BindBracketingSourceNodeEditor() {
         const NodeEditTarget target{GetProjectDocumentId(),kProjectGraphId,node.instanceUuid};
         const bool changed=!m_Project->nodeEditor || *m_Project->nodeEditor!=target;
         if (changed) m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+        m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
         m_Project->nodeEditor=target;
         m_RawWorkspaceLabUi.activeTool=RawLabTool::MultiFrame;
         m_SelectedRawAdjustmentLayer.clear();

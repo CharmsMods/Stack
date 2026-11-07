@@ -80,6 +80,9 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     for (const auto& workspace : m_ProjectWorkspaces) {
         if (workspace->id == m_GalleryWorkspaceId) continue;
         const auto id = workspace->id;
+        if ((m_WorkspaceTabAction==WorkspaceTabAction::Close && m_WorkspaceTabActionId==id) ||
+            m_PendingWorkspaceRetirement==id ||
+            (m_PendingFileAction==PendingFileAction::CloseWorkspace && m_ActiveProjectWorkspace==id)) continue;
         ImGui::PushID(static_cast<int>(id));
         const bool selected = id == m_ActiveProjectWorkspace;
         const bool dirty = workspace->editor->NeedsWorkspaceSaveBeforeTransition();
@@ -127,7 +130,7 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         }
         const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
         auto* draw = ImGui::GetWindowDrawList();
-        if (ImGui::IsItemVisible())
+        if (ImGui::IsItemVisible() && !ImGui::IsItemClicked(ImGuiMouseButton_Middle))
             Stack::Navigation::DrawProjectEntry(draw,min,max,rail.scale,texture,width,height,
                 automatic ? "Auto" : name,selected,dirty);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s",name);

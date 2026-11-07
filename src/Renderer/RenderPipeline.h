@@ -174,6 +174,7 @@ struct GraphExecutionStats {
     std::size_t viewportPlanFingerprint = 0;
     int imageCacheHits = 0;
     int imageCacheMisses = 0;
+    int cachePrunedOutputs = 0;
     int maskCacheHits = 0;
     int maskCacheMisses = 0;
     int rawStageCacheHits = 0;
@@ -364,6 +365,7 @@ public:
         std::uint64_t minimumRawStageCacheBytes = 0,
         bool reserveRawStages = true);
     std::uint64_t GetGraphResidentCacheBytes() const;
+    bool HasFloat32GraphDependencies() const;
 
     // Returns the final output texture ID for display in the ImGui viewport
     Raw::ViewportGpuTiming m_RawViewportGpuTiming;

@@ -177,13 +177,6 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
             request.backgroundProcessing=true;
             request.shouldCancel=[work]{return work->cancel.load();};
             request.reportProgress=[work](double progress,const std::string& text){work->progress=progress;Status(work,text);};
-            request.reportPresentation=[work](const Raw::Bracketing::ProcessingProgress& progress){
-                if(progress.stage!=Raw::Bracketing::ProcessingStage::Completed)work->mailbox->Publish(progress);
-                if(progress.evidenceOnly||progress.thumbnail)return;
-                std::optional<Notifications::Progress> measured;
-                if(progress.total>0)measured=Notifications::Progress{double(progress.completed),double(progress.total),{}};
-                work->notifier.UpdateActivity(work->activity,Raw::Bracketing::ProcessingStageTitle(progress.stage),measured);
-            };
             auto result=Project::RunBracketingJob(request);
             if(work->cancel||result.status==Raw::Bracketing::BracketingResult::Status::Canceled)throw std::runtime_error("Canceled.");
             if(result.status!=Raw::Bracketing::BracketingResult::Status::Completed){processingFailure=true;throw std::runtime_error(result.message);}

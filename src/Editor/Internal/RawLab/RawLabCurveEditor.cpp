@@ -1,3 +1,5 @@
+#include "Utils/ImGuiExtras.h"
+#include "Editor/Internal/RawLab/CurvePointInsertion.h"
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
 #include "Editor/GraphUI/GraphPlotStyle.h"
 #include "Utils/GlassControls.h"
@@ -969,9 +971,16 @@ bool DrawBezierCurveInteraction(
                 Stack::RawRecipe::RawBezierCurvePoint added;
                 added.x = graphPoint.x;
                 added.y = graphPoint.y;
-                if (insertionIndex > 0) points[static_cast<std::size_t>(insertionIndex - 1)].outgoing = {};
-                if (insertionIndex < static_cast<int>(points.size())) points[static_cast<std::size_t>(insertionIndex)].incoming = {};
-                points.insert(insertion, added);
+                if (createPoint && insertionIndex > 0 && insertionIndex < static_cast<int>(points.size())) {
+                    auto segments=Stack::RawRecipe::BuildRawBezierSegments(points);
+                    if (segmentBuilder) for (std::size_t i=0;i<segments.size();++i) segments[i]=segmentBuilder(points,i);
+                    InsertCurvePointOnLine(points,graphPoint.x,std::move(segments));
+                    added=points[insertionIndex];
+                } else {
+                    if (insertionIndex > 0) points[static_cast<std::size_t>(insertionIndex - 1)].outgoing = {};
+                    if (insertionIndex < static_cast<int>(points.size())) points[static_cast<std::size_t>(insertionIndex)].incoming = {};
+                    points.insert(insertion, added);
+                }
                 state = {};
                 selectedPoint = insertionIndex;
                 if(createPoint) {
@@ -984,13 +993,20 @@ bool DrawBezierCurveInteraction(
         }
     }
 
+    if(state.draggingPoint>=0 && ImGui::IsMouseDown(0) && !ImGui::GetIO().AppFocusLost && !ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {
+        ImGuiExtras::CursorCaptureRequest capture;
+        capture.mode=ImGuiExtras::CursorCaptureMode::LockedPan;
+        capture.anchorScreenPos=state.dragMouseStart;
+        capture.restoreScreenPos=state.dragMouseStart;
+        ImGuiExtras::SubmitCursorCaptureRequest(capture);
+    }
     if (state.draggingPoint >= 0 &&
         ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
         ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.5f)) {
         const int pointIndex = state.draggingPoint;
         const ImVec2 travel(
-            mouse.x - state.dragMouseStart.x,
-            mouse.y - state.dragMouseStart.y);
+            (mouse.x - state.dragMouseStart.x)*.15f,
+            (mouse.y - state.dragMouseStart.y)*.15f);
         ImVec2 requested(
             state.dragPointStart.x +
                 travel.x /

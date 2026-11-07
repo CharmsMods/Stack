@@ -73,8 +73,8 @@ bool ValidateToneCurveParameters(const nlohmann::json& value,std::string& error)
         if (!value.is_object() || value.value("schemaVersion",0)!=2 || !Finite(value))
             return fail("Unsupported or non-finite Tone Curve parameters.");
         const auto mode=value.value("curveMode",std::string{});
-        if (mode!="components" && mode!="luminance" && mode!="contrast" && mode!="advanced")
-            return fail("Unknown Tone Curve processing mode.");
+        if (mode!="luminance")
+            return fail("This Tone Curve mode is no longer supported.");
         const int domain=value.value("domain",-1);
         if (domain<0 || domain>1 || value.value("middleGrey",0.f)<=0 ||
             value.value("logMaxEv",0.f)<=value.value("logMinEv",0.f))

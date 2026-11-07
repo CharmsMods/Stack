@@ -112,6 +112,7 @@ struct SocketLayoutSpec {
     std::string socketId;
     EditorNodeGraph::SocketDirection direction =
         EditorNodeGraph::SocketDirection::Input;
+    std::string channelSource;
 };
 
 struct NodeLayoutBuildSpec {
@@ -372,6 +373,26 @@ inline NodeLogicalLayout BuildLogicalNodeLayout(
         };
     distributeAnchors(EditorNodeGraph::SocketDirection::Input);
     distributeAnchors(EditorNodeGraph::SocketDirection::Output);
+
+    // Component outputs belong beside their producing image socket, not in
+    // the coverage lane. Reposition once in the cached logical layout.
+    for (const auto& socket : spec.sockets) {
+        if (socket.channelSource.empty()) continue;
+        auto base=std::find_if(logical.sockets.begin(),logical.sockets.end(),[&](const auto& value) {
+            return value.direction==EditorNodeGraph::SocketDirection::Output && value.socketId==socket.channelSource;
+        });
+        auto component=std::find_if(logical.sockets.begin(),logical.sockets.end(),[&](const auto& value) {
+            return value.direction==EditorNodeGraph::SocketDirection::Output && value.socketId==socket.socketId;
+        });
+        if (base==logical.sockets.end() || component==logical.sockets.end()) continue;
+        int ordinal=0;
+        for (const auto& candidate:spec.sockets) {
+            if (candidate.channelSource==socket.channelSource) ++ordinal;
+            if (candidate.socketId==socket.socketId) break;
+        }
+        base->center.y=std::max(kSocketRadius+4.f,spec.headerInsetY*.9f);
+        component->center={base->center.x+ordinal*(2.f*kSocketRadius+8.f),base->center.y};
+    }
 
     logical.bounds.body = logical.body;
     logical.bounds.persistentVisual = logical.body;

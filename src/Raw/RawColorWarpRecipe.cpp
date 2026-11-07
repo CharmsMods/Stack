@@ -156,8 +156,11 @@ nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
         item["hueRange"] = RangeJson(pin.hueRange);
         item["saturationRange"] = RangeJson(pin.saturationRange);
         item["exposureRange"] = RangeJson(pin.exposureRange);
+        item["moveColors"] = pin.moveColors;
         item["hueShift"] = pin.hueShift;
         item["saturation"] = pin.saturation;
+        item["smoothSelection"] = pin.smoothSelection;
+        item["sampleRadius"] = pin.sampleRadius;
         item["strength"] = pin.strength;
         item["regionId"] = pin.regionId;
         item["exposureEv"] = pin.exposureEv;
@@ -237,8 +240,11 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
             pin.hueRange=ReadRange(item.value("hueRange",nlohmann::json::object()),pin.hueRange);
             pin.saturationRange=ReadRange(item.value("saturationRange",nlohmann::json::object()),pin.saturationRange);
             pin.exposureRange=ReadRange(item.value("exposureRange",nlohmann::json::object()),pin.exposureRange);
+            pin.moveColors=item.value("moveColors",false);
             pin.hueShift=JsonFloat(item,"hueShift",0);
             pin.saturation=JsonFloat(item,"saturation",0);
+            pin.smoothSelection=JsonFloat(item,"smoothSelection",0);
+            pin.sampleRadius=JsonFloat(item,"sampleRadius",0);
             pin.strength = JsonFloat(item, "strength", 1.0f);
             pin.regionId = item.value("regionId", std::string());
             pin.exposureEv = JsonFloat(item, "exposureEv", 0.0f);

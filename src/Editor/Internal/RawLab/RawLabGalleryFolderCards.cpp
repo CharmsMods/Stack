@@ -454,7 +454,7 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
             if (ImGui::IsRectVisible(ImVec2(origin.x - 64 * unit, rowY - 64 * unit),
                     ImVec2(origin.x + width + 64 * unit, origin.y + 232 * unit))) {
                 std::string title = folder.root.filename().u8string(); if (title.empty()) title = key;
-                const std::string subtitle = folder.countKnown ? std::to_string(folder.sourceCount) + (folder.sourceCount == 1 ? " image" : " images") : "Open to browse";
+                const std::string subtitle = folder.offline ? "Offline - cached previews" : folder.countKnown ? std::to_string(folder.sourceCount) + (folder.sourceCount == 1 ? " image" : " images") : "Open to browse";
                 auto* draw=ImGui::GetWindowDrawList();
                 const bool moving=navigation && navigation->FoldersMoving();
                 if(moving)draw->PushClipRect(ImGui::GetMainViewport()->Pos,

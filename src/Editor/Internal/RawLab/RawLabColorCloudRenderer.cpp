@@ -224,6 +224,7 @@ void DrawRawLabColorCloudCallback(
     glEnable(GL_PROGRAM_POINT_SIZE);
     glUseProgram(state->colorWarpCloudProgram);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
+    glUniform1f(Stack::Hdr::Ui::HeadroomUniform,Stack::Hdr::CurrentTargetHeadroom());
     glUniform2f(
         state->locations[0],
         state->colorWarpCloudViewCenterA,

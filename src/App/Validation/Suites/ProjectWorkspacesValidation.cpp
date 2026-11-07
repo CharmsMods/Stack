@@ -6,7 +6,6 @@
 #include "App/Validation/Suites/ProjectFileOperationsValidation.h"
 #include "App/Validation/Suites/ProjectCurveFeedbackValidation.h"
 #include "App/Validation/Suites/ProjectGraphSnapshotValidation.h"
-#include "App/Validation/Suites/BracketingPresentationValidation.h"
 #include "App/ProjectWorkspace.h"
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
@@ -561,7 +560,6 @@ bool ValidateProjectWorkspaces(const std::string& projectPath) {
         ValidateProjectGraphSnapshotBuilder();
         ValidateProjectBracketingOwnership();
         ValidateProjectLoadTransitionOwnership();
-        BracketingPresentationValidationAccess::ValidateProjectOwnership();
         RequireWorkspace(ValidateHeaderActionRegistry(), "Header action registry validation failed.");
         for (auto* workspace : {first.get(), second.get()}) {
             workspace->editor->SetDocumentPersistenceEnabled(false);

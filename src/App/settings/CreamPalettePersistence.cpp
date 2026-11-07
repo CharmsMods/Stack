@@ -29,7 +29,7 @@ void ReadAccent(const nlohmann::json& value,const char* key,NodeAccent& accent) 
 nlohmann::json EncodeCreamPalette(const CreamPalette& palette) {
     nlohmann::json seeds = nlohmann::json::array();
     for (const auto& c : palette.seeds) seeds.push_back({c.x,c.y,c.z});
-    return {{"id",palette.id},{"name",palette.name},{"seeds",seeds},{"numberAccent",AccentName(palette.numberAccent)},{"resetAccent",AccentName(palette.resetAccent)},{"colorPolicy",PolicyName(palette.colorPolicy)}};
+    return {{"id",palette.id},{"name",palette.name},{"brightness",palette.brightness},{"seeds",seeds},{"numberAccent",AccentName(palette.numberAccent)},{"resetAccent",AccentName(palette.resetAccent)},{"colorPolicy",PolicyName(palette.colorPolicy)}};
 }
 bool DecodeCreamPalette(const nlohmann::json& value, CreamPalette& palette) {
     if (!value.is_object() || !value.contains("id") || !value["id"].is_string() ||
@@ -53,6 +53,11 @@ bool DecodeCreamPalette(const nlohmann::json& value, CreamPalette& palette) {
     ReadAccent(value,"resetAccent",result.resetAccent);
     if (value.value("colorPolicy",std::string("full-color"))=="monochrome")
         result.colorPolicy=PaletteColorPolicy::Monochrome;
+    if (value.contains("brightness")) {
+        if (!value["brightness"].is_number()) return false;
+        result.brightness=value["brightness"].get<float>();
+        if (!std::isfinite(result.brightness) || result.brightness<0 || result.brightness>1) return false;
+    }
     palette=std::move(result); return true;
 }
 bool WriteAppearanceAtomically(const std::filesystem::path& path, const nlohmann::json& value,

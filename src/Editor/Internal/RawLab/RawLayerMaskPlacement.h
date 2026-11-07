@@ -9,7 +9,7 @@ namespace Stack::Editor::RawLabInternal {
 // Negative states do not own a gesture. Nonnegative states are active handles
 // or the initial placement drag, all committed by the RAW document owner.
 inline constexpr int MaskAwaitingPlacement = -2;
-inline constexpr int MaskPlacementDrag = 5;
+inline constexpr int MaskPlacementDrag = 8;
 
 inline void PlaceLayerMask(EditorNodeGraph::MaskGeneratorSettings& settings,
     EditorNodeGraph::MaskGeneratorKind kind, ImVec2 start, ImVec2 point) {

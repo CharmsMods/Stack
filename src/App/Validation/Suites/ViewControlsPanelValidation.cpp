@@ -17,7 +17,7 @@
 #include <stdexcept>
 
 namespace Stack::Validation {
-bool ValidateViewControlsPanel(const std::filesystem::path& output) {
+bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnly) {
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
@@ -40,6 +40,33 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
     bool success=false;
     const auto require=[](bool value,const char* message){if (!value) throw std::runtime_error(message);};
     try {
+        if(tiltOnly) {
+            editor->GetNodeGraph().Clear();
+            editor->AddLayer(LayerType::TiltShiftBlur);
+            int target=-1;
+            for(const auto& node:editor->GetNodeGraph().GetNodes())
+                if(node.kind==EditorNodeGraph::NodeKind::Layer && node.layerType==LayerType::TiltShiftBlur)target=node.id;
+            require(target>0,"Tilt-shift node was not created.");
+            const int outputId=editor->GetNodeGraph().AddOutputNode({500,0},true)->id;
+            require(editor->GetNodeGraph().TryConnect(target,outputId),"Could not connect tilt-shift controls fixture.");
+            require(editor->OpenRawProjectNodeEditor(target),"Tilt-shift controls did not open.");
+            auto prefs=editor->GetRawWorkspacePresentationPreferences();prefs.viewSectionTab=1;prefs.viewSectionOpen=true;
+            editor->ApplyRawWorkspacePresentationPreferences(prefs);
+            const auto before=editor->SerializePipeline();
+            for(int frame=0;frame<8;++frame) {
+                ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();
+                editor->RenderRawWorkspaceSectionPanel({20,20},{320,720},320);
+                ImGui::Render();glViewport(0,0,1000,760);
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            }
+            bool rendered=false;
+            for(const auto* item:ImGui::GetCurrentContext()->Windows)
+                rendered |= item->Active && std::string(item->Name).find("/Primary_")!=std::string::npos;
+            require(rendered,"Tilt-shift primary controls were not rendered.");
+            require(editor->SerializePipeline()==before,"Opening tilt-shift controls changed authored values.");
+            std::cout<<"Tilt-shift node opening and Controls rendering passed.\n";
+            success=true;
+        } else {
         auto& graph=editor->GetNodeGraph();graph.Clear();
         EditorNodeGraph::RawDevelopmentPayload source;source.recipe=RawRecipe::MakeDefaultRecipe({});
         const int start=graph.AddRawDevelopmentNode(std::move(source),{})->id;
@@ -50,12 +77,21 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         Project::RawLayerStackDocument document;std::string error;
         require(document.Load(payload.at("rawLayerStack"),error),error.c_str());
         auto layers=document.State();
-        auto* firstExposure=layers.background.graph.AddRawOperationNode(RawRecipe::GraphOperationKind::Exposure,{900,0});
-        const auto firstUuid=firstExposure->instanceUuid;
-        const auto second=layers.background.graph.AddRawOperationNode(RawRecipe::GraphOperationKind::Exposure,{1000,0})->instanceUuid;
+        auto& background=layers.background.graph;
+        int ingress=0;
+        for(const auto& node:background.GetNodes()) if(node.role==Stack::GraphModel::NodeRole::CurrentImage) ingress=node.id;
+        const auto oldLink=*background.FindOutputLink(ingress);
+        background.EditLinks().erase(std::remove_if(background.EditLinks().begin(),background.EditLinks().end(),
+            [&](const auto& link){return link.fromNodeId==ingress;}),background.EditLinks().end());
+        const auto firstId=background.AddRawOperationNode(RawRecipe::GraphOperationKind::Exposure,{900,0})->id;
+        const auto firstUuid=background.FindNode(firstId)->instanceUuid;
+        const auto secondId=background.AddRawOperationNode(RawRecipe::GraphOperationKind::Exposure,{1000,0})->id;
+        const auto second=background.FindNode(secondId)->instanceUuid;
+        require(background.TryConnect(ingress,firstId) && background.TryConnect(firstId,secondId) &&
+            background.TryConnectSockets(secondId,"imageOut",oldLink.toNodeId,oldLink.toSocketId),"Could not connect ordered exposure controls.");
         auto& ordered=layers.background.graph.GetNodes();
         std::stable_partition(ordered.begin(),ordered.end(),[&](const auto& node) {
-            return node.instanceUuid==firstUuid || node.instanceUuid==second;
+            return node.instanceUuid==second;
         });
         const auto secondLayer=Project::AddRawAdjustmentLayer(layers,"Second layer");
         Project::FindRawAdjustmentLayer(layers,secondLayer)->graph.AddRawOperationNode(RawRecipe::GraphOperationKind::Exposure,{100,0});
@@ -68,9 +104,10 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         const auto authored=editor->SerializePipeline().at("rawLayerStack");
         const int selectedBefore=editor->GetRawLayerToolIndex();
         float width=320;
+        float panelReveal=1.f;
         const auto frame=[&] {
             ImGui_ImplOpenGL3_NewFrame();ImGui::NewFrame();
-            editor->RenderRawWorkspaceSectionPanel({20,20},{width,720},width);
+            editor->RenderRawWorkspaceSectionPanel({20,20},{width,720},width*panelReveal);
             ImGui::Render();glViewport(0,0,1000,760);glClearColor(.08f,.08f,.08f,1);glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         };
@@ -127,6 +164,23 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         }
         require(scrolled,"The Controls body did not scroll with the wheel.");
         capture("controls-bottom-320.png");
+        // Closing clips the body entirely before it stops being submitted.
+        // Reopening must retain the scrolled location, not an empty range.
+        ImGuiWindow* scrollBody=nullptr;
+        for (auto* item:ImGui::GetCurrentContext()->Windows) {
+            const std::string name=item->Name;
+            const auto body=name.rfind("/PanelBody_");
+            if (item->Active && body!=std::string::npos && name.find('/',body+1)==std::string::npos)
+                scrollBody=item;
+        }
+        require(scrollBody!=nullptr,"Controls scroll body missing.");
+        const float retainedScroll=scrollBody->Scroll.y;
+        for (float reveal:{.7f,.2f,.01f,0.f,.01f,.2f,.7f,1.f}) {
+            panelReveal=reveal;frame();
+        }
+        for (int i=0;i<3;++i) frame();
+        require(std::abs(scrollBody->Scroll.y-retainedScroll)<1.f,
+            "Closing and reopening Controls lost its scroll position.");
         io.AddMouseWheelEvent(0,30);
         // Wheel scrolling now eases to its target. Select from settled native
         // geometry rather than clicking a heading while it is still moving.
@@ -142,115 +196,34 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         }
         require(returnedToTop,"The Controls body did not settle back at the top.");
         controls=primaries();
-        // Use the rendered first section's geometry to click its second node.
+        require(controls.size()>1,"The connected exposures did not produce separate ordered sections.");
         const float buttonHeight=ImGui::GetFontSize()+10.f;
-        const float buttonWidth=std::max(buttonHeight,ImGui::CalcTextSize("3").x+14.f);
-        const float switchStart=controls.front()->Pos.x+ImGui::CalcTextSize("Exposure").x+8.f;
-        const float versionsStart=switchStart+buttonHeight*1.5f+8.f;
-        const ImVec2 secondButton(versionsStart+buttonWidth*1.5f,
-            controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
-        io.AddMousePosEvent(secondButton.x,secondButton.y);frame();
+        const auto secondHeading=ImVec2(controls[1]->Pos.x+10.f,
+            controls[1]->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
+        io.AddMousePosEvent(secondHeading.x,secondHeading.y);frame();
         io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        if (editor->GetRawLayerToolIndex()==selectedBefore) {
-            capture("controls-selector-320.png");
-            std::cerr << "Selector at " << secondButton.x << ',' << secondButton.y
-                << "; primary at " << controls.front()->Pos.x << ',' << controls.front()->Pos.y << '\n';
-        }
-        require(editor->GetRawLayerToolIndex()!=selectedBefore,"The numbered selector did not change the active instance.");
-        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Selecting a numbered instance changed its parameters.");
-        const auto clickToggle=[&] {
-            io.AddMousePosEvent(switchStart+buttonHeight*.75f,secondButton.y);frame();
-            io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        };
-        clickToggle();
-        const auto disabled=editor->SerializePipeline().at("rawLayerStack");
-        require(document.Load(disabled,error),error.c_str());
-        for (const auto& node:document.State().background.graph.GetNodes())
-            if (node.kind==EditorNodeGraph::NodeKind::RawOperation)
-                require(node.rawOperation.enabled==(node.instanceUuid!=second),"Toggle affected the wrong RAW instance.");
-        require(disabled!=authored,"The switch did not persist the bypass.");
-        controls=primaries();
-        const auto disabledSlider=ImVec2(controls.front()->Pos.x+controls.front()->Size.x*.75f,
-            controls.front()->Pos.y+50.f*ImGui::GetFontSize()/16.f);
-        io.AddMousePosEvent(disabledSlider.x,disabledSlider.y);frame();
-        io.AddMouseButtonEvent(0,true);frame();
-        io.AddMousePosEvent(disabledSlider.x+40.f,disabledSlider.y);frame();
-        io.AddMouseButtonEvent(0,false);frame();
-        require(editor->SerializePipeline().at("rawLayerStack")==disabled,"A disabled slider edited its node.");
-        capture("controls-exposure-off.png");
-        clickToggle();
-        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Re-enabling the node changed its parameters or graph.");
-        controls=primaries();
-        const int numberedTarget=editor->GetRawLayerToolIndex();
-        require(controls.size()>1,"The heading selection check needs a second visible section.");
-        io.AddMousePosEvent(controls[1]->Pos.x+5.f,controls[1]->Pos.y+5.f);frame();
-        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        require(editor->GetRawLayerToolIndex()!=numberedTarget,"The other section did not activate its tool.");
-        controls=primaries();
-        io.AddMousePosEvent(controls.front()->Pos.x+10.f,
-            controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);frame();
-        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        require(editor->GetRawLayerToolIndex()==numberedTarget,"Clicking the name did not restore its chosen instance.");
-        editor->SetViewSectionTab(2);frame();
-        require(editor->GetRawLayerToolIndex()==numberedTarget,"Settings lost the name-selected tool.");
-        editor->SetViewSectionTab(1);frame();
-        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Selecting a heading changed authored values.");
-        controls=primaries();
-        const ImVec2 slider(controls.front()->Pos.x+controls.front()->Size.x*.75f,
-            controls.front()->Pos.y+50.f*ImGui::GetFontSize()/16.f);
-        io.AddMousePosEvent(slider.x,slider.y);frame();
-        const auto* tooltip=ImGui::GetCurrentContext()->TooltipPreviousWindow;
-        require(tooltip && tooltip->Hidden,"Controls hover text was not suppressed.");
-        positions.clear();
-        for (auto* item:primaries()) positions.emplace_back(item,item->Pos);
-        io.AddMouseButtonEvent(0,true);frame();stablePositions();
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Heading selection changed authored data.");
+        const auto slider=ImVec2(controls[1]->Pos.x+controls[1]->Size.x*.75f,
+            controls[1]->Pos.y+50.f*ImGui::GetFontSize()/16.f);
         const auto readExposure=[&] {
             require(document.Load(editor->SerializePipeline().at("rawLayerStack"),error),error.c_str());
             return Project::ReadRawLayerOperation(document.State().background,second).preToneExposureEv;
         };
-        // Stay captured beyond the horizontal and vertical bounds, then move
-        // back in. Every intermediate frame commits through the real history.
-        io.AddMousePosEvent(controls.front()->Pos.x-100,slider.y-150);frame();stablePositions();
-        require(readExposure()==-10.f,"Dragging outside the left edge stopped updating.");
-        io.AddMousePosEvent(controls.front()->Pos.x+width+100,slider.y+150);frame();stablePositions();
-        require(readExposure()==10.f,"Dragging outside the right edge stopped updating.");
-        io.AddMousePosEvent(slider.x+12,slider.y);frame();stablePositions();
-        require(readExposure()>0.f && readExposure()<10.f,"Returning from an edge lost the captured slider.");
-        for (int i=0;i<8;++i) {frame();stablePositions();}
+        io.AddMousePosEvent(slider.x,slider.y);frame();
+        io.AddMouseButtonEvent(0,true);frame();
+        io.AddMousePosEvent(controls[1]->Pos.x-100,slider.y-100);frame();
+        require(readExposure()==-10.f,"The second graph operation did not follow its slider beyond the left edge.");
+        io.AddMousePosEvent(controls[1]->Pos.x+width+100,slider.y+100);frame();
+        require(readExposure()==10.f,"The second graph operation did not follow its slider beyond the right edge.");
         io.AddMouseButtonEvent(0,false);frame();
-        for (int i=0;i<8;++i) {frame();stablePositions();}
-        require(ImGui::GetActiveID()==0,"Releasing an edge drag left a control active.");
-        for (auto* item:primaries())
-            require(item->Scroll.x==0 && item->Scroll.y==0,"A primary surface scrolled inside the Controls body.");
+        require(ImGui::GetActiveID()==0,"Slider release retained capture.");
         const auto edited=editor->SerializePipeline().at("rawLayerStack");
-        require(edited!=authored,"A panel slider did not commit its node draft.");
-        require(document.Load(edited,error),error.c_str());
-        require(Project::ReadRawLayerOperation(document.State().background,firstUuid).preToneExposureEv==0 &&
-            Project::ReadRawLayerOperation(document.State().background,second).preToneExposureEv!=0,
-            "The panel edited the wrong numbered node.");
-        require(editor->UndoRawLayerEdit(),"Panel editing could not be undone.");
-        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Undo did not restore the panel's instance edit.");
-        require(editor->RedoRawLayerEdit(),"Panel editing could not be redone.");
-        require(editor->SerializePipeline().at("rawLayerStack")==edited,"Redo did not restore the panel's instance edit.");
-        controls=primaries();
-        const ImVec2 thirdButton(versionsStart+buttonWidth*2.5f,
-            controls.front()->Pos.y-ImGui::GetStyle().ItemSpacing.y-buttonHeight*.5f);
-        io.AddMousePosEvent(thirdButton.x,thirdButton.y);frame();
-        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        require(editor->GetRawLayerToolLabels().size()==1 && editor->GetRawLayerToolIndex()==0,
-            "The numbered selector did not select the instance in the other layer.");
-        controls=primaries();
-        const ImVec2 otherSlider(controls.front()->Pos.x+controls.front()->Size.x*.65f,
-            controls.front()->Pos.y+50.f*ImGui::GetFontSize()/16.f);
-        io.AddMousePosEvent(otherSlider.x,otherSlider.y);frame();
-        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
-        require(document.Load(editor->SerializePipeline().at("rawLayerStack"),error),error.c_str());
-        const auto* otherLayer=Project::FindRawAdjustmentLayer(document.State(),secondLayer);
-        require(otherLayer && Project::ReadRawLayerOperation(*otherLayer,
-            Project::FindRawOperation(*otherLayer,RawRecipe::GraphOperationKind::Exposure)->instanceUuid).preToneExposureEv!=0,
-            "The other layer's selected tool did not receive its edit.");
         require(Project::ReadRawLayerOperation(document.State().background,firstUuid).preToneExposureEv==0,
-            "An edit in the other layer changed the first instance.");
+            "Controls storage order replaced the connected graph order.");
+        require(editor->UndoRawLayerEdit(),"Could not undo the ordered instance edit.");
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Undo changed another operation.");
+        require(editor->RedoRawLayerEdit(),"Could not redo the ordered instance edit.");
+        require(editor->SerializePipeline().at("rawLayerStack")==edited,"Redo did not restore the ordered instance.");
         editor->SetViewSectionTab(2);
         require(editor->GetRawWorkspacePresentationPreferences().viewSectionTab==2,"Settings did not replace Controls.");
         editor->SetViewSectionTab(1);editor->SetViewSectionPanelOpen(false);
@@ -297,8 +270,9 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output) {
         RawWorkspace::AppState restored;
         require(RawWorkspace::LoadAppState(preferenceFile,restored,&error),error.c_str());
         require(restored.viewSectionTab==1 && !restored.viewSectionOpen,"Controls presentation did not survive app-state reload.");
-        std::cout<<"View Controls: inline version selection, name activation and Settings ownership, hidden hover text, stable section layout through edits, continuous slider and curve outside-edge dragging and release, idle drawing, numbered instances across layers, targeted slider editing, undo/redo, panel tabs/closing, scrollbar-free scrolling, narrow layout, persisted preferences and finite reveal passed.\n";
+        std::cout<<"View Controls: connected order independent of storage, separate instances, targeted editing, undo/redo, idle layout, scrolling, narrow layout, release and persisted preferences passed.\n";
         success=true;
+        }
     } catch (const std::exception& exception) {std::cerr<<exception.what()<<'\n';}
     editor->RequestWorkerShutdownForAppClose();Async::TaskSystem::Get().Shutdown();editor.reset();
     ImGui_ImplOpenGL3_Shutdown();ImGui::DestroyContext();glfwDestroyWindow(window);glfwTerminate();

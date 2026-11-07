@@ -82,7 +82,7 @@ bool EditorModule::DrawRawViewportTransition(ImDrawList* list, ImVec2 minimum, I
         return false;
     }
     const auto map = Raw::MapViewportFade(m_RawViewportFadeBase.region,m_RawViewportLastPresentation.region);
-    const bool hdr = Stack::Hdr::PreviewActiveForCurrentWindow() && m_RawWorkspacePresentationTexture.hdr;
+    const bool hdr = IsHdrOutputPreview() && m_RawWorkspacePresentationTexture.hdr;
     if (hdr && !m_RawViewportPreviousTexture.hdr) return false;
     const bool drawn = m_RawViewportFadeRenderer.Draw(list, m_RawViewportPreviousTexture.Display(hdr),
         m_RawWorkspacePresentationTexture.Display(hdr), minimum, maximum,

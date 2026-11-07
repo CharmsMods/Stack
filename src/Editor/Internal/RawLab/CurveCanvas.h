@@ -18,17 +18,23 @@ struct CurveCanvasGeometryCache {
     CurveAxisMapping xAxis,yAxis;
     float offset=0;
     bool mapped=false;
+    bool screenMapped=false;
+    ImVec2 screenMinimum{},screenMaximum{};
     std::vector<ImVec2> mappedPoints,screenPoints;
 };
 struct CurveCanvasState {
     void EndInteraction() {
         gesture=exposureGesture=amountGesture=normalizationGesture=tonalSliderGesture=false;
-        gestureMoved=gestureApplied=false;dragged=-1;activeTonalSlider=0;probe.reset();
+        gestureMoved=gestureApplied=insertionDrag=false;dragged=-1;activeTonalSlider=0;probe.reset();
         modeSelector.dragging=false;modeSelector.capture=0;
+        viewPanning=false;
     }
     CurveGestureMode mode = CurveGestureMode::Points;
     CurveModeSelectorState modeSelector;
     CurveCanvasFraming framing;
+    bool viewPanning=false;
+    ImVec2 viewPress{};
+    RawLabToneGraphViewRange beforeViewX{},beforeViewY{};
     std::vector<bool> selected;
     std::vector<RawRecipe::RawBezierCurvePoint> before;
     ImVec2 press{};
@@ -39,7 +45,7 @@ struct CurveCanvasState {
     bool showTonalSliders = false, tonalSliderGesture = false;
     ImGuiID activeTonalSlider = 0;
     std::vector<RawRecipe::RawBezierCurvePoint> beforeTonalSliders;
-    bool gestureApplied = false;
+    bool gestureApplied = false, insertionDrag = false;
     ImVec2 appliedGestureDelta{};
     float appliedGestureRadius = 0;
     std::vector<RawRecipe::RawBezierCurvePoint> gesturePoints;

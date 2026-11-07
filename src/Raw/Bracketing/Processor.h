@@ -53,7 +53,9 @@ struct AlignmentInspection {
     std::vector<float> confidence;
     std::vector<std::uint16_t> rejectionBits;
 };
-enum class ClippedReference : std::uint8_t { None, LowerBound, EstimatedColor };
+// NeutralCompletion is an unresolved-color display value, not recovered hue.
+// These four states occupy the existing two-bit observation storage field.
+enum class ClippedReference : std::uint8_t { None, LowerBound, EstimatedColor, NeutralCompletion };
 enum class MeasurementFallbackReason : std::uint8_t {
     None = 0,
     AutomaticValidInput = 1,
@@ -129,6 +131,7 @@ struct BracketingResult {
     std::shared_ptr<const Panorama::Layout> panorama;
     struct ReconstructionInspection {
         std::filesystem::path directory;
+        std::shared_ptr<void> storageOwner; // Keeps an owned scratch session alive across lazy inspection.
         double scale=1;
         unsigned tilePixels=256,sensorWidth=0,sensorHeight=0,groups=0;
         BracketingRecipe recipe;
@@ -150,6 +153,8 @@ struct ProcessingRequest {
     // Explicit budgets stay strict. Interactive/automatic callers allow the
     // reconstruction stage to recheck fresh RAM and system commit headroom.
     bool automaticMemoryBudget=false;
+    // Host-only policy for disposable automatic work; never sent as recipe data.
+    bool terminateOnCancel=false;
     // Zero means no graphics-device limit was supplied by a headless caller.
     unsigned maximumOutputDimension=0;
     // Rebuild source/group inspection data while retaining a saved final measurement.

@@ -44,15 +44,12 @@ void DrawColorWarpCloud(RawLabColorSurfaceArgs& args,ImVec2 minimum,float size) 
         const auto* selectedPin=selected>=0 && selected<int(args.colorWarp.pins.size())?&args.colorWarp.pins[selected]:nullptr;
         const auto selectedRegion=selectedPin?std::find_if(args.colorWarp.regions.begin(),args.colorWarp.regions.end(),
             [&](const auto& r){return r.id==selectedPin->regionId;}):args.colorWarp.regions.end();
-        const bool selectedSpatial=selectedRegion!=args.colorWarp.regions.end() && selectedRegion->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches;
-        RawRecipe::RawColorWarpPin membership;
-        if(selectedPin){membership=*selectedPin;membership.enabled=true;membership.strength=1;}
+        const bool selectedSpatial=(selectedPin && selectedPin->smoothSelection>0) || (selectedRegion!=args.colorWarp.regions.end() && selectedRegion->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches);
         for(const auto& point:state.points) {
             if(feedback)feedback->SampleMasks(args.colorWarp,point.input,point.u,point.v,masks);
             float caught=0;
-            if(preview && selectedPin && (!selectedSpatial || feedback)) {
-                caught=RawRecipe::EvaluateColorWarpPinWeight(membership,point.input,
-                    feedback && selectedSpatial?masks[selected]:RawRecipe::RawColorWarpMaskSample{},RawRecipe::ColorWarpPinSpatialSupport(args.colorWarp,membership));
+            if(preview && selectedPin && ((!spatial && !selectedSpatial) || feedback)) {
+                caught=RawRecipe::ColorWarpPreviewInfluence(args.colorWarp,std::size_t(selected),point.input,masks);
             }
             auto rgb=point.rgb;auto coordinate=point.input;
             if(live && (!spatial || feedback)) {

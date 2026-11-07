@@ -80,20 +80,60 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     if(BareTextButton("Adjust",!state.selectRange))state.selectRange=false;
     ImGui::SameLine();
     if(BareTextButton("Select range",state.selectRange))state.selectRange=true;
-    ImGui::SameLine();
+    ContinueRawLabControlRow("Preview");
     if(BareTextButton("Preview",args.ui.colorWarpDiagnosticLocked))
         args.ui.colorWarpDiagnosticLocked=!args.ui.colorWarpDiagnosticLocked;
-    LabTooltip("Show where this selection matches the incoming image. Hold H for a temporary preview.");
-    const float size=std::clamp(ImGui::GetContentRegionAvail().y-(state.selectRange?320.f:220.f),160.f,
+    LabTooltip("Preview this selection after strength, protection and overlap settings. Unadjusted colors remain visible for choosing a range. Hold H for a temporary preview.");
+    if(!state.selectRange) {
+        ImGui::BeginDisabled(pin.protectColor);
+        if(BareTextButton("Move",pin.moveColors)) {pin.moveColors=true;changed=true;}
+        LabTooltip("Slide the selected color group toward the wheel destination. Selection stays anchored to the input colors.");
+        ImGui::SameLine();
+        if(BareTextButton("Turn",!pin.moveColors)) {pin.moveColors=false;changed=true;}
+        LabTooltip("Rotate hue and scale saturation around neutral, preserving variation within the group.");
+        ImGui::EndDisabled();
+    }
+    const float size=std::clamp(ImGui::GetContentRegionAvail().y-(state.selectRange?(pin.sampleRadius>0?400.f:300.f):220.f),160.f,
         std::max(160.f,std::min(330.f,ImGui::GetContentRegionAvail().x)));
     changed|=DrawColorWarpWheel(args,pin,size);
-    if(state.selectRange)changed|=DrawColorWarpBrightness(args,pin);
+    if(state.selectRange) {
+        changed|=DrawColorWarpBrightness(args,pin);
+        if(pin.family<0) {
+            if(BareTextButton("Soft color",pin.sampleRadius>0) && pin.sampleRadius==0) {
+                pin.sampleRadius=std::max(.04f,std::hypot(pin.sourceA,pin.sourceB)*.4f);
+                pin.hueRange.enabled=pin.saturationRange.enabled=false;
+                pin.smoothSelection=.65f;changed=true;
+            }
+            LabTooltip("Select a soft neighborhood around the sampled color, including subtle near-gray variations. Resets the color range; keeps exposure limits.");
+            ImGui::SameLine();
+            if(BareTextButton("Hue / saturation",pin.sampleRadius==0) && pin.sampleRadius>0) {
+                pin.sampleRadius=0;pin.hueRange.enabled=pin.saturationRange.enabled=true;changed=true;
+            }
+            if(pin.sampleRadius>0) {
+                ImGui::TextUnformatted("Color reach");
+                float reach=pin.sampleRadius*100.f;
+                if(ImGuiExtras::FloatingSliderFloat("Color reach","##color-reach",&reach,1,100,"%.1f",ImGui::GetContentRegionAvail().x)) {
+                    pin.sampleRadius=reach*.01f;changed=true;
+                }
+                args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+                LabTooltip("Widen the sampled color neighborhood. The outer edge always fades softly.");
+            }
+        }
+        ImGui::TextUnformatted("Smooth selection");
+        float smooth=pin.smoothSelection*100.f;
+        if(ImGuiExtras::FloatingSliderFloat("Smooth selection","##smooth-selection",&smooth,0,100,"%.0f%%",ImGui::GetContentRegionAvail().x)) {
+            pin.smoothSelection=smooth*.01f;changed=true;
+        }
+        args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+        LabTooltip("Even out selection speckles and small gaps while respecting image edges. Smooths the selection only, not image detail. Higher values can include nearby colors.");
+    }
+    if(!state.selectRange) {
     ImGui::BeginDisabled(pin.protectColor);
     const float width=ImGui::GetContentRegionAvail().x;
-    ImGui::TextUnformatted("Hue");
+    ImGui::TextUnformatted(pin.moveColors?"Move hue":"Hue");
     changed|=ImGuiExtras::FloatingSliderFloat("Hue","##hue",&pin.hueShift,-180,180,"%+.1f deg",width);
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
-    ImGui::TextUnformatted("Saturation");
+    ImGui::TextUnformatted(pin.moveColors?"Move saturation":"Saturation");
     float saturation=pin.saturation*100.f;
     if(ImGuiExtras::FloatingSliderFloat("Saturation","##sat",&saturation,-100,500,"%+.1f%%",width)) {
         pin.saturation=saturation*.01f;changed=true;
@@ -103,6 +143,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     changed|=ImGuiExtras::FloatingSliderFloat("Exposure","##ev",&pin.exposureEv,-4,4,"%+.2f EV",width);
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
     ImGui::EndDisabled();
+    }
     if(state.selectRange) {
         if(BareTextButton("Range details",state.details))state.details=!state.details;
         if(state.details)changed|=DrawColorWarpRanges(args,pin);

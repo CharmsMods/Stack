@@ -111,7 +111,7 @@ struct AppearanceLibrary {
     bool graphSpotlightHaloOutlines = false;
     bool graphDottedMaskLinks = false;
     bool graphStraightLinks = false;
-    float graphLineOpacity = 0.20f;
+    float graphLineOpacity = 0.0f;
     float graphPanSensitivity = 0.40f;
     float graphNodeSliderDragSensitivity = 0.10f;
     GraphConnectionLabelVisibility graphConnectionLabels =

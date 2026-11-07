@@ -1,3 +1,4 @@
+#include "Async/ForegroundIO.h"
 #include "Persistence/BracketMaster.h"
 #include "Raw/RawViewportSettings.h"
 #include "Raw/RawGalleryInputPolicy.h"
@@ -388,18 +389,10 @@ bool ReadGalleryOriginal(const std::filesystem::path& root, const std::filesyste
         return false;
     }
     auto record = FileListingRecord(entry, owner);
-    const auto identity = Stack::RawEvidence::ComputeSourceIdentity(record.absolutePath, cancelled);
-    if (!identity.valid) {
-        error = identity.reason;
-        return false;
-    }
-    const auto modified = std::filesystem::last_write_time(path, ec);
-    if (ec || FileTimeTicks(modified) != record.modifiedTimeTicks || identity.byteSize != record.fileSizeBytes) {
-        error = "The original changed while it was being opened. Open it again.";
-        return false;
-    }
-    record.fingerprint = identity.sha256;
-    record.sourceIdentityAlgorithmVersion = kSourceIdentityAlgorithmVersion;
+    // This is a transient browsing reference. The RAW decoder verifies the
+    // source bytes when it loads them; project materialization verifies assets.
+    // Do not read the entire file once more before allowing that load to start.
+    if(cancelled && cancelled()) {error="Opening canceled.";return false;}
     record.sourceWorkspaceRoot = owner;
     source = std::move(record);
     return true;
@@ -507,7 +500,7 @@ ScanResult ScanWorkspace(
         }
 
         for (; it != end; it.increment(ec)) {
-            if (isCancelled()) {
+            if (isCancelled() || (galleryBrowse && !Async::ForegroundIO::WaitForIdle(isCancelled))) {
                 result.errorMessage = "Workspace scan canceled.";
                 result.progress.statusText = result.errorMessage;
                 return result;
@@ -588,9 +581,10 @@ ScanResult ScanWorkspace(
             if (identityReused) {
                 ++result.progress.reusedSourceIdentityCount;
             } else {
+                const auto backgroundCanceled = [&] { return galleryBrowse ? !Async::ForegroundIO::WaitForIdle(isCancelled) : isCancelled(); };
                 const Stack::RawEvidence::SourceIdentity identity =
                     Stack::RawEvidence::ComputeSourceIdentity(
-                        record.absolutePath, isCancelled);
+                        record.absolutePath, backgroundCanceled);
                 if (!identity.valid) {
                     if (isCancelled()) {
                         result.errorMessage = "Workspace scan canceled.";
@@ -612,6 +606,7 @@ ScanResult ScanWorkspace(
             }
             if (IsGalleryRasterPath(record.absolutePath)) record.captureMetadataChecked=true;
             if (!record.captureMetadataChecked && !isCancelled()) {
+                if(galleryBrowse && !Async::ForegroundIO::WaitForIdle(isCancelled))return result;
                 Raw::RawMetadata metadata;
                 if (Raw::RawLoader::LoadMetadata(record.absolutePath.u8string(), metadata)) {
                     record.captureTimestamp = metadata.hasCaptureTimestamp
@@ -619,11 +614,12 @@ ScanResult ScanWorkspace(
                     record.captureMetadataChecked = true;
                 }
             }
-            record.browsePreview = false;
+            record.browsePreview = galleryBrowse;
             if (sourceReadyCallback) sourceReadyCallback(result.layout, record, result.progress);
         }
         for (auto& master : masters) {
             const auto path = result.layout.workspaceRoot / std::filesystem::u8path(master.at("relativePath").get<std::string>());
+            if (galleryBrowse) continue;
             const auto identity = Stack::RawEvidence::ComputeSourceIdentity(path, isCancelled);
             if (!identity.valid) { result.errorMessage = "Could not index bracket master."; return result; }
             master["fingerprint"] = identity.sha256;

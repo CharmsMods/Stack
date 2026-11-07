@@ -85,7 +85,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             const bool settings = !bracketSource && m_ViewSectionTab==2;
             ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Layers");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
-            const bool bodyVisible=controls ? Stack::Editor::BeginControlsPanelBody() :
+            const bool bodyVisible=controls ? Stack::Editor::BeginControlsPanelBody(visibleWidth < size.x - 0.5f) :
                 ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground);
             {
                 if (bodyVisible && m_ViewSectionTab==3) {

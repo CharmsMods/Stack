@@ -7,8 +7,7 @@
 namespace StackAppearance {
 inline constexpr const char* kMonochromeDarkPaletteId = "monochrome-dark";
 inline constexpr const char* kMonochromeGrayPaletteId = "monochrome-gray";
-// Future dark palettes should resolve these same roles. Mixing modes belongs
-// here, not in individual widgets; no dark-mode interpolation is enabled yet.
+// Shared neutral surface roles; brightness is resolved only when appearance changes.
 enum class NodeAccent { Blue, Teal, Olive };
 enum class PaletteColorPolicy { FullColor, Monochrome };
 struct CreamPalette {
@@ -18,6 +17,7 @@ struct CreamPalette {
     NodeAccent numberAccent = NodeAccent::Blue;
     NodeAccent resetAccent = NodeAccent::Teal;
     PaletteColorPolicy colorPolicy = PaletteColorPolicy::FullColor;
+    float brightness = 0.15f; // 0: black workspace, 1: gray workspace.
     CreamPalette();
 };
 struct SurfaceColors {

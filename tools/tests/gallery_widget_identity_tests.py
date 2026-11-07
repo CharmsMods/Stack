@@ -14,14 +14,16 @@ list_start = source.index('bool GalleryListSelectable(')
 list_helper = source[list_start:source.index('\n}', list_start) + 2]
 assert 'GalleryListSelectable(row, listProjectSelected)' in source
 assert 'GalleryListSelectable(row, selected)' in source
+assert 'PushGalleryKeyID(project.projectCoverKey);' in source
+assert 'PushGalleryKeyID(project->projectCoverKey);' in source
 
 def scope(expression):
     return next(line.strip() for line in source.splitlines()
                 if line.strip() == f'PushGalleryKeyID({expression});')
 
 # Keep the permanent-stack inner identity in sync with drawThumbnail.
-inner = 'ImGui::PushID("RawGalleryTile");\n        ImGui::PushID(itemId);'
-assert inner in source
+inner_start = source.index('ImGui::PushID("RawGalleryTile");')
+inner = source[inner_start:source.index('        const ImVec2 tileMinimum', inner_start)]
 # Source-only cost guard: cards must not own unused metadata before row culling.
 item = source[source.index('    struct AnimatedGalleryItem {'):source.index('    const auto gridStackSource =')]
 assert 'GallerySourceView' not in item, 'animated cards copy unused gallery metadata'

@@ -3,6 +3,7 @@
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionRuntime.h"
 #include "Renderer/RenderTiling.h"
+#include "Renderer/GraphResourcePolicy.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "NodeMath/ReductionMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -196,16 +197,6 @@ void RenderPipeline::ExecuteGraphImpl(
     const RenderGraphSnapshot& graph,
     const GraphTopologyIndex& topology) {
     m_OutputDenoisePending = false;
-    const bool sceneRaw = graph.rawLayerBackgroundNodeId > 0 ||
-        std::any_of(graph.nodes.begin(),graph.nodes.end(),[](const auto& node) {
-            return node.kind == RenderGraphNodeKind::RawDevelopment;
-        });
-    // Keep near-black and extended scene values through the same precision
-    // path on Background and layers. Display encoding is the final boundary.
-    const bool preciseMath = std::any_of(graph.nodes.begin(), graph.nodes.end(), [](const auto& node) {
-        return node.kind == RenderGraphNodeKind::DataMath;
-    });
-    ConfigureGraphTargetPrecision(sceneRaw || preciseMath);
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;
@@ -327,6 +318,11 @@ void RenderPipeline::ExecuteGraphImpl(
             "Graph scheduling failed: " + evaluationSchedule.error;
         return;
     }
+
+    Stack::Renderer::GraphResourcePolicy resources;
+    for (const auto& output : evaluationSchedule.outputs)
+        resources.Include(*topology.nodes.at(output.nodeId), graph.rawLayerBackgroundNodeId > 0);
+    ConfigureGraphTargetPrecision(resources.float32Targets);
 
     const RenderGraphRegionPlan regionPlan =
         RenderTiling::PlanGraphRegions(graph, m_Width, m_Height);

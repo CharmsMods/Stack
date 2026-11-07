@@ -1993,7 +1993,7 @@ bool EditorRenderWorker::ShouldAbortStaleSnapshot(
     const Snapshot& snapshot) const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     return m_StopRequested ||
-        (m_HasPending &&
+        (snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitExport && m_HasPending &&
          m_Pending.schedulingSerial > snapshot.schedulingSerial &&
          (m_Pending.ownerId != snapshot.ownerId ||
           (snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
@@ -2032,8 +2032,11 @@ void EditorRenderWorker::PublishCompletedResult(Snapshot& snapshot, Result& resu
         result.rawWorkspace.preciseSolveResult.has_value() &&
         result.rawWorkspace.preciseSolveResult->canceled;
     const bool staleResult = IsOwnerResultStaleLocked(result);
+    // Exports carry terminal operation results. Their initiating editor checks
+    // the captured generation even if its viewport has since changed.
     if (m_StopRequested ||
-        (staleResult && !carriesCancellationAcknowledgement)) {
+        (staleResult && !carriesCancellationAcknowledgement &&
+         result.rawRenderPurpose != RawRenderPurpose::ExplicitExport)) {
         snapshot.generation = 0;
         retired.TakeUnpublished(result);
         m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
@@ -2047,7 +2050,8 @@ void EditorRenderWorker::PublishCompletedResult(Snapshot& snapshot, Result& resu
     }
     auto cancellationAcknowledgement = m_Completed.end();
     for (auto it = m_Completed.begin(); it != m_Completed.end();) {
-        if (it->ownerId != result.ownerId) {
+        if (it->ownerId != result.ownerId ||
+            it->rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
             ++it;
             continue;
         }
@@ -2080,7 +2084,8 @@ void EditorRenderWorker::PublishCompletedResult(Snapshot& snapshot, Result& resu
         // second queue node, after every other owner's retained completions.
         m_Completed.splice(m_Completed.end(), m_Completed, cancellationAcknowledgement);
     }
-    if (m_FallbackCompleted && m_FallbackCompleted->ownerId == result.ownerId) {
+    if (m_FallbackCompleted && m_FallbackCompleted->ownerId == result.ownerId &&
+        m_FallbackCompleted->rawRenderPurpose != RawRenderPurpose::ExplicitExport) {
         retired.TakeFallback(m_FallbackCompleted);
     }
     bool resultQueued = false;

@@ -16,3 +16,11 @@ else()
 endif()
 add_test(NAME StackBurst.Quality COMMAND StackBurstQualityTests)
 set_tests_properties(StackBurst.Quality PROPERTIES LABELS "burst;calibration;super-resolution;gpu")
+
+add_executable(StackBracketHighlightTests EXCLUDE_FROM_ALL
+    tools/tests/bracket_highlight_tests.cpp
+    src/Raw/Bracketing/HdrHighlightFallback.cpp)
+target_include_directories(StackBracketHighlightTests PRIVATE src src/ThirdParty)
+target_link_libraries(StackBracketHighlightTests PRIVATE imgui_core)
+add_test(NAME StackBurst.HighlightCompletion COMMAND StackBracketHighlightTests)
+set_tests_properties(StackBurst.HighlightCompletion PROPERTIES LABELS "burst;highlight;cpu")

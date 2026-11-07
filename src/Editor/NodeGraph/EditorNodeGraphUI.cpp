@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/ChannelOutputs.h"
 #include "EditorNodeGraphUI.h"
 #include "Editor/EditorModule.h"
 #include "App/UiPerformanceTrace.h"
@@ -381,7 +382,9 @@ EditorNodeGraphUI::BuildLogicalNodeLayout(
     for (const EditorNodeGraph::SocketDefinition& socket : sockets) {
         spec.sockets.push_back(SocketLayoutSpec {
             socket.id,
-            socket.direction
+            socket.direction,
+            EditorNodeGraph::FindChannelOutput(node,socket.id) ?
+                EditorNodeGraph::FindChannelOutput(node,socket.id)->sourceSocket : std::string{}
         });
     }
     return Stack::Editor::NodeGraphUILayout::BuildLogicalNodeLayout(

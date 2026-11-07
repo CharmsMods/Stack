@@ -24,6 +24,8 @@
 #include "Raw/RawLoader.h"
 #include "Raw/RawProcessingMath.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GraphResourcePolicy.h"
+#include "Renderer/Internal/RenderPipelineGraphSchedule.h"
 #include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/SceneColorGuidePlanning.h"
 #include "Editor/GraphRenderMemory.h"
@@ -508,7 +510,8 @@ unsigned EditorModule::DisplayOutputTexture(unsigned texture,bool hdr) const {
     if(texture==m_RawWorkspacePresentationTexture.texture) return m_RawWorkspacePresentationTexture.Display(true);
     if(texture==m_RawViewportDetailTexture.texture) return m_RawViewportDetailTexture.Display(true);
     if(texture==m_RawViewportPreviousTexture.texture) return m_RawViewportPreviousTexture.Display(true);
-    if(texture==m_HdrGraphBase && m_HdrGraphOutput && texture==m_Pipeline.GetOutputTexture()) return m_HdrGraphOutput.Texture();
+    if(texture==m_HdrGraphBase && m_HdrGraphOutput && texture==m_Pipeline.GetOutputTexture())
+        return Stack::Hdr::RegisterPhotoPair(texture,m_HdrGraphOutput.Texture());
     return texture;
 }
 void EditorModule::MarkRenderRefreshDirty() {
@@ -1431,10 +1434,17 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     }
     if (m_RawWorkspaceRootTabActive && IsRawWorkspaceProjectActive()) ResolveRawViewportInteractiveEdge();
     Stack::EditorRendering::RawRenderPlanInput planInput;
-    if (snapshot.graph.rawLayerBackgroundNodeId > 0 ||
-        std::any_of(snapshot.graph.nodes.begin(),snapshot.graph.nodes.end(),[](const auto& node) {
-            return node.kind == RenderGraphNodeKind::RawDevelopment;
-        })) planInput.surfaceBytesPerPixel = 16;
+    using namespace Stack::Renderer::GraphExecution;
+    const auto resourceTopology = BuildGraphTopologyIndex(snapshot.graph);
+    std::vector<ScheduledGraphOutput> resourceRoots;
+    if (snapshot.graph.rawLayerScopeNodeId > 0)
+        resourceRoots.push_back({snapshot.graph.rawLayerScopeNodeId, snapshot.graph.rawLayerScopeSocketId});
+    const auto resourceSchedule = BuildGraphEvaluationSchedule(snapshot.graph, resourceTopology,
+        {snapshot.graph.outputNodeId, snapshot.graph.outputSocketId}, resourceRoots);
+    Stack::Renderer::GraphResourcePolicy graphResources;
+    if (resourceSchedule.valid) for (const auto& output : resourceSchedule.outputs)
+        graphResources.Include(*resourceTopology.nodes.at(output.nodeId), snapshot.graph.rawLayerBackgroundNodeId > 0);
+    planInput.surfaceBytesPerPixel = resourceSchedule.valid ? graphResources.TargetBytesPerPixel() : 16;
     planInput.exportRequested = m_RawWorkspaceExportRenderRequested;
     planInput.targetAuxiliary = rawWorkspaceTargetAuxiliary;
     planInput.explicitInspectionRequested =
@@ -1468,12 +1478,20 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
         kRawDevelopComplexPreviewMaxDimension;
     planInput.fullFrameWidth = fullFrameWidth;
     planInput.fullFrameHeight = fullFrameHeight;
-    planInput.additionalWorkingBytes = Stack::Renderer::LocalToneGuideWorkingBytes(snapshot.graph,fullFrameWidth,fullFrameHeight);
-    if (snapshot.rawWorkspace.hasRecipe && Stack::Renderer::RecipeUsesLocalToneGuide(snapshot.rawWorkspace.recipe))
+    if (resourceSchedule.valid) for (const auto& output : resourceSchedule.outputs) {
+        const auto& node = *resourceTopology.nodes.at(output.nodeId);
+        planInput.additionalWorkingBytes = std::max(planInput.additionalWorkingBytes,
+            Stack::Renderer::LocalToneGuideWorkingBytes(node,fullFrameWidth,fullFrameHeight));
+    }
+    if (graphResources.rawStages && snapshot.rawWorkspace.hasRecipe && Stack::Renderer::RecipeUsesLocalToneGuide(snapshot.rawWorkspace.recipe))
         planInput.additionalWorkingBytes = std::max(planInput.additionalWorkingBytes,
             Stack::Renderer::LocalToneGuideWorkingBytes(snapshot.rawWorkspace.recipe,fullFrameWidth,fullFrameHeight));
-    planInput.additionalWorkingBytes=Stack::GraphRendering::AddBytes(planInput.additionalWorkingBytes,
-        Stack::Renderer::SceneColorMaskGuideWorkingBytes(snapshot.graph,fullFrameWidth,fullFrameHeight));
+    if (graphResources.sourceColorGuide && resourceSchedule.valid &&
+        std::any_of(resourceSchedule.outputs.begin(),resourceSchedule.outputs.end(),[&](const auto& output) {
+            return Stack::Renderer::NodeMayUseColorMaskGuide(*resourceTopology.nodes.at(output.nodeId));
+        }))
+        planInput.additionalWorkingBytes=Stack::GraphRendering::AddBytes(planInput.additionalWorkingBytes,
+            Stack::Renderer::SceneColorMaskGuideWorkingBytes(fullFrameWidth,fullFrameHeight));
     planInput.maximumTextureSize = m_RawWorkspaceGlMaxTextureSize;
     planInput.workingBudgetBytes =
         m_RawWorkspaceVramWorkingBudgetBytes;

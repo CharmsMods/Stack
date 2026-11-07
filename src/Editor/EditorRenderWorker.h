@@ -34,6 +34,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include "Hdr/PhotoPairs.h"
 #include <vector>
 
 struct GLFWwindow;
@@ -139,7 +140,7 @@ public:
         GLsync readyFence = nullptr;
         Raw::RawGpuImageLease lease;
         Raw::RawGpuImageLease hdr;
-        unsigned Display(bool active) const {return active && hdr ? hdr.Texture() : texture;}
+        unsigned Display(bool active) const {return active && hdr ? Stack::Hdr::RegisterPhotoPair(texture,hdr.Texture()) : texture;}
 
     private:
         void MoveFrom(SharedTextureResult&& other) noexcept {
@@ -167,7 +168,7 @@ public:
         int haloWidth = 0;
         int haloHeight = 0;
         Raw::RawGpuImageLease hdr;
-        unsigned Display(bool active) const {return active && hdr ? hdr.Texture() : texture;}
+        unsigned Display(bool active) const {return active && hdr ? Stack::Hdr::RegisterPhotoPair(texture,hdr.Texture()) : texture;}
     };
 
     struct SharedTextureTileSet {

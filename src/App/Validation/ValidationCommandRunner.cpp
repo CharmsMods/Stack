@@ -1,3 +1,6 @@
+#include "BurstEngine/Protocol.h"
+namespace Stack::Validation { bool ValidateBracketScratch(); int BracketScratchChild(const std::filesystem::path&,HANDLE); }
+namespace Stack::Validation { bool ValidateColorWarpMove(); }
 #include "App/Validation/Suites/GraphRenderingValidation.h"
 #include "App/Validation/ValidationCommandRunner.h"
 
@@ -14,7 +17,7 @@
 #include <vector>
 #include <filesystem>
 
-namespace Stack::Validation { bool BenchmarkBracketingPresentation(const std::filesystem::path&,const std::filesystem::path&); bool ValidateBracketing(); bool ValidateBracketingUi(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateBracketing(); bool ValidateBracketingUi(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateBracketingWorkflow(int,char**,bool=false,unsigned=2,bool=false); }
 namespace Stack::Validation { bool ValidateProjectStageState(int,char**); }
 namespace Stack::Validation { bool ValidateAutoBracket(int,char**); }
@@ -22,7 +25,6 @@ namespace Stack::Validation { bool ValidateAutoBracketReopen(const std::filesyst
 namespace Stack::Validation { bool DiagnoseBracketingProject(int,char**); }
 namespace Stack::Validation { bool ValidateSuperResolution(int,char**); bool ValidateHdrDisplay(int,char**); bool ValidateHdrGallery(const char*); }
 namespace Stack::Validation { bool ValidateHdrGraphExport(const char*,const char*); }
-namespace Stack::Validation { bool ValidateProcessingPresentation(const std::filesystem::path&,const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateColorCalibration(int, char**); }
 namespace Stack::Validation { bool ValidateFilmGrain(); }
 namespace Stack::Validation { bool ValidateClosetGallery(const std::string&, const std::string&, const std::string&, bool, bool); bool ValidateGalleryTrash(const std::filesystem::path&); bool ValidateProjectGallery(const std::filesystem::path&); }
@@ -36,7 +38,7 @@ namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
 namespace Stack::Validation { bool ValidateBracketMaskResult(int,char**); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
-namespace Stack::Validation { bool ValidateRawGraphCanvas(); bool ValidateViewControlsPanel(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateRawGraphCanvas(); bool ValidateViewControlsPanel(const std::filesystem::path&,bool=false); }
 namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateGraphChannelOutputs(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesystem::path&, bool); }
@@ -72,6 +74,13 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     if (argc == 3 && std::strcmp(argv[1], "--validate-graph-node-notes") == 0) {
         exitCode = Stack::Validation::ValidateGraphNodeNotes(std::filesystem::u8path(argv[2])) ? 0 : 114;
         return true;
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--validate-bracket-scratch-child") == 0) {
+        exitCode=Stack::Validation::BracketScratchChild(std::filesystem::u8path(argv[2]),
+            reinterpret_cast<HANDLE>(std::stoull(argv[3])));return true;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--validate-bracket-scratch") == 0) {
+        exitCode=Stack::Validation::ValidateBracketScratch()?0:126;return true;
     }
     if (argc > 1 && std::strcmp(argv[1], "--validate-settings-defaults") == 0) {
         if ((argc != 3 && argc != 4) || (argc == 4 && std::strcmp(argv[3], "--reload") != 0)) {
@@ -152,6 +161,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateRawGraphEditing() ? 0 : 89;
         return true;
     }
+    if(argc==2 && std::strcmp(argv[1],"--validate-tilt-shift-controls")==0) {
+        exitCode=Stack::Validation::ValidateViewControlsPanel({},true)?0:89;return true;
+    }
     if (argc == 3 && std::strcmp(argv[1], "--validate-view-controls-panel") == 0) {
         exitCode=Stack::Validation::ValidateViewControlsPanel(std::filesystem::u8path(argv[2])) ? 0 : 89;
         return true;
@@ -202,6 +214,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateFilmGrain() ? 0 : 1;
         return true;
     }
+    if (argc > 1 && std::strcmp(argv[1], "--validate-color-warp-move") == 0) {
+        exitCode=Stack::Validation::ValidateColorWarpMove()?0:125;return true;
+    }
     if (argc > 1 && std::strcmp(argv[1], "--validate-color-calibration") == 0) {
         exitCode = Stack::Validation::ValidateColorCalibration(argc - 2, argv + 2) ? 0 : 85;
         return true;
@@ -233,20 +248,6 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     if (argc == 5 && std::strcmp(argv[1], "--validate-project-stage-state") == 0) {
         exitCode = Stack::Validation::ValidateProjectStageState(argc - 2, argv + 2) ? 0 : 81;
         return true;
-    }
-    if(argc>3&&std::strcmp(argv[1],"--validate-processing-presentation")==0) {
-#if STACK_BUILD_BURST_DIAGNOSTICS
-        exitCode=Stack::Validation::ValidateProcessingPresentation(argv[2],argv[3])?0:80;return true;
-#else
-        BurstDiagnosticsUnavailable(exitCode); return true;
-#endif
-    }
-    if(argc>3 && std::strcmp(argv[1],"--benchmark-bracketing-presentation")==0) {
-#if STACK_BUILD_BURST_DIAGNOSTICS
-        exitCode=Stack::Validation::BenchmarkBracketingPresentation(argv[2],argv[3])?0:79;return true;
-#else
-        BurstDiagnosticsUnavailable(exitCode); return true;
-#endif
     }
     if(argc>3&&std::strcmp(argv[1],"--validate-bracketing-sr1-workflow")==0) {
         exitCode=Stack::Validation::ValidateBracketingWorkflow(argc-2,argv+2,true,1)?0:78;return true;

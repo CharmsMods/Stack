@@ -34,23 +34,26 @@ def main():
     rows = block(source, 'if (projectsOnly && !presentation.projects.empty())')
     literal_row = (block(source, 'bool GalleryListSelectable(')
                    if 'bool GalleryListSelectable(' in source else '')
+    key_helper = block(source, 'void PushGalleryKeyID(')
     generated = r'''
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-''' + literal_row + r'''
+''' + key_helper + literal_row + r'''
 namespace Stack::RawWorkspace {
 enum class GalleryDisplayMode { Grid, List };
 enum class GalleryContentMode { Projects, Bracket };
 struct GalleryProjectView {
  std::filesystem::path projectPath; std::string projectId,projectName;
  bool multiFrameProject=false; std::size_t frameCount=1;
+ std::string projectCoverKey;
 };
 }
 using Project=Stack::RawWorkspace::GalleryProjectView;
@@ -62,6 +65,9 @@ struct GalleryFixture {
  std::vector<Family> families{{{0,1}},{{2,3}},{{4}}};
  const std::vector<Family>* projectStacks=&families;
  bool compactFilmstrip=false,projectsOnly=true;
+ float filmstripDrawerExpansion=0.f;
+ struct {bool projectGroups=false;int groupCount=0;std::array<std::vector<std::string>,2> groups;} gridBrowse;
+ std::unordered_map<std::string,std::size_t> m_RawWorkspaceGalleryProjectIndices;
  Display m_RawWorkspaceGalleryDisplayMode=Display::List;
  Stack::RawWorkspace::GalleryContentMode m_RawWorkspaceGalleryContentMode=Stack::RawWorkspace::GalleryContentMode::Projects;
  std::filesystem::path m_RawWorkspaceLabFocusedProjectPath,m_RawWorkspaceLabProjectSelectionAnchor;
@@ -74,7 +80,9 @@ struct GalleryFixture {
  void RequestOpenRawWorkspaceProjectFromGallery(const std::filesystem::path&){++opens;}
  void RenderRawGalleryContextActions(const std::filesystem::path&){}
  void LabTooltip(const std::string&){}
- GalleryFixture(){for(const char* id:{"a0","a1","b0","b1","c0"})presentation.projects.push_back({std::filesystem::path(id),id,id});}
+ GalleryFixture(){for(const char* id:{"a0","a1","b0","b1","c0"}){
+  m_RawWorkspaceGalleryProjectIndices.emplace(id,presentation.projects.size());
+  presentation.projects.push_back({std::filesystem::path(id),id,id,false,1,id});}}
  void draw(int direct=-1,bool toggle=false,bool range=false) {
 ''' + selection + r'''
  if(direct>=0){const auto& p=presentation.projects[direct];selectProject(p.projectPath,p.projectName,toggle,range);return;}
@@ -116,6 +124,14 @@ int main(){
    grouped.m_RawWorkspaceGalleryDisplayMode=filmstrip?Display::List:Display::Grid;
    frame(1);frame(4,false,true);grouped.expect({"a1","b0","c0"},"grid/filmstrip range stopped using one family cover");
   }
+  GalleryFixture expanded;active=&expanded;expanded.m_RawWorkspaceGalleryDisplayMode=Display::Grid;
+  expanded.gridBrowse.projectGroups=true;expanded.gridBrowse.groupCount=1;expanded.gridBrowse.groups[0]={"a0","a1"};
+  frame(0);frame(1,false,true);expanded.expect({"a0","a1"},"expanded saved stack range omitted a visible version");
+  GalleryFixture drawer;active=&drawer;drawer.compactFilmstrip=true;drawer.filmstripDrawerExpansion=1.f;
+  frame(0);frame(3,false,true);drawer.expect({"a0","a1","b0","b1"},"expanded filmstrip range omitted visible versions");
+  GalleryFixture interleaved;active=&interleaved;interleaved.compactFilmstrip=true;interleaved.filmstripDrawerExpansion=1.f;
+  interleaved.families={{{0,2}},{{1,3}},{{4}}};
+  frame(0);frame(2,false,true);interleaved.expect({"a0","b0"},"expanded filmstrip range followed interleaved catalog instead of visible family order");
   std::cout<<"PASS real ImGui project-list clicks: sibling, cross-family, reverse, additive Shift ranges; grouped controls unchanged\n";
  }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';ImGui::DestroyContext();return 1;}
  ImGui::DestroyContext();

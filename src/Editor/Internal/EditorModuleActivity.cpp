@@ -60,30 +60,28 @@ void EditorModule::CollectActivity(Stack::UiActivity::Snapshot& snapshot) const 
     const bool scanBusy = Async::IsBusy(scan.state);
     const bool thumbnailBusy = Async::IsBusy(thumbnails.state);
     const bool groupingBusy = m_RawWorkspaceSimilarityWorkerActive ||
-        m_RawWorkspaceSimilarityRebuildPending;
+        m_RawWorkspaceSimilarityRebuildPending ||
+        m_RawWorkspacePendingSimilarityResult.has_value();
     if (scan.state == Async::TaskState::Failed && scan.sourcesPublished &&
         !scan.errorMessage.empty()) {
         snapshot.AddDetail(
             "Folder load incomplete: " + scan.errorMessage);
     }
 
-    int quickAvailable = 0;
-    int standardAvailable = 0;
-    // Readiness is displayed only while scanning or making previews. Inactive
-    // Gallery owners still participate in the shell's activity collection, but
-    // must not rescan their entire unchanged source library every UI frame.
-    if (scanBusy || thumbnailBusy) {
-        for (const auto& source : m_RawWorkspace.sources) {
-            const bool standard = source.thumbnail.status ==
-                    Stack::RawWorkspace::ThumbnailStatus::Valid ||
-                source.thumbnail.status ==
-                    Stack::RawWorkspace::ThumbnailStatus::Ready;
-            const bool quick = standard || source.transientThumbnail.status ==
-                Stack::RawWorkspace::ThumbnailStatus::Ready;
-            quickAvailable += quick ? 1 : 0;
-            standardAvailable += standard ? 1 : 0;
+    if ((scanBusy || thumbnailBusy) && m_GalleryActivityCountRevision != m_RawWorkspaceGalleryRevision) {
+        m_GalleryActivityQuickCount=m_GalleryActivityStandardCount=0;
+        for(const auto& source:m_RawWorkspace.sources) {
+            const bool standard=source.thumbnail.status==Stack::RawWorkspace::ThumbnailStatus::Valid ||
+                source.thumbnail.status==Stack::RawWorkspace::ThumbnailStatus::Ready;
+            const bool quick=standard || source.thumbnail.camera.bytes ||
+                source.transientThumbnail.status==Stack::RawWorkspace::ThumbnailStatus::Ready;
+            m_GalleryActivityQuickCount+=quick?1:0;
+            m_GalleryActivityStandardCount+=standard?1:0;
         }
+        m_GalleryActivityCountRevision=m_RawWorkspaceGalleryRevision;
     }
+    const int quickAvailable=m_GalleryActivityQuickCount;
+    const int standardAvailable=m_GalleryActivityStandardCount;
     const int sourceCount = std::max(
         scan.progress.discoveredRawCount,
         static_cast<int>(m_RawWorkspace.sources.size()));

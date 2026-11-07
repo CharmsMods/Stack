@@ -11,6 +11,11 @@
 
 namespace Stack::AutoBracket {
 
+inline std::atomic<std::uint64_t> foregroundBurstCompletionGeneration{0};
+inline std::uint64_t ForegroundBurstCompletionGeneration() {
+    return foregroundBurstCompletionGeneration.load();
+}
+
 // Only executing workers register. A foreground task must never wait for a
 // queued automatic task that needs the foreground task's own pool slot.
 class RunningAutomaticBurst {
@@ -55,7 +60,7 @@ private:
 // ambiguous optional-runtime errors that merely mention memory.
 inline bool IsBurstMemoryFailure(std::string_view message) {
     for (const auto reason : {"memory budget", "Less than 512 MiB is safely available",
-            "exceed the processing memory allowance", "exceed the bracketing proxy budget",
+            "exceed the processing memory allowance",
             "workspace exceeds the processing budget", "needs at least 2 GiB of processing memory",
             " more memory; ",
             "could not be allocated", "bad allocation", "bad_alloc", "out of memory",
@@ -76,8 +81,12 @@ Raw::Bracketing::BracketingResult RunForegroundBurst(Attempt attempt, const std:
         })) {
         result = {};
         report("Retrying this bracket...");
-        if (!canceled()) return attempt();
+        if (!canceled()) result = attempt();
     }
+    // A memory failure must not wake other parked memory failures: otherwise
+    // two constrained projects repeatedly restart one another without gain.
+    if (result.status != Raw::Bracketing::BracketingResult::Status::Failed ||
+        !IsBurstMemoryFailure(result.message)) ++foregroundBurstCompletionGeneration;
     return result;
 }
 }

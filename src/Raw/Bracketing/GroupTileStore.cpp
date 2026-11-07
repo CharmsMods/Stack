@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "GroupTileStore.h"
 #include "NodeMath/ContractTypes.h"
 #include <array>
@@ -97,7 +98,7 @@ bool ReadGroupTile(const ProcessingRequest& request,const PreparedDataset& data,
            !std::isfinite(p.support)||p.support<0||!std::isfinite(p.measurement)||
            (p.support>0&&p.measurement<0)||!std::isfinite(p.uncertainty)||p.uncertainty<0||
            !std::isfinite(p.headroom)||p.headroom<0||p.headroom>1||
-           !std::isfinite(p.fallback)||!std::isfinite(p.exposure)||p.exposure<0||p.flags>=96) return false;
+           !std::isfinite(p.fallback)||!std::isfinite(p.exposure)||p.exposure<0||p.flags>=128) return false;
         groups[i/pixels][i%pixels]={p.value,p.variance,p.headroom,p.support,p.fallback,p.exposure,
             bool(p.flags&1),bool(p.flags&2),bool(p.flags&4),bool(p.flags&8),p.measurement,p.uncertainty,bool(p.flags&16),static_cast<ClippedReference>(p.flags>>5)};
     }
@@ -130,7 +131,7 @@ bool WriteGroupTile(const ProcessingRequest& request,const PreparedDataset& data
     std::filesystem::create_directories(path.parent_path(),filesystemError);
     if(filesystemError) {error="The group cache directory could not be created.";return false;}
     {
-        std::ofstream stream(temporary,std::ios::binary|std::ios::trunc);
+        Stack::Storage::ScratchBudget::Output stream(temporary,std::ios::binary|std::ios::trunc);
         if(!stream.write(reinterpret_cast<const char*>(&header),sizeof(header))||
            !stream.write(reinterpret_cast<const char*>(packed.data()),packed.size()*sizeof(PackedObservation))) {
             stream.close();std::filesystem::remove(temporary,filesystemError);

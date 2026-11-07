@@ -475,6 +475,7 @@ void ViewTransformLayer::ResetDisplayDefaults() {
     m_Contrast=1.f; m_ContrastPivotEv=0.f; m_Saturation=1.f;
     m_PreserveHue=true; m_DebugFalseColor=false;
     m_InputIsRec2020=false; m_EncodeSrgbOutput=false;
+    m_SdrBrightness=0.f; m_SdrHighlightDetail=1.f; m_SdrSaturation=1.f;
 }
 
 void ViewTransformLayer::StoreProbeStats(const RenderTextureStats& stats) {
@@ -500,7 +501,7 @@ void ViewTransformLayer::ApplyAutoFromStats(const RenderTextureStats& stats) {
 
 void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeSurfaceContext& context) {
     ImGuiExtras::RichSectionLabel("View Transform / Display Render");
-    ImGui::TextDisabled("Sigmoid: scene-linear RGB to SDR display RGB.");
+    ImGui::TextDisabled("Shared HDR finish with separate SDR output adjustments.");
     const float width=context.safeContentWidth;
     if (ImGui::Button("Auto From Current Frame",ImVec2(width,0.f))) {
         RenderTextureStats stats;
@@ -529,6 +530,15 @@ void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const N
     int space=m_InputIsRec2020?1:0;
     if (ImGuiExtras::NodeCombo("Input Space","##ViewInputSpace",&space,spaces,IM_ARRAYSIZE(spaces),width)) m_InputIsRec2020=space==1;
     ImGuiExtras::NodeCheckbox("Encode sRGB Output","##ViewEncodeSrgb",&m_EncodeSrgbOutput,width);
+    ImGui::Separator();
+    ImGuiExtras::RichSectionLabel("SDR output");
+    if(editor) {
+        bool proof=editor->IsSdrOutputProof();
+        if(ImGui::Checkbox("Preview SDR",&proof)) editor->SetSdrOutputProof(proof);
+    }
+    ImGuiExtras::NodeSliderFloat("Brightness","##SdrBrightness",&m_SdrBrightness,-3.f,3.f,"%+.2f EV",width);
+    ImGuiExtras::NodeSliderFloat("Highlight detail","##SdrHighlightDetail",&m_SdrHighlightDetail,0.f,1.f,"%.2f",width);
+    ImGuiExtras::NodeSliderFloat("Color","##SdrSaturation",&m_SdrSaturation,0.f,2.f,"%.2f",width);
 }
 
 json ViewTransformLayer::Serialize() const {
@@ -544,13 +554,24 @@ json ViewTransformLayer::Serialize() const {
         { "debugFalseColor", m_DebugFalseColor },
         { "inputWorkingSpace", m_InputIsRec2020 ? "linear-rec2020-d65" : "linear-srgb-d65" },
         { "encodeSrgbOutput", m_EncodeSrgbOutput },
-        { "displayCurve", Raw::SigmoidDisplay::Id }
+        { "displayCurve", Raw::SigmoidDisplay::Id },
+        { "sdrBrightness", m_SdrBrightness },
+        { "sdrHighlightDetail", m_SdrHighlightDetail },
+        { "sdrSaturation", m_SdrSaturation }
     };
 }
 
 void ViewTransformLayer::Deserialize(const json& j) {
     m_DisplayLinearInput = j.value("_displayLinearInput", false);
     m_HdrHeadroom = std::clamp(j.value("_presentationHeadroom", 1.f), 1.f, 125.f);
+    const auto finiteTrim=[&](const char* key,float fallback,float low,float high) {
+        const auto it=j.find(key);
+        const float v=it!=j.end() && it->is_number() ? it->get<float>() : fallback;
+        return std::isfinite(v) ? std::clamp(v,low,high) : fallback;
+    };
+    m_SdrBrightness=finiteTrim("sdrBrightness",0.f,-3.f,3.f);
+    m_SdrHighlightDetail=finiteTrim("sdrHighlightDetail",0.f,0.f,1.f);
+    m_SdrSaturation=finiteTrim("sdrSaturation",1.f,0.f,2.f);
     if (j.contains("displayCurve") && j.at("displayCurve") != Raw::SigmoidDisplay::Id)
         throw std::runtime_error("Unsupported View Transform display curve.");
     m_Exposure = j.value("exposure", m_Exposure);

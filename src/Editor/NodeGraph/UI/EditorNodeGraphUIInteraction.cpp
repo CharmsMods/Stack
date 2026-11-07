@@ -935,8 +935,8 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             m_HoveredGroupId = -1;
         } else if (editor->DeleteSelectedGraphLink()) {
             PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Link deleted.", "editor-node-graph-delete");
-        } else if (editor->DeleteSelectedGraphNodes()) {
-            PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Node deleted.", "editor-node-graph-delete");
+        } else {
+            editor->DeleteSelectedGraphNodes();
         }
     }
 

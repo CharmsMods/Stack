@@ -1,3 +1,4 @@
+#include "Async/ForegroundIO.h"
 #ifdef STACK_READ_BRACKET_MASTERS
 #include "Persistence/BracketMaster.h"
 #include "Raw/RawTechnicalEvidence.h"
@@ -137,6 +138,7 @@ bool RawLoader::LoadFile(
     const std::string& path,
     RawImageData& outData,
     const std::function<bool()>& shouldCancel) {
+    Async::ForegroundIO::Read foregroundRead;
     outData = {};
     outData.metadata.sourcePath = path;
     if (shouldCancel && shouldCancel()) {

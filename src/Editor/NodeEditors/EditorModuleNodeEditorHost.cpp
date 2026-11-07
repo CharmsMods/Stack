@@ -69,7 +69,10 @@ bool EditorModule::BeginNodeEditorContext(const NodeEditTarget& target, RawWorks
     BindRawOperationContext(context);
     // Fallback controls also edit a private node draft; the real owner is never
     // replaced with a temporary selected-node or canvas ID.
-    if (!FindNodeEditor(*node).primary) context.nodeDraft=*node;
+    if (!FindNodeEditor(*node).primary) {
+        context.nodeDraft=*node;
+        if(node->kind==EditorNodeGraph::NodeKind::Layer)context.nodeSettings=node->layerParameters;
+    }
     return true;
 }
 
@@ -150,7 +153,7 @@ void EditorModule::RefreshNodeEditorPanel() {
     for (const auto& layer:state.layers) matches(layer.id,layer.graph);
     matches(kProjectGraphId,m_Project->graph);
     if (current) {
-        if (panel.visible && m_Project->nodeEditor && panel.lastTarget!=m_Project->nodeEditor) {
+        if (m_Project->nodeEditor && panel.lastTarget!=m_Project->nodeEditor) {
             for (auto& group:panel.groups) for (const auto& instance:group.instances)
                 if (instance.target==*m_Project->nodeEditor) {
                     group.selectedKey=instance.key;group.measuredHeight=0.f;
@@ -168,8 +171,27 @@ void EditorModule::RefreshNodeEditorPanel() {
     panel.structure.clear();panel.groups.clear();
     const auto append=[&](const std::string& owner,const EditorNodeGraph::Graph& graph) {
         panel.structure.emplace_back(owner,graph.GetStructureRevision());
-        for (const auto& entry:graph.GetNodes()) {
-            const auto* node=&entry;
+        // Traverse the image ancestry, excluding coverage/parameter branches.
+        // This catalog is rebuilt only when graph structure changes.
+        std::vector<const EditorNodeGraph::Node*> ordered;
+        std::unordered_set<int> visited;
+        const auto visit=[&](const auto& self,int id)->void {
+            if (!visited.insert(id).second) return;
+            const auto* node=graph.FindNode(id);
+            if (!node) return;
+            for (const auto& link:graph.GetLinks()) if (link.toNodeId==id) {
+                EditorNodeGraph::SocketDefinition socket;
+                if (graph.FindSocket(id,link.toSocketId,&socket) &&
+                    (socket.type==EditorNodeGraph::SocketType::Image || socket.type==EditorNodeGraph::SocketType::ImageOrChannel || socket.type==EditorNodeGraph::SocketType::Raw))
+                    self(self,link.fromNodeId);
+            }
+            ordered.push_back(node);
+        };
+        for (int output:graph.GetOutputNodeIds()) {
+            const auto* node=graph.FindNode(output);
+            if (node && !node->outputSettings.maskOutput) visit(visit,output);
+        }
+        for (const auto* node:ordered) {
             if (node->role!=Stack::GraphModel::NodeRole::Ordinary) continue;
             const auto resolved=EditorNodeGraphDefinitions::ResolveNodeDefinition(graph,*node);
             if (!resolved || !resolved.Identity()) continue;
@@ -181,7 +203,7 @@ void EditorModule::RefreshNodeEditorPanel() {
                         return parameter.storageKey!="node-payload" && parameter.id!="inspection";
                     });
             if (!editor.primary && !fallback) continue;
-            const auto& id=resolved.Identity()->id;
+            const auto id=resolved.Identity()->id;
             auto group=std::find_if(panel.groups.begin(),panel.groups.end(),[&](const auto& value){return value.definitionId==id;});
             if (group==panel.groups.end()) {
                 NodeEditorPanelGroup item;item.definitionId=id;
@@ -222,6 +244,7 @@ bool EditorModule::ActivateNodeEditorPanelTarget(const NodeEditTarget& target) {
         // Finish the outgoing gesture before changing its stable edit identity.
         m_Project->rawLayers.EndGesture();m_Project->graphHistory.EndGesture();
         if (target.layerId==kProjectGraphId) {
+            m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
             m_Project->nodeEditor=target;
             const auto& definition=FindNodeEditor(*ResolveNodeEditorTarget(target));
             m_RawWorkspaceLabUi.activeTool=definition.legacyTool.value_or(RawLabTool::GraphNode);
@@ -303,7 +326,11 @@ void EditorModule::RenderNodeEditorPanel() {
             // last frame's extent back into available-space-based plots drifts.
             const float layoutHeight=std::max(56.f,definition->preferredSize.y*
                 std::min(1.f,width/std::max(1.f,definition->preferredSize.x)));
-            const float estimated=measured ? group.measuredHeight : layoutHeight;
+            // Width changes invalidate measurement, not the last useful slot.
+            // Falling back to the preferred height on every drag frame makes
+            // all following sections jump between estimated and actual sizes.
+            const float estimated=group.measuredHeight>0 && group.measuredFont==font
+                ? group.measuredHeight : layoutHeight;
             const auto origin=ImGui::GetCursorScreenPos();
             const auto* parent=ImGui::GetCurrentWindow();
             const bool onScreen=origin.y+estimated>=parent->ClipRect.Min.y && origin.y<=parent->ClipRect.Max.y;
@@ -348,6 +375,10 @@ void EditorModule::RenderNodeEditorPanel() {
                         group.measuredWidth=width;group.measuredFont=font;
                     }
                 }
+                // EndChild advances the parent using this frame's measured
+                // extent, so lower sections never inherit a stale height.
+                if (group.measuredHeight>0 && group.measuredWidth==width && group.measuredFont==font)
+                    ImGui::SetWindowSize(ImVec2(width,group.measuredHeight));
                 primary->SkipItems=skipItems;
                 ImGui::EndChild();ImGui::PopStyleVar(2);
             } else ImGui::Dummy(ImVec2(width,estimated));

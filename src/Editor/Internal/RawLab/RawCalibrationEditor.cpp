@@ -69,7 +69,7 @@ bool DrawCalibrationEditor(RawRecipe::RawColorCalibrationRecipe& recipe,
             auto p = position(primaries[i]);
             // Keep the handle inside the tool. Zooming changes the amount of
             // mathematical space visible, never the operation's values.
-            const float fine = io.KeyShift ? .1f : 1.f;
+            const float fine = .15f * (io.KeyShift ? .1f : 1.f);
             if (!ImGui::IsItemActivated()) {
                 p.x = std::clamp(p.x + io.MouseDelta.x*fine, bounds.Min.x+12.f, bounds.Max.x-12.f);
                 p.y = std::clamp(p.y + io.MouseDelta.y*fine, bounds.Min.y+12.f, bounds.Max.y-12.f);

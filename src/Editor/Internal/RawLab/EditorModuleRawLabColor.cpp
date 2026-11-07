@@ -58,7 +58,7 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
     args.areaEditingAllowed = context.canEdit;
     if (context.nodeTarget && context.editorState) {
         args.feedback = &context.State<Stack::Editor::ColorWarpFeedback>();
-        const bool needsFields=args.ui.colorWarpDiagnosticLocked || ImGui::IsKeyDown(ImGuiKey_H) ||
+        const bool needsFields=std::any_of(context.recipe.colorWarp.pins.begin(),context.recipe.colorWarp.pins.end(),[](const auto& pin){return pin.smoothSelection>0;}) || args.ui.colorWarpDiagnosticLocked || ImGui::IsKeyDown(ImGuiKey_H) ||
             std::any_of(context.recipe.colorWarp.regions.begin(),context.recipe.colorWarp.regions.end(),
                 [](const auto& region){return region.spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;});
         if(needsFields)args.feedback->Update(scope, previewIdentity + context.nodeTarget->Key(),

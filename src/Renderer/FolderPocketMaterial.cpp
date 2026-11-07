@@ -56,6 +56,7 @@ void FolderPocketMaterial::Bind(const ImDrawList*, const ImDrawCmd* command) {
     std::memcpy(&p, command->UserCallbackData, sizeof(p));
     glUseProgram(p.program);
     glUniform1i(Stack::Hdr::Ui::TargetUniform,Stack::Hdr::Ui::linearTarget);
+    glUniform1f(Stack::Hdr::Ui::HeadroomUniform,Stack::Hdr::CurrentTargetHeadroom());
     glUniform4f(1, p.displayRect.x, p.displayRect.y, p.displayRect.z, p.displayRect.w);
     glUniform2f(2, p.sampleStep.x, p.sampleStep.y);
     glUniform4f(3, p.topTint.x, p.topTint.y, p.topTint.z, p.topTint.w);

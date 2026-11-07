@@ -63,6 +63,54 @@ void ValidateOverlappingProjectFileOperations(
     };
     Require(prepare(a) && prepare(b),
         "Could not prepare the overlapping project operation check.");
+    // Opening Bracket reserves an identity before any captures are selected.
+    // That transient identity must not turn an empty tab into a saved project.
+    const auto emptyFolder = scratch / "empty-bracket-folder";
+    std::filesystem::create_directories(emptyFolder);
+    a.SetRawWorkspaceFolder(emptyFolder);
+    a.SetDocumentPersistenceEnabled(true);
+    a.BeginBracketingDraft();
+    Require(!a.GetProjectDocumentId().empty() && !a.HasUnsavedBracketingDraft() &&
+        a.GetNodeGraph().GetNodes().empty() && !a.IsDirty(),
+        "The empty bracket fixture unexpectedly contains authored content.");
+    auto emptySave = std::make_shared<Completion>();
+    const bool acceptedEmptySave = a.RequestSaveCurrentProject({},
+        [emptySave](bool success) { emptySave->Finish(success); });
+    if (acceptedEmptySave) WaitForBoth(a, b, emptySave, emptySave);
+    Require(!acceptedEmptySave && emptySave->calls == 1 && !emptySave->success &&
+        a.GetCurrentProjectFileName().empty(),
+        "Saving an empty bracket identity created a placeholder project.");
+    a.SetCurrentProjectName("Named empty draft");
+    const auto emptyPath = emptyFolder / "Named empty draft.stack";
+    a.SetCurrentProjectFileName(emptyPath.string());
+    a.MarkDirty(false);
+    const auto emptyContext = a.GetProjectFileCommandContext();
+    Require(!a.HasProjectContent() && !emptyContext.canSave && !emptyContext.canSaveAs &&
+        emptyContext.canClose && !a.NeedsWorkspaceSaveBeforeTransition(),
+        "A name, path or dirty flag made an empty draft saveable or blocked closing it.");
+    auto emptySaveAs = std::make_shared<Completion>();
+    Require(!a.RequestSaveProjectAs(emptyPath,
+        [emptySaveAs](bool success) { emptySaveAs->Finish(success); }) &&
+        emptySaveAs->calls == 1 && !emptySaveAs->success,
+        "Save As accepted an empty draft.");
+    StackBinaryFormat::ProjectDocument emptyDocument;
+    Require(!a.BuildProjectDocumentForSave("Named empty draft", emptyDocument),
+        "Document capture manufactured source pixels for an empty draft.");
+    auto emptyLibrarySave = std::make_shared<Completion>();
+    LibraryManager::Get().RequestSaveProjectToPath("Named empty draft", &a, emptyPath,
+        [emptyLibrarySave](bool success) { emptyLibrarySave->Finish(success); });
+    Require(emptyLibrarySave->calls == 1 && !emptyLibrarySave->success,
+        "The Library writer accepted an empty draft through its direct entry point.");
+    auto emptyClose = std::make_shared<Completion>();
+    Require(a.RequestSaveWorkspaceBeforeClose(
+        [emptyClose](bool success) { emptyClose->Finish(success); }) &&
+        emptyClose->calls == 1 && emptyClose->success && a.CloseCurrentProject(false),
+        "Closing an empty draft failed to complete.");
+    const auto emptyProjects = RawWorkspace::BuildManagedLayout(emptyFolder).projectsDirectory;
+    Require(!std::filesystem::exists(emptyPath) &&
+        (!std::filesystem::exists(emptyProjects) || std::filesystem::is_empty(emptyProjects)),
+        "Closing an empty draft created a project.");
+    std::cout << "PASS empty bracket identities, names and paths do not create placeholder projects\n";
     const auto pathA = scratch / "Overlapping save A";
     const auto pathB = scratch / "Overlapping save B";
     a.SetDocumentPersistenceEnabled(true);
@@ -178,7 +226,7 @@ void ValidateOverlappingProjectFileOperations(
     const auto timelineForCopy = a.SerializePipeline().at("editorTimeline");
     Require(timelineForCopy != renamed.candidate->pipelineData.at("editorTimeline"),
         "The Save As check did not create a new timeline edit.");
-    const auto copyPath = scratch / "Timeline save copy";
+    const auto copyPath = scratch / "Timeline save copy.stack";
     auto copiedA = std::make_shared<Completion>();
     Require(a.RequestSaveProjectAs(copyPath,
         [copiedA](bool success) { copiedA->Finish(success); }),
@@ -278,7 +326,22 @@ void ValidateOverlappingProjectFileOperations(
     Require(RawWorkspace::DiscoverSourceSetProjects(layout, folderSources, folderProjects) &&
         folderProjects.size() == 1 && folderProjects.front().projectId == a.GetProjectDocumentId(),
         "The saved Graph document was not discoverable in its folder's Projects section.");
-    Require(a.CloseCurrentProject(false), "The folder's saved Graph project could not close.");
     std::cout << "PASS first Graph save stays in the loaded folder and appears in Projects\n";
+    // Removing content from an existing document is still a legitimate edit.
+    // The empty-draft guard must not strand that document's save/close flow.
+    a.GetNodeGraph().Clear();
+    a.MarkDirty(false);
+    a.SetDocumentPersistenceEnabled(true);
+    auto clearedSave = std::make_shared<Completion>();
+    Require(a.HasProjectContent() && a.RequestSaveCurrentProject({},
+        [clearedSave](bool success) { clearedSave->Finish(success); }),
+        "Removing the graph from a saved document made it unsaveable.");
+    a.SetDocumentPersistenceEnabled(false);
+    WaitForBoth(a, b, clearedSave, clearedSave);
+    const auto clearedProject = Project::OpenProjectStore(savedPath);
+    Require(clearedProject && clearedProject.snapshot.pipelineData.at("nodeGraph").at("nodes").empty() &&
+        a.CloseCurrentProject(false) && !a.HasProjectContent(),
+        "Saving and closing a deliberately cleared document failed or left stale content.");
+    std::cout << "PASS existing documents remain saveable after deliberate content removal\n";
 }
 }

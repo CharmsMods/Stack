@@ -70,7 +70,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $exePath = Join-Path $BuildDir $productDefinition.executable
-if ($Product -eq "Stack") { Copy-OptionalFfmpegProvider -Paths $paths -StageDir $BuildDir | Out-Null }
 Write-Host ""
 Write-Host "Build complete."
 Write-Host "Use this executable: $exePath"

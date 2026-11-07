@@ -9,6 +9,11 @@ using Color=std::array<double,4>;
 using Moments=std::array<double,9>; // weight, weighted color and squared color
 constexpr int radius=32; // CFA cells; an all-clipped interior beyond this stays unknown
 
+double Fade(double x) {
+    x=std::clamp(x,0.,1.);
+    return x*x*x*(10+x*(-15+6*x));
+}
+
 bool Clipped(std::uint8_t flags) {
     return Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::Saturated)||
         Mfd::HasSampleFlag(flags,Mfd::PreparedSampleFlag::ExplicitDecoderClip);
@@ -108,7 +113,7 @@ public:
         }
     }
     bool HasSamples() const {return table.back()[0]>0;}
-    bool Estimate(int x,int y,Color& mean,Color& deviation) const {
+    bool Estimate(int x,int y,Color& mean,Color& deviation,double& confidence) const {
         Moments total{};
         // Nested normalized windows give nearby boundary samples more weight
         // without changing discontinuously when the nearest ring gains a sample.
@@ -126,6 +131,22 @@ public:
             if(!(mean[s]>0))return false;
             deviation[s]=std::sqrt(std::max(0.,total[5+s]/total[0]-mean[s]*mean[s]));
         }
+        // A finite search radius must fade into unresolved-color completion,
+        // not draw a square where its last boundary sample leaves the window.
+        // The same summed-area table locates the nearest usable boundary in
+        // logarithmic time, independent of the clipped area's size.
+        const auto weight=[&](int r) {
+            const int l=std::max(0,x-r),t=std::max(0,y-r);
+            const int b=std::min(height,y+r+1),e=std::min(width,x+r+1);
+            return table[std::size_t(b)*stride+e][0]-table[std::size_t(t)*stride+e][0]
+                -table[std::size_t(b)*stride+l][0]+table[std::size_t(t)*stride+l][0];
+        };
+        int lo=0,hi=radius;
+        while(lo<hi) {
+            const int middle=(lo+hi)/2;
+            if(weight(middle)>1e-9)hi=middle;else lo=middle+1;
+        }
+        confidence=Fade((radius-lo)/(.75*radius));
         return true;
     }
 private:
@@ -184,6 +205,26 @@ bool PrepareHighlightFallback(const ProcessingRequest& request,const PreparedDat
                 }
             }
         } else if(missingSites) {
+            if(hasNeutral) {
+                // A bounded neighborhood cannot provide chromaticity deep
+                // inside a clipped highlight. Keep a separate last-resort
+                // completion instead of publishing a capped channel beside
+                // measured brighter colors (which invents magenta/other hues).
+                // Preserve every measured site and every saturation bound.
+                double brightness=0;
+                for(unsigned s=0;s<4;++s) {
+                    const auto i=Site(first,width,s);
+                    const double raw=double(origin.normalizedMosaic[i])*origin.comparisonGain[i]*source.scale;
+                    if(!Bad(origin.sampleFlags[i])&&std::isfinite(raw))
+                        brightness=std::max(brightness,raw/neutral[s]);
+                }
+                for(unsigned s=0;s<4;++s) {
+                    auto& v=reference[Site(first,width,s)];
+                    if(v.clippedReference!=ClippedReference::LowerBound)continue;
+                    v.value=std::max(v.fallback,brightness*neutral[s]);
+                    v.clippedReference=ClippedReference::NeutralCompletion;
+                }
+            }
             if(missingSites==3) {
                 unsigned anchor=0;
                 while(anchor<4 && reference[Site(first,width,anchor)].clippedReference!=ClippedReference::None)++anchor;
@@ -208,9 +249,10 @@ bool PrepareHighlightFallback(const ProcessingRequest& request,const PreparedDat
     if(!colors.HasSamples())return true;
     for(const auto first:missing) {
         const int x=(int(origin.originX)+int(first%width)-left)/2,y=(int(origin.originY)+int(first/width)-top)/2;
-        Color hue{},spread{};
-        if(!colors.Estimate(x,y,hue,spread))continue;
+        Color hue{},spread{};double confidence=0;
+        if(!colors.Estimate(x,y,hue,spread,confidence))continue;
         Color raw{};double cross=0,norm=0,lower=0;bool compatible=true;
+        double mismatch=0;
         for(unsigned s=0;s<4;++s) {
             const auto i=Site(first,width,s);
             raw[s]=double(origin.normalizedMosaic[i])*origin.comparisonGain[i]*source.scale;
@@ -226,15 +268,24 @@ bool PrepareHighlightFallback(const ProcessingRequest& request,const PreparedDat
         for(unsigned s=0;s<4;++s) {
             const auto i=Site(first,width,s);const auto predicted=scale*hue[s];
             const double tolerance=3*std::hypot(scale*spread[s],std::sqrt(std::max(0.,reference[i].measurementVariance)));
-            if(raw[s]-predicted>tolerance||(!Clipped(origin.sampleFlags[i])&&predicted-raw[s]>tolerance))
-                compatible=false;
+            const double error=Clipped(origin.sampleFlags[i])?std::max(0.,raw[s]-predicted):std::abs(raw[s]-predicted);
+            if(error>tolerance)compatible=false;
+            mismatch=std::max(mismatch,error/std::max(1e-12,tolerance));
         }
         if(!compatible)continue;
+        confidence*=Fade(2*(1-mismatch));
         for(unsigned s=0;s<4;++s) {
             auto& v=reference[Site(first,width,s)];
-            if(v.clippedReference!=ClippedReference::LowerBound)continue;
-            v.value=std::max(v.fallback,scale*hue[s]);
-            v.clippedReference=ClippedReference::EstimatedColor;
+            if(v.clippedReference!=ClippedReference::LowerBound&&
+               v.clippedReference!=ClippedReference::NeutralCompletion)continue;
+            const double estimated=std::max(v.fallback,scale*hue[s]);
+            if(v.clippedReference==ClippedReference::NeutralCompletion) {
+                v.value+=confidence*(estimated-v.value);
+                if(confidence==1)v.clippedReference=ClippedReference::EstimatedColor;
+            } else {
+                // Without calibrated white balance there is no neutral endpoint.
+                v.value=estimated;v.clippedReference=ClippedReference::EstimatedColor;
+            }
         }
     }
     return true;

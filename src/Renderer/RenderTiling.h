@@ -142,7 +142,8 @@ RenderGraphViewportPlan PlanGraphViewport(
     int fullHeight,
     int previewMaxDimension,
     const Stack::Renderer::ViewportPreviewRequest& request,
-    const std::vector<RenderGraphViewportEndpoint>& completeConsumers = {});
+    const std::vector<RenderGraphViewportEndpoint>& completeConsumers = {},
+    bool retainedFloat32 = false);
 inline RenderGraphViewportPlan PlanGraphViewportRegions(
     const RenderGraphSnapshot& graph, int fullWidth, int fullHeight,
     const Stack::Renderer::ViewportPreviewRequest& request, int previewMaxDimension) {

@@ -129,15 +129,18 @@ void CameraThumbnail::DisplaySize(int maxEdge, int& outWidth, int& outHeight) co
     if (orientation >= 5) std::swap(outWidth, outHeight);
 }
 
-CameraThumbnail FindCameraThumbnail(const std::filesystem::path& path, std::uintmax_t fileSize, int targetEdge) {
+CameraThumbnail FindCameraThumbnail(const std::filesystem::path& path, std::uintmax_t fileSize, int targetEdge, const std::function<bool()>& cancelled) {
     CameraThumbnail best;
+    if(cancelled && cancelled())return best;
 #ifdef STACK_ENABLE_LIBRAW
     if (!Raw::IsLibRawRuntimeAvailable()) return best;
     LibRaw raw;
     if (raw.open_file(path.c_str()) != LIBRAW_SUCCESS) return best;
+    if(cancelled && cancelled())return best;
     const auto& list = raw.imgdata.thumbs_list;
     std::ifstream input(path, std::ios::binary);
     for (int i = 0; i < std::min(list.thumbcount, int(LIBRAW_THUMBNAIL_MAXCOUNT)); ++i) {
+        if(cancelled && cancelled())return {};
         const auto& item = list.thumblist[i];
         if (item.tformat != LIBRAW_INTERNAL_THUMBNAIL_JPEG || item.toffset <= 0) continue;
         CameraThumbnail candidate{static_cast<std::uint64_t>(item.toffset), item.tlength,
@@ -154,7 +157,7 @@ CameraThumbnail FindCameraThumbnail(const std::filesystem::path& path, std::uint
 }
 
 bool DecodeCameraThumbnail(const std::filesystem::path& path, const CameraThumbnail& preview,
-    int maxEdge, std::vector<unsigned char>& rgba, int& width, int& height) {
+    int maxEdge, std::vector<unsigned char>& rgba, int& width, int& height, const std::function<bool()>& cancelled) {
     rgba.clear();
     width = height = 0;
 #ifdef _WIN32
@@ -164,7 +167,13 @@ bool DecodeCameraThumbnail(const std::filesystem::path& path, const CameraThumbn
     if (length < 0 || !preview.Fits(static_cast<std::uintmax_t>(length))) return false;
     file.seekg(static_cast<std::streamoff>(preview.offset));
     std::vector<unsigned char> jpeg(preview.bytes);
-    if (!file.read(reinterpret_cast<char*>(jpeg.data()), preview.bytes) || jpeg[0]!=0xff || jpeg[1]!=0xd8) return false;
+    for(std::size_t offset=0;offset<jpeg.size();) {
+        if(cancelled && cancelled())return false;
+        const auto count=std::min<std::size_t>(64*1024,jpeg.size()-offset);
+        if(!file.read(reinterpret_cast<char*>(jpeg.data()+offset),count))return false;
+        offset+=count;
+    }
+    if(jpeg.size()<2||jpeg[0]!=0xff||jpeg[1]!=0xd8)return false;
 
     Stack::Win32::ScopedComApartment apartment(COINIT_MULTITHREADED);
     if (!apartment && apartment.Result() != RPC_E_CHANGED_MODE) return false;
@@ -213,10 +222,10 @@ GalleryPixelSource LoadOriginalGalleryPixels(const std::filesystem::path& path, 
         // a particular image has settled in a view that needs those pixels.
         std::error_code error;
         const auto size = std::filesystem::file_size(path, error);
-        if (!error) candidate = FindCameraThumbnail(path, size, maxEdge);
+        if (!error) candidate = FindCameraThumbnail(path, size, maxEdge, cancelled);
     }
     if (candidate.bytes && (!largeView || std::max(candidate.width, candidate.height) >= maxEdge) &&
-        DecodeCameraThumbnail(path, candidate, maxEdge, rgba, width, height) &&
+        DecodeCameraThumbnail(path, candidate, maxEdge, rgba, width, height, cancelled) &&
         (!largeView || std::max(width, height) >= maxEdge)) return GalleryPixelSource::CameraJpeg;
 
     Raw::RawImageData raw;

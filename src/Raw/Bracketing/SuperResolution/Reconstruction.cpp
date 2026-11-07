@@ -1,3 +1,4 @@
+#include "Storage/ScratchBudget.h"
 #include "../HdrColorFusion.h"
 #include "../CaptureCorrespondence.h"
 #include "Reconstruction.h"
@@ -351,7 +352,7 @@ bool ReconstructSuperResolution(const ProcessingRequest& request,BracketingResul
             s.second=float(Evaluate(request.recipe.automatic?result.analysis->suggestion:request.recipe.knots,ev)[group]);
             s.known=(*validity)[index]!=0;return s;
         });
-        std::ofstream file(inspection->directory/(std::to_string(left/tileSide)+"-"+std::to_string(top/tileSide)+".bin"),std::ios::binary);
+        Stack::Storage::ScratchBudget::Output file(inspection->directory/(std::to_string(left/tileSide)+"-"+std::to_string(top/tileSide)+".bin"),std::ios::binary);
         file.write(reinterpret_cast<const char*>(actual.data()),std::streamsize(actual.size()*sizeof(float)));
         if(!file){error="Could not write super-resolution inspection data.";return false;}
         inspection->checksums[{left/tileSide,top/tileSide}]=Stack::NodeMath::Sha256ContentIdentity(

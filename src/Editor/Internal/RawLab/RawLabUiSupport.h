@@ -8,6 +8,7 @@ namespace Stack::Editor::RawLabInternal {
 inline constexpr float kRawLabFilmstripMinimumHeight = 180.0f;
 inline constexpr float kRawLabFilmstripMaximumHeight = 280.0f;
 inline constexpr float kRawLabFilmstripTileHeight = 104.0f;
+inline constexpr float kRawLabFilmstripTimelineHeight = 32.0f;
 inline constexpr float kRawLabLowerShelfDefaultHeight = 180.0f;
 inline constexpr float kRawLabFloatingScopesHeight = 112.0f;
 inline constexpr float kRawLabFloatingScopesGap = 8.0f;

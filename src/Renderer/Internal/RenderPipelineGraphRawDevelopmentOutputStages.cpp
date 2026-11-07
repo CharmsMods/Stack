@@ -4,6 +4,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawColorWarpMask.h"
 #include "Raw/RawColorWarpSelection.h"
+#include "Raw/ColorWarpMath.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/CoverageSampling.h"
 #include "Renderer/GLStateGuards.h"
@@ -20,6 +21,9 @@
 
 #ifndef GL_R8
 #define GL_R8 0x8229
+#endif
+#ifndef GL_R16
+#define GL_R16 0x822A
 #endif
 #ifndef GL_R32F
 #define GL_R32F 0x822E
@@ -129,6 +133,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         Stack::RawRecipe::kMaxRawColorWarpPins;
     std::vector<std::array<float,4>> params,adjustments,hueRanges,saturationRanges,exposureRanges;
     std::vector<float> spatialSupport;
+    std::vector<std::array<float,4>> fieldFlags,moves,selections;
     std::vector<const Stack::RawRecipe::RawColorWarpPin*> spatialPins;
     const auto packedRange=[](const Stack::RawRecipe::RawColorWarpRange& r) -> std::array<float,4> {
         return r.enabled?std::array<float,4>{r.low-r.featherLow,r.low,r.high,r.high+r.featherHigh}:
@@ -143,12 +148,17 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             Stack::RawRecipe::ColorWarpParticipates(pin)?1.f:0.f});
         const auto region=std::find_if(colorWarp.regions.begin(),colorWarp.regions.end(),[&](const auto& r){return r.id==pin.regionId;});
         const bool spatial=region!=colorWarp.regions.end() && region->spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;
-        adjustments.push_back({pin.hueShift,pin.saturation,pin.exposureEv,spatial?float(spatialPins.size()+1):0.f});
+        selections.push_back({pin.sourceA,pin.sourceB,pin.sampleRadius,0});
+        fieldFlags.push_back({pin.smoothSelection>0?1.f:0.f,spatial?1.f:0.f,0,0});
+        const bool needsField=spatial || pin.smoothSelection>0;
+        const auto destination=Stack::RawRecipe::ColorWarpDestination(pin);
+        moves.push_back({pin.moveColors?destination[0]-pin.sourceA:0.f,pin.moveColors?destination[1]-pin.sourceB:0.f,0,0});
+        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors?0.f:pin.saturation,pin.exposureEv,needsField?float(spatialPins.size()+1):0.f});
         hueRanges.push_back(packedRange(pin.hueRange));
         saturationRanges.push_back(packedRange(pin.saturationRange));
         exposureRanges.push_back(packedRange(pin.exposureRange));
         spatialSupport.push_back(Stack::RawRecipe::ColorWarpPinSpatialSupport(colorWarp,pin));
-        if(spatial)spatialPins.push_back(&pin);
+        if(needsField)spatialPins.push_back(&pin);
     }
     const int pinCount=static_cast<int>(params.size());
     const int layerCount=static_cast<int>(spatialPins.size());
@@ -159,6 +169,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         spatialPins.end(),
         [&](const Stack::RawRecipe::RawColorWarpPin* pin) {
             if(!Stack::RawRecipe::ColorWarpParticipates(*pin))return false;
+            if(pin->smoothSelection>0)return true;
             const auto region = std::find_if(
                 colorWarp.regions.begin(),
                 colorWarp.regions.end(),
@@ -281,8 +292,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                     packedGuide[index * 4u + 3u] = 1.0f;
                 }
             }
-            std::vector<std::vector<std::uint8_t>> gateLayers;
-            std::vector<std::vector<std::uint8_t>> supportLayers;
+            std::vector<std::vector<float>> gateLayers;
+            std::vector<std::vector<float>> supportLayers;
             std::vector<std::vector<std::uint8_t>> boundaryLayers;
             bool cancelled = false;
             if (proxyReady) {
@@ -320,8 +331,14 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                         ++m_LastGraphExecutionStats.colorWarpMaskCancellations;
                         break;
                     }
-                    gateLayers.push_back(std::move(fields.gate));
-                    supportLayers.push_back(std::move(fields.support));
+                    if(!fields.smoothed) {
+                        fields.smoothGate.assign(fields.gate.begin(),fields.gate.end());
+                        fields.smoothSupport.assign(fields.support.begin(),fields.support.end());
+                        for(auto& v:fields.smoothGate)v/=255.f;
+                        for(auto& v:fields.smoothSupport)v/=255.f;
+                    }
+                    gateLayers.push_back(std::move(fields.smoothGate));
+                    supportLayers.push_back(std::move(fields.smoothSupport));
                     boundaryLayers.push_back(std::move(fields.boundary));
                 }
             }
@@ -332,10 +349,12 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             Stack::Renderer::ScopedGLTexture boundaryTexture;
             Stack::Renderer::ScopedGLTexture guideTexture;
             if (proxyReady && gateLayers.size() == spatialPins.size()) {
+                const auto fieldFormat=std::any_of(spatialPins.begin(),spatialPins.end(),
+                    [](const auto* pin){return pin->smoothSelection>0;}) ? GL_R16 : GL_R8;
                 gateTexture.Reset(GLHelpers::CreateTextureArray(
-                    proxyWidth, proxyHeight, layerCount, GL_R8));
+                    proxyWidth, proxyHeight, layerCount, fieldFormat));
                 supportTexture.Reset(GLHelpers::CreateTextureArray(
-                    proxyWidth, proxyHeight, layerCount, GL_R8));
+                    proxyWidth, proxyHeight, layerCount, fieldFormat));
                 boundaryTexture.Reset(GLHelpers::CreateTextureArray(
                     proxyWidth, proxyHeight, layerCount, GL_R8));
                 guideTexture.Reset(GLHelpers::CreateEmptyTexture(proxyWidth, proxyHeight));
@@ -343,11 +362,11 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
                     for (int layer = 0; layer < layerCount; ++layer) {
                         GLHelpers::UploadTextureArrayLayer(
                             gateTexture.Get(), layer, proxyWidth, proxyHeight,
-                            GL_RED, GL_UNSIGNED_BYTE,
+                            GL_RED, GL_FLOAT,
                             gateLayers[static_cast<std::size_t>(layer)].data());
                         GLHelpers::UploadTextureArrayLayer(
                             supportTexture.Get(), layer, proxyWidth, proxyHeight,
-                            GL_RED, GL_UNSIGNED_BYTE,
+                            GL_RED, GL_FLOAT,
                             supportLayers[static_cast<std::size_t>(layer)].data());
                         GLHelpers::UploadTextureArrayLayer(
                             boundaryTexture.Get(), layer, proxyWidth, proxyHeight,
@@ -401,7 +420,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         m_LastGraphExecutionStats.colorWarpMaskBytesRetained =
             m_RawDevelopmentColorWarpMaskCache.retainedBytes;
         if (!useSpatialMasks && m_RawDevelopmentInteractivePreview &&
-            compatibleCachedMask) {
+            compatibleCachedMask && cache.key == maskKey) {
+            // Never decode fields using a different smoothing encoding.
             // Keep the last coherent spatial selection on screen while a
             // qualifier/EV/region edit rebuilds its interaction mask. Input,
             // working space and sample geometry must still match.
@@ -498,7 +518,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             const auto upload=[&](const char* name,const auto& values) {
                 glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,name),pinCount,values.front().data());
             };
-            upload("uPinParams",params);upload("uPinAdjust",adjustments);
+            upload("uPinFieldFlags",fieldFlags);upload("uPinParams",params);upload("uPinAdjust",adjustments);upload("uPinMove",moves);upload("uPinSelection",selections);
             upload("uHueRange",hueRanges);upload("uSaturationRange",saturationRanges);upload("uExposureRange",exposureRanges);
             glUniform1fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPinSpatialSupport"),pinCount,spatialSupport.data());
             glActiveTexture(GL_TEXTURE0);

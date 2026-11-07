@@ -18,11 +18,13 @@ public:
 private:
     struct Command {
         const ViewportFadeRenderer* renderer = nullptr;
-        unsigned int previous = 0;
+        unsigned int previous = 0, current = 0;
         float amount = 1;
         bool encoded = false;
         ImVec2 displayPosition, displaySize;
         ImVec2 previousOffset, previousScale;
+        int baseTextures[2]{}, baseSamplers[2]{};
+        bool paired = false;
     };
     std::deque<Command> m_Commands;
     int m_CommandFrame = -1;
@@ -30,6 +32,7 @@ private:
     struct Uniforms {
         int projection = -1, vertexColor = -1, texture = -1, previous = -1;
         int amount = -1, encoded = -1, previousOffset = -1, previousScale = -1;
+        int currentBase = -1, previousBase = -1, hasCurrentBase = -1, hasPreviousBase = -1;
     } m_Uniforms;
 };
 }

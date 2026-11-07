@@ -3,6 +3,7 @@
 #include "Persistence/RawProjectModel.h"
 #include "Project/BracketingProgress.h"
 #include "Raw/Bracketing/Processor.h"
+#include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -18,7 +19,7 @@ struct BracketingDraftSource {
 };
 
 struct BracketingMetadataJob {
-    std::atomic<bool> done{false};
+    std::atomic<bool> done{false}, canceled{false};
     std::vector<BracketingDraftSource> sources;
 };
 
@@ -31,6 +32,8 @@ struct BracketingJob {
     std::string projectId, setId, recipeIdentity;
     std::uint64_t revision = 0;
     bool restoredFromProject = false;
+    Raw::Mfd::PhysicalMemorySnapshot memoryAtAttempt;
+    std::uint64_t memoryCompletionGeneration = 0;
     std::shared_ptr<ProcessingMailbox> presentation;
 };
 
@@ -45,6 +48,7 @@ struct BracketingState {
     std::string editedRecipe, projectName = "Bracket", boundDocument;
     std::filesystem::path awaitingProject;
     bool newProject = false, processRequired = false, processAfterImport = false;
+    bool processWhenMetadataReady = false;
     bool savingDraft = false;
     std::function<void(bool)> saveBeforeCloseCompletion;
     std::shared_ptr<const Raw::RawImageData> interactiveRaw;
@@ -90,6 +94,13 @@ struct BracketingState {
     std::vector<std::uint8_t> inspectionPixels;
     std::string inspectionIdentity, inspectionRequested, inspectionError;
     bool publishRequested = false, pending = false, failed = false, previewDirty = false;
+    // Waiting owns no worker slot. Tick samples headroom only once a second;
+    // an edit, explicit retry, cancellation or replacement clears this state.
+    bool waitingForMemory = false;
+    double nextMemoryRetryCheck = 0;
+    double memoryRetryProbeAt = 0;
+    Raw::Mfd::PhysicalMemorySnapshot memoryAtFailure;
+    std::uint64_t memoryCompletionGeneration = 0;
     bool gestureActive = false;
     double changedAt = 0;
 

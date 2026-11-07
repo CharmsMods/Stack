@@ -186,7 +186,7 @@ bool RawRenderService::SubmitCommand(
 void RawRenderService::QueueSyntheticSuperseded(
     const EditorRenderWorker::Snapshot& snapshot,
     bool workerStarted, bool overload, RawPreviewSkipReason reason) {
-    if (snapshot.graphRequest.enabled || snapshot.ownerId == 0 ||
+    if ((snapshot.graphRequest.enabled && snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitExport) || snapshot.ownerId == 0 ||
         m_Clients.find(snapshot.ownerId) == m_Clients.end()) {
         return;
     }
@@ -254,9 +254,11 @@ void RawRenderService::Pump() {
                 continue;
             }
             auto& queue = m_Completed[value.ownerId];
-            if (value.graphRequest.enabled && !workerFailed) {
+            if (value.graphRequest.enabled && !workerFailed &&
+                value.rawRenderPurpose != RawRenderPurpose::ExplicitExport) {
                 for (auto stale = queue.begin(); stale != queue.end();) {
-                    if (!stale->graphRequest.enabled) { ++stale; continue; }
+                    if (!stale->graphRequest.enabled ||
+                        stale->rawRenderPurpose == RawRenderPurpose::ExplicitExport) { ++stale; continue; }
                     retired.Take(queue, stale++);
                 }
             }
@@ -374,6 +376,15 @@ bool RawRenderService::Submit(
             m_ActiveOwner = clientId;
             m_ActiveSnapshot = snapshot;
             submitNow = true;
+        } else if (m_ActiveSnapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
+            // The active capture is a user operation with a destination, not a
+            // disposable preview. Finish its readback; the UI and CPU writer
+            // remain asynchronous, and newer previews wait in their own slot.
+            const auto pending = m_Pending.find(clientId);
+            if (pending != m_Pending.end())
+                QueueSyntheticSuperseded(pending->second, false);
+            m_Pending[clientId] = std::move(snapshot);
+            return true;
         } else if (
             m_ActiveOwner == clientId &&
             snapshot.rawRenderPurpose ==

@@ -6,7 +6,7 @@ struct NodeEditorPanelGroup;
 int DrawControlsPanelHeader(const NodeEditorPanelGroup& group, float width, const bool* enabled, bool& toggle);
 
 // Smooth native wheel requests before child layout; pair with EndChild().
-bool BeginControlsPanelBody();
+bool BeginControlsPanelBody(bool transitioning = false);
 
 // Native scrollbar behavior drawn over the panel seam, never a layout gutter.
 void DrawControlsPanelScrollbar(ImGuiWindow* body, float seamX);

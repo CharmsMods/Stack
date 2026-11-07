@@ -8,7 +8,8 @@ layout(location=0) out vec4 FragColor;
 uniform sampler2D uInputTex;
 uniform int uInputIsRec2020, uPinCount, uUseSpatialMasks, uBlendOverlaps;
 uniform float uStrength;
-uniform vec4 uPinParams[16], uPinAdjust[16];
+uniform vec4 uPinParams[16], uPinAdjust[16], uPinFieldFlags[16], uPinMove[16];
+uniform vec4 uPinSelection[16];
 uniform vec4 uHueRange[16], uSaturationRange[16], uExposureRange[16];
 uniform sampler2DArray uGateMask, uSupportMask, uBoundaryMask;
 uniform sampler2D uMaskGuide;
@@ -82,7 +83,7 @@ void main() {
     float hue=chroma>0.000001 ? degrees(atan(normalized.y,normalized.x)):0.0;
     float neutral=smoothstep(0.001,0.01,chroma);
     float ev=log2(max(xyz.y,0.000001)/0.18);
-    vec3 adjustment=vec3(0.0);
+    vec3 adjustment=vec3(0.0);vec2 movement=vec2(0.0);
     float total=0.0,protection=0.0;
     for(int index=0;index<16;++index) {
         if(index>=uPinCount)break;
@@ -91,27 +92,35 @@ void main() {
         float h=hueDelta(hue-p.x);
         float colorWeight=neutral*max(rangeWeight(uHueRange[index],h),
             max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
-        if(colorWeight<=0.0)continue;
+        if(uPinSelection[index].z>0.0) {
+            float x=length(normalized-uPinSelection[index].xy)/uPinSelection[index].z;
+            colorWeight=(1.0-smoothstep(0.25,1.0,x))*max(rangeWeight(uHueRange[index],h),
+                max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
+        }
         float direct=colorWeight*rangeWeight(uExposureRange[index],ev);
         float gate=1.0,support=0.0,boundary=1.0;
         if(uUseSpatialMasks!=0 && uPinAdjust[index].w>0.5) {
             vec3 maskUv=vec3(vUV,uPinAdjust[index].w-1.0);
             vec3 guide=texture(uMaskGuide,vUV).rgb;
             float guided=clamp(exp(-(length(lab.yz-guide.xy)*36.0+abs(ev-guide.z)*0.28)),0.04,1.0);
+            guided=uPinFieldFlags[index].y>0.5?guided:1.0;
             gate=texture(uGateMask,maskUv).r*guided;
             support=texture(uSupportMask,maskUv).r*guided;
+            if(uPinFieldFlags[index].x>0.5)direct=1.0;
             boundary=texture(uBoundaryMask,maskUv).r;
         }
-        float weight=direct*max(gate,support*uPinSpatialSupport[index])*boundary*p.y;
+        float weight=min(1.0,direct*max(gate,support*uPinSpatialSupport[index]))*boundary*p.y;
         if(p.z>0.5) { protection=max(protection,clamp(weight,0.0,1.0));continue; }
-        total+=weight;adjustment+=uPinAdjust[index].xyz*weight;
+        total+=weight;adjustment+=uPinAdjust[index].xyz*weight;movement+=uPinMove[index].xy*weight;
     }
     adjustment*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
-    if(all(equal(adjustment,vec3(0.0)))) { FragColor=inputColor;return; }
+    movement*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
+    if(all(equal(adjustment,vec3(0.0))) && all(equal(movement,vec2(0.0)))) { FragColor=inputColor;return; }
     vec3 rgb=inputColor.rgb;
-    if(adjustment.x!=0.0 || adjustment.y!=0.0) {
+    if(adjustment.x!=0.0 || adjustment.y!=0.0 || any(notEqual(movement,vec2(0.0)))) {
         float angle=radians(adjustment.x),c=cos(angle),s=sin(angle);
         lab.yz=vec2(c*lab.y-s*lab.z,s*lab.y+c*lab.z)*max(0.0,1.0+adjustment.y);
+        lab.yz+=movement*max(abs(lab.x),0.000001);
         rgb=xyzToWorking(oklabToXyz(lab));
     }
     FragColor=vec4(rgb*exp2(adjustment.z),inputColor.a);

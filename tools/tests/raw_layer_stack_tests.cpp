@@ -1140,6 +1140,25 @@ void TestRawLayerStackContracts() {
     const auto savedSource = SerializeWorkspaceSourceRecipe(authoredSource);
     Check(IsCanonicalRawRecipeDocument(savedSource) && IsCanonicalWorkspaceSourceRecipeDocument(savedSource),
         "The source-settings writer and current-format validator disagree.");
+    for(const auto& complete:{savedSource,SerializeRecipe(authoredSource)}) {
+        auto withoutSdr=complete;
+        for(const auto* field:{"sdrBrightness","sdrHighlightDetail","sdrSaturation"})withoutSdr["viewTransform"].erase(field);
+        Check(IsCanonicalRawRecipeDocument(withoutSdr),"Absent additive SDR trims rejected a current-format recipe.");
+        const auto restored=DeserializeRecipe(withoutSdr).viewTransform.layerJson;
+        Check(restored.at("sdrBrightness")==0.f && restored.at("sdrHighlightDetail")==0.f && restored.at("sdrSaturation")==1.f,
+            "Absent SDR trims changed the existing finish.");
+        auto explicitSdr=withoutSdr;
+        explicitSdr["viewTransform"]["sdrBrightness"]=.5f;
+        explicitSdr["viewTransform"]["sdrHighlightDetail"]=.75f;
+        explicitSdr["viewTransform"]["sdrSaturation"]=1.25f;
+        Check(IsCanonicalRawRecipeDocument(explicitSdr) &&
+            SerializeRecipe(DeserializeRecipe(explicitSdr)).at("viewTransform")==explicitSdr.at("viewTransform"),
+            "Explicit authored SDR trims failed validation or changed on load.");
+        withoutSdr["viewTransform"]["unsupportedField"]=0;
+        Check(!IsCanonicalRawRecipeDocument(withoutSdr),"Optional SDR trims admitted an unknown View field.");
+        withoutSdr=complete;withoutSdr["rawRecipeVersion"]=kRawDevelopmentRecipeVersion-1;
+        Check(!IsCanonicalRawRecipeDocument(withoutSdr),"Optional SDR trims admitted an obsolete recipe version.");
+    }
     auto duplicateCreative = savedSource;
     duplicateCreative["exposureEv"] = 2.f;
     Check(!IsCanonicalRawRecipeDocument(duplicateCreative),"A source record accepted duplicate creative settings.");

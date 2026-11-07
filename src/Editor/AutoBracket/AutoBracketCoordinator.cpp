@@ -1,3 +1,4 @@
+#include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "AutoBracketCoordinator.h"
 #include "App/AppPaths.h"
 #include "Async/TaskSystem.h"
@@ -162,6 +163,23 @@ void AutoBracketCoordinator::Begin(Item& item,const Raw::OpenGlTaskExecutor& exe
     }
 }
 void AutoBracketCoordinator::Tick(double now,bool ready,bool foregroundBusy,const Raw::OpenGlTaskExecutor& executor,const std::string& foregroundProjectId) {
+    // Sample system headroom at a bounded cadence, never once per frame.
+    if (now>=nextMemoryCheck_) {
+        nextMemoryCheck_=now+.5;
+        const bool demand=work_ || std::any_of(queue_.items.begin(),queue_.items.end(),
+            [](const auto& item){return item.available && item.state==State::Pending;});
+        const auto memory=demand ? Raw::Mfd::QueryPhysicalMemorySnapshot() : Raw::Mfd::PhysicalMemorySnapshot{};
+        if (memory.valid) {
+            const auto reserve=std::max<std::uint64_t>(512ull*1024*1024,
+                memory.totalPhysicalBytes/(memoryConstrained_?6:10));
+            memoryConstrained_=memory.availablePhysicalBytes<reserve ||
+                (memory.commitLimitKnown && memory.availableCommitBytes<reserve);
+        }
+    }
+    if (foregroundBusy || memoryConstrained_) {
+        resourceResumeAt_=now+3.;
+        if (work_ && !work_->done) work_->cancel=true;
+    }
     if(work_&&work_->done) {
         for(auto& item:queue_.items)if(item.candidate.identity==work_->item.candidate.identity) {
             item.state=work_->outcome;item.error=work_->status;break;
@@ -186,7 +204,7 @@ void AutoBracketCoordinator::Tick(double now,bool ready,bool foregroundBusy,cons
     Begin(*item,executor);
 }
 bool AutoBracketCoordinator::CanStartWork(double now,bool ready,bool foregroundBusy,const std::string& foregroundProjectId) const {
-    if(work_||completed_||pendingAction_||!loaded_||queue_.root.empty()||storageBlocked_||!ready||foregroundBusy)return false;
+    if(memoryConstrained_||now<resourceResumeAt_||work_||completed_||pendingAction_||!loaded_||queue_.root.empty()||storageBlocked_||!ready||foregroundBusy)return false;
     if(queue_.paused&&(!queue_.resumeWhenIdle||IdleSeconds(now)<kResumeIdleSeconds))return false;
     return std::any_of(queue_.items.begin(),queue_.items.end(),[&](const auto& item){
         return IsPendingWorkEligible(item,foregroundProjectId);

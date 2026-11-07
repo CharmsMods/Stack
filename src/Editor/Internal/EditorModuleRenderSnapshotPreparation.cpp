@@ -21,6 +21,12 @@ bool EditorModule::TryBuildRenderSnapshot(
 
     ResetIncompleteCompositeOutputRequestsForRetry();
     ResetIncompletePreviewRequestsForRetry();
+    if (m_RawWorkspaceExportRenderRequested && m_RawWorkspaceExportRenderGeneration == 0) {
+        EditorRenderWorker::Result failed;
+        failed.rawRenderPurpose = RawRenderPurpose::ExplicitExport;
+        failed.error = "The full-resolution export snapshot could not be prepared safely.";
+        CompleteRawWorkspaceExportRender(failed, false);
+    }
     FailFullQualityRenderRequest("The full-quality render snapshot could not be prepared safely.");
     Stack::PreciseIntegration::IntegrationState& precise =
         m_RawWorkspaceAutoBaseUi.preciseStartingPoint;

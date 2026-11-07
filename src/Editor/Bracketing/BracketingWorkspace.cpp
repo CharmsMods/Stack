@@ -33,12 +33,6 @@ void EditorModule::RenderBracketingSidePanelUI() {
     }
     auto& ui=*m_Bracketing;
     const bool running=ui.job&&!ui.job->done;
-    // The project's processing surface owns progress and cancellation. Neither
-    // a hidden sidebar nor an alternate node host may edit that project.
-    if(running||IsBracketingPresentationActive()) {
-        ImGui::TextWrapped("Processing this bracket. Its result will open here when it is ready.");
-        return;
-    }
     using Phase=Stack::Project::ProjectLifecyclePhase;
     const auto phase=m_Project->lifecycle.Phase();
     const bool readOnly=phase==Phase::ReadOnlyRecovery||(m_Project->store&&m_Project->store->IsReadOnlyRecovery());
@@ -56,7 +50,7 @@ void EditorModule::RenderBracketingSidePanelUI() {
     ImGui::EndDisabled();
     if(readingCaptures)ImGui::TextWrapped("Reading capture details. Process will be available when this finishes.");
     else ImGui::TextWrapped("%s",ui.status.c_str());
-    ImGui::BeginDisabled(running||!ui.awaitingProject.empty());
+    ImGui::BeginDisabled(!ui.awaitingProject.empty());
     if(ImGui::SmallButton("New bracket")){BeginBracketingDraft(true);ImGui::EndDisabled();ImGui::EndDisabled();return;}
     ImGui::SameLine();if(ImGui::SmallButton("Save")) {
         if(ui.newProject)CommitBracketingDraft(false,nullptr);
@@ -175,7 +169,7 @@ void EditorModule::RenderBracketingSidePanelUI() {
 void EditorModule::RenderBracketingContributionUI() {
     if(!m_Bracketing||!HasBracketingContributionTool())return;
     auto& ui=*m_Bracketing;
-    const bool blocked=Stack::Workspace::IsPreview()||(ui.job&&!ui.job->done)||IsBracketingPresentationActive()||
+    const bool blocked=Stack::Workspace::IsPreview()||
         (ImGui::GetCurrentContext()->CurrentItemFlags&ImGuiItemFlags_Disabled)!=0;
     Stack::Workspace::InputScope input(blocked,false);
     ImGui::BeginDisabled(blocked);

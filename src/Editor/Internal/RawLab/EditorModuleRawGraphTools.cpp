@@ -26,41 +26,37 @@ void EditorModule::RefreshRawLayerToolPicker() const {
             cache.labels.push_back(source->title);
         }
     }
-    const auto tools = Stack::Editor::RawLayerToolNodes(projectGraph ? m_Project->graph : layer->graph);
+    const auto& ownerGraph=projectGraph ? m_Project->graph : layer->graph;
+    const auto editable=Stack::Editor::RawLayerToolNodes(ownerGraph);
+    std::vector<const EditorNodeGraph::Node*> tools;
+    std::unordered_set<int> visited;
+    const auto visit=[&](const auto& self,int id)->void {
+        if(!visited.insert(id).second) return;
+        const auto* node=ownerGraph.FindNode(id);
+        if(!node) return;
+        for(const auto& link:ownerGraph.GetLinks()) if(link.toNodeId==id) {
+            EditorNodeGraph::SocketDefinition socket;
+            if(ownerGraph.FindSocket(id,link.toSocketId,&socket) &&
+                (socket.type==EditorNodeGraph::SocketType::Image ||
+                 socket.type==EditorNodeGraph::SocketType::ImageOrChannel ||
+                 socket.type==EditorNodeGraph::SocketType::Raw)) self(self,link.fromNodeId);
+        }
+        if(std::find(editable.begin(),editable.end(),node)!=editable.end()) tools.push_back(node);
+    };
+    for(int output:ownerGraph.GetOutputNodeIds()) {
+        const auto* node=ownerGraph.FindNode(output);
+        if(node && !node->outputSettings.maskOutput) visit(visit,output);
+    }
     const auto labels=Stack::Editor::RawLayerToolLabels(tools);
     cache.labels.insert(cache.labels.end(),labels.begin(),labels.end());
     for (const auto* node : tools) cache.operationUuids.push_back(node->instanceUuid);
-    const auto& graph = projectGraph ? m_Project->graph : layer->graph;
-    for (const auto& node : graph.GetNodes()) {
-        const auto found=std::find(cache.operationUuids.begin(),cache.operationUuids.end(),node.instanceUuid);
-        const int choice=found==cache.operationUuids.end() ? -1 : int(found-cache.operationUuids.begin());
-        cache.cards.push_back({node.id,choice,{node.position.x,node.position.y},
-            choice>=0 ? cache.labels[choice] : node.title});
-    }
-    for (const auto& link : graph.GetLinks()) {
-        const auto* from=graph.FindNode(link.fromNodeId);
-        const auto* to=graph.FindNode(link.toNodeId);
-        if (from && to) cache.wires.push_back({{from->position.x+190,from->position.y+30},
-            {to->position.x,to->position.y+30}});
-    }
-    if (!cache.sourceUuid.empty()) {
-        const auto first=cache.cards.empty() ? ImVec2{} : cache.cards.front().position;
-        cache.cards.push_back({-1,0,{first.x-250,first.y},cache.labels.front()});
-    }
+
 }
 
 const Stack::Editor::RawLayerToolPickerCache& EditorModule::GetRawLayerToolGraph() const {
     if (!(m_Project->nodeEditor && m_Project->nodeEditor->layerId == Stack::Project::kProjectGraphId) &&
         m_Project->rawMode != Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
-        static const auto legacy = [] {
-            Stack::Editor::RawLayerToolPickerCache result;
-            const char* labels[] = {"Transform","Denoise","Color","Exposure","Curves","View"};
-            for (int i=0;i<6;++i) {
-                result.cards.push_back({i,i,{float(i)*240.f,0.f},labels[i]});
-                if (i) result.wires.push_back({{float(i-1)*240.f+190.f,30.f},{float(i)*240.f,30.f}});
-            }
-            return result;
-        }();
+        static const Stack::Editor::RawLayerToolPickerCache legacy;
         return legacy;
     }
     RefreshRawLayerToolPicker();

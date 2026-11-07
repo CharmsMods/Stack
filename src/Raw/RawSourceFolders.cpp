@@ -1,3 +1,4 @@
+#include "Raw/GalleryBrowseMetadata.h"
 #include "Raw/RawSourceFolders.h"
 #include "Persistence/ManagedAssetPaths.h"
 #include "Persistence/ProjectStore.h"
@@ -228,8 +229,8 @@ ScanResult AggregateSourceFolders(
             progress(combined);
         };
         auto result = ScanWorkspace(root, acceptsSource, report, shouldCancel,
-            [](const ManagedLayout& owner, SourceRecord& source, ScanProgress& state) {
-                ClassifyThumbnailMetadata(owner, source);
+            [&](const ManagedLayout& owner, SourceRecord& source, ScanProgress& state) {
+                RefreshGalleryBrowseMetadata(owner,source,shouldCancel);
                 source.browsePreview |= source.thumbnail.status != ThumbnailStatus::Valid;
                 ++state.cachedPreviewsChecked;
             }, reuseIdentity, true);
@@ -244,10 +245,17 @@ ScanResult AggregateSourceFolders(
         if (!result.success) {
             if (!aggregate.errorMessage.empty()) aggregate.errorMessage += "\n";
             aggregate.errorMessage += root.u8string() + ": " + result.errorMessage;
-            continue;
+            // Offline folders remain browsable from their local catalog.
+            if(cached.empty()) {
+                SourceFolderCard offline;offline.root=root;offline.offline=true;
+                aggregate.sourceFolderCards.push_back(std::move(offline));
+                continue;
+            }
+            result.layout=layout;result.sources=std::move(cached);
         }
         aggregate.success = true;
         SourceFolderCard card;
+        card.offline = !result.success;
         card.root = result.layout.workspaceRoot;
         card.countKnown = true;
         card.sourceCount = result.sources.size();
@@ -292,6 +300,16 @@ ScanResult AggregateSourceFolders(
             }
             const auto reference = displayKeys.find(project.referenceSourceKey);
             if (reference != displayKeys.end()) project.referenceSourceKey = reference->second;
+            if (project.thumbnailOriginal) {
+                auto thumbnail = std::make_shared<SourceRecord>(*project.thumbnailOriginal);
+                const auto localKey = thumbnail->relativePathKey;
+                thumbnail->sourceWorkspaceRoot = project.sourceWorkspaceRoot;
+                thumbnail->sourceRelativePathKey = localKey;
+                const auto display = displayKeys.find(localKey);
+                thumbnail->relativePathKey = display == displayKeys.end()
+                    ? QualifiedSourceKey(rootKey, localKey) : display->second;
+                project.thumbnailOriginal = std::move(thumbnail);
+            }
             aggregate.sourceSetProjects.push_back(std::move(project));
         }
         aggregate.progress.directoriesVisited += result.progress.directoriesVisited;

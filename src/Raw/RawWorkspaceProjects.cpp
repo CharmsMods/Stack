@@ -525,15 +525,19 @@ bool AssociateWorkspaceSourceSetProjects(
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
     const std::vector<Stack::Project::ProjectRecord>& indexedProjects,
-    CancellationPredicate shouldCancel) {
+    CancellationPredicate shouldCancel,
+    ProjectDiscoveryMode mode = ProjectDiscoveryMode::VerifiedSources) {
     projects.clear();
     std::unordered_map<std::string, std::size_t> originPathToSource;
+    std::unordered_map<std::string, std::size_t> sourceKeyToIndex;
+    std::unordered_map<std::string, std::shared_ptr<const SourceRecord>> thumbnailOriginals;
     std::unordered_map<std::uint64_t, std::vector<std::size_t>> byteLengthToSources;
     std::unordered_map<std::size_t, Stack::RawEvidence::SourceIdentity> sourceIdentities;
     for (std::size_t index = 0; index < sources.size(); ++index) {
         SourceRecord& source = sources[index];
         source.sourceSetProjectMemberships.clear();
         originPathToSource[LowerGenericPathKey(NormalizePath(source.absolutePath))] = index;
+        sourceKeyToIndex.emplace(source.relativePathKey, index);
         byteLengthToSources[static_cast<std::uint64_t>(source.fileSizeBytes)].push_back(index);
     }
 
@@ -605,7 +609,10 @@ bool AssociateWorkspaceSourceSetProjects(
                 const auto source = originPathToSource.find(
                     LowerGenericPathKey(NormalizePath(originPath)));
                 if (source != originPathToSource.end() &&
-                    sources[source->second].fingerprint == asset.contentSha256) {
+                    (sources[source->second].fingerprint == asset.contentSha256 ||
+                     (mode == ProjectDiscoveryMode::BrowseListing &&
+                      sources[source->second].fingerprint.empty() &&
+                      sources[source->second].fileSizeBytes == asset.byteLength))) {
                     assetSources[asset.assetId].push_back(source->second);
                 }
             }
@@ -619,6 +626,7 @@ bool AssociateWorkspaceSourceSetProjects(
                         assetSources[asset.assetId].push_back(sourceIndex);
                     continue;
                 }
+                if (mode == ProjectDiscoveryMode::BrowseListing) continue;
                 auto identity = sourceIdentities.find(sourceIndex);
                 if (identity == sourceIdentities.end()) {
                     identity = sourceIdentities.emplace(
@@ -655,7 +663,8 @@ bool AssociateWorkspaceSourceSetProjects(
                 auto path=asset.workspaceRelativePath.empty() ? asset.originalPath : projectLayout.workspaceRoot/asset.workspaceRelativePath;
                 std::error_code ec;
                 const bool existing=std::filesystem::file_size(path,ec)==asset.byteLength && !ec &&
-                    Stack::RawEvidence::ComputeSourceIdentity(path,shouldCancel).sha256==asset.contentSha256;
+                    (mode == ProjectDiscoveryMode::BrowseListing ||
+                     Stack::RawEvidence::ComputeSourceIdentity(path,shouldCancel).sha256==asset.contentSha256);
                 if (!existing) {
                     // The store also consults the master catalog for renamed bracket-backed originals.
                     auto opened=Stack::Project::OpenProjectStore(indexed.absolutePath);
@@ -670,10 +679,17 @@ bool AssociateWorkspaceSourceSetProjects(
                     source->relativePathKey=source->relativePath.generic_u8string();
                     source->fileName=path.filename().u8string(); source->stem=path.stem().u8string();
                     source->extension=path.extension().u8string(); source->fileSizeBytes=asset.byteLength;
-                    source->fingerprint=asset.contentSha256;
-                    source->sourceIdentityAlgorithmVersion=kSourceIdentityAlgorithmVersion;
+                    ec.clear();
+                    const auto modified = std::filesystem::last_write_time(path, ec);
+                    if (!ec) source->modifiedTimeTicks = FileTimeTicks(modified);
+                    if (mode == ProjectDiscoveryMode::VerifiedSources) {
+                        source->fingerprint=asset.contentSha256;
+                        source->sourceIdentityAlgorithmVersion=kSourceIdentityAlgorithmVersion;
+                    }
                     source->browsePreview = true;
-                    entry.linkedOriginal=std::move(source);
+                    entry.thumbnailOriginal=source;
+                    if (mode == ProjectDiscoveryMode::VerifiedSources)
+                        entry.linkedOriginal=std::move(source);
                 }
             }
         }
@@ -776,6 +792,16 @@ bool AssociateWorkspaceSourceSetProjects(
         if (sourceIdentities.empty() && !indexed.rawSourceFingerprint.empty())
             sourceIdentities.push_back(indexed.rawSourceFingerprint);
         entry.sourceIdentityKey = BuildGallerySourceIdentityKey(std::move(sourceIdentities));
+        const auto reference = sourceKeyToIndex.find(entry.referenceSourceKey);
+        if (reference != sourceKeyToIndex.end()) {
+            auto& original = thumbnailOriginals[entry.referenceSourceKey];
+            if (!original) {
+                auto source = std::make_shared<SourceRecord>(sources[reference->second]);
+                if (source->sourceWorkspaceRoot.empty()) source->sourceWorkspaceRoot = layout.workspaceRoot;
+                original = std::move(source);
+            }
+            entry.thumbnailOriginal = original;
+        }
         projects.push_back(std::move(entry));
     };
 
@@ -818,10 +844,11 @@ bool DiscoverSourceSetProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
-    CancellationPredicate shouldCancel) {
+    CancellationPredicate shouldCancel,
+    ProjectDiscoveryMode mode) {
     if (shouldCancel && shouldCancel()) return false;
     return AssociateWorkspaceSourceSetProjects(
-        layout, sources, projects, ScanWorkspaceProjects(layout), std::move(shouldCancel));
+        layout, sources, projects, ScanWorkspaceProjects(layout), std::move(shouldCancel), mode);
 }
 
 bool DiscoverWorkspaceProjects(
@@ -829,7 +856,8 @@ bool DiscoverWorkspaceProjects(
     std::vector<SourceRecord>& sources,
     std::vector<SourceSetProjectCatalogEntry>& projects,
     CancellationPredicate shouldCancel,
-    const nlohmann::json* scannedMasters) {
+    const nlohmann::json* scannedMasters,
+    ProjectDiscoveryMode mode) {
     if (shouldCancel && shouldCancel()) return false;
     // Keep discovery scoped to this operation. Both associations consume the
     // same records; another workspace cannot replace them via the global index.
@@ -838,7 +866,7 @@ bool DiscoverWorkspaceProjects(
         IsMarkedCloset(layout.dataDirectory) ? ScanWorkspaceProjects(layout) : std::vector<Stack::Project::ProjectRecord>{};
     if (shouldCancel && shouldCancel()) return false;
     if (!AssociateWorkspaceProjects(layout, sources, indexedProjects, shouldCancel) ||
-        !AssociateWorkspaceSourceSetProjects(layout, sources, projects, indexedProjects, shouldCancel)) return false;
+        !AssociateWorkspaceSourceSetProjects(layout, sources, projects, indexedProjects, shouldCancel, mode)) return false;
     std::set<std::string> represented;
     for (const auto& doc : indexedProjects) for (const auto& set : doc.sourceSets) {
         if (std::find(doc.savedBracketingSourceSetIds.begin(), doc.savedBracketingSourceSetIds.end(), set.sourceSetId) ==

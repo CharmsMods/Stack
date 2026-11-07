@@ -1,5 +1,7 @@
 #include "Presentation.h"
 #include "Hdr/UiTarget.h"
+#include "Hdr/PhotoPairs.h"
+#include "Hdr/Color.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <atomic>
@@ -117,6 +119,16 @@ bool PreviewActiveForCurrentWindow() {
     return IsActive(vp && vp->PlatformHandle ? static_cast<GLFWwindow*>(vp->PlatformHandle) : mainWindow);
 }
 bool PreviewInSdr() {return forced;}
+float CurrentTargetHeadroom() {
+#ifdef _WIN32
+    const auto it=windows.find(glfwGetCurrentContext());
+    if(it!=windows.end() && it->second->Active()) {
+        const auto& display=it->second->Display();
+        return (std::max)(1.f,display.peak/(std::max)(1.f,display.white));
+    }
+#endif
+    return MasterHeadroom;
+}
 void SetPreviewInSdr(bool value) {forced=value;}
 const std::string& MainDisplayStatus(){return mainStatus;}
 }

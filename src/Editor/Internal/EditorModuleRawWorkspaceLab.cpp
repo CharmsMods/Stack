@@ -8,6 +8,8 @@
 #include "Library/LibraryControls.h"
 #include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
+#include "App/EdgeChrome.h"
+#include "RawLab/RawLabFilmstripEdgeFade.h"
 #include "Editor/Timeline/TimelineParameterEdits.h"
 #include "Project/RawNodeEditing.h"
 #include "Graph/GraphDocumentRules.h"
@@ -885,10 +887,23 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         const std::string layoutKey = m_RawWorkspace.workspaceRoot.lexically_normal().generic_string() +
             ":" + std::to_string(static_cast<int>(m_RawWorkspaceGalleryContentMode)) +
             ":" + std::to_string(static_cast<int>(m_RawWorkspaceLabUi.galleryNavigationMode)) +
-            ":" + m_RawWorkspaceLabUi.galleryProjectId;
+            ":" + m_RawWorkspaceLabUi.galleryProjectId + ":" +
+            m_RawGalleryFolderFilter.value_or(std::string{});
+        if (m_RawWorkspaceGalleryGridStacks.filmstripSlots.SetContent(layoutKey,
+                m_RawWorkspaceNavigatorRevision, m_RawWorkspaceFilmstripOrganizationRevision,
+                m_RawWorkspaceCategoryQueueRevision)) {
+            m_RawWorkspaceGalleryGridStacks.filmstripScroll = {};
+            m_RawWorkspaceLabFilmstripScrollTargetX = 0.0f;
+            m_RawWorkspaceLabFilmstripScrollLastAppliedX = 0.0f;
+        }
         m_RawWorkspaceGalleryLayoutAnimation.BeginFrame(layoutKey,
             m_RawWorkspaceLabUi.galleryWorkspaceGrid, ImGui::GetFrameCount(), ImGui::GetTime(),
-            m_RawWorkspaceFilmstripOrganizationRevision + m_RawWorkspaceGalleryGridStacks.navigationRevision,
+            // Catalog/grouping publication is not a navigation gesture. In
+            // particular, it must not hide badges or disable drag targets.
+            m_RawWorkspaceGalleryGridStacks.navigationRevision ^
+                (m_RawWorkspaceLabUi.galleryWorkspaceGrid ?
+                    (static_cast<std::uint64_t>(std::max(1.f, ImGui::GetContentRegionAvail().x)) << 32) ^
+                    static_cast<std::uint64_t>(m_RawWorkspaceLabUi.galleryThumbnailScale * 1000.f) : 0),
             Stack::LibraryUi::ReducedMotion());
     } else {
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
@@ -1119,19 +1134,8 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         bool drawerContentAvailable = true;
         if (projectsFilmstripMode &&
             !m_RawWorkspaceLabUi.galleryWorkspaceOpen) {
-            drawerContentAvailable = false;
-            const auto& presentation = GetRawWorkspaceGalleryPresentation();
-            for (const auto& group : presentation.groups) {
-                if (std::any_of(
-                        group.sources.begin(),
-                        group.sources.end(),
-                        [](const auto& source) {
-                            return source.savedProjectCount > 1u;
-                        })) {
-                    drawerContentAvailable = true;
-                    break;
-                }
-            }
+            ResolveRawWorkspaceGalleryProjectStacks();
+            drawerContentAvailable = m_RawWorkspaceGalleryProjectMaximumVersions > 1u;
         }
         Stack::RawWorkspace::RawGalleryFilmstripDrawerInput drawerInput;
         drawerInput.now = ImGui::GetTime();
@@ -1159,7 +1163,7 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             m_RawWorkspaceGalleryContentMode ==
                 Stack::RawWorkspace::GalleryContentMode::Gallery;
         const auto maximumFilmstripStackSize = [&]() {
-            if (!normalGalleryFilmstrip) return std::size_t { 1u };
+            if (!normalGalleryFilmstrip && !projectsFilmstripMode) return std::size_t { 1u };
             return m_RawFilmstripHeight.maximum;
         };
         constexpr float kFilmstripStackGap = 10.0f;
@@ -1317,12 +1321,38 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             constexpr float kFilmstripNavigationGap = 12.0f;
             constexpr float kFilmstripBottomPadding = 8.0f;
             const auto renderFilmstripScroll = [&](bool expandedDrawer) {
-                constexpr float kTimelineHeight = 54.0f;
+                constexpr float kTimelineHeight = kRawLabFilmstripTimelineHeight;
+                ImVec2 stripMinimum = ImGui::GetCursorScreenPos();
+                float stripWidth = ImGui::GetContentRegionAvail().x;
+                auto& slots = m_RawWorkspaceGalleryGridStacks.filmstripSlots;
+                slots.enabled = m_PermanentGalleryWorkspace &&
+                    m_RawWorkspaceLabUi.galleryNavigationMode == RawGalleryNavigationMode::ProjectRoot;
+                if (slots.enabled) {
+                    const std::size_t count = m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Gallery
+                        ? ResolveRawWorkspaceVisibleGalleryStacks().size() : ResolveRawWorkspaceGalleryProjectStacks().size();
+                    auto& motion = m_RawWorkspaceGalleryGridStacks.filmstripScroll;
+                    const auto leading = slots.Nearest(std::max(0.f, motion.current));
+                    if (slots.Update(stripWidth, 124.f * m_RawWorkspaceLabUi.galleryThumbnailScale,
+                            count, std::max(.75f, ImGui::GetFontSize() / 16.f),
+                            kRawLabFilmstripTileHeight * m_RawWorkspaceLabUi.galleryThumbnailScale)) {
+                        m_RawWorkspaceLabFilmstripScrollTargetX = slots.Position(std::min(leading, slots.lastStop));
+                        motion.current = motion.lastApplied = m_RawWorkspaceLabFilmstripScrollTargetX;
+                        motion.overshoot = motion.rebound = 0.f;
+                        ImGui::SetNextWindowScroll({motion.current, 0.f});
+                    }
+                    slots.Frame(std::max(0.f, motion.current));
+                    stripMinimum.x += slots.margin;
+                    stripWidth = slots.width;
+                    ImGui::SetCursorScreenPos(stripMinimum);
+                    ImGui::SetNextWindowContentSize({stripWidth + slots.maximum, 0.f});
+                }
+                const float feather = 48.f * std::max(.75f, ImGui::GetFontSize() / 16.f);
                 const float scrollHeight = std::max(
-                    1.0f, ImGui::GetContentRegionAvail().y - kTimelineHeight);
+                    1.0f, ImGui::GetContentRegionAvail().y - kTimelineHeight - ImGui::GetStyle().ItemSpacing.y);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
                 ImGui::BeginChild(
                     "RawLabFilmstripScroll",
-                    ImVec2(0.0f, scrollHeight),
+                    ImVec2(stripWidth, scrollHeight),
                     false,
                     ImGuiWindowFlags_NoScrollbar |
                         ImGuiWindowFlags_NoScrollWithMouse);
@@ -1342,9 +1372,24 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                 const float scrollX = ImGui::GetScrollX();
                 const float scrollMaxX = ImGui::GetScrollMaxX();
                 const float viewportWidth = ImGui::GetWindowSize().x;
+                if (m_PermanentGalleryWorkspace) {
+                    Stack::Editor::RawLabInternal::DrawFilmstripEdgeFade(
+                        ImGui::GetWindowDrawList(), stripMinimum,
+                        {stripMinimum.x + stripWidth, stripMinimum.y + scrollHeight},
+                        feather, GetWorkspaceBaseColor());
+                }
                 ImGui::EndChild();
+                ImGui::PopStyleVar();
+                const float timelineTop = ImGui::GetCursorScreenPos().y;
+                ImGui::SetCursorScreenPos({stripMinimum.x, timelineTop});
                 RenderRawWorkspaceLabFilmstripTimeline(
                     scrollX, scrollMaxX, viewportWidth);
+                if (m_PermanentGalleryWorkspace) {
+                    Stack::Editor::RawLabInternal::DrawFilmstripEdgeFade(
+                        ImGui::GetWindowDrawList(), {stripMinimum.x, timelineTop},
+                        {stripMinimum.x + stripWidth, timelineTop + kTimelineHeight},
+                        feather, GetWorkspaceBaseColor());
+                }
             };
             const auto renderFilmstripBody = [&](bool expandedDrawer) {
                 const ImVec2 expandedContentMinimum =
@@ -1470,8 +1515,10 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             };
 
             const ImVec2 filmstripMinimum = ImGui::GetCursorScreenPos();
+            const float rightInset = m_PermanentGalleryWorkspace
+                ? Stack::Navigation::BarExtent * std::max(.75f, ImGui::GetFontSize() / 16.f) : 0.f;
             const ImVec2 filmstripSize(
-                std::max(1.0f, ImGui::GetContentRegionAvail().x),
+                std::max(1.0f, ImGui::GetContentRegionAvail().x - rightInset),
                 filmstripHeight);
             bool workspaceChanged = false;
             ImGui::PushStyleVar(

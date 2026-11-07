@@ -69,6 +69,9 @@ private:
     Queue queue_;
     bool manualRun_=false,takeoverChosen_=false,loaded_=false,storageBlocked_=false;
     double lastActivity_=0;
+    double resourceResumeAt_=0;
+    double nextMemoryCheck_=0;
+    bool memoryConstrained_=false;
     std::uint64_t generation_=0,revision_=0;
     std::uint64_t foregroundRequestId_=0;
     std::string error_,actionLabel_;

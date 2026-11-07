@@ -366,7 +366,10 @@ struct RawColorWarpPin {
     int family = -1; // -1 is a sampled selection; 0..7 are the named families.
     RawColorWarpRange hueRange {-7.5f, 7.5f, 7.5f, 7.5f, true}; // Degrees relative to source hue.
     RawColorWarpRange saturationRange;
+    float sampleRadius = 0.0f; // Soft normalized-ab radius; zero retains independent H/S ranges.
+    float smoothSelection = 0.0f; // Edge-aware influence smoothing, 0..1.
     RawColorWarpRange exposureRange {-16.0f, 16.0f, 1.0f, 1.0f, false};
+    bool moveColors = false; // Translate normalized chroma; false retains Turn behavior.
     float hueShift = 0.0f; // Signed degrees.
     float saturation = 0.0f; // Relative chroma change, -1 through +1.
     float strength = 1.0f;
