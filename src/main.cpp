@@ -152,9 +152,19 @@ int RunStackApplication(int argc, char** argv) {
 #endif
 
         const bool workspaceDiagnostic = argc == 3 && std::strcmp(argv[1], "--diagnose-workspace-switcher") == 0;
-        const bool uiPerformanceCapture = (argc == 4 || argc == 5) && std::strcmp(argv[1],"--diagnose-ui-performance")==0;
+        const bool uiPerformanceCapture = argc >= 4 && std::strcmp(argv[1],"--diagnose-ui-performance")==0;
         AppShell app;
-        if (uiPerformanceCapture) app.ConfigureUiPerformanceCapture(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),argc==5?argv[4]:"");
+        if (uiPerformanceCapture) {
+            std::string scenario, workload = "idle";
+            bool visible = false;
+            for (int i=4; i<argc; ++i) {
+                if (std::strcmp(argv[i],"--visible")==0) visible=true;
+                else if (std::strcmp(argv[i],"--workload")==0 && i+1<argc) workload=argv[++i];
+                else if (scenario.empty() && argv[i][0]!='-') scenario=argv[i];
+                else throw std::runtime_error("Unknown UI performance argument");
+            }
+            app.ConfigureUiPerformanceCapture(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),scenario,visible,workload);
+        }
         if (workspaceDiagnostic) app.ConfigureDiagnosticWorkspaceSwitcher(argv[2]);
         if (projectOpenDiagnostic) {
             app.ConfigureDiagnosticProjectOpen(

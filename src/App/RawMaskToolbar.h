@@ -4,6 +4,7 @@
 #include "Raw/RawAssetCapture.h"
 #include "imgui.h"
 #include "Animation/ControlMotion.h"
+#include "Animation/FrameTween.h"
 
 namespace Stack::Navigation {
 
@@ -12,6 +13,7 @@ struct RawMaskToolbarState {
     bool enabled = false;
     bool maskButtonEnabled = false; // Preserve styling while the disabled bar exits.
     float revealAmount = 0.f;
+    Animation::FrameTween revealMotion;
     double visibleUntil = 0.0;
     float visibleHeight = 0.f;
     ImVec2 position{};

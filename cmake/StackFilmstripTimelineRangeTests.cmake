@@ -7,5 +7,6 @@ add_custom_command(OUTPUT "${filmstrip_timeline_range_test}"
         src/Editor/Internal/RawLab/EditorModuleRawLabFilmstripTimeline.cpp
     VERBATIM)
 add_executable(StackFilmstripTimelineRangeTests "${filmstrip_timeline_range_test}")
+target_include_directories(StackFilmstripTimelineRangeTests PRIVATE src)
 add_test(NAME StackRaw.FilmstripTimelineRange COMMAND StackFilmstripTimelineRangeTests)
 set_tests_properties(StackRaw.FilmstripTimelineRange PROPERTIES LABELS "raw;gallery;ui;cpu" TIMEOUT 30)

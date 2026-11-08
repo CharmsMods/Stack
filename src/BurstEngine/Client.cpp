@@ -5,11 +5,13 @@
 #include "Storage/ScratchBudget.h"
 #include "Raw/Bracketing/ResultSerialization.h"
 #include "App/AppPaths.h"
+#include "Async/UiInteraction.h"
 #include <atomic>
 #include <chrono>
 #include <fstream>
 #include <mutex>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -33,12 +35,21 @@ std::filesystem::path Executable(){
 // remains visible while the worker is executing or publishing progress.
 class CancellationWatch {
 public:
-    CancellationWatch(HANDLE cancel,HANDLE process,std::function<bool()> callback,std::chrono::milliseconds deadline={},bool immediate=false):
+    CancellationWatch(HANDLE cancel,HANDLE process,std::function<bool()> callback,std::chrono::milliseconds deadline={},bool immediate=false,bool bulk=false):
         stop_(CreateEventW(nullptr,TRUE,FALSE,nullptr)){
         if(!stop_)throw std::runtime_error(WindowsError("Could not create burst cancellation monitor"));
-        thread_=std::thread([this,cancel,process,callback=std::move(callback),deadline,immediate]{
+        thread_=std::thread([this,cancel,process,callback=std::move(callback),deadline,immediate,bulk]{
             const auto started=std::chrono::steady_clock::now();auto canceledAt=started;bool sent=false;
+            const DWORD priority=bulk?GetPriorityClass(process):0;
+            bool lowered=false;
             while(WaitForSingleObject(stop_.Get(),40)==WAIT_TIMEOUT){
+                // Reuse this operation-owned monitor. CPU priority is advisory,
+                // changes only with demand, and never suspends the worker or
+                // interrupts GPU/resource ownership. Preview commands retain
+                // their normal priority. GPU packets already running may still
+                // overrun a display interval.
+                const bool yield=bulk && priority==NORMAL_PRIORITY_CLASS && Async::UiInteraction::Active();
+                if(yield!=lowered && SetPriorityClass(process,yield?BELOW_NORMAL_PRIORITY_CLASS:priority))lowered=yield;
                 const auto now=std::chrono::steady_clock::now();
                 if(!sent&&(Canceled(callback)||(deadline.count()>0&&now-started>=deadline))){SetEvent(cancel);sent=true;canceledAt=now;}
                 // A crashed driver or noncooperative child must not hold a
@@ -46,6 +57,7 @@ public:
                 // is terminated; other projects own separate leases/processes.
                 if(sent&&(immediate || now-canceledAt>=std::chrono::seconds(8))){TerminateProcess(process,ERROR_CANCELLED);break;}
             }
+            if(lowered)SetPriorityClass(process,priority);
         });
     }
     ~CancellationWatch(){SetEvent(stop_.Get());if(thread_.joinable())thread_.join();}
@@ -95,7 +107,8 @@ public:
         }
         if(seedPreview){WriteDocument(Artifact(directory_,"preview-",id,".cbor"),Wire::Preview(*seedPreview));command["importOverview"]=true;}
         } catch(...) { RemoveInputs(id);throw; }
-        CancellationWatch watcher(cancel_.Get(),process_.Get(),request.shouldCancel,{},request.terminateOnCancel);
+        CancellationWatch watcher(cancel_.Get(),process_.Get(),request.shouldCancel,{},request.terminateOnCancel,
+            std::string_view(operation)=="process");
         bool terminalConsumed=false;
         try{
             WriteMessage(input_.Get(),command);

@@ -1,5 +1,6 @@
 #include "NavigationRail.h"
 #include "WorkspacePresentation.h"
+#include "App/UiPerformanceProbe.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -71,6 +72,7 @@ void RenderNavigatorResize(RailState& state, bool queue, bool editor=false) {
         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin(editor ? "EditorNavigatorResize" : queue ? "QueueNavigatorResize" : "GalleryNavigatorResize", nullptr, flags)) {
         ImGui::InvisibleButton(queue ? "Resize queue navigator" : "Resize source navigator", ImVec2(width, height));
+        Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::PanelResize);
         if (ImGui::IsItemActivated()) {
             state.galleryResizeActive = true;
             state.panelOpen = true;

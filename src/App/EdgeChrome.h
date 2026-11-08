@@ -25,7 +25,7 @@ inline bool NavigationInputActive() {
          ImGui::IsKeyDown(ImGuiKey_GamepadDpadDown) || ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown));
 }
 
-inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
+inline void UpdateEdgeReveal(float& amount, Animation::FrameTween& motion, double& visibleUntil, bool focused,
     bool atEdge, bool hovered, bool interacting, bool popupOpen, bool reducedMotion) {
     const double now = ImGui::GetTime();
     if (focused && (hovered || interacting || popupOpen ||
@@ -33,8 +33,7 @@ inline void UpdateEdgeReveal(float& amount, double& visibleUntil, bool focused,
         visibleUntil = now + .65;
     const float target = focused && now < visibleUntil ? 1.f : 0.f;
     if (!focused) visibleUntil = 0.0;
-    if (reducedMotion) amount = target;
-    else Stack::Header::ApproachMotion(amount, target, .24f);
+    motion.Update(amount,target,.24f,now,ImGui::GetFrameCount(),reducedMotion);
 }
 
 inline bool IconButton(const char* label, Glyph glyph, bool selected, bool enabled,

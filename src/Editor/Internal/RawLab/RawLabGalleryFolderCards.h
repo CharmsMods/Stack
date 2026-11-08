@@ -3,6 +3,7 @@
 #include "Raw/RawWorkspace.h"
 #include "Renderer/FolderPocketMaterial.h"
 #include "App/GalleryNavigationTransition.h"
+#include "Animation/FrameTween.h"
 #include <imgui.h>
 #include <array>
 #include <functional>
@@ -39,16 +40,21 @@ public:
         Navigation::GalleryNavigationTransition* navigation = nullptr);
     void Reset() { m_Motion.clear(); }
     void Shutdown() { m_Material.Shutdown(); }
+    bool Active(int frame) const { return m_LastFrame==frame && m_Active; }
 
 private:
     struct Motion {
         float reveal = .16f, leanX = 0.f, leanY = 0.f;
         std::array<float, 4> pageLift{};
+        Animation::FrameTween revealMotion;
+        std::array<Animation::FrameTween,4> liftMotion;
         int frame = -1;
         bool expanded = false;
     };
     std::unordered_map<std::string, Motion> m_Motion;
     Renderer::FolderPocketMaterial m_Material;
+    int m_LastFrame=-2;
+    bool m_Active=false;
 };
 
 } // namespace Stack::Editor::RawLabInternal

@@ -78,7 +78,7 @@ void AppShell::LayoutNavigationRail() {
     LayoutRawMaskToolbar();
     const float width = Stack::Navigation::BarExtent * rail.scale;
     const auto& io = ImGui::GetIO();
-    const bool focused = m_UiPerformanceCapture || glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool focused = m_UiPerformanceCapture ? !io.AppFocusLost : glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
     const bool inHeight = io.MousePos.y >= viewport->Pos.y &&
         io.MousePos.y < viewport->Pos.y + viewport->Size.y;
     const bool atEdge = inHeight && io.MousePos.x >= viewport->Pos.x &&
@@ -106,7 +106,8 @@ void AppShell::LayoutNavigationRail() {
     const bool otherControlActive = !railActive && (context->ActiveId || ImGui::IsAnyMouseDown());
     if (otherControlActive && atEdge) rail.suppressEdgeRevealUntilLeave = true;
     const bool allowPointerReveal = !rail.suppressEdgeRevealUntilLeave && !otherControlActive;
-    Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.visibleUntil, focused,
+    if(allowPointerReveal || !focused) Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::Rail);
+    Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.revealMotion, rail.visibleUntil, focused,
         atEdge && allowPointerReveal, overRail && allowPointerReveal,
         railActive, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
@@ -135,8 +136,10 @@ void AppShell::LayoutNavigationRail() {
         viewport->Size.x * .6f);
     const float panelWidth = std::min(std::max(240.f * rail.scale, preferredRight - rail.visibleWidth), available * .6f);
     const float target = !processing && rail.panelOpen ? 1.f : 0.f;
-    if (processing || Stack::Notifications::SystemReducedMotion()) rail.panelAmount = target;
-    else if (!rail.galleryResizeActive) Stack::Header::ApproachMotion(rail.panelAmount, target, .28f);
+    if (rail.galleryResizeActive) rail.panelMotion.Reset(rail.panelAmount);
+    else if (rail.panelAmount!=target || rail.panelMotion.Active())
+        rail.panelMotion.Update(rail.panelAmount,target,.28f,Stack::Animation::FrameTween::ClockSeconds(),ImGui::GetFrameCount(),
+            processing || Stack::Notifications::SystemReducedMotion());
     rail.visiblePanelWidth = panelWidth * rail.panelAmount;
     // The rail consumes the panel's left edge. Only the minimum-width clamp
     // can move its right edge; its expanded extent survives sidebar retreat.
@@ -169,6 +172,8 @@ void AppShell::LayoutNavigationRail() {
 }
 
 void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity) {
+    Stack::UiPerformance::Probe::Motion(Stack::UiPerformance::Probe::Visual::Rail,
+        m_NavigationRail.revealAmount>0 && m_NavigationRail.revealAmount<1);
     ImGuiExtras::HoverTextScope noHoverText;
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NavigationBars);
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Rail,
@@ -269,7 +274,10 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const auto& rail = m_NavigationRail;
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Panel,
-        Stack::UiPerformance::Probe::Key(rail.visiblePanelWidth));
+        Stack::UiPerformance::Probe::Key(rail.visiblePanelWidth),
+        {rail.panelPosition.x,rail.panelPosition.y,rail.visiblePanelWidth,rail.panelSize.y});
+    Stack::UiPerformance::Probe::Motion(Stack::UiPerformance::Probe::Visual::Panel,
+        rail.galleryResizeActive || rail.panelAmount>0 && rail.panelAmount<1);
     const bool graphMode = renderTab == Graph && !m_Editor->IsViewMode();
     m_Editor->SetGraphCatalogHost(graphMode ? rail.panelPosition : ImVec2(),
         graphMode ? rail.panelSize : ImVec2(), rail.panelOpen, rail.visiblePanelWidth);
@@ -279,6 +287,7 @@ void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
             Stack::Navigation::RenderGalleryNavigatorResize(m_NavigationRail);
         else if (renderTab == Queue) Stack::Navigation::RenderQueueNavigatorResize(m_NavigationRail);
         else Stack::Navigation::RenderEditorNavigatorResize(m_NavigationRail);
+        if(rail.galleryResizeActive)Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::Panel);
     }
     if (IsRaw(renderTab) || (renderTab == Graph && m_Editor->IsViewMode())) {
         m_Editor->RenderRawWorkspaceSectionPanel(rail.panelPosition, rail.panelSize, rail.visiblePanelWidth,

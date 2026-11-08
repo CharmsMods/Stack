@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <array>
 #include <fstream>
+#include "App/UiResponsivenessCapture.h"
 
 class EditorModule;
 
@@ -17,20 +18,30 @@ struct UiPerformanceCapture {
         std::string scenario;
         Stack::UiPerformance::FrameSample sample;
         double gpuMs = -1;
-        std::array<double, 4> shellPhases {};
+        std::array<double, 7> shellPhases {};
+        std::uint64_t qpc = 0;
+        double intervalMs = 0;
+        bool scanBusy = false, thumbnailsBusy = false, processingBusy = false, moving = false;
     };
     struct GpuQuery { unsigned int start = 0, end = 0; std::size_t frame = static_cast<std::size_t>(-1); bool pending = false; };
     std::array<GpuQuery,16> queries {};
     int query = -1;
     bool gpuActive = false;
-    std::array<double, 4> shellPhases {};
+    std::array<double, 7> shellPhases {};
     std::filesystem::path project, output;
     std::vector<Frame> frames;
     std::chrono::steady_clock::time_point started, nextTick;
     int step = -1, frame = 0, warmup = 0, editNode = -1, dragNode = -1;
     int onlyStep = -1;
     std::uint64_t firstWorkspace = 0, secondWorkspace = 0;
+    std::uint64_t hdrPresents = 0, glPresents = 0;
     bool loadQueued = false, ready = false, passed = false, finished = false;
+    bool visible = false;
+    std::string workload = "idle";
+    UiResponsivenessCapture responsiveness;
+    std::chrono::steady_clock::time_point previousFrame;
+    std::uint64_t frameQpc = 0;
+    double frameIntervalMs = 0;
     bool qualityCapture = false;
     bool imageSurfaceCapture = false;
     bool qualityRawOpened = false;

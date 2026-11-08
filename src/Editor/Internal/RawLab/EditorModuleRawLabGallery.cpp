@@ -1,3 +1,5 @@
+#include "App/UiPerformanceProbe.h"
+#include "App/UiPerformanceTrace.h"
 #include "App/WorkspacePresentation.h"
 #include "App/AppHeaderStyle.h"
 #include "Editor/EditorModule.h"
@@ -533,7 +535,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     bool compactFilmstrip,
     bool expandedFilmstripDrawer,
     float filmstripDrawerExpansion) {
+    m_RawGalleryGroupsMoving=false;
     ImGuiExtras::HoverTextScope noHoverText;
+    Stack::UiPerformance::Span galleryTiming(Stack::UiPerformance::Stage::Gallery);
+    bool diagnosticItemRecorded=false;
     auto& layoutMotion = m_RawWorkspaceGalleryLayoutAnimation;
     if (ImGui::GetCurrentWindow()->SkipItems) {
         return;
@@ -582,6 +587,17 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
     }
     const ImRect viewClip = ImGui::GetCurrentWindow()->ClipRect;
+    if (Stack::UiPerformance::Probe::Active()) {
+        namespace P=Stack::UiPerformance::Probe;
+        const auto* w=ImGui::GetCurrentWindow();
+        const auto visual=compactFilmstrip?P::Visual::Filmstrip:P::Visual::Gallery;
+        P::Drawn(visual,P::Key(compactFilmstrip?w->Scroll.x:w->Scroll.y),
+            {viewClip.Min.x,viewClip.Min.y,viewClip.GetWidth(),viewClip.GetHeight()});
+        // Native ImGui scroll is pixel-rounded; a subpixel remainder is not motion.
+        P::Motion(visual,compactFilmstrip ? (gridBrowse.filmstripScroll.glide.Active() || std::abs(m_RawWorkspaceLabFilmstripScrollTargetX-w->Scroll.x)>1.1f) :
+            std::abs(m_RawWorkspaceLabGalleryScrollTargetY-w->Scroll.y)>.1f);
+        if (ImGui::IsWindowHovered() && (ImGui::GetIO().MouseWheel!=0 || ImGui::GetIO().MouseWheelH!=0)) P::Accepted(visual);
+    }
     if (m_PermanentGalleryWorkspace) layoutMotion.SetViewport(viewClip);
     const std::string movingImageAtPointer = layoutMotion.ImageAt(ImGui::GetIO().MousePos);
     bool gridAnchorApplied = false;
@@ -610,9 +626,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawWorkspaceGalleryContentMode !=
             Stack::RawWorkspace::GalleryContentMode::Gallery;
     if (compactFilmstrip) {
-        if (!stackFilmstrip && !projectFilmstrip) {
-            m_RawWorkspaceLabFilmstripTimelineEntries.clear();
-        }
+        if (stackFilmstrip || projectFilmstrip) m_RawGalleryFrameSourceCache.timelineActive=false;
         if (!stackFilmstrip) m_RawWorkspaceLabFilmstripStackTimelineActive = false;
         if (!projectFilmstrip) m_RawWorkspaceLabFilmstripProjectTimelineActive = false;
         m_RawWorkspaceLabFilmstripTimelineHoveredIndex =
@@ -674,6 +688,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         (!projectsOnly && presentation.totalSources <= 0)) {
         if (compactFilmstrip) {
             m_RawWorkspaceLabFilmstripTimelineEntries.clear();
+            m_RawGalleryFrameSourceCache.timelineActive=false;
             m_RawWorkspaceLabFilmstripStackTimelineActive = false;
             m_RawWorkspaceLabFilmstripProjectTimelineActive = false;
         }
@@ -941,6 +956,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             ImGui::GetIO().MousePos.y < tileMotion.Map(ImVec2(tileMinimum.x, previewHoverBottomY)).y;
         const bool queuePlaceholder=projectsOnly&&projectPath.empty();
         const bool tilePressed = rawTilePressed && pointerOnVisibleCard&&!queuePlaceholder;
+        if(Stack::UiPerformance::Probe::Active() && !diagnosticItemRecorded &&
+            ImGui::IsItemVisible() && pointerEnabled) {
+            namespace P=Stack::UiPerformance::Probe;
+            P::Item(P::Visual::GalleryItem,P::Key(source.relativePathKey) ^ (m_RawWorkspace.selectedSourceKey==source.relativePathKey));
+            if(tilePressed)P::Accepted(P::Visual::GalleryItem);
+            diagnosticItemRecorded=true;
+        }
         const bool tileHovered = pointerOnVisibleCard &&
             ImGui::IsItemHovered() &&
             ImGui::GetIO().MousePos.y >= tileMotion.Map(tileMinimum).y;
@@ -1638,121 +1660,99 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             1,
             static_cast<int>((std::max(tileWidth, ImGui::GetContentRegionAvail().x) + gap) /
                 (tileWidth + gap)));
-        std::vector<const Stack::RawWorkspace::SourceRecord*> sources;
-        sources.reserve(m_RawWorkspace.sources.size());
-        for (const auto& source : m_RawWorkspace.sources) {
-            if (projectFrames && !std::any_of(
-                    source.sourceSetProjectMemberships.begin(),
-                    source.sourceSetProjectMemberships.end(),
-                    [&](const auto& membership) {
-                        return membership.projectId ==
-                            m_RawWorkspaceLabUi.galleryProjectId;
-                    })) {
-                continue;
+        auto& frameCache=m_RawGalleryFrameSourceCache;
+        if(frameCache.revision!=m_RawWorkspaceGalleryRevision ||
+            frameCache.sourceCount!=m_RawWorkspace.sources.size() ||
+            frameCache.project!=m_RawWorkspaceLabUi.galleryProjectId || frameCache.projectFrames!=projectFrames) {
+            frameCache.revision=m_RawWorkspaceGalleryRevision;frameCache.sourceCount=m_RawWorkspace.sources.size();
+            frameCache.project=m_RawWorkspaceLabUi.galleryProjectId;frameCache.projectFrames=projectFrames;
+            frameCache.timelineActive=false;
+            frameCache.indices.clear();frameCache.indices.reserve(m_RawWorkspace.sources.size());
+            for(std::size_t index=0;index<m_RawWorkspace.sources.size();++index) {
+                const auto& source=m_RawWorkspace.sources[index];
+                if(projectFrames && !std::any_of(source.sourceSetProjectMemberships.begin(),source.sourceSetProjectMemberships.end(),
+                    [&](const auto& membership){return membership.projectId==frameCache.project;}))continue;
+                frameCache.indices.push_back(index);
             }
-            sources.push_back(&source);
         }
+        const auto& sources=frameCache.indices;
+        const auto sourceAt=[&](std::size_t index)->const Stack::RawWorkspace::SourceRecord& {
+            return m_RawWorkspace.sources[sources[index]];
+        };
 
-        const ImRect clip = ImGui::GetCurrentWindow()->ClipRect;
-        const ImVec2 contentStart = ImGui::GetCursorScreenPos();
-        if (compactFilmstrip) {
-            m_RawWorkspaceLabFilmstripTimelineContentOriginX =
-                contentStart.x + ImGui::GetScrollX();
-            m_RawWorkspaceLabFilmstripTimelineEntries.reserve(sources.size());
-            for (const auto* source : sources) {
-                appendSingleFilmstripTimelineEntry(
-                    source->fileName, source, 1u);
-            }
-            const auto visible = ComputeGalleryVisibleRange(
-                static_cast<int>(sources.size()),
-                tileWidth,
-                gap,
-                contentStart.x,
-                clip.Min.x,
-                clip.Max.x,
-                RawLabGalleryPrefetchPixels(
-                    std::max(0.0f, clip.Max.x - clip.Min.x)));
-            for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
-                if (index > 0) {
-                    ImGui::SameLine(0.0f, gap);
-                }
-                const auto& source = *sources[static_cast<std::size_t>(index)];
-                const bool multiSelected = sourceMultiSelected(source);
-                RecordRawWorkspaceGallerySlot(source, ImGui::GetCursorScreenPos(),
-                    ImVec2(tileWidth, imageHeight), clip);
-                if (index < visible.first || index >= visible.lastExclusive) {
-                    updateScrollToSource(source);
-                }
-                if (index >= visible.first && index < visible.lastExclusive) {
-                    currentFilmstripTimelineIndex = static_cast<std::size_t>(index);
-                    if (creationMode && !multiSelected) {
-                        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.38f);
-                    }
-                    drawThumbnail(
-                        source,
-                        ImVec2(tileWidth, tileHeight),
-                        imageHeight,
-                        false,
-                        source.fileName,
-                        {},
-                        &source);
-                    if (creationMode && !multiSelected) {
-                        ImGui::PopStyleVar();
-                    }
-                } else {
-                    ImGui::Dummy(ImVec2(tileWidth, tileHeight));
+        if(compactFilmstrip) {
+            auto& motion=gridBrowse.filmstripScroll;
+            auto& target=m_RawWorkspaceLabFilmstripScrollTargetX;
+            const auto& io=ImGui::GetIO();
+            motion.Observe(ImGui::GetScrollX(),target,ImGui::GetFrameCount());
+            motion.PrepareUniform(std::max(0.f,ImGui::GetScrollMaxX()),tileWidth+gap);
+            if(!m_LibraryWindowHovered && !io.KeyCtrl && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+                const float wheel=std::abs(io.MouseWheelH)>.0001f?io.MouseWheelH:io.MouseWheel;
+                if(std::abs(wheel)>.0001f) {
+                    motion.glide.Wheel(wheel,motion.uniformStops,motion.uniformStops.size()-1,
+                        ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());target=motion.glide.Position();
                 }
             }
+            if(gridBrowse.filmstripSlots.dragging && io.MouseDown[0])
+                motion.glide.Drag(target,motion.uniformMaximum,ImGui::GetTime());
+            else motion.glide.Step(target,motion.uniformStops,motion.uniformStops.size()-1,
+                ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
+            motion.current=motion.lastApplied=motion.glide.Position();
+            Stack::UiPerformance::Probe::FilmstripSample(ImGui::GetScrollX(),motion.current,motion.glide.Velocity(),
+                motion.glide.Direction(),motion.glide.Active(),motion.uniformMaximum);
+            ImGui::SetScrollX(motion.current);
+            m_RawWorkspaceLabFilmstripScrollLastAppliedX=motion.current;
+        }
+        const ImRect clip=ImGui::GetCurrentWindow()->ClipRect;
+        const ImVec2 contentStart=ImGui::GetCursorScreenPos();
+        const bool allGeometry=layoutMotion.Active() || layoutMotion.AnchorPending();
+        const auto recordAt=[&](int index) {
+            const auto& source=sourceAt(static_cast<std::size_t>(index));
+            const ImVec2 position=compactFilmstrip ? ImVec2(contentStart.x+index*(tileWidth+gap),contentStart.y) :
+                ImVec2(contentStart.x+(index%columns)*(tileWidth+gap),
+                    contentStart.y+(index/columns)*(tileHeight+ImGui::GetStyle().ItemSpacing.y));
+            ImGui::SetCursorScreenPos(position);
+            if(!compactFilmstrip)applyGridAnchor(source.relativePathKey,position,imageHeight);
+            RecordRawWorkspaceGallerySlot(source,position,ImVec2(tileWidth,imageHeight),clip);
+            updateScrollToSource(source);
+        };
+        if(allGeometry || !m_RawLabGalleryScrollToSourceKey.empty()) {
+            for(int index=0;index<static_cast<int>(sources.size());++index)recordAt(index);
+            ImGui::SetCursorScreenPos(contentStart);
+        }
+        const auto drawAt=[&](int index) {
+            const auto& source=sourceAt(static_cast<std::size_t>(index));
+            if(!allGeometry)recordAt(index);
+            if(compactFilmstrip)currentFilmstripTimelineIndex=static_cast<std::size_t>(index);
+            const bool dim=creationMode && !sourceMultiSelected(source);
+            if(dim)ImGui::PushStyleVar(ImGuiStyleVar_Alpha,.38f);
+            drawThumbnail(source,ImVec2(tileWidth,tileHeight),imageHeight,!compactFilmstrip,source.fileName,{},&source);
+            if(dim)ImGui::PopStyleVar();
+        };
+        if(compactFilmstrip) {
+            m_RawWorkspaceLabFilmstripTimelineContentOriginX=contentStart.x+ImGui::GetScrollX();
+            if(!frameCache.timelineActive) {
+                m_RawWorkspaceLabFilmstripTimelineEntries.clear();
+                m_RawWorkspaceLabFilmstripTimelineEntries.reserve(sources.size());
+                for(std::size_t index=0;index<sources.size();++index) {
+                    const auto& source=sourceAt(index);
+                    appendSingleFilmstripTimelineEntry(source.fileName,&source,1u);
+                }
+                frameCache.timelineActive=true;
+            }
+            const auto visible=ComputeGalleryVisibleRange(static_cast<int>(sources.size()),tileWidth,gap,
+                contentStart.x,clip.Min.x,clip.Max.x,RawLabGalleryPrefetchPixels(std::max(0.f,clip.GetWidth())));
+            for(int index=visible.first;index<visible.lastExclusive;++index) {
+                ImGui::SetCursorScreenPos(ImVec2(contentStart.x+index*(tileWidth+gap),contentStart.y));drawAt(index);
+            }
+            ImGui::SetCursorScreenPos(contentStart);
+            ImGui::Dummy(ImVec2(std::max(0.f,float(sources.size())*(tileWidth+gap)-gap),tileHeight));
         } else {
-            const int rowCount = static_cast<int>(
-                (sources.size() + static_cast<std::size_t>(columns) - 1u) /
-                static_cast<std::size_t>(columns));
-            const auto visibleRows = ComputeGalleryVisibleRange(
-                rowCount,
-                tileHeight,
-                ImGui::GetStyle().ItemSpacing.y,
-                contentStart.y,
-                clip.Min.y,
-                clip.Max.y,
-                RawLabGalleryPrefetchPixels(
-                    std::max(0.0f, clip.Max.y - clip.Min.y)));
-            for (int row = 0; row < rowCount; ++row) {
-                for (int column = 0; column < columns; ++column) {
-                    const int index = row * columns + column;
-                    if (index >= static_cast<int>(sources.size())) {
-                        break;
-                    }
-                    if (column > 0) {
-                        ImGui::SameLine(0.0f, gap);
-                    }
-                    const auto& source = *sources[static_cast<std::size_t>(index)];
-                    const bool multiSelected = sourceMultiSelected(source);
-                    applyGridAnchor(source.relativePathKey, ImGui::GetCursorScreenPos(), imageHeight);
-                    RecordRawWorkspaceGallerySlot(source, ImGui::GetCursorScreenPos(),
-                        ImVec2(tileWidth, imageHeight), clip);
-                    if (row < visibleRows.first || row >= visibleRows.lastExclusive) {
-                        updateScrollToSource(source);
-                    }
-                    if (row >= visibleRows.first && row < visibleRows.lastExclusive) {
-                        if (creationMode && !multiSelected) {
-                            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.38f);
-                        }
-                        drawThumbnail(
-                            source,
-                            ImVec2(tileWidth, tileHeight),
-                            imageHeight,
-                            true,
-                            source.fileName,
-                            {},
-                            &source);
-                        if (creationMode && !multiSelected) {
-                            ImGui::PopStyleVar();
-                        }
-                    } else {
-                        ImGui::Dummy(ImVec2(tileWidth, tileHeight));
-                    }
-                }
-            }
+            const int rowCount=(static_cast<int>(sources.size())+columns-1)/columns;
+            const auto visibleRows=ComputeGalleryVisibleRange(rowCount,tileHeight,ImGui::GetStyle().ItemSpacing.y,
+                contentStart.y,clip.Min.y,clip.Max.y,RawLabGalleryPrefetchPixels(std::max(0.f,clip.GetHeight())));
+            Stack::Editor::RawLabInternal::SubmitGalleryGrid(static_cast<int>(sources.size()),columns,
+                ImVec2(tileWidth,tileHeight),gap,visibleRows,drawAt);
         }
         return;
     }
@@ -1761,7 +1761,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawWorkspaceGalleryDisplayMode == Stack::RawWorkspace::GalleryDisplayMode::List) {
         if (projectsOnly && !presentation.projects.empty()) {
             ImGui::TextDisabled("%s",m_RawWorkspaceGalleryContentMode==Stack::RawWorkspace::GalleryContentMode::Bracket?"Bracket":"Projects");
-            for (const auto& project : presentation.projects) {
+            ImGuiListClipper projectRows;
+            projectRows.Begin(static_cast<int>(presentation.projects.size()));
+            while(projectRows.Step()) for(int index=projectRows.DisplayStart;index<projectRows.DisplayEnd;++index) {
+                const auto& project=presentation.projects[static_cast<std::size_t>(index)];
                 PushGalleryKeyID(project.projectCoverKey);
                 const std::string row = project.projectName + "    " +
                     (!project.multiFrameProject
@@ -1890,13 +1893,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const float currentScrollX = ImGui::GetScrollX();
         scrollMotion.Observe(currentScrollX,m_RawWorkspaceLabFilmstripScrollTargetX,ImGui::GetFrameCount());
         const float wheelMaximum = std::max(0.f,ImGui::GetScrollMaxX());
+        if(!alignedSlots)scrollMotion.PrepareUniform(wheelMaximum,tileWidth+gap);
+        const auto& motionStops=alignedSlots?slots.offsets:scrollMotion.uniformStops;
+        const auto motionLast=alignedSlots?slots.lastStop:motionStops.size()-1;
         const auto applyWheel = [&](float wheel) {
-            if (alignedSlots) {
-                slots.Wheel(wheel, m_RawWorkspaceLabFilmstripScrollTargetX);
-                return;
-            }
-            scrollMotion.Wheel(wheel, std::min(viewportWidth*.22f,(tileWidth+gap)*1.5f),
-                wheelMaximum,ImGui::GetTime(),m_RawWorkspaceLabFilmstripScrollTargetX);
+            scrollMotion.glide.Wheel(wheel,motionStops,motionLast,ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
+            m_RawWorkspaceLabFilmstripScrollTargetX=scrollMotion.glide.Position();
         };
         m_RawFilmstripHeight.ObserveScroll(currentScrollX, ImGui::GetTime(), io.DeltaTime);
         if (m_RawWorkspaceLabFilmstripDragState.phase !=
@@ -1929,14 +1931,15 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
 
         const float scrollMaximumX = alignedSlots ? slots.maximum : std::max(0.f,ImGui::GetScrollMaxX());
-        if (alignedSlots) {
-            const bool continuous = (slots.dragging && io.MouseDown[0]) ||
-                m_RawWorkspaceLabFilmstripDragState.phase == RawGalleryFilmstripDragPhase::Dragging;
-            if (!continuous) m_RawWorkspaceLabFilmstripScrollTargetX = slots.Snap(m_RawWorkspaceLabFilmstripScrollTargetX);
-            scrollMotion.overshoot = scrollMotion.rebound = 0.f;
-        }
-        scrollMotion.Step(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaximumX,io.DeltaTime,
+        const bool continuous=(slots.dragging && io.MouseDown[0]) ||
+            m_RawWorkspaceLabFilmstripDragState.phase==RawGalleryFilmstripDragPhase::Dragging;
+        if(continuous)scrollMotion.glide.Drag(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaximumX,ImGui::GetTime());
+        else scrollMotion.glide.Step(m_RawWorkspaceLabFilmstripScrollTargetX,motionStops,motionLast,
             ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
+        scrollMotion.current=scrollMotion.lastApplied=scrollMotion.glide.Position();
+        Stack::UiPerformance::Probe::FilmstripSample(currentScrollX,scrollMotion.current,scrollMotion.glide.Velocity(),
+            scrollMotion.glide.Direction(),scrollMotion.glide.Active(),scrollMaximumX);
+        scrollMotion.overshoot=scrollMotion.rebound=0.f;
         ImGui::SetScrollX(scrollMotion.current);
         m_RawWorkspaceLabFilmstripScrollLastAppliedX = scrollMotion.current;
         const ImRect filmstripClip = ImGui::GetCurrentWindow()->ClipRect;
@@ -3015,8 +3018,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     const auto renderAnimatedGroup = [&](
         const std::string& groupKey,
         const std::string& label,
-        const std::vector<AnimatedGalleryItem>& items) {
-        if (items.empty()) {
+        std::size_t itemCount, const auto& itemAt) {
+        if (itemCount == 0) {
             return;
         }
 
@@ -3029,15 +3032,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         if (!animation.initialized) {
             animation.expansion = target;
             animation.initialized = true;
-        } else {
-            const float delta = target - animation.expansion;
-            if (std::abs(delta) < 0.001f || Stack::LibraryUi::ReducedMotion()) {
-                animation.expansion = target;
-            } else {
-                Stack::Header::ApproachMotion(animation.expansion, target, .18f);
-            }
         }
-
         PushGalleryKeyID(groupKey);
         constexpr float headerHeight = 22.0f;
         constexpr float chevronHitSize = 16.0f;
@@ -3057,6 +3052,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             }
         }
 
+        const float acceptedTarget=gridBrowse.groupCount ||
+            m_RawWorkspaceLabCollapsedGalleryGroups.find(groupKey)==m_RawWorkspaceLabCollapsedGalleryGroups.end()?1.f:0.f;
+        animation.motion.Update(animation.expansion,acceptedTarget,.18f,ImGui::GetTime(),
+            ImGui::GetFrameCount(),Stack::LibraryUi::ReducedMotion());
+        m_RawGalleryGroupsMoving |= animation.motion.Active();
         const ImVec2 headerMinimum = ImGui::GetItemRectMin();
         const ImVec2 cursorAfterHeader = ImGui::GetCursorScreenPos();
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -3119,8 +3119,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const float easedExpansion =
             expansion * expansion * (3.0f - 2.0f * expansion);
         const float miniAlpha = 1.0f - easedExpansion;
-        if (animation.expansion <= 0.0001f && m_PermanentGalleryWorkspace) {
-            for (const auto& item : items) {
+        if (animation.expansion <= 0.0001f && m_PermanentGalleryWorkspace &&
+            (layoutMotion.Active() || layoutMotion.AnchorPending())) {
+            for (std::size_t index=0; index<itemCount; ++index) {
+                const auto item=itemAt(index);
                 if (!item.source) continue;
                 const ImRect hidden(headerMinimum, headerMinimum);
                 recordGridStackSlot(item, headerMinimum, headerHeight, hidden);
@@ -3133,10 +3135,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             float x = headerMinimum.x + chevronHitSize + 4.0f +
                 labelSize.x + 14.0f;
             const float right = headerMinimum.x + availableWidth - 10.0f;
-            for (std::size_t index = 0; index < items.size(); ++index) {
+            for (std::size_t index = 0; index < itemCount; ++index) {
                 if (x + miniWidth > right) {
                     const std::string remaining =
-                        "+" + std::to_string(items.size() - index);
+                        "+" + std::to_string(itemCount - index);
                     ImVec4 remainingTint =
                         ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
                     remainingTint.w *= miniAlpha * 0.8f;
@@ -3146,7 +3148,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         remaining.c_str());
                     break;
                 }
-                const AnimatedGalleryItem& item = items[index];
+                const AnimatedGalleryItem& item = itemAt(index);
                 if (item.source == nullptr) {
                     continue;
                 }
@@ -3249,15 +3251,15 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
 
         if (animation.expansion > 0.0001f) {
             const int rowCount =
-                (static_cast<int>(items.size()) + columns - 1) / columns;
+                (static_cast<int>(itemCount) + columns - 1) / columns;
             const float rowGap = ImGui::GetStyle().ItemSpacing.y;
             const float fullHeight = rowCount * tileHeight +
                 std::max(0, rowCount - 1) * rowGap;
             const float animatedHeight = fullHeight * easedExpansion;
             const ImVec2 contentStart = ImGui::GetCursorScreenPos();
-            if (m_PermanentGalleryWorkspace) {
-                for (std::size_t index = 0; index < items.size(); ++index) {
-                    const auto& item = items[index];
+            if (m_PermanentGalleryWorkspace && (layoutMotion.Active() || layoutMotion.AnchorPending())) {
+                for (std::size_t index = 0; index < itemCount; ++index) {
+                    const auto& item = itemAt(index);
                     if (!item.source) continue;
                     const ImVec2 minimum(contentStart.x + static_cast<float>(index % columns) * (tileWidth + gap),
                         contentStart.y + static_cast<float>(index / columns) * (tileHeight + rowGap));
@@ -3284,8 +3286,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                         0.0f,
                         galleryClip.Max.y - galleryClip.Min.y)));
             if (!m_RawLabGalleryScrollToSourceKey.empty()) {
-                for (std::size_t index = 0; index < items.size(); ++index) {
-                    const auto* source = items[index].source;
+                for (std::size_t index = 0; index < itemCount; ++index) {
+                    const auto* source = itemAt(index).source;
                     if (!source || source->relativePathKey != m_RawLabGalleryScrollToSourceKey) continue;
                     const int row = static_cast<int>(index) / columns;
                     if (row < visibleRows.first || row >= visibleRows.lastExclusive) {
@@ -3298,10 +3300,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 }
             }
             Stack::Editor::RawLabInternal::SubmitGalleryGrid(
-                static_cast<int>(items.size()), columns, ImVec2(tileWidth, tileHeight), gap,
+                static_cast<int>(itemCount), columns, ImVec2(tileWidth, tileHeight), gap,
                 visibleRows, [&](int index) {
-                const AnimatedGalleryItem& item = items[static_cast<std::size_t>(index)];
+                const AnimatedGalleryItem& item = itemAt(static_cast<std::size_t>(index));
                 if (item.source != nullptr) {
+                    if (m_PermanentGalleryWorkspace && !layoutMotion.Active() && !layoutMotion.AnchorPending())
+                        recordGridStackSlot(item,ImGui::GetCursorScreenPos(),imageHeight,viewClip);
                     // The widget ID follows the stack, so changing its cover
                     // cannot steal a click or interrupt a double-click.
                     PushGalleryKeyID(item.animationKey);
@@ -3330,32 +3334,24 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     };
 
     if (projectsOnly) {
-        std::vector<AnimatedGalleryItem> projectItems;
-        if (gridBrowse.projectGroups && gridBrowse.groupCount) {
-            projectItems.reserve(gridBrowse.groups[0].size());
-            for (const auto& key : gridBrowse.groups[0]) {
-                const auto found = m_RawWorkspaceGalleryProjectIndices.find(key);
-                if (found == m_RawWorkspaceGalleryProjectIndices.end()) continue;
-                const auto index = found->second;
-                const auto& project = presentation.projects[index];
-                projectItems.push_back({&m_RawWorkspaceGalleryProjectTileSources[index],
-                    project.projectName, project.projectPath, &project,
-                    "project:" + project.projectCoverKey, nullptr, false, nullptr, &project});
+        const bool opened=gridBrowse.projectGroups && gridBrowse.groupCount;
+        const auto itemAt=[&](std::size_t item)->AnimatedGalleryItem {
+            if(opened) {
+                const auto found=m_RawWorkspaceGalleryProjectIndices.find(gridBrowse.groups[0][item]);
+                if(found==m_RawWorkspaceGalleryProjectIndices.end())return {};
+                const auto index=found->second;const auto& project=presentation.projects[index];
+                return {&m_RawWorkspaceGalleryProjectTileSources[index],project.projectName,project.projectPath,
+                    &project,"project:"+project.projectCoverKey,nullptr,false,nullptr,&project};
             }
-        } else {
-            projectItems.reserve(projectStacks->size());
-            for (const auto& family : *projectStacks) {
-                const auto& project = projectCover(family);
-                const auto index = static_cast<std::size_t>(&project - presentation.projects.data());
-                projectItems.push_back({&m_RawWorkspaceGalleryProjectTileSources[index],
-                    project.projectName, project.projectPath, &project,
-                    "project-family:" + family.familyKey, nullptr, false, &family.projectIndices});
-            }
-        }
+            const auto& family=(*projectStacks)[item];const auto& project=projectCover(family);
+            const auto index=std::size_t(&project-presentation.projects.data());
+            return {&m_RawWorkspaceGalleryProjectTileSources[index],project.projectName,project.projectPath,
+                &project,"project-family:"+family.familyKey,nullptr,false,&family.projectIndices};
+        };
         renderAnimatedGroup(gridBrowse.projectGroups ? "opened-project-stack" : "projects",
             gridBrowse.projectGroups ? "Stack" :
                 m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Bracket ? "Bracket" : "Projects",
-            projectItems);
+            opened ? gridBrowse.groups[0].size() : projectStacks->size(),itemAt);
         if (gridBrowse.projectGroups && gridBrowse.openedFrame != ImGui::GetFrameCount() &&
             (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
              (!gridImageHovered && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::GetDragDropPayload())))
@@ -3366,14 +3362,13 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         for (int group = 0; group < gridBrowse.groupCount; ++group) {
             gridGroup = group;
             const auto start = ImGui::GetCursorScreenPos();
-            std::vector<AnimatedGalleryItem> members;
-            members.reserve(gridBrowse.groups[group].size());
-            for (const auto& key : gridBrowse.groups[group]) {
-                if (const auto* source = gridStackSource(key))
-                    members.push_back({source, source->fileName, {}, source, "source:"+key});
-            }
             renderAnimatedGroup(group == 0 ? "opened-stack-a" : "opened-stack-b",
-                gridBrowse.groupCount == 1 ? "Stack" : group == 0 ? "First stack" : "Second stack", members);
+                gridBrowse.groupCount == 1 ? "Stack" : group == 0 ? "First stack" : "Second stack",
+                gridBrowse.groups[group].size(),[&](std::size_t index)->AnimatedGalleryItem {
+                    const auto& key=gridBrowse.groups[group][index];
+                    const auto* source=gridStackSource(key);
+                    return source ? AnimatedGalleryItem{source,source->fileName,{},source,"source:"+key} : AnimatedGalleryItem{};
+                });
             const auto end = ImGui::GetCursorScreenPos();
             const ImRect area(start, {start.x+availableWidth,std::max(end.y,start.y+tileHeight+32.f)});
             if (ImGui::BeginDragDropTargetCustom(area,ImGui::GetID(group ? "StackDropB" : "StackDropA"))) {
@@ -3399,42 +3394,25 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     } else if (!projectsOnly && m_PermanentGalleryWorkspace) {
         const auto& stacks = ResolveRawWorkspaceVisibleGalleryStacks();
         for (const auto& section : m_RawWorkspaceLabVisibleGallerySections) {
-            std::vector<AnimatedGalleryItem> sourceItems;
-            sourceItems.reserve(section.stackCount);
-            for (std::size_t index = section.firstStack;
-                 index < section.firstStack + section.stackCount; ++index) {
-                const auto* stack = &stacks[index];
-                const auto cover = m_RawWorkspaceGalleryGridStacks.Cover(
-                    stack->sourceKeys, {});
-                const auto* source = gridStackSource(cover);
-                const auto view = m_RawWorkspaceLabGalleryViewsBySource.find(cover);
-                if (!source || view == m_RawWorkspaceLabGalleryViewsBySource.end()) continue;
-                sourceItems.push_back({
-                    source,
-                    source->fileName,
-                    {},
-                    nullptr,
-                    "stack:" + stack->sourceKeys.front(),
-                    &stack->sourceKeys, stack->hasSavedBracketingResult });
-            }
             renderAnimatedGroup(
                 section.separateFolder ? "folder:" + section.folderKey : "all-originals",
-                section.separateFolder
-                    ? (section.folderKey.empty() ? "Workspace root" : section.folderKey)
-                    : "All images",
-                sourceItems);
+                section.separateFolder ? (section.folderKey.empty() ? "Workspace root" : section.folderKey) : "All images",
+                section.stackCount,[&](std::size_t index)->AnimatedGalleryItem {
+                    const auto& stack=stacks[section.firstStack+index];
+                    const auto cover=gridBrowse.Cover(stack.sourceKeys,{});
+                    const auto* source=gridStackSource(cover);
+                    if(!source || m_RawWorkspaceLabGalleryViewsBySource.find(cover)==m_RawWorkspaceLabGalleryViewsBySource.end())return {};
+                    return {source,source->fileName,{},nullptr,"stack:"+stack.sourceKeys.front(),
+                        &stack.sourceKeys,stack.hasSavedBracketingResult};
+                });
         }
     } else if (!projectsOnly) {
         for (const auto& group : presentation.groups) {
-            std::vector<AnimatedGalleryItem> sourceItems;
-            sourceItems.reserve(group.sources.size());
-            for (const auto& view : group.sources) {
-                const auto* source = FindRawWorkspaceSourceByKey(view.relativePathKey);
-                if (!source) continue;
-                sourceItems.push_back({source, source->fileName, {}, source,
-                    "source:" + source->relativePathKey});
-            }
-            renderAnimatedGroup("folder:" + group.folderKey, group.label, sourceItems);
+            renderAnimatedGroup("folder:"+group.folderKey,group.label,group.sources.size(),
+                [&](std::size_t index)->AnimatedGalleryItem {
+                    const auto* source=FindRawWorkspaceSourceByKey(group.sources[index].relativePathKey);
+                    return source ? AnimatedGalleryItem{source,source->fileName,{},source,"source:"+source->relativePathKey} : AnimatedGalleryItem{};
+                });
         }
     }
 

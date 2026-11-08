@@ -44,7 +44,7 @@ void AppShell::TickAutoBracketWorkspaces() {
     };
     const bool blocked = m_CloseRequested || !m_ContinueMainWindowCloseSource.empty() ||
         m_MainWindowCloseSavePending || !m_StartupRevealVisual.AllowsInput();
-    const bool foregroundBusy = std::any_of(m_ProjectWorkspaces.begin(),m_ProjectWorkspaces.end(),foregroundWork) ||
+    const bool foregroundBusy = Async::UiInteraction::Active() || std::any_of(m_ProjectWorkspaces.begin(),m_ProjectWorkspaces.end(),foregroundWork) ||
         std::any_of(m_RetiredProjectWorkspaces.begin(),m_RetiredProjectWorkspaces.end(),foregroundWork);
     auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
     if (!gallery) return;

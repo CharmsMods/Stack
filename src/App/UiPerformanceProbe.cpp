@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <vector>
 #include <cstdlib>
+#include "imgui.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,11 +25,19 @@ struct Pending {
     std::uint64_t baseline = 0, required = 0;
     Clock::time_point started;
     std::string scenario, action, dispatch;
+    double acceptedMs = -1, geometryMs = -1, presentedMs = -1;
+    std::uint64_t inputQpc = 0;
+    bool tracksMotion = false;
+    unsigned int earliestFrame = 0;
+    double submittedMs = -1;
 };
-struct Record { std::string scenario, action, dispatch; double milliseconds; bool changed; };
+struct Record { std::string scenario, action, dispatch; double milliseconds; bool changed;
+    double acceptedMs = -1, geometryMs = -1, settledMs = -1; std::uint64_t inputQpc = 0; const char* outcome = "presented";
+    double submittedMs = -1; };
 struct ImageEvent { const char* kind; std::uint64_t generation, revision; };
 struct Invalidation { const char* kind; std::array<void*,12> addresses {}; unsigned short count = 0; };
 struct RefinementEvent { std::uint64_t content,accepted; bool native,covered; int logical,storage; };
+struct FilmstripRecord { std::uint64_t qpc; float nativePosition,position,velocity; int direction; bool active; float maximum; };
 struct AcceptedImageTag { std::uint64_t generation = 0, revision = 0; bool settledKernels = false; };
 struct State {
     bool active = false;
@@ -37,6 +46,7 @@ struct State {
     std::filesystem::path output;
     std::array<Observation, count> last {}, current {};
     std::array<Pending, count> pending {};
+    std::array<bool, count> moving {};
     std::array<AcceptedImageTag,64> images {};
     std::size_t nextImage = 0;
     std::vector<ImageEvent> imageEvents;
@@ -46,16 +56,47 @@ struct State {
     std::vector<RefinementEvent> refinements;
     std::vector<ViewportTiming> viewportTimings;
     std::vector<Record> records;
+    std::vector<FilmstripRecord> filmstrip;
 };
 State& Get() { static State state; return state; }
 }
 void Enable(const std::filesystem::path& output) {
-    auto& s = Get(); s = {}; s.active = true; s.output = output; s.records.reserve(512);
+    auto& s = Get(); s = {}; s.active = true; s.output = output; s.records.reserve(512); s.filmstrip.reserve(60000);
 }
 bool Active() { return Get().active; }
-void BeginFrame() { if (Active()) { Get().current = {}; ++Get().frame; } }
+void BeginFrame() { if (Active()) { Get().current = {}; Get().moving = {}; ++Get().frame; } }
+std::uint64_t Timestamp() {
+#if defined(_WIN32)
+    LARGE_INTEGER value; QueryPerformanceCounter(&value); return static_cast<std::uint64_t>(value.QuadPart);
+#else
+    return static_cast<std::uint64_t>(Clock::now().time_since_epoch().count());
+#endif
+}
+static double Elapsed(const Pending& p) { return std::chrono::duration<double,std::milli>(Clock::now()-p.started).count(); }
+void Accepted(Visual visual) {
+    if (!Active()) return; auto& p=Get().pending[static_cast<std::size_t>(visual)];
+    if (p.active && p.acceptedMs<0) p.acceptedMs=Elapsed(p);
+}
+void Motion(Visual visual,bool active) {
+    if (!Active()) return; const auto i=static_cast<std::size_t>(visual); Get().moving[i]=active;
+    if (Get().pending[i].active) Get().pending[i].tracksMotion=true;
+}
+void FilmstripSample(float nativePosition,float position,float velocity,int direction,bool active,float maximum) {
+    if(!Active())return;
+    auto& samples=Get().filmstrip;
+    if(samples.size()<60000)samples.push_back({Timestamp(),nativePosition,position,velocity,direction,active,maximum});
+}
+void Item(Visual visual,std::uint64_t key) {
+    if (!Active()) return; const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+    Drawn(visual,key,{lo.x,lo.y,hi.x-lo.x,hi.y-lo.y});
+}
 void Drawn(Visual visual, std::uint64_t key, Region region) {
-    if (Active()) Get().current[static_cast<std::size_t>(visual)] = {key, region, true};
+    if (!Active()) return;
+    const auto i=static_cast<std::size_t>(visual); auto& s=Get();
+    s.current[i] = {key, region, true};
+    auto& p=s.pending[i];
+    if (p.active && s.frame>=p.earliestFrame && p.geometryMs<0 && key!=p.baseline && (!p.required ||
+        (visual==Visual::Image ? key>=p.required : key==p.required))) p.geometryMs=Elapsed(p);
 }
 void AcceptedImage(std::uint64_t generation,std::uint64_t revision,const void* owner,bool settledKernels) {
     if (Active()) { auto& s=Get();
@@ -90,8 +131,16 @@ bool BeginInteraction(Visual visual, const std::string& scenario, const std::str
     if (!Active()) return false;
     auto& s = Get(); const auto index = static_cast<std::size_t>(visual);
     auto& pending = s.pending[index];
-    if (pending.active || !s.last[index].valid || s.records.size() >= 512) return false;
-    pending = {true,s.last[index].key,0,Clock::now(),scenario,action,dispatch}; return true;
+    if (!s.last[index].valid || s.records.size() >= 2048) return false;
+    if (pending.active) s.records.push_back({pending.scenario,pending.action,pending.dispatch,
+        pending.presentedMs,pending.presentedMs>=0,pending.acceptedMs,pending.geometryMs,-1,pending.inputQpc,"interrupted",pending.submittedMs});
+    pending = {true,s.last[index].key,0,Clock::now(),scenario,action,dispatch};
+    pending.inputQpc=Timestamp();
+    // Scroll geometry at the start of this frame may still reflect momentum
+    // from the previous input. Native scroll adoption happens next frame.
+    pending.earliestFrame=s.frame+(std::strcmp(dispatch,"imgui-wheel")==0 ? 1u : 0u);
+    if (std::strcmp(dispatch,"ui-command")==0) pending.acceptedMs=0;
+    return true;
 }
 void RequireKey(Visual visual, std::uint64_t key) {
     Get().pending[static_cast<std::size_t>(visual)].required = key;
@@ -112,6 +161,17 @@ void Refinement(std::uint64_t content,std::uint64_t accepted,bool native,bool co
     if(Active() && owner==Get().editor && Get().refinements.size()<16)
         Get().refinements.push_back({content,accepted,native,covered,logicalWidth,storageWidth});
 }
+void Submitted() {
+    if(!Active())return;
+    auto& s=Get();
+    for(std::size_t i=0;i<count;++i) {
+        auto& pending=s.pending[i];const auto& observation=s.current[i];
+        if(pending.active && pending.submittedMs<0 && s.frame>=pending.earliestFrame && observation.valid &&
+            observation.key!=pending.baseline && (!pending.required || (i==static_cast<std::size_t>(Visual::Image)
+                ? observation.key>=pending.required : observation.key==pending.required)))
+            pending.submittedMs=Elapsed(pending);
+    }
+}
 void Presented() {
     if (!Active()) return;
     auto& s = Get(); const auto now = Clock::now();
@@ -119,11 +179,15 @@ void Presented() {
         auto& pending = s.pending[index]; const auto& observation = s.current[index];
         if (pending.active) {
             const double elapsed = std::chrono::duration<double,std::milli>(now-pending.started).count();
-            const bool changed = observation.valid && observation.key != pending.baseline &&
+            const bool changed = s.frame>=pending.earliestFrame && observation.valid && observation.key != pending.baseline &&
                 (!pending.required || (index==static_cast<std::size_t>(Visual::Image)
                     ? observation.key>=pending.required : observation.key==pending.required));
-            if (changed || elapsed > 2000) {
-                s.records.push_back({pending.scenario,pending.action,pending.dispatch,elapsed,changed});
+            if (changed && pending.presentedMs<0) pending.presentedMs=elapsed;
+            const bool settled = pending.presentedMs>=0 && (!pending.tracksMotion || !s.moving[index]);
+            if (settled || elapsed > 2500) {
+                s.records.push_back({pending.scenario,pending.action,pending.dispatch,
+                    pending.presentedMs,pending.presentedMs>=0,pending.acceptedMs,pending.geometryMs,
+                    settled && pending.tracksMotion ? elapsed : -1,pending.inputQpc,settled?"presented":"timeout",pending.submittedMs});
                 pending.active = false;
             }
         }
@@ -139,12 +203,16 @@ void Finish() {
     if (!Active()) return;
     auto& s = Get(); std::filesystem::create_directories(s.output);
     std::ofstream out(s.output / "interactions.csv");
-    out << "scenario,action,dispatch,response_ms,status\n" << std::fixed << std::setprecision(6);
+    out << "scenario,action,dispatch,response_ms,status,accepted_ms,geometry_ms,settled_ms,input_qpc,submitted_ms\n" << std::fixed << std::setprecision(6);
     for (const auto& record : s.records) out << record.scenario << ',' << record.action << ',' << record.dispatch
-        << ',' << record.milliseconds << ',' << (record.changed ? "presented" : "timeout") << '\n';
+        << ',' << record.milliseconds << ',' << record.outcome << ',' << record.acceptedMs << ',' << record.geometryMs << ',' << record.settledMs << ',' << record.inputQpc << ',' << record.submittedMs << '\n';
     for (const auto& pending : s.pending) if (pending.active)
-        out << pending.scenario << ',' << pending.action << ',' << pending.dispatch << ",,incomplete\n";
+        out << pending.scenario << ',' << pending.action << ',' << pending.dispatch << ',' << pending.presentedMs << ",incomplete," << pending.acceptedMs << ',' << pending.geometryMs << ",-1," << pending.inputQpc << ',' << pending.submittedMs << '\n';
     std::ofstream images(s.output / "images.csv");images<<"kind,generation,revision\n";
+    std::ofstream filmstrip(s.output/"filmstrip.csv");
+    filmstrip<<"qpc,native_position,position,velocity,direction,active,maximum\n"<<std::fixed<<std::setprecision(6);
+    for(const auto& row:s.filmstrip)filmstrip<<row.qpc<<','<<row.nativePosition<<','<<row.position<<','<<row.velocity
+        <<','<<row.direction<<','<<row.active<<','<<row.maximum<<'\n';
     for(const auto& event:s.imageEvents)images<<event.kind<<','<<event.generation<<','<<event.revision<<'\n';
     std::ofstream refinements(s.output/"refinements.csv");refinements<<"content,accepted,native,covered,logical_width,storage_width\n";
     for(const auto& event:s.refinements)refinements<<event.content<<','<<event.accepted<<','<<event.native<<','<<event.covered<<','<<event.logical<<','<<event.storage<<'\n';

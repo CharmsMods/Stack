@@ -40,6 +40,10 @@ bool AppShell::TopBarOwnsPanelToggle() const {
 void AppShell::ToggleWorkspaceSectionPanel() {
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     m_NavigationRail.panelOpen = !m_NavigationRail.panelOpen;
+    // Buttons render after layout; arm at acceptance so the next layout can
+    // already move, without charging time spent stalled before this click.
+    m_NavigationRail.panelMotion.Update(m_NavigationRail.panelAmount,m_NavigationRail.panelOpen?1.f:0.f,.28f,
+        Stack::Animation::FrameTween::ClockSeconds(),ImGui::GetFrameCount(),Stack::Notifications::SystemReducedMotion());
     if (m_CurrentTabId == 1) m_Editor->SetWorkspacePanelOpen(m_NavigationRail.panelOpen);
     else if (m_CurrentTabId==3 || m_CurrentTabId==5) m_Editor->SetViewSectionPanelOpen(m_NavigationRail.panelOpen);
     CancelProjectPillPreview();
@@ -56,7 +60,7 @@ void AppShell::LayoutRawMaskToolbar() {
         m_ActiveProjectWorkspace != m_GalleryWorkspaceId &&
         !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !processing;
     toolbar.menuDrawn = false;
-    const bool focused = m_UiPerformanceCapture || glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool focused = m_UiPerformanceCapture ? !io.AppFocusLost : glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
     toolbar.menuOpen = toolbar.popupId && ImGui::IsPopupOpen(toolbar.popupId, ImGuiPopupFlags_None);
     if (toolbar.target) {
         const auto available = m_Editor->QueryRawOperationMaskAvailability();
@@ -70,8 +74,8 @@ void AppShell::LayoutRawMaskToolbar() {
         toolbar.visibleUntil = 0.0;
         // Keep the same visible geometry through View -> Graph. Clearing the
         // bar immediately also teleports the destination canvas upward.
-        if (processing || Stack::Notifications::SystemReducedMotion()) toolbar.revealAmount = 0.f;
-        else Stack::Header::ApproachMotion(toolbar.revealAmount, 0.f, .24f);
+        toolbar.revealMotion.Update(toolbar.revealAmount,0.f,.24f,ImGui::GetTime(),ImGui::GetFrameCount(),
+            processing || Stack::Notifications::SystemReducedMotion());
     } else {
         const bool inWidth = io.MousePos.x >= viewport->Pos.x && io.MousePos.x < viewport->Pos.x + viewport->Size.x;
         const bool atEdge = inWidth && io.MousePos.y >= viewport->Pos.y && io.MousePos.y <= viewport->Pos.y + 2.f * scale;
@@ -83,7 +87,7 @@ void AppShell::LayoutRawMaskToolbar() {
         };
         const bool interacting = (context->ActiveId && belongs(context->ActiveIdWindow)) ||
             (Stack::Navigation::NavigationInputActive() && belongs(context->NavWindow));
-        Stack::Navigation::UpdateEdgeReveal(toolbar.revealAmount, toolbar.visibleUntil, focused,
+        Stack::Navigation::UpdateEdgeReveal(toolbar.revealAmount, toolbar.revealMotion, toolbar.visibleUntil, focused,
             atEdge, hovered, interacting, toolbar.menuOpen, Stack::Notifications::SystemReducedMotion());
     }
     toolbar.visibleHeight = height * toolbar.revealAmount;

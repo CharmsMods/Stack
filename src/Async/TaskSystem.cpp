@@ -375,6 +375,8 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMillisecond
         }
 
         if (task) {
+            const auto callbackStarted=m_MainTaskTimingObserver ? std::chrono::steady_clock::now() :
+                std::chrono::steady_clock::time_point{};
             try {
                 task();
             } catch (const std::exception& e) {
@@ -382,6 +384,8 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMillisecond
             } catch (...) {
                 std::cerr << "[TaskSystem] Main-thread task failed: unknown exception\n";
             }
+            if(m_MainTaskTimingObserver)m_MainTaskTimingObserver(
+                std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-callbackStarted).count());
         }
 
         ++processed;

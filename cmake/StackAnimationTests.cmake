@@ -14,3 +14,8 @@ add_executable(StackAnimationControlTests
 target_include_directories(StackAnimationControlTests PRIVATE src)
 add_test(NAME StackAnimation.Controls COMMAND StackAnimationControlTests)
 set_tests_properties(StackAnimation.Controls PROPERTIES LABELS "ui;animation;cpu" TIMEOUT 30)
+add_executable(StackUiResponsivenessMotionTests
+    tools/tests/ui_responsiveness_motion_tests.cpp ${STACK_ANIMATION_CORE_SOURCES})
+target_include_directories(StackUiResponsivenessMotionTests PRIVATE src)
+add_test(NAME StackAnimation.UiResponsiveness COMMAND StackUiResponsivenessMotionTests)
+set_tests_properties(StackAnimation.UiResponsiveness PROPERTIES LABELS "ui;animation;cpu" TIMEOUT 30)

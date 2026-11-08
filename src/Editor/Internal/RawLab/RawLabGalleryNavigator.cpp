@@ -1,3 +1,4 @@
+#include "App/UiPerformanceProbe.h"
 #include "RawLabGalleryNavigator.h"
 #include "App/AppHeaderStyle.h"
 
@@ -130,6 +131,7 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
     if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
         result.openFolder = true;
+    Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::BrowseButton);
     const auto browse=ImGui::GetItemRectMin(),browseMax=ImGui::GetItemRectMax();
     result.browseMinimum={browse.x+10*m_Unit,(browse.y+browseMax.y-17*m_Unit)*.5f};
     result.browseMaximum={result.browseMinimum.x+17*m_Unit,result.browseMinimum.y+17*m_Unit};
@@ -261,8 +263,10 @@ GalleryNavigatorFooterAction GalleryNavigator::RenderFooter(bool grid, bool prop
     const float half = (width - 10 * m_Unit) * .5f;
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 3 * m_Unit, origin.y + 3 * m_Unit));
     if (Button("##Grid", "Grid", Ui::Icon::View, ImVec2(half, 30 * m_Unit), grid, nullptr, ButtonLayout::Centered)) result = Action::Grid;
+    Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::GridButton);
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 7 * m_Unit + half, origin.y + 3 * m_Unit));
     if (Button("##Filmstrip", "Filmstrip", Ui::Icon::Filmstrip, ImVec2(half, 30 * m_Unit), !grid, nullptr, ButtonLayout::Centered)) result = Action::Filmstrip;
+    Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::FilmstripButton);
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 44 * m_Unit));
     const float sortWidth = std::max(32 * m_Unit, width - 72 * m_Unit);
     ImGui::BeginDisabled(!canSort);
@@ -272,6 +276,7 @@ GalleryNavigatorFooterAction GalleryNavigator::RenderFooter(bool grid, bool prop
         canSort ? sortLabel : "Open a folder and switch to original images to sort them.");
     ImGui::SameLine(0, 4 * m_Unit);
     if (Button("##Properties", "", Ui::Icon::Details, ImVec2(32 * m_Unit, 32 * m_Unit), properties, nullptr, ButtonLayout::Centered)) result = Action::Properties;
+    Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::PropertiesButton);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Image properties");
     ImGui::SameLine(0, 4 * m_Unit);
     if (Button("##More", "", Ui::Icon::MoreHorizontal, ImVec2(32 * m_Unit, 32 * m_Unit), false, nullptr, ButtonLayout::Centered)) result = Action::More;

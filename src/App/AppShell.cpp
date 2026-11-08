@@ -1353,7 +1353,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     SetWindowIconFromEmbeddedPng(m_Window, EmbeddedTabIcons::ProgramIcon_png_data, EmbeddedTabIcons::ProgramIcon_png_size);
 
     glfwMakeContextCurrent(m_Window);
-    glfwSwapInterval(m_UiPerformanceCapture ? 0 : 1);
+    glfwSwapInterval(m_UiPerformanceCapture && !m_UiPerformanceCapture->visible ? 0 : 1);
 
     int glMajor = 0;
     int glMinor = 0;
@@ -1608,7 +1608,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     }
 
     TraceMainWindowState("main-show-maximized-requested");
-    if (!m_UiPerformanceCapture) ShowMainWindowMaximized(m_Window);
+    if (!m_UiPerformanceCapture || m_UiPerformanceCapture->visible) ShowMainWindowMaximized(m_Window);
     TraceMainWindowState("main-shown");
     m_MainWindowShownTime = glfwGetTime();
     m_StartupReveal.Start(m_MainWindowShownTime);
@@ -1826,11 +1826,24 @@ void AppShell::Run() {
     while (m_Window && m_IsRunning) {
         PaceUiPerformanceCapture();
         const auto frameStarted = std::chrono::steady_clock::now();
+        if (m_UiPerformanceCapture) {
+            auto& capture=*m_UiPerformanceCapture;
+            capture.frameQpc=Stack::UiPerformance::Probe::Timestamp();
+            capture.frameIntervalMs=capture.previousFrame.time_since_epoch().count() ?
+                std::chrono::duration<double,std::milli>(frameStarted-capture.previousFrame).count() : 0;
+            capture.previousFrame=frameStarted;
+        }
         if (m_UiPerformanceCapture) m_UiPerformanceCapture->shellPhases = {};
         Stack::UiPerformance::BeginFrame();
         Stack::UiPerformance::Probe::BeginFrame();
+        const auto refreshStarted=m_UiPerformanceCapture ? std::chrono::steady_clock::now() : frameStarted;
         const int displayRefreshRate = DisplayRefreshRate::ForWindow(m_Window);
+        if(m_UiPerformanceCapture)m_UiPerformanceCapture->shellPhases[6]=
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-refreshStarted).count();
+        const auto eventPumpStarted=m_UiPerformanceCapture ? std::chrono::steady_clock::now() : frameStarted;
         glfwPollEvents();
+        if(m_UiPerformanceCapture)m_UiPerformanceCapture->shellPhases[4]=
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-eventPumpStarted).count();
         if (glfwWindowShouldClose(m_Window)) {
             glfwSetWindowShouldClose(m_Window, GLFW_FALSE);
             RequestMainWindowClose("glfw-close-flag");
@@ -1844,9 +1857,21 @@ void AppShell::Run() {
             m_UiPerformanceCapture->shellPhases[3] = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - backendStarted).count();
         }
+        const auto captureInputStarted=m_UiPerformanceCapture ? std::chrono::steady_clock::now() : frameStarted;
         TickUiPerformanceCapture();
+        if(m_UiPerformanceCapture)m_UiPerformanceCapture->shellPhases[5]=
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-captureInputStarted).count();
         ImGui::NewFrame();
         ImGuiExtras::BeginFrameInputRouting();
+        const auto& input=ImGui::GetIO();
+        const bool relevantInput=input.MouseWheel!=0 || input.MouseWheelH!=0 ||
+            ImGui::IsAnyMouseDown() || ImGui::IsKeyPressed(ImGuiKey_Tab,false) ||
+            ImGui::IsKeyPressed(ImGuiKey_LeftArrow,false) || ImGui::IsKeyPressed(ImGuiKey_RightArrow,false);
+        if(input.AppFocusLost || m_CloseRequested) m_UiInteraction.Clear();
+        else m_UiInteraction.Update(relevantInput,
+            m_NavigationRail.panelMotion.Active() || m_NavigationRail.revealMotion.Active() ||
+            m_RawMaskToolbar.revealMotion.Active() || m_GalleryNavigationMotion->Active() ||
+            (m_Editor && m_Editor->HasUiPresentationMotion(ImGui::GetFrameCount()-1)),ImGui::GetTime());
         m_WorkspaceCompositor.BeginFrame();
         m_NotificationPresenter.BeginFrame(*m_NotificationStore);
         TickToolSwitcher();
@@ -2071,7 +2096,13 @@ void AppShell::Run() {
         }
         const auto swapStarted = std::chrono::steady_clock::now();
         if(m_UiPerformanceCapture)m_UiPerformanceCapture->EndGpu();
-        if (!Stack::Hdr::PresentWindow(m_Window)) glfwSwapBuffers(m_Window);
+        Stack::UiPerformance::Probe::Submitted();
+        const bool hdrPresented=Stack::Hdr::PresentWindow(m_Window);
+        if (!hdrPresented) glfwSwapBuffers(m_Window);
+        if(m_UiPerformanceCapture) {
+            if(hdrPresented)++m_UiPerformanceCapture->hdrPresents;
+            else ++m_UiPerformanceCapture->glPresents;
+        }
         if (m_StartupRevealWindowOpacityHidden) {
 #if defined(_WIN32)
             DwmFlush();
@@ -3492,6 +3523,7 @@ float AppShell::ConsumeRootTabBodyFadeAlpha(int* outRenderTabId) {
 }
 
 void AppShell::Shutdown() {
+    m_UiInteraction.Clear();
     if (!m_Window) return;
 
     m_GalleryNavigationMotion->Shutdown();

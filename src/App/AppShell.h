@@ -22,6 +22,7 @@
 #include "ToolSwitcher.h"
 #include "NavigationRail.h"
 #include "RawMaskToolbar.h"
+#include "Async/UiInteraction.h"
 #include "ProjectWorkspace.h"
 #include "Renderer/WorkspaceCompositor.h"
 #include <chrono>
@@ -44,7 +45,7 @@ public:
     bool Initialize(const std::string& title, int width, int height);
     void Run();
     void ConfigureUiPerformanceCapture(std::filesystem::path project,std::filesystem::path output,
-        const std::string& onlyScenario = {});
+        const std::string& onlyScenario = {}, bool visible = false, const std::string& workload = "idle");
     bool WasUiPerformanceCaptureSuccessful() const;
     void Shutdown();
 
@@ -75,6 +76,7 @@ private:
     void PaceUiPerformanceCapture();
     void TickUiPerformanceCapture();
     void TickUiViewportQualityCapture();
+    void TickUiResponsivenessCapture();
     void FinishUiPerformanceFrame();
     std::unique_ptr<UiPerformanceCapture> m_UiPerformanceCapture;
     void QueueRailNavigation(int destination);
@@ -95,6 +97,7 @@ private:
     void RenderProjectPreviewFallback();
     void CancelProjectPillPreview();
     Stack::Navigation::RailState m_NavigationRail;
+    Async::UiInteraction::Lease m_UiInteraction;
     Stack::Navigation::RawMaskToolbarState m_RawMaskToolbar;
     void TickToolSwitcher();
     void CancelToolSwitcher();

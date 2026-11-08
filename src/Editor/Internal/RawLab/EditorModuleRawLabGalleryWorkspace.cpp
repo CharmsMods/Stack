@@ -1,3 +1,4 @@
+#include "App/UiPerformanceProbe.h"
 #include "Editor/EditorModule.h"
 #include "RawLabGalleryDetails.h"
 #include "RawLabUiSupport.h"
@@ -46,9 +47,16 @@ void EditorModule::RenderRawWorkspaceLabGalleryWorkspace(const ImVec2& size) {
         if(m_GalleryNavigationMotion)ImGui::PopStyleVar();
         ImGui::End();ImGui::PopStyleVar(2);
     }
+    if (Stack::UiPerformance::Probe::Active()) {
+        namespace P=Stack::UiPerformance::Probe;
+        P::Drawn(P::Visual::GalleryMode,P::Key(m_RawWorkspaceLabUi.galleryWorkspaceGrid?1.f:2.f,
+            m_GalleryNavigationMotion ? m_GalleryNavigationMotion->FolderAmount() : (folders?1.f:0.f)));
+        P::Motion(P::Visual::GalleryMode,transitioning || m_RawWorkspaceGalleryLayoutAnimation.Active());
+    }
 }
 
 void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
+    m_RawGalleryPresentationFrame=ImGui::GetFrameCount();
     const bool grid = m_RawWorkspaceLabUi.galleryWorkspaceGrid;
     const bool previewHoverArmed = m_RawWorkspaceGalleryPreviewHovered;
     m_RawWorkspaceGalleryPreviewHovered = false;
@@ -57,14 +65,17 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
     const float target = showProperties ? 1.f : 0.f;
     if (m_RawGalleryPropertiesAmount < 0.f)
         m_RawGalleryPropertiesAmount = target;
-    if (m_RawGalleryPropertiesAmount != target) {
-        if (Stack::LibraryUi::ReducedMotion()) m_RawGalleryPropertiesAmount = target;
-        else Stack::Header::ApproachMotion(m_RawGalleryPropertiesAmount, target, .24f);
-    }
+    m_RawGalleryPropertiesMotion.Update(m_RawGalleryPropertiesAmount,target,.24f,
+        ImGui::GetTime(),ImGui::GetFrameCount(),Stack::LibraryUi::ReducedMotion());
     const float propertiesAmount = m_RawGalleryPropertiesAmount;
     const float fullDetailsWidth = std::min(320.0f * ImGui::GetFontSize() / 16.f,
         std::max(1.0f, size.x * 0.34f));
     const float detailsWidth = fullDetailsWidth * propertiesAmount;
+    if(Stack::UiPerformance::Probe::Active()) {
+        namespace P=Stack::UiPerformance::Probe;
+        P::Drawn(P::Visual::Controls,P::Key(detailsWidth));
+        P::Motion(P::Visual::Controls,propertiesAmount!=target);
+    }
     // Reserve the inspector lane throughout its reveal, keeping grid slots stable.
     const float gridGutter = grid ? std::clamp(size.x * .025f, 12.f * unit, 36.f * unit) : 0.f;
     const float imageWidth = std::max(1.0f, size.x - (grid ? fullDetailsWidth + gridGutter : detailsWidth));
@@ -478,4 +489,13 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
+}
+
+bool EditorModule::HasUiPresentationMotion(int frame) const {
+    return m_RawGalleryFolderCards.Active(frame) || (m_RawGalleryPresentationFrame==frame &&
+        (m_RawGalleryPropertiesMotion.Active() || m_RawWorkspaceGalleryLayoutAnimation.Active() ||
+         m_RawGallerySelectionMotion[0].Active() || m_RawGalleryGroupsMoving ||
+         std::abs(m_RawWorkspaceLabGalleryScrollTargetY-m_RawWorkspaceLabGalleryScrollCurrentY)>.05f)) ||
+        (m_RawWorkspaceGalleryGridStacks.filmstripScroll.frame==frame &&
+         m_RawWorkspaceGalleryGridStacks.filmstripScroll.glide.Active());
 }

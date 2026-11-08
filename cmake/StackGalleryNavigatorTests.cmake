@@ -6,6 +6,7 @@ add_custom_command(OUTPUT "${gallery_navigator_test}"
         src/Editor/Internal/RawLab/RawLabGalleryNavigator.cpp
     VERBATIM)
 add_executable(StackGalleryNavigatorTests "${gallery_navigator_test}"
+    src/App/UiPerformanceProbe.cpp
     src/Editor/Internal/RawLab/RawLabGalleryFolderTree.cpp)
 target_include_directories(StackGalleryNavigatorTests PRIVATE src src/Editor/Internal/RawLab)
 target_link_libraries(StackGalleryNavigatorTests PRIVATE imgui_core)

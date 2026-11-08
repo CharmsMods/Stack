@@ -296,6 +296,7 @@ bool HitButton(const char* id, const ImRect& rect, bool overlap = false, bool na
 GalleryFolderCards::Action GalleryFolderCards::Render(
     const std::vector<RawWorkspace::SourceFolderCard>& folders, const ImVec2& size,
     ImVec4 surface, const ResolveTexture& texture,Navigation::GalleryNavigationTransition* navigation) {
+    m_LastFrame=ImGui::GetFrameCount();m_Active=false;
     Action action;
     const float unit = ImGui::GetFontSize() / 16.f;
     const bool reduced = LibraryUi::ReducedMotion();
@@ -399,7 +400,8 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
             const float leanX = aroundFolder ? std::clamp((mouse.x - origin.x) / width * 2.f - 1.f, -1.f, 1.f) : 0.f;
             const float leanY = aroundFolder ? std::clamp((mouse.y - origin.y) / (168 * unit) * 2.f - 1.f, -1.f, 1.f) : 0.f;
             if (reduced) { motion.reveal = target; motion.leanX = motion.leanY = 0; }
-            else { Header::ApproachMotion(motion.reveal, target, .46f); Header::Approach(motion.leanX, leanX, 14.f, .001f); Header::Approach(motion.leanY, leanY, 14.f, .001f); }
+            else { motion.revealMotion.Update(motion.reveal,target,.46f,ImGui::GetTime(),ImGui::GetFrameCount()); Header::Approach(motion.leanX, leanX, 14.f, .001f); Header::Approach(motion.leanY, leanY, 14.f, .001f); }
+            m_Active |= !reduced && motion.revealMotion.Active();
             std::array<Texture, 4> images{};
             const std::size_t count = std::min(images.size(), folder.previews.size());
             for (std::size_t image = 0; image < count; ++image) images[image] = texture(folder.root, folder.previews[image]);
@@ -437,7 +439,8 @@ GalleryFolderCards::Action GalleryFolderCards::Render(
                     ImGui::PopID();
                 }
                 if (reduced) motion.pageLift[image] = raised ? 1.f : 0.f;
-                else Header::ApproachMotion(motion.pageLift[image], raised ? 1.f : 0.f, .18f);
+                else motion.liftMotion[image].Update(motion.pageLift[image],raised ? 1.f : 0.f,.18f,ImGui::GetTime(),ImGui::GetFrameCount());
+                m_Active |= !reduced && motion.liftMotion[image].Active();
             }
             if(action.openFolder && *action.openFolder==folder.root) {
                 for(std::size_t image=0;image<count;++image) {

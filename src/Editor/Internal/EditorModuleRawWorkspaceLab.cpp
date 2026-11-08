@@ -1331,12 +1331,23 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                     const std::size_t count = m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Gallery
                         ? ResolveRawWorkspaceVisibleGalleryStacks().size() : ResolveRawWorkspaceGalleryProjectStacks().size();
                     auto& motion = m_RawWorkspaceGalleryGridStacks.filmstripScroll;
-                    const auto leading = slots.Nearest(std::max(0.f, motion.current));
-                    if (slots.Update(stripWidth, 124.f * m_RawWorkspaceLabUi.galleryThumbnailScale,
-                            count, std::max(.75f, ImGui::GetFontSize() / 16.f),
-                            kRawLabFilmstripTileHeight * m_RawWorkspaceLabUi.galleryThumbnailScale)) {
-                        m_RawWorkspaceLabFilmstripScrollTargetX = slots.Position(std::min(leading, slots.lastStop));
+                    const float thumbnail=124.f*m_RawWorkspaceLabUi.galleryThumbnailScale;
+                    const float unit=std::max(.75f,ImGui::GetFontSize()/16.f);
+                    const float imageHeight=kRawLabFilmstripTileHeight*m_RawWorkspaceLabUi.galleryThumbnailScale;
+                    if(slots.NeedsUpdate(stripWidth,thumbnail,count,unit,imageHeight)) {
+                        const float previous=std::max(0.f,motion.current);
+                        const auto end=std::upper_bound(slots.offsets.begin(),slots.offsets.end(),previous);
+                        const auto leading=end==slots.offsets.begin()?0:std::size_t(end-slots.offsets.begin()-1);
+                        const float oldSpacing=Stack::Animation::FilmstripMotion::Spacing(
+                            slots.offsets,slots.lastStop,previous,1);
+                        const float fraction=(previous-slots.Position(leading))/oldSpacing;
+                        slots.Update(stripWidth,thumbnail,count,unit,imageHeight);
+                        const float newSpacing=Stack::Animation::FilmstripMotion::Spacing(
+                            slots.offsets,slots.lastStop,slots.Position(std::min(leading,slots.lastStop)),1);
+                        m_RawWorkspaceLabFilmstripScrollTargetX = std::clamp(
+                            slots.Position(std::min(leading,slots.lastStop))+fraction*newSpacing,0.f,slots.maximum);
                         motion.current = motion.lastApplied = m_RawWorkspaceLabFilmstripScrollTargetX;
+                        motion.glide.Reframe(motion.current,newSpacing/oldSpacing,slots.maximum);
                         motion.overshoot = motion.rebound = 0.f;
                         ImGui::SetNextWindowScroll({motion.current, 0.f});
                     }

@@ -1,4 +1,5 @@
 #include "Utils/DisplayRefreshRate.h"
+#include "Platform/GlfwMonitorRefresh.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,11 +25,18 @@ int DisplayRefreshRate::ForWindow(GLFWwindow* window) {
     const auto now = std::chrono::steady_clock::now();
 #if defined(_WIN32)
     static HMONITOR previousMonitor = nullptr;
+    static std::uint64_t previousRevision = 0;
     const HMONITOR nativeMonitor = MonitorFromWindow(
         glfwGetWin32Window(window), MONITOR_DEFAULTTONEAREST);
-    if (window == previousWindow && nativeMonitor == previousMonitor &&
-        now - checkedAt < std::chrono::seconds(1)) return cachedRate;
+    const auto revision=Stack::Platform::glfwMonitorRevision.load(std::memory_order_relaxed);
+    // The backend already invalidates on display/settings/DPI and topology
+    // changes. Mode enumeration can block in the driver; do not repeat it on a
+    // timer for an unchanged display. Moving between monitors refreshes now.
+    // Retry an unavailable initial mode, rather than caching failure forever.
+    if (window == previousWindow && nativeMonitor == previousMonitor && revision == previousRevision &&
+        (cachedRate > 0 || now - checkedAt < std::chrono::seconds(1))) return cachedRate;
     previousMonitor = nativeMonitor;
+    previousRevision = revision;
 #else
     if (window == previousWindow && now - checkedAt < std::chrono::seconds(1))
         return cachedRate;

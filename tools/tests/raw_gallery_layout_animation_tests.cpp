@@ -357,18 +357,27 @@ int main() {
     browsing.Close();
     if(!Check(!browsing.groupCount && browsing.navigationRevision>revision,"background exit invalidates navigation geometry"))return 1;
     GalleryScrollMotion scroll;
+    scroll.PrepareUniform(3000.f,150.f);
     float target=0.f,native=0.f;double now=0.;
+    const auto wheel=[&](float amount) {
+        scroll.glide.Wheel(amount,scroll.uniformStops,scroll.uniformStops.size()-1,now,false);
+        target=scroll.glide.Position();
+    };
+    const auto step=[&] {
+        scroll.glide.Step(target,scroll.uniformStops,scroll.uniformStops.size()-1,now,false);
+        scroll.current=scroll.lastApplied=scroll.glide.Position();
+    };
     for(int frame=1;frame<=1000;++frame) {
         scroll.Observe(native,target,frame);
-        if(frame<80)scroll.Wheel(-1.f,150.f,3000.f,now,target);
-        scroll.Step(target,3000.f,1.f/120.f,now,false);
+        if(frame<80)wheel(-1.f);
+        step();
         native=std::floor(scroll.current);now+=1./120.;
     }
     if(!Check(scroll.current==3000.f && scroll.rebound==0.f,"wheel reaches exact far edge and rebound settles"))return 1;
     for(int frame=1001;frame<=2000;++frame) {
         scroll.Observe(native,target,frame);
-        if(frame<1080)scroll.Wheel(1.f,150.f,3000.f,now,target);
-        scroll.Step(target,3000.f,1.f/120.f,now,false);
+        if(frame<1080)wheel(1.f);
+        step();
         native=std::floor(scroll.current);now+=1./120.;
     }
     if(!Check(scroll.current==0.f && scroll.rebound==0.f,"wheel reaches exact near edge without integer stalls"))return 1;

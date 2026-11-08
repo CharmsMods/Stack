@@ -54,7 +54,7 @@ constexpr std::array<const char*, kStages> kStageNames {
     "floatingControls", "navigationBars", "compositor", "nativeChrome",
     "viewServices", "viewContext", "viewImage", "viewSubmission",
     "backdrop", "backdropBlur", "backdropNoise", "compositorBody",
-    "frameTarget", "compositorState", "compositorPresent", "platformPresent"
+    "frameTarget", "compositorState", "compositorPresent", "platformPresent", "gallery", "mainCallbackMax"
 };
 constexpr std::array<const char*, kCounters> kCounterNames {
     "nodes", "visibleNodes", "links", "visibleLinks", "catalogMatches", "catalogCards",
@@ -150,6 +150,11 @@ void FinishFrame(const Context& context, double frameMs, double completionMs,
 }
 void Add(Counter counter, std::uint64_t value) {
     if (Enabled() && Trace().frameOpen) Trace().current.counters[static_cast<std::size_t>(counter)] += value;
+}
+void Maximum(Stage stage,double milliseconds) {
+    if (!Enabled() || !Trace().frameOpen) return;
+    auto& value=Trace().current.milliseconds[static_cast<std::size_t>(stage)];
+    value=std::max(value,milliseconds);
 }
 Span::Span(Stage stage) : m_Stage(stage), m_Active(false), m_Entered(Enabled() && Trace().frameOpen) {
     if (m_Entered) m_Active = Trace().depth[static_cast<std::size_t>(stage)]++ == 0;

@@ -2,6 +2,7 @@
 #include "App/UiPerformanceCapture.h"
 #include "App/UiPerformanceProbe.h"
 #include "Platform/GlfwMonitorRefresh.h"
+#include "Utils/DisplayRefreshRate.h"
 #include "Raw/RawLoader.h"
 #include "Graph/GraphDocumentRules.h"
 #include "Project/ProjectSession.h"
@@ -29,7 +30,7 @@ const char* stages[] {"frame","mainCompletions","interface","drawSubmission","sw
     "viewWorkspace","viewPanel","floatingControls","navigationBars","compositor","nativeChrome",
     "viewServices","viewContext","viewImage","viewSubmission",
     "backdrop","backdropBlur","backdropNoise","compositorBody",
-    "frameTarget","compositorState","compositorPresent","platformPresent"};
+    "frameTarget","compositorState","compositorPresent","platformPresent","gallery","mainCallbackMax"};
 static_assert(std::size(stages)==static_cast<std::size_t>(Stack::UiPerformance::Stage::Count));
 void Pointer(float x,float y) { ImGui::GetIO().AddMousePosEvent(x,y); }
 void PointAt(Visual kind,float x=.5f,float y=.5f) {
@@ -61,23 +62,33 @@ bool LoadFixture(EditorModule& editor,const std::filesystem::path& path) {
 }
 }
 std::string UiPerformanceCapture::Scenario() const {
+    if (responsiveness.enabled) return responsiveness.scenario;
     if (qualityCapture) return "view_quality";
     return step>=0 && step<int(scenarios.size()) ? scenarios[step] : "warmup";
 }
-void AppShell::ConfigureUiPerformanceCapture(std::filesystem::path project,std::filesystem::path output,const std::string& onlyScenario) {
+void AppShell::ConfigureUiPerformanceCapture(std::filesystem::path project,std::filesystem::path output,const std::string& onlyScenario,
+    bool visible,const std::string& workload) {
     m_UiPerformanceCapture=std::make_unique<UiPerformanceCapture>();
     auto& s=*m_UiPerformanceCapture; s.project=std::move(project);s.output=std::move(output);
+    if (workload!="idle" && workload!="loading" && workload!="processing" && workload!="combined")
+        throw std::runtime_error("UI workload must be idle, loading, processing or combined");
+    s.visible=visible;s.workload=workload;s.responsiveness.enabled=onlyScenario=="gallery" || onlyScenario=="gallery_resize";
+    if(onlyScenario=="gallery_resize")s.responsiveness.onlyPhase=15;
+    if (!s.responsiveness.enabled && workload!="idle") throw std::runtime_error("Workload selection requires the gallery scenario");
     s.qualityCapture=onlyScenario=="view_quality";
     s.imageSurfaceCapture=onlyScenario=="view_pan" || onlyScenario=="view_tool_drag" ||
         onlyScenario=="view_zoom" || onlyScenario=="view_pan_over_tool" || onlyScenario=="view_edit_resolution";
-    if(!onlyScenario.empty() && !s.qualityCapture) {
+    if(!onlyScenario.empty() && !s.qualityCapture && !s.responsiveness.enabled) {
         const auto found=std::find(scenarios.begin(),scenarios.end(),onlyScenario);
         if(found==scenarios.end())throw std::runtime_error("Unknown UI performance scenario");
         s.onlyStep=int(found-scenarios.begin());
     }
-    s.frames.reserve(2400);s.started=s.nextTick=std::chrono::steady_clock::now();
+    s.frames.reserve(s.responsiveness.enabled?60000:2400);s.started=s.nextTick=std::chrono::steady_clock::now();
     std::filesystem::create_directories(s.output); Probe::Enable(s.output);
     Stack::UiPerformance::EnableFrameCapture(true);
+    Async::TaskSystem::Get().SetMainTaskTimingObserver([](double ms) {
+        Stack::UiPerformance::Maximum(Stack::UiPerformance::Stage::MainCallbackMax,ms);
+    });
 }
 bool AppShell::WasUiPerformanceCaptureSuccessful() const {
     return m_UiPerformanceCapture && m_UiPerformanceCapture->passed;
@@ -85,12 +96,17 @@ bool AppShell::WasUiPerformanceCaptureSuccessful() const {
 void AppShell::PaceUiPerformanceCapture() {
     if(!m_UiPerformanceCapture)return;
     auto& s=*m_UiPerformanceCapture;
+    if(s.visible)return;
     std::this_thread::sleep_until(s.nextTick);
     s.nextTick=std::chrono::steady_clock::now()+std::chrono::microseconds(16667);
 }
 void AppShell::TickUiPerformanceCapture() {
     if(!m_UiPerformanceCapture)return;
     auto& s=*m_UiPerformanceCapture; auto& io=ImGui::GetIO();io.AddFocusEvent(true);
+    // Backend cursor fallback and scripted events share this queue. Consume the
+    // complete diagnostic batch so a physical cursor sample cannot defer clicks.
+    io.ConfigInputTrickleEventQueue=false;
+    if(s.responsiveness.enabled){TickUiResponsivenessCapture();return;}
     if(std::chrono::steady_clock::now()-s.started>std::chrono::seconds(180)) {
         s.failure="Diagnostic deadline exceeded";s.finished=true;m_IsRunning=false;return;
     }
@@ -146,8 +162,11 @@ void AppShell::TickUiPerformanceCapture() {
         if (s.imageSurfaceCapture) s.editNode=s.qualityTone;
         Probe::WatchNode(s.dragNode);
         std::ofstream metadata(s.output/"environment.txt");
+        int width=0,height=0;glfwGetFramebufferSize(m_Window,&width,&height);
         metadata<<"project="<<s.project.u8string()<<"\nrenderer="<<glGetString(GL_RENDERER)
-            <<"\nglVersion="<<glGetString(GL_VERSION)<<"\nsize=1280x800\nhidden=1\nvsync=0\npacingHz=60\n"
+            <<"\nglVersion="<<glGetString(GL_VERSION)<<"\nsize="<<width<<'x'<<height
+            <<"\nhidden="<<!s.visible<<"\nvsync="<<s.visible
+            <<"\nrefreshHz="<<DisplayRefreshRate::ForWindow(m_Window)<<'\n'
             <<"nodes="<<m_Editor->GetNodeGraph().GetNodes().size()<<"\nlinks="<<m_Editor->GetNodeGraph().GetLinks().size()<<'\n';
         const auto preferences=m_Editor->GetRawViewportPreferences();
         metadata<<"viewportTargetFps="<<m_Editor->GetRawViewportTargetFps()
@@ -308,11 +327,14 @@ void AppShell::TickUiPerformanceCapture() {
 void AppShell::FinishUiPerformanceFrame() {
     if(!m_UiPerformanceCapture)return;
     auto& s=*m_UiPerformanceCapture;Probe::Presented();
-    if(s.ready && (s.qualityCapture || s.step>=0 && s.step<int(scenarios.size()) && s.frame>30) && s.frames.size()<2400) {
+    if(s.ready && (s.responsiveness.enabled || s.qualityCapture || s.step>=0 && s.step<int(scenarios.size()) && s.frame>30) && s.frames.size()<(s.responsiveness.enabled?60000u:2400u)) {
         if(s.gpuActive)s.queries[s.query].frame=s.frames.size();
-        s.frames.push_back({s.Scenario(),Stack::UiPerformance::LastFrame(),-1,s.shellPhases});
+        const auto& r=s.responsiveness;
+        s.frames.push_back({s.Scenario(),Stack::UiPerformance::LastFrame(),-1,s.shellPhases,
+            s.frameQpc,s.frameIntervalMs,r.scanBusy,r.thumbnailsBusy,r.processingBusy,r.moving});
     }
     if(!s.finished)return;
+    Async::TaskSystem::Get().SetMainTaskTimingObserver(nullptr);
     if (s.qualityStream.is_open()) s.qualityStream.close();
     std::ofstream monitorStats(s.output/"monitor-cache.txt");
     const auto monitorCounters=Stack::Platform::glfwMonitorRefreshCounters;
@@ -324,14 +346,23 @@ void AppShell::FinishUiPerformanceFrame() {
         <<"\npassthroughReused="<<monitorCounters.passthroughReused<<'\n';
     Probe::Finish();s.CloseGpu();Stack::UiPerformance::EnableFrameCapture(false);std::ofstream out(s.output/"frames.csv");
     out<<"scenario";for(auto stage:stages)out<<','<<stage<<"_ms";
-    out<<",nodes,visible_nodes,links,visible_links,vertices,indices,gpu_draw_ms,frame_setup_ms,shell_services_ms,interface_tail_ms,backend_newframe_ms\n"<<std::fixed<<std::setprecision(6);
+    out<<",nodes,visible_nodes,links,visible_links,vertices,indices,gpu_draw_ms,frame_setup_ms,shell_services_ms,interface_tail_ms,backend_newframe_ms,event_pump_ms,capture_input_ms,refresh_query_ms,frame_qpc,interval_ms,scan_busy,thumbnails_busy,processing_busy,moving\n"<<std::fixed<<std::setprecision(6);
     for(const auto& frame:s.frames) {
         out<<frame.scenario;for(double value:frame.sample.milliseconds)out<<','<<value;
         for(auto counter:{Stack::UiPerformance::Counter::Nodes,Stack::UiPerformance::Counter::VisibleNodes,
             Stack::UiPerformance::Counter::Links,Stack::UiPerformance::Counter::VisibleLinks})out<<','<<frame.sample.counters[static_cast<std::size_t>(counter)];
         out<<','<<frame.sample.vertices<<','<<frame.sample.indices<<','<<frame.gpuMs;
         for (double phase : frame.shellPhases) out<<','<<phase;
+        out<<','<<frame.qpc<<','<<frame.intervalMs<<','<<frame.scanBusy<<','<<frame.thumbnailsBusy<<','<<frame.processingBusy<<','<<frame.moving;
         out<<'\n';
     }
     std::ofstream status(s.output/"status.txt");status<<(s.passed?"passed":"failed")<<'\n'<<s.failure<<'\n';
+    std::ofstream presentation(s.output/"presentation.txt");
+    presentation<<"hdr_bridge_presents="<<s.hdrPresents<<"\nglfw_swap_presents="<<s.glPresents
+        <<"\ndisplay_path=Requires PresentMon; these counters identify the application API only\n";
+    if(s.responsiveness.enabled) {
+        std::ofstream work(s.output/"workload.txt");
+        work<<"workload="<<s.workload<<"\nprocessing_requests="<<s.responsiveness.processingRequests
+            <<"\nprocessing_completions="<<s.responsiveness.processingCompletions<<'\n';
+    }
 }

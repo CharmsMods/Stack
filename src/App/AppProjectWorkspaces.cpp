@@ -14,6 +14,10 @@ void AppShell::InitializeProjectWorkspaces() {
     workspace->rootTab = static_cast<int>(Stack::Workspace::Id::Raw);
     BindWorkspaceNotifications(*workspace);
     workspace->editor->SetPermanentGalleryWorkspace(true);
+    if (m_UiPerformanceCapture) {
+        workspace->editor->SetDocumentPersistenceEnabled(false);
+        workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+    }
     workspace->editor->Initialize(m_Window, m_Appearance.get());
     workspace->editor->EnterRawWorkspaceRootTab();
     m_ActiveProjectWorkspace = workspace->id;
@@ -50,6 +54,10 @@ std::uint64_t AppShell::CreateProjectWorkspace(const std::filesystem::path& sour
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
     workspace->sourceWorkspaceRoot = sourceWorkspaceRoot;
     BindWorkspaceNotifications(*workspace);
+    if (m_UiPerformanceCapture) {
+        workspace->editor->SetDocumentPersistenceEnabled(false);
+        workspace->editor->SetWorkspaceAppStatePersistenceEnabled(false);
+    }
     workspace->editor->Initialize(m_Window, m_Appearance.get(), false, true);
     workspace->editor->SetPermanentGalleryWorkspace(false);
     workspace->editor->EnterRawWorkspaceRootTab();

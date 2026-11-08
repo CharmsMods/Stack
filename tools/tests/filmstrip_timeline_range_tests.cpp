@@ -4,6 +4,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include "Editor/Internal/RawLab/RawLabFilmstripSlots.h"
 
 using Range = std::pair<std::size_t, std::size_t>;
 struct Geometry {
@@ -22,6 +23,7 @@ Range Actual(std::size_t count, Geometry geometry, float low, float high) {
     const float scaledTileWidth = geometry.scaledTileWidth;
     const float tileStep = scaledTileWidth + 10.f;
     const float scrollX = geometry.scrollX;
+    const Stack::Editor::RawLabInternal::FilmstripSlots slots;
 // PRODUCTION_TIMELINE_RANGE
     return entryRange(low, high);
 }

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <functional>
 #include <thread>
+#include "UiInteraction.h"
 
 namespace Async::ForegroundIO {
 inline std::atomic<long long> demandUntil{0};
@@ -31,7 +32,7 @@ inline bool WaitForOpen(const std::function<bool()>& canceled) {
 // Only background discovery uses this cooperative boundary. Dedicated tile and
 // foreground workers remain available while a discovery worker is parked.
 inline bool WaitForIdle(const std::function<bool()>& canceled) {
-    while(readers.load(std::memory_order_relaxed)||tiles.load(std::memory_order_relaxed)||Now()<demandUntil.load(std::memory_order_relaxed)) {
+    while(UiInteraction::Active()||readers.load(std::memory_order_relaxed)||tiles.load(std::memory_order_relaxed)||Now()<demandUntil.load(std::memory_order_relaxed)) {
         if(canceled&&canceled())return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }

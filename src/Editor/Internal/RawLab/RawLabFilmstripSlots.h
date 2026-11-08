@@ -21,6 +21,7 @@ struct FilmstripSlots {
     std::string contentScope;
     std::uint64_t contentRevision = ~std::uint64_t{0}, organizationRevision = ~std::uint64_t{0}, queueRevision = ~std::uint64_t{0};
     bool dirty = true;
+    float framedTarget = -1.f;
     std::size_t lastStop = 0;
     bool SetContent(const std::string& scope, std::uint64_t content,
         std::uint64_t organization, std::uint64_t queue) {
@@ -57,6 +58,8 @@ struct FilmstripSlots {
         return {int(first-offsets.begin()), int(last-offsets.begin())};
     }
     void Frame(float target) {
+        if(target==framedTarget)return;
+        framedTarget=target;
         if (offsets.empty()) { width = available; margin = 0.f; return; }
         auto end = std::upper_bound(offsets.begin(), offsets.begin()+lastStop+1, target);
         const std::size_t first = end == offsets.begin() ? 0 : std::size_t(end-offsets.begin()-1);
@@ -65,9 +68,13 @@ struct FilmstripSlots {
         width = spans[first] + (spans[next]-spans[first])*blend;
         margin = std::max(0.f,(available-width)*.5f);
     }
+    bool NeedsUpdate(float room,float thumbnail,std::size_t items,float scale,float imageHeight) const {
+        return available!=std::max(1.f,room) || requested!=thumbnail || count!=items || unit!=scale ||
+            requestedHeight!=imageHeight || dirty;
+    }
     bool Update(float room, float thumbnail, std::size_t items, float scale, float imageHeight) {
         room = std::max(1.f, room);
-        if (available == room && requested == thumbnail && count == items && unit == scale && requestedHeight == imageHeight && !dirty) return false;
+        if (!NeedsUpdate(room,thumbnail,items,scale,imageHeight)) return false;
         available = room; requested = thumbnail; requestedHeight = imageHeight; count = items; unit = scale;
         const float minimumGap = std::min(10.f * unit, room * .25f);
         tile = std::max(1.f, std::min(thumbnail, room - minimumGap));
@@ -98,6 +105,7 @@ struct FilmstripSlots {
             spans[first] = offsets[last]+widths[last]-offsets[first]+gap;
         }
         dirty = false;
+        framedTarget=-1.f;
         Frame(0.f);
         return true;
     }

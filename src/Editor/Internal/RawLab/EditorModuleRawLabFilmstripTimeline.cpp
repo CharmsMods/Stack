@@ -1,3 +1,4 @@
+#include "App/UiPerformanceProbe.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -112,7 +113,7 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
     ImGui::Dummy(ImVec2(width, 18.0f));
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 18.0f));
     ImGui::InvisibleButton("##RawLabFilmstripTimeline", ImVec2(width, height - 18.0f));
-    slots.dragging = slots.enabled && ImGui::IsItemActive();
+    slots.dragging = ImGui::IsItemActive();
     if (slots.enabled) { scrollMaxX = slots.maximum; viewportWidth = slots.width; }
     if (m_RawWorkspaceLabFilmstripTimelineEntries.empty()) return;
 
@@ -187,6 +188,9 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
         ImVec2(thumbX, trackCenterY - 3.5f),
         ImVec2(thumbX + thumbWidth, trackCenterY + 3.5f),
         thumbFill, 3.5f);
+    if (Stack::UiPerformance::Probe::Active())
+        Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::FilmstripScrollbar,
+            Stack::UiPerformance::Probe::Key(scrollX),{left,trackTop,span,trackBottom-trackTop});
     const ImGuiID dragOffsetId = ImGui::GetID("RawFilmstripScrollGrabOffset");
     if (ImGui::IsItemActivated()) {
         const float mouseX = ImGui::GetIO().MousePos.x;
@@ -194,12 +198,16 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
             mouseX >= thumbX && mouseX <= thumbX + thumbWidth ? mouseX - thumbX : thumbWidth * 0.5f);
     }
     if (dragging && scrollMaxX > 0.0f) {
+        Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::Filmstrip);
         const float targetFraction = std::clamp(
             (ImGui::GetIO().MousePos.x - left - ImGui::GetStateStorage()->GetFloat(dragOffsetId)) /
                 std::max(1.0f, thumbTravel),
             0.0f, 1.0f);
         m_RawWorkspaceLabFilmstripScrollTargetX =
             targetFraction * scrollMaxX;
+        auto& motion=m_RawWorkspaceGalleryGridStacks.filmstripScroll;
+        motion.glide.Drag(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaxX,ImGui::GetTime());
+        motion.current=m_RawWorkspaceLabFilmstripScrollTargetX;
     }
 
     std::size_t hoveredIndex =

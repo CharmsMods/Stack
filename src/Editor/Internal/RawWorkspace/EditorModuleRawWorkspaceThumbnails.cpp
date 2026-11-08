@@ -863,7 +863,7 @@ void EditorModule::PumpRawWorkspaceThumbnailTextureUploads() {
         }
     }
 
-    const std::size_t uploadLimit = filmstripLayoutMoving
+    const std::size_t uploadLimit = (filmstripLayoutMoving || Async::UiInteraction::Active())
         ? 1u : kRawWorkspaceThumbnailTextureUploadsPerFrame;
     const auto uploadStarted = std::chrono::steady_clock::now();
     const auto* viewport = ImGui::GetCurrentContext() ? ImGui::GetMainViewport() : nullptr;

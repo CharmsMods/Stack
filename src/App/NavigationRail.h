@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "Animation/ControlMotion.h"
+#include "Animation/FrameTween.h"
 #include "Library/LibraryControls.h"
 #include <cstdint>
 
@@ -16,6 +17,7 @@ struct RailState {
     LibraryUi::ViewSwitchMotion libraryViewMotion;
     float panelAmount = 1.0f;
     float revealAmount = 0.0f;
+    Animation::FrameTween panelMotion, revealMotion;
     double visibleUntil = 0.0;
     bool suppressEdgeRevealUntilLeave = false;
     float scale = 1.0f;

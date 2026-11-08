@@ -14,7 +14,7 @@ enum class Stage : std::size_t {
     FloatingControls, NavigationBars, Compositor, NativeChrome,
     ViewServices, ViewContext, ViewImage, ViewSubmission,
     Backdrop, BackdropBlur, BackdropNoise, CompositorBody,
-    FrameTarget, CompositorState, CompositorPresent, PlatformPresent, Count
+    FrameTarget, CompositorState, CompositorPresent, PlatformPresent, Gallery, MainCallbackMax, Count
 };
 enum class Counter : std::size_t {
     Nodes, VisibleNodes, Links, VisibleLinks, CatalogMatches, CatalogCards,
@@ -45,6 +45,7 @@ void BeginFrame();
 void FinishFrame(const Context& context, double frameMs, double completionMs,
     double interfaceMs, double drawMs, double swapMs, int vertices, int indices);
 void Add(Counter counter, std::uint64_t value = 1);
+void Maximum(Stage stage, double milliseconds);
 void Flush();
 
 class Span {

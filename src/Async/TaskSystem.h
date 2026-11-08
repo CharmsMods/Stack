@@ -60,6 +60,8 @@ public:
     // it, but at least one always runs so queued completions keep progressing.
     // Zero retains the existing count-only or unlimited draining behavior.
     void PumpMainThreadTasks(std::size_t maxTasks = 0, double maxMilliseconds = 0.0);
+    // UI-thread-only optional diagnostics; caller clears this at capture teardown.
+    void SetMainTaskTimingObserver(void (*observer)(double)) { m_MainTaskTimingObserver=observer; }
 
 private:
     TaskSystem() = default;
@@ -90,6 +92,7 @@ private:
     std::mutex m_MainMutex;
     std::queue<Task> m_MainQueue;
     bool m_AcceptMainTasks = true;
+    void (*m_MainTaskTimingObserver)(double) = nullptr;
     std::mutex m_ActivityMutex;
     std::vector<std::weak_ptr<const ActivityMetadata>> m_Activities;
     std::atomic<std::uint64_t> m_NextActivityId{1};

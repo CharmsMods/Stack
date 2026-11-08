@@ -17,6 +17,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "Renderer/RawImageBackdrop.h"
 #include "Editor/UI/ImageViewTransition.h"
 #include "App/GalleryNavigationTransition.h"
+#include "Animation/FrameTween.h"
 #include "Editor/UI/NodeOpenTransition.h"
 #include "Raw/RawViewportTimingHistory.h"
 #include "Raw/RawViewportPreferences.h"
@@ -325,6 +326,8 @@ public:
     bool IsRawWorkspaceGalleryAvailable() const;
     bool IsRawWorkspaceGalleryOpen() const;
     void ToggleRawWorkspaceGallery();
+    void SetRawGalleryGridView(bool grid);
+    bool HasUiPresentationMotion(int frame) const;
     bool OpenRawWorkspaceGalleryWorkspace();
     bool RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort = true);
     void SetPermanentGalleryWorkspace(bool permanent);
@@ -1883,6 +1886,11 @@ private:
     std::shared_ptr<Stack::Editor::RawLabInternal::GalleryDetails> m_RawWorkspaceGalleryDetails;
     Stack::Editor::RawLabInternal::GalleryPreviewState m_RawWorkspaceGalleryPreview;
     float m_RawGalleryPropertiesAmount = -1.f;
+    int m_RawGalleryPresentationFrame = -2;
+    bool m_RawGalleryGroupsMoving = false;
+    Stack::Animation::FrameTween m_RawGalleryPropertiesMotion;
+    std::array<float,2> m_RawGallerySelectionAmount{};
+    std::array<Stack::Animation::FrameTween,2> m_RawGallerySelectionMotion;
     Stack::Editor::RawLabInternal::GalleryLayoutAnimation m_RawWorkspaceGalleryLayoutAnimation;
     Stack::Editor::RawLabInternal::FilmstripHeightState m_RawFilmstripHeight;
     Stack::Editor::RawLabInternal::GalleryGridStacks m_RawWorkspaceGalleryGridStacks;
@@ -1984,6 +1992,7 @@ private:
     struct RawGalleryFolderAnimationState {
         float expansion = 1.0f;
         bool initialized = false;
+        Stack::Animation::FrameTween motion;
     };
     std::unordered_set<std::string> m_RawWorkspaceLabCollapsedGalleryGroups;
     std::unordered_map<std::string, RawGalleryFolderAnimationState>
@@ -2045,6 +2054,7 @@ private:
         m_RawEditAttributeClipboard;
     std::string m_RawEditAttributeClipboardObservedText;
     std::uint32_t m_RawEditAttributeClipboardObservedSequence = 0;
+    double m_RawEditAttributeClipboardRetryAfter = 0;
     std::unordered_set<std::string> m_RawEditAttributePasteSelection;
     std::vector<RawEditAttributePasteTarget> m_RawEditAttributePasteTargets;
     bool m_RawEditAttributePastePopupRequested = false;
@@ -2079,6 +2089,14 @@ private:
     ImVec2 m_RawWorkspaceLabNativeGalleryWindowPos = ImVec2(0.0f, 0.0f);
     ImVec2 m_RawWorkspaceLabNativeGalleryWindowSize = ImVec2(0.0f, 0.0f);
     std::uint64_t m_RawWorkspaceGalleryRevision = 1;
+    struct RawGalleryFrameSourceCache {
+        std::uint64_t revision=0;
+        std::size_t sourceCount=0;
+        std::string project;
+        bool projectFrames=false;
+        bool timelineActive=false;
+        std::vector<std::size_t> indices;
+    } m_RawGalleryFrameSourceCache;
     mutable std::uint64_t m_GalleryActivityCountRevision = 0;
     mutable int m_GalleryActivityQuickCount = 0, m_GalleryActivityStandardCount = 0;
     bool m_RawWorkspaceCatalogChanged = false;
@@ -3372,7 +3390,6 @@ private:
         const Stack::RawGalleryActions::Context& context);
     void RenderRawGalleryContextActions(const std::filesystem::path& focusedPath);
     void HandleRawGalleryActionShortcuts();
-    void SetRawGalleryGridView(bool grid);
     void RefreshRawGalleryAfterFileMove(const std::filesystem::path& root);
     void RequestPasteRawEditAttributesForGalleryTargets(
         std::vector<Stack::RawWorkspace::SourceRecord> sources,

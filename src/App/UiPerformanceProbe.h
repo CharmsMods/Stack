@@ -4,13 +4,21 @@
 #include <string>
 
 namespace Stack::UiPerformance::Probe {
-enum class Visual { Camera, Node, Catalog, Search, Workspace, Project, Panel, Rail, Toolbar, Controls, Image, ImageCamera, Count };
+enum class Visual { Camera, Node, Catalog, Search, Workspace, Project, Panel, Rail, Toolbar, Controls, Image, ImageCamera,
+    Gallery, Filmstrip, GalleryMode, GridButton, FilmstripButton, BrowseButton, PropertiesButton, FilmstripScrollbar, GalleryItem, PanelResize, Count };
 struct Region { float x = 0, y = 0, width = 0, height = 0; };
 struct Observation { std::uint64_t key = 0; Region region; bool valid = false, settledKernels = false; };
 void Enable(const std::filesystem::path& output);
 bool Active();
 void BeginFrame();
 void Drawn(Visual visual, std::uint64_t key, Region region = {});
+void Accepted(Visual visual);
+void Motion(Visual visual, bool active);
+void FilmstripSample(float nativePosition, float position, float velocity, int direction,
+    bool active, float maximum);
+// Diagnostic targets use the actual submitted widget's bounds. No hit-test substitute.
+void Item(Visual visual, std::uint64_t key = 0);
+std::uint64_t Timestamp();
 void AcceptedImage(std::uint64_t generation, std::uint64_t revision, const void* owner, bool settledKernels);
 void ImageDrawn(std::uint64_t generation, Region region);
 Observation Last(Visual visual);
@@ -34,5 +42,6 @@ struct ViewportTiming {
 };
 void CompletedViewport(const ViewportTiming& timing, const void* owner);
 void Presented();
+void Submitted();
 void Finish();
 } // namespace Stack::UiPerformance::Probe

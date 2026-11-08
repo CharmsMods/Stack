@@ -222,12 +222,18 @@ void EditorModule::RefreshRawEditAttributeClipboardFromSystem(bool force) {
     // and comparing unchanged OS clipboard text on every animation frame.
     // Actual paste/actions force a read, including on sequence wrap or races.
     const auto sequence = PlatformHelpers::ClipboardSequenceNumber();
-    if (!force && sequence != 0 && sequence == m_RawEditAttributeClipboardObservedSequence) return;
+    const double now=ImGui::GetTime();
+    if (!force && sequence==m_RawEditAttributeClipboardObservedSequence &&
+        ((sequence!=0 && m_RawEditAttributeClipboardRetryAfter==0) || now<m_RawEditAttributeClipboardRetryAfter)) return;
     const char* text = ImGui::GetClipboardText();
     // A failed read must remain retryable. Delayed rendering can change the
     // sequence during retrieval, so cache only a stable, successful read.
-    m_RawEditAttributeClipboardObservedSequence = text && sequence != 0 &&
-        sequence == PlatformHelpers::ClipboardSequenceNumber() ? sequence : 0;
+    const bool stable=sequence==PlatformHelpers::ClipboardSequenceNumber();
+    m_RawEditAttributeClipboardObservedSequence=stable?sequence:0;
+    // An unavailable/non-text clipboard must not retry and emit a platform
+    // error at display frequency. A changed sequence or explicit action bypasses
+    // this cooldown, and transient read failures remain retryable.
+    m_RawEditAttributeClipboardRetryAfter=text && stable && sequence!=0 ? 0 : now+.25;
     const char* observedText = text ? text : "";
     if (m_RawEditAttributeClipboardObservedText == observedText) {
         return;

@@ -1,3 +1,4 @@
+#include "App/UiPerformanceProbe.h"
 #include "Editor/EditorModule.h"
 #include "App/AppHeaderStyle.h"
 #include "App/WorkspacePresentation.h"
@@ -19,6 +20,7 @@ namespace Ui = Stack::LibraryUi;
 
 void EditorModule::SetRawGalleryGridView(bool grid) {
     if (m_RawWorkspaceLabUi.galleryWorkspaceGrid == grid) return;
+    Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::GalleryMode);
     std::string preferred = m_RawWorkspaceLabFilmstripHoverSourceKey;
     if (!m_RawWorkspaceLabFilmstripHoverProjectPath.empty()) {
         for (const auto& project : GetRawWorkspaceGalleryPresentation().projects) {
@@ -43,13 +45,10 @@ bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
         m_RawGalleryOpenSelectionHandler && !Stack::Workspace::IsPreview();
     const float unit = ImGui::GetFontSize() / 13.f;
     ImGui::PushID(nativeWindow ? "RawNativeGalleryActions" : "RawGalleryActions");
-    auto* storage = ImGui::GetStateStorage();
-    const ImGuiID amountId = ImGui::GetID("SelectionAmount");
-    float amount = storage->GetFloat(amountId, 0.f);
+    float& amount=m_RawGallerySelectionAmount[nativeWindow ? 1 : 0];
     const float target = (canQueue || canCreate) ? 1.f : 0.f;
-    if (Ui::ReducedMotion()) amount = target;
-    else Stack::Header::ApproachMotion(amount, target, .20f);
-    storage->SetFloat(amountId, amount);
+    m_RawGallerySelectionMotion[nativeWindow ? 1 : 0].Update(amount,target,.20f,
+        ImGui::GetTime(),ImGui::GetFrameCount(),Ui::ReducedMotion());
     if (amount == 0.f) { ImGui::PopID(); return false; }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f * unit, 6.f * unit));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.f * unit, 5.f * unit));
@@ -171,6 +170,7 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
     if (!navigator) ImGui::SameLine(0, 8.f * unit);
     const bool properties = nativeWindow ? m_RawWorkspaceLabGalleryPanelsOpen : m_RawWorkspaceLabUi.galleryPropertiesOpen;
     if (requested == FooterAction::Properties || (!navigator && Ui::IconButton("Image properties", Ui::Icon::Details, properties))) {
+        Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::Controls);
         if (nativeWindow) {
             m_RawWorkspaceLabGalleryPanelsOpen = !properties;
             if (properties) CancelRawWorkspaceLabGalleryImagePreview();
