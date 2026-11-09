@@ -127,6 +127,7 @@ Result MoveProjectBundlesToTrash(
         }
         ++result.moved;
         result.destinations.push_back(destination);
+        result.movedSources.push_back(requested);
     }
     return result;
 }
@@ -185,6 +186,7 @@ Result DeleteSourcesToTrash(const std::filesystem::path& workspaceRoot,
         if (MoveOne(source, destination, message)) {
             ++result.moved;
             result.destinations.push_back(destination);
+            result.movedSources.push_back(path);
         } else {
             result.errors.push_back(std::move(message));
         }

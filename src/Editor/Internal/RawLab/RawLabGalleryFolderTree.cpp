@@ -94,9 +94,9 @@ void GalleryFolderTree::Prepare(const std::filesystem::path& workspace,
         const auto source = sourceFolders.find(project.referenceSourceKey);
         return source == sourceFolders.end() ? &root : source->second;
     };
-    // Saved projects includes saved bracket documents. Pending brackets occur
-    // only in the narrower Brackets view, matching its existing presentation.
-    for (const auto& project : all.projects) add(projectFolder(project), 1, 1);
+    for (const auto& project : all.projects)
+        if (RawWorkspace::GalleryProjectMatchesContentMode(project, RawWorkspace::GalleryContentMode::Projects))
+            add(projectFolder(project), 1, 1);
     for (const auto& project : brackets) add(projectFolder(project), 2, 1);
     const auto format = [&](const auto& self, Folder& folder) -> void {
         for (std::size_t index = 0; index < folder.counts.size(); ++index)

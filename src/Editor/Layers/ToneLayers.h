@@ -484,6 +484,7 @@ public:
 
 private:
     unsigned int m_ShaderProgram = 0;
+    unsigned int m_SdrAppearanceTexture = 0;
     float m_Exposure = 0.0f;
     float m_MiddleGrey = 0.18f;
     float m_Contrast = 1.0f;

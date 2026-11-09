@@ -13,7 +13,7 @@ add_executable(StackProjectCoverTransactionTests
     src/Raw/MultiFrameDenoise/Contracts.cpp
     src/Raw/MultiFrameHdr/Contracts.cpp
     src/Raw/Bracketing/Recipe.cpp
-    src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
+    src/Hdr/SdrAppearance.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
     src/Raw/RawGraphOperation.cpp
     src/Raw/Tone/SceneTone.cpp
     src/Raw/RawZoneAreaRecipe.cpp

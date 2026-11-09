@@ -161,13 +161,13 @@ bool EditorModule::ConsumeRawToolPickerRequest() {
 const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspacePanelGalleryPresentation() {
     SynchronizeRawGalleryFolderScope();
     const auto& source = GetRawWorkspaceCategoryPresentation();
-    if (!m_PermanentGalleryWorkspace || !m_RawGalleryFolderFilter) return source;
+    if (!m_PermanentGalleryWorkspace || (!m_RawGalleryFolderFilter && m_RawGalleryIncludeSubfolders)) return source;
     if (m_RawGalleryFilteredRevision == m_RawWorkspaceGalleryRevision &&
         m_RawGalleryFilteredMode == m_RawWorkspaceGalleryContentMode &&
         m_RawGalleryFilteredQueueRevision == m_RawWorkspaceCategoryQueueRevision) return m_RawGalleryFilteredPresentation;
-    const std::string folder = *m_RawGalleryFolderFilter;
+    const std::string folder = m_RawGalleryFolderFilter.value_or("");
     const auto contains = [&](const std::string& key) {
-        return GalleryFolderTree::ContainsFolderKey(folder, key);
+        return m_RawGalleryIncludeSubfolders ? (folder.empty() || GalleryFolderTree::ContainsFolderKey(folder,key)) : (key==folder || (folder.empty() && key=="."));
     };
     m_RawGalleryFilteredPresentation = source;
     auto& filtered = m_RawGalleryFilteredPresentation;

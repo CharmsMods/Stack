@@ -31,6 +31,7 @@ void EditorModule::SetRawGalleryGridView(bool grid) {
             }
         }
     }
+    if (preferred.empty()) preferred = m_RawWorkspace.selectedSourceKey;
     m_RawWorkspaceGalleryLayoutAnimation.PrepareSwitch(preferred);
     m_RawWorkspaceLabUi.galleryWorkspaceGrid = grid;
     if (grid) m_RawWorkspaceGalleryDisplayMode = Stack::RawWorkspace::GalleryDisplayMode::Grid;
@@ -98,7 +99,7 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
             sort == SortMode::TimelineByFolder ? "Capture time by folder" :
             Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(sort);
         requested = m_RawGalleryNavigator.RenderFooter(m_RawWorkspaceLabUi.galleryWorkspaceGrid,
-            m_RawWorkspaceLabUi.galleryPropertiesOpen, canSort || canChooseScope, label);
+            m_RawWorkspaceLabUi.galleryPropertiesOpen, true, label);
         if (requested == FooterAction::Grid || requested == FooterAction::Filmstrip) {
             m_RawGallerySourceFoldersOpen = false;
             SetRawGalleryGridView(requested == FooterAction::Grid);
@@ -114,30 +115,93 @@ void EditorModule::RenderRawGallerySidebarControls(bool nativeWindow) {
     if (requested == FooterAction::Sort || (!navigator && Ui::IconButton("Sort", Ui::Icon::Sort, false, canSort || canChooseScope))) ImGui::OpenPopup("Sort");
     if (!navigator && !canSort) LabTooltip("Open a folder and switch to original images to sort them.",
         ImGuiHoveredFlags_AllowWhenDisabled);
+    const auto workSize = ImGui::GetWindowViewport()->WorkSize;
+    const float optionsWidth = std::max(1.f, std::min(290.f * unit, workSize.x - 24.f * unit));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(optionsWidth, 0),
+        ImVec2(optionsWidth, std::max(1.f, workSize.y - 24.f * unit)));
     if (ImGui::BeginPopup("Sort")) {
         const auto workspaceKey = GetRawWorkspaceGalleryScopeKey();
         const auto organization = m_RawWorkspaceManualGroupings.find(workspaceKey);
         const auto current = organization != m_RawWorkspaceManualGroupings.end()
             ? organization->second.sortMode : SortMode::TimelineAll;
-        // Scope is independent of sort order. Aggregating folders never writes
-        // a synthetic sort mode into any source folder's saved organization.
-        if (m_PermanentGalleryWorkspace && ImGui::MenuItem("All Folders", nullptr,
-                IsRawWorkspaceAllFolders() && !IsRawWorkspaceFolderBrowserOpen(), canChooseScope)) {
-            m_RawWorkspaceGalleryContentMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
-            SetRawWorkspaceAllFolders(true);
-        }
-        constexpr std::array modes {
-            SortMode::TimelineAll, SortMode::TimelineByFolder, SortMode::Manual,
-            SortMode::FileNameAscending, SortMode::FileNameDescending,
-            SortMode::ModifiedNewestFirst, SortMode::ModifiedOldestFirst,
-            SortMode::FolderThenNameAscending, SortMode::FolderThenNameDescending
-        };
-        for (const auto mode : modes) {
-            if (ImGui::MenuItem(Stack::RawWorkspace::RawGalleryFilmstripSortModeLabel(mode),
-                    nullptr, !IsRawWorkspaceAllFolders() && current == mode, canChooseNativeSort)) {
-                m_RawGallerySourceFoldersOpen = false;
-                SetRawWorkspaceFilmstripSortMode(mode);
+        ImGui::TextUnformatted("View options");
+        ImGui::Separator();
+        const bool folder=current==SortMode::TimelineByFolder || current==SortMode::TimelineByFolderOldestFirst ||
+            current==SortMode::FolderThenNameAscending || current==SortMode::FolderThenNameDescending;
+        const bool folderName=current==SortMode::FolderThenNameAscending || current==SortMode::FolderThenNameDescending;
+        const bool name=current==SortMode::FileNameAscending || current==SortMode::FileNameDescending;
+        const bool modified=current==SortMode::ModifiedNewestFirst || current==SortMode::ModifiedOldestFirst;
+        const bool manual=current==SortMode::Manual;
+        const bool oldest=current==SortMode::TimelineOldestFirst || current==SortMode::TimelineByFolderOldestFirst ||
+            current==SortMode::ModifiedOldestFirst || current==SortMode::FileNameDescending;
+        ImGui::BeginDisabled(!canChooseNativeSort);
+        ImGui::TextDisabled("Organize by");
+        ImGui::SetNextItemWidth(-1);
+        if(ImGui::BeginCombo("##OrganizeBy",manual?"Custom order":folder?"Folder":name?"File name":modified?"Date modified":"Date taken")) {
+            for(const auto mode:{SortMode::TimelineAll,SortMode::TimelineByFolder,SortMode::FileNameAscending,SortMode::ModifiedNewestFirst,SortMode::Manual}) {
+                const char* title=mode==SortMode::TimelineAll?"Date taken":mode==SortMode::TimelineByFolder?"Folder":
+                    mode==SortMode::FileNameAscending?"File name":mode==SortMode::ModifiedNewestFirst?"Date modified":"Custom order";
+                if(ImGui::Selectable(title))SetRawWorkspaceFilmstripSortMode(mode);
             }
+            ImGui::EndCombo();
+        }
+        if(!manual) {
+            ImGui::TextDisabled("Order");
+            ImGui::SetNextItemWidth(-1);
+            if(ImGui::BeginCombo("##Order",folderName?(current==SortMode::FolderThenNameDescending?"Name Z to A":"Name A to Z"):name?(oldest?"Z to A":"A to Z"):(oldest?"Oldest first":"Newest first"))) {
+                for(int reverse=0;reverse<2;++reverse) {
+                    if(ImGui::Selectable(name?(reverse?"Z to A":"A to Z"):(reverse?"Oldest first":"Newest first"),oldest==bool(reverse))) {
+                        SetRawWorkspaceFilmstripSortMode(folder?(reverse?SortMode::TimelineByFolderOldestFirst:SortMode::TimelineByFolder):
+                            name?(reverse?SortMode::FileNameDescending:SortMode::FileNameAscending):
+                            modified?(reverse?SortMode::ModifiedOldestFirst:SortMode::ModifiedNewestFirst):
+                            (reverse?SortMode::TimelineOldestFirst:SortMode::TimelineAll));
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+        if(ImGui::Checkbox("Include subfolders",&m_RawGalleryIncludeSubfolders)) {
+            m_RawWorkspace.selectedSourceKeys.clear();
+            m_RawWorkspace.selectedSourceKey.clear();
+            m_RawWorkspaceLabSelectedProjectPaths.clear();
+            m_RawWorkspaceLabProjectSelectionAnchor.clear();
+            m_RawGalleryFilteredRevision=std::numeric_limits<std::uint64_t>::max();
+            m_RawWorkspaceLabVisibleGalleryContentRevision=std::numeric_limits<std::uint64_t>::max();
+            InvalidateRawWorkspaceGalleryPresentation(false);
+            SaveRawWorkspaceAppState();
+        }
+        ImGui::TextDisabled("Thumbnail size");
+        ImGui::SetNextItemWidth(-1);
+        if(ImGui::SliderFloat("##ThumbnailSize",&m_RawWorkspaceLabUi.galleryThumbnailScale,.65f,1.75f,"%.1fx"))SaveRawWorkspaceAppState();
+        if(ImGui::Checkbox("Image properties",&m_RawWorkspaceLabUi.galleryPropertiesOpen))SaveRawWorkspaceAppState();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x);
+        ImGui::TextUnformatted("Dates use your computer's local calendar.");
+        ImGui::PopTextWrapPos();ImGui::PopStyleColor();
+        if(canSort && !folder && !name && !manual && !m_RawWorkspaceLabVisibleGallerySections.empty() && ImGui::BeginMenu("Jump to date")) {
+            const auto& stacks=ResolveRawWorkspaceVisibleGalleryStacks();
+            for(const auto& section:m_RawWorkspaceLabVisibleGallerySections) {
+                if(section.dateLabel.empty() || section.firstStack>=stacks.size())continue;
+                ImGui::PushID(section.dateKey.c_str());
+                if(ImGui::MenuItem(section.dateLabel.c_str())) {
+                    const auto& members=stacks[section.firstStack].sourceKeys;
+                    if(!members.empty())m_RawLabGalleryScrollToSourceKey=m_RawWorkspaceLabUi.galleryWorkspaceGrid?
+                        m_RawWorkspaceGalleryGridStacks.Cover(members,{}):members.front();
+                    m_RawWorkspaceLabCollapsedGalleryGroups.erase("date:"+section.dateKey);
+                    ImGui::CloseCurrentPopup();
+                }
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",section.dateDetail.c_str());
+                ImGui::PopID();
+            }
+            ImGui::EndMenu();
+        }
+        if(ImGui::Button("Jump to start")) {
+            m_RawWorkspaceLabGalleryScrollTargetY=0;
+            m_RawWorkspaceLabGalleryScrollCurrentY=0;
+            m_RawWorkspaceLabFilmstripScrollTargetX=0;
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }

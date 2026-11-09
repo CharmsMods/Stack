@@ -22,7 +22,8 @@ void EditorModule::PrepareRawGalleryFolderTree() {
     const auto& all = GetRawWorkspaceGalleryPresentation();
     std::vector<Stack::RawWorkspace::GalleryProjectView> brackets;
     for (const auto& project : all.projects)
-        if (project.bracketingProject) brackets.push_back(project);
+        if (Stack::RawWorkspace::GalleryProjectMatchesContentMode(project,
+                Stack::RawWorkspace::GalleryContentMode::Bracket)) brackets.push_back(project);
     // Reuse the Brackets view's eligibility/deduplication, without resolving
     // project paths or touching disk just to display a count.
     AppendRawWorkspaceQueuedBrackets(brackets, false);
@@ -31,11 +32,13 @@ void EditorModule::PrepareRawGalleryFolderTree() {
 }
 
 void EditorModule::RenderRawGalleryFolderPanel() {
+    if(IsRawWorkspaceAllFolders())SetRawWorkspaceAllFolders(false);
     PrepareRawGalleryFolderTree();
     const auto action = m_RawGalleryNavigator.Render(m_RawGalleryFolderTree,
         m_RawWorkspaceGalleryContentMode, m_RawGalleryFolderFilter,
         Stack::Header::ResolvePanelColor(GetWorkspaceBaseColor()),
         [this] { RenderRawGallerySidebarControls(); });
+    if(action.openPath)SetRawWorkspaceFolder(*action.openPath);
     if(action.browseMaximum.x>action.browseMinimum.x)
         m_GalleryBrowseAnchor={action.browseMinimum,action.browseMaximum};
     if (action.category || action.folderChanged) {
@@ -59,13 +62,5 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceLabFilmstripScrollTargetX = 0.f;
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
-    if (action.openFolder) {
-        if (m_PermanentGalleryWorkspace) {
-            if(m_RawGallerySourceFoldersOpen) {
-                m_RawGallerySourceFoldersOpen=false;
-                if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Folders(false,m_GalleryBrowseAnchor);
-            } else ShowRawWorkspaceSourceFolders();
-        }
-        else OpenRawWorkspaceFolderDialog();
-    }
+    if(action.openFolder)OpenRawWorkspaceFolderDialog();
 }

@@ -41,7 +41,7 @@ uniform vec2 PreviousScale;
 out vec4 OutColor;
 vec3 decode(vec3 x) { vec3 a=abs(x); return sign(x)*mix(a/12.92,pow((a+0.055)/1.055,vec3(2.4)),step(vec3(0.04045),a)); }
 vec3 encode(vec3 x) { vec3 a=abs(x); return sign(x)*mix(12.92*a,1.055*pow(a,vec3(1.0/2.4))-0.055,step(vec3(0.0031308),a)); }
-)")+Stack::Hdr::SdrFinishShader+Stack::Hdr::GainMapPreviewShader+R"(
+)")+Stack::Hdr::GainMapPreviewShader+R"(
 void main() {
     vec4 a=texture(Previous,PreviousOffset+uv*PreviousScale), b=texture(Texture,uv);
     float alpha=mix(a.a,b.a,Amount);

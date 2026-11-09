@@ -89,15 +89,13 @@ bool EditorModule::HasOpenProjectSession() const {
 
 EditorModule::ProjectSessionKind EditorModule::GetProjectSessionKind() const {
     if (IsRawWorkspaceProjectActive()) {
-        const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
-        if (source != nullptr &&
-            source->project.status == Stack::RawWorkspace::ProjectStatus::NoProject &&
-            !IsDirty()) {
+        if (!m_Project->store && !m_Project->snapshot && !IsDirty()) {
             return ProjectSessionKind::RawPreview;
         }
         return ProjectSessionKind::RawProject;
     }
+    if (m_Project->galleryRasterPreview && m_Project->editRevision == 0 && !m_Project->store && !m_Project->snapshot &&
+        m_Project->fileName.empty()) return ProjectSessionKind::RasterPreview;
     return HasOpenProjectSession()
         ? ProjectSessionKind::EditorProject
         : ProjectSessionKind::Empty;
@@ -402,6 +400,7 @@ void EditorModule::ResetToBlankProject() {
     m_ProjectNamingPromptRequested = false;
     m_ProjectNamingPromptShown = false;
     m_Project->editRevision = 0;
+    m_Project->galleryRasterPreview = false;
     MarkRenderRefreshDirty();
     ClearDirty();
     m_Project->lastEditTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
@@ -1716,10 +1715,11 @@ bool EditorModule::UpdateRawWorkspaceInteractionDraft(
         }
     }
     if (!m_Project->rawInteractionDraft.active) {
-        // Materialize a first-edit project using the untouched frame-start
-        // recipe. The visible gesture is then an overlay and does not dirty or
-        // revise the document until release.
-        if (!EnsureRawWorkspaceProjectForSelectedRecipeEdit(
+        // A source preview already has the graph needed for the temporary
+        // overlay. Materialize its project only if the gesture commits.
+        const bool previewingSelectedSource = GetProjectSessionKind() == ProjectSessionKind::RawPreview &&
+            m_Project->rawSourceKey == m_RawWorkspace.selectedSourceKey;
+        if (!previewingSelectedSource && !EnsureRawWorkspaceProjectForSelectedRecipeEdit(
                 persistedRecipe)) {
             return false;
         }
@@ -1748,14 +1748,14 @@ bool EditorModule::ResolveRawWorkspaceInteractionDraft(bool cancel) {
     }
     RawInteractionDraft resolved = std::move(m_Project->rawInteractionDraft);
     m_Project->rawInteractionDraft = {};
-    if (!cancel) {
+    if (!cancel && (GetProjectSessionKind() != ProjectSessionKind::RawPreview ||
+        Stack::RawRecipe::SerializeRecipe(resolved.recipe) != Stack::RawRecipe::SerializeRecipe(ReadRawControlRecipe()))) {
         return ApplyRawWorkspaceRecipeEditForSelectedSource(
             resolved.recipe,
             false);
     }
 
-    // Cancel only discards the transient command overlay. No graph state was
-    // mutated during the gesture, so there is nothing to restore.
+    // A canceled or unchanged preview gesture only discards the overlay.
     MarkRenderRefreshDirty();
     NoteRawWorkspaceRecipePreviewEdit(false);
     return true;

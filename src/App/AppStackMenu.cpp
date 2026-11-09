@@ -116,8 +116,8 @@ void AppShell::RenderStackMenu() {
             }
 
             menuSeparator();
-            const char* closeLabel = context.sessionKind ==
-                EditorModule::ProjectSessionKind::RawPreview
+            const char* closeLabel = (context.sessionKind == EditorModule::ProjectSessionKind::RawPreview ||
+                context.sessionKind == EditorModule::ProjectSessionKind::RasterPreview)
                 ? "Close Preview"
                 : "Close Project";
             if (fileMenuItem(

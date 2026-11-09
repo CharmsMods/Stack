@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "Raw/RawGalleryCoverCache.h"
+#include "Raw/GalleryDateLabels.h"
 #include "Editor/Internal/RawLab/RawLabGalleryFolderTree.h"
 
 #include <algorithm>
@@ -9,7 +10,10 @@
 const std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>&
 EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     const auto& resolved = ResolveRawWorkspaceFilmstripStacks();
-    if (m_RawWorkspaceLabVisibleGalleryWorkspaceKey == m_RawWorkspaceFilmstripStacksCacheWorkspaceKey &&
+    const auto calendar=Stack::RawWorkspace::GalleryCalendarRevision();
+    const bool dateChanged=calendar!=m_RawGalleryCalendarRevision;
+    m_RawGalleryCalendarRevision=calendar;
+    if (!dateChanged && m_RawWorkspaceLabVisibleGalleryWorkspaceKey == m_RawWorkspaceFilmstripStacksCacheWorkspaceKey &&
         m_RawWorkspaceLabVisibleGalleryRevision == m_RawWorkspaceGalleryRevision &&
         m_RawWorkspaceLabVisibleGalleryOrganizationRevision == m_RawWorkspaceFilmstripOrganizationRevision) {
         return m_RawWorkspaceLabVisibleGalleryStacksCache;
@@ -17,12 +21,16 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     const auto& presentation = GetRawWorkspaceGalleryPresentation();
     const auto folderFilter = m_PermanentGalleryWorkspace
         ? m_RawGalleryFolderFilter : std::optional<std::string>{};
-    const bool orderCurrent =
+    const bool orderCurrent = !dateChanged &&
         m_RawWorkspaceLabVisibleGalleryWorkspaceKey == m_RawWorkspaceFilmstripStacksCacheWorkspaceKey &&
         m_RawWorkspaceLabVisibleGalleryContentRevision == m_RawWorkspaceNavigatorRevision &&
         m_RawWorkspaceLabVisibleGalleryOrganizationRevision == m_RawWorkspaceFilmstripOrganizationRevision &&
         m_RawWorkspaceLabVisibleGalleryFolderFilter == folderFilter;
     const auto folderVisible = [&](const std::string& key) {
+        if(m_PermanentGalleryWorkspace && !m_RawGalleryIncludeSubfolders) {
+            const auto selected=m_RawGalleryFolderFilter.value_or("");
+            if(key!=selected && !(selected.empty() && key=="."))return false;
+        }
         if (!m_PermanentGalleryWorkspace || !m_RawGalleryFolderFilter) return true;
         const auto& folder = *m_RawGalleryFolderFilter;
         return Stack::Editor::RawLabInternal::GalleryFolderTree::ContainsFolderKey(folder, key);
@@ -115,7 +123,7 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     m_RawWorkspaceLabVisibleGalleryFolderFilter = folderFilter;
     m_RawWorkspaceLabVisibleGalleryOrganizationRevision = m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceLabVisibleGallerySections = Stack::RawWorkspace::BuildRawGalleryStackSections(
-        stacks, ordering.sortMode);
+        stacks, ordering.sortMode, m_RawWorkspaceFilmstripSortSources);
     m_RawWorkspaceLabFilmstripStackTimelineActive = false;
     m_RawWorkspaceGalleryGridStacks.Reconcile(m_RawWorkspaceLabVisibleGalleryWorkspaceKey, stacks);
     return stacks;
@@ -195,7 +203,10 @@ EditorModule::ResolveRawWorkspaceGalleryProjectStacks() {
             }
         }
         if (chosen.empty()) {
-            chosen = presentation.projects[family.projectIndices.front()].projectCoverKey;
+            const auto savedCover = std::find_if(family.projectIndices.begin(), family.projectIndices.end(),
+                [&](const auto index) { return !presentation.projects[index].coverThumbnailCachePath.empty(); });
+            chosen = presentation.projects[savedCover == family.projectIndices.end()
+                ? family.projectIndices.front() : *savedCover].projectCoverKey;
             for (const auto index : family.projectIndices) {
                 const auto& project = presentation.projects[index];
                 if (project.projectPath == m_RawWorkspaceLabFocusedProjectPath ||

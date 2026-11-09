@@ -1,4 +1,5 @@
 #pragma once
+#include "Raw/GalleryCaptureMetadata.h"
 
 #include "ThirdParty/json.hpp"
 #include "Persistence/StackBinaryFormat.h"
@@ -215,6 +216,7 @@ struct SourceRecord {
     std::int64_t modifiedUnixSeconds = 0;
     std::int64_t captureTimestamp = 0;
     bool captureMetadataChecked = false;
+    GalleryCaptureMetadata groupingMetadata;
     std::string fingerprint;
     int sourceIdentityAlgorithmVersion = 0;
     ThumbnailInfo thumbnail;
@@ -270,6 +272,7 @@ struct CatalogSourceRecord {
     std::int64_t modifiedUnixSeconds = 0;
     std::int64_t captureTimestamp = 0;
     bool captureMetadataChecked = false;
+    GalleryCaptureMetadata groupingMetadata;
     std::string fingerprint;
     CatalogThumbnailRecord thumbnail;
     CatalogProjectRecord project;
@@ -443,6 +446,7 @@ struct AppState {
     float rawLabLowerShelfHeight = 0.0f;
     float rawLabFilmstripHeight = 0.0f;
     float rawLabGalleryThumbnailScale = 1.0f;
+    bool galleryIncludeSubfolders = true;
     bool rawLabLowerShelfOpen = false;
     bool rawLabToolRailOnRight = false;
     int rawViewportTargetFps = 30;
@@ -486,7 +490,10 @@ ScanResult ScanWorkspace(
     ScanSourceReadyCallback sourceReadyCallback = {},
     SourceIdentityReuseCallback reuseSourceIdentity = {},
     bool galleryBrowse = false,
-    std::function<void(const std::vector<SourceRecord>&)> listingReady = {});
+    std::function<void(const std::vector<SourceRecord>&)> listingReady = {},
+    // Optional append-only Gallery hints, before the complete listing and
+    // identity verification. Cancellation/failure leaves these non-authoritative.
+    std::function<void(std::vector<SourceRecord>)> listingBatchReady = {});
 
 SourceRecord* FindStandaloneMaster(const WorkspaceState& state, const std::string& sourceKey);
 bool SelectSourceByKey(WorkspaceState& state, const std::string& sourceKey);
@@ -535,6 +542,7 @@ std::vector<GalleryCompletedBurstSourceSet> BuildGalleryCompletedBurstSourceSets
 std::vector<GalleryProjectStack> BuildGalleryProjectStacks(
     const GalleryPresentation& presentation,
     const std::vector<RawGallerySimilarityStack>& originalStacks);
+bool GalleryProjectMatchesContentMode(const GalleryProjectView& project, GalleryContentMode mode);
 void FilterGalleryProjectCards(GalleryPresentation& presentation, GalleryContentMode mode);
 RawPanelState BuildRawPanelState(const SourceRecord* source);
 GalleryPlacementMode ResolveExclusiveGalleryPlacement(

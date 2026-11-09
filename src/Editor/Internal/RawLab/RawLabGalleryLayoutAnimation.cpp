@@ -8,6 +8,7 @@
 namespace Stack::Editor::RawLabInternal {
 
 void GalleryLayoutAnimation::Reset() {
+    m_RemovalPending = m_Removing = false;
     m_Workspace.clear();
     m_Layout.clear();
     m_From.clear();
@@ -30,6 +31,7 @@ void GalleryLayoutAnimation::BeginFrame(
         m_OrderRevision = orderRevision;
     }
     if (reducedMotion) {
+        m_RemovalPending = m_Removing = false;
         m_Active = false;
         m_Progress = 1.0f;
         m_From.clear();
@@ -37,6 +39,8 @@ void GalleryLayoutAnimation::BeginFrame(
     } else if (grid != m_Grid || orderRevision != m_OrderRevision) {
         // A reversal starts from the geometry currently on screen.
         m_From = m_Active ? Sample() : m_Layout;
+        m_Removing = m_RemovalPending;
+        m_RemovalPending = false;
         m_StartedAt = time;
         m_Duration = grid != m_Grid ? 0.26 : 0.22;
         m_Progress = 0.0f;
@@ -122,8 +126,15 @@ GalleryLayoutAnimation::Pose GalleryLayoutAnimation::Interpolate(
             ImLerp(from.opacity, to.opacity, amount), from.rendered || to.rendered, to.order, to.frame};
 }
 
-GalleryLayoutAnimation::Pose GalleryLayoutAnimation::OffscreenEndpoint(const Pose& pose, bool grid) {
+GalleryLayoutAnimation::Pose GalleryLayoutAnimation::OffscreenEndpoint(const Pose& pose, bool grid) const {
     Pose endpoint = pose;
+    if (m_Removing) {
+        const auto center=pose.image.GetCenter();
+        const ImVec2 half(pose.image.GetWidth()*.43f,pose.image.GetHeight()*.43f);
+        endpoint.image=ImRect(ImVec2(center.x-half.x,center.y-half.y+8.f),ImVec2(center.x+half.x,center.y+half.y+8.f));
+        endpoint.opacity=0.f;
+        return endpoint;
+    }
     const ImVec2 shift = grid
         ? ImVec2(0.0f, pose.clip.Max.y - pose.image.Min.y + pose.image.GetHeight())
         : ImVec2(pose.clip.Max.x - pose.image.Min.x + pose.image.GetWidth(), 0.0f);

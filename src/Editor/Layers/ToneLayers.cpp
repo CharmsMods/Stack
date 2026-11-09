@@ -537,7 +537,7 @@ void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const N
         if(ImGui::Checkbox("Preview SDR",&proof)) editor->SetSdrOutputProof(proof);
     }
     ImGuiExtras::NodeSliderFloat("Brightness","##SdrBrightness",&m_SdrBrightness,-3.f,3.f,"%+.2f EV",width);
-    ImGuiExtras::NodeSliderFloat("Highlight detail","##SdrHighlightDetail",&m_SdrHighlightDetail,0.f,1.f,"%.2f",width);
+    ImGuiExtras::NodeSliderFloat("Highlight separation","##SdrHighlightDetail",&m_SdrHighlightDetail,0.f,1.f,"%.2f",width);
     ImGuiExtras::NodeSliderFloat("Color","##SdrSaturation",&m_SdrSaturation,0.f,2.f,"%.2f",width);
 }
 

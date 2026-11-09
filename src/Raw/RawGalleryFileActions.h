@@ -9,6 +9,7 @@ namespace Stack::RawGalleryFileActions {
 struct Result {
     std::size_t moved = 0;
     std::vector<std::filesystem::path> destinations;
+    std::vector<std::filesystem::path> movedSources;
     std::vector<std::string> errors;
 
     explicit operator bool() const {

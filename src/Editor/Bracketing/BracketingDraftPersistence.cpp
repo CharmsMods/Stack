@@ -28,7 +28,7 @@ bool EditorModule::NeedsWorkspaceSaveBeforeTransition() const {
     if (!HasProjectContent()) return false;
     if (IsDirty()) return true;
     const auto kind = GetProjectSessionKind();
-    return kind != ProjectSessionKind::Empty && kind != ProjectSessionKind::RawPreview &&
+    return (kind == ProjectSessionKind::EditorProject || kind == ProjectSessionKind::RawProject) &&
         GetCurrentProjectFileName().empty();
 }
 

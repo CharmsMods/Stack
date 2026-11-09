@@ -13,6 +13,7 @@
 #include "Hdr/RasterSource.h"
 #include "Raw/RawLoader.h"
 #include "ThirdParty/stb_image.h"
+#include "ThirdParty/stb_image_write.h"
 #include <GLFW/glfw3.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <algorithm>
@@ -192,7 +193,7 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
     if (!graphOutputOnly) CheckHdrUiBlend();
     auto& editor=check.editor;
     int graphOutput = 0;
-    if (graphOutputOnly) {
+    {
         const auto input=std::filesystem::absolute(raw);
         Require(editor.EnterRawWorkspaceRootTab(),"Could not activate a clean RAW destination tab.");
         editor.OpenGalleryOriginalInNewTab(input.parent_path(),input);
@@ -203,6 +204,7 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
             return !editor.IsRawWorkspaceProjectLoadBusy() &&
                 editor.TryGetActiveRawWorkspacePresentationTexture(texture,width,height);
         },"RAW project open");
+        if(graphOutputOnly) {
         editor.OpenRawLayerMaskGraph(Project::kRawBackgroundId,false);
         editor.SetWorkspaceMode(Project::WorkspaceMode::Graph);
         Require(editor.IsRawProjectCanvas(),"The RAW project Graph did not open.");
@@ -213,11 +215,7 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
         }
         Require(graphOutput>0,"The final RAW Output is still disabled for export.");
         std::cout<<"RAW Graph final Output "<<graphOutput<<" is exportable.\n"<<std::flush;
-    } else {
-        editor.RequestLoadSourceImage(std::filesystem::absolute(raw).u8string());
-        check.Wait([&]{return !editor.IsSourceLoadBusy();},"RAW source load");
-        Require(editor.GetSourceLoadTaskState()!=Async::TaskState::Failed,editor.GetSourceLoadStatusText());
-        Require(editor.GetNodeGraph().IsOutputConnected(),"RAW import did not connect an output.");
+        }
     }
     if (!graphOutputOnly && Hdr::PreviewActive()) {
         // Submit the real UI surface and inspect its normal ImGui draw stream.
@@ -258,6 +256,18 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
         std::cout<<"Viewport and View drew their accepted HDR texture and SDR counterpart.\n"<<std::flush;
     }
     const auto graph=editor.BuildGraphSnapshot();
+    std::cout<<"Photo output domain: "<<graph.outputDescriptor.color.value.identity
+        <<", transfer "<<int(graph.outputDescriptor.transfer.value.kind)
+        <<", reference "<<int(graph.outputDescriptor.reference.value)<<'\n'<<std::flush;
+    // Retain the actual accepted SDR proof for an independent photo comparison.
+    unsigned proof=0;int pw=0,ph=0,sw=0,sh=0;
+    if(!editor.TryGetActiveRawWorkspacePresentationTexture(proof,sw,sh)) {
+        proof=editor.GetPipeline().GetOutputTexture();
+        sw=editor.GetPipeline().GetCanvasWidth();sh=editor.GetPipeline().GetCanvasHeight();
+    }
+    const auto proofPixels=editor.GetPipeline().GetExternalTexturePixels(proof,sw,sh,pw,ph,1024);
+    Require(!proofPixels.empty() && stbi_write_png((folder/"SDR-proof.png").u8string().c_str(),pw,ph,4,proofPixels.data(),pw*4),
+        "Could not retain the accepted SDR proof.");
     std::vector<std::filesystem::path> paths;
     for(auto format:{Hdr::FileFormat::PqPng,Hdr::FileFormat::GainMapJpeg}) {
         Hdr::SetPreviewInSdr(format==Hdr::FileFormat::PqPng);
@@ -274,26 +284,27 @@ void ValidatePhotoExports(GLFWwindow* window,const std::filesystem::path& raw,co
     const auto reference=SampleReference(graph,Raw::DisplayWidth(meta),Raw::DisplayHeight(meta));
     CheckFile(paths[0],Hdr::FileFormat::PqPng,reference);
     CheckFile(paths[1],Hdr::FileFormat::GainMapJpeg,reference);
-    if (graphOutputOnly) {
+    for(auto format:{Hdr::FileFormat::SdrPng,Hdr::FileFormat::SdrJpeg}) {
         const auto file=folder/std::filesystem::u8path(raw.stem().u8string()+"-sdr-"+
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
-        Require(editor.RequestExportGraphOutput(graphOutput,file.u8string(),Hdr::FileFormat::SdrPng),
-            "Could not start the default SDR graph export. "+editor.GetExportStatusText());
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+Hdr::Extension(format));
+        Require(graphOutputOnly ? editor.RequestExportGraphOutput(graphOutput,file.u8string(),format) :
+            editor.RequestQueueExportImage(file.u8string(),format),
+            "Could not start the SDR export. "+editor.GetExportStatusText());
         check.Wait([&]{return !editor.IsExportBusy();},"SDR graph export");
         Require(editor.GetExportTaskState()!=Async::TaskState::Failed,editor.GetExportStatusText());
         const auto bytes=ReadFile(file);
-        Require(bytes.size()>25 && bytes[24]==8 && !Hdr::IsPqPng(bytes),
-            "The default SDR PNG changed format.");
+        Require(!Hdr::IsPqPng(bytes) && !Hdr::IsGainMapJpeg(bytes),"SDR export contains an HDR rendition.");
+        if(format==Hdr::FileFormat::SdrPng) Require(bytes.size()>25 && bytes[24]==8,"SDR PNG changed precision.");
         int w=0,h=0,channels=0;
         std::unique_ptr<unsigned char,decltype(&stbi_image_free)> sdr(
             stbi_load_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels,4),stbi_image_free);
-        Require(sdr && w==reference.width && h==reference.height,"SDR PNG lost native dimensions.");
+        Require(sdr && w==reference.width && h==reference.height,"SDR export lost native dimensions.");
         double error=0;
         for(const auto& sample:reference.samples) for(int k=0;k<3;++k)
             error+=std::abs(int(sdr.get()[sample.offset+k])-int(sample.sdr[k]));
         error/=3.0*reference.samples.size();
-        Require(error<.6,"Default SDR PNG differs from the authored SDR finish.");
-        std::cout<<file.u8string()<<": 8-bit SDR PNG, mean SDR error "<<error<<" code values.\n"<<std::flush;
+        std::cout<<file.u8string()<<": "<<Hdr::FormatName(format)<<", mean SDR error "<<error<<" code values.\n"<<std::flush;
+        Require(error<(format==Hdr::FileFormat::SdrPng ? .6 : 3.),"SDR export differs from the authored SDR finish.");
     }
 }
 }

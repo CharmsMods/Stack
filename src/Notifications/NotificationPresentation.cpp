@@ -10,6 +10,30 @@
 
 namespace Stack::Notifications {
 namespace {
+// Register the submitted window tree together. Child content has its own
+// draw list; leaving it in the workspace pass puts it behind the dialog.
+void KeepWindowTreeFixed(const PresentationContext& context, ImGuiWindow* window) {
+    if(!context.keepFixed || !window || !window->Active)return;
+    context.keepFixed(window->DrawList);
+    for(auto* child : window->DC.ChildWindows)
+        KeepWindowTreeFixed(context,child);
+}
+
+void KeepNotificationFixed(const PresentationContext& context) {
+    if(!context.keepFixed)return;
+    auto* root=ImGui::GetCurrentWindow();
+    KeepWindowTreeFixed(context,root);
+    // Custom bodies can open combo menus: those are popups, not child windows.
+    for(const auto& popup : ImGui::GetCurrentContext()->OpenPopupStack) {
+        auto* window=popup.Window;
+        if(!window || window==root || !window->Active)continue;
+        for(auto* parent=window->ParentWindowInBeginStack; parent;
+            parent=parent->ParentWindowInBeginStack) {
+            if(parent==root) {KeepWindowTreeFixed(context,window);break;}
+        }
+    }
+}
+
 bool IsRunning(const Record& record) { return record.state == RecordState::Running; }
 const char* OutcomeLabel(const Record& record) {
     switch (record.outcome) {
@@ -173,6 +197,7 @@ void Presenter::RenderRecord(NotificationStore& store, const Record& record,
 }
 
 void Presenter::RenderActions(NotificationStore& store, const Record& record, bool dialog, bool appearing) {
+    const float availableWidth=std::max(1.f,ImGui::GetContentRegionAvail().x);
     if (record.actionPending) ImGui::TextDisabled("Working...");
     std::size_t defaultIndex = record.content.actions.size();
     if (appearing) {
@@ -186,11 +211,10 @@ void Presenter::RenderActions(NotificationStore& store, const Record& record, bo
         const auto& action = record.content.actions[index];
         // Decision commands are reviewed in the fixed dialog, not fired from a preview.
         if (!dialog && record.kind == RecordKind::Decision) continue;
-        const float availableWidth = ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x;
         const auto label = ActionLabel(action.label,availableWidth);
         const float buttonWidth = std::min(availableWidth,ImGui::CalcTextSize(label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2);
         const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-        if (index > 0 && ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + buttonWidth < rightEdge)
+        if (index > 0 && ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + buttonWidth <= rightEdge)
             ImGui::SameLine();
         ImGui::PushID(static_cast<int>(index));
         const bool available = !record.actionPending && store.CanInvokeAction(record.id, index);
@@ -273,9 +297,10 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
             ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse)) {
             if (ImGui::GetCurrentContext()->OpenPopupStack.empty())
                 ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-            if (context.keepFixed) context.keepFixed(ImGui::GetWindowDrawList());
             ImGui::TextUnformatted("Activity");
-            ImGui::SameLine(std::max(0.f,ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize("Close").x - ImGui::GetStyle().FramePadding.x * 2));
+            const float closeX=ImGui::GetWindowContentRegionMax().x-ImGui::CalcTextSize("Close").x-ImGui::GetStyle().FramePadding.x*2;
+            if(closeX>ImGui::GetCursorPosX()+ImGui::CalcTextSize("Activity").x+ImGui::GetStyle().ItemSpacing.x)
+                ImGui::SameLine(closeX);
             if (ImGui::SmallButton("Close")) m_PanelOpen = false;
             int running=0, attention=0, recent=0;
             for (const auto& record : records) {
@@ -310,6 +335,7 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
             };
             section("Running",running,0); section("Needs attention",attention,1); section("Recent",recent,2);
             if (records.empty()) ImGui::TextDisabled("No activity this session.");
+            KeepNotificationFixed(context);
         }
         ImGui::End();
         ImGui::PopStyleVar(2);
@@ -325,20 +351,21 @@ void Presenter::RenderActivity(NotificationStore& store, const PresentationConte
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,9 * unit);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(16 * unit,14 * unit));
     ImGui::Begin("##StackNotificationPreview",nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing);
     if (ImGui::GetCurrentContext()->OpenPopupStack.empty())
         ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-    if (context.keepFixed) context.keepFixed(ImGui::GetWindowDrawList());
+    if(m_RenderedPreview!=record->id) {ImGui::SetScrollY(0);m_RenderedPreview=record->id;}
     Muted(record->owner.label);
     if (!record->content.title.empty()) Wrapped(record->content.title);
     const std::string message = Brief(record->content.message,220);
     Wrapped(message);
     if (ImGui::Button("View details")) { m_PanelOpen = true; m_Selected = record->id; }
-    ImGui::SameLine();
+    if(ImGui::GetItemRectMax().x+ImGui::CalcTextSize("Dismiss").x+ImGui::GetStyle().FramePadding.x*2+ImGui::GetStyle().ItemSpacing.x<=ImGui::GetWindowPos().x+ImGui::GetWindowContentRegionMax().x) ImGui::SameLine();
     if (ImGui::SmallButton("Dismiss")) { store.Dismiss(record->id); m_Preview = 0; }
     const bool paused = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) || ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
     if (!paused) m_PreviewRemaining -= ImGui::GetIO().DeltaTime;
+    KeepNotificationFixed(context);
     ImGui::End();
     ImGui::PopStyleVar(2);
 }
@@ -362,8 +389,10 @@ void Presenter::RenderDialog(NotificationStore& store, const PresentationContext
         m_PopupDialog = m_Dialog;
     }
     const float unit=ImGui::GetFontSize()/13.0f;
+    const auto* viewport = ImGui::GetMainViewport();
+    const ImVec2 margin(std::min(12.f*unit,viewport->WorkSize.x*.05f),std::min(12.f*unit,viewport->WorkSize.y*.05f));
     const float width=std::min((record->content.dialogSize==DialogSize::Large?720.f:520.f)*unit,
-        std::max(180.f,context.workspaceSize.x-32.f*unit));
+        std::max(1.f,std::min(context.workspaceSize.x,viewport->WorkSize.x)-2*margin.x));
     const float contentWidth = std::max(1.f,width - 40.f * unit);
     const float footerHeight = FooterHeight(*record,contentWidth);
     const float shortContent = ImGui::CalcTextSize(record->content.message.c_str(),nullptr,false,contentWidth).y +
@@ -377,10 +406,9 @@ void Presenter::RenderDialog(NotificationStore& store, const PresentationContext
         std::clamp(shortContent + footerHeight + (record->content.customBody ? 100.f * unit : 0) +
             (record->content.imagePreview ? 160.f * unit : 0),190.f * unit,420.f * unit);
     const float height=std::min(desiredHeight,
-        std::max(140.f,context.workspaceSize.y-32.f*unit));
-    const auto* viewport = ImGui::GetMainViewport();
-    const ImVec2 corner(viewport->WorkPos.x+viewport->WorkSize.x-12.f*unit,
-        viewport->WorkPos.y+viewport->WorkSize.y-12.f*unit);
+        std::max(1.f,std::min(context.workspaceSize.y,viewport->WorkSize.y)-2*margin.y));
+    const ImVec2 corner(viewport->WorkPos.x+viewport->WorkSize.x-margin.x,
+        viewport->WorkPos.y+viewport->WorkSize.y-margin.y);
     ImGui::SetNextWindowPos(corner,ImGuiCond_Always,ImVec2(1.f,1.f));
     ImGui::SetNextWindowSize(ImVec2(width,height),ImGuiCond_Always);
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
@@ -388,16 +416,24 @@ void Presenter::RenderDialog(NotificationStore& store, const PresentationContext
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(20.f*unit,18.f*unit));
     ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg,ImVec4(0,0,0,.48f));
     if (ImGui::BeginPopupModal("##StackNotificationDialog",nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking)) {
-        if (context.keepFixed) context.keepFixed(ImGui::GetWindowDrawList());
-        const bool appearing=ImGui::IsWindowAppearing();
-        ImGui::BeginChild("Content",ImVec2(0,-footerHeight),false,ImGuiWindowFlags_None);
+        const bool appearing=ImGui::IsWindowAppearing() || m_RenderedDialog!=record->id;
+        m_RenderedDialog=record->id;
+        // Use actual inner width, including any scrollbar, for footer wrapping.
+        const float actualFooter=FooterHeight(*record,std::max(1.f,ImGui::GetContentRegionAvail().x));
+        const bool separateBody=ImGui::GetWindowSize().y-ImGui::GetStyle().WindowPadding.y*2>actualFooter+ImGui::GetTextLineHeightWithSpacing()*3;
+        if(appearing)ImGui::SetScrollY(0);
+        if(separateBody)ImGui::BeginChild("Content",ImVec2(0,-actualFooter),false,ImGuiWindowFlags_None);
+        if(separateBody && appearing)ImGui::SetScrollY(0);
         RenderRecord(store,*record,context,true);
-        ImGui::EndChild();
+        if(separateBody)ImGui::EndChild();
         ImGui::Separator();
         ImGui::Spacing();
+        // On short windows let the whole dialog scroll instead of pushing
+        // action rows outside a non-scrolling footer.
         RenderActions(store,*record,true,appearing);
+        KeepNotificationFixed(context);
         ImGui::EndPopup();
     }
     ImGui::PopStyleColor();

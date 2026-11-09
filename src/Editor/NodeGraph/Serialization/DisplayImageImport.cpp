@@ -40,7 +40,7 @@ bool DecodeManagedImagePayload(const std::vector<unsigned char>& bytes,ImagePayl
             if(baseImage.width!=w || baseImage.height!=h) throw std::runtime_error("Invalid HDR JPEG base extent.");
             for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
                 const size_t source=(size_t(h-1-y)*w+x)*4,dest=(size_t(y)*w+x)*4;
-                for(int c=0;c<3;++c) sdr[dest+c]=Hdr::SdrPreviewByte(baseImage.rgba[source+c],Hdr::FileFormat::SdrPng);
+                for(int c=0;c<3;++c) sdr[dest+c]=Hdr::SdrPreviewByte(baseImage.rgba[source+c]);
                 sdr[dest+3]=255;
             }
         } else {
@@ -51,11 +51,12 @@ bool DecodeManagedImagePayload(const std::vector<unsigned char>& bytes,ImagePayl
         std::copy_n(base.get(),sdr.size(),sdr.data());
         }
     } else {
-        // Invert the extended shoulder for a PQ rendition without a stored base.
+        // Use the shared luminance/color finish for a PQ source without a base.
         // Profiled SDR sources have ordinary relative luminance already.
         for(size_t i=0;i<sdr.size();i+=4) {
+            const auto rgb=Hdr::SdrPreviewRgb({(*pixels)[i],(*pixels)[i+1],(*pixels)[i+2]},format);
             for(int channel=0;channel<3;++channel) {
-                sdr[i+channel]=Hdr::SdrPreviewByte((*pixels)[i+channel],format);
+                sdr[i+channel]=Hdr::SdrPreviewByte(rgb[channel]);
             }
             sdr[i+3]=static_cast<unsigned char>(std::lround(std::clamp((*pixels)[i+3],0.f,1.f)*255.f));
         }

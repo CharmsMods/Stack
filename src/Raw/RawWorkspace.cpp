@@ -2,6 +2,7 @@
 #include "Persistence/BracketMaster.h"
 #include "Raw/RawViewportSettings.h"
 #include "Raw/RawGalleryInputPolicy.h"
+#include "Raw/GalleryListingBatch.h"
 #include "RawWorkspace.h"
 #include "RawGalleryCoverCache.h"
 #include "Raw/RawSourceFolders.h"
@@ -436,7 +437,8 @@ ScanResult ScanWorkspace(
     ScanSourceReadyCallback sourceReadyCallback,
     SourceIdentityReuseCallback reuseSourceIdentity,
     bool galleryBrowse,
-    std::function<void(const std::vector<SourceRecord>&)> listingReady) {
+    std::function<void(const std::vector<SourceRecord>&)> listingReady,
+    std::function<void(std::vector<SourceRecord>)> listingBatchReady) {
     ScanResult result;
     result.layout = galleryBrowse ? BuildGalleryLayout(workspaceRoot) : BuildManagedLayout(workspaceRoot);
     result.progress.stage = ScanProgress::Stage::Preparing;
@@ -487,6 +489,15 @@ ScanResult ScanWorkspace(
     };
 
     auto& masters = result.bracketMasters;
+    GalleryListingBatch listingBatch(galleryBrowse ? std::move(listingBatchReady) : nullptr);
+    const auto appendSource = [&](const std::filesystem::directory_entry& entry) {
+        auto record = FileListingRecord(entry, result.layout.workspaceRoot);
+        record.browsePreview = galleryBrowse;
+        result.sources.push_back(std::move(record));
+        result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
+        listingBatch.Append(result.sources.back());
+    };
+    std::vector<std::filesystem::directory_entry> masterCandidates;
     try {
         result.progress.stage = ScanProgress::Stage::Scanning;
         std::filesystem::recursive_directory_iterator it(
@@ -500,7 +511,9 @@ ScanResult ScanWorkspace(
         }
 
         for (; it != end; it.increment(ec)) {
-            if (isCancelled() || (galleryBrowse && !Async::ForegroundIO::WaitForIdle(isCancelled))) {
+            // Directory metadata is lightweight. Do not park the entire listing
+            // behind hover/scroll activity or the thumbnails it just requested.
+            if (isCancelled()) {
                 result.errorMessage = "Workspace scan canceled.";
                 result.progress.statusText = result.errorMessage;
                 return result;
@@ -546,6 +559,14 @@ ScanResult ScanWorkspace(
             result.progress.currentItem = entryPath.filename().u8string();
             const auto extension = ToLowerAscii(entryPath.extension().u8string());
             if (extension == ".dng" || extension == ".exr") {
+                if (galleryBrowse) {
+                    // Inspect possible saved results after publishing ordinary
+                    // originals. Masters must still be classified before they
+                    // can enter the original-photo list.
+                    masterCandidates.push_back(entry);
+                    reportProgress();
+                    continue;
+                }
                 const auto marker = Stack::Project::BracketMasterMetadata(entryPath);
                 if (marker.is_object() && marker.contains("resultId") && marker["resultId"].is_string()) {
                     masters.push_back({{"relativePath",entryPath.lexically_relative(result.layout.workspaceRoot).generic_u8string()},
@@ -562,12 +583,32 @@ ScanResult ScanWorkspace(
 
             result.progress.stage = ScanProgress::Stage::Scanning;
 
-            auto record = FileListingRecord(entry, result.layout.workspaceRoot);
-            record.browsePreview = galleryBrowse;
-            result.sources.push_back(std::move(record));
-            result.progress.discoveredRawCount = static_cast<int>(result.sources.size());
+            appendSource(entry);
             reportProgress();
         }
+        // Release the last ordinary-image batch before opening DNG/EXR headers.
+        if (!isCancelled()) listingBatch.Flush();
+        for (const auto& entry : masterCandidates) {
+            // Once there are drawable tiles, let their visible JPEG reads win
+            // over further result discovery on a seek-sensitive external disk.
+            const bool canRead = listingBatch.Published()
+                ? Async::ForegroundIO::WaitForIdle(isCancelled)
+                : Async::ForegroundIO::WaitForOpen(isCancelled);
+            if (isCancelled() || !canRead) {
+                result.errorMessage = "Workspace scan canceled.";
+                return result;
+            }
+            const auto& path = entry.path();
+            result.progress.currentItem = path.filename().u8string();
+            const auto marker = Stack::Project::BracketMasterMetadata(path);
+            if (marker.is_object() && marker.contains("resultId") && marker["resultId"].is_string()) {
+                masters.push_back({{"relativePath",path.lexically_relative(result.layout.workspaceRoot).generic_u8string()},
+                    {"fileSizeBytes",entry.file_size(ec)},{"modifiedTimeTicks",FileTimeTicks(entry.last_write_time(ec))},
+                    {"resultId",marker["resultId"]},{"captures",marker.value("sources",nlohmann::json::array())}});
+            } else if (isRawPath(path)) appendSource(entry);
+            reportProgress();
+        }
+        if (!isCancelled()) listingBatch.Flush();
         std::sort(result.sources.begin(), result.sources.end(), [](const SourceRecord& a, const SourceRecord& b) {
             return RawGalleryPathOrderKey(a.relativePathKey) < RawGalleryPathOrderKey(b.relativePathKey);
         });
@@ -604,14 +645,21 @@ ScanResult ScanWorkspace(
                 result.progress.verifiedRawBytes += identity.byteSize;
                 ++result.progress.hashedRawCount;
             }
-            if (IsGalleryRasterPath(record.absolutePath)) record.captureMetadataChecked=true;
-            if (!record.captureMetadataChecked && !isCancelled()) {
+            if (IsGalleryRasterPath(record.absolutePath)) {record.captureMetadataChecked=true;record.groupingMetadata.checked=true;}
+            if ((!record.captureMetadataChecked || !record.groupingMetadata.checked) && !isCancelled()) {
                 if(galleryBrowse && !Async::ForegroundIO::WaitForIdle(isCancelled))return result;
                 Raw::RawMetadata metadata;
                 if (Raw::RawLoader::LoadMetadata(record.absolutePath.u8string(), metadata)) {
                     record.captureTimestamp = metadata.hasCaptureTimestamp
                         ? metadata.captureTimestamp : 0;
                     record.captureMetadataChecked = true;
+                    auto& tags=record.groupingMetadata;tags.checked=true;
+                    tags.make=metadata.cameraMake;tags.model=metadata.cameraModel;tags.lens=metadata.lensModel;
+                    tags.width=metadata.rawWidth;tags.height=metadata.rawHeight;
+                    tags.shutter=metadata.hasExposureTime?metadata.exposureTimeSeconds:0;
+                    tags.aperture=metadata.hasApertureFNumber?metadata.apertureFNumber:0;
+                    tags.iso=metadata.hasIsoSpeed?metadata.isoSpeed:0;
+                    tags.focalLength=metadata.hasFocalLength?metadata.focalLengthMm:0;
                 }
             }
             record.browsePreview = galleryBrowse;
@@ -1159,15 +1207,20 @@ bool RemoveTransientThumbnailCache(
     return false;
 }
 
+bool GalleryProjectMatchesContentMode(const GalleryProjectView& project, GalleryContentMode mode) {
+    if (mode == GalleryContentMode::Gallery) return true;
+    if (mode == GalleryContentMode::Bracket) return project.bracketingProject && !project.standaloneMaster;
+    if (project.untouchedAutomaticBracket) return false;
+    if (mode == GalleryContentMode::Unlinked) return project.unlinked;
+    return true;
+}
+
 void FilterGalleryProjectCards(GalleryPresentation& presentation, GalleryContentMode mode) {
     if (mode == GalleryContentMode::Gallery) return;
     auto& projects = presentation.projects;
     projects.erase(std::remove_if(projects.begin(), projects.end(),
         [mode](const auto& project) {
-            if (mode == GalleryContentMode::Unlinked) return !project.unlinked;
-            if (project.standaloneMaster) return mode != GalleryContentMode::Bracket;
-            if (mode == GalleryContentMode::AllProjects) return false;
-            return mode == GalleryContentMode::Bracket ? !project.bracketingProject : project.untouchedAutomaticBracket;
+            return !GalleryProjectMatchesContentMode(project, mode);
         }), projects.end());
 }
 
@@ -1205,7 +1258,11 @@ std::vector<GalleryProjectStack> BuildGalleryProjectStacks(
             members.push_back("source:" + project.referenceSourceKey);
         }
         std::string key = project.bracketingProject ? "burst:" : "image:";
-        if (!members.empty()) key += BuildGallerySourceIdentityKey(std::move(members));
+        // Single-image versions can resolve the same saved source through
+        // different paths, or have no currently reachable original at all.
+        if (!project.bracketingProject && !project.multiFrameProject && !project.sourceIdentityKey.empty())
+            key += "identity:" + project.sourceIdentityKey;
+        else if (!members.empty()) key += BuildGallerySourceIdentityKey(std::move(members));
         else if (!project.sourceIdentityKey.empty()) key += "identity:" + project.sourceIdentityKey;
         else key += "project:" + (project.projectId.empty() ? project.projectPath.generic_string() : project.projectId);
         const auto [family, inserted] = families.emplace(key, stacks.size());
@@ -1627,6 +1684,7 @@ nlohmann::json SerializeSourceRecord(const SourceRecord& source) {
     item["modifiedUnixSeconds"] = source.modifiedUnixSeconds;
     item["captureTimestamp"] = source.captureTimestamp;
     item["captureMetadataChecked"] = source.captureMetadataChecked;
+    item["groupingMetadata"] = source.groupingMetadata;
     item["fingerprint"] = source.fingerprint.empty() ? nlohmann::json() : nlohmann::json(source.fingerprint);
     item["thumbnail"] = {
         { "status", ThumbnailStatusToString(source.thumbnail.status) },
@@ -1681,6 +1739,7 @@ CatalogSourceRecord BuildCatalogSourceRecord(const SourceRecord& source) {
     record.modifiedUnixSeconds = source.modifiedUnixSeconds;
     record.captureTimestamp = source.captureTimestamp;
     record.captureMetadataChecked = source.captureMetadataChecked;
+    record.groupingMetadata = source.groupingMetadata;
     record.fingerprint = source.fingerprint;
     record.thumbnail.camera = source.thumbnail.camera;
     record.thumbnail.relativePath = source.thumbnail.relativePath;
@@ -1719,6 +1778,7 @@ nlohmann::json SerializeCatalogSourceRecord(const CatalogSourceRecord& source) {
     item["modifiedUnixSeconds"] = source.modifiedUnixSeconds;
     item["captureTimestamp"] = source.captureTimestamp;
     item["captureMetadataChecked"] = source.captureMetadataChecked;
+    item["groupingMetadata"] = source.groupingMetadata;
     item["fingerprint"] = source.fingerprint.empty() ? nlohmann::json() : nlohmann::json(source.fingerprint);
     item["thumbnail"] = {
         { "status", ThumbnailStatusToString(source.thumbnail.status) },
@@ -1897,6 +1957,18 @@ bool LoadCatalogSnapshot(
     std::vector<SourceRecord> loaded;
     loaded.reserve(sourceArray->size());
     std::unordered_set<std::string> sourceKeys;
+    // A source set can attach hundreds of originals to the same project. Check
+    // each saved path once per snapshot, rather than probing per attached photo.
+    std::unordered_map<std::string, bool> projectExists;
+    const auto cachedProjectExists = [&](const std::filesystem::path& path) {
+        const auto key = ToLowerAscii(path.generic_u8string());
+        const auto found = projectExists.find(key);
+        if (found != projectExists.end()) return found->second;
+        std::error_code error;
+        const bool exists = std::filesystem::exists(path, error) && !error;
+        projectExists.emplace(key, exists);
+        return exists;
+    };
     for (const nlohmann::json& item : *sourceArray) {
         if (!item.is_object()) {
             continue;
@@ -1934,14 +2006,13 @@ bool LoadCatalogSnapshot(
         source.fileSizeBytes = JsonUintMaxOrDefault(item, "fileSizeBytes");
         source.modifiedTimeTicks = JsonInt64OrDefault(item, "modifiedTimeTicks");
         source.modifiedUnixSeconds = JsonInt64OrDefault(item, "modifiedUnixSeconds");
-        if (source.modifiedUnixSeconds == 0) {
-            std::error_code timeError;
-            const auto modifiedTime = std::filesystem::last_write_time(
-                source.absolutePath, timeError);
-            if (!timeError) source.modifiedUnixSeconds = FileTimeUnixSeconds(modifiedTime);
-        }
+        // Legacy catalogs may omit the display date. Leave it unknown until
+        // the directory listing supplies it, instead of stat'ing every original
+        // before showing any tile. Identity ticks are opaque comparison values,
+        // not a portable calendar timestamp.
         source.captureTimestamp = JsonInt64OrDefault(item, "captureTimestamp");
         source.captureMetadataChecked = item.value("captureMetadataChecked", false);
+        if(item.contains("groupingMetadata"))from_json(item["groupingMetadata"],source.groupingMetadata);
         source.fingerprint = JsonStringOrDefault(item, "fingerprint");
         source.sourceIdentityAlgorithmVersion =
             sourceIdentityAlgorithmVersion;
@@ -2042,10 +2113,7 @@ bool LoadCatalogSnapshot(
         }
         if (source.project.status != ProjectStatus::NoProject &&
             !source.project.absolutePath.empty()) {
-            std::error_code projectError;
-            if (!std::filesystem::exists(
-                    source.project.absolutePath, projectError) ||
-                projectError) {
+            if (!cachedProjectExists(source.project.absolutePath)) {
                 // A catalog from the former global project layout must not
                 // make a missing bundle look like a current-workspace edit
                 // during warm start. Project discovery will repopulate this
@@ -2086,10 +2154,7 @@ bool LoadCatalogSnapshot(
                         layout.projectsDirectory)) {
                     continue;
                 }
-                std::error_code projectError;
-                if (!std::filesystem::exists(
-                        membership.projectPath, projectError) ||
-                    projectError) {
+                if (!cachedProjectExists(membership.projectPath)) {
                     continue;
                 }
                 membership.sourceSetId = JsonStringOrDefault(
@@ -2199,6 +2264,7 @@ bool SaveAppStateIfCurrent(
     if (state.rawLabFilmstripHeight > 0.0f && std::isfinite(state.rawLabFilmstripHeight)) {
         root["rawLabFilmstripHeight"] = state.rawLabFilmstripHeight;
     }
+    root["galleryIncludeSubfolders"]=state.galleryIncludeSubfolders;
     if (state.rawLabGalleryThumbnailScale > 0.0f &&
         std::isfinite(state.rawLabGalleryThumbnailScale)) {
         root["rawLabGalleryThumbnailScale"] = std::clamp(
@@ -2322,6 +2388,8 @@ bool LoadAppState(const std::filesystem::path& path, AppState& outState, std::st
                 outState.rawLabFilmstripHeight = height;
             }
         }
+        if(root.contains("galleryIncludeSubfolders") && root["galleryIncludeSubfolders"].is_boolean())
+            outState.galleryIncludeSubfolders=root["galleryIncludeSubfolders"].get<bool>();
         const nlohmann::json* rawLabGalleryThumbnailScale =
             FindJsonMember(root, "rawLabGalleryThumbnailScale");
         if (rawLabGalleryThumbnailScale != nullptr &&

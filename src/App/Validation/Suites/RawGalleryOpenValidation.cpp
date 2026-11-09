@@ -290,6 +290,7 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
                 <<ms/120<<" ms/frame including GPU submission and completion; no new source hashes or scan.\n";
         } else if (immediateOpen) {
             if (std::filesystem::exists(root / "Closet")) throw std::runtime_error("Expected a disposable photo root without a Closet.");
+            editor->SetDocumentPersistenceEnabled(true);
             auto notices = std::make_shared<Notifications::NotificationStore>();
             editor->SetNotificationScope(notices->ForOwner(1, "Untitled"));
             gallery = std::make_unique<EditorModule>();
@@ -327,7 +328,16 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
             for (const auto& notice : notices->Snapshot())
                 if (notice.content.severity == Notifications::Severity::Error)
                     throw std::runtime_error(notice.content.message);
-            std::cout << "PASS immediate Gallery open: selected original rendered, no folder rescan, error notification or Closet.\n";
+            frame([&] {
+                if (!editor->SetWorkspaceMode(Project::WorkspaceMode::View) ||
+                    !editor->SetWorkspaceMode(Project::WorkspaceMode::Graph) ||
+                    editor->IsDirty() || editor->NeedsWorkspaceSaveBeforeTransition() ||
+                    editor->IsUnifiedProjectStoreActive())
+                    throw std::runtime_error("Opening or viewing the original left a project to save.");
+                if (!editor->CloseCurrentProject() || std::filesystem::exists(root / "Closet"))
+                    throw std::runtime_error("The original did not close as an unsaved preview.");
+            });
+            std::cout << "PASS immediate Gallery open: original rendered and closed without a project.\n";
             gallery->SetRawGalleryOpenSelectionHandler({});
         } else if (!profileOnly) {
         if (bracketCaptures) {

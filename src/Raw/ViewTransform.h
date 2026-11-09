@@ -25,13 +25,13 @@ inline constexpr Parameters Defaults{};
 class PreparedTransform {
 public:
     explicit PreparedTransform(const Parameters& parameters=Defaults):p_(parameters),
-        sigmoid_(parameters.middleGrey,parameters.contrast,parameters.exposure,parameters.contrastPivotEv) {}
+        sigmoid_(parameters.middleGrey,parameters.contrast,parameters.exposure,parameters.contrastPivotEv), sdr_(parameters.sdr) {}
     float Luma(float input) const {
         const float base=sigmoid_.Evaluate(input);
         if(p_.hdrHeadroom>1.f) return Stack::Hdr::Extend(base,p_.middleGrey,p_.hdrHeadroom);
         if(p_.sdr.highlightDetail==0.f && p_.sdr.brightness==0.f) return base;
         const float master=p_.sdr.highlightDetail>0.f ? Stack::Hdr::Extend(base,p_.middleGrey,Stack::Hdr::MasterHeadroom) : 0.f;
-        return Stack::Hdr::FinishSdr({base,base,base},{master,master,master},p_.sdr)[0];
+        return sdr_.Apply({base,base,base},{master,master,master})[0];
     }
     std::array<float,3> Rgb(std::array<float,3> rgb) const {
         if(p_.debugFalseColor) {
@@ -69,7 +69,7 @@ public:
         CompressGamut(rgb);
         if(p_.sdr.highlightDetail!=0.f || p_.sdr.brightness!=0.f || p_.sdr.saturation!=1.f) {
             if(p_.sdr.highlightDetail==0.f) {
-                rgb=Stack::Hdr::FinishSdr(rgb,{},p_.sdr);
+                rgb=sdr_.Apply(rgb,{});
             } else {
             auto hdr=sigmoidRgb;
             for(float& v:hdr) v=Stack::Hdr::Extend(v,p_.middleGrey,Stack::Hdr::MasterHeadroom);
@@ -81,7 +81,7 @@ public:
                 if(v<y) chroma=std::min(chroma,y/(y-v));
             }
             for(float& v:hdr) v=y+(v-y)*chroma;
-            rgb=Stack::Hdr::FinishSdr(rgb,Rec2020ToSrgb(hdr),p_.sdr);
+            rgb=sdr_.Apply(rgb,Rec2020ToSrgb(hdr));
             }
         }
         for(auto& value:rgb) {
@@ -118,6 +118,7 @@ private:
     }
     Parameters p_;
     SigmoidDisplay::PreparedCurve sigmoid_;
+    Stack::Hdr::PreparedSdrFinish sdr_;
 };
 
 // Actual Stack View Transform shader functions, kept with their CPU reference.
@@ -178,6 +179,7 @@ vec3 hdrViewFinish(vec3 rgb,float headroom) {
 vec3 applyViewTransform(vec3 inputRgb) {
     if(uDisplayLinearInput!=0) {
         vec3 rgb=uInputIsRec2020!=0 ? rec2020ToLinearSrgb(inputRgb) : inputRgb;
+        if(uHdrHeadroom<=1.0) rgb=finishSdrOutput(vec3(0),rgb,vec3(uSdrTrim.x,1.0,uSdrTrim.z));
         return uEncodeSrgbOutput!=0 ? sign(rgb)*linearToSrgb(abs(rgb)) : rgb;
     }
     if (uDebugFalseColor != 0) {
@@ -197,7 +199,7 @@ vec3 applyViewTransform(vec3 inputRgb) {
     float luma = lumaOf(rgb);
     rgb = mix(vec3(luma), rgb, max(0.0, uSaturation));
     rgb = compressDisplayGamut(rgb);
-    if(uSdrTrim.x!=0.0 || uSdrTrim.y!=0.0 || uSdrTrim.z!=1.0)
+    if(uSdrTrim.x!=1.0 || uSdrTrim.y!=0.0 || uSdrTrim.z!=1.0)
         rgb=finishSdrOutput(rgb,uSdrTrim.y>0.0 ? hdrViewFinish(sigmoidRgb,1000.0/203.0) : vec3(0),uSdrTrim);
     rgb = clamp(rgb, 0.0, 1.0);
     if (uEncodeSrgbOutput != 0) rgb = linearToSrgb(rgb);

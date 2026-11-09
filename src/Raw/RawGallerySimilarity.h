@@ -1,4 +1,5 @@
 #pragma once
+#include "GalleryCaptureMetadata.h"
 
 #include "ThirdParty/json.hpp"
 
@@ -42,6 +43,8 @@ struct RawGallerySimilarityInput {
     std::string folderKey;
     std::size_t catalogIndex = 0;
     RawGallerySimilarityDescriptor descriptor;
+    std::int64_t captureTimestamp = 0;
+    GalleryCaptureMetadata capture;
 };
 
 struct RawGallerySimilarityStack {
@@ -64,7 +67,9 @@ enum class RawGalleryFilmstripSortMode {
     FolderThenNameAscending,
     FolderThenNameDescending,
     TimelineAll,
-    TimelineByFolder
+    TimelineByFolder,
+    TimelineOldestFirst,
+    TimelineByFolderOldestFirst
 };
 
 struct RawGalleryFilmstripSourceSortInfo {
@@ -84,11 +89,13 @@ struct RawGalleryStackSection {
     std::size_t firstStack = 0;
     std::size_t stackCount = 0;
     bool separateFolder = false;
+    std::string dateKey, dateLabel, dateDetail;
 };
 
 std::vector<RawGalleryStackSection> BuildRawGalleryStackSections(
     const std::vector<RawGallerySimilarityStack>& stacks,
-    RawGalleryFilmstripSortMode mode);
+    RawGalleryFilmstripSortMode mode,
+    const std::vector<RawGalleryFilmstripSourceSortInfo>& sources = {});
 
 struct RawGalleryManualGrouping {
     int version = kRawGalleryManualGroupingVersion;
@@ -109,6 +116,7 @@ struct RawGallerySimilarityResult {
     std::uint64_t generation = 0;
     std::string workspaceKey;
     std::vector<RawGallerySimilarityStack> stacks;
+    std::vector<RawGallerySimilarityStack> bracketCandidates;
 };
 
 struct RawGalleryFilmstripStackLayout {
@@ -217,7 +225,7 @@ std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
     const std::function<bool()>& shouldCancel);
 
 RawGallerySimilarityResult BuildRawGallerySimilarityResult(
-    const RawGallerySimilarityRequest& request);
+    const RawGallerySimilarityRequest& request, const std::function<bool()>& shouldCancel = {});
 
 bool IsRawGallerySimilarityResultCurrent(
     const RawGallerySimilarityResult& result,

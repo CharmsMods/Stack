@@ -27,12 +27,14 @@ struct CurveCanvasState {
         gesture=exposureGesture=amountGesture=normalizationGesture=tonalSliderGesture=false;
         gestureMoved=gestureApplied=insertionDrag=false;dragged=-1;activeTonalSlider=0;probe.reset();
         modeSelector.dragging=false;modeSelector.capture=0;
-        viewPanning=false;
+        viewPanning=false;zoomActive=false;
     }
     CurveGestureMode mode = CurveGestureMode::Points;
     CurveModeSelectorState modeSelector;
     CurveCanvasFraming framing;
-    bool viewPanning=false;
+    bool viewPanning=false,zoomActive=false;
+    double zoomStarted=0;
+    RawLabToneGraphViewRange zoomFromX{},zoomFromY{},zoomTargetX{},zoomTargetY{};
     ImVec2 viewPress{};
     RawLabToneGraphViewRange beforeViewX{},beforeViewY{};
     std::vector<bool> selected;

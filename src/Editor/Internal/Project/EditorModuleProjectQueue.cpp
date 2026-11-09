@@ -61,6 +61,10 @@ bool EditorModule::AddProjectOutputToQueue(int outputNodeId) {
         auto candidate = std::make_shared<LoadedProjectData>();
         candidate->pipelineData = SerializePipeline();
         Stack::Queue::ProjectRequest request;
+        if (const auto* source = FindRawWorkspaceSourceByKey(m_Project->rawSourceKey)) {
+            request.originalThumbnailPath = source->absolutePath;
+            request.camera = source->thumbnail.camera;
+        }
         request.outputNodeUuid = outputUuid;
         request.editRevision = m_Project->editRevision;
         request.displayName = m_Project->name.empty() ? "Untitled Project" : m_Project->name;

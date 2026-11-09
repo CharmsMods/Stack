@@ -382,7 +382,10 @@ bool ValidateHdrDisplay(int argc,char** argv) {
         float last=-1.f;
         for(unsigned x=0;x<width;++x) {
             const auto value=standard.Rgb({ramp[4*x],ramp[4*x],ramp[4*x]});
-            Check(std::isfinite(value[0])&&value[0]>=last&&value[0]>=0.f&&value[0]<=1.f,
+            // Matrix + shaped-table arithmetic can differ by a few float ULPs
+            // when Sigmoid is already at white (observed 3.6e-7). Permit less
+            // than .0003 of one 8-bit code, not a visible ramp reversal.
+            Check(std::isfinite(value[0])&&value[0]+1e-6f>=last&&value[0]>=0.f&&value[0]<=1.f,
                 "Default Sigmoid reversed or invalidated the neutral ramp");
             last=value[0];
         }
@@ -408,7 +411,29 @@ bool ValidateHdrDisplay(int argc,char** argv) {
             }
         }
         ViewTransformLayer saved;saved.Deserialize(standardSettings);
-        for(float detail:{0.f,1.f}) {
+        Check(std::abs(Stack::Hdr::SdrShoulder(1.f)-.55f)<1e-6f &&
+            std::abs(Stack::Hdr::SdrShoulder(Stack::Hdr::MasterHeadroom)-.98f)<1e-6f &&
+            Stack::Hdr::SdrShoulder(20.f)>.98f && Stack::Hdr::SdrShoulder(20.f)<1.f,
+            "SDR white placement or unclipped highlight tail failed");
+        const Stack::Hdr::PreparedSdrFinish darker({-1.f,1.f,1.f});
+        const float darkPeak=darker.Apply({}, {Stack::Hdr::MasterHeadroom,Stack::Hdr::MasterHeadroom,Stack::Hdr::MasterHeadroom})[0];
+        Check(darkPeak>.95f && darker.Apply({}, {1.f,1.f,1.f})[0]<.4f,
+            "SDR brightness failed to reserve highlight range");
+        for(float brightness:{-1.f,0.f,1.f}) {
+            const Stack::Hdr::PreparedSdrFinish colorFinish({brightness,1.f,1.f});
+            const auto bright=colorFinish.Apply({}, {4.8f,2.4f,.12f});
+            const auto dim=colorFinish.Apply({}, {2.4f,1.2f,.06f});
+            Check(.2126f*(bright[0]-dim[0])+.7152f*(bright[1]-dim[1])+.0722f*(bright[2]-dim[2])>0.f &&
+                bright[0]<=1.f &&
+                bright[1]>bright[2]+.15f && bright[0]>bright[2]+.3f,
+                "SDR finish whitened a bright color or flattened its highlight gradient");
+        }
+        const auto colorReference=Stack::Hdr::DefaultSdrFromHdr({4.8f,2.4f,.12f});
+        Check(std::abs(colorReference[0]-1.f)<.004f &&
+            std::abs(colorReference[1]-.676206f)<.004f &&
+            std::abs(colorReference[2]-.258556f)<.004f,
+            "SDR appearance table differs from the pinned perceptual reference");
+        for(float detail:{0.f,.5f,1.f}) {
             auto trimSettings=standardSettings;
             trimSettings["sdrBrightness"]=-.65f;trimSettings["sdrHighlightDetail"]=detail;
             trimSettings["sdrSaturation"]=.85f;
@@ -498,15 +523,16 @@ bool ValidateHdrDisplay(int argc,char** argv) {
 #ifdef _WIN32
         CheckNativeHdrPresentation(context.window);
 #endif
-        if(argc==2) {
-            const auto raw=std::filesystem::u8path(argv[0]),dest=std::filesystem::u8path(argv[1]);
+        const bool exportsOnly=argc==3 && std::string(argv[0])=="--exports";
+        if(argc==2 || exportsOnly) {
+            const auto raw=std::filesystem::u8path(argv[exportsOnly?1:0]),dest=std::filesystem::u8path(argv[exportsOnly?2:1]);
             struct DisplayCleanup {GLFWwindow* w; ~DisplayCleanup(){Stack::Hdr::ShutdownPresentation(w);}} cleanup{context.window};
             const auto target=Stack::Hdr::BeginWindow(context.window,32,32,true);
             ValidatePhotoExports(context.window,raw,dest);
-            if(target) CheckHdrGallery(context.window,raw);
+            if(target && !exportsOnly) CheckHdrGallery(context.window,raw);
         } else if(argc==4 && std::string(argv[0])=="--renditions") {
             ValidateHdrRenditionPair(std::filesystem::u8path(argv[1]),std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]));
-        } else if(argc) throw std::runtime_error("Expected a RAW path and output directory, or --renditions HDR-PNG SDR-PNG new-output-directory.");
+        } else if(argc) throw std::runtime_error("Expected [--exports] RAW output-directory, or --renditions HDR-PNG SDR-PNG new-output-directory.");
         return true;
     }catch(const std::exception& e){std::cerr<<"HDR display validation failed: "<<e.what()<<'\n';return false;}
 }

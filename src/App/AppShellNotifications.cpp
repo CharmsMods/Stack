@@ -118,6 +118,44 @@ void AppShell::RenderNotifications() {
     m_NotificationPresenter.RenderDialog(*m_NotificationStore, context);
 }
 
+void AppShell::ConfirmForceCloseWorkspace(std::uint64_t id) {
+    using namespace Stack::Notifications;
+    auto* workspace=FindProjectWorkspace(id);
+    if(!workspace || id==m_GalleryWorkspaceId)return;
+    const auto scope=workspace->editor->GetNotifier();
+    const auto document=workspace->editor->GetProjectDocumentId();
+    const auto generation=workspace->editor->GetProjectSession().files->load.generation;
+    const auto current=[this,id,scope,document,generation] {
+        const auto* target=FindProjectWorkspace(id);
+        return scope.Valid() && target &&
+            target->editor->GetProjectDocumentId()==document &&
+            target->editor->GetProjectSession().files->load.generation==generation;
+    };
+    NoticeSpec spec;
+    spec.title="Force close project?";
+    const auto& name=workspace->editor->GetCurrentProjectName();
+    spec.message="Force close "+(name.empty()?std::string("Untitled project"):name)+
+        "?\n\nUnsaved changes will be discarded and this project's running work will be cancelled.";
+    spec.severity=Severity::Warning;
+    spec.foreground=true;
+    ActionSpec keep;
+    keep.label="Keep open"; keep.safeCancel=true;
+    keep.invoke=[] {return ActionResult::Success();};
+    spec.actions.push_back(std::move(keep));
+    ActionSpec close;
+    close.label="Discard changes and force close";
+    close.destructive=true;
+    close.canInvoke=current;
+    close.invoke=[this,id,current] {
+        if(!current())return ActionResult::Failure("This project changed. Close it from its tab.");
+        m_PendingWorkspaceRetirement=id;
+        m_ForceWorkspaceRetirement=true;
+        return ActionResult::Success();
+    };
+    spec.actions.push_back(std::move(close));
+    scope.RequestDecision(std::move(spec));
+}
+
 void AppShell::ReportSaveFailure(EditorModule& owner, const std::string& message,
     std::function<void()> continuation) {
     using namespace Stack::Notifications;
@@ -155,6 +193,18 @@ void AppShell::ReportSaveFailure(EditorModule& owner, const std::string& message
         return accepted ? ActionResult::Pending() : ActionResult::Failure("The save could not start. Try again.");
     };
     spec.actions.push_back(std::move(retry));
+    const auto workspaceId=scope.GetOwner().id;
+    if(workspaceId!=m_GalleryWorkspaceId && FindProjectWorkspace(workspaceId)) {
+        ActionSpec discard;
+        discard.label="Force close (discard changes)";
+        discard.canInvoke=current;
+        discard.invoke=[this,current,workspaceId] {
+            if(!current())return ActionResult::Failure("This project changed. Close it from its tab.");
+            QueueWorkspaceTabAction(WorkspaceTabAction::ForceClose,workspaceId);
+            return ActionResult::Success();
+        };
+        spec.actions.push_back(std::move(discard));
+    }
     *event = scope.RequestDecision(std::move(spec));
 }
 

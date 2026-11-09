@@ -56,7 +56,7 @@
       "versionedExecutables": ["StackBurst.exe", "Stack/App/Runtime/StackBurstShell.dll"],
       "shellClsid": "{74273991-A142-4823-ABFB-66398A23FE0D}",
       "localTestShellClsid": "{44082701-6DC0-4B17-9E5E-83EE78BA7E2B}",
-      "thirdPartyIds": ["glfw", "nlohmann-json", "libraw", "opencv", "darktable-sigmoid"]
+      "thirdPartyIds": ["glfw", "nlohmann-json", "libraw", "opencv", "darktable-sigmoid", "aces-sdr-appearance"]
     }
   }
 }

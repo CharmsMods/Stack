@@ -218,6 +218,7 @@ ScanResult AggregateSourceFolders(
             source.sourceIdentityAlgorithmVersion = previous.sourceIdentityAlgorithmVersion;
             source.captureTimestamp = previous.captureTimestamp;
             source.captureMetadataChecked = previous.captureMetadataChecked;
+            source.groupingMetadata = previous.groupingMetadata;
             return true;
         };
         const auto report = [&](const ScanProgress& folderProgress) {

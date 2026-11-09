@@ -2,11 +2,13 @@
 
 #include "Queue/RenderQueueModel.h"
 #include "Queue/QueueView.h"
+#include "Queue/ExportPreferences.h"
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,6 +24,7 @@ public:
         const std::vector<Item>&)>;
 
     void SetExportRequestHandler(ExportRequest handler);
+    void InitializePreferences(const std::filesystem::path& settingsDirectory);
     void SetStatusText(const std::string& status) {
         if (m_StatusText != status) { m_StatusText = status; m_ExportState.status = status; }
     }
@@ -74,6 +77,7 @@ private:
     int m_ThumbnailFrame = -1, m_ThumbnailLoads = 0;
     QueueView m_View;
     ExportPresentation m_ExportState;
+    std::unique_ptr<ExportPreferences> m_ExportPreferences;
     std::filesystem::path m_Destination;
 };
 

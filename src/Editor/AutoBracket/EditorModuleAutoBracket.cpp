@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "AutoBracketCoordinator.h"
+#include "AutoBracketPreferences.h"
 #include "AutoBracketPresentation.h"
 #include "Editor/Bracketing/BracketingGallery.h"
 #include "Editor/Bracketing/BracketingSession.h"
@@ -47,6 +48,11 @@ bool EditorModule::TryGetBracketSidebarTexture(unsigned& texture, int& width, in
 
 void EditorModule::TickAutoBracketing(bool externalBusy) {
     if((!m_DocumentPersistenceEnabled&&!m_IsAutoBracketWorkspace)||Stack::Workspace::IsPreview())return;
+    const bool powered=Stack::AutoBracket::Preferences::Get().Enabled();
+    if(!powered && (!m_AutoBracket || (!m_AutoBracket->HasWork() && !m_AutoBracket->Yielding()))) {
+        m_AutoBracketWorkspaceRequested=false;
+        return;
+    }
     const double now=ImGui::GetTime();
     if(!m_AutoBracket) {
         m_AutoBracket=std::make_unique<Stack::AutoBracket::AutoBracketCoordinator>();
@@ -67,20 +73,19 @@ void EditorModule::TickAutoBracketing(bool externalBusy) {
     const auto root=m_RawWorkspace.workspaceRoot.lexically_normal();
     const bool rootCurrent=!m_AutoBracketWorkspaceClosing&&coordinator.SetRoot(root,now);
     const auto scan=GetRawWorkspaceScanSnapshot();
-    const bool ready=rootCurrent&&!root.empty()&&scan.completedSuccessfully&&!Async::IsBusy(scan.state)&&
+    const bool ready=powered&&rootCurrent&&!root.empty()&&scan.completedSuccessfully&&!Async::IsBusy(scan.state)&&
         GetRawWorkspaceThumbnailSnapshot().state==Async::TaskState::Idle&&!m_RawWorkspaceThumbnailWorkerActive&&
         !m_RawWorkspaceSimilarityWorkerActive&&!m_RawWorkspaceSimilarityRebuildPending&&
         m_RawWorkspaceSimilarityPublishedGeneration==m_RawWorkspaceSimilarityGeneration.load()&&
         m_RawWorkspaceSimilarityWorkspaceKey==root.generic_string();
-    // Catalog-content invalidation is shared with the navigator. Selection,
-    // folder scope and thumbnail readiness do not change bracket candidates;
-    // similarity and authored grouping changes have their own revisions.
+    // Automatic admission consumes its own capture-evidence result. Manual
+    // merges, visual stack order and folder selection cannot authorize a merge
+    // or trigger catalog-wide queue reconciliation.
     const auto catalogContentsRevision = m_RawWorkspaceNavigatorRevision;
     if(ready&&(m_AutoBracketRoot!=root.generic_string()||m_AutoBracketCatalogRevision!=catalogContentsRevision||
-        m_AutoBracketGroupingGeneration!=m_RawWorkspaceSimilarityPublishedGeneration||
-        m_AutoBracketOrganizationRevision!=m_RawWorkspaceFilmstripOrganizationRevision)) {
+        m_AutoBracketGroupingGeneration!=m_RawWorkspaceSimilarityPublishedGeneration)) {
         const auto candidates=Stack::AutoBracket::CollectCandidates(
-            m_RawWorkspace.sources,ResolveRawWorkspaceFilmstripStacks());
+            m_RawWorkspace.sources,m_RawWorkspaceBracketCandidates);
         std::unordered_map<std::string,const Stack::RawWorkspace::SourceRecord*> sourcesByKey;
         for(const auto& source:m_RawWorkspace.sources)sourcesByKey.emplace(source.relativePathKey,&source);
         std::unordered_map<std::string,std::filesystem::path> projectPaths;
@@ -165,6 +170,7 @@ bool EditorModule::TransferAutoBracketingTo(EditorModule& target) {
     target.m_RawWorkspaceThumbnailSnapshot = GetRawWorkspaceThumbnailSnapshot();
     target.m_RawWorkspaceThumbnailSnapshot.generation = target.m_RawWorkspaceThumbnailGeneration;
     target.m_RawWorkspaceSimilarityStacks = m_RawWorkspaceSimilarityStacks;
+    target.m_RawWorkspaceBracketCandidates = m_RawWorkspaceBracketCandidates;
     target.m_RawWorkspaceSimilarityWorkspaceKey = m_RawWorkspaceSimilarityWorkspaceKey;
     target.m_RawWorkspaceSimilarityGeneration.store(m_RawWorkspaceSimilarityPublishedGeneration);
     target.m_RawWorkspaceSimilarityPublishedGeneration = m_RawWorkspaceSimilarityPublishedGeneration;
@@ -246,36 +252,58 @@ bool EditorModule::IsUserStartedProcessingBusy() const {
 }
 void EditorModule::RenderAutoBracketControls(bool submenu) {
     if (submenu) {
-        if (!ImGui::BeginMenu("Auto bracket", m_AutoBracket != nullptr)) return;
+        if (!ImGui::BeginMenu("Auto bracket")) return;
     } else {
-        if (!m_AutoBracket) return;
         if (ImGui::SmallButton("Auto bracket")) ImGui::OpenPopup("Auto bracket controls");
         if (!ImGui::BeginPopup("Auto bracket controls")) return;
     }
-    {
+    auto& preferences=Stack::AutoBracket::Preferences::Get();
+    bool powered=preferences.Enabled();
+    const float unit=ImGui::GetFontSize()/16.f;
+    const float extent=30.f*unit;
+    if(ImGui::Button("##AutoBracketPower",{extent,extent})) {
+        powered=!powered;preferences.SetEnabled(powered);
+        m_AutoBracketWorkspaceRequested=false;
+        if(!powered && m_AutoBracket)m_AutoBracket->CancelCurrent();
+    }
+    const auto low=ImGui::GetItemRectMin();
+    const ImVec2 center(low.x+extent*.5f,low.y+extent*.5f);
+    auto* draw=ImGui::GetWindowDrawList();
+    const auto ink=ImGui::GetColorU32(powered?ImGuiCol_CheckMark:ImGuiCol_TextDisabled);
+    draw->PathArcTo(center,extent*.25f,-.25f*3.14159265f,1.25f*3.14159265f,24);
+    draw->PathStroke(ink,0,1.8f*unit);
+    draw->AddLine({center.x,center.y-extent*.34f},{center.x,center.y-extent*.02f},ink,1.8f*unit);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip(powered?"Turn off automatic bracketing and cancel its current work.":"Turn on automatic bracketing when the folder and computer are ready.");
+    ImGui::SameLine();ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(powered?"Automatic bracketing  On":"Automatic bracketing  Off");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+300.f*unit);
+    ImGui::TextWrapped(powered?"Starts when the folder is ready and foreground work allows it. Paused work resumes after one minute without input.":
+        "No automatic brackets will start. This stays off until you turn it back on.");
+    const auto preferenceError=preferences.Error();
+    if(!preferenceError.empty())ImGui::TextWrapped("Setting could not be saved or read: %s",preferenceError.c_str());
+    if(m_AutoBracket) {
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!powered);
         if(ImGui::Button("Run now")){m_AutoBracket->RunNow();ImGui::CloseCurrentPopup();}
         ImGui::SameLine();if(ImGui::Button(m_AutoBracket->GetQueue().paused?"Resume":"Pause until idle")) {
             if(m_AutoBracket->GetQueue().paused)m_AutoBracket->SetPaused(false);
             else m_AutoBracket->PauseUntilIdle(ImGui::GetTime());
         }
+        ImGui::EndDisabled();
         if(m_AutoBracket->HasWork()) {
             if(ImGui::Button("Show processing"))m_AutoBracketPresentation->visible=true;
             ImGui::SameLine();if(ImGui::Button("Cancel current")){m_AutoBracket->PauseUntilIdle(ImGui::GetTime());m_AutoBracket->CancelCurrent();}
         }
-        unsigned completed=0,remaining=0;
-        for(const auto& item:m_AutoBracket->GetQueue().items) {
-            completed+=item.state==Stack::AutoBracket::State::Completed;
-            remaining+=item.available&&(item.state==Stack::AutoBracket::State::Pending||item.state==Stack::AutoBracket::State::Running);
-        }
-        ImGui::Text("%u completed, %u remaining",completed,remaining);
-        ImGui::TextWrapped("Processes existing stacks throughout this folder. Each bracket is saved separately.");
-        ImGui::TextWrapped("Starts automatically when the folder is ready. After a pause or stop, resumes after one minute without input.");
+        ImGui::TextWrapped("Processes existing stacks in this folder. Each bracket is saved separately.");
         if(!m_AutoBracket->Error().empty())ImGui::TextWrapped("%s",m_AutoBracket->Error().c_str());
         RenderAutoBracketQueueItems();
-        if (submenu) ImGui::EndMenu();
-        else ImGui::EndPopup();
     }
+    ImGui::PopTextWrapPos();
+    if (submenu) ImGui::EndMenu();
+    else ImGui::EndPopup();
 }
+
 void EditorModule::RenderAutoBracketQueueItems() {
     if(!m_AutoBracket)return;
     const auto& queue=m_AutoBracket->GetQueue();

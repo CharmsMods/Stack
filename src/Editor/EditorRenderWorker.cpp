@@ -1,4 +1,5 @@
 #include "Hdr/PhotoPreview.h"
+#include "Hdr/GraphView.h"
 #include "Hdr/Presentation.h"
 #include "Renderer/RawCandidateRenderer.h"
 #include "Editor/CompositePixels.h"
@@ -3231,11 +3232,14 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 }
             }
             if (snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport &&
-                snapshot.rawWorkspace.exportFormat != Stack::Hdr::FileFormat::SdrPng) {
+                (Stack::Hdr::IsHdr(snapshot.rawWorkspace.exportFormat) ||
+                 snapshot.rawWorkspace.exportFormat==Stack::Hdr::FileFormat::SdrJpeg ||
+                 Stack::Hdr::NeedsSdrPhotoView(snapshot.graph) ||
+                 Stack::NodeMath::EvaluateDirectPngOutputPolicy(snapshot.graph.outputDescriptor).writeSrgbChunk)) {
                 result.success = Stack::EditorRendering::ReadHdrExport(
                     pipeline, snapshot.graph, snapshot.rawWorkspace.exportFormat, result);
                 result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
-                finishProgressStep(result.success ? "HDR image rendered." : "HDR export failed.");
+                finishProgressStep(result.success ? "Photo export rendered." : "Photo export failed.");
                 return result;
             }
             if(Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic &&

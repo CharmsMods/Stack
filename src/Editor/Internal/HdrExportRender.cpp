@@ -11,7 +11,7 @@ bool ReadHdrExport(RenderPipeline& pipeline, const RenderGraphSnapshot& graph,
     const auto render = [&](float headroom, bool encodeSrgb) {
         auto rendition = graph;
         if (!Hdr::ConfigureView(rendition, headroom, encodeSrgb)) {
-            result.error = "HDR export needs a color image with a supported final View or a declared HDR output.";
+            result.error = "Photo export needs a color image with a supported final View or a declared display output.";
             return false;
         }
         pipeline.ExecuteGraph(rendition);
@@ -27,13 +27,14 @@ bool ReadHdrExport(RenderPipeline& pipeline, const RenderGraphSnapshot& graph,
         }
         return true;
     };
-    if (format == Hdr::FileFormat::GainMapJpeg) {
+    if (format == Hdr::FileFormat::GainMapJpeg || !Hdr::IsHdr(format)) {
         if (!render(1.f, true)) return false;
         result.pixels = pipeline.GetOutputPixelsTiledPbo(result.width, result.height);
         if (!PixelBuffer::HasCompletePixelBuffer(result.pixels.size(), result.width, result.height, 4)) {
-            result.error = "Could not read the SDR base of the gain-map JPEG.";
+            result.error = "Could not read the full-resolution SDR rendition.";
             return false;
         }
+        if(!Hdr::IsHdr(format)) return true;
     }
     if (!render(Hdr::MasterHeadroom, false)) return false;
     auto& image = result.hdrExportImage;

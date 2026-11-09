@@ -30,10 +30,15 @@ enum class ItemState {
     Failed
 };
 
+inline bool CanExport(ItemState state) {
+    return state == ItemState::Waiting || state == ItemState::Failed || state == ItemState::Complete;
+}
+
 struct Item {
     std::uint64_t id = 0;
     ItemKind kind = ItemKind::Project;
     std::filesystem::path path;
+    std::filesystem::path originalThumbnailPath;
     std::string displayName;
     std::string projectId;
     std::shared_ptr<const std::vector<unsigned char>> thumbnailBytes;

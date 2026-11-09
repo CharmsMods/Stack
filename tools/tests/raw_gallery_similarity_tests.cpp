@@ -71,6 +71,10 @@ Stack::RawWorkspace::RawGallerySimilarityInput Input(
     input.folderKey = std::move(folder);
     input.catalogIndex = index;
     input.descriptor = std::move(descriptor);
+    input.captureTimestamp=1700000000+static_cast<std::int64_t>(index);
+    input.capture.checked=true;input.capture.make="Camera";input.capture.model="Model A";
+    input.capture.width=6000;input.capture.height=4000;
+    input.capture.shutter=.01;input.capture.aperture=8;input.capture.iso=100;
     return input;
 }
 
@@ -144,8 +148,8 @@ bool TestDescriptorAndGrouping() {
             captureSequenceVariation)
     });
     if (!Check(
-            stacks.size() == 1u,
-            "short camera capture sequence groups composition changes")) {
+            stacks.size() == 2u,
+            "filename sequence cannot bypass visual evidence")) {
         return false;
     }
 
@@ -164,6 +168,53 @@ bool TestDescriptorAndGrouping() {
     return Check(
         stacks.size() == 2u,
         "capture sequence time gap separates different shoots");
+}
+
+bool TestCaptureBoundariesAndBracketSeparation() {
+    using namespace Stack::RawWorkspace;
+    const auto pixels=MakeScene(80,64,false,1,0,false);
+    const auto descriptor=Describe(pixels,80,64);
+    auto a=Input("a","shoot",0,descriptor),b=Input("b","shoot",1,descriptor),c=Input("c","shoot",2,descriptor);
+    const auto evaluate=[](std::vector<RawGallerySimilarityInput> inputs) {
+        RawGallerySimilarityRequest request;request.inputs=std::move(inputs);return BuildRawGallerySimilarityResult(request);
+    };
+    auto result=evaluate({a,b,c});
+    if(!Check(result.stacks.size()==1&&result.bracketCandidates.empty(),"same exposure visual stack is not an automatic bracket"))return false;
+    a.capture.shutter=.0025;c.capture.shutter=.04;
+    result=evaluate({a,b,c});
+    if(!Check(result.stacks.size()==1&&result.bracketCandidates.size()==1&&result.bracketCandidates[0].sourceKeys.size()==3,"exposure bracket independently admitted"))return false;
+    auto late=c;late.sourceKey="late";late.captureTimestamp+=60;
+    if(!Check(evaluate({a,late}).stacks.size()==2,"same scene across time boundary stays separate"))return false;
+    auto other=b;other.capture.model="Model B";
+    if(!Check(evaluate({a,other}).stacks.size()==2,"camera boundary"))return false;
+    other=b;other.captureTimestamp=0;
+    if(!Check(evaluate({a,other}).stacks.size()==2&&evaluate({a,other}).bracketCandidates.empty(),"missing capture time never guessed from name"))return false;
+    other=b;other.capture.model.clear();
+    if(!Check(evaluate({a,other}).stacks.size()==2,"missing camera remains separate"))return false;
+    other=b;other.capture.aperture=4;
+    if(!Check(evaluate({a,other}).bracketCandidates.empty(),"aperture change not auto admitted"))return false;
+    auto d=a,e=b,f=c;d.sourceKey="d";e.sourceKey="e";f.sourceKey="f";
+    d.captureTimestamp+=3;e.captureTimestamp+=3;f.captureTimestamp+=3;
+    if(!Check(evaluate({a,b,c,d,e,f}).bracketCandidates.size()==2,"repeated bracket cycles separated"))return false;
+    RawGalleryManualGrouping manual;manual.stacks={{"a","late"}};manual.detachedSourceKeys={"b"};
+    const std::vector<RawGallerySimilarityInput> catalog={a,b,c,late};
+    result=evaluate(catalog);
+    const auto resolved=ApplyRawGalleryManualGrouping(result.stacks,catalog,manual);
+    bool preserved=false,detached=false;
+    for(const auto& stack:resolved){preserved|=stack.sourceKeys==std::vector<std::string>{"a","late"};detached|=stack.sourceKeys==std::vector<std::string>{"b"};}
+    if(!Check(preserved&&detached&&result.bracketCandidates.size()==1,"manual overrides retained without rewriting bracket evidence"))return false;
+    auto nightA=a,nightB=b,nightC=c;
+    nightA.capture.shutter=8;nightB.capture.shutter=16;nightC.capture.shutter=32;
+    nightB.captureTimestamp=nightA.captureTimestamp+9;nightC.captureTimestamp=nightA.captureTimestamp+26;
+    if(!Check(evaluate({nightA,nightB,nightC}).bracketCandidates.size()==1,"long exposure timing includes shutter duration"))return false;
+    std::vector<RawGallerySimilarityInput> chain;
+    for(int i=0;i<8;++i){auto x=b;x.sourceKey=std::to_string(i);x.captureTimestamp+=i*8;chain.push_back(x);}
+    if(!Check(evaluate(chain).stacks.size()>1,"adjacent matches cannot chain across the stack time limit"))return false;
+    RawGallerySimilarityRequest cancelled;cancelled.inputs={a,b,c};
+    const auto abandoned=BuildRawGallerySimilarityResult(cancelled,[]{return true;});
+    if(!Check(abandoned.stacks.empty()&&abandoned.bracketCandidates.empty(),"cancelled requests publish neither grouping"))return false;
+    GalleryCaptureMetadata restored;const nlohmann::json tags=a.capture;from_json(tags,restored);
+    return Check(restored.checked&&restored.model==a.capture.model&&restored.shutter==a.capture.shutter,"capture metadata round trip");
 }
 
 bool TestPersistenceAndDeterminism() {
@@ -433,8 +484,8 @@ bool TestFilmstripOrganization() {
     if (!Check(
             anchors(Stack::RawWorkspace::SortRawGalleryFilmstripStacks(
                 stacks, sources, organization)) ==
-                std::vector<std::string>({ "d", "a", "c" }),
-            "default timeline sorts by time")) return false;
+                std::vector<std::string>({ "a", "c", "d" }),
+            "missing capture times retain deterministic catalog order")) return false;
     auto captureSources = sources;
     captureSources[0].captureTimestamp = 100;
     captureSources[1].captureTimestamp = 101;
@@ -443,13 +494,13 @@ bool TestFilmstripOrganization() {
     if (!Check(
             anchors(Stack::RawWorkspace::SortRawGalleryFilmstripStacks(
                 stacks, captureSources, organization)) ==
-                std::vector<std::string>({ "a", "d", "c" }),
-            "timeline uses capture metadata and falls back to file modification time")) return false;
+                std::vector<std::string>({ "c", "a", "d" }),
+            "timeline is newest first with unknown capture dates last")) return false;
     organization.sortMode = RawGalleryFilmstripSortMode::TimelineByFolder;
     if (!Check(
             anchors(Stack::RawWorkspace::SortRawGalleryFilmstripStacks(
                 stacks, captureSources, organization)) ==
-                std::vector<std::string>({ "d", "c", "a" }),
+                std::vector<std::string>({ "c", "d", "a" }),
             "folder timeline keeps folders together and sorts their capture times")) return false;
     organization.sortMode = RawGalleryFilmstripSortMode::FileNameAscending;
     if (!Check(
@@ -593,8 +644,8 @@ bool TestAllGallerySortModes() {
         stacks.push_back({source.folderKey, source.catalogIndex, {source.sourceKey}});
     struct Expected { RawGalleryFilmstripSortMode mode; const char* keys; };
     const Expected cases[] {
-        {RawGalleryFilmstripSortMode::TimelineAll, "bdcae"},
-        {RawGalleryFilmstripSortMode::TimelineByFolder, "ebdca"},
+        {RawGalleryFilmstripSortMode::TimelineAll, "acbde"},
+        {RawGalleryFilmstripSortMode::TimelineByFolder, "ebdac"},
         {RawGalleryFilmstripSortMode::Manual, "cabde"},
         {RawGalleryFilmstripSortMode::FileNameAscending, "cbdea"},
         {RawGalleryFilmstripSortMode::FileNameDescending, "aebdc"},
@@ -759,7 +810,7 @@ bool TestGalleryRestorationPolicy() {
 } // namespace
 
 int main() {
-    if (!TestDescriptorAndGrouping() ||
+    if (!TestCaptureBoundariesAndBracketSeparation() || !TestDescriptorAndGrouping() ||
         !TestPersistenceAndDeterminism() ||
         !TestManualGrouping() ||
         !TestFilmstripOrganization() ||

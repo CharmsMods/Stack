@@ -52,6 +52,9 @@ Item MakeProjectItem(const std::filesystem::path& path) {
         item.displayName = record.displayName.empty()
             ? item.displayName : record.displayName;
         item.projectId = record.projectId;
+        for (const auto& source : record.sources) {
+            if (!source.originalPath.empty()) { item.originalThumbnailPath = source.originalPath; break; }
+        }
         if (!record.coverThumbnailBytes.empty())
             item.thumbnailBytes = std::make_shared<const std::vector<unsigned char>>(
                 std::move(record.coverThumbnailBytes));
@@ -64,6 +67,7 @@ Item MakeSourceItem(const Stack::RawGalleryQueue::SourceRequest& source) {
     item.kind = ItemKind::SourceImage;
     item.path = NormalizePath(source.sourcePath);
     item.displayName = item.path.stem().u8string();
+    item.originalThumbnailPath = item.path;
     item.camera = source.camera;
     if (item.camera.bytes) return item;
     auto thumbnail = ReadThumbnailBytes(source.thumbnailPath);
@@ -131,8 +135,14 @@ Stack::RawGalleryQueue::Result RenderQueueModel::AddProjectSnapshot(
     Item item;
     item.kind = ItemKind::ProjectSnapshot;
     item.projectSnapshot = request.snapshot;
+    item.originalThumbnailPath = request.originalThumbnailPath;
+    item.camera = request.camera;
     item.path = std::filesystem::path(request.snapshot->projectFileName);
     item.projectId = request.snapshot->projectId;
+    if (item.originalThumbnailPath.empty() && request.snapshot->decodedRawSource)
+        item.originalThumbnailPath = std::filesystem::u8path(request.snapshot->decodedRawSource->metadata.sourcePath);
+    if (item.originalThumbnailPath.empty() && !item.path.empty())
+        item.originalThumbnailPath = MakeProjectItem(item.path).originalThumbnailPath;
     item.displayName = request.displayName.empty()
         ? request.snapshot->projectName : request.displayName;
     if (item.displayName.empty()) item.displayName = "Untitled Project";
@@ -238,7 +248,7 @@ std::vector<Item> RenderQueueModel::ClaimForExport(const std::vector<Item>& requ
         const auto item = std::find_if(m_Items.begin(), m_Items.end(),
             [&](const Item& candidate) { return candidate.id == request.id; });
         if (item == m_Items.end() ||
-            (item->state != ItemState::Waiting && item->state != ItemState::Failed)) continue;
+            !CanExport(item->state)) continue;
         item->state = ItemState::Queued;
         item->progress = 0.0f;
         item->exportFormat = request.exportFormat;
@@ -275,7 +285,7 @@ void RenderQueueModel::SetSelected(std::uint64_t id, bool selected) {
     const auto item = std::find_if(m_Items.begin(), m_Items.end(),
         [&](const Item& candidate) { return candidate.id == id; });
     if (item != m_Items.end() && item->selected != selected &&
-        (item->state == ItemState::Waiting || item->state == ItemState::Failed)) {
+        CanExport(item->state)) {
         item->selected = selected;
         ++m_Revision;
         ++m_PresentationRevision;
@@ -286,7 +296,7 @@ void RenderQueueModel::SetAllSelected(bool selected) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     bool changed = false;
     for (Item& item : m_Items) {
-        if (item.state != ItemState::Waiting && item.state != ItemState::Failed) continue;
+        if (!CanExport(item.state)) continue;
         if (item.selected == selected) continue;
         item.selected = selected;
         changed = true;
@@ -370,8 +380,7 @@ bool RenderQueueModel::HasSelectedWaitingItems() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     return std::any_of(m_Items.begin(), m_Items.end(), [](const Item& item) {
         return item.selected &&
-            (item.state == ItemState::Waiting ||
-             item.state == ItemState::Failed);
+            CanExport(item.state);
     });
 }
 

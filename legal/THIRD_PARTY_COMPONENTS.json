@@ -2,6 +2,20 @@
   "schemaVersion": 1,
   "components": [
     {
+      "id": "aces-sdr-appearance",
+      "name": "ACES 2 perceptual functions / OpenColorIO generated SDR table",
+      "version": "OpenColorIO 2.6.0; Stack tone and chroma policy, generated table only",
+      "homepage": "https://github.com/AcademySoftwareFoundation/OpenColorIO/tree/v2.6.0",
+      "license": "BSD-3-Clause and Apache-2.0",
+      "copyright": "Copyright Contributors to OpenColorIO and Contributors to ACES; Stack adaptations 2026",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "OpenColorIO-BSD-3-Clause.txt",
+        "ACES-Apache-2.0.txt"
+      ]
+    },
+    {
       "id": "darktable-sigmoid",
       "name": "darktable Sigmoid curve and hue correction adaptation",
       "version": "local 2026-11-02 sigmoid.c reference; zero-skew SDR subset",

@@ -1,5 +1,6 @@
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
 #include "AutoBracketCoordinator.h"
+#include "AutoBracketPreferences.h"
 #include "App/AppPaths.h"
 #include "Async/TaskSystem.h"
 #include "Persistence/ProjectIndex.h"
@@ -163,8 +164,10 @@ void AutoBracketCoordinator::Begin(Item& item,const Raw::OpenGlTaskExecutor& exe
     }
 }
 void AutoBracketCoordinator::Tick(double now,bool ready,bool foregroundBusy,const Raw::OpenGlTaskExecutor& executor,const std::string& foregroundProjectId) {
+    const bool powered=Preferences::Get().Enabled();
+    if(!powered)CancelCurrent();
     // Sample system headroom at a bounded cadence, never once per frame.
-    if (now>=nextMemoryCheck_) {
+    if ((powered || work_) && now>=nextMemoryCheck_) {
         nextMemoryCheck_=now+.5;
         const bool demand=work_ || std::any_of(queue_.items.begin(),queue_.items.end(),
             [](const auto& item){return item.available && item.state==State::Pending;});
@@ -204,7 +207,7 @@ void AutoBracketCoordinator::Tick(double now,bool ready,bool foregroundBusy,cons
     Begin(*item,executor);
 }
 bool AutoBracketCoordinator::CanStartWork(double now,bool ready,bool foregroundBusy,const std::string& foregroundProjectId) const {
-    if(memoryConstrained_||now<resourceResumeAt_||work_||completed_||pendingAction_||!loaded_||queue_.root.empty()||storageBlocked_||!ready||foregroundBusy)return false;
+    if(!Preferences::Get().Enabled()||memoryConstrained_||now<resourceResumeAt_||work_||completed_||pendingAction_||!loaded_||queue_.root.empty()||storageBlocked_||!ready||foregroundBusy)return false;
     if(queue_.paused&&(!queue_.resumeWhenIdle||IdleSeconds(now)<kResumeIdleSeconds))return false;
     return std::any_of(queue_.items.begin(),queue_.items.end(),[&](const auto& item){
         return IsPendingWorkEligible(item,foregroundProjectId);

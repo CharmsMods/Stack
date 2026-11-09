@@ -1,4 +1,5 @@
 #include "Raw/ViewTransform.h"
+#include "Hdr/SdrAppearanceTexture.h"
 #include "ToneLayers.h"
 
 #include "Renderer/FullscreenQuad.h"
@@ -895,6 +896,7 @@ void ToneEqualizerLayer::Execute(unsigned int inputTexture, int width, int heigh
 
 ViewTransformLayer::~ViewTransformLayer() {
     if (m_ShaderProgram) glDeleteProgram(m_ShaderProgram);
+    if (m_SdrAppearanceTexture) glDeleteTextures(1,&m_SdrAppearanceTexture);
 }
 
 void ViewTransformLayer::InitializeGL() {
@@ -909,6 +911,9 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
         DrawTonePassthrough(inputTexture, quad);
         return;
     }
+    if(m_HdrHeadroom<=1.f && (m_DisplayLinearInput || m_SdrHighlightDetail>0.f) && !m_SdrAppearanceTexture)
+        m_SdrAppearanceTexture=Stack::Hdr::CreateSdrAppearanceTexture();
+    const Stack::Hdr::SdrAppearanceBinding appearanceBinding(m_SdrAppearanceTexture);
     glUseProgram(m_ShaderProgram);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -922,7 +927,9 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDisplayLinearInput"), m_DisplayLinearInput);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uHdrHeadroom"), m_HdrHeadroom);
-    glUniform3f(glGetUniformLocation(m_ShaderProgram, "uSdrTrim"), m_SdrBrightness, m_SdrHighlightDetail, m_SdrSaturation);
+    const auto sdr = Stack::Hdr::PreparedSdrFinish({m_SdrBrightness,m_SdrHighlightDetail,m_SdrSaturation}).Uniforms();
+    glUniform3f(glGetUniformLocation(m_ShaderProgram, "uSdrTrim"), sdr[0], sdr[1], sdr[2]);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uSdrAppearance"), 1);
     const auto sigmoid = Raw::SigmoidDisplay::PreparedCurve(
         m_MiddleGrey, m_Contrast, m_Exposure, m_ContrastPivotEv).Coefficients();
     glUniform4f(glGetUniformLocation(m_ShaderProgram, "uSigmoidParameters"),

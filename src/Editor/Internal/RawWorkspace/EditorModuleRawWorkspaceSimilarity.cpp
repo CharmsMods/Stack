@@ -41,7 +41,7 @@ EditorModule::ResolveRawWorkspaceFilmstripStacks() const {
         automaticStacks,
         catalog,
         organization);
-    // The source gallery and automatic queue share the original grouping.
+    // Visual/manual grouping and automatic bracket candidates are independent.
     // Saved results are presented in the Bracket category.
     auto& sortSources = m_RawWorkspaceFilmstripSortSources;
     sortSources.clear();
@@ -267,6 +267,7 @@ void EditorModule::ResetRawWorkspaceSimilarityStacks(bool preserveCurrentStacks)
         if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey.clear();
         m_RawWorkspaceSimilarityStacks.clear();
+        m_RawWorkspaceBracketCandidates.clear();
     }
     m_RawWorkspaceSimilarityRebuildPending = false;
     m_RawWorkspaceSimilarityActiveSourceCount = 0;
@@ -292,6 +293,7 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
         if (!m_RawWorkspaceSimilarityStacks.empty()) ++m_RawWorkspaceFilmstripOrganizationRevision;
         m_RawWorkspaceSimilarityWorkspaceKey = workspaceKey;
         m_RawWorkspaceSimilarityStacks.clear();
+        m_RawWorkspaceBracketCandidates.clear();
         return;
     }
 
@@ -313,6 +315,8 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
         input.sourceKey = source.relativePathKey;
         input.folderKey = source.parentFolderKey;
         input.catalogIndex = index;
+        input.captureTimestamp = source.captureTimestamp;
+        input.capture = source.groupingMetadata;
         input.descriptor = source.thumbnail.similarityDescriptor.IsValid()
             ? source.thumbnail.similarityDescriptor
             : source.transientThumbnail.similarityDescriptor;
@@ -331,7 +335,9 @@ void EditorModule::RequestRawWorkspaceSimilarityRebuild() {
                 bool completed = false;
                 try {
                     result = Stack::RawWorkspace::BuildRawGallerySimilarityResult(
-                        request);
+                        request, [this, generation=request.generation] {
+                            return generation!=m_RawWorkspaceSimilarityGeneration.load(std::memory_order_relaxed);
+                        });
                     completed = true;
                 } catch (...) {
                 }
@@ -392,5 +398,6 @@ void EditorModule::ApplyPendingRawWorkspaceSimilarityResult() {
     m_RawWorkspaceSimilarityPublishedGeneration = result.generation;
     m_RawWorkspaceSimilarityWorkspaceKey = std::move(result.workspaceKey);
     m_RawWorkspaceSimilarityStacks = std::move(result.stacks);
+    m_RawWorkspaceBracketCandidates = std::move(result.bracketCandidates);
     m_RawWorkspaceSimilarityLastStackCount = m_RawWorkspaceSimilarityStacks.size();
 }

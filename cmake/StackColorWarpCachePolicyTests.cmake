@@ -1,6 +1,6 @@
 add_executable(StackColorWarpCachePolicyTests
     tools/tests/color_warp_cache_policy_tests.cpp
-    src/Raw/RawDevelopmentRecipe.cpp src/Raw/Tone/SceneTone.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
+    src/Hdr/SdrAppearance.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/Tone/SceneTone.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
     src/Raw/RawColorWarpMask.cpp src/Raw/ImageGuidance.cpp
     src/Raw/RawZoneAreaRecipe.cpp
     src/Raw/RawZoneAreaGain.cpp

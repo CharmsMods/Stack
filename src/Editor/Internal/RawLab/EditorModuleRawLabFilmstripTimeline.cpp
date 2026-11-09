@@ -1,5 +1,6 @@
 #include "App/UiPerformanceProbe.h"
 #include "Editor/EditorModule.h"
+#include "Raw/GalleryDateLabels.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
 #include <algorithm>
@@ -291,10 +292,11 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
         drawLine(label.time, origin.y + fontSize + 2.0f);
     }
     if (!labelHovered) {
+        Stack::RawWorkspace::GalleryCalendarRevision();
         ImVec4 idleColor = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
         idleColor.w *= 1.0f - std::min(1.0f, hoverOpacity);
         float lastLabelRight = left - 1000.0f;
-        int previousDay = std::numeric_limits<int>::min();
+        std::string previousGroup;
         for (std::size_t index = visibleEntries.first;
              index < visibleEntries.second;
              ++index) {
@@ -302,13 +304,10 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
                 m_RawWorkspaceLabFilmstripTimelineEntries[index];
             const float itemX = imageCenterX(index);
             if (itemX < left || itemX > right) continue;
-            std::tm localTime {};
-            if (!ToLocalTime(entry.firstTimestamp, localTime)) continue;
-            const int day = localTime.tm_year * 366 + localTime.tm_yday;
-            if (day == previousDay) continue;
-            previousDay = day;
-            const std::string label =
-                DateTimeLabel(entry.firstTimestamp, true);
+            const auto& date=Stack::RawWorkspace::FriendlyGalleryDate(entry.firstTimestamp);
+            if(date.key==previousGroup)continue;
+            previousGroup=date.key;
+            const std::string& label=date.label;
             const float labelWidth = ImGui::CalcTextSize(label.c_str()).x;
             const float x = std::clamp(
                 itemX - labelWidth * 0.5f,

@@ -2,6 +2,8 @@
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Hdr/ImageFile.h"
+#include "Hdr/GraphView.h"
+#include "Hdr/RasterSource.h"
 #include "Project/GraphImagePayload.h"
 #include <algorithm>
 #include <stdexcept>
@@ -18,11 +20,26 @@ inline void CheckHdrFileReopen(const std::vector<unsigned char>& file, const Hdr
             render.sourceDescriptor.transfer.value.kind!=NodeMath::TransferKind::Linear ||
             render.sourceDescriptor.color.value.identity!="srgb-d65" || !render.sourceDescriptor.range.value.allowsAboveNominal)
             throw std::runtime_error("HDR image lost its original file, display rendition, or declared color domain.");
+        RenderGraphSnapshot sdrGraph;
+        RenderGraphNode source;source.nodeId=1;source.kind=RenderGraphNodeKind::Image;
+        source.image=render;source.image.useHdrPixels=true;
+        sdrGraph.nodes.push_back(std::move(source));sdrGraph.outputNodeId=1;
+        sdrGraph.outputSocketId="imageOut";sdrGraph.outputDescriptor=render.sourceDescriptor;
+        if(!Hdr::NeedsSdrPhotoView(sdrGraph) || !Hdr::ConfigureView(sdrGraph,1.f,true) ||
+            sdrGraph.nodes[0].image.useHdrPixels ||
+            !NodeMath::EvaluateDirectPngOutputPolicy(sdrGraph.outputDescriptor).writeSrgbChunk)
+            throw std::runtime_error("Imported HDR source did not select and declare its SDR rendition.");
+        const bool pq=Hdr::IsPqPng(file);
         for(int y:{0,upright.height/2,upright.height-1}) for(int x:{0,upright.width/2,upright.width-1}) {
             const size_t src=(size_t(y)*upright.width+x)*4;
             const size_t dst=(size_t(upright.height-y-1)*upright.width+x)*4;
             if(!std::equal(upright.rgba.begin()+src,upright.rgba.begin()+src+4,render.hdrPixels->begin()+dst))
                 throw std::runtime_error("HDR image rows or straight-alpha samples changed on reopen.");
+            if(pq) {
+                const auto rgb=Hdr::SdrPreviewRgb({upright.rgba[src],upright.rgba[src+1],upright.rgba[src+2]},Hdr::FileFormat::PqPng);
+                for(int c=0;c<3;++c) if(loaded.pixels[dst+c]!=Hdr::SdrPreviewByte(rgb[c]))
+                    throw std::runtime_error("Imported PQ image lost its shared SDR finish.");
+            }
         }
     };
     nlohmann::json stored;

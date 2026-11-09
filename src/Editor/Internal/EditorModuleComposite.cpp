@@ -1385,7 +1385,7 @@ void EditorModule::UseCompositeViewAsExportBounds(const ImVec2& canvasSize) {
     SyncCompositeExportResolutionFromWidth();
 }
 
-bool EditorModule::ValidateCompositePngExport(std::string& error) {
+bool EditorModule::ValidateCompositePngExport(std::string& error, bool requireSrgb) {
     error.clear();
     EnsureCompositeSceneState(ImVec2(0.0f, 0.0f));
     if (!RefreshCompositeMetadataCacheIfNeeded()) {
@@ -1416,6 +1416,10 @@ bool EditorModule::ValidateCompositePngExport(std::string& error) {
         if (!Stack::EditorRendering::ValidateCompositePngInput(outputNodeId,
                 rendered == snapshot.nodes.end() ? nullptr : &rendered->semanticDescriptor,
                 pixelsCurrent, error)) {
+            return false;
+        }
+        if(requireSrgb && !Stack::NodeMath::EvaluateDirectPngOutputPolicy(rendered->semanticDescriptor).writeSrgbChunk) {
+            error="SDR JPEG requires every visible composite input to be sRGB encoded. Convert its Image Output or choose PNG.";
             return false;
         }
     }

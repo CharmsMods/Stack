@@ -6,7 +6,7 @@ add_custom_command(OUTPUT "${view_transform_graph_test}"
         src/Editor/Internal/RawLab/EditorModuleRawLabView.cpp
         src/Editor/Internal/EditorModuleRawWorkspaceLab.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
     VERBATIM)
-add_executable(StackViewTransformGraphTests "${view_transform_graph_test}")
+add_executable(StackViewTransformGraphTests "${view_transform_graph_test}" src/Hdr/SdrAppearance.cpp)
 target_include_directories(StackViewTransformGraphTests PRIVATE src)
 target_link_libraries(StackViewTransformGraphTests PRIVATE imgui_core)
 add_test(NAME StackRaw.ViewTransformGraph COMMAND StackViewTransformGraphTests)

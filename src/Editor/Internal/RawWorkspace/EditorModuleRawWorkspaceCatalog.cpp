@@ -61,6 +61,7 @@ struct RawWorkspaceCachedSourceIdentity {
     int algorithmVersion = 0;
     std::int64_t captureTimestamp = 0;
     bool captureMetadataChecked = false;
+    Stack::RawWorkspace::GalleryCaptureMetadata groupingMetadata;
 };
 
 void SetRawWorkspaceStatusNoThrow(
@@ -201,7 +202,8 @@ std::filesystem::path EditorModule::GetRawWorkspaceAppStatePath() const {
 Stack::RawWorkspace::AppState
 EditorModule::BuildRawWorkspaceAppStateSnapshot() const {
     Stack::RawWorkspace::AppState appState;
-    appState.lastWorkspaceRoot = m_RawWorkspace.workspaceRoot;
+    appState.lastWorkspaceRoot = m_PermanentGalleryWorkspace && m_RawGalleryFolderFilter
+        ? m_RawWorkspace.workspaceRoot/std::filesystem::u8path(*m_RawGalleryFolderFilter) : m_RawWorkspace.workspaceRoot;
     appState.recentWorkspaceRoots = m_RawWorkspace.recentWorkspaceRoots;
     appState.registeredSourceFolders = m_RawWorkspace.registeredSourceFolders;
     appState.allSourceFolders = m_RawWorkspace.allSourceFolders;
@@ -212,6 +214,7 @@ EditorModule::BuildRawWorkspaceAppStateSnapshot() const {
     appState.rawLabLowerShelfOpen = m_RawWorkspaceLabUi.lowerShelfOpen;
     appState.rawLabToolRailOnRight = m_RawWorkspaceLabUi.toolRailOnRight;
     appState.rawLabFilmstripHeight = m_RawWorkspaceLabUi.filmstripHeight;
+    appState.galleryIncludeSubfolders=m_RawGalleryIncludeSubfolders;
     appState.rawLabGalleryThumbnailScale =
         m_RawWorkspaceLabUi.galleryThumbnailScale;
     appState.rawLabActiveTool =
@@ -386,7 +389,7 @@ bool EditorModule::RequestOpenRawWorkspaceSourceForEditing(
             selected && Stack::RawWorkspace::IsGalleryRasterPath(selected->absolutePath)) {
             CloseRawWorkspaceGalleryWorkspace();
             RequestOpenEditorTab();
-            RequestLoadSourceImage(selected->absolutePath.u8string());
+            RequestLoadSourceImage(selected->absolutePath.u8string(), true);
             return true;
         }
         m_RawWorkspaceExplicitReplacementSourceKey = sourceKey;
@@ -593,6 +596,7 @@ void EditorModule::LoadRawWorkspaceAppState() {
         appState.rawLabFilmstripHeight > 0.0f ? appState.rawLabFilmstripHeight : 132.0f,
         96.0f,
         280.0f);
+    m_RawGalleryIncludeSubfolders=appState.galleryIncludeSubfolders;
     m_RawWorkspaceLabUi.galleryThumbnailScale = std::clamp(
         appState.rawLabGalleryThumbnailScale > 0.0f
             ? appState.rawLabGalleryThumbnailScale
@@ -875,10 +879,21 @@ void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& selected
                 !Stack::RawWorkspace::LoadGalleryState(layout,grouping,&error))ready=gallery;
             roots.push_back(root);roots=Stack::RawWorkspace::NormalizeSourceFolders(roots);
         }catch(const std::exception& e){error=e.what();ready=false;}
-        auto apply=[this,generation,root,grouping=std::move(grouping),roots=std::move(roots),error,ready]() mutable {
+        auto apply=[this,generation,root,selectedFolder,gallery,grouping=std::move(grouping),roots=std::move(roots),error,ready]() mutable {
             if(generation!=m_RawWorkspaceFolderOpenGeneration)return;
             if(!error.empty())PostNotification(ready?UiNotificationSeverity::Warning:UiNotificationSeverity::Error,error,"gallery-state-load");
-            if(ready)ApplyRawWorkspaceFolder(root,std::move(grouping),std::move(roots));
+            if(ready) {
+                ApplyRawWorkspaceFolder(root,std::move(grouping),std::move(roots));
+                if(gallery) {
+                    // Storage may belong to an ancestor. Browse the clicked
+                    // directory without moving project/catalog ownership.
+                    const auto relative=selectedFolder.lexically_normal().lexically_relative(root.lexically_normal());
+                    m_RawGalleryFolderTree.workspaceKey=GetRawWorkspaceGalleryScopeKey();
+                    m_RawGalleryFolderTree.revision=std::numeric_limits<std::uint64_t>::max();
+                    if(!relative.empty() && relative!="." && !relative.is_absolute() && *relative.begin()!="..")
+                        m_RawGalleryFolderFilter=relative.generic_u8string();
+                }
+            }
             else {
                 std::lock_guard lock(m_RawWorkspaceScanMutex);
                 m_RawWorkspaceScanSnapshot.state=Async::TaskState::Failed;
@@ -963,9 +978,9 @@ void EditorModule::ApplyRawWorkspaceFolder(const std::filesystem::path& workspac
     RequestRawWorkspaceScan();
 }
 
-void EditorModule::RequestRawWorkspaceScan() {
+void EditorModule::RequestRawWorkspaceScan(bool allowCachedCatalog) {
     try {
-        RequestRawWorkspaceScanImpl();
+        RequestRawWorkspaceScanImpl(allowCachedCatalog);
     } catch (...) {
         std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
         const std::uint64_t generation = ++m_RawWorkspaceScanGeneration;
@@ -981,7 +996,7 @@ void EditorModule::RequestRawWorkspaceScan() {
     }
 }
 
-void EditorModule::RequestRawWorkspaceScanImpl() {
+void EditorModule::RequestRawWorkspaceScanImpl(bool allowCachedCatalog) {
     // An explicit reconnect/rescan retries failed tiles without discarding
     // successful resident images. No recurring drive polling is necessary.
     for(auto& item:m_RawWorkspaceThumbnailTextures)
@@ -994,7 +1009,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
     ResetRawWorkspaceSimilarityStacks(true);
 
     const std::filesystem::path workspaceRoot = m_RawWorkspace.workspaceRoot;
-    const bool allowCatalogWarmStart = m_RawWorkspace.sources.empty();
+    const bool allowCatalogWarmStart = allowCachedCatalog && m_RawWorkspace.sources.empty();
     std::unordered_map<std::string, RawWorkspaceCachedSourceIdentity>
         reusableIdentities;
     reusableIdentities.reserve(m_RawWorkspace.sources.size());
@@ -1007,7 +1022,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                 source.fingerprint,
                 source.sourceIdentityAlgorithmVersion,
                 source.captureTimestamp,
-                source.captureMetadataChecked });
+                source.captureMetadataChecked, source.groupingMetadata });
     }
 
     std::uint64_t generation = 0;
@@ -1096,7 +1111,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                                         source.fingerprint,
                                         source.sourceIdentityAlgorithmVersion,
                                         source.captureTimestamp,
-                                        source.captureMetadataChecked };
+                                        source.captureMetadataChecked, source.groupingMetadata };
                             }
                             ProjectTasks().PostToMain([
                                 this,
@@ -1333,10 +1348,49 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                         source.captureTimestamp = cached->second.captureTimestamp;
                         source.captureMetadataChecked =
                             cached->second.captureMetadataChecked;
+                        source.groupingMetadata = cached->second.groupingMetadata;
                         return true;
                     };
 
                     std::function<void(const std::vector<Stack::RawWorkspace::SourceRecord>&)> publishListing;
+                    std::function<void(std::vector<Stack::RawWorkspace::SourceRecord>)> publishListingBatch;
+                    if (galleryBrowse) publishListingBatch = [this, generation](auto batch) {
+                        if (!ProjectTasks().PostToMain([this, generation, batch = std::move(batch)]() mutable {
+                            {
+                                std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+                                if (generation != m_RawWorkspaceScanGeneration) return;
+                                m_RawWorkspaceScanSnapshot.sourcesPublished = true;
+                            }
+                            // Append discoveries without dropping warm entries that the
+                            // scanner has not reached. Reconcile removals only when the
+                            // complete listing arrives. Index per batch, not per tile.
+                            std::unordered_map<std::string, std::size_t> indices;
+                            indices.reserve(m_RawWorkspace.sources.size() + batch.size());
+                            for (std::size_t index = 0; index < m_RawWorkspace.sources.size(); ++index)
+                                indices.emplace(m_RawWorkspace.sources[index].relativePathKey, index);
+                            bool changed = false;
+                            for (auto& source : batch) {
+                                const auto found = indices.find(source.relativePathKey);
+                                if (found == indices.end()) {
+                                    indices.emplace(source.relativePathKey, m_RawWorkspace.sources.size());
+                                    m_RawWorkspace.sources.push_back(std::move(source));
+                                    changed = true;
+                                } else {
+                                    auto& previous = m_RawWorkspace.sources[found->second];
+                                    if (previous.absolutePath != source.absolutePath ||
+                                        previous.fileSizeBytes != source.fileSizeBytes ||
+                                        previous.modifiedTimeTicks != source.modifiedTimeTicks) {
+                                        previous = std::move(source);
+                                        changed = true;
+                                    } else if (previous.modifiedUnixSeconds == 0 && source.modifiedUnixSeconds != 0) {
+                                        previous.modifiedUnixSeconds = source.modifiedUnixSeconds;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            if (changed) InvalidateRawWorkspaceGalleryPresentation();
+                        })) throw std::runtime_error("Could not publish discovered Gallery images.");
+                    };
                     if (galleryBrowse) publishListing = [this, generation, workspaceRoot, &isScanCancelled](const auto& sources) {
                         // Discover manifests before hashing every original. These
                         // path/size associations are browsing hints, not asset
@@ -1384,7 +1438,7 @@ void EditorModule::RequestRawWorkspaceScanImpl() {
                             updateProgress,
                             isScanCancelled,
                             sourceReady,
-                            reuseSourceIdentity, galleryBrowse, std::move(publishListing));
+                            reuseSourceIdentity, galleryBrowse, std::move(publishListing), std::move(publishListingBatch));
 
                     if (!flushProgressiveBatch(result.layout) &&
                         !isScanCancelled()) {

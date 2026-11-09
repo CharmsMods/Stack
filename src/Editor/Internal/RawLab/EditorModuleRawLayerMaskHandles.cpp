@@ -197,6 +197,10 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         const auto& original = m_RawLayerMaskDragOriginal;
         const float a = original.angle*pi/180;
         const float c = std::cos(a), s = std::sin(a);
+        const float originalScale=std::max(.001f,original.scale);
+        const float correction=(original.centerX-.5f)*c+(original.centerY-.5f)*s+original.offset/originalScale;
+        const float originalCenterX=original.centerX-c*correction;
+        const float originalCenterY=original.centerY-s*correction;
         const auto point = generatorPoint(mouse), start = generatorPoint(m_RawLayerMaskDragStart);
         const float dx = point.x-start.x, dy = point.y-start.y;
         if (m_RawLayerMaskDrag == MaskPlacementDrag) {
@@ -215,16 +219,32 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
                 changed.offset -= (dx*c+dy*s)*original.scale;
             }
             else if (m_RawLayerMaskDrag == 7) {
-                changed.angle = original.angle + (std::atan2(point.y-centerV,point.x-centerU) -
-                    std::atan2(start.y-centerV,start.x-centerU))*180/pi;
+                // A bounded tangential drag has no angular singularity at the
+                // center. Near-center drags become progressively less sensitive.
+                const float sx=start.x-originalCenterX, sy=start.y-originalCenterY;
+                const float radius=std::hypot(sx,sy);
+                const float reference=std::max(.12f,.5f/std::max(.1f,original.scale));
+                const float denominator=std::max(radius*radius,reference*reference);
+                changed.angle=original.angle+.25f*(sx*dy-sy*dx)/denominator*180/pi;
                 const float angle = changed.angle*pi/180;
-                changed.offset = -((centerU-.5f)*std::cos(angle)+(centerV-.5f)*std::sin(angle))*changed.scale;
+                changed.offset = -((originalCenterX-.5f)*std::cos(angle)+(originalCenterY-.5f)*std::sin(angle))*changed.scale;
             }
             else {
                 const int fixedEnd = m_RawLayerMaskDrag == 1 ? 2 : 1;
-                const ImVec2 fixed = generatorPoint(handles[fixedEnd]);
-                if (fixedEnd == 1) PlaceLayerMask(changed, kind, fixed, point);
-                else PlaceLayerMask(changed, kind, point, fixed);
+                const float sign=fixedEnd==1?-1.f:1.f;
+                const ImVec2 fixed(originalCenterX+sign*c*.5f/originalScale,originalCenterY+sign*s*.5f/originalScale);
+                // Scale along the original axis; damp the tangential component
+                // so resizing a short gradient does not whip its rotation.
+                const float along=dx*c+dy*s, across=-dx*s+dy*c;
+                const float radius=std::hypot(start.x-originalCenterX,start.y-originalCenterY);
+                const float gain=.25f*std::clamp(radius/.15f,0.f,1.f);
+                const float movingSign=-sign;
+                const float span=std::max(.01f,1.f/originalScale+movingSign*along);
+                const float sideways=across*gain*std::min(1.f,span*originalScale);
+                const ImVec2 gentle(fixed.x+movingSign*c*span-s*sideways,
+                    fixed.y+movingSign*s*span+c*sideways);
+                if (fixedEnd == 1) PlaceLayerMask(changed, kind, fixed, gentle);
+                else PlaceLayerMask(changed, kind, gentle, fixed);
             }
         } else if (m_RawLayerMaskDrag == 0) {
             changed.centerX = std::clamp(original.centerX+dx,-2.0f,3.0f);

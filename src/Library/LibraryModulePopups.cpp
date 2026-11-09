@@ -150,7 +150,9 @@ void LibraryModule::RequestDeleteItems(std::vector<std::string> fileNames, bool 
             ImGui::TextWrapped("%s", request->remaining.front().c_str());
         } else {
             ImGui::BeginChild("##DeleteItems", ImVec2(0.0f, std::min(180.0f, request->remaining.size() * ImGui::GetTextLineHeightWithSpacing())), true);
+            ImGui::PushTextWrapPos(0.f);
             for (const auto& name : request->remaining) ImGui::BulletText("%s", name.c_str());
+            ImGui::PopTextWrapPos();
             ImGui::EndChild();
         }
     };
@@ -251,15 +253,16 @@ void LibraryModule::DrawImportConflictComparison(std::uint64_t id) {
     const ImVec2 previewAreaSize(available.x, std::max(100.0f, std::min(320.0f, available.y - detailsHeight - 12.0f)));
         ImGui::BeginChild("ConflictPreview", previewAreaSize, true);
         if (!conflict.previewsReady && !conflict.previewFailed) {
+            ImGui::TextWrapped("Preparing comparison previews...");
             manager.PrepareConflictPreview(currentIndex);
         } else if (conflict.localPreviewTex && conflict.importedPreviewTex) {
             ImVec2 imageSize = FitImageToBounds(
                 static_cast<float>(conflict.localWidth),
                 static_cast<float>(conflict.localHeight),
-                previewAreaSize);
+                ImGui::GetContentRegionAvail());
 
-            ImGui::SetCursorPosX((previewAreaSize.x - imageSize.x) * 0.5f);
-            ImGui::SetCursorPosY((previewAreaSize.y - imageSize.y) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX()+(ImGui::GetContentRegionAvail().x-imageSize.x)*.5f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(ImGui::GetContentRegionAvail().y-imageSize.y)*.5f);
 
             ImGui::InvisibleButton("##ConflictWipe", imageSize);
             const ImRect rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
@@ -282,8 +285,10 @@ void LibraryModule::DrawImportConflictComparison(std::uint64_t id) {
             DrawSplitHandle(drawList, rect, m_ConflictCompareSplit, handleId, hovered, active);
 
             // Labels
-            drawList->AddText(ImVec2(rect.Min.x + 15, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Imported");
-            drawList->AddText(ImVec2(rect.Max.x - 120, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Existing");
+            if(rect.GetWidth()>ImGui::CalcTextSize("Imported").x+30.f)
+                drawList->AddText(ImVec2(rect.Min.x + 15, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Imported");
+            if(rect.GetWidth()>ImGui::CalcTextSize("Imported").x+ImGui::CalcTextSize("Existing").x+45.f)
+                drawList->AddText(ImVec2(rect.Max.x-ImGui::CalcTextSize("Existing").x-15.f,rect.Min.y+15.f),IM_COL32(255,255,255,255),"Existing");
         } else if (conflict.previewFailed) {
             ImGui::TextWrapped("%s", conflict.previewStatusText.empty()
                 ? "Failed to generate comparison previews for this conflict."
@@ -299,19 +304,21 @@ void LibraryModule::DrawImportConflictComparison(std::uint64_t id) {
 
         if (ImGui::CollapsingHeader("Compare details")) {
         ImGui::BeginChild("ConflictDetails", ImVec2(0, detailsHeight), true);
-        ImGui::Columns(2, "DetailsSplit", false);
+        const bool sideBySide=ImGui::GetContentRegionAvail().x>32.f*ImGui::GetFontSize();
+        ImGui::Columns(sideBySide?2:1, "DetailsSplit", false);
+        ImGui::PushTextWrapPos(0.f);
         ImGui::Text("Existing");
         ImGui::TextDisabled("Modified: %s", conflict.localTimestamp.c_str());
         ImGui::TextDisabled("Resolution: %d x %d", conflict.localWidth, conflict.localHeight);
 
-        ImGui::NextColumn();
+        if(sideBySide)ImGui::NextColumn(); else ImGui::Spacing();
         ImGui::Text("Imported");
         ImGui::TextDisabled("Modified: %s", conflict.importedTimestamp.c_str());
         ImGui::TextDisabled("Resolution: %d x %d", conflict.importedWidth, conflict.importedHeight);
         if (conflict.areIdentical) {
-            ImGui::SameLine();
             ImGui::TextDisabled("Identical");
         }
+        ImGui::PopTextWrapPos();
         ImGui::Columns(1);
         ImGui::EndChild();
         }
@@ -329,15 +336,16 @@ void LibraryModule::DrawAssetConflictComparison(std::uint64_t id) {
     const ImVec2 previewAreaSize(available.x, std::max(100.0f, std::min(320.0f, available.y - detailsHeight - 12.0f)));
         ImGui::BeginChild("AssetConflictPreview", previewAreaSize, true);
         if (!conflict.previewsReady) {
+            ImGui::TextWrapped("Preparing comparison previews...");
             manager.PrepareAssetConflictPreview(currentIndex);
         } else if (conflict.localPreviewTex && conflict.importedPreviewTex) {
             ImVec2 imageSize = FitImageToBounds(
                 static_cast<float>(std::max(conflict.localWidth, conflict.importedWidth)),
                 static_cast<float>(std::max(conflict.localHeight, conflict.importedHeight)),
-                previewAreaSize);
+                ImGui::GetContentRegionAvail());
 
-            ImGui::SetCursorPosX((previewAreaSize.x - imageSize.x) * 0.5f);
-            ImGui::SetCursorPosY((previewAreaSize.y - imageSize.y) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX()+(ImGui::GetContentRegionAvail().x-imageSize.x)*.5f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(ImGui::GetContentRegionAvail().y-imageSize.y)*.5f);
             ImGui::InvisibleButton("##AssetConflictWipe", imageSize);
             const ImRect rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
             const ImGuiID handleId = ImGui::GetItemID();
@@ -358,8 +366,10 @@ void LibraryModule::DrawAssetConflictComparison(std::uint64_t id) {
             drawList->PopClipRect();
             DrawSplitHandle(drawList, rect, m_AssetConflictCompareSplit, handleId, hovered, active);
 
-            drawList->AddText(ImVec2(rect.Min.x + 15, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Imported");
-            drawList->AddText(ImVec2(rect.Max.x - 130, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Existing");
+            if(rect.GetWidth()>ImGui::CalcTextSize("Imported").x+30.f)
+                drawList->AddText(ImVec2(rect.Min.x + 15, rect.Min.y + 15), IM_COL32(255, 255, 255, 255), "Imported");
+            if(rect.GetWidth()>ImGui::CalcTextSize("Imported").x+ImGui::CalcTextSize("Existing").x+45.f)
+                drawList->AddText(ImVec2(rect.Max.x-ImGui::CalcTextSize("Existing").x-15.f,rect.Min.y+15.f),IM_COL32(255,255,255,255),"Existing");
         } else {
             ImGui::TextWrapped("Comparison previews are unavailable. You can still choose which asset to keep.");
         }
@@ -367,21 +377,23 @@ void LibraryModule::DrawAssetConflictComparison(std::uint64_t id) {
 
         if (ImGui::CollapsingHeader("Compare details")) {
         ImGui::BeginChild("AssetConflictDetails", ImVec2(0, detailsHeight), true);
-        ImGui::Columns(2, "AssetConflictSplit", false);
+        const bool sideBySide=ImGui::GetContentRegionAvail().x>32.f*ImGui::GetFontSize();
+        ImGui::Columns(sideBySide?2:1, "AssetConflictSplit", false);
+        ImGui::PushTextWrapPos(0.f);
         ImGui::Text("Existing");
         ImGui::TextDisabled("%s", conflict.localDisplayName.c_str());
         ImGui::TextDisabled("Saved: %s", conflict.localTimestamp.c_str());
         ImGui::TextDisabled("Resolution: %d x %d", conflict.localWidth, conflict.localHeight);
 
-        ImGui::NextColumn();
+        if(sideBySide)ImGui::NextColumn(); else ImGui::Spacing();
         ImGui::Text("Imported");
         ImGui::TextDisabled("%s", conflict.importedDisplayName.c_str());
         ImGui::TextDisabled("Saved: %s", conflict.importedTimestamp.c_str());
         ImGui::TextDisabled("Resolution: %d x %d", conflict.importedWidth, conflict.importedHeight);
         if (conflict.areIdentical) {
-            ImGui::SameLine();
             ImGui::TextDisabled("Identical");
         }
+        ImGui::PopTextWrapPos();
         ImGui::Columns(1);
         ImGui::EndChild();
         }

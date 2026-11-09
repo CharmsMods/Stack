@@ -476,6 +476,8 @@ add_custom_target(StackRuntimePayload
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-GPL-3.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/LibRaw-Demosaic-NOTICE.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/Darktable-GPL-3.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/ACES-Apache-2.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenColorIO-BSD-3-Clause.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-Apache-2.0.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-COPYRIGHT.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-zlib.txt"
@@ -809,6 +811,7 @@ if (BUILD_TESTING)
     include(cmake/StackRailNavigationIntentTests.cmake)
     add_executable(StackRawGallerySimilarityTests
         tools/tests/raw_gallery_similarity_tests.cpp
+        src/Raw/GalleryDateLabels.cpp
         src/Raw/RawGalleryFilmstripOrganization.cpp
         src/Raw/RawGallerySimilarity.cpp)
     target_include_directories(StackRawGallerySimilarityTests PRIVATE src)

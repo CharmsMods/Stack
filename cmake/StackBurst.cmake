@@ -4,6 +4,7 @@ file(GLOB_RECURSE STACK_BURST_PROCESSING_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Bracketing/*.cpp")
 
 set(STACK_BURST_SOURCE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Hdr/SdrAppearance.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/burst/StackBurstMain.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/Protocol.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/BurstEngine/WireData.cpp"

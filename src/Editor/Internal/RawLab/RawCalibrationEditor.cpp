@@ -1,5 +1,6 @@
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
 #include <imgui_internal.h>
+#include "Library/LibraryControls.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -17,18 +18,28 @@ bool DrawCalibrationEditor(RawRecipe::RawColorCalibrationRecipe& recipe,
     const ImVec2 center = bounds.GetCenter();
     const float screenRadius = std::max(1.f, std::min(size.x, size.y) * .5f - 14.f);
     auto primaries = ColorCalibrationPrimaries(recipe);
-    // Fit externally changed or re-opened values without changing the recipe.
-    if (state.dragging < 0) {
-        if (fixedFit) state.radius=.65;
-        for (const auto& p : primaries) {
-            const double extent = std::hypot(p[0]-kCalibrationWhite[0], p[1]-kCalibrationWhite[1]);
-            if (std::isfinite(extent) && extent > state.radius) state.radius = extent * 1.12;
-        }
+    const int frame=ImGui::GetFrameCount();
+    if(state.lastFrame+1!=frame || fixedFit || !enabled || !ImGui::IsItemVisible() || io.AppFocusLost || ImGui::IsMouseDown(0))state.zoomActive=false;
+    state.lastFrame=frame;
+    double minimumRadius=.001;
+    if(state.dragging<0)for(const auto& p:primaries) {
+        const double extent=std::hypot(p[0]-kCalibrationWhite[0],p[1]-kCalibrationWhite[1]);
+        if(std::isfinite(extent))minimumRadius=std::max(minimumRadius,extent*1.12);
     }
-    if (!fixedFit && hovered && state.dragging < 0 && io.MouseWheel != 0 && !io.KeyAlt) {
+    if(state.zoomActive) {
+        const double t=std::clamp((ImGui::GetTime()-state.zoomStarted)/.16,0.,1.);
+        state.radius=state.zoomFrom+(state.zoomTarget-state.zoomFrom)*(1-std::pow(1-t,3));
+        if(t>=1) {state.radius=state.zoomTarget;state.zoomActive=false;}
+    }
+    if(state.dragging<0)state.radius=std::max(fixedFit?.65:state.radius,minimumRadius);
+    if (!fixedFit && enabled && hovered && state.dragging < 0 && io.MouseWheel != 0 && !io.KeyAlt) {
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-        const double radius = state.radius * std::exp(-double(io.MouseWheel) * .15);
-        if (std::isfinite(radius) && radius > std::numeric_limits<double>::min()) state.radius = radius;
+        const double radius=(state.zoomActive?state.zoomTarget:state.radius)*std::exp(-double(io.MouseWheel)*.15);
+        if(std::isfinite(radius) && radius>0) {
+            state.zoomFrom=state.radius;state.zoomTarget=std::max(radius,minimumRadius);
+            state.zoomStarted=ImGui::GetTime();state.zoomActive=!LibraryUi::ReducedMotion();
+            if(!state.zoomActive)state.radius=state.zoomTarget;
+        }
     }
     const double scale = screenRadius / state.radius;
     const auto position = [&](const std::array<double,2>& xy) {

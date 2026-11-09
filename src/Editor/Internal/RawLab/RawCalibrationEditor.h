@@ -6,13 +6,16 @@
 
 namespace Stack::Editor::RawLabInternal {
 struct CalibrationEditorState {
-    void EndInteraction() { dragging=-1; dialGesture=false; }
+    void EndInteraction() { dragging=-1; dialGesture=false; zoomActive=false; }
     std::string source;
     int dragging = -1;
     int selected = -1;
     bool dialGesture = false;
     float dialPhase = 0.f;
     double radius = .65;
+    bool zoomActive = false;
+    double zoomFrom=.65,zoomTarget=.65,zoomStarted=0;
+    int lastFrame=-1;
     RawRecipe::RawColorCalibrationRecipe gestureStart;
     RawRecipe::RawColorCalibrationRecipe checkedRecipe;
     Raw::RawWorkingSpace checkedSpace{};

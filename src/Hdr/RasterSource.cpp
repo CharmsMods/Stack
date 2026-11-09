@@ -1,5 +1,6 @@
 #include "Hdr/RasterSource.h"
 #include "Hdr/Color.h"
+#include "Hdr/SdrFinish.h"
 #include "NodeMath/SourceColorMetadata.h"
 #include "ThirdParty/stb_image.h"
 #include <lcms2.h>
@@ -45,12 +46,10 @@ struct Transform {
 };
 }
 
-unsigned char SdrPreviewByte(float v,FileFormat source) {
-    constexpr float grey=.1845f;
-    if(source==FileFormat::PqPng && v>grey) {
-        const float slope=1.f/(1.f-grey)-1.f/(MasterHeadroom-grey);
-        v=grey+(v-grey)/(1.f+(v-grey)*slope);
-    }
+Rgb SdrPreviewRgb(Rgb value,FileFormat source) {
+    return source==FileFormat::PqPng ? DefaultSdrFromHdr(value) : value;
+}
+unsigned char SdrPreviewByte(float v) {
     return static_cast<unsigned char>(std::lround(255.f*std::clamp(Srgb(v),0.f,1.f)));
 }
 bool DecodeDisplaySource(const std::vector<unsigned char>& bytes, Image& result, FileFormat* format) {
@@ -58,7 +57,9 @@ bool DecodeDisplaySource(const std::vector<unsigned char>& bytes, Image& result,
     if(format) *format=FileFormat::SdrPng;
     if(IsPqPng(bytes)) { result=DecodePqPng(bytes); if(format) *format=FileFormat::PqPng; return true; }
     if(IsGainMapJpeg(bytes)) { result=DecodeGainMapJpeg(bytes); if(format) *format=FileFormat::GainMapJpeg; return true; }
-    return DecodeProfiledSdr(bytes,result);
+    if(!DecodeProfiledSdr(bytes,result)) return false;
+    if(format && bytes.size()>2 && bytes[0]==255 && bytes[1]==216) *format=FileFormat::SdrJpeg;
+    return true;
 }
 bool DecodeProfiledSdr(const std::vector<unsigned char>& bytes,Image& result) {
     if(bytes.empty() || bytes.size()>INT_MAX) return false;

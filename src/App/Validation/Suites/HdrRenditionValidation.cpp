@@ -1,7 +1,12 @@
 #include "HdrRenditionValidation.h"
+#include "HdrRenditionComparison.h"
 #include "Hdr/ImageFile.h"
 #include "Hdr/SdrFinish.h"
 #include "Hdr/GainMapPreview.h"
+#include "Hdr/RasterSource.h"
+#include "Queue/ExportPreferences.h"
+#include "NodeMath/PngMetadataWriter.h"
+#include "Utils/PngEncodingUtils.h"
 #include "Platform/ImGuiWindowColor.h"
 #include "Renderer/FullscreenQuad.h"
 #include "Renderer/GLHelpers.h"
@@ -83,19 +88,23 @@ void main(){Frag_UV=UV;Frag_Color=vec4(1);gl_Position=vec4(Position,0,1);}
 void ValidateHdrRenditionPair(const std::filesystem::path& hdrPath,
     const std::filesystem::path& sdrPath,const std::filesystem::path& output) {
     Require(!std::filesystem::exists(output),"Choose a new rendition-check output folder.");
-    auto hdr=Hdr::DecodePqPng(Read(hdrPath));
+    Hdr::Image hdr;Hdr::FileFormat hdrFormat;
+    Require(Hdr::DecodeDisplaySource(Read(hdrPath),hdr,&hdrFormat) && Hdr::IsHdr(hdrFormat),
+        "The supplied HDR rendition must be a PQ PNG or gain-map JPEG.");
     const auto old=Read(sdrPath);
     int w=0,h=0,c=0;
     stbi_set_flip_vertically_on_load_thread(0);
     std::unique_ptr<unsigned char,decltype(&stbi_image_free)> base(
         stbi_load_from_memory(old.data(),int(old.size()),&w,&h,&c,4),stbi_image_free);
     Require(base && w==hdr.width && h==hdr.height,"Supplied rendition dimensions differ.");
-    Hdr::SdrTrim trim{0.f,1.f,1.f};
+    const Hdr::PreparedSdrFinish finish;
     std::vector<unsigned char> sdr(hdr.rgba.size());
     for(std::size_t i=0;i<sdr.size();i+=4) {
         Hdr::Rgb a{},b{};
         for(int k=0;k<3;++k) {a[k]=Hdr::Linear(base.get()[i+k]/255.f);b[k]=hdr.rgba[i+k];}
-        const auto rgb=Hdr::FinishSdr(a,b,trim);
+        const auto rgb=finish.Apply(a,b);
+        const auto imported=Hdr::SdrPreviewRgb(b,Hdr::FileFormat::PqPng);
+        for(int k=0;k<3;++k) Require(std::abs(rgb[k]-imported[k])<1e-6f,"Imported PQ fallback differs from SDR finish.");
         for(int k=0;k<3;++k) sdr[i+k]=static_cast<unsigned char>(std::lround(255.f*Hdr::Srgb(rgb[k])));
         sdr[i+3]=base.get()[i+3];
     }
@@ -125,7 +134,39 @@ void ValidateHdrRenditionPair(const std::filesystem::path& hdrPath,
     std::ofstream f(jpg,std::ios::binary);f.write(reinterpret_cast<const char*>(jpeg.data()),jpeg.size());
     Require(bool(f),"Could not write gain-map inspection file.");f.close();
     const auto png=output/"SDR.png";
-    Require(stbi_write_png(png.u8string().c_str(),w,h,4,sdr.data(),w*4)!=0,"Could not write SDR inspection file.");
+    NodeMath::PngColorMetadataChunks metadata;metadata.writeSrgb=true;
+    std::vector<NodeMath::ContractIssue> issues;
+    const auto pngBytes=NodeMath::InsertPngColorMetadataChunks(PngEncoding::EncodeInterleaved(sdr,w,h,4),metadata,issues);
+    Require(!pngBytes.empty() && issues.empty(),"Could not encode tagged SDR inspection PNG.");
+    std::ofstream pf(png,std::ios::binary);
+    pf.write(reinterpret_cast<const char*>(pngBytes.data()),pngBytes.size());
+    pf.close();Require(bool(pf),"Could not write SDR inspection file.");
+    const auto sdrJpeg=Hdr::EncodeSdrJpeg(w,h,sdr);
+    Require(!Hdr::IsGainMapJpeg(sdrJpeg),"SDR JPEG unexpectedly contains a gain map.");
+    Hdr::Image profiled;
+    Require(Hdr::DecodeProfiledSdr(sdrJpeg,profiled) && profiled.width==w && profiled.height==h,
+        "SDR JPEG sRGB profile or extent did not reopen.");
+    std::ofstream sf(output/"SDR.jpg",std::ios::binary);
+    sf.write(reinterpret_cast<const char*>(sdrJpeg.data()),sdrJpeg.size());
+    sf.close();Require(bool(sf),"Could not write SDR JPEG inspection file.");
+    WriteHdrRenditionComparison(hdr,jpeg,sdr,output);
+    sdr[3]=128;
+    bool alphaRejected=false;
+    try {Hdr::EncodeSdrJpeg(w,h,sdr);} catch(const std::exception&) {alphaRejected=true;}
+    Require(alphaRejected,"SDR JPEG silently discarded transparency.");
+    const auto preferences=output/"QueueExportSettings.json";
+    {
+        Queue::ExportPreferences settings(preferences);
+        Require(settings.Read()==Hdr::FileFormat::GainMapJpeg,"Queue initial default is not HDR JPEG.");
+        settings.Set(Hdr::FileFormat::SdrPng);
+        settings.Set(Hdr::FileFormat::SdrJpeg);
+        Require(settings.Flush().empty(),"Queue setting could not be saved.");
+    }
+    {
+        Queue::ExportPreferences restored(preferences);
+        Require(restored.Read()==Hdr::FileFormat::SdrJpeg,"Queue format did not survive owner restart.");
+    }
+    std::cout<<"SDR JPEG profile, alpha rejection, imported PQ parity and Queue preference reload passed.\n";
     std::cout<<"Wrote "<<jpg.u8string()<<" and "<<png.u8string()<<". Original renditions unchanged.\n";
 }
 }

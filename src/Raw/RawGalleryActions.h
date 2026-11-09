@@ -30,6 +30,7 @@ enum class ItemKind { Source, Project };
 struct Item {
     ItemKind kind = ItemKind::Source;
     std::filesystem::path path;
+    std::filesystem::path sourceRoot;
     std::string sourceKey;
     std::filesystem::path thumbnailPath;
     bool canCopyEdits = false;

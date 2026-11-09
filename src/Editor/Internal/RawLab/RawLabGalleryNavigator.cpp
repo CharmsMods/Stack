@@ -33,21 +33,6 @@ void GalleryNavigator::PreparePalette(ImVec4 surface) {
     m_Control = Header::Blend(surface, m_Text, .035f);
 }
 
-void GalleryNavigator::PrepareRows(GalleryFolderTree& tree) {
-    if (m_TreeSerial == tree.serial && !m_RowsDirty) return;
-    m_TreeSerial = tree.serial;
-    m_RowsDirty = false;
-    m_Rows.clear();
-    m_Rows.push_back({&tree.root, 0});
-    const auto append = [&](const auto& self, GalleryFolderTree::Folder& parent, int depth) -> void {
-        for (auto& [label, child] : parent.children) {
-            m_Rows.push_back({&child, depth});
-            if (child.expanded) self(self, child, depth + 1);
-        }
-    };
-    append(append, tree.root, 0);
-}
-
 void GalleryNavigator::Text(const char* text, ImVec2 minimum, ImVec2 maximum, bool secondary) {
     ImGui::PushStyleColor(ImGuiCol_Text, secondary ? m_Secondary : m_Text);
     ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), minimum, maximum,
@@ -71,7 +56,9 @@ bool GalleryNavigator::Button(const char* id, const char* label, Ui::Icon icon,
     const auto ink = [&](ImVec4 color) { color.w *= alpha; return ImGui::ColorConvertFloat4ToU32(color); };
     if (selected && !control) draw->AddRectFilled(ImVec2(minimum.x, minimum.y + 9 * m_Unit),
         ImVec2(minimum.x + 2 * m_Unit, maximum.y - 9 * m_Unit), ink(m_Text), m_Unit);
-    const bool hasLabel = label[0] != '\0';
+    const bool hasLabel = label[0] != '\0' && (!control ||
+        ImGui::CalcTextSize(label).x + 41 * m_Unit <= maximum.x - minimum.x);
+    if (!hasLabel && label[0] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", label);
     const float iconLeft = control ? ((maximum.x - minimum.x) -
         (hasLabel ? ImGui::CalcTextSize(label).x + 25 * m_Unit : 17 * m_Unit)) * .5f : (10 + leading) * m_Unit;
     Ui::DrawIcon(icon, ImVec2(minimum.x + iconLeft, (minimum.y + maximum.y - 17 * m_Unit) * .5f),
@@ -101,7 +88,7 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     GalleryNavigatorAction result;
     m_Unit = ImGui::GetFontSize() / 16.f;
     PreparePalette(surface);
-    PrepareRows(tree);
+
     const bool compact = ImGui::GetWindowHeight() < 560 * m_Unit;
     const bool hasSource = !tree.workspaceRoot.empty();
     const float rowHeight = (compact ? 30.f : 32.f) * m_Unit;
@@ -113,129 +100,54 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5 * m_Unit);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
-    for (int index = 0; index < 3; ++index) {
-        ImGui::PushID(index);
-        if (Button("##Category", CategoryLabels[index], CategoryIcons[index],
-                ImVec2(-1, rowHeight), static_cast<int>(category) == index,
-                hasSource ? (selectedFolder ? selectedFolder->countLabels[index].c_str() : "0") : nullptr))
-            result.category = static_cast<Mode>(index);
-        ImGui::PopID();
-        if (index != 2) Space(2 * m_Unit);
-    }
-    Space((compact ? 10 : 20) * m_Unit);
-    const auto heading = ImGui::GetCursorScreenPos();
-    const float width = ImGui::GetContentRegionAvail().x;
-    ImGui::PushFont(nullptr, 12 * m_Unit);
-    ImGui::SetCursorScreenPos(ImVec2(heading.x + 4 * m_Unit, heading.y + 6 * m_Unit));
-    ImGui::TextColored(m_Secondary, "Source folders");
-    ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
-    if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
-        result.openFolder = true;
-    Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::BrowseButton);
-    const auto browse=ImGui::GetItemRectMin(),browseMax=ImGui::GetItemRectMax();
-    result.browseMinimum={browse.x+10*m_Unit,(browse.y+browseMax.y-17*m_Unit)*.5f};
-    result.browseMaximum={result.browseMinimum.x+17*m_Unit,result.browseMinimum.y+17*m_Unit};
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose or add a source folder");
-    ImGui::PopFont();
-    ImGui::SetCursorScreenPos(ImVec2(heading.x, heading.y + (compact ? 28 : 34) * m_Unit));
-    if (hasSource) {
-        const auto origin = ImGui::GetCursorScreenPos();
-        Ui::DrawIcon(Ui::Icon::Folder, ImVec2(origin.x + 8 * m_Unit, origin.y + 5 * m_Unit),
-            18 * m_Unit, ImGui::GetColorU32(m_Secondary));
-        Text(tree.sourceName.c_str(), ImVec2(origin.x + 34 * m_Unit, origin.y),
-            ImVec2(origin.x + width - 8 * m_Unit, origin.y + 20 * m_Unit));
-        ImGui::Dummy(ImVec2(width, 20 * m_Unit));
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tree.fullPath.c_str());
-        if (!compact) {
-            ImGui::PushFont(nullptr, 12 * m_Unit);
-            Text(tree.parentPath.c_str(), ImVec2(origin.x + 34 * m_Unit, origin.y + 22 * m_Unit),
-                ImVec2(origin.x + width - 8 * m_Unit, origin.y + 38 * m_Unit), true);
-            ImGui::PopFont();
-            Space(18 * m_Unit);
-        }
-        Space((compact ? 8 : 14) * m_Unit);
-    }
-    const float footerHeight = 88 * m_Unit;
-    const float bodyHeight = std::max(1.f, ImGui::GetContentRegionAvail().y - footerHeight - 12 * m_Unit);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 10 * m_Unit);
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 5 * m_Unit);
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, Header::Blend(m_Surface, m_Text, .26f));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, Header::Blend(m_Surface, m_Text, .4f));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, Header::Blend(m_Surface, m_Text, .55f));
-    if (ImGui::BeginChild("FolderBrowser", ImVec2(0, bodyHeight), ImGuiChildFlags_None,
-            ImGuiWindowFlags_NoBackground)) {
-        if (!hasSource) {
-            ImGui::TextWrapped("Choose a folder to browse its original images, saved projects, and brackets.");
-            Space(12 * m_Unit);
-            if (Button("##ChooseFolder", "Browse source folders", Ui::Icon::AllFolders, ImVec2(-1, 32 * m_Unit)))
-                result.openFolder = true;
-        } else {
-            ImGuiListClipper clipper;
-            const float folderHeight = 32 * m_Unit;
-            clipper.Begin(static_cast<int>(m_Rows.size()), folderHeight);
-            while (clipper.Step()) for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
-                const auto& row = m_Rows[index];
-                auto& folder = *row.folder;
-                const bool all = row.folder == &tree.root;
-                const auto origin = ImGui::GetCursorScreenPos();
-                const float indent = std::min((all ? 0.f : row.depth * 16.f) * m_Unit,
-                    std::max(0.f, ImGui::GetContentRegionAvail().x - 144 * m_Unit));
-                const float available = ImGui::GetContentRegionAvail().x;
-                if (all) ImGui::PushID("AllFolders");
-                else ImGui::PushOverrideID(ImHashData(folder.key.data(), folder.key.size(),
-                    ImGui::GetCurrentWindow()->IDStack.back()));
-                ImGui::SetCursorScreenPos(ImVec2(origin.x + indent, origin.y));
-                const bool selected = all ? !filter : filter && *filter == folder.key;
-                const bool clicked = Button("##Folder", folder.label.c_str(), all ? Ui::Icon::AllFolders : Ui::Icon::Folder,
-                        ImVec2(std::max(1.f, available - indent), folderHeight), selected,
-                        folder.countLabels[static_cast<int>(category)].c_str(), ButtonLayout::Folder);
-                const bool expandable = !all && !folder.children.empty();
-                const bool arrowHovered = expandable && ImGui::IsItemHovered() &&
-                    ImGui::GetMousePos().x < origin.x + indent + 24 * m_Unit;
-                const bool disclosureClicked = clicked && arrowHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-                if (clicked && !disclosureClicked) {
-                    result.folderChanged = true;
-                    result.folder = all ? std::nullopt : std::optional<std::string>(folder.key);
-                }
-                if (ImGui::IsItemHovered()) {
-                    if (arrowHovered) ImGui::SetTooltip("%s folder", folder.expanded ? "Collapse" : "Expand");
-                    else ImGui::SetTooltip("%s\nIncludes subfolders", folder.fullPath.c_str());
-                }
-                if (expandable) {
-                    const bool focused = ImGui::IsItemFocused() &&
-                        !(ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled);
-                    const bool right = focused && ImGui::IsKeyPressed(ImGuiKey_RightArrow);
-                    const bool left = focused && ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
-                    if (disclosureClicked || (right && !folder.expanded) || (left && folder.expanded)) {
-                        // Defer rebuilding the flat list until the next frame.
-                        folder.expanded = !folder.expanded;
-                        m_RowsDirty = true;
-                    }
-                    const auto point = ImVec2(origin.x + indent + 4 * m_Unit, origin.y + 13 * m_Unit);
-                    auto* draw = ImGui::GetWindowDrawList();
-                    auto* storage = ImGui::GetStateStorage();
-                    const auto expansionId = ImGui::GetID("DisclosureExpansion");
-                    float& expansion = *storage->GetFloatRef(expansionId, folder.expanded ? 1.f : 0.f);
-                    const float target = folder.expanded ? 1.f : 0.f;
-                    if (Ui::ReducedMotion()) expansion = target;
-                    else if (expansion != target) Header::ApproachMotion(expansion, target, .18f);
-                    // Arrow sits before the folder glyph, within its own rail.
-                    draw->AddTriangleFilled(point,
-                        ImVec2(point.x + 6.f * expansion * m_Unit, point.y + 6.f * (1.f - expansion) * m_Unit),
-                        ImVec2(point.x + (4.f - expansion) * m_Unit, point.y + (3.f + expansion) * m_Unit),
-                        ImGui::GetColorU32(m_Secondary));
-                }
-                ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + folderHeight));
-                ImGui::PopID();
-            }
+    const float footerHeight = 90 * m_Unit;
+    const float contentHeight = std::max(1.f, ImGui::GetContentRegionAvail().y-footerHeight-12*m_Unit);
+    // On short windows only the content scrolls; view controls stay reachable.
+    if (ImGui::BeginChild("NavigatorContent", {0, contentHeight}, ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground)) {
+        for (int index = 0; index < 3; ++index) {
+            ImGui::PushID(index);
+            if (Button("##Category", CategoryLabels[index], CategoryIcons[index],
+                    ImVec2(-1, rowHeight), static_cast<int>(category) == index,
+                    hasSource ? (selectedFolder ? selectedFolder->countLabels[index].c_str() : "0") : nullptr))
+                result.category = static_cast<Mode>(index);
+            ImGui::PopID();
+            if (index != 2) Space(2 * m_Unit);
         }
+        Space((compact ? 10 : 20) * m_Unit);
+        const auto heading = ImGui::GetCursorScreenPos();
+        const float width = ImGui::GetContentRegionAvail().x;
+        ImGui::PushFont(nullptr, 12 * m_Unit);
+        ImGui::SetCursorScreenPos(ImVec2(heading.x + 4 * m_Unit, heading.y + 6 * m_Unit));
+        ImGui::TextColored(m_Secondary, "Folders");
+        ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
+        if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
+            result.openFolder = true;
+        Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::BrowseButton);
+        const auto browse=ImGui::GetItemRectMin(),browseMax=ImGui::GetItemRectMax();
+        result.browseMinimum={browse.x+10*m_Unit,(browse.y+browseMax.y-17*m_Unit)*.5f};
+        result.browseMaximum={result.browseMinimum.x+17*m_Unit,result.browseMinimum.y+17*m_Unit};
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose or add a source folder");
+        ImGui::PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(heading.x, heading.y + 36 * m_Unit));
+        const float bodyHeight = std::max(160 * m_Unit, ImGui::GetContentRegionAvail().y);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, Header::Blend(m_Surface, m_Text, .26f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, Header::Blend(m_Surface, m_Text, .4f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, Header::Blend(m_Surface, m_Text, .55f));
+        if (ImGui::BeginChild("FolderBrowser", ImVec2(0, bodyHeight), ImGuiChildFlags_None,
+                ImGuiWindowFlags_NoBackground)) {
+            result.openPath=m_Filesystem.Render(filter && !tree.allSourceFolders?
+                tree.workspaceRoot/std::filesystem::u8path(*filter):tree.workspaceRoot);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(4);
     }
     ImGui::EndChild();
-    ImGui::PopStyleColor(4);
     Space(12 * m_Unit);
     if (ImGui::BeginChild("NavigatorFooter", ImVec2(0, footerHeight), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
@@ -260,7 +172,7 @@ GalleryNavigatorFooterAction GalleryNavigator::RenderFooter(bool grid, bool prop
     ImGui::GetWindowDrawList()->AddRectFilled(origin,
         ImVec2(origin.x + width, origin.y + 36 * m_Unit), ImGui::GetColorU32(m_Control), 7 * m_Unit);
     ImGui::PushFont(nullptr, 12 * m_Unit);
-    const float half = (width - 10 * m_Unit) * .5f;
+    const float half = std::max(1.f, (width - 10 * m_Unit) * .5f);
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 3 * m_Unit, origin.y + 3 * m_Unit));
     if (Button("##Grid", "Grid", Ui::Icon::View, ImVec2(half, 30 * m_Unit), grid, nullptr, ButtonLayout::Centered)) result = Action::Grid;
     Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::GridButton);
@@ -270,7 +182,7 @@ GalleryNavigatorFooterAction GalleryNavigator::RenderFooter(bool grid, bool prop
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 44 * m_Unit));
     const float sortWidth = std::max(32 * m_Unit, width - 72 * m_Unit);
     ImGui::BeginDisabled(!canSort);
-    if (Button("##Sort", sortLabel, Ui::Icon::Sort, ImVec2(sortWidth, 32 * m_Unit), false, nullptr, ButtonLayout::Sort)) result = Action::Sort;
+    if (Button("##Sort", "View options", Ui::Icon::Sort, ImVec2(sortWidth, 32 * m_Unit), false, nullptr, ButtonLayout::Sort)) result = Action::Sort;
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s",
         canSort ? sortLabel : "Open a folder and switch to original images to sort them.");

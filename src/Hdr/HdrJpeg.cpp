@@ -36,8 +36,11 @@ std::vector<unsigned char> EncodeGainMapJpeg(const Image& im,const std::vector<u
     Check(uhdr_enc_set_raw_image(enc.get(),&base,UHDR_SDR_IMG));
     Check(uhdr_enc_set_using_multi_channel_gainmap(enc.get(),1));
     Check(uhdr_enc_set_quality(enc.get(),95,UHDR_BASE_IMG));
-    Check(uhdr_enc_set_quality(enc.get(),95,UHDR_GAIN_MAP_IMG));
-    Check(uhdr_enc_set_gainmap_scale_factor(enc.get(),2));
+    // Colorful HDR/SDR renditions can have very different channel ratios.
+    // Retain their spatial gain detail; a half-size lossy gain map visibly
+    // perturbs bright colors when the authored SDR appearance changes.
+    Check(uhdr_enc_set_quality(enc.get(),100,UHDR_GAIN_MAP_IMG));
+    Check(uhdr_enc_set_gainmap_scale_factor(enc.get(),1));
     Check(uhdr_enc_set_target_display_peak_brightness(enc.get(),PeakNits));
     Check(uhdr_encode(enc.get()));
     auto result=uhdr_get_encoded_stream(enc.get());

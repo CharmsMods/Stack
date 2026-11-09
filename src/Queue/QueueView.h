@@ -23,7 +23,7 @@ struct ViewAction {
 };
 
 struct ExportPresentation {
-    Hdr::FileFormat format = Hdr::FileFormat::SdrPng;
+    Hdr::FileFormat format = Hdr::FileFormat::GainMapJpeg;
     std::string destination;
     std::string status;
     bool busy = false;

@@ -30,8 +30,11 @@ float Presenter::RenderIndicator(NotificationStore& store,
     if (!context.beginIndicator && (m_PanelOpen||ImGui::IsItemHovered()))
         draw->AddRectFilled(pos,ImVec2(pos.x+hitWidth,pos.y+height),
             ImGui::GetColorU32(ImGuiCol_ButtonHovered),6.f);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-        ImGui::SetTooltip("%s",attention?"View activity and items needing attention":"View activity");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip) && ImGui::BeginTooltip()) {
+        ImGui::TextUnformatted(attention?"View activity and items needing attention":"View activity");
+        if(context.keepFixed)context.keepFixed(ImGui::GetWindowDrawList());
+        ImGui::EndTooltip();
+    }
     const ImVec4 ink=ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
     const ImU32 color=ImGui::GetColorU32(ink);
     const ImVec2 center(pos.x+hitWidth-16.f,pos.y+height*.5f);

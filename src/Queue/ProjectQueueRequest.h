@@ -16,6 +16,8 @@ namespace Stack::Queue {
 // Consumers copy the candidate and its mutable RAW manifest before applying it.
 struct ProjectRequest {
     std::shared_ptr<const Project::LoadedProjectData> snapshot;
+    std::filesystem::path originalThumbnailPath;
+    Stack::RawWorkspace::CameraThumbnail camera;
     std::string displayName;
     std::vector<unsigned char> thumbnailBytes;
     std::string outputNodeUuid;

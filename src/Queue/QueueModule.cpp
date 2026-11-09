@@ -1,5 +1,6 @@
 #include "Queue/QueueModule.h"
 #include "Async/TaskSystem.h"
+#include "Raw/RawLoader.h"
 #include "App/settings/AppearanceTheme.h"
 #include "App/PlatformHelpers.h"
 #include "Library/LibraryControls.h"
@@ -14,12 +15,16 @@
 
 namespace Stack::Queue {
 
+void QueueModule::InitializePreferences(const std::filesystem::path& settingsDirectory) {
+    m_ExportPreferences=std::make_unique<ExportPreferences>(settingsDirectory/"QueueExportSettings.json");
+    m_ExportState.format=m_ExportPreferences->Read();
+}
+
 void QueueModule::SetExportRequestHandler(ExportRequest handler) {
     m_ExportRequest = std::move(handler);
 }
 
 QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
-    if (!item.camera.bytes && (!item.thumbnailBytes || item.thumbnailBytes->empty())) return nullptr;
     const int frame = ImGui::GetFrameCount();
     const auto found = m_Textures.find(item.id);
     if (m_ThumbnailFrame != frame) { m_ThumbnailFrame = frame; m_ThumbnailLoads = 0; }
@@ -36,7 +41,7 @@ QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
         }
         return entry.texture ? &entry : nullptr;
     }
-    if (m_ThumbnailLoads >= 2 || (item.camera.bytes && m_CameraLoads->load() >= 2)) return nullptr;
+    if (m_ThumbnailLoads >= 2 || m_CameraLoads->load() >= 2) return nullptr;
     ++m_ThumbnailLoads;
     ReleaseTexture(item.id);
     if (m_Textures.size() >= 128) {
@@ -47,35 +52,42 @@ QueueModule::TextureEntry* QueueModule::EnsureTexture(const Item& item) {
     auto& entry = m_Textures[item.id];
     entry.bytes = item.thumbnailBytes;
     entry.usedFrame = frame;
-    if (item.camera.bytes) {
-        auto pixels = std::make_shared<CameraPixels>();
-        auto count = m_CameraLoads;
-        ++*count;
-        if (Async::TaskSystem::Get().Submit("Loading Queue thumbnail", [pixels, count, path = item.path, camera = item.camera] {
-            try {
-                if (!RawWorkspace::DecodeCameraThumbnail(path, camera, 320, pixels->rgba, pixels->width, pixels->height))
-                    pixels->rgba.clear();
-            } catch (...) { pixels->rgba.clear(); }
-            pixels->ready.store(true);
-            --*count;
-        })) entry.camera = std::move(pixels);
-        else --*count;
-        return nullptr;
-    }
-    const auto& bytes = *entry.bytes;
-    if (bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return nullptr;
-    int channels = 0;
-    stbi_set_flip_vertically_on_load_thread(0);
-    auto* decoded = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()),
-        &entry.width, &entry.height, &channels, 4);
-    if (!decoded || entry.width <= 0 || entry.height <= 0) {
-        if (decoded) stbi_image_free(decoded);
-        return nullptr;
-    }
-    entry.texture = GLHelpers::CreateTextureFromPixels(decoded, entry.width, entry.height, 4);
-    stbi_image_free(decoded);
-    // Failed bytes retain their immutable identity too; don't retry each frame.
-    return entry.texture ? &entry : nullptr;
+    auto pixels = std::make_shared<CameraPixels>();
+    auto count = m_CameraLoads;
+    ++*count;
+    // Decode once on demand, off the drawing thread. Prefer the edited cover,
+    // falling back to the captured original when no usable cover exists.
+    if (Async::TaskSystem::Get().Submit("Loading Queue thumbnail",
+        [pixels, count, bytes = item.thumbnailBytes, path = item.originalThumbnailPath, camera = item.camera] {
+        try {
+            if (bytes && !bytes->empty() && bytes->size() <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                int channels = 0;
+                stbi_set_flip_vertically_on_load_thread(0);
+                auto* decoded = stbi_load_from_memory(bytes->data(), static_cast<int>(bytes->size()),
+                    &pixels->width, &pixels->height, &channels, 4);
+                if (decoded) {
+                    pixels->rgba.assign(decoded, decoded + static_cast<std::size_t>(pixels->width)*pixels->height*4);
+                    stbi_image_free(decoded);
+                }
+            }
+            if (pixels->rgba.empty() && !path.empty()) {
+                std::error_code error;
+                auto preview = camera;
+                if (!preview.bytes) {
+                    const auto size = std::filesystem::file_size(path, error);
+                    if (!error) preview = RawWorkspace::FindCameraThumbnail(path, size, 320);
+                }
+                if (Raw::RawLoader::IsRawPath(path.u8string()))
+                    RawWorkspace::LoadOriginalGalleryPixels(path, preview, 320, false,
+                        pixels->rgba, pixels->width, pixels->height);
+                else RawWorkspace::DecodeRasterThumbnail(path, 320, pixels->rgba, pixels->width, pixels->height);
+            }
+        } catch (...) { pixels->rgba.clear(); }
+        pixels->ready.store(true);
+        --*count;
+    })) entry.camera = std::move(pixels);
+    else { --*count; m_Textures.erase(item.id); }
+    return nullptr;
 }
 
 void QueueModule::ReleaseTexture(std::uint64_t id) {
@@ -145,7 +157,10 @@ void QueueModule::Execute(ViewAction action) {
         if (m_OpenGallery) m_OpenGallery();
         break;
     case ViewCommand::ChooseFormat:
-        if (!m_ExportState.busy) m_ExportState.format = action.format;
+        if (!m_ExportState.busy && m_ExportState.format!=action.format) {
+            m_ExportState.format = action.format;
+            if(m_ExportPreferences) m_ExportPreferences->Set(action.format);
+        }
         break;
     case ViewCommand::ChooseDestination:
         if (!m_ExportState.busy) {
@@ -162,7 +177,7 @@ void QueueModule::Execute(ViewAction action) {
         if (!m_Destination.empty()) {
             std::vector<Item> selected;
             for (const auto& item : m_Model.Snapshot())
-                if (item.selected && (item.state == ItemState::Waiting || item.state == ItemState::Failed)) selected.push_back(item);
+                if (item.selected && CanExport(item.state)) selected.push_back(item);
             for (auto& item : selected) item.exportFormat = m_ExportState.format;
             if (!selected.empty()) m_ExportRequest(m_Destination, selected);
         }
@@ -217,6 +232,7 @@ void QueueModule::RenderUI(StackAppearance::AppearanceManager* appearance) {
 }
 
 void QueueModule::Shutdown() {
+    m_ExportPreferences.reset();
     for (auto& entry : m_RetiredTextures) glDeleteTextures(1, &entry.texture);
     m_RetiredTextures.clear();
     for (auto& entry : m_Textures) if (entry.second.texture) glDeleteTextures(1, &entry.second.texture);

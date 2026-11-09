@@ -1,6 +1,5 @@
 #pragma once
 #include "Color.h"
-#include "SdrFinish.h"
 namespace Stack::Hdr {
 // Uncompressed gain-map reconstruction in the SDR base's linear Rec.709 gamut.
 // The codec uses identical positive offsets; JPEG/downsizing are export-only.

@@ -148,6 +148,7 @@ public:
     enum class ProjectSessionKind {
         Empty,
         EditorProject,
+        RasterPreview,
         RawPreview,
         RawProject
     };
@@ -833,7 +834,7 @@ public:
     void DeserializePipeline(const nlohmann::json& j);
     void LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch, bool loadCompositePreview = true);
     bool ApplyLoadedProject(const LoadedProjectData& projectData);
-    void RequestLoadSourceImage(const std::string& path);
+    void RequestLoadSourceImage(const std::string& path, bool galleryPreview = false);
     bool ExportImage(const std::string& path);
     bool CanExportGraphOutput(int outputNodeId) const;
     bool RequestExportGraphOutput(int outputNodeId, const std::string& path,
@@ -1430,7 +1431,7 @@ public:
     bool TryGetCompositeAutoExportBounds(CompositeFloatRect& outBounds) const;
     CompositeFloatRect GetCompositeViewWorldRect(const ImVec2& canvasSize) const;
     void UseCompositeViewAsExportBounds(const ImVec2& canvasSize);
-    bool ValidateCompositePngExport(std::string& error);
+    bool ValidateCompositePngExport(std::string& error, bool requireSrgb = false);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     bool BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     void BeginImageExportWrite(
@@ -1823,6 +1824,7 @@ private:
     std::string m_RawWorkspaceSelectedSourceBeforePinnedProject;
     std::uint64_t m_RawWorkspaceScanGeneration = 0;
     int m_RawGalleryShortcutFrame = -1;
+    bool m_RawGalleryDeletionPending = false;
     mutable std::mutex m_RawWorkspaceScanMutex;
     RawWorkspaceScanSnapshot m_RawWorkspaceScanSnapshot;
     std::uint64_t m_RawWorkspaceThumbnailGeneration = 0;
@@ -2116,6 +2118,8 @@ private:
     std::uint64_t m_RawWorkspaceFilmstripOrganizationRevision = 1;
     std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>
         m_RawWorkspaceLabVisibleGalleryStacksCache;
+    std::uint64_t m_RawGalleryCalendarRevision = 0;
+    bool m_RawGalleryIncludeSubfolders = true;
     std::vector<Stack::RawWorkspace::RawGalleryStackSection>
         m_RawWorkspaceLabVisibleGallerySections;
     std::unordered_map<std::string, const Stack::RawWorkspace::GallerySourceView*>
@@ -2146,6 +2150,7 @@ private:
     std::string m_RawWorkspaceSimilarityWorkspaceKey;
     std::vector<Stack::RawWorkspace::RawGallerySimilarityStack>
         m_RawWorkspaceSimilarityStacks;
+    std::vector<Stack::RawWorkspace::RawGallerySimilarityStack> m_RawWorkspaceBracketCandidates;
     std::unordered_map<
         std::string,
         Stack::RawWorkspace::RawGalleryManualGrouping>
@@ -2860,8 +2865,8 @@ private:
     void RequestRawWorkspaceFolderCardPreviews();
     void UpdateRawWorkspaceFolderCardThumbnail(const Stack::RawWorkspace::SourceRecord& source);
     void ResetRawWorkspaceBrowseSources();
-    void RequestRawWorkspaceScan();
-    void RequestRawWorkspaceScanImpl();
+    void RequestRawWorkspaceScan(bool allowCachedCatalog = true);
+    void RequestRawWorkspaceScanImpl(bool allowCachedCatalog);
     void RequestRawWorkspaceThumbnailGeneration();
     void RequestRawWorkspaceThumbnailGenerationImpl();
     void PrioritizeRawWorkspaceThumbnailSource(const std::string& sourceKey);

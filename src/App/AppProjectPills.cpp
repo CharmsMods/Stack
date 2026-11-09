@@ -1,5 +1,6 @@
 #include "AppShell.h"
 #include "ProjectSidebarEntry.h"
+#include "ProjectSidebarMenu.h"
 #include "AppHeaderStyle.h"
 #include "GlassNavigationFeedback.h"
 #include "imgui_internal.h"
@@ -60,7 +61,8 @@ void AppShell::UpdateProjectPillPreview(std::uint64_t hovered) {
 }
 
 void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
-    const auto& rail = m_NavigationRail;
+    auto& rail = m_NavigationRail;
+    rail.projectMenuOpen = false;
     ImGui::SetCursorScreenPos(position);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 3.f * rail.scale));
@@ -134,13 +136,19 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
             Stack::Navigation::DrawProjectEntry(draw,min,max,rail.scale,texture,width,height,
                 automatic ? "Auto" : name,selected,dirty);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s",name);
-        if (ImGui::BeginPopupContextItem("ProjectActions")) {
-            ImGui::TextUnformatted(name);
-            if (dirty) ImGui::TextDisabled("Unsaved changes");
-            if (ImGui::MenuItem("Open workspace")) QueueWorkspaceTabAction(WorkspaceTabAction::Select, id);
-            if (ImGui::MenuItem("Close project")) QueueWorkspaceTabAction(WorkspaceTabAction::Close, id);
-            ImGui::EndPopup();
+        // Resolve command status only while this particular menu is open.
+        const bool menuOpen=ImGui::IsPopupOpen("ProjectActions");
+        const auto fileContext=menuOpen?editor.GetProjectFileCommandContext():EditorModule::ProjectFileCommandContext{};
+        switch(Stack::Navigation::DrawProjectMenu(name,dirty,automatic,
+            fileContext.busy?fileContext.busyReason.c_str():"",rail.scale)) {
+        case Stack::Navigation::ProjectMenuAction::Open: QueueWorkspaceTabAction(WorkspaceTabAction::Select,id);break;
+        case Stack::Navigation::ProjectMenuAction::Close: QueueWorkspaceTabAction(WorkspaceTabAction::Close,id);break;
+        case Stack::Navigation::ProjectMenuAction::ForceClose: QueueWorkspaceTabAction(WorkspaceTabAction::ForceClose,id);break;
+        default:break;
         }
+        // Include the opening frame, and release the hold after selection,
+        // Escape or an outside click. The reveal update consumes this next frame.
+        rail.projectMenuOpen |= ImGui::IsPopupOpen("ProjectActions");
         if (selected && m_ScrollActiveProjectTabIntoView) ImGui::SetScrollHereY(.5f);
         ImGui::PopID();
     }

@@ -103,6 +103,7 @@ bool DecodeScaledFrame(IWICImagingFactory* factory, IWICBitmapFrameDecode* frame
             Stack::Hdr::Rgb linear{};
             for(int c=0;c<3;++c) linear[c]=Stack::Hdr::Nits(words[i+c]/65535.f)/Stack::Hdr::ReferenceWhite;
             linear=Stack::Hdr::To709(linear);
+            linear=Stack::Hdr::SdrPreviewRgb(linear,Stack::Hdr::FileFormat::PqPng);
             for(int c=0;c<3;++c) pixels[i+c]=Stack::Hdr::SdrPreviewByte(linear[c]);
             pixels[i+3]=static_cast<unsigned char>((words[i+3]+128)/257);
         }

@@ -103,8 +103,9 @@ void EditorModule::RenderBracketingOrientationReview() {
         ImGui::Text("%s: %zu captures", OrientationName(group.first), group.second.size());
         int corrected = ui.orientationChoices.count(group.first) ? ui.orientationChoices[group.first] : group.first;
         if (corrected == 0) corrected = 1;
-        ImGui::SetNextItemWidth(250);
-        if (ImGui::BeginCombo("Use orientation", OrientationName(corrected))) {
+        ImGui::TextUnformatted("Use orientation");
+        ImGui::SetNextItemWidth(std::min(250.f,ImGui::GetContentRegionAvail().x));
+        if (ImGui::BeginCombo("##UseOrientation", OrientationName(corrected))) {
             for (int value = 1; value <= 8; ++value)
                 if (ImGui::Selectable(OrientationName(value), value == corrected)) {
                     corrected = value;
@@ -120,7 +121,7 @@ void EditorModule::RenderBracketingOrientationReview() {
                 // RAW gallery thumbnails are stored in sensor coordinates.
                 // Apply the selected tag once, just as the result renderer does.
                 if (corrected >= 5) std::swap(width, height);
-                const float scale = std::min(200.0f / width, 125.0f / height);
+                const float scale = std::min({200.0f / width, 125.0f / height,std::max(1.f,ImGui::GetContentRegionAvail().x)/width});
                 const ImVec2 size(width*scale, height*scale), min = ImGui::GetCursorScreenPos();
                 ImGui::Dummy(size);
                 const auto uv = [&](ImVec2 p) { return ToSensor(p, corrected); };
@@ -130,8 +131,10 @@ void EditorModule::RenderBracketingOrientationReview() {
             }
         }
         if (ImGui::TreeNode("Captures")) {
+            ImGui::PushTextWrapPos(0.f);
             for (const auto* source : group.second)
                 ImGui::TextUnformatted(source->path.filename().string().c_str());
+            ImGui::PopTextWrapPos();
             ImGui::TreePop();
         }
         ImGui::Separator();

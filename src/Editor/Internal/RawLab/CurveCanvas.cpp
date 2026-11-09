@@ -56,7 +56,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     if(s.lastFrame>=0 && s.lastFrame+1<frame) {
         s.gesture=s.exposureGesture=s.amountGesture=s.normalizationGesture=s.tonalSliderGesture=false;
         s.activeTonalSlider=0;
-        s.viewPanning=false;
+        s.viewPanning=false;s.zoomActive=false;
     }
     s.lastFrame=frame;
     ImGui::PushID(id);
@@ -84,9 +84,11 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const auto mouse=ImGui::GetIO().MousePos;
     const bool interacting=s.gesture || s.amountGesture || s.tonalSliderGesture ||
         ImGui::IsMouseDown(0) || ImGui::IsMouseReleased(0);
+    if (!s.framing.initialized || !(s.framing.options==viewOptions)) s.zoomActive=false;
     auto xAxis=ResolveCurveCanvasAxis(s.framing,viewOptions,view);
     if(viewOptions.stableScale) {
         if(plotVisible && !interacting && !ImGui::IsMouseDown(2) && !s.viewPanning) {
+            if(s.framing.request!=CurveCanvasFraming::Request::None)s.zoomActive=false;
             if(s.framing.request==CurveCanvasFraming::Request::Full) {
                 SetCurveCanvasView(s.framing,{},{});s.framing.fitPending=false;
             } else if(s.framing.request==CurveCanvasFraming::Request::Fit) {

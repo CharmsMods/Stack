@@ -5,7 +5,7 @@
 bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) {
     const bool hasWorkspace = !m_RawWorkspace.workspaceRoot.empty();
     bool workspaceChanged = false;
-    if (ImGui::MenuItem("Add Source Folder...")) {
+    if (ImGui::MenuItem("Open folder...")) {
         OpenRawWorkspaceFolderDialog();
         workspaceChanged = true;
     }
@@ -23,17 +23,12 @@ bool EditorModule::RenderRawWorkspaceGalleryFileMenu(bool includeFilmstripSort) 
                 : Stack::RawWorkspace::RawGalleryFilmstripSortMode::
                     TimelineAll;
         if (ImGui::BeginMenu(
-                "Sort Filmstrip",
+                "Sort photos",
                 (hasWorkspace && CanEditRawWorkspaceFilmstripOrganization()) ||
                     (m_PermanentGalleryWorkspace && !GetRawWorkspaceSourceFolders().empty()))) {
-            if (m_PermanentGalleryWorkspace && ImGui::MenuItem("All Folders", nullptr,
-                    IsRawWorkspaceAllFolders() && !IsRawWorkspaceFolderBrowserOpen(),
-                    !GetRawWorkspaceSourceFolders().empty())) {
-                m_RawWorkspaceGalleryContentMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
-                SetRawWorkspaceAllFolders(true);
-            }
             constexpr std::array sortModes {
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineAll,
+                Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineOldestFirst,
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineByFolder,
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::Manual,
                 Stack::RawWorkspace::RawGalleryFilmstripSortMode::

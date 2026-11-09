@@ -101,7 +101,7 @@ void QueueView::Prepare(const std::vector<Item>& items, std::uint64_t revision) 
             }
             ++m_Counts[0];
             ++m_Counts[Category(item.state)];
-            if (item.selected && (item.state == ItemState::Waiting || item.state == ItemState::Failed)) ++m_Ready;
+            if (item.selected && CanExport(item.state)) ++m_Ready;
             detailExists |= item.id == m_DetailItem;
             if (item.id == m_DetailItem) m_DetailIndex = i;
         }
@@ -184,7 +184,7 @@ ViewAction QueueView::RenderNavigator(const std::vector<Item>& items) {
                 ImGui::TextColored(secondary, "%s", found->status.c_str());
             }
             ImGui::PopFont();
-            if (!Active(found->state) && found->state != ItemState::Complete) {
+            if (CanExport(found->state)) {
                 Space(12 * s);
                 bool included = found->selected;
                 if (ImGui::Checkbox("Include in export", &included)) action = {ViewCommand::Include, found->id, included};
@@ -310,7 +310,7 @@ ViewAction QueueView::RenderWorkspace(const std::vector<Item>& items,
                 }
                 ImGui::SetCursorScreenPos(ImVec2(low.x, low.y + 25 * s));
                 bool included = item.selected;
-                ImGui::BeginDisabled(Active(item.state) || item.state == ItemState::Complete);
+                ImGui::BeginDisabled(!CanExport(item.state));
                 if (ImGui::Checkbox("##Include", &included)) action = {ViewCommand::Include, item.id, included};
                 ImGui::EndDisabled();
                 const ImVec2 thumbMin(low.x + 38 * s, low.y + 10 * s);
@@ -374,12 +374,16 @@ ViewAction QueueView::RenderWorkspace(const std::vector<Item>& items,
     if (destinationHovered && !output.destination.empty()) ImGui::SetTooltip("%s", output.destination.c_str());
     ImGui::SetCursorScreenPos(ImVec2(footer.x, footer.y + 54 * s));
     ImGui::PushFont(nullptr, 12 * s);
-    int format = static_cast<int>(output.format);
     ImGui::BeginDisabled(output.busy);
-    ImGui::SetNextItemWidth(130 * s);
-    if (ImGui::Combo("##QueueExportFormat", &format, "SDR PNG\0HDR JPEG\0HDR PNG\0")) {
-        action.command = ViewCommand::ChooseFormat;
-        action.format = static_cast<Hdr::FileFormat>(format);
+    ImGui::SetNextItemWidth(170 * s);
+    if (ImGui::BeginCombo("##QueueExportFormat",Hdr::FormatName(output.format))) {
+        for(auto format:Hdr::ExportFormats) {
+            if(ImGui::Selectable(Hdr::FormatName(format),format==output.format)) {
+                action.command = ViewCommand::ChooseFormat;
+                action.format = format;
+            }
+        }
+        ImGui::EndCombo();
     }
     ImGui::EndDisabled();
     if (width >= 420 * s) {

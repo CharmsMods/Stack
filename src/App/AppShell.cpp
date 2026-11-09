@@ -1558,6 +1558,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     InitializeProjectWorkspaces();
     if(m_Appearance) Stack::Hdr::SetPreviewInSdr(m_Appearance->GetPreviewInSdr());
     m_QueueRenderer.Configure(m_Window, m_Appearance.get(), &m_Queue.Model());
+    m_Queue.InitializePreferences(AppPaths::GetSettingsDirectory());
     m_Queue.SetGalleryRequestHandler([this] {
         m_NavigationRail.galleryView = true;
         QueueRailNavigation(0);

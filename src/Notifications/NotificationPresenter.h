@@ -47,6 +47,8 @@ private:
     EventId m_Selected = 0;
     EventId m_Dialog = 0;
     EventId m_PopupDialog = 0;
+    EventId m_RenderedDialog = 0;
+    EventId m_RenderedPreview = 0;
     EventId m_Preview = 0;
     double m_PreviewRemaining = 0.0;
     std::uint64_t m_SeenPreviewRevision = 0;

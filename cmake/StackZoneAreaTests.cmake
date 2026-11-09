@@ -28,7 +28,7 @@ add_executable(StackRawZoneAreaTests
     src/Raw/RawZoneAreaGuidance.cpp
     src/Raw/ImageGuidance.cpp
     src/Raw/RawZoneAreaGain.cpp
-    src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
+    src/Hdr/SdrAppearance.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp
     src/Raw/RawGraphOperation.cpp
     src/NodeMath/ToneCurveParameters.cpp
     src/NodeMath/ContractTypes.cpp

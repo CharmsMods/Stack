@@ -1,4 +1,5 @@
 #include "AutoBracketPresentation.h"
+#include "AutoBracketPreferences.h"
 #include <imgui.h>
 #include <algorithm>
 namespace Stack::AutoBracket {
@@ -20,9 +21,13 @@ void DrawPresentation(Presentation& ui,AutoBracketCoordinator& coordinator,bool 
         ImGui::ProgressBar(float(std::clamp(work->progress.load(),0.,1.)),{-1,6},"");
         {std::lock_guard<std::mutex> lock(work->mutex);ImGui::TextWrapped("%s",work->status.c_str());}
         if (ImGui::Button("Cancel current")) {coordinator.PauseUntilIdle(ImGui::GetTime());coordinator.CancelCurrent();}
-    } else ImGui::TextWrapped("Waiting for available resources. You can keep editing.");
+    } else ImGui::TextWrapped(Preferences::Get().Enabled()
+        ? "Waiting for available resources. You can keep editing."
+        : "Automatic bracketing is off. Turn it on from Gallery > Auto bracket.");
+    ImGui::BeginDisabled(!Preferences::Get().Enabled());
     if (ImGui::Button(coordinator.GetQueue().paused?"Resume":"Pause"))
         coordinator.SetPaused(!coordinator.GetQueue().paused);
+    ImGui::EndDisabled();
     if (!coordinator.Error().empty()) ImGui::TextWrapped("%s",coordinator.Error().c_str());
     if (!workspace) ImGui::End();
 }

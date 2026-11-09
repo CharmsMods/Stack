@@ -29,7 +29,7 @@ uniform sampler2D StackPhotoBase;
 uniform bool StackHasPhotoBase;
 uniform float StackPhotoHeadroom;
 layout(location=0) out vec4 Out_Color;
-)") + Hdr::Ui::DecodeShader + Hdr::SdrFinishShader + Hdr::GainMapPreviewShader + R"(
+)") + Hdr::Ui::DecodeShader + Hdr::GainMapPreviewShader + R"(
 void main() {
     vec4 texel=texture(Texture,Frag_UV);
     if(StackLinearTarget) {

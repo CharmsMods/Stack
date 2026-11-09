@@ -45,6 +45,7 @@ public:
     void BeginFrame(const std::string& workspace, bool grid, int frame, double time,
         std::uint64_t orderRevision, bool reducedMotion);
     void EndFrame();
+    void PrepareRemoval() { m_RemovalPending = true; }
     bool Observe(const std::string& key, const ImRect& image, const ImRect& clip,
         float opacity = 1.0f);
     void ObserveSlot(const std::string& key, const ImRect& image, const ImRect& clip);
@@ -78,7 +79,7 @@ private:
     Layout Sample() const;
     Pose SamplePose(const std::string& key, const Pose& destination) const;
     static Pose Interpolate(const Pose& from, const Pose& to, float amount);
-    static Pose OffscreenEndpoint(const Pose& pose, bool grid);
+    Pose OffscreenEndpoint(const Pose& pose, bool grid) const;
     bool Participates(const std::string& key) const;
 
     std::string m_Workspace;
@@ -92,6 +93,7 @@ private:
     bool m_Grid = false;
     std::uint64_t m_OrderRevision = 0;
     bool m_Active = false;
+    bool m_RemovalPending = false, m_Removing = false;
     std::size_t m_NextOrder = 0;
     std::string m_AnchorKey;
     ImVec2 m_AnchorFraction = ImVec2(.5f, .5f);

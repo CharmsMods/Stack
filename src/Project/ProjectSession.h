@@ -54,6 +54,7 @@ public:
     std::string fileName;
     std::string documentId;
     std::filesystem::path adoptionSourcePath;
+    bool galleryRasterPreview = false;
     bool dirty = false;
     std::uint64_t editRevision = 0;
     double lastEditTime = 0.0;

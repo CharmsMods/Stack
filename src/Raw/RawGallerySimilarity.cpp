@@ -12,114 +12,9 @@
 namespace Stack::RawWorkspace {
 namespace {
 
-constexpr int kPerceptualHashMaximumDistance = 24;
-constexpr float kMinimumGradientSimilarity = 0.82f;
-constexpr float kMinimumLuminanceCorrelation = 0.55f;
-constexpr float kMinimumCaptureSequenceGradientSimilarity = 0.40f;
 constexpr float kMaximumAspectRatioScale = 1.08f;
 constexpr float kMinimumEdgeEnergy = 0.0125f;
-constexpr std::int64_t kMaximumCaptureSequenceGapMilliseconds = 30'000;
-constexpr std::int64_t kMaximumCaptureSequenceOrdinalGap = 32;
-constexpr std::size_t kMaximumRecentCaptureAnchors = 64u;
 constexpr float kPi = 3.14159265358979323846f;
-
-struct CaptureSequenceIdentity {
-    bool valid = false;
-    std::string seriesKey;
-    std::int64_t timeOfDayMilliseconds = 0;
-    std::int64_t ordinal = 0;
-};
-
-bool ParseUnsignedDecimal(
-    const std::string& value,
-    std::int64_t& parsed) {
-    if (value.empty()) return false;
-    std::int64_t result = 0;
-    for (const unsigned char character : value) {
-        if (!std::isdigit(character)) return false;
-        const int digit = character - '0';
-        if (result > (std::numeric_limits<std::int64_t>::max() - digit) / 10) {
-            return false;
-        }
-        result = result * 10 + digit;
-    }
-    parsed = result;
-    return true;
-}
-
-CaptureSequenceIdentity ParseCaptureSequenceIdentity(
-    const std::string& sourceKey) {
-    CaptureSequenceIdentity identity;
-    const std::size_t fileStart = sourceKey.find_last_of("/\\");
-    std::string stem = sourceKey.substr(
-        fileStart == std::string::npos ? 0u : fileStart + 1u);
-    const std::size_t extension = stem.find_last_of('.');
-    if (extension != std::string::npos) stem.resize(extension);
-
-    std::vector<std::string> fields;
-    std::size_t fieldStart = 0;
-    while (fieldStart <= stem.size()) {
-        const std::size_t separator = stem.find('_', fieldStart);
-        fields.push_back(stem.substr(
-            fieldStart,
-            separator == std::string::npos
-                ? std::string::npos
-                : separator - fieldStart));
-        if (separator == std::string::npos) break;
-        fieldStart = separator + 1u;
-    }
-    if (fields.size() < 5u) return identity;
-
-    const std::size_t dateIndex = fields.size() - 4u;
-    const std::string& date = fields[dateIndex];
-    const std::string& time = fields[dateIndex + 1u];
-    const std::string& milliseconds = fields[dateIndex + 2u];
-    const std::string& ordinal = fields[dateIndex + 3u];
-    if ((date.size() != 6u && date.size() != 8u) ||
-        time.size() != 6u || milliseconds.size() != 3u) {
-        return identity;
-    }
-
-    std::int64_t dateValue = 0;
-    std::int64_t timeValue = 0;
-    std::int64_t millisecondValue = 0;
-    if (!ParseUnsignedDecimal(date, dateValue) ||
-        !ParseUnsignedDecimal(time, timeValue) ||
-        !ParseUnsignedDecimal(milliseconds, millisecondValue) ||
-        !ParseUnsignedDecimal(ordinal, identity.ordinal)) {
-        return identity;
-    }
-    (void)dateValue;
-    const int hours = static_cast<int>(timeValue / 10'000);
-    const int minutes = static_cast<int>((timeValue / 100) % 100);
-    const int seconds = static_cast<int>(timeValue % 100);
-    if (hours > 23 || minutes > 59 || seconds > 59) return identity;
-
-    identity.seriesKey.clear();
-    for (std::size_t index = 0; index <= dateIndex; ++index) {
-        if (!identity.seriesKey.empty()) identity.seriesKey.push_back('_');
-        identity.seriesKey += fields[index];
-    }
-    identity.timeOfDayMilliseconds =
-        ((static_cast<std::int64_t>(hours) * 60 + minutes) * 60 + seconds) *
-            1'000 +
-        millisecondValue;
-    identity.valid = !identity.seriesKey.empty();
-    return identity;
-}
-
-bool CaptureSequencesCompatible(
-    const CaptureSequenceIdentity& left,
-    const CaptureSequenceIdentity& right) {
-    if (!left.valid || !right.valid || left.seriesKey != right.seriesKey) {
-        return false;
-    }
-    const std::int64_t timeGap = std::llabs(
-        left.timeOfDayMilliseconds - right.timeOfDayMilliseconds);
-    const std::int64_t ordinalGap = std::llabs(left.ordinal - right.ordinal);
-    return timeGap <= kMaximumCaptureSequenceGapMilliseconds &&
-        ordinalGap <= kMaximumCaptureSequenceOrdinalGap;
-}
 
 template <std::size_t Size>
 std::string EncodeBytes(const std::array<std::uint8_t, Size>& bytes) {
@@ -248,69 +143,7 @@ int HashDistance(std::uint64_t left, std::uint64_t right) {
     return count;
 }
 
-class PerceptualHashTree {
-public:
-    void Insert(std::uint64_t hash, std::size_t value) {
-        if (!m_Root) {
-            m_Root = std::make_unique<Node>(hash, value);
-            return;
-        }
-        Node* node = m_Root.get();
-        while (true) {
-            const int distance = HashDistance(hash, node->hash);
-            if (distance == 0) {
-                node->values.push_back(value);
-                return;
-            }
-            const auto child = node->children.find(distance);
-            if (child == node->children.end()) {
-                node->children.emplace(
-                    distance,
-                    std::make_unique<Node>(hash, value));
-                return;
-            }
-            node = child->second.get();
-        }
-    }
 
-    void Query(
-        std::uint64_t hash,
-        int radius,
-        std::vector<std::size_t>& values) const {
-        QueryNode(m_Root.get(), hash, radius, values);
-    }
-
-private:
-    struct Node {
-        Node(std::uint64_t nodeHash, std::size_t value)
-            : hash(nodeHash), values { value } {}
-
-        std::uint64_t hash = 0;
-        std::vector<std::size_t> values;
-        std::unordered_map<int, std::unique_ptr<Node>> children;
-    };
-
-    static void QueryNode(
-        const Node* node,
-        std::uint64_t hash,
-        int radius,
-        std::vector<std::size_t>& values) {
-        if (node == nullptr) return;
-        const int distance = HashDistance(hash, node->hash);
-        if (distance <= radius) {
-            values.insert(values.end(), node->values.begin(), node->values.end());
-        }
-        const int minimum = std::max(0, distance - radius);
-        const int maximum = distance + radius;
-        for (const auto& [edge, child] : node->children) {
-            if (edge >= minimum && edge <= maximum) {
-                QueryNode(child.get(), hash, radius, values);
-            }
-        }
-    }
-
-    std::unique_ptr<Node> m_Root;
-};
 
 } // namespace
 
@@ -438,6 +271,16 @@ RawGallerySimilarityDescriptor BuildRawGallerySimilarityDescriptor(
     // horizontal coefficient so the brightness/DC term can be excluded
     // without reducing the hash to 63 effective bits.
     std::array<float, 65> dct {};
+    // Immutable basis shared by descriptor requests. Evaluating the same
+    // trigonometric terms for every thumbnail adds avoidable large-folder work.
+    static const auto cosineBasis=[] {
+        std::array<std::array<double,kRawGallerySimilarityGridSize>,9> basis{};
+        for(int frequency=0;frequency<9;++frequency)
+            for(int position=0;position<kRawGallerySimilarityGridSize;++position)
+                basis[frequency][position]=std::cos((2.0*static_cast<double>(position)+1.0)*
+                    static_cast<double>(frequency)*kPi/(2.0*kRawGallerySimilarityGridSize));
+        return basis;
+    }();
     const auto computeDct = [&](int u, int v) {
         double sum = 0.0;
         for (int y = 0; y < kRawGallerySimilarityGridSize; ++y) {
@@ -446,14 +289,7 @@ RawGallerySimilarityDescriptor BuildRawGallerySimilarityDescriptor(
                     static_cast<std::size_t>(y) *
                         kRawGallerySimilarityGridSize +
                     static_cast<std::size_t>(x)]) *
-                    std::cos(
-                        (2.0 * static_cast<double>(x) + 1.0) *
-                        static_cast<double>(u) * kPi /
-                        (2.0 * kRawGallerySimilarityGridSize)) *
-                    std::cos(
-                        (2.0 * static_cast<double>(y) + 1.0) *
-                        static_cast<double>(v) * kPi /
-                        (2.0 * kRawGallerySimilarityGridSize));
+                    cosineBasis[u][x] * cosineBasis[v][y];
             }
         }
         return static_cast<float>(sum);
@@ -584,7 +420,7 @@ bool DeserializeRawGalleryManualGrouping(
             if (sortMode < static_cast<int>(
                     RawGalleryFilmstripSortMode::Manual) ||
                 sortMode > static_cast<int>(
-                    RawGalleryFilmstripSortMode::TimelineByFolder)) {
+                    RawGalleryFilmstripSortMode::TimelineByFolderOldestFirst)) {
                 return false;
             }
             grouping.sortMode =
@@ -755,139 +591,117 @@ std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
     return BuildRawGallerySimilarityStacks(inputs, {});
 }
 
-std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
-    const std::vector<RawGallerySimilarityInput>& inputs,
-    const std::function<bool()>& shouldCancel) {
-    std::vector<RawGallerySimilarityInput> ordered = inputs;
-    std::stable_sort(
-        ordered.begin(),
-        ordered.end(),
-        [](const auto& left, const auto& right) {
-            return left.catalogIndex < right.catalogIndex;
-        });
-
-    struct FolderState {
-        PerceptualHashTree anchors;
-        std::vector<std::size_t> recentAnchorStackIndexes;
-    };
-    std::unordered_map<std::string, FolderState> folders;
-    std::vector<RawGallerySimilarityStack> stacks;
-    std::vector<const RawGallerySimilarityInput*> anchors;
-
-    for (const RawGallerySimilarityInput& input : ordered) {
-        if (shouldCancel && shouldCancel()) return {};
-        FolderState& folder = folders[input.folderKey];
-        const CaptureSequenceIdentity inputCapture =
-            ParseCaptureSequenceIdentity(input.sourceKey);
-        std::size_t matchedStack = std::numeric_limits<std::size_t>::max();
-        float matchedScore = -std::numeric_limits<float>::infinity();
-        int matchedHashDistance = std::numeric_limits<int>::max();
-        std::size_t matchedAnchorCatalogIndex =
-            std::numeric_limits<std::size_t>::max();
-
-        if (input.descriptor.IsValid() &&
-            input.descriptor.edgeEnergy >= kMinimumEdgeEnergy) {
-            std::vector<std::size_t> candidates;
-            folder.anchors.Query(
-                input.descriptor.perceptualHash,
-                kPerceptualHashMaximumDistance,
-                candidates);
-            const std::size_t recentBegin =
-                folder.recentAnchorStackIndexes.size() >
-                        kMaximumRecentCaptureAnchors
-                    ? folder.recentAnchorStackIndexes.size() -
-                        kMaximumRecentCaptureAnchors
-                    : 0u;
-            for (std::size_t recentIndex = recentBegin;
-                 recentIndex < folder.recentAnchorStackIndexes.size();
-                 ++recentIndex) {
-                const std::size_t candidate =
-                    folder.recentAnchorStackIndexes[recentIndex];
-                if (std::find(candidates.begin(), candidates.end(), candidate) ==
-                    candidates.end()) {
-                    candidates.push_back(candidate);
-                }
-            }
-            for (const std::size_t candidateIndex : candidates) {
-                if (shouldCancel && shouldCancel()) return {};
-                if (candidateIndex >= anchors.size() ||
-                    anchors[candidateIndex] == nullptr) {
-                    continue;
-                }
-                const RawGallerySimilarityInput& anchor =
-                    *anchors[candidateIndex];
-                if (anchor.folderKey != input.folderKey ||
-                    anchor.descriptor.edgeEnergy < kMinimumEdgeEnergy ||
-                    !AspectRatiosCompatible(
-                        anchor.descriptor.aspectRatio,
-                        input.descriptor.aspectRatio)) {
-                    continue;
-                }
-                const int hashDistance = HashDistance(
-                    anchor.descriptor.perceptualHash,
-                    input.descriptor.perceptualHash);
-                const float similarity = GradientCosineSimilarity(
-                    anchor.descriptor,
-                    input.descriptor);
-                const float luminanceCorrelation =
-                    NormalizedLuminanceCorrelation(
-                        anchor.descriptor,
-                        input.descriptor);
-                const bool visualMatch =
-                    hashDistance <= kPerceptualHashMaximumDistance &&
-                    similarity >= kMinimumGradientSimilarity &&
-                    luminanceCorrelation >= kMinimumLuminanceCorrelation;
-                const bool captureSequenceMatch =
-                    similarity >=
-                        kMinimumCaptureSequenceGradientSimilarity &&
-                    CaptureSequencesCompatible(
-                        ParseCaptureSequenceIdentity(anchor.sourceKey),
-                        inputCapture);
-                if (!visualMatch && !captureSequenceMatch) continue;
-
-                const float score = similarity +
-                    std::max(-1.0f, luminanceCorrelation) * 0.20f +
-                    (captureSequenceMatch ? 0.08f : 0.0f);
-                if (score > matchedScore + 0.000001f ||
-                    (std::abs(score - matchedScore) <= 0.000001f &&
-                     (hashDistance < matchedHashDistance ||
-                      (hashDistance == matchedHashDistance &&
-                       anchor.catalogIndex < matchedAnchorCatalogIndex)))) {
-                    matchedScore = score;
-                    matchedHashDistance = hashDistance;
-                    matchedAnchorCatalogIndex = anchor.catalogIndex;
-                    matchedStack = candidateIndex;
-                }
-            }
-        }
-
-        if (matchedStack != std::numeric_limits<std::size_t>::max()) {
-            stacks[matchedStack].sourceKeys.push_back(input.sourceKey);
-            continue;
-        }
-
-        const std::size_t stackIndex = stacks.size();
-        RawGallerySimilarityStack stack;
-        stack.folderKey = input.folderKey;
-        stack.anchorCatalogIndex = input.catalogIndex;
-        stack.sourceKeys.push_back(input.sourceKey);
-        stacks.push_back(std::move(stack));
-        anchors.push_back(&input);
-        folder.recentAnchorStackIndexes.push_back(stackIndex);
-        if (input.descriptor.IsValid() &&
-            input.descriptor.edgeEnergy >= kMinimumEdgeEnergy) {
-            folder.anchors.Insert(input.descriptor.perceptualHash, stackIndex);
-        }
+namespace {
+std::vector<RawGallerySimilarityStack> CaptureStacks(const std::vector<RawGallerySimilarityInput>& inputs,
+    const std::function<bool()>& cancelled, bool brackets) {
+    struct Prepared { const RawGallerySimilarityInput* source; std::string partition; };
+    std::vector<Prepared> ordered;ordered.reserve(inputs.size());
+    for(const auto& input:inputs) {
+        const auto& c=input.capture;
+        ordered.push_back({&input,input.folderKey+"\n"+c.make+"\n"+c.model+"\n"+
+            std::to_string(c.width)+"x"+std::to_string(c.height)});
     }
-    return stacks;
+    std::sort(ordered.begin(),ordered.end(),[](const auto& a,const auto& b) {
+        if(a.partition!=b.partition)return a.partition<b.partition;
+        if(a.source->captureTimestamp!=b.source->captureTimestamp)return a.source->captureTimestamp<b.source->captureTimestamp;
+        return a.source->sourceKey<b.source->sourceKey;
+    });
+    struct Group {RawGallerySimilarityStack stack;std::vector<const RawGallerySimilarityInput*> members;double shutterSeconds=0;};
+    std::vector<Group> groups;
+    std::vector<std::size_t> recent;
+    std::string partition;
+    const auto exposureCompatible=[](const GalleryCaptureMetadata& a,const GalleryCaptureMetadata& b) {
+        return a.ExposureKnown()&&b.ExposureKnown()&&std::abs(std::log2(a.aperture/b.aperture))<=.10 &&
+            std::abs(std::log2(a.iso/b.iso))<=.10;
+    };
+    const auto visual=[&](const auto& a,const auto& b,bool exposureSequence) {
+        const auto& x=a.descriptor;const auto& y=b.descriptor;
+        if(!x.IsValid()||!y.IsValid()||x.edgeEnergy<kMinimumEdgeEnergy||y.edgeEnergy<kMinimumEdgeEnergy||
+            !AspectRatiosCompatible(x.aspectRatio,y.aspectRatio))return -1.f;
+        const float gradient=GradientCosineSimilarity(x,y),light=NormalizedLuminanceCorrelation(x,y);
+        const int hash=HashDistance(x.perceptualHash,y.perceptualHash);
+        const bool ordinary=gradient>=.82f&&light>=.55f&&hash<=24;
+        const bool exposure=exposureSequence&&gradient>=(brackets?.75f:.65f)&&light>=(brackets?.35f:.20f)&&hash<=32;
+        return ordinary||exposure?gradient+.2f*light:-1.f;
+    };
+    for(const auto& item:ordered) {
+        if(cancelled&&cancelled())return {};
+        const auto& input=*item.source;
+        if(partition!=item.partition){partition=item.partition;recent.clear();}
+        std::size_t chosen=groups.size();float best=-1;
+        const bool known=input.captureTimestamp>0&&input.capture.CameraKnown();
+        if(known)for(auto it=recent.rbegin();it!=recent.rend();++it) {
+            auto& group=groups[*it];const auto& first=*group.members.front();const auto& last=*group.members.back();
+            const auto span=input.captureTimestamp-first.captureTimestamp;
+            const auto& c=input.capture;const auto& anchor=first.capture;
+            const bool exposure=exposureCompatible(anchor,c);
+            // Start-to-start time includes the previous shutter duration. Long
+            // exposures need that allowance, but every sequence has a hard cap.
+            const double gapLimit=exposure?std::max(brackets?5.:10.,std::min(65.,last.capture.shutter+3.)):(brackets?5.:10.);
+            const double spanLimit=exposure?std::max(brackets?12.:30.,std::min(180.,group.shutterSeconds+8.)):(brackets?12.:30.);
+            if(span>spanLimit||input.captureTimestamp-last.captureTimestamp>gapLimit)continue;
+            if(brackets&&group.members.size()>=9)continue;
+            if(first.folderKey!=input.folderKey||anchor.make!=c.make||anchor.model!=c.model)continue;
+            if(!anchor.lens.empty()&&!c.lens.empty()&&anchor.lens!=c.lens)continue;
+            if(anchor.focalLength>0&&c.focalLength>0&&
+                std::max(anchor.focalLength,c.focalLength)/std::min(anchor.focalLength,c.focalLength)>1.05)continue;
+            if(brackets&&!exposure)continue;
+            // Keep repeated bracket cycles separate, even if they share a scene.
+            if(brackets&&group.members.size()>=2) {
+                bool repeated=false;
+                for(const auto* member:group.members)if(std::abs(member->capture.ExposureStops()-c.ExposureStops())<.20)repeated=true;
+                if(repeated)continue;
+            }
+            // A fixed first reference bounds scene drift; midpoint and latest
+            // references tolerate exposure changes without an all-pairs search.
+            const auto exposureChange=[&](const auto& member) {return exposureCompatible(member.capture,c)&&
+                std::abs(member.capture.ExposureStops()-c.ExposureStops())>=.3;};
+            const float anchorScore=visual(first,input,exposureChange(first));
+            if(anchorScore<0)continue;
+            float score=anchorScore;
+            if(group.members.size()>1)score=std::max(score,visual(last,input,exposureChange(last)));
+            if(group.members.size()>2) {
+                const auto& middle=*group.members[group.members.size()/2];
+                score=std::max(score,visual(middle,input,exposureChange(middle)));
+            }
+            if(score>best){best=score;chosen=*it;}
+        }
+        if(chosen==groups.size()) {
+            Group group;group.stack.folderKey=input.folderKey;group.stack.anchorCatalogIndex=input.catalogIndex;
+            groups.push_back(std::move(group));
+            if(known) {
+                recent.push_back(chosen);
+                if(recent.size()>64)recent.erase(recent.begin());
+            }
+        }
+        groups[chosen].members.push_back(&input);groups[chosen].stack.sourceKeys.push_back(input.sourceKey);
+        if(input.capture.ExposureKnown())groups[chosen].shutterSeconds+=std::min(180.,input.capture.shutter);
+    }
+    std::vector<RawGallerySimilarityStack> result;result.reserve(groups.size());
+    for(auto& group:groups) {
+        if(brackets) {
+            if(group.members.size()<2)continue;
+            double low=group.members.front()->capture.ExposureStops(),high=low;
+            for(const auto* member:group.members) {const double ev=member->capture.ExposureStops();low=std::min(low,ev);high=std::max(high,ev);}
+            if(high-low<.7)continue;
+        }
+        result.push_back(std::move(group.stack));
+    }
+    return result;
+}
+}
+std::vector<RawGallerySimilarityStack> BuildRawGallerySimilarityStacks(
+    const std::vector<RawGallerySimilarityInput>& inputs,const std::function<bool()>& shouldCancel) {
+    return CaptureStacks(inputs,shouldCancel,false);
 }
 
 RawGallerySimilarityResult BuildRawGallerySimilarityResult(
-    const RawGallerySimilarityRequest& request) {
+    const RawGallerySimilarityRequest& request, const std::function<bool()>& shouldCancel) {
     RawGallerySimilarityResult result;
     result.generation = request.generation;
     result.workspaceKey = request.workspaceKey;
-    result.stacks = BuildRawGallerySimilarityStacks(request.inputs);
+    result.stacks = BuildRawGallerySimilarityStacks(request.inputs,shouldCancel);
+    result.bracketCandidates = CaptureStacks(request.inputs,shouldCancel,true);
     return result;
 }
 

@@ -130,7 +130,7 @@ private:
         CloseWorkspace
     };
 
-    enum class WorkspaceTabAction { None, Select, Create, Close };
+    enum class WorkspaceTabAction { None, Select, Create, Close, ForceClose };
     void InitializeProjectWorkspaces();
     std::uint64_t CreateProjectWorkspace();
     std::uint64_t CreateProjectWorkspace(const std::filesystem::path& sourceWorkspaceRoot, bool scanFolder = true);
@@ -173,6 +173,7 @@ private:
     std::uint64_t m_WorkspaceTabActionId = 0;
     bool m_ScrollActiveProjectTabIntoView = false;
     std::uint64_t m_PendingWorkspaceRetirement = 0;
+    bool m_ForceWorkspaceRetirement = false;
     std::string m_ContinueMainWindowCloseSource;
 
     void ShowSplashScreen();
@@ -234,6 +235,7 @@ private:
         ImDrawList* targetDrawList = nullptr);
     void PostNotification(UiNotificationSeverity severity, const std::string& message, const std::string& dedupeKey = "");
     void RenderNotifications();
+    void ConfirmForceCloseWorkspace(std::uint64_t id);
     void ReportSaveFailure(EditorModule& owner, const std::string& message,
         std::function<void()> continuation = {});
     bool CanChangeRootTab(int oldTab, int newTab);

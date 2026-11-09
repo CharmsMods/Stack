@@ -346,7 +346,7 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
     LabTooltip("Show the SDR export on this display. Your HDR edit is unchanged.");
     ImGui::BeginDisabled(!enabled);
     const float width=std::max(180.f,ImGui::GetContentRegionAvail().x-110.f);
-    if(FramelessTextButton("Match HDR appearance")) {
+    if(FramelessTextButton("Reset SDR appearance")) {
         view["sdrBrightness"]=0.f;view["sdrHighlightDetail"]=1.f;view["sdrSaturation"]=1.f;
         SetSdrOutputProof(true);changed=true;
     }
@@ -355,7 +355,7 @@ bool EditorModule::RenderRawWorkspaceLabViewSurface(RawWorkspaceEditContext& con
         view["sdrBrightness"]=brightness;changed=true;
     }
     float detail=JsonFloat(view,"sdrHighlightDetail",0.f);
-    if(BareSliderFloat("Highlight detail","SdrDetail",&detail,0.f,1.f,"%.2f",width)) {
+    if(BareSliderFloat("Highlight separation","SdrDetail",&detail,0.f,1.f,"%.2f",width)) {
         view["sdrHighlightDetail"]=detail;changed=true;
     }
     float color=JsonFloat(view,"sdrSaturation",1.f);

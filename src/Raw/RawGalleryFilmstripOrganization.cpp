@@ -1,4 +1,5 @@
 #include "Raw/RawGallerySimilarity.h"
+#include "Raw/GalleryDateLabels.h"
 
 #include <algorithm>
 #include <cctype>
@@ -30,8 +31,7 @@ int CompareValues(const T& left, const T& right) {
 
 std::int64_t TimelineTime(const RawGalleryFilmstripSourceSortInfo& source) {
     if (source.captureTimestamp > 0) return source.captureTimestamp;
-    if (source.modifiedUnixSeconds > 0) return source.modifiedUnixSeconds;
-    return source.modifiedTimeTicks;
+    return 0;
 }
 
 int CompareKnownTimes(std::int64_t left, std::int64_t right) {
@@ -159,15 +159,22 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
                         rightSource->modifiedTimeTicks);
                     break;
                 case RawGalleryFilmstripSortMode::TimelineAll:
-                    comparison = CompareKnownTimes(
-                        TimelineTime(*leftSource), TimelineTime(*rightSource));
+                case RawGalleryFilmstripSortMode::TimelineOldestFirst: {
+                    const auto left=TimelineTime(*leftSource),right=TimelineTime(*rightSource);
+                    if((left==0)!=(right==0))return left!=0;
+                    comparison=CompareValues(left,right);
+                    if(organization.sortMode==RawGalleryFilmstripSortMode::TimelineAll)comparison=-comparison;
                     break;
+                }
                 case RawGalleryFilmstripSortMode::TimelineByFolder:
+                case RawGalleryFilmstripSortMode::TimelineByFolderOldestFirst:
                     comparison = CompareValues(
                         leftSource->folderKey, rightSource->folderKey);
                     if (comparison == 0) {
-                        comparison = CompareKnownTimes(
-                            TimelineTime(*leftSource), TimelineTime(*rightSource));
+                        const auto left=TimelineTime(*leftSource),right=TimelineTime(*rightSource);
+                        if((left==0)!=(right==0))return left!=0;
+                        comparison=CompareValues(left,right);
+                        if(organization.sortMode==RawGalleryFilmstripSortMode::TimelineByFolder)comparison=-comparison;
                     }
                     break;
                 case RawGalleryFilmstripSortMode::FolderThenNameAscending:
@@ -198,9 +205,37 @@ std::vector<RawGallerySimilarityStack> SortRawGalleryFilmstripStacks(
 
 std::vector<RawGalleryStackSection> BuildRawGalleryStackSections(
     const std::vector<RawGallerySimilarityStack>& stacks,
-    RawGalleryFilmstripSortMode mode) {
+    RawGalleryFilmstripSortMode mode,
+    const std::vector<RawGalleryFilmstripSourceSortInfo>& sources) {
     if (stacks.empty()) return {};
+    GalleryCalendarRevision();
+    if(mode==RawGalleryFilmstripSortMode::TimelineAll || mode==RawGalleryFilmstripSortMode::TimelineOldestFirst ||
+        mode==RawGalleryFilmstripSortMode::ModifiedNewestFirst || mode==RawGalleryFilmstripSortMode::ModifiedOldestFirst) {
+        std::unordered_map<std::string,std::int64_t> times;
+        const bool modified=mode==RawGalleryFilmstripSortMode::ModifiedNewestFirst || mode==RawGalleryFilmstripSortMode::ModifiedOldestFirst;
+        for(const auto& source:sources)times.emplace(source.sourceKey,modified?source.modifiedUnixSeconds:source.captureTimestamp);
+        std::vector<RawGalleryStackSection> dates;
+        for(std::size_t i=0;i<stacks.size();++i) {
+            const auto found=stacks[i].sourceKeys.empty()?times.end():times.find(stacks[i].sourceKeys.front());
+            const auto date=FriendlyGalleryDate(found==times.end()?0:found->second);
+            if(dates.empty() || dates.back().dateKey!=date.key) {
+                RawGalleryStackSection section;section.firstStack=i;section.dateKey=date.key;section.dateLabel=date.label;section.dateDetail=date.exact;
+                dates.push_back(std::move(section));
+            }
+            auto& section=dates.back();
+            if(!date.exact.empty()) {
+                const auto first=times.find(stacks[section.firstStack].sourceKeys.front());
+                const auto firstDate=FriendlyGalleryDate(first==times.end()?0:first->second).exact;
+                section.dateDetail=firstDate==date.exact?firstDate:
+                    (first!=times.end() && found!=times.end() && first->second>found->second
+                        ? date.exact+" - "+firstDate:firstDate+" - "+date.exact);
+            }
+            ++section.stackCount;
+        }
+        return dates;
+    }
     const bool byFolder = mode == RawGalleryFilmstripSortMode::TimelineByFolder ||
+        mode == RawGalleryFilmstripSortMode::TimelineByFolderOldestFirst ||
         mode == RawGalleryFilmstripSortMode::FolderThenNameAscending ||
         mode == RawGalleryFilmstripSortMode::FolderThenNameDescending;
     if (!byFolder) return {{ {}, 0u, stacks.size() }};
@@ -311,9 +346,13 @@ const char* RawGalleryFilmstripSortModeLabel(
         case RawGalleryFilmstripSortMode::FolderThenNameDescending:
             return "Folder then filename Z-A";
         case RawGalleryFilmstripSortMode::TimelineAll:
-            return "Timeline: all folders";
+            return "Date taken";
         case RawGalleryFilmstripSortMode::TimelineByFolder:
-            return "Timeline: separate folders";
+            return "Folder";
+        case RawGalleryFilmstripSortMode::TimelineOldestFirst:
+            return "Date taken (oldest first)";
+        case RawGalleryFilmstripSortMode::TimelineByFolderOldestFirst:
+            return "Folder (oldest first)";
     }
     return "Folder then filename A-Z";
 }

@@ -76,9 +76,9 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         P::Drawn(P::Visual::Controls,P::Key(detailsWidth));
         P::Motion(P::Visual::Controls,propertiesAmount!=target);
     }
-    // Reserve the inspector lane throughout its reveal, keeping grid slots stable.
+    // Return the inspector lane and its gutter to the grid as the panel closes.
     const float gridGutter = grid ? std::clamp(size.x * .025f, 12.f * unit, 36.f * unit) : 0.f;
-    const float imageWidth = std::max(1.0f, size.x - (grid ? fullDetailsWidth + gridGutter : detailsWidth));
+    const float imageWidth = std::max(1.0f, size.x - (detailsWidth + gridGutter * propertiesAmount));
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
     // This is one docked workspace surface. Inner layout children must not
@@ -447,7 +447,7 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         ImGui::EndChild();
     }
     if (detailsWidth > .5f) {
-        ImGui::SameLine(0.0f, gridGutter);
+        ImGui::SameLine(0.0f, gridGutter * propertiesAmount);
         ImGui::BeginChild("PropertiesClip", ImVec2(detailsWidth, 0), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         Stack::Workspace::InputScope propertiesInput(!showProperties, false);

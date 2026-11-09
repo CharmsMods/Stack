@@ -36,7 +36,7 @@ inline std::string Fragment(std::string source,const char* output) {
     source.replace(version,versionEnd-version,"#version 430 core");
     const auto insertAt=source.find('\n',version)+1;
     source.insert(insertAt,std::string("layout(location=48) uniform bool stackLinearTarget;\nlayout(location=49) uniform float stackPhotoHeadroom;\n")+
-        DecodeShader+SdrFinishShader+GainMapPreviewShader+"\n#define main stackEncodedUiMain\n");
+        DecodeShader+GainMapPreviewShader+"\n#define main stackEncodedUiMain\n");
     source+="\n#undef main\nvoid main(){stackEncodedUiMain();if(stackLinearTarget) ";
     source+=output;
     source+=".rgb=stackUiLinear(";

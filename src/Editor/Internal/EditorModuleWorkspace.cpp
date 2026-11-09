@@ -33,7 +33,6 @@ bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
     if (IsRawWorkspaceProjectActive() && !IsRawProjectCanvas())
         OpenRawLayerMaskGraph(m_SelectedRawAdjustmentLayer, false);
     m_Viewport.FrameTransition().Reset();
-    MarkDirty();
     MarkRenderRefreshDirty();
     return true;
 }

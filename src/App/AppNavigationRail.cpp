@@ -95,7 +95,7 @@ void AppShell::LayoutNavigationRail() {
     };
     const bool railActive = (context->ActiveId && (belongsToRail(context->ActiveIdWindow) || belongsToToggle(context->ActiveIdWindow))) ||
         (Stack::Navigation::NavigationInputActive() && (belongsToRail(context->NavWindow) || belongsToToggle(context->NavWindow)));
-    const bool railPopup = rail.menuOpen || m_NotificationPresenter.PanelOpen();
+    const bool railPopup = rail.menuOpen || rail.projectMenuOpen || m_NotificationPresenter.PanelOpen();
     // Closing by dragging toward the edge must not immediately reveal the rail
     // on release. Rearm only after a deliberate return into the window.
     if (rail.suppressEdgeRevealUntilLeave && !rail.galleryResizeActive &&

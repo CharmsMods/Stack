@@ -28,13 +28,14 @@ std::vector<Candidate> CollectCandidates(const std::vector<RawWorkspace::SourceR
     for(const auto& stack:stacks) {
         Candidate candidate;std::set<std::string> seen;
         for(const auto& key:stack.sourceKeys) {
-            const auto found=records.find(key);if(found==records.end())continue;
+            const auto found=records.find(key);if(found==records.end()){candidate.sources.clear();break;}
             const auto& source=*found->second;
             if(source.fingerprint.empty()||!RawWorkspace::IsGalleryRawPath(source.absolutePath)||
-                !seen.insert(source.fingerprint).second)continue;
+                !seen.insert(source.fingerprint).second) {candidate.sources.clear();break;}
             candidate.sources.push_back({source.absolutePath,source.fingerprint,source.fileSizeBytes});
             if(candidate.name.empty())candidate.name=source.stem+" Bracket";
         }
+        if(candidate.sources.size()<2)continue;
         candidate.identity=SourceIdentity(candidate.sources);
         if(!candidate.identity.empty())candidates.push_back(std::move(candidate));
     }

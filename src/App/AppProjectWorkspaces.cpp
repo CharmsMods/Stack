@@ -200,7 +200,7 @@ bool AppShell::CanSwitchProjectWorkspace() const {
 void AppShell::QueueWorkspaceTabAction(WorkspaceTabAction action, std::uint64_t id) {
     if (!CanSwitchProjectWorkspace()) return;
     m_GalleryNavigationMotion->NewIntent();
-    if (action == WorkspaceTabAction::Close && id == m_GalleryWorkspaceId) return;
+    if ((action == WorkspaceTabAction::Close || action == WorkspaceTabAction::ForceClose) && id == m_GalleryWorkspaceId) return;
     // Explicit pill navigation supersedes a root destination waiting on a load,
     // including selecting the already-active project.
     m_NavigationRail.requestedDestination = -1;
@@ -218,7 +218,7 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     }
     const auto next = std::find_if(m_ProjectWorkspaces.begin(), m_ProjectWorkspaces.end(),
         [id](const auto& workspace) { return workspace->id == id; });
-    if (next == m_ProjectWorkspaces.end() || !m_Editor->FinishWorkspaceInteraction()) return false;
+    if (next == m_ProjectWorkspaces.end() || (FindProjectWorkspace(m_ActiveProjectWorkspace) && !m_Editor->FinishWorkspaceInteraction())) return false;
     std::filesystem::path gallerySourceRoot;
     if (id == m_GalleryWorkspaceId) {
         if (const auto* outgoing = FindProjectWorkspace(m_ActiveProjectWorkspace))
@@ -363,6 +363,10 @@ void AppShell::TickProjectWorkspaces() {
     if (m_WorkspaceTabAction != WorkspaceTabAction::None && CanSwitchProjectWorkspace()) {
         const auto action = std::exchange(m_WorkspaceTabAction, WorkspaceTabAction::None);
         const auto id = std::exchange(m_WorkspaceTabActionId, 0);
+        if (action == WorkspaceTabAction::ForceClose) {
+            ConfirmForceCloseWorkspace(id);
+            return;
+        }
         if (action == WorkspaceTabAction::Close && CloseAutoBracketWorkspace(id)) return;
         if (action == WorkspaceTabAction::Close && id != m_ActiveProjectWorkspace) {
             const auto closing = std::find_if(m_ProjectWorkspaces.begin(), m_ProjectWorkspaces.end(),
@@ -457,10 +461,16 @@ void AppShell::FinishProjectWorkspaceRetirement() {
         [retiringId](const auto& workspace) { return workspace->id == retiringId; });
     if (current == m_ProjectWorkspaces.end() || retiringId == m_GalleryWorkspaceId) {
         m_PendingWorkspaceRetirement = 0;
+        m_ForceWorkspaceRetirement = false;
         return;
     }
     // Do not remove the active editor until it can safely relinquish input.
-    if ((*current)->editor->IsWorkspaceTransitionPending() || !(*current)->editor->FinishWorkspaceInteraction()) return;
+    if (!m_ForceWorkspaceRetirement &&
+        ((*current)->editor->IsWorkspaceTransitionPending() || !(*current)->editor->FinishWorkspaceInteraction())) return;
+    m_ForceWorkspaceRetirement = false;
+    if (m_PendingGalleryTabOpen && m_PendingGalleryTabOpen->workspaceId == retiringId) m_PendingGalleryTabOpen.reset();
+    m_BackgroundGalleryTabOpens.erase(std::remove_if(m_BackgroundGalleryTabOpens.begin(), m_BackgroundGalleryTabOpens.end(),
+        [retiringId](const auto& open) { return open.workspaceId == retiringId; }), m_BackgroundGalleryTabOpens.end());
     m_PendingWorkspaceRetirement = 0;
     const auto index = static_cast<std::size_t>(current - m_ProjectWorkspaces.begin());
     const bool wasActive = retiringId == m_ActiveProjectWorkspace;

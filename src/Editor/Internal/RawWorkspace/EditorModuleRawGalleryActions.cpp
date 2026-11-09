@@ -8,6 +8,7 @@
 #include "Project/ProjectPath.h"
 #include "Raw/RawGalleryFileActions.h"
 #include "Raw/RawLoader.h"
+#include "Raw/RawSourceFolders.h"
 
 #include <imgui_internal.h>
 #include <algorithm>
@@ -103,6 +104,7 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
         Stack::RawGalleryActions::Item item;
         item.path = source->absolutePath;
         item.sourceKey = key;
+        item.sourceRoot = Stack::RawWorkspace::ResolveSourceWorkspaceRoot(*source, m_RawWorkspace.workspaceRoot);
         // An original remains an unedited input even when a saved project
         // references it. Copying edits belongs to the saved project card.
         item.camera = source->thumbnail.camera;
@@ -147,18 +149,16 @@ Stack::RawGalleryActions::Context EditorModule::CaptureRawGalleryActionContext(b
 }
 
 void EditorModule::RefreshRawGalleryAfterFileMove(const std::filesystem::path& root) {
-    Stack::Project::ProjectIndex::Get().RebuildDefaultRoots();
-    LibraryManager::Get().RequestRefreshLibraryAsync();
-    // A deferred operation may finish after folder navigation. Refresh the
-    // shared index, but never clear the new folder's selection or scan owner.
-    if (!SameRoot(root, m_RawWorkspace.workspaceRoot)) return;
-    m_RawWorkspace.selectedSourceKey.clear();
-    m_RawWorkspace.selectedSourceKeys.clear();
-    m_RawWorkspaceLabSelectedProjectPaths.clear();
-    m_RawWorkspaceLabFocusedProjectPath.clear();
-    m_RawWorkspaceLabFocusedProjectName.clear();
-    RescanRawWorkspace();
-    InvalidateRawWorkspaceGalleryPresentation();
+    // Index discovery touches disk; never run it on the key/input thread.
+    ProjectTasks().Submit("Refreshing Gallery after move", [this, root] {
+        Stack::Project::ProjectIndex::Get().RebuildDefaultRoots();
+        ProjectTasks().PostToMain([this, root] {
+            LibraryManager::Get().RequestRefreshLibraryAsync();
+            if (!SameRoot(root, m_RawWorkspace.workspaceRoot)) return;
+            RequestRawWorkspaceScan(false);
+            InvalidateRawWorkspaceGalleryPresentation();
+        });
+    });
 }
 
 bool EditorModule::ExecuteRawGalleryAction(Action action,
@@ -285,6 +285,7 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
         RenderRawWorkspaceGalleryRevertPopup();
         return true;
     case Action::MoveToTrash: {
+        if (m_RawGalleryDeletionPending) return false;
         const auto document = GetProjectDocumentId();
         auto remove = [this, context, document] {
             if (GetProjectDocumentId() != document || context.aggregateView != m_RawWorkspace.allSourceFolders ||
@@ -306,14 +307,16 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
                         continue;
                     }
                 }
-                const auto owner = ResolveRawWorkspaceSourceFolder(item.path);
+                const auto owner = item.sourceRoot.empty() ? ResolveRawWorkspaceSourceFolder(item.path) : item.sourceRoot;
                 if (owner.empty()) {
                     result.errors.push_back("Could not identify the source folder for " + item.path.u8string());
                     continue;
                 }
                 jobs.push_back({item.kind,{owner,item.path}});
             }
-            if (!ProjectTasks().Submit("Moving Gallery items to Trash",[this,context,document,jobs=std::move(jobs),result=std::move(result),protectedProject]() mutable {
+            m_RawGalleryDeletionPending = true;
+            const auto activity = GetNotifier().BeginActivity("Moving " + std::to_string(jobs.size()) + " items to Closet Trash");
+            if (!ProjectTasks().Submit("Moving Gallery items to Trash",[this,context,document,activity,jobs=std::move(jobs),result=std::move(result),protectedProject]() mutable {
                 std::map<std::pair<std::filesystem::path,Kind>,std::vector<std::filesystem::path>> batches;
                 for(const auto& job:jobs)batches[{job.second.first,job.first}].push_back(job.second.second);
                 for(const auto& [batch,paths]:batches) {
@@ -322,10 +325,39 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
                             Stack::RawGalleryFileActions::DeleteSourcesToTrash(batch.first,paths) :
                             Stack::RawGalleryFileActions::DeleteProjectsToTrash(batch.first,paths);
                         result.moved+=moved.moved;
+                        result.movedSources.insert(result.movedSources.end(),moved.movedSources.begin(),moved.movedSources.end());
                         result.errors.insert(result.errors.end(),moved.errors.begin(),moved.errors.end());
                     } catch(const std::exception& error) {result.errors.push_back(error.what());}
                 }
-                ProjectTasks().PostToMain([this,context,document,result=std::move(result),protectedProject]() mutable {
+                ProjectTasks().PostToMain([this,context,document,activity,result=std::move(result),protectedProject]() mutable {
+            m_RawGalleryDeletionPending = false;
+            GetNotifier().CompleteActivity(activity, "Finished moving Gallery items.");
+            if (result.moved && GetProjectDocumentId()==document && SameRoot(context.workspaceRoot,m_RawWorkspace.workspaceRoot)) {
+                // Reject scan publications captured before the move; the fresh
+                // scan starts after the background index refresh completes.
+                {
+                    std::lock_guard<std::mutex> lock(m_RawWorkspaceScanMutex);
+                    m_RawWorkspaceScanSnapshot.generation=++m_RawWorkspaceScanGeneration;
+                    m_RawWorkspaceScanSnapshot.state=Async::TaskState::Idle;
+                }
+                m_RawWorkspaceGalleryLayoutAnimation.PrepareRemoval();
+                ++m_RawWorkspaceGalleryGridStacks.navigationRevision;
+                std::unordered_set<std::string> movedPaths, movedKeys;
+                for (const auto& path : result.movedSources) movedPaths.insert(path.lexically_normal().generic_u8string());
+                const auto movedPath = [&](const auto& path) { return movedPaths.count(path.lexically_normal().generic_u8string()) != 0; };
+                for (const auto& source : m_RawWorkspace.sources) if (movedPath(source.absolutePath)) movedKeys.insert(source.relativePathKey);
+                auto& sources=m_RawWorkspace.sources;
+                sources.erase(std::remove_if(sources.begin(),sources.end(),[&](const auto& source) {return movedPath(source.absolutePath);}),sources.end());
+                auto& projects=m_RawWorkspace.sourceSetProjects;
+                projects.erase(std::remove_if(projects.begin(),projects.end(),[&](const auto& project) {return movedPath(project.absolutePath);}),projects.end());
+                auto& keys=m_RawWorkspace.selectedSourceKeys;
+                keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const auto& key) {return movedKeys.count(key)!=0;}),keys.end());
+                auto& paths=m_RawWorkspaceLabSelectedProjectPaths;
+                paths.erase(std::remove_if(paths.begin(),paths.end(),movedPath),paths.end());
+                if (movedKeys.count(m_RawWorkspace.selectedSourceKey)) m_RawWorkspace.selectedSourceKey=keys.empty()?std::string{}:keys.front();
+                if (movedPath(m_RawWorkspaceLabFocusedProjectPath)) {m_RawWorkspaceLabFocusedProjectPath.clear();m_RawWorkspaceLabFocusedProjectName.clear();}
+                InvalidateRawWorkspaceGalleryPresentation();
+            }
             if (result.moved && GetProjectDocumentId()==document && SameRoot(context.workspaceRoot,m_RawWorkspace.workspaceRoot)) RefreshRawGalleryAfterFileMove(context.workspaceRoot);
             Stack::Notifications::NoticeSpec notice;
             notice.severity = !result.errors.empty() || protectedProject ? UiNotificationSeverity::Warning :
@@ -340,7 +372,11 @@ bool EditorModule::ExecuteRawGalleryAction(Action action,
             for (const auto& error : result.errors) notice.details += error + "\n";
             GetNotifier().Post(std::move(notice));
                 });
-            })) PostNotification(UiNotificationSeverity::Error,"Could not schedule Gallery deletion.","raw-gallery-delete-project");
+            })) {
+                m_RawGalleryDeletionPending = false;
+                GetNotifier().CompleteActivity(activity, "Could not schedule Gallery deletion.");
+                PostNotification(UiNotificationSeverity::Error,"Could not schedule Gallery deletion.","raw-gallery-delete-project");
+            }
         };
         if (!RequestAutoBracketForeground("move these items to Trash", remove)) remove();
         return true;

@@ -43,7 +43,26 @@ void EditorModule::SetRawWorkspaceFolder(const std::filesystem::path& root) {
     m_RawGallerySourceFoldersOpen = false;
     if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion)
         m_GalleryNavigationMotion->Folders(false,m_GalleryBrowseAnchor);
-    if (!m_RawWorkspace.allSourceFolders && root.lexically_normal() == m_RawWorkspace.workspaceRoot.lexically_normal()) return;
+    if(m_PermanentGalleryWorkspace && !m_RawWorkspace.allSourceFolders && !root.empty() &&
+        !m_RawWorkspace.workspaceRoot.empty() && !Async::IsBusy(GetRawWorkspaceScanSnapshot().state)) {
+        const auto relative=root.lexically_normal().lexically_relative(m_RawWorkspace.workspaceRoot.lexically_normal());
+        if(!relative.empty() && !relative.is_absolute() && *relative.begin()!="..") {
+            const auto filter=relative=="."?std::optional<std::string>{}:std::optional<std::string>{relative.generic_u8string()};
+            if(filter==m_RawGalleryFolderFilter)return;
+            m_RawGalleryFolderFilter=filter;
+            m_RawWorkspace.selectedSourceKeys.clear();
+            m_RawWorkspace.selectedSourceKey.clear();
+            m_RawWorkspaceLabSelectedProjectPaths.clear();
+            m_RawWorkspaceLabGalleryScrollTargetY=m_RawWorkspaceLabGalleryScrollCurrentY=0.f;
+            m_RawWorkspaceLabFilmstripScrollTargetX=0.f;
+            m_RawWorkspaceLabFilmstripScrollLastAppliedX=-1.f;
+            m_RawWorkspaceGalleryLayoutAnimation.Reset();
+            InvalidateRawWorkspaceGalleryPresentation(false);
+            SaveRawWorkspaceAppState();
+            return;
+        }
+    }
+    if (!m_PermanentGalleryWorkspace && !m_RawWorkspace.allSourceFolders && root.lexically_normal() == m_RawWorkspace.workspaceRoot.lexically_normal()) return;
     if (root.empty()) ClearRawWorkspace();
     else RequestOpenRawWorkspace(root);
 }

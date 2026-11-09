@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/Serialization/DisplayImageImport.h"
+#include "Hdr/GraphView.h"
 #include "Editor/CompositePersistence.h"
 #include "Editor/LayerParameterPreflight.h"
 #include "Editor/Timeline/TimelinePersistence.h"
@@ -558,6 +559,7 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
     m_Project->lastEditTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
     m_Project->lastAutosaveTime = -1.0;
     m_Project->lastAutosaveAttemptTime = -1.0;
+    m_Project->galleryRasterPreview = false;
     return true;
 }
 
@@ -698,6 +700,7 @@ void EditorModule::FailDeferredLoadedProjectApply(std::string message) {
     const std::shared_ptr<LoadedProjectData> rollbackProject =
         m_DeferredLoadedProjectApply.rollbackProject;
     const bool rollbackDirty = m_DeferredLoadedProjectApply.rollbackDirty;
+    const bool rollbackRasterPreview = m_Project->galleryRasterPreview;
     const bool rollbackGalleryOpen = m_DeferredLoadedProjectApply.rollbackGalleryOpen;
     auto completion = std::move(m_DeferredLoadedProjectApply.completion);
     m_DeferredLoadedProjectApply.active = false;
@@ -710,6 +713,7 @@ void EditorModule::FailDeferredLoadedProjectApply(std::string message) {
     m_DeferredLoadedProjectApply.rollbackProject.reset();
     if (rollbackProject) {
         if (ApplyLoadedProject(*rollbackProject)) {
+            m_Project->galleryRasterPreview = rollbackRasterPreview;
             if (rollbackDirty) {
                 MarkDirty();
             }
@@ -1221,6 +1225,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
             m_DeferredLoadedProjectApply.rollbackProject.reset();
             m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
             m_DeferredLoadedProjectApply.statusText = "Project ready.";
+            m_Project->galleryRasterPreview = false;
             CloseRawWorkspaceGalleryWorkspace();
             FinalizeDeferredRawWorkspaceProjectLoadIfNeeded();
             if (completion) {
@@ -1368,7 +1373,7 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foregr
     }
 }
 
-void EditorModule::RequestLoadSourceImage(const std::string& path) {
+void EditorModule::RequestLoadSourceImage(const std::string& path, bool galleryPreview) {
     if (path.empty()) {
         return;
     }
@@ -1458,7 +1463,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
     bool submitted = false;
     try {
         const auto published = std::make_shared<PublishedImage>();
-        submitted = ProjectTasks().SubmitHighPriority("Preparing image", [this, generation, projectGeneration, path, published]() {
+        submitted = ProjectTasks().SubmitHighPriority("Preparing image", [this, generation, projectGeneration, path, published, galleryPreview]() {
             const auto completeEmbedding = [this, generation, projectGeneration, published](std::vector<unsigned char> pngBytes) {
                 if (projectGeneration != m_SourceLoadProjectGeneration || published->uuid.empty()) {
                     return;
@@ -1543,8 +1548,9 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 channels = payload.channels;
             }
 
-            payloadQueued = ProjectTasks().PostToMain([this, generation, path, published, payload = std::move(payload), success]() mutable {
-                if (generation != m_SourceLoadGeneration) {
+            payloadQueued = ProjectTasks().PostToMain([this, generation, projectGeneration, published,
+                payload = std::move(payload), success, galleryPreview]() mutable {
+                if (generation != m_SourceLoadGeneration || projectGeneration != m_SourceLoadProjectGeneration) {
                     return;
                 }
 
@@ -1579,7 +1585,11 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
                 SetCurrentProjectFileName("");
                 WorkspaceLoaded();
                 MarkNodeBrowserThumbnailSourceChanged();
-                MarkDirty();
+                if (galleryPreview && !IsDirty() && !m_Project->store && !m_Project->snapshot) {
+                    m_Project->galleryRasterPreview = true;
+                } else {
+                    MarkDirty();
+                }
 
                 m_SourceLoadTaskState = Async::TaskState::Idle;
                 m_SourceLoadStatusText = "Source image loaded; preparing portable storage...";
@@ -1672,6 +1682,9 @@ void EditorModule::BeginImageExportWrite(
                 case Stack::Hdr::FileFormat::PqPng:
                     encoded = Stack::Hdr::EncodePqPng(hdrImage);
                     break;
+                case Stack::Hdr::FileFormat::SdrJpeg:
+                    encoded = Stack::Hdr::EncodeSdrJpeg(width,height,pixels);
+                    break;
                 case Stack::Hdr::FileFormat::SdrPng: {
                     const auto base = EncodePngBytes(pixels, width, height, 4);
                     std::vector<Stack::NodeMath::ContractIssue> issues;
@@ -1755,7 +1768,7 @@ void EditorModule::CompleteRawWorkspaceExportRender(
     const bool rasterValid = result.success && !result.telemetry.superseded &&
         result.error.empty() && sourceMatchesActive &&
         Stack::PixelBuffer::HasCompletePixelBuffer(
-            m_RequestedExportFormat == Stack::Hdr::FileFormat::SdrPng ? result.pixels.size() : result.hdrExportImage.rgba.size(),
+            Stack::Hdr::IsHdr(m_RequestedExportFormat) ? result.hdrExportImage.rgba.size() : result.pixels.size(),
             result.width, result.height, 4) &&
         (m_RequestedExportFormat != Stack::Hdr::FileFormat::GainMapJpeg ||
             (result.hdrExportImage.width == result.width &&
@@ -1795,7 +1808,8 @@ void EditorModule::CompleteRawWorkspaceExportRender(
 }
 
 bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileFormat format) {
-    const bool hdr = format != Stack::Hdr::FileFormat::SdrPng;
+    const bool hdr = Stack::Hdr::IsHdr(format);
+    bool photoExport=hdr || format==Stack::Hdr::FileFormat::SdrJpeg;
     if(HasPendingBracketingDraft()) {
         m_ExportTaskState=Async::TaskState::Failed;
         m_ExportStatusText="Process or discard pending Bracketing input changes before export.";
@@ -1836,7 +1850,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
     }
     Stack::FileSave::ExportFileTarget target;
     std::string targetError;
-    const std::vector<std::string> extensions = format == Stack::Hdr::FileFormat::GainMapJpeg
+    const std::vector<std::string> extensions = Stack::Hdr::IsJpeg(format)
         ? std::vector<std::string>{".jpg", ".jpeg"} : std::vector<std::string>{".png"};
     if (!Stack::FileSave::PrepareExportFileTarget(std::filesystem::u8path(path),
             protectedSources, extensions, target, targetError)) {
@@ -1860,7 +1874,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
             m_Project->rawRecipe)) {
         PostNotification(
             UiNotificationSeverity::Warning,
-            "View is bypassed. The current 8-bit PNG encoder clips scene-linear negatives and highlight headroom.",
+            "View is bypassed. The SDR encoder clips scene-linear negatives and highlight headroom.",
             "raw-export-view-bypassed-clipping");
     }
 
@@ -1883,7 +1897,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
         }
     } else if (IsCompositeViewportMode()) {
         std::string policyError;
-        if (!ValidateCompositePngExport(policyError)) {
+        if (!ValidateCompositePngExport(policyError,format==Stack::Hdr::FileFormat::SdrJpeg)) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText = std::move(policyError);
             PostNotification(UiNotificationSeverity::Error, m_ExportStatusText,
@@ -1891,7 +1905,15 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
             return false;
         }
     } else {
-        const RenderGraphSnapshot semanticSnapshot = BuildGraphSnapshot();
+        RenderGraphSnapshot semanticSnapshot = BuildGraphSnapshot();
+        if(Stack::Hdr::NeedsSdrPhotoView(semanticSnapshot)) {
+            if(!Stack::Hdr::ConfigureView(semanticSnapshot,1.f,true)) {
+                m_ExportTaskState=Async::TaskState::Failed;
+                m_ExportStatusText="The imported HDR image has no supported SDR rendition.";
+                return false;
+            }
+            photoExport=true;
+        }
         if (m_Project->graph.IsOutputChannelInspection(
                 semanticSnapshot.outputNodeId)) {
             m_ExportTaskState = Async::TaskState::Failed;
@@ -1919,6 +1941,9 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
             return false;
         }
         colorChunks.writeSrgb = outputPolicy.writeSrgbChunk;
+        // Photo delivery always resolves its SDR view at native size, including
+        // ordinary image/RAW graphs outside the dedicated RAW workspace.
+        photoExport=photoExport || colorChunks.writeSrgb;
         colorChunks.writeDisplayP3Cicp = outputPolicy.writeDisplayP3Cicp;
         if (outputPolicy.writeRetainedIccProfile) {
             for (const EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
@@ -1949,7 +1974,13 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
         }
     }
 
-    if ((IsRawWorkspaceProjectActive() || hdr) && !IsCompositeViewportMode()) {
+    if(format==Stack::Hdr::FileFormat::SdrJpeg && !colorChunks.writeSrgb && !IsCompositeViewportMode()) {
+        m_ExportTaskState=Async::TaskState::Failed;
+        m_ExportStatusText="SDR JPEG needs an sRGB image output. Enable the View Transform and sRGB output encoding.";
+        PostNotification(UiNotificationSeverity::Error,m_ExportStatusText,"editor-export-semantic-policy");
+        return false;
+    }
+    if ((IsRawWorkspaceProjectActive() || photoExport) && !IsCompositeViewportMode()) {
         if (IsRawWorkspaceProjectActive() ? m_RawRenderClientId == 0 : !m_RenderWorkerAvailable) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText =
@@ -1961,6 +1992,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
             return false;
         }
         if (!m_SuppressExportProjectCheckpoint &&
+            GetProjectSessionKind() != ProjectSessionKind::RawPreview &&
             !m_Project->name.empty() &&
             !RequestSaveCurrentProject(m_Project->name)) {
             PostNotification(
@@ -2032,7 +2064,7 @@ bool EditorModule::RequestExportImage(const std::string& path, Stack::Hdr::FileF
         height,
         std::move(colorChunks),
         generation,
-        std::move(target));
+        std::move(target),format);
     return Async::IsBusy(m_ExportTaskState);
 }
 

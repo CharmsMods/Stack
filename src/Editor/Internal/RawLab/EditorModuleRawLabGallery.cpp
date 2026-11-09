@@ -635,12 +635,16 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         m_RawWorkspaceLabFilmstripTimelineHoveredStackMember = false;
         m_RawWorkspaceLabFilmstripTimelineHoveredCenterX = 0.0f;
     }
-    const auto addTimelineSourceTime = [](
+    const auto timelineOrganization=m_RawWorkspaceManualGroupings.find(m_RawWorkspaceFilmstripStacksCacheWorkspaceKey);
+    const auto timelineSort=timelineOrganization==m_RawWorkspaceManualGroupings.end()
+        ? Stack::RawWorkspace::RawGalleryFilmstripSortMode::TimelineAll : timelineOrganization->second.sortMode;
+    const bool modifiedTimeline=timelineSort==Stack::RawWorkspace::RawGalleryFilmstripSortMode::ModifiedNewestFirst ||
+        timelineSort==Stack::RawWorkspace::RawGalleryFilmstripSortMode::ModifiedOldestFirst;
+    const auto addTimelineSourceTime = [modifiedTimeline](
         RawLabFilmstripTimelineEntry& entry,
         const Stack::RawWorkspace::SourceRecord* source) {
         if (source == nullptr) return;
-        const std::int64_t timestamp = source->captureTimestamp > 0
-            ? source->captureTimestamp : source->modifiedUnixSeconds;
+        const std::int64_t timestamp = modifiedTimeline?source->modifiedUnixSeconds:source->captureTimestamp;
         if (timestamp <= 0) return;
         if (entry.firstTimestamp == 0 || timestamp < entry.firstTimestamp)
             entry.firstTimestamp = timestamp;
@@ -849,6 +853,20 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
         SelectRawWorkspaceSourceForGallery(
             sourceKey, toggle, range, openForEditing, range ? &visibleSourceOrder : nullptr);
+        const bool collapsedRange=range && m_PermanentGalleryWorkspace &&
+            (compactFilmstrip ? filmstripDrawerExpansion<=.001f :
+                m_RawWorkspaceGalleryDisplayMode!=Stack::RawWorkspace::GalleryDisplayMode::List && !gridBrowse.groupCount);
+        if(collapsedRange) {
+            auto& selected=m_RawWorkspace.selectedSourceKeys;
+            std::unordered_set<std::string> selectedSet(selected.begin(),selected.end());
+            for(const auto& stack:m_RawWorkspaceLabVisibleGalleryStacksCache) {
+                if(stack.sourceKeys.empty())continue;
+                const auto cover=compactFilmstrip?stack.sourceKeys.front():gridBrowse.Cover(stack.sourceKeys,{});
+                if(!selectedSet.count(cover))continue;
+                for(const auto& key:stack.sourceKeys)if(selectedSet.insert(key).second)selected.push_back(key);
+            }
+            InvalidateRawWorkspaceGalleryPresentation(false);
+        }
     };
     HandleRawGalleryActionShortcuts();
 
@@ -1461,8 +1479,22 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 filmstripTargetMembers && (!compactFilmstrip || filmstripDrawerExpansion <= 0.001f) &&
                 !doubleClicked) {
                 SelectBracketingSources(*filmstripTargetMembers,click.KeyCtrl,click.KeyShift);
-            } else if (collapsedCaptureStack && !selectionModifier && !doubleClicked) {
-                selectCaptureStack();
+            } else if (collapsedCaptureStack && !click.KeyShift && !doubleClicked) {
+                if (!click.KeyCtrl) selectCaptureStack();
+                else {
+                    // Ctrl toggles the whole visible stack, just as an ordinary
+                    // click selects it. Do not silently select only its cover.
+                    auto& selected=m_RawWorkspace.selectedSourceKeys;
+                    const bool all=std::all_of(filmstripTargetMembers->begin(),filmstripTargetMembers->end(),
+                        [&](const auto& key) {return std::find(selected.begin(),selected.end(),key)!=selected.end();});
+                    for(const auto& key:*filmstripTargetMembers) {
+                        const auto at=std::find(selected.begin(),selected.end(),key);
+                        if(all && at!=selected.end()) selected.erase(at);
+                        else if(!all && at==selected.end()) selected.push_back(key);
+                    }
+                    m_RawWorkspace.selectedSourceKey=all?(selected.empty()?std::string{}:selected.back()):source.relativePathKey;
+                    InvalidateRawWorkspaceGalleryPresentation(false);
+                }
             } else if (!activeProjectPath.empty()) {
                 selectProject(
                     activeProjectPath,
@@ -3018,7 +3050,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
     const auto renderAnimatedGroup = [&](
         const std::string& groupKey,
         const std::string& label,
-        std::size_t itemCount, const auto& itemAt) {
+        std::size_t itemCount, const auto& itemAt, const std::string& detail = {}) {
         if (itemCount == 0) {
             return;
         }
@@ -3044,6 +3076,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             "##GalleryFolderHeader",
             ImVec2(headerWidth, headerHeight));
         const bool headerHovered = ImGui::IsItemHovered();
+        if(headerHovered && !detail.empty())ImGui::SetTooltip("%s",detail.c_str());
         if (ImGui::IsItemClicked() && !gridBrowse.groupCount) {
             if (targetExpanded) {
                 m_RawWorkspaceLabCollapsedGalleryGroups.insert(groupKey);
@@ -3395,8 +3428,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const auto& stacks = ResolveRawWorkspaceVisibleGalleryStacks();
         for (const auto& section : m_RawWorkspaceLabVisibleGallerySections) {
             renderAnimatedGroup(
-                section.separateFolder ? "folder:" + section.folderKey : "all-originals",
-                section.separateFolder ? (section.folderKey.empty() ? "Workspace root" : section.folderKey) : "All images",
+                !section.dateKey.empty() ? "date:"+section.dateKey : section.separateFolder ? "folder:" + section.folderKey : "all-originals",
+                !section.dateLabel.empty() ? section.dateLabel : section.separateFolder ? (section.folderKey.empty() ? "Workspace root" : section.folderKey) : "All images",
                 section.stackCount,[&](std::size_t index)->AnimatedGalleryItem {
                     const auto& stack=stacks[section.firstStack+index];
                     const auto cover=gridBrowse.Cover(stack.sourceKeys,{});
@@ -3404,7 +3437,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     if(!source || m_RawWorkspaceLabGalleryViewsBySource.find(cover)==m_RawWorkspaceLabGalleryViewsBySource.end())return {};
                     return {source,source->fileName,{},nullptr,"stack:"+stack.sourceKeys.front(),
                         &stack.sourceKeys,stack.hasSavedBracketingResult};
-                });
+                },section.dateDetail);
         }
     } else if (!projectsOnly) {
         for (const auto& group : presentation.groups) {
