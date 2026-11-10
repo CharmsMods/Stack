@@ -179,11 +179,6 @@ struct RootTabDescriptor {
     std::function<void()> renderBody;
 };
 
-constexpr double kLibraryLoadFadeOutSeconds = 0.48;
-constexpr double kLibraryLoadSpinnerFadeInSeconds = 0.26;
-constexpr double kLibraryLoadSpinnerMinVisibleSeconds = 0.85;
-constexpr double kLibraryLoadSpinnerFadeOutSeconds = 0.32;
-constexpr double kLibraryLoadEditorRevealSeconds = 1.90;
 constexpr double kRootTabBodyFadeOutSeconds = 0.14;
 constexpr double kRootTabBodyFadeInSeconds = 0.24;
 constexpr float kRootTabWidgetFadeOutFraction = 0.70f;
@@ -1865,14 +1860,22 @@ void AppShell::Run() {
         ImGui::NewFrame();
         ImGuiExtras::BeginFrameInputRouting();
         const auto& input=ImGui::GetIO();
+        // Focus alone (for example an idle text field) must not indefinitely
+        // suppress background work. Track actual presses, text and repeats.
         const bool relevantInput=input.MouseWheel!=0 || input.MouseWheelH!=0 ||
-            ImGui::IsAnyMouseDown() || ImGui::IsKeyPressed(ImGuiKey_Tab,false) ||
-            ImGui::IsKeyPressed(ImGuiKey_LeftArrow,false) || ImGui::IsKeyPressed(ImGuiKey_RightArrow,false);
+            input.InputQueueCharacters.Size!=0 ||
+            ImGui::GetCurrentContext()->LastKeyboardKeyPressTime==ImGui::GetTime() ||
+            ImGui::IsAnyMouseDown() || ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
+            ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) ||
+            ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Backspace) ||
+            ImGui::IsKeyPressed(ImGuiKey_Delete);
         if(input.AppFocusLost || m_CloseRequested) m_UiInteraction.Clear();
         else m_UiInteraction.Update(relevantInput,
             m_NavigationRail.panelMotion.Active() || m_NavigationRail.revealMotion.Active() ||
             m_RawMaskToolbar.revealMotion.Active() || m_GalleryNavigationMotion->Active() ||
             (m_Editor && m_Editor->HasUiPresentationMotion(ImGui::GetFrameCount()-1)),ImGui::GetTime());
+        Stack::App::UiFrameWorkBudget workBudget(m_UiFrameBudget.Limits(
+            displayRefreshRate, Async::UiInteraction::Active()));
         m_WorkspaceCompositor.BeginFrame();
         m_NotificationPresenter.BeginFrame(*m_NotificationStore);
         TickToolSwitcher();
@@ -1899,10 +1902,11 @@ void AppShell::Run() {
         } else {
             const auto pumpStarted = std::chrono::steady_clock::now();
             LibraryManager::Get().ProcessDeferredDeletions();
-            Async::TaskSystem::Get().PumpMainThreadTasks(4,
-                Stack::App::MainThreadCompletionBudgetMs(displayRefreshRate));
+            Async::TaskSystem::Get().PumpMainThreadTasks(workBudget.Limits().completionCount,
+                workBudget.ProgressSliceMs(workBudget.Limits().completionMs));
             pumpMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pumpStarted).count();
+            workBudget.Charge(pumpMs);
 
             if (!m_ToolSwitcher.Visible() && !m_NotificationPresenter.BlocksInput()) ProcessNativeCloseButtonHoverSave();
 
@@ -1915,7 +1919,7 @@ void AppShell::Run() {
             UpdateNotifications();
             {
                 Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ProjectWorkspaces);
-                TickProjectWorkspaces();
+                TickProjectWorkspaces(workBudget);
             }
             ApplyRailNavigation();
 
@@ -1956,7 +1960,11 @@ void AppShell::Run() {
         const double secondsSinceMainWindowShown = glfwGetTime() - m_MainWindowShownTime;
         LibraryTextureUploadStats libraryUploadStats;
         if (!m_CloseRequested && (m_CurrentTabId == RootTabLibrary || (m_WorkspaceSwitcher.Visible() && m_WorkspaceSwitcher.preview == RootTabLibrary)) && secondsSinceMainWindowShown > 0.35) {
-            libraryUploadStats = LibraryManager::Get().UploadLibraryTextures(2.0);
+            // Library uploads run after its UI has requested visible thumbnails.
+            // Keep a small progress slice even under sustained pressure.
+            libraryUploadStats = LibraryManager::Get().UploadLibraryTextures(
+                workBudget.ProgressSliceMs(workBudget.Limits().libraryUploadMs));
+            workBudget.Charge(libraryUploadStats.elapsedMs);
         }
         if (!m_CloseRequested && m_StartupRevealVisual.AllowsInput() && !m_UiPerformanceCapture) {
             if (!m_WorkspaceSwitcher.held && !m_ToolSwitcher.Visible()) SyncCursorCaptureRequest();
@@ -2135,6 +2143,8 @@ void AppShell::Run() {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drawStarted).count();
         const double frameMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStarted).count();
+        if (!renderedClosingFrame)
+            m_UiFrameBudget.ObserveFrame(frameMs, swapMs, displayRefreshRate);
         TraceLibraryPerfFrame(
             ImGui::GetFrameCount(),
             secondsSinceMainWindowShown,
@@ -2702,7 +2712,6 @@ void AppShell::RenderUI() {
             } }
     };
 
-    TickLibraryToEditorProjectLoadTransition();
     if(m_CurrentTabId==RootTabMultiFrame){m_Editor->OpenBracketingTool();m_CurrentTabId=RootTabRawLab;}
     m_Editor->TickBracketing();
     m_Editor->UpdateBracketingPresentation();

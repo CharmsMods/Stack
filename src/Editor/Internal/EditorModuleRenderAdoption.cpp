@@ -1,5 +1,7 @@
 #include "Renderer/ViewportTextureCopy.h"
 #include "Editor/EditorModule.h"
+#include "App/UiFrameBudget.h"
+#include "Utils/DisplayRefreshRate.h"
 #include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
 
 #include "App/settings/AppearanceTheme.h"
@@ -71,52 +73,54 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
     };
 
-    std::deque<EditorRenderWorker::Result> resultsToProcess;
-    while (!m_DeferredRenderResults.empty()) {
-        try {
-            resultsToProcess.push_back(
-                std::move(m_DeferredRenderResults.front()));
-        } catch (const std::bad_alloc&) {
-            releaseDeferredResultResources(
-                m_DeferredRenderResults.front());
-        } catch (const std::length_error&) {
-            releaseDeferredResultResources(
-                m_DeferredRenderResults.front());
+    const int frame = ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
+    const auto* viewport = ImGui::GetCurrentContext() ? ImGui::GetMainViewport() : nullptr;
+    const int refresh = viewport ? DisplayRefreshRate::ForWindow(
+        static_cast<GLFWwindow*>(viewport->PlatformHandle)) : 60;
+    const double completionBudgetMs = Stack::App::MainThreadCompletionBudgetMs(refresh);
+    m_RenderCompletionUiBudget.BeginFrame(frame);
+    m_RenderTimingUiBudget.BeginFrame(frame);
+    std::size_t deferredRemaining = m_DeferredRenderResults.size();
+    bool graphExhausted = false, rawExhausted = false;
+    const auto consumeNext = [&](EditorRenderWorker::Result& next) {
+        // Do not drain producers into another UI-owned backlog. Leave packets
+        // with their coalescing owner until this frame has time to adopt them.
+        // Rotate sources so a fence or a busy Graph owner cannot starve RAW.
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const int source = m_NextRenderCompletionSource;
+            m_NextRenderCompletionSource = (source + 1) % 3;
+            if (source == 0 && deferredRemaining > 0 && !m_DeferredRenderResults.empty()) {
+                --deferredRemaining;
+                next = std::move(m_DeferredRenderResults.front());
+                m_DeferredRenderResults.pop_front();
+                return true;
+            }
+            if (source == 1 && !graphExhausted) {
+                if (m_RenderWorker.TryConsumeCompleted(next)) return true;
+                graphExhausted = true;
+            }
+            if (source == 2 && !rawExhausted) {
+                if (m_RawRenderClientId != 0 && Stack::EditorRendering::RawRenderService::Get()
+                        .TryConsumeCompleted(m_RawRenderClientId, next)) return true;
+                rawExhausted = true;
+            }
         }
-        m_DeferredRenderResults.pop_front();
-    }
-
-    EditorRenderWorker::Result result;
-    while (m_RenderWorker.TryConsumeCompleted(result)) {
-        try {
-            resultsToProcess.push_back(std::move(result));
-        } catch (const std::bad_alloc&) {
-            releaseDeferredResultResources(result);
-        } catch (const std::length_error&) {
-            releaseDeferredResultResources(result);
-        }
-    }
-    while (m_RawRenderClientId != 0 &&
-           Stack::EditorRendering::RawRenderService::Get()
-               .TryConsumeCompleted(m_RawRenderClientId, result)) {
-        try {
-            resultsToProcess.push_back(std::move(result));
-        } catch (const std::bad_alloc&) {
-            releaseDeferredResultResources(result);
-        } catch (const std::length_error&) {
-            releaseDeferredResultResources(result);
-        }
-    }
-
-    while (m_RenderWorker.TryConsumeViewportTiming(result)) {
-        ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result);
-    }
-    while (m_RawRenderClientId && Stack::EditorRendering::RawRenderService::Get().TryConsumeViewportTiming(m_RawRenderClientId,result)) {
-        ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result);
-    }
-    while (!resultsToProcess.empty()) {
-        EditorRenderWorker::Result result = std::move(resultsToProcess.front());
-        resultsToProcess.pop_front();
+        return false;
+    };
+    // Cleanup runs before this gate and guarantees a turn each frame. Bound
+    // UI-owned retirement residency during sustained producer pressure; new
+    // completions (including terminal operations) remain queued, never dropped.
+    constexpr std::size_t maximumDeferredTextures = 16;
+    constexpr std::size_t maximumDeferredTileSets = 4;
+    while (m_RenderCompletionUiBudget.CanStart(4, completionBudgetMs) &&
+        m_DeferredViewportOutputTextureReleases.size() < maximumDeferredTextures &&
+        m_DeferredViewportOutputTileReleases.size() < maximumDeferredTileSets) {
+        // Include acquisition (the RAW service pumps its owner here), adoption
+        // and payload destruction. An empty attempt also consumes a bounded
+        // slice, and the next UI frame always gives this owner another turn.
+        Stack::EditorRendering::RenderUiWorkBudget::Item work(m_RenderCompletionUiBudget);
+        EditorRenderWorker::Result result;
+        if (!consumeNext(result)) break;
 
         try {
         if (result.rawRenderPurpose==RawRenderPurpose::AnalysisScopes && m_NodeEditorPanel.analysisTarget &&
@@ -1132,6 +1136,30 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 IsAnyRenderBackendBusy();
             m_RenderDirty = true;
         }
+    }
+    // Timing evidence is useful, but a burst of measurements must not delay
+    // the first usable image or consume the rest of an interaction frame.
+    bool graphTimingExhausted = false, rawTimingExhausted = false;
+    while (m_RenderTimingUiBudget.CanStart(8, completionBudgetMs * 0.25)) {
+        Stack::EditorRendering::RenderUiWorkBudget::Item work(m_RenderTimingUiBudget);
+        EditorRenderWorker::Result timing;
+        bool consumed = false;
+        for (int attempt = 0; attempt < 2 && !consumed; ++attempt) {
+            const bool raw = m_NextRenderTimingRaw;
+            m_NextRenderTimingRaw = !raw;
+            if (raw && !rawTimingExhausted) {
+                consumed = m_RawRenderClientId != 0 &&
+                    Stack::EditorRendering::RawRenderService::Get()
+                        .TryConsumeViewportTiming(m_RawRenderClientId, timing);
+                rawTimingExhausted = !consumed;
+            } else if (!raw && !graphTimingExhausted) {
+                consumed = m_RenderWorker.TryConsumeViewportTiming(timing);
+                graphTimingExhausted = !consumed;
+            }
+        }
+        if (!consumed) break;
+        ObserveRawViewportTiming(timing);
+        ObserveViewportPreviewTiming(timing);
     }
 }
 

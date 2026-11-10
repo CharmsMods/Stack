@@ -10,11 +10,6 @@ namespace {
 
 constexpr int RootTabEditor = 1;
 constexpr int RootTabLibrary = 0;
-constexpr double kLibraryLoadFadeOutSeconds = 0.48;
-constexpr double kLibraryLoadSpinnerFadeInSeconds = 0.26;
-constexpr double kLibraryLoadSpinnerMinVisibleSeconds = 0.85;
-constexpr double kLibraryLoadSpinnerFadeOutSeconds = 0.32;
-constexpr double kLibraryLoadEditorRevealSeconds = 1.90;
 constexpr bool kLibraryLoadTransitionDiagnostics = false;
 
 } // namespace
@@ -164,11 +159,6 @@ void AppShell::SetLibraryToEditorProjectLoadPhase(ProjectWorkspace& workspace, L
     TraceLibraryLoadTransition(workspace, event);
 }
 
-void AppShell::TickLibraryToEditorProjectLoadTransition() {
-    for (auto& workspace : m_ProjectWorkspaces)
-        TickLibraryToEditorProjectLoadTransition(*workspace);
-}
-
 void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& workspace) {
     auto& transition = workspace.loadTransition;
     auto* editor = workspace.editor.get();
@@ -177,14 +167,32 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
         return;
     }
 
-    editor->PumpNonRenderingWork(foreground ? 2.5 : 0.5, foreground);
+    // The shell's budgeted workspace pump advances each editor. Inspecting
+    // load readiness here must not give every hidden load an extra UI slice.
     if (!foreground && transition.phase == LibraryToEditorProjectLoadPhase::SpinnerFadeIn &&
         !transition.loadRequested) RequestDeferredLibraryProjectLoad(workspace);
 
     const double now = ImGui::GetTime();
-    const double elapsed = now - transition.phaseStartTime;
-    const bool skipPresentationDelay = !foreground || Stack::Notifications::SystemReducedMotion();
-    auto finishToLibrary = [&]() {
+    // Loading owns readiness; presentation must not add a minimum dwell before
+    // applying decoded state or keep a ready editor locked behind a reveal.
+    auto finishTransition = [&](bool opened) {
+        if (opened) {
+            workspace.rootTab = RootTabEditor;
+            if (foreground) {
+                OnTabChanged(m_CurrentTabId, RootTabEditor);
+                m_CurrentTabId = RootTabEditor;
+                editor->BeginLibraryLoadReveal();
+            }
+            TraceLibraryLoadTransition(workspace, "editor ready for interaction");
+        } else {
+            workspace.rootTab = RootTabLibrary;
+            if (foreground) {
+                OnTabChanged(m_CurrentTabId, RootTabLibrary);
+                m_CurrentTabId = RootTabLibrary;
+                m_LibraryWindowOpen = false;
+                m_LibraryWindowFocusRequested = false;
+            }
+        }
         SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::None);
         transition.projectFileName.clear();
         transition.decodedProject.reset();
@@ -195,13 +203,6 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
         transition.loadRequested = false;
         transition.firstRenderReady = false;
         transition.nodeBrowserThumbnailsReady = false;
-        workspace.rootTab = RootTabLibrary;
-        if (foreground) {
-            OnTabChanged(m_CurrentTabId, RootTabLibrary);
-            m_CurrentTabId = RootTabLibrary;
-            m_LibraryWindowOpen = false;
-            m_LibraryWindowFocusRequested = false;
-        }
     };
 
     if (transition.dismissLibraryPreviewsPending &&
@@ -212,17 +213,12 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
 
     switch (transition.phase) {
     case LibraryToEditorProjectLoadPhase::LibraryFadeOut:
-        if (skipPresentationDelay || elapsed >= kLibraryLoadFadeOutSeconds) {
-            SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeIn);
-        }
+        SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeIn);
         break;
     case LibraryToEditorProjectLoadPhase::SpinnerFadeIn: {
-        const bool minimumSpinnerShown = skipPresentationDelay ||
-            (now - transition.spinnerStartTime) >= kLibraryLoadSpinnerMinVisibleSeconds;
-        const bool spinnerReady = skipPresentationDelay || elapsed >= kLibraryLoadSpinnerFadeInSeconds;
-        if (transition.decodeReady && !transition.decodeSucceeded && spinnerReady && minimumSpinnerShown) {
-            SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
-        } else if (transition.decodeReady && spinnerReady && minimumSpinnerShown) {
+        if (transition.decodeReady && !transition.decodeSucceeded) {
+            finishTransition(false);
+        } else if (transition.decodeReady) {
             transition.applyStartedAt = ImGui::GetTime();
             TraceLibraryLoadTransition(workspace, "apply start");
             if (!editor->BeginDeferredLoadedProjectApply(transition.decodedProject)) {
@@ -234,7 +230,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
                     editor->GetDeferredLoadedProjectStatusText().empty()
                         ? "Failed to apply the loaded project."
                         : editor->GetDeferredLoadedProjectStatusText());
-                SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+                finishTransition(false);
                 break;
             }
             LibraryManager::Get().SetProjectLoadApplyingStatus(editor, "Applying editor state...");
@@ -276,7 +272,7 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
                 editor->GetDeferredLoadedProjectStatusText().empty()
                     ? "Failed to apply the loaded project."
                     : editor->GetDeferredLoadedProjectStatusText());
-            SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+            finishTransition(false);
             break;
         }
 
@@ -304,39 +300,14 @@ void AppShell::TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& worksp
             TraceLibraryLoadTransition(workspace, "apply end ok");
             TraceLibraryLoadTransition(workspace, "ready to reveal");
             LibraryManager::Get().FinishDeferredProjectLoad(editor, true, "Project loaded into the editor.");
-            SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+            finishTransition(true);
         }
         break;
     }
     case LibraryToEditorProjectLoadPhase::SpinnerFadeOut:
-        if (skipPresentationDelay || elapsed >= kLibraryLoadSpinnerFadeOutSeconds) {
-            if (transition.applySucceeded) {
-                workspace.rootTab = RootTabEditor;
-                if (foreground) {
-                    OnTabChanged(m_CurrentTabId, RootTabEditor);
-                    m_CurrentTabId = RootTabEditor;
-                    editor->BeginLibraryLoadReveal();
-                }
-                TraceLibraryLoadTransition(workspace, "editor reveal start");
-                SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::EditorReveal);
-            } else {
-                finishToLibrary();
-            }
-        }
-        break;
     case LibraryToEditorProjectLoadPhase::EditorReveal:
-        if (skipPresentationDelay || elapsed >= kLibraryLoadEditorRevealSeconds) {
-            SetLibraryToEditorProjectLoadPhase(workspace, LibraryToEditorProjectLoadPhase::None);
-            transition.projectFileName.clear();
-            transition.decodeReady = false;
-            transition.decodeSucceeded = false;
-            transition.applySucceeded = false;
-            transition.dismissLibraryPreviewsPending = false;
-            transition.loadRequested = false;
-            transition.decodedProject.reset();
-            transition.firstRenderReady = false;
-            transition.nodeBrowserThumbnailsReady = false;
-        }
+        // Drain a previously entered presentation phase without holding input.
+        finishTransition(transition.applySucceeded);
         break;
     case LibraryToEditorProjectLoadPhase::None:
         break;

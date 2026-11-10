@@ -5,6 +5,7 @@
 #include "Editor/EditorModule.h"
 #include "Hdr/Presentation.h"
 #include "App/UiPerformanceProbe.h"
+#include "App/UiFrameBudget.h"
 #include "Project/RawLayerStackSnapshot.h"
 #include "Project/RawNodeEditing.h"
 #include "NodeMath/ToneCurveParameters.h"
@@ -58,6 +59,7 @@ namespace {
 constexpr int kRawDevelopComplexPreviewMaxDimension = 2048;
 // Grading scopes need enough source samples to make the higher-resolution
 // vectorscope and parade meaningful. This remains an asynchronous readback.
+constexpr std::size_t kViewportOutputTextureDeletesPerFrame = 8;
 constexpr std::size_t kViewportOutputTileTextureDeletesPerFrame = 12;
 
 std::size_t RawLayerScopeFingerprint(const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
@@ -1104,7 +1106,14 @@ void EditorModule::QueueViewportOutputTileSetRelease(EditorRenderWorker::SharedT
 }
 
 void EditorModule::PumpViewportOutputTextureDeletes(bool drainAll) {
-    while (!m_DeferredViewportOutputTextureReleases.empty()) {
+    const double budgetMs = Stack::App::MainThreadCompletionBudgetMs(m_RawViewportDisplayRefreshRate) * 0.25;
+    m_ViewportTextureRetirementUiBudget.BeginFrame(
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1);
+    while (!m_DeferredViewportOutputTextureReleases.empty() &&
+        (drainAll || m_ViewportTextureRetirementUiBudget.CanStart(
+            kViewportOutputTextureDeletesPerFrame, budgetMs))) {
+        Stack::EditorRendering::RenderUiWorkBudget::Item work(
+            m_ViewportTextureRetirementUiBudget, !drainAll);
         EditorRenderWorker::SharedTextureResult& texture =
             m_DeferredViewportOutputTextureReleases.front();
         if (texture.readyFence) {
@@ -1136,11 +1145,20 @@ void EditorModule::PumpViewportOutputTextureDeletes(bool drainAll) {
 }
 
 void EditorModule::PumpViewportOutputTileTextureDeletes(bool drainAll) {
-    std::size_t deletedThisFrame = 0;
+    const double budgetMs = Stack::App::MainThreadCompletionBudgetMs(m_RawViewportDisplayRefreshRate) * 0.25;
+    m_ViewportTileRetirementUiBudget.BeginFrame(
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1);
 
-    while (!m_DeferredViewportOutputTileReleases.empty()) {
+    while (!m_DeferredViewportOutputTileReleases.empty() &&
+        (drainAll || m_ViewportTileRetirementUiBudget.CanStart(
+            kViewportOutputTileTextureDeletesPerFrame, budgetMs))) {
         EditorRenderWorker::SharedTextureTileSet& tileSet = m_DeferredViewportOutputTileReleases.front();
         if (tileSet.readyFence) {
+            // Polling/deleting a fence can enter the driver too. Charge it
+            // before admitting tile deletes. A signaled fence is cleared, so
+            // even a slow poll leaves the tiles a fresh turn next frame.
+            Stack::EditorRendering::RenderUiWorkBudget::Item fenceWork(
+                m_ViewportTileRetirementUiBudget, !drainAll);
             if (drainAll) {
                 glClientWaitSync(tileSet.readyFence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000);
                 glDeleteSync(tileSet.readyFence);
@@ -1154,13 +1172,15 @@ void EditorModule::PumpViewportOutputTileTextureDeletes(bool drainAll) {
         }
 
         while (!tileSet.tiles.empty() &&
-            (drainAll || deletedThisFrame < kViewportOutputTileTextureDeletesPerFrame)) {
+            (drainAll || m_ViewportTileRetirementUiBudget.CanStart(
+                kViewportOutputTileTextureDeletesPerFrame, budgetMs))) {
+            Stack::EditorRendering::RenderUiWorkBudget::Item work(
+                m_ViewportTileRetirementUiBudget, !drainAll);
             EditorRenderWorker::SharedTextureTile tile = tileSet.tiles.back();
             tileSet.tiles.pop_back();
             if (tile.texture != 0) {
                 glDeleteTextures(1, &tile.texture);
             }
-            ++deletedThisFrame;
         }
 
         if (!tileSet.tiles.empty()) {

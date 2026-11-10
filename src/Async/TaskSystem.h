@@ -58,6 +58,8 @@ public:
     bool PostToMain(ActivityMetadata activity, Task task);
     // A positive time limit stops between callbacks. One callback can exceed
     // it, but at least one always runs so queued completions keep progressing.
+    // Time-budgeted calls leave callbacks posted during the pump for next turn;
+    // callback capture cleanup is included in the elapsed budget.
     // Zero retains the existing count-only or unlimited draining behavior.
     void PumpMainThreadTasks(std::size_t maxTasks = 0, double maxMilliseconds = 0.0);
     // UI-thread-only optional diagnostics; caller clears this at capture teardown.

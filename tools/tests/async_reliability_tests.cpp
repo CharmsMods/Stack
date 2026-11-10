@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <future>
 #include <iostream>
@@ -240,6 +241,116 @@ void TestMainThreadCompletionBudget() {
     tasks.Shutdown();
 }
 
+void TestMainThreadTurnBoundary() {
+    auto& tasks = Async::TaskSystem::Get();
+    tasks.Initialize();
+    int completed = 0;
+    bool followupAccepted = false;
+    const auto firstStage = [&] {
+        ++completed;
+        followupAccepted = tasks.PostToMain([&] { ++completed; });
+    };
+
+    Require(tasks.PostToMain(firstStage), "Staged completion should be accepted");
+    tasks.PumpMainThreadTasks(0, 1000.0);
+    Require(followupAccepted && completed == 1,
+        "A budgeted UI turn must defer callbacks posted during that turn");
+    tasks.PumpMainThreadTasks();
+    Require(completed == 2, "Deferred followup must remain queued for the next turn");
+
+    Require(tasks.PostToMain(firstStage), "Count-limited completion should be accepted");
+    tasks.PumpMainThreadTasks(2);
+    Require(followupAccepted && completed == 4,
+        "Count-only pumping must retain its existing staged drain behavior");
+    Require(tasks.PostToMain(firstStage), "Unbudgeted completion should be accepted");
+    tasks.PumpMainThreadTasks();
+    Require(followupAccepted && completed == 6,
+        "Unlimited pumping must still drain callbacks posted during the same call");
+    tasks.Shutdown();
+}
+
+void TestMainThreadCaptureTiming() {
+    auto& tasks = Async::TaskSystem::Get();
+    tasks.Initialize();
+    static bool captureReleased = false;
+    static bool observedAfterRelease = false;
+    captureReleased = observedAfterRelease = false;
+    bool cleanupAccepted = false;
+    int cleanupCallbacks = 0;
+    auto capture = std::shared_ptr<int>(new int(0), [&](int* value) {
+        delete value;
+        captureReleased = true;
+        cleanupAccepted = tasks.PostToMain([&] { ++cleanupCallbacks; });
+    });
+    Require(tasks.PostToMain([capture = std::move(capture)] {}),
+        "Callback capture should queue successfully");
+    tasks.SetMainTaskTimingObserver([](double) { observedAfterRelease = captureReleased; });
+    tasks.PumpMainThreadTasks(4, 1000.0);
+    tasks.SetMainTaskTimingObserver(nullptr);
+    Require(observedAfterRelease && cleanupAccepted && cleanupCallbacks == 0,
+        "Callback timing must include capture release and safely defer its cleanup work");
+    tasks.PumpMainThreadTasks();
+    Require(cleanupCallbacks == 1, "Deferred capture cleanup must execute on the next turn");
+    tasks.Shutdown();
+}
+
+void TestAdaptiveUiFrameBudget() {
+    Stack::App::UiFrameBudget policy;
+    const auto normal = policy.Limits(60, false);
+    const auto interactive = policy.Limits(60, true);
+    Require(interactive.totalMs < normal.totalMs && interactive.completionCount > 0 &&
+        interactive.backgroundProjects > 0,
+        "Interaction must reserve UI capacity without stopping completion or hidden-owner progress");
+
+    policy.ObserveFrame(180.0, 14.0, 60);
+    const auto afterHitch = policy.Limits(60, false);
+    Require(afterHitch.totalMs < interactive.totalMs &&
+        afterHitch.completionCount < normal.completionCount,
+        "One severe hitch must constrain optional work on the next frame");
+    for (int frame = 0; frame < 30; ++frame) {
+        policy.ObserveFrame(22.0, 1.0, 60);
+        Require(policy.Limits(60, false).totalMs <= afterHitch.totalMs,
+            "Sustained overload must not age out the recovery allowance");
+    }
+    for (int frame = 0; frame < 10; ++frame) policy.ObserveFrame(16.0, 14.0, 60);
+    Require(policy.Limits(60, false).totalMs < normal.totalMs,
+        "A short healthy run must not immediately undo hitch protection");
+    for (int frame = 0; frame < 20; ++frame) policy.ObserveFrame(16.0, 14.0, 60);
+    Require(policy.Limits(60, false).totalMs == normal.totalMs,
+        "Healthy frames must eventually restore the ordinary allowance");
+
+    double previousAllowance = std::numeric_limits<double>::infinity();
+    for (int refreshRate : {60, 144, 240, 400}) {
+        Stack::App::UiFrameBudget vsyncPolicy;
+        const double interval = 1000.0 / refreshRate;
+        const auto initial = vsyncPolicy.Limits(refreshRate, false);
+        for (int frame = 0; frame < 30; ++frame)
+            vsyncPolicy.ObserveFrame(interval, interval - 0.5, refreshRate);
+        const auto settled = vsyncPolicy.Limits(refreshRate, false);
+        Require(settled.totalMs == initial.totalMs,
+            "Ordinary display synchronization must not be mistaken for overload");
+        Require(settled.totalMs < previousAllowance &&
+            settled.totalMs <= interval * 0.25 && settled.completionMs > 0.0 &&
+            settled.projectApplyMs > 0.0 && settled.libraryUploadMs > 0.0,
+            "Higher-refresh displays must receive smaller, positive work allowances");
+        previousAllowance = settled.totalMs;
+        vsyncPolicy.ObserveFrame(100.0, 95.0, refreshRate);
+        Require(vsyncPolicy.Limits(refreshRate, false).totalMs < initial.totalMs,
+            "A stalled presentation must still trigger pressure protection");
+    }
+
+    Stack::App::UiFrameWorkBudget allowance(normal);
+    allowance.Charge(normal.totalMs * 0.75);
+    Require(allowance.RemainingMs() < normal.totalMs &&
+        allowance.ProgressSliceMs(normal.projectApplyMs) <= allowance.RemainingMs(),
+        "Later housekeeping must share the allowance already spent by earlier work");
+    allowance.Charge(normal.totalMs);
+    const double progressSlice = allowance.ProgressSliceMs(normal.completionMs);
+    Require(allowance.RemainingMs() == 0.0 && std::isfinite(progressSlice) &&
+        progressSlice > 0.0 && progressSlice < normal.completionMs,
+        "An exhausted allowance must retain a small positive slice, never unlimited draining");
+}
+
 } // namespace
 
 int main() {
@@ -250,6 +361,9 @@ int main() {
         TestStaleMainThreadCompletions();
         TestProjectTaskGroups();
         TestMainThreadCompletionBudget();
+        TestMainThreadTurnBoundary();
+        TestMainThreadCaptureTiming();
+        TestAdaptiveUiFrameBudget();
         std::cout << "Async initialization, shutdown, and stale completion tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

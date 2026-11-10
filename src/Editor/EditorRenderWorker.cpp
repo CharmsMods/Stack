@@ -1877,6 +1877,10 @@ EditorRenderWorker::Result EditorRenderWorker::MakeFailedResult(
 }
 
 bool EditorRenderWorker::Submit(Snapshot snapshot) {
+    return TrySubmit(snapshot);
+}
+
+bool EditorRenderWorker::TrySubmit(Snapshot& snapshot) {
     const int progressTotal = EstimateRenderProgressStepCount(snapshot);
     Snapshot superseded;
     {
@@ -1928,15 +1932,17 @@ bool EditorRenderWorker::TryConsumeCompleted(Result& result) {
     Result completed;
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        if (!m_CompletedTimings.empty()) {
-            completed = std::move(m_CompletedTimings.front());
-            m_CompletedTimings.pop_front();
-        } else if (!m_Completed.empty()) {
+        // Publish the useful image/terminal operation before optional timing
+        // evidence, especially when the UI can adopt only a few packets.
+        if (!m_Completed.empty()) {
             completed = std::move(m_Completed.front());
             m_Completed.pop_front();
         } else if (m_FallbackCompleted) {
             completed = std::move(*m_FallbackCompleted);
             m_FallbackCompleted.reset();
+        } else if (!m_CompletedTimings.empty()) {
+            completed = std::move(m_CompletedTimings.front());
+            m_CompletedTimings.pop_front();
         } else {
             return false;
         }

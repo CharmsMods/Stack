@@ -184,7 +184,7 @@ public:
     void HandleThreadFailure(const char*,const Snapshot*) noexcept;
     bool GetThreadFailure(std::string* = nullptr) const noexcept;
     static Result MakeFailedResult(const Snapshot&,const std::string&);
-    bool Submit(Snapshot);bool TryConsumeCompleted(Result&);bool TryConsumeViewportTiming(Result&);
+    bool Submit(Snapshot);bool TrySubmit(Snapshot&);bool TryConsumeCompleted(Result&);bool TryConsumeViewportTiming(Result&);
     bool IsOwnerSnapshotInvalidLocked(std::uint64_t,std::uint64_t,std::uint64_t,RawRenderPurpose) const;
     bool HasPendingForOwner(std::uint64_t) const;bool HasSnapshotWorkFor(std::uint64_t) const;
     bool HasPendingSnapshotOrRender() const;bool HasDenoiseWorkLocked() const;
@@ -205,7 +205,7 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
     for(auto& tile:result.outputTiles.tiles) if(tile.texture) glDeleteTextures(1,&tile.texture);
     result.outputTiles.tiles.clear();
 }
-namespace Stack::Renderer { using ViewportPreviewRequest=::ViewportRequest; }
+namespace Stack::Renderer { using ViewportPreviewRequest=::ViewportRequest; namespace RawDevelopmentCache { using Stage=int; } }
 namespace Stack::EditorRendering { std::size_t BuildRawPresentationFingerprint(int recipe,int) { return recipe; } }
 '''
 retirement = (root / 'src/Editor/Internal/EditorRenderResultRetirement.h').read_text()
@@ -219,6 +219,7 @@ for signature in [
     'EditorRenderWorker::Result EditorRenderWorker::MakeFailedResult(',
     'void EditorRenderWorker::PublishCompletedResult(',
     'bool EditorRenderWorker::Submit(',
+    'bool EditorRenderWorker::TrySubmit(',
     'bool EditorRenderWorker::TryConsumeCompleted(',
     'bool EditorRenderWorker::HasPendingSnapshotOrRender()',
     'bool EditorRenderWorker::IsWaitingForRawDenoiseCompletion()',

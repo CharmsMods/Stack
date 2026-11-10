@@ -59,6 +59,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "NodeGraph/EditorNodeGraph.h"
 #include "Editor/ViewportPreviewState.h"
 #include "Editor/RenderPresentationState.h"
+#include "Editor/RenderUiWorkBudget.h"
 #include "NodeMath/PngMetadataWriter.h"
 #include "UI/EditorSidebar.h"
 #include "UI/EditorViewport.h"
@@ -2554,6 +2555,12 @@ private:
     std::uint64_t m_RenderRevision = 1;
     std::uint64_t m_LastSubmittedRenderRevision = 0;
     int m_LastNonRenderingPumpFrame = -1;
+    Stack::EditorRendering::RenderUiWorkBudget m_RenderCompletionUiBudget;
+    Stack::EditorRendering::RenderUiWorkBudget m_RenderTimingUiBudget;
+    Stack::EditorRendering::RenderUiWorkBudget m_ViewportTextureRetirementUiBudget;
+    Stack::EditorRendering::RenderUiWorkBudget m_ViewportTileRetirementUiBudget;
+    int m_NextRenderCompletionSource = 0;
+    bool m_NextRenderTimingRaw = false;
     int m_AutoGainMaskPreviewNodeId = -1;
     double m_LastRenderDirtyTime = 0.0;
     bool m_ShowGraphPerformancePopup = false;

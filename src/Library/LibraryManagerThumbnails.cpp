@@ -204,6 +204,7 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
     const auto budgetHit = [&]() {
         return elapsedMs() >= budgetMs;
     };
+    std::size_t processedWork = 0;
 
     constexpr int kProjectDecodeQueueBudget = 8;
     constexpr int kAssetDecodeQueueBudget = 2;
@@ -271,12 +272,16 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
             return;
         }
         if (project->thumbnailDecodeState == Async::TaskState::Ready) {
-            if (budgetHit()) {
+            // Candidate discovery can itself use a small UI allowance. Still
+            // allow one upload, then yield; otherwise pressure can starve every
+            // ready thumbnail on every turn without making any progress.
+            if (processedWork > 0 && budgetHit()) {
                 stats.budgetHit = true;
                 ++stats.pendingReadyUploads;
                 return;
             }
             InitializeThumbnail(project);
+            ++processedWork;
             if (project->thumbnailTex != 0) {
                 ++stats.projectUploads;
             }
@@ -293,12 +298,13 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
             return;
         }
         if (asset->thumbnailDecodeState == Async::TaskState::Ready) {
-            if (budgetHit()) {
+            if (processedWork > 0 && budgetHit()) {
                 stats.budgetHit = true;
                 ++stats.pendingReadyUploads;
                 return;
             }
             InitializeAssetThumbnail(asset);
+            ++processedWork;
             if (asset->thumbnailTex != 0) {
                 ++stats.assetUploads;
             }
@@ -337,10 +343,16 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
                 Async::IsBusy(project->thumbnailDecodeState)) {
                 continue;
             }
+            if (processedWork > 0 && budgetHit()) {
+                stats.budgetHit = true;
+                break;
+            }
             QueueProjectThumbnailDecode(project);
+            ++processedWork;
             ++queuedProjectDecodes;
             ++stats.projectDecodeQueued;
-            if (queuedProjectDecodes >= kProjectDecodeQueueBudget) {
+            stats.budgetHit = budgetHit();
+            if (stats.budgetHit || queuedProjectDecodes >= kProjectDecodeQueueBudget) {
                 break;
             }
         }
@@ -356,10 +368,16 @@ LibraryTextureUploadStats LibraryManager::UploadLibraryTextures(double maxMainTh
                 Async::IsBusy(asset->thumbnailDecodeState)) {
                 continue;
             }
+            if (processedWork > 0 && budgetHit()) {
+                stats.budgetHit = true;
+                break;
+            }
             QueueAssetThumbnailDecode(asset);
+            ++processedWork;
             ++queuedAssetDecodes;
             ++stats.assetDecodeQueued;
-            if (queuedAssetDecodes >= kAssetDecodeQueueBudget) {
+            stats.budgetHit = budgetHit();
+            if (stats.budgetHit || queuedAssetDecodes >= kAssetDecodeQueueBudget) {
                 break;
             }
         }

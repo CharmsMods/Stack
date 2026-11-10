@@ -310,7 +310,7 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     return true;
 }
 
-void AppShell::TickProjectWorkspaces() {
+void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) {
     m_GalleryNavigationMotion->Tick(ImGui::GetTime(),ImGui::GetFrameCount(),Stack::Notifications::SystemReducedMotion());
     SynchronizeRawWorkspaceFolder();
     const auto openPendingGalleryTab = [this]() {
@@ -418,19 +418,40 @@ void AppShell::TickProjectWorkspaces() {
         }
     }
     if (m_PendingWorkspaceRetirement) FinishProjectWorkspaceRetirement();
-    for (auto& workspace : m_ProjectWorkspaces) {
-        const bool foreground = workspace->id == m_ActiveProjectWorkspace;
-        workspace->editor->PumpNonRenderingWork(foreground ?
-            (m_GalleryNavigationMotion->Waiting(workspace->id) ? Stack::App::MainThreadCompletionBudgetMs(0) : 2.5) : .5, foreground);
-        if(foreground && m_GalleryNavigationMotion->Waiting(workspace->id) &&
-            workspace->editor->GalleryLoadFailed())
+    const auto pumpWorkspace = [&](ProjectWorkspace& workspace, bool foreground) {
+        const auto started = std::chrono::steady_clock::now();
+        workspace.editor->PumpNonRenderingWork(workBudget.ProgressSliceMs(
+            foreground ? workBudget.Limits().projectApplyMs : 0.5), foreground);
+        TickLibraryToEditorProjectLoadTransition(workspace);
+        if(foreground && m_GalleryNavigationMotion->Waiting(workspace.id) &&
+            workspace.editor->GalleryLoadFailed())
             QueueWorkspaceTabAction(WorkspaceTabAction::Select,m_GalleryWorkspaceId);
         if (!foreground) {
             // Allow already-running work to finish without starting another
             // automatic batch in every inactive tab.
-            workspace->editor->TickBracketing(false);
-            workspace->editor->UpdateBracketingPresentation(false);
+            workspace.editor->TickBracketing(false);
+            workspace.editor->UpdateBracketingPresentation(false);
         }
+        workBudget.Charge(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count());
+    };
+    // The visible document must not wait behind every open background tab.
+    if (auto* foreground = FindProjectWorkspace(m_ActiveProjectWorkspace))
+        pumpWorkspace(*foreground, true);
+
+    // A count cap also bounds cheap-but-numerous pumps. Give one hidden owner a
+    // turn even after an overrun, then rotate fairly on the next UI frame.
+    std::size_t pumped = 0;
+    for (std::size_t inspected = 0; inspected < m_ProjectWorkspaces.size() &&
+            pumped < workBudget.Limits().backgroundProjects; ++inspected) {
+        const auto index = m_BackgroundWorkspacePumpCursor % m_ProjectWorkspaces.size();
+        auto& workspace = *m_ProjectWorkspaces[index];
+        if (workspace.id != m_ActiveProjectWorkspace && pumped > 0 &&
+            workBudget.RemainingMs() <= 0.0) break;
+        m_BackgroundWorkspacePumpCursor = (index + 1) % m_ProjectWorkspaces.size();
+        if (workspace.id == m_ActiveProjectWorkspace) continue;
+        pumpWorkspace(workspace, false);
+        ++pumped;
     }
     TickAutoBracketWorkspaces();
     // A retired editor waits only for its own tasks, external callbacks and
