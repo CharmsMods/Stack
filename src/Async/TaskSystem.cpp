@@ -361,6 +361,16 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMillisecond
     const bool timeLimited = std::isfinite(maxMilliseconds) && maxMilliseconds > 0.0;
     const auto started = timeLimited ? std::chrono::steady_clock::now() :
         std::chrono::steady_clock::time_point{};
+    if (timeLimited) {
+        // A UI turn only adopts completions that were already queued. Work
+        // posted by those callbacks (or their cleanup) waits for the next
+        // turn instead of extending a chain while input is waiting. Keep
+        // count-only and unlimited draining unchanged for other callers.
+        std::lock_guard<std::mutex> lock(m_MainMutex);
+        const auto queued = m_MainQueue.size();
+        if (queued == 0) return;
+        maxTasks = maxTasks > 0 ? std::min(maxTasks, queued) : queued;
+    }
 
     while (true) {
         Task task;
@@ -384,6 +394,10 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks, double maxMillisecond
             } catch (...) {
                 std::cerr << "[TaskSystem] Main-thread task failed: unknown exception\n";
             }
+            // Releasing image payloads and owner leases is part of adopting
+            // a completion. Include it in both timing and the frame budget,
+            // outside the queue lock so cleanup can safely post more work.
+            task = {};
             if(m_MainTaskTimingObserver)m_MainTaskTimingObserver(
                 std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-callbackStarted).count());
         }

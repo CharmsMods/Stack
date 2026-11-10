@@ -23,6 +23,7 @@
 #include "NavigationRail.h"
 #include "RawMaskToolbar.h"
 #include "Async/UiInteraction.h"
+#include "UiFrameBudget.h"
 #include "ProjectWorkspace.h"
 #include "Renderer/WorkspaceCompositor.h"
 #include <chrono>
@@ -98,6 +99,7 @@ private:
     void CancelProjectPillPreview();
     Stack::Navigation::RailState m_NavigationRail;
     Async::UiInteraction::Lease m_UiInteraction;
+    Stack::App::UiFrameBudget m_UiFrameBudget;
     Stack::Navigation::RawMaskToolbarState m_RawMaskToolbar;
     void TickToolSwitcher();
     void CancelToolSwitcher();
@@ -155,7 +157,7 @@ private:
     std::deque<GalleryTabOpen> m_GalleryTabOpenQueue;
     std::optional<GalleryTabOpen> m_PendingGalleryTabOpen;
     std::deque<GalleryTabOpen> m_BackgroundGalleryTabOpens;
-    void TickProjectWorkspaces();
+    void TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget);
     bool CanSwitchProjectWorkspace() const;
     bool ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigation = false);
     void QueueWorkspaceTabAction(WorkspaceTabAction action, std::uint64_t id = 0);
@@ -164,6 +166,7 @@ private:
     void ContinueMainWindowClose(const std::string& source);
     bool AllWorkspaceWorkersReadyForClose() const;
     std::vector<std::unique_ptr<ProjectWorkspace>> m_ProjectWorkspaces;
+    std::size_t m_BackgroundWorkspacePumpCursor = 0;
     std::vector<std::unique_ptr<ProjectWorkspace>> m_RetiredProjectWorkspaces;
     std::vector<std::uint64_t> m_CloseApprovedWorkspaces;
     std::uint64_t m_ActiveProjectWorkspace = 0;
@@ -206,7 +209,6 @@ private:
         bool dispositionApproved = false);
     void RequestDeferredLibraryProjectLoad(ProjectWorkspace& workspace);
     void SetLibraryToEditorProjectLoadPhase(ProjectWorkspace& workspace, LibraryToEditorProjectLoadPhase phase);
-    void TickLibraryToEditorProjectLoadTransition();
     void TickLibraryToEditorProjectLoadTransition(ProjectWorkspace& workspace);
     void OnFramePresented();
     void RenderLibraryLoadTransitionDiagnostics();

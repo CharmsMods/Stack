@@ -100,8 +100,30 @@ private:
     RawRenderService& operator=(const RawRenderService&) = delete;
 
     void Pump();
+    // The scheduler retains identity, not a second graph/JSON/source snapshot.
+    // Worker rejection reports from the still-owned original request instead.
+    struct SchedulingIdentity {
+        ClientId ownerId = 0;
+        std::uint64_t generation = 0, lastAcceptedGeneration = 0;
+        Stack::GraphRendering::RequestTag graphRequest;
+        RawRenderPurpose rawRenderPurpose = RawRenderPurpose::InteractivePresentation;
+        EditorRenderWorker::RawRenderTelemetry telemetry;
+        int previewMaxDimension = 0, viewportViewId = 0;
+        Stack::Renderer::ViewportPreviewRequest viewportPreview;
+        std::size_t viewportExecutionIdentity = 0, viewportContentIdentity = 0;
+        struct {
+            std::string sourceKey;
+            std::uint64_t sourceHash = 0;
+            std::size_t recipeRevision = 0, cachePrewarmFingerprint = 0;
+            std::optional<Stack::Renderer::RawDevelopmentCache::Stage> cachePrewarmStage;
+        } rawWorkspace;
+    };
+    static SchedulingIdentity CaptureSchedulingIdentity(const EditorRenderWorker::Snapshot& snapshot);
     void QueueSyntheticSuperseded(
         const EditorRenderWorker::Snapshot& snapshot,
+        bool workerStarted, bool overload = false, RawPreviewSkipReason reason = RawPreviewSkipReason::None);
+    void QueueSyntheticSuperseded(
+        const SchedulingIdentity& snapshot,
         bool workerStarted, bool overload = false, RawPreviewSkipReason reason = RawPreviewSkipReason::None);
     void QueueWorkerFailure(const EditorRenderWorker::Snapshot& snapshot, const std::string& error);
 
@@ -118,7 +140,7 @@ private:
         m_Completed;
     std::unordered_map<ClientId, std::list<EditorRenderWorker::Result>> m_Timings;
     ClientId m_ActiveOwner = 0;
-    EditorRenderWorker::Snapshot m_ActiveSnapshot;
+    SchedulingIdentity m_ActiveRequest;
     ClientId m_NextClientId = 1;
     bool m_Initialized = false;
 };

@@ -64,7 +64,7 @@ void RawRenderService::Release(ClientId clientId) {
         }
         if (m_ActiveOwner == clientId) {
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
         }
         shutdown = m_Clients.empty() && m_Initialized;
     }
@@ -94,7 +94,7 @@ void RawRenderService::Release(ClientId clientId) {
     m_Pending.clear();
     m_Sessions.clear();
     m_ActiveOwner = 0;
-    m_ActiveSnapshot = {};
+    m_ActiveRequest = {};
 }
 
 bool RawRenderService::ConfigureSession(
@@ -120,7 +120,7 @@ void RawRenderService::ClearSession(ClientId clientId) {
         m_Pending.erase(clientId);
         if (m_ActiveOwner == clientId) {
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
         }
     }
     m_Worker.CancelOwnerSnapshots(clientId);
@@ -138,11 +138,11 @@ void RawRenderService::CancelPurpose(ClientId clientId, RawRenderPurpose purpose
             m_Pending.erase(pending);
         }
         if (m_ActiveOwner == clientId &&
-            m_ActiveSnapshot.rawRenderPurpose ==
+            m_ActiveRequest.rawRenderPurpose ==
                 purpose) {
-            QueueSyntheticSuperseded(m_ActiveSnapshot, true, false, RawPreviewSkipReason::Canceled);
+            QueueSyntheticSuperseded(m_ActiveRequest, true, false, RawPreviewSkipReason::Canceled);
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
         }
     }
     m_Worker.CancelOwnerSnapshots(clientId, purpose);
@@ -183,8 +183,39 @@ bool RawRenderService::SubmitCommand(
     return Submit(clientId, std::move(snapshot));
 }
 
+RawRenderService::SchedulingIdentity RawRenderService::CaptureSchedulingIdentity(
+    const EditorRenderWorker::Snapshot& snapshot) {
+    SchedulingIdentity identity;
+    identity.ownerId = snapshot.ownerId;
+    identity.generation = snapshot.generation;
+    identity.lastAcceptedGeneration = snapshot.lastAcceptedGeneration;
+    identity.graphRequest = snapshot.graphRequest;
+    identity.rawRenderPurpose = snapshot.rawRenderPurpose;
+    identity.telemetry = snapshot.telemetry;
+    identity.previewMaxDimension = snapshot.previewMaxDimension;
+    identity.viewportPreview = snapshot.viewportPreview;
+    identity.viewportViewId = snapshot.viewportViewId;
+    identity.viewportExecutionIdentity = snapshot.viewportExecutionIdentity;
+    identity.viewportContentIdentity = snapshot.viewportContentIdentity;
+    identity.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
+    identity.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
+    identity.rawWorkspace.recipeRevision = snapshot.rawWorkspace.recipeRevision;
+    identity.rawWorkspace.cachePrewarmStage = snapshot.rawWorkspace.cachePrewarmStage;
+    identity.rawWorkspace.cachePrewarmFingerprint = snapshot.rawWorkspace.cachePrewarmFingerprint;
+    return identity;
+}
+
 void RawRenderService::QueueSyntheticSuperseded(
     const EditorRenderWorker::Snapshot& snapshot,
+    bool workerStarted, bool overload, RawPreviewSkipReason reason) {
+    // Graph requests do not need a synthetic cancellation acknowledgement.
+    // Avoid allocating even an identity string for their normal coalescing.
+    if (snapshot.graphRequest.enabled && snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitExport) return;
+    QueueSyntheticSuperseded(CaptureSchedulingIdentity(snapshot), workerStarted, overload, reason);
+}
+
+void RawRenderService::QueueSyntheticSuperseded(
+    const SchedulingIdentity& snapshot,
     bool workerStarted, bool overload, RawPreviewSkipReason reason) {
     if ((snapshot.graphRequest.enabled && snapshot.rawRenderPurpose != RawRenderPurpose::ExplicitExport) || snapshot.ownerId == 0 ||
         m_Clients.find(snapshot.ownerId) == m_Clients.end()) {
@@ -291,7 +322,7 @@ void RawRenderService::Pump() {
                 QueueWorkerFailure(pending, workerError);
             m_Pending.clear();
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
             return;
         }
         // A compute batch owns the GL context, not the next image slot.
@@ -299,7 +330,7 @@ void RawRenderService::Pump() {
         // its next safe boundary rather than waiting for all burst batches.
         if (!m_Worker.HasPendingSnapshotOrRender()) {
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
             auto selected = m_Pending.end();
             for (auto it = m_Pending.begin(); it != m_Pending.end(); ++it) {
                 const int candidatePriority =
@@ -320,18 +351,18 @@ void RawRenderService::Pump() {
                 next = std::move(selected->second);
                 m_Pending.erase(selected);
                 m_ActiveOwner = nextOwner;
-                m_ActiveSnapshot = next;
+                m_ActiveRequest = CaptureSchedulingIdentity(next);
             }
         }
     }
-    if (nextOwner != 0 && !m_Worker.Submit(std::move(next))) {
+    if (nextOwner != 0 && !m_Worker.TrySubmit(next)) {
         std::lock_guard<std::mutex> lock(m_Mutex);
         if (m_Worker.GetThreadFailure(&workerError))
-            QueueWorkerFailure(m_ActiveSnapshot, workerError);
+            QueueWorkerFailure(next, workerError);
         else
-            QueueSyntheticSuperseded(m_ActiveSnapshot, false);
+            QueueSyntheticSuperseded(m_ActiveRequest, false);
         m_ActiveOwner = 0;
-        m_ActiveSnapshot = {};
+        m_ActiveRequest = {};
     }
 }
 
@@ -374,9 +405,9 @@ bool RawRenderService::Submit(
             // A compute task may own the worker without owning a RAW session.
             // Queue the foreground snapshot now so it runs between batches.
             m_ActiveOwner = clientId;
-            m_ActiveSnapshot = snapshot;
+            m_ActiveRequest = CaptureSchedulingIdentity(snapshot);
             submitNow = true;
-        } else if (m_ActiveSnapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
+        } else if (m_ActiveRequest.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
             // The active capture is a user operation with a destination, not a
             // disposable preview. Finish its readback; the UI and CPU writer
             // remain asynchronous, and newer previews wait in their own slot.
@@ -389,14 +420,14 @@ bool RawRenderService::Submit(
             m_ActiveOwner == clientId &&
             snapshot.rawRenderPurpose ==
                 RawRenderPurpose::InteractivePresentation &&
-            m_ActiveSnapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation &&
+            m_ActiveRequest.rawRenderPurpose == RawRenderPurpose::InteractivePresentation &&
             !m_Worker.IsWaitingForRawDenoiseCompletion() &&
-            m_ActiveSnapshot.rawWorkspace.sourceKey == snapshot.rawWorkspace.sourceKey &&
-            m_ActiveSnapshot.rawWorkspace.sourceHash == snapshot.rawWorkspace.sourceHash &&
-            m_ActiveSnapshot.telemetry.gestureId == snapshot.telemetry.gestureId &&
-            ((!snapshot.graphRequest.enabled && !m_ActiveSnapshot.graphRequest.enabled) ||
+            m_ActiveRequest.rawWorkspace.sourceKey == snapshot.rawWorkspace.sourceKey &&
+            m_ActiveRequest.rawWorkspace.sourceHash == snapshot.rawWorkspace.sourceHash &&
+            m_ActiveRequest.telemetry.gestureId == snapshot.telemetry.gestureId &&
+            ((!snapshot.graphRequest.enabled && !m_ActiveRequest.graphRequest.enabled) ||
              Stack::GraphRendering::MayFinishActive(
-                 m_ActiveSnapshot.graphRequest, snapshot.graphRequest))) {
+                 m_ActiveRequest.graphRequest, snapshot.graphRequest))) {
             // Finish one frame and retain only the latest pending value. Age
             // includes queue waits and cold resource preparation; canceling
             // on that age can starve a continuous drag of every visible frame.
@@ -411,30 +442,30 @@ bool RawRenderService::Submit(
             m_ActiveOwner == clientId &&
             RawRenderPurposePriority(snapshot.rawRenderPurpose) <=
                 RawRenderPurposePriority(
-                    m_ActiveSnapshot.rawRenderPurpose)) {
+                    m_ActiveRequest.rawRenderPurpose)) {
             const auto pending = m_Pending.find(clientId);
             if (pending != m_Pending.end()) {
                 QueueSyntheticSuperseded(pending->second, false);
                 m_Pending.erase(pending);
             }
-            QueueSyntheticSuperseded(m_ActiveSnapshot, true);
-            m_ActiveSnapshot = snapshot;
+            QueueSyntheticSuperseded(m_ActiveRequest, true);
+            m_ActiveRequest = CaptureSchedulingIdentity(snapshot);
             submitNow = true;
         } else if (
             m_ActiveOwner != clientId &&
             RawRenderPurposePriority(snapshot.rawRenderPurpose) <
                 RawRenderPurposePriority(
-                    m_ActiveSnapshot.rawRenderPurpose)) {
+                    m_ActiveRequest.rawRenderPurpose)) {
             // The persistent worker accepts a newer scheduling serial and
             // cancels the lower-priority stage at its next safe boundary.
-            QueueSyntheticSuperseded(m_ActiveSnapshot, true);
+            QueueSyntheticSuperseded(m_ActiveRequest, true);
             const auto pending = m_Pending.find(clientId);
             if (pending != m_Pending.end()) {
                 QueueSyntheticSuperseded(pending->second, false);
                 m_Pending.erase(pending);
             }
             m_ActiveOwner = clientId;
-            m_ActiveSnapshot = snapshot;
+            m_ActiveRequest = CaptureSchedulingIdentity(snapshot);
             submitNow = true;
         } else {
             const auto existing = m_Pending.find(clientId);
@@ -445,17 +476,17 @@ bool RawRenderService::Submit(
             return true;
         }
     }
-    if (submitNow && m_Worker.Submit(std::move(snapshot))) return true;
+    if (submitNow && m_Worker.TrySubmit(snapshot)) return true;
 
     std::lock_guard<std::mutex> lock(m_Mutex);
     std::string workerError;
     const bool workerFailed = m_Worker.GetThreadFailure(&workerError);
     if (workerFailed)
-        QueueWorkerFailure(m_ActiveSnapshot, workerError);
+        QueueWorkerFailure(snapshot, workerError);
     else
-        QueueSyntheticSuperseded(m_ActiveSnapshot, false);
+        QueueSyntheticSuperseded(m_ActiveRequest, false);
     m_ActiveOwner = 0;
-    m_ActiveSnapshot = {};
+    m_ActiveRequest = {};
     return workerFailed;
 }
 
@@ -547,10 +578,10 @@ void RawRenderService::InvalidateSnapshotsBefore(
             m_Pending.erase(pending);
         }
         if (m_ActiveOwner == clientId &&
-            m_ActiveSnapshot.generation < generation) {
-            QueueSyntheticSuperseded(m_ActiveSnapshot, true);
+            m_ActiveRequest.generation < generation) {
+            QueueSyntheticSuperseded(m_ActiveRequest, true);
             m_ActiveOwner = 0;
-            m_ActiveSnapshot = {};
+            m_ActiveRequest = {};
         }
     }
     m_Worker.InvalidateOwnerSnapshotsBefore(clientId, generation);

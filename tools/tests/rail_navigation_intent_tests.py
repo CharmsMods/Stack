@@ -49,8 +49,10 @@ constexpr int Library=0,Graph=1,RawTab=5,Queue=7;
 void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 struct Workspace {std::uint64_t id; ProjectLoadTransition loadTransition;};
 struct AppShell {
+ struct GalleryMotion {std::uint64_t generation=0;void NewIntent(){++generation;}bool Owns(std::uint64_t)const{return false;}};
+ std::shared_ptr<GalleryMotion> m_GalleryNavigationMotion=std::make_shared<GalleryMotion>();
  struct Rail {int requestedDestination=-1;std::uint64_t requestedWorkspace=0,requestedLoadGeneration=0,lastEditingWorkspace=2;bool galleryView=false;} m_NavigationRail;
- enum class WorkspaceTabAction {None,Select,Close,Create};
+ enum class WorkspaceTabAction {None,Select,Close,ForceClose,Create};
  WorkspaceTabAction m_WorkspaceTabAction=WorkspaceTabAction::None;
  std::uint64_t m_WorkspaceTabActionId=0,m_ActiveProjectWorkspace=2,m_GalleryWorkspaceId=1;
  std::vector<std::unique_ptr<Workspace>> m_ProjectWorkspaces;

@@ -809,6 +809,7 @@ endif()
 if (BUILD_TESTING)
     include(cmake/StackWorkspaceSwitcherTests.cmake)
     include(cmake/StackRailNavigationIntentTests.cmake)
+    include(cmake/StackProjectLoadTransitionTests.cmake)
     add_executable(StackRawGallerySimilarityTests
         tools/tests/raw_gallery_similarity_tests.cpp
         src/Raw/GalleryDateLabels.cpp

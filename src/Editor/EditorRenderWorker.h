@@ -685,6 +685,9 @@ public:
     bool HasSnapshotWorkFor(std::uint64_t ownerId) const;
     bool TryConsumeReadyDenoiseSnapshot(Snapshot& snapshot);
     bool Submit(Snapshot snapshot);
+    // Moves an accepted request into the worker. Rejection leaves the caller's
+    // request intact so its operation/capture identities can report failure.
+    bool TrySubmit(Snapshot& snapshot);
     bool TryConsumeCompleted(Result& result);
     bool TryConsumeViewportTiming(Result& result);
     bool IsBusy() const { return m_Busy.load(); }
