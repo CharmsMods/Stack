@@ -25,6 +25,14 @@ struct NodeEditorDefinition {
     // image input. Its legacy stage names identify readback formats only.
     RawDevelopmentGraphScopeStage inputAnalysis{};
     bool hasFloatingSurface = true;
+    // Optional photographic-panel surface. The full registry/catalog remains
+    // available to Graph and to floating tools outside this fixed workspace.
+    Draw panelPrimary = nullptr;
+    Draw panelSettings = nullptr;
+    const char* panelLabel = nullptr;
+    int panelOrder = -1;
+    float panelHeight = 220.f;
+    RawDevelopmentGraphScopeStage panelAnalysis{};
 };
 
 // Absence of a custom primary is intentional: borrow the existing graph
@@ -32,5 +40,7 @@ struct NodeEditorDefinition {
 const NodeEditorDefinition& FindNodeEditor(const EditorNodeGraph::Node& node);
 const NodeEditorDefinition* FindNodeEditorForTool(EditorModuleTypes::RawLabTool tool, int toneView);
 const std::vector<NodeEditorDefinition>& NodeEditorDefinitions();
+const std::vector<const NodeEditorDefinition*>& PhotographicPanelDefinitions();
+const NodeEditorDefinition* FindPhotographicPanelEditor(const std::string& definitionId);
 struct NodeEditorRegistration;
 }

@@ -201,6 +201,7 @@ std::uint64_t RenderPipeline::GraphPersistentCacheBytes() const {
     addCache(m_GraphImageCache);
     addCache(m_GraphMaskCache);
     addCache(m_LutTextureCache);
+    for(const auto& entry:m_LightAnalysisCache)total+=entry.guideBytes;
     return total;
 }
 
@@ -213,6 +214,12 @@ void RenderPipeline::TrimGraphPersistentCachesToBudget() {
     };
 
     std::uint64_t totalBytes = GraphPersistentCacheBytes();
+    if(totalBytes>m_GraphPersistentCacheBudgetBytes) {
+        for(auto& entry:m_LightAnalysisCache)if(entry.guide) {
+            glDeleteTextures(1,&entry.guide);entry.guide=0;entry.guideKey=0;
+            totalBytes-=entry.guideBytes;entry.guideBytes=0;
+        }
+    }
     while (totalBytes > m_GraphPersistentCacheBudgetBytes) {
         CacheKind victimKind = CacheKind::None;
         const std::string* victimKey = nullptr;

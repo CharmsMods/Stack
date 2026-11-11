@@ -45,6 +45,10 @@ RawDevelopmentGraphScopeStage EditorModule::ActiveNodeEditorAnalysis() const {
     const auto* editor=SelectedNodeEditor();
     if(!editor && !m_Project->nodeEditor)
         editor=Stack::Editor::FindNodeEditorForTool(m_RawWorkspaceLabUi.activeTool,m_RawWorkspaceLabUi.sceneToneView);
+    // Fixed-panel analysis is requested by visible sections through its
+    // independent lane. A remembered tool with no floating surface has no
+    // reason to refresh a histogram or a color cloud.
+    if(editor && editor->panelPrimary && !IsFocusedNodeEditor())return RawDevelopmentGraphScopeStage::None;
     return editor?editor->inputAnalysis:RawDevelopmentGraphScopeStage::None;
 }
 

@@ -1,6 +1,7 @@
 #include "Editor/GraphUI/GraphPlotStyle.h"
 #include "Editor/NodeEditors/ToneCurveEditor.h"
 #include "Editor/NodeEditors/ToneCurveEditorState.h"
+#include "Editor/NodeEditors/PhotographicPanelEditors.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeEditors/RawWorkspaceEditContext.h"
 #include "Editor/Internal/RawLab/CurveCanvas.h"
@@ -43,6 +44,7 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
     auto& state=context.State<ToneCurveEditorState>();
     const auto input=NodeMath::DescribeImageOperationInput(context.inputDescriptor);
     bool changed=false;
+    const bool panel=context.presentation==NodeEditorPresentation::Panel;
     for (const auto& id:context.drivenParameters) {
         if (!NodeMath::IsToneCurveParameterActive(parameters,id)) continue;
         const auto feedback=context.uniformParameters.find(id);
@@ -65,7 +67,7 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
         ImVec2 size=ImGui::GetContentRegionAvail();size.y=std::min(size.y,250.f);
         const auto tonalDomain=ExposureTonalSliderDomain(-16.f,16.f);
         const bool toneChanged=DrawCurveCanvas("Luminance",tone.curve,tone.curveAmount,state.canvas[4],true,context.inputHistogram,size,64,nullptr,{},context.IsParameterDriven("luminance-amount"),
-            nullptr,false,true,&tonalDomain,context.inputHistogramRevision,{true,false,parameters.value("domain",0)==1,-16,16,parameters.value("domain",0)==0});
+            nullptr,false,true,panel?nullptr:&tonalDomain,context.inputHistogramRevision,{true,false,parameters.value("domain",0)==1,-16,16,parameters.value("domain",0)==0});
         if (toneChanged) {
             const auto serialized=RawRecipe::SerializeSceneTone(tone);
             for (const auto& field:serialized.items())
@@ -77,13 +79,42 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
     int& activeChannel = state.photoChannel;
     if (settings) {
         int domain=parameters.value("domain",0);
-        if (ImGui::Combo("Curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
+        if(panel) {
+            ImGui::TextUnformatted("Curve values");
+            if(ImGui::RadioButton("Linear",domain==0)) {parameters["domain"]=0;domain=0;changed=true;}
+            ImGui::SameLine();
+            if(ImGui::RadioButton("Exposure stops",domain==1)) {parameters["domain"]=1;domain=1;changed=true;}
+        } else if (ImGui::Combo("Curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Changes how channel curves affect the image. The graph initially fits the image's tonal range; zooming only changes the view.");
         if (domain==1) {
             float low=parameters.at("logMinEv"),high=parameters.at("logMaxEv"),grey=parameters.at("middleGrey");
             if (ImGui::InputFloat("Minimum EV",&low) && low<high) {parameters["logMinEv"]=low;changed=true;}
             if (ImGui::InputFloat("Maximum EV",&high) && high>low) {parameters["logMaxEv"]=high;changed=true;}
             if (ImGui::InputFloat("Middle grey",&grey) && grey>0) {parameters["middleGrey"]=grey;changed=true;}
+        }
+        if(panel) {
+            auto& canvas=state.canvas[activeChannel==0?4:activeChannel];
+            ImGui::Checkbox("Tonal controls",&canvas.showTonalSliders);
+            if(canvas.showTonalSliders && activeChannel==0) {
+                auto tone=RawRecipe::ReadSceneTone(parameters.at("luminanceTone"));
+                if(DrawPanelTonalRollers(context,tone.curve,ExposureTonalSliderDomain(-16,16),64,tone.curveAmount.locked)) {
+                    const auto serialized=RawRecipe::SerializeSceneTone(tone);
+                    for(const auto& field:serialized.items())parameters["luminanceTone"][field.key()]=field.value();
+                    changed=true;
+                }
+            } else if(canvas.showTonalSliders) {
+                const auto channel=static_cast<RawRecipe::RawPointCurveChannel>(activeChannel);
+                const auto key=RawRecipe::RawPointCurveChannelKey(channel);
+                auto component=RawRecipe::PointCurveComponentFromFinishToneJson(parameters,channel);
+                auto points=RawRecipe::RawPointCurveBezierPoints(component);
+                const auto amount=RawRecipe::ReadCurveAmount(parameters.value("curveAmounts",nlohmann::json::object()).value(key,nlohmann::json::object()));
+                const auto tonalDomain=domain==1 ? ExposureTonalSliderDomain(parameters.value("logMinEv",-10.f),parameters.value("logMaxEv",6.f)) : CurveTonalSliderDomain{};
+                if(DrawPanelTonalRollers(context,points,tonalDomain,64,amount.locked)) {
+                    component.points.clear();
+                    for(const auto& point:points)component.points.push_back({point.x,point.y,1,point.incoming,point.outgoing,point.tonal});
+                    RawRecipe::StorePointCurveComponentInFinishToneJson(parameters,channel,component);changed=true;
+                }
+            }
         }
         return changed;
     }
@@ -108,7 +139,7 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
             exposureDomain?parameters.value("logMinEv",-10.f):0.f,
             exposureDomain?parameters.value("logMaxEv",6.f):1.f};
         if (DrawCurveCanvas("Curve",points,amount,state.canvas[activeChannel],true,histogram,size,64,nullptr,{},context.IsParameterDriven(std::string("amount-")+key),
-            nullptr,false,true,&tonalDomain,context.inputHistogramRevision,viewOptions)) {
+            nullptr,false,true,panel?nullptr:&tonalDomain,context.inputHistogramRevision,viewOptions)) {
             component.points.clear();
             for (const auto& point:points) component.points.push_back({point.x,point.y,1,point.incoming,point.outgoing,point.tonal});
             RawRecipe::StorePointCurveComponentInFinishToneJson(parameters,channel,component);

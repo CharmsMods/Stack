@@ -16,6 +16,7 @@ struct RawColorWarpAnalysisSample {
 };
 
 struct RawColorWarpAreaProposal {
+    std::vector<RawColorWarpPopulation> population;
     float sourceLightness = 0.0f;
     float sourceA = 0.0f;
     float sourceB = 0.0f;

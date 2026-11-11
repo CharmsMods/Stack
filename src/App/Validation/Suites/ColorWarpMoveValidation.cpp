@@ -31,9 +31,9 @@ out vec2 vUV;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vUV=p;gl_
     integer("uInputTex",0);integer("uGateMask",1);integer("uSupportMask",2);integer("uBoundaryMask",3);integer("uMaskGuide",4);
     integer("uUseSpatialMasks",0);integer("uPinCount",1);scalar("uStrength",1);
     vector("uHueRange[0]",-1e20f,-1e20f,1e20f,1e20f);vector("uSaturationRange[0]",-1e20f,-1e20f,1e20f,1e20f);vector("uExposureRange[0]",-1e20f,-1e20f,1e20f,1e20f);
-    for(float exposure:{-2.67f,0.f,2.67f})for(int selectionMode:{0,1,2})for(bool rec2020:{false,true})for(bool move:{false,true})for(float strength:{0.f,.4f,1.f}) {
+    for(float brightness:{-1.f,0.f,1.f})for(int selectionMode:{0,1,2})for(bool rec2020:{false,true})for(bool move:{false,true})for(float strength:{0.f,.4f,1.f}) {
         RawRecipe::RawColorWarpRecipe recipe;RawRecipe::RawColorWarpPin pin;
-        pin.id="test";pin.sourceA=.2f;pin.sourceB=.1f;pin.hueShift=25;pin.saturation=.2f;pin.exposureEv=exposure;pin.moveColors=move;pin.strength=strength;
+        pin.id="test";pin.sourceA=.2f;pin.sourceB=.1f;pin.hueShift=25;pin.saturation=.2f;pin.brightness=brightness;pin.moveColors=move;pin.strength=strength;
         pin.hueRange.enabled=pin.saturationRange.enabled=pin.exposureRange.enabled=false;
         pin.sampleRadius=selectionMode? .4f:0.f;recipe.pins={pin};
         vector("uPinSelection[0]",pin.sourceA,pin.sourceB,pin.sampleRadius,0);
@@ -47,7 +47,7 @@ out vec2 vUV;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vUV=p;gl_
         }
         std::vector<RawRecipe::RawColorWarpMaskSample> masks{{.6f,0,1,true}};
         integer("uInputIsRec2020",rec2020);vector("uPinParams[0]",0,strength,0,1);
-        vector("uPinAdjust[0]",move?0:pin.hueShift,move?0:pin.saturation,pin.exposureEv,selectionMode==2?1.f:0.f);
+        vector("uPinAdjust[0]",move?0:pin.hueShift,move?0:pin.saturation,pin.brightness,selectionMode==2?1.f:0.f);
         const auto destination=RawRecipe::ColorWarpDestination(pin);vector("uPinMove[0]",move?destination[0]-pin.sourceA:0,move?destination[1]-pin.sourceB:0,0,0);
         for(const std::array<float,4> input: {std::array<float,4>{.4f,.12f,.08f,1},std::array<float,4>{2.f,.8f,.2f,.5f},std::array<float,4>{.18f,.18f,.18f,1}}) {
             const auto source=GLHelpers::CreateTextureFromData(input.data(),1,1,GL_RGBA32F,GL_RGBA,GL_FLOAT);

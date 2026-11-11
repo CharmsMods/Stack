@@ -263,6 +263,7 @@ nlohmann::json LocalRangeJson(const RawLocalRangeRecipe& input) {
         { "strength", localRange.strength },
         { "curveAmount", CurveAmountJson(localRange.curveAmount) },
         { "curveNormalization", localRange.curveNormalization },
+        { "lightBands", {{"amounts",localRange.light.amounts},{"automatic",localRange.light.automatic},{"lowEv",localRange.light.lowEv},{"highEv",localRange.light.highEv}} },
         { "middleGrey", localRange.middleGrey },
         { "minEv", localRange.minEv },
         { "maxEv", localRange.maxEv },
@@ -1515,7 +1516,8 @@ std::array<float, 3> ApplyPreparedColorWarp(
         WorkingRgbToColorWarpCoordinate(
             sceneRgb,
             workingSpace);
-    float hue=0, saturation=0, exposure=0, totalWeight=0, protection=0, moveA=0, moveB=0;
+    if(coordinate.lightness<=0.f || !std::isfinite(coordinate.lightness))return sceneRgb;
+    float hue=0, saturation=0, brightness=0, totalWeight=0, protection=0, moveA=0, moveB=0;
     for (std::size_t index=0;index<colorWarp.pins.size();++index) {
         const auto& pin=colorWarp.pins[index];
         if(!ColorWarpParticipates(pin))continue;
@@ -1523,17 +1525,18 @@ std::array<float, 3> ApplyPreparedColorWarp(
         const float weight=EvaluateColorWarpPinWeight(pin,coordinate,mask,
             masks?ColorWarpPinSpatialSupport(colorWarp,pin):0.f);
         if(pin.protectColor) { protection=std::max(protection,std::clamp(weight,0.f,1.f));continue; }
-        totalWeight+=weight;exposure+=pin.exposureEv*weight;
+        totalWeight+=weight;brightness+=pin.brightness*weight;
         if(pin.moveColors) {
             const auto destination=ColorWarpDestination(pin);
             moveA+=(destination[0]-pin.sourceA)*weight;
             moveB+=(destination[1]-pin.sourceB)*weight;
-        } else {hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;}
+        } else {hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;
+            moveA+=pin.tintA*weight;moveB+=pin.tintB*weight;}
     }
     const float denominator=colorWarp.combine==RawColorWarpCombine::Blend?std::max(1.f,totalWeight):1.f;
     const float amount=colorWarp.strength*(1.f-protection)/denominator;
-    hue*=amount;saturation*=amount;exposure*=amount;moveA*=amount;moveB*=amount;
-    if(hue==0 && saturation==0 && exposure==0 && moveA==0 && moveB==0)return sceneRgb;
+    hue*=amount;saturation*=amount;brightness*=amount;moveA*=amount;moveB*=amount;
+    if(hue==0 && saturation==0 && brightness==0 && moveA==0 && moveB==0)return sceneRgb;
     auto output=sceneRgb;
     if(hue!=0 || saturation!=0 || moveA!=0 || moveB!=0) {
         const float radians=hue*3.14159265358979323846f/180.f;
@@ -1542,7 +1545,11 @@ std::array<float, 3> ApplyPreparedColorWarp(
         coordinate.a=(c*a-s*b)*gain+moveA*std::max(std::abs(coordinate.lightness),.000001f);coordinate.b=(s*a+c*b)*gain+moveB*std::max(std::abs(coordinate.lightness),.000001f);
         output=ColorWarpCoordinateToWorkingRgb(coordinate,workingSpace);
     }
-    const float gain=std::exp2(exposure);
+    // A bounded, monotone lightness adjustment preserves black and eases
+    // toward highlights. Apply its gain to original RGB to retain detail.
+    const float lightness=std::max(0.f,coordinate.lightness);
+    const float ratio=1.f+std::clamp(brightness,-1.f,1.f)/(1.f+lightness);
+    const float gain=lightness>0.f ? ratio*ratio*ratio : 1.f;
     for(float& channel:output)channel*=gain;
     return output;
 }
@@ -1603,6 +1610,9 @@ RawLocalRangeRecipe DefaultLocalRangeRecipe() {
 }
 
 RawLocalRangeRecipe SanitizeLocalRangeRecipe(RawLocalRangeRecipe localRange) {
+    for(auto& amount:localRange.light.amounts) amount=ClampFinite(amount,0.f,-100.f,100.f);
+    localRange.light.lowEv=ClampFinite(localRange.light.lowEv,-8.f,-48.f,47.9f);
+    localRange.light.highEv=ClampFinite(localRange.light.highEv,6.f,localRange.light.lowEv+.1f,48.f);
     SanitizeZoneAreas(localRange.areas);
     RawLocalRangeRecipe defaults = DefaultLocalRangeRecipe();
     localRange.strength = ClampFinite(localRange.strength, defaults.strength, 0.0f, 1.0f);
@@ -1879,7 +1889,7 @@ float EvaluateSanitizedLocalRangeControlDeltaEv(
             std::max(0.1f, sanitized.maxEv - sanitized.minEv),
         0.0f,
         1.0f);
-    return -4.0f +
+    return LightBandDelta(sanitized.light,{sanitized.light.lowEv,sanitized.light.highEv,true},sceneEv) -4.0f +
         EvaluateRawBezierCurve(
             RawLocalRangeBezierPoints(sanitized),
             coordinate) * 8.0f;
@@ -2280,6 +2290,7 @@ bool IsLocalRangeEnabled(const RawLocalRangeRecipe& localRangeInput) {
     if (!localRange.enabled || localRange.strength <= 0.0001f) {
         return false;
     }
+    for(float amount:localRange.light.amounts) if(std::abs(amount)>0.0001f) return true;
     for (const RawLocalRangePoint& point : localRange.points) {
         if (std::abs(point.deltaEv) > 0.0001f) {
             return true;
@@ -2600,6 +2611,15 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
         recipe.localRange.curveAmount=ReadCurveAmount(localRange.value("curveAmount",nlohmann::json::object()));
         recipe.localRange.curveNormalization = JsonFloat(localRange, "curveNormalization", 0.0f);
         recipe.localRange.strength = JsonFloat(localRange, "strength", recipe.localRange.strength);
+        if(localRange.contains("lightBands") && localRange["lightBands"].is_object()) {
+            const auto& light=localRange["lightBands"];
+            recipe.localRange.light.automatic=light.value("automatic",true);
+            recipe.localRange.light.lowEv=JsonFloat(light,"lowEv",-8.f);
+            recipe.localRange.light.highEv=JsonFloat(light,"highEv",6.f);
+            if(light.contains("amounts") && light["amounts"].is_array())
+                for(std::size_t i=0;i<std::min<std::size_t>(5,light["amounts"].size());++i)
+                    if(light["amounts"][i].is_number()) recipe.localRange.light.amounts[i]=light["amounts"][i].get<float>();
+        }
         recipe.localRange.middleGrey = JsonFloat(localRange, "middleGrey", recipe.localRange.middleGrey);
         recipe.localRange.minEv = JsonFloat(localRange, "minEv", recipe.localRange.minEv);
         recipe.localRange.maxEv = JsonFloat(localRange, "maxEv", recipe.localRange.maxEv);

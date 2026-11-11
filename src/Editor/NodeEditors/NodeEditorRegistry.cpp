@@ -3,6 +3,7 @@
 #include "Editor/NodeEditors/StylizeEditors.h"
 #include "Editor/NodeEditors/ToneCurveEditor.h"
 #include "Editor/NodeEditors/FilmGrainEditor.h"
+#include "Editor/NodeEditors/PhotographicPanelEditors.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
@@ -87,14 +88,18 @@ struct NodeEditorRegistration {
                 bool changed=e.RenderRawWorkspaceLabZonesSurface(c,RawLabControlSection::Settings);
                 changed|=e.RenderRawWorkspaceLabZonesSecondaryControls(c);return changed;
             },[](EditorModule& e,RawWorkspaceEditContext& c){
-                if(e.m_RawWorkspaceLabUi.zonesTargetedView && !e.m_RawWorkspaceLabUi.zoneAreas.legacy) {
+                if(c.presentation!=NodeEditorPresentation::Panel && e.m_RawWorkspaceLabUi.zonesTargetedView && !e.m_RawWorkspaceLabUi.zoneAreas.legacy) {
                     for(auto& area:c.recipe.localRange.areas) if(area.id==e.m_RawWorkspaceLabUi.zoneAreas.selectedId) {
                         area.offsetEv=0;
                         for(auto& point:area.points){point.deltaEv=0;point.incoming={};point.outgoing={};}
                     }
-                } else if(e.m_RawWorkspaceLabUi.zonesTargetedView) {
+                } else if(c.presentation!=NodeEditorPresentation::Panel && e.m_RawWorkspaceLabUi.zonesTargetedView) {
                     for(auto& zone:c.recipe.localRange.targetZones) if(zone.id==e.m_RawWorkspaceLocalRangeTargetZoneId) zone.deltaEv=0;
-                } else c.recipe.localRange=RawRecipe::ApplyLocalRangePreset(c.recipe.localRange,RawRecipe::RawLocalRangePreset::Reset);
+                } else {
+                    c.recipe.localRange.light.amounts.fill(0);
+                    c.recipe.localRange=RawRecipe::ApplyLocalRangePreset(c.recipe.localRange,RawRecipe::RawLocalRangePreset::Reset);
+                    if(!c.IsParameterDriven("ev"))c.recipe.preToneExposureEv=0;
+                }
                 return true;
             },-1,RawDevelopmentGraphScopeStage::LocalRangeInput);
         add(Kind::ToneCurve,Tool::Tone,{400,400},DrawToneCurve,DrawToneCurveSettings,ResetToneCurve,
@@ -133,12 +138,42 @@ struct NodeEditorRegistration {
             };
             result.push_back(std::move(editor));
         }
+        for(auto& editor:result) {
+            if(editor.legacyTool==Tool::Zones) {
+                editor.panelPrimary=DrawLightPanel;editor.panelLabel="Light";editor.panelOrder=0;editor.panelHeight=220;
+            } else if(editor.legacyTool==Tool::Tone && editor.primary==DrawToneCurve) {
+                editor.panelPrimary=DrawToneCurve;editor.panelLabel="Tone";editor.panelOrder=1;editor.panelHeight=250;
+                editor.panelAnalysis=RawDevelopmentGraphScopeStage::FinishToneInput;
+            } else if(editor.legacyTool==Tool::Calibration) {
+                editor.panelPrimary=DrawCalibrationPanel;editor.panelSettings=DrawCalibrationPanelSettings;
+                editor.panelLabel="Calibration";editor.panelOrder=3;editor.panelHeight=260;
+            } else if(editor.legacyTool==Tool::Color) {
+                editor.panelPrimary=[](EditorModule& e,RawWorkspaceEditContext& c) {
+                    bool changed=DrawHslPanel(e,c);
+                    changed|=e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Graph);
+                    return changed;
+                };editor.panelLabel="HSL";editor.panelOrder=2;editor.panelHeight=320;
+            }
+        }
         return result;
     }
 };
 const std::vector<NodeEditorDefinition>& NodeEditorDefinitions() {
     static const auto definitions=NodeEditorRegistration::Build();
     return definitions;
+}
+const std::vector<const NodeEditorDefinition*>& PhotographicPanelDefinitions() {
+    static const auto definitions=[] {
+        std::vector<const NodeEditorDefinition*> result;
+        for(const auto& editor:NodeEditorDefinitions())if(editor.panelPrimary)result.push_back(&editor);
+        std::sort(result.begin(),result.end(),[](const auto* a,const auto* b){return a->panelOrder<b->panelOrder;});
+        return result;
+    }();
+    return definitions;
+}
+const NodeEditorDefinition* FindPhotographicPanelEditor(const std::string& id) {
+    for(const auto* editor:PhotographicPanelDefinitions())if(editor->definitionId==id)return editor;
+    return nullptr;
 }
 const NodeEditorDefinition& FindNodeEditor(const EditorNodeGraph::Node& node) {
     const auto* definition=EditorNodeGraphDefinitions::FindLiveNodeDefinition(node);

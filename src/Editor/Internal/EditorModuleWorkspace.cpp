@@ -12,6 +12,7 @@ WorkspaceMode EditorModule::GetWorkspaceMode() const { return m_Project->workspa
 bool EditorModule::IsViewMode() const { return GetWorkspaceMode() == WorkspaceMode::View; }
 
 bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
+    if(mode!=WorkspaceMode::View)ExitFocusedNodeEditor();
     if (mode != GetWorkspaceMode() && IsBracketingPresentationActive()) return false;
     if (mode == WorkspaceMode::Graph && IsViewMode()) EnsureGraphWorkers();
     if (mode == WorkspaceMode::Graph) {
@@ -38,6 +39,9 @@ bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
 }
 
 void EditorModule::WorkspaceLoaded(WorkspaceMode mode) {
+    m_NodeEditorPanel.focusTarget.reset();
+    m_ViewSectionTab=1;m_ViewSectionOpen=true;
+    m_RawWorkspaceLabUi.settingsTabActive=false;m_RawAssetCapture.assetsTab=false;
     m_NodeOpenTransition.Reset();
     m_Project->workspace.Loaded(mode);
     m_RawWorkspaceRootTabActive = mode == WorkspaceMode::View;
@@ -71,7 +75,9 @@ void EditorModule::RenderViewWorkspace() {
         m_Project->rawLayers.EndGesture();
     const bool escapeOwned = ImGui::IsAnyItemActive() || ImGui::IsAnyMouseDown() ||
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) ||
-        m_Project->rawLayers.GestureActive() || ImGui::GetIO().KeyAlt;
+        m_Project->rawLayers.GestureActive() || ImGui::GetIO().KeyAlt ||
+        (IsFocusedNodeEditor() && (m_RawWorkspaceLabUi.colorWarpSamplingArmed ||
+            m_RawWorkspaceLabUi.colorWarpPendingCircleActive || m_RawWorkspaceLabUi.colorWarpInspectionActive));
     // Do not let the second graph click begin an image gesture mid-morph.
     // Keep Escape available below so opening can be interrupted.
     PumpNonRenderingWork(2.5);
@@ -111,5 +117,5 @@ void EditorModule::RenderViewWorkspace() {
         !ImGui::IsAnyMouseDown() && !io.KeyAlt &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !m_Project->rawLayers.GestureActive())
-        ReturnToGraphFromNode();
+        { if(IsFocusedNodeEditor())ExitFocusedNodeEditor();else ReturnToGraphFromNode(); }
 }

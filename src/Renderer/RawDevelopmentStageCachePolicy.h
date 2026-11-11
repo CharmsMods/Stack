@@ -197,6 +197,10 @@ inline void HashLocalRange(
     const Stack::RawRecipe::RawLocalRangeRecipe& value) {
     HashTypedValue(fingerprint, value.enabled);
     if (!Stack::RawRecipe::IsLocalRangeEnabled(value)) return;
+    for(float amount:value.light.amounts) HashTypedValue(fingerprint,amount);
+    HashTypedValue(fingerprint,value.light.automatic);
+    HashTypedValue(fingerprint,value.light.lowEv);
+    HashTypedValue(fingerprint,value.light.highEv);
     HashTypedValue(fingerprint, value.strength);
     for (const auto& area : value.areas) HashTypedValue(fingerprint, Stack::RawRecipe::ZoneAreaGainFingerprint(area));
     HashTypedValue(fingerprint, value.middleGrey);
@@ -264,7 +268,8 @@ inline void HashColorWarp(
     for(const auto& pin:value.pins) {
         HashTypedValue(fingerprint,pin.enabled);HashTypedValue(fingerprint,pin.protectColor);
         HashTypedValue(fingerprint,pin.strength);HashTypedValue(fingerprint,pin.moveColors);HashTypedValue(fingerprint,pin.hueShift);
-        HashTypedValue(fingerprint,pin.saturation);HashTypedValue(fingerprint,pin.exposureEv);
+        HashTypedValue(fingerprint,pin.tintA);HashTypedValue(fingerprint,pin.tintB);
+        HashTypedValue(fingerprint,pin.saturation);HashTypedValue(fingerprint,pin.brightness);
     }
 }
 

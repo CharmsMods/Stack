@@ -1396,7 +1396,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             result.texture,
             recipe.localRange,
             m_Width,
-            m_Height, recipe.technical.workingSpace, spatialSourceWidth, spatialSourceHeight);
+            m_Height, recipe.technical.workingSpace, spatialSourceWidth, spatialSourceHeight,rawPlacementFingerprint);
         m_RawDevelopmentGraphScopeReadback.inputExposureEv = recipe.preToneExposureEv;
     }
 
@@ -1528,7 +1528,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 RenderRawDevelopmentLocalRange(gradientInput, adjustment.curve,
                     recipe.technical.workingSpace,
                     recipe.technical.processingVersion,
-                    rawPlacementFingerprint, spatialSourceWidth, spatialSourceHeight));
+                    0, spatialSourceWidth, spatialSourceHeight));
             if (!processed) { gradientFailure = true; break; }
             Stack::Renderer::ScopedGLTexture nextEv(
                 RenderRawGradientBlend(

@@ -28,7 +28,9 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     auto& surface = m_RawFloatingSurface;
     surface.forwardsImageWheel = false;
     UpdateNodeEditorPanelVisibility();
-    if (m_NodeEditorPanel.visible || m_RawToolPickerAmount >= 1.f) {
+    const auto* selectedDefinition=SelectedNodeEditor();
+    if (m_NodeEditorPanel.visible || m_RawToolPickerAmount >= 1.f ||
+        (!IsFocusedNodeEditor() && selectedDefinition && selectedDefinition->panelPrimary)) {
         surface.input={};surface.frame=-2;m_RawActiveControlFrame=-2;
         m_RawToolGlass->BeginFrame(false,{});
         return;
@@ -125,7 +127,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     trace("before-layout");
     const bool wasMoving = surface.input.phase == ImGuiExtras::FloatingSurfaceInput::Phase::Moving;
     std::optional<ImGuiExtras::FloatingSurfaceInputScope> input;
-    input.emplace(surface.input, canStart, controls ? controls->MoveId : 0);
+    input.emplace(surface.input, canStart, controls ? controls->MoveId : 0,!IsFocusedNodeEditor());
     if (surface.input.moving) {
         if (!wasMoving) {
             const auto origin = controls ? controls->Pos : position;
@@ -167,7 +169,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         {
             ImGuiExtras::GlassControlScope glass(*m_RawToolGlass,openingOpacity,false,ImGuiExtras::GlassElements::FloatingTools);
             bool switched=false;
-            if(context.nodeTarget) {
+            if(context.nodeTarget && !IsFocusedNodeEditor()) {
                 RefreshNodeEditorPanel();
                 for(auto& group:m_NodeEditorPanel.groups) {
                     if(group.instances.size()<2)continue;
@@ -205,6 +207,10 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         Stack::Editor::ApplyWindowDrawOpacity(ImGui::GetCurrentWindow(),openingOpacity);
     }
     input.reset();
+    if(IsFocusedNodeEditor() && m_NodeEditorPanel.focusEnteredFrame<ImGui::GetFrameCount() &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
+        !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId))
+        ExitFocusedNodeEditor();
     surface.forwardsImageWheel = enabled && openingOpacity == 1.f && ImGui::GetIO().MouseWheel != 0.f &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
         !surface.input.OwnsPointer() && !ImGui::IsAnyItemActive() &&

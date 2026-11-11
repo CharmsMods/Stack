@@ -11,10 +11,10 @@ bool DrawColorWarpBrightness(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWar
     auto& range=pin.exposureRange;
     bool changed=false;
     ImGui::PushID("brightness-range");
-    ImGui::TextUnformatted("Brightness range");
-    ContinueRawLabControlRow("All brightness");
-    if(BareTextButton("All brightness",!range.enabled)) {range.enabled=!range.enabled;changed=true;}
-    LabTooltip("Choose which input brightness levels receive this color edit.");
+    ImGui::TextUnformatted("Additional brightness range");
+    ContinueRawLabControlRow("No extra limit");
+    if(BareTextButton("No extra limit",!range.enabled)) {range.enabled=!range.enabled;changed=true;}
+    LabTooltip("Optionally narrow the input brightness range. Sampled color/brightness populations remain linked.");
     const float scale=ImGui::GetFontSize()/16.f;
     const auto origin=ImGui::GetCursorScreenPos();
     const float width=std::max(80.f,ImGui::GetContentRegionAvail().x);
@@ -81,7 +81,7 @@ bool DrawColorWarpBrightness(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWar
     if(ImGui::BeginPopupContextItem("Exact brightness")) {
         ImGui::TextUnformatted("Brightness range (stops)");
         bool all=!range.enabled;
-        if(ImGui::Checkbox("All brightness",&all)){range.enabled=!all;changed=true;}
+        if(ImGui::Checkbox("No extra limit",&all)){range.enabled=!all;changed=true;}
         ImGui::BeginDisabled(!range.enabled);
         ImGui::SetNextItemWidth(160*scale);changed|=ImGui::InputFloat("Minimum",&range.low,0,0,"%.2f");
         ImGui::SetNextItemWidth(160*scale);changed|=ImGui::InputFloat("Maximum",&range.high,0,0,"%.2f");

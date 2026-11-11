@@ -22,9 +22,11 @@ struct RawColorWarpMaskSample {
 inline float EvaluateColorWarpPinWeight(const RawColorWarpPin& pin,
     const RawColorWarpCoordinate& input, const RawColorWarpMaskSample& mask = {},
     float spatialSupport = 0.0f) {
-    const float colorWeight=EvaluateColorWarpPinColorWeight(pin,input);
+    if(input.lightness<=0.f)return 0.f;
+    const float colorWeight=mask.absoluteInfluence?1.f:EvaluateColorWarpPinColorWeight(pin,input);
+    const float shadow=std::clamp((input.sceneEv+16.f)/4.f,0.f,1.f);
     if (!pin.enabled || pin.strength <= 0.0f) return 0.0f;
-    const float direct = mask.absoluteInfluence ? 1.f : colorWeight *
+    const float direct = mask.absoluteInfluence ? shadow*shadow*(3.f-2.f*shadow) : colorWeight *
         EvaluateColorWarpPinLightnessWeight(pin, input.sceneEv);
     return std::min(1.f,direct * std::max(mask.gate, mask.support * spatialSupport)) *
         mask.boundary * pin.strength;
@@ -74,6 +76,8 @@ inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recip
     hash(recipe.version);
     hash(recipe.pins.size());
     for (const auto& pin : recipe.pins) {
+        hash(pin.brightnessSoftness);hash(pin.population.size());
+        for(const auto& p:pin.population){hash(p.a);hash(p.b);hash(p.sceneEv);hash(p.mass);}
         hash(pin.sampleRadius);hash(pin.smoothSelection);hash(pin.id);hash(pin.sourceA);hash(pin.sourceB);hash(pin.regionId);
         for(const auto* range:{&pin.hueRange,&pin.saturationRange,&pin.exposureRange}) {
             hash(range->enabled);hash(range->low);hash(range->high);hash(range->featherLow);hash(range->featherHigh);

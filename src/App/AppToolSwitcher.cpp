@@ -37,6 +37,7 @@ void AppShell::CancelToolSwitcher() {
 }
 
 void AppShell::TickToolSwitcher() {
+    if(m_Editor->IsFocusedNodeEditor()) {if(m_ToolSwitcher.Visible())CancelToolSwitcher();return;}
     auto& sw = m_ToolSwitcher;
     auto& io = ImGui::GetIO();
     const bool rightAlt = AltKeyDown(m_Window, true);

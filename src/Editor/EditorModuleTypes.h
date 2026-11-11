@@ -462,6 +462,9 @@ struct RawNodePrimaryUiState {
     bool colorWarpPendingCircleDrawing = false;
     bool colorWarpPendingCircleRefining = false;
     bool colorWarpPendingCircleCommitRequested = false;
+    int colorWarpAcceptedProposal = -1;
+    std::size_t colorWarpSampleInputFingerprint = 0;
+    std::string colorWarpResamplePinId;
     int colorWarpPendingCircleEditKind = 0; // 1 move, 2 resize.
     ImVec2 colorWarpPendingCirclePressPosition { 0.0f, 0.0f };
     float colorWarpPendingCirclePressCenterU = 0.5f;
@@ -588,6 +591,9 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
         ++colorWarpAreaAnalysisGeneration;
         colorWarpAreaAnalysisState.reset();
         colorWarpAreaAnalysisResult = {};
+        colorWarpAcceptedProposal = -1;
+        colorWarpSampleInputFingerprint = 0;
+        colorWarpResamplePinId.clear();
         colorWarpAreaOwner = {};
         colorWarpPendingCircleActive = false;
         colorWarpPendingCircleDrawing = false;

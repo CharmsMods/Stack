@@ -112,9 +112,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
             break;
         case GraphOperationKind::LocalEv: {
             if (recipe.preToneExposureEv != 0.f) adopt(RenderRawDevelopmentExposure(input,recipe.preToneExposureEv));
-            const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(node.nodeId, "imageOut");
+            const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(inputLink->fromNodeId, inputLink->fromSocketId);
             const auto cached = context.imageFingerprintCache.find(key);
-            const auto fingerprint = cached == context.imageFingerprintCache.end() ? 0 : cached->second;
+            auto fingerprint = cached == context.imageFingerprintCache.end() ? 0 : cached->second;
+            if(fingerprint) Stack::Renderer::RawDevelopmentCache::HashTypedValue(fingerprint,recipe.preToneExposureEv);
             if (IsLocalRangeEnabled(recipe.localRange))
                 adopt(RenderRawDevelopmentLocalRange(result.texture, recipe.localRange, node.rawWorkingSpace,
                     recipe.technical.processingVersion, fingerprint, nativeWidth, nativeHeight));
@@ -142,7 +143,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
                 const auto maskTexture = graphCoverage ? coverage("gradient:" + gradient.mask.id) : 0;
                 if (graphCoverage && !maskTexture) continue;
                 ScopedGLTexture adjustment(RenderRawDevelopmentLocalRange(gradientInput, gradient.curve,
-                    node.rawWorkingSpace, recipe.technical.processingVersion, fingerprint, nativeWidth, nativeHeight));
+                    node.rawWorkingSpace, recipe.technical.processingVersion, 0, nativeWidth, nativeHeight));
                 if (!adjustment) throw std::runtime_error("Local EV gradient failed.");
                 ScopedGLTexture next(RenderRawGradientBlend(accumulated ? accumulated.Get() : gradientInput,
                     adjustment.Get(), gradient.mask, gradientInput, accumulated ? 2 : 1, maskTexture));

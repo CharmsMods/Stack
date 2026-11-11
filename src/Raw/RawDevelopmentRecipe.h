@@ -6,6 +6,7 @@
 #include "Raw/RawColorCalibration.h"
 #include "Raw/Tone/SceneTone.h"
 #include "Raw/Curves/CurveTypes.h"
+#include "Raw/Curves/LightBands.h"
 #include "Raw/Detail/DetailContrast.h"
 #include "ThirdParty/json.hpp"
 
@@ -221,6 +222,7 @@ struct RawLocalRangeTargetZone {
 };
 
 struct RawLocalRangeRecipe {
+    LightBands light;
     CurveAmountState curveAmount;
     float curveNormalization = 0.0f;
     bool enabled = false;
@@ -354,9 +356,16 @@ struct RawColorWarpRange {
 };
 enum class RawColorWarpCombine { Accumulate, Blend };
 
-// Selection coordinates are OKLab a/abs(L), b/abs(L), independent of exposure.
-// Destination positions are derived from the three authored adjustments.
+// Selection centers retain joint normalized OKLab a/b and scene EV. Six
+// populations keep analysis bounded and fit the OpenGL 3.3 uniform budget.
+inline constexpr std::size_t kMaxRawColorWarpPopulation = 6;
+struct RawColorWarpPopulation {
+    float a = 0, b = 0, sceneEv = 0, mass = 1;
+};
 struct RawColorWarpPin {
+    std::vector<RawColorWarpPopulation> population;
+    float brightnessSoftness = 0.75f;
+    float tintA = 0, tintB = 0;
     std::string id;
     std::string name;
     bool enabled = true;
@@ -366,20 +375,20 @@ struct RawColorWarpPin {
     int family = -1; // -1 is a sampled selection; 0..7 are the named families.
     RawColorWarpRange hueRange {-7.5f, 7.5f, 7.5f, 7.5f, true}; // Degrees relative to source hue.
     RawColorWarpRange saturationRange;
-    float sampleRadius = 0.0f; // Soft normalized-ab radius; zero retains independent H/S ranges.
+    float sampleRadius = 0.0f; // Soft joint-color radius; zero uses per-population widths with H/S ranges.
     float smoothSelection = 0.0f; // Edge-aware influence smoothing, 0..1.
     RawColorWarpRange exposureRange {-16.0f, 16.0f, 1.0f, 1.0f, false};
     bool moveColors = false; // Translate normalized chroma; false retains Turn behavior.
     float hueShift = 0.0f; // Signed degrees.
-    float saturation = 0.0f; // Relative chroma change, -1 through +1.
+    float saturation = 0.0f; // Relative chroma change, -1 through +5.
     float strength = 1.0f;
     std::string regionId;
-    float exposureEv = 0.0f;
+    float brightness = 0.0f; // Perceptual lightness adjustment, -1..1.
 };
 
 struct RawColorWarpRecipe {
     RawColorWarpRecipe();
-    int version = 3;
+    int version = 4;
     bool enabled = true;
     float strength = 1.0f;
     std::vector<RawColorWarpPin> pins;
@@ -535,6 +544,12 @@ RawRgbDenoiseRecipe SanitizeRgbDenoiseRecipe(RawRgbDenoiseRecipe rgbDenoise);
 bool HasRgbDenoiseEffect(const RawRgbDenoiseRecipe& rgbDenoise);
 bool IsRgbDenoiseActive(const RawRgbDenoiseRecipe& rgbDenoise);
 RawLocalRangeRecipe ApplyLocalRangePreset(RawLocalRangeRecipe localRange, RawLocalRangePreset preset);
+// Resolve automatic targeting once per input, then use the resulting recipe
+// for all CPU pixel evaluations. This mirrors the renderer's cached analysis.
+inline RawLocalRangeRecipe ResolveLightRange(RawLocalRangeRecipe recipe, LightRange range) {
+    if(recipe.light.automatic) {recipe.light.lowEv=range.lowEv;recipe.light.highEv=range.highEv;}
+    return recipe;
+}
 float EvaluateLocalRangeControlDeltaEv(const RawLocalRangeRecipe& localRange, float sceneEv);
 float EvaluateLocalRangeDeltaEv(const RawLocalRangeRecipe& localRange, float sceneEv);
 float LocalRangeExposureScaleForLuma(const RawLocalRangeRecipe& localRange, float sceneLuma);

@@ -73,6 +73,7 @@ int DrawControlsPanelHeader(const NodeEditorPanelGroup& group,float width,const 
             ImGui::GetColorU32(ImGuiCol_Text));
         ImGui::SameLine(0,gap);
     }
+    if(group.instances.size()==1) {ImGui::NewLine();return activated;}
     const float firstWidth=std::max(step,width-labelWidth-gap-switchSpace);
     auto* draw=ImGui::GetWindowDrawList();
     ImGuiExtras::AutomaticGlassScope glass;

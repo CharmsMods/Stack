@@ -38,6 +38,7 @@ bool AppShell::TopBarOwnsPanelToggle() const {
 }
 
 void AppShell::ToggleWorkspaceSectionPanel() {
+    if(m_Editor->IsFocusedNodeEditor())return;
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     m_NavigationRail.panelOpen = !m_NavigationRail.panelOpen;
     // Buttons render after layout; arm at acceptance so the next layout can
@@ -98,6 +99,7 @@ void AppShell::LayoutRawMaskToolbar() {
 }
 
 void AppShell::RenderRawMaskToolbar() {
+    if(m_Editor->IsFocusedNodeEditor())return;
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Toolbar,
         Stack::UiPerformance::Probe::Key(m_RawMaskToolbar.revealAmount));
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::NavigationBars);
@@ -195,6 +197,7 @@ void AppShell::RenderRawMaskToolbar() {
 }
 
 void AppShell::RenderSharedPanelToggle() {
+    if(m_Editor->IsFocusedNodeEditor())return;
     ImGuiExtras::HoverTextScope noHoverText;
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const float amount = std::max(m_NavigationRail.revealAmount, m_RawMaskToolbar.revealAmount);

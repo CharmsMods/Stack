@@ -2184,7 +2184,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
 
             smokeColorPin.exposureRange={-6,4,1,1,true};
             smokeColorPin.regionId = "real-raw-smoke-region";
-            smokeColorPin.exposureEv = 0.15f;
+            smokeColorPin.brightness = 0.15f;
             activeColorWarpRecipe.colorWarp.pins = { smokeColorPin };
             Stack::RawRecipe::RawColorWarpRegion smokeColorRegion;
             smokeColorRegion.id = smokeColorPin.regionId;

@@ -2,6 +2,9 @@
 #include "Raw/Curves/CurveAuthoring.h"
 #include "Raw/Curves/TonalCurvePoints.h"
 #include "Editor/Internal/RawLab/CurveTonalSliders.h"
+#include "Editor/NodeEditors/PanelRoller.h"
+#include "Editor/NodeEditors/LightBandEditor.h"
+#include "Editor/NodeEditors/PhotographicPanelEditors.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 
@@ -159,12 +162,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             const float minimumEv = context.recipe.localRange.minEv;
             const float maximumEv = context.recipe.localRange.maxEv;
             const float middleGrey = std::max(0.000001f, context.recipe.localRange.middleGrey);
-            const auto& histogram = m_RawFloatingSurface.histogram.Zones(
-                inputScope,
-                inputScope.valid ? inputRevision : 0,
-                minimumEv,
-                maximumEv,
-                middleGrey);
+
 
             constexpr float graphHorizontalInset = 8.0f;
             const float surfaceStartX = ImGui::GetCursorPosX();
@@ -172,16 +170,37 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             graphSize.y = std::max(12.f,std::min(graphSize.y,graphSize.x*.75f));
             graphSize.x = std::max(1.0f, graphSize.x - graphHorizontalInset * 2.0f);
             ImGui::SetCursorPosX(surfaceStartX + graphHorizontalInset);
+            Stack::Editor::LightBandViewState fallbackBandView;
+            fallbackBandView.advanced=true;
+            auto& bandView=context.nodeTarget && context.editorState ? context.State<Stack::Editor::LightBandViewState>() : fallbackBandView;
+            graphSize.y=std::min(graphSize.y,180.f*ImGui::GetFontSize()/13.f);
+            if(context.nodeTarget && context.editorState)ImGui::Checkbox("Advanced curve",&bandView.advanced);
+            if(!bandView.advanced) {
+                auto bandRange=inputScope.lightRange;
+                if(bandRange.valid) {
+                    const float shift=context.recipe.preToneExposureEv-inputScope.inputExposureEv;
+                    bandRange.lowEv+=shift;bandRange.highEv+=shift;
+                }
+                changed|=Stack::Editor::DrawLightBandGraph(context,bandRange,graphSize);
+                changed|=Stack::Editor::DrawLightPanel(*this,context);
+                return changed;
+            }
+            const auto& histogram = m_RawFloatingSurface.histogram.Zones(
+                inputScope,
+                inputScope.valid ? inputRevision : 0,
+                minimumEv,
+                maximumEv,
+                middleGrey);
+            ImGui::TextDisabled("Additive correction; Light sliders remain independent");
             bool curveChanged = false;
             if(context.nodeTarget && context.editorState) {
                 auto& state=context.State<CurveCanvasState>();
                 auto points=Stack::RawRecipe::RawLocalRangeBezierPoints(localRange);
-                const auto tonalDomain=ExposureTonalSliderDomain(minimumEv,maximumEv);
                 float normalization=1.f;
                 curveChanged=DrawCurveCanvas("LocalEV",points,localRange.curveAmount,state,false,
                     histogram,graphSize,12,canAdjustExposure?&exposureEv:nullptr,{},false,
                     &normalization,false,true,
-                    &tonalDomain,inputRevision,{true,false,true,minimumEv,maximumEv});
+                    nullptr,inputRevision,{true,false,true,minimumEv,maximumEv});
                 if(curveChanged && !Stack::RawRecipe::SameCurvePoints(points,
                     Stack::RawRecipe::RawLocalRangeBezierPoints(localRange))) {
                     localRange.points.clear();
@@ -232,6 +251,12 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
     ImGui::Spacing();
     if (ShowsRawLabSettings(section)) {
         constexpr float strengthHorizontalInset = 8.0f;
+        if(context.presentation==Stack::Editor::NodeEditorPresentation::Panel) {
+            ImGui::BeginDisabled(context.IsParameterDriven("strength"));
+            changed|=Stack::Editor::PanelRoller("Strength","strength",localRange.strength,0,2,.005f,1,"%.2f",context.State<Stack::Editor::PanelControlState>());
+            ImGui::EndDisabled();
+            return changed;
+        }
         const float strengthStartX = ImGui::GetCursorPosX();
         const float strengthWidth = std::max(
             1.0f,
@@ -262,7 +287,9 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
 
 bool EditorModule::RenderRawWorkspaceLabZonesSecondaryControls(
     RawWorkspaceEditContext& context) {
-    bool changed = false;
+    if(context.presentation==Stack::Editor::NodeEditorPresentation::Panel)
+        return Stack::Editor::DrawLightPanelSettings(*this,context);
+    bool changed = context.nodeTarget && context.editorState ? Stack::Editor::DrawLightRangeSettings(context,m_RawWorkspaceGraphScopeReadback.lightRange,m_RawWorkspaceGraphScopeReadback.inputExposureEv) : false;
     ImGui::TextWrapped("Local EV measures this operation's input. Use Exposure for a uniform brightness adjustment.");
     ImGui::Spacing();
     float smoothness = context.recipe.localRange.smoothness;

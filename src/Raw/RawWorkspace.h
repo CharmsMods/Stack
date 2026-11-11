@@ -456,7 +456,7 @@ struct AppState {
     int rawLabActivePointCurve = 0;
     bool rawLabColorWarpLiveCloud = false;
     int rawLabLastGalleryHost = 1;
-    int viewSectionTab = 0;
+    int viewSectionTab = 1;
     bool viewSectionOpen = true;
     int rawLabGalleryDisplayMode = 0;
     int rawLabGalleryContentMode = 0;

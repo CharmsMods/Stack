@@ -24,8 +24,14 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         const auto projected=ProjectColorDisc(chroma*.7f*std::cos(hue*radians),chroma*.7f*std::sin(hue*radians));
         return ImVec2(center.x+projected.x/ColorDiscExtent*size*.5f,center.y-projected.y/ColorDiscExtent*size*.5f);
     };
+    for(const auto& other:args.colorWarp.pins) {
+        if(other.id==pin.id)continue;
+        const auto point=screen(RawRecipe::ColorWarpHue(other.sourceA,other.sourceB),std::hypot(other.sourceA,other.sourceB));
+        draw->AddCircle(point,3.f,ImGui::GetColorU32(ImGuiCol_Text,other.enabled?.35f:.15f),16,1.f);
+    }
     const auto source=screen(sourceHue,sourceChroma);
-    const auto target=screen(sourceHue+pin.hueShift,sourceChroma*std::max(0.f,1.f+pin.saturation));
+    const auto destination=RawRecipe::ColorWarpDestination(pin);
+    const auto target=screen(RawRecipe::ColorWarpHue(destination[0],destination[1]),std::hypot(destination[0],destination[1]));
     const auto white=ImGui::GetColorU32(ImGuiCol_Text);
     draw->AddLine(source,target,white,1.5f);
     draw->AddCircle(source,4,white,20,1.2f);
@@ -95,11 +101,17 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         const auto unwrapped=[&](float reference){return reference+RawRecipe::ColorWarpHueDelta(relative-reference);};
         switch(state.dragging) {
         case 0:
-            if(pin.moveColors) {
+            if(pin.moveColors || sourceChroma<.02f) {
                 const float a=state.moveStart.x+.15f*(pointerChroma*std::cos(pointerHue*radians)-state.movePress.x);
                 const float b=state.moveStart.y+.15f*(pointerChroma*std::sin(pointerHue*radians)-state.movePress.y);
-                pin.hueShift=RawRecipe::ColorWarpHueDelta(RawRecipe::ColorWarpHue(a,b)-sourceHue);
-                pin.saturation=std::clamp(std::hypot(a,b)/std::max(.01f,sourceChroma)-1.f,-1.f,5.f);
+                if(sourceChroma<.02f) {
+                    const auto current=RawRecipe::ColorWarpDestination(pin);
+                    pin.tintA=std::clamp(a-(current[0]-pin.tintA),-1.f,1.f);
+                    pin.tintB=std::clamp(b-(current[1]-pin.tintB),-1.f,1.f);
+                } else {
+                    pin.hueShift=RawRecipe::ColorWarpHueDelta(RawRecipe::ColorWarpHue(a-pin.tintA,b-pin.tintB)-sourceHue);
+                    pin.saturation=std::clamp(std::hypot(a-pin.tintA,b-pin.tintB)/sourceChroma-1.f,-1.f,5.f);
+                }
                 break;
             }
             if(std::hypot(dx,dy)>3)pin.hueShift=std::clamp(pin.hueShift+.15f*RawRecipe::ColorWarpHueDelta(pointerHue-state.lastHue),-180.f,180.f);

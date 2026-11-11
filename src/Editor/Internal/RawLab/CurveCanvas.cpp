@@ -67,8 +67,7 @@ bool DrawCurveCanvas(const char* id,std::vector<RawBezierCurvePoint>& points,
     const float axisHeight=viewOptions.stableScale ? ImGui::GetFontSize()+style.controlGap : 0;
     const float controlsHeight=style.controlHeight+ImGui::GetStyle().ItemSpacing.y;
     size.x=std::max(1.f,size.x);size.y=std::max(12.f*style.scale,size.y-controlsHeight);
-    ImGui::InvisibleButton("curve",size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight|
-        (viewOptions.stableScale?ImGuiButtonFlags_MouseButtonMiddle:0));
+    ImGui::InvisibleButton("curve",size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
     const float inset=std::min(style.inset,std::min(size.x,size.y)*.2f);
     const ImRect box(ImVec2(ImGui::GetItemRectMin().x+inset,ImGui::GetItemRectMin().y+inset),
         ImVec2(ImGui::GetItemRectMax().x-inset,ImGui::GetItemRectMax().y-inset-std::min(axisHeight,size.y*.25f)));

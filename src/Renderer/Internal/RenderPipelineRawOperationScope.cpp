@@ -18,7 +18,8 @@ void RenderPipeline::CaptureRawLayerLocalScope(
     const int width = m_Width, height = m_Height;
     const auto native = ResolveGraphNativeExtent(context, node.nodeId, "inputImageOut");
     const int nativeWidth = native.first, nativeHeight = native.second;
-    const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(context.graph.rawLayerScopeNodeId, context.graph.rawLayerScopeSocketId);
+    const auto* incoming=context.FindInputLink(node.nodeId,"imageIn");
+    const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(incoming?incoming->fromNodeId:node.nodeId,incoming?incoming->fromSocketId:"inputImageOut");
     const auto fp = context.imageFingerprintCache.find(key);
     const std::size_t fingerprint = fp == context.imageFingerprintCache.end() ? 0 : fp->second;
     // Local EV applies its own exposure offset before evaluating the curve.
@@ -31,11 +32,12 @@ void RenderPipeline::CaptureRawLayerLocalScope(
     }
     const auto curveInput = exposed ? exposed.Get() : texture;
     auto curveInputFingerprint = fingerprint;
-    if (curveInputFingerprint != 0 && recipe.preToneExposureEv != 0.f)
-        StackHash::HashCombine(curveInputFingerprint, StackHash::HashValue(recipe.preToneExposureEv));
+    if (curveInputFingerprint != 0)
+        Stack::Renderer::RawDevelopmentCache::HashTypedValue(curveInputFingerprint,recipe.preToneExposureEv);
     CaptureRawDevelopmentLocalRangeGraphScopeReadback(curveInput, recipe.localRange, width, height,
-        node.rawWorkingSpace, nativeWidth, nativeHeight);
+        node.rawWorkingSpace, nativeWidth, nativeHeight,curveInputFingerprint);
     m_RawDevelopmentGraphScopeReadback.graphInputFingerprint = fingerprint;
+    m_RawDevelopmentGraphScopeReadback.inputExposureEv = recipe.preToneExposureEv;
     if (!recipe.localRange.areas.empty()) {
         const bool external = node.rawOperation.parameters.value("graphCoverage", false);
         for (auto& area : recipe.localRange.areas) {

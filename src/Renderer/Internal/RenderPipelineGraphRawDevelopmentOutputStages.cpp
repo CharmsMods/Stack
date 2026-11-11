@@ -133,7 +133,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         Stack::RawRecipe::kMaxRawColorWarpPins;
     std::vector<std::array<float,4>> params,adjustments,hueRanges,saturationRanges,exposureRanges;
     std::vector<float> spatialSupport;
-    std::vector<std::array<float,4>> fieldFlags,moves,selections;
+    std::vector<std::array<float,4>> fieldFlags,moves,selections,populations;
     std::vector<const Stack::RawRecipe::RawColorWarpPin*> spatialPins;
     const auto packedRange=[](const Stack::RawRecipe::RawColorWarpRange& r) -> std::array<float,4> {
         return r.enabled?std::array<float,4>{r.low-r.featherLow,r.low,r.high,r.high+r.featherHigh}:
@@ -148,12 +148,16 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             Stack::RawRecipe::ColorWarpParticipates(pin)?1.f:0.f});
         const auto region=std::find_if(colorWarp.regions.begin(),colorWarp.regions.end(),[&](const auto& r){return r.id==pin.regionId;});
         const bool spatial=region!=colorWarp.regions.end() && region->spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;
-        selections.push_back({pin.sourceA,pin.sourceB,pin.sampleRadius,0});
-        fieldFlags.push_back({pin.smoothSelection>0?1.f:0.f,spatial?1.f:0.f,0,0});
+        selections.push_back({pin.sourceA,pin.sourceB,pin.sampleRadius,float(pin.population.size())});
+        for(std::size_t j=0;j<Stack::RawRecipe::kMaxRawColorWarpPopulation;++j) {
+            const auto p=j<pin.population.size()?pin.population[j]:Stack::RawRecipe::RawColorWarpPopulation{};
+            populations.push_back({p.a,p.b,p.sceneEv,p.mass});
+        }
+        fieldFlags.push_back({pin.smoothSelection>0?1.f:0.f,spatial?1.f:0.f,pin.brightnessSoftness,0});
         const bool needsField=spatial || pin.smoothSelection>0;
         const auto destination=Stack::RawRecipe::ColorWarpDestination(pin);
-        moves.push_back({pin.moveColors?destination[0]-pin.sourceA:0.f,pin.moveColors?destination[1]-pin.sourceB:0.f,0,0});
-        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors?0.f:pin.saturation,pin.exposureEv,needsField?float(spatialPins.size()+1):0.f});
+        moves.push_back({pin.moveColors?destination[0]-pin.sourceA:pin.tintA,pin.moveColors?destination[1]-pin.sourceB:pin.tintB,0,0});
+        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors?0.f:pin.saturation,pin.brightness,needsField?float(spatialPins.size()+1):0.f});
         hueRanges.push_back(packedRange(pin.hueRange));
         saturationRanges.push_back(packedRange(pin.saturationRange));
         exposureRanges.push_back(packedRange(pin.exposureRange));
@@ -518,6 +522,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             const auto upload=[&](const char* name,const auto& values) {
                 glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,name),pinCount,values.front().data());
             };
+            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPopulation"),static_cast<GLsizei>(populations.size()),populations.front().data());
             upload("uPinFieldFlags",fieldFlags);upload("uPinParams",params);upload("uPinAdjust",adjustments);upload("uPinMove",moves);upload("uPinSelection",selections);
             upload("uHueRange",hueRanges);upload("uSaturationRange",saturationRanges);upload("uExposureRange",exposureRanges);
             glUniform1fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPinSpatialSupport"),pinCount,spatialSupport.data());

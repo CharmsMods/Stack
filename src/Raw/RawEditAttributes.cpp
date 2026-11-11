@@ -78,6 +78,7 @@ void CopyLocalRangeOverall(
     target.minEv = source.minEv;
     target.maxEv = source.maxEv;
     target.points = source.points;
+    target.light = source.light;
     target.smoothness = source.smoothness;
     target.edgeProtection = source.edgeProtection;
     target.detailProtection = source.detailProtection;

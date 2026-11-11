@@ -42,67 +42,77 @@ Legacy layer controls can opt into a wider expanded graph node through `NodeSurf
 
 Graph plot presentation lives in [GraphUI/GraphPlotStyle](../../src/Editor/GraphUI/GraphPlotStyle.h). Local EV, Tone and Film Grain use its theme colors, scaled dimensions and drawing primitives. Extend this presentation interface for visual rules shared by node editors; keep domain mapping, authored parameters, processing and gestures with their respective owners. The default remains frameless. A common appearance does not require unrelated nodes to share an editing algorithm.
 
-Local EV's overall curve and Tone's component/direct-luminance curves offer optional tonal sliders through `RawLab/CurveTonalSliders`. Their points remain in the node's existing authored collection, with ownership and a retained insertion baseline in `Raw/Curves/TonalCurvePoints`. Owned anchors move only vertically; zero removes the anchor or restores an ordinary point it temporarily replaced. Preserve that metadata through conversion, amount references, save/history and graph gestures. Slider visibility is node-local presentation state. Curve geometry, normalization and histogram display preparation are cached by their actual inputs; showing the sliders does not request image analysis.
+Light's five independent amounts live in `RawLocalRangeRecipe::light`, with automatic/manual tonal range settings. `Raw/Curves/LightBands` defines nonnegative raised-cosine weights and the common 1%/99% log-luminance fit with a four-stop minimum span. The floating band graph and panel author the same values; Advanced curve edits the existing additive freehand correction. No curve-point ownership conversion is performed. The renderer measures every valid incoming pixel into a bounded histogram, caches scalar fits by incoming content/geometry/working space, and retains at most one full-resolution brightness field. Adjustment-only edits reuse analysis. Scope publication carries the actual fitted range; drawing never measures image pixels. Hidden controls request no presentation analysis.
 
-Tone's direct editor and Local EV's primary overall curve use `RawLab/CurveCanvas`. Older Local EV area/gradient surfaces use `DrawBezierCurveInteraction` in `RawLabCurveEditor`; Film Grain reuses that interaction through `DrawFramelessResponseBezier`. Grain's points live in its authored layer parameters, with a flat 1x multiplier preserving the existing three-zone response. Its point editor and reader opt into uncapped collections; existing RAW callers retain their limits. `BuildRawBezierSegments` prepares a collection's geometry once for drawing or processing. Local EV always applies full normalization, retaining the total authored curve and deriving a residual plus uniform offset through `Raw/Curves/LocalEvCurveNormalization`; processing combines them before the existing strength, protection and masks. Normalization is automatic and has no graph parameter socket. Double-click insertion into editable point graphs places the new anchor on the existing line at the pointer horizontal coordinate, preserving the cubic shape. Moving while the second press is held drags the new point to the pointer. Node-specific selection, gestures and the grain reference preview belong to `context.State<T>()`. Color Warp keeps wheel gestures and retained GPU/cloud resources in its per-node ColorWarpEditorState, and selection analysis in ColorWarpFeedback. Photo sampling and selection bridge through the host-swapped per-node primary UI state. Some older area/RGB curve interaction state still belongs to the RAW view structure. Selection clears incompatible gestures and analysis caches. Move that state into the node's own module when changing that design, rather than adding more shared tool-specific fields.
+Tone's component/direct-luminance curves offer optional tonal sliders through `RawLab/CurveTonalSliders`. Their points remain in the node's existing authored collection, with ownership and a retained insertion baseline in `Raw/Curves/TonalCurvePoints`. Owned anchors move only vertically; zero removes the anchor or restores an ordinary point it temporarily replaced. Preserve that metadata through conversion, amount references, save/history and graph gestures. Slider visibility is node-local presentation state. Curve geometry, normalization and histogram display preparation are cached by their actual inputs; showing the sliders does not request image analysis.
 
-`RawLab/CurveCanvasMapping` owns continuous presentation scales for Tone's direct editors and Local EV's primary curve. Each node/channel initially fits the first valid input histogram with padding, then retains that view through edits and later histogram publications. Wheel zoom and middle-button panning crop the scale without compressing its edges; Bend mode reserves the plain wheel for band width and uses Ctrl+wheel for zoom. The graph-view menu explicitly refits or restores the full range. Domain changes start a fresh fit. Linear-value channel curves use logarithmic brightness spacing; exposure curves already use stops. Tone fits its output view to include the existing curve, while Local EV retains its adjustment scale. Histogram bins, evaluated geometry, point picking, probes and inverse pointer coordinates share the mapping; offscreen anchors remain authored but are not hit targets. View navigation never authors an edit or requests image analysis. Cache labels, histogram rebins and transformed/screen geometry by their actual dependencies.
+Tone's direct editor and Local EV's advanced correction curve use `RawLab/CurveCanvas`. Older Local EV area/gradient surfaces use `DrawBezierCurveInteraction` in `RawLabCurveEditor`; Film Grain reuses that interaction through `DrawFramelessResponseBezier`. Grain's points live in its authored layer parameters, with a flat 1x multiplier preserving the existing three-zone response. Its point editor and reader opt into uncapped collections; existing RAW callers retain their limits. `BuildRawBezierSegments` prepares a collection's geometry once for drawing or processing. Local EV always applies full normalization, retaining the total authored curve and deriving a residual plus uniform offset through `Raw/Curves/LocalEvCurveNormalization`; processing combines them before the existing strength, protection and masks. Normalization is automatic and has no graph parameter socket. Double-click insertion into editable point graphs places the new anchor on the existing line at the pointer horizontal coordinate, preserving the cubic shape. Moving while the second press is held drags the new point to the pointer. Node-specific selection, gestures and the grain reference preview belong to `context.State<T>()`. Color Warp keeps wheel gestures and retained GPU/cloud resources in its per-node ColorWarpEditorState, and selection analysis in ColorWarpFeedback. Photo sampling and selection bridge through the host-swapped per-node primary UI state. Some older area/RGB curve interaction state still belongs to the RAW view structure. Selection clears incompatible gestures and analysis caches. Move that state into the node's own module when changing that design, rather than adding more shared tool-specific fields.
+
+`RawLab/CurveCanvasMapping` owns continuous presentation scales for Tone's direct editors and Local EV's primary curve. Each node/channel initially fits the first valid input histogram with padding, then retains that view through edits and later histogram publications. Wheel zoom crops the scale without compressing its edges; Bend mode reserves the plain wheel for band width and uses Ctrl+wheel for zoom. The graph-view menu explicitly refits or restores the full range. Domain changes start a fresh fit. Linear-value channel curves use logarithmic brightness spacing; exposure curves already use stops. Tone fits its output view to include the existing curve, while Local EV retains its adjustment scale. Histogram bins, evaluated geometry, point picking, probes and inverse pointer coordinates share the mapping; offscreen anchors remain authored but are not hit targets. View navigation never authors an edit or requests image analysis. Cache labels, histogram rebins and transformed/screen geometry by their actual dependencies.
 
 ## View Controls panel
 
-View's Controls tab is an additional host for the registered primary editor, not
-another parameter model or a list of default tool enums. The catalog uses exact
-resolved definition identities and stable document/layer/node targets across all
-owned graphs. Sections follow the connected image ancestry from first operation to last; mask and parameter-only branches are omitted. Repeated definition identities share one section with a numbered horizontal instance selector; each instance retains its own document/layer/node target and editing state.
-Names are native activation buttons: clicking one selects that section's chosen
-instance through the existing node selection path, including image handles and
-Settings. Names are slightly dimmed at rest, white with a glyph halo on hover.
-The selector lists every connected instance of that definition in traversal order. Hover never changes the selected target. Floating editors reuse this same selector when the definition has two or more connected instances and Controls is hidden. Selection changes the stable edit target before the incoming controls receive a fresh context. Mask handles follow the active target's mask input branch, including intermediate mask-processing nodes; image-input ancestry must not expose an earlier operation's mask just because its instance remains remembered by a section.
-The catalog changes on owner/structure revisions, independently of drawing.
+Controls is the default photographic editor when opening an image. Its fixed
+registration order is Light, Tone, HSL, and Calibration, independent of
+rendering order. Light edits Exposure and five tonal anchors in one Local EV
+node; Tone retains its luminance/RGB curve; Calibration exposes the three primary
+Hue/Saturation pairs; HSL exposes eight fixed families with Hue, Saturation, or
+Brightness (the existing per-pin exposure) selected above them. These are views
+of existing authored parameters, not a second recipe or an automatic graph repair.
 
-`RawWorkspaceEditContext::presentation` distinguishes Panel from Floating.
-Target-specific context preparation and `DrawNodeEditorPrimary` reuse the same
-registry callbacks and commit path. Drawing an unselected section must not change
-project selection. The host scopes legacy primary interaction state per instance;
-GPU resources and asynchronous services retain their existing owners. Generic
-graph controls draw a private node draft and report changes to that draft rather
-than marking the live graph edited from the drawing callback.
+The catalog uses exact resolved definition identities and stable document/layer/node
+targets across owned graphs. Include RAW-layer graphs only when the renderer lowers them for the current document; ordinary documents may retain unused RAW defaults. Connected image ancestry determines available
+instances, excluding mask and parameter-only branches. Missing or disconnected
+nodes leave disabled sections in place. Repeated definitions share a numbered
+instance selector; one instance needs no numbered pill. Selection is retained
+through graph edits and focus transitions. Graph tools outside the fixed inventory
+keep their existing editing route. Rebuild catalogs only on owner/structure changes.
 
-Controls uses a thin native scrollbar over the panel seam while scrolling; it
-fades out when idle and never reserves a layout gutter. Wheel requests use the
-shared finite easing before child layout, preserving native wheel ownership and
-matching control hit geometry. Scrollbar dragging and keyboard navigation remain
-direct; hiding the body ends its wheel tail. Its primary surfaces retain
-their designs at the available width; only the outer body scrolls. Hidden measured
-sections reserve their cached height without submitting controls or analysis.
-The panel header exposes Reset through its three-dot menu. The definition groups
-supply its labels; duplicate instances offer Reset all and individual layer/node
-entries. Reset invokes the registered callback and existing draft/history path.
-Serialized payload and inspection-only metadata do not create control sections.
-Calibration stays fitted at panel width and lets wheel input scroll the panel.
-The panel host suppresses hover tooltip windows, including help emitted by shared
-primary designs; floating help and click-opened menus retain their own behavior.
-Primary drawing uses a stable content budget independent of its measured outer
-slot. Preserve section measurements through catalog refreshes; image revisions
-must not feed a height feedback loop. Only the outer body scrolls, and captured
-controls remain submitted through release outside its clipping bounds. Hold the
-last accepted input-analysis display mapping during the active gesture, without
-accepting stale asynchronous results.
-Floating-only glass and movement stay with the floating host. While Controls is
-visible, that host releases pointer ownership and submits no floating window.
-Leaving Controls restores the last-used instance with a finite 180 ms fade
-(immediate for reduced motion). Panel/tab preferences belong to app state;
-instance selections belong to their document's transient editor state.
+`RawWorkspaceEditContext::presentation` and optional registry `panelPrimary` /
+`panelSettings` callbacks select presentation while retaining the shared draft,
+commit, history, and per-node state. Each section has Settings collapsed by default.
+The panel reset menu operates on the fixed sections and their chosen instances.
+Drawing an unselected section must not change project selection. Scope legacy
+primary interaction state per instance; GPU resources keep their existing owners.
 
-Visible editors request their node's actual incoming analysis through the existing
-independent analysis lane. Requests are serial, identity/revision checked and
-latched on unchanged failures; they do not dirty the main image. Accepted packets
-are immutable per-instance presentation data. Hidden sections do not queue new
-requests, and removed catalog instances release retained analysis packets.
+`PanelRoller` is a short stationary ribbed handle with a separate numeric readout.
+Relative horizontal drag changes the draft, Shift reduces sensitivity, clicking
+the readout opens exact entry, double-click resets, and Escape cancels the gesture.
+Keep existing value limits and one undo transaction per gesture. Ribs move only
+during active editing; idle frames do not animate. Disabled placeholders require
+no authored model or retained gesture state. Calibration pairs columns only when
+the available font-scaled width fits; narrow panels stack them.
+
+Middle-clicking a control enters image-only focus with that node's existing
+floating primary editor. Middle-clicking the floating editor again returns;
+Escape returns after widgets/popups have had their cancellation opportunity.
+The shell hides navigation, toolbars, panels, and their toggles without changing
+saved presentation preferences or the image camera. Focus owns one tool: Alt
+switching and duplicate selectors are suppressed until return. Leaving View,
+switching documents, or losing the target ends focus. Curve middle-button panning
+is removed; wheel zoom and explicit Fit/Full view actions remain. Named fixed-panel
+tools no longer appear floating merely because the panel was closed.
+
+Only the outer panel body scrolls. Its thin seam scrollbar has no layout gutter;
+wheel easing is finite and hiding the body ends its tail. Hidden measured sections
+reserve cached height without submitting controls. Keep primary drawing budgets
+independent of measured outer extent, and preserve measurements through catalog
+refreshes. Captured controls remain submitted until release beyond clipping bounds.
+Panel hover tooltips are suppressed; click-opened settings and exact-entry popups
+remain available. Panel/tab preferences belong to app state; instance selection,
+settings disclosure, channels, and focus are transient presentation state.
+
+Analysis uses the existing serial, identity/revision-checked lane. Tone's visible
+curve can request incoming analysis; Light rollers, Calibration rollers, and HSL
+rows need none. Expanded settings request analysis only when their existing
+editor requires it. Hidden remembered tools do not refresh scopes. Hold the last
+accepted display mapping through a gesture, reject stale asynchronous results,
+and release retained analysis when a catalog instance disappears. No new idle
+image scans, timers, or processing path are introduced by these presentations.
 
 ## Reuse analysis and rendering services
 
-Tone Curve and Local EV begin with their full graph domain visible; Fit is an explicit view action. Point drags use equal 0.15x screen travel on both axes, including newly inserted points.
+Tone Curve and Local EV fit the first valid input histogram, then retain that view; Fit and Full are explicit view actions. Point drags use equal 0.15x screen travel on both axes, including newly inserted points.
 
 The photographic Tone Curve starts on white (luminance). The white, red, green and blue dots select editors for one node. Selection belongs to the node's presentation state and never edits the recipe. The executor applies the luminance gain first, then the three individual channel curves, and preserves alpha. Settings retain Linear values (the default) and Exposure stops. Numeric channels, parametric contrast and advanced tone modes are no longer exposed or accepted by the Tone Curve parameter validator. Input histograms describe the incoming wire and use the selected editor's coordinate scale.
 
@@ -119,4 +129,8 @@ This framework does not flatten the saved layer graphs or separate every legacy 
 
 Color Calibration's infinite saturation dial edits the existing three primary saturation values together. Their logarithmic radius controls receive the same offset, so radii scale by a common factor around D65 while hue and relative distances remain intact. The dial has no separate processing parameter or saved multiplier. A graph-driven primary disables the shared gesture. Existing primary serialization, undo and CPU/GPU processing remain authoritative. Cache transform diagnostics by the recipe and working space, rather than rebuilding the matrix during every draw.
 
-Color Warp provides Move and Turn per selection. Move translates normalized chroma from source to destination; Turn retains hue rotation and saturation scaling. Both select from immutable input colors, share protection and overlap policy, and preserve scene-linear HDR values. Influence previews include enabled state, strength, protection and overlap; an unadjusted selected pin still previews its potential influence. Mode and destination edits invalidate output without rebuilding spatial membership fields. Missing saved moveColors defaults to Turn. New sampled selections use a soft normalized-chroma distance range with a minimum near-neutral width; missing sampleRadius retains saved H/S ranges. Select range exposes Soft color, Color reach and Smooth selection. Smoothing filters influence on the existing bounded guide, stores floating-point strengths, and retains spatial gates/boundaries; it does not filter image RGB. It can admit nearby colors to repair small membership gaps. Range/amount edits invalidate selection fields; destination edits reuse them.
+Color Warp's version-4 recipe owns eight permanent hue families, up to eight accepted custom selections, perceptual brightness, neutral tint, and Move/Turn adjustments. Custom selections retain up to six joint normalized-OKLab/scene-EV population centers with editable brightness softness; these are a bounded approximation, not independent color and exposure marginals. CPU, shader, masks, and selection feedback use the same membership definition on immutable input colors. Brightness applies a bounded lightness-derived gain with highlight rolloff; defaults suppress unreliable neutral hues and very dark signals. The existing bounded guide smooths influence, not image RGB. HDR values and alpha are retained.
+
+Sampling presents suggested swatches for individual acceptance. New selections start with zero adjustment and Everywhere scope; This region applies the retained spatial restriction. Resample explicitly replaces the sampled profile while retaining adjustments and the spatial restriction. Moving a region does not resample colors. Pending suggestions are rejected after input, node, or source identity changes. Accepted profiles serialize with the node and therefore follow ordinary document history. Version 4 intentionally rejects earlier Color Warp formats; no migration or compatibility renderer is provided.
+
+Move translates normalized chroma from source to destination; Turn rotates hue and scales saturation. Neutral tint is a translation in either mode. Influence previews include strength, protection and overlap; an unadjusted selected pin still previews potential influence. Unchanged selections never dilute active edits. Membership and spatial fields are cached by input and selection definition; brightness, tint, destination, strength and protection edits reuse them. Profile analysis stays on the existing sampling worker; drawing introduces no image scans. The compact panel uses thin tracks with hollow handles; custom swatches and selected adjustments appear directly beneath the default HSL rows. The floating wheel separates vertical brightness from hue/chroma and shows quiet surrounding anchors and the retained brightness profile. Source/result swatches use the shared CPU transform on a representative source color, cached by node/local revision, selected pin and working space. They illustrate color transformation; spatial influence is inspected with the affected-area preview.

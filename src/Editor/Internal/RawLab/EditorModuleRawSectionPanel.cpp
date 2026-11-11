@@ -9,6 +9,7 @@
 #include "RawLabUiSupport.h"
 #include "Library/LibraryControls.h"
 #include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
+#include "Editor/NodeEditors/PanelRoller.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -20,6 +21,7 @@ using namespace Stack::Editor::RawLabInternal;
 void EditorModule::RenderRawWorkspaceSectionPanel(
     const ImVec2& position, const ImVec2& size, float visibleWidth,
     const std::function<void()>& libraryNavigation) {
+    if(IsFocusedNodeEditor())return;
     ImGuiExtras::HoverTextScope noHoverText(m_PermanentGalleryWorkspace);
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewPanel);
     m_RawSectionPanelFrame = ImGui::GetFrameCount();
@@ -134,6 +136,11 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
 
 void EditorModule::RequestRawSettingsPanel() {
     if (Stack::Workspace::IsPreview()) return;
+    ExitFocusedNodeEditor();
+    if(const auto* editor=SelectedNodeEditor();editor && editor->panelPrimary && m_Project->nodeEditor) {
+        m_NodeEditorState.Get<Stack::Editor::PanelControlState>(*m_Project->nodeEditor).settingsOpen=true;
+        SetViewSectionTab(1);m_RawSettingsPanelRequested=true;return;
+    }
     SetViewSectionTab(2);
     m_RawSettingsPanelRequested = true;
 }

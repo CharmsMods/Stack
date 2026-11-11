@@ -45,6 +45,7 @@ void EditorModule::RenderNodeEditorPanelMenu() {
     std::vector<NodeEditTarget> resetTargets;
     if (ImGui::BeginMenu("Reset")) {
         for (const auto& group:m_NodeEditorPanel.groups) {
+            if(!FindPhotographicPanelEditor(group.definitionId))continue;
             if (group.instances.empty()) continue;
             const auto* first=ResolveNodeEditorTarget(group.instances.front().target);
             const bool enabled=first && FindNodeEditor(*first).reset;

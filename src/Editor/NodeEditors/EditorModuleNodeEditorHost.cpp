@@ -7,6 +7,8 @@
 #include "Library/LibraryControls.h"
 #include "App/WorkspacePresentation.h"
 #include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
+#include "Editor/NodeEditors/PanelRoller.h"
+#include "Editor/NodeEditors/PhotographicPanelEditors.h"
 #include "imgui_internal.h"
 #include <unordered_set>
 #include <cstdio>
@@ -111,9 +113,12 @@ NodeEditorDrawResult EditorModule::DrawNodeEditorPrimary(RawWorkspaceEditContext
     if (definition.toneView>=0) m_RawWorkspaceLabUi.sceneToneView=definition.toneView;
     const auto* window=ImGui::GetCurrentWindow();
     const auto oldActive=ImGui::GetActiveID();
+    const bool panel=context.presentation==NodeEditorPresentation::Panel && definition.panelPrimary;
+    if(panel)ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{ImGui::GetStyle().ItemSpacing.x,2.f*ImGui::GetFontSize()/13.f});
     ImGui::PushID(context.nodeTarget->Key().c_str());
     ImGui::BeginDisabled(!context.canEdit);
-    if (definition.primary) result.changed=definition.primary(*this,context);
+    const auto primary=panel ? definition.panelPrimary : definition.primary;
+    if (primary) result.changed=primary(*this,context);
     else if (context.nodeDraft) {
         const auto* layer=Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),context.nodeTarget->layerId);
         auto& graph=context.nodeTarget->layerId==kProjectGraphId ? m_Project->graph :
@@ -121,8 +126,23 @@ NodeEditorDrawResult EditorModule::DrawNodeEditorPrimary(RawWorkspaceEditContext
         m_Sidebar.GetNodeGraphUI().RenderOperationDraftControls(this,graph,*context.nodeDraft);
         result.changed=context.draftChanged;
     }
+    if(panel) {
+        auto& state=context.State<PanelControlState>();
+        const auto settings=definition.panelSettings ? definition.panelSettings : definition.settings;
+        if(settings) {
+            ImGui::Spacing();
+            if(Stack::Editor::RawLabInternal::BareTextButton(state.settingsOpen ? "v  Settings" : ">  Settings"))
+                state.settingsOpen=!state.settingsOpen;
+            if(state.settingsOpen) {
+                ImGui::PushID("PanelSettings");
+                result.changed|=settings(*this,context);
+                ImGui::PopID();
+            }
+        }
+    }
     ImGui::EndDisabled();
     ImGui::PopID();
+    if(panel)ImGui::PopStyleVar();
     auto& gui=*ImGui::GetCurrentContext();
     result.interactionActive=gui.ActiveId && gui.ActiveIdWindow &&
         ImGui::IsWindowChildOf(gui.ActiveIdWindow,const_cast<ImGuiWindow*>(window),true,true);
@@ -141,7 +161,10 @@ void EditorModule::RefreshNodeEditorPanel() {
     const auto document=GetProjectDocumentId();
     // Compare a small owner/revision list, never hash node payloads in drawing.
     const auto& state=m_Project->rawLayers.State();
-    const std::size_t ownerCount=state.layers.size()+2;
+    // Ordinary documents can retain unused RAW defaults. Match the renderer's
+    // lowering rule so these never masquerade as connected editing controls.
+    const bool ownsRawLayers=IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive();
+    const std::size_t ownerCount=ownsRawLayers?state.layers.size()+2:1;
     bool current=panel.document==document && panel.structure.size()==ownerCount;
     std::size_t index=0;
     const auto matches=[&](const std::string& id,const EditorNodeGraph::Graph& graph) {
@@ -149,8 +172,10 @@ void EditorModule::RefreshNodeEditorPanel() {
             panel.structure[index].second!=graph.GetStructureRevision())) current=false;
         ++index;
     };
-    matches(state.background.id,state.background.graph);
-    for (const auto& layer:state.layers) matches(layer.id,layer.graph);
+    if(ownsRawLayers) {
+        matches(state.background.id,state.background.graph);
+        for (const auto& layer:state.layers) matches(layer.id,layer.graph);
+    }
     matches(kProjectGraphId,m_Project->graph);
     if (current) {
         if (m_Project->nodeEditor && panel.lastTarget!=m_Project->nodeEditor) {
@@ -169,6 +194,12 @@ void EditorModule::RefreshNodeEditorPanel() {
     }
     auto old=std::move(panel.groups);
     panel.structure.clear();panel.groups.clear();
+    for(const auto* definition:PhotographicPanelDefinitions()) {
+        NodeEditorPanelGroup group;group.definitionId=definition->definitionId;group.label=definition->panelLabel;
+        const auto previous=std::find_if(old.begin(),old.end(),[&](const auto& value){return value.definitionId==group.definitionId;});
+        if(previous!=old.end()) {group=*previous;group.instances.clear();}
+        panel.groups.push_back(std::move(group));
+    }
     const auto append=[&](const std::string& owner,const EditorNodeGraph::Graph& graph) {
         panel.structure.emplace_back(owner,graph.GetStructureRevision());
         // Traverse the image ancestry, excluding coverage/parameter branches.
@@ -221,10 +252,13 @@ void EditorModule::RefreshNodeEditorPanel() {
             group->instances.push_back({target,target.Key(),std::to_string(group->instances.size()+1)});
         }
     };
-    append(state.background.id,state.background.graph);
-    for (const auto& layer:state.layers) append(layer.id,layer.graph);
+    if(ownsRawLayers) {
+        append(state.background.id,state.background.graph);
+        for (const auto& layer:state.layers) append(layer.id,layer.graph);
+    }
     append(kProjectGraphId,m_Project->graph);
     for (auto& group:panel.groups) {
+        if(group.instances.empty()) {group.selectedKey.clear();continue;}
         const auto chosen=std::find_if(group.instances.begin(),group.instances.end(),[&](const auto& value){return value.key==group.selectedKey;});
         if (chosen==group.instances.end()) {
             const auto active=std::find_if(group.instances.begin(),group.instances.end(),[&](const auto& value){return m_Project->nodeEditor==value.target;});
@@ -236,6 +270,7 @@ void EditorModule::RefreshNodeEditorPanel() {
     for (const auto& group:old) for (const auto& instance:group.instances)
         if (!live.count(instance.key)) m_NodeEditorState.Get<NodeEditorPanelAnalysis>(instance.target)={};
     if (panel.lastTarget && !ResolveNodeEditorTarget(*panel.lastTarget)) panel.lastTarget.reset();
+    if(panel.focusTarget && !live.count(panel.focusTarget->Key()))ExitFocusedNodeEditor();
 }
 
 bool EditorModule::ActivateNodeEditorPanelTarget(const NodeEditTarget& target) {
@@ -252,7 +287,13 @@ bool EditorModule::ActivateNodeEditorPanelTarget(const NodeEditTarget& target) {
         } else SelectRawNodeEditor(target.layerId,target.nodeUuid);
         BindNodeEditorPrimaryState(target);
     }
-    m_NodeEditorPanel.lastTarget=target;
+    if(m_NodeEditorPanel.lastTarget!=target) {
+        for(auto& group:m_NodeEditorPanel.groups)for(const auto& instance:group.instances)
+            if(instance.target==target && group.selectedKey!=instance.key) {
+                group.selectedKey=instance.key;group.measuredHeight=0.f;
+            }
+        m_NodeEditorPanel.lastTarget=target;
+    }
     return true;
 }
 
@@ -263,18 +304,20 @@ void EditorModule::RenderNodeEditorPanel() {
     bool queuedAnalysisVisible=!m_NodeEditorPanel.analysisTarget;
     bool firstSection=true;
     for (auto& group:m_NodeEditorPanel.groups) {
+        const auto* panelDefinition=FindPhotographicPanelEditor(group.definitionId);
+        if(!panelDefinition)continue;
         if (!firstSection) {
-            const auto start=ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddLine(start,ImVec2(start.x+ImGui::GetContentRegionAvail().x,start.y),
-                ImGui::GetColorU32(ImGuiCol_Text,.12f),.5f);
-            ImGui::Dummy(ImVec2(0,ImGui::GetFontSize()*.65f));
+            ImGui::Dummy(ImVec2(0,2.f));
         }
         firstSection=false;
         ImGui::PushID(group.definitionId.c_str());
         const float width=ImGui::GetContentRegionAvail().x;
         const auto selected=std::find_if(group.instances.begin(),group.instances.end(),
             [&](const auto& value){return value.key==group.selectedKey;});
-        if (selected==group.instances.end()) {ImGui::PopID();continue;}
+        if (selected==group.instances.end()) {
+            ImGui::TextDisabled("%s",group.label.c_str());DrawMissingPanelControls(panelDefinition->panelOrder);
+            ImGui::PopID();continue;
+        }
         auto target=selected->target;
         const auto* node=ResolveNodeEditorTarget(target);
         using Kind=EditorNodeGraph::NodeKind;
@@ -288,7 +331,12 @@ void EditorModule::RenderNodeEditorPanel() {
         };
         auto enabled=enabledState(node);
         bool toggle=false;
+        const auto headingMinimum=ImGui::GetCursorScreenPos();
         const int activated=DrawControlsPanelHeader(group,width,enabled ? &*enabled : nullptr,toggle);
+        const auto headingMaximum=ImGui::GetItemRectMax();
+        if(ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
+            ImGui::GetIO().MousePos.y>=headingMinimum.y && ImGui::GetIO().MousePos.y<=headingMaximum.y && !ImGui::IsAnyItemActive())
+            EnterFocusedNodeEditor(target);
         if (toggle && enabled && FinishWorkspaceInteraction()) {
             RawWorkspaceEditContext edit;
             if (BeginNodeEditorContext(target,edit) && edit.canEdit) {
@@ -324,8 +372,7 @@ void EditorModule::RenderNodeEditorPanel() {
             const bool measured=group.measuredHeight>0 && group.measuredWidth==width && group.measuredFont==font;
             // Separate the drawing budget from the measured outer slot. Feeding
             // last frame's extent back into available-space-based plots drifts.
-            const float layoutHeight=std::max(56.f,definition->preferredSize.y*
-                std::min(1.f,width/std::max(1.f,definition->preferredSize.x)));
+            const float layoutHeight=definition->panelHeight*ImGui::GetFontSize()/13.f;
             // Width changes invalidate measurement, not the last useful slot.
             // Falling back to the preferred height on every drag frame makes
             // all following sections jump between estimated and actual sizes.
@@ -355,7 +402,9 @@ void EditorModule::RenderNodeEditorPanel() {
                     if (BeginNodeEditorContext(target,context)) {
                         context.presentation=NodeEditorPresentation::Panel;
                         context.canEdit &= enabled.value_or(true);
-                        if (onScreen && context.canEdit && definition->inputAnalysis!=RawDevelopmentGraphScopeStage::None && !nextAnalysis) {
+                        const bool needsAnalysis=definition->panelAnalysis!=RawDevelopmentGraphScopeStage::None ||
+                            (context.State<PanelControlState>().settingsOpen && definition->inputAnalysis!=RawDevelopmentGraphScopeStage::None);
+                        if (onScreen && context.canEdit && needsAnalysis && !nextAnalysis) {
                             const auto identity=NodeInputAnalysisIdentity(target,
                                 m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
                             const auto& analysis=m_NodeEditorState.Get<NodeEditorPanelAnalysis>(target);
@@ -363,6 +412,9 @@ void EditorModule::RenderNodeEditorPanel() {
                                 nextAnalysis=target;
                         }
                         const auto result=DrawNodeEditorPrimary(context);
+                        if(context.canEdit && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
+                            !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId))
+                            EnterFocusedNodeEditor(target);
                         if (result.activated) ActivateNodeEditorPanelTarget(target);
                         if (result.changed || ownsGesture || result.interactionActive) {
                             CommitRawWorkspaceEditContext(context,result.changed,result.interactionActive);
@@ -383,7 +435,7 @@ void EditorModule::RenderNodeEditorPanel() {
                 ImGui::EndChild();ImGui::PopStyleVar(2);
             } else ImGui::Dummy(ImVec2(width,estimated));
         }
-        ImGui::Dummy(ImVec2(0,ImGui::GetFontSize()));
+        ImGui::Dummy(ImVec2(0,4.f));
         ImGui::PopID();
     }
     if (!queuedAnalysisVisible && !m_RawWorkspaceAnalysisRequested) {
@@ -423,6 +475,7 @@ void EditorModule::SetViewSectionTab(int tab) {
 
 void EditorModule::UpdateNodeEditorPanelVisibility() {
     const bool visible=m_ViewSectionTab==1 && m_ViewSectionOpen &&
+        !IsFocusedNodeEditor() &&
         !m_PermanentGalleryWorkspace && !m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
         IsViewMode() && !IsBracketingPresentationActive();
     if (visible==m_NodeEditorPanel.visible) return;

@@ -2,6 +2,7 @@
 #include "Renderer/OutputTextureStatsCache.h"
 #include "Renderer/Internal/RawZoneAreaRenderer.h"
 #include "Renderer/SceneColorGuideCache.h"
+#include "Renderer/Internal/LightRangeAnalysis.h"
 
 #include "Raw/RawGradingScope.h"
 #include "Renderer/Internal/RawGradingScopeGpu.h"
@@ -118,6 +119,7 @@ struct RawDevelopmentGraphScopeReadback {
     // Actual incoming content, including standalone Color Warp recipe stages.
     // Zero means the producer did not provide a content identity.
     std::size_t graphInputFingerprint = 0;
+    Stack::RawRecipe::LightRange lightRange;
     float inputExposureEv = 0.0f;
     RawDevelopmentGraphScopeStage stage = RawDevelopmentGraphScopeStage::None;
     std::string measurementDomain;
@@ -720,6 +722,20 @@ private:
     unsigned int m_AutoGainStatsProgram;
     unsigned int m_RawDevelopmentToneCurveProgram;
     unsigned int m_RawDevelopmentLocalRangeProgram;
+    Stack::Renderer::LightRangeAnalysis m_LightRangeAnalysis;
+    struct LightAnalysisEntry {
+        std::size_t key=0;
+        Stack::RawRecipe::LightRange range;
+        unsigned int guide=0;
+        std::size_t guideKey=0;
+        std::uint64_t guideBytes=0;
+    };
+    std::array<LightAnalysisEntry,4> m_LightAnalysisCache{};
+    unsigned int m_LightAnalysisNext=0;
+    LightAnalysisEntry& PrepareLightAnalysis(unsigned int input,
+        const Stack::RawRecipe::RawLocalRangeRecipe& recipe, Raw::RawWorkingSpace space,
+        std::size_t fingerprint,int nativeWidth,int nativeHeight);
+    void ClearLightAnalysis();
     unsigned int m_RawSpatialInitProgram = 0;
     unsigned int m_RawSpatialFilterProgram = 0;
     unsigned int m_RawSpatialApplyProgram = 0;
@@ -1176,7 +1192,7 @@ private:
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         int sourceWidth,
-        int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight);
+        int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight, std::size_t inputFingerprint = 0);
     void ClearRawDevelopmentLocalRangeOverlay();
     void ClearRawDevelopmentLocalRangeTargetSample();
     Stack::Renderer::OutputTextureStatsCache<RenderTextureStats> m_OutputTextureStatsCache;

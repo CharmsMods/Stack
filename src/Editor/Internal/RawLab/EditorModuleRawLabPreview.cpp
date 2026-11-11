@@ -797,7 +797,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 for (const auto& pin : previewRecipe.colorWarp.pins) {
                     hashFeedback(std::hash<float>{}(pin.strength));
                     hashFeedback(pin.enabled);hashFeedback(pin.protectColor);
-                    hashFeedback(pin.hueShift!=0 || pin.saturation!=0 || pin.exposureEv!=0);
+                    hashFeedback(pin.hueShift!=0 || pin.saturation!=0 || pin.brightness!=0 || pin.tintA!=0 || pin.tintB!=0);
                 }
                 for (const auto& pin : previewRecipe.colorWarp.pins)
                     if (inspectPin(pin)) hashFeedback(std::hash<std::string>{}(pin.id));
@@ -1319,6 +1319,9 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                 ? (sourceV - crop.cropY) / std::max(0.000001f, crop.cropHeight)
                 : sourceV);
     };
+    const auto sampleInputKey=colorScope.graphInputFingerprint?colorScope.graphInputFingerprint:fingerprint;
+    if(scopeReady && colorUi.colorWarpSampleInputFingerprint && colorUi.colorWarpSampleInputFingerprint!=sampleInputKey)
+        colorUi.ResetColorWarpAreaRequest();
     const auto submitAreaAnalysis = [&]() {
         if (colorUi.colorWarpAreaOwner != areaOwner) {
             colorUi.ResetColorWarpAreaRequest();
@@ -1331,6 +1334,8 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
             ++colorUi.colorWarpAreaAnalysisGeneration;
         colorUi.colorWarpAreaAnalysisState.reset();
         colorUi.colorWarpAreaAnalysisResult = {};
+        colorUi.colorWarpAcceptedProposal = -1;
+        colorUi.colorWarpSampleInputFingerprint = scopeReady?sampleInputKey:0;
         colorUi.colorWarpPendingCircleCommitRequested = false;
         colorUi.colorWarpPendingCircleRefining = false;
         colorUi.colorWarpAreaWaitingForInput = !scopeReady;
@@ -1392,6 +1397,7 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                 Stack::RawRecipe::kMaxRawColorWarpSamples > occupiedSlots
                     ? Stack::RawRecipe::kMaxRawColorWarpSamples - occupiedSlots
                     : 0u;
+            const auto analysisSlots=colorUi.colorWarpResamplePinId.empty()?availableSlots:std::size_t(1);
             auto state = std::make_shared<
                 Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaAnalysisState>();
             state->generation = generation;
@@ -1401,14 +1407,14 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
             colorUi.colorWarpAreaStatus = "Refining";
             const bool submitted = ProjectTasks().SubmitHighPriority("Analyzing colors",
                 [state, generation, samples = std::move(samples), circle,
-                 availableSlots]() mutable {
+                 analysisSlots]() mutable {
                     Stack::RawRecipe::RawColorWarpAreaAnalysisResult analysis;
                     bool failed = false;
                     try {
                         analysis = Stack::RawRecipe::AnalyzeRawColorWarpArea(
                             samples,
                             circle,
-                            availableSlots);
+                            analysisSlots);
                     } catch (...) {
                         // Pool exception handling releases task
                         // ownership, not this request's UI state.
@@ -1444,7 +1450,7 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                 colorUi.colorWarpAreaStatus =
                     colorUi.colorWarpAreaAnalysisResult.capacityLimited
                     ? "No pin slots available"
-                    : "Choose a distinguishable color; neutrals have no hue";
+                    : "Choose a brighter area with a reliable color signal";
             } else if (colorUi.colorWarpAreaAnalysisResult.capacityLimited) {
                 colorUi.colorWarpAreaStatus = "Result limited by remaining pin slots";
             } else {
@@ -1589,7 +1595,9 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
                 colorUi.colorWarpInspectionActive = false;
                 colorUi.colorWarpInspectedRegionId.clear();
             } else {
+            const auto resamplePinId=colorUi.colorWarpResamplePinId;
             colorUi.ResetColorWarpAreaRequest();
+            colorUi.colorWarpResamplePinId=resamplePinId;
             colorUi.colorWarpAreaOwner = areaOwner;
             colorUi.colorWarpPendingCircleActive = true;
             colorUi.colorWarpPendingCircleDrawing = true;

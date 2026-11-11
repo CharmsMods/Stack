@@ -187,6 +187,7 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
         if (editor.toneView >= 0) m_RawWorkspaceLabUi.sceneToneView=editor.toneView;
         SelectGraphNode(nodeId);
         SetWorkspaceMode(WorkspaceMode::View);
+        PresentSelectedNodeEditor();
         return true;
     }
     if (!IsEditingRawLayerMaskGraph() || !m_RawLayerMaskWorkspace->projectCanvas) return false;

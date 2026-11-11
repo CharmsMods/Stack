@@ -79,9 +79,11 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
     // New tabs inherit current presentation defaults, not a stale disk copy.
     // This value-only snapshot contains no browse scope or project state.
     if (const auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
-        gallery && gallery->editor.get() != owner)
-        editor.ApplyRawWorkspacePresentationPreferences(
-            gallery->editor->GetRawWorkspacePresentationPreferences());
+        gallery && gallery->editor.get() != owner) {
+        auto preferences=gallery->editor->GetRawWorkspacePresentationPreferences();
+        preferences.viewSectionTab=1;preferences.viewSectionOpen=true;
+        editor.ApplyRawWorkspacePresentationPreferences(preferences);
+    }
     editor.SetRawWorkspacePresentationPreferencesChangedHandler(
         [this, owner](const EditorModule::RawWorkspacePresentationPreferences& preferences) {
             if (m_UiPerformanceCapture || owner != m_Editor || owner->IsAutoBracketWorkspace()) return;
@@ -267,6 +269,7 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
         m_BackgroundGalleryTabOpens.push_back(std::move(*m_PendingGalleryTabOpen));
         m_PendingGalleryTabOpen.reset();
     }
+    m_Editor->ExitFocusedNodeEditor();
     m_Editor->EndWorkspacePreview();
     m_Editor->SetWorkspaceDetachedWindowsVisible(false);
     m_Editor->SetLibraryWindowHovered(false);

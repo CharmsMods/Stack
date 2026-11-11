@@ -2007,6 +2007,17 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
         uniform float uCurveGlobalOffsetEv;
+        uniform float uLightAmounts[5];
+        uniform vec2 uLightRange;
+        float lightDelta(float ev) {
+            float x=clamp(4.0*(ev-uLightRange.x)/max(.1,uLightRange.y-uLightRange.x),0.0,4.0);
+            float delta=0.0;
+            for(int i=0;i<5;++i) {
+                float d=abs(x-float(i));
+                if(d<1.0)delta+=.04*uLightAmounts[i]*(.5+.5*cos(d*3.141592653589793));
+            }
+            return delta;
+        }
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform float uSmoothness;
@@ -2086,7 +2097,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) return 0.0;
             // Combine before strength, masks, and highlight protection so the
             // split never changes the input guide or the total correction.
-            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv;
+            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv + lightDelta(sceneEv);
         }
 
         float lumaOf(vec3 rgb) {
@@ -2323,6 +2334,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
                 FragColor = vec4(color.rgb, mapSceneEv);
                 return;
             }
+            if (color.a <= 0.0 || all(equal(color.rgb,vec3(0.0)))) {FragColor=color;return;}
             float baseDeltaEv =
                 protectedLocalDeltaEv(mapSceneEv) *
                 regionMaskValue(mapSceneEv) *
@@ -2362,6 +2374,17 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
         uniform float uCurveGlobalOffsetEv;
+        uniform float uLightAmounts[5];
+        uniform vec2 uLightRange;
+        float lightDelta(float ev) {
+            float x=clamp(4.0*(ev-uLightRange.x)/max(.1,uLightRange.y-uLightRange.x),0.0,4.0);
+            float delta=0.0;
+            for(int i=0;i<5;++i) {
+                float d=abs(x-float(i));
+                if(d<1.0)delta+=.04*uLightAmounts[i]*(.5+.5*cos(d*3.141592653589793));
+            }
+            return delta;
+        }
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform int uOverlayMode;
@@ -2443,7 +2466,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) return 0.0;
             // Combine before strength, masks, and highlight protection so the
             // split never changes the input guide or the total correction.
-            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv;
+            return evaluateLocalRangeResidual(sceneEv) + uCurveGlobalOffsetEv + lightDelta(sceneEv);
         }
 
         float lumaOf(vec3 rgb) {
@@ -3563,7 +3586,7 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     int sourceWidth,
-    int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight) {
+    int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight, std::size_t inputFingerprint) {
     if (m_RawDevelopmentGraphScopeStage !=
             RawDevelopmentGraphScopeStage::LocalRangeInput ||
         m_RawDevelopmentGraphScopeReadbackMaxDimension <= 0 ||
@@ -3578,12 +3601,8 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
 
     const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
-    Stack::Renderer::ScopedGLTexture guide;
-    if (sanitized.smoothness > 0.0001f) {
-        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * sanitized.smoothness,
-            sanitized.edgeProtection, workingSpace, nativeWidth, nativeHeight));
-        if (!guide) return;
-    }
+    auto& analysis=PrepareLightAnalysis(inputTexture,sanitized,workingSpace,inputFingerprint,nativeWidth,nativeHeight);
+    const auto measuredRange=analysis.range;
     const float scale = std::min(
         1.0f,
         static_cast<float>(m_RawDevelopmentGraphScopeReadbackMaxDimension) /
@@ -3613,7 +3632,7 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
         [&](unsigned int) {
             glUseProgram(m_RawDevelopmentLocalRangeProgram);
             glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, guide.Get());
+            glBindTexture(GL_TEXTURE_2D, sanitized.smoothness>.0001f ? analysis.guide : 0);
             glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSceneGuide"), 2);
             UploadRawLocalRangeTargetZoneUniforms(m_RawDevelopmentLocalRangeProgram, sanitized, workingSpace);
             glActiveTexture(GL_TEXTURE0);
@@ -3670,6 +3689,7 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
             "scene-linear-pre-local-range-rgb",
             true,
             "edge-aware-scene-ev");
+        m_RawDevelopmentGraphScopeReadback.lightRange = measuredRange;
         m_RawDevelopmentGraphScopeReadback.sourceWidth = sourceWidth;
         m_RawDevelopmentGraphScopeReadback.sourceHeight = sourceHeight;
     }
@@ -3700,6 +3720,8 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             processingVersion,
             inputStageFingerprint);
 
+    auto& analysis=PrepareLightAnalysis(inputTexture,sanitized,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight);
+    const auto range=sanitized.light.automatic ? analysis.range : Stack::RawRecipe::LightRange{sanitized.light.lowEv,sanitized.light.highEv,true};
     unsigned int outputTexture = m_RawZoneAreasFloatOutput
         ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
         : CreateGraphRenderTargetTexture();
@@ -3707,16 +3729,12 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
         return 0;
     }
 
-    Stack::Renderer::ScopedGLTexture guide;
-    if (sanitized.smoothness > 0.0001f) {
-        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * sanitized.smoothness,
-            sanitized.edgeProtection, workingSpace, sourceWidth, sourceHeight));
-        if (!guide) { glDeleteTextures(1, &outputTexture); return 0; }
-    }
     const bool rendered = RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {
         glUseProgram(m_RawDevelopmentLocalRangeProgram);
+        glUniform1fv(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram,"uLightAmounts"),5,sanitized.light.amounts.data());
+        glUniform2f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram,"uLightRange"),range.lowEv,range.highEv);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, guide.Get());
+        glBindTexture(GL_TEXTURE_2D, sanitized.smoothness>.0001f ? analysis.guide : 0);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -3872,6 +3890,8 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
     if (!m_RawDevelopmentLocalRangeOverlayProgram) {
         return 0;
     }
+    auto& analysis=PrepareLightAnalysis(inputTexture,overlayRange,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight);
+    const auto range=overlayRange.light.automatic ? analysis.range : Stack::RawRecipe::LightRange{overlayRange.light.lowEv,overlayRange.light.highEv,true};
     unsigned int outputTexture = CreateGraphRenderTargetTexture();
     if (!outputTexture) {
         return 0;
@@ -3957,16 +3977,12 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
         return 0;
     }
 
-    Stack::Renderer::ScopedGLTexture guide;
-    if (overlayRange.smoothness > 0.0001f) {
-        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * overlayRange.smoothness,
-            overlayRange.edgeProtection, workingSpace, sourceWidth, sourceHeight));
-        if (!guide) { glDeleteTextures(1, &outputTexture); return 0; }
-    }
     const bool rendered = RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {
         glUseProgram(m_RawDevelopmentLocalRangeOverlayProgram);
+        glUniform1fv(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram,"uLightAmounts"),5,overlayRange.light.amounts.data());
+        glUniform2f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram,"uLightRange"),range.lowEv,range.highEv);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, guide.Get());
+        glBindTexture(GL_TEXTURE_2D, overlayRange.smoothness>.0001f ? analysis.guide : 0);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);

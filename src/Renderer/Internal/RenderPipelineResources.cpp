@@ -69,6 +69,7 @@ void RenderPipeline::Shutdown() {
     m_Shutdown = true;
     m_RawZoneAreaRenderer.Clear();
     m_SceneColorGuideCache.Clear();
+    ClearLightAnalysis();
 
     // Externally bound continuations belong to the render worker's owner map.
     // Destroying a temporary pipeline must not cancel another owner's job.
@@ -168,6 +169,7 @@ void RenderPipeline::Shutdown() {
     m_GraphSourceWidth = 0;
     m_GraphSourceHeight = 0;
     m_SourceChannels = 4;
+    ClearLightAnalysis();
     m_SourcePixels.clear();
     m_SourcePixelsShared.reset();
     m_SourceFingerprint = 0;
@@ -520,6 +522,7 @@ SharedPixelBuffer RenderPipeline::ShareSourcePixels(
 }
 
 void RenderPipeline::Clear() {
+    ClearLightAnalysis();
     InvalidateOutputTextureStats();
     if (m_SourceTexture) {
         glDeleteTextures(1, &m_SourceTexture);

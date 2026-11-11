@@ -10,6 +10,7 @@ uniform int uInputIsRec2020, uPinCount, uUseSpatialMasks, uBlendOverlaps;
 uniform float uStrength;
 uniform vec4 uPinParams[16], uPinAdjust[16], uPinFieldFlags[16], uPinMove[16];
 uniform vec4 uPinSelection[16];
+uniform vec4 uPopulation[96]; // Six joint chroma/EV centers per selection.
 uniform vec4 uHueRange[16], uSaturationRange[16], uExposureRange[16];
 uniform sampler2DArray uGateMask, uSupportMask, uBoundaryMask;
 uniform sampler2D uMaskGuide;
@@ -78,10 +79,11 @@ float hueDelta(float h) { return h-360.0*floor((h+180.0)/360.0); }
 void main() {
     vec4 inputColor=texture(uInputTex,vUV);
     vec3 xyz=workingToXyz(inputColor.rgb),lab=xyzToOklab(xyz);
+    if(inputColor.a<=0.0 || lab.x<=0.0) {FragColor=inputColor;return;}
     vec2 normalized=lab.yz/max(abs(lab.x),0.000001);
     float chroma=length(normalized);
     float hue=chroma>0.000001 ? degrees(atan(normalized.y,normalized.x)):0.0;
-    float neutral=smoothstep(0.001,0.01,chroma);
+    float neutral=smoothstep(0.02,0.10,chroma);
     float ev=log2(max(xyz.y,0.000001)/0.18);
     vec3 adjustment=vec3(0.0);vec2 movement=vec2(0.0);
     float total=0.0,protection=0.0;
@@ -97,6 +99,19 @@ void main() {
             colorWeight=(1.0-smoothstep(0.25,1.0,x))*max(rangeWeight(uHueRange[index],h),
                 max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
         }
+        if(uPinSelection[index].w>0.0) {
+            float joint=0.0;
+            for(int j=0;j<6;++j) {
+                if(float(j)>=uPinSelection[index].w)break;
+                vec4 point=uPopulation[index*6+j];
+                float dc=length(normalized-point.xy)/(uPinSelection[index].z>0.0?uPinSelection[index].z:max(.04,length(point.xy)*.4));
+                float de=(ev-point.z)/max(.1,uPinFieldFlags[index].z);
+                joint=max(joint,1.0-smoothstep(.25,1.0,length(vec2(dc,de))));
+            }
+            colorWeight=joint*max(rangeWeight(uHueRange[index],h),
+                max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
+        }
+        colorWeight*=smoothstep(-16.0,-12.0,ev);
         float direct=colorWeight*rangeWeight(uExposureRange[index],ev);
         float gate=1.0,support=0.0,boundary=1.0;
         if(uUseSpatialMasks!=0 && uPinAdjust[index].w>0.5) {
@@ -106,7 +121,7 @@ void main() {
             guided=uPinFieldFlags[index].y>0.5?guided:1.0;
             gate=texture(uGateMask,maskUv).r*guided;
             support=texture(uSupportMask,maskUv).r*guided;
-            if(uPinFieldFlags[index].x>0.5)direct=1.0;
+            if(uPinFieldFlags[index].x>0.5)direct=smoothstep(-16.0,-12.0,ev);
             boundary=texture(uBoundaryMask,maskUv).r;
         }
         float weight=min(1.0,direct*max(gate,support*uPinSpatialSupport[index]))*boundary*p.y;
@@ -123,7 +138,10 @@ void main() {
         lab.yz+=movement*max(abs(lab.x),0.000001);
         rgb=xyzToWorking(oklabToXyz(lab));
     }
-    FragColor=vec4(rgb*exp2(adjustment.z),inputColor.a);
+    float lightness=max(0.0,lab.x);
+    float ratio=1.0+clamp(adjustment.z,-1.0,1.0)/(1.0+lightness);
+    float gain=lightness>0.0 ? ratio*ratio*ratio : 1.0;
+    FragColor=vec4(rgb*gain,inputColor.a);
 }
 )GLSL";
 }

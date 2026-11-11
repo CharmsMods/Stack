@@ -575,7 +575,9 @@ bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
                         snapshot.graph.rawLayerScopeSocketId=input->fromSocketId;
                         snapshot.graph.rawLayerScopeOperationId=compiled->nodeId;
                         snapshot.graph.rawLayerScopeDescriptor=input->semanticDescriptor;
-                        snapshot.rawWorkspace.graphScopeStage=Stack::Editor::FindNodeEditor(*authored).inputAnalysis;
+                        const auto& editor=Stack::Editor::FindNodeEditor(*authored);
+                        snapshot.rawWorkspace.graphScopeStage=editor.panelAnalysis!=RawDevelopmentGraphScopeStage::None ?
+                            editor.panelAnalysis : editor.inputAnalysis;
                         snapshot.rawWorkspace.graphScopeOwnerKey=target.Key();
                         snapshot.rawWorkspace.graphScopeInputFingerprint=Stack::Editor::NodeInputAnalysisIdentity(target,
                             m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);

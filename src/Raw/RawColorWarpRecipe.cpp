@@ -31,7 +31,7 @@ RawColorWarpRecipe::RawColorWarpRecipe() {
     pins=families;
 }
 RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp) {
-    colorWarp.version = 3;
+    colorWarp.version = 4;
     colorWarp.strength = ClampFinite(colorWarp.strength, 1.0f, 0.0f, 2.0f);
     if (colorWarp.pins.size() > kMaxRawColorWarpPins) {
         colorWarp.pins.resize(kMaxRawColorWarpPins);
@@ -113,7 +113,7 @@ nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
     result["version"] = colorWarp.version;
     result["enabled"] = colorWarp.enabled;
     result["strength"] = colorWarp.strength;
-    result["coordinateModel"] = "oklab-hse-d65-v3";
+    result["coordinateModel"] = "oklab-joint-luminance-d65-v4";
     result["combine"] = colorWarp.combine==RawColorWarpCombine::Blend ? "blend" : "accumulate";
     result["regions"] = nlohmann::json::array();
     for (const RawColorWarpRegion& region : colorWarp.regions) {
@@ -163,7 +163,11 @@ nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
         item["sampleRadius"] = pin.sampleRadius;
         item["strength"] = pin.strength;
         item["regionId"] = pin.regionId;
-        item["exposureEv"] = pin.exposureEv;
+        item["brightness"] = pin.brightness;
+        item["brightnessSoftness"]=pin.brightnessSoftness;
+        item["tintA"]=pin.tintA;item["tintB"]=pin.tintB;
+        item["population"]=nlohmann::json::array();
+        for(const auto& p:pin.population)item["population"].push_back({p.a,p.b,p.sceneEv,p.mass});
         result["pins"].push_back(std::move(item));
     }
     return result;
@@ -174,13 +178,13 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
     if (!value.is_object()) {
         return result;
     }
-    if (value.value("version", 0) != 3 ||
+    if (value.value("version", 0) != 4 ||
         value.value("coordinateModel", std::string()) !=
-            "oklab-hse-d65-v3") {
+            "oklab-joint-luminance-d65-v4") {
         if(value.empty()) return result;
         throw std::runtime_error("Unsupported Color Warp format.");
     }
-    result.version = 3;
+    result.version = 4;
     result.enabled = value.value("enabled", true);
     result.strength = JsonFloat(value, "strength", 1.0f);
     result.combine=value.value("combine",std::string("accumulate"))=="blend" ? RawColorWarpCombine::Blend : RawColorWarpCombine::Accumulate;
@@ -247,7 +251,15 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
             pin.sampleRadius=JsonFloat(item,"sampleRadius",0);
             pin.strength = JsonFloat(item, "strength", 1.0f);
             pin.regionId = item.value("regionId", std::string());
-            pin.exposureEv = JsonFloat(item, "exposureEv", 0.0f);
+            pin.brightness = JsonFloat(item, "brightness", 0.0f);
+            pin.brightnessSoftness=JsonFloat(item,"brightnessSoftness",.75f);
+            pin.tintA=JsonFloat(item,"tintA",0);pin.tintB=JsonFloat(item,"tintB",0);
+            if(auto it=item.find("population");it!=item.end() && it->is_array())
+                for(const auto& p:*it) {
+                    if(pin.population.size()>=kMaxRawColorWarpPopulation)break;
+                    if(p.is_array() && p.size()==4 && std::all_of(p.begin(),p.end(),[](const auto& x){return x.is_number();}))
+                        pin.population.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>(),p[3].get<float>()});
+                }
             result.pins.push_back(std::move(pin));
         }
     }

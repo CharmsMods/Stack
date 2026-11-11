@@ -65,6 +65,39 @@ RawColorWarpAreaProposal BuildProposal(
     proposal.sourceA = samples[medoid].color.a;
     proposal.sourceB = samples[medoid].color.b;
     proposal.supportingPixelCount = members.size();
+    // Retain joint centers rather than independent hue and EV marginals.
+    // Farthest-first initialization preserves separated brightness populations.
+    const auto distance=[](const RawColorWarpPopulation& a,const RawColorWarpPopulation& b) {
+        return Square(a.a-b.a)+Square(a.b-b.b)+Square((a.sceneEv-b.sceneEv)*.08f);
+    };
+    const auto point=[&](std::size_t i) {
+        const auto& c=samples[i].color;
+        return RawColorWarpPopulation{c.a,c.b,c.sceneEv,1};
+    };
+    proposal.population.push_back(point(medoid));
+    while(proposal.population.size()<kMaxRawColorWarpPopulation) {
+        float farthest=0;std::size_t candidate=medoid;
+        for(auto i:members) {
+            float nearest=std::numeric_limits<float>::max();
+            for(const auto& p:proposal.population)nearest=std::min(nearest,distance(point(i),p));
+            if(nearest>farthest){farthest=nearest;candidate=i;}
+        }
+        if(farthest<.0004f)break;
+        proposal.population.push_back(point(candidate));
+    }
+    for(int iteration=0;iteration<4;++iteration) {
+        std::vector<RawColorWarpPopulation> sums(proposal.population.size(),{0,0,0,0});
+        for(auto i:members) {
+            const auto p=point(i);std::size_t best=0;
+            for(std::size_t j=1;j<sums.size();++j)
+                if(distance(p,proposal.population[j])<distance(p,proposal.population[best]))best=j;
+            auto& sum=sums[best];sum.a+=p.a;sum.b+=p.b;sum.sceneEv+=p.sceneEv;sum.mass+=1;
+        }
+        for(std::size_t j=0;j<sums.size();++j)if(sums[j].mass>0) {
+            auto p=sums[j];p.a/=p.mass;p.b/=p.mass;p.sceneEv/=p.mass;
+            p.mass/=float(members.size());proposal.population[j]=p;
+        }
+    }
     return proposal;
 }
 
@@ -240,7 +273,7 @@ RawColorWarpAreaAnalysisResult AnalyzeRawColorWarpArea(
             continue;
         }
         const auto normalized=ColorWarpSelectionCoordinate(sample.color);
-        if(std::abs(sample.color.lightness)<.000001f || std::hypot(normalized[0],normalized[1])<.01f) {
+        if(!std::isfinite(sample.color.lightness) || sample.color.lightness<.01f) {
             ++result.rejectedPixelCount;continue;
         }
         sample.color.a=normalized[0];sample.color.b=normalized[1];sample.color.lightness=1;

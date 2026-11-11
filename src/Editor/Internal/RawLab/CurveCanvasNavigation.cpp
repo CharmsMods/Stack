@@ -39,33 +39,11 @@ void NavigateCurveCanvas(CurveCanvasState& state,const ImRect& box,bool hovered,
         if(!state.zoomActive)SetCurveCanvasView(view,horizontal,vertical);
         view.fitPending=false;
     }
-    if(enabled && inside && active && !editing && !io.MouseDown[0] && !io.MouseDown[1] && ImGui::IsMouseClicked(2)) {
-        state.zoomActive=false;
-        state.viewPanning=true;state.viewPress=io.MousePos;
-        state.beforeViewX=view.horizontal;state.beforeViewY=view.vertical;
-        view.fitPending=false;
-    }
-    if(!state.viewPanning)return;
-    const bool cancel=!enabled || io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape,false) ||
-        (io.MouseDown[2] && (!active || io.MouseDown[0] || io.MouseDown[1]));
-    if(cancel) {
-        SetCurveCanvasView(view,state.beforeViewX,state.beforeViewY);
-        state.viewPanning=false;if(active)ImGui::ClearActiveID();return;
-    }
-    if(io.MouseDown[2] || ImGui::IsMouseReleased(2)) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
-        const float dx=-(io.MousePos.x-state.viewPress.x)/box.GetWidth()*(state.beforeViewX.maximum-state.beforeViewX.minimum);
-        const float dy=diagonal?(io.MousePos.y-state.viewPress.y)/box.GetHeight()*(state.beforeViewY.maximum-state.beforeViewY.minimum):0.f;
-        const RawLabToneGraphViewRange horizontal{state.beforeViewX.minimum+dx,state.beforeViewX.maximum+dx};
-        const RawLabToneGraphViewRange vertical{state.beforeViewY.minimum+dy,state.beforeViewY.maximum+dy};
-        if(horizontal.minimum!=view.horizontal.minimum || vertical.minimum!=view.vertical.minimum)
-            SetCurveCanvasView(view,horizontal,vertical);
-    }
-    if(!io.MouseDown[2])state.viewPanning=false;
+    state.viewPanning=false;
 }
 void DrawCurveCanvasViewControl(CurveCanvasFraming& state,const GraphUI::GraphPlotStyle& style) {
     if(DrawCurveControlGlyph(5,false,
-        "Graph view. Wheel to zoom at the pointer; middle-drag to pan. In Bend mode, use Ctrl+wheel to zoom.",style))
+        "Graph view. Wheel to zoom at the pointer. In Bend mode, use Ctrl+wheel to zoom.",style))
         ImGui::OpenPopup("curve-view");
     if(ImGui::BeginPopup("curve-view")) {
         if(ImGui::MenuItem("Fit image range"))state.request=CurveCanvasFraming::Request::Fit;

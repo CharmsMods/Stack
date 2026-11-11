@@ -13,6 +13,10 @@ struct ColorWarpEditorState {
         std::array<float,3> rgb;
         float u=0,v=0;
     };
+    std::uint64_t swatchRevision=~std::uint64_t(0),swatchLocalRevision=~std::uint64_t(0);
+    int swatchSelection=-1;
+    Raw::RawWorkingSpace swatchSpace=Raw::RawWorkingSpace::LinearSrgbD65;
+    ImVec4 sourceSwatch{},resultSwatch{};
     bool selectRange=false;
     int dragging=-1; // 0 adjustment; 1..8 core/soft range boundaries.
     float lastHue=0, startChroma=0, startSaturation=0;

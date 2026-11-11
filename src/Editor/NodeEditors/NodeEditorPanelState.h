@@ -36,6 +36,8 @@ struct NodeEditorPanelState {
     std::optional<Project::NodeEditTarget> lastTarget;
     std::optional<Project::NodeEditTarget> gestureTarget;
     std::optional<Project::NodeEditTarget> analysisTarget;
+    std::optional<Project::NodeEditTarget> focusTarget;
+    int focusEnteredFrame=-1;
     bool visible = false;
     double floatingRevealStarted = -1.;
     float Reveal(double now, bool reduced) const {

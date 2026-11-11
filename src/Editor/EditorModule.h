@@ -263,6 +263,11 @@ public:
     void SetViewSectionPanelOpen(bool open);
     bool ViewSectionPanelOpen() const;
     void SetViewSectionTab(int tab);
+    bool IsFocusedNodeEditor() const;
+    bool EnterFocusedNodeEditor(const Stack::Project::NodeEditTarget& target);
+    void ExitFocusedNodeEditor();
+    void UpdateFocusedNodeEditor();
+    void PresentSelectedNodeEditor();
     bool ConsumeRawSettingsPanelRequest();
     bool GetRawActiveControlBounds(ImVec2& minimum, ImVec2& maximum) const;
     const Stack::Renderer::RawImageBackdropFrame* GetRawImageBackdrop() const;
@@ -1077,7 +1082,7 @@ public:
         m_OpenRawWorkspaceTabRequested = false;
         return requested;
     }
-    void RequestOpenRawLabTab() { m_OpenRawLabTabRequested = true; }
+    void RequestOpenRawLabTab() { m_OpenRawLabTabRequested = true; PresentSelectedNodeEditor(); }
     bool ConsumeOpenRawLabTabRequest() {
         const bool requested = m_OpenRawLabTabRequested;
         m_OpenRawLabTabRequested = false;
@@ -1176,7 +1181,7 @@ public:
         int rawLabActivePointCurve = 0;
         bool rawLabColorWarpLiveCloud = false;
         int rawLabLastGalleryHost = 1;
-        int viewSectionTab = 0;
+        int viewSectionTab = 1;
         bool viewSectionOpen = true;
     };
     RawWorkspacePresentationPreferences GetRawWorkspacePresentationPreferences() const;
@@ -3171,7 +3176,7 @@ private:
     RawWorkspaceEditContext* m_NodeEditorDrawingContext = nullptr;
     std::optional<Stack::Project::NodeEditTarget> m_NodePrimaryUiTarget;
     void BindNodeEditorPrimaryState(const Stack::Project::NodeEditTarget& target);
-    int m_ViewSectionTab = 0; // Layers, Controls, Settings, Assets.
+    int m_ViewSectionTab = 1; // Layers, Controls, Settings, Assets.
     bool m_ViewSectionOpen = true;
     void RenderNodeEditorPanel();
     void RenderNodeEditorPanelMenu();

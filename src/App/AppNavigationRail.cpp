@@ -61,6 +61,17 @@ void AppShell::ApplyRailNavigation() {
 }
 
 void AppShell::LayoutNavigationRail() {
+    m_Editor->UpdateFocusedNodeEditor();
+    if(m_Editor->IsFocusedNodeEditor()) {
+        // Hide presentation without overwriting the user's retained chrome
+        // amounts, panel width, or saved open/tab preferences.
+        auto& rail=m_NavigationRail;
+        const auto* view=ImGui::GetMainViewport();
+        rail.visibleWidth=rail.visiblePanelWidth=0;
+        rail.bodyPosition=view->Pos;rail.bodySize=view->Size;
+        m_RawMaskToolbar.visibleHeight=0;
+        return;
+    }
     const bool processing = m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace();
     if (m_CurrentTabId == Graph) m_NavigationRail.panelOpen = m_Editor->WorkspacePanelOpen();
     auto& rail = m_NavigationRail;
@@ -172,6 +183,7 @@ void AppShell::LayoutNavigationRail() {
 }
 
 void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity) {
+    if(m_Editor->IsFocusedNodeEditor())return;
     Stack::UiPerformance::Probe::Motion(Stack::UiPerformance::Probe::Visual::Rail,
         m_NavigationRail.revealAmount>0 && m_NavigationRail.revealAmount<1);
     ImGuiExtras::HoverTextScope noHoverText;
@@ -271,6 +283,7 @@ void AppShell::RenderLibraryViewSwitch() {
 }
 
 void AppShell::RenderWorkspaceSectionPanel(int renderTab) {
+    if(m_Editor->IsFocusedNodeEditor())return;
     if (m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace()) return;
     const auto& rail = m_NavigationRail;
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Panel,

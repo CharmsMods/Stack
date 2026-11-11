@@ -3,6 +3,7 @@
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/NodeEditors/ColorWarpEditorState.h"
 #include "Raw/ColorWarpMath.h"
+#include "Editor/NodeEditors/PanelRoller.h"
 #include "Utils/FloatingSlider.h"
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@ ImVec4 Swatch(const RawRecipe::RawColorWarpPin& pin,Raw::RawWorkingSpace space) 
 }
 void Select(RawLabColorSurfaceArgs& args,int index) {
     args.ui.selectedColorWarpPin=index;
+    if(args.panelControls)args.panelControls->selectedFamily=args.colorWarp.pins[index].family;
     args.ui.colorWarpHoveredSelection=-1;
     args.ui.colorWarpInspectedRegionId=args.colorWarp.pins[index].regionId;
     args.ui.colorWarpInspectionActive=false;
@@ -39,7 +41,8 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     if(recipe.pins.empty())return changed; // Valid documents always contain eight families.
     args.ui.selectedColorWarpPin=std::clamp(args.ui.selectedColorWarpPin,0,int(recipe.pins.size())-1);
     const float dot=std::max(18.f,ImGui::GetFontSize()*1.15f);
-    for(int row=0;row<2;++row) {
+    if(args.panel)ImGui::TextDisabled("Custom colors");
+    for(int row=args.panel?1:0;row<2;++row) {
         bool first=true;
         for(int i=0;i<int(recipe.pins.size());++i) {
             auto& pin=recipe.pins[i];
@@ -58,15 +61,31 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         }
     }
     auto& pin=recipe.pins[args.ui.selectedColorWarpPin];
+    if(args.panel) {
+        if(pin.family<0) {
+            changed|=DrawColorWarpSampleScope(args,pin);
+            if(BareTextButton("Preview affected area",args.ui.colorWarpDiagnosticLocked))args.ui.colorWarpDiagnosticLocked=!args.ui.colorWarpDiagnosticLocked;
+            ImGui::BeginDisabled(!recipe.enabled || !pin.enabled || pin.protectColor);
+            changed|=PanelRoller("Hue","custom-hue",pin.hueShift,-180,180,.4f,0,"%+.1f",*args.panelControls);
+            float saturation=pin.saturation*100,brightness=pin.brightness*100;
+            if(PanelRoller("Saturation","custom-saturation",saturation,-100,500,.4f,0,"%+.1f",*args.panelControls)){pin.saturation=saturation*.01f;changed=true;}
+            if(PanelRoller("Brightness","custom-brightness",brightness,-100,100,.4f,0,"%+.1f",*args.panelControls)){pin.brightness=brightness*.01f;changed=true;}
+            ImGui::EndDisabled();
+            DrawColorWarpResultSwatches(args,pin);
+        }
+        DrawColorWarpSamplingActions(args);
+        if(changed)++state.localRevision;
+        return changed;
+    }
     ImGui::TextUnformatted(pin.name.c_str());
     ImGui::SameLine();
     if(BypassEyeButton("##selection-enabled",pin.enabled,"Bypass this selection","Enable this selection")) {pin.enabled=!pin.enabled;changed=true;}
     ContinueRawLabControlRow("Reset");
     if(BareTextButton("Reset")) {
-        pin.hueShift=pin.saturation=pin.exposureEv=0;
+        pin.hueShift=pin.saturation=pin.brightness=pin.tintA=pin.tintB=0;
         changed=true;
     }
-    LabTooltip("Reset this selection's Hue, Saturation, and Exposure. Keep its range.");
+    LabTooltip("Reset this selection's Hue, Saturation, Brightness, and Tint. Keep its range.");
     if(pin.family<0) {
         ContinueRawLabControlRow("Delete");
         if(BareTextButton("Delete")) {
@@ -77,6 +96,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             Select(args,0);++state.localRevision;return true;
         }
     }
+    changed|=DrawColorWarpSampleScope(args,pin);
     if(BareTextButton("Adjust",!state.selectRange))state.selectRange=false;
     ImGui::SameLine();
     if(BareTextButton("Select range",state.selectRange))state.selectRange=true;
@@ -94,8 +114,34 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         ImGui::EndDisabled();
     }
     const float size=std::clamp(ImGui::GetContentRegionAvail().y-(state.selectRange?(pin.sampleRadius>0?400.f:300.f):220.f),160.f,
-        std::max(160.f,std::min(330.f,ImGui::GetContentRegionAvail().x)));
-    changed|=DrawColorWarpWheel(args,pin,size);
+        std::max(160.f,std::min(280.f,ImGui::GetContentRegionAvail().x-72.f)));
+    ImGui::BeginGroup();
+    if(ImGui::BeginChild("wheel-space",{size,size},ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse))
+        changed|=DrawColorWarpWheel(args,pin,size);
+    ImGui::EndChild();ImGui::EndGroup();ImGui::SameLine();
+    changed|=DrawColorWarpSideBrightness(args,pin,size);
+    DrawColorWarpResultSwatches(args,pin);
+    if(!pin.population.empty()) {
+        ImGui::TextDisabled("Selected brightness profile");
+        const auto origin=ImGui::GetCursorScreenPos();
+        const float width=ImGui::GetContentRegionAvail().x;
+        ImGui::Dummy({width,48.f});
+        if(ImGui::IsItemVisible()) {
+            auto* draw=ImGui::GetWindowDrawList();
+            float low=32.f,high=-32.f;
+            for(const auto& p:pin.population){low=std::min(low,p.sceneEv-pin.brightnessSoftness);high=std::max(high,p.sceneEv+pin.brightnessSoftness);}
+            const float span=std::max(1.f,high-low);
+            draw->AddLine({origin.x,origin.y+42},{origin.x+width,origin.y+42},ImGui::GetColorU32(ImGuiCol_Text,.25f));
+            for(const auto& p:pin.population) {
+                const float x=origin.x+width*(p.sceneEv-low)/span;
+                const float half=width*pin.brightnessSoftness/span;
+                const ImVec2 peak(x,origin.y+42-36*std::max(.15f,p.mass));
+                draw->AddLine({std::max(origin.x,x-half),origin.y+42},peak,ImGui::GetColorU32(ImGuiCol_Text,.65f));
+                draw->AddLine(peak,{std::min(origin.x+width,x+half),origin.y+42},ImGui::GetColorU32(ImGuiCol_Text,.65f));
+            }
+        }
+    }
+
     if(state.selectRange) {
         changed|=DrawColorWarpBrightness(args,pin);
         if(pin.family<0) {
@@ -139,8 +185,11 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         pin.saturation=saturation*.01f;changed=true;
     }
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
-    ImGui::TextUnformatted("Exposure");
-    changed|=ImGuiExtras::FloatingSliderFloat("Exposure","##ev",&pin.exposureEv,-4,4,"%+.2f EV",width);
+    if(pin.family<0) {
+        changed|=ImGuiExtras::FloatingSliderFloat("Tint green / red","##tint-a",&pin.tintA,-.2f,.2f,"%+.3f",width);
+        args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+        changed|=ImGuiExtras::FloatingSliderFloat("Tint blue / yellow","##tint-b",&pin.tintB,-.2f,.2f,"%+.3f",width);
+    }
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
     ImGui::EndDisabled();
     }
@@ -148,25 +197,7 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
         if(BareTextButton("Range details",state.details))state.details=!state.details;
         if(state.details)changed|=DrawColorWarpRanges(args,pin);
     }
-    ImGui::BeginDisabled(RawRecipe::ColorWarpSampleCount(recipe)>=RawRecipe::kMaxRawColorWarpSamples);
-    if(BareTextButton("Sample image",args.ui.colorWarpSamplingArmed)) {
-        args.ui.colorWarpSamplingArmed=!args.ui.colorWarpSamplingArmed;
-        args.ui.colorWarpAttachRegionPinId.clear();
-        args.ui.colorWarpInspectionActive=false;
-    }
-    ImGui::EndDisabled();
-    LabTooltip("Click or draw a circle on the image, then add the sampled color. It initially applies throughout the image.");
-    if(args.ui.colorWarpPendingCircleActive && args.ui.colorWarpAreaOwner==args.areaOwner) {
-        ImGui::SameLine();
-        const bool ready=!args.ui.colorWarpPendingCircleRefining &&
-            (args.ui.colorWarpPendingCircleAppend || !args.ui.colorWarpAttachRegionPinId.empty() || !args.ui.colorWarpAreaAnalysisResult.proposals.empty());
-        ImGui::BeginDisabled(!ready);
-        if(BareTextButton("Add selection"))args.ui.colorWarpPendingCircleCommitRequested=true;
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if(BareTextButton("Cancel"))args.ui.ResetColorWarpAreaRequest();
-    }
-    if(!args.ui.colorWarpAreaStatus.empty())ImGui::TextWrapped("%s",args.ui.colorWarpAreaStatus.c_str());
+    DrawColorWarpSamplingActions(args);
     if(changed)++state.localRevision;
     return changed;
 }
