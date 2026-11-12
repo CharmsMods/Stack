@@ -1,7 +1,6 @@
 #include "Raw/RawZoneArea.h"
 #include "Raw/RawRecipeCompatibility.h"
 #include "Raw/RawEditAttributes.h"
-#include "Editor/RawZoneAreaHistory.h"
 #include "Editor/Internal/RawLab/RawLabCurveEditor.h"
 #include "Renderer/Internal/RawZoneAreaRenderer.h"
 #include "Renderer/GLHelpers.h"
@@ -15,7 +14,6 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace Stack::Validation { bool ValidateRawZoneAreaGraph(); }
 void ValidateRawZoneGuidanceCpu();
 void ValidateRawZoneGuidanceGpu();
 using namespace Stack::RawRecipe;
@@ -150,13 +148,6 @@ void CpuTests() {
     roundTrip["localRange"].erase("areas");roundTrip["localRange"].erase("areasVersion");
     Check(roundTrip==withoutAreas,"current recipe operations survive omitted-area round trip");
     Check(defaultAreasRecipe.localRange.areas.empty(),"omitted areas default to empty");
-    Stack::Editor::RawZoneAreaHistory history; history.Initialize({});
-    history.Observe({area},true);history.Observe({edited.localRange.areas[0]},true);history.Observe(edited.localRange.areas,false);
-    Check(history.CanUndo(),"completed gesture is undoable");
-    Check(history.Undo().empty(),"one undo restores state before entire gesture");
-    Check(history.Redo().size()==1,"redo restores painted area");
-    history.Observe({},true);history.Cancel();
-    Check(history.Undo().empty(),"cancel does not insert undo history");
     RawEditAttributeBundle bundle;
     // Attribute transfer carries the new collection with the existing Areas group.
     auto target=MakeDefaultRecipe("test.dng");
@@ -232,7 +223,7 @@ void GpuTests() {
 void ValidateRawZoneInteractionCpu();
 void ValidateRawZoneInteractionGpu();
 int main() {
-    try {ToneGraphViewTests(); ValidateRawZoneInteractionCpu(); CpuTests(); ValidateRawZoneGuidanceCpu(); Check(Stack::Validation::ValidateRawZoneAreaGraph(),"graph interaction validation");} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {ToneGraphViewTests(); CpuTests(); ValidateRawZoneGuidanceCpu();} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
     if(!glfwInit()) return 2;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
     glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);

@@ -146,6 +146,7 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_RawDevelopmentRgbDenoiseBandProgram);
     deleteProgram(m_RawDevelopmentRgbDenoiseReconstructProgram);
     deleteProgram(m_RawDevelopmentExposureProgram);
+    deleteProgram(m_RawDevelopmentProtectedExposureProgram);
     deleteProgram(m_RawDevelopmentColorWarpProgram);
     deleteProgram(m_RawDevelopmentColorWarpProxyProgram);
     deleteProgram(m_RawDevelopmentCropProgram);

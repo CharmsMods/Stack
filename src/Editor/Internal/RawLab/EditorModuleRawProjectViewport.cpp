@@ -18,7 +18,7 @@ bool EditorModule::IsRawImageNavigationActive() const {
         m_RawWorkspaceLabUi.previewSpacePanning ||
         (!io.AppFocusLost && !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
          !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) &&
-         ImGui::IsKeyDown(ImGuiKey_Space) && !m_RawWorkspaceLabUi.zoneAreas.active &&
+         ImGui::IsKeyDown(ImGuiKey_Space) &&
          m_RawWorkspaceLabUi.gradientDragHandle<0 && !m_RawAssetCapture.drawing &&
          !m_RawWorkspaceLabUi.colorWarpPendingCircleDrawing &&
          !(m_EditingRawLayerMask && m_RawLayerMaskDrag>=0));

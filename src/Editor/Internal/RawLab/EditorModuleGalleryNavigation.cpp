@@ -2,6 +2,20 @@
 #include <algorithm>
 #include "Hdr/Presentation.h"
 
+void EditorModule::PresentGalleryOpeningImage(ImVec2& minimum,ImVec2& maximum,unsigned int texture) {
+    if(!m_GalleryNavigationMotion || !m_GalleryNavigationMotion->Owns(m_GalleryNavigationWorkspace))return;
+    if(!texture && m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace)) {
+        int width=0,height=0;
+        if(!TryGetViewportPreviewOverview(texture,width,height)) {
+            Stack::Renderer::ViewportPreviewGeometry geometry;
+            if(!TryGetViewportPreviewGeometry(geometry) || !geometry.resident.Partial())
+                TryGetActiveRawWorkspacePresentationTexture(texture,width,height);
+        }
+    }
+    const auto rect=m_GalleryNavigationMotion->PresentImage(m_GalleryNavigationWorkspace,{minimum,maximum},texture);
+    minimum=rect.Min;maximum=rect.Max;
+}
+
 Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionOrigin(
     const std::filesystem::path& subject,const std::string& explicitKey,const ImRect& explicitBounds) {
     Stack::Renderer::GalleryTransitionOrigin origin;

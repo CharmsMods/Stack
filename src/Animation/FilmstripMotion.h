@@ -40,15 +40,18 @@ public:
         if (!std::isfinite(wheel) || wheel == 0 || stops.empty()) return;
         const int direction = wheel < 0 ? 1 : -1;
         const float spacing = Spacing(stops,last,position_,direction);
-        if (direction != direction_) velocity_ = 0;
+        const bool reversed = direction != direction_;
+        if (reversed) velocity_ = 0;
         direction_ = direction;
-        // Fractional input moves on acceptance, even at rest. A new gesture
-        // cannot consume time from before this input, including a stalled frame.
-        position_ = std::clamp(position_-wheel*spacing*(reduced ? 1.f : .22f),0.f,stops[last]);
-        velocity_ = reduced ? 0.f : std::clamp(velocity_-wheel*spacing*5.f,-spacing*24.f,spacing*24.f);
-        phase_ = reduced ? Phase::Idle : Phase::Glide;
-        lastTime_ = now; published_ = position_; dragging_ = false;
-        Clamp(stops[last]);
+        // Coalesce wheel ticks into bounded travel, then ease from the displayed
+        // pose. No immediate position jump and no accumulated inertial tail.
+        const bool continuing = !reversed && phase_ == Phase::Settle && now - lastWheel_ < .14;
+        const float base = continuing ? destination_ : position_;
+        const float destination = std::clamp(base - wheel * spacing, 0.f, stops[last]);
+        const float bounded = std::clamp(destination, position_ - 2.f*spacing, position_ + 2.f*spacing);
+        if (reduced) Reset(bounded, now);
+        else BeginSettle(bounded, now + (continuing ? 0. : .025), .24f);
+        lastWheel_ = now; lastTime_ = now; published_ = position_; dragging_ = false;
     }
     void Drag(float position, float maximum, double now) {
         position = std::clamp(position,0.f,maximum);
@@ -59,11 +62,12 @@ public:
     // Geometry updates preserve the fractional leading-item anchor and scale
     // velocity with its spacing. They do not restart the gesture or snap it.
     void Reframe(float position, float scale, float maximum) {
+        const float publishedBefore_ = position_;
         position_ = published_ = std::clamp(position,0.f,maximum);
         velocity_ *= scale;
         if (phase_ == Phase::Settle) {
-            // Re-capture from this displayed position on the next update.
-            phase_ = Phase::Glide;
+            destination_ = std::clamp(position_ + (destination_ - publishedBefore_) * scale, 0.f, maximum);
+            start_ = position_; started_ = lastTime_;
         }
         Clamp(maximum);
     }
@@ -75,26 +79,8 @@ public:
             Reset(std::clamp(requested,0.f,maximum),now);
         }
         if (reduced) { velocity_=0; phase_=Phase::Idle; dragging_=false; }
-        if (dragging_) {
-            dragging_=false;
-            if (direction_ && !reduced) BeginSettle(stops[Ahead(stops,last,position_,direction_)],now,.18f);
-        }
-        const double elapsed=std::max(0.,now-lastTime_);lastTime_=now;
-        if (phase_==Phase::Glide) {
-            const float spacing=Spacing(stops,last,position_,direction_);
-            const float stop=stops[Ahead(stops,last,position_,direction_)];
-            const float distance=std::abs(stop-position_), speed=std::abs(velocity_);
-            // Detents take over before velocity reaches zero between stops.
-            // Fast motion crosses stops freely; low speed captures the next
-            // stop in the input direction, never the nearest one behind it.
-            if (speed/spacing<5.f && speed*.16f<=distance+spacing*.035f) {
-                BeginSettle(stop,now-elapsed,std::clamp(2.f*distance/std::max(speed,spacing),.08f,.28f));
-            } else {
-                const float tau=.09f+.07f*std::clamp(speed/spacing/5.f,0.f,1.f);
-                const float decay=std::exp(-float(elapsed)/tau);
-                position_+=velocity_*tau*(1.f-decay);velocity_*=decay;
-            }
-        }
+        dragging_=false;
+        lastTime_=now;
         if (phase_==Phase::Settle) {
             const float t=std::clamp(float((now-started_)/duration_),0.f,1.f);
             const float t2=t*t,t3=t2*t;
@@ -113,8 +99,7 @@ private:
         const float distance=destination-start_;
         if(std::abs(distance)<.001f) {position_=destination;velocity_=0;phase_=Phase::Idle;return;}
         slope_=std::clamp(velocity_*duration/distance,0.f,3.f);
-        // A released drag has no inertia; start moving immediately.
-        if(slope_==0) slope_=1.f;
+        // Zero initial speed rounds off an isolated wheel notch.
         phase_=Phase::Settle;
     }
     void Clamp(float maximum) {
@@ -124,7 +109,7 @@ private:
         }
     }
     float position_=0,published_=0,velocity_=0,start_=0,destination_=0,duration_=.2f,slope_=0;
-    double lastTime_=0,started_=0;
+    double lastTime_=0,started_=0,lastWheel_=-1;
     int direction_=0;
     Phase phase_=Phase::Idle;
     bool dragging_=false;

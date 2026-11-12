@@ -1,9 +1,9 @@
 #include "GalleryFilesystemBrowserState.h"
+#include "GalleryBrowserImageTypes.h"
 #include "Async/TaskSystem.h"
 #include <algorithm>
 #include <cwctype>
 #include <cstdio>
-#include <map>
 #define NOMINMAX
 #include <windows.h>
 #include <shlobj.h>
@@ -19,6 +19,7 @@ std::wstring GalleryFilesystemBrowser::State::Key(const std::filesystem::path& p
 std::shared_ptr<GalleryFilesystemBrowser::State::Node> GalleryFilesystemBrowser::State::Make(
     const std::filesystem::path& path,const std::string& name,Kind kind) {
     auto node=std::make_shared<Node>();node->path=path;node->key=Key(path);node->kind=kind;
+    node->pathLabel=path.u8string();
     node->label=name.empty()?path.filename().u8string():name;
     if(node->label.empty())node->label=path.u8string();
     node->sortKey=Key(std::filesystem::u8path(node->label));
@@ -29,62 +30,100 @@ std::shared_ptr<GalleryFilesystemBrowser::State::Node> GalleryFilesystemBrowser:
 }
 void GalleryFilesystemBrowser::State::Merge(std::vector<std::shared_ptr<Node>>& existing,
     std::vector<std::shared_ptr<Node>> incoming) {
-    std::map<std::wstring,std::shared_ptr<Node>> retained;
-    for(auto& node:existing)retained.emplace(node->key,node);
-    for(auto& node:incoming)if(const auto found=retained.find(node->key);found!=retained.end()) {
+    for(auto& node:incoming)if(const auto found=listings.find(node->key);found!=listings.end()) {
         // Keep identity, expansion, cached children and pending requests stable.
-        found->second->label=std::move(node->label);found->second->kind=node->kind;
+        const auto oldKind=found->second->kind;
+        const bool locationAlias=oldKind==Kind::Desktop || oldKind==Kind::Downloads || oldKind==Kind::Pictures;
+        if(node->kind!=Kind::Folder || !locationAlias) {
+            found->second->label=std::move(node->label);found->second->kind=node->kind;
+            found->second->sortKey=std::move(node->sortKey);
+        }
+        if(node->drive) {
+            found->second->drive=true;found->second->capacityKnown=node->capacityKnown;
+            found->second->capacityLabel=std::move(node->capacityLabel);
+            found->second->usedFraction=node->usedFraction;found->second->systemDrive=node->systemDrive;
+        }
         node=found->second;
-    }
+    } else listings.emplace(node->key,node);
     existing=std::move(incoming);
 }
 void GalleryFilesystemBrowser::State::Request(const std::shared_ptr<State>& self,const std::shared_ptr<Node>& node) {
-    if(node->pending)return;
+    if(closed.load() || node->pending)return;
     node->pending=true;node->error.clear();dirty=true;
     // Capture immutable inputs, not UI-owned fields that a refresh may change.
     const auto path=node->path;const auto branch=node->branch;const bool inherit=node->kind==Kind::Folder;
     if(!Async::TaskSystem::Get().Submit("Listing folders",[self,node,path,branch,inherit] {
+        if(self->closed.load())return;
         Result result;result.node=node;
         try {
             std::error_code error;
             std::filesystem::directory_iterator it(path,error),end;
-            while(!error && it!=end) {
+            while(!error && it!=end && !self->closed.load()) {
                 std::error_code itemError;
                 if(it->is_directory(itemError)) {
                     auto child=Make(it->path());if(inherit)child->branch=branch;
                     result.children.push_back(std::move(child));
+                } else if(!itemError && BrowserImagePath(it->path())) {
+                    result.children.push_back(Make(it->path(),{},Kind::Image));
                 }
                 it.increment(error);
             }
             if(error)result.error="Folder unavailable or access denied. Right-click to retry.";
             std::sort(result.children.begin(),result.children.end(),[](const auto& a,const auto& b) {
+                if((a->kind==Kind::Image)!=(b->kind==Kind::Image))return a->kind!=Kind::Image;
                 return a->sortKey<b->sortKey;
             });
         } catch(const std::exception&) {result.error="Could not read this folder. Right-click to retry.";}
+        if(self->closed.load())return;
         {std::lock_guard<std::mutex> lock(self->mutex);self->results.push_back(std::move(result));}
         self->ready.store(true);
     })) {node->pending=false;node->error="Could not list folders. Right-click to retry.";}
 }
 void GalleryFilesystemBrowser::State::Start(const std::shared_ptr<State>& self) {
-    if(started || rootsPending)return;
+    if(closed.load() || started || rootsPending)return;
     started=true;rootsPending=true;locationsError.clear();
     if(!Async::TaskSystem::Get().Submit("Finding computer folders",[self] {
+        if(self->closed.load())return;
         Result result;
         try {
-            for(const auto& item:{std::pair{&FOLDERID_Desktop,"Desktop"},std::pair{&FOLDERID_Pictures,"Pictures"}}) {
+            for(const auto& item:{std::pair{&FOLDERID_Desktop,"Desktop"},std::pair{&FOLDERID_Downloads,"Downloads"},std::pair{&FOLDERID_Pictures,"Pictures"}}) {
                 PWSTR path=nullptr;
                 if(SUCCEEDED(SHGetKnownFolderPath(*item.first,KF_FLAG_DONT_VERIFY,nullptr,&path))) {
                     const std::filesystem::path location(path);CoTaskMemFree(path);
                     result.children.push_back(Make(location,item.second,
-                        item.first==&FOLDERID_Desktop?Kind::Desktop:Kind::Pictures));
+                        item.first==&FOLDERID_Desktop?Kind::Desktop:item.first==&FOLDERID_Downloads?Kind::Downloads:Kind::Pictures));
                 }
             }
+            DWORD previousMode=0;
+            SetThreadErrorMode(SEM_FAILCRITICALERRORS,&previousMode);
+            struct ErrorMode {DWORD previous;~ErrorMode(){SetThreadErrorMode(previous,nullptr);}} errorMode{previousMode};
+            wchar_t windows[MAX_PATH]{};GetWindowsDirectoryW(windows,MAX_PATH);
             const DWORD drives=GetLogicalDrives();
             for(int index=0;index<26;++index)if(drives&(1u<<index)) {
+                if(self->closed.load())return;
                 const std::wstring path={wchar_t(L'A'+index),L':',L'\\'};
                 const auto type=GetDriveTypeW(path.c_str());
-                result.children.push_back(Make(path,{},type==DRIVE_REMOTE?Kind::Network:
-                    type==DRIVE_REMOVABLE?Kind::Removable:Kind::Drive));
+                wchar_t volume[MAX_PATH]{};
+                GetVolumeInformationW(path.c_str(),volume,MAX_PATH,nullptr,nullptr,nullptr,nullptr,0);
+                const char* fallback=type==DRIVE_REMOTE?"Network drive":type==DRIVE_REMOVABLE?"USB drive":type==DRIVE_CDROM?"DVD drive":"Local Disk";
+                const auto name=volume[0]?std::filesystem::path(volume).u8string():std::string(fallback);
+                auto drive=Make(path,name+" ("+char('A'+index)+":)",type==DRIVE_REMOTE?Kind::Network:
+                    type==DRIVE_REMOVABLE?Kind::Removable:type==DRIVE_CDROM?Kind::Optical:Kind::Drive);
+                drive->drive=true;drive->systemDrive=::towupper(windows[0])==L'A'+index;
+                ULARGE_INTEGER available{},total{},free{};
+                drive->capacityKnown=GetDiskFreeSpaceExW(path.c_str(),&available,&total,&free) && total.QuadPart>0;
+                if(drive->capacityKnown) {
+                    drive->usedFraction=std::clamp(1.f-float(double(free.QuadPart)/double(total.QuadPart)),0.f,1.f);
+                    const auto format=[](unsigned long long bytes) {
+                        char text[48];const double gib=double(bytes)/(1024.*1024.*1024.);
+                        if(gib>=1024)std::snprintf(text,sizeof(text),"%.1f TB",gib/1024.);
+                        else if(gib>=1)std::snprintf(text,sizeof(text),"%.1f GB",gib);
+                        else std::snprintf(text,sizeof(text),"%.0f MB",gib*1024.);
+                        return std::string(text);
+                    };
+                    drive->capacityLabel=format(free.QuadPart)+" free of "+format(total.QuadPart);
+                } else drive->capacityLabel=type==DRIVE_CDROM?"No disc or unavailable":"Space unavailable";
+                result.children.push_back(std::move(drive));
             }
         } catch(const std::exception&) {result.error="Could not load locations. Use Refresh locations to retry.";}
         {std::lock_guard<std::mutex> lock(self->mutex);self->results.push_back(std::move(result));}
@@ -107,7 +146,7 @@ void GalleryFilesystemBrowser::State::Reveal(const std::shared_ptr<State>& self)
     // Prefer the closest location alias (Pictures rather than also expanding
     // C:/Users/...). Do not unfold two copies of the same ancestry.
     std::shared_ptr<Node> closest;
-    for(const auto& node:roots) {
+    for(const auto& node:drives) {
         const auto& path=node->key;
         const bool contains=currentKey==path || (currentKey.size()>path.size() &&
             currentKey.compare(0,path.size(),path)==0 && (path.back()==L'\\' || currentKey[path.size()]==L'\\'));
@@ -123,13 +162,22 @@ void GalleryFilesystemBrowser::State::Pump(const std::shared_ptr<State>& self) {
         for(auto& result:completed) {
             if(!result.node) {
                 rootsPending=false;
-                if(result.error.empty())Merge(roots,std::move(result.children));
+                if(result.error.empty()) {
+                    Merge(roots,std::move(result.children));shortcuts.clear();drives.clear();
+                    for(const auto& root:roots)(root->drive?drives:shortcuts).push_back(root);
+                    if(!searchKey.empty() && current.empty())SearchChanged();
+                }
                 locationsError=std::move(result.error);
             } else {
                 auto& n=*result.node;
                 // A failed refresh must not replace a useful cached subtree.
-                if(result.error.empty())Merge(n.children,std::move(result.children));
+                if(result.error.empty()) {
+                    Merge(n.children,std::move(result.children));
+                    n.folderChildren=std::count_if(n.children.begin(),n.children.end(),[](const auto& child){return child->kind!=Kind::Image;});
+                }
                 n.error=std::move(result.error);n.loaded=true;n.pending=false;
+                if(result.node==directory && selection &&
+                    std::find(n.children.begin(),n.children.end(),selection)==n.children.end())selection.reset();
             }
         }
         dirty=true;
@@ -149,16 +197,17 @@ void GalleryFilesystemBrowser::State::Pump(const std::shared_ptr<State>& self) {
     if(!filterKey.empty())match(match,roots);
     const auto append=[&](const auto& recurse,const std::vector<std::shared_ptr<Node>>& nodes,int depth)->void {
         for(const auto& node:nodes) {
+            if(node->kind==Kind::Image)continue;
             if(!filterKey.empty() && !node->matches)continue;
             rows.push_back({node,depth});
             if(node->expanded || !filterKey.empty()) {
-                if(node->pending || !node->error.empty() || (node->loaded && node->children.empty()))
+                if(node->pending || !node->error.empty() || (node->loaded && node->folderChildren==0))
                     rows.push_back({node,depth+1,true});
                 recurse(recurse,node->children,depth+1);
             }
         }
     };
-    append(append,roots,0);
+    append(append,drives,0);
     restoreRow.reset();
     for(std::size_t index=0;index<rows.size();++index) {
         if(scrollToCurrent && !rows[index].message && rows[index].node->key==currentKey) {
@@ -170,6 +219,14 @@ void GalleryFilesystemBrowser::State::Pump(const std::shared_ptr<State>& self) {
 }
 void GalleryFilesystemBrowser::State::Navigate(const std::filesystem::path& path) {
     current=path;currentKey=Key(path);revealRequested=true;scrollToCurrent=true;dirty=true;
+    selection.reset();directory.reset();resetGridScroll=true;addressError.clear();
+    if(searchIndex)searchIndex->SetScope(path);
+    search[0]=0;SearchChanged();
+    if(!path.empty()) {
+        auto& entry=listings[currentKey];
+        if(!entry)entry=Make(path);
+        directory=entry;
+    }
     // Clicking a visible row must keep it under the pointer, not align it to
     // the top of the tree. External/back navigation still reveals its target.
     for(int index=visibleFirst;index<=visibleLast && index<static_cast<int>(rows.size());++index)
@@ -179,7 +236,7 @@ void GalleryFilesystemBrowser::State::Navigate(const std::filesystem::path& path
     if(requestedHistory && *requestedHistory<history.size() && Key(history[*requestedHistory])==currentKey)
         historyIndex=*requestedHistory;
     requestedHistory.reset();
-    if(!path.empty() && (history.empty() || Key(history[historyIndex])!=currentKey)) {
+    if(history.empty() || Key(history[historyIndex])!=currentKey) {
         if(!history.empty())history.resize(historyIndex+1);
         history.push_back(path);historyIndex=history.size()-1;
     }

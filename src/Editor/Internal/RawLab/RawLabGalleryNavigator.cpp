@@ -84,7 +84,8 @@ bool GalleryNavigator::Button(const char* id, const char* label, Ui::Icon icon,
 }
 
 GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode category,
-    const std::optional<std::string>& filter, ImVec4 surface, const std::function<void()>& footer) {
+    const std::optional<std::string>& filter, ImVec4 surface, const std::function<void()>& footer,
+    std::uint64_t fileTypes) {
     GalleryNavigatorAction result;
     m_Unit = ImGui::GetFontSize() / 16.f;
     PreparePalette(surface);
@@ -119,6 +120,33 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
             if (index != 2) Space(2 * m_Unit);
         }
         Space((compact ? 10 : 20) * m_Unit);
+        if (Button("##ImageTypes", fileTypes == AllGalleryFileTypes ? "Images" : "Images (filtered)",
+                Ui::Icon::Gallery, ImVec2(-1, rowHeight), false, nullptr, ButtonLayout::Sort))
+            ImGui::OpenPopup("ImageTypes");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show image formats; projects use their reference image's format");
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * m_Unit, 12 * m_Unit));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12 * m_Unit, 7 * m_Unit));
+        if (ImGui::BeginPopup("ImageTypes")) {
+            auto next = fileTypes;
+            if (ImGui::SmallButton("All")) next = AllGalleryFileTypes;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("None")) next = 0;
+            ImGui::Separator();
+            if (ImGui::BeginTable("Formats", 2)) {
+                for (unsigned i = 0; i < GalleryFileTypeCount; ++i) {
+                    ImGui::TableNextColumn();
+                    const auto bit = std::uint64_t{1} << i;
+                    bool checked = (next & bit) != 0;
+                    if (ImGui::Checkbox(GalleryFileTypes[i].label, &checked))
+                        next = checked ? next | bit : next & ~bit;
+                }
+                ImGui::EndTable();
+            }
+            if (next != fileTypes) result.fileTypes = next;
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(2);
+        Space(6 * m_Unit);
         const auto heading = ImGui::GetCursorScreenPos();
         const float width = ImGui::GetContentRegionAvail().x;
         ImGui::PushFont(nullptr, 12 * m_Unit);
@@ -126,26 +154,14 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
         ImGui::TextColored(m_Secondary, "Folders");
         ImGui::SetCursorScreenPos(ImVec2(heading.x + std::max(0.f, width - 88 * m_Unit), heading.y));
         if (Button("##OpenSource", "Browse", Ui::Icon::AllFolders, ImVec2(88 * m_Unit, 28 * m_Unit)))
-            result.openFolder = true;
+            m_Filesystem.Open(filter && !tree.allSourceFolders ?
+                tree.workspaceRoot/std::filesystem::u8path(*filter) : tree.workspaceRoot);
         Stack::UiPerformance::Probe::Item(Stack::UiPerformance::Probe::Visual::BrowseButton);
         const auto browse=ImGui::GetItemRectMin(),browseMax=ImGui::GetItemRectMax();
         result.browseMinimum={browse.x+10*m_Unit,(browse.y+browseMax.y-17*m_Unit)*.5f};
         result.browseMaximum={result.browseMinimum.x+17*m_Unit,result.browseMinimum.y+17*m_Unit};
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose or add a source folder");
         ImGui::PopFont();
-        ImGui::SetCursorScreenPos(ImVec2(heading.x, heading.y + 36 * m_Unit));
-        const float bodyHeight = std::max(160 * m_Unit, ImGui::GetContentRegionAvail().y);
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, Header::Blend(m_Surface, m_Text, .26f));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, Header::Blend(m_Surface, m_Text, .4f));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, Header::Blend(m_Surface, m_Text, .55f));
-        if (ImGui::BeginChild("FolderBrowser", ImVec2(0, bodyHeight), ImGuiChildFlags_None,
-                ImGuiWindowFlags_NoBackground)) {
-            result.openPath=m_Filesystem.Render(filter && !tree.allSourceFolders?
-                tree.workspaceRoot/std::filesystem::u8path(*filter):tree.workspaceRoot);
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(4);
     }
     ImGui::EndChild();
     Space(12 * m_Unit);
@@ -160,6 +176,8 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(3);
     ImGui::PopFont();
+    const auto browser=m_Filesystem.RenderPopup();
+    result.openPath=browser.folder;result.openImage=browser.image;
     return result;
 }
 

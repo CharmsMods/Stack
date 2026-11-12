@@ -2877,12 +2877,10 @@ void AppShell::RenderUI() {
         RenderEditorSavePrompts();
     }
 
-    const bool stableViewCamera = m_Editor->IsViewMode() &&
-        !m_Editor->IsRawWorkspaceGalleryWorkspaceOpen() && !bracketPresentation;
     m_Editor->SetViewToolBounds(m_NavigationRail.bodyPosition,
         {viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y});
-    const ImVec2 projectBodyPosition = stableViewCamera ? viewport->Pos : m_NavigationRail.bodyPosition;
-    const ImVec2 projectBodySize = stableViewCamera ? viewport->Size : m_NavigationRail.bodySize;
+    const ImVec2 projectBodyPosition = m_NavigationRail.bodyPosition;
+    const ImVec2 projectBodySize = m_NavigationRail.bodySize;
     const bool pillPreview = m_NavigationRail.previewAmount > .001f;
     Stack::Workspace::InputScope previewInput(pillPreview, false);
     if (pillPreview) { ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 1.f); ImGui::BeginDisabled(); }
@@ -2897,7 +2895,8 @@ void AppShell::RenderUI() {
         const bool lockPanel = loadTransitionActive || m_RootTabBodyFadeActive ||
             RawMaskToolbarOwnsInput() ||
             (IsRawProjectWorkspaceRootTab(rootTabBodyRenderTabId) && m_Editor->IsRawWorkspaceLockedByEditorProject());
-        Stack::Workspace::InputScope panelInput(lockPanel || m_Editor->IsNodeOpenTransitionActive(), false);
+        Stack::Workspace::InputScope panelInput(lockPanel || m_Editor->IsNodeOpenTransitionActive() ||
+            m_GalleryNavigationMotion->ImageMoving(m_ActiveProjectWorkspace), false);
         ImGui::BeginDisabled(lockPanel);
         RenderWorkspaceSectionPanel(rootTabBodyRenderTabId);
         ImGui::EndDisabled();
@@ -2914,9 +2913,6 @@ void AppShell::RenderUI() {
         ImVec2(graphBody || bracketPresentation || m_Editor->IsAutoBracketWorkspace() ? 0.f : 12.f * m_NavigationRail.scale, 0.f));
     ImGui::BeginChild("StackWorkingArea", projectBodySize, ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    // Chrome masks the photo but never changes its camera dimensions.
-    if (stableViewCamera) ImGui::PushClipRect(m_NavigationRail.bodyPosition,
-        {viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y},true);
     if (m_Editor->IsAutoBracketWorkspace()) {
         ImGui::BeginChild("AutoBracketWorkspace", ImVec2(0, 0), false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -3020,7 +3016,6 @@ void AppShell::RenderUI() {
         }
     }
 
-    if (stableViewCamera) ImGui::PopClipRect();
     ImGui::EndChild();
     ImGui::PopStyleVar();
     railInput.reset();

@@ -45,10 +45,6 @@ void EditorModule::ResetProjectInteractionState() {
 
     auto& ui = m_RawWorkspaceLabUi;
     ui.exposureHistory = {};
-    if (ui.zoneAreas.overlayTexture) {
-        glDeleteTextures(1, &ui.zoneAreas.overlayTexture);
-    }
-    ui.zoneAreas = {};
     ui.zonesCurveGraph = {};
     ui.toneCurveGraphs = {};
     ui.denoiseMap = {};

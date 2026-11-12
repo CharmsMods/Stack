@@ -88,18 +88,11 @@ struct NodeEditorRegistration {
                 bool changed=e.RenderRawWorkspaceLabZonesSurface(c,RawLabControlSection::Settings);
                 changed|=e.RenderRawWorkspaceLabZonesSecondaryControls(c);return changed;
             },[](EditorModule& e,RawWorkspaceEditContext& c){
-                if(c.presentation!=NodeEditorPresentation::Panel && e.m_RawWorkspaceLabUi.zonesTargetedView && !e.m_RawWorkspaceLabUi.zoneAreas.legacy) {
-                    for(auto& area:c.recipe.localRange.areas) if(area.id==e.m_RawWorkspaceLabUi.zoneAreas.selectedId) {
-                        area.offsetEv=0;
-                        for(auto& point:area.points){point.deltaEv=0;point.incoming={};point.outgoing={};}
-                    }
-                } else if(c.presentation!=NodeEditorPresentation::Panel && e.m_RawWorkspaceLabUi.zonesTargetedView) {
-                    for(auto& zone:c.recipe.localRange.targetZones) if(zone.id==e.m_RawWorkspaceLocalRangeTargetZoneId) zone.deltaEv=0;
-                } else {
                     c.recipe.localRange.light.amounts.fill(0);
                     c.recipe.localRange=RawRecipe::ApplyLocalRangePreset(c.recipe.localRange,RawRecipe::RawLocalRangePreset::Reset);
                     if(!c.IsParameterDriven("ev"))c.recipe.preToneExposureEv=0;
-                }
+                    c.recipe.exposureAfterLight=true;
+                    c.recipe.protectExposureHighlights=true;
                 return true;
             },-1,RawDevelopmentGraphScopeStage::LocalRangeInput);
         add(Kind::ToneCurve,Tool::Tone,{400,400},DrawToneCurve,DrawToneCurveSettings,ResetToneCurve,

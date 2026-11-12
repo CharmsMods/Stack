@@ -140,8 +140,8 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         auto controls=primaries();
         const auto& fixed=Editor::PhotographicPanelDefinitions();
         require(fixed.size()==4 && std::string(fixed[0]->panelLabel)=="Light" &&
-            std::string(fixed[1]->panelLabel)=="Tone Curve" && std::string(fixed[2]->panelLabel)=="Calibration" &&
-            std::string(fixed[3]->panelLabel)=="HSL","Fixed panel inventory/order changed.");
+            std::string(fixed[1]->panelLabel)=="Tone" && std::string(fixed[2]->panelLabel)=="HSL" &&
+            std::string(fixed[3]->panelLabel)=="Calibration","Fixed panel inventory/order changed.");
         require(!controls.empty(),"The Controls tab did not draw registered primary tools.");
         for (auto* item:controls) {
             require(item->Size.x<=width && item->Pos.x>=20,"A primary surface overflowed the panel.");

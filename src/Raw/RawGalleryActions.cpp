@@ -68,7 +68,7 @@ Availability GetAvailability(const Context& context, Action action) {
 const char* Label(Action action) {
     switch (action) {
     case Action::Open: return "Open";
-    case Action::CreateCaptureSet: return "Create Capture Set";
+    case Action::CreateCaptureSet: return "Bracket";
     case Action::AddToQueue: return "Add to Queue";
     case Action::Relink: return "Locate folder...";
     case Action::ApplyProject: return "Apply project...";

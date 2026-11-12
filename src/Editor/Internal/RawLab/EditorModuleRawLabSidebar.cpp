@@ -106,13 +106,6 @@ void EditorModule::ApplyRequestedRawLabTool(RawWorkspaceEditContext& context) {
         m_RawWorkspaceLabUi.zonesCurveGraph.draggingExposure = false;
         m_RawWorkspaceLabUi.sceneToneDraggingPoint = -1;
         if (previousTool == RawLabTool::Zones) {
-            if (m_RawWorkspaceLabUi.zoneAreas.active) {
-                ResolveRawWorkspaceInteractionDraft(false);
-                m_RawWorkspaceLabUi.zoneAreas.active = false;
-            }
-            if (m_RawWorkspaceLabUi.zoneAreas.nodeTarget == context.nodeTarget)
-                m_RawWorkspaceLabUi.zoneAreas.history.Observe(context.recipe.localRange.areas, false);
-            for (auto& entry : m_RawWorkspaceLabUi.zoneAreas.graphs) entry.second.interaction = {};
             ClearCurveSegmentSelection(
                 m_RawWorkspaceLabUi.zonesCurveGraph,
                 m_RawWorkspaceLabUi.selectedZonePoint);

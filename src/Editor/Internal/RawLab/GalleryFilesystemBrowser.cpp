@@ -1,4 +1,5 @@
 #include "GalleryFilesystemBrowserState.h"
+#include "GalleryBrowserScroll.h"
 #include "Library/LibraryControls.h"
 #include "App/AppHeaderStyle.h"
 #include <imgui_internal.h>
@@ -30,7 +31,13 @@ void LocationIcon(Kind kind, bool open, ImVec2 pos, float size, ImU32 color) {
     if(kind==Kind::Folder) {
         LibraryUi::DrawIcon(open?LibraryUi::Icon::OpenFolder:LibraryUi::Icon::Folder,pos,size,color);return;
     }
-    if(kind==Kind::Pictures) {
+    if(kind==Kind::Downloads) {
+        d->AddLine(p(8,1),p(8,11),color,1.5f*u);
+        d->AddPolyline(std::array<ImVec2,3>{p(4,7),p(8,11),p(12,7)}.data(),3,color,0,1.5f*u);
+        d->AddLine(p(2,15),p(14,15),color,1.5f*u);
+    } else if(kind==Kind::Optical) {
+        d->AddCircle(p(8,8),6*u,color,20,1.25f*u);d->AddCircle(p(8,8),1.5f*u,color,12,1.25f*u);
+    } else if(kind==Kind::Pictures) {
         d->AddRect(p(1,2),p(15,14),color,2*u,0,1.25f*u);
         d->AddCircleFilled(p(11,6),1.5f*u,color);
         d->AddPolyline(std::array<ImVec2,3>{p(2,12),p(6,7),p(11,13)}.data(),3,color,0,1.25f*u);
@@ -65,14 +72,21 @@ ImVec4 BranchColor(unsigned index) {
 }
 }
 GalleryFilesystemBrowser::GalleryFilesystemBrowser():state_(std::make_shared<State>()) {}
-GalleryFilesystemBrowser::~GalleryFilesystemBrowser()=default;
+GalleryFilesystemBrowser::~GalleryFilesystemBrowser(){state_->closed.store(true);state_->motion.Stop();if(state_->searchIndex)state_->searchIndex->Suspend();state_->ReleasePreviews();}
 std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std::filesystem::path& current) {
     auto& s=*state_;s.Start(state_);
+    if(!s.motion.Active())s.navigationTile={};
     if(s.current!=current)s.Navigate(current);
-    s.Pump(state_);
+    if(s.directory && !s.directory->loaded && !s.directory->pending && s.directory->error.empty())s.Request(state_,s.directory);
+    s.Pump(state_);s.PumpSearch(state_);
     std::optional<std::filesystem::path> selected;
     const float unit=ImGui::GetFontSize()/14.f;
     const bool reduced=LibraryUi::ReducedMotion();
+    // GLFW/ImGui button indices 3 and 4 are the standard mouse Back/Forward buttons.
+    if(ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows)) {
+        if(ImGui::IsMouseClicked(3) && s.historyIndex>0) {s.requestedHistory=s.historyIndex-1;selected=s.history[*s.requestedHistory];}
+        else if(ImGui::IsMouseClicked(4) && s.historyIndex+1<s.history.size()) {s.requestedHistory=s.historyIndex+1;selected=s.history[*s.requestedHistory];}
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{6*unit,6*unit});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{10*unit,8*unit});
     ImGui::BeginDisabled(s.history.empty() || s.historyIndex==0);
@@ -85,8 +99,8 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
     ImGui::EndDisabled();
     if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Forward");
     ImGui::SameLine();
-    ImGui::BeginDisabled(current.empty() || current==current.root_path());
-    if(NavigationButton("##Up",0,unit))selected=current.parent_path();
+    ImGui::BeginDisabled(current.empty());
+    if(NavigationButton("##Up",0,unit))selected=current==current.root_path()?std::filesystem::path{}:current.parent_path();
     ImGui::EndDisabled();
     if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Up one folder");
     ImGui::SameLine();
@@ -104,16 +118,26 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
         }
         ImGui::Separator();
         ImGui::MenuItem("Branch colors",nullptr,&s.colors);
+        if(ImGui::MenuItem("Refresh current folder",nullptr,false,s.directory && !s.directory->pending)) {
+            s.Request(state_,s.directory);if(s.searchIndex)s.searchIndex->Refresh();
+        }
         if(ImGui::MenuItem("Refresh locations",nullptr,false,!s.rootsPending)){s.started=false;s.Start(state_);}
         ImGui::EndPopup();
     }
-    const float addressWidth=std::max(1.f,ImGui::GetContentRegionAvail().x-34*unit);
+    ImGui::SameLine();
+    const float searchWidth=std::clamp(ImGui::GetContentRegionAvail().x*.28f,130*unit,250*unit);
+    const float addressWidth=std::max(1.f,ImGui::GetContentRegionAvail().x-74*unit-searchWidth);
     ImGui::SetNextItemWidth(addressWidth);
-    if(ImGui::InputTextWithHint("##FolderPath","Paste a folder path",s.address,sizeof(s.address),ImGuiInputTextFlags_EnterReturnsTrue)) {
-        const auto path=std::filesystem::u8path(s.address);
-        if(path.is_absolute())selected=path.lexically_normal();
+    const bool submittedPath=ImGui::InputTextWithHint("##FolderPath","This PC",s.address,sizeof(s.address),ImGuiInputTextFlags_EnterReturnsTrue);
+    if(submittedPath) {
+        try {
+            const auto path=std::filesystem::u8path(s.address);
+            if(path.is_absolute())selected=path.lexically_normal();
+            else s.addressError="Enter an absolute folder path.";
+        } catch(const std::exception&) {s.addressError="This folder path is invalid.";}
     }
-    if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))PathTooltip(s.address);
+    if(ImGui::IsItemEdited() && !submittedPath)s.addressError="Press Enter to navigate to this path.";
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))PathTooltip(s.address,s.addressError.c_str());
     ImGui::SameLine();
     if(ImGui::Button("##Ancestors",{28*unit,ImGui::GetFrameHeight()}))ImGui::OpenPopup("Ancestors");
     const auto low=ImGui::GetItemRectMin();
@@ -136,16 +160,42 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
         }
         ImGui::EndPopup();
     }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(searchWidth);
+    if(ImGui::InputTextWithHint("##SearchFolders",current.empty()?"Search drives":"Search images and folders",s.search,sizeof(s.search)))s.SearchChanged();
+    if(ImGui::IsItemHovered())ImGui::SetTooltip(current.empty()?"Filter drives by name or letter":"Search names in this folder and all subfolders. Small spelling mistakes are tolerated. Ctrl-scroll resizes thumbnails.");
+    ImGui::SameLine();
+    if(ImGui::Button("##CloseBrowser",{28*unit,28*unit}))s.closeRequested=true;
+    const auto closeMin=ImGui::GetItemRectMin();
+    auto* closeDraw=ImGui::GetWindowDrawList();
+    const auto closeColor=ImGui::GetColorU32(ImGuiCol_Text);
+    closeDraw->AddLine({closeMin.x+9*unit,closeMin.y+9*unit},{closeMin.x+19*unit,closeMin.y+19*unit},closeColor,1.5f*unit);
+    closeDraw->AddLine({closeMin.x+19*unit,closeMin.y+9*unit},{closeMin.x+9*unit,closeMin.y+19*unit},closeColor,1.5f*unit);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Close folder browser");
     if(s.showFilter) {
         ImGui::SetNextItemWidth(-1);
         if(ImGui::InputTextWithHint("##FilterFolders","Filter loaded folders",s.filter,sizeof(s.filter)))s.FilterChanged();
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Filters folder names already loaded in this tree. Clear to restore your expanded branches.");
     }
-    ImGui::TextDisabled(s.filterKey.empty()?"This PC":"Matching loaded folders");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{0,0});
     const float rowHeight=32*unit;
-    if(s.restoreRow){ImGui::SetNextWindowScroll({-1,*s.restoreRow*rowHeight});s.restoreRow.reset();}
-    if(ImGui::BeginChild("ComputerFolders",{0,0},false,ImGuiWindowFlags_NoBackground)) {
+    const float bodyHeight=std::max(1.f,ImGui::GetContentRegionAvail().y);
+    const float treeWidth=std::min(260*unit,ImGui::GetContentRegionAvail().x*.30f);
+    if(ImGui::BeginChild("BrowserLocations",{treeWidth,bodyHeight},false,ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar)) {
+        for(const auto& shortcut:s.shortcuts) {
+            ImGui::PushID(shortcut.get());const auto pos=ImGui::GetCursorScreenPos();
+            if(ImGui::Selectable("##Shortcut",s.currentKey==shortcut->key,0,{0,rowHeight}))selected=shortcut->path;
+            LocationIcon(shortcut->kind,false,{pos.x+8*unit,pos.y+8*unit},16*unit,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+            ImGui::GetWindowDrawList()->AddText({pos.x+34*unit,pos.y+8*unit},ImGui::GetColorU32(ImGuiCol_Text),shortcut->label.c_str());
+            ImGui::PopID();
+        }
+        ImGui::Dummy({0,12*unit});
+        const auto pcPos=ImGui::GetCursorScreenPos();
+        if(ImGui::Selectable("##ThisPC",current.empty(),0,{0,rowHeight}))selected=std::filesystem::path{};
+        LocationIcon(State::Kind::Desktop,false,{pcPos.x+8*unit,pcPos.y+8*unit},16*unit,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+        ImGui::GetWindowDrawList()->AddText({pcPos.x+34*unit,pcPos.y+8*unit},ImGui::GetColorU32(ImGuiCol_Text),"This PC");
+        if(s.restoreRow){ImGui::SetNextWindowScroll({-1,*s.restoreRow*rowHeight});s.restoreRow.reset();}
+    if(ImGui::BeginChild("ComputerFolders",{0,0},false,ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar)) {
         s.visibleFirst=static_cast<int>(std::max(0.f,ImGui::GetScrollY()/rowHeight));
         s.visibleLast=static_cast<int>((ImGui::GetScrollY()+ImGui::GetWindowHeight())/rowHeight);
         const auto anchorIndex=static_cast<std::size_t>(s.visibleFirst);
@@ -175,7 +225,7 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
                 ImGui::PopID();continue;
             }
             const bool active=s.currentKey==node.key;
-            const bool expandable=!node.loaded || !node.children.empty() || !node.error.empty();
+            const bool expandable=!node.loaded || node.folderChildren!=0 || !node.error.empty();
             ImGui::PushStyleColor(ImGuiCol_Header,ImVec4(0,0,0,0));
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered,ImVec4(0,0,0,0));
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,ImVec4(0,0,0,0));
@@ -224,9 +274,38 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
             if(tooltip)PathTooltip(node.path.u8string().c_str(),node.pending?"Loading folders...":node.error.c_str());
             ImGui::PopID();
         }
+        RenderGalleryBrowserScroll(unit);
         if(s.rows.empty())ImGui::TextWrapped("%s",!s.filterKey.empty()?"No matching loaded folders.":s.locationsError.empty()?"Loading locations...":s.locationsError.c_str());
     }
+    ImGui::EndChild();
+    }
+    ImGui::EndChild();
+    ImGui::SameLine(0,10*unit);
+    if(selected)s.motion.Stop();
+    if(s.resetGridScroll){ImGui::SetNextWindowScroll({0,s.directory?s.directory->gridScroll:0});s.resetGridScroll=false;}
+    if(ImGui::BeginChild("FolderTiles",{0,bodyHeight},false,ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar)) {
+        if(ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl) {
+            ImGui::SetKeyOwner(ImGuiKey_MouseWheelY,ImGui::GetCurrentWindow()->ID);
+            const float wheel=ImGui::GetIO().MouseWheel;
+            if(wheel!=0){s.motion.Stop();s.tileSize=std::clamp(s.tileSize*std::pow(1.12f,wheel),96.f,360.f); }
+        }
+        s.gridBounds=ImGui::GetCurrentWindow()->InnerClipRect;
+        s.motion.Begin(s.gridBounds,!s.locateReturn && ((!s.directory && !s.rootsPending) || (s.directory && s.directory->loaded && !s.directory->pending)),LibraryUi::ReducedMotion());
+        if(s.directory && !s.directory->error.empty())s.motion.Stop();
+        const int firstVertex=ImGui::GetWindowDrawList()->VtxBuffer.Size;
+        ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha,1.f);
+        ImGui::BeginDisabled(s.motion.Active());
+        RenderTiles(selected);
+        ImGui::EndDisabled();
+        ImGui::PopStyleVar();
+        s.motion.Finish(ImGui::GetWindowDrawList(),firstVertex);
+        if(selected && !s.motion.Active() && !s.current.empty() && *selected==s.current.parent_path())
+            s.motion.Capture(ImGui::GetWindowDrawList(),s.gridBounds);
+        if(s.directory)s.directory->gridScroll=ImGui::GetScrollY();
+        if(!s.motion.Active())RenderGalleryBrowserScroll(unit);
+    }
     ImGui::EndChild();ImGui::PopStyleVar(3);
+    if(s.motion.Active())selected.reset();
     if(selected && s.requestedHistory && *selected!=s.history[*s.requestedHistory])s.requestedHistory.reset();
     return selected;
 }

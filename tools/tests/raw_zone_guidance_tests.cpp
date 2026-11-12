@@ -1,7 +1,5 @@
 #include "Raw/RawZoneArea.h"
 #include "Raw/RawRecipeCompatibility.h"
-#include "Editor/RawZoneAreaHistory.h"
-#include "Editor/Internal/RawLab/RawLabAreaMask.h"
 #include "Renderer/Internal/RawZoneAreaRenderer.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/GLHelpers.h"
@@ -151,12 +149,6 @@ void CorrectionAndRecipeTests() {
     Check(IsCanonicalRawRecipeDocument(softDocument),"current soft area document remains canonical");
     const auto softArea=DeserializeRecipe(softDocument).localRange.areas.front();
     Check(!softArea.strokes[0].followEdges,"current soft strokes remain ordinary soft painting");
-    Stack::Editor::RawZoneAreaHistory history;history.Initialize({a});
-    history.Observe({edited},true);history.Observe({edited},false);
-    Check(SerializeZoneAreas(history.Undo())==SerializeZoneAreas({a}),"undo restores guided recipe exactly");
-    Check(SerializeZoneAreas(history.Redo())==SerializeZoneAreas({edited}),"redo restores guided edit exactly");
-    history.Observe({},true);history.Cancel();
-    Check(SerializeZoneAreas(history.Undo())==SerializeZoneAreas({a}),"cancel adds no guided history entry");
     auto restored=Area();restored.strokes[0].followEdges=false;
     Check(RasterizeZoneArea(restored,256,128,{})==Mask(Area(),guide),"disabling guidance restores authored soft footprint");
 }
@@ -343,20 +335,6 @@ void ValidateRawZoneGuidanceGpu() {
     output.Reset(renderer.Render(reference.Get(),reference.Get(),w,h,recipe,true,true,stats,{},100));
     Check(renderer.MaskBuildCount()==masks && renderer.GuideBuildCount()==guides,"EV dragging reuses image guide and mask");
     Check(stats[0].maskPreview==acceptedMask,"gain edit keeps exact accepted coverage");
-    RawDevelopmentGraphScopeReadback scope;scope.valid=true;scope.stage=RawDevelopmentGraphScopeStage::LocalRangeInput;
-    scope.zoneGuide=renderer.PreviewGuide();scope.zoneAreas=stats;
-    Stack::EditorModuleTypes::RawZoneAreaUiState ui;
-    using namespace Stack::Editor::RawLabInternal;
-    Check(RawLabAreaGuideReady(recipe,scope),"neutral guide survives global EV edit");
-    const auto overlay=ResolveRawLabAreaMask(ui,recipe.localRange.areas[0],recipe,scope);
-    Check(overlay==acceptedMask,"settled overlay uses rendered mask");
-    Near(SampleRawLabAreaMask(*overlay,.55f,.5f,{}),0,1e-6f,"hit testing cannot select rejected background");
-    ui.showMask=false;ui.showCursor=false;
-    Check(ResolveRawLabAreaMask(ui,recipe.localRange.areas[0],recipe,scope)==overlay,"overlay/cursor visibility leaves coverage untouched");
-    auto different=recipe;different.source.sourcePath="other.dng";
-    Check(!RawLabAreaGuideReady(different,scope) && ResolveRawLabAreaMask(ui,different.localRange.areas[0],different,scope)!=overlay,"reject stale source guidance");
-    different=recipe;different.cropRotation.rotationDegrees=90;
-    Check(!RawLabAreaGuideReady(different,scope),"reject stale orientation guidance");
     // Reuse the same texture name with new image contents and a new revision.
     for(std::size_t i=0;i<rgb.size();++i) if(i%4!=3) rgb[i]=.1f;
     glBindTexture(GL_TEXTURE_2D,reference.Get());glTexSubImage2D(GL_TEXTURE_2D,0,0,0,w,h,GL_RGBA,GL_FLOAT,rgb.data());

@@ -225,9 +225,12 @@ GalleryPixelSource LoadOriginalGalleryPixels(const std::filesystem::path& path, 
         const auto size = std::filesystem::file_size(path, error);
         if (!error) candidate = FindCameraThumbnail(path, size, maxEdge, cancelled);
     }
-    if (candidate.bytes && (!largeView || std::max(candidate.width, candidate.height) >= maxEdge) &&
-        DecodeCameraThumbnail(path, candidate, maxEdge, rgba, width, height, cancelled) &&
-        (!largeView || std::max(width, height) >= maxEdge)) return GalleryPixelSource::CameraJpeg;
+    // Resolution demand must never silently change the photograph's rendering.
+    // A smaller camera JPEG is still the correct browsing representation.
+    if (candidate.bytes && DecodeCameraThumbnail(path, candidate, maxEdge, rgba, width, height, cancelled))
+        return GalleryPixelSource::CameraJpeg;
+    if (preview.bytes && DecodeCameraThumbnail(path, preview, maxEdge, rgba, width, height, cancelled))
+        return GalleryPixelSource::CameraJpeg;
 
     Raw::RawImageData raw;
     if ((!cancelled || !cancelled()) && Raw::RawLoader::LoadFile(path.u8string(), raw, cancelled)) {

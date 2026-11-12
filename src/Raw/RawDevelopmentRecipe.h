@@ -416,6 +416,10 @@ struct RawDevelopmentRecipe {
     RawRgbDenoiseRecipe rgbDenoise;
     RawColorCalibrationRecipe colorCalibration;
     float preToneExposureEv = 0.0f;
+    // Authored by the Local EV graph operation. Whole-development recipes use the legacy order.
+    bool exposureAfterLight = false;
+    bool protectExposureHighlights = false;
+    float LocalEvInputExposureEv() const { return exposureAfterLight ? 0.f : preToneExposureEv; }
     RawLocalRangeRecipe localRange;
     std::vector<RawGradientEvAdjustment> evGradients;
     RawFinishToneRecipe finishTone;

@@ -121,7 +121,7 @@ bool EditorModule::StartBracketingProcessing(bool publish,std::string* error) {
     if(m_RawRenderClientId!=0)request.executeOpenGlTask=[](Raw::OpenGlTask task,std::string& taskError) {
         return Stack::EditorRendering::RawRenderService::Get().ExecuteOpenGlTaskBlocking(std::move(task),taskError);
     };
-    if (!ui.result) {
+    if (!ui.result && !ui.galleryBackground && IsBracketingToolActive()) {
         BindBracketingSourceNodeEditor();
         RequestRawSettingsPanel();
         SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
@@ -171,6 +171,11 @@ void EditorModule::TickBracketing(bool foreground) {
             state->awaitingProject.clear();state->newProject=false;
             state->projectId=m_Project->snapshot->projectId;
             state->setId=m_Project->snapshot->activeSourceSetId;
+            if (state->galleryBackground) {
+                m_RawWorkspaceLabUi.activeTool=RawLabTool::View;
+                m_Project->nodeEditor.reset();
+                SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
+            }
             const bool saved = CommitBracketingDraft(state->processAfterImport,nullptr);
             auto completion = std::exchange(state->saveBeforeCloseCompletion, {});
             if (completion) completion(saved);

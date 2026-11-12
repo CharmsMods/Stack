@@ -1,15 +1,8 @@
 add_executable(StackRawZoneAreaTests
     src/Raw/RawZoneAreaRasterizer.cpp
-    src/Editor/RawZoneAreaPreview.cpp
     src/Async/TaskSystem.cpp
-    src/Editor/Internal/RawLab/RawLabAreaImageInteraction.cpp
-    src/Editor/Internal/RawLab/RawLabAreaImageOverlay.cpp
-    tools/tests/raw_zone_interaction_tests.cpp
     tools/tests/raw_zone_area_tests.cpp
     tools/tests/raw_zone_guidance_tests.cpp
-    src/App/Validation/Suites/RawZoneAreaGraphValidation.cpp
-    src/Editor/Internal/RawLab/RawLabAreaGraph.cpp
-    src/Editor/Internal/RawLab/RawLabAreaMask.cpp
     src/Editor/Internal/RawLab/RawLabCurveEditor.cpp
     src/Editor/GraphUI/GraphPlotStyle.cpp
     src/Utils/GlassControls.cpp

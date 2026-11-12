@@ -40,7 +40,10 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     views.reserve(static_cast<std::size_t>(presentation.totalSources));
     for (const auto& group : presentation.groups) {
         if (!folderVisible(group.folderKey)) continue;
-        for (const auto& view : group.sources) views.emplace(view.relativePathKey, &view);
+        for (const auto& view : group.sources)
+            if (!m_PermanentGalleryWorkspace || Stack::Editor::RawLabInternal::GalleryFileTypeMatches(
+                    view.relativePathKey, m_RawGalleryFileTypes))
+                views.emplace(view.relativePathKey, &view);
     }
     const auto updateCompletion = [&](auto& stacks) {
         std::unordered_set<std::string> completed;
@@ -99,6 +102,7 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     for (const auto& group : presentation.groups) {
         if (!folderVisible(group.folderKey)) continue;
         for (const auto& view : group.sources) {
+            if (views.find(view.relativePathKey) == views.end()) continue;
             if (!assigned.insert(view.relativePathKey).second) continue;
             Stack::RawWorkspace::RawGallerySimilarityStack stack;
             stack.folderKey = group.folderKey;

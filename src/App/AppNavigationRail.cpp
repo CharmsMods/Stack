@@ -118,9 +118,9 @@ void AppShell::LayoutNavigationRail() {
     if (otherControlActive && atEdge) rail.suppressEdgeRevealUntilLeave = true;
     const bool allowPointerReveal = !rail.suppressEdgeRevealUntilLeave && !otherControlActive;
     if(allowPointerReveal || !focused) Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::Rail);
-    Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.revealMotion, rail.visibleUntil, focused,
+    Stack::Navigation::UpdateEdgeReveal(rail.revealAmount, rail.revealMotion, rail.visibleUntil, focused || rail.pinnedOpen,
         atEdge && allowPointerReveal, overRail && allowPointerReveal,
-        railActive, railPopup, Stack::Notifications::SystemReducedMotion());
+        railActive || rail.pinnedOpen, railPopup, Stack::Notifications::SystemReducedMotion());
     rail.visibleWidth = width * rail.revealAmount;
     rail.position = ImVec2(viewport->Pos.x - width + rail.visibleWidth,
         viewport->Pos.y);
@@ -151,7 +151,9 @@ void AppShell::LayoutNavigationRail() {
     else if (rail.panelAmount!=target || rail.panelMotion.Active())
         rail.panelMotion.Update(rail.panelAmount,target,.28f,Stack::Animation::FrameTween::ClockSeconds(),ImGui::GetFrameCount(),
             processing || Stack::Notifications::SystemReducedMotion());
-    rail.visiblePanelWidth = panelWidth * rail.panelAmount;
+    const bool galleryOpening = !gallery && m_GalleryNavigationMotion->ImageMoving(m_ActiveProjectWorkspace);
+    const float openingControls = galleryOpening ? m_GalleryNavigationMotion->ImageControls(m_ActiveProjectWorkspace) : 1.f;
+    rail.visiblePanelWidth = panelWidth * rail.panelAmount * openingControls;
     // The rail consumes the panel's left edge. Only the minimum-width clamp
     // can move its right edge; its expanded extent survives sidebar retreat.
     const float toolbarHeight = m_RawMaskToolbar.visibleHeight;
@@ -159,8 +161,9 @@ void AppShell::LayoutNavigationRail() {
     rail.panelSize = ImVec2(panelWidth, std::max(1.f, viewport->Size.y - toolbarHeight));
     const bool graphBody = m_CurrentTabId == Graph && !m_Editor->IsViewMode();
     const float top = processing ? 0.f : graphBody ? toolbarHeight : std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
-    rail.bodyPosition = ImVec2(viewport->Pos.x + reservedRailWidth + rail.visiblePanelWidth, viewport->Pos.y + top);
-    rail.bodySize = ImVec2(std::max(1.f, available - rail.visiblePanelWidth), std::max(1.f, viewport->Size.y - top));
+    const float reservedPanel = galleryOpening && rail.panelOpen ? panelWidth : rail.visiblePanelWidth;
+    rail.bodyPosition = ImVec2(viewport->Pos.x + reservedRailWidth + reservedPanel, viewport->Pos.y + top);
+    rail.bodySize = ImVec2(std::max(1.f, available - reservedPanel), std::max(1.f, viewport->Size.y - top));
     // Graph chrome overlays a stable canvas instead of translating its camera.
     if (graphBody) {
         rail.bodyPosition.x = viewport->Pos.x;

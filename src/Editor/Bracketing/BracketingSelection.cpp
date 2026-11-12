@@ -56,14 +56,29 @@ void EditorModule::BeginBracketingDraft(bool fresh) {
     m_Bracketing->status="Select captures in the filmstrip or Gallery, then press Process.";
     SyncBracketingSelection();
 }
-void EditorModule::CreateBracketingCaptureSet(const std::vector<std::filesystem::path>& paths) {
+void EditorModule::CreateBracketingCaptureSet(const std::vector<std::filesystem::path>& paths, bool background) {
     BeginBracketingDraft(true);
     AddBracketingDraftFiles(paths);
     if(!m_Bracketing)return;
+    m_Bracketing->galleryBackground=background;
     m_Bracketing->processWhenMetadataReady=true;
     m_Bracketing->status="Reading captures before processing...";
-    OpenBracketingTool();
+    if (!background) OpenBracketingTool();
+    else {
+        m_RawWorkspaceLabUi.activeTool=RawLabTool::View;
+        m_RawWorkspaceLabUi.galleryWorkspaceOpen=false;
+        m_RawWorkspaceLabUi.galleryHost=RawGalleryHost::Closed;
+        m_Project->nodeEditor.reset();
+        SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
+    }
     RequestOpenRawLabTab();
+}
+bool EditorModule::IsGalleryBracketProcessing() const {
+    if (!m_Bracketing || !m_Bracketing->galleryBackground) return false;
+    const auto& ui=*m_Bracketing;
+    return !ui.failed && !ui.orientationReviewRequested &&
+        (ui.processWhenMetadataReady || ui.metadataJob || !ui.awaitingProject.empty() ||
+         ui.pending || ui.job || ui.waitingForMemory || ui.publishRequested);
 }
 void EditorModule::RestoreBracketingSelection() {
     if(!m_Bracketing||m_Bracketing->selectionRestored||m_Bracketing->newProject||!IsBracketingActive())return;
@@ -263,14 +278,27 @@ void EditorModule::TickBracketingDraft() {
                     source.inspected=true;
                 }
                 job->done=true;
-            })) {ui.metadataJob.reset();ui.metadataCheckedRevision=std::numeric_limits<std::uint64_t>::max();ui.status="Could not inspect captures. Retry selection.";}
+            })) {
+                ui.metadataJob.reset();ui.metadataCheckedRevision=std::numeric_limits<std::uint64_t>::max();
+                ui.status="Could not inspect captures. Retry selection.";
+                if (ui.galleryBackground) {
+                    ui.failed=true;ui.processWhenMetadataReady=false;
+                    PostNotification(UiNotificationSeverity::Error,ui.status,"gallery-bracket-failed");
+                }
+            }
         }
     }
     if(ui.processWhenMetadataReady && !ui.metadataJob && !ui.sources.empty() &&
         std::all_of(ui.sources.begin(),ui.sources.end(),[](const auto& source){return source.inspected;})) {
         ui.processWhenMetadataReady=false;
         const auto rejected=std::find_if(ui.sources.begin(),ui.sources.end(),[](const auto& source){return !source.error.empty();});
-        if(rejected!=ui.sources.end())ui.status=rejected->error;
-        else CommitBracketingDraft(true,nullptr);
+        const bool hasRejectedSource = rejected!=ui.sources.end();
+        if(hasRejectedSource)ui.status=rejected->error;
+        const bool accepted = !hasRejectedSource && CommitBracketingDraft(true,nullptr);
+        if (!accepted && ui.galleryBackground) {
+            ui.failed=!ui.orientationReviewRequested;
+            PostNotification(ui.orientationReviewRequested?UiNotificationSeverity::Warning:UiNotificationSeverity::Error,
+                ui.status,"gallery-bracket-failed");
+        }
     }
 }

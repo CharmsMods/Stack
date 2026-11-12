@@ -323,7 +323,7 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
         auto* editor = workspace->editor.get();
         const GalleryTabOpen& target = *m_PendingGalleryTabOpen;
         if (target.kind == GalleryTabOpen::Kind::Bracket) {
-            editor->CreateBracketingCaptureSet(target.bracketSources);
+            editor->CreateBracketingCaptureSet(target.bracketSources, true);
         } else if (target.kind == GalleryTabOpen::Kind::Project) {
             // The queue releases this file before its editor reads a snapshot.
             // Other bracket jobs and tabs continue while this one cancels.
@@ -390,7 +390,8 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
             if (m_Editor->FinishWorkspaceInteraction()) {
                 const auto& target = m_GalleryTabOpenQueue.front();
                 const auto createdId = CreateProjectWorkspace(target.sourceWorkspaceRoot, target.kind != GalleryTabOpen::Kind::Source);
-                const bool foreground=m_GalleryTabOpenQueue.front().navigationGeneration==m_GalleryNavigationMotion->Intent();
+                const bool foreground=target.kind != GalleryTabOpen::Kind::Bracket &&
+                    target.navigationGeneration==m_GalleryNavigationMotion->Intent();
                 if (!foreground || ActivateProjectWorkspace(createdId)) {
                     m_PendingGalleryTabOpen =
                         std::move(m_GalleryTabOpenQueue.front());
@@ -398,6 +399,13 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
                     m_PendingGalleryTabOpen->workspaceId = createdId;
                     if(auto* created=FindProjectWorkspace(createdId)) {
                         created->galleryOrigin=m_PendingGalleryTabOpen->transitionOrigin;
+                        created->galleryBracket=m_PendingGalleryTabOpen->kind==GalleryTabOpen::Kind::Bracket;
+                        created->galleryArrivalPending=created->galleryBracket && created->galleryOrigin.Valid();
+                        if (created->galleryBracket) {
+                            created->rootTab=static_cast<int>(Stack::Workspace::Id::Graph);
+                            m_NavigationRail.visibleUntil=ImGui::GetTime()+2.;
+                            m_ScrollActiveProjectTabIntoView=true;
+                        }
                     }
                     if(foreground && m_PendingGalleryTabOpen->transitionOrigin.Valid()) {
                         const auto& rail=m_NavigationRail;

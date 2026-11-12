@@ -2719,6 +2719,7 @@ void EditorViewport::RenderSingleImageMode(
     editor->UpdateGraphViewportCoverage(cameraImageMin, cameraImageMax, contentScreen,
         ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y), m_Panning || m_ZoomAnimating);
     if (editor->IsViewMode()) editor->PresentNodeOpenImage(imageMin, imageMax);
+    if (editor->IsViewMode() && hasOutputTexture) editor->PresentGalleryOpeningImage(imageMin,imageMax,outputTex);
     const bool sourceAvailable = sourceTex != 0 && sourceTex != outputTex;
     const bool labelsFit = finalScale >= 42.0f;
     const EditorViewportPreview::StateInput previewInput {

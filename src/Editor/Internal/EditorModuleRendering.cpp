@@ -1,4 +1,3 @@
-#include "Editor/Internal/RawLab/RawLabAreaMask.h"
 #include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
 #include "Editor/Internal/EditorRenderPresentationHelpers.h"
 #include "Renderer/ViewportTextureCopy.h"
@@ -556,8 +555,6 @@ void EditorModule::CacheRawWorkspaceGraphScopeReadback(
         if (m_NodeEditorPanel.analysisTarget==target) m_NodeEditorPanel.analysisTarget.reset();
         break;
     }
-    if (m_RawWorkspaceLabUi.zoneAreas.sourceKey==sourceKey)
-        Stack::Editor::RawLabInternal::RememberRawLabAreaGuide(m_RawWorkspaceLabUi.zoneAreas,readback);
 
     RawWorkspaceGraphScopeCacheEntry* cache = nullptr;
     switch (readback.stage) {

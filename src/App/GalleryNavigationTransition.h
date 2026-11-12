@@ -33,12 +33,12 @@ public:
     void Retire(std::uint64_t workspace);
     void Shutdown() {CancelImage();pagesFromFolder.clear();submitted.clear();folderAmount.Finish();sceneAmount.Finish();}
     bool Owns(std::uint64_t workspace) const {return imageWorkspace==workspace && imageOrigin.Valid();}
-    bool ImageMoving(std::uint64_t workspace) const {return Owns(workspace) && (imageGeometryActive || returning);}
+    bool ImageMoving(std::uint64_t workspace) const {return Owns(workspace) && (returning || !liveReady || readyAt < 0 || time-readyAt < .76);}
     bool Waiting(std::uint64_t workspace) const {return Owns(workspace) && !returning && !liveReady;}
     bool HasImage() const {return imageOrigin.Valid();}
     std::uint64_t ImageWorkspace() const {return imageWorkspace;}
-    ImRect PresentImage(std::uint64_t workspace,ImRect target);
-    void Viewport(std::uint64_t workspace,ImRect bounds) {if(Waiting(workspace))TargetImage(Fit(imageOrigin,bounds));}
+    ImRect PresentImage(std::uint64_t workspace,ImRect target,unsigned int texture=0);
+    void Viewport(std::uint64_t workspace,ImRect bounds) {if(Waiting(workspace))imageTarget=Fit(imageOrigin,bounds);}
     void DrawOverlay(ImDrawList& draw);
     float ImageControls(std::uint64_t workspace) const;
     float SceneWeight() const {return std::clamp(sceneAmount.Value(),0.f,1.f);}
@@ -52,7 +52,8 @@ private:
     std::uint64_t generation=0,navigationIntent=0,imageWorkspace=0;
     double time=0,lastTime=-1,folderDeadline=0,imageDeadline=0,readyAt=-1;
     int frame=-1;
-    bool reduced=false,foldersRequested=false,returning=false,liveReady=false,imageGeometryActive=false;
+    bool reduced=false,foldersRequested=false,returning=false,liveReady=false,imageGeometryActive=false,flightStarted=false,sceneStarted=false;
+    unsigned int liveTexture=0; // Borrowed only for the current submitted frame.
     Animation::ScalarChannel folderAmount,sceneAmount{1.f},imageCrop{1.f};
     std::array<Animation::ScalarChannel,4> imageBounds;
     Origin imageOrigin;

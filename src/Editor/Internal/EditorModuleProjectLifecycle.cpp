@@ -1782,6 +1782,14 @@ bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
     Stack::Project::RawLayerStackState operationCandidate;
     bool operationsChanged = false;
     if (!PrepareRawControlRecipeEdit(recipe, operationCandidate, operationsChanged, m_RawLayerStatus)) return false;
+    bool exposurePreview = false;
+    if (GetProjectSessionKind() == ProjectSessionKind::RawPreview) {
+        auto exposureNeutralRecipe = recipe;
+        const auto previousRecipe = ReadRawControlRecipe();
+        exposureNeutralRecipe.preToneExposureEv = previousRecipe.preToneExposureEv;
+        exposurePreview = Stack::RawRecipe::SerializeRecipe(exposureNeutralRecipe) == Stack::RawRecipe::SerializeRecipe(previousRecipe) &&
+            Stack::Project::SameRawLayerStackExceptExposure(m_Project->rawLayers.State(), operationCandidate);
+    }
     if (!EnsureRawWorkspaceProjectForSelectedRecipeEdit(ReadRawControlRecipe())) return false;
     const int boundSource = ResolveRawWorkspaceStageOutputNodeId();
     auto* sourceNode = m_Project->graph.FindNode(boundSource);
@@ -1792,6 +1800,12 @@ bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
     if (!m_Project->rawLayers.ApplySourceEdit(std::move(operationCandidate), m_Project->rawRecipe,
             recipe, m_RawLayerStatus, &m_Project->graph, boundSource)) return false;
     sourceNode->rawDevelopment.recipe = m_Project->rawRecipe;
+    if (exposurePreview) {
+        ++m_Project->editRevision;
+        MarkRenderRefreshDirty();
+        NoteRawWorkspaceRecipePreviewEdit(interactionActive);
+        return true;
+    }
     sourceNode->rawDevelopment.projectStatus = "Edited";
     sourceNode->rawDevelopment.edited = true;
     sourceNode->rawDevelopment.autosaved = false;

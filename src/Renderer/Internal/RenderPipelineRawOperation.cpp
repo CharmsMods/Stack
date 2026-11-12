@@ -111,11 +111,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
             if (recipe.preToneExposureEv != 0) adopt(RenderRawDevelopmentExposure(input, recipe.preToneExposureEv));
             break;
         case GraphOperationKind::LocalEv: {
-            if (recipe.preToneExposureEv != 0.f) adopt(RenderRawDevelopmentExposure(input,recipe.preToneExposureEv));
+            const float inputExposureEv = recipe.LocalEvInputExposureEv();
+            if (inputExposureEv != 0.f) adopt(RenderRawDevelopmentExposure(input, inputExposureEv));
             const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(inputLink->fromNodeId, inputLink->fromSocketId);
             const auto cached = context.imageFingerprintCache.find(key);
             auto fingerprint = cached == context.imageFingerprintCache.end() ? 0 : cached->second;
-            if(fingerprint) Stack::Renderer::RawDevelopmentCache::HashTypedValue(fingerprint,recipe.preToneExposureEv);
+            if(fingerprint) Stack::Renderer::RawDevelopmentCache::HashTypedValue(fingerprint, inputExposureEv);
             if (IsLocalRangeEnabled(recipe.localRange))
                 adopt(RenderRawDevelopmentLocalRange(result.texture, recipe.localRange, node.rawWorkingSpace,
                     recipe.technical.processingVersion, fingerprint, nativeWidth, nativeHeight));
@@ -151,6 +152,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
                 accumulated.Reset(next.Release()); lastMask = gradient.mask;
             }
             if (accumulated) adopt(RenderRawGradientBlend(gradientInput, accumulated.Get(), lastMask, 0, 3));
+            if (recipe.exposureAfterLight && recipe.preToneExposureEv != 0.f) {
+                const auto protectedSpace = recipe.protectExposureHighlights
+                    ? std::optional{node.rawWorkingSpace} : std::nullopt;
+                adopt(RenderRawDevelopmentExposure(result.texture, recipe.preToneExposureEv, nullptr, protectedSpace));
+            }
             break;
         }
         case GraphOperationKind::ColorWarp:

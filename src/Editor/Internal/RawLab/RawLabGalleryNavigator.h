@@ -2,6 +2,7 @@
 
 #include "RawLabGalleryFolderTree.h"
 #include "GalleryFilesystemBrowser.h"
+#include "GalleryFileTypeFilter.h"
 #include "Library/LibraryControls.h"
 #include "Raw/RawWorkspace.h"
 #include <functional>
@@ -15,6 +16,8 @@ struct GalleryNavigatorAction {
     bool folderChanged = false, openFolder = false;
     std::optional<std::string> folder;
     std::optional<std::filesystem::path> openPath;
+    std::optional<std::filesystem::path> openImage;
+    std::optional<std::uint64_t> fileTypes;
     ImVec2 browseMinimum{},browseMaximum{};
 };
 
@@ -26,7 +29,8 @@ class GalleryNavigator {
 public:
     GalleryNavigatorAction Render(GalleryFolderTree& tree,
         RawWorkspace::GalleryContentMode category, const std::optional<std::string>& folder,
-        ImVec4 surface, const std::function<void()>& footer);
+        ImVec4 surface, const std::function<void()>& footer,
+        std::uint64_t fileTypes = AllGalleryFileTypes);
     GalleryNavigatorFooterAction RenderFooter(bool grid, bool properties,
         bool canSort, const char* sortLabel);
 

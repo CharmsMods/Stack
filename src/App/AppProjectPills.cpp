@@ -6,6 +6,7 @@
 #include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 void AppShell::CancelProjectPillPreview() {
@@ -127,14 +128,44 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
             QueueWorkspaceTabAction(WorkspaceTabAction::Select, id);
             activationQueued = true;
         }
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
+        const bool middleClose = enabled && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
+            ImGui::GetTopMostPopupModal() == nullptr &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup | ImGuiHoveredFlags_NoNavOverride);
+        if (middleClose) {
+            ImGui::ClosePopupsOverWindow(ImGui::GetCurrentWindow(), false);
             CancelProjectPillPreview(); QueueWorkspaceTabAction(WorkspaceTabAction::Close, id); hovered = 0;
         }
         const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
         auto* draw = ImGui::GetWindowDrawList();
-        if (ImGui::IsItemVisible() && !ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+        if (workspace->galleryArrivalPending && ImGui::IsItemVisible()) {
+            if (workspace->galleryArrivalStarted < 0) workspace->galleryArrivalStarted=ImGui::GetTime();
+            const float elapsed=float((ImGui::GetTime()-workspace->galleryArrivalStarted)/.32);
+            const float t=Stack::Notifications::SystemReducedMotion()?1.f:std::clamp(elapsed,0.f,1.f);
+            const float ease=t*t*(3.f-2.f*t);
+            const auto& origin=workspace->galleryOrigin;
+            if (origin.thumbnail && t<1.f) {
+                const auto mix=[&](ImVec2 a,ImVec2 b) {return ImVec2(a.x+(b.x-a.x)*ease,a.y+(b.y-a.y)*ease);};
+                const float fit=std::min((max.x-min.x-4.f*rail.scale)/origin.thumbnail->width,
+                    (max.y-min.y-4.f*rail.scale)/origin.thumbnail->height);
+                const ImVec2 extent(origin.thumbnail->width*fit,origin.thumbnail->height*fit);
+                const ImVec2 destination((min.x+max.x-extent.x)*.5f,(min.y+max.y-extent.y)*.5f);
+                ImGui::GetForegroundDrawList()->AddImageRounded((ImTextureID)(intptr_t)origin.thumbnail->texture,
+                    mix(origin.minimum,destination),mix(origin.maximum,{destination.x+extent.x,destination.y+extent.y}),
+                    origin.uvMinimum,origin.uvMaximum,IM_COL32_WHITE,3.f*rail.scale);
+            }
+            if(t>=1.f) workspace->galleryArrivalPending=false;
+        }
+        if (ImGui::IsItemVisible() && !workspace->galleryArrivalPending && !ImGui::IsItemClicked(ImGuiMouseButton_Middle))
             Stack::Navigation::DrawProjectEntry(draw,min,max,rail.scale,texture,width,height,
                 automatic ? "Auto" : name,selected,dirty);
+        if (ImGui::IsItemVisible() && !workspace->galleryArrivalPending && editor.IsGalleryBracketProcessing()) {
+            const ImVec2 center((min.x+max.x)*.5f,(min.y+max.y)*.5f);
+            const float radius=6.f*rail.scale;
+            draw->AddCircleFilled(center,radius+3.f*rail.scale,IM_COL32(0,0,0,180),20);
+            const float angle=float(std::fmod(ImGui::GetTime()*5.,6.283185307));
+            draw->PathArcTo(center,radius,angle,angle+4.5f,20);
+            draw->PathStroke(IM_COL32(245,245,245,255),0,1.7f*rail.scale);
+        }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s",name);
         // Resolve command status only while this particular menu is open.
         const bool menuOpen=ImGui::IsPopupOpen("ProjectActions");
@@ -149,7 +180,7 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         // Include the opening frame, and release the hold after selection,
         // Escape or an outside click. The reveal update consumes this next frame.
         rail.projectMenuOpen |= ImGui::IsPopupOpen("ProjectActions");
-        if (selected && m_ScrollActiveProjectTabIntoView) ImGui::SetScrollHereY(.5f);
+        if ((selected || workspace->galleryArrivalPending) && m_ScrollActiveProjectTabIntoView) ImGui::SetScrollHereY(.5f);
         ImGui::PopID();
     }
     ImGui::EndDisabled();

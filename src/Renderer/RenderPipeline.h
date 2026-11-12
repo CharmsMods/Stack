@@ -746,6 +746,7 @@ private:
     unsigned int m_RawDevelopmentRgbDenoiseBandProgram;
     unsigned int m_RawDevelopmentRgbDenoiseReconstructProgram;
     unsigned int m_RawDevelopmentExposureProgram;
+    unsigned int m_RawDevelopmentProtectedExposureProgram = 0;
     unsigned int m_RawDevelopmentColorWarpProgram;
     unsigned int m_RawDevelopmentColorWarpProxyProgram;
     unsigned int m_RawDevelopmentCropProgram;
@@ -1142,7 +1143,7 @@ private:
     void EnsureRawDevelopmentLocalRangeOverlayProgram();
     void EnsureRawDevelopmentLocalRangeQualifierProgram();
     void EnsureRawDevelopmentRgbDenoisePrograms();
-    void EnsureRawDevelopmentExposureProgram();
+    unsigned int EnsureRawDevelopmentExposureProgram(bool protectHighlights);
     unsigned int BuildRawDevelopmentLocalRangeSelectionBits(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
@@ -1266,7 +1267,8 @@ private:
     unsigned int RenderRawDevelopmentExposure(
         unsigned int inputTexture,
         float exposureEv,
-        const Stack::RawRecipe::RawColorCalibrationTransform* calibration = nullptr);
+        const Stack::RawRecipe::RawColorCalibrationTransform* calibration = nullptr,
+        std::optional<Raw::RawWorkingSpace> protectedWorkingSpace = std::nullopt);
     unsigned int RenderRawDevelopmentLocalRange(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,

@@ -13,5 +13,4 @@ void EditorModule::ClearRawCurveDragState() {
     };
     clear(m_RawWorkspaceLabUi.zonesCurveGraph);
     for (auto& curve : m_RawWorkspaceLabUi.toneCurveGraphs) clear(curve);
-    for (auto& entry : m_RawWorkspaceLabUi.zoneAreas.graphs) clear(entry.second.interaction);
 }

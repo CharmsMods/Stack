@@ -46,6 +46,11 @@ RawDevelopmentRecipe ReadGraphOperation(const GraphOperation& operation) {
             if (p.contains("evGradients")) serialized["evGradients"] = p.at("evGradients");
             recipe = DeserializeRecipe(serialized);
             recipe.preToneExposureEv = p.value("ev",0.f);
+            // Local EV has one supported order and adaptive range. These are
+            // processing rules, not switches that can survive in saved nodes.
+            recipe.exposureAfterLight = true;
+            recipe.protectExposureHighlights = true;
+            recipe.localRange.light.automatic = true;
             break;
         }
         case GraphOperationKind::ToneCurve: recipe.finishTone.layerJson=p; break;
@@ -63,6 +68,7 @@ void WriteGraphOperation(GraphOperation& operation, const RawDevelopmentRecipe& 
             const auto serialized = SerializeRecipe(edited);
             operation.parameters = {{"localRange", serialized.at("localRange")}, {"evGradients", serialized.at("evGradients")}};
             if (edited.preToneExposureEv != 0.f) operation.parameters["ev"] = edited.preToneExposureEv;
+            operation.parameters["localRange"]["lightBands"]["automatic"] = true;
             break;
         }
         case GraphOperationKind::ToneCurve: operation.parameters=NodeMath::CaptureToneCurveParameters(edited.finishTone.layerJson); break;
@@ -94,6 +100,8 @@ RawDevelopmentRecipe BuildTechnicalSourceRecipe(const RawDevelopmentRecipe& curr
     auto source = current;
     source.colorCalibration = {};
     source.preToneExposureEv = 0;
+    source.exposureAfterLight = false;
+    source.protectExposureHighlights = false;
     source.localRange = DefaultLocalRangeRecipe();
     source.evGradients.clear(); source.toneGradients.clear();
     source.finishTone.layerJson = DefaultFinishToneJson();

@@ -62,7 +62,7 @@ bool EditorModule::RenderRawWorkspaceGalleryActionBar(bool nativeWindow) {
         ImGui::TextDisabled("%zu selected", count);
         if (canCreate) {
             ImGui::SameLine();
-            if (Ui::TextButton("Create Capture Set"))
+            if (Ui::TextButton("Bracket"))
                 ExecuteRawGalleryAction(Action::CreateCaptureSet, CaptureRawGalleryActionContext());
         }
     }

@@ -6,10 +6,8 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/RawWorkspaceAutoBaseState.h"
 #include "Editor/RawVariablePrecisionValueGraph.h"
-#include "Editor/RawZoneAreaHistory.h"
 #include "Project/NodeEditTarget.h"
 #include "Editor/RawExposureHistory.h"
-#include "Editor/RawZoneAreaPreview.h"
 #include "Editor/Internal/RawLab/RawDenoiseMapEditor.h"
 #include "Editor/Internal/RawLab/RawLabColorWheelRenderer.h"
 #include "Editor/Timeline/TimelineAnimation.h"
@@ -361,56 +359,6 @@ struct RawCurveGraphUiState {
     ImVec2 dragPointStart { 0.0f, 0.0f };
 };
 
-struct RawZoneAreaGraphState {
-    RawCurveGraphUiState interaction;
-    int selectedPoint = -1;
-    float minimumEv = -8.0f;
-    float maximumEv = 6.0f;
-    float minimumGain = -4.0f;
-    float maximumGain = 4.0f;
-    std::size_t fittedMask = 0;
-    bool fittedFullResolution = false;
-};
-
-struct RawZoneAreaUiState {
-    Stack::Editor::RawZoneAreaHistory history;
-    std::optional<Stack::Project::NodeEditTarget> nodeTarget;
-    std::string sourceKey;
-    std::string selectedId;
-    int mode = 0; // Adjust, Add, Erase.
-    float radius = 0.06f;
-    float softness = 1.0f;
-    float opacity = 1.0f;
-    bool followEdges = false;
-    float edgeSensitivity = .65f;
-    bool showMask = true;
-    bool showCursor = true;
-    bool effectPreview = false;
-    bool legacy = false;
-    bool active = false;
-    bool changed = false;
-    float pressY = 0.0f;
-    float pressOffsetEv = 0.0f;
-    int gestureMode = 0;
-    std::string gestureAreaId;
-    Stack::RawRecipe::RawDevelopmentRecipe beforeGesture;
-    std::unordered_map<std::string, RawZoneAreaGraphState> graphs;
-    std::size_t overlayKey = 0;
-    unsigned int overlayTexture = 0;
-    int overlayWidth = 0, overlayHeight = 0;
-    std::shared_ptr<const Stack::RawRecipe::ImageGuide> neutralGuide;
-    std::shared_ptr<Stack::Editor::RawZoneAreaPreview> maskWorker;
-    bool maskPending = false;
-    struct MaskCache {
-        std::size_t key = 0;
-        bool fullResolution = false;
-        bool authoritative = false, provisional = false;
-        std::shared_ptr<const Stack::RawRecipe::ImageGuide> guide;
-        std::shared_ptr<const Stack::RawRecipe::RawZoneAreaMaskPreview> preview;
-    };
-    std::unordered_map<std::string, MaskCache> masks;
-};
-
 struct RawPreviewLayoutState {
     bool valid = false;
     bool fitting = true;
@@ -549,7 +497,6 @@ struct RawWorkspaceLabUiState : RawNodePrimaryUiState {
     float lightDemosaicPreviousPointerAngle = 0.0f;
     int lightDemosaicPressedItem = -1;
     int lightDemosaicSelectedItem = 2;
-    RawZoneAreaUiState zoneAreas;
     int selectedEvGradient = -1;
     int selectedToneGradient = -1;
     int hoveredEvGradient = -1;

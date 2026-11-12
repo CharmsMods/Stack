@@ -39,6 +39,15 @@ bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
 }
 
 void EditorModule::WorkspaceLoaded(WorkspaceMode mode) {
+    // A newly opened document starts fitted, independently of the previous
+    // image's camera or the dimensions of its provisional thumbnail.
+    m_Viewport.ResetSinglePreviewState();
+    m_RawWorkspaceLabUi.previewActualPixels=false;
+    m_RawWorkspaceLabUi.previewZoom=m_RawWorkspaceLabUi.previewZoomTarget=1.f;
+    m_RawWorkspaceLabUi.previewPanX=m_RawWorkspaceLabUi.previewPanY=0.f;
+    m_RawWorkspaceLabUi.previewZoomAnimating=m_RawWorkspaceLabUi.previewPanning=false;
+    m_RawWorkspaceLabUi.previewLayout={};
+    m_RawWorkspaceLabUi.previewViewSourceKey.clear();
     m_NodeEditorPanel.focusTarget.reset();
     m_ViewSectionTab=1;m_ViewSectionOpen=true;
     m_RawWorkspaceLabUi.settingsTabActive=false;m_RawAssetCapture.assetsTab=false;
@@ -70,7 +79,6 @@ void EditorModule::RenderViewWorkspace() {
     // A released/hidden control can leave only the transaction open. It must
     // not permanently own Escape or block optional input analysis.
     if (m_Project->rawLayers.GestureActive() && !ImGui::IsAnyItemActive() && !ImGui::IsAnyMouseDown() &&
-        !m_RawWorkspaceLabUi.zoneAreas.active &&
         !m_RawWorkspaceLabUi.colorWarpInteractionActive && !m_Project->rawInteractionDraft.active)
         m_Project->rawLayers.EndGesture();
     const bool escapeOwned = ImGui::IsAnyItemActive() || ImGui::IsAnyMouseDown() ||

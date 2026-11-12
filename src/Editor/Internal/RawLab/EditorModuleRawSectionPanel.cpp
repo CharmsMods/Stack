@@ -168,7 +168,8 @@ bool EditorModule::ConsumeRawToolPickerRequest() {
 const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspacePanelGalleryPresentation() {
     SynchronizeRawGalleryFolderScope();
     const auto& source = GetRawWorkspaceCategoryPresentation();
-    if (!m_PermanentGalleryWorkspace || (!m_RawGalleryFolderFilter && m_RawGalleryIncludeSubfolders)) return source;
+    if (!m_PermanentGalleryWorkspace || (!m_RawGalleryFolderFilter && m_RawGalleryIncludeSubfolders &&
+        m_RawGalleryFileTypes == AllGalleryFileTypes)) return source;
     if (m_RawGalleryFilteredRevision == m_RawWorkspaceGalleryRevision &&
         m_RawGalleryFilteredMode == m_RawWorkspaceGalleryContentMode &&
         m_RawGalleryFilteredQueueRevision == m_RawWorkspaceCategoryQueueRevision) return m_RawGalleryFilteredPresentation;
@@ -180,10 +181,18 @@ const Stack::RawWorkspace::GalleryPresentation& EditorModule::GetRawWorkspacePan
     auto& filtered = m_RawGalleryFilteredPresentation;
     filtered.groups.erase(std::remove_if(filtered.groups.begin(), filtered.groups.end(),
         [&](const auto& group) { return !contains(group.folderKey); }), filtered.groups.end());
+    for (auto& group : filtered.groups)
+        group.sources.erase(std::remove_if(group.sources.begin(), group.sources.end(),
+            [&](const auto& view) { return !GalleryFileTypeMatches(view.relativePathKey, m_RawGalleryFileTypes); }),
+            group.sources.end());
+    filtered.groups.erase(std::remove_if(filtered.groups.begin(), filtered.groups.end(),
+        [](const auto& group) { return group.sources.empty(); }), filtered.groups.end());
     filtered.projects.erase(std::remove_if(filtered.projects.begin(), filtered.projects.end(),
         [&](const auto& project) {
             const auto* reference = FindRawWorkspaceSourceByKey(project.referenceSourceKey);
-            return !reference || !contains(reference->parentFolderKey);
+            const bool folderMatches = (!m_RawGalleryFolderFilter && m_RawGalleryIncludeSubfolders) ||
+                (reference && contains(reference->parentFolderKey));
+            return !folderMatches || !GalleryFileTypeMatches(project.referenceSourceKey, m_RawGalleryFileTypes);
         }), filtered.projects.end());
     filtered.totalSources = 0;
     for (const auto& group : filtered.groups) filtered.totalSources += static_cast<int>(group.sources.size());

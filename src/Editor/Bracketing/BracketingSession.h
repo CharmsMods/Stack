@@ -41,6 +41,7 @@ struct BracketingSession : Project::BracketingState {
     } curvePlot;
     bool selectionRestored = false, synchronizing = false;
     bool gradedResult = true;
+    bool galleryBackground = false;
     bool orientationReviewRequested = false;
     bool processAfterOrientationReview = true;
     std::map<int, int> orientationChoices;

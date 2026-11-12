@@ -9,6 +9,7 @@
 #include <GLFW/glfw3.h>
 
 #include <cmath>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -68,6 +69,52 @@ bool ValidateFusedRawGainMapRange() {
                               << std::endl;
                     return false;
                 }
+            }
+        }
+    }
+    return true;
+}
+
+// Reuse the small RAW pipeline fixture to bound neutral completion to sensor
+// clipping. This checks actual shader output, including nonclipped neighbors.
+bool ValidateFullyClippedHighlights() {
+    constexpr int width=16,height=8;
+    Raw::RawImageData raw;
+    raw.metadata.rawWidth=raw.metadata.visibleWidth=width;
+    raw.metadata.rawHeight=raw.metadata.visibleHeight=height;
+    raw.metadata.pixelLayout=Raw::RawPixelLayout::MosaicBayer;
+    raw.metadata.cfaPattern=Raw::CfaPattern::RGGB;
+    raw.metadata.orientation=1;
+    raw.metadata.blackLevel=0;raw.metadata.whiteLevel=65535;
+    raw.metadata.cameraWhiteBalance={2.f,1.f,1.5f,1.f};
+    raw.rawBuffer.resize(width*height);
+    for(int y=0;y<height;++y)for(int x=0;x<width;++x)
+        raw.rawBuffer[y*width+x]=x<8?65535:32768;
+    Raw::RawDevelopSettings settings;
+    settings.cameraTransformEnabled=false;settings.mosaicDenoise.enabled=false;
+    settings.falseColorSuppression=settings.defringeStrength=settings.highlightEdgeCleanup=0;
+    Raw::RawGpuPipeline pipeline;
+    const auto read=[&](Raw::RawDebugView view) {
+        settings.debugView=view;
+        const auto texture=pipeline.Render(raw,settings);
+        std::vector<float> pixels(width*height*4);
+        if(!texture) {std::cerr<<"Highlight fixture render failed: "<<pipeline.GetLastError()<<"\n";return std::vector<float>{};}
+        glBindTexture(GL_TEXTURE_2D,texture);glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,pixels.data());
+        glBindTexture(GL_TEXTURE_2D,0);return pixels;
+    };
+    const auto before=read(Raw::RawDebugView::WhiteBalancedCameraRgb);
+    const auto after=read(Raw::RawDebugView::FinalOutput);
+    if(before.empty() || after.empty())return false;
+    for(int y=0;y<height;++y)for(int x=0;x<width;++x) {
+        const auto i=(y*width+x)*4;
+        const float maximum=std::max({before[i],before[i+1],before[i+2]});
+        // Keep a full CFA neighborhood on the clipped side; the boundary's
+        // mixed sensor samples are intentionally left recoverable.
+        for(int c=0;c<3;++c) {
+            const float expected=x<7?maximum:before[i+c];
+            if(std::abs(after[i+c]-expected)>.003f) {
+                std::cerr<<"Fully clipped highlight boundary failed at "<<x<<","<<y<<" channel "<<c<<'\n';
+                return false;
             }
         }
     }
@@ -175,7 +222,7 @@ bool ValidateRawRgbDenoiseGpuShaders() {
         return false;
     }
     glfwDefaultWindowHints();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
@@ -188,7 +235,7 @@ bool ValidateRawRgbDenoiseGpuShaders() {
     if (!window) {
         glfwTerminate();
         std::cerr
-            << "RAW RGB denoise GPU validation failed: OpenGL 3.3 is unavailable."
+            << "RAW RGB denoise GPU validation failed: OpenGL 4.3 is unavailable."
             << std::endl;
         return false;
     }
@@ -209,6 +256,9 @@ bool ValidateRawRgbDenoiseGpuShaders() {
         valid = pipeline.ValidateRawRgbDenoiseProgramsForTesting();
         valid = ValidateFusedRawGainMapRange() && valid;
         valid = ValidateNearestNeighborDemosaic() && valid;
+        const bool highlights=ValidateFullyClippedHighlights();
+        std::cout<<"Fully clipped highlight and unchanged-neighbor validation "<<(highlights?"passed":"failed")<<".\n";
+        valid = highlights && valid;
     }
     glfwMakeContextCurrent(nullptr);
     glfwDestroyWindow(window);

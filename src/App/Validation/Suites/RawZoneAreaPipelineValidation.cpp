@@ -9,7 +9,6 @@
 #include <stdexcept>
 
 namespace Stack::Validation {
-bool ValidateRawZoneAreaGraph();
 bool ValidateRawZoneAreaWorker(GLFWwindow*);
 namespace {
 void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
@@ -172,7 +171,7 @@ bool ValidateRawZoneAreaPipeline() {
     if(!window) {glfwTerminate(); return false;}
     glfwMakeContextCurrent(window);
     bool ok=false;
-    try {Require(LoadGLFunctions(),"GL loading failed");ValidatePipeline();ok=ValidateRawZoneAreaGraph() && ValidateRawZoneAreaWorker(window);}
+    try {Require(LoadGLFunctions(),"GL loading failed");ValidatePipeline();ok=ValidateRawZoneAreaWorker(window);}
     catch(const std::exception& error) {std::cerr<<"Zones pipeline validation failed: "<<error.what()<<'\n';}
     glfwMakeContextCurrent(nullptr);glfwDestroyWindow(window);glfwTerminate();
     if(ok) std::cout<<"Zones RAW pipeline validation passed.\n";

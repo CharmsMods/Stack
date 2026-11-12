@@ -66,8 +66,8 @@ RawLabPreviewPresentationBounds MakeRawLabPreviewPresentationBounds(
             canvasMinimum.x + sidePadding,
             canvasMinimum.y + verticalPadding),
         ImVec2(
-            std::max(kMinimumPreviewExtent, canvasSize.x - sidePadding * 2.0f),
-            std::max(kMinimumPreviewExtent, canvasSize.y - verticalPadding * 2.0f))
+            std::max(1.0f, canvasSize.x - sidePadding * 2.0f),
+            std::max(1.0f, canvasSize.y - verticalPadding * 2.0f))
     };
 }
 
@@ -307,6 +307,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         m_RawWorkspaceLabUi.previewViewSourceKey =
             preview.identity;
         m_RawWorkspaceLabUi.previewZoom = 1.0f;
+        m_RawWorkspaceLabUi.previewActualPixels = false;
         m_RawWorkspaceLabUi.previewZoomTarget = 1.0f;
         m_RawWorkspaceLabUi.previewZoomAnimating = false;
         m_RawWorkspaceLabUi.previewPanX = 0.0f;
@@ -353,8 +354,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (thumbnailTexture != 0 && thumbnailWidth > 1 && thumbnailHeight > 1) {
             const ImVec2 canvasStart = ImGui::GetCursorScreenPos();
             const ImVec2 canvasBounds(
-                std::max(120.0f, available.x),
-                std::max(120.0f, available.y));
+                std::max(1.0f, available.x),
+                std::max(1.0f, available.y));
             const RawLabPreviewPresentationBounds presentationBounds =
                 MakeRawLabPreviewPresentationBounds(
                     canvasStart,
@@ -402,7 +403,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
     // Tool selection changes overlays, never the camera's available space.
     const ImVec2 canvasStart = layoutStart;
     const ImVec2 canvasBounds(
-        std::max(120.0f, available.x), std::max(120.0f, available.y));
+        std::max(1.0f, available.x), std::max(1.0f, available.y));
     const RawLabPreviewPresentationBounds presentationBounds =
         MakeRawLabPreviewPresentationBounds(
             canvasStart,
@@ -529,7 +530,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                  forwardedWheel) && bounds.Contains(navigationMouse);
 
             if(currentRawPreview && !Stack::Workspace::IsPreview()) {
-                const bool editOwnsPointer=ui.zoneAreas.active || ui.gradientDragHandle>=0 ||
+                const bool editOwnsPointer=ui.gradientDragHandle>=0 ||
                     m_RawAssetCapture.armed || m_RawAssetCapture.drawing ||
                     ui.colorWarpPendingCircleDrawing || (m_EditingRawLayerMask && m_RawLayerMaskDrag>=0);
                 const bool canStart=previewHovered && !RawFloatingSurfaceOwnsPointer() &&
@@ -571,9 +572,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             navigationInput.minimumZoom = std::min({.10f, navigation.zoom, navigation.target});
             navigationInput.maximumZoom = std::max({12.0f, navigation.zoom, navigation.target});
             const float targetBefore = navigation.target;
-            if ((m_RawWorkspaceLabUi.activeTool == RawLabTool::Zones &&
-                 m_RawWorkspaceLabUi.zoneAreas.active) ||
-                (m_EditingRawLayerMask && m_RawLayerMaskDrag >= 0) ||
+            if ((m_EditingRawLayerMask && m_RawLayerMaskDrag >= 0) ||
                 (m_RawAssetCapture.armed && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ui.previewSpacePanning)) {
                 // Keep the image under an authored stroke fixed through release.
                 navigation.target = navigation.zoom;
@@ -627,7 +626,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if(currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview() &&
             m_GalleryNavigationMotion && m_GalleryNavigationMotion->Owns(m_GalleryNavigationWorkspace)) {
             UpdateRawViewportCoverage(fullRect.Min,fullRect.Max,bounds.Min,bounds.Max,currentRawPreview);
-            return m_GalleryNavigationMotion->PresentImage(m_GalleryNavigationWorkspace,fullRect);
+            PresentGalleryOpeningImage(fullRect.Min,fullRect.Max);
+            return fullRect;
         }
         if(currentRawPreview && rememberLayout && !Stack::Workspace::IsPreview()) {
             const auto displayed=m_RawImageViewTransition.Present(Stack::Editor::ImageViewTransition::View::Raw,
@@ -706,7 +706,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (currentRawPreview && !capturingAsset)
             RenderRawWorkspaceLabGradientImage(selectedSource,
                 imageRect.Min, imageRect.Max);
-        if (currentRawPreview && !capturingAsset && !IsRawImageNavigationActive()) RenderRawWorkspaceLabImageAreas(selectedSource, imageRect.Min, imageRect.Max);
         const int colorWarpDisplayedPin =
             GetRawWorkspaceColorWarpDisplayedPin(previewRecipe);
         const int colorWarpSelectionViewMode =

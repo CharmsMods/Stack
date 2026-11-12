@@ -516,7 +516,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 CaptureBracketSurface(root / "unopened-stack-menu.png");
                 auto* popup=ImGui::GetCurrentContext()->OpenPopupStack.back().Window;
                 RequireBracketSurface(popup,"Missing Gallery context popup.");
-                ImGui::ActivateItemByID(popup->GetID("Create Capture Set"));
+                ImGui::ActivateItemByID(popup->GetID("Bracket"));
                 frame();
                 RequireBracketSurface(handoffs==1,"The context menu did not hand off the unopened stack.");
                 ImGuiWindow* selectionBar=nullptr;
@@ -528,12 +528,12 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 }
                 RequireBracketSurface(selectionBar,"Gallery selection action bar did not appear.");
                 CaptureBracketSurface(root / "gallery-capture-button.png");
-                const char* label="Create Capture Set";
+                const char* label="Bracket";
                 const auto buttonId=ImHashStr(label,0,selectionBar->GetID(label));
                 ImGui::ActivateItemByID(buttonId);
                 frame();
                 testingCaptureButton=false;
-                RequireBracketSurface(handedOff,"The Create Capture Set button did not hand off the selected originals.");
+                RequireBracketSurface(handedOff,"The Bracket button did not hand off the selected originals.");
                 foreground=owner.get();
                 viewRequestObserved = panelRequestObserved = false;
                 frame(); // Consume the operation's View/panel requests and start metadata inspection.
@@ -596,7 +596,7 @@ bool ValidateBracketingNodeSurface(int argc, char** argv) {
                 for (const auto& file : files) RequireBracketSurface(capturedText.find(file.filename().string()) != std::string::npos,
                     "Opening Bracketing lost capture: " + file.filename().string());
                 CaptureBracketSurface(root / "reopened-controls.png");
-                std::cout << "PASS Gallery Create Capture Set before import, selected originals, requested View/Source panel, "
+                std::cout << "PASS Gallery Bracket before import, selected originals, requested View/Source panel, "
                     "contextual canvas, independent project switch and reopened Bracketing controls; no bracket import or Process (" << frames
                     << " submitted frames)\nCaptures: " << root << '\n' << std::flush;
                 success = true;

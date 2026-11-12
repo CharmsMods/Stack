@@ -193,7 +193,7 @@ bool EditorModule::RenderRawWorkspaceLabGalleryHeader(bool nativeWindow, bool si
     const std::size_t selectedCount = projectsContent
         ? 0u
         : m_RawWorkspace.selectedSourceKeys.size();
-    const char* createProjectLabel = "Create Capture Set";
+    const char* createProjectLabel = "Bracket";
     const bool compactFilmstrip = !nativeWindow;
     const float unit = ImGui::GetFontSize() / 13.f;
     const auto advanceHeaderControl = [&](float gap) {
@@ -697,9 +697,11 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             m_RawWorkspaceLabFilmstripProjectTimelineActive = false;
         }
         ImGui::TextDisabled(
-            projectsOnly
+            m_PermanentGalleryWorkspace && m_RawGalleryFileTypes != Stack::Editor::RawLabInternal::AllGalleryFileTypes
+                ? "No items match these file types. Change the Images filter to show more."
+                : projectsOnly
                 ? "No saved projects in this folder."
-                : "No RAW images in this workspace.");
+                : "No images in this workspace.");
         return;
     }
 
@@ -1234,8 +1236,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     imageArea.Min.y + (imageArea.GetHeight() - fitted.y) * 0.5f);
                 const ImVec2 imageMaximum(imageMinimum.x + fitted.x, imageMinimum.y + fitted.y);
                 badgeArea = ImRect(imageMinimum, imageMaximum);
-                if (compactFilmstrip && (!filmstripTargetMembers || filmstripTargetMembers->empty() || source.relativePathKey == filmstripTargetMembers->front()))
-                    gridBrowse.filmstripSlots.Report(currentFilmstripTimelineIndex, textureWidth, textureHeight);
+                // Thumbnail readiness changes pixels, never the strip's slot
+                // geometry. Late decodes must not move its cards or scrollbar.
                 if (!RecordRawWorkspaceGalleryThumbnail(source.relativePathKey,
                         imageMinimum, imageMaximum)) {
                     drawList->AddImage(
@@ -3386,7 +3388,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Bracket ? "Bracket" : "Projects",
             opened ? gridBrowse.groups[0].size() : projectStacks->size(),itemAt);
         if (gridBrowse.projectGroups && gridBrowse.openedFrame != ImGui::GetFrameCount() &&
-            (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+            ((ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ||
              (!gridImageHovered && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::GetDragDropPayload())))
             gridBrowse.Close();
     }
@@ -3421,7 +3423,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         }
         gridGroup = -1;
         if (gridBrowse.openedFrame != ImGui::GetFrameCount() &&
-            (ImGui::IsKeyPressed(ImGuiKey_Escape,false) ||
+            ((ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape,false)) ||
              (!gridImageHovered && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::GetDragDropPayload())))
             gridBrowse.Close();
     } else if (!projectsOnly && m_PermanentGalleryWorkspace) {
@@ -4243,7 +4245,9 @@ bool EditorModule::RequestOpenRawWorkspaceProjectFromGallery(
         [this](bool opened) {
             if (!opened) return;
             if (IsMultiFrameRawProjectActive()) {
-                OpenBracketingTool();
+                m_RawWorkspaceLabUi.activeTool = RawLabTool::View;
+                m_Project->nodeEditor.reset();
+                SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
             } else if (!IsRawWorkspaceProjectActive()) {
                 RequestOpenEditorTab();
                 return;

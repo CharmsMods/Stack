@@ -22,22 +22,22 @@ void RenderPipeline::CaptureRawLayerLocalScope(
     const auto key = Stack::Renderer::GraphExecution::MakeNodeSocketKey(incoming?incoming->fromNodeId:node.nodeId,incoming?incoming->fromSocketId:"inputImageOut");
     const auto fp = context.imageFingerprintCache.find(key);
     const std::size_t fingerprint = fp == context.imageFingerprintCache.end() ? 0 : fp->second;
-    // Local EV applies its own exposure offset before evaluating the curve.
-    // Measure that same input, while preserving the original image below for
+    // Measure the same input as the curve and keep the original image for
     // the area reference statistics used by RenderRawOperation.
+    const float inputExposureEv = recipe.LocalEvInputExposureEv();
     Stack::Renderer::ScopedGLTexture exposed;
-    if (recipe.preToneExposureEv != 0.f) {
-        exposed.Reset(RenderRawDevelopmentExposure(texture, recipe.preToneExposureEv));
+    if (inputExposureEv != 0.f) {
+        exposed.Reset(RenderRawDevelopmentExposure(texture, inputExposureEv));
         if (!exposed) throw std::runtime_error("Local EV input measurement is unavailable.");
     }
     const auto curveInput = exposed ? exposed.Get() : texture;
     auto curveInputFingerprint = fingerprint;
     if (curveInputFingerprint != 0)
-        Stack::Renderer::RawDevelopmentCache::HashTypedValue(curveInputFingerprint,recipe.preToneExposureEv);
+        Stack::Renderer::RawDevelopmentCache::HashTypedValue(curveInputFingerprint, inputExposureEv);
     CaptureRawDevelopmentLocalRangeGraphScopeReadback(curveInput, recipe.localRange, width, height,
         node.rawWorkingSpace, nativeWidth, nativeHeight,curveInputFingerprint);
     m_RawDevelopmentGraphScopeReadback.graphInputFingerprint = fingerprint;
-    m_RawDevelopmentGraphScopeReadback.inputExposureEv = recipe.preToneExposureEv;
+    m_RawDevelopmentGraphScopeReadback.inputExposureEv = inputExposureEv;
     if (!recipe.localRange.areas.empty()) {
         const bool external = node.rawOperation.parameters.value("graphCoverage", false);
         for (auto& area : recipe.localRange.areas) {

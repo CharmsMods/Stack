@@ -7,30 +7,15 @@
 
 namespace Stack::Editor {
 bool DrawLightRangeSettings(RawWorkspaceEditContext& c,RawRecipe::LightRange fallback,float measuredExposure) {
-    auto& light=c.recipe.localRange.light;
     if(!c.nodeTarget || !c.editorState)return false;
     auto fit=c.inputAnalysis ? c.inputAnalysis->lightRange : fallback;
     if(fit.valid) {
-        const float shift=c.recipe.preToneExposureEv-(c.inputAnalysis ? c.inputAnalysis->inputExposureEv : measuredExposure);
+        const float shift=c.recipe.LocalEvInputExposureEv()-(c.inputAnalysis ? c.inputAnalysis->inputExposureEv : measuredExposure);
         fit.lowEv+=shift;fit.highEv+=shift;
     }
-    bool automatic=light.automatic,changed=false;
-    ImGui::BeginDisabled(light.automatic && !fit.valid);
-    if(ImGui::Checkbox("Automatic tonal range",&automatic)) {
-        light.automatic=automatic;
-        if(!automatic){light.lowEv=fit.lowEv;light.highEv=fit.highEv;}
-        changed=true;
-    }
-    ImGui::EndDisabled();
-    if(light.automatic) {
-        if(fit.valid)ImGui::TextDisabled("Image range: %.2f to %.2f EV",fit.lowEv,fit.highEv);
-        else ImGui::TextDisabled("Measuring incoming image...");
-    } else {
-        auto& state=c.State<PanelControlState>();
-        changed|=PanelRoller("Lower bound","lightLow",light.lowEv,-48,light.highEv-.1f,.02f,-8,"%.2f EV",state);
-        changed|=PanelRoller("Upper bound","lightHigh",light.highEv,light.lowEv+.1f,48,.02f,6,"%.2f EV",state);
-    }
-    return changed;
+    if(fit.valid)ImGui::TextDisabled("Image range: %.2f to %.2f EV",fit.lowEv,fit.highEv);
+    else ImGui::TextDisabled("Measuring incoming image...");
+    return false;
 }
 bool DrawLightBandGraph(RawWorkspaceEditContext& c,RawRecipe::LightRange range,ImVec2 size) {
     auto& state=c.State<LightBandViewState>();

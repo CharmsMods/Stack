@@ -11,13 +11,16 @@
 using namespace Stack::Project;
 
 bool EditorModule::ApplyRawLayerStackEdit(RawLayerStackState candidate, bool affectsPixels, bool completesAction) {
+    const bool exposurePreview = GetProjectSessionKind() == ProjectSessionKind::RawPreview &&
+        SameRawLayerStackExceptExposure(m_Project->rawLayers.State(), candidate);
     const auto revision = m_Project->editRevision;
     auto prepared = m_Project->rawLayers.Prepare(std::move(candidate), m_RawLayerStatus,
         &m_Project->graph, ResolveRawWorkspaceStageOutputNodeId(), revision);
     if (!prepared || !m_Project->rawLayers.Commit(std::move(*prepared), m_RawLayerStatus,
         affectsPixels, completesAction, m_Project->editRevision, &m_Project->graph)) return false;
     ReconcileRawNodeEditorSelection();
-    MarkDirty();
+    if (exposurePreview) ++m_Project->editRevision;
+    else MarkDirty();
     if (affectsPixels) {
         MarkRenderRefreshDirty();
         NoteRawWorkspaceRecipePreviewEdit(m_Project->rawLayers.GestureActive());
@@ -34,6 +37,9 @@ bool EditorModule::RedoRawLayerEdit() {
 bool EditorModule::RestoreRawLayerHistoryEdit(bool redo) {
     if (!CommitRawLayerMaskGraph()) return false;
     m_Project->rawLayers.EndGesture();
+    const bool wasPreview = GetProjectSessionKind() == ProjectSessionKind::RawPreview;
+    const auto previewBefore = wasPreview
+        ? std::optional<RawLayerStackState>(m_Project->rawLayers.State()) : std::nullopt;
     const auto action = redo ? RawLayerHistoryAction::Redo : RawLayerHistoryAction::Undo;
     const bool notesOnly = m_Project->rawLayers.PendingHistoryIsNotesOnly(action);
     const auto* pending = m_Project->rawLayers.PendingSourceHistory(action);
@@ -44,6 +50,13 @@ bool EditorModule::RestoreRawLayerHistoryEdit(bool redo) {
     const auto update = RestoreRawLayerHistory(m_Project->rawLayers,action,m_Project->rawRecipe,
         m_Project->snapshot.get(),&m_Project->graph,sourceId);
     if (!update.success) { m_RawLayerStatus = update.errorMessage; return false; }
+    if (previewBefore && !update.preMergeChanged && !update.postMergeChanged &&
+        SameRawLayerStackExceptExposure(*previewBefore, m_Project->rawLayers.State())) {
+        ++m_Project->editRevision;
+        ReconcileRawNodeEditorSelection();
+        MarkRenderRefreshDirty();
+        return true;
+    }
     m_RawLayerStatus.clear();
     if (notesOnly) {
         if (m_RawLayerMaskWorkspace && m_RawLayerMaskWorkspace->projectCanvas) {
@@ -98,8 +111,6 @@ void EditorModule::SelectRawAdjustmentLayer(const std::string& id) {
     m_RawWorkspaceLabUi.selectedTonePoint = -1;
     m_RawWorkspaceLabUi.sceneToneSelectedPoint = -1;
     m_RawWorkspaceLabUi.sceneToneDraggingPoint = -1;
-    if (m_RawWorkspaceLabUi.zoneAreas.overlayTexture) glDeleteTextures(1, &m_RawWorkspaceLabUi.zoneAreas.overlayTexture);
-    m_RawWorkspaceLabUi.zoneAreas = {};
     m_RawWorkspaceLabUi.toneCurveGraphs = {};
     m_RawWorkspaceLabUi.gradientDrawShape = -1;
     m_RawWorkspaceLabUi.gradientDragHandle = -1;

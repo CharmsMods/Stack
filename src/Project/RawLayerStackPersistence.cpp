@@ -114,6 +114,28 @@ bool SameRawLayerStackState(const RawLayerStackState& a, const RawLayerStackStat
     return SerializeLayerStack(a,false,false) == SerializeLayerStack(b,false,false);
 }
 
+bool SameRawLayerStackExceptExposure(const RawLayerStackState& a, const RawLayerStackState& b) {
+    auto normalized = b;
+    const auto restoreExposure = [](const RawAdjustmentLayer& before, RawAdjustmentLayer& after) {
+        for (auto& node : after.graph.EditNodes()) {
+            if (node.kind != EditorNodeGraph::NodeKind::RawOperation ||
+                node.rawOperation.kind != RawRecipe::GraphOperationKind::Exposure) continue;
+            for (const auto& original : before.graph.GetNodes()) {
+                if (original.instanceUuid != node.instanceUuid || original.kind != node.kind ||
+                    original.rawOperation.kind != node.rawOperation.kind) continue;
+                if (original.rawOperation.parameters.contains("ev"))
+                    node.rawOperation.parameters["ev"] = original.rawOperation.parameters["ev"];
+                else node.rawOperation.parameters.erase("ev");
+                break;
+            }
+        }
+    };
+    restoreExposure(a.background, normalized.background);
+    for (auto& layer : normalized.layers)
+        if (const auto* before = FindRawAdjustmentLayer(a, layer.id)) restoreExposure(*before, layer);
+    return SameRawLayerStackState(a, normalized);
+}
+
 bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& result, std::string& error) {
     error.clear();
     try {

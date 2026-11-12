@@ -290,22 +290,17 @@ void EditorModule::CommitRawWorkspaceEditContext(
     }
     if (!context.rawAdjustmentLayerId.empty()) {
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            const bool exposurePreview = GetProjectSessionKind() == ProjectSessionKind::RawPreview;
             if (m_Project->rawLayers.CancelGesture()) {
-                MarkDirty(); MarkRenderRefreshDirty();
+                if (exposurePreview) ++m_Project->editRevision;
+                else MarkDirty();
+                MarkRenderRefreshDirty();
                 NoteRawWorkspaceRecipePreviewEdit(false);
             }
-            auto& areas = m_RawWorkspaceLabUi.zoneAreas;
-            if (areas.nodeTarget == context.nodeTarget) areas.history.Cancel();
-            areas.active=false;
-            for(auto& graph:areas.graphs) graph.second.interaction={};
             m_RawWorkspaceLabUi.sceneToneDraggingPoint=-1;
             ImGui::ClearActiveID();
             return;
         }
-        auto& areaUi = m_RawWorkspaceLabUi.zoneAreas;
-        if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity() &&
-            areaUi.nodeTarget == context.nodeTarget && (changed || !interactionActive))
-            areaUi.history.Observe(context.recipe.localRange.areas, interactionActive);
         if (changed) {
             if (interactionActive) m_Project->rawLayers.BeginGesture();
             Stack::Project::RawLayerStackState candidate;
@@ -333,20 +328,6 @@ void EditorModule::CommitRawWorkspaceEditContext(
             }
         }
         return;
-    }
-    auto& areaUi = m_RawWorkspaceLabUi.zoneAreas;
-    if (areaUi.sourceKey == GetActiveRawWorkspacePreviewIdentity() && areaUi.nodeTarget == context.nodeTarget) {
-        const bool cancelling = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
-        if (cancelling) {
-            auto restored = areaUi.history.Cancel();
-            changed |= !Stack::RawRecipe::EqualZoneAreas(restored, context.recipe.localRange.areas);
-            context.recipe.localRange.areas = std::move(restored);
-            areaUi.active = false;
-            interactionActive = false;
-            for (auto& entry : areaUi.graphs) entry.second.interaction = {};
-            ImGui::ClearActiveID();
-        }
-        else if (changed || !interactionActive) areaUi.history.Observe(context.recipe.localRange.areas, interactionActive);
     }
     if (context.multiFrameResult) {
         const bool cancelling = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape,false);
@@ -764,9 +745,6 @@ bool EditorModule::RenderRawWorkspaceActiveControls(RawWorkspaceEditContext& con
     const bool interactionActive =
         ImGui::IsAnyItemActive() ||
         graphInteractionActive ||
-        m_RawWorkspaceLabUi.zoneAreas.active ||
-        std::any_of(m_RawWorkspaceLabUi.zoneAreas.graphs.begin(), m_RawWorkspaceLabUi.zoneAreas.graphs.end(),
-            [&](const auto& entry) { return curveInteractionActive(entry.second.interaction); }) ||
         m_RawWorkspaceLabUi.colorWarpInteractionActive ||
         (m_RawWorkspaceLabUi.activeTool == RawLabTool::Light &&
          m_RawWorkspaceLabUi.lightInteractionActive);
@@ -1094,8 +1072,8 @@ void EditorModule::RenderRawWorkspaceLabUI() {
             m_RawWorkspaceLabFilmstripAnimationOpenHeight =
                 filmstripTargetHeight;
         }
-        m_RawWorkspaceLabAnimatedFilmstripHeight =
-            AnimateRawLabDrawerHeight(
+        m_RawWorkspaceLabAnimatedFilmstripHeight = m_PermanentGalleryWorkspace
+            ? filmstripTargetHeight : AnimateRawLabDrawerHeight(
                 m_RawWorkspaceLabAnimatedFilmstripHeight,
                 filmstripTargetHeight,
                 ImGui::GetIO().DeltaTime);

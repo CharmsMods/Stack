@@ -21,27 +21,38 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
     if (!owner || !output) return;
     const ImVec2 size(maximum.x - minimum.x, maximum.y - minimum.y);
     if (size.x <= 1 || size.y <= 1) return;
+    const float uiScale = std::max(.75f, ImGui::GetFontSize() / 16.f);
 
     // Follow the selected result upstream. Processing a generator through more
     // nodes does not replace that generator or its viewport handles.
     const auto* producer = FindRawPublishedNode(*owner, *output);
     if (!producer) return;
-    std::vector<int> pending{producer->id}, generators;
-    std::unordered_set<int> visited;
-    while (!pending.empty()) {
-        const int id = pending.back();
-        pending.pop_back();
-        if (!visited.insert(id).second) continue;
-        const auto* node = owner->graph.FindNode(id);
-        if (!node) continue;
-        if ((node->kind == EditorNodeGraph::NodeKind::MaskGenerator || node->kind == EditorNodeGraph::NodeKind::MaskTexture) &&
-            (node->maskKind == Kind::RadialGradient || node->maskKind == Kind::LinearGradient || node->maskKind == Kind::Square))
-            generators.push_back(id);
-        for (const auto& link : owner->graph.GetLinks())
-            // The sizing image can contain earlier masked edits; those shapes
-            // do not belong to this coverage branch.
-            if (link.toNodeId == id && link.toSocketId != "matchExtent") pending.push_back(link.fromNodeId);
+    auto& cache = m_RawMaskHandleGenerators;
+    if (cache.documentId != GetProjectDocumentId() || cache.layerId != owner->id ||
+        cache.revision != m_Project->rawLayers.Revision() || cache.producer != producer->id) {
+        cache.documentId = GetProjectDocumentId();
+        cache.layerId = owner->id;
+        cache.revision = m_Project->rawLayers.Revision();
+        cache.producer = producer->id;
+        cache.generators.clear();
+        std::vector<int> pending{producer->id};
+        std::unordered_set<int> visited;
+        while (!pending.empty()) {
+            const int id = pending.back();
+            pending.pop_back();
+            if (!visited.insert(id).second) continue;
+            const auto* node = owner->graph.FindNode(id);
+            if (!node) continue;
+            if ((node->kind == EditorNodeGraph::NodeKind::MaskGenerator || node->kind == EditorNodeGraph::NodeKind::MaskTexture) &&
+                (node->maskKind == Kind::RadialGradient || node->maskKind == Kind::LinearGradient || node->maskKind == Kind::Square))
+                cache.generators.push_back(id);
+            for (const auto& link : owner->graph.GetLinks())
+                // The sizing image can contain earlier masked edits; those shapes
+                // do not belong to this coverage branch.
+                if (link.toNodeId == id && link.toSocketId != "matchExtent") pending.push_back(link.fromNodeId);
+        }
     }
+    const auto& generators = cache.generators;
     if (generators.empty()) return;
     if (std::find(generators.begin(), generators.end(), m_RawLayerMaskGenerator) == generators.end())
         m_RawLayerMaskGenerator = generators.front();
@@ -160,7 +171,7 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
     if (hovered && !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         int nearest = -1;
-        float best = 12;
+        float best = 12.f * uiScale;
         if (m_RawLayerMaskDrag == MaskAwaitingPlacement) {
             if (inImage) nearest = MaskPlacementDrag;
         } else for (int i = 0; i < count; ++i) {
@@ -304,7 +315,8 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
     // pointer position even while its GPU image result is still pending.
     auto* draw = ImGui::GetWindowDrawList();
     // Retain the host View clip so handles remain usable beyond the photo.
-    const auto color = IM_COL32(255, 255, 255, 220);
+    const auto color = IM_COL32(255, 255, 255, 245);
+    const auto outlineColor = IM_COL32(12, 12, 12, 235);
     if (m_RawLayerMaskDrag == MaskAwaitingPlacement)
         draw->AddText({minimum.x+12,minimum.y+42},color,"Drag on the image to place this mask.");
     if (kind == Kind::LinearGradient) {
@@ -313,7 +325,8 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
             const float d=(i==0 ? 0.f : (i==1 ? -.5f : .5f))/scale;
             const auto a=screen(centerU+cs*d-sn*4.f,centerV+sn*d+cs*4.f);
             const auto b=screen(centerU+cs*d+sn*4.f,centerV+sn*d-cs*4.f);
-            draw->AddLine(a,b,color);
+            draw->AddLine(a,b,outlineColor,3.5f * uiScale);
+            draw->AddLine(a,b,color,1.5f * uiScale);
         }
     } else {
         std::array<ImVec2,64> outline;
@@ -328,16 +341,23 @@ void EditorModule::RenderRawLayerMaskHandles(const RawWorkspaceEditContext& cont
             y *= settings.radiusY;
             outline[i]=screen(centerU + cs*x-sn*y, centerV+sn*x+cs*y);
         }
-        draw->AddPolyline(outline.data(), static_cast<int>(outline.size()), color, ImDrawFlags_Closed, 1.5f);
+        draw->AddPolyline(outline.data(), static_cast<int>(outline.size()), outlineColor, ImDrawFlags_Closed, 3.5f * uiScale);
+        draw->AddPolyline(outline.data(), static_cast<int>(outline.size()), color, ImDrawFlags_Closed, 1.5f * uiScale);
         if(kind==Kind::RadialGradient)for(float boundary:{std::max(0.f,1.f-settings.feather/std::max(.001f,settings.radius)),1.f+settings.feather/std::max(.001f,settings.radius)}) {
             for(int i=0;i<64;++i){const float t=2*pi*i/64;const float x=std::cos(t)*settings.radius*boundary,y=std::sin(t)*settings.radiusY*boundary;
                 outline[i]=screen(centerU+cs*x-sn*y,centerV+sn*x+cs*y);}
-            draw->AddPolyline(outline.data(),64,IM_COL32(255,255,255,130),ImDrawFlags_Closed,1.f);
+            draw->AddPolyline(outline.data(),64,IM_COL32(12,12,12,190),ImDrawFlags_Closed,3.f * uiScale);
+            draw->AddPolyline(outline.data(),64,IM_COL32(255,255,255,190),ImDrawFlags_Closed,1.f * uiScale);
         }
 
     }
     for (int i = 0; i < count; ++i) {
-        draw->AddCircleFilled(handles[i], 5, IM_COL32(25, 25, 25, 230));
-        draw->AddCircle(handles[i], 5, color, 0, 1.5f);
+        const bool active = m_RawLayerMaskDrag == i;
+        const bool hot = hovered && distance(handles[i], mouse) < 12.f * uiScale;
+        const float radius = (active || hot ? 7.f : 6.f) * uiScale;
+        draw->AddCircleFilled(handles[i], radius + 2.f * uiScale, outlineColor);
+        draw->AddCircleFilled(handles[i], radius, color);
+        if (active || hot)
+            draw->AddCircleFilled(handles[i], 3.f * uiScale, ImGui::GetColorU32(ImGuiCol_CheckMark));
     }
 }

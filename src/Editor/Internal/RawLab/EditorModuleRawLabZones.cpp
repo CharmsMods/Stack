@@ -114,18 +114,6 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
         return changed;
     }
 
-    auto stopTargeting = [&]() {
-        if (!m_RawWorkspaceLocalRangeTargetMode) {
-            return;
-        }
-        const std::string selectedZoneId = m_RawWorkspaceLocalRangeTargetZoneId;
-        m_RawWorkspaceLocalRangeOverlayMode =
-            m_RawWorkspaceLocalRangeTargetPreviousOverlayMode;
-        ClearRawWorkspaceLocalRangeOverlayState();
-        ClearRawWorkspaceLocalRangeTargetState(false);
-        m_RawWorkspaceLocalRangeTargetZoneId = selectedZoneId;
-        MarkRenderRefreshDirty();
-    };
     if (ShowsRawLabSettings(section)) {
         if (BypassEyeButton(
                 "##RawLabEvBypass",
@@ -139,25 +127,8 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
         ImGui::TextUnformatted("EV adjustments");
         ImGui::Spacing();
 
-        const bool targetedView = m_RawWorkspaceLabUi.zonesTargetedView;
-        if (BareToolIslandButton("Overall Tones", !targetedView) && targetedView) {
-            stopTargeting();
-            m_RawWorkspaceLabUi.zonesTargetedView = false;
-        }
-        ImGui::SameLine(0.0f, 2.0f);
-        if (BareToolIslandButton("Areas", targetedView) && !targetedView) {
-            m_RawWorkspaceLabUi.zonesTargetedView = true;
-            m_RawWorkspaceLabUi.selectedZonePoint = -1;
-            if (!localRange.areas.empty()) {
-                m_RawWorkspaceAnalysisPending = true;
-                m_RawWorkspaceAnalysisRequested = false;
-                m_RawWorkspaceAnalysisQuietUntilTime = ImGui::GetTime() + .1;
-            }
-        }
-        ImGui::Spacing();
-
     }
-    if (!m_RawWorkspaceLabUi.zonesTargetedView) {
+    {
         if (ShowsRawLabGraph(section)) {
             const float minimumEv = context.recipe.localRange.minEv;
             const float maximumEv = context.recipe.localRange.maxEv;
@@ -178,7 +149,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             if(!bandView.advanced) {
                 auto bandRange=inputScope.lightRange;
                 if(bandRange.valid) {
-                    const float shift=context.recipe.preToneExposureEv-inputScope.inputExposureEv;
+                    const float shift=context.recipe.LocalEvInputExposureEv()-inputScope.inputExposureEv;
                     bandRange.lowEv+=shift;bandRange.highEv+=shift;
                 }
                 changed|=Stack::Editor::DrawLightBandGraph(context,bandRange,graphSize);
@@ -233,20 +204,6 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
             history.Observe(exposureEv, graph.draggingExposure);
 
         }
-    } else {
-        changed |= RenderRawWorkspaceLabAreas(context, section);
-        if (ShowsRawLabSettings(section)) {
-            if (!localRange.targetZones.empty()) {
-                ImGui::Spacing();
-                const bool legacyOpen = ImGui::CollapsingHeader("Existing targets");
-                m_RawWorkspaceLabUi.zoneAreas.legacy = legacyOpen;
-                if (legacyOpen) changed |= RenderRawWorkspaceLabLegacyZones(context);
-                else stopTargeting();
-            } else {
-                m_RawWorkspaceLabUi.zoneAreas.legacy = false;
-            }
-    }
-
     }
     ImGui::Spacing();
     if (ShowsRawLabSettings(section)) {
@@ -290,7 +247,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSecondaryControls(
     if(context.presentation==Stack::Editor::NodeEditorPresentation::Panel)
         return Stack::Editor::DrawLightPanelSettings(*this,context);
     bool changed = context.nodeTarget && context.editorState ? Stack::Editor::DrawLightRangeSettings(context,m_RawWorkspaceGraphScopeReadback.lightRange,m_RawWorkspaceGraphScopeReadback.inputExposureEv) : false;
-    ImGui::TextWrapped("Local EV measures this operation's input. Use Exposure for a uniform brightness adjustment.");
+    ImGui::TextWrapped("Exposure follows Light with gentle highlight protection. Tonal ranges adapt automatically to the incoming image.");
     ImGui::Spacing();
     float smoothness = context.recipe.localRange.smoothness;
     if (BareSliderFloat(

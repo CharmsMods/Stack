@@ -404,7 +404,7 @@ vec3 clippedMaskAt(ivec2 rawP, ivec2 visibleP) {
     int color = cfaAt(visibleQ);
     float black = blackForColor(color);
     float white = max(black + 1.0, uWhiteLevel);
-    float threshold = mix(black, white, clamp(uHighlightThreshold, 0.0, 1.0));
+    float threshold = uHighlightMode == 0 ? white : mix(black, white, clamp(uHighlightThreshold, 0.0, 1.0));
     float clipped = float(texelFetch(uRaw, q, 0).r) >= threshold ? 1.0 : 0.0;
     if (color == 0) return vec3(clipped, 0.0, 0.0);
     if (color == 2) return vec3(0.0, 0.0, clipped);
@@ -807,12 +807,7 @@ void main() {
 
     vec3 rgb = rawDemosaicAt(rawP, visibleP);
     rgb = applyLateralCa(visibleUv, rgb);
-    vec3 clipMask = vec3(0.0);
-    if (uHighlightMode != 0 ||
-        uHighlightEdgeCleanup > 0.0001 ||
-        uDebugView == 13) {
-        clipMask = clippedDemosaicMask(rawP, visibleP);
-    }
+    vec3 clipMask = clippedDemosaicMask(rawP, visibleP);
     if (uHighlightMode != 0) {
         rgb = reconstructHighlights(rgb, clipMask);
     }
@@ -848,6 +843,12 @@ void main() {
     if (uUseCameraTransform != 0) {
         rgb = uCameraToWorking * rgb;
     }
+    // All contributing CFA samples have reached sensor white. Their apparent
+    // hue after white balance/matrix conversion is not recoverable color.
+    // Complete to neutral at the brightest channel, without darkening it.
+    // Partial clipping stays untouched; floating/HDR mosaics have no clip mask.
+    if (uHighlightMode == 0 && all(greaterThanEqual(clipMask, vec3(1.0))))
+        rgb = vec3(max(0.0, max(rgb.r, max(rgb.g, rgb.b))));
     if (uDebugView == 5) {
         FragColor = vec4(rgb, 1.0);
         return;

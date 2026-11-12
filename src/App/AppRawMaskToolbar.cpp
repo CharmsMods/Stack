@@ -216,9 +216,14 @@ void AppShell::RenderSharedPanelToggle() {
         (amount <= .001f || m_Editor->IsReturningToGraph() ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     Stack::Workspace::InputScope transitionInput(m_Editor->IsReturningToGraph(), false);
     if (Stack::Navigation::IconButton(m_NavigationRail.panelOpen ? "Close side panel###PanelToggle" : "Open side panel###PanelToggle",
-            Stack::Navigation::Glyph::Panel, false, true, scale, palette, m_NavigationRail.panelToggleMotion, nullptr,
+            Stack::Navigation::Glyph::Panel, m_NavigationRail.pinnedOpen, true, scale, palette, m_NavigationRail.panelToggleMotion, nullptr,
             false, nullptr, false, {}))
         ToggleWorkspaceSectionPanel();
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        m_NavigationRail.pinnedOpen = !m_NavigationRail.pinnedOpen;
+        if (m_NavigationRail.pinnedOpen && !m_NavigationRail.panelOpen)
+            ToggleWorkspaceSectionPanel();
+    }
     if (ImGui::IsItemHovered()) CancelProjectPillPreview();
     m_WorkspaceCompositor.KeepChrome(ImGui::GetWindowDrawList());
     ImGui::End();

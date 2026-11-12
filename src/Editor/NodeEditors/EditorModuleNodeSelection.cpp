@@ -82,8 +82,6 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
         m_RawWorkspaceLabUi.colorWarpProvisionalPinValid=false;
         m_RawWorkspaceLabUi.colorWarpProvisionalSceneEvValid=false;
         m_RawWorkspaceLabUi.gradientDragHandle=-1;
-        m_RawWorkspaceLabUi.zoneAreas.active=false;
-        for(auto& graph:m_RawWorkspaceLabUi.zoneAreas.graphs) graph.second.interaction={};
         m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
         ClearRawWorkspaceGraphScopeReadbackCaches();
     }

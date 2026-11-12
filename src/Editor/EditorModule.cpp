@@ -780,10 +780,6 @@ void EditorModule::Shutdown() {
     m_RawAssetCapture.feedbackRenderer.Shutdown();
     m_RawAssetPreviews.Clear();
     m_RawAssetCapture.feedback.reset();
-    if (m_RawWorkspaceLabUi.zoneAreas.overlayTexture) {
-        glDeleteTextures(1, &m_RawWorkspaceLabUi.zoneAreas.overlayTexture);
-        m_RawWorkspaceLabUi.zoneAreas.overlayTexture = 0;
-    }
     if (m_RawGradientOverlayTexture) {
         glDeleteTextures(1, &m_RawGradientOverlayTexture);
         m_RawGradientOverlayTexture = 0;

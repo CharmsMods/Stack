@@ -150,16 +150,24 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     ImGui::SetNextWindowPos(position);
     ImGui::SetNextWindowSize(extent);
     ImGui::SetNextWindowViewport(viewport->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    // A stable theme-colored backing keeps labels and plots legible over both
+    // bright and dark photographs without another blur/capture pass.
+    auto backing = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    backing.w = .96f;
+    auto border = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    border.w = .32f;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, backing);
+    ImGui::PushStyleColor(ImGuiCol_Border, border);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.f * scale, 8.f * scale));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f * scale);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1, 1));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
         ImGui::GetStyle().Alpha * m_RawWorkspaceLabEditingSurfaceReveal);
     const auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoBringToFrontOnFocus |
         (openingOpacity < 1.f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None);
     if (ImGui::Begin(name, nullptr, flags)) {
@@ -225,8 +233,8 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         GetRenderRevision() ^ Stack::UiPerformance::Probe::Key(position.x,position.y),
         {position.x,position.y,extent.x,extent.y});
     ImGui::End();
-    ImGui::PopStyleVar(4);
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(5);
+    ImGui::PopStyleColor(3);
 }
 
 bool EditorModule::RawFloatingSurfaceOwnsPointer() const {

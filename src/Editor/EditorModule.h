@@ -310,7 +310,8 @@ public:
     void OpenBracketingTool();
     void BindBracketingSourceNodeEditor();
     void BeginBracketingDraft(bool newProject = false);
-    void CreateBracketingCaptureSet(const std::vector<std::filesystem::path>& paths);
+    void CreateBracketingCaptureSet(const std::vector<std::filesystem::path>& paths, bool background = false);
+    bool IsGalleryBracketProcessing() const;
     void SyncBracketingSelection();
     void SelectBracketingSources(const std::vector<std::string>& keys, bool toggle, bool range);
     void AddBracketingDraftFiles(const std::vector<std::filesystem::path>& paths);
@@ -1197,9 +1198,6 @@ public:
     bool IsRawWorkspaceImageEditActive() const {
         return m_Project->rawInteractionDraft.active ||
             m_Project->rawLayers.GestureActive() ||
-            m_RawWorkspaceLabUi.zoneAreas.active ||
-            std::any_of(m_RawWorkspaceLabUi.zoneAreas.graphs.begin(), m_RawWorkspaceLabUi.zoneAreas.graphs.end(),
-                [](const auto& entry) {return entry.second.interaction.draggingPoint >= 0 || entry.second.interaction.draggingSegment >= 0;}) ||
             m_RawWorkspaceLocalRangeTargetDragging ||
             m_RawWorkspaceLabUi.colorWarpInteractionActive;
     }
@@ -1297,6 +1295,7 @@ public:
     bool AddProjectOutputToQueue(int outputNodeId);
     void SetGalleryNavigationTransition(std::shared_ptr<Stack::Navigation::GalleryNavigationTransition> motion,
         std::uint64_t workspace) {m_GalleryNavigationMotion=std::move(motion);m_GalleryNavigationWorkspace=workspace;}
+    void PresentGalleryOpeningImage(ImVec2& minimum, ImVec2& maximum, unsigned int texture=0);
     Stack::Renderer::GalleryTransitionOrigin CaptureGalleryTransitionOrigin(
         const std::filesystem::path& subject,const std::string& key={},const ImRect& bounds={});
     void EnsureGraphWorkers();
@@ -3304,6 +3303,12 @@ private:
     void RenderRawLayerMaskHandles(const RawWorkspaceEditContext& context, const ImVec2& minimum, const ImVec2& maximum);
     std::optional<Stack::Project::RawMaskReference> m_EditingRawLayerMask;
     int m_RawLayerMaskGenerator = -1;
+    struct MaskHandleGeneratorCache {
+        std::string documentId, layerId;
+        std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
+        int producer = -1;
+        std::vector<int> generators;
+    } m_RawMaskHandleGenerators;
     int m_RawLayerMaskDrag = -1;
     ImVec2 m_RawLayerMaskDragStart;
     EditorNodeGraph::MaskGeneratorSettings m_RawLayerMaskDragOriginal;
@@ -3339,6 +3344,7 @@ private:
     void RenderRawGallerySourceFolders(const ImVec2& size);
     void RenderRawWorkspaceGalleryContentSurface(const ImVec2& size);
     Stack::RawWorkspace::GalleryPresentation m_RawGalleryFilteredPresentation;
+    std::uint64_t m_RawGalleryFileTypes = Stack::Editor::RawLabInternal::AllGalleryFileTypes;
     std::uint64_t m_RawGalleryFilteredRevision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t m_RawGalleryFilteredQueueRevision = std::numeric_limits<std::uint64_t>::max();
     Stack::RawWorkspace::GalleryContentMode m_RawGalleryFilteredMode = Stack::RawWorkspace::GalleryContentMode::Gallery;
@@ -3359,10 +3365,6 @@ private:
     bool RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& context,
         Stack::Editor::RawLabInternal::RawLabControlSection section = Stack::Editor::RawLabInternal::RawLabControlSection::All);
     bool RenderRawWorkspaceLabLegacyZones(RawWorkspaceEditContext& context);
-    bool RenderRawWorkspaceLabAreas(RawWorkspaceEditContext& context,
-        Stack::Editor::RawLabInternal::RawLabControlSection section = Stack::Editor::RawLabInternal::RawLabControlSection::All);
-    void RenderRawWorkspaceLabImageAreas(const Stack::RawWorkspace::SourceRecord* source,
-        const ImVec2& minimum, const ImVec2& maximum);
     void RenderRawWorkspaceLabGradientDots(
         const Stack::RawWorkspace::SourceRecord* source,
         const ImVec2& minimum, float width);

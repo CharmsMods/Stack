@@ -33,6 +33,7 @@ namespace Stack::Validation { bool ValidateConcurrentBracketing(const std::files
 namespace Stack::Validation { bool ValidatePanorama(int,char**); }
 namespace Stack::Validation { bool ValidateBurstWorker(const std::filesystem::path&,const std::filesystem::path&,bool); }
 namespace Stack::Validation { bool ValidateBurstParity(const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateLocalEvExposureOrder(const std::filesystem::path&, const std::filesystem::path&, bool); }
 namespace Stack::Validation { bool ValidateToneDetail(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); bool ValidateClosetEditing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
@@ -170,6 +171,12 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-canvas") == 0) {
         exitCode = Stack::Validation::ValidateRawGraphCanvas() ? 0 : 89;
+        return true;
+    }
+    if ((argc == 4 || (argc == 5 && std::strcmp(argv[4], "--full-resolution-protection") == 0)) &&
+        std::strcmp(argv[1], "--validate-local-ev-exposure-order") == 0) {
+        exitCode = Stack::Validation::ValidateLocalEvExposureOrder(std::filesystem::u8path(argv[2]),
+            std::filesystem::u8path(argv[3]), argc == 5) ? 0 : 90;
         return true;
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-tone-detail") == 0) {
