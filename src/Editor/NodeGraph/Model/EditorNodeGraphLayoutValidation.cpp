@@ -139,7 +139,6 @@ void Graph::AutoLayout() {
         }
         outgoing[link.fromNodeId].push_back(link.toNodeId);
         incoming[link.toNodeId].push_back(link.fromNodeId);
-        ++indegree[link.toNodeId];
     }
 
     for (auto& entry : outgoing) {
@@ -149,6 +148,9 @@ void Graph::AutoLayout() {
     for (auto& entry : incoming) {
         std::sort(entry.second.begin(), entry.second.end(), nodeIdLess);
         entry.second.erase(std::unique(entry.second.begin(), entry.second.end()), entry.second.end());
+        // Layout orders nodes, not socket links. Count each predecessor once,
+        // matching the deduplicated outgoing adjacency used below.
+        indegree[entry.first] = static_cast<int>(entry.second.size());
     }
 
     std::vector<int> ready;
@@ -299,7 +301,6 @@ ValidationResult Graph::Validate() const {
     std::set<int> ids;
     std::set<std::string> instanceUuids;
     int outputCount = 0;
-    std::set<int> outgoingImages;
 
     for (const Node& node : m_Nodes) {
         std::string channelError;
@@ -386,15 +387,6 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Link uses an invalid socket direction.");
         }
-        if (from->kind == NodeKind::Image ||
-            from->kind == NodeKind::RawDevelopment ||
-            from->kind == NodeKind::RawDecode ||
-            from->kind == NodeKind::RawDevelop ||
-            from->kind == NodeKind::MultiFrameDenoise ||
-            from->kind == NodeKind::MultiFrameHdr) {
-            outgoingImages.insert(from->id);
-        }
-
         std::string normalized;
         std::string reason;
         if (!CanConnectSockets(link.fromNodeId, link.fromSocketId,

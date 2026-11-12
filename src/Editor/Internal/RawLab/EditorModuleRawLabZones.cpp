@@ -47,14 +47,17 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
     auto& graph = m_RawWorkspaceLabUi.zonesCurveGraph;
     auto& history = m_RawWorkspaceLabUi.exposureHistory;
     const auto* layer = Stack::Project::FindRawAdjustmentLayer(m_Project->rawLayers.State(),context.rawAdjustmentLayerId);
-    const auto* exposureNode = layer ? Stack::Project::FindRawOperation(*layer,
-        Stack::RawRecipe::GraphOperationKind::LocalEv, context.rawOperationUuid) : nullptr;
+    const auto* exposureNode = context.nodeTarget ? ResolveNodeEditorTarget(*context.nodeTarget) :
+        layer ? Stack::Project::FindRawOperation(*layer,
+            Stack::RawRecipe::GraphOperationKind::LocalEv, context.rawOperationUuid) : nullptr;
+    if(exposureNode && (exposureNode->kind!=EditorNodeGraph::NodeKind::RawOperation ||
+        exposureNode->rawOperation.kind!=Stack::RawRecipe::GraphOperationKind::LocalEv))exposureNode=nullptr;
     const bool canAdjustExposure = exposureNode && exposureNode->rawOperation.enabled &&
         !context.IsParameterDriven("ev");
     const auto exposureUuid = exposureNode ? exposureNode->instanceUuid : context.rawOperationUuid;
     // The ordinary Local EV surface already owns this node's draft. Legacy
     // entry points without a target can still read their separate instance.
-    float exposureEv = exposureNode && exposureUuid != context.rawOperationUuid
+    float exposureEv = !context.nodeTarget && layer && exposureNode && exposureUuid != context.rawOperationUuid
         ? Stack::Project::ReadRawLayerOperation(*layer,exposureUuid).preToneExposureEv
         : context.recipe.preToneExposureEv;
     const float exposureBefore = exposureEv;
@@ -210,7 +213,7 @@ bool EditorModule::RenderRawWorkspaceLabZonesSurface(RawWorkspaceEditContext& co
         constexpr float strengthHorizontalInset = 8.0f;
         if(context.presentation==Stack::Editor::NodeEditorPresentation::Panel) {
             ImGui::BeginDisabled(context.IsParameterDriven("strength"));
-            changed|=Stack::Editor::PanelRoller("Strength","strength",localRange.strength,0,2,.005f,1,"%.2f",context.State<Stack::Editor::PanelControlState>());
+            changed|=Stack::Editor::PanelRoller("Strength","strength",localRange.strength,0,1,.005f,1,"%.2f",context.State<Stack::Editor::PanelControlState>());
             ImGui::EndDisabled();
             return changed;
         }
