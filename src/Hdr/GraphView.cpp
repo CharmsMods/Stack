@@ -4,6 +4,21 @@
 #include <algorithm>
 namespace Stack::Hdr {
 namespace {
+RenderGraphNode* DirectPhotoSource(RenderGraphSnapshot& graph) {
+    int endpoint=graph.outputNodeId;
+    std::string socket=graph.outputSocketId.empty()?"imageOut":graph.outputSocketId;
+    for(size_t depth=0;depth<graph.nodes.size();++depth) {
+        if(socket!="imageOut") return nullptr;
+        auto node=std::find_if(graph.nodes.begin(),graph.nodes.end(),[&](const auto& n){return n.nodeId==endpoint;});
+        if(node==graph.nodes.end()) return nullptr;
+        if(node->kind==RenderGraphNodeKind::Image) return node->image.hdrPixels ? &*node : nullptr;
+        if(node->kind!=RenderGraphNodeKind::Output) return nullptr;
+        const auto link=std::find_if(graph.links.begin(),graph.links.end(),[&](const auto& l){return l.toNodeId==endpoint && l.toSocketId=="imageIn";});
+        if(link==graph.links.end()) return nullptr;
+        endpoint=link->fromNodeId;socket=link->fromSocketId;
+    }
+    return nullptr;
+}
 void DescribeOutput(RenderGraphSnapshot& graph,bool encodeSrgb,bool hdr) {
     using namespace NodeMath;
     auto& descriptor=graph.outputDescriptor;
@@ -35,7 +50,8 @@ bool ConfigureView(RenderGraphSnapshot& graph,float headroom,bool encodeSrgb) {
         if(it==graph.nodes.end()) break;
         auto& node=*it;
         nlohmann::json* view=nullptr;
-        if(node.kind==K::Layer && node.layerJson.value("type",std::string{})=="ViewTransform") view=&node.layerJson;
+        if(node.kind==K::Layer && node.layerJson.value("type",std::string{})=="ViewTransform" &&
+            node.layerJson.value("visible",true)) view=&node.layerJson;
         if(node.kind==K::RawDevelopment && !graph.rawLayerBackgroundNodeId)
             view=&node.rawDevelopment.recipe.viewTransform.layerJson;
         if(view && view->is_object()) {
@@ -58,25 +74,32 @@ bool ConfigureView(RenderGraphSnapshot& graph,float headroom,bool encodeSrgb) {
         if(!useMaster && encodeSrgb && descriptor.reference.state==KnowledgeState::Known &&
             descriptor.reference.value==ReferenceState::Display && descriptor.transfer.state==KnowledgeState::Known &&
             descriptor.transfer.value.kind==TransferKind::Srgb && descriptor.color.state==KnowledgeState::Known &&
-            descriptor.color.value.identity=="srgb-d65") return true;
+            descriptor.color.value.identity=="srgb-d65") {
+            for(auto& node:graph.nodes) if(node.kind==K::Image && node.image.hdrPixels) node.image.useHdrPixels=true;
+            return true;
+        }
         const auto linear=descriptor.transfer.state==KnowledgeState::Known && descriptor.transfer.value.kind==TransferKind::Linear;
-        const bool alreadyHdr=descriptor.reference.value==ReferenceState::Display && descriptor.range.state==KnowledgeState::Known && descriptor.range.value.allowsAboveNominal;
+        // Processing such as Tone may clear the range without changing the
+        // explicitly declared display-linear representation.
+        const bool displayLinearInput=linear && descriptor.reference.state==KnowledgeState::Known &&
+            descriptor.reference.value==ReferenceState::Display;
         if(!linear || descriptor.color.state!=KnowledgeState::Known || descriptor.reference.state!=KnowledgeState::Known ||
-            (!alreadyHdr && descriptor.reference.value!=ReferenceState::Scene)) return false;
+            (!displayLinearInput && descriptor.reference.value!=ReferenceState::Scene)) return false;
         const auto& basis=descriptor.color.value.identity;
         if(basis!="srgb-d65" && basis!="linear-srgb-d65" && basis!="rec2020-d65" && basis!="linear-rec2020-d65") return false;
-        const bool hasBase=alreadyHdr && std::any_of(graph.nodes.begin(),graph.nodes.end(),[](const auto& n){return n.kind==K::Image && bool(n.image.hdrPixels);});
+        auto* directBase=displayLinearInput && descriptor.range.state==KnowledgeState::Known &&
+            descriptor.range.value.allowsAboveNominal ? DirectPhotoSource(graph) : nullptr;
         // The source decoder retains the encoded SDR rendition for gain-map
         // JPEGs and prepares one for PQ PNGs. Use it directly for the base.
-        if(hasBase && !useMaster && encodeSrgb) {
-            for(auto& n:graph.nodes) if(n.kind==K::Image) n.image.useHdrPixels=false;
+        if(directBase && !useMaster && encodeSrgb) {
+            directBase->image.useHdrPixels=false;
             DescribeOutput(graph,true,false);
             return true;
         }
         RenderGraphNode view;
         for(const auto& n:graph.nodes) view.nodeId=std::max(view.nodeId,n.nodeId);
         ++view.nodeId; view.kind=K::Layer;
-        view.layerJson={{"type","ViewTransform"},{"_displayLinearInput",alreadyHdr},{"_presentationHeadroom",headroom},
+        view.layerJson={{"type","ViewTransform"},{"_displayLinearInput",displayLinearInput},{"_presentationHeadroom",headroom},
             {"sdrHighlightDetail",1.f},
             {"inputWorkingSpace",basis.find("2020")!=std::string::npos ? "linear-rec2020-d65":"linear-srgb-d65"},{"encodeSrgbOutput",encodeSrgb}};
         RenderGraphLink link; link.fromNodeId=graph.outputNodeId; link.fromSocketId=graph.outputSocketId.empty()?"imageOut":graph.outputSocketId;
@@ -84,7 +107,9 @@ bool ConfigureView(RenderGraphSnapshot& graph,float headroom,bool encodeSrgb) {
         graph.links.push_back(std::move(link)); graph.outputNodeId=view.nodeId; graph.outputSocketId="imageOut";
         graph.nodes.push_back(std::move(view));
     }
-    for(auto& node:graph.nodes) if(node.kind==K::Image && node.image.hdrPixels) node.image.useHdrPixels=useMaster;
+    // Processing and the view transform consume the declared linear source.
+    // Headroom selects the presentation, not the source's transfer encoding.
+    for(auto& node:graph.nodes) if(node.kind==K::Image && node.image.hdrPixels) node.image.useHdrPixels=true;
     DescribeOutput(graph,encodeSrgb,useMaster);
     return true;
 }

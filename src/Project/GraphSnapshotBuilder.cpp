@@ -236,6 +236,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             case EditorNodeGraph::NodeKind::Image:
                 renderNode.kind = RenderGraphNodeKind::Image;
                 renderNode.image = BuildRenderImagePayload(node.image);
+                if (node.image.isLoading)
+                    snapshot.unavailableOutputs[node.id] = "The image source is still loading.";
                 break;
             case EditorNodeGraph::NodeKind::RawSource:
                 renderNode.kind = RenderGraphNodeKind::RawSource;

@@ -51,14 +51,4 @@ struct GraphSnapshotResult {
 
 GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs);
 
-std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers(
-    const EditorNodeGraph::Graph& graph,
-    const std::vector<std::shared_ptr<LayerBase>>& layers);
-std::vector<RenderLayerStep> BuildGraphRenderSteps(
-    const EditorNodeGraph::Graph& graph,
-    const std::vector<std::shared_ptr<LayerBase>>& layers);
-std::vector<RenderMaskSource> BuildGraphRenderMasks(
-    const EditorNodeGraph::Graph& graph,
-    const std::vector<std::shared_ptr<LayerBase>>& layers);
-
 } // namespace Stack::Project

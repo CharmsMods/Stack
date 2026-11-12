@@ -117,7 +117,7 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
 bool DefinitionSupportsGraphRole(const LiveNodeDefinition& definition, LiveGraphRole role);
 bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node, const std::string& socketId,
-    const Stack::NodeMath::ValueDescriptor& value, std::string& error);
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error, bool checkValueShape = true);
 
 bool AcceptsTypedParameterInput(const EditorNodeGraph::Node& node, const std::string& socketId, EditorNodeGraph::SocketType type);
 

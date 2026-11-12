@@ -464,7 +464,7 @@ bool Graph::CanConnectSockets(
 
     std::string semanticError;
     if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this, *to, toSocketId,
-            source.descriptor, semanticError)) {
+            source.descriptor, semanticError, !retained)) {
         if (errorMessage) *errorMessage = semanticError;
         return false;
     }

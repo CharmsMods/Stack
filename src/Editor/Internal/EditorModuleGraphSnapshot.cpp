@@ -15,18 +15,6 @@ EditorNodeGraph::GraphOutputContext RawLayerRootOutputContext(
 }
 } // namespace
 
-std::vector<std::shared_ptr<LayerBase>> EditorModule::BuildGraphRenderLayers() const {
-    return Stack::Project::BuildGraphRenderLayers(m_Project->graph, m_Project->layers);
-}
-
-std::vector<RenderLayerStep> EditorModule::BuildGraphRenderSteps() const {
-    return Stack::Project::BuildGraphRenderSteps(m_Project->graph, m_Project->layers);
-}
-
-std::vector<RenderMaskSource> EditorModule::BuildGraphRenderMasks() const {
-    return Stack::Project::BuildGraphRenderMasks(m_Project->graph, m_Project->layers);
-}
-
 RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
     return BuildGraphSnapshotForTimelineFrame(m_TimelineUi.currentFrame);
 }

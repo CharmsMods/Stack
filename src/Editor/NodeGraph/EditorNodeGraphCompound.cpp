@@ -742,6 +742,8 @@ bool Graph::UnpackCompoundNode(
 
     struct ChannelBinding { std::string publicId; int node; std::string socket; };
     std::vector<ChannelBinding> channelBindings;
+    std::map<std::pair<int, bool>, int> arithmeticExtractors;
+    std::vector<Link> componentLinks;
     for(const auto& channel:savedChannels) {
         const auto port=std::find_if(definition->ports.begin(),definition->ports.end(),[&](const auto& p) {
             return p.direction==Stack::NodeMath::PortDirection::Output && p.id==channel.sourceSocket;
@@ -749,6 +751,40 @@ bool Graph::UnpackCompoundNode(
         if(port==definition->ports.end()) {if(error)*error="A component output lost its compound image binding.";return false;}
         const int target=uuidToNew.at(port->internalInstanceUuid);
         auto child=std::find_if(clones.begin(),clones.end(),[&](const auto& n){return n.id==target;});
+        // Arithmetic deliberately has one Result and cannot own direct selectors.
+        // Keep that invariant when exposing a compound's component on decompile.
+        if (child->kind == NodeKind::DataMath) {
+            const auto key = std::make_pair(target, channel.missingAlphaIsOpaque);
+            auto extractor = arithmeticExtractors.find(key);
+            if (extractor == arithmeticExtractors.end()) {
+                if (nextNodeId <= 0 || nextNodeId == std::numeric_limits<int>::max()) {
+                    if (error) *error = "Unpack cannot allocate component extractor IDs.";
+                    return false;
+                }
+                Node split;
+                split.id = nextNodeId++;
+                split.kind = NodeKind::ChannelSplit;
+                split.position = {child->position.x + 260.f, child->position.y};
+                split.rawLayerOwnerId = child->rawLayerOwnerId;
+                split.splitMissingAlphaIsOpaque = channel.missingAlphaIsOpaque;
+                EditorNodeGraphDefinitions::ApplyNodeMetadata(split);
+                if (retainBoundary) split.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
+                else {
+                    const auto hash = Stack::NodeMath::Sha256ContentIdentity(
+                        child->instanceUuid + "/compound-component/" + port->internalSocketId +
+                        (channel.missingAlphaIsOpaque ? "/opaque" : "/exact")).substr(7);
+                    split.instanceUuid = hash.substr(0,8) + "-" + hash.substr(8,4) + "-4" +
+                        hash.substr(13,3) + "-8" + hash.substr(17,3) + "-" + hash.substr(20,12);
+                }
+                const int splitId = split.id;
+                componentLinks.push_back({target, port->internalSocketId, splitId, kImageInputSocketId});
+                clonedNodeIds.push_back(splitId);
+                clones.push_back(std::move(split));
+                extractor = arithmeticExtractors.emplace(key, splitId).first;
+            }
+            channelBindings.push_back({channel.id, extractor->second, channel.component});
+            continue;
+        }
         auto internalChannel=channel;
         internalChannel.sourceSocket=port->internalSocketId;
         internalChannel.id=ChannelOutputId(port->internalSocketId,channel.component,channel.missingAlphaIsOpaque);
@@ -756,8 +792,8 @@ bool Graph::UnpackCompoundNode(
         channelBindings.push_back({channel.id,target,internalChannel.id});
     }
 
-    std::vector<Link> internalLinks;
-    internalLinks.reserve(internal.GetLinks().size());
+    std::vector<Link> internalLinks = std::move(componentLinks);
+    internalLinks.reserve(internalLinks.size() + internal.GetLinks().size());
     for (const Link& link : internal.GetLinks()) {
         const auto from = oldToNew.find(link.fromNodeId);
         const auto to = oldToNew.find(link.toNodeId);
@@ -1244,7 +1280,11 @@ bool Graph::ResolveCompoundOutputInputDependencies(
                 } else {
                     for (const SocketDefinition& socket :
                             sockets->second) {
-                        if (socket.direction == SocketDirection::Input) {
+                        // Preserve native output-specific structural contracts
+                        // across a compound boundary, including passthroughs.
+                        if (socket.direction == SocketDirection::Input &&
+                            EditorNodeGraphDefinitions::OutputDependsOnInput(
+                                canonical, *internalNode, frame.key.second, socket.id)) {
                             frame.inputs.push_back(socket);
                         }
                     }
@@ -1570,7 +1610,10 @@ bool Graph::CreateCompoundFromSelection(
             LogicalTypeForSocket(socket.type),
             socket.optional,
             target ? target->instanceUuid : std::string(),
-            boundary.link.toSocketId
+            boundary.link.toSocketId,
+            // Arithmetic operands accept both numeric uniforms and spatial values.
+            // Preserve that contract on newly packed public inputs.
+            target && target->kind == NodeKind::DataMath && IsDataMathInputSocketId(boundary.link.toSocketId)
         });
     }
     for (auto& item : outputPorts) {
@@ -1665,6 +1708,11 @@ bool Graph::CreateCompoundFromSelection(
                 return false;
             }
         }
+        // Output shape depends on the external operands. Expose the prepared
+        // inputs during validation instead of describing a disconnected instance.
+        // rollbackPreparedCompound removes these edges with the temporary node.
+        for (const Link& link : replacementLinks) m_Links.push_back(link);
+        TouchStructure();
         for (const BoundaryLink& boundary : outputs) {
             if (!prepareConnection(
                     newCompoundId,
@@ -1709,7 +1757,8 @@ bool Graph::CreateCompoundFromSelection(
     m_Nodes.erase(std::remove_if(m_Nodes.begin(),m_Nodes.end(),
         [&](const Node& node){return selected.count(node.id)!=0;}),m_Nodes.end());
     m_Links.erase(std::remove_if(m_Links.begin(),m_Links.end(),
-        [&](const Link& link){return selected.count(link.fromNodeId)!=0 || selected.count(link.toNodeId)!=0;}),m_Links.end());
+        [&](const Link& link){return selected.count(link.fromNodeId)!=0 || selected.count(link.toNodeId)!=0 ||
+            link.toNodeId==newCompoundId;}),m_Links.end());
     if (!retainedBoundary) {
         // These complete boundaries were copied into the canonical graph.
         // Keeping their canvas copies would retain IDs of the removed nodes.

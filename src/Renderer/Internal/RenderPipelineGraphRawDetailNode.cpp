@@ -144,6 +144,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDetailGraphNode(
         const unsigned int manualMask = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
         m_Width = inputWidth;
         m_Height = inputHeight;
+        if (maskLink && !manualMask) {
+            m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+            m_LastGraphExecutionStats.lastSpecializedFailure =
+                "The connected detail-fusion mask is unavailable; previous presentation retained.";
+            return {};
+        }
         const bool debugPreview = executionContext.graph.autoGainMaskPreview &&
             executionContext.graph.outputNodeId == node.nodeId &&
             executionContext.graph.outputSocketId == "maskOut";
@@ -155,6 +161,16 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDetailGraphNode(
     const unsigned int generatedMask = evalMask(node.nodeId, "maskOut");
     m_Width = inputWidth;
     m_Height = inputHeight;
+    if (!generatedMask) {
+        // A valid neutral/no-op map still has a texture. Zero means generation
+        // failed, not permission to publish an unadjusted image as success.
+        if (m_LastGraphExecutionStats.lastSpecializedFailure.empty()) {
+            m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+            m_LastGraphExecutionStats.lastSpecializedFailure =
+                "The detail-fusion exposure map is unavailable; previous presentation retained.";
+        }
+        return {};
+    }
     const Raw::RawDetailFusionSettings applySettings = ResolveRawDetailFusionApplySettings(executionContext, node);
     m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
         inputImage,

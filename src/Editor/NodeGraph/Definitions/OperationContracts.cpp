@@ -211,8 +211,23 @@ bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
 
 bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node, const std::string& socketId,
-    const Stack::NodeMath::ValueDescriptor& value, std::string& error) {
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error, bool checkValueShape) {
     using namespace Stack::NodeMath;
+    const auto contract = GetLivePortContract(graph, node, socketId);
+    if (checkValueShape && contract && value.logicalType != LogicalValueType::Invalid) {
+        const auto& accepted = contract->port.acceptedLogicalTypes;
+        const bool exact = std::find(accepted.begin(), accepted.end(), value.logicalType) != accepted.end();
+        const bool channel = EditorNodeGraph::IsSingleChannelValue(value.logicalType) &&
+            std::any_of(accepted.begin(), accepted.end(), EditorNodeGraph::IsSingleChannelValue);
+        // Preserve the existing explicit numeric socket promotion; this is not
+        // permission to broadcast a Number into a spatial image or mask input.
+        const bool number = value.logicalType == LogicalValueType::Integer &&
+            std::find(accepted.begin(), accepted.end(), LogicalValueType::Scalar) != accepted.end();
+        if (!exact && !channel && !number) {
+            error = node.title + " cannot accept this value at " + socketId + ".";
+            return false;
+        }
+    }
     if (node.kind == NodeKind::RawOperation && socketId == EditorNodeGraph::kImageInputSocketId) {
         error = Stack::GraphModel::PhotoInputError(Stack::GraphModel::PhotoInputFor(node.rawOperation), value, false);
         return error.empty();
@@ -236,7 +251,6 @@ bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     if (coverage && value.logicalType == LogicalValueType::ColorImage) {
         error = "Coverage needs one channel. Select a channel or convert the image to a mask."; return false;
     }
-    const auto contract = GetLivePortContract(graph, node, socketId);
     if (!contract || contract->port.semanticRequirement != RequirementPolicy::Strict || single) return true;
     const auto& required = contract->requiredSemantics;
     if ((required.transfer.state == KnowledgeState::Known && value.transfer.state == KnowledgeState::Known && value.transfer.value.kind != required.transfer.value.kind) ||

@@ -485,7 +485,22 @@ void CheckProjectCanvas() {
     feedbackGraph.EditLinks().erase(std::remove_if(feedbackGraph.EditLinks().begin(),feedbackGraph.EditLinks().end(),
         [&](const auto& link){return link.toNodeId==feedbackNode;}),feedbackGraph.EditLinks().end());
     feedback.imageOutput=RawLayerEndpoint(feedback.background,*feedbackGraph.FindNode(feedbackNode));
-    Check(!ValidateRawLayerStack(feedback,error),"A uniform result was accepted as the main image route.");
+    // Operand edits retain the authored route for repair, but it must not
+    // become an executable main image output while carrying a uniform value.
+    Check(ValidateRawLayerStack(feedback,error),"A retained arithmetic route must remain editable: "+error);
+    RenderGraphSnapshot uniformSnapshot;
+    RenderGraphNode rawSource;rawSource.nodeId=1;rawSource.kind=RenderGraphNodeKind::RawDevelopment;
+    rawSource.rawDevelopment.recipe=Stack::RawRecipe::MakeDefaultRecipe("uniform-route-test");
+    uniformSnapshot.nodes.push_back(rawSource);
+    uniformSnapshot.outputNodeId=1;uniformSnapshot.outputSocketId="imageOut";
+    const auto retainedUniform=SerializeRawLayerStack(feedback);
+    Check(LowerRawLayerStack(uniformSnapshot,feedback,1,1,error),error);
+    Check(uniformSnapshot.unavailableOutputs.count(1)!=0,
+        "A uniform result did not mark the main image route unavailable.");
+    Check(!IsRawLayerOutputAvailable(uniformSnapshot,error),
+        "A uniform result was executable as the main image route.");
+    Check(SerializeRawLayerStack(feedback)==retainedUniform,
+        "Runtime validation mutated the retained arithmetic route.");
     std::cout << "Project canvas defaults, local creation, cap order, image-route guards, cycle rejection and save/reopen passed.\n";
 }
 
@@ -1049,9 +1064,10 @@ void TestRawLayerStackContracts() {
         const auto* operation = FindRawOperation(*FindRawAdjustmentLayer(target, id), kind);
         Check(SetRawOperationMask(target, id, operation->instanceUuid, mask, error), error);
     };
-    SceneTone tone; tone.direct=false; tone.contrast = 1.3f; tone.outerProtection = .6f;
+    SceneTone tone;
+    tone.curve={{0,0,{1},{1}},{.3f,.2f,{1},{1}},{.7f,.8f,{1},{1}},{1,1,{1},{1}}};
     auto authoredTone=Stack::RawRecipe::ReadGraphOperation(FindRawOperation(*creative, GraphOperationKind::ToneCurve)->rawOperation);
-    authoredTone.finishTone.layerJson["curveMode"]="contrast";
+    authoredTone.finishTone.layerJson["curveMode"]="luminance";
     authoredTone.finishTone.layerJson["luminanceTone"]=SerializeSceneTone(tone);
     Stack::RawRecipe::WriteGraphOperation(FindRawOperation(*creative, GraphOperationKind::ToneCurve)->rawOperation,authoredTone);
     DetailContrast detail; detail.scaleGains[4] = 1.25f; detail.evScaleResidual[63] = -.2f;
@@ -1220,19 +1236,49 @@ void TestRawLayerStackContracts() {
     // the reference box's declared image socket.
     auto invalidReference = state;
     auto* producerLayer = FindRawAdjustmentLayer(invalidReference,second);
-    const int viewId = producerLayer->graph.AddLayerNode(LayerType::ViewTransform,0,{0,600})->id;
-    const auto currentId = FindRawRole(*producerLayer,Role::OriginalImage)->id;
-    Check(producerLayer->graph.TryConnectSockets(currentId,"imageOut",viewId,"imageIn",&error),error);
-    const auto displayEndpoint = RawLayerEndpoint(*producerLayer,*producerLayer->graph.FindNode(viewId));
+    EditorNodeGraph::ImagePayload displayImage;
+    displayImage.width=1;displayImage.height=1;displayImage.channels=3;displayImage.originalChannels=3;
+    displayImage.pixels={128,128,128};
+    auto& displayDescriptor=displayImage.sourceColorMetadata.descriptor;
+    displayDescriptor=Stack::Project::RawLayerSceneDescriptor(Raw::RawWorkingSpace::LinearSrgbD65);
+    displayDescriptor.reference=Stack::NodeMath::SemanticField<Stack::NodeMath::ReferenceState>::Known(
+        Stack::NodeMath::ReferenceState::Display);
+    const auto* displayProducer=producerLayer->graph.AddImageNode(std::move(displayImage),{0,600});
+    Check(displayProducer!=nullptr,"Supported display image producer could not be created.");
+    const auto carriedDisplay=EditorNodeGraph::DescribeGraphOutput(producerLayer->graph,displayProducer->id,"imageOut");
+    Check(carriedDisplay.descriptor.reference.value==Stack::NodeMath::ReferenceState::Display &&
+        carriedDisplay.descriptor.transfer.value.kind==Stack::NodeMath::TransferKind::Linear,
+        "Display fixture must isolate reference rejection rather than encoded transfer rejection.");
+    const auto displayEndpoint = RawLayerEndpoint(*producerLayer,*displayProducer);
     auto* consumerLayer = FindRawAdjustmentLayer(invalidReference,first);
     const int referenceId = consumerLayer->graph.AddImageNode({}, {0,600})->id;
     consumerLayer->graph.FindNode(referenceId)->role = Role::Reference;
     consumerLayer->graph.FindNode(referenceId)->reference = displayEndpoint;
-    const int consumerId = FindRawOperation(*consumerLayer,GraphOperationKind::Exposure)->id;
+    // Exposure is component-wise; Calibration requires scene-linear RGB.
+    auto* sceneConsumer=FindRawOperation(*consumerLayer,GraphOperationKind::Calibration);
+    sceneConsumer->rawOperation.enabled=true;
+    const int consumerId = sceneConsumer->id;
     Check(consumerLayer->graph.TryConnectSockets(referenceId,"imageOut",consumerId,"imageIn",&error),error);
-    const bool acceptedDisplayReference = ValidateRawLayerStack(invalidReference,error);
-    Check(!acceptedDisplayReference && error.find("Scene-linear") != std::string::npos,
-        "A display-referred cross-graph image entered a scene-linear operation: " + error);
+    Check(ValidateRawLayerStack(invalidReference,error),"Semantic drafts must remain repairable: "+error);
+    const auto retainedDisplayReference=SerializeRawLayerStack(invalidReference);
+    const auto consumerEndpoint=RawLayerEndpoint(*consumerLayer,*sceneConsumer);
+    RenderGraphSnapshot displaySnapshot;
+    RenderGraphNode displayRawSource;displayRawSource.nodeId=1;displayRawSource.kind=RenderGraphNodeKind::RawDevelopment;
+    displayRawSource.rawDevelopment.recipe=MakeDefaultRecipe("display-reference-test");
+    displaySnapshot.nodes.push_back(displayRawSource);
+    displaySnapshot.outputNodeId=1;displaySnapshot.outputSocketId="imageOut";
+    Check(LowerRawLayerStack(displaySnapshot,invalidReference,1,1,error),error);
+    const auto consumerAlias=std::find_if(displaySnapshot.authoredOutputAliases.begin(),displaySnapshot.authoredOutputAliases.end(),
+        [&](const auto& alias){return alias.authored==consumerEndpoint;});
+    Check(consumerAlias!=displaySnapshot.authoredOutputAliases.end(),"Scene consumer lost its runtime endpoint.");
+    const auto* displayFailure=displaySnapshot.FindOutputFailure(consumerAlias->nodeId,consumerAlias->socketId);
+    Check(displayFailure && displayFailure->find("This operation needs scene-referred RGB.")!=std::string::npos,
+        "Resolved display producer did not block scene-only execution with its diagnostic: "+
+            (displayFailure ? *displayFailure : std::string("<none>")));
+    displaySnapshot.outputNodeId=consumerAlias->nodeId;displaySnapshot.outputSocketId=consumerAlias->socketId;
+    Check(!IsRawLayerOutputAvailable(displaySnapshot,error),"Display-to-scene semantic draft was executable.");
+    Check(SerializeRawLayerStack(invalidReference)==retainedDisplayReference,
+        "Lowering mutated the retained display-reference draft.");
 
     auto unfinished = state;
     owner = FindRawAdjustmentLayer(unfinished, first);

@@ -272,21 +272,20 @@ void TestDeepScalarAndChannelPropagationUsesBoundedCallStack() {
         graph.AddChannelSplitNode({ 0.0f, 0.0f });
     RequireScale(split != nullptr, "deep scalar Split allocation failed");
     const int splitNodeId = split->id;
-    const EditorNodeGraph::Node* viewTransform =
-        graph.AddLayerNode(
-            LayerType::ViewTransform,
-            0,
+    const EditorNodeGraph::Node* firstExposure =
+        graph.AddTechnicalImageNode(
+            Stack::NodeMath::TechnicalImageOperation::Exposure,
             { 1.0f, 0.0f });
     RequireScale(
-        viewTransform != nullptr,
-        "deep scalar View Transform allocation failed");
+        firstExposure != nullptr,
+        "deep scalar Exposure allocation failed");
     graph.EditLinks().push_back(EditorNodeGraph::Link{
         splitNodeId,
         "r",
-        viewTransform->id,
+        firstExposure->id,
         EditorNodeGraph::kImageInputSocketId
     });
-    int previousNodeId = viewTransform->id;
+    int previousNodeId = firstExposure->id;
     std::string previousSocketId = EditorNodeGraph::kImageOutputSocketId;
 
     for (int index = 0; index < kDepth; ++index) {
@@ -316,8 +315,8 @@ void TestDeepScalarAndChannelPropagationUsesBoundedCallStack() {
     const EditorNodeGraph::ScenePathInfo scenePath =
         EditorNodeGraph::AnalyzeScenePath(graph, previousNodeId);
     RequireScale(
-        !scenePath.sceneReferred && scenePath.hasViewTransform,
-        "deep scene-path analysis should retain the upstream View Transform");
+        !scenePath.sceneReferred && !scenePath.hasViewTransform,
+        "deep scene-path analysis should not invent a view transform");
 }
 
 
@@ -1043,17 +1042,11 @@ void TestChannelReformatChainRetainsItsReferenceSource() {
 
 void TestChannelReformatScenePathUsesTypedInputs() {
     EditorNodeGraph::Graph graph;
-    EditorNodeGraph::RawSourcePayload rawPayload;
-    const int rawSourceNodeId =
-        graph.AddRawSourceNode(std::move(rawPayload), { 0.0f, 0.0f })->id;
-    EditorNodeGraph::RawDecodePayload decodePayload;
-    const int decodeNodeId =
-        graph.AddRawDecodeNode(std::move(decodePayload), { 1.0f, 0.0f })->id;
-    const int viewTransformNodeId =
-        graph.AddLayerNode(
-            LayerType::ViewTransform,
-            0,
-            { 2.0f, 0.0f })->id;
+    EditorNodeGraph::RawDevelopmentPayload rawPayload;
+    rawPayload.recipe = Stack::RawRecipe::MakeDefaultRecipe({});
+    rawPayload.recipe.viewTransform.layerJson["enabled"] = true;
+    const int developmentNodeId =
+        graph.AddRawDevelopmentNode(std::move(rawPayload), { 0.0f, 0.0f })->id;
     const int splitNodeId =
         graph.AddChannelSplitNode({ 3.0f, 0.0f })->id;
     const int firstReformatNodeId =
@@ -1065,19 +1058,7 @@ void TestChannelReformatScenePathUsesTypedInputs() {
 
     graph.EditLinks() = {
         {
-            rawSourceNodeId,
-            EditorNodeGraph::kRawOutputSocketId,
-            decodeNodeId,
-            EditorNodeGraph::kRawInputSocketId
-        },
-        {
-            decodeNodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            viewTransformNodeId,
-            EditorNodeGraph::kImageInputSocketId
-        },
-        {
-            viewTransformNodeId,
+            developmentNodeId,
             EditorNodeGraph::kImageOutputSocketId,
             splitNodeId,
             EditorNodeGraph::kImageInputSocketId

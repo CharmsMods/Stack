@@ -2698,9 +2698,6 @@ private:
     void FailDeferredLoadedProjectApply(std::string message);
     void TickDeferredLoadedProjectApply(double projectApplyBudgetMs);
     void ApplyGraphLayerOrder();
-    std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers() const;
-    std::vector<RenderLayerStep> BuildGraphRenderSteps() const;
-    std::vector<RenderMaskSource> BuildGraphRenderMasks() const;
     EditorRenderWorker::Snapshot BuildRenderSnapshot(std::uint64_t generation);
     bool TryBuildRenderSnapshot(
         std::uint64_t generation,
