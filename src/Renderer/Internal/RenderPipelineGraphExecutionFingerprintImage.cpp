@@ -497,12 +497,13 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             const auto* input = findInputLink(node.nodeId, "imageIn");
             HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
             for (const auto& link : graph.links) {
-                if (link.toNodeId != node.nodeId || (link.toSocketId != "maskIn" &&
+                if (!node.rawOperation.enabled || link.toNodeId != node.nodeId || (link.toSocketId != "maskIn" &&
                     link.toSocketId.rfind("gradient:", 0) != 0 && link.toSocketId.rfind("area:", 0) != 0)) continue;
                 HashCombine(fingerprint, HashValue(link.toSocketId));
                 HashCombine(fingerprint, fingerprintMask(link.fromNodeId, link.fromSocketId));
             }
             for (const auto& parameter : node.uniformParameters) {
+                if (!node.rawOperation.enabled) break;
                 const auto* input = findInputLink(nodeId, EditorNodeGraph::ParameterInputSocketId(parameter.id));
                 if (input) { HashCombine(fingerprint, HashValue(parameter.id)); HashCombine(fingerprint, fingerprintScalar(input->fromNodeId, input->fromSocketId)); }
             }

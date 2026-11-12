@@ -644,7 +644,7 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             if (renderNodeIds.count(link.toNodeId)) {
                 if (const auto* consumer = graph.FindNode(link.toNodeId))
                     for (const auto& port : outputPorts(*consumer))
-                        if (EditorNodeGraphDefinitions::OutputDependsOnInput(graph, *consumer, port, link.toSocketId))
+                        if (EditorNodeGraphDefinitions::ExecutionOutputDependsOnInput(graph, *consumer, port, link.toSocketId))
                             snapshot.unavailableOutputSockets[link.toNodeId][port] =
                                 "The connected operand has no executable source.";
             }

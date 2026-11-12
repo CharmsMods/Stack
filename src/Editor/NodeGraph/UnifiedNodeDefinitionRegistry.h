@@ -123,6 +123,10 @@ bool AcceptsTypedParameterInput(const EditorNodeGraph::Node& node, const std::st
 
 bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input);
+// Current execution only. Authoring and cycle prevention must continue to use
+// OutputDependsOnInput so toggling bypass cannot introduce a feedback loop.
+bool ExecutionOutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input);
 bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input);
 

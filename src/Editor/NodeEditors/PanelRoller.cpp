@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace Stack::Editor {
 void PanelRollerPlaceholder(const char* label,float width) {
@@ -40,6 +41,11 @@ bool PanelRoller(const char* label,const char* id,float& value,float minimum,flo
     const float readout=compact?std::min(52.f*scale,width*.55f):62.f*scale;
     const float gap=(compact || width<250.f*scale?4.f:8.f)*scale;
     const float grip=std::max(12.f*scale,width-readout-gap*2-(compact?0.f:80.f*scale));
+    const double span=static_cast<double>(maximum)-minimum;
+    // Calibration deliberately permits the full finite float range. Its span
+    // cannot fit in a float, so use the caller's relative speed for dragging.
+    const float dragStep=span<=std::numeric_limits<float>::max()
+        ? static_cast<float>(span)/std::max(1.f,grip/scale-10.f) : speed;
     const auto origin=ImGui::GetCursorScreenPos();
     const bool enabled=!(ImGui::GetItemFlags()&ImGuiItemFlags_Disabled);
     auto* draw=ImGui::GetWindowDrawList();
@@ -61,7 +67,7 @@ bool PanelRoller(const char* label,const char* id,float& value,float minimum,flo
     }
     if(enabled && gesture.dragging && (active || ImGui::IsMouseReleased(0)) && ImGui::IsMouseDragging(0,1.f)) {
         const float delta=io.MouseDelta.x/scale*(io.KeyShift?.1f:1.f);
-        const float next=std::clamp(value+delta*(maximum-minimum)/std::max(1.f,grip/scale-10.f),minimum,maximum);
+        const float next=std::clamp(value+delta*dragStep,minimum,maximum);
         if(next!=value) {value=next;changed=true;gesture.phase=std::fmod(gesture.phase+delta,8.f);}
 
     }
@@ -77,8 +83,8 @@ bool PanelRoller(const char* label,const char* id,float& value,float minimum,flo
         const ImVec2 low=ImGui::GetItemRectMin(),high=ImGui::GetItemRectMax();
         const float cy=(low.y+high.y)*.5f;
         const float left=low.x+5*scale,right=high.x-5*scale;
-        const float t=std::clamp((value-minimum)/std::max(.000001f,maximum-minimum),0.f,1.f);
-        const float neutral=std::clamp((reset-minimum)/std::max(.000001f,maximum-minimum),0.f,1.f);
+        const float t=static_cast<float>(std::clamp((static_cast<double>(value)-minimum)/std::max(.000001,span),0.0,1.0));
+        const float neutral=static_cast<float>(std::clamp((static_cast<double>(reset)-minimum)/std::max(.000001,span),0.0,1.0));
         draw->AddLine({left,cy},{right,cy},ImGui::GetColorU32(ImGuiCol_Text,.4f),scale);
         const float tick=left+(right-left)*neutral;
         draw->AddLine({tick,cy-3*scale},{tick,cy+3*scale},ImGui::GetColorU32(ImGuiCol_Text,.3f),scale);

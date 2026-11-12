@@ -179,9 +179,25 @@ ExportResult BuildExport(
     }
 
     if (layoutMode == LayoutMode::Preserve) {
+        std::unordered_set<std::string> sourceNodeUuids;
+        for (const auto& node : graph.GetNodes()) sourceNodeUuids.insert(node.instanceUuid);
         for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
             if (wholeGraph || GroupIntersectsSelection(group, graph, includedNodeIds)) {
                 exportGraph.GetGroups().push_back(group);
+                auto& boundary = exportGraph.GetGroups().back().compoundBoundary;
+                if (boundary.is_object()) {
+                    // Deleting a decompiled member leaves its old boundary
+                    // until Recompile. Omit only bindings proven detached in
+                    // the full source graph, not merely absent from selection.
+                    for (const char* key : {"ports", "parameters"}) {
+                        auto& entries = boundary[key];
+                        for (auto entry = entries.begin(); entry != entries.end();) {
+                            if (!sourceNodeUuids.count(entry->at("internalInstanceUuid").get<std::string>()))
+                                entry = entries.erase(entry);
+                            else ++entry;
+                        }
+                    }
+                }
             }
         }
     }
@@ -197,6 +213,16 @@ ExportResult BuildExport(
         if (node.kind == EditorNodeGraph::NodeKind::Compound && node.definitionResolved) {
             compoundRoots.push_back(node.compound.instance.definition);
         }
+    }
+    for (const auto& group : exportGraph.GetGroups()) {
+        if (!group.compoundBoundary.is_object() || group.compoundMembers.empty() ||
+            !std::all_of(group.compoundMembers.begin(),group.compoundMembers.end(),
+                [&](int id) { return includedNodeIds.count(id) != 0; })) continue;
+        // A decompiled body still needs its origin definition to Recompile,
+        // even when no live Compound node remains in the copied selection.
+        Stack::NodeMath::CompoundInstance origin;
+        if (Stack::NodeMath::DeserializeCompoundInstance(group.compoundBoundary.at("origin"), origin, nullptr))
+            compoundRoots.push_back(origin.definition);
     }
     if (!compoundRoots.empty()) {
         const std::vector<Stack::NodeMath::DefinitionReference> closure =

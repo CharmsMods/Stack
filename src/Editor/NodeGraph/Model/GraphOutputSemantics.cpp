@@ -115,7 +115,7 @@ public:
                     pending.back().expanded = true;
                     visiting.insert(key);
                     graph.ForEachIncomingLink(node->id, [&](const Link& link) {
-                        if (!EditorNodeGraphDefinitions::OutputDependsOnInput(graph, *node, frame.socketId, link.toSocketId)) return;
+                        if (!EditorNodeGraphDefinitions::ExecutionOutputDependsOnInput(graph, *node, frame.socketId, link.toSocketId)) return;
                         const auto inputKey = GraphOutputIdentity(link.fromNodeId, link.fromSocketId);
                         if (!complete.count(inputKey) && !visiting.count(inputKey))
                             pending.push_back({link.fromNodeId, link.fromSocketId});
@@ -124,7 +124,7 @@ public:
                 }
                 OutputRules::Inputs inputs;
                 graph.ForEachIncomingLink(node->id, [&](const Link& link) {
-                    if (!EditorNodeGraphDefinitions::OutputDependsOnInput(graph, *node, frame.socketId, link.toSocketId)) return;
+                    if (!EditorNodeGraphDefinitions::ExecutionOutputDependsOnInput(graph, *node, frame.socketId, link.toSocketId)) return;
                     const auto input = outputs.find(GraphOutputIdentity(link.fromNodeId, link.fromSocketId));
                     if (input != outputs.end()) inputs[link.toSocketId] = &input->second;
                 });

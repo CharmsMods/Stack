@@ -175,6 +175,16 @@ bool AcceptsTypedParameterInput(const Node& node, const std::string& socketId, E
     return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), id) != node.exposedParameterIds.end();
 }
 
+bool ExecutionOutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input) {
+    if (const auto* channel = EditorNodeGraph::FindChannelOutput(node, output))
+        return ExecutionOutputDependsOnInput(graph, node, channel->sourceSocket, input);
+    if (node.kind == NodeKind::RawOperation && !node.rawOperation.enabled &&
+        output == EditorNodeGraph::kImageOutputSocketId)
+        return input == EditorNodeGraph::kImageInputSocketId;
+    return OutputDependsOnInput(graph, node, output, input);
+}
+
 bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input) {
     if (const auto* channel=EditorNodeGraph::FindChannelOutput(node,output))

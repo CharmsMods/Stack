@@ -4,6 +4,7 @@
 #include "NodeMath/ChannelImageSemantics.h"
 #include "NodeMath/ArithmeticContract.h"
 #include "NodeMath/SourceImageSemantics.h"
+#include "Graph/LayerGeometrySemantics.h"
 
 #include <algorithm>
 #include <array>
@@ -345,6 +346,13 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
     case NodeKind::Mix:
         output = MergeSignals(signals({ kMixInputASocketId, kMixInputBSocketId }), declaredType,
             node.mixBlendMode == MixBlendMode::Average);
+        if (const auto* a = input(kMixInputASocketId)) if (const auto* b = input(kMixInputBSocketId)) {
+            const bool mixedChannel = (a->descriptor.logicalType == LogicalValueType::ColorImage && IsSingleChannelValue(b->descriptor.logicalType)) ||
+                (b->descriptor.logicalType == LogicalValueType::ColorImage && IsSingleChannelValue(a->descriptor.logicalType));
+            if (mixedChannel && output.descriptor.presentImageComponents.state == KnowledgeState::Known &&
+                HasImageComponent(output.descriptor.presentImageComponents.value, ImageComponent::Alpha))
+                output.descriptor.alpha = SemanticField<AlphaMode>::Unknown();
+        }
         if (!input(kMixInputASocketId) && !input(kMixInputBSocketId)) AddDiagnostic(output, node, socketId, "Connect a data input");
         break;
     case NodeKind::MaskCombine:
@@ -444,11 +452,17 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
                 diagnostic.affectedIdentity = GraphOutputIdentity(node.id, socketId);
                 output.diagnostics.push_back(std::move(diagnostic));
             }
-        } else if (node.kind != NodeKind::Reformat) output.descriptor.range = SemanticField<NumericRange>::Unknown();
+        } else if (node.kind != NodeKind::Reformat &&
+            !(node.kind == NodeKind::RawOperation && (!node.rawOperation.enabled || socketId == "inputImageOut")))
+            output.descriptor.range = SemanticField<NumericRange>::Unknown();
         if (node.kind == NodeKind::Reformat) {
             output.descriptor.spatial = SemanticField<SpatialDescriptor>::Known(
                 ReformatOutputSpatial(output.descriptor.spatial.value, node.reformatSettings));
         }
+        if (node.kind == NodeKind::Layer)
+            Stack::GraphModel::DescribeLayerGeometryCoverage(output.descriptor,
+                node.layerType == LayerType::Crop ? "Crop" : node.layerType == LayerType::Rotate ? "Rotate" :
+                    node.layerType == LayerType::Flip ? "Flip" : "", node.layerParameters);
         if (const auto* mask = input(kMaskInputSocketId)) MergeDiagnostics(output, *mask);
         break;
     case NodeKind::Output:
