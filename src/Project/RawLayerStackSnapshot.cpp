@@ -518,23 +518,25 @@ bool IsRawLayerOutputAvailable(const RenderGraphSnapshot& graph, std::string& er
     while (!pending.empty()) {
         const auto endpoint = pending.back(); pending.pop_back();
         if (!visited.insert(std::to_string(endpoint.node) + "/" + endpoint.socket).second) continue;
-        const auto unavailable = graph.unavailableOutputs.find(endpoint.node);
-        if (unavailable != graph.unavailableOutputs.end()) { error = unavailable->second; return false; }
+        if (const auto* unavailable = graph.FindOutputFailure(endpoint.node, endpoint.socket)) {
+            error = *unavailable; return false;
+        }
         const auto node = nodes.find(endpoint.node);
         if (node == nodes.end()) { error = "The requested image producer is missing."; return false; }
         for (const auto* link : inputs[endpoint.node]) {
+            if (!GraphModel::OutputDependsOnInput(node->second->outputDependencies, endpoint.socket, link->toSocketId)) continue;
             const auto producer = nodes.find(link->fromNodeId);
+            const auto* producerFailure = graph.FindOutputFailure(link->fromNodeId, link->fromSocketId);
             if (producer != nodes.end() && producer->second->rawCoverage.contains("bracketDepthMask") &&
-                graph.unavailableOutputs.count(link->fromNodeId)) {
-                error = graph.unavailableOutputs.at(link->fromNodeId);
+                producerFailure) {
+                error = *producerFailure;
                 return false;
             }
             // Optional missing coverage leaves its consumer unrestricted.
             // A missing required math input still makes that branch unavailable.
             if (link->toSocketId == "maskIn" || link->toSocketId == "factor" ||
                 link->toSocketId.rfind("gradient:", 0) == 0 || link->toSocketId.rfind("area:", 0) == 0) continue;
-            if (GraphModel::OutputDependsOnInput(node->second->outputDependencies, endpoint.socket, link->toSocketId))
-                pending.push_back({link->fromNodeId, link->fromSocketId});
+            pending.push_back({link->fromNodeId, link->fromSocketId});
         }
     }
     error.clear(); return true;

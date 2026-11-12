@@ -15,16 +15,6 @@
 namespace EditorNodeGraph {
 namespace {
 
-bool IsChannelSocketId(const std::string& socketId) {
-    return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
-}
-
-bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
-    return std::any_of(nodes.begin(), nodes.end(), [id](const Node& node) {
-        return node.id == id;
-    });
-}
-
 bool IsSourceLikeNode(const Node& node) {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
@@ -356,7 +346,9 @@ ValidationResult Graph::Validate() const {
     std::set<std::tuple<int, std::string, int, std::string>> seenLinks;
     std::set<std::pair<int, std::string>> occupiedInputs;
     for (const Link& link : m_Links) {
-        if (!ContainsNodeId(m_Nodes, link.fromNodeId) || !ContainsNodeId(m_Nodes, link.toNodeId)) {
+        const Node* from = FindNode(link.fromNodeId);
+        const Node* to = FindNode(link.toNodeId);
+        if (!from || !to) {
             result.valid = false;
             result.messages.push_back("Link references a missing node.");
         }
@@ -370,8 +362,6 @@ ValidationResult Graph::Validate() const {
                 "An input socket has more than one incoming link.");
         }
 
-        const Node* from = FindNode(link.fromNodeId);
-        const Node* to = FindNode(link.toNodeId);
         SocketDefinition fromSocket;
         SocketDefinition toSocket;
         if (!from || !to) {

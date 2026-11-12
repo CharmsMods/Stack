@@ -1375,6 +1375,22 @@ bool Graph::CreateCompoundFromSelection(
         if (error) *error = "Select at least one pointwise graph node.";
         return false;
     }
+    if (!retainedBoundary) {
+        // Ordinary packing can transfer complete retained bodies into its
+        // canonical graph, but cannot remap an enclosing body's public ports.
+        // RepackCompoundGroup owns that ancestor repair for its explicit path.
+        for (const auto& group : m_Groups) {
+            if (!group.compoundBoundary.is_object() || group.compoundMembers.empty()) continue;
+            const bool intersects = std::any_of(group.compoundMembers.begin(), group.compoundMembers.end(),
+                [&](int id) { return selected.count(id) != 0; });
+            const bool contained = std::all_of(group.compoundMembers.begin(), group.compoundMembers.end(),
+                [&](int id) { return selected.count(id) != 0; });
+            if (intersects && !contained) {
+                if (error) *error = "The selection contains only part of a decompiled compound. Use its Recompile action, or select all of its members before creating a new compound.";
+                return false;
+            }
+        }
+    }
     std::vector<Node> selectedNodes;
     float minX = 0.0f;
     float minY = 0.0f;
@@ -1694,6 +1710,15 @@ bool Graph::CreateCompoundFromSelection(
         [&](const Node& node){return selected.count(node.id)!=0;}),m_Nodes.end());
     m_Links.erase(std::remove_if(m_Links.begin(),m_Links.end(),
         [&](const Link& link){return selected.count(link.fromNodeId)!=0 || selected.count(link.toNodeId)!=0;}),m_Links.end());
+    if (!retainedBoundary) {
+        // These complete boundaries were copied into the canonical graph.
+        // Keeping their canvas copies would retain IDs of the removed nodes.
+        m_Groups.erase(std::remove_if(m_Groups.begin(),m_Groups.end(),[&](const auto& group) {
+            return group.compoundBoundary.is_object() && !group.compoundMembers.empty() &&
+                std::all_of(group.compoundMembers.begin(),group.compoundMembers.end(),
+                    [&](int id) { return selected.count(id) != 0; });
+        }),m_Groups.end());
+    }
     ClearSelection();
     for (Link& link : replacementLinks) {
         m_Links.push_back(std::move(link));

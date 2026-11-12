@@ -16,8 +16,12 @@ struct PanelControlState {
     bool settingsOpen=false;
     void EndInteraction() { for(auto& entry:rollers) entry.second.EndInteraction(); }
 };
+struct PanelRollerGestureResult {
+    bool started=false;
+    bool cancelled=false;
+};
 // Presentation only. The caller edits a draft and owns the transaction.
 bool PanelRoller(const char* label,const char* id,float& value,float minimum,float maximum,
-    float speed,float reset,const char* format,PanelControlState& state,float width=0);
+    float speed,float reset,const char* format,PanelControlState& state,float width=0,PanelRollerGestureResult* gestureResult=nullptr);
 void PanelRollerPlaceholder(const char* label,float width=0);
 }

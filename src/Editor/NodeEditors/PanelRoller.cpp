@@ -27,7 +27,8 @@ void PanelRollerPlaceholder(const char* label,float width) {
     draw->AddText({origin.x+width-readout+(readout-ImGui::CalcTextSize("--").x)*.5f,y},ink,"--");
 }
 bool PanelRoller(const char* label,const char* id,float& value,float minimum,float maximum,
-    float speed,float reset,const char* format,PanelControlState& state,float width) {
+    float speed,float reset,const char* format,PanelControlState& state,float width,PanelRollerGestureResult* gestureResult) {
+    if(gestureResult)*gestureResult={};
     ImGui::PushID(id);
     const auto key=ImGui::GetID("roller");
     auto& gesture=state.rollers[key];
@@ -49,8 +50,12 @@ bool PanelRoller(const char* label,const char* id,float& value,float minimum,flo
     ImGui::InvisibleButton("roller",{grip,height},ImGuiButtonFlags_EnableNav);
     const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
     bool changed=false;
-    if(enabled && ImGui::IsItemActivated()) {gesture.before=value;gesture.press=io.MousePos;gesture.dragging=true;}
+    if(enabled && ImGui::IsItemActivated()) {
+        gesture.before=value;gesture.press=io.MousePos;gesture.dragging=true;
+        if(gestureResult)gestureResult->started=true;
+    }
     if(gesture.dragging && (!enabled || io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape,false))) {
+        if(gestureResult)gestureResult->cancelled=true;
         changed=value!=gesture.before;value=gesture.before;gesture.dragging=false;
         if(ImGui::GetActiveID()==key)ImGui::ClearActiveID();
     }

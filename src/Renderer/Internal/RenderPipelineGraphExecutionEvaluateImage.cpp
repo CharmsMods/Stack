@@ -25,9 +25,9 @@ namespace Stack::Renderer::GraphExecution {
 void GraphExecutionRuntime::BindImageEvaluation() {
     evalImage = [this](int nodeId, const std::string& socketId) -> unsigned int {
         if (pipeline.m_ShouldCancelRender && pipeline.m_ShouldCancelRender()) return 0;
-        if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end()) {
+        if (const auto* unavailable = graph.FindOutputFailure(nodeId, socketId)) {
             pipeline.m_LastGraphExecutionStats.lastSpecializedFailureNodeId=nodeId;
-            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=unavailable->second;return 0;
+            pipeline.m_LastGraphExecutionStats.lastSpecializedFailure=*unavailable;return 0;
         }
         const std::string key = MakeNodeSocketKey(nodeId, socketId);
         bool& outputDenoisePending = imageDenoisePending[key];

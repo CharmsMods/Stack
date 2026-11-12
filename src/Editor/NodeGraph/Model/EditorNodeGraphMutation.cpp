@@ -441,6 +441,7 @@ bool Graph::CanConnectSockets(
 
     const auto* targetDefinition=EditorNodeGraphDefinitions::FindLiveNodeDefinition(*to);
     if (((targetDefinition && targetDefinition->requiresSceneLinearRgb &&
+        (to->kind != NodeKind::RawOperation || to->rawOperation.enabled) &&
         toSocketId == kImageInputSocketId) ||
         (to->role == Stack::GraphModel::NodeRole::LayerResult && toSocketId == kImageInputSocketId)) &&
         (fromSocket.type != SocketType::Image || isFromScalarStream())) {

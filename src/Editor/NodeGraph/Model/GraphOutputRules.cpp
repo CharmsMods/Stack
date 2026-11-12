@@ -412,8 +412,10 @@ GraphOutputDescription Describe(const Node& node, const std::string& socketId, c
             // Disconnecting it leaves a draft branch whose existing mask wires can be kept.
             output.descriptor = MakeUnknownDescriptor(LogicalValueType::Invalid);
         }
-        if (node.kind == NodeKind::RawOperation) output.descriptor.range = SemanticField<NumericRange>::Unknown();
+        if (node.kind == NodeKind::RawOperation && node.rawOperation.enabled && socketId != "inputImageOut")
+            output.descriptor.range = SemanticField<NumericRange>::Unknown();
         if (node.kind == NodeKind::Layer && node.layerType == LayerType::ViewTransform &&
+            node.layerParameters.value("enabled", true) && node.layerParameters.value("visible", true) &&
             output.descriptor.logicalType == LogicalValueType::ColorImage) {
             output.descriptor.reference = SemanticField<ReferenceState>::Known(ReferenceState::Display);
             output.descriptor.color = SemanticField<ColorIdentity>::Known({"srgb-d65", {}, ColorRelation::Standard});

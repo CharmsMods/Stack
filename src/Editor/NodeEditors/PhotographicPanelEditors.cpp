@@ -10,19 +10,23 @@
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
 #include <imgui_internal.h>
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <limits>
 
 namespace Stack::Editor {
 namespace {
+struct LightPanelState {
+    std::array<bool,5> enabledBefore{};
+};
 constexpr const char* tones[]{"Blacks","Shadows","Midtones","Highlights","Whites"};
 constexpr const char* primaries[]{"Red","Green","Blue"};
 constexpr const char* hueIds[]{"hue-0","hue-1","hue-2"};
 constexpr const char* saturationIds[]{"saturation-0","saturation-1","saturation-2"};
 bool Field(RawWorkspaceEditContext& c,const char* label,const char* id,float& value,
-    float low,float high,float speed,float reset,const char* format) {
+    float low,float high,float speed,float reset,const char* format,PanelRollerGestureResult* gestureResult=nullptr) {
     ImGui::BeginDisabled(c.IsParameterDriven(id));
-    const bool changed=PanelRoller(label,id,value,low,high,speed,reset,format,c.State<PanelControlState>());
+    const bool changed=PanelRoller(label,id,value,low,high,speed,reset,format,c.State<PanelControlState>(),0,gestureResult);
     ImGui::EndDisabled();return changed;
 }
 }
@@ -48,8 +52,15 @@ bool DrawPanelTonalRollers(RawWorkspaceEditContext& c,std::vector<RawRecipe::Raw
 bool DrawLightPanel(EditorModule&,RawWorkspaceEditContext& c) {
     bool changed=Field(c,"Exposure","ev",c.recipe.preToneExposureEv,-16,16,.02f,0,"%+.2f EV");
     auto& local=c.recipe.localRange;
+    auto& state=c.State<LightPanelState>();
     for(int i=0;i<5;++i) {
-        if(Field(c,tones[i],tones[i],local.light.amounts[i],-100,100,.4f,0,"%+.1f")) {
+        PanelRollerGestureResult gesture;
+        const bool adjusted=Field(c,tones[i],tones[i],local.light.amounts[i],-100,100,.4f,0,"%+.1f",&gesture);
+        if(gesture.started)state.enabledBefore[i]=local.enabled;
+        if(gesture.cancelled) {
+            changed|=adjusted || local.enabled!=state.enabledBefore[i];
+            local.enabled=state.enabledBefore[i];
+        } else if(adjusted) {
             local.enabled=true;changed=true;
         }
     }

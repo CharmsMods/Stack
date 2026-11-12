@@ -110,9 +110,10 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
         if (layer && layer->channelPolicy == LayerChannelPolicy::FullImageOnly)
             result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
     }
-    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::RawOperation &&
-        Stack::GraphModel::PhotoInputFor(node.rawOperation) != Stack::GraphModel::PhotoInput::Components)
-        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::RawOperation)
+        result.port.acceptedLogicalTypes = Stack::GraphModel::PhotoInputFor(node.rawOperation) == Stack::GraphModel::PhotoInput::Components
+            ? std::vector<LogicalValueType>{LogicalValueType::ColorImage,LogicalValueType::Channel,LogicalValueType::ScalarField,LogicalValueType::Mask}
+            : std::vector<LogicalValueType>{LogicalValueType::ColorImage};
     if (socketId == EditorNodeGraph::kImageInputSocketId && HasColorModeRequirement(node)) {
         ImageOperationInput channel;
         channel.scalar = true;
@@ -134,7 +135,8 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
             : std::vector<LogicalValueType>{type};
     }
     const auto* definition = FindLiveNodeDefinition(node);
-    const bool sceneInput = (definition && definition->requiresSceneLinearRgb && socketId == "imageIn") ||
+    const bool sceneInput = (definition && definition->requiresSceneLinearRgb && socketId == "imageIn" &&
+        (node.kind != NodeKind::RawOperation || node.rawOperation.enabled)) ||
         (node.role == Stack::GraphModel::NodeRole::LayerResult && socketId == "imageIn");
     if (sceneInput) {
         result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};

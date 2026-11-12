@@ -58,7 +58,7 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
     PointwiseFusionPlan plan;
     if (socketId != EditorNodeGraph::kImageOutputSocketId ||
         disabledNodes.find(nodeId) != disabledNodes.end() ||
-        executionContext.graph.unavailableOutputs.count(nodeId) ||
+        executionContext.graph.FindOutputFailure(nodeId, socketId) ||
         IsScalarRenderSocket(executionContext, nodeId, socketId)) {
         return plan;
     }
@@ -97,7 +97,7 @@ RenderPipeline::PointwiseFusionPlan RenderPipeline::BuildPointwiseFusionPlan(
     auto mayInlineUpstream = [&](const RenderGraphLink& link) {
         if (lowering.size() >= 48 ||
             disabledNodes.find(link.fromNodeId) != disabledNodes.end() ||
-            executionContext.graph.unavailableOutputs.count(link.fromNodeId) ||
+            executionContext.graph.FindOutputFailure(link.fromNodeId, link.fromSocketId) ||
             materializedOutputs.count(MakeNodeSocketKey(link.fromNodeId, link.fromSocketId)) ||
             executionContext.OutputUseCount(link.fromNodeId, link.fromSocketId) != 1) {
             return false;
