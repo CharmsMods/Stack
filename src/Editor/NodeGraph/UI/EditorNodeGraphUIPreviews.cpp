@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "Editor/NodeGraph/UI/GraphKeyboardInsertion.h"
 
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/ImagePreviewIdentity.h"
@@ -71,11 +72,14 @@ struct EditorNodeGraphUI::ImagePreviewDecode {
     int width = 0, height = 0, channels = 4;
 };
 
+EditorNodeGraphUI::EditorNodeGraphUI() = default;
+
 EditorNodeGraphUI::~EditorNodeGraphUI() {
     Shutdown();
 }
 
 void EditorNodeGraphUI::Shutdown() {
+    m_KeyboardInsertion.reset();
     m_DragLayout.reset();
     m_LayoutGroupPresentation.clear();
     m_LayoutRestingNodes.clear();m_LayoutRestingGroups.clear();

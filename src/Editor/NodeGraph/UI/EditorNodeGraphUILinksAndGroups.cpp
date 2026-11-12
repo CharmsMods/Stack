@@ -608,6 +608,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             }
         };
 
+        const float keyboardOpacity = m_KeyboardInsertion ? KeyboardWireOpacity(link) : 1.f;
         if (graphStyle.enabled) {
             const float handle = ResolveLinkHandle(p1, p2, straightLinks);
             const ImVec2 c1(p1.x + handle, p1.y);
@@ -620,13 +621,14 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                     std::clamp(linkColor.w + emphasis * 0.10f, 0.0f, 1.0f));
             }
 
+            linkColor.w *= keyboardOpacity;
             DrawLinkStrokeWithEdgeFade(
                 drawList,
                 p1,
                 c1,
                 c2,
                 p2,
-                ColorWithAlpha(graphStyle.linkUnderlay, 0.48f + emphasis * (selected ? 0.34f : 0.22f)),
+                ColorWithAlpha(graphStyle.linkUnderlay, keyboardOpacity * (0.48f + emphasis * (selected ? 0.34f : 0.22f))),
                 (4.6f + emphasis * (selected ? 2.8f : 1.6f)) * thicknessScale,
                 visualStyle.dotted,
                 straightLinks,
@@ -696,7 +698,8 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             ImVec2(p1.x + handle, p1.y),
             ImVec2(p2.x - handle, p2.y),
             p2,
-            LinkColorClassic(visualStyle, selected),
+            keyboardOpacity == 1.f ? LinkColorClassic(visualStyle, selected) :
+                ColorToU32(WithAlpha(ImGui::ColorConvertU32ToFloat4(LinkColorClassic(visualStyle, selected)), keyboardOpacity)),
             (3.0f + emphasis * (selected ? 1.5f : 0.9f)) * thicknessScale,
             visualStyle.dotted,
             straightLinks,

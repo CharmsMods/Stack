@@ -39,7 +39,7 @@ namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
 namespace Stack::Validation { bool ValidateBracketMaskResult(int,char**); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
-namespace Stack::Validation { bool ValidateRawGraphCanvas(); bool ValidateViewControlsPanel(const std::filesystem::path&,bool=false); }
+namespace Stack::Validation { bool ValidateRawGraphCanvas(bool keyboardOnly); bool ValidateViewControlsPanel(const std::filesystem::path&,bool=false); }
 namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateGraphChannelOutputs(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesystem::path&, bool); }
@@ -169,8 +169,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode=Stack::Validation::ValidateViewControlsPanel(std::filesystem::u8path(argv[2])) ? 0 : 89;
         return true;
     }
-    if (argc == 2 && std::strcmp(argv[1], "--validate-raw-graph-canvas") == 0) {
-        exitCode = Stack::Validation::ValidateRawGraphCanvas() ? 0 : 89;
+    if ((argc == 2 || (argc == 3 && std::strcmp(argv[2], "--keyboard-only") == 0)) &&
+        std::strcmp(argv[1], "--validate-raw-graph-canvas") == 0) {
+        exitCode = Stack::Validation::ValidateRawGraphCanvas(argc == 3) ? 0 : 89;
         return true;
     }
     if ((argc == 4 || (argc == 5 && std::strcmp(argv[4], "--full-resolution-protection") == 0)) &&

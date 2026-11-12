@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "Editor/NodeGraph/UI/GraphKeyboardInsertion.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/CompoundGroupMembership.h"
 #include "Notifications/NotificationPresenter.h"
@@ -11,7 +12,11 @@
 namespace {
 using namespace EditorNodeGraph;
 bool Equal(Vec2 a,Vec2 b) {return a.x==b.x && a.y==b.y;}
-Vec2 Blend(Vec2 a,Vec2 b,float t) {return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t};}
+Vec2 Blend(Vec2 a,Vec2 b,float t) {
+    const float distance=std::max(std::abs(b.x-a.x),std::abs(b.y-a.y));
+    t=std::min(t,1.f+2.f/std::max(1.f,distance));
+    return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t};
+}
 }
 
 bool EditorNodeGraphUI::DecompileNode(EditorModule* editor,int nodeId,std::string* error) {
@@ -198,14 +203,16 @@ void EditorNodeGraphUI::AdvanceLayoutMotion(const Stack::Editor::GraphEditorCont
     for(auto it=m_LayoutNodeMotion.begin();it!=m_LayoutNodeMotion.end();) {
         const auto* node=context.graph->FindNode(it->first);auto& motion=it->second;
         motion.elapsed+=step;
-        const float t=std::clamp(float((motion.elapsed-motion.delay)/motion.duration),0.f,1.f),ease=t*t*(3-2*t);
+        const float t=std::clamp(float((motion.elapsed-motion.delay)/motion.duration),0.f,1.f);
+        const float ease=Stack::Editor::GraphLayoutMotionTiming::ElasticProgress(motion.elapsed-motion.delay,motion.duration);
         if(!node || node->instanceUuid!=motion.uuid || !Equal(node->position,motion.target) || t>=1)it=m_LayoutNodeMotion.erase(it);
         else {motion.current=Blend(motion.start,motion.target,ease);++it;}
     }
     for(auto it=m_LayoutGroupMotion.begin();it!=m_LayoutGroupMotion.end();) {
         const auto* group=context.graph->FindGroup(it->first);auto& motion=it->second;
         motion.elapsed+=step;
-        const float t=std::clamp(float((motion.elapsed-motion.delay)/motion.duration),0.f,1.f),ease=t*t*(3-2*t);
+        const float t=std::clamp(float((motion.elapsed-motion.delay)/motion.duration),0.f,1.f);
+        const float ease=Stack::Editor::GraphLayoutMotionTiming::ElasticProgress(motion.elapsed-motion.delay,motion.duration);
         const auto presentation=m_LayoutGroupPresentation.find(it->first);
         const bool matchesPresentation=presentation!=m_LayoutGroupPresentation.end() &&
             Equal(presentation->second.rect.min,motion.target.min) && Equal(presentation->second.rect.max,motion.target.max);
@@ -217,6 +224,10 @@ void EditorNodeGraphUI::AdvanceLayoutMotion(const Stack::Editor::GraphEditorCont
 }
 
 Vec2 EditorNodeGraphUI::DisplayNodePosition(const Node& node) const {
+    if (!m_RenderPreviewOnly && !m_RenderCaptureOnly && m_KeyboardInsertion && !m_KeyboardInsertion->nodes.empty()) {
+        const auto found = m_KeyboardInsertion->nodes.find(node.id);
+        if (found != m_KeyboardInsertion->nodes.end()) return found->second.current;
+    }
     if(!m_RenderPreviewOnly && !m_RenderCaptureOnly && m_DragLayout) {
         const auto held=m_DragLayout->displayed.find(node.id);
         if(held!=m_DragLayout->displayed.end())return held->second;
@@ -229,6 +240,10 @@ Vec2 EditorNodeGraphUI::DisplayNodePosition(const Node& node) const {
 }
 
 GraphRect EditorNodeGraphUI::DisplayGroupRect(const NodeGroup& group) const {
+    if (!m_RenderPreviewOnly && !m_RenderCaptureOnly && m_KeyboardInsertion && !m_KeyboardInsertion->groups.empty()) {
+        const auto found = m_KeyboardInsertion->groups.find(group.id);
+        if (found != m_KeyboardInsertion->groups.end()) return found->second.current;
+    }
     if(!m_RenderPreviewOnly && !m_RenderCaptureOnly && !m_LayoutGroupMotion.empty()) {
         const auto it=m_LayoutGroupMotion.find(group.id);
         if(it!=m_LayoutGroupMotion.end())return it->second.current;

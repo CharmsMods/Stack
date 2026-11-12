@@ -24,6 +24,7 @@
 
 class EditorModule;
 struct PresetEntry;
+namespace Stack::Editor { struct GraphKeyboardInsertion; }
 namespace Stack::Editor::NodeGraphUIVisuals {
 struct GraphStyleTokens;
 struct NodeLayoutMetrics;
@@ -31,6 +32,7 @@ struct NodeLayoutMetrics;
 
 class EditorNodeGraphUI {
 public:
+    EditorNodeGraphUI();
     ~EditorNodeGraphUI();
     void Initialize();
     void Shutdown();
@@ -339,6 +341,18 @@ private:
     void RenderPendingOutputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredInput);
     void RenderPendingInputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredOutput);
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
+    bool UpdateKeyboardInsertion(EditorModule& editor, EditorNodeGraph::Graph& graph);
+    void DrawKeyboardInsertion(const EditorNodeGraph::Graph& graph, ImDrawList& draw,
+        const Stack::Editor::NodeGraphUIVisuals::GraphStyleTokens& style);
+    void CommitKeyboardInsertion(EditorModule& editor);
+    void ResetKeyboardInsertion();
+    float KeyboardWireOpacity(const EditorNodeGraph::Link& link) const;
+    void PrepareKeyboardRoom(EditorNodeGraph::Graph& graph);
+    void SetKeyboardRoomTargets(const EditorNodeGraph::Graph& graph);
+    void BringKeyboardBoundsIntoView(const EditorNodeGraph::GraphRect& bounds);
+    void FindKeyboardTargets(const EditorNodeGraph::Graph& graph);
+    void RankKeyboardResults(EditorModule& editor, const EditorNodeGraph::Graph& graph);
+    std::unique_ptr<Stack::Editor::GraphKeyboardInsertion> m_KeyboardInsertion;
     void RenderNodeBrowser(EditorModule* editor);
     void RenderInteractionDebugOverlay(const EditorNodeGraph::Graph& graph, int hoveredNodeId, GraphMouseOwner owner);
     void RenderChannelSplitConfirmPrompt(EditorModule* editor);

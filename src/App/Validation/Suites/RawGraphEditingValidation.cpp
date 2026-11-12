@@ -2,6 +2,8 @@
 #include "Editor/EditorModule.h"
 #include "Graph/LayerOperationParameters.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
+#include "Editor/NodeGraph/UI/NodeNameSearch.h"
+#include "Editor/NodeGraph/GraphCatalogInsertion.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeEditors/NodeEditorRegistry.h"
 #include "Editor/LayerRegistry.h"
@@ -9,6 +11,7 @@
 #include "Editor/RawLayerTools.h"
 #include "Renderer/GLLoader.h"
 #include "Async/TaskSystem.h"
+#include "Utils/ImGuiExtras.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <iostream>
@@ -23,6 +26,129 @@ namespace Stack::Validation {
 void ValidateSharedCurveInteractions();
 void ValidateRawGraphInsertions(EditorModule& editor);
 namespace {
+void ValidateKeyboardInsertion(EditorModule& editor) {
+    using namespace EditorNodeGraph;
+    using Stack::Editor::NodeNameSearch;
+    using Stack::Editor::RankNodeName;
+    const auto require = [](bool ok, const char* message) {
+        if (!ok) throw std::runtime_error(message);
+    };
+    for (const auto* text : {"gaussianblur", "gausian blur", "blur gauss"})
+        require(RankNodeName(NodeNameSearch(text), "Gaussian Blur") >= 0, "Keyboard search lost a fuzzy match.");
+    require(RankNodeName(NodeNameSearch("g"), "Gaussian Blur") < RankNodeName(NodeNameSearch("g"), "Apply Gain"),
+        "A word prefix beat a first-letter match.");
+
+    Graph masks;
+    masks.Clear();
+    const int source = masks.AddMaskGeneratorNode(MaskGeneratorKind::Solid, {})->id;
+    const int first = masks.AddMaskUtilityNode(MaskUtilityKind::Invert, {})->id;
+    const int second = masks.AddMaskUtilityNode(MaskUtilityKind::Invert, {})->id;
+    require(masks.TryConnectSockets(source, "maskOut", first, "maskIn") &&
+        masks.TryConnectSockets(source, "maskOut", second, "maskIn"), "Could not prepare a branched mask wire.");
+    const auto wire = *masks.FindAnyInputLink(first, "maskIn");
+    EditorNodeGraphDefinitions::NodeCatalogEntry entry;
+    entry.kind = NodeKind::MaskUtility;
+    entry.value = static_cast<int>(MaskUtilityKind::Invert);
+    std::string error;
+    const auto result = Stack::GraphModel::PrepareCatalogInsertion(masks, {source, "maskOut", SocketDirection::Output, wire}, entry, {}, error);
+    const auto maskSource = [](const Graph& graph, int node) {
+        const auto* link = graph.FindAnyInputLink(node, "maskIn");
+        return link ? link->fromNodeId : 0;
+    };
+    require(result && maskSource(result->graph, first) == result->nodeId &&
+        maskSource(result->graph, result->nodeId) == source &&
+        maskSource(result->graph, second) == source &&
+        maskSource(masks, first) == source, "Mask insertion changed another branch or the live graph.");
+
+    const auto baseline = editor.SerializePipeline();
+    const auto state = [&] { return Stack::Project::SerializeRawLayerStack(editor.GetProjectSession().rawLayers.State()); };
+    const auto original = state();
+    const auto& graph = editor.GetNodeGraph();
+    const auto found = std::find_if(graph.GetNodes().begin(), graph.GetNodes().end(), [](const auto& node) {
+        return node.kind == NodeKind::RawOperation && node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LocalEv;
+    });
+    require(found != graph.GetNodes().end(), "The keyboard fixture is missing Local EV.");
+    const int anchor = found->id;
+    const auto* edge = graph.FindOutputLink(anchor, "imageOut");
+    require(edge != nullptr, "The keyboard fixture has no outgoing image wire.");
+    const auto old = *edge;
+
+    EditorNodeGraphUI ui;
+    ui.Initialize();
+    auto& io = ImGui::GetIO();
+    io.AddMousePosEvent(-100, -100);
+    const auto frame = [&](bool showGraph = true) {
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        ImGuiExtras::BeginFrameInputRouting();
+        ImGui::SetNextWindowFocus();
+        ImGui::SetNextWindowPos({0, 0});
+        ImGui::SetNextWindowSize(io.DisplaySize);
+        ImGui::Begin("Graph keyboard validation", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+        if (showGraph) {
+            ui.Render(&editor);
+            editor.FinishRawLayerGraphFrame();
+        }
+        ImGui::End();
+        ImGui::Render();
+    };
+    const auto key = [&](ImGuiKey code) {
+        io.AddKeyEvent(code, true);
+        frame();
+        io.AddKeyEvent(code, false);
+        frame();
+    };
+    const auto type = [&](const char* text) { io.AddInputCharactersUTF8(text); frame(); };
+    frame();
+    key(ImGuiKey_Slash);
+    type("localev");
+    key(ImGuiKey_Enter);
+    require(graph.GetSelectedNodeId() == anchor, "Enter did not select the node matched by name.");
+    key(ImGuiKey_LeftArrow);
+    key(ImGuiKey_RightArrow);
+    key(ImGuiKey_Enter);
+    type("gausianblur");
+    key(ImGuiKey_Escape);
+    key(ImGuiKey_Escape);
+    key(ImGuiKey_Escape);
+    require(state() == original, "Cancelling the preview changed the document.");
+
+    type("@");
+    type("localev");
+    key(ImGuiKey_Enter);
+    key(ImGuiKey_Enter);
+    type("gaussianblur");
+    frame(false);
+    frame();
+    key(ImGuiKey_Enter);
+    require(state() == original, "Returning to a hidden canvas retained its pending insertion.");
+
+    key(ImGuiKey_Slash);
+    type("localev");
+    key(ImGuiKey_Enter);
+    key(ImGuiKey_Enter);
+    type("not a node");
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    key(ImGuiKey_A);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    key(ImGuiKey_Backspace);
+    type("gausian blur");
+    key(ImGuiKey_Enter);
+    const auto* rewired = graph.FindAnyInputLink(old.toNodeId, old.toSocketId);
+    require(rewired && rewired->fromNodeId != anchor, "The keyboard command did not insert Gaussian Blur.");
+    const auto* inserted = graph.FindNode(rewired->fromNodeId);
+    const auto* before = graph.FindAnyInputLink(rewired->fromNodeId, "imageIn");
+    require(inserted && inserted->layerType == LayerType::GaussianBlur && before && before->fromNodeId == anchor,
+        "The keyboard command did not reconnect both sides.");
+    const auto committed = state();
+    require(editor.UndoRawLayerEdit() && state() == original &&
+        editor.RedoRawLayerEdit() && state() == committed, "Keyboard insertion was not a single undoable graph edit.");
+    ui.Shutdown();
+    editor.DeserializePipeline(baseline);
+    editor.OpenRawLayerMaskGraph({});
+    std::cout << "Keyboard search, mask branch insertion, cancellation, hidden-canvas cleanup and undo passed.\n";
+}
+
 void ValidateNodeOpening(EditorModule& editor, int nodeId, int expectedTool, bool checkTransition = false) {
     // Tool selection switches the editor to RAW's render graph. Return to the
     // project canvas before sending graph pointer events, as the tab rail does.
@@ -95,7 +221,7 @@ void ValidateNodeOpening(EditorModule& editor, int nodeId, int expectedTool, boo
     ui.Shutdown();
 }
 
-bool ValidateCanvas(EditorModule& editor) {
+bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
     const auto require = [](bool ok, const std::string& message) {
         if (!ok) throw std::runtime_error(message);
     };
@@ -121,6 +247,10 @@ bool ValidateCanvas(EditorModule& editor) {
             "A fresh Background did not select an authored tool for Alt navigation.");
         editor.OpenRawLayerMaskGraph({});
         require(editor.IsRawProjectCanvas(), "The project canvas did not open.");
+        if (keyboardOnly) {
+            ValidateKeyboardInsertion(editor);
+            return true;
+        }
         ValidateRawGraphInsertions(editor);
         const auto find = [&](auto predicate) {
             for (const auto& node : editor.GetNodeGraph().GetNodes()) if (predicate(node)) return node.id;
@@ -758,7 +888,8 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
 
 } // namespace
 
-static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureOnly, bool includeSharedCurves = true) {
+static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureOnly, bool includeSharedCurves = true,
+    bool keyboardOnly = false) {
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -782,7 +913,7 @@ static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureO
     editor->SetDocumentPersistenceEnabled(false);
     editor->Initialize(window, nullptr, false);
     bool success=false;
-    try {if(input.empty() && includeSharedCurves) ValidateSharedCurveInteractions(); success=input.empty() ? ValidateCanvas(*editor) : ValidateFloatingTools(*editor,input,captureOnly);}
+    try {if(input.empty() && includeSharedCurves) ValidateSharedCurveInteractions(); success=input.empty() ? ValidateCanvas(*editor,keyboardOnly) : ValidateFloatingTools(*editor,input,captureOnly);}
     catch(const std::exception& error) {std::cerr<<error.what()<<'\n';}
     editor->RequestWorkerShutdownForAppClose();
     Async::TaskSystem::Get().Shutdown();
@@ -799,7 +930,7 @@ bool ValidateRawGraphEditing(const std::filesystem::path& input) {
 bool ValidateRawAssetCapture(const std::filesystem::path& input) {
     return !input.empty() && RunRawGraphEditing(input,true);
 }
-bool ValidateRawGraphCanvas() {
-    return RunRawGraphEditing({},false,false);
+bool ValidateRawGraphCanvas(bool keyboardOnly) {
+    return RunRawGraphEditing({},false,false,keyboardOnly);
 }
 } // namespace Stack::Validation

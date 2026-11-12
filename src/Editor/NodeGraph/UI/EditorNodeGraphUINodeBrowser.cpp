@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/NodeGraph/UI/NodeCatalogCommand.h"
+#include "Editor/NodeGraph/UI/NodeNameSearch.h"
 #include "App/AppHeaderStyle.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/UiPerformanceProbe.h"
@@ -22,60 +23,15 @@
 #include <unordered_set>
 #include <imgui.h>
 
-namespace {
-
-using NodeBrowserEntry = EditorNodeGraphDefinitions::NodeCatalogEntry;
-
-const std::vector<NodeBrowserEntry>& CachedNodeBrowserEntries() {
-    static const std::vector<NodeBrowserEntry> entries = EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries();
+const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>& Stack::Editor::RegisteredNodeCatalog() {
+    static const auto entries = EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries();
     return entries;
 }
 
-std::string Lower(std::string text) {
-    for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return text;
-}
+namespace {
 
-// One missing, extra, substituted or transposed letter in a whole word.
-bool NearWord(std::string_view query, std::string_view word) {
-    if (query.size() < 4 || query.size() + 1 < word.size() || word.size() + 1 < query.size()) return false;
-    const auto i = std::mismatch(query.begin(), query.end(), word.begin(), word.end()).first - query.begin();
-    if (query.size() < word.size()) return query.substr(i) == word.substr(i + 1);
-    if (word.size() < query.size()) return query.substr(i + 1) == word.substr(i);
-    if (i == query.size() || query.substr(i + 1) == word.substr(i + 1)) return true;
-    return i + 1 < query.size() && query[i] == word[i + 1] && query[i + 1] == word[i] &&
-        query.substr(i + 2) == word.substr(i + 2);
-}
-
-int SearchRank(const NodeBrowserEntry& entry, const std::string& query) {
-    if (query.empty()) return 0;
-    const auto label = Lower(entry.label), aliases = Lower(entry.searchAliases);
-    if (label == query) return 0;
-    if (label.find(query) != std::string::npos) return 1;
-    int rank = -1;
-    std::string_view intents = aliases;
-    while (!intents.empty()) {
-        const auto end = intents.find('|');
-        const auto intent = intents.substr(0, end);
-        if (intent == query) return 2;
-        if (NearWord(query, intent)) rank = 4;
-        if (end == intents.npos) break;
-        intents.remove_prefix(end + 1);
-    }
-    if (aliases.find(query) != std::string::npos) return 3;
-    if (Lower(entry.category).find(query) != std::string::npos) return 3;
-    if (rank >= 0) return rank;
-    for (const auto* field : {&label, &aliases}) {
-        std::string_view words = *field;
-        while (!words.empty()) {
-            const auto end = words.find_first_of(" ,-|()/");
-            if (NearWord(query, words.substr(0, end))) return 5;
-            if (end == words.npos) break;
-            words.remove_prefix(end + 1);
-        }
-    }
-    return -1;
-}
+using NodeBrowserEntry = EditorNodeGraphDefinitions::NodeCatalogEntry;
+using Stack::Editor::RegisteredNodeCatalog;
 
 std::string EntryKey(const NodeBrowserEntry& entry) {
     return std::to_string(static_cast<int>(entry.kind)) + ":" + std::to_string(entry.value) + ":" + entry.label;
@@ -84,7 +40,7 @@ std::string EntryKey(const NodeBrowserEntry& entry) {
 const std::vector<std::string>& CachedEntryKeys() {
     static const auto keys = [] {
         std::vector<std::string> result;
-        for (const auto& entry : CachedNodeBrowserEntries()) result.push_back(EntryKey(entry));
+        for (const auto& entry : RegisteredNodeCatalog()) result.push_back(EntryKey(entry));
         return result;
     }();
     return keys;
@@ -443,6 +399,7 @@ void EditorNodeGraphUI::RenderNodeBrowser(EditorModule* editor) {
 }
 
 void EditorNodeGraphUI::CloseTransientDrawers() {
+    ResetKeyboardInsertion();
     CloseNodeBrowser();
     m_DrawerMode = DrawerMode::None;
 }
@@ -492,7 +449,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     const float layoutPanelWidth = std::max(panelWidth, m_NodeBrowserStablePanelWidth);
 
     const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    const std::vector<NodeBrowserEntry>& entries = CachedNodeBrowserEntries();
+    const std::vector<NodeBrowserEntry>& entries = RegisteredNodeCatalog();
     const auto& entryKeys = CachedEntryKeys();
     if (!isOpen && alpha <= 0.01f) {
         m_NodeBrowserVisibleCacheOpen = false;
@@ -725,11 +682,11 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                     for (const auto& entry : available) m_NodeBrowserAvailableKeys.insert(EntryKey(entry));
                 }
 
-                const auto query = Lower(search);
+                const Stack::Editor::NodeNameSearch query(search);
                 std::array<std::vector<std::size_t>, 6> ranked;
                 for (std::size_t index = 0; index < entries.size(); ++index) {
                     if (!m_NodeBrowserAvailableKeys.count(entryKeys[index])) continue;
-                    const int rank = SearchRank(entries[index], query);
+                    const int rank = Stack::Editor::RankNodeName(query, entries[index].label, entries[index].searchAliases, entries[index].category);
                     if (rank >= 0) ranked[rank].push_back(index);
                 }
                 for (const auto& matches : ranked)

@@ -11,6 +11,10 @@ using namespace Stack::NodeMath;
 namespace {
 using RecipeBuilding::Recipe;
 
+std::string MixWeightId(int slot) {
+    return "weight-" + std::string(1, char('a' + slot));
+}
+
 int Number(Recipe& recipe, const std::string& id, const std::string& label, bool weight = false) {
     const int number = recipe.Keep(recipe.graph.AddValueNode(MakeUniformScalar(0), {}));
     const double limit = std::numeric_limits<float>::max();
@@ -25,7 +29,7 @@ CompoundDefinition MakeMix(unsigned mask) {
     for (int slot = 0; slot < kMaxDataMathInputCount; ++slot) {
         if (!(mask & (1u << slot))) continue;
         const std::string label(1, char('A' + slot));
-        const int weight = Number(recipe, "weight-" + label, label + " contribution", true);
+        const int weight = Number(recipe, MixWeightId(slot), label + " contribution", true);
         const int term = recipe.Math(DataMathMode::Multiply);
         recipe.Port(DataMathInputSocketId(slot).c_str(), label.c_str(), term, "imageA",
                     LogicalValueType::ColorImage, false, false, true);
@@ -80,7 +84,7 @@ bool BindMathRecipe(Graph& graph, int nodeId, std::string& error) {
         for (int i = 0; i < mix.count; ++i) {
             const int slot = mix.slots[i];
             mask |= 1u << slot;
-            values.emplace_back("weight-" + std::string(1, char('A' + slot)), mix.shares[i]);
+            values.emplace_back(MixWeightId(slot), mix.shares[i]);
         }
         definition = &MixDefinition(mask);
     } else {

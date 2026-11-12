@@ -6,6 +6,7 @@
 #include "App/UiPerformanceProbe.h"
 #include "Utils/GraphNumericControls.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "Editor/NodeGraph/UI/GraphKeyboardInsertion.h"
 
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
@@ -363,6 +364,8 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     if (!options.interactive || !m_SmoothZoomActive) {
         m_ZoomTarget = m_Zoom;
     }
+    const bool keyboardInsertion = options.interactive && &graph == m_GraphContext.graph &&
+        UpdateKeyboardInsertion(*editor, graph);
     bool graphHovered = options.interactive && IsGraphCanvasHovered();
     if (graphHovered) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
@@ -392,7 +395,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     }
 
     if (options.interactive) {
-        m_NodeNotes.BeginFrame(editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyDown(ImGuiKey_F),
+        m_NodeNotes.BeginFrame(!keyboardInsertion && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyDown(ImGuiKey_F),
             [&](const auto& note) {
                 const auto* target = graph.FindNode(note.nodeId);
                 return note.documentId == m_GraphContext.documentId && note.graphId == m_GraphContext.graphId &&
@@ -418,7 +421,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         const auto& tabIo = ImGui::GetIO();
         const bool catalogShortcutAvailable = HasCatalogHost() && !tabIo.WantTextInput &&
             !ImGui::IsAnyItemActive() && !ImGui::IsAnyMouseDown();
-        if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed &&
+        if (!keyboardInsertion && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed &&
             !tabIo.KeyCtrl && !tabIo.KeyAlt && !tabIo.KeyShift && !tabIo.KeySuper) {
             if (HasCatalogHost() && (catalogShortcutAvailable ||
                 (m_NodeBrowserSearchFocused && !ImGui::IsAnyMouseDown()))) {
@@ -617,8 +620,13 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     std::function<void()> pendingGraphAction;
     const int openingNode = options.interactive && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
         ? FindNodeAt(graph, ToGraphVec2(ImGui::GetMousePos())) : -1;
+    const int arrivingNode = options.interactive && m_KeyboardInsertion &&
+        m_KeyboardInsertion->stage == Stack::Editor::GraphKeyboardInsertion::Stage::Inserted
+        ? m_KeyboardInsertion->inserted : 0;
     for (int nodeId : nodeRenderOrder) {
-        const float revealAlpha=ExpansionNodeAlpha(nodeId);
+        const float revealAlpha = nodeId == arrivingNode && !GraphReducedMotion()
+            ? .65f + .35f * float(std::clamp((ImGui::GetTime() - m_KeyboardInsertion->roomStart) / .16, 0., 1.))
+            : ExpansionNodeAlpha(nodeId);
         if(revealAlpha<=0)continue;
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         const bool forceRenderForInteraction =
@@ -667,9 +675,11 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     RenderLinks(graph);
     RenderCompoundEntries(graph);
     graphSplitter.Merge(drawList);
+    if (options.interactive && m_KeyboardInsertion)
+        DrawKeyboardInsertion(graph, *drawList, graphStyle);
 
     if (options.interactive) {
-        RenderInteraction(editor, graph);
+        if (!keyboardInsertion) RenderInteraction(editor, graph);
         RenderMaskTextureInspector(editor);
     }
 
@@ -709,6 +719,8 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     if (pendingGraphAction) {
         pendingGraphAction();
     }
+    if (keyboardInsertion && m_KeyboardInsertion && m_KeyboardInsertion->commit)
+        CommitKeyboardInsertion(*editor);
     std::string noteError;
     if (!m_NodeNotes.CommitPending([&](const auto& note) {
             return editor->SetGraphNodeNotes(note.documentId, note.graphId, note.nodeId,
