@@ -43,6 +43,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
     const int inputHeight = m_Height;
 
     const std::string type = node.layerJson.value("type", std::string());
+    const auto* descriptor = LayerRegistry::FindDescriptorByTypeId(type);
+    if (descriptor && descriptor->channelPolicy == LayerChannelPolicy::FullImageOnly &&
+        input->semanticDescriptor.logicalType != Stack::NodeMath::LogicalValueType::ColorImage)
+        return fail("This layer requires a full color image.");
     if (type == "RawOutputCrop")
         return RenderRawSpatialLayer(executionContext, node, inputTexture);
     const bool stylize=type=="CellShading" || type=="PaletteReconstructor" || type=="Halftoning";

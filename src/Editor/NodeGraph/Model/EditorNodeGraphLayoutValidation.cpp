@@ -324,10 +324,13 @@ ValidationResult Graph::Validate() const {
                     " is invalid: " + issue.message);
             }
         }
-        if (!node.definitionResolutionError.empty()) {
+        if (!node.definitionResolved || !node.definitionResolutionError.empty()) {
             result.valid = false;
             result.messages.push_back("Node " + std::to_string(node.id) +
-                " has an unresolved definition: " + node.definitionResolutionError);
+                " has an unresolved definition: " +
+                (node.definitionResolutionError.empty()
+                    ? "Exact node definition has not been resolved."
+                    : node.definitionResolutionError));
         }
     }
 

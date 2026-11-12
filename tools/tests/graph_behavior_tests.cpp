@@ -15962,6 +15962,7 @@ void TestGraphRenderPolicyAndNavigation();
 
 void RunGraphOutputSemanticsTests();
 void RunHdrGraphSourceContractTests();
+void RunTileGraphMasterCropTests();
 void RunLoadingImageSnapshotTests();
 void RunGraphWireRoutingTests();
 void RunGraphNodeNotesTests();
@@ -15970,6 +15971,11 @@ void RunGraphChannelOutputsTests();
 void TestProjectGalleryDiscovery();
 
 int main(int argc, char** argv) try {
+    if (argc == 2 && std::string(argv[1]) == "--tile-master-only") {
+        RunTileGraphMasterCropTests();
+        std::cout << "Tile float-master crop checks passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--raw-color-warp-only") {
         RunRawColorWarpContractTests();
         std::cout << "Color Warp v4 model contract passed.\n";
@@ -16074,6 +16080,7 @@ int main(int argc, char** argv) try {
     }
     RunGraphOutputSemanticsTests();
     RunHdrGraphSourceContractTests();
+    RunTileGraphMasterCropTests();
     RunLoadingImageSnapshotTests();
     TestGraphRenderPolicyAndNavigation();
     TestVariablePrecisionValueGraph();

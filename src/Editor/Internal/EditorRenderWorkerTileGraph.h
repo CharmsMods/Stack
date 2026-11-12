@@ -5,6 +5,7 @@
 #include "Utils/SharedPixelBuffer.h"
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace Stack::EditorRenderWorkerTiles {
@@ -47,6 +48,7 @@ private:
         std::size_t nodeIndex = 0;
         SharedPixelBuffer pixels;
         int channels = 0;
+        std::shared_ptr<const std::vector<float>> hdrPixels;
     };
 
     RenderGraphSnapshot m_Graph;

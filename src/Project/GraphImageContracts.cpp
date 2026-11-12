@@ -1,4 +1,5 @@
 #include "Graph/PhotoOperationInput.h"
+#include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 #include "NodeMath/ImageOperationInput.h"
 #include "NodeMath/StylizeInput.h"
@@ -197,6 +198,11 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
         }
         if (node.kind==K::Layer && source) {
             const auto type=node.layerJson.value("type",std::string{});
+            const auto* layer = LayerRegistry::FindDescriptorByTypeId(type);
+            if (node.layerJson.value("enabled", true) && node.layerJson.value("visible", true) &&
+                layer && layer->channelPolicy == LayerChannelPolicy::FullImageOnly &&
+                source->logicalType != LogicalValueType::Invalid && source->logicalType != LogicalValueType::ColorImage)
+                graph.unavailableOutputSockets[id][port] = "This layer requires a full color image.";
             if (type=="CellShading" || type=="PaletteReconstructor" || type=="Halftoning") {
                 std::string reason;
                 if (!ValidateStylizeInput(type,node.layerJson,DescribeImageOperationInput(*source),reason)) graph.unavailableOutputSockets[id][port]=reason;

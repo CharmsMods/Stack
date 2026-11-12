@@ -153,10 +153,19 @@ public:
                         };
                         for (const auto& issue : value->diagnostics)
                             if (issue.ruleId=="graph.wire") inherit(issue);
-                        if (value->invalidWire || (!value->usesArithmeticContract && !IsFoundationNode(*node) && !IsLayoutSensitivePort(*node, port))) continue;
+                        if (value->invalidWire) continue;
+                        const bool passthrough = port == kImageInputSocketId &&
+                            ((node->kind == NodeKind::Layer && (!node->layerParameters.value("enabled", true) ||
+                                !node->layerParameters.value("visible", true))) ||
+                             (node->kind == NodeKind::RawOperation && (!node->rawOperation.enabled || frame.socketId == "inputImageOut")));
+                        if (passthrough) continue;
+                        std::string reason;
+                        EditorNodeGraphDefinitions::ValidateInputDescriptor(graph, *node, port, value->descriptor, reason);
+                        const bool arithmetic = value->usesArithmeticContract || IsFoundationNode(*node) || IsLayoutSensitivePort(*node, port);
+                        if (reason.empty() && !arithmetic) continue;
                         const auto other = inputs.find(port==kMixInputASocketId ? kMixInputBSocketId : kMixInputASocketId);
                         const int slot = DataMathInputSocketIndex(port);
-                        const auto reason = node->kind == NodeKind::DataMath && slot >= 0
+                        if (reason.empty()) reason = node->kind == NodeKind::DataMath && slot >= 0
                             ? ArithmeticInputError(operands, slot, ArithmeticInputCount(node->dataMathMode))
                             : FoundationWireError(graph,*node,port,value->descriptor,
                                 other == inputs.end() ? nullptr : &other->second->descriptor);
