@@ -35,7 +35,7 @@ void GraphExecutionRuntime::PruneCachedDependencies() {
             break;
         default: break;
         }
-        if (!independent || graph.unavailableOutputs.count(node.nodeId)) continue;
+        if (!independent || graph.FindOutputFailure(node.nodeId, output.socketId)) continue;
         const auto inputs = topology.inputsByNode.find(node.nodeId);
         if (inputs != topology.inputsByNode.end()) for (const auto* input : inputs->second) {
             // Some legacy identities hash even inactive bindings. Require all

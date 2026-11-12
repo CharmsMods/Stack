@@ -51,8 +51,18 @@ struct VisitFrame {
 } // namespace
 
 const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
+    // Bypass is mutable payload, not topology. A toggle changes executable
+    // dependencies even when no socket or link has been edited.
     if (m_CompletedChainsCacheRevision == m_StructureRevision) {
-        return m_CompletedChainsCache;
+        bool sameBypasses = true;
+        for (const auto& state : m_CompletedChainsRawBypassStates) {
+            const auto* node = FindNode(state.nodeId);
+            if (!node || node->kind != NodeKind::RawOperation || node->rawOperation.enabled != state.enabled) {
+                sameBypasses = false;
+                break;
+            }
+        }
+        if (sameBypasses) return m_CompletedChainsCache;
     }
 
     std::unordered_map<int, const Node*> nodes;
@@ -353,9 +363,9 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
             }
 
             // Required-port checks establish whether the node can execute at
-            // all. Every additional authored render input still influences
-            // the result and must participate in exact-definition, cycle,
-            // and dependency validation. Otherwise an unresolved mask or
+            // all. Every additional executable input must participate in
+            // exact-definition and dependency validation. Structural cycle
+            // analysis separately retains every authored input. Otherwise an unresolved mask or
             // dynamic scalar branch can disappear from the render snapshot
             // and silently turn a conditional edit into a global one.
             const bool adoptedMultiFrameSource =
@@ -367,7 +377,7 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                 if (authoredInputs != renderInputsByNode.end()) {
                     for (const Link* input :
                          authoredInputs->second) {
-                        if (!EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, key.socketId, input->toSocketId)) continue;
+                        if (!EditorNodeGraphDefinitions::ExecutionOutputDependsOnInput(*this, *node, key.socketId, input->toSocketId)) continue;
                         const bool coverage = (input->toSocketId == kMaskInputSocketId &&
                             (node->kind == NodeKind::RawOperation || node->kind == NodeKind::Layer || node->kind == NodeKind::Lut || node->kind == NodeKind::RawDevelop)) ||
                             (node->kind == NodeKind::Mix && input->toSocketId == kMixFactorSocketId) ||
@@ -472,8 +482,13 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
         }
     }
 
+    std::vector<RawBypassState> rawBypassStates;
+    for (const Node& node : m_Nodes)
+        if (node.kind == NodeKind::RawOperation)
+            rawBypassStates.push_back({node.id, node.rawOperation.enabled});
     m_CompletedChainsCache = std::move(chains);
     m_OutputConnectionDiagnosticCache = std::move(outputConnectionDiagnostic);
+    m_CompletedChainsRawBypassStates = std::move(rawBypassStates);
     m_CompletedChainsCacheRevision = m_StructureRevision;
     return m_CompletedChainsCache;
 }

@@ -20,10 +20,26 @@ bool DrawLightRangeSettings(RawWorkspaceEditContext& c,RawRecipe::LightRange fal
 bool DrawLightBandGraph(RawWorkspaceEditContext& c,RawRecipe::LightRange range,ImVec2 size) {
     auto& state=c.State<LightBandViewState>();
     auto& local=c.recipe.localRange;
-    if(range.valid){state.retainedRange=range;state.retainedInputRevision=c.inputAnalysisRevision;}
-    else if(state.dragging>=0)range=state.retainedRange;
+    bool changed=false;
+    const bool inputEnabled=!(ImGui::GetItemFlags()&ImGuiItemFlags_Disabled);
+    if(state.dragging>=0) {
+        if(ImGui::GetIO().AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            changed=local.light.amounts[state.dragging]!=state.before || local.enabled!=state.enabledBefore;
+            local.light.amounts[state.dragging]=state.before;
+            local.enabled=state.enabledBefore;
+            if(ImGui::GetActiveID()==state.activeId)ImGui::ClearActiveID();
+            state.EndInteraction();
+        } else if(!inputEnabled || ImGui::GetActiveID()!=state.activeId) {
+            if(ImGui::GetActiveID()==state.activeId)ImGui::ClearActiveID();
+            state.EndInteraction();
+        }
+    }
     if(!local.light.automatic)range={local.light.lowEv,local.light.highEv,true};
-    if(!range.valid){ImGui::TextDisabled("Measuring incoming image...");return false;}
+    // Accepted analysis can refresh during a gesture; keep its original mapping
+    // until release rather than moving the graph under the held handle.
+    if(state.dragging>=0)range=state.retainedRange;
+    else if(range.valid){state.retainedRange=range;state.retainedInputRevision=c.inputAnalysisRevision;}
+    if(!range.valid){ImGui::TextDisabled("Measuring incoming image...");return changed;}
     size.x=std::max(80.f,size.x);size.y=std::max(90.f,size.y);
     const auto origin=ImGui::GetCursorScreenPos();
     const float pad=12.f,h=size.y-28.f,w=size.x-pad*2;
@@ -53,7 +69,6 @@ bool DrawLightBandGraph(RawWorkspaceEditContext& c,RawRecipe::LightRange range,I
         if(i)draw->AddLine(previous,p,ImGui::GetColorU32(ImGuiCol_Text),1.4f);
         previous=p;
     }
-    bool changed=false;
     constexpr const char* labels[]{"Blacks","Shadows","Midtones","Highlights","Whites"};
     for(int i=0;i<5;++i){
         ImGui::PushID(i);
@@ -61,14 +76,13 @@ bool DrawLightBandGraph(RawWorkspaceEditContext& c,RawRecipe::LightRange range,I
         const auto p=point(x,state.response[i*32]);
         ImGui::SetCursorScreenPos({p.x-9,p.y-9});
         ImGui::InvisibleButton("band",{18,18});
-        if(ImGui::IsItemActivated()){state.dragging=i;state.before=local.light.amounts[i];}
-        if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        if(ImGui::IsItemActivated()){state.dragging=i;state.before=local.light.amounts[i];state.enabledBefore=local.enabled;state.activeId=ImGui::GetItemID();}
+        if(inputEnabled && state.dragging==i && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const float amount=std::clamp(local.light.amounts[i]-ImGui::GetIO().MouseDelta.y*400.f/h*(ImGui::GetIO().KeyShift?.1f:1.f),-100.f,100.f);
-            if(amount!=local.light.amounts[i]){local.light.amounts[i]=amount;changed=true;}
+            if(amount!=local.light.amounts[i]){local.light.amounts[i]=amount;local.enabled=true;changed=true;}
         }
-        if(ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {local.light.amounts[i]=0;changed=true;}
-        if(state.dragging==i && (ImGui::GetIO().AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape))){local.light.amounts[i]=state.before;changed=true;ImGui::ClearActiveID();state.dragging=-1;}
-        if(ImGui::IsItemDeactivated())state.dragging=-1;
+        if(inputEnabled && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {local.light.amounts[i]=0;local.enabled=true;changed=true;}
+        if(state.dragging==i && !ImGui::IsItemActive())state.EndInteraction();
         draw->AddCircle(p,5.f,ImGui::GetColorU32(ImGui::IsItemHovered()?ImGuiCol_SliderGrabActive:ImGuiCol_Text),16,1.5f);
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s  %+.1f\nDrag vertically; Shift for fine adjustment; double-click to reset",labels[i],local.light.amounts[i]);
         ImGui::PopID();
@@ -77,7 +91,6 @@ bool DrawLightBandGraph(RawWorkspaceEditContext& c,RawRecipe::LightRange range,I
     ImGui::Dummy(size);
     ImGui::SetCursorScreenPos({origin.x,origin.y+size.y});
     ImGui::TextDisabled("%.2f EV",range.lowEv);ImGui::SameLine();ImGui::TextDisabled("to %.2f EV",range.highEv);
-    if(changed)local.enabled=true;
     return changed;
 }
 }

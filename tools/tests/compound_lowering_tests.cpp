@@ -1,5 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
+#include "Editor/NodeGraph/CompoundRecipeBuilder.h"
+#include "Graph/GraphDocumentRules.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +18,61 @@ void RequireLowering(bool condition, const std::string& message) {
 void TestCompoundExecutionLowering() {
     using namespace EditorNodeGraph;
     using namespace Stack::NodeMath;
+    {
+        EditorNodeGraphDefinitions::RecipeBuilding::Recipe recipe(914001, "test-independent-insertion", "Independent branches");
+        const int first = recipe.Identity(), second = recipe.Identity();
+        recipe.Port("first-in", "First input", first, "imageA", LogicalValueType::ColorImage);
+        recipe.Port("second-in", "Second input", second, "imageA", LogicalValueType::ColorImage);
+        // Deliberately reverse the public output order relative to inputs.
+        recipe.Port("second-out", "Second output", second, "imageOut", LogicalValueType::ColorImage, true, false, true);
+        recipe.Port("first-out", "First output", first, "imageOut", LogicalValueType::ColorImage, true, false, true);
+        const auto independent = recipe.Finish();
+        Graph graph; graph.Clear(); graph.SetAllowNoOutput(true);
+        std::string error;
+        const bool independentAccepted = graph.AddCompoundDefinition(independent, &error);
+        RequireLowering(independentAccepted, "Independent branch definition: " + error);
+        const int source = graph.AddImageGeneratorNode(ImageGeneratorKind::SolidColor, {})->id;
+        const int output = graph.AddOutputNode({}, true)->id;
+        const int compound = graph.AddCompoundNode(independent.identity, {})->id;
+        RequireLowering(graph.TryConnectSockets(source, "imageOut", output, "imageIn", &error), error);
+        const Link original = *graph.FindAnyInputLink(output, "imageIn");
+        const auto revision = graph.GetStructureRevision();
+        auto insertion = Stack::GraphModel::ProposeInsertion(graph, revision, compound, original);
+        RequireLowering(insertion.analysis.valid, "Independent-branch insertion must find a through-path.");
+        const auto* insertedInput = insertion.candidate.FindAnyInputLink(compound, "first-in");
+        const auto* insertedOutput = insertion.candidate.FindAnyInputLink(output, "imageIn");
+        RequireLowering(insertedInput && insertedInput->fromNodeId == source && insertedOutput &&
+            insertedOutput->fromNodeId == compound && insertedOutput->fromSocketId == "first-out",
+            "Insertion must pair a compound input with its dependent output, not the first compatible output.");
+        RequireLowering(graph.GetStructureRevision() == revision && graph.GetLinks().size() == 1 &&
+            graph.FindAnyInputLink(output, "imageIn")->fromNodeId == source,
+            "Preparing insertion must leave the original graph and connection unchanged.");
+        auto rejected = Stack::GraphModel::ProposeInsertion(graph, revision, source, original);
+        RequireLowering(!rejected.analysis.valid && graph.GetLinks().size() == 1 &&
+            graph.GetStructureRevision() == revision,
+            "Rejected insertion must preserve the original connection and revision.");
+    }
+    {
+        EditorNodeGraphDefinitions::RecipeBuilding::Recipe recipe(914002, "test-native-output-dependency", "Native output dependencies");
+        const int operation = recipe.Keep(recipe.graph.AddRawOperationNode(Stack::RawRecipe::GraphOperationKind::Exposure, {}));
+        recipe.Port("image", "Image", operation, "imageIn", LogicalValueType::ColorImage, false, false, true);
+        recipe.Port("mask", "Mask", operation, "maskIn", LogicalValueType::Mask, false, true);
+        recipe.Port("before", "Before", operation, "inputImageOut", LogicalValueType::ColorImage, true);
+        recipe.Port("after", "After", operation, "imageOut", LogicalValueType::ColorImage, true);
+        Graph graph; graph.Clear(); graph.SetAllowNoOutput(true);
+        const auto definition = recipe.Finish();
+        std::string error;
+        const bool nativeAccepted = graph.AddCompoundDefinition(definition, &error);
+        RequireLowering(nativeAccepted, "Native dependency definition: " + error);
+        const int compound = graph.AddCompoundNode(definition.identity, {})->id;
+        std::vector<std::string> dependencies;
+        RequireLowering(graph.ResolveCompoundOutputInputDependencies(compound, "before", dependencies, &error), error);
+        RequireLowering(dependencies == std::vector<std::string>{"image"},
+            "Native before-image compound output must not depend on the operation mask.");
+        RequireLowering(graph.ResolveCompoundOutputInputDependencies(compound, "after", dependencies, &error), error);
+        RequireLowering(std::find(dependencies.begin(), dependencies.end(), "mask") != dependencies.end(),
+            "Native processed compound output must retain its mask dependency.");
+    }
     const auto& definition = EditorNodeGraphDefinitions::GetShippedCompoundTemplates().front();
     Graph authored;
     authored.SetAllowNoOutput(true);

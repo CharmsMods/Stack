@@ -297,6 +297,8 @@ private:
     SocketPreviewIntent m_SocketPreviewIntent = SocketPreviewIntent::None;
     mutable std::uint64_t m_StructureRevision = 1;
     mutable std::uint64_t m_CompletedChainsCacheRevision = 0;
+    struct RawBypassState { int nodeId; bool enabled; };
+    mutable std::vector<RawBypassState> m_CompletedChainsRawBypassStates;
     mutable std::vector<CompletedChainInfo> m_CompletedChainsCache;
     mutable std::string m_OutputConnectionDiagnosticCache;
     mutable std::shared_ptr<const GraphLookupCache> m_LookupCache;

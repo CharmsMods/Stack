@@ -99,6 +99,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::Layer:
             case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
+            case NodeKind::Reformat:
             case NodeKind::Mix:
             case NodeKind::DataMath:
             case NodeKind::Compound:
@@ -159,6 +160,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::Lut:
             case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
+            case NodeKind::Reformat:
             case NodeKind::Output:
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:

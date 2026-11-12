@@ -2,6 +2,7 @@
 # presentation doubles avoid a GL dependency while native input stays intact.
 add_executable(StackBezierCurveOwnerTests tools/tests/bezier_curve_owner_tests.cpp
     src/Editor/Internal/RawLab/RawLabCurveEditor.cpp src/Editor/GraphUI/GraphPlotStyle.cpp
+    src/Utils/ImGuiExtras.cpp
     src/Raw/Tone/SceneTone.cpp src/Hdr/SdrAppearance.cpp src/Raw/RawDevelopmentRecipe.cpp src/Raw/ColorWarpMath.cpp src/Raw/RawColorWarpRecipe.cpp)
 target_include_directories(StackBezierCurveOwnerTests PRIVATE src)
 target_link_libraries(StackBezierCurveOwnerTests PRIVATE imgui_core)

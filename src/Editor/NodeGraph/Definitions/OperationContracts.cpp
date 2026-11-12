@@ -110,9 +110,10 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
         if (layer && layer->channelPolicy == LayerChannelPolicy::FullImageOnly)
             result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
     }
-    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::RawOperation &&
-        Stack::GraphModel::PhotoInputFor(node.rawOperation) != Stack::GraphModel::PhotoInput::Components)
-        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+    if (socketId == EditorNodeGraph::kImageInputSocketId && node.kind == NodeKind::RawOperation)
+        result.port.acceptedLogicalTypes = Stack::GraphModel::PhotoInputFor(node.rawOperation) == Stack::GraphModel::PhotoInput::Components
+            ? std::vector<LogicalValueType>{LogicalValueType::ColorImage,LogicalValueType::Channel,LogicalValueType::ScalarField,LogicalValueType::Mask}
+            : std::vector<LogicalValueType>{LogicalValueType::ColorImage};
     if (socketId == EditorNodeGraph::kImageInputSocketId && HasColorModeRequirement(node)) {
         ImageOperationInput channel;
         channel.scalar = true;
@@ -134,7 +135,8 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
             : std::vector<LogicalValueType>{type};
     }
     const auto* definition = FindLiveNodeDefinition(node);
-    const bool sceneInput = (definition && definition->requiresSceneLinearRgb && socketId == "imageIn") ||
+    const bool sceneInput = (definition && definition->requiresSceneLinearRgb && socketId == "imageIn" &&
+        (node.kind != NodeKind::RawOperation || node.rawOperation.enabled)) ||
         (node.role == Stack::GraphModel::NodeRole::LayerResult && socketId == "imageIn");
     if (sceneInput) {
         result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
@@ -173,6 +175,16 @@ bool AcceptsTypedParameterInput(const Node& node, const std::string& socketId, E
     return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), id) != node.exposedParameterIds.end();
 }
 
+bool ExecutionOutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input) {
+    if (const auto* channel = EditorNodeGraph::FindChannelOutput(node, output))
+        return ExecutionOutputDependsOnInput(graph, node, channel->sourceSocket, input);
+    if (node.kind == NodeKind::RawOperation && !node.rawOperation.enabled &&
+        output == EditorNodeGraph::kImageOutputSocketId)
+        return input == EditorNodeGraph::kImageInputSocketId;
+    return OutputDependsOnInput(graph, node, output, input);
+}
+
 bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input) {
     if (const auto* channel=EditorNodeGraph::FindChannelOutput(node,output))
@@ -199,8 +211,23 @@ bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
 
 bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node, const std::string& socketId,
-    const Stack::NodeMath::ValueDescriptor& value, std::string& error) {
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error, bool checkValueShape) {
     using namespace Stack::NodeMath;
+    const auto contract = GetLivePortContract(graph, node, socketId);
+    if (checkValueShape && contract && value.logicalType != LogicalValueType::Invalid) {
+        const auto& accepted = contract->port.acceptedLogicalTypes;
+        const bool exact = std::find(accepted.begin(), accepted.end(), value.logicalType) != accepted.end();
+        const bool channel = EditorNodeGraph::IsSingleChannelValue(value.logicalType) &&
+            std::any_of(accepted.begin(), accepted.end(), EditorNodeGraph::IsSingleChannelValue);
+        // Preserve the existing explicit numeric socket promotion; this is not
+        // permission to broadcast a Number into a spatial image or mask input.
+        const bool number = value.logicalType == LogicalValueType::Integer &&
+            std::find(accepted.begin(), accepted.end(), LogicalValueType::Scalar) != accepted.end();
+        if (!exact && !channel && !number) {
+            error = node.title + " cannot accept this value at " + socketId + ".";
+            return false;
+        }
+    }
     if (node.kind == NodeKind::RawOperation && socketId == EditorNodeGraph::kImageInputSocketId) {
         error = Stack::GraphModel::PhotoInputError(Stack::GraphModel::PhotoInputFor(node.rawOperation), value, false);
         return error.empty();
@@ -224,7 +251,6 @@ bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     if (coverage && value.logicalType == LogicalValueType::ColorImage) {
         error = "Coverage needs one channel. Select a channel or convert the image to a mask."; return false;
     }
-    const auto contract = GetLivePortContract(graph, node, socketId);
     if (!contract || contract->port.semanticRequirement != RequirementPolicy::Strict || single) return true;
     const auto& required = contract->requiredSemantics;
     if ((required.transfer.state == KnowledgeState::Known && value.transfer.state == KnowledgeState::Known && value.transfer.value.kind != required.transfer.value.kind) ||

@@ -64,6 +64,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/RawLayerStackValidation.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/RawLayerStackPersistence.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/RawLayerStackSnapshot.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Hdr/GraphView.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/GraphSnapshotBuilder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/GraphSnapshotBrightness.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Project/GraphSnapshotConversions.cpp"

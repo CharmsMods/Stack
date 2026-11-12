@@ -104,6 +104,12 @@ void AppendGraphSnapshotMetadata(RenderGraphSnapshot& destination,
         const auto mapped = nodeIds.find(nodeId);
         if (mapped != nodeIds.end()) destination.unavailableOutputs[mapped->second] = reason;
     }
+    for (const auto& [nodeId, sockets] : source.unavailableOutputSockets) {
+        const auto mapped = nodeIds.find(nodeId);
+        if (mapped != nodeIds.end())
+            for (const auto& [socket, reason] : sockets)
+                destination.unavailableOutputSockets[mapped->second][socket] = reason;
+    }
     for (auto diagnostic : source.semanticDiagnostics) {
         diagnostic.authoredSourceIdentity = graphId + "/" + diagnostic.authoredSourceIdentity;
         diagnostic.affectedIdentity = graphId + "/" + diagnostic.affectedIdentity;

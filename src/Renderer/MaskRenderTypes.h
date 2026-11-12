@@ -453,7 +453,18 @@ struct RenderGraphSnapshot {
     int rawLayerScopeOperationId = 0;
     std::string rawLayerScopeSocketId = "imageOut";
     Stack::NodeMath::ValueDescriptor rawLayerScopeDescriptor;
+    // Node-wide failures (inactive layers, missing resources) block every port.
+    // Processing/operand diagnostics belong only to the outputs they affect.
     std::unordered_map<int, std::string> unavailableOutputs;
+    std::unordered_map<int, std::unordered_map<std::string, std::string>> unavailableOutputSockets;
+    const std::string* FindOutputFailure(int nodeId, const std::string& socketId) const {
+        if (const auto node = unavailableOutputs.find(nodeId); node != unavailableOutputs.end())
+            return &node->second;
+        const auto node = unavailableOutputSockets.find(nodeId);
+        if (node == unavailableOutputSockets.end()) return nullptr;
+        const auto socket = node->second.find(socketId);
+        return socket == node->second.end() ? nullptr : &socket->second;
+    }
     int outputNodeId = -1;
     std::string outputSocketId;
     bool autoGainMaskPreview = false;

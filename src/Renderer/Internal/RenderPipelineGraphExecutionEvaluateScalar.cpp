@@ -46,8 +46,8 @@ void GraphExecutionRuntime::BindScalarEvaluation() {
         const auto nodeIt = nodes.find(nodeId);
         if (nodeIt == nodes.end() || nodeIt->second == nullptr)
             return finishFailure("The connected uniform value has no executable source.");
-        if (const auto unavailable=graph.unavailableOutputs.find(nodeId);unavailable!=graph.unavailableOutputs.end())
-            return finishFailure(unavailable->second);
+        if (const auto* unavailable = graph.FindOutputFailure(nodeId, socketId))
+            return finishFailure(*unavailable);
         const RenderGraphNode& node = *nodeIt->second;
         if (node.kind == RenderGraphNodeKind::Output && IsUniformRenderSocket(executionContext, nodeId, socketId)) {
             const auto* input = findInputLink(nodeId, EditorNodeGraph::kImageInputSocketId);

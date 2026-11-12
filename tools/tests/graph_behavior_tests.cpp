@@ -106,6 +106,7 @@ const std::vector<LayerDescriptor>& TestLayerDescriptors() {
         { LayerType::Sharpen, "Sharpen", "Sharpen", "Sharpen", "Color", "Adjust sharpening.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::ChannelUsefulWithWarning },
         { LayerType::GaussianBlur, "GaussianBlur", "Gaussian Blur", "Gaussian Blur", "Blur", "Gaussian convolution.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::ChannelSafe },
         { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Display/output transform.", {}, NullLayerFactory, LayerLifecycleStatus::Stable, LayerChannelPolicy::FullImagePreferred },
+        { LayerType::BackgroundPatcher, "BackgroundPatcher", "Background Remover", "Background Remover", "Composite", "Remove or isolate background colors.", {}, NullLayerFactory, LayerLifecycleStatus::NeedsFix, LayerChannelPolicy::FullImageOnly, true, "Useful advanced node, but brush/flood/AA/patch state is incomplete.", "Full-image matte operation; not a generic scalar channel effect.", { "alpha", "matte", "advanced-ui" } },
     };
     return descriptors;
 }
@@ -7736,10 +7737,14 @@ void TestRawColorWarpContract() {
     R::RawColorWarpPin sample;
     sample.id="sample";
     Require(R::SetColorWarpSample(sample,R::WorkingRgbToColorWarpCoordinate(input,space)),"a colored sample must qualify");
-    sample.exposureEv=1;
+    sample.brightness=.5f;
     recipe.pins.push_back(sample);
-    const auto exposed=R::ApplyColorWarp(recipe,input,space);
-    for(int c=0;c<3;++c)Require(std::abs(exposed[c]-input[c]*2)<.0001f,"exposure must apply scene-linear gain");
+    const auto brightened=R::ApplyColorWarp(recipe,input,space);
+    const float lightness=R::WorkingRgbToColorWarpCoordinate(input,space).lightness;
+    const float ratio=1.f+sample.brightness/(1.f+lightness);
+    const float gain=ratio*ratio*ratio;
+    for(int c=0;c<3;++c)Require(std::abs(brightened[c]-input[c]*gain)<.0001f,
+        "brightness must apply the bounded perceptual lightness gain");
     auto protectedRecipe=recipe;auto protection=sample;protection.id="protection";protection.protectColor=true;
     protectedRecipe.pins.push_back(protection);
     Require(R::ApplyColorWarp(protectedRecipe,input,space)==input,"full protection must suppress the adjustment");
@@ -7748,10 +7753,11 @@ void TestRawColorWarpContract() {
     recipe.combine=R::RawColorWarpCombine::Blend;
     const auto saved=R::SerializeColorWarpRecipe(recipe);
     const auto restored=R::DeserializeColorWarpRecipe(saved);
-    Require(restored.version==3 && restored.pins.size()==9 && restored.combine==R::RawColorWarpCombine::Blend &&
-        restored.pins.back().exposureRange.enabled && restored.pins.back().exposureEv==1 &&
-        !saved.contains("linkGroups") && !saved["pins"].back().contains("targetA"),
-        "Color Warp must persist ranges and HSE directly without obsolete offsets or linked groups");
+    Require(restored.version==4 && restored.pins.size()==9 && restored.combine==R::RawColorWarpCombine::Blend &&
+        restored.pins.back().exposureRange.enabled && restored.pins.back().brightness==.5f &&
+        !saved.contains("linkGroups") && !saved["pins"].back().contains("targetA") &&
+        !saved["pins"].back().contains("exposureEv"),
+        "Color Warp v4 must persist brightness and ranges without obsolete exposure or linked groups");
     recipe.pins.assign(12,sample);
     Require(R::SanitizeColorWarpRecipe(recipe).pins.size()==16,"eight families plus at most eight samples are retained");
 }
@@ -15946,6 +15952,8 @@ bool ValidateRegistry(std::vector<std::string>* errors) {
 
 } // namespace LayerRegistry
 
+void RunRawColorWarpContractTests() { TestRawColorWarpContract(); }
+
 void RunGraphScaleTests();
 void RunRetainedRoutingTests();
 void RunNodeLayoutTests();
@@ -15953,6 +15961,9 @@ void RunNodeLayoutTests();
 void TestGraphRenderPolicyAndNavigation();
 
 void RunGraphOutputSemanticsTests();
+void RunHdrGraphSourceContractTests();
+void RunTileGraphMasterCropTests();
+void RunLoadingImageSnapshotTests();
 void RunGraphWireRoutingTests();
 void RunGraphNodeNotesTests();
 void RunGraphChannelOutputsTests();
@@ -15960,6 +15971,16 @@ void RunGraphChannelOutputsTests();
 void TestProjectGalleryDiscovery();
 
 int main(int argc, char** argv) try {
+    if (argc == 2 && std::string(argv[1]) == "--tile-master-only") {
+        RunTileGraphMasterCropTests();
+        std::cout << "Tile float-master crop checks passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--raw-color-warp-only") {
+        RunRawColorWarpContractTests();
+        std::cout << "Color Warp v4 model contract passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--channels-only") {
         try { RunGraphChannelOutputsTests(); }
         catch (const std::exception& e) { std::cerr << "Channel outputs: " << e.what() << '\n'; return 1; }
@@ -15977,6 +15998,8 @@ int main(int argc, char** argv) try {
     }
     if (argc == 2 && std::string(argv[1]) == "--semantics-only") {
         RunGraphOutputSemanticsTests();
+        RunHdrGraphSourceContractTests();
+        RunLoadingImageSnapshotTests();
         std::cout << "Focused graph output semantics passed.\n";
         return 0;
     }
@@ -16056,6 +16079,9 @@ int main(int argc, char** argv) try {
         return 0;
     }
     RunGraphOutputSemanticsTests();
+    RunHdrGraphSourceContractTests();
+    RunTileGraphMasterCropTests();
+    RunLoadingImageSnapshotTests();
     TestGraphRenderPolicyAndNavigation();
     TestVariablePrecisionValueGraph();
     RunGraphScaleTests();

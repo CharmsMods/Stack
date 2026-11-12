@@ -8,6 +8,8 @@ struct LightBandViewState {
     bool advanced=false;
     int dragging=-1;
     float before=0;
+    bool enabledBefore=false;
+    ImGuiID activeId=0;
     std::array<float,129> response{};
     RawRecipe::LightBands responseBands;
     RawRecipe::LightRange responseRange;
@@ -16,7 +18,7 @@ struct LightBandViewState {
     bool responseValid=false;
     RawRecipe::LightRange retainedRange;
     std::uint64_t retainedInputRevision=0;
-    void EndInteraction(){dragging=-1;}
+    void EndInteraction(){dragging=-1;activeId=0;retainedRange={};retainedInputRevision=0;}
 };
 bool DrawLightRangeSettings(RawWorkspaceEditContext&,RawRecipe::LightRange fallback={},float measuredExposure=0);
 bool DrawLightBandGraph(RawWorkspaceEditContext&,RawRecipe::LightRange,ImVec2);

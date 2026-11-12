@@ -15,16 +15,6 @@
 namespace EditorNodeGraph {
 namespace {
 
-bool IsChannelSocketId(const std::string& socketId) {
-    return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
-}
-
-bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
-    return std::any_of(nodes.begin(), nodes.end(), [id](const Node& node) {
-        return node.id == id;
-    });
-}
-
 bool IsSourceLikeNode(const Node& node) {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
@@ -139,7 +129,6 @@ void Graph::AutoLayout() {
         }
         outgoing[link.fromNodeId].push_back(link.toNodeId);
         incoming[link.toNodeId].push_back(link.fromNodeId);
-        ++indegree[link.toNodeId];
     }
 
     for (auto& entry : outgoing) {
@@ -149,6 +138,9 @@ void Graph::AutoLayout() {
     for (auto& entry : incoming) {
         std::sort(entry.second.begin(), entry.second.end(), nodeIdLess);
         entry.second.erase(std::unique(entry.second.begin(), entry.second.end()), entry.second.end());
+        // Layout orders nodes, not socket links. Count each predecessor once,
+        // matching the deduplicated outgoing adjacency used below.
+        indegree[entry.first] = static_cast<int>(entry.second.size());
     }
 
     std::vector<int> ready;
@@ -299,7 +291,6 @@ ValidationResult Graph::Validate() const {
     std::set<int> ids;
     std::set<std::string> instanceUuids;
     int outputCount = 0;
-    std::set<int> outgoingImages;
 
     for (const Node& node : m_Nodes) {
         std::string channelError;
@@ -333,10 +324,13 @@ ValidationResult Graph::Validate() const {
                     " is invalid: " + issue.message);
             }
         }
-        if (!node.definitionResolutionError.empty()) {
+        if (!node.definitionResolved || !node.definitionResolutionError.empty()) {
             result.valid = false;
             result.messages.push_back("Node " + std::to_string(node.id) +
-                " has an unresolved definition: " + node.definitionResolutionError);
+                " has an unresolved definition: " +
+                (node.definitionResolutionError.empty()
+                    ? "Exact node definition has not been resolved."
+                    : node.definitionResolutionError));
         }
     }
 
@@ -355,7 +349,9 @@ ValidationResult Graph::Validate() const {
     std::set<std::tuple<int, std::string, int, std::string>> seenLinks;
     std::set<std::pair<int, std::string>> occupiedInputs;
     for (const Link& link : m_Links) {
-        if (!ContainsNodeId(m_Nodes, link.fromNodeId) || !ContainsNodeId(m_Nodes, link.toNodeId)) {
+        const Node* from = FindNode(link.fromNodeId);
+        const Node* to = FindNode(link.toNodeId);
+        if (!from || !to) {
             result.valid = false;
             result.messages.push_back("Link references a missing node.");
         }
@@ -369,8 +365,6 @@ ValidationResult Graph::Validate() const {
                 "An input socket has more than one incoming link.");
         }
 
-        const Node* from = FindNode(link.fromNodeId);
-        const Node* to = FindNode(link.toNodeId);
         SocketDefinition fromSocket;
         SocketDefinition toSocket;
         if (!from || !to) {
@@ -386,15 +380,6 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Link uses an invalid socket direction.");
         }
-        if (from->kind == NodeKind::Image ||
-            from->kind == NodeKind::RawDevelopment ||
-            from->kind == NodeKind::RawDecode ||
-            from->kind == NodeKind::RawDevelop ||
-            from->kind == NodeKind::MultiFrameDenoise ||
-            from->kind == NodeKind::MultiFrameHdr) {
-            outgoingImages.insert(from->id);
-        }
-
         std::string normalized;
         std::string reason;
         if (!CanConnectSockets(link.fromNodeId, link.fromSocketId,

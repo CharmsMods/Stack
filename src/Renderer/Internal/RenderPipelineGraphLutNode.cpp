@@ -203,6 +203,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
     const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
     m_Width = inputWidth;
     m_Height = inputHeight;
+    if (maskLink && !maskTexture) {
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure =
+            "The connected LUT mask is unavailable; previous presentation retained.";
+        return {};
+    }
     if (maskTexture) {
         EnsureMaskPrograms();
         Stack::Renderer::ScopedGLTexture blended(

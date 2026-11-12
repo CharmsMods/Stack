@@ -922,7 +922,8 @@ void RawOutput(Checks& c) {
     incompatible.nodes.front().rawDevelopment.recipe.technical.workingSpace=Raw::RawWorkingSpace::LinearSrgbD65;
     const auto rejected=lower(state,std::move(incompatible));
     const bool unavailable=!IsRawLayerOutputAvailable(rejected,error);
-    c.Check(unavailable && !rejected.semanticDiagnostics.empty() && !rejected.unavailableOutputs.empty(),
+    c.Check(unavailable && !rejected.semanticDiagnostics.empty() &&
+        (!rejected.unavailableOutputs.empty() || !rejected.unavailableOutputSockets.empty()),
         "RAW.output.diagnostics","A mismatched source keeps its RAW lowering diagnostics and unavailable producer: "+error);
 }
 

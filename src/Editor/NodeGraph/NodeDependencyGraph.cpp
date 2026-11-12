@@ -10,8 +10,11 @@ Graph BuildNodeDependencyGraph(const Graph& graph, int outputNodeId) {
         const int node = pending.back();
         pending.pop_back();
         if (!retained.insert(node).second) continue;
-        for (const auto& link : graph.GetLinks())
-            if (link.toNodeId == node) pending.push_back(link.fromNodeId);
+        // Reuse the graph's indexed adjacency rather than rescanning every wire
+        // for each ancestor. Include every input, including masks and parameters.
+        graph.ForEachIncomingLink(node, [&](const Link& link) {
+            pending.push_back(link.fromNodeId);
+        });
     }
     Graph result = graph;
     auto& nodes = result.EditNodes();

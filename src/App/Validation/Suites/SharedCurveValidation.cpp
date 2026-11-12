@@ -146,10 +146,10 @@ void Check(const std::filesystem::path& path) {
             unsupported.nodes[0].semanticDescriptor=Project::RawLayerSceneDescriptor(recipe.technical.workingSpace);
             unsupported.nodes[0].semanticDescriptor.color.value.identity="display-p3-d65";
             Project::BindGraphImageContracts(unsupported);
-            Require(unsupported.unavailableOutputs.count(3)!=0,"Unsupported RAW input color silently used the project basis.");
+            Require(unsupported.FindOutputFailure(3,"imageOut")!=nullptr,"Unsupported RAW input color silently used the project basis.");
             unsupported=scopeGraph;
             Project::BindGraphImageContracts(unsupported);
-            Require(unsupported.unavailableOutputs.count(3)!=0,"Unknown RAW input color silently used the project basis.");
+            Require(unsupported.FindOutputFailure(3,"imageOut")!=nullptr,"Unknown RAW input color silently used the project basis.");
             std::cout<<"RAW input basis: supported spaces, editor cache identity and unsupported input diagnostics passed.\n";
         }
         pipeline.SetRawDevelopmentGraphScopeReadbackRequest(RawDevelopmentGraphScopeStage::LocalRangeInput,192);

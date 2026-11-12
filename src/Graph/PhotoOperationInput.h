@@ -8,9 +8,11 @@ enum class PhotoInput { Components, LinearRgb, SceneLinearRgb };
 
 inline PhotoInput PhotoInputFor(const RawRecipe::GraphOperation& operation) {
     using Kind = RawRecipe::GraphOperationKind;
+    // Disabled operations return the incoming value without interpreting color.
+    if (!operation.enabled) return PhotoInput::Components;
     if (operation.kind == Kind::Exposure) return PhotoInput::Components;
     if (operation.kind == Kind::ToneCurve)
-        return !operation.enabled || NodeMath::ToneCurveMode(operation.parameters) == "components"
+        return NodeMath::ToneCurveMode(operation.parameters) == "components"
             ? PhotoInput::Components : PhotoInput::LinearRgb;
     return PhotoInput::SceneLinearRgb;
 }

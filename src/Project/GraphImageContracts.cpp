@@ -1,4 +1,5 @@
 #include "Graph/PhotoOperationInput.h"
+#include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 #include "NodeMath/ImageOperationInput.h"
 #include "NodeMath/StylizeInput.h"
@@ -6,6 +7,7 @@
 #include "Raw/RawGraphParameters.h"
 #include "Project/GraphImageContracts.h"
 #include "Graph/GraphImageRules.h"
+#include "Graph/LayerGeometrySemantics.h"
 #include "NodeMath/DescriptorSerialization.h"
 #include "Raw/RawZoneArea.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -75,7 +77,7 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
             if (!source) source = second;
             std::string error;
             if (source && second && !GraphModel::ValidateImageCombination(*source,*second,error))
-                graph.unavailableOutputs[id] = std::move(error);
+                graph.unavailableOutputSockets[id][port] = std::move(error);
         }
         if (!source) {
             for (const auto* link : incoming[id]) {
@@ -86,17 +88,35 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
             }
         }
         if (source) {
-            if (node.kind == K::Output || node.kind == K::RawOperation || node.kind == K::Mix) value = *source;
+            if (node.kind == K::Output || node.kind == K::RawOperation) value = *source;
             if (node.kind==K::RawOperation && port!="inputImageOut" && node.rawOperation.enabled) {
                 value.range=SemanticField<NumericRange>::Unknown();
                 if (node.rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve || node.rawOperation.kind==RawRecipe::GraphOperationKind::Exposure)
                     value.precision=SemanticField<LogicalPrecision>::Known(LogicalPrecision::Float32);
             }
-            if (node.kind == K::Mix) if (const auto second = input("imageB")) {
-                if (value.alpha != second->alpha) value.alpha = SemanticField<AlphaMode>::Unknown();
-                if (value.color != second->color) value.color = SemanticField<ColorIdentity>::Unknown();
-                if (value.transfer != second->transfer) value.transfer = SemanticField<TransferDescriptor>::Unknown();
-                if (value.reference != second->reference) value.reference = SemanticField<ReferenceState>::Unknown();
+            if (node.kind == K::Mix) {
+                // Rendering sizes the result from A, but a broadcast Channel
+                // does not replace the merged RGB layout or its color basis.
+                value.spatial = source->spatial;
+                const auto second = input("imageB");
+                const auto& colorSource = source->logicalType == LogicalValueType::ColorImage || !second
+                    ? *source : *second;
+                value.alpha = colorSource.alpha;
+                value.color = colorSource.color;
+                value.transfer = colorSource.transfer;
+                value.reference = colorSource.reference;
+                if (source->logicalType == LogicalValueType::ColorImage && second &&
+                    second->logicalType == LogicalValueType::ColorImage) {
+                    if (value.alpha != second->alpha) value.alpha = SemanticField<AlphaMode>::Unknown();
+                    if (value.color != second->color) value.color = SemanticField<ColorIdentity>::Unknown();
+                    if (value.transfer != second->transfer) value.transfer = SemanticField<TransferDescriptor>::Unknown();
+                    if (value.reference != second->reference) value.reference = SemanticField<ReferenceState>::Unknown();
+                }
+                if (second && (source->logicalType == LogicalValueType::ColorImage) !=
+                    (second->logicalType == LogicalValueType::ColorImage) &&
+                    value.presentImageComponents.state == KnowledgeState::Known &&
+                    HasImageComponent(value.presentImageComponents.value, ImageComponent::Alpha))
+                    value.alpha = SemanticField<AlphaMode>::Unknown();
             }
             if (node.kind != K::Output && node.kind != K::RawOperation && node.kind != K::Mix) {
                 value.spatial = source->spatial;
@@ -119,16 +139,13 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
         if ((node.kind == K::RawDevelopment || node.kind == K::RawProjectSourceSet) &&
             sourceMetadata && sourceMetadata->error.empty()) {
             const auto& metadata = *sourceMetadata;
-            // RAW preparation produces scene-linear RGB in its authored working
-            // basis, with a separate straight coverage/alpha channel. This is a
-            // technical boundary fact, never inferred from a pixel average.
+            // Keep the snapshot owner's recipe-dependent color interpretation:
+            // an internal View Transform may already have produced display RGB.
+            // Both paths retain the separate straight coverage/alpha channel.
             value.logicalType=LogicalValueType::ColorImage;
             value.presentImageComponents=SemanticField<ImageComponentSet>::Known(
                 MakeImageComponentSet({ImageComponent::Red,ImageComponent::Green,ImageComponent::Blue,ImageComponent::Alpha}));
             value.channels=SemanticField<ChannelDescriptor>::Known(MakeImageChannelDescriptor(value.presentImageComponents.value));
-            value.color=SemanticField<ColorIdentity>::Known({node.rawDevelopment.recipe.technical.workingSpace==Raw::RawWorkingSpace::LinearRec2020D65 ? "rec2020-d65" : "srgb-d65",{},ColorRelation::Standard});
-            value.transfer=SemanticField<TransferDescriptor>::Known({TransferKind::Linear,0,{}});
-            value.reference=SemanticField<ReferenceState>::Known(ReferenceState::Scene);
             value.alpha=SemanticField<AlphaMode>::Known(AlphaMode::Straight);
             auto spatial = SpatialDescriptor{};
             spatial.kind = SpatialExtentKind::Finite;
@@ -155,9 +172,10 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
             value.spatial = SemanticField<SpatialDescriptor>::Known(spatial);
         } else if (node.kind == K::Reformat && value.spatial.state == KnowledgeState::Known) {
             value.spatial.value = Stack::NodeMath::ReformatOutputSpatial(value.spatial.value, node.reformatSettings);
-        } else if (node.kind == K::Layer && value.spatial.state == KnowledgeState::Known) {
+        } else if (node.kind == K::Layer && value.spatial.state == KnowledgeState::Known &&
+            node.layerJson.value("enabled", true) && node.layerJson.value("visible", true)) {
             const auto type = node.layerJson.value("type", std::string{});
-            if (type == "RawOutputCrop" && node.layerJson.value("enabled", true))
+            if (type == "RawOutputCrop")
                 ApplyOutputCrop(value.spatial.value,
                     RawRecipe::DeserializeRecipe(node.layerJson.at("recipe")).cropRotation);
             if (type == "Rotate" || type == "Flip") {
@@ -169,18 +187,25 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
                 value.spatial.value.sourceTransform = Multiply(value.spatial.value.sourceTransform, Multiply(rotate,flip));
             }
         }
+        if (node.kind == K::Layer)
+            GraphModel::DescribeLayerGeometryCoverage(value, node.layerJson.value("type", std::string{}), node.layerJson);
         if ((node.kind == K::RawOperation || node.kind == K::MaskGenerator) && source) {
-            if (node.kind == K::RawOperation) {
+            if (node.kind == K::RawOperation && port != "inputImageOut") {
                 const auto issue = GraphModel::PhotoInputError(GraphModel::PhotoInputFor(node.rawOperation), *source, true);
-                if (!issue.empty()) graph.unavailableOutputs[id] = issue;
+                if (!issue.empty()) graph.unavailableOutputSockets[id][port] = issue;
             }
             if (const auto space = RawOperationInputWorkingSpace(*source)) node.rawWorkingSpace = *space;
         }
         if (node.kind==K::Layer && source) {
             const auto type=node.layerJson.value("type",std::string{});
+            const auto* layer = LayerRegistry::FindDescriptorByTypeId(type);
+            if (node.layerJson.value("enabled", true) && node.layerJson.value("visible", true) &&
+                layer && layer->channelPolicy == LayerChannelPolicy::FullImageOnly &&
+                source->logicalType != LogicalValueType::Invalid && source->logicalType != LogicalValueType::ColorImage)
+                graph.unavailableOutputSockets[id][port] = "This layer requires a full color image.";
             if (type=="CellShading" || type=="PaletteReconstructor" || type=="Halftoning") {
                 std::string reason;
-                if (!ValidateStylizeInput(type,node.layerJson,DescribeImageOperationInput(*source),reason)) graph.unavailableOutputs[id]=reason;
+                if (!ValidateStylizeInput(type,node.layerJson,DescribeImageOperationInput(*source),reason)) graph.unavailableOutputSockets[id][port]=reason;
                 value.range=SemanticField<NumericRange>::Unknown();
             }
         }
@@ -202,7 +227,7 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
     }
     // Ports remain authored when modes or components change. Only controls
     // participating in this evaluation add uniform producer dependencies.
-    for (auto& node:graph.nodes) if (node.kind==K::RawOperation &&
+    for (auto& node:graph.nodes) if (node.kind==K::RawOperation && node.rawOperation.enabled &&
         node.rawOperation.kind==RawRecipe::GraphOperationKind::ToneCurve) {
         const auto capability=DescribeImageOperationInput(node.semanticDescriptor);
         node.uniformParameters.clear();
@@ -228,6 +253,15 @@ void BindGraphImageContracts(RenderGraphSnapshot& graph) {
             for (auto& dependency:node.outputDependencies)
                 dependency.inputs.erase(std::remove(dependency.inputs.begin(),dependency.inputs.end(),port),dependency.inputs.end());
         }
+    }
+    // This snapshot owns executable dependencies, not the permanent authoring
+    // contract used for cycle checks. Disabled RAW operations return imageIn.
+    for (auto& node : graph.nodes) if (node.kind == K::RawOperation && !node.rawOperation.enabled) {
+        node.uniformParameters.clear();
+        auto dependency = std::find_if(node.outputDependencies.begin(), node.outputDependencies.end(),
+            [](const auto& rule) { return rule.output == "imageOut"; });
+        if (dependency == node.outputDependencies.end()) node.outputDependencies.push_back({"imageOut", {"imageIn"}});
+        else dependency->inputs = {"imageIn"};
     }
     graph.outputDescriptor = describe(graph.outputNodeId,graph.outputSocketId.empty()?"imageOut":graph.outputSocketId);
     graph.outputDescriptorIdentity = DescriptorContentIdentity(graph.outputDescriptor);

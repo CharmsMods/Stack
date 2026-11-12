@@ -117,11 +117,15 @@ std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph
 bool DefinitionSupportsGraphRole(const LiveNodeDefinition& definition, LiveGraphRole role);
 bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node, const std::string& socketId,
-    const Stack::NodeMath::ValueDescriptor& value, std::string& error);
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error, bool checkValueShape = true);
 
 bool AcceptsTypedParameterInput(const EditorNodeGraph::Node& node, const std::string& socketId, EditorNodeGraph::SocketType type);
 
 bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input);
+// Current execution only. Authoring and cycle prevention must continue to use
+// OutputDependsOnInput so toggling bypass cannot introduce a feedback loop.
+bool ExecutionOutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input);
 bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
     const std::string& output, const std::string& input);

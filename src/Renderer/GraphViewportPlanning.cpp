@@ -75,7 +75,7 @@ bool CanExecuteRegion(const RenderGraphNode& node, const std::string& socket) {
                 default: return false;
             }
         case K::Layer: {
-            if (!node.layerJson.value("enabled", true)) return true;
+            if (!node.layerJson.value("enabled", true) || !node.layerJson.value("visible", true)) return true;
             const auto type = node.layerJson.value("type", std::string{});
             // The screen phase uses full-input UVs and logical source pixels.
             // Consumers may crop its complete output, never restart the screen
@@ -201,8 +201,15 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         }
         if (node.kind == RenderGraphNodeKind::Image && node.image.width > 0 && node.image.height > 0)
             stage.spatial = Spatial(node.image.width, node.image.height);
-        if (node.kind == RenderGraphNodeKind::Reformat)
-            stage.spatial = Stack::NodeMath::ReformatOutputSpatial(stage.spatial, node.reformatSettings);
+        if (node.kind == RenderGraphNodeKind::Reformat) {
+            // The node descriptor already describes the output. Resolve from
+            // its actual input instead of applying framing to that output twice.
+            for (const auto* link : inputs[endpoint.nodeId]) if (link->toSocketId == "imageIn") {
+                const auto source = plan.stages.find({link->fromNodeId, link->fromSocketId});
+                if (source != plan.stages.end() && UsableSpatial(source->second.spatial))
+                    stage.spatial = Stack::NodeMath::ReformatOutputSpatial(source->second.spatial, node.reformatSettings);
+            }
+        }
         if ((node.kind == RenderGraphNodeKind::RawDevelopment || node.kind == RenderGraphNodeKind::RawProjectSourceSet) &&
             node.rawDevelopment.embeddedRawData) {
             int width = Raw::DisplayWidth(node.rawDevelopment.embeddedRawData->metadata);
@@ -217,7 +224,7 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
             }
             stage.spatial = Spatial(width, height);
         }
-        if (node.kind == RenderGraphNodeKind::Layer && node.layerJson.value("enabled", true) &&
+        if (node.kind == RenderGraphNodeKind::Layer && node.layerJson.value("enabled", true) && node.layerJson.value("visible", true) &&
             node.layerJson.value("type", std::string{}) == "RawOutputCrop" && UsableSpatial(stage.spatial)) {
             for (const auto* link : inputs[endpoint.nodeId]) if (link->toSocketId == "imageIn") {
                 const auto source = plan.stages.find({link->fromNodeId, link->fromSocketId});

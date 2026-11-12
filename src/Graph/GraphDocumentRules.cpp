@@ -245,6 +245,9 @@ EditProposal ProposeInsertion(const EditorNodeGraph::Graph& source, std::uint64_
         const auto sockets = source.GetSockets(*node, true);
         for (const auto& input : sockets) for (const auto& output : sockets) {
             if (input.direction != EditorNodeGraph::SocketDirection::Input || output.direction != EditorNodeGraph::SocketDirection::Output) continue;
+            // Insertion must carry the old wire through the selected branch,
+            // not feed one compound branch while publishing an unrelated one.
+            if (!EditorNodeGraphDefinitions::OutputDependsOnInput(source,*node,output.id,input.id)) continue;
             auto proposal = ProposeEdit(source, revision, [&](auto& graph) {
                 std::string error;
                 if (!graph.TryConnectSockets(link.fromNodeId,link.fromSocketId,nodeId,input.id,&error) ||

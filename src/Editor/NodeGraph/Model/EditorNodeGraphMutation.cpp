@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -349,6 +350,18 @@ bool Graph::CanConnectSockets(
     }
 
     auto source = DescribeGraphOutput(*this,fromNodeId,fromSocketId);
+    const auto normalizeLutChannel = [&]() -> std::optional<bool> {
+        if (to->kind != NodeKind::Lut || toSocketId != kImageInputSocketId) return std::nullopt;
+        const auto upstreamChannel = OutputChannelColor(source);
+        if (upstreamChannel.empty()) return std::nullopt;
+        const bool ok = CanConnectSockets(fromNodeId, fromSocketId, toNodeId,
+            upstreamChannel, nullptr, errorMessage);
+        if (ok && normalizedToSocketId) *normalizedToSocketId = upstreamChannel;
+        return ok;
+    };
+    // A channel's ancestry must not turn a main-pin drop into replacement of
+    // every LUT channel. Normalize new wires before arithmetic's early return.
+    if (!retained) if (const auto normalized = normalizeLutChannel()) return *normalized;
     // Only an authoring gesture can request an adapter. Stored edges and ordinary
     // programmatic links always validate their actual endpoints.
     const bool combine = insertRgbCombine && DescribeRgbAdapter(*this, *to, toSocketId, source);
@@ -441,6 +454,7 @@ bool Graph::CanConnectSockets(
 
     const auto* targetDefinition=EditorNodeGraphDefinitions::FindLiveNodeDefinition(*to);
     if (((targetDefinition && targetDefinition->requiresSceneLinearRgb &&
+        (to->kind != NodeKind::RawOperation || to->rawOperation.enabled) &&
         toSocketId == kImageInputSocketId) ||
         (to->role == Stack::GraphModel::NodeRole::LayerResult && toSocketId == kImageInputSocketId)) &&
         (fromSocket.type != SocketType::Image || isFromScalarStream())) {
@@ -450,7 +464,7 @@ bool Graph::CanConnectSockets(
 
     std::string semanticError;
     if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this, *to, toSocketId,
-            source.descriptor, semanticError)) {
+            source.descriptor, semanticError, !retained)) {
         if (errorMessage) *errorMessage = semanticError;
         return false;
     }
@@ -495,25 +509,9 @@ bool Graph::CanConnectSockets(
         return true;
     }
 
-    if (to->kind == NodeKind::Lut &&
-        toSocketId == kImageInputSocketId) {
-        const std::string upstreamChannel =
-            ResolveSocketChannel(fromNodeId, fromSocketId);
-        if (!upstreamChannel.empty()) {
-            const bool ok =
-                CanConnectSockets(
-                    fromNodeId,
-                    fromSocketId,
-                    toNodeId,
-                    upstreamChannel,
-                    nullptr,
-                    errorMessage);
-            if (ok && normalizedToSocketId) {
-                *normalizedToSocketId = upstreamChannel;
-            }
-            return ok;
-        }
-    }
+    // Retained non-arithmetic links keep their existing normalization checks;
+    // do not reinterpret an already-authored arithmetic main-input connection.
+    if (retained) if (const auto normalized = normalizeLutChannel()) return *normalized;
 
     if (ConnectionRules::IsChannelProcessingBridge(
             *this,

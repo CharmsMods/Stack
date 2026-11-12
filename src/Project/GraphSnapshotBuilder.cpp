@@ -236,6 +236,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
             case EditorNodeGraph::NodeKind::Image:
                 renderNode.kind = RenderGraphNodeKind::Image;
                 renderNode.image = BuildRenderImagePayload(node.image);
+                if (node.image.isLoading)
+                    snapshot.unavailableOutputs[node.id] = "The image source is still loading.";
                 break;
             case EditorNodeGraph::NodeKind::RawSource:
                 renderNode.kind = RenderGraphNodeKind::RawSource;
@@ -615,6 +617,16 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
     for (const RenderGraphNode& node : snapshot.nodes) {
         renderNodeIds.insert(node.nodeId);
     }
+    const auto outputPorts = [&](const EditorNodeGraph::Node& node) {
+        std::vector<std::string> ports;
+        for (const auto& socket : graph.GetSockets(node, false))
+            if (socket.direction == EditorNodeGraph::SocketDirection::Output) ports.push_back(socket.id);
+        // Output cards publish an implicit result even without a visible output pin.
+        if (node.kind == EditorNodeGraph::NodeKind::Output &&
+            std::find(ports.begin(), ports.end(), EditorNodeGraph::kImageOutputSocketId) == ports.end())
+            ports.push_back(EditorNodeGraph::kImageOutputSocketId);
+        return ports;
+    };
 
     for (const auto& binding : expansion.outputBindings) {
         const auto* authored = inputs.graph.FindNode(binding.authoredNodeId);
@@ -631,8 +643,13 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
         }
         if (renderNodeIds.count(link.fromNodeId) == 0 ||
             renderNodeIds.count(link.toNodeId) == 0) {
-            if (renderNodeIds.count(link.toNodeId))
-                snapshot.unavailableOutputs[link.toNodeId]="The connected operand has no executable source.";
+            if (renderNodeIds.count(link.toNodeId)) {
+                if (const auto* consumer = graph.FindNode(link.toNodeId))
+                    for (const auto& port : outputPorts(*consumer))
+                        if (EditorNodeGraphDefinitions::ExecutionOutputDependsOnInput(graph, *consumer, port, link.toSocketId))
+                            snapshot.unavailableOutputSockets[link.toNodeId][port] =
+                                "The connected operand has no executable source.";
+            }
             continue;
         }
         snapshot.links.push_back(RenderGraphLink{
@@ -688,7 +705,8 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                 node.kind == RenderGraphNodeKind::RawDecode ? node.rawDecode.settings.workingSpace : node.rawDevelop.settings.workingSpace,
                 "raw.scene-output");
         } else if (node.kind == RenderGraphNodeKind::Layer && node.layerJson.is_object() &&
-                   node.layerJson.value("type", std::string()) == "ViewTransform") {
+                   node.layerJson.value("type", std::string()) == "ViewTransform" &&
+                   node.layerJson.value("enabled", true) && node.layerJson.value("visible", true)) {
             source = true;
             DeclareRawDisplayOutput(descriptor, node.layerJson.value("encodeSrgbOutput", false), "view-transform.display-output");
         }
@@ -722,15 +740,18 @@ GraphSnapshotResult BuildGraphSnapshot(const GraphSnapshotInputs& inputs) {
                     node.dataMathSettings.domain=EditorNodeGraph::IsSingleChannelValue(node.semanticDescriptor.logicalType)
                         ? NodeMath::ArithmeticDomain::Channel : NodeMath::ArithmeticDomain::Spatial;
             }
-            for (const auto& diagnostic : output->second.diagnostics)
-                    if (diagnostic.severity==NodeMath::DiagnosticSeverity::HardError ||
-                        diagnostic.severity==NodeMath::DiagnosticSeverity::RuntimeFault) {
-                        // Component selection can fail on one output while its siblings stay usable.
-                        if (node.kind == RenderGraphNodeKind::ChannelSplit && diagnostic.ruleId == "graph.wire" &&
-                            diagnostic.affectedIdentity == output->first) continue;
-                        snapshot.unavailableOutputs[node.nodeId]=diagnostic.message;
-                        break;
-                    }
+        }
+        // Output descriptions already include only their declared dependencies.
+        // A failed result must not hide a healthy passthrough or sibling channel.
+        if (authored) for (const auto& port : outputPorts(*authored)) {
+            const auto description = outputs.find(EditorNodeGraph::GraphOutputIdentity(node.nodeId, port));
+            if (description == outputs.end()) continue;
+            for (const auto& diagnostic : description->second.diagnostics)
+                if (diagnostic.severity == NodeMath::DiagnosticSeverity::HardError ||
+                    diagnostic.severity == NodeMath::DiagnosticSeverity::RuntimeFault) {
+                    snapshot.unavailableOutputSockets[node.nodeId][port] = diagnostic.message;
+                    break;
+                }
         }
     }
     for (RenderGraphLink& link : snapshot.links) {

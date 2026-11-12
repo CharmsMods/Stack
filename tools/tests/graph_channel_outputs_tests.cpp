@@ -96,9 +96,10 @@ void RunGraphChannelOutputsTests() {
     Wire(graph,constant,graph.DefaultOutputSocket(*graph.FindNode(constant)),gain,"imageB");
     Check(Color(graph,gain)=="r","A uniform raster coefficient discarded channel identity.");
     Wire(graph,control,"valueOut",gain,"imageB");
-    const int threshold=graph.AddMaskUtilityNode(MaskUtilityKind::Threshold,{})->id;
-    Wire(graph,gain,"imageOut",threshold,graph.DefaultInputSocket(*graph.FindNode(threshold)));
-    Check(Color(graph,threshold,graph.DefaultOutputSocket(*graph.FindNode(threshold)))=="r","A unary channel threshold discarded identity.");
+    const int clamp=graph.AddDataMathNode(DataMathMode::Clamp,{})->id;
+    graph.FindNode(clamp)->dataMathSettings.domain=ArithmeticDomain::Channel;
+    Wire(graph,gain,"imageOut",clamp,"imageA");
+    Check(Color(graph,clamp)=="r","A unary channel clamp discarded identity.");
     const int mixed=graph.AddDataMathNode(DataMathMode::Add,{})->id;
     graph.FindNode(mixed)->dataMathSettings.domain=ArithmeticDomain::Channel;
     Wire(graph,gain,"imageOut",mixed,"imageA");Wire(graph,split,"g",mixed,"imageB");

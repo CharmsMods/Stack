@@ -63,6 +63,7 @@ int RenderPipeline::FindReferenceSourceNode(const GraphExecutionContext& executi
                 useCurrentNode();
                 break;
             case RenderGraphNodeKind::Layer:
+            case RenderGraphNodeKind::RawOperation:
             case RenderGraphNodeKind::TechnicalImage:
             case RenderGraphNodeKind::Reformat:
             case RenderGraphNodeKind::RawDetailFusion:
