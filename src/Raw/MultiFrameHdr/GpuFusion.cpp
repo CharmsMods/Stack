@@ -461,7 +461,8 @@ void main() {
         scene[c] = candidateScene;
         exposure[c] = frameExposure;
         normalized[c] = measurement.normalized;
-        gain[c] = max(1.0e-8, measurement.gain);
+)GLSL"
+R"GLSL(        gain[c] = max(1.0e-8, measurement.gain);
         baseWeight[c] = 0.0;
         weight[c] = 0.0;
         fusionWeight[c] = 0.0;

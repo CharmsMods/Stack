@@ -38,8 +38,8 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
         width = std::max(width, node.image.width);
         height = std::max(height, node.image.height);
         if (node.kind == RenderGraphNodeKind::Reformat) {
-            width = std::max(width, node.reformatSettings.width);
-            height = std::max(height, node.reformatSettings.height);
+            width = std::max(width, node.nativeWidth > 0 ? node.nativeWidth : node.reformatSettings.width);
+            height = std::max(height, node.nativeHeight > 0 ? node.nativeHeight : node.reformatSettings.height);
         }
         if (node.kind == RenderGraphNodeKind::RawSource) {
             width = std::max(width, Raw::DisplayWidth(node.rawSource.metadata));

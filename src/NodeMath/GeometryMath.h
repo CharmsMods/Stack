@@ -7,7 +7,7 @@
 
 namespace Stack::NodeMath {
 
-inline constexpr int kReformatAlgorithmVersion = 2;
+inline constexpr int kReformatAlgorithmVersion = 3;
 inline constexpr int kMaximumReformatDimension = 32768;
 
 struct ReformatSettings {
@@ -15,13 +15,14 @@ struct ReformatSettings {
     int height = 1080;
     ReconstructionFilter filter = ReconstructionFilter::Linear;
     BorderPolicy border = BorderPolicy::Clamp;
-    // Custom uses exact width/height. Other ratios derive height from width.
+    // Exact dimensions are the low-level resampling operation. Framing ratios
+    // derive a native-resolution crop from the incoming image, ignoring width.
     int canvasRatio = 0; // Exact dimensions, Original, 16:9, 3:2, 4:3, Square, Portrait 9:16, Custom ratio
     float customCanvasAspect = 16.0f / 9.0f;
     float visibleAspect = 0.0f; // zero disables aspect bars
     float sideBars = 0.0f; // symmetric fraction on each edge
     float topBottomBars = 0.0f;
-    float sourceScale = 1.0f; // relative to cover, never exposes empty canvas
+    float sourceScale = 1.0f; // crop zoom for ratio framing; cover scale for exact resampling
     float sourceX = 0.0f; // -1..1 across available source slack
     float sourceY = 0.0f;
 };

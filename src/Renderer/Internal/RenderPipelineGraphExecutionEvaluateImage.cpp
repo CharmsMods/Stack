@@ -355,9 +355,15 @@ void GraphExecutionRuntime::BindImageEvaluation() {
             const int inputHeight = pipeline.m_Height;
             if (inputTexture &&
                 Stack::NodeMath::ValidateReformatSettings(node.reformatSettings).empty()) {
-                auto canvas = Stack::NodeMath::ResolveFramingCanvas(node.reformatSettings, inputWidth, inputHeight);
-                // Original aspect follows authored input geometry, not a rounded preview raster.
-                if (canvas.canvasRatio == 1 && node.semanticDescriptor.spatial.state == Stack::NodeMath::KnowledgeState::Known) {
+                const auto nativeInput = pipeline.ResolveGraphNativeExtent(executionContext,
+                    input->fromNodeId, input->fromSocketId);
+                const int mappingWidth = node.reformatSettings.canvasRatio > 0 ? nativeInput.first : inputWidth;
+                const int mappingHeight = node.reformatSettings.canvasRatio > 0 ? nativeInput.second : inputHeight;
+                auto canvas = Stack::NodeMath::ResolveFramingCanvas(node.reformatSettings, mappingWidth, mappingHeight);
+                const auto framing = Stack::NodeMath::ResolveFramingMapping(node.reformatSettings, mappingWidth, mappingHeight);
+                // Framing follows the declared native canvas, not the size of
+                // a temporary upstream preview raster.
+                if (canvas.canvasRatio > 0 && node.semanticDescriptor.spatial.state == Stack::NodeMath::KnowledgeState::Known) {
                     canvas.width = int(node.semanticDescriptor.spatial.value.fullWindow.width);
                     canvas.height = int(node.semanticDescriptor.spatial.value.fullWindow.height);
                 }
@@ -369,7 +375,7 @@ void GraphExecutionRuntime::BindImageEvaluation() {
                 const bool targetRendered = result != 0 && renderToTexture(result, [&](unsigned int fbo) {
                     reformatRendered = pipeline.RenderReformat(
                         inputTexture, inputWidth, inputHeight,
-                        canvas, fbo);
+                        canvas, framing, fbo);
                 });
                 if (!targetRendered || !reformatRendered) {
                     if (result != 0) glDeleteTextures(1, &result);

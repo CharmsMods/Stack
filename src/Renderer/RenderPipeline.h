@@ -1244,6 +1244,7 @@ private:
         int inputWidth,
         int inputHeight,
         const Stack::NodeMath::ReformatSettings& settings,
+        const Stack::NodeMath::FramingMapping& framing,
         unsigned int targetFBO);
     bool RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
                               bool hasR, bool hasG, bool hasB, bool hasA, unsigned int targetFBO);

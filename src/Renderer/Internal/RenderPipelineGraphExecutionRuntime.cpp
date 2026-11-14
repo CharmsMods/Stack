@@ -159,11 +159,22 @@ void GraphExecutionRuntime::Execute() {
     } else {
         finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);
     }
-    const auto finalRegion = pipeline.m_RawViewportAppliedRegion;
+    auto finalRegion = pipeline.m_RawViewportAppliedRegion;
     const bool finalDenoisePending = finalTexture != 0 && denoiseProvenance.pending;
-    const auto finalGeometry = pipeline.m_CurrentGraphImageGeometry;
+    auto finalGeometry = pipeline.m_CurrentGraphImageGeometry;
     const int finalWidth = pipeline.m_Width;
     const int finalHeight = pipeline.m_Height;
+    // Explicit full-quality rendering skips regional viewport planning. Its
+    // output still needs the final graph's native geometry: the RAW source
+    // extent is no longer the output extent after Framing or other geometry.
+    if (finalTexture && !finalGeometry.Valid() &&
+        !pipeline.m_GraphViewportRequest.enabled && pipeline.m_PreviewMaxDimension == 0 &&
+        outputIt != nodes.end() && outputIt->second->nativeWidth > 0 && outputIt->second->nativeHeight > 0) {
+        if (!finalRegion.Valid() || !finalRegion.Partial())
+            finalRegion = Stack::Renderer::WholeImageRegion(finalWidth, finalHeight);
+        finalGeometry = {outputIt->second->nativeWidth, outputIt->second->nativeHeight,
+            finalRegion, finalWidth, finalHeight};
+    }
     if (graph.rawLayerScopeNodeId > 0 && pipeline.m_RawDevelopmentGraphScopeStage != RawDevelopmentGraphScopeStage::None) {
         const auto scopeTexture = evalImage(graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);
         if (pipeline.m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput)

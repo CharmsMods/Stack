@@ -1298,7 +1298,11 @@ void EditorModule::AddFieldMeanNodeAt(EditorNodeGraph::Vec2 graphPosition) {
 }
 
 void EditorModule::AddReformatNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    AddGraphNode(*this,[&](auto& graph) { return graph.AddReformatNode(graphPosition); });
+    AddGraphNode(*this,[&](auto& graph) {
+        auto* node = graph.AddReformatNode(graphPosition);
+        if (node) node->reformatSettings.canvasRatio = 1;
+        return node;
+    });
 }
 
 void EditorModule::AddRawOperationNodeAt(Stack::RawRecipe::GraphOperationKind kind, EditorNodeGraph::Vec2 position) {

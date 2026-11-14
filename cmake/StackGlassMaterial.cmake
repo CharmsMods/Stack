@@ -3,6 +3,18 @@
 set(STACK_GLASS_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src/Renderer/Glass/Shaders/material.frag")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${STACK_GLASS_SHADER}")
 file(READ "${STACK_GLASS_SHADER}" STACK_GLASS_MATERIAL_SOURCE)
+# MSVC limits each individual string literal, even when the resulting shader
+# fits in a concatenated constant. Split the embedding without changing bytes.
+set(stack_glass_remaining "${STACK_GLASS_MATERIAL_SOURCE}")
+set(STACK_GLASS_MATERIAL_SOURCE "")
+string(LENGTH "${stack_glass_remaining}" stack_glass_length)
+while(stack_glass_length GREATER 12000)
+    string(SUBSTRING "${stack_glass_remaining}" 0 12000 stack_glass_chunk)
+    string(APPEND STACK_GLASS_MATERIAL_SOURCE "${stack_glass_chunk})GLASS\"\nR\"GLASS(")
+    string(SUBSTRING "${stack_glass_remaining}" 12000 -1 stack_glass_remaining)
+    string(LENGTH "${stack_glass_remaining}" stack_glass_length)
+endwhile()
+string(APPEND STACK_GLASS_MATERIAL_SOURCE "${stack_glass_remaining}")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/Renderer/Glass/Shaders/EmbeddedMaterial.h.in"
     "${CMAKE_BINARY_DIR}/generated/src/Renderer/Glass/EmbeddedMaterial.h" @ONLY)
 

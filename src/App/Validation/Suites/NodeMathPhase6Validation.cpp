@@ -458,10 +458,10 @@ bool BuildAuthoredReformatGraph(
 }
 
 bool RunPhase6GeometryValidation() {
-    constexpr int width = 4;
-    constexpr int height = 3;
-    constexpr int outputWidth = 7;
-    constexpr int outputHeight = 5;
+    constexpr int width = 40;
+    constexpr int height = 30;
+    constexpr int outputWidth = 35;
+    constexpr int outputHeight = 25;
     constexpr double rgba16fTolerance = 2.5e-3;
     const std::vector<unsigned char> source = GeneratePhase6Pixels(width, height);
     RenderGraphSnapshot graph;
@@ -472,6 +472,24 @@ bool RunPhase6GeometryValidation() {
     bool ok = Phase6Check(built,
         error.empty() ? "the authored Reformat graph did not lower" : error);
     if (!built) return false;
+    NodeMath::ReformatSettings nativeFraming;
+    nativeFraming.canvasRatio = 2;
+    nativeFraming.width = 3840;
+    nativeFraming.visibleAspect = 2.39f;
+    const auto nativeCanvas = NodeMath::ResolveFramingCanvas(nativeFraming, 7968, 5320);
+    nativeFraming.width = 1280;
+    const auto sameCanvas = NodeMath::ResolveFramingCanvas(nativeFraming, 7968, 5320);
+    ok &= Phase6Check(nativeCanvas.width == 7968 && nativeCanvas.height == 4482 &&
+        sameCanvas.width == nativeCanvas.width && sameCanvas.height == nativeCanvas.height,
+        "Framing downscaled the source using a saved output width");
+    nativeFraming.sourceScale = 2.f;
+    const auto tighterCanvas = NodeMath::ResolveFramingCanvas(nativeFraming, 7968, 5320);
+    ok &= Phase6Check(tighterCanvas.width == 3984 && tighterCanvas.height == 2241,
+        "Framing zoom must tighten the native crop instead of enlarging its pixels");
+    const auto nativeMapping = NodeMath::ResolveFramingMapping(nativeFraming, 7968, 5320);
+    ok &= Phase6Check(std::abs(nativeMapping.sampleWidth * 7968 - tighterCanvas.width) < 1e-8 &&
+        std::abs(nativeMapping.sampleHeight * 5320 - tighterCanvas.height) < 1e-8,
+        "Framing must sample one original pixel per output pixel");
     const RenderGraphRegionPlan plan = RenderTiling::PlanGraphRegions(graph, width, height);
     ok &= Phase6Check(
         plan.valid && plan.requiresFullFrame && !plan.tileable &&
@@ -492,6 +510,10 @@ bool RunPhase6GeometryValidation() {
     pipeline.Initialize();
     pipeline.LoadSourceFromPixels(source.data(), width, height, 4);
     pipeline.ExecuteGraph(graph);
+    const auto fullGeometry = pipeline.GetGraphViewportGeometry();
+    ok &= Phase6Check(fullGeometry.NativeSamples() && !fullGeometry.resident.Partial() &&
+        fullGeometry.logicalWidth == outputWidth && fullGeometry.logicalHeight == outputHeight,
+        "Complete Framing output retained source geometry and would fail full-quality adoption");
     const std::vector<float> rendered = ReadPhase6Texture(
         pipeline.GetOutputTexture(), outputWidth, outputHeight);
     ok &= Phase6Check(
@@ -558,7 +580,7 @@ bool RunPhase6GeometryValidation() {
             [](const auto& boundary) { return boundary.changesGraphResult; }),
         "preview, scope, and export did not execute through typed non-mutating consumer boundaries");
     if (ok) {
-        std::cout << "Phase 6 geometry validation passed: 4x3 -> 7x5 linear Reformat, "
+        std::cout << "Phase 6 geometry validation passed: 40x30 -> 35x25 native Framing, "
                   << "project round-trip, downstream Exposure, and typed consumers "
                   << "(max difference " << difference << ").\n";
     }

@@ -461,7 +461,8 @@ bool SampleSameCfa(int frameIndex, vec2 sourceRaw, int site,
     float pilot = max(0.0, referencePilot);
     for (int oy = -1; oy <= 2; ++oy) {
         int tapPlaneY = base.y + oy;
-        float dy = sourcePlane.y - float(tapPlaneY);
+)GLSL"
+R"GLSL(        float dy = sourcePlane.y - float(tapPlaneY);
         float wy = Keys(dy);
         float dwy = KeysDerivative(dy);
         for (int ox = -1; ox <= 2; ++ox) {
@@ -686,7 +687,8 @@ void main() {
                                 rejection = REJECT_RELIABILITY_ZERO;
                             } else {
                                 values[observationCount] = candidateValue;
-                                variances[observationCount] = frozenVariance;
+)GLSL"
+R"GLSL(                                variances[observationCount] = frozenVariance;
                                 reliabilities[observationCount] = resolvedReliability;
                                 ++observationCount;
                                 ++eligibleCount;

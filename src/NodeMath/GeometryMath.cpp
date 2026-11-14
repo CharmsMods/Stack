@@ -43,9 +43,20 @@ ReformatSettings ResolveFramingCanvas(const ReformatSettings& settings, int inpu
         16.0 / 9.0, 3.0 / 2.0, 4.0 / 3.0, 1.0, 9.0 / 16.0, settings.customCanvasAspect};
     if (settings.canvasRatio > 0 && settings.canvasRatio < 8 && ratios[settings.canvasRatio] > 0.0) {
         const double ratio = ratios[settings.canvasRatio];
-        // Bound resolution while preserving the chosen ratio to integer-pixel precision.
-        result.width = std::clamp(result.width, 1, std::max(1, int(std::min(double(kMaximumReformatDimension), std::floor(kMaximumReformatDimension * ratio)))));
-        result.height = std::clamp(int(std::round(result.width / ratio)), 1, kMaximumReformatDimension);
+        // Framing crops the incoming sample grid; authored width is not an
+        // export-size limit. Include bars in the canvas without shrinking the
+        // photograph, and make Source scale a tighter native-resolution crop.
+        double visibleWidth = 1.0, visibleHeight = 1.0;
+        if (settings.visibleAspect > ratio) visibleHeight = ratio / settings.visibleAspect;
+        else if (settings.visibleAspect > 0.0) visibleWidth = settings.visibleAspect / ratio;
+        visibleWidth = std::min(visibleWidth, 1.0 - 2.0 * settings.sideBars);
+        visibleHeight = std::min(visibleHeight, 1.0 - 2.0 * settings.topBottomBars);
+        const double nativeWidth = std::min(inputWidth / visibleWidth,
+            inputHeight * ratio / visibleHeight) / settings.sourceScale;
+        // Do not lose a row to division roundoff when Original resolves back
+        // to an integer source extent.
+        result.width = std::clamp(int(std::floor(nativeWidth + 1e-8)), 1, kMaximumReformatDimension);
+        result.height = std::clamp(int(std::floor(nativeWidth / ratio + 1e-8)), 1, kMaximumReformatDimension);
     }
     return result;
 }
@@ -63,7 +74,8 @@ FramingMapping ResolveFramingMapping(const ReformatSettings& authored, int input
     result.halfHeight = std::min(result.halfHeight, 0.5 - settings.topBottomBars);
     const double visibleWidth = settings.width * result.halfWidth * 2.0;
     const double visibleHeight = settings.height * result.halfHeight * 2.0;
-    const double scale = std::max(visibleWidth / inputWidth, visibleHeight / inputHeight) * settings.sourceScale;
+    const double scale = authored.canvasRatio > 0 ? 1.0 :
+        std::max(visibleWidth / inputWidth, visibleHeight / inputHeight) * settings.sourceScale;
     result.sampleWidth = settings.width / (inputWidth * scale);
     result.sampleHeight = settings.height / (inputHeight * scale);
     const double slackX = std::max(0.0, 0.5 - result.halfWidth * result.sampleWidth);
@@ -71,6 +83,11 @@ FramingMapping ResolveFramingMapping(const ReformatSettings& authored, int input
     // Translation moves the image, hence inverse sampling moves oppositely.
     result.centerX -= settings.sourceX * slackX;
     result.centerY -= settings.sourceY * slackY;
+    if (authored.canvasRatio > 0) {
+        // Native crops land on source pixel centers, including odd extents.
+        result.centerX = (std::round(result.centerX * inputWidth - settings.width * 0.5) + settings.width * 0.5) / inputWidth;
+        result.centerY = (std::round(result.centerY * inputHeight - settings.height * 0.5) + settings.height * 0.5) / inputHeight;
+    }
     return result;
 }
 
