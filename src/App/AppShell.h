@@ -5,6 +5,7 @@
 #include "AppLegal.h"
 #include "AppSettingsPopup.h"
 #include "StartupReveal.h"
+#include "Startup/StartupScene.h"
 #include "UpdateManager.h"
 #include "settings/AppearanceTheme.h"
 #include "../Composite/CompositeModule.h"
@@ -323,6 +324,9 @@ private:
     std::string m_CloseSource;
     bool m_FirstTimeLayout;
     double m_MainWindowShownTime = 0.0;
+    Stack::Startup::Scene m_StartupScene;
+    Stack::Startup::WindowPresentation m_StartupWindow;
+    bool m_StartupSceneClockPending = false;
     Stack::StartupReveal::Controller m_StartupReveal;
     Stack::StartupReveal::Visual m_StartupRevealVisual;
     bool m_StartupRevealBorderVisible = true;

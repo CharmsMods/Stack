@@ -1,3 +1,4 @@
+#include "Startup/StartupUiTransition.h"
 #include "BurstEngine/ScratchDirectory.h"
 #include "Raw/GalleryTileCache.h"
 #include "GraphNativeCursor.h"
@@ -1494,6 +1495,14 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 #endif
     AppWindowTitleBarBridge::Initialize(m_Window);
 #if defined(_WIN32)
+    if (AppWindowTitleBarBridge::IsActive() || UseFramelessMainWindowChrome()) {
+        // DWM's stock minimize/restore snapshot exposes native caption chrome.
+        const BOOL disableNativeTransition=TRUE;
+        DwmSetWindowAttribute(glfwGetWin32Window(m_Window),DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disableNativeTransition,sizeof(disableNativeTransition));
+    }
+#endif
+#if defined(_WIN32)
     if (AppWindowTitleBarBridge::IsActive()) {
         InstallAppWindowTitlebarNativeInput(m_Window);
     }
@@ -1505,39 +1514,28 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
             titlebarMetrics.fallbackReason.c_str());
     }
 
-    const bool transparentFramebufferAvailable =
-        glfwGetWindowAttrib(m_Window, GLFW_TRANSPARENT_FRAMEBUFFER) == GLFW_TRUE;
-    if (transparentFramebufferAvailable && AppWindowTitleBarBridge::IsActive() && !m_UiPerformanceCapture) {
-        m_StartupReveal.Enable();
-        m_StartupRevealVisual = m_StartupReveal.Update(
-            0.0,
-            ImVec2(static_cast<float>(width), static_cast<float>(height)));
-        const StackAppearance::RuntimeSurfacePalette palette =
-            m_Appearance->GetRuntimeSurfacePalette();
-        AppWindowTitleBarBridge::UpdateTheme(
-            m_Window,
-            ImGui::GetStyleColorVec4(ImGuiCol_Text),
-            palette.controlSurfaceHovered,
-            palette.controlSurfaceActive,
-            0.0f);
-        NativeWindowTheme::SetMainWindowBorderVisible(
-            m_Window,
-            palette.border,
-            false);
-        m_StartupRevealBorderVisible = false;
-        TraceMainWindowState("startup-reveal-enabled");
-    } else {
-        m_StartupReveal.Disable();
-        std::string detail;
-        if (!transparentFramebufferAvailable) {
-            detail = "GLFW transparent framebuffer unavailable";
+    // Captured desktop composition does not require transparent framebuffer/titlebar support.
+    if (!m_UiPerformanceCapture && m_DiagnosticProjectOpenPath.empty()) {
+        auto desktop = m_StartupWindow.Prepare(m_Window);
+        int sceneWidth=0,sceneHeight=0;
+        glfwGetFramebufferSize(m_Window,&sceneWidth,&sceneHeight);
+        if (m_StartupWindow.Active() &&
+            m_StartupScene.Initialize(AppPaths::GetResourcesDirectory()/"Startup",desktop,sceneWidth,sceneHeight)) {
+            m_StartupReveal.Enable();
+            m_StartupSceneClockPending = true;
+            m_StartupRevealVisual = m_StartupReveal.Update(0,ImVec2(float(sceneWidth),float(sceneHeight)));
+            AppWindowTitleBarBridge::UpdateTheme(m_Window,ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                ImVec4(),ImVec4(),0.f);
+            const auto palette=m_Appearance->GetRuntimeSurfacePalette();
+            NativeWindowTheme::SetMainWindowBorderVisible(m_Window,palette.border,false);
+            m_StartupRevealBorderVisible=false;
+            TraceMainWindowState("startup-lantern-enabled");
         } else {
-            detail = AppWindowTitleBarBridge::GetMetrics().fallbackReason.empty()
-                ? "AppWindow titlebar bridge inactive"
-                : AppWindowTitleBarBridge::GetMetrics().fallbackReason;
+            m_StartupWindow.Finish();
+            m_StartupReveal.Disable();
+            TraceMainWindowState("startup-lantern-unavailable");
         }
-        TraceMainWindowState("startup-reveal-disabled", detail.c_str());
-    }
+    } else m_StartupReveal.Disable();
     FileDialogs::SetOwnerWindow(m_Window, [this]() {
         ReleaseLockedScrubCursor(false);
     });
@@ -1588,26 +1586,18 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     }
 
     if (m_StartupReveal.IsEnabled()) {
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        int w=0,h=0;glfwGetFramebufferSize(m_Window,&w,&h);
+        m_StartupScene.PrimeWindow(w,h);
         glfwSwapBuffers(m_Window);
-        TraceMainWindowState("startup-reveal-transparent-frame-primed");
-        m_StartupRevealWindowOpacityHidden =
-            NativeWindowTheme::HideMainWindowUntilFirstFrame(
-                m_Window,
-                m_StartupRevealOriginalExtendedStyle);
-        if (m_StartupRevealWindowOpacityHidden) {
-            TraceMainWindowState("startup-reveal-window-hidden-until-first-frame");
-        } else {
-            TraceMainWindowState("startup-reveal-window-hide-unavailable");
-        }
+        TraceMainWindowState("startup-backdrop-frame-primed");
     }
 
     TraceMainWindowState("main-show-maximized-requested");
-    if (!m_UiPerformanceCapture || m_UiPerformanceCapture->visible) ShowMainWindowMaximized(m_Window);
+    if (m_StartupReveal.IsEnabled()) m_StartupWindow.Show();
+    else if (!m_UiPerformanceCapture || m_UiPerformanceCapture->visible) ShowMainWindowMaximized(m_Window);
     TraceMainWindowState("main-shown");
     m_MainWindowShownTime = glfwGetTime();
-    m_StartupReveal.Start(m_MainWindowShownTime);
+    // The cinematic clock begins after its first submitted frame is visible.
     m_StartupRevealVisual = m_StartupReveal.Update(
         m_MainWindowShownTime,
         ImVec2(static_cast<float>(width), static_cast<float>(height)));
@@ -1845,6 +1835,10 @@ void AppShell::Run() {
             RequestMainWindowClose("glfw-close-flag");
         }
 
+        if (!m_CloseRequested && m_StartupReveal.IsActive() && glfwGetWindowAttrib(m_Window,GLFW_ICONIFIED)) {
+            glfwWaitEventsTimeout(.05);
+            continue;
+        }
         const auto backendStarted = m_UiPerformanceCapture
             ? std::chrono::steady_clock::now() : frameStarted;
         ImGui_ImplOpenGL3_NewFrame();
@@ -1859,6 +1853,33 @@ void AppShell::Run() {
             std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-captureInputStarted).count();
         ImGui::NewFrame();
         ImGuiExtras::BeginFrameInputRouting();
+        if (m_StartupReveal.IsActive()) {
+            const bool skip = ImGui::IsKeyPressed(ImGuiKey_Escape,false) ||
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+            if (skip) m_StartupReveal.RequestSkip();
+            const bool released=!ImGui::IsAnyMouseDown() && !ImGui::IsKeyDown(ImGuiKey_Escape) &&
+                !ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+                !ImGui::IsKeyReleased(ImGuiKey_Escape);
+            if (m_StartupWindow.DisplayChanged() || m_CloseRequested) {
+                m_StartupReveal.Disable();
+                m_StartupWindow.Finish();
+            }
+            m_StartupRevealVisual=m_StartupReveal.Update(ImGui::GetTime(),ImGui::GetIO().DisplaySize,
+                true,Stack::Notifications::SystemReducedMotion(),released);
+            if (m_StartupRevealVisual.phase==Stack::StartupReveal::Phase::RevealInterface)
+                m_StartupWindow.Finish();
+            if (m_StartupRevealVisual.IsActive()) {
+                // No underlying command sees the skip press or its release.
+                ImGui::SetKeyOwner(ImGuiKey_Escape,ImGui::GetID("StartupScene"));
+                ImGui::SetKeyOwner(ImGuiKey_MouseLeft,ImGui::GetID("StartupScene"));
+                ImGui::SetKeyOwner(ImGuiKey_MouseRight,ImGui::GetID("StartupScene"));
+                const auto size=ImGui::GetIO().DisplaySize;
+                if (m_StartupRevealVisual.interfaceOpacity < 1.f)
+                    m_StartupScene.Render(m_StartupRevealVisual.sceneSeconds,m_StartupRevealVisual.interfaceOpacity,
+                        size.x/std::max(1.f,size.y),m_StartupRevealVisual.backdropAmount);
+                else m_StartupScene.Shutdown();
+            } else m_StartupScene.Shutdown();
+        }
         const auto& input=ImGui::GetIO();
         // Focus alone (for example an idle text field) must not indefinitely
         // suppress background work. Track actual presses, text and repeats.
@@ -1936,7 +1957,7 @@ void AppShell::Run() {
                 Stack::Workspace::PresentationScope presentation(preview);
                 const bool reservedAlt = IsRawWorkspaceRootTab(m_CurrentTabId) && ImGui::GetIO().KeyAlt &&
                     !(ImGui::GetIO().KeyCtrl && ImGui::IsKeyDown(ImGuiKey_RightAlt));
-                const bool savingTransition = m_MainWindowCloseSavePending ||
+                const bool savingTransition = !m_StartupRevealVisual.AllowsInput() || m_MainWindowCloseSavePending ||
                     m_FileActionSavePending || m_ProjectLoadSavePending || m_RawWorkspaceSwitchSavePending ||
                     !m_ContinueMainWindowCloseSource.empty();
                 Stack::Workspace::InputScope input(preview || savingTransition || m_WorkspaceDiscardMouse || reservedAlt || m_NotificationPresenter.BlocksInput(), m_WorkspaceFinishing && !m_NotificationPresenter.BlocksInput());
@@ -1993,6 +2014,9 @@ void AppShell::Run() {
             m_GalleryNavigationMotion->DrawOverlay(*overlay);
             m_WorkspaceCompositor.KeepFixed(overlay);
         }
+        if(m_StartupRevealVisual.IsActive())
+            Stack::Startup::MorphInterface(m_StartupRevealVisual.interfaceOpacity,
+                Stack::Notifications::SystemReducedMotion());
         ImGui::Render();
         if (!m_CloseRequested) {
             for (const auto& workspace : m_ProjectWorkspaces) ProcessGraphCaptureRequest(workspace->editor.get());
@@ -2121,6 +2145,10 @@ void AppShell::Run() {
                 m_StartupRevealOriginalExtendedStyle);
             m_StartupRevealWindowOpacityHidden = false;
             TraceMainWindowState("startup-reveal-first-frame-visible");
+        }
+        if (m_StartupSceneClockPending) {
+            m_StartupReveal.Start(ImGui::GetTime());
+            m_StartupSceneClockPending=false;
         }
         const double swapMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - swapStarted).count();
@@ -2624,15 +2652,11 @@ void AppShell::RenderUI() {
     }
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const double startupNow = ImGui::GetTime();
     const StackAppearance::RuntimeSurfacePalette surfacePalette =
         m_Appearance ? m_Appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
     const auto headerPalette = Stack::Header::ResolvePalette(
         m_Appearance ? m_Appearance->GetClearColor() : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg),
         !m_Window || glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE);
-    m_StartupRevealVisual = m_StartupReveal.Update(
-        startupNow,
-        viewport ? viewport->Size : ImVec2(1280.0f, 800.0f));
     AppWindowTitleBarBridge::UpdateTheme(
         m_Window,
         ImGui::GetStyleColorVec4(ImGuiCol_Text),
@@ -3029,17 +3053,16 @@ void AppShell::RenderUI() {
     if (m_Editor->GetRawActiveControlBounds(toolMin, toolMax))
         m_WorkspaceCompositor.SetToolBlurBounds(toolMin, toolMax);
 
-    const float startupInterfaceVeil = std::clamp(
-        1.0f - m_StartupRevealVisual.interfaceOpacity,
-        0.0f,
-        1.0f);
-    if (startupInterfaceVeil > 0.001f) {
-        ImVec4 overlayColor = m_Appearance ? m_Appearance->GetClearColor() : ImVec4(0.06f, 0.07f, 0.08f, 1.0f);
-        overlayColor.w = startupInterfaceVeil;
-        ImGui::GetForegroundDrawList(viewport)->AddRectFilled(
-            viewport->Pos,
-            ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y),
-            ImGui::ColorConvertFloat4ToU32(overlayColor));
+    if (m_StartupRevealVisual.IsActive() && m_StartupScene.Ready()) {
+        auto* overlay=ImGui::GetForegroundDrawList(viewport);
+        const float inset=Stack::Notifications::SystemReducedMotion()?0.f:
+            m_StartupRevealVisual.interfaceOpacity*.025f;
+        overlay->AddImage(
+            (ImTextureID)(intptr_t)m_StartupScene.Texture(),viewport->Pos,
+            ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y),
+            ImVec2(inset,1-inset),ImVec2(1-inset,inset),
+            ImGui::GetColorU32(ImVec4(1,1,1,1-m_StartupRevealVisual.interfaceOpacity)));
+        m_WorkspaceCompositor.KeepFixed(overlay);
     }
 
     if (m_StartupRevealVisual.IsActive() && !m_StartupRevealVisual.AllowsInput()) {
@@ -3124,12 +3147,10 @@ void AppShell::RenderStartupReveal(
         return;
     }
 
-    Stack::StartupReveal::Render(
-        visual,
-        viewport->Pos,
-        viewport->Size,
-        surfaceColor,
-        ImGui::GetForegroundDrawList(viewport));
+    if (m_StartupScene.Ready())
+        ImGui::GetForegroundDrawList(viewport)->AddImage(
+            (ImTextureID)(intptr_t)m_StartupScene.Texture(),viewport->Pos,
+            ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y),ImVec2(0,1),ImVec2(1,0));
 
     ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
@@ -3531,6 +3552,8 @@ void AppShell::Shutdown() {
     m_UiInteraction.Clear();
     if (!m_Window) return;
 
+    glfwHideWindow(m_Window); // Hide before native chrome/context teardown can expose a legacy frame.
+    m_StartupScene.Shutdown();
     m_GalleryNavigationMotion->Shutdown();
     m_GalleryTabOpenQueue.clear();m_PendingGalleryTabOpen.reset();m_BackgroundGalleryTabOpens.clear();
     TraceShutdownPhase("shutdown-begin");

@@ -6,9 +6,9 @@ Keep the root for the CMake entry point, command launchers, Git configuration an
 | --- | --- |
 | `src/` | Application code, shaders and third-party source dependencies |
 | `src/Assets/` | Created project asset records, immutable float data and value serialization. RAW capture math lives under `src/Raw/`; managed storage adapters live under `src/Persistence/`. |
-| `Assets/` | Source fonts, icons and splash images |
+| `Assets/` | Source fonts, icons, splash images and packaged startup-scene assets |
 | `cmake/` | Source lists, version information and focused build targets |
-| `tools/assets/` | Scripts that bake source assets into embedded headers |
+| `tools/assets/` | Scripts that bake embedded headers or prepare packaged assets |
 | `tools/build/` | Build scripts |
 | `tools/dev/` | Build menu, environment helpers and development maintenance |
 | `tools/release/` | Packaging, compliance and runtime staging scripts |

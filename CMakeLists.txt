@@ -395,6 +395,9 @@ if (WIN32)
 endif()
 
 add_custom_target(StackRuntimePayload
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Startup"
+        "${STACK_DEPLOY_DIR}/Stack/App/Resources/Startup"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
     COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -848,6 +851,7 @@ if (BUILD_TESTING)
     target_link_libraries(StackStartupRevealTests PRIVATE imgui_core)
     add_test(NAME StackApp.StartupReveal COMMAND StackStartupRevealTests)
     set_tests_properties(StackApp.StartupReveal PROPERTIES LABELS "app;startup;cpu")
+    include(cmake/StackStartupSceneTests.cmake)
 
     add_test(NAME StackRaw.GradingScopes
         COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-raw-grading-scopes)

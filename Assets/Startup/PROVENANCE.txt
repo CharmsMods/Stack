@@ -1,0 +1,13 @@
+Wooden Lantern 01 - Poly Haven
+Source: https://polyhaven.com/a/wooden_lantern_01
+License: CC0 1.0 Universal - https://creativecommons.org/publicdomain/zero/1.0/
+Poly Haven asset license: https://polyhaven.com/license
+Retrieved 2026-11-12. Poly Haven permits commercial use, modification and redistribution.
+
+lantern.mesh: converted from the published 1K glTF and its 268136-byte buffer.
+8321 triangles; translation-only node transforms baked; handle retained as a separate part.
+lantern.jpg: original 1K diffuse JPG, 1024-pixel maximum dimension.
+Offline converter: tools/assets/prepare_startup_lantern.py
+Runtime format: STKLANT1 (8 bytes), uint32 vertex count, 10 little-endian floats per vertex
+(position xyz, normal xyz, UV, handle part, glass material).
+No source glTF loader or download is used at runtime.
