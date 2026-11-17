@@ -12,6 +12,8 @@ check real worker/service retirement while a separate thread probes both locks,
 including owner isolation, exactly-once tiled cleanup, failure and context order.
 A single queue-push failure exercises the existing allocation-free fallback; this
 is not a process-wide OOM proof. No private-state hook is added to production.
+Ready denoise retirement probes the real lock boundary, and two coordinated CPU
+callbacks check that cancellation stays latched without touching the GL context.
 """
 import argparse
 from pathlib import Path
@@ -39,6 +41,7 @@ def method(source, signature):
 pre = r'''
 #include "Editor/RawRenderPurpose.h"
 #include "Editor/GraphRenderPolicy.h"
+#include "Hdr/ImageFile.h"
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -69,6 +72,7 @@ struct GLFWwindow {};
 using GLsync = void*;
 int deletedTextures=0, deletedFences=0, destroyedWindows=0, drainedModels=0;
 std::function<void()> onResourceDelete;
+std::function<void()> onDenoiseDrain;
 std::unordered_map<unsigned,int> textureDeletes;
 std::unordered_map<GLsync,int> fenceDeletes;
 GLFWwindow* currentContext=nullptr;
@@ -86,9 +90,16 @@ struct FakeDenoise {
     std::future<int> future;
     bool IsCompletionReady() const { return pending && future.valid() && future.wait_for(std::chrono::milliseconds(0))==std::future_status::ready; }
     void RequestCancellation() { canceled=true;deferred=false; }
-    void CancelAndWait() { ++drainedModels;pending=false; }
+    void CancelAndWait() { if(onDenoiseDrain) onDenoiseDrain();++drainedModels;pending=false; }
 };
-struct RenderPipeline {};
+using RawRgbDenoiseState=FakeDenoise;
+struct RenderPipeline {
+    std::function<bool()> cancellation,quadCancellation;
+    void SetRenderCancellationContext(std::uint64_t,std::function<bool()> callback) {
+        cancellation=std::move(callback);quadCancellation=cancellation;
+    }
+};
+namespace Stack::Renderer { struct ViewportSectionStore {}; }
 struct ViewportRequest { bool enabled=false,empty=false; std::uint64_t generation=0; };
 struct ViewportTilingSettings {};
 struct PreviewRequest { std::optional<int> assetCapture; bool assetCaptureInput=false; std::string rawLayerId,rawMaskId; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
@@ -130,6 +141,7 @@ public:
         RawRenderTelemetry telemetry; int previewMaxDimension=0;
         RawWorkspaceSnapshot rawWorkspace; ViewportRequest viewportPreview;
         int viewportViewId=0; std::size_t viewportExecutionIdentity=0,viewportContentIdentity=0;
+        std::shared_ptr<Stack::Renderer::ViewportSectionStore> viewportSections;int viewportSection=-1;
         bool prepareViewportOverview=false,outputConnected=false; int graph=0; ViewportTilingSettings viewportTiling;
         std::vector<PreviewRequest> previews;
         std::shared_ptr<const Snapshot> rawSessionTemplate;
@@ -142,10 +154,12 @@ public:
         RawRenderTelemetry telemetry; int previewMaxDimension=0;
         WorkspaceResult rawWorkspace; ViewportRequest viewportPreview;
         int viewportViewId=0; std::size_t viewportExecutionIdentity=0,viewportContentIdentity=0;
+        std::shared_ptr<Stack::Renderer::ViewportSectionStore> viewportSections;int viewportSection=-1;
         struct Calibration { double renderMs=0; } calibration;
         std::array<std::size_t,1> workloadKeys{};std::string timingRepresentation;
         bool denoisePending=false,timingOnly=false,success=false,workerFailed=false; std::string error; std::vector<unsigned char> pixels; int width=0,height=0;
         SharedTextureResult outputTexture,viewportOverview; Tiles outputTiles;
+        Stack::Hdr::Image hdrExportImage;
         std::vector<PreviewResult> previews;
     };
     struct RenderProgress { bool busy=false; int completedSteps=0,totalSteps=0; std::string label; };
@@ -192,7 +206,7 @@ public:
     bool TryConsumeReadyDenoiseSnapshot(Snapshot&);RenderProgress GetProgress() const;
     bool TakeDedicatedContinuationForTest(Snapshot&);
     bool CanStartAuthoritativeRenderLocked(std::uint64_t) const;
-    void PollDenoiseContinuationsLocked();
+    void PollDenoiseContinuations();
     Result RenderAuxiliaryForTest(const Snapshot&);
     int mainRenderCalls=0,previewRenderCalls=0;
     void DrainDenoiseForShutdown() noexcept;void RequestStopForShutdown();void Shutdown();
@@ -210,7 +224,7 @@ namespace Stack::EditorRendering { std::size_t BuildRawPresentationFingerprint(i
 '''
 retirement = (root / 'src/Editor/Internal/EditorRenderResultRetirement.h').read_text()
 retirement = '\n'.join(line for line in retirement.splitlines() if not line.startswith('#include') and line != '#pragma once')
-methods = retirement + '\nusing Stack::EditorRendering::Internal::RenderResultRetirement;\nusing Stack::EditorRendering::Internal::RenderResultResourceGuard;\n'
+methods = method(worker, 'class RenderCancellationScope') + ';\n' + retirement + '\nusing Stack::EditorRendering::Internal::RenderResultRetirement;\nusing Stack::EditorRendering::Internal::RenderResultResourceGuard;\n'
 for signature in [
     'void EditorRenderWorker::HandleThreadFailure(',
     'void EditorRenderWorker::RequestStopForShutdown()',
@@ -230,7 +244,7 @@ for signature in [
     'void EditorRenderWorker::CancelOwnerSnapshots(',
     'void EditorRenderWorker::InvalidateOwnerSnapshotsBefore(',
     'void EditorRenderWorker::ReleaseOwner(',
-    'void EditorRenderWorker::PollDenoiseContinuationsLocked()',
+    'void EditorRenderWorker::PollDenoiseContinuations()',
     'bool EditorRenderWorker::CanStartAuthoritativeRenderLocked(',
     'bool EditorRenderWorker::IsOwnerSnapshotInvalidLocked(',
     'bool EditorRenderWorker::IsOwnerResultStaleLocked(',
@@ -314,6 +328,43 @@ bool MutexAvailable(std::mutex& mutex) {
     std::thread contender([&] { acquired=mutex.try_lock();if(acquired) mutex.unlock(); });
     contender.join();
     return acquired;
+}
+void DenoiseRetirementLockBoundary() {
+    EditorRenderWorker worker;
+    auto ready=std::make_shared<FakeDenoise>();ready->pending=true;
+    std::promise<int> finished;ready->future=finished.get_future();finished.set_value(1);
+    worker.m_DrainingDenoise.push_back({1,ready});
+    auto pending=std::make_shared<FakeDenoise>();pending->pending=true;
+    std::promise<int> finishLater;pending->future=finishLater.get_future();
+    auto& owner=worker.m_OwnerStates[2];owner.denoise=pending;owner.resetDenoiseRequested=true;
+    auto unused=std::make_shared<FakeDenoise>();
+    worker.m_OwnerStates[3].denoise=unused;worker.m_OwnerStates[3].resetDenoiseRequested=true;
+    bool unlocked=true;int drains=0;
+    onDenoiseDrain=[&] { ++drains;unlocked &= MutexAvailable(worker.m_Mutex); };
+    worker.PollDenoiseContinuations();
+    Require(drains==2 && unlocked && !ready->pending && pending->pending && pending->canceled,
+        "ready and unused inference states drain after unlock; unfinished other-owner work stays pending");
+    Require(worker.m_DrainingDenoise.size()==1 && worker.HasPendingForOwner(2),
+        "canceled inference stays owned and busy until its real future completes");
+    finishLater.set_value(1);worker.PollDenoiseContinuations();
+    Require(drains==3 && unlocked && !pending->pending && worker.m_DrainingDenoise.empty(),
+        "newly ready inference drains exactly once outside the scheduling mutex");
+    worker.PollDenoiseContinuations();Require(drains==3,"retired inference is not drained again");
+    onDenoiseDrain={};
+}
+void CancellationScopeLifetime() {
+    RenderPipeline pipeline;
+    const auto execute=[&](bool fail) {
+        bool alive=true;
+        RenderCancellationScope cancellation(pipeline);
+        pipeline.SetRenderCancellationContext(5,[&]{return alive;});
+        Require(pipeline.cancellation() && pipeline.quadCancellation(),"request callback reaches pipeline and quad");
+        if(fail) throw std::runtime_error("end request");
+    };
+    execute(false);
+    Require(!pipeline.cancellation && !pipeline.quadCancellation,"normal return clears callbacks before locals expire");
+    try {execute(true);} catch(const std::runtime_error&) {}
+    Require(!pipeline.cancellation && !pipeline.quadCancellation,"exception return clears callbacks before locals expire");
 }
 Result ResourcePacket(const Snapshot& request,unsigned base) {
     auto result=EditorRenderWorker::MakeFailedResult(request,"completed");
@@ -506,11 +557,11 @@ void ContinuationPurposeOwnership() {
         const auto take=[&](Snapshot& next){return dedicated?worker.TakeDedicatedContinuationForTest(next):worker.TryConsumeReadyDenoiseSnapshot(next);};
         Snapshot next;
         for(int tick=0;tick<4;++tick) {
-            worker.PollDenoiseContinuationsLocked();
+            worker.PollDenoiseContinuations();
             Require(!owner.continuationReady && !owner.resumeOriginalPurpose && !take(next),"pending auxiliary model must not hot-replay or bypass its future");
         }
         Require(worker.HasPendingForOwner(request.ownerId) && worker.IsWaitingForRawDenoiseCompletion(),"parked auxiliary continuation remains visible as busy work");
-        promise.set_value(1);worker.PollDenoiseContinuationsLocked();
+        promise.set_value(1);worker.PollDenoiseContinuations();
         Require(take(next) && !take(next),"ready continuation dequeues exactly once");
         const auto expected=RawRenderPurposeMayPublishPresentation(purpose)?RawRenderPurpose::DenoiseCompletion:purpose;
         Require(next.rawRenderPurpose==expected && owner.denoisePurpose==expected && !owner.resumeOriginalPurpose,"effective continuation purpose preserves the original consumer");
@@ -526,7 +577,7 @@ void ContinuationPurposeOwnership() {
     for(bool dedicated:{false,true}) for(auto purpose:{RawRenderPurpose::ExplicitExport,RawRenderPurpose::ExplicitInspection}) {
         EditorRenderWorker worker;auto request=Request(dedicated?0:7,78,purpose);
         auto& owner=worker.m_OwnerStates[request.ownerId];owner.continuation=request;owner.resumeOriginalPurpose=true;
-        worker.PollDenoiseContinuationsLocked();Snapshot next;
+        worker.PollDenoiseContinuations();Snapshot next;
         Require((dedicated?worker.TakeDedicatedContinuationForTest(next):worker.TryConsumeReadyDenoiseSnapshot(next)) && next.rawRenderPurpose==purpose,"authoritative deferred resume retains original purpose");
     }
     for(int invalid=0;invalid<3;++invalid) {
@@ -537,7 +588,7 @@ void ContinuationPurposeOwnership() {
         if(invalid==0)worker.CancelOwnerSnapshots(9,RawRenderPurpose::Thumbnail);
         if(invalid==1)worker.InvalidateOwnerSnapshotsBefore(9,request.generation+1);
         if(invalid==2)worker.ReleaseOwner(9);
-        promise.set_value(1);worker.PollDenoiseContinuationsLocked();Snapshot next;
+        promise.set_value(1);worker.PollDenoiseContinuations();Snapshot next;
         Require(!worker.TryConsumeReadyDenoiseSnapshot(next) && !worker.HasDenoiseWorkLocked(),"canceled, newer-generation or released auxiliary ownership cannot revive after readiness");
     }
     for(auto purpose:{RawRenderPurpose::Thumbnail,RawRenderPurpose::AnalysisScopes,
@@ -572,6 +623,12 @@ struct DeferredLoadedProjectApplyState { enum class Step { WaitForFirstRender };
 class EditorModule {
 public:
     bool m_RenderPending=true,m_RawWorkspaceExportRenderRequested=true,m_RenderDirty=false;
+    bool m_DeferredGraphWorkers=false;
+    struct ProjectStub { struct Graph { bool IsOutputConnected() const { return true; } } graph; } projectStub;
+    ProjectStub* m_Project=&projectStub;
+    struct FullQualityRequest { bool Pending() const { return false; } } m_FullQualityRenderRequest;
+    void FailFullQualityRenderRequest(const char*) {}
+    Stack::Hdr::FileFormat m_RequestedExportFormat=Stack::Hdr::FileFormat::SdrPng;
     struct Capture { bool pending=false,armed=false,drawing=false,feedbackNeeded=false,feedbackDirty=false;std::optional<int> target=7,application;std::uint64_t serial=0;std::shared_ptr<int> feedback;std::string status; } m_RawAssetCapture;
     Capture QueryRawOperationMaskAvailability() { return {}; }
     bool RawAssetCaptureInputMatches() { return true; }
@@ -706,10 +763,36 @@ void AdoptionTerminalState() {
     EditorModule editor;editor.m_RawWorkspaceExportRenderGeneration=151;editor.CompleteRawWorkspaceExportRender(failure,true);Require(!editor.m_RawWorkspaceExportRenderRequested && editor.m_RawWorkspaceExportRenderGeneration==0 && editor.m_ExportStatusText=="worker stopped","export failure releases expected request and preserves reason");
 }
 '''
+cancellation_start = worker.index('        std::atomic<bool> renderCancelled { false };')
+cancellation_end = worker.index('        auto collectToneCurveAutoRewriteFeedback', cancellation_start)
+cancellation = worker[cancellation_start:cancellation_end]
+cancellation_test = r'''
+void ConcurrentCancellationStaysLatched() {
+    Snapshot snapshot;snapshot.viewportPreview.enabled=true;snapshot.rawRenderPurpose=RawRenderPurpose::ViewportRefinement;
+    std::atomic<int> checks{0},gpuWaits{0};
+    std::promise<void> firstEntered,releaseFirst;
+    auto entered=firstEntered.get_future(),release=releaseFirst.get_future();
+    const auto ShouldAbortStaleSnapshot=[&](const Snapshot&) {
+        if(checks.fetch_add(1)==0) {firstEntered.set_value();release.wait();return false;}
+        return true;
+    };
+    const auto WaitForSubmittedGpuWork=[&] {++gpuWaits;return true;};
+''' + cancellation + r'''
+    bool firstResult=false,secondResult=false;
+    std::thread first([&]{firstResult=shouldAbortStaleWork();});
+    entered.wait();
+    std::thread second([&]{secondResult=shouldAbortStaleWork();});second.join();
+    releaseFirst.set_value();first.join();
+    Require(firstResult && secondResult && shouldAbortStaleWork(),
+        "a delayed false callback cannot undo another CPU helper's cancellation");
+    Require(checks==2 && gpuWaits==0,
+        "latched cancellation stops polling and CPU helpers never call the GL worker wait");
+}
+'''
 main = r'''
 int main() {
-    try { WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
+    try { DenoiseRetirementLockBoundary();CancellationScopeLifetime();ConcurrentCancellationStaysLatched();WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''
-args.output.write_text(pre + header + '\n' + methods + service + '\n' + tests + consumer + main)
+args.output.write_text(pre + header + '\n' + methods + service + '\n' + tests + consumer + cancellation_test + main)

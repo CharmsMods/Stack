@@ -123,47 +123,55 @@ void EditorRenderWorker::BindDenoiseState(const Snapshot& snapshot, RenderPipeli
     pipeline.SetRawRgbDenoiseState(std::move(state), allowStart);
 }
 
-void EditorRenderWorker::PollDenoiseContinuationsLocked() {
-    for (auto it = m_OwnerStates.begin(); it != m_OwnerStates.end();) {
-        auto& owner = it->second;
-        if (owner.resetDenoiseRequested) {
-            if (owner.denoise && owner.denoise->pending) {
-                owner.denoise->RequestCancellation();
-                m_DrainingDenoise.push_back({it->first, std::move(owner.denoise)});
-            } else {
-                owner.denoise.reset();
+void EditorRenderWorker::PollDenoiseContinuations() {
+    std::vector<std::shared_ptr<RawRgbDenoiseState>> retired;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        for (auto it = m_OwnerStates.begin(); it != m_OwnerStates.end();) {
+            auto& owner = it->second;
+            if (owner.resetDenoiseRequested) {
+                if (owner.denoise && owner.denoise->pending) {
+                    owner.denoise->RequestCancellation();
+                    m_DrainingDenoise.push_back({it->first, std::move(owner.denoise)});
+                } else if (owner.denoise) {
+                    retired.push_back(std::move(owner.denoise));
+                }
+                owner.denoiseInFlight = false;
+                owner.resetDenoiseRequested = false;
             }
-            owner.denoiseInFlight = false;
-            owner.resetDenoiseRequested = false;
+            if (owner.released) it = m_OwnerStates.erase(it);
+            else ++it;
         }
-        if (owner.released) it = m_OwnerStates.erase(it);
-        else ++it;
-    }
-    for (auto it = m_DrainingDenoise.begin(); it != m_DrainingDenoise.end();) {
-        if (!it->state->pending || !it->state->future.valid() || it->state->IsCompletionReady()) {
-            it->state->CancelAndWait();
-            it = m_DrainingDenoise.erase(it);
-        } else ++it;
-    }
-    bool inferencePending = !m_DrainingDenoise.empty();
-    for (const auto& [id, owner] : m_OwnerStates) {
-        (void)id;
-        inferencePending |= owner.denoise && owner.denoise->pending;
-    }
-    for (auto& [id, owner] : m_OwnerStates) {
-        if (!owner.continuation) continue;
-        if (owner.resumeOriginalPurpose) {
-            const auto purpose = owner.continuation->rawRenderPurpose;
-            owner.continuationReady =
-                (purpose != RawRenderPurpose::ExplicitExport && purpose != RawRenderPurpose::ExplicitInspection) ||
-                CanStartAuthoritativeRenderLocked(id);
-            continue;
+        for (auto it = m_DrainingDenoise.begin(); it != m_DrainingDenoise.end();) {
+            if (!it->state->pending || !it->state->future.valid() || it->state->IsCompletionReady()) {
+                retired.push_back(std::move(it->state));
+                it = m_DrainingDenoise.erase(it);
+            } else ++it;
         }
-        if (!owner.denoise) continue;
-        owner.continuationReady = owner.denoise->pending
-            ? !owner.denoise->future.valid() || owner.denoise->IsCompletionReady()
-            : owner.denoise->deferred && !inferencePending;
+        bool inferencePending = !m_DrainingDenoise.empty();
+        for (const auto& [id, owner] : m_OwnerStates) {
+            (void)id;
+            inferencePending |= owner.denoise && owner.denoise->pending;
+        }
+        for (auto& [id, owner] : m_OwnerStates) {
+            if (!owner.continuation) continue;
+            if (owner.resumeOriginalPurpose) {
+                const auto purpose = owner.continuation->rawRenderPurpose;
+                owner.continuationReady =
+                    (purpose != RawRenderPurpose::ExplicitExport && purpose != RawRenderPurpose::ExplicitInspection) ||
+                    CanStartAuthoritativeRenderLocked(id);
+                continue;
+            }
+            if (!owner.denoise) continue;
+            owner.continuationReady = owner.denoise->pending
+                ? !owner.denoise->future.valid() || owner.denoise->IsCompletionReady()
+                : owner.denoise->deferred && !inferencePending;
+        }
     }
+    // future.get() destroys the returned native/model image payload, even when
+    // readiness made the wait itself instantaneous. Keep both that cleanup and
+    // the state destructor outside the mutex shared with UI scheduling.
+    for (auto& state : retired) state->CancelAndWait();
 }
 
 bool EditorRenderWorker::CanStartAuthoritativeRenderLocked(std::uint64_t ownerId) const {

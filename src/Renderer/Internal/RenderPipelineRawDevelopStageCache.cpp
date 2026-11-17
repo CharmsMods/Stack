@@ -236,7 +236,8 @@ void RenderPipeline::TrimRawDevelopStageCacheVector(std::vector<RenderPipeline::
 std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
     std::uint64_t currentTotalBytes,
     std::uint64_t maximumBytes,
-    unsigned int protectedTexture) {
+    unsigned int protectedTexture,
+    bool honorReusePreferences) {
     while (currentTotalBytes > maximumBytes) {
         const std::string* victimKey = nullptr;
         std::uint64_t victimBytes = 0;
@@ -246,11 +247,11 @@ std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
             if (entries.empty()) {
                 continue;
             }
-            if (m_RawDevelopmentGlobalExposureInteraction &&
+            if (honorReusePreferences && m_RawDevelopmentGlobalExposureInteraction &&
                 IsTransientExposureProtectedCacheKey(cacheKey)) {
                 continue;
             }
-            if (m_RawDevelopmentPreferredCacheInputStage.has_value() &&
+            if (honorReusePreferences && m_RawDevelopmentPreferredCacheInputStage.has_value() &&
                 entries.size() == 1u &&
                 RawDevelopStageCacheEntryBytes(entries.front()) <= m_RawDevelopStageCacheBudgetBytes &&
                 CacheKeyMatchesStage(
@@ -263,7 +264,10 @@ std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
             }
             for (std::size_t index = entries.size(); index-- > 0;) {
                 const CachedGraphTexture& candidate = entries[index];
-                if (candidate.texture == protectedTexture || candidate.viewportNativeDependency) continue;
+                // Reuse preferences may yield when a new request lowers the
+                // budget, but active output/explicit dependency borrows cannot.
+                if (candidate.texture == protectedTexture || candidate.viewportNativeDependency ||
+                    candidate.texture == m_OutputTexture || candidate.texture == m_GraphSourceTexture) continue;
                 const std::uint64_t bytes = RawDevelopStageCacheEntryBytes(candidate);
                 const int priority = RawDevelopStageCacheEvictionPriority(cacheKey, index > 0 ? 2u : 1u);
                 if (priority > victimPriority ||

@@ -198,6 +198,10 @@ void EditorModule::UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     ++state.request.generation;
     state.physicalWidth = physicalWidth; state.physicalHeight = physicalHeight;
     UpdateOverviewCoverage(state);
+    if (state.refinementMemoryDeferred) {
+        state.refinementBlocked = false;
+        state.refinementMemoryDeferred = false;
+    }
     if (!previousRegion.Valid() || region.fullWidth != previousRegion.fullWidth ||
         region.fullHeight != previousRegion.fullHeight ||
         (((region.width < previousRegion.width && region.height <= previousRegion.height) ||
@@ -306,6 +310,7 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
         if (state.request.visible.Valid()) ++request.generation;
         state.request = request;
         state.refinement = false; state.refinementBlocked = false;
+        state.refinementMemoryDeferred = false;
         state.refinementGeneration = 0; state.refinementFailures = 0;
         state.refinementRetryAt = -1; state.refinementError.clear();
     }
@@ -318,6 +323,7 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
         state.qualityModel.valid = false;
         ++state.qualityModel.revision;
         state.refinement = false; state.refinementBlocked = false;
+        state.refinementMemoryDeferred = false;
         state.refinementGeneration = 0; state.refinementFailures = 0;
         state.refinementRetryAt = -1; state.refinementError.clear();
     }
@@ -327,14 +333,18 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     const auto visible = request.visible;
     request.visible = PadViewportPreviewRegion(visible);
     if (!state.sections) {
-        state.sections = std::shared_ptr<Stack::Renderer::ViewportSectionStore>(
+        auto sections = std::shared_ptr<Stack::Renderer::ViewportSectionStore>(
             new Stack::Renderer::ViewportSectionStore(nativePlan.logicalWidth,nativePlan.logicalHeight),
             [](Stack::Renderer::ViewportSectionStore* retired) {
                 try { if(Async::TaskSystem::Get().Submit("Retiring native image cache",[retired] {delete retired;}))return; }
                 catch (...) {}
                 delete retired; // Task service is already stopping.
             });
-        state.sectionTextures.resize(state.sections->Count());
+        // Publish coverage and its GPU slots together. An allocation failure
+        // must leave no store whose Count() exceeds the corresponding vector.
+        std::vector<Stack::EditorRendering::ViewportPreviewState::Section> textures(sections->Count());
+        state.sections = std::move(sections);
+        state.sectionTextures = std::move(textures);
     }
     if (state.refinement && state.nextSection >= 0)
         request.visible = state.sections->Raster(state.nextSection);
@@ -385,8 +395,13 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     for (const auto& section : state.sectionTextures)
         for (const auto* texture : {&section.native,&section.preview})
             retained += std::uint64_t(texture->width)*texture->height*(texture->hdr ? 32u : 16u);
-    const std::uint64_t budget = m_RawWorkspaceVramWorkingBudgetBytes > retained ?
-        m_RawWorkspaceVramWorkingBudgetBytes-retained : 1u;
+    // Measured free headroom already excludes resident presentation textures.
+    // Only the unmeasured fallback is a total allowance to subtract them from.
+    // The candidate API reserves zero for caller-owned admission. Preserve a
+    // finite exhausted sentinel here so zero headroom never means unlimited.
+    const std::uint64_t budget = std::max<std::uint64_t>(1u,
+        m_RawWorkspaceGpuBudgetMeasured ? m_RawWorkspaceVramWorkingBudgetBytes :
+        (m_RawWorkspaceVramWorkingBudgetBytes > retained ? m_RawWorkspaceVramWorkingBudgetBytes-retained : 0u));
     std::vector<ViewportPreviewCandidate> candidates;
     for (int edge : edges) {
         auto plan = planner.Plan(width,height,edge == nativeEdge ? 0 : edge,request);
@@ -546,10 +561,15 @@ void EditorModule::UpdateViewportPreviewRefinement(double now) {
     if (state.refinementFailures >= 3 || now < state.refinementRetryAt) return;
     state.nextSection = NextViewportNativeSection(state);
     if (state.nextSection < 0) return;
-    if (state.refinementBlocked && !state.sections->Has(state.nextSection)) {
+    if (state.refinementBlocked) {
         RefreshRawWorkspaceGpuMemoryBudget();
-        if (m_RawWorkspaceVramWorkingBudgetBytes <= state.blockedBudget + 64u*1024u*1024u) return;
+        // Admission refusals are pending work, not failed GPU executions.
+        // Recheck at the normal budget cadence even if other owners released
+        // caches without making this UI-side headroom estimate larger.
+        if (!state.refinementMemoryDeferred &&
+            m_RawWorkspaceVramWorkingBudgetBytes <= state.blockedBudget + 64u*1024u*1024u) return;
         state.refinementBlocked = false;
+        state.refinementMemoryDeferred = false;
     }
     // One section per dispatch is the preemption boundary. Re-evaluate the
     // current camera between jobs, without invalidating authored image state.
@@ -600,10 +620,12 @@ bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
         state.acceptedContentIdentity == state.contentIdentity &&
         Stack::EditorRendering::IsCurrentGraphViewportAnalysis(state.acceptedTag, CurrentGraphRenderTag());
     const bool nativeReady = HasNativeViewportCoverage();
+    const bool storedNativeCoverage = currentPresentation && state.sectionBudgetLimited &&
+        state.sections && state.sections->Covers(state.request.visible);
     const Stack::EditorRendering::GraphViewportAnalysisDemand demand{
         m_RawWorkspaceAnalysisPending, m_RawWorkspaceAnalysisRequested,
-        currentPresentation, !state.acceptedInteractive && IsPresentedRenderComplete(),
-        nativeReady || state.refinementBlocked,
+        currentPresentation, (!state.acceptedInteractive || storedNativeCoverage) && IsPresentedRenderComplete(),
+        nativeReady || state.refinementBlocked || storedNativeCoverage,
         workOutstanding, false,
         (m_RawWorkspaceAnalysisQuietUntilTime <= 0 || now >= m_RawWorkspaceAnalysisQuietUntilTime) &&
             state.request.enabled && !state.request.empty &&
@@ -817,6 +839,14 @@ void EditorModule::FinishViewportPreviewRequest(const EditorRenderWorker::Result
     state.refinement = false;
     if (result.viewportPreview.generation != state.request.generation ||
         result.viewportContentIdentity != state.contentIdentity) return;
+    if (result.telemetry.skipReason == RawPreviewSkipReason::MemoryBudget) {
+        state.refinementBlocked = true;
+        state.refinementMemoryDeferred = true;
+        state.blockedBudget = m_RawWorkspaceVramWorkingBudgetBytes;
+        state.refinementRetryAt = ImGui::GetTime()+2.0;
+        state.refinementError = result.error;
+        return;
+    }
     if (result.viewportSections && result.denoisePending) { state.refinementRetryAt = ImGui::GetTime()+.25; return; }
     if (adopted && result.viewportPreviewGeometry.NativeSamples()) {
         state.refinementFailures = 0; state.refinementRetryAt = -1; state.refinementError.clear();

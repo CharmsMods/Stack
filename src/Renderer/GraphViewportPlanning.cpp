@@ -6,6 +6,7 @@
 #include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/SceneColorGuidePlanning.h"
 #include "Raw/RawGraphOperation.h"
+#include "Raw/Demosaic/DemosaicCatalog.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 
 #include <algorithm>
@@ -126,6 +127,54 @@ bool UsableSpatial(const SpatialDescriptor& spatial) {
 std::uint64_t SaturatingAdd(std::uint64_t a, std::uint64_t b) {
     return a > std::numeric_limits<std::uint64_t>::max() - b ? std::numeric_limits<std::uint64_t>::max() : a + b;
 }
+
+// Single-pass Bayer development samples native sensor coordinates into a
+// preview-sized RGBA32F output. Only its sensor/correction fields remain native.
+// Multipass demosaics and unproven legacy sources keep conservative full-size
+// accounting because they can materialize native color images internally.
+bool HasSampledRawOutput(const RenderGraphNode& node, int previewMaxDimension) {
+    using K = RenderGraphNodeKind;
+    if (previewMaxDimension <= 0 ||
+        (node.kind != K::RawDevelopment && node.kind != K::RawProjectSourceSet)) return false;
+    const auto& raw = node.rawDevelopment.embeddedRawData;
+    return raw && raw->metadata.rawWidth > 0 && raw->metadata.rawHeight > 0 &&
+        raw->metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer &&
+        !Raw::Demosaic::UsesMultipassGpu(node.rawDevelopment.recipe.technical.demosaicMethod);
+}
+
+std::uint64_t RawPreprocessMetadataBytes(const Raw::RawMetadata& metadata) {
+    // Match RawGpuPreprocessor's compact R32F atlas without building its upload
+    // arrays. Count unsupported gain maps too, conservatively. The preprocessor
+    // rejects more than 2^24 values before upload; supported GL contexts use
+    // 1024-wide rows. Include its separate 1x1 R32F variance sink.
+    constexpr std::uint64_t maximumValues = 1ull << 24;
+    constexpr std::uint64_t atlasWidth = 1024;
+    auto values = SaturatingAdd(metadata.dngLinearizationTable.size(), metadata.dngBlackLevelValues.size());
+    values = SaturatingAdd(values, metadata.dngBlackLevelDeltaH.size());
+    values = SaturatingAdd(values, metadata.dngBlackLevelDeltaV.size());
+    values = SaturatingAdd(values, metadata.dngWhiteLevelValues.size());
+    for (const auto& map : metadata.dngGainMaps)
+        values = SaturatingAdd(values, SaturatingAdd(16, map.gains.size()));
+    values = std::clamp<std::uint64_t>(values, 1, maximumValues);
+    return ((values + atlasWidth - 1) / atlasWidth) * atlasWidth * sizeof(float) + sizeof(float);
+}
+
+std::uint64_t RawPreviewSourceBytes(const RenderGraphNode& node) {
+    const auto& raw = *node.rawDevelopment.embeddedRawData;
+    const auto pixels = std::uint64_t(raw.metadata.rawWidth) * raw.metadata.rawHeight;
+    const bool normalized = raw.normalizedMosaicBuffer && raw.normalizedMosaicBuffer->size() >= pixels;
+    const auto& denoise = node.rawDevelopment.recipe.technical.mosaicDenoise;
+    // Ordinary source: R16UI upload + R32F correction. Normalized bracket
+    // source: R32F samples + optional R32F measurement variance (reserved).
+    const std::uint64_t bytesPerPixel = normalized ? 8u :
+        (denoise.enabled && denoise.mode == Raw::RawMosaicDenoiseMode::DngNoiseProfile &&
+         raw.metadata.hasDngNoiseProfile ? 10u : 6u);
+    const auto sensorBytes = pixels > std::numeric_limits<std::uint64_t>::max() / bytesPerPixel
+        ? std::numeric_limits<std::uint64_t>::max() : pixels * bytesPerPixel;
+    // Normalized mosaics apply GainMaps before upload and bypass the metadata
+    // preprocessor, so they do not allocate its atlas or variance sink.
+    return SaturatingAdd(sensorBytes, normalized ? 0 : RawPreprocessMetadataBytes(raw.metadata));
+}
 }
 
 RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
@@ -179,6 +228,9 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     for (const auto& consumer : completeRoots) if (!visit(consumer)) return plan;
 
     Stack::Renderer::GraphResourcePolicy resources;
+    std::set<Endpoint> sampledCompleteOutputs;
+    std::set<int> sampledRawSources;
+    std::uint64_t nativeSourceBytes = 0;
     for (const auto& endpoint : order) {
         const auto& node = *nodes.at(endpoint.nodeId);
         resources.Include(node, graph.rawLayerBackgroundNodeId > 0);
@@ -262,6 +314,28 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
         const auto raster = Stack::Renderer::RawPreviewProxy::FitPreviewExtent(
             int(stage.spatial.fullWindow.width), int(stage.spatial.fullWindow.height), previewMaxDimension);
         stage.renderWidth = raster.first; stage.renderHeight = raster.second;
+        if (HasSampledRawOutput(node, previewMaxDimension)) {
+            sampledCompleteOutputs.insert(endpoint);
+            if (sampledRawSources.insert(node.nodeId).second)
+                nativeSourceBytes = SaturatingAdd(nativeSourceBytes, RawPreviewSourceBytes(node));
+        } else if (node.kind == RenderGraphNodeKind::RawOperation) {
+            // Photo operations restore their image input dimensions after any
+            // mask evaluation. A complete-image requirement does not promote
+            // a sampled RAW input back to its native sample count.
+            for (const auto* link : inputs[endpoint.nodeId])
+                if (link->toSocketId == "imageIn" &&
+                    sampledCompleteOutputs.count({link->fromNodeId, link->fromSocketId}))
+                    sampledCompleteOutputs.insert(endpoint);
+        }
+        // Regional consumers explicitly sample to their planned grid. Output
+        // aliases are an exception: they inherit the actual input texture.
+        if (stage.regionalExecutable && node.kind != RenderGraphNodeKind::Output)
+            sampledCompleteOutputs.insert(endpoint);
+        if (node.kind == RenderGraphNodeKind::Output)
+            for (const auto* link : inputs[endpoint.nodeId])
+                if (link->toSocketId == "imageIn" &&
+                    sampledCompleteOutputs.count({link->fromNodeId, link->fromSocketId}))
+                    sampledCompleteOutputs.insert(endpoint);
         plan.stages.emplace(endpoint, std::move(stage));
     }
     auto& output = plan.stages.at(plan.output);
@@ -311,7 +385,9 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
                 Stack::Renderer::LocalToneGuideWorkingBytes(node,stage.renderWidth,stage.renderHeight));
         const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand, stage.renderWidth, stage.renderHeight);
         const auto pixels = std::uint64_t(resident.width) * resident.height;
-        const auto completePixels = std::uint64_t(stage.spatial.fullWindow.width) * stage.spatial.fullWindow.height;
+        const auto completePixels = sampledCompleteOutputs.count(*it)
+            ? std::uint64_t(stage.renderWidth) * stage.renderHeight
+            : std::uint64_t(stage.spatial.fullWindow.width) * stage.spatial.fullWindow.height;
         largestRasterPixels = std::max(largestRasterPixels, stage.regionalExecutable ? pixels : completePixels);
         if (stage.regionalExecutable) plan.regionalPixels = SaturatingAdd(plan.regionalPixels, pixels);
         else plan.completePixels = SaturatingAdd(plan.completePixels, completePixels);
@@ -352,7 +428,9 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     // Reserve a conservative scratch/input-view/publication working set for
     // the largest operation once; multiplying every retained output by that
     // reserve falsely rejected ordinary native RAW graphs. Keep complete
-    // dependency extents conservative and retain engine-specific admission.
+    // dependency extents conservative unless their sampled execution contract
+    // is proven above. Native sensor fields are added separately and cannot
+    // shrink as the editing resolution changes.
     const std::uint64_t scratchSurfaces = raw ? 7u : 4u;
     const auto scratchPixels = largestRasterPixels > std::numeric_limits<std::uint64_t>::max() / scratchSurfaces
         ? std::numeric_limits<std::uint64_t>::max() : largestRasterPixels * scratchSurfaces;
@@ -366,7 +444,7 @@ RenderGraphViewportPlan RenderTiling::GraphViewportPlanner::Plan(
     // its bounded fields explicitly rather than increasing every image
     // surface estimate. Serial tone nodes reuse this peak, not their sum.
     plan.workingBytes = SaturatingAdd(SaturatingAdd(outputAndScratchBytes,cropBytes),
-        SaturatingAdd(localToneWorkingBytes,colorMaskWorkingBytes));
+        SaturatingAdd(nativeSourceBytes, SaturatingAdd(localToneWorkingBytes,colorMaskWorkingBytes)));
     plan.fingerprint = 1;
     const auto mix = [&](std::size_t value) { plan.fingerprint ^= value + std::size_t(0x9e3779b97f4a7c15ull) +
         (plan.fingerprint << 6u) + (plan.fingerprint >> 2u); };

@@ -65,10 +65,13 @@ Raw::RawGpuMemoryBudgetInput QueryGpuMemoryBudget() {
         }
         return memory;
     };
-    if (identity.known) for (const auto& adapter : adapters) {
-        if (identity.luid != adapter.luid) continue;
-        const auto memory = query(adapter, identity.nodeMask);
-        if (memory.queryAvailable) return memory;
+    if (identity.known) {
+        for (const auto& adapter : adapters)
+            if (identity.luid == adapter.luid) return query(adapter, identity.nodeMask);
+        // A known rendering device with unavailable telemetry must use the
+        // bounded unmeasured policy. Another adapter's capacity/headroom is
+        // not evidence that this context can allocate those bytes.
+        return {};
     }
     std::vector<GpuAdapterBudget> budgets;
     budgets.reserve(adapters.size());

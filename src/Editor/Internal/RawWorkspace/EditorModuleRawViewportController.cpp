@@ -57,7 +57,8 @@ std::string EditorModule::GetRawViewportDecisionStatus() const {
                 text << std::fixed << std::setprecision(1) << "; predicted " << state.plannedTiming.predictedMs << " ms";
             if (state.plannedTiming.provisional) text << ". Provisional timing estimate";
         } else text << "Preview timing is not available yet";
-        if (state.refinementBlocked) text << ". Native detail is limited by the memory or texture budget";
+        if (state.refinementBlocked || state.sectionBudgetLimited)
+            text << ". Native detail is limited by the memory or texture budget";
         if (!state.refinementError.empty() && !state.refinementBlocked) {
             text << ". Native detail " << (state.refinementFailures >= 3 ? "failed after retries: " : "will retry: ")
                 << state.refinementError;

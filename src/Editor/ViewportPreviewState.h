@@ -50,8 +50,10 @@ struct ViewportPreviewState {
     std::vector<Section> sectionTextures;
     int nextSection = -1;
     bool sectionNativeDemand = false, sectionsComplete = false, sectionsCoverView = false;
+    bool sectionBudgetLimited = false;
     std::uint64_t sectionRevision = 0, sectionCheckedRevision = 0, sectionCheckedView = 0;
     std::uint64_t sectionUseSerial = 0, sectionCheckedBudget = 0;
+    std::uint64_t sectionGpuBudgetBytes = 128ull * 1024 * 1024;
     bool sectionCheckedWhole = false;
     bool navigationActive = false, acceptedInteractive = false, overviewSettled = false;
     bool overviewCoversDisplay = false;
@@ -59,5 +61,6 @@ struct ViewportPreviewState {
     int refinementFailures = 0;
     std::string refinementError;
     bool mainEmpty = false, refinement = false, refinementBlocked = false;
+    bool refinementMemoryDeferred = false;
 };
 }

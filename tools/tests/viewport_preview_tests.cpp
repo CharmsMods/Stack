@@ -9,6 +9,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
 
 namespace {
 using namespace Stack::Renderer;
@@ -39,6 +41,58 @@ void TestSectionStore() {
         ViewportSectionStore otherRevision(2051,4,allowance);
         Require(!otherRevision.Has(2),"Different revision stores must not reuse pixels without matching identity");
     }
+}
+
+void TestSectionPublication() {
+    // Exercise the public store while coverage is polled as the UI does. The
+    // disk and retained-RAM paths must publish only complete immutable pairs.
+    for (std::uint64_t allowance : {std::uint64_t(0), std::uint64_t(1024*1024)}) {
+        ViewportSectionStore store(2051,4,allowance);
+        const auto whole = WholeImageRegion(2051,4);
+        std::atomic<bool> finished{false};
+        bool stored = true;
+        std::thread producer([&] {
+            for (int index = 0; index < store.Count(); ++index) {
+                const auto raster = store.Raster(index);
+                std::vector<float> pixels(std::size_t(raster.width)*raster.height*4, float(index)-2.5f);
+                std::vector<float> hdr(pixels.size(), float(index)+4.25f);
+                std::string error;
+                stored = stored && store.Store(index,std::move(pixels),std::move(hdr),error);
+            }
+            finished.store(true,std::memory_order_release);
+        });
+        bool publicationConsistent = true;
+        std::vector<bool> seen(store.Count(),false);
+        do {
+            for (int i = 0; i < store.Count(); ++i) {
+                const bool ready = store.Has(i);
+                publicationConsistent &= !seen[i] || ready;
+                seen[i] = ready;
+            }
+            // Completion is published after the final section, so these
+            // following observations must agree once it becomes true.
+            if (store.Complete())
+                publicationConsistent &= store.Covers(whole) && store.NextMissing(whole,true) < 0;
+            (void)store.DiskBytes();
+            std::this_thread::yield();
+        } while (!finished.load(std::memory_order_acquire));
+        producer.join();
+        Require(stored && publicationConsistent && store.Complete(),
+            "Concurrent section coverage must be monotonic and follow successful publication");
+        for (int index = 0; index < store.Count(); ++index) {
+            std::vector<float> pixels,hdr;
+            std::string error;
+            Require(store.Load(index,pixels,hdr,error) && !pixels.empty() && pixels.size()==hdr.size(),
+                "A published section must contain both complete renditions");
+            for (std::size_t i=0; i<pixels.size(); ++i)
+                Require(pixels[i]==float(index)-2.5f && hdr[i]==float(index)+4.25f,
+                    "Section publication must not expose mixed revisions or partial float payloads");
+        }
+    }
+    ViewportSectionStore invalid(4,4);
+    std::string error;
+    Require(!invalid.Store(0,{1.f},{},error) && !invalid.Has(0) && !invalid.Complete(),
+        "Invalid payloads must leave section availability unpublished");
 }
 
 void TestGeometry() {
@@ -259,6 +313,7 @@ void TestTimingCurve() {
 int main() {
     try {
         TestSectionStore();
+        TestSectionPublication();
         TestGeometry();
         TestCandidateSelection();
         TestTimingCurve();

@@ -1,4 +1,5 @@
 #pragma once
+#include "Raw/RawGpuMemoryBudget.h"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -17,10 +18,23 @@ inline std::uint64_t ImageBytes(int width, int height, std::uint64_t surfaces = 
     return pixels * 8 * surfaces;
 }
 
+inline std::uint64_t ViewportSectionUploadBytes(int width, int height, bool hdr) {
+    if (width <= 0 || height <= 0) return 0;
+    const auto surfaces = hdr ? 4u : 2u; // RGBA32F, with an optional paired HDR rendition.
+    return AddBytes(ImageBytes(width, height, surfaces),
+        ImageBytes(width / 4 + (width % 4 != 0), height / 4 + (height % 4 != 0), surfaces));
+}
+
 inline std::uint64_t CacheAllowance(bool budgetKnown, std::uint64_t headroom,
     std::uint64_t residentCaches, std::uint64_t workingBytes,
     std::uint64_t ceiling = 1280ull * 1024 * 1024) {
-    if (!budgetKnown) return ceiling;
+    if (!budgetKnown) {
+        // The fallback is a total planning allowance, not measured free VRAM.
+        // Adding retained allocations back would grow it on every request.
+        const auto allowance = std::min(headroom, Raw::kUnmeasuredGpuWorkingBudgetBytes);
+        return std::min({ceiling, Raw::kUnmeasuredGpuCacheBudgetBytes,
+            allowance > workingBytes ? allowance - workingBytes : 0});
+    }
     const auto reclaimableHeadroom = AddBytes(headroom, residentCaches);
     return std::min(ceiling, reclaimableHeadroom > workingBytes ?
         reclaimableHeadroom - workingBytes : 0);

@@ -119,14 +119,25 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
         }
     }
     // Published output is immutable and independently leased. Retire the
-    // prior execution's comparison borrow before choosing section cache victims.
-    if (snapshot.viewportSections) pipeline.ClearOutput();
+    // previous execution's output/comparison borrows before cache admission,
+    // including ordinary editing frames. Otherwise their obsolete protection
+    // can prevent reclaiming the very caches counted as available below.
+    pipeline.ClearOutput();
     const auto memory = Stack::Renderer::QueryGpuMemoryBudget();
     const auto budget = Raw::ResolveRawGpuMemoryBudget(memory);
     const auto resident = pipeline.GetGraphResidentCacheBytes();
-    if (snapshot.viewportSections && memory.queryAvailable &&
-        working > AddBytes(budget.workingBudgetBytes,resident)) {
-        throw std::runtime_error("Native section working set exceeds GPU headroom including reclaimable graph caches.");
+    const bool budgetKnown = !budget.usedFallback;
+    const auto available = budgetKnown ? AddBytes(budget.workingBudgetBytes, resident)
+                                      : budget.workingBudgetBytes;
+    if (snapshot.viewportSections && working > available) {
+        // The unmeasured allowance is total admitted work, not free memory;
+        // never increase it by adding existing cache residency back.
+        result.telemetry.skipReason = RawPreviewSkipReason::MemoryBudget;
+        result.telemetry.fullFrameEstimatedWorkingSetBytes = working;
+        result.telemetry.fullFrameRefinementBudgetAllowed = false;
+        throw std::runtime_error(budgetKnown
+            ? "Native section working set exceeds GPU headroom including reclaimable graph caches."
+            : "Native section needs more than the 512 MiB conservative GPU allowance; device memory headroom is unavailable.");
     }
     // Device usage already includes accepted/queued presentation textures and
     // other pipelines. Only this pipeline's evictable caches are added back.
@@ -135,9 +146,9 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     // float32 boundary, causing whole-image processing for every section.
     // Permit a larger cache only from headroom left AFTER the conservative
     // active working set. Low-memory devices retain the same admission limit.
-    const auto ceiling = snapshot.viewportSections && memory.queryAvailable ?
+    const auto ceiling = snapshot.viewportSections && budgetKnown ?
         3ull*1024*1024*1024 : 1280ull*1024*1024;
-    const auto allowance = CacheAllowance(memory.queryAvailable,
+    const auto allowance = CacheAllowance(budgetKnown,
         budget.workingBudgetBytes, resident, working, ceiling);
     // When a complete downstream operation is required, its finished image
     // is the reusable boundary for subsequent sections. Giving half the small

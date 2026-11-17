@@ -16,13 +16,10 @@ RawGpuMemoryBudgetDecision ResolveRawGpuMemoryBudget(
     const RawGpuMemoryBudgetInput& input) {
     RawGpuMemoryBudgetDecision decision;
     if (!input.queryAvailable || input.localBudgetBytes == 0u) {
-        // An unavailable DXGI query is not evidence of low memory. Treat the
-        // budget as unknown/unbounded for planning so native RAW presentation
-        // is attempted; GL texture limits and allocation failure remain the
-        // authoritative safety gates. Optional caches are still independently
-        // capped by ResolveRawRenderCacheBudgetBytes().
-        decision.workingBudgetBytes =
-            std::numeric_limits<std::uint64_t>::max();
+        // Texture dimensions and adapter capacity do not establish currently
+        // available memory. Keep foreground previews bounded until measurement
+        // returns; explicit exports retain their own full-quality tiling path.
+        decision.workingBudgetBytes = kUnmeasuredGpuWorkingBudgetBytes;
         decision.availableBytes = decision.workingBudgetBytes;
         decision.usedFallback = true;
         return decision;

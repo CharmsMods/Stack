@@ -3,7 +3,7 @@
 #include <cstdint>
 
 enum class RawPreviewSkipReason : std::uint8_t {
-    None, InputCoalesced, OverloadDeadline, PriorityChange, Canceled, ObsoleteView
+    None, InputCoalesced, OverloadDeadline, PriorityChange, Canceled, ObsoleteView, MemoryBudget
 };
 
 enum class RawRenderPurpose : std::uint8_t {

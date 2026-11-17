@@ -57,7 +57,7 @@ void TestGraphRenderPolicyAndNavigation() {
     require(!MayFinishActive({}, {}));
     require(CacheAllowance(true, 100, 50, 120) == 30);
     require(CacheAllowance(true, 10, 20, 100) == 0);
-    require(CacheAllowance(false, 0, 0, UINT64_MAX) > 0);
+    require(CacheAllowance(false, 0, 0, UINT64_MAX) == 0);
     require(AddBytes(UINT64_MAX, 1) == UINT64_MAX);
     require(ImageBytes(100, 200, 3) == 480000);
     require(ImageBytes(100, 200, UINT64_MAX) == UINT64_MAX);

@@ -7,7 +7,9 @@
 
 namespace Stack::Renderer {
 // Native, settled pixels for one immutable document/view revision. CPU-only:
-// reads/writes run on the render worker; coverage queries never touch disk.
+// reads/writes run on the render worker; coverage queries never touch disk or
+// wait on payload transfers. Published sections are immutable for this store's
+// lifetime; readers keep the store alive while polling its completion metadata.
 class ViewportSectionStore {
 public:
     static constexpr int Edge = 1024;

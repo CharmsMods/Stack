@@ -810,7 +810,7 @@ private:
     bool IsOwnerResultStaleLocked(const Result& result) const;
     bool HasDenoiseWorkLocked() const;
     void BindDenoiseState(const Snapshot& snapshot, RenderPipeline& pipeline);
-    void PollDenoiseContinuationsLocked();
+    void PollDenoiseContinuations();
     bool CanStartAuthoritativeRenderLocked(std::uint64_t ownerId) const;
     bool DeferAuthoritativeRenderLocked(Snapshot& snapshot);
     void RetainDenoiseContinuationLocked(Snapshot& snapshot,

@@ -335,8 +335,7 @@ bool EditorModule::IsRawWorkspaceFastPreviewRenderActive(double now) const {
 void EditorModule::RefreshRawWorkspaceGpuMemoryBudget() {
     const auto now = std::chrono::steady_clock::now();
     constexpr auto kBudgetRefreshInterval = std::chrono::seconds(2);
-    if (m_RawWorkspaceVramWorkingBudgetBytes > 0u &&
-        m_RawWorkspaceGpuBudgetLastRefresh.time_since_epoch().count() != 0 &&
+    if (m_RawWorkspaceGpuBudgetLastRefresh.time_since_epoch().count() != 0 &&
         now - m_RawWorkspaceGpuBudgetLastRefresh < kBudgetRefreshInterval) {
         return;
     }
@@ -356,6 +355,21 @@ void EditorModule::RefreshRawWorkspaceGpuMemoryBudget() {
         memoryDecision.workingBudgetBytes;
     m_RawWorkspaceVramAvailableBytes =
         memoryDecision.availableBytes;
+    m_RawWorkspaceGpuBudgetMeasured = !memoryDecision.usedFallback;
+    for(auto& view:m_ViewportPreviewStates) {
+        std::uint64_t resident=0;
+        for(const auto& section:view.sectionTextures)
+            for(const auto* texture:{&section.native,&section.preview})
+                if(texture->texture && texture->width>0 && texture->height>0)
+                    resident+=std::uint64_t(texture->width)*texture->height*(texture->hdr ? 32u : 16u);
+        // Credit only this view's owned copies, sampled at the same time as
+        // free headroom. A missing query has a fixed conservative allowance;
+        // a real zero headroom reading must not turn into that fallback.
+        const auto headroom=memoryDecision.workingBudgetBytes;
+        const auto reclaimable=headroom>UINT64_MAX-resident ? UINT64_MAX : headroom+resident;
+        view.sectionGpuBudgetBytes=memoryDecision.usedFallback ? 128ull*1024*1024 :
+            std::min<std::uint64_t>(1024ull*1024*1024,reclaimable/4);
+    }
     m_RawWorkspaceMinimumMemoryTiling =
         memoryDecision.forceMinimumMemoryTiling;
     m_GraphPerformanceStats.rawVramWorkingBudgetBytes =

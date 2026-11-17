@@ -27,13 +27,21 @@ bool Intersects(const ImageRegion& a,const ImageRegion& b) {
 }
 }
 struct ViewportSectionStore::Impl {
-    struct Entry { std::vector<float> pixels,hdr; std::uint64_t offset=0,bytes=0; bool ready=false,onDisk=false,hasHdr=false; };
+    struct Entry {
+        std::vector<float> pixels,hdr;
+        std::uint64_t offset=0,bytes=0;
+        // Published once, after both renditions have been stored successfully.
+        // UI coverage queries must never take the payload/file-position lock.
+        std::atomic<bool> ready{false};
+        bool onDisk=false,hasHdr=false;
+    };
     int width,height,columns,rows;
     mutable std::mutex mutex;
     std::vector<Entry> entries;
     HANDLE file=INVALID_HANDLE_VALUE;
-    std::uint64_t diskBytes=0,ramBytes=0;
-    int completed=0;
+    std::atomic<std::uint64_t> diskBytes{0};
+    std::uint64_t ramBytes=0;
+    std::atomic<int> completed{0};
     std::uint64_t ramAllowance=RamLimit;
     std::wstring directory;
     Impl(int w,int h):width(w),height(h),columns((w+Edge-1)/Edge),rows((h+Edge-1)/Edge),entries(std::size_t(columns)*rows) {}
@@ -82,17 +90,20 @@ ImageRegion ViewportSectionStore::Raster(int index) const {
     const int right=std::min(m->width,r.x+r.width+4),bottom=std::min(m->height,r.y+r.height+4);
     r.x=std::max(0,r.x-4);r.y=std::max(0,r.y-4);r.width=right-r.x;r.height=bottom-r.y;return r;
 }
-bool ViewportSectionStore::Has(int index) const { std::lock_guard lock(m->mutex);return index>=0 && index<Count() && m->entries[index].ready; }
-bool ViewportSectionStore::Complete() const { std::lock_guard lock(m->mutex);return m->completed==Count(); }
+bool ViewportSectionStore::Has(int index) const {
+    return index>=0 && index<Count() && m->entries[index].ready.load(std::memory_order_acquire);
+}
+bool ViewportSectionStore::Complete() const {
+    return m->completed.load(std::memory_order_acquire)==Count();
+}
 bool ViewportSectionStore::Covers(const ImageRegion& visible) const {
     if(!visible.Valid() || visible.fullWidth!=m->width || visible.fullHeight!=m->height) return false;
-    std::lock_guard lock(m->mutex);
-    for(int i=0;i<Count();++i) if(Intersects(Bounds(i),visible) && !m->entries[i].ready) return false;
+    for(int i=0;i<Count();++i) if(Intersects(Bounds(i),visible) && !Has(i)) return false;
     return true;
 }
 int ViewportSectionStore::NextMissing(const ImageRegion& visible,bool whole) const {
-    std::lock_guard lock(m->mutex);int background=-1;
-    for(int i=0;i<Count();++i) if(!m->entries[i].ready) {
+    int background=-1;
+    for(int i=0;i<Count();++i) if(!Has(i)) {
         if(Intersects(Bounds(i),visible)) return i;
         if(background<0) background=i;
     }
@@ -101,7 +112,7 @@ int ViewportSectionStore::NextMissing(const ImageRegion& visible,bool whole) con
 bool ViewportSectionStore::Store(int index,std::vector<float> pixels,std::vector<float> hdr,std::string& error) {
     const auto r=Raster(index);const std::size_t values=std::size_t(r.width)*r.height*4;
     if(!r.Valid() || pixels.size()!=values || (!hdr.empty() && hdr.size()!=values)) { error="Invalid native section payload."; return false; }
-    std::lock_guard lock(m->mutex); auto& entry=m->entries[index];if(entry.ready)return true;
+    std::lock_guard lock(m->mutex); auto& entry=m->entries[index];if(entry.ready.load(std::memory_order_acquire))return true;
     const std::uint64_t bytes=(pixels.size()+hdr.size())*sizeof(float);
     entry.hasHdr=!hdr.empty();entry.bytes=bytes;
     if(bytes<=m->ramAllowance && m->ramBytes<=m->ramAllowance-bytes && Reserve(bytes)) {
@@ -113,16 +124,18 @@ bool ViewportSectionStore::Store(int index,std::vector<float> pixels,std::vector
             freeBytes.QuadPart < bytes+256ull*1024*1024) {
             error="Insufficient free disk space for native image cache.";return false;
         }
-        entry.offset=m->diskBytes;
+        entry.offset=m->diskBytes.load(std::memory_order_relaxed);
         if(!m->Transfer(true,entry.offset,pixels.data(),pixels.size()*sizeof(float),error) ||
             (!hdr.empty() && !m->Transfer(true,entry.offset+pixels.size()*sizeof(float),hdr.data(),hdr.size()*sizeof(float),error)))return false;
-        entry.onDisk=true;m->diskBytes+=bytes;
+        entry.onDisk=true;m->diskBytes.fetch_add(bytes,std::memory_order_relaxed);
     }
-    entry.ready=true;++m->completed;return true;
+    entry.ready.store(true,std::memory_order_release);
+    m->completed.fetch_add(1,std::memory_order_release);
+    return true;
 }
 bool ViewportSectionStore::Load(int index,std::vector<float>& pixels,std::vector<float>& hdr,std::string& error) const {
     std::lock_guard lock(m->mutex);
-    if(index<0 || index>=Count() || !m->entries[index].ready)return false;
+    if(!Has(index))return false;
     const auto& entry=m->entries[index];
     if(!entry.onDisk) {pixels=entry.pixels;hdr=entry.hdr;return true;}
     const auto r=Raster(index);const std::size_t values=std::size_t(r.width)*r.height*4;
@@ -130,5 +143,7 @@ bool ViewportSectionStore::Load(int index,std::vector<float>& pixels,std::vector
     return m->Transfer(false,entry.offset,pixels.data(),values*sizeof(float),error) &&
         (!entry.hasHdr || m->Transfer(false,entry.offset+values*sizeof(float),hdr.data(),values*sizeof(float),error));
 }
-std::uint64_t ViewportSectionStore::DiskBytes() const {std::lock_guard lock(m->mutex);return m->diskBytes;}
+std::uint64_t ViewportSectionStore::DiskBytes() const {
+    return m->diskBytes.load(std::memory_order_relaxed);
+}
 }
