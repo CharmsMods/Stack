@@ -1,0 +1,61 @@
+name: Render resource checks
+
+on:
+  pull_request:
+    paths:
+      - 'src/Editor/**'
+      - 'src/Renderer/**'
+      - 'src/Raw/**'
+      - 'tools/tests/**'
+      - '.github/workflows/render-resource-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-resources-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-cpu-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Prepare existing lifecycle checks
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/stack-render-checks" | Out-Null
+          python tools/tests/render_worker_failure_tests.py --output "$env:RUNNER_TEMP/stack-render-checks/worker.cpp"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/tests/denoise_launch_failure_tests.py --output "$env:RUNNER_TEMP/stack-render-checks/denoise.cpp"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and run focused Windows contracts
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b 1
+          cd /d "%RUNNER_TEMP%\stack-render-checks"
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" "%GITHUB_WORKSPACE%\tools\tests\viewport_preview_tests.cpp" "%GITHUB_WORKSPACE%\src\Renderer\ViewportSectionStore.cpp" /Fe:viewport.exe
+          if errorlevel 1 exit /b 1
+          viewport.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" "%GITHUB_WORKSPACE%\tools\tests\viewport_section_residency_tests.cpp" /Fe:residency.exe
+          if errorlevel 1 exit /b 1
+          residency.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" "%GITHUB_WORKSPACE%\tools\tests\gpu_memory_budget_selection_tests.cpp" "%GITHUB_WORKSPACE%\src\Raw\RawGpuMemoryBudget.cpp" /Fe:budget.exe
+          if errorlevel 1 exit /b 1
+          budget.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" worker.cpp /Fe:worker.exe
+          if errorlevel 1 exit /b 1
+          worker.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" denoise.cpp "%GITHUB_WORKSPACE%\src\Renderer\RawRgbDenoiseState.cpp" /Fe:denoise.exe
+          if errorlevel 1 exit /b 1
+          denoise.exe
+          if errorlevel 1 exit /b 1

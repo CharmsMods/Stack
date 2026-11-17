@@ -1,13 +1,20 @@
 #include "Editor/EditorModule.h"
 #include "Async/TaskSystem.h"
 #include "App/UiPerformanceProbe.h"
+#include "Editor/ViewportSectionDrawing.h"
+#include "Renderer/ViewportSectionResidency.h"
 #include <imgui.h>
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 
 namespace {
 bool Intersects(const Stack::Renderer::ImageRegion& a,const Stack::Renderer::ImageRegion& b) {
     return a.x < b.x+b.width && b.x < a.x+a.width && a.y < b.y+b.height && b.y < a.y+a.height;
+}
+std::uint64_t SectionTextureBytes(const EditorRenderWorker::SharedTextureResult& texture) {
+    return texture.texture && texture.width>0 && texture.height>0 ?
+        std::uint64_t(texture.width)*texture.height*(texture.hdr ? 32u : 16u) : 0;
 }
 }
 void EditorModule::ClearViewportNativeSections(Stack::EditorRendering::ViewportPreviewState& state) {
@@ -19,58 +26,57 @@ void EditorModule::ClearViewportNativeSections(Stack::EditorRendering::ViewportP
     // off the UI thread. In-flight snapshots also retain their original store.
     state.sections.reset();
     state.sectionsComplete=state.sectionsCoverView=false;
+    state.sectionBudgetLimited=false;
     state.sectionCheckedView=0;state.sectionRevision=state.sectionCheckedRevision=0;
     state.nextSection=-1;
 }
 int EditorModule::NextViewportNativeSection(Stack::EditorRendering::ViewportPreviewState& state) {
-    if(!state.sections || !state.request.visible.Valid())return -1;
+    if(!state.sections || !state.request.visible.Valid() ||
+        state.sectionTextures.size()!=std::size_t(state.sections->Count()))return -1;
+    RefreshRawWorkspaceGpuMemoryBudget();
+    state.sectionsComplete=state.sections->Complete();
     if(state.sectionsComplete)state.completion.wholeImagePending=false;
     const bool whole=state.completion.wholeImagePending;
-    // Keep recently seen sharp pixels through pan reversals and zoom-out. RAM
-    // and disk remain authoritative; this bounded GPU working set avoids a
-    // disposable low-detail flash merely because a section crossed the pane.
-    const std::uint64_t budget=std::min<std::uint64_t>(1024ull*1024*1024,
-        m_RawWorkspaceVramWorkingBudgetBytes ? m_RawWorkspaceVramWorkingBudgetBytes/4 : 128ull*1024*1024);
+    // This is an absolute cache allowance sampled with GPU headroom, not a
+    // newly shrinking fraction of free memory after every adopted section.
+    const std::uint64_t budget=state.sectionGpuBudgetBytes;
     if(state.sectionCheckedView && state.sectionCheckedView==state.request.generation &&
         state.sectionCheckedRevision==state.sectionRevision && state.sectionCheckedWhole==whole && state.sectionCheckedBudget==budget)
         return state.nextSection;
     const auto& visible=state.request.visible;
     state.sectionNativeDemand=std::max(double(state.physicalWidth)/visible.width,
         double(state.physicalHeight)/visible.height)>.249;
-    int next=-1;
     const auto useSerial=++state.sectionUseSerial;
-    std::uint64_t residentBytes=0;
-    std::vector<int> evictionCandidates;
     const auto nearby=Stack::Renderer::PadViewportPreviewRegion(visible);
-    int prefetch=-1;
+    std::vector<Stack::Renderer::ViewportSectionResidencyInput> inputs;
+    inputs.reserve(state.sectionTextures.size());
     for(int i=0;i<state.sections->Count();++i) {
         auto& tile=state.sectionTextures[i];
         const bool shown=Intersects(state.sections->Bounds(i),visible);
-        if(tile.native.texture) {
-            residentBytes+=std::uint64_t(tile.native.width)*tile.native.height*(tile.native.hdr ? 32u : 16u);
-            if(shown && state.sectionNativeDemand)tile.lastUse=useSerial;
-            else evictionCandidates.push_back(i);
-        }
-        if(shown && next<0 && (!tile.preview.texture || (state.sectionNativeDemand && !tile.native.texture)))next=i;
-        if(!shown && prefetch<0 && state.sectionNativeDemand && !tile.native.texture && tile.preview.texture &&
-            Intersects(state.sections->Bounds(i),nearby))prefetch=i;
+        if(shown && (tile.native.texture || tile.preview.texture))tile.lastUse=useSerial;
+        const auto raster=state.sections->Raster(i);
+        // An unseen section may carry a paired HDR rendition. Use that upper
+        // bound until an actual retained texture establishes its format.
+        const bool hdr=tile.native.texture ? bool(tile.native.hdr) :
+            (tile.preview.texture ? bool(tile.preview.hdr) : true);
+        const std::uint64_t bytesPerPixel=hdr ? 32u : 16u;
+        inputs.push_back({SectionTextureBytes(tile.native),SectionTextureBytes(tile.preview),
+            std::uint64_t(raster.width)*raster.height*bytesPerPixel,
+            std::uint64_t((raster.width+3)/4)*((raster.height+3)/4)*bytesPerPixel,
+            tile.lastUse,shown,Intersects(state.sections->Bounds(i),nearby),state.sectionNativeDemand});
     }
-    if(residentBytes>budget) {
-        std::sort(evictionCandidates.begin(),evictionCandidates.end(),[&](int a,int b) {
-            return state.sectionTextures[a].lastUse<state.sectionTextures[b].lastUse;
-        });
-        for(int i:evictionCandidates) {
-            if(residentBytes<=budget)break;
-            auto& texture=state.sectionTextures[i].native;
-            residentBytes-=std::uint64_t(texture.width)*texture.height*(texture.hdr ? 32u : 16u);
-            QueueViewportOutputTextureRelease(texture);
-        }
+    const auto plan=Stack::Renderer::PlanViewportSectionResidency(inputs,budget);
+    for(std::size_t i=0;i<state.sectionTextures.size();++i) {
+        auto& tile=state.sectionTextures[i];
+        if(!plan.sections[i].wantNative)QueueViewportOutputTextureRelease(tile.native);
+        if(!plan.sections[i].wantPreview)QueueViewportOutputTextureRelease(tile.preview);
     }
-    state.sectionsCoverView=next<0;
-    // Restore nearby finished sections only with spare space; otherwise
-    // prefetch/eviction could chase one another forever on small GPUs.
-    if(next<0 && prefetch>=0 && residentBytes+40ull*1024*1024<=budget)next=prefetch;
-    if(next<0 && whole)next=state.sections->NextMissing(visible,true);
+    state.sectionsCoverView=plan.covered;
+    state.sectionBudgetLimited=plan.budgetLimited;
+    int next=plan.nextVisibleRestore;
+    // Native CPU/disk completion is independent of disposable GPU residency.
+    // Never restore a finished section excluded by the desired display set.
+    if(next<0)next=state.sections->NextMissing(visible,whole);
     state.sectionCheckedBudget=budget;
     state.sectionCheckedView=state.request.generation;
     state.sectionCheckedRevision=state.sectionRevision;state.sectionCheckedWhole=whole;
@@ -92,6 +98,7 @@ bool EditorModule::HasNativeViewportCoverage() const {
         state.sectionCheckedRevision==state.sectionRevision;
 }
 void EditorModule::AdoptViewportNativeSection(EditorRenderWorker::Result& result) {
+    if(result.viewportViewId<1 || result.viewportViewId>2)return;
     auto& state=m_ViewportPreviewStates[result.viewportViewId-1];
     if(state.sections!=result.viewportSections || result.viewportSection<0 ||
         result.viewportSection>=int(state.sectionTextures.size()) || result.denoisePending ||
@@ -118,15 +125,28 @@ void EditorModule::AdoptViewportNativeSection(EditorRenderWorker::Result& result
 void EditorModule::DrawViewportNativeSections(ImDrawList* draw,ImVec2 minimum,ImVec2 maximum,bool hdr,ImU32 tint,float rounding) const {
     if(!UsesGraphViewportPreview() || !draw)return;
     const auto& state=ActiveViewportPreviewState();
-    if(!state.sections || state.acceptedContentIdentity!=state.contentIdentity || state.sectionTextures.empty())return;
+    if(!state.sections || state.acceptedContentIdentity!=state.contentIdentity ||
+        !state.acceptedGeneration || state.acceptedGeneration!=m_ViewportOutputRenderGeneration || !state.geometry.Valid() ||
+        state.sectionTextures.size()!=std::size_t(state.sections->Count()))return;
     const ImVec2 size(maximum.x-minimum.x,maximum.y-minimum.y);
-    if(size.x<=0 || size.y<=0)return;
     const auto clipMin=draw->GetClipRectMin(),clipMax=draw->GetClipRectMax();
+    if(!std::isfinite(minimum.x) || !std::isfinite(minimum.y) ||
+        !std::isfinite(maximum.x) || !std::isfinite(maximum.y) ||
+        !std::isfinite(size.x) || !std::isfinite(size.y) || size.x<=0 || size.y<=0 ||
+        !std::isfinite(clipMin.x) || !std::isfinite(clipMin.y) ||
+        !std::isfinite(clipMax.x) || !std::isfinite(clipMax.y) ||
+        clipMax.x<=minimum.x || clipMax.y<=minimum.y || clipMin.x>=maximum.x || clipMin.y>=maximum.y)return;
     const auto full=state.sections->Bounds(0);
+    if(state.geometry.logicalWidth!=full.fullWidth || state.geometry.logicalHeight!=full.fullHeight)return;
+    const bool currentOverview=state.overviewContentIdentity==state.contentIdentity &&
+        state.overview.texture && state.overview.lease.Texture()==state.overview.texture && !state.overview.readyFence;
+    const int overviewWidth=currentOverview ? state.overview.width : 0;
+    const int overviewHeight=currentOverview ? state.overview.height : 0;
     const int columns=(full.fullWidth+Stack::Renderer::ViewportSectionStore::Edge-1)/Stack::Renderer::ViewportSectionStore::Edge;
     const int rows=(full.fullHeight+Stack::Renderer::ViewportSectionStore::Edge-1)/Stack::Renderer::ViewportSectionStore::Edge;
     const auto cell=[&](float position,float origin,float extent,int pixels,int limit) {
-        return std::clamp(int((position-origin)/extent*pixels)/Stack::Renderer::ViewportSectionStore::Edge,0,limit-1);
+        const double fraction=std::clamp((double(position)-origin)/extent,0.0,1.0);
+        return std::min(int(fraction*pixels)/Stack::Renderer::ViewportSectionStore::Edge,limit-1);
     };
     const int x0=cell(clipMin.x,minimum.x,size.x,full.fullWidth,columns),x1=cell(clipMax.x,minimum.x,size.x,full.fullWidth,columns);
     const int y0=cell(clipMin.y,minimum.y,size.y,full.fullHeight,rows),y1=cell(clipMax.y,minimum.y,size.y,full.fullHeight,rows);
@@ -144,7 +164,25 @@ void EditorModule::DrawViewportNativeSections(ImDrawList* draw,ImVec2 minimum,Im
         if(x==columns-1 && y==0)corners|=ImDrawFlags_RoundCornersTopRight;
         if(x==0 && y==rows-1)corners|=ImDrawFlags_RoundCornersBottomLeft;
         if(x==columns-1 && y==rows-1)corners|=ImDrawFlags_RoundCornersBottomRight;
-        if(rounding>0 && corners)draw->AddImageRounded((ImTextureID)(intptr_t)texture.Display(hdr),low,high,uv0,uv1,tint,rounding,corners);
-        else draw->AddImage((ImTextureID)(intptr_t)texture.Display(hdr),low,high,uv0,uv1,tint);
+        const auto drawSection=[&] {
+            if(rounding>0 && corners)draw->AddImageRounded((ImTextureID)(intptr_t)texture.Display(hdr),low,high,uv0,uv1,tint,rounding,corners);
+            else draw->AddImage((ImTextureID)(intptr_t)texture.Display(hdr),low,high,uv0,uv1,tint);
+        };
+        if(tile.native.texture) {
+            drawSection();
+            continue;
+        }
+        // Evicting native residency may leave only a quarter-sized display
+        // copy. Preserve finer current base/overview pixels beneath it.
+        const auto plan=Stack::EditorRendering::PlanViewportSectionPreviewDraw(core,raster,
+            texture.width,texture.height,state.geometry,overviewWidth,overviewHeight);
+        for(std::size_t i=0;i<plan.count;++i) {
+            const auto& clip=plan.clips[i];
+            draw->PushClipRect(
+                ImVec2(float(minimum.x+size.x*clip.left),float(minimum.y+size.y*clip.top)),
+                ImVec2(float(minimum.x+size.x*clip.right),float(minimum.y+size.y*clip.bottom)),true);
+            drawSection();
+            draw->PopClipRect();
+        }
     }
 }

@@ -268,6 +268,16 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 ? !currentRawGeneration || !currentRawRecipe || obsoleteViewport ||
                     (!m_RawWorkspaceRootTabActive && result.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)
                 : !IsCurrentGraphResult(result)));
+        if (result.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
+            result.viewportPreview.enabled && result.viewportSections &&
+            result.telemetry.skipReason == RawPreviewSkipReason::MemoryBudget) {
+            // A deferred native section did not invalidate the accepted image.
+            // Keep its retry state separate from execution failures and avoid
+            // marking a good preview stale or repeating error notifications.
+            releaseDeferredResultResources(result);
+            m_RenderPending = IsAnyRenderBackendBusy();
+            continue;
+        }
         ObserveRenderPresentationFailure(result);
         if (staleResult || !result.success || !result.error.empty())
             CompleteFullQualityRenderRequest(result, false);

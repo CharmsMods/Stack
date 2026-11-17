@@ -4,6 +4,11 @@
 
 namespace Raw {
 
+// Planning limits when device headroom cannot be measured. These are modest
+// admission allowances, not claims about the adapter's physical capacity.
+inline constexpr std::uint64_t kUnmeasuredGpuWorkingBudgetBytes = 512ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t kUnmeasuredGpuCacheBudgetBytes = 64ull * 1024ull * 1024ull;
+
 struct RawGpuMemoryBudgetInput {
     std::uint64_t localBudgetBytes = 0;
     std::uint64_t localUsageBytes = 0;

@@ -143,8 +143,130 @@ void TestLocalToneViewportPlanning() {
         "The bounded three-field guide must never allocate more than 12 MiB");
 }
 
+void TestRawPreviewMemoryPlanning() {
+    const auto require = [](bool ok, const char* message) { if (!ok) throw std::runtime_error(message); };
+    using namespace Stack::RawRecipe;
+    using namespace Stack::Renderer;
+    auto raw = std::make_shared<Raw::RawImageData>();
+    raw->metadata.rawWidth = raw->metadata.visibleWidth = 7952;
+    raw->metadata.rawHeight = raw->metadata.visibleHeight = 5304;
+    raw->metadata.pixelLayout = Raw::RawPixelLayout::MosaicBayer;
+    RenderGraphNode source; source.nodeId = 1; source.kind = RenderGraphNodeKind::RawDevelopment;
+    source.rawDevelopment.embeddedRawData = raw;
+    source.rawDevelopment.recipe = MakeDefaultRecipe("raw-preview-memory");
+    source.rawDevelopment.recipe.technical.demosaicMethod = Raw::DemosaicMethod::MalvarHeCutler;
+    source.rawDevelopment.recipe.technical.mosaicDenoise.enabled = false;
+    RenderGraphSnapshot graph; graph.nodes = {source};
+    graph.outputNodeId = 1; graph.outputSocketId = "imageOut";
+    ViewportPreviewRequest request{WholeImageRegion(7952,5304),1,1,true,false};
+    const auto plan = [&](int edge) { return RenderTiling::PlanGraphViewport(graph,7952,5304,edge,request); };
+    const auto small = plan(512), preview = plan(1024), native = plan(0);
+    require(small.valid && preview.valid && native.valid,
+        "Known RAW preview and native plans must remain executable");
+    const auto sampledPixels = [](const auto& value) {
+        const auto& stage = value.stages.at({1,"imageOut"});
+        return std::uint64_t(stage.renderWidth) * stage.renderHeight;
+    };
+    const auto sensorBytes = 7952ull * 5304 * 6; // Native R16UI + corrected R32F.
+    const auto emptyMetadataBytes = 1024ull * 4 + 4; // One R32F atlas row and its variance sink.
+    require(preview.completePixels == sampledPixels(preview) &&
+        small.completePixels == sampledPixels(small) && native.completePixels == 7952ull * 5304,
+        "Single-pass RAW complete work must follow the actual sampled RGBA output");
+    require(preview.workingBytes == sensorBytes + emptyMetadataBytes + sampledPixels(preview) * 8 * 16 &&
+        small.workingBytes == sensorBytes + emptyMetadataBytes + sampledPixels(small) * 8 * 16,
+        "Reducing RAW preview size must not shrink its native sensor residency");
+    require(preview.workingBytes < Raw::kUnmeasuredGpuWorkingBudgetBytes &&
+        native.workingBytes > Raw::kUnmeasuredGpuWorkingBudgetBytes,
+        "A normal 42 MP source must admit a bounded preview without admitting native color surfaces");
+    const auto originalMetadata = raw->metadata;
+    raw->metadata.dngLinearizationTable.resize(1000);
+    raw->metadata.dngBlackLevelValues.resize(3);
+    raw->metadata.dngBlackLevelDeltaH.resize(4);
+    raw->metadata.dngBlackLevelDeltaV.resize(5);
+    raw->metadata.dngWhiteLevelValues.resize(6);
+    Raw::DngGainMapOpcode gainMap;
+    gainMap.mapPointsH = 4; gainMap.mapPointsV = 2;
+    gainMap.mapSpacingH = gainMap.mapSpacingV = 1;
+    gainMap.gains.assign(8, 1.f);
+    raw->metadata.dngGainMaps.push_back(gainMap);
+    gainMap.mapPointsH = 496; gainMap.gains.assign(992, 1.f);
+    raw->metadata.dngGainMaps.push_back(gainMap);
+    // 1,018 table values + 32 header values + 1,000 gains require three atlas
+    // rows. Omitting any metadata field would incorrectly fit in two rows.
+    const auto metadataPreview = plan(1024), metadataSmall = plan(512);
+    require(metadataPreview.workingBytes - preview.workingBytes == 2 * 1024 * 4 &&
+        metadataSmall.workingBytes - small.workingBytes == 2 * 1024 * 4,
+        "All RAW metadata tables and GainMap headers must remain reserved at every preview size");
+    raw->metadata = originalMetadata;
+    raw->metadata.hasDngNoiseProfile = true;
+    graph.nodes[0].rawDevelopment.recipe.technical.mosaicDenoise.enabled = true;
+    graph.nodes[0].rawDevelopment.recipe.technical.mosaicDenoise.mode = Raw::RawMosaicDenoiseMode::DngNoiseProfile;
+    const auto variance = plan(1024);
+    require(variance.workingBytes - preview.workingBytes == 7952ull * 5304 * 4,
+        "A native noise-variance field must remain reserved independently of preview size");
+    graph.nodes[0] = source;
+    raw->metadata.rawWidth = raw->metadata.visibleWidth = 9568;
+    raw->metadata.rawHeight = raw->metadata.visibleHeight = 6376;
+    const auto sixtyOneMegapixel = plan(1024);
+    require(sixtyOneMegapixel.valid && sixtyOneMegapixel.workingBytes < Raw::kUnmeasuredGpuWorkingBudgetBytes,
+        "A simple 61 MP single-pass RAW must retain a usable 1024-pixel preview under the fallback allowance");
+    raw->metadata.rawWidth = raw->metadata.visibleWidth = 7952;
+    raw->metadata.rawHeight = raw->metadata.visibleHeight = 5304;
+
+    SceneTone tone; tone.curve = {{0,0},{.5f,.5f},{1,.625f}}; tone.localAmount = 1;
+    RenderGraphNode curve; curve.nodeId = 2; curve.kind = RenderGraphNodeKind::RawOperation;
+    curve.rawOperation = MakeGraphOperation(GraphOperationKind::ToneCurve);
+    curve.rawOperation.parameters["curveMode"] = "luminance";
+    curve.rawOperation.parameters["luminanceTone"] = SerializeSceneTone(tone);
+    RenderGraphNode output; output.nodeId = 3; output.kind = RenderGraphNodeKind::Output;
+    graph.nodes = {source,curve,output};
+    graph.links = {{1,"imageOut",2,"imageIn"},{2,"imageOut",3,"imageIn"}};
+    graph.outputNodeId = 3;
+    const auto local = plan(1024);
+    require(local.valid && !local.stages.at({2,"imageOut"}).regionalExecutable &&
+        local.completePixels == 2 * sampledPixels(local) && local.workingBytes < Raw::kUnmeasuredGpuWorkingBudgetBytes,
+        "Complete local-tone support must retain the whole preview without allocating native color pixels");
+    auto branch = curve; branch.nodeId = 4; graph.nodes.push_back(branch);
+    graph.links.push_back({1,"imageOut",4,"imageIn"});
+    const auto branched = RenderTiling::PlanGraphViewport(graph,7952,5304,1024,request,{{4,"imageOut"}});
+    require(branched.valid && branched.completePixels == 3 * sampledPixels(branched) &&
+        branched.workingBytes - local.workingBytes == sampledPixels(branched) * 16,
+        "Branched RAW consumers must share one sensor reservation while retaining each output");
+
+    graph.nodes = {source}; graph.links.clear(); graph.outputNodeId = 1;
+    graph.nodes[0].rawDevelopment.recipe.technical.demosaicMethod = Raw::DemosaicMethod::Ahd;
+    const auto multipass = plan(1024);
+    require(multipass.completePixels == native.completePixels && multipass.workingBytes >= native.workingBytes,
+        "Multipass demosaicing must retain its conservative native reconstruction reservation");
+    graph.nodes[0] = source; graph.nodes[0].kind = RenderGraphNodeKind::RawProjectSourceSet;
+    const auto bracket = plan(1024);
+    require(bracket.valid && bracket.workingBytes == preview.workingBytes,
+        "Embedded Bayer bracket sources share the same sampled development contract");
+    graph.nodes[0].kind = RenderGraphNodeKind::Image;
+    graph.nodes[0].image.width = 7952; graph.nodes[0].image.height = 5304;
+    const auto image = plan(1024);
+    require(image.valid && image.completePixels == 7952ull * 5304,
+        "An ordinary image upload must keep native accounting until its execution is scaled");
+
+    auto normalized = std::make_shared<Raw::RawImageData>();
+    normalized->metadata = originalMetadata;
+    normalized->metadata.rawWidth = normalized->metadata.visibleWidth = 32;
+    normalized->metadata.rawHeight = normalized->metadata.visibleHeight = 16;
+    normalized->metadata.dngLinearizationTable.resize(2050);
+    normalized->normalizedMosaicBuffer = std::make_shared<const std::vector<float>>(32 * 16, 0.f);
+    normalized->normalizedMosaicInputContract = Raw::NormalizedMosaicInputContract::BracketingPreGain;
+    graph.nodes[0] = source;
+    graph.nodes[0].rawDevelopment.embeddedRawData = normalized;
+    const ViewportPreviewRequest normalizedRequest{WholeImageRegion(32,16),1,1,true,false};
+    const auto normalizedPlan = RenderTiling::PlanGraphViewport(graph,32,16,16,normalizedRequest);
+    require(normalizedPlan.valid && normalizedPlan.workingBytes ==
+        32ull * 16 * 8 + sampledPixels(normalizedPlan) * 8 * 16,
+        "Normalized mosaics must reserve their float samples and variance without an unused preprocessing atlas");
+}
+
 void TestRawViewportTimingLearning() {
     TestLocalToneViewportPlanning();
+    TestRawPreviewMemoryPlanning();
     const auto require = [](bool ok, const char* message) { if (!ok) throw std::runtime_error(message); };
     using namespace Stack::EditorRenderScheduling;
     auto recipe = Stack::RawRecipe::MakeDefaultRecipe("timing-test");

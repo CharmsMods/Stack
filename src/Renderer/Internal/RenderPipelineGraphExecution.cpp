@@ -159,6 +159,7 @@ bool TryResolveIntrinsicGraphCanvas(
 void RenderPipeline::SetGraphCacheBudget(
     std::uint64_t totalCacheBudgetBytes,
     std::uint64_t minimumRawStageCacheBytes, bool reserveRawStages) {
+    ReleaseRetiredGraphTargets();
     const std::uint64_t proportionalRawBudget =
         reserveRawStages ? (totalCacheBudgetBytes / 20u) * 9u : 0;
     // A percentage-only split can leave the RAW cache a few bytes short of
@@ -186,9 +187,12 @@ void RenderPipeline::SetGraphCacheBudget(
         for (auto& [key, entries] : m_RawDevelopStageImageCache)
             for (auto& entry : entries) entry.viewportNativeDependency = false;
 
+    // Interaction preferences are soft between executions. Keeping several
+    // previous neutral stages pinned here would defeat a reduced GPU budget.
     (void)TrimRawDevelopStageCacheToBudget(
         RawDevelopStageCacheTotalBytes(),
-        m_RawDevelopStageCacheBudgetBytes);
+        m_RawDevelopStageCacheBudgetBytes,
+        0, false);
     TrimGraphPersistentCachesToBudget();
     TrimGraphTransientTargetsToBudget();
 }
@@ -196,9 +200,7 @@ void RenderPipeline::SetGraphCacheBudget(
 void RenderPipeline::ExecuteGraphImpl(
     const RenderGraphSnapshot& graph,
     const GraphTopologyIndex& topology) {
-    for(auto& target:m_GraphTransientTargets)if(target.retiredCache) {
-        target.retiredCache=false;target.inUse=false;
-    }
+    ReleaseRetiredGraphTargets();
     TrimGraphTransientTargetsToBudget();
     m_OutputDenoisePending = false;
     m_GraphSourceTexture = 0;

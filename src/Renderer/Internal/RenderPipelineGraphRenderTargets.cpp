@@ -202,6 +202,16 @@ bool RenderPipeline::RetainRetiredGraphTarget(const CachedGraphTexture& entry) {
     } catch(...) {return false;}
 }
 
+void RenderPipeline::ReleaseRetiredGraphTargets() {
+    // Call only between executions, after all evaluation-local borrows ended.
+    // Restore-only requests can then reclaim these allocations without needing
+    // to execute a graph just to make its previous retired targets evictable.
+    for (auto& target : m_GraphTransientTargets) if (target.retiredCache) {
+        target.retiredCache = false;
+        target.inUse = false;
+    }
+}
+
 void RenderPipeline::ReleaseGraphTransientTarget(unsigned int texture) {
     const auto found = std::find_if(
         m_GraphTransientTargets.begin(), m_GraphTransientTargets.end(),

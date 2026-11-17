@@ -972,7 +972,8 @@ private:
     std::uint64_t TrimRawDevelopStageCacheToBudget(
         std::uint64_t currentTotalBytes,
         std::uint64_t maximumBytes,
-        unsigned int protectedTexture = 0);
+        unsigned int protectedTexture = 0,
+        bool honorReusePreferences = true);
     bool StoreRawDevelopStageCacheEntry(
         const std::string& key,
         unsigned int texture,
@@ -999,6 +1000,7 @@ private:
     void DestroyPointwiseProgramCache();
     unsigned int CreateGraphRenderTargetTexture();
     bool RetainRetiredGraphTarget(const CachedGraphTexture& entry);
+    void ReleaseRetiredGraphTargets();
     std::uint64_t EstimateGraphTargetBytes(int width, int height) const;
     void EnsureGraphFloat32Targets();
     void ConfigureGraphTargetPrecision(bool requiredFloat32);

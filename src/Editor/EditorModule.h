@@ -2359,6 +2359,7 @@ private:
     int m_RawWorkspaceGlMaxTextureSize = 0;
     std::uint64_t m_RawWorkspaceVramWorkingBudgetBytes = 0;
     std::uint64_t m_RawWorkspaceVramAvailableBytes = 0;
+    bool m_RawWorkspaceGpuBudgetMeasured = false;
     bool m_RawWorkspaceMinimumMemoryTiling = false;
     std::size_t m_LatestRawPresentationRecipeRevision = 0;
     std::size_t m_LatestRawAuxiliaryRecipeRevision = 0;

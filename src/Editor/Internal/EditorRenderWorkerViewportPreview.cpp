@@ -30,8 +30,8 @@ public:
         m_Pipeline.SetPreviewMaxDimension(m_Edge);
         m_Pipeline.SetRawDevelopmentAnalysisEnabled(m_AnalysisEnabled);
         m_Pipeline.SetRawDevelopmentViewportValidationEnabled(m_ValidationEnabled);
-        // RenderSnapshot's callback captures its local cancellation latch.
-        // Its lifetime ends before this optional, separate execution starts.
+        // This optional execution owns a separate cancellation registration.
+        // RenderSnapshot has already cleared its callback on leaving scope.
         m_Pipeline.SetRenderCancellationContext(0, {});
     }
 
@@ -94,12 +94,13 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
         }
 
         RenderPipeline& pipeline = *m_PersistentPipeline;
+        std::atomic<bool> canceled { false };
         OverviewPipelineState restore(pipeline, result.viewportPreview,
             snapshot.rawWorkspace.analysisRequested);
-        bool canceled = false;
         pipeline.SetRenderCancellationContext(snapshot.generation, [&]() {
-            canceled = canceled || ShouldAbortStaleSnapshot(snapshot);
-            return canceled;
+            if (!canceled.load(std::memory_order_relaxed) && ShouldAbortStaleSnapshot(snapshot))
+                canceled.store(true, std::memory_order_relaxed);
+            return canceled.load(std::memory_order_relaxed);
         });
         pipeline.BeginRawViewportTiming(false);
         pipeline.SetRawViewportRequest({});
@@ -129,7 +130,7 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
         // The overview is a separate graph execution and can still be waiting
         // for denoise even when the native patch is settled. Its provisional
         // current-edit pixels are still valid navigation coverage, not native proof.
-        if (canceled || ShouldAbortStaleSnapshot(snapshot)) return;
+        if (canceled.load(std::memory_order_relaxed) || ShouldAbortStaleSnapshot(snapshot)) return;
         const auto geometry = pipeline.GetGraphViewportGeometry();
         if (!geometry.Valid() || geometry.resident.Partial() ||
             geometry.logicalWidth != result.viewportPreviewGeometry.logicalWidth ||

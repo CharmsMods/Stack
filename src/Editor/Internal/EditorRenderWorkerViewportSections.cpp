@@ -1,4 +1,6 @@
 #include "Editor/EditorRenderWorker.h"
+#include "Editor/GraphRenderMemory.h"
+#include "Renderer/GpuMemoryBudget.h"
 #include "Renderer/ViewportSectionStore.h"
 #include "Renderer/ViewportTextureCopy.h"
 #include "Renderer/GLHelpers.h"
@@ -28,6 +30,27 @@ bool EditorRenderWorker::RestoreViewportSection(const Snapshot& snapshot,Result&
     std::vector<float> pixels,hdr;
     if(!snapshot.viewportSections->Load(snapshot.viewportSection,pixels,hdr,result.error)) {result.success=false;return true;}
     const auto region=snapshot.viewportSections->Raster(snapshot.viewportSection);
+    // Restoring is a normal GPU allocation even though it skips graph work.
+    // Reserve its immutable native image and the display copy made below,
+    // including both renditions when HDR samples were preserved.
+    using namespace Stack::GraphRendering;
+    const auto required = ViewportSectionUploadBytes(region.width, region.height, !hdr.empty());
+    m_CalibrationPipeline.reset();
+    if (m_PersistentPipeline) m_PersistentPipeline->ClearOutput();
+    const auto budget = Raw::ResolveRawGpuMemoryBudget(Stack::Renderer::QueryGpuMemoryBudget());
+    const auto resident = m_PersistentPipeline ? m_PersistentPipeline->GetGraphResidentCacheBytes() : 0;
+    const auto available = budget.usedFallback ? budget.workingBudgetBytes :
+        AddBytes(budget.workingBudgetBytes, resident);
+    const auto cacheAllowance = CacheAllowance(!budget.usedFallback, budget.workingBudgetBytes, resident, required);
+    if (m_PersistentPipeline) m_PersistentPipeline->SetGraphCacheBudget(cacheAllowance, 0, false);
+    result.telemetry.fullFrameEstimatedWorkingSetBytes = required;
+    if (required > available) {
+        result.success = false;
+        result.telemetry.skipReason = RawPreviewSkipReason::MemoryBudget;
+        result.telemetry.fullFrameRefinementBudgetAllowed = false;
+        result.error = "Native section reload is waiting for GPU memory headroom.";
+        return true;
+    }
     auto& output=result.outputTexture;output.width=region.width;output.height=region.height;
     output.texture=GLHelpers::CreateTextureFromData(pixels.data(),region.width,region.height,GL_RGBA32F,GL_RGBA,GL_FLOAT,GL_LINEAR);
     if(!hdr.empty()) {

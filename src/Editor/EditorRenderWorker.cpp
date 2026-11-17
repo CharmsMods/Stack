@@ -39,6 +39,20 @@ namespace {
 using Stack::EditorRendering::Internal::RenderResultRetirement;
 using Stack::EditorRendering::Internal::RenderResultResourceGuard;
 
+// The persistent pipeline and its quad outlive RenderSnapshot's local request
+// state. Clear their borrowed callback before that state leaves scope, including
+// early returns and exceptions. Construct before installing the callback so a
+// failed std::function copy cannot leave a dangling registration behind.
+class RenderCancellationScope {
+public:
+    explicit RenderCancellationScope(RenderPipeline& pipeline) : m_Pipeline(pipeline) {}
+    ~RenderCancellationScope() { m_Pipeline.SetRenderCancellationContext(0, {}); }
+    RenderCancellationScope(const RenderCancellationScope&) = delete;
+    RenderCancellationScope& operator=(const RenderCancellationScope&) = delete;
+private:
+    RenderPipeline& m_Pipeline;
+};
+
 constexpr int kRawWorkspaceGraphScopeMaxDimension = 192;
 constexpr int kRawWorkspaceGradingScopeMaxDimension = 192;
 
@@ -2173,7 +2187,15 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
             if (m_StopRequested) {
                 break;
             }
-            PollDenoiseContinuationsLocked();
+        }
+        // Ready inference results can own large image buffers. Poll and retire
+        // them without keeping UI submissions behind their destruction.
+        PollDenoiseContinuations();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            if (m_StopRequested) {
+                break;
+            }
             const auto dedicated = m_OwnerStates.find(0);
             const bool denoiseCompletionReady =
                 !m_HasPending &&
@@ -2619,7 +2641,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             progressCompleted = std::min(totalProgressSteps, progressCompleted + 1);
             SetProgress(progressCompleted, totalProgressSteps, std::move(label));
         };
-        bool renderCancelled = false;
+        std::atomic<bool> renderCancelled { false };
         const auto submissionThread = std::this_thread::get_id();
         auto lastGpuYield = std::chrono::steady_clock::now();
         unsigned nativeCheckpoints = 0;
@@ -2628,19 +2650,24 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             // The pending job can be withdrawn or replaced while the GPU stage
             // unwinds, so re-reading only the queue can misreport cancellation
             // as a render with no pixels.
-            renderCancelled = renderCancelled || ShouldAbortStaleSnapshot(snapshot);
+            if (renderCancelled.load(std::memory_order_relaxed)) return true;
+            if (ShouldAbortStaleSnapshot(snapshot)) {
+                renderCancelled.store(true, std::memory_order_relaxed);
+                return true;
+            }
             // Bound worker GPU backlog at existing stage/tile checkpoints.
             // CPU helpers may call this callback on another thread: only the
             // context-owning submission thread can drain graphics commands.
-            if (!renderCancelled && snapshot.viewportPreview.enabled &&
+            if (snapshot.viewportPreview.enabled &&
                 std::this_thread::get_id() == submissionThread &&
                 ((snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement && ++nativeCheckpoints >= 2) ||
                  std::chrono::steady_clock::now()-lastGpuYield >= std::chrono::milliseconds(2))) {
-                renderCancelled = !WaitForSubmittedGpuWork() || ShouldAbortStaleSnapshot(snapshot);
+                if (!WaitForSubmittedGpuWork() || ShouldAbortStaleSnapshot(snapshot))
+                    renderCancelled.store(true, std::memory_order_relaxed);
                 lastGpuYield = std::chrono::steady_clock::now();
                 nativeCheckpoints = 0;
             }
-            return renderCancelled;
+            return renderCancelled.load(std::memory_order_relaxed);
         };
         auto collectToneCurveAutoRewriteFeedback = [&]() {
             std::vector<ToneCurveAutoRewriteFeedback> feedbacks =
@@ -2663,6 +2690,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 }
             }
         };
+        RenderCancellationScope cancellationScope(pipeline);
         pipeline.SetRenderCancellationContext(
             snapshot.generation,
             shouldAbortStaleWork);
@@ -2850,7 +2878,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         previewResult.success = true;
                     } catch (const std::exception& e) {
                         previewResult.error = e.what();
-                        previewResult.assetCaptureSuperseded = renderCancelled &&
+                        previewResult.assetCaptureSuperseded = renderCancelled.load(std::memory_order_relaxed) &&
                             !(request.assetCaptureCancellation && request.assetCaptureCancellation->load());
                     }
                     result.previews.push_back(std::move(previewResult)); ++previewIndex;

@@ -7132,9 +7132,8 @@ void TestRawGpuMemoryBudgetPolicy() {
     const Raw::RawGpuMemoryBudgetDecision fallback =
         Raw::ResolveRawGpuMemoryBudget({});
     Require(fallback.usedFallback &&
-            fallback.workingBudgetBytes ==
-                std::numeric_limits<std::uint64_t>::max(),
-        "an unavailable VRAM query should permit a native attempt instead of imposing an arbitrary fallback cap");
+            fallback.workingBudgetBytes == Raw::kUnmeasuredGpuWorkingBudgetBytes,
+        "an unavailable VRAM query must use a bounded allowance instead of assuming unlimited memory");
 
     Raw::RawGpuMemoryBudgetInput normalInput;
     normalInput.queryAvailable = true;
@@ -7201,10 +7200,10 @@ void TestRawGpuMemoryBudgetPolicy() {
             16384,
             fallback.workingBudgetBytes,
             false);
-    Require(fallbackSony.allowed &&
+    Require(!fallbackSony.allowed &&
             fallbackSony.fitsTextureLimits &&
-            fallbackSony.fitsWorkingBudget,
-        "a settled RAW preview should attempt native resolution when the device budget cannot be queried");
+            !fallbackSony.fitsWorkingBudget,
+        "a settled RAW preview must defer oversized native work when device headroom cannot be measured");
 
     const Raw::RawFullFramePreviewDecision oversizedTexture =
         Raw::ResolveRawFullFramePreviewDecision(
