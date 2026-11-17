@@ -5,7 +5,8 @@ param(
     [ValidateSet("Stack", "Burst")][string]$Product = "Stack",
     [int]$Parallel = 14,
     [switch]$Launch,
-    [switch]$SkipClose
+    [switch]$SkipClose,
+    [string]$VersionOverride = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +47,9 @@ $configureArgs = @(
     "-DSTACK_BUILD_MODEL_SERVICE=OFF",
     "-DSTACK_BUILD_BURST_DIAGNOSTICS=OFF",
     "-DSTACK_BUILD_AUXILIARY_TOOLS=OFF"
-    "-DSTACK_MSVC_COMPILE_JOBS=$Parallel"
+    "-DSTACK_MSVC_COMPILE_JOBS=$Parallel",
+    # Pass the empty default too, so ordinary builds clear an earlier package's override.
+    "-DSTACK_VERSION_OVERRIDE:STRING=$VersionOverride"
 )
 
 $localAppSdkRoot = Join-Path $Root "_workspace\deps\Microsoft.WindowsAppSDK\2.2.0"

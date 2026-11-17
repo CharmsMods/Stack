@@ -6,7 +6,8 @@ input was unnecessary, or that every distribution obligation has been met.
 
 ## Before a distributable package
 
-1. Commit the intended source, assets, version and build/install scripts. Check
+1. Commit the intended source, assets, and build/install scripts, including any
+   changes to the default version. Check
    `git status --short` and `git rev-parse HEAD`. Preserve unrelated work; do not
    delete files just to satisfy the check. Source packaging rejects tracked
    changes and non-ignored untracked files. Local experiments can use
@@ -69,6 +70,12 @@ The provenance record hashes the staged executable files after signing and
 labels binary correspondence as unverified or maintainer-reviewed. The helper
 checks the revision and clean tree before and after packaging. Ignored local
 inputs and third-party completeness remain explicit review requirements.
+
+Option 3's version choice is a build setting. When the provenance record includes
+`cmakeVersionOverride`, pass that value with `-VersionOverride` to
+`tools/build/build_stack.ps1`, or configure CMake with
+`-DSTACK_VERSION_OVERRIDE:STRING=<version>`, to reproduce the package version
+from the recorded source.
 
 A downloaded source ZIP without `.git` cannot establish release provenance with
 this helper. Build from a Git checkout when preparing a release. Submodules,

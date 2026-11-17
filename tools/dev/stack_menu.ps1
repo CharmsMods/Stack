@@ -135,7 +135,8 @@ function Invoke-ExtraBuildFolderArchive {
 function Confirm-StackVersionForAction {
     param(
         [object]$Paths,
-        [string]$ActionLabel
+        [string]$ActionLabel,
+        [switch]$PackageOnly
     )
 
     $versionInfo = Get-StackVersionInfo -VersionFile $Paths.VersionFile
@@ -151,49 +152,39 @@ function Confirm-StackVersionForAction {
     Write-Host "      C  Cancel"
     Write-Host ""
     Write-Host "Or type a version as major.minor.patch, for example 1.3.0."
+    if ($PackageOnly) {
+        Write-Host "This selection applies to this package only."
+    }
     Write-Host ""
 
     while ($true) {
         $versionInput = Read-Host "Version"
         if ($null -eq $versionInput) {
-            return $false
+            return
         }
 
         $trimmedInput = $versionInput.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmedInput)) {
-            Write-Host "Keeping current version $($versionInfo.Version)."
-            return $true
-        }
-
-        if ($trimmedInput -match '^[nN]$') {
-            Set-StackVersionInfo -VersionFile $Paths.VersionFile -Version $suggestedVersion
-            Write-Host "Using suggested version $suggestedVersion."
-            return $true
-        }
-
         if ($trimmedInput -match '^[cC]$') {
             Write-Host "Cancelled."
-            return $false
+            return
         }
 
-        if ($trimmedInput -match '^[kK]$') {
-            Write-Host "Keeping current version $($versionInfo.Version)."
-            return $true
+        $version = switch ($trimmedInput) {
+            "" { $versionInfo.Version }
+            "K" { $versionInfo.Version }
+            "N" { $suggestedVersion }
+            default { $trimmedInput }
         }
-
-        if (-not (Test-StackSemanticVersion -Version $trimmedInput)) {
+        if (-not (Test-StackSemanticVersion -Version $version)) {
             Write-Host "Please use a version like 1.1.0."
             continue
         }
 
-        if ($trimmedInput -eq $versionInfo.Version) {
-            Write-Host "Version is already $trimmedInput."
-            return $true
+        if (-not $PackageOnly) {
+            Set-StackVersionInfo -VersionFile $Paths.VersionFile -Version $version
         }
-
-        Set-StackVersionInfo -VersionFile $Paths.VersionFile -Version $trimmedInput
-        Write-Host "Updated Stack version to $trimmedInput."
-        return $true
+        Write-Host "Using version $version."
+        return $version
     }
 }
 
@@ -241,8 +232,9 @@ while ($true) {
                 Pause-StackMenu
             }
             "3" {
-                if (Confirm-StackVersionForAction -Paths $paths -ActionLabel "release package") {
-                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct
+                $packageVersion = Confirm-StackVersionForAction -Paths $paths -ActionLabel "release package" -PackageOnly
+                if ($packageVersion) {
+                    & (Join-Path $Root "tools\release\create_release.ps1") -Root $Root -BuildDir $paths.BuildDir -Product $selectedProduct -VersionOverride $packageVersion
                 }
                 Pause-StackMenu
             }

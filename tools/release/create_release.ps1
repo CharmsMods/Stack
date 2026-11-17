@@ -11,7 +11,8 @@ param(
     [switch]$SkipHashes,
     [string]$PythonExecutable = "python",
     [string]$ReviewedBuildCommit = "",
-    [switch]$CorrespondingSourceReviewed
+    [switch]$CorrespondingSourceReviewed,
+    [string]$VersionOverride = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -139,8 +140,16 @@ if (-not $LocalTestPackage) {
     if ([string]::IsNullOrWhiteSpace($sourceRevision)) { throw "Source preflight did not return a commit." }
 }
 
+$versionInfo = Get-StackVersionInfo -VersionFile $paths.VersionFile
+if ($VersionOverride) {
+    $versionParts = ConvertTo-StackVersionParts -Version $VersionOverride
+    $VersionOverride = "$($versionParts.Major).$($versionParts.Minor).$($versionParts.Patch)"
+    $versionInfo.Version = $VersionOverride
+    $versionInfo.Tag = "v$VersionOverride"
+}
+
 if (-not $SkipBuild) {
-    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $BuildDir -Product $Product
+    & (Join-Path $Root "tools\build\build_stack.ps1") -Root $Root -BuildDir $BuildDir -Product $Product -VersionOverride $VersionOverride
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -163,7 +172,6 @@ $outputRoot = [System.IO.Path]::GetFullPath($OutputDir)
 $OutputDir = Resolve-StackPayloadPath $outputRoot $Product
 Ensure-StackDirectory -Path $OutputDir
 
-$versionInfo = Get-StackVersionInfo -VersionFile (Join-Path $Root "cmake\StackVersion.cmake")
 if ($LocalTestPackage) {
     $stageDir = Join-Path $OutputDir ("{0}-LOCAL-TEST-{1}-win-x64" -f $productDefinition.artifactName, $versionInfo.Tag)
     $portableZipPath = Join-Path $OutputDir ("{0}-LOCAL-TEST-UNSIGNED-{1}-win-x64.zip" -f $productDefinition.artifactName, $versionInfo.Tag)
@@ -254,6 +262,7 @@ if (-not $LocalTestPackage) {
     $sourceBundleDir = Join-Path $OutputDir ($productDefinition.artifactName + "-source")
     $sourceArgs = @($sourceHelper, "--root", $Root, "--output", $sourceBundleDir,
         "--revision", $sourceRevision, "--stage", $stageDir)
+    if ($VersionOverride) { $sourceArgs += @("--cmake-version-override", $VersionOverride) }
     if ($ReviewedBuildCommit) { $sourceArgs += @("--reviewed-build-commit", $ReviewedBuildCommit) }
     if ($CorrespondingSourceReviewed) { $sourceArgs += "--corresponding-source-reviewed" }
     if ($PublicRelease) { $sourceArgs += "--public" }

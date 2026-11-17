@@ -356,6 +356,8 @@ def run(args):
             "publicMode": bool(args.public), "dependencyArtifacts": dependencies,
             "stagedBinaries": binaries, "limitations": LIMITATIONS,
         }
+        if args.cmake_version_override:
+            provenance["cmakeVersionOverride"] = args.cmake_version_override
         write_json(bundle / "release-provenance.json", provenance)
         sums = [sha256_file(path) + "  " + relative for relative, path in inventory_files(bundle)]
         (bundle / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
@@ -388,6 +390,7 @@ def parser():
     result.add_argument("--reviewed-build-commit", help="Maintainer's full SHA assertion; must equal current HEAD")
     result.add_argument("--corresponding-source-reviewed", action="store_true", help="Record maintainer review assertion, not automatic proof")
     result.add_argument("--public", action="store_true", help="Require both maintainer assertions")
+    result.add_argument("--cmake-version-override", help="Record the release build's STACK_VERSION_OVERRIDE")
     return result
 
 
