@@ -167,7 +167,9 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1, 1));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
         ImGui::GetStyle().Alpha * m_RawWorkspaceLabEditingSurfaceReveal);
-    const auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollWithMouse |
+    const bool scrollContent=definition && definition->scrollFloatingContent;
+    const auto decoration=scrollContent ? (ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse) : ImGuiWindowFlags_NoDecoration;
+    const auto flags = decoration | ImGuiWindowFlags_NoMove | (scrollContent?0:ImGuiWindowFlags_NoScrollWithMouse) |
         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoBringToFrontOnFocus |
@@ -221,7 +223,7 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
         !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId))
         ExitFocusedNodeEditor();
-    surface.forwardsImageWheel = enabled && openingOpacity == 1.f && ImGui::GetIO().MouseWheel != 0.f &&
+    surface.forwardsImageWheel = !scrollContent && enabled && openingOpacity == 1.f && ImGui::GetIO().MouseWheel != 0.f &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
         !surface.input.OwnsPointer() && !ImGui::IsAnyItemActive() &&
         !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) &&

@@ -9,6 +9,7 @@ bool DrawPanelTonalRollers(RawWorkspaceEditContext&,std::vector<RawRecipe::RawBe
 bool DrawLightPanel(EditorModule&,RawWorkspaceEditContext&);
 bool DrawCalibrationPanel(EditorModule&,RawWorkspaceEditContext&);
 bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext&);
+bool DrawHslPanelControls(RawWorkspaceEditContext&);
 bool DrawLightPanelSettings(EditorModule&,RawWorkspaceEditContext&);
 bool DrawCalibrationPanelSettings(EditorModule&,RawWorkspaceEditContext&);
 void DrawMissingPanelControls(int order);

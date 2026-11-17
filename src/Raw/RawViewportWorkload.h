@@ -110,6 +110,11 @@ inline std::size_t PostColorWarpCost(const Recipe& input) {
     HashTypedValue(color, Stack::RawRecipe::IsColorWarpEnabled(input.colorWarp));
     HashTypedValue(color, input.colorWarp.version);
     HashTypedValue(color, input.colorWarp.pins.size());
+    HashTypedValue(color, input.colorWarp.hslSelections.size());
+    for(const auto& selection:input.colorWarp.hslSelections) {
+        HashTypedValue(color,selection.bands.size());HashTypedValue(color,selection.excludedBands.size());
+        HashTypedValue(color,selection.areaEnabled);HashTypedValue(color,selection.outline.size());
+    }
     for (const auto& region : input.colorWarp.regions) {
         HashTypedValue(color, region.spatialMode);
         HashTypedValue(color, region.reachPixels);

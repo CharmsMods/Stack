@@ -1,4 +1,5 @@
 #include "Editor/NodeEditors/PhotographicPanelEditors.h"
+#include "Editor/NodeEditors/HslSelectionControls.h"
 #include "Editor/NodeEditors/RawWorkspaceEditContext.h"
 #include "Editor/NodeEditors/PanelRoller.h"
 #include "Editor/NodeEditors/LightBandEditor.h"
@@ -109,7 +110,8 @@ bool DrawCalibrationPanel(EditorModule&,RawWorkspaceEditContext& c) {
     ImGui::EndDisabled();
     return changed;
 }
-bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) {
+bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) { return DrawHslPanelControls(c); }
+bool DrawHslPanelControls(RawWorkspaceEditContext& c) {
     bool changed=false;
     if(c.recipe.colorWarp.version<5) {
         ImGui::TextDisabled("Legacy color processing");
@@ -120,12 +122,7 @@ bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) {
     static const char* names[]{"   Red","   Orange","   Yellow","   Green","   Aqua","   Blue","   Purple","   Magenta"};
     static const ImVec4 colors[]={{.9f,.3f,.3f,1},{.9f,.55f,.25f,1},{.85f,.8f,.3f,1},{.3f,.75f,.4f,1},{.3f,.75f,.75f,1},{.35f,.55f,.9f,1},{.65f,.4f,.85f,1},{.85f,.4f,.7f,1}};
     const float width=ImGui::GetContentRegionAvail().x;
-    for(int channel=0;channel<3;++channel) {
-        if(channel)ImGui::SameLine(0,4);
-        ImGui::PushStyleColor(ImGuiCol_Button,ImGui::GetStyleColorVec4(state.hslChannel==channel?ImGuiCol_ButtonActive:ImGuiCol_ChildBg));
-        if(ImGui::Button(channels[channel],{(width-8)/3,0}))state.hslChannel=channel;
-        ImGui::PopStyleColor();
-    }
+    HslSegmented("Global HSL",channels,3,state.hslChannel,state.hslChannelMotion);
     ImGui::BeginDisabled(!c.recipe.colorWarp.enabled);
     for(int family=0;family<8;++family) {
         const auto found=std::find_if(c.recipe.colorWarp.pins.begin(),c.recipe.colorWarp.pins.end(),

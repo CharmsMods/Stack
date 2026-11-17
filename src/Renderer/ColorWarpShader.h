@@ -1,4 +1,5 @@
 #pragma once
+#include "Renderer/HslSelectionShader.h"
 // Shared RAW and graph Color Warp pass; mirrors Raw/ColorWarpMath and ApplyPreparedColorWarp.
 namespace Stack::Renderer::ColorWarp {
 inline constexpr const char* Fragment=R"GLSL(
@@ -90,6 +91,7 @@ vec3 hslAdjustment(float hue) {
     }
     return vec3(0.0);
 }
+)GLSL" STACK_HSL_SELECTION_GLSL R"GLSL(
 void main() {
     vec4 inputColor=texture(uInputTex,vUV);
     vec3 xyz=workingToXyz(inputColor.rgb),lab=xyzToOklab(xyz);
@@ -146,7 +148,7 @@ void main() {
     movement*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
     float familyGain=1.0;
     if(uHslModel!=0) {
-        vec3 family=hslAdjustment(hue);
+        vec3 family=resolveHsl(hslAdjustment(hue),hue,ev);
         float guard=neutral*smoothstep(-16.0,-12.0,ev);
         float influence=uStrength*(1.0-protection);
         adjustment.x+=family.x*influence*guard;

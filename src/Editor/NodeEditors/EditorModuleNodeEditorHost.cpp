@@ -9,6 +9,7 @@
 #include "Editor/NodeEditors/NodeEditorPanelPresentation.h"
 #include "Editor/NodeEditors/PanelRoller.h"
 #include "Editor/NodeEditors/PhotographicPanelEditors.h"
+#include "Editor/NodeEditors/HslSelectionEditor.h"
 #include "imgui_internal.h"
 #include <unordered_set>
 #include <cstdio>
@@ -403,6 +404,7 @@ void EditorModule::RenderNodeEditorPanel() {
                         context.presentation=NodeEditorPresentation::Panel;
                         context.canEdit &= enabled.value_or(true);
                         const bool needsAnalysis=definition->panelAnalysis!=RawDevelopmentGraphScopeStage::None ||
+                            (definition->legacyTool==RawLabTool::Color && HslNeedsAnalysis(context.State<HslSelectionEditorState>())) ||
                             (context.State<PanelControlState>().settingsOpen && definition->inputAnalysis!=RawDevelopmentGraphScopeStage::None);
                         if (onScreen && context.canEdit && needsAnalysis && !nextAnalysis) {
                             const auto identity=NodeInputAnalysisIdentity(target,

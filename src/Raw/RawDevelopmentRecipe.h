@@ -8,6 +8,7 @@
 #include "Raw/Curves/CurveTypes.h"
 #include "Raw/Curves/LightBands.h"
 #include "Raw/Detail/DetailContrast.h"
+#include "Raw/HslSelectionTypes.h"
 #include "ThirdParty/json.hpp"
 
 #include <array>
@@ -398,6 +399,8 @@ struct RawColorWarpRecipe {
     std::vector<RawColorWarpPin> pins;
     std::vector<RawColorWarpRegion> regions;
     RawColorWarpCombine combine = RawColorWarpCombine::Accumulate;
+    std::vector<HslSelection> hslSelections;
+    bool limitHslToSelections=false;
 };
 
 struct RawColorWarpCoordinate {
@@ -536,7 +539,8 @@ std::array<float, 3> ApplyPreparedColorWarp(
     const RawColorWarpRecipe& colorWarp,
     const std::array<float, 3>& sceneRgb,
     Raw::RawWorkingSpace workingSpace,
-    const std::vector<RawColorWarpMaskSample>* masks = nullptr);
+    const std::vector<RawColorWarpMaskSample>* masks = nullptr,
+    std::array<float,2> imagePosition = {.5f,.5f});
 nlohmann::json DefaultViewTransformJson();
 inline constexpr const char* kViewContrastModelPivotedLogV2 = "pivoted-log-v2";
 float EvaluateViewTransformDisplayLuma(

@@ -1,4 +1,5 @@
 #include "Raw/ColorWarpHsl.h"
+#include "Raw/HslSelections.h"
 #include "Raw/Demosaic/DemosaicCatalog.h"
 #include "ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -51,7 +52,7 @@ bool HasPreparedColorWarpEffect(const RawColorWarpRecipe& colorWarp) {
     if (!colorWarp.enabled || colorWarp.strength <= 0.f) {
         return false;
     }
-    return std::any_of(
+    return HslHasOwnAdjustment(colorWarp) || std::any_of(
         colorWarp.pins.begin(),
         colorWarp.pins.end(),
         [](const RawColorWarpPin& pin) {
@@ -1514,7 +1515,7 @@ std::array<float, 3> ApplyPreparedColorWarp(
     const RawColorWarpRecipe& colorWarp,
     const std::array<float, 3>& sceneRgb,
     Raw::RawWorkingSpace workingSpace,
-    const std::vector<RawColorWarpMaskSample>* masks) {
+    const std::vector<RawColorWarpMaskSample>* masks, std::array<float,2> imagePosition) {
     if (!HasPreparedColorWarpEffect(colorWarp)) {
         return sceneRgb;
     }
@@ -1547,7 +1548,8 @@ std::array<float, 3> ApplyPreparedColorWarp(
     float familyGain=1.f;
     if(colorWarp.version>=5) {
         const auto normalized=ColorWarpSelectionCoordinate(coordinate);
-        const auto family=EvaluateColorWarpHsl(PrepareColorWarpHsl(colorWarp),std::hypot(normalized[0],normalized[1])>1e-6f?ColorWarpHue(normalized[0],normalized[1]):0.f);
+        auto family=EvaluateColorWarpHsl(PrepareColorWarpHsl(colorWarp),std::hypot(normalized[0],normalized[1])>1e-6f?ColorWarpHue(normalized[0],normalized[1]):0.f);
+        family=ResolveHslSelections(colorWarp,coordinate,family,imagePosition);
         const auto smooth=[](float x){x=std::clamp(x,0.f,1.f);return x*x*(3.f-2.f*x);};
         const float guard=smooth((std::hypot(normalized[0],normalized[1])-.02f)/.08f)*smooth((coordinate.sceneEv+16.f)/4.f);
         const float influence=colorWarp.strength*(1.f-protection);

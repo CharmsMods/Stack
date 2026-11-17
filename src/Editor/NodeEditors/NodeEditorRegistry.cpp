@@ -4,6 +4,7 @@
 #include "Editor/NodeEditors/ToneCurveEditor.h"
 #include "Editor/NodeEditors/FilmGrainEditor.h"
 #include "Editor/NodeEditors/PhotographicPanelEditors.h"
+#include "Editor/NodeEditors/HslSelectionEditor.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/Internal/RawLab/RawCalibrationEditor.h"
@@ -97,8 +98,30 @@ struct NodeEditorRegistration {
             },-1,RawDevelopmentGraphScopeStage::LocalRangeInput);
         add(Kind::ToneCurve,Tool::Tone,{400,400},DrawToneCurve,DrawToneCurveSettings,ResetToneCurve,
             -1,RawDevelopmentGraphScopeStage::FinishToneInput);
-        add(Kind::ColorWarp,Tool::Color,{400,560},
-            [](EditorModule& e,RawWorkspaceEditContext& c){return e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Graph);},
+        add(Kind::ColorWarp,Tool::Color,{420,760},
+            [](EditorModule& e,RawWorkspaceEditContext& c){
+                bool changed=DrawHslPanel(e,c);
+                changed|=DrawHslSelections(c);
+                auto& selection=c.State<HslSelectionEditorState>();
+                if(!selection.selected.empty()) {
+                    e.m_RawWorkspaceLabUi.colorWarpSamplingArmed=selection.tool!=HslImageTool::None;
+                    e.m_RawWorkspaceLabUi.colorWarpPendingCircleDrawing=selection.drawing;
+                    e.m_RawWorkspaceLabUi.colorWarpDiagnosticLocked=false;selection.photoRouting=true;
+                }else if(selection.photoRouting) {
+                    e.m_RawWorkspaceLabUi.colorWarpSamplingArmed=false;
+                    e.m_RawWorkspaceLabUi.colorWarpPendingCircleDrawing=false;selection.photoRouting=false;
+                }
+                if(ImGui::TreeNode("Advanced Color Warp")) {
+                    const auto start=ImGui::GetCursorScreenPos();const float width=ImGui::GetContentRegionAvail().x;
+                    const bool legacyChanged=e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Graph);
+                    if(legacyChanged || (ImGui::IsMouseClicked(0) && ImRect(start,{start.x+width,ImGui::GetCursorScreenPos().y}).Contains(ImGui::GetIO().MousePos))) {
+                        selection.EndInteraction();selection.selected.clear();selection.photoRouting=false;
+                    }
+                    changed|=legacyChanged;
+                    ImGui::TreePop();
+                }
+                return changed;
+            },
             [](EditorModule& e,RawWorkspaceEditContext& c){
                 return e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Settings);
             },[](EditorModule& e,RawWorkspaceEditContext& c){
@@ -141,11 +164,9 @@ struct NodeEditorRegistration {
                 editor.panelPrimary=DrawCalibrationPanel;editor.panelSettings=DrawCalibrationPanelSettings;
                 editor.panelLabel="Calibration";editor.panelOrder=3;editor.panelHeight=260;
             } else if(editor.legacyTool==Tool::Color) {
-                editor.panelPrimary=[](EditorModule& e,RawWorkspaceEditContext& c) {
-                    bool changed=DrawHslPanel(e,c);
-                    changed|=e.RenderRawWorkspaceLabColorSurface(c,RawLabControlSection::Graph);
-                    return changed;
-                };editor.panelLabel="HSL";editor.panelOrder=2;editor.panelHeight=320;
+                editor.panelPrimary=editor.primary;
+                editor.scrollFloatingContent=true;
+                editor.panelLabel="HSL";editor.panelOrder=2;editor.panelHeight=360;
             }
         }
         return result;

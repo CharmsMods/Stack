@@ -16,6 +16,8 @@
 #include <cmath>
 #include "Utils/FloatingSlider.h"
 namespace Stack::Validation {
+bool ValidateHslSelectionMath(unsigned program);
+bool CaptureHslSelectionControls();
 bool ValidateColorWarpMove() {
     if(!glfwInit())return false;
     glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
@@ -171,6 +173,7 @@ out vec2 vUV;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vUV=p;gl_
         }
     }
     std::cout<<"HSL endpoint/identity/HDR/round-trip cases: "<<hslCases<<"; passed="<<ok<<'\n';
+    ok &= ValidateHslSelectionMath(program);
     glDeleteVertexArrays(1,&vao);glDeleteProgram(program);
     
     ImGui::CreateContext();auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.DisplaySize={720,860};io.DeltaTime=1.f/60;
@@ -201,6 +204,7 @@ out vec2 vUV;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vUV=p;gl_
         std::filesystem::create_directories("outputs/validation/color-warp-selection");
         ok &= stbi_write_png("outputs/validation/color-warp-selection/controls.png",720,860,4,pixels.data(),720*4)!=0;
     }
+    ok &= CaptureHslSelectionControls();
     ImGui_ImplOpenGL3_Shutdown();ImGui::DestroyContext();glfwDestroyWindow(window);glfwTerminate();
     std::cout<<"Color Warp Move/Turn CPU-GPU difference: "<<worst<<"; passed="<<ok<<'\n';return ok;
 }

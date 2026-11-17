@@ -1,4 +1,5 @@
 #include "Raw/ColorWarpMath.h"
+#include "Raw/HslSelectionSerialization.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -31,7 +32,9 @@ RawColorWarpRecipe::RawColorWarpRecipe() {
     pins=families;
 }
 RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp) {
-    colorWarp.version = colorWarp.version == 4 ? 4 : 5;
+    colorWarp.version = colorWarp.version == 4 ? 4 : colorWarp.version==6?6:5;
+    SanitizeHslSelections(colorWarp.hslSelections);
+    if(!colorWarp.hslSelections.empty() || colorWarp.limitHslToSelections)colorWarp.version=6;
     colorWarp.strength = ClampFinite(colorWarp.strength, 1.0f, 0.0f, 2.0f);
     if (colorWarp.pins.size() > kMaxRawColorWarpPins) {
         colorWarp.pins.resize(kMaxRawColorWarpPins);
@@ -113,6 +116,10 @@ nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
     result["version"] = colorWarp.version;
     result["enabled"] = colorWarp.enabled;
     result["strength"] = colorWarp.strength;
+    if(colorWarp.version>=6) {
+        result["hslSelections"]=SerializeHslSelections(colorWarp.hslSelections);
+        result["limitHslToSelections"]=colorWarp.limitHslToSelections;
+    }
     result["coordinateModel"] = "oklab-joint-luminance-d65-v4";
     result["combine"] = colorWarp.combine==RawColorWarpCombine::Blend ? "blend" : "accumulate";
     result["regions"] = nlohmann::json::array();
@@ -178,13 +185,17 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
     if (!value.is_object()) {
         return result;
     }
-    if ((value.value("version", 0) != 4 && value.value("version", 0) != 5) ||
+    if ((value.value("version", 0) != 4 && value.value("version", 0) != 5 && value.value("version",0)!=6) ||
         value.value("coordinateModel", std::string()) !=
             "oklab-joint-luminance-d65-v4") {
         if(value.empty()) return result;
         throw std::runtime_error("Unsupported Color Warp format.");
     }
     result.version = value.value("version", 4);
+    if(result.version>=6) {
+        result.hslSelections=DeserializeHslSelections(value.value("hslSelections",nlohmann::json::array()));
+        result.limitHslToSelections=value.value("limitHslToSelections",false);
+    }
     result.enabled = value.value("enabled", true);
     result.strength = JsonFloat(value, "strength", 1.0f);
     result.combine=value.value("combine",std::string("accumulate"))=="blend" ? RawColorWarpCombine::Blend : RawColorWarpCombine::Accumulate;

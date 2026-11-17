@@ -62,6 +62,22 @@ HSL/Color Warp saturation is displayed as 0-600%, with 100% unchanged; the
 stored signed delta remains unchanged. These are views
 of existing authored parameters, not a second recipe or an automatic graph repair.
 
+HSL selections belong to the same Color Warp recipe. Version 6 adds ordered
+local influences and optional per-channel frozen global curves; versions 4/5
+retain their existing processing. Selection uses the incoming image, and local
+values resolve before the single HSL transform. Included brightness bands form
+a union, exclusions subtract coverage, and a drawn outline intersects it. Later
+selections override earlier ones with soft coverage. An unfinished enabled area
+has zero coverage. Outline coordinates refer to the full incoming image, including
+when a preview executes on a resident crop. The panel and floating editor use the
+same selection editor and normal node history; legacy custom Color Warp remains
+available in Advanced Color Warp. Presentation-only previews and tool choices
+are not saved edits. Request input analysis only while sampling or showing a
+selection preview, and reuse coverage analysis across adjustment-only edits. HSL's
+composite inspector explicitly opts into floating-content scrolling when its
+expanded controls exceed the display height. Wheel input stays with that inspector
+rather than also zooming the photo; other floating editors retain their layout.
+
 Interpretation replaces the View sidebar's Layers tab and edits the prepared
 RAW source independently of the selected adjustment. Demosaicing uses a
 horizontal text carousel with faded edges, click/drag/wheel navigation and a

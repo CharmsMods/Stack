@@ -25,6 +25,8 @@ struct NodeEditorDefinition {
     // image input. Its legacy stage names identify readback formats only.
     RawDevelopmentGraphScopeStage inputAnalysis{};
     bool hasFloatingSurface = true;
+    // Composite inspectors retain access to disclosed controls on small screens.
+    bool scrollFloatingContent = false;
     // Optional photographic-panel surface. The full registry/catalog remains
     // available to Graph and to floating tools outside this fixed workspace.
     Draw panelPrimary = nullptr;

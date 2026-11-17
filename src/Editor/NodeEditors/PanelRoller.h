@@ -1,6 +1,7 @@
 #pragma once
 #include <imgui.h>
 #include <unordered_map>
+#include "Animation/ScalarChannel.h"
 
 namespace Stack::Editor {
 struct PanelRollerState {
@@ -12,6 +13,7 @@ struct PanelRollerState {
 struct PanelControlState {
     std::unordered_map<ImGuiID,PanelRollerState> rollers;
     int hslChannel=0;
+    Animation::ScalarChannel hslChannelMotion{0};
     int selectedFamily=0;
     bool settingsOpen=false;
     void EndInteraction() { for(auto& entry:rollers) entry.second.EndInteraction(); }

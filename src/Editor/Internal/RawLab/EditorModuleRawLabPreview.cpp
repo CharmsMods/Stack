@@ -8,6 +8,7 @@
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/Internal/RawLab/RawFloatingInputTrace.h"
 #include "Editor/NodeEditors/ColorWarpFeedback.h"
+#include "Editor/NodeEditors/HslSelectionEditor.h"
 #include "Editor/NodeEditors/NodeInputAnalysisIdentity.h"
 
 #include "Async/TaskSystem.h"
@@ -551,7 +552,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             navigationInput.wheel = (forwardedWheel ? m_RawFloatingSurface.imageWheel : previewIo.MouseWheel) * .5f;
             navigationInput.seconds = previewIo.DeltaTime;
             navigationInput.hovered = previewHovered;
-            navigationInput.wheelAllowed = !previewIo.KeyAlt && (!colorLayout ||
+            navigationInput.wheelAllowed = !ui.colorWarpPendingCircleDrawing && !previewIo.KeyAlt && (!colorLayout ||
                 (!m_RawWorkspaceLabUi.colorWarpPendingCircleActive &&
                  !(m_RawWorkspaceLabUi.colorWarpInspectionActive &&
                    (previewIo.KeyCtrl || previewIo.KeyShift))));
@@ -572,7 +573,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             navigationInput.minimumZoom = std::min({.10f, navigation.zoom, navigation.target});
             navigationInput.maximumZoom = std::max({12.0f, navigation.zoom, navigation.target});
             const float targetBefore = navigation.target;
-            if ((m_EditingRawLayerMask && m_RawLayerMaskDrag >= 0) ||
+            if (ui.colorWarpPendingCircleDrawing || (m_EditingRawLayerMask && m_RawLayerMaskDrag >= 0) ||
                 (m_RawAssetCapture.armed && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ui.previewSpacePanning)) {
                 // Keep the image under an authored stroke fixed through release.
                 navigation.target = navigation.zoom;
@@ -1304,6 +1305,17 @@ void EditorModule::RenderColorWarpAreaSelector(const RawWorkspaceEditContext& co
     const std::size_t colorScopePixelCount = colorScope.valid && colorScope.stage == RawDevelopmentGraphScopeStage::ColorWarpInput &&
         colorScope.width > 0 && colorScope.height > 0 ? std::size_t(colorScope.width) * colorScope.height : 0;
     const bool scopeReady = colorScopePixelCount && colorScope.pixels.size() / 3 >= colorScopePixelCount;
+    if(context.nodeTarget) {
+        auto& selections=m_NodeEditorState.Get<Stack::Editor::HslSelectionEditorState>(*context.nodeTarget);
+        if(!selections.selected.empty()) {
+            const bool used=Stack::Editor::DrawHslSelectionImage(selections,context,colorScope,
+                colorScope.graphInputFingerprint?colorScope.graphInputFingerprint:fingerprint,imageRect,
+                !RawFloatingSurfaceOwnsPointer() && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem),
+                [this](std::function<void()> job){return ProjectTasks().SubmitHighPriority("Previewing HSL selection",std::move(job));});
+            m_RawWorkspaceLabUi.colorWarpPendingCircleDrawing=selections.drawing;
+            if(used || !selections.selected.empty())return;
+        }
+    }
     auto& colorUi = m_RawWorkspaceLabUi;
     const auto displayToSource = [&](float displayU, float displayV) {
         const auto& crop = previewRecipe.cropRotation;

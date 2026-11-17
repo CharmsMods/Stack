@@ -1,4 +1,5 @@
 #include "Raw/ColorWarpHsl.h"
+#include "Raw/HslSelections.h"
 #include "Renderer/ColorWarpShader.h"
 #include "Renderer/RenderPipeline.h"
 
@@ -115,8 +116,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     if (m_RawDevelopmentColorWarpProgram == 0) {
         std::cerr << "[RenderPipeline] RAW Color Warp shader compilation failed; "
                      "passing input texture through.\n";
-        if (m_RawDevelopmentColorWarpRequireSpatialResult &&
-            !colorWarp.regions.empty()) {
+        if ((m_RawDevelopmentColorWarpRequireSpatialResult && !colorWarp.regions.empty()) ||
+            !colorWarp.hslSelections.empty() || colorWarp.limitHslToSelections) {
             if (result.owned && result.texture != 0u) {
                 glDeleteTextures(1, &result.texture);
             }
@@ -464,6 +465,18 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     }
 
     const unsigned int inputTexture = result.texture;
+    Stack::Renderer::ScopedGLTexture selectionTexture;
+    if(!colorWarp.hslSelections.empty()) {
+        const auto selectionData=Stack::RawRecipe::PackHslSelections(colorWarp);
+        selectionTexture.Reset(GLHelpers::CreateTextureFromData(selectionData.data(),Stack::RawRecipe::kHslDataWidth,
+            static_cast<int>(colorWarp.hslSelections.size()),GL_RGBA32F,GL_RGBA,GL_FLOAT));
+        if(!selectionTexture) {
+            if(result.owned && result.texture)glDeleteTextures(1,&result.texture);
+            result.texture=0;result.owned=false;
+            m_LastGraphExecutionStats.lastSpecializedFailure="HSL selection data could not be uploaded.";
+            return false;
+        }
+    }
     Stack::Renderer::ScopedGLTexture processed(CreateGraphRenderTargetTexture());
     const bool rendered = RenderIntoGraphTargetTexture(
         processed.Get(),
@@ -471,6 +484,14 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             while (glGetError() != GL_NO_ERROR) {
             }
             glUseProgram(m_RawDevelopmentColorWarpProgram);
+            glActiveTexture(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,selectionTexture?selectionTexture.Get():inputTexture);
+            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslSelections"),5);
+            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslSelectionCount"),static_cast<int>(colorWarp.hslSelections.size()));
+            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslLimit"),colorWarp.limitHslToSelections);
+            const std::array<float,4> region=inputRegion.Valid()?std::array<float,4>{
+                float(inputRegion.x)/inputRegion.fullWidth,float(inputRegion.y)/inputRegion.fullHeight,
+                float(inputRegion.width)/inputRegion.fullWidth,float(inputRegion.height)/inputRegion.fullHeight}:std::array<float,4>{0,0,1,1};
+            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslImageRegion"),1,region.data());
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, inputTexture);
             glUniform1i(
@@ -540,8 +561,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     if (!rendered || !processed || drawError != GL_NO_ERROR) {
         std::cerr << "[RenderPipeline] RAW Color Warp pass failed; passing "
                      "input texture through.\n";
-        if (m_RawDevelopmentColorWarpRequireSpatialResult &&
-            hasSpatialRegions) {
+        if ((m_RawDevelopmentColorWarpRequireSpatialResult && hasSpatialRegions) ||
+            !colorWarp.hslSelections.empty() || colorWarp.limitHslToSelections) {
             if (result.owned && result.texture != 0u) {
                 glDeleteTextures(1, &result.texture);
             }
