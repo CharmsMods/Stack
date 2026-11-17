@@ -3,6 +3,9 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <thread>
+#include <algorithm>
+#include <cstddef>
 
 #ifndef GL_RG
 #define GL_RG 0x8227
@@ -225,13 +228,34 @@ unsigned int CreateTextureFromData(
     if (texture == 0) return 0;
     glBindTexture(GL_TEXTURE_2D, texture);
     savedUnpack.ConfigureTightCpuUpload();
-    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0,
-        format, type, data);
+    // Large linear RAW uploads otherwise hold the shared driver for hundreds
+    // of milliseconds in one glTexImage2D call. Allocate once, then transfer
+    // tightly packed float rows in bounded chunks so the UI context can submit
+    // between calls. This changes neither precision nor the image sample grid.
+    const std::size_t components = format == GL_RGBA ? 4 : format == GL_RGB ? 3 :
+        format == GL_RG ? 2 : format == GL_RED ? 1 : 0;
+    const std::size_t rowBytes = std::size_t(width)*components*sizeof(float);
+    GLenum transferError = GL_NO_ERROR;
+    if (data && type == GL_FLOAT && rowBytes && rowBytes*std::size_t(height) > 16u*1024u*1024u) {
+        glTexImage2D(GL_TEXTURE_2D,0,internalFormat,width,height,0,format,type,nullptr);
+        transferError=glGetError();
+        const int rows=std::max(1,int((4u*1024u*1024u)/rowBytes));
+        for(int y=0;transferError==GL_NO_ERROR && y<height;y+=rows) {
+            glTexSubImage2D(GL_TEXTURE_2D,0,0,y,width,std::min(rows,height-y),format,type,
+                static_cast<const unsigned char*>(data)+std::size_t(y)*rowBytes);
+            glFlush();
+            transferError=glGetError();
+            std::this_thread::yield();
+        }
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, data);
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    const GLenum uploadError = glGetError();
+    const GLenum parameterError = glGetError();
+    const GLenum uploadError = transferError != GL_NO_ERROR ? transferError : parameterError;
     savedUnpack.Restore();
     savedTexture.Restore();
     if (uploadError != GL_NO_ERROR) {

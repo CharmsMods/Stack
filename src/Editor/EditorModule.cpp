@@ -1113,7 +1113,10 @@ bool EditorModule::SubmitRenderSnapshot(
     }
     const bool tracePreparation = Stack::UiPerformance::Probe::Active();
     const auto preparationStarted = tracePreparation ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const bool requestedNativeSection = snapshot.viewportSection >= 0;
     ConfigureViewportPreview(snapshot);
+    if (requestedNativeSection && (!ActiveViewportPreviewState().refinement ||
+        snapshot.viewportSections != ActiveViewportPreviewState().sections)) return false;
     if (tracePreparation) {
         const double elapsed = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-preparationStarted).count();
         if (elapsed > 5.0) std::clog << "Viewport planning ms=" << elapsed << '\n';

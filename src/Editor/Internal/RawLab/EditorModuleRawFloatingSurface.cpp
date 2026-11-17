@@ -29,7 +29,9 @@ void EditorModule::RenderRawFloatingControls(RawWorkspaceEditContext& context,
     surface.forwardsImageWheel = false;
     UpdateNodeEditorPanelVisibility();
     const auto* selectedDefinition=SelectedNodeEditor();
-    if (m_NodeEditorPanel.visible || m_RawToolPickerAmount >= 1.f ||
+    if (m_NodeEditorPanel.visible ||
+        (m_ViewSectionOpen && m_ViewSectionTab==0 && !IsBracketingToolActive() && !IsFocusedNodeEditor()) ||
+        m_RawToolPickerAmount >= 1.f ||
         (!IsFocusedNodeEditor() && selectedDefinition && selectedDefinition->panelPrimary)) {
         surface.input={};surface.frame=-2;m_RawActiveControlFrame=-2;
         m_RawToolGlass->BeginFrame(false,{});

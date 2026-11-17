@@ -7,6 +7,7 @@
 #include "Renderer/SceneColorGuidePlanning.h"
 #include <algorithm>
 #include <unordered_set>
+#include <stdexcept>
 
 void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     RenderPipeline& pipeline, Result& result) {
@@ -79,11 +80,21 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     guideWorking=AddBytes(guideWorking,colorMaskWorking);
     const auto completeWorking = AddBytes(targetBytes(width, height, AddBytes(surfaces, rawStages ? 7 : 3)),guideWorking);
     std::uint64_t working = completeWorking;
+    bool completeProcessingBoundary = false;
     if (result.viewportPreview.enabled) {
         const auto mainPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
             snapshot.width, snapshot.height, snapshot.previewMaxDimension, result.viewportPreview, {}, retainedFloat32);
         if (mainPlan.valid) {
             working = mainPlan.workingBytes;
+            if (snapshot.viewportSections) {
+                for (const auto& [endpoint,stage] : mainPlan.stages) {
+                    if (stage.regionalExecutable) continue;
+                    const auto node=std::find_if(snapshot.graph.nodes.begin(),snapshot.graph.nodes.end(),
+                        [&](const auto& item) {return item.nodeId==endpoint.nodeId;});
+                    if (node!=snapshot.graph.nodes.end() && node->kind==RenderGraphNodeKind::RawOperation)
+                        completeProcessingBoundary=true;
+                }
+            }
             std::uint64_t publishedMain = 0;
             const auto output = mainPlan.stages.find(mainPlan.output);
             if (output != mainPlan.stages.end()) {
@@ -107,13 +118,33 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
             }
         }
     }
+    // Published output is immutable and independently leased. Retire the
+    // prior execution's comparison borrow before choosing section cache victims.
+    if (snapshot.viewportSections) pipeline.ClearOutput();
     const auto memory = Stack::Renderer::QueryGpuMemoryBudget();
     const auto budget = Raw::ResolveRawGpuMemoryBudget(memory);
     const auto resident = pipeline.GetGraphResidentCacheBytes();
+    if (snapshot.viewportSections && memory.queryAvailable &&
+        working > AddBytes(budget.workingBudgetBytes,resident)) {
+        throw std::runtime_error("Native section working set exceeds GPU headroom including reclaimable graph caches.");
+    }
     // Device usage already includes accepted/queued presentation textures and
     // other pipelines. Only this pipeline's evictable caches are added back.
+    // Repeated native sections share complete-input boundaries. The ordinary
+    // 1.25 GiB cap splits into RAW/image pools too small for even one 50 MP
+    // float32 boundary, causing whole-image processing for every section.
+    // Permit a larger cache only from headroom left AFTER the conservative
+    // active working set. Low-memory devices retain the same admission limit.
+    const auto ceiling = snapshot.viewportSections && memory.queryAvailable ?
+        3ull*1024*1024*1024 : 1280ull*1024*1024;
     const auto allowance = CacheAllowance(memory.queryAvailable,
-        budget.workingBudgetBytes, resident, working);
-    pipeline.SetGraphCacheBudget(allowance, snapshot.rawWorkspace.minimumRawStageCacheBytes, rawStages);
+        budget.workingBudgetBytes, resident, working, ceiling);
+    // When a complete downstream operation is required, its finished image
+    // is the reusable boundary for subsequent sections. Giving half the small
+    // remaining allowance to earlier RAW stages can evict that boundary every
+    // time. Prefer the downstream cache; a hit skips those RAW stages too.
+    pipeline.SetGraphCacheBudget(allowance,
+        completeProcessingBoundary ? 0 : snapshot.rawWorkspace.minimumRawStageCacheBytes,
+        rawStages && !completeProcessingBoundary);
     result.telemetry.fullFrameEstimatedWorkingSetBytes = working;
 }

@@ -1299,7 +1299,7 @@ if (STACK_BUILD_GRAPH_TESTS)
     )
 
     if (BUILD_TESTING)
-        add_executable(StackViewportPreviewTests tools/tests/viewport_preview_tests.cpp)
+        add_executable(StackViewportPreviewTests tools/tests/viewport_preview_tests.cpp src/Renderer/ViewportSectionStore.cpp)
         target_include_directories(StackViewportPreviewTests PRIVATE src)
         add_test(NAME StackRenderer.ViewportPreview COMMAND StackViewportPreviewTests)
         set_tests_properties(StackRenderer.ViewportPreview PROPERTIES LABELS "renderer;viewport;cpu")

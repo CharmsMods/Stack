@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpHsl.h"
 #include "Editor/Internal/RawLab/RawLabColorSurface.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Editor/NodeEditors/ColorWarpEditorState.h"
@@ -153,7 +154,8 @@ bool RenderRawLabColorSettings(RawLabColorSurfaceArgs& args) {
         ImGui::SameLine();
         if(BareTextButton("Move",selected.moveColors)) {changed|=!selected.moveColors;selected.moveColors=true;}
         changed|=Setting(args,"Strength","pin-strength",selected.strength,0,2,1,"%.2f");
-        changed|=Setting(args,"Smoothing","pin-smooth",selected.smoothSelection,0,1,0,"%.2f");
+        if(RawRecipe::UsesColorWarpHsl(args.colorWarp,selected))ImGui::TextDisabled("Smooth hue transitions");
+        else changed|=Setting(args,"Smoothing","pin-smooth",selected.smoothSelection,0,1,0,"%.2f");
         if(selected.family<0) {
             changed|=Setting(args,"Green / red tint","pin-tint-a",selected.tintA,-.2f,.2f,0,"%+.3f");
             changed|=Setting(args,"Blue / yellow tint","pin-tint-b",selected.tintB,-.2f,.2f,0,"%+.3f");

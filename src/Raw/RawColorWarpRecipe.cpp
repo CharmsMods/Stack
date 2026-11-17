@@ -31,7 +31,7 @@ RawColorWarpRecipe::RawColorWarpRecipe() {
     pins=families;
 }
 RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp) {
-    colorWarp.version = 4;
+    colorWarp.version = colorWarp.version == 4 ? 4 : 5;
     colorWarp.strength = ClampFinite(colorWarp.strength, 1.0f, 0.0f, 2.0f);
     if (colorWarp.pins.size() > kMaxRawColorWarpPins) {
         colorWarp.pins.resize(kMaxRawColorWarpPins);
@@ -178,13 +178,13 @@ RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
     if (!value.is_object()) {
         return result;
     }
-    if (value.value("version", 0) != 4 ||
+    if ((value.value("version", 0) != 4 && value.value("version", 0) != 5) ||
         value.value("coordinateModel", std::string()) !=
             "oklab-joint-luminance-d65-v4") {
         if(value.empty()) return result;
         throw std::runtime_error("Unsupported Color Warp format.");
     }
-    result.version = 4;
+    result.version = value.value("version", 4);
     result.enabled = value.value("enabled", true);
     result.strength = JsonFloat(value, "strength", 1.0f);
     result.combine=value.value("combine",std::string("accumulate"))=="blend" ? RawColorWarpCombine::Blend : RawColorWarpCombine::Accumulate;

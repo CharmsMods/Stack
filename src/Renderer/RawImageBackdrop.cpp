@@ -137,7 +137,19 @@ bool RawImageBackdrop::Render(const RawImageBackdropFrame& frame, const ImDrawDa
         glUniform1i(BackdropUniforms::Copy::Image, 0);
         glUniform1i(BackdropUniforms::Copy::Previous, 1);
         glUniform1i(BackdropUniforms::Copy::VisibleColorOnly, 0);
+        glEnable(GL_SCISSOR_TEST);
         for (const auto& patch : frame.patches) {
+            // Rasterize only this patch's coverage, including explicitly
+            // extended photo edges. Drawing every section over the entire
+            // window multiplies fragment work during every pan frame.
+            const auto px=[&](float x) {return (x-data.DisplayPos.x)*width/data.DisplaySize.x;};
+            const auto py=[&](float y) {return (1.f-(y-data.DisplayPos.y)/data.DisplaySize.y)*height;};
+            const int left=patch.extendEdges.x>.5f ? 0 : std::clamp(int(std::floor(px(patch.minimum.x))),0,width);
+            const int right=patch.extendEdges.z>.5f ? width : std::clamp(int(std::ceil(px(patch.maximum.x))),0,width);
+            const int bottom=patch.extendEdges.y>.5f ? 0 : std::clamp(int(std::floor(py(patch.maximum.y))),0,height);
+            const int top=patch.extendEdges.w>.5f ? height : std::clamp(int(std::ceil(py(patch.minimum.y))),0,height);
+            if(right<=left || top<=bottom)continue;
+            glScissor(left,bottom,right-left,top-bottom);
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, patch.previousTexture ? patch.previousTexture : patch.texture);
             glActiveTexture(GL_TEXTURE0);
@@ -153,6 +165,7 @@ bool RawImageBackdrop::Render(const RawImageBackdropFrame& frame, const ImDrawDa
             glUniform1i(BackdropUniforms::Copy::EncodedSrgb, patch.encodedSrgb ? 1 : 0);
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
+        glDisable(GL_SCISSOR_TEST);
         if (glGetError() == GL_NO_ERROR) {
             copiedIdentity = copyIdentity;
             copiedValid = true;

@@ -1,6 +1,7 @@
 #include "RawGpuPipeline.h"
 
 #include "RawGpuPreprocessor.h"
+#include "HighlightReconstructionShader.h"
 #include "Raw/Demosaic/DemosaicCatalog.h"
 #include "Raw/Demosaic/DemosaicTexture.h"
 #include "RawProcessingMath.h"
@@ -119,7 +120,7 @@ void main() {
 }
 )GLSL";
 
-constexpr const char* kRawDevelopShader = R"GLSL(
+const std::string kRawDevelopShader = std::string(R"GLSL(
 #version 330 core
 in vec2 vUv;
 out vec4 FragColor;
@@ -151,6 +152,7 @@ uniform float uExposure;
 uniform int uHighlightMode;
 uniform float uHighlightStrength;
 uniform float uHighlightThreshold;
+uniform vec3 uHighlightNeutralCamera;
 uniform int uDemosaicMethod;
 uniform int uPrepareDemosaic;
 uniform sampler2D uExternalDemosaic;
@@ -405,7 +407,9 @@ vec3 clippedMaskAt(ivec2 rawP, ivec2 visibleP) {
     float black = blackForColor(color);
     float white = max(black + 1.0, uWhiteLevel);
     float threshold = uHighlightMode == 0 ? white : mix(black, white, clamp(uHighlightThreshold, 0.0, 1.0));
-    float clipped = float(texelFetch(uRaw, q, 0).r) >= threshold ? 1.0 : 0.0;
+    float sensor = float(texelFetch(uRaw, q, 0).r);
+    float clipped = uHighlightMode == 0 ? (sensor >= white ? 1.0 : 0.0) :
+        smoothstep(min(threshold, white - 1.0), white, sensor);
     if (color == 0) return vec3(clipped, 0.0, 0.0);
     if (color == 2) return vec3(0.0, 0.0, clipped);
     return vec3(0.0, clipped, 0.0);
@@ -419,7 +423,7 @@ vec3 cfaDebugColor(ivec2 visibleP) {
 }
 
 vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP);
-vec3 reconstructHighlights(vec3 rgb, vec3 clipMask);
+vec3 reconstructHighlights(vec2 uv, vec3 rgb, vec3 clipMask);
 
 vec3 bilinearDemosaic(ivec2 rawP, ivec2 visibleP) {
     float c = demosaicSampleAt(rawP, visibleP);
@@ -582,7 +586,7 @@ vec3 rawDemosaicAtUv(vec2 uv) {
 
 vec3 developedCameraRgbAtUv(vec2 uv) {
     vec3 rgb = rawDemosaicAtUv(uv);
-    rgb = reconstructHighlights(rgb, clippedMaskAtUv(uv));
+    rgb = reconstructHighlights(uv, rgb, clippedMaskAtUv(uv));
     return uWhiteBalanceBeforeDemosaic != 0 ? rgb : rgb * uWhiteBalance;
 }
 
@@ -663,7 +667,7 @@ vec3 cleanupColorEdges(vec2 visibleUv, vec3 rgb, vec3 clipMask, out float falseC
     return uHdrVirtualAnchor != 0 ? cleaned : max(cleaned, vec3(0.0));
 }
 
-vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP) {
+vec3 bilinearClipMask(ivec2 rawP, ivec2 visibleP) {
     vec3 c = clippedMaskAt(rawP, visibleP);
     int color = cfaAt(visibleP);
     vec3 l = clippedMaskAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
@@ -690,43 +694,22 @@ vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP) {
     return vec3(red, c.g, blue);
 }
 
-vec3 reconstructHighlights(vec3 rgb, vec3 clipMask) {
-    if (uHighlightMode == 0) {
-        return rgb;
-    }
-    float clippedCount = clipMask.r + clipMask.g + clipMask.b;
-    if (clippedCount <= 0.001) {
-        return rgb;
-    }
-
-    float strength = clamp(uHighlightStrength, 0.0, 1.0);
-    float luma = max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
-    vec3 neutral = vec3(luma);
-
-    if (clippedCount >= 2.95 || uHighlightMode == 1) {
-        return mix(rgb, neutral, strength);
-    }
-
-    vec3 repaired = rgb;
-    float unclippedMean = 0.0;
-    float unclippedCount = 0.0;
-    if (clipMask.r < 0.5) { unclippedMean += rgb.r; unclippedCount += 1.0; }
-    if (clipMask.g < 0.5) { unclippedMean += rgb.g; unclippedCount += 1.0; }
-    if (clipMask.b < 0.5) { unclippedMean += rgb.b; unclippedCount += 1.0; }
-    unclippedMean = unclippedCount > 0.0 ? unclippedMean / unclippedCount : luma;
-
-    if (clipMask.r > 0.5) repaired.r = unclippedMean;
-    if (clipMask.g > 0.5) repaired.g = unclippedMean;
-    if (clipMask.b > 0.5) repaired.b = unclippedMean;
-
-    if (uHighlightMode == 2) {
-        repaired = mix(repaired, neutral, 0.35);
-    }
-    return mix(rgb, repaired, strength);
+vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP) {
+    vec3 mask = bilinearClipMask(rawP, visibleP);
+    if (uHighlightMode == 0 || uHdrVirtualAnchor != 0 ||
+        (uDemosaicMethod == 0 && uUseExternalDemosaic == 0)) return mask;
+    // MHC and external demosaicers can carry clipped samples through a wider
+    // correction stencil than bilinear interpolation. Include its outer cross
+    // with reduced influence, then fade that contaminated detail to bilinear.
+    vec3 outer = max(max(clippedMaskAt(rawP + ivec2(-2,0), visibleP + ivec2(-2,0)),
+                         clippedMaskAt(rawP + ivec2(2,0), visibleP + ivec2(2,0))),
+                     max(clippedMaskAt(rawP + ivec2(0,-2), visibleP + ivec2(0,-2)),
+                         clippedMaskAt(rawP + ivec2(0,2), visibleP + ivec2(0,2))));
+    float influence = 0.25 * max(outer.r, max(outer.g, outer.b));
+    return max(mask, vec3(influence));
 }
 
-)GLSL"
-R"GLSL(
+)GLSL") + kHighlightReconstructionShader + R"GLSL(
 vec2 orientVisibleUv(vec2 uv) {
     vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
     if (uFlipHorizontally != 0) q.x = 1.0 - q.x;
@@ -809,7 +792,7 @@ void main() {
     rgb = applyLateralCa(visibleUv, rgb);
     vec3 clipMask = clippedDemosaicMask(rawP, visibleP);
     if (uHighlightMode != 0) {
-        rgb = reconstructHighlights(rgb, clipMask);
+        rgb = reconstructHighlights(visibleUv, rgb, clipMask);
     }
     if (uDebugView == 3) {
         FragColor = vec4(rgb, 1.0);
@@ -1138,7 +1121,7 @@ bool RawGpuPipeline::EnsureProgram() {
     if (m_Program != 0) {
         return true;
     }
-    m_Program = GLHelpers::CreateShaderProgram(kRawVertexShader, kRawDevelopShader);
+    m_Program = GLHelpers::CreateShaderProgram(kRawVertexShader, kRawDevelopShader.c_str());
     if (m_Program == 0) {
         m_LastError = "RAW GPU shader compile/link failed.";
         return false;
@@ -1174,6 +1157,7 @@ bool RawGpuPipeline::EnsureProgram() {
     m_RawUniforms.highlightMode = glGetUniformLocation(m_Program, "uHighlightMode");
     m_RawUniforms.highlightStrength = glGetUniformLocation(m_Program, "uHighlightStrength");
     m_RawUniforms.highlightThreshold = glGetUniformLocation(m_Program, "uHighlightThreshold");
+    m_RawUniforms.highlightNeutralCamera = glGetUniformLocation(m_Program, "uHighlightNeutralCamera");
     m_RawUniforms.demosaicMethod = glGetUniformLocation(m_Program, "uDemosaicMethod");
     m_RawUniforms.prepareDemosaic = glGetUniformLocation(m_Program, "uPrepareDemosaic");
     m_RawUniforms.externalDemosaic = glGetUniformLocation(m_Program, "uExternalDemosaic");
@@ -1891,13 +1875,17 @@ unsigned int RawGpuPipeline::Render(
             return 0;
         }
         glBindVertexArray(m_QuadVao);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        // Linear DNGs need the same bounded native scheduling as mosaic RAWs.
+        // Scissor tiles retain full-image coordinates and exact sampling.
+        const bool completed=DrawRawFullscreenPass(outWidth,outHeight,
+            bool(shouldCancel) && std::uint64_t(outWidth)*outHeight>kCooperativeCfaRasterPixelThreshold,shouldCancel);
         glBindVertexArray(0);
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
 
         glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
         glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+        if(!completed) {m_LastError="RAW render was canceled while processing linear pixels.";return 0;}
         return m_OutputTexture;
     }
     if (metadata.pixelLayout != RawPixelLayout::MosaicBayer) {
@@ -2005,6 +1993,9 @@ unsigned int RawGpuPipeline::Render(
     glUniform1i(m_RawUniforms.highlightMode, static_cast<int>(settings.highlightMode));
     glUniform1f(m_RawUniforms.highlightStrength, settings.highlightStrength);
     glUniform1f(m_RawUniforms.highlightThreshold, settings.highlightThreshold);
+    // One inverse per invalidated image, never per pixel or UI frame.
+    const auto neutralCamera = ResolveRawHighlightNeutral(cameraToWorking, settings);
+    glUniform3f(m_RawUniforms.highlightNeutralCamera, neutralCamera[0], neutralCamera[1], neutralCamera[2]);
     glUniform1i(m_RawUniforms.demosaicMethod, static_cast<int>(settings.demosaicMethod));
     glUniform1i(m_RawUniforms.prepareDemosaic, 0);
     glUniform1i(m_RawUniforms.useExternalDemosaic, 0);

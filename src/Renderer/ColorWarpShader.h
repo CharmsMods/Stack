@@ -8,6 +8,8 @@ layout(location=0) out vec4 FragColor;
 uniform sampler2D uInputTex;
 uniform int uInputIsRec2020, uPinCount, uUseSpatialMasks, uBlendOverlaps;
 uniform float uStrength;
+uniform int uHslModel;
+uniform vec4 uHsl[8];
 uniform vec4 uPinParams[16], uPinAdjust[16], uPinFieldFlags[16], uPinMove[16];
 uniform vec4 uPinSelection[16];
 uniform vec4 uPopulation[96]; // Six joint chroma/EV centers per selection.
@@ -76,6 +78,18 @@ float rangeWeight(vec4 r,float x) {
     return 1.0;
 }
 float hueDelta(float h) { return h-360.0*floor((h+180.0)/360.0); }
+vec3 hslAdjustment(float hue) {
+    for(int i=0;i<8;++i) {
+        vec4 a=uHsl[i],b=uHsl[(i+1)%8];
+        float span=mod(b.x-a.x,360.0),distance=mod(hue-a.x,360.0);
+        if(distance<=span) {
+            float t=smoothstep(0.0,max(span,0.000001),distance);
+            float delta=hueDelta(b.y-a.y);if(delta==-180.0)delta=180.0;
+            return vec3(a.y+t*delta,mix(a.zw,b.zw,t));
+        }
+    }
+    return vec3(0.0);
+}
 void main() {
     vec4 inputColor=texture(uInputTex,vUV);
     vec3 xyz=workingToXyz(inputColor.rgb),lab=xyzToOklab(xyz);
@@ -130,13 +144,25 @@ void main() {
     }
     adjustment*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
     movement*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
-    if(all(equal(adjustment,vec3(0.0))) && all(equal(movement,vec2(0.0)))) { FragColor=inputColor;return; }
+    float familyGain=1.0;
+    if(uHslModel!=0) {
+        vec3 family=hslAdjustment(hue);
+        float guard=neutral*smoothstep(-16.0,-12.0,ev);
+        float influence=uStrength*(1.0-protection);
+        adjustment.x+=family.x*influence*guard;
+        adjustment.z+=family.z*influence*guard;
+        familyGain=max(0.0,1.0+family.y*influence*(family.y>0.0?guard:1.0));
+    }
+    if(all(equal(adjustment,vec3(0.0))) && all(equal(movement,vec2(0.0))) && familyGain==1.0) { FragColor=inputColor;return; }
     vec3 rgb=inputColor.rgb;
-    if(adjustment.x!=0.0 || adjustment.y!=0.0 || any(notEqual(movement,vec2(0.0)))) {
+    if(adjustment.x!=0.0 || adjustment.y!=0.0 || any(notEqual(movement,vec2(0.0))) || familyGain!=1.0) {
         float angle=radians(adjustment.x),c=cos(angle),s=sin(angle);
-        lab.yz=vec2(c*lab.y-s*lab.z,s*lab.y+c*lab.z)*max(0.0,1.0+adjustment.y);
+        float saturationGain=max(0.0,1.0+adjustment.y);
+        lab.yz=vec2(c*lab.y-s*lab.z,s*lab.y+c*lab.z)*(uHslModel!=0?1.0:saturationGain);
         lab.yz+=movement*max(abs(lab.x),0.000001);
+        lab.yz*=familyGain*(uHslModel!=0?saturationGain:1.0);
         rgb=xyzToWorking(oklabToXyz(lab));
+        if(uHslModel!=0 && all(equal(lab.yz,vec2(0.0))))rgb=vec3(lab.x*lab.x*lab.x);
     }
     float lightness=max(0.0,lab.x);
     float ratio=1.0+clamp(adjustment.z,-1.0,1.0)/(1.0+lightness);

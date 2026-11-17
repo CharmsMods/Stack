@@ -10,6 +10,12 @@ inline nlohmann::json CanonicalRawRecipeForComparison(const nlohmann::json& valu
     const auto recipe=DeserializeRecipe(value);
     auto canonical=value.contains("rawRecipeRole")
         ? SerializeWorkspaceSourceRecipe(recipe) : SerializeRecipe(recipe);
+    const auto processing=value.find("processing");
+    if(processing!=value.end() && processing->is_object()) {
+        // Additive reconstruction settings retain Off / .5 / .98 when absent.
+        for(const auto* field:{"highlightMode","highlightStrength","highlightThreshold"})
+            if(!processing->contains(field))canonical["processing"].erase(field);
+    }
     const auto storedView=value.find("viewTransform");
     auto canonicalView=canonical.find("viewTransform");
     if(storedView!=value.end() && storedView->is_object() &&

@@ -2,6 +2,7 @@
 
 #include "Raw/RawColorWarpMask.h"
 #include "Raw/ColorWarpMath.h"
+#include "Raw/ColorWarpHsl.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -50,22 +51,31 @@ inline float ColorWarpEffectiveSelectionWeight(const RawColorWarpRecipe& recipe,
 inline float ColorWarpPreviewInfluence(const RawColorWarpRecipe& recipe, std::size_t selected,
     const RawColorWarpCoordinate& input, const std::vector<RawColorWarpMaskSample>& masks) {
     if(selected>=recipe.pins.size() || !recipe.enabled)return 0.f;
+    const bool family=UsesColorWarpHsl(recipe,recipe.pins[selected]);
     float selectedWeight=0,total=0,protection=0;
+    if(family) {
+        auto coefficients=PrepareColorWarpHsl(recipe);
+        for(auto& c:coefficients)c[1]=c[2]=c[3]=0;
+        coefficients[recipe.pins[selected].family][2]=recipe.pins[selected].enabled?recipe.pins[selected].strength:0.f;
+        selectedWeight=EvaluateColorWarpHsl(coefficients,ColorWarpHue(input.a,input.b))[1];
+    }
     for(std::size_t i=0;i<recipe.pins.size();++i) {
         const auto& pin=recipe.pins[i];
-        if(i!=selected && !ColorWarpParticipates(pin))continue;
+        if(UsesColorWarpHsl(recipe,pin) || (i!=selected && !ColorWarpParticipates(pin)))continue;
         const float w=EvaluateColorWarpPinWeight(pin,input,i<masks.size()?masks[i]:RawColorWarpMaskSample{},
             ColorWarpPinSpatialSupport(recipe,pin));
         if(i==selected)selectedWeight=w;
         if(pin.protectColor)protection=std::max(protection,std::clamp(w,0.f,1.f));
         else total+=w;
     }
+    if(family)return std::clamp(recipe.strength*selectedWeight*(1.f-protection),0.f,1.f);
     if(recipe.pins[selected].protectColor)return std::clamp(recipe.strength*selectedWeight,0.f,1.f);
     return ColorWarpEffectiveSelectionWeight(recipe,selectedWeight*(1.f-protection),total);
 }
 
 // Includes only membership/field inputs. Destinations, lightness shifts,
-// protection and strength do not change the spatial fields.
+// protection and strength do not change field values. Switching a canonical
+// family into custom processing does change which fields are needed.
 inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recipe) {
     std::size_t seed = 0x712e531du;
     const auto hash = [&](const auto& value) {
@@ -76,6 +86,7 @@ inline std::size_t ColorWarpSelectionFingerprint(const RawColorWarpRecipe& recip
     hash(recipe.version);
     hash(recipe.pins.size());
     for (const auto& pin : recipe.pins) {
+        hash(UsesColorWarpHsl(recipe,pin));
         hash(pin.brightnessSoftness);hash(pin.population.size());
         for(const auto& p:pin.population){hash(p.a);hash(p.b);hash(p.sceneEv);hash(p.mass);}
         hash(pin.sampleRadius);hash(pin.smoothSelection);hash(pin.id);hash(pin.sourceA);hash(pin.sourceB);hash(pin.regionId);

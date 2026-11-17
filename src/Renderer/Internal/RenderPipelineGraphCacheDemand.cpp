@@ -27,6 +27,11 @@ void GraphExecutionRuntime::PruneCachedDependencies() {
         case K::Value:
             independent = true;
             break;
+        case K::Output: {
+            const auto* input=findInputLink(node.nodeId,"imageIn");
+            independent=input && !IsScalarRenderSocket(executionContext,input->fromNodeId,input->fromSocketId);
+            break;
+        }
         case K::TechnicalImage:
             independent = findInputLink(node.nodeId, "imageIn") != nullptr;
             break;

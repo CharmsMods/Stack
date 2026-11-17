@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpHsl.h"
 #include "Editor/NodeEditors/ColorWarpFeedback.h"
 
 #include <cmath>
@@ -119,7 +120,7 @@ void ColorWarpFeedback::Update(const RawDevelopmentGraphScopeReadback& scope,
                         const auto& pin = recipe.pins[index];
                         const auto region = std::find_if(recipe.regions.begin(), recipe.regions.end(),
                             [&](const auto& candidate) { return candidate.id == pin.regionId; });
-                        if(pin.smoothSelection>0 || (region!=recipe.regions.end() && region->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches))
+                        if(!RawRecipe::UsesColorWarpHsl(recipe,pin) && (pin.smoothSelection>0 || (region!=recipe.regions.end() && region->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches)))
                             data->fields[index]=RawRecipe::BuildRawColorWarpMaskFields(guide,pin,region!=recipe.regions.end()?&*region:nullptr,cancelled);
                     }
                     if (!cancelled()) {

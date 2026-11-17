@@ -1154,6 +1154,25 @@ void TestRawLayerStackContracts() {
     authoredSource.whiteBalance.hasMultipliers = true;
     authoredSource.whiteBalance.multipliers = {2.f,1.f,1.5f};
     const auto savedSource = SerializeWorkspaceSourceRecipe(authoredSource);
+    Check(authoredSource.technical.highlightMode==Raw::HighlightReconstructionMode::ColorReconstruction &&
+        ToRawDevelopSettings(authoredSource).highlightStrength==1.f,"New recipe lost automatic highlight repair.");
+    for(const auto& document:{savedSource,SerializeRecipe(authoredSource)}) {
+        auto old=document;
+        for(const auto* field:{"highlightMode","highlightStrength","highlightThreshold"})old["processing"].erase(field);
+        Check(IsCanonicalRawRecipeDocument(old),"Missing additive highlight fields rejected a current recipe.");
+        const auto restored=ToRawDevelopSettings(DeserializeRecipe(old));
+        Check(restored.highlightMode==Raw::HighlightReconstructionMode::Off && restored.highlightStrength==.5f,
+            "Opening an existing recipe enabled highlight repair.");
+        auto explicitSettings=document;
+        explicitSettings["processing"]["highlightMode"]=2;
+        explicitSettings["processing"]["highlightStrength"]=.35f;
+        explicitSettings["processing"]["highlightThreshold"]=.95f;
+        const auto roundTrip=SerializeRecipe(DeserializeRecipe(explicitSettings));
+        Check(IsCanonicalRawRecipeDocument(explicitSettings) && roundTrip["processing"]==explicitSettings["processing"],
+            "Explicit reconstruction settings did not round-trip.");
+        explicitSettings["processing"]["unknownHighlightField"]=true;
+        Check(!IsCanonicalRawRecipeDocument(explicitSettings),"Highlight compatibility admitted unknown fields.");
+    }
     Check(IsCanonicalRawRecipeDocument(savedSource) && IsCanonicalWorkspaceSourceRecipeDocument(savedSource),
         "The source-settings writer and current-format validator disagree.");
     for(const auto& complete:{savedSource,SerializeRecipe(authoredSource)}) {

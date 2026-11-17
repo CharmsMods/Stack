@@ -1,5 +1,6 @@
 add_executable(StackGpuUploadTests
     tools/tests/gpu_upload_tests.cpp
+    tools/tests/raw_highlight_gpu_checks.cpp
     src/Renderer/GLLoader.cpp
     src/Renderer/GLHelpers.cpp
     src/Raw/RawGpuPipeline.cpp

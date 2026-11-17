@@ -281,7 +281,10 @@ bool PrepareHighlightFallback(const ProcessingRequest& request,const PreparedDat
             const double estimated=std::max(v.fallback,scale*hue[s]);
             if(v.clippedReference==ClippedReference::NeutralCompletion) {
                 v.value+=confidence*(estimated-v.value);
-                if(confidence==1)v.clippedReference=ClippedReference::EstimatedColor;
+                // Keep the same fallback class at full boundary confidence.
+                // Promoting only at exactly one makes the downstream donor
+                // priority switch abruptly at the edge of this smooth blend.
+                // It remains inferred color with zero measurement support.
             } else {
                 // Without calibrated white balance there is no neutral endpoint.
                 v.value=estimated;v.clippedReference=ClippedReference::EstimatedColor;

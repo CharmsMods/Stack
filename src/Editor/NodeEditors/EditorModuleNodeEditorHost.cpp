@@ -456,6 +456,14 @@ bool EditorModule::ViewSectionPanelOpen() const { return m_ViewSectionOpen; }
 void EditorModule::SetViewSectionPanelOpen(bool open) {
     if (m_ViewSectionOpen==open || Stack::Workspace::IsPreview()) return;
     if (!FinishWorkspaceInteraction()) return;
+    if (!open && m_ViewSectionTab==0 && !IsBracketingToolActive()) {
+        m_WhiteBalancePickerArmed=false;
+        m_RawWorkspaceLabUi.lightInteractionActive=false;
+        if (m_RawWorkspaceAdaptiveGestureActive) {
+            NoteRawWorkspaceRecipePreviewEdit(false);
+            MarkRenderRefreshDirty();
+        }
+    }
     m_ViewSectionOpen=open;
     m_Project->workspace.viewPanelOpen=open;
     UpdateNodeEditorPanelVisibility();
@@ -466,6 +474,14 @@ void EditorModule::SetViewSectionTab(int tab) {
     tab=std::clamp(tab,0,3);
     if (tab==m_ViewSectionTab || Stack::Workspace::IsPreview()) return;
     if (!FinishWorkspaceInteraction()) return;
+    if (m_ViewSectionTab==0 && !IsBracketingToolActive()) {
+        m_WhiteBalancePickerArmed=false;
+        m_RawWorkspaceLabUi.lightInteractionActive=false;
+        if (m_RawWorkspaceAdaptiveGestureActive) {
+            NoteRawWorkspaceRecipePreviewEdit(false);
+            MarkRenderRefreshDirty();
+        }
+    }
     m_ViewSectionTab=tab;
     m_RawWorkspaceLabUi.settingsTabActive=tab==2;
     m_RawAssetCapture.assetsTab=tab==3;

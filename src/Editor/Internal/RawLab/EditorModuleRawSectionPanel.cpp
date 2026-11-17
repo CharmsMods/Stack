@@ -73,8 +73,8 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
                 if (BareToolIslandButton(label,m_ViewSectionTab==tab))
                     SetViewSectionTab(tab==1 && m_ViewSectionTab==1 ? 0 : tab);
             };
-            tabButton(bracketSource ? "Source" : "Layers",0);
-            ImGui::SameLine(0,8.f*unit);tabButton("Controls",1);
+            tabButton(bracketSource ? "Source" : "Interpretation",0);
+            ImGui::SameLine(0,8.f*unit);tabButton("Light",1);
             if (!bracketSource) { ImGui::SameLine(0,8.f*unit);tabButton("Settings",2); }
             ImGui::SameLine(0,8.f*unit);tabButton("Assets",3);
             if (m_ViewSectionTab==1) {
@@ -85,7 +85,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             ImGui::Spacing();
             const bool controls=m_ViewSectionTab==1;
             const bool settings = !bracketSource && m_ViewSectionTab==2;
-            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Layers");
+            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Interpretation");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
             const bool bodyVisible=controls ? Stack::Editor::BeginControlsPanelBody(visibleWidth < size.x - 0.5f) :
                 ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground);
@@ -98,16 +98,8 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
                     RenderBracketingSidePanelUI();
                 } else if (bodyVisible && settings) {
                     RenderRawWorkspaceToolSettings();
-                } else if (bodyVisible && IsRawWorkspaceProjectActive() &&
-                    m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
-                    m_RawLayerPanel.Prune(ImGui::GetFrameCount());
-                    // This is a permanent section host. The old floating/docked
-                    // presentation flag does not move it out of the section panel.
-                    RenderRawLayerPanelContents();
-                } else if (bodyVisible && IsMultiFrameRawProjectActive()) {
-                    ImGui::TextWrapped("Layers become available on a developed RAW image. Capture controls remain beside the viewport.");
                 } else if (bodyVisible) {
-                    ImGui::TextWrapped("Open an image from Gallery to work with its layers and masks.");
+                    RenderRawInterpretationPanel();
                 }
             }
             auto* body=ImGui::GetCurrentWindow();

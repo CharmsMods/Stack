@@ -26,10 +26,13 @@ void DescribeQuality(const EditorRendering::ViewportQualitySample& sample) {
 }
 }
 void RenderViewportQualityControls(EditorModule& editor, float width) {
+    auto preferences = editor.GetRawViewportPreferences();
+    const bool fullDetail = Raw::UsesFullDisplayDetail(preferences);
     int target = editor.GetRawViewportRequestedFps();
     const int minimum = Raw::kMinimumViewportTargetFps;
     const int maximum = std::max({240,editor.GetRawViewportMaximumFps(),target});
     const auto forecast = editor.GetViewportQualityBar(maximum);
+    ImGui::BeginDisabled(fullDetail);
     const ImVec2 start = ImGui::GetCursorScreenPos();
     const float height = ImGui::GetFrameHeight();
     // Mirror the standard integer slider's positive logarithmic usable track.
@@ -43,7 +46,7 @@ void RenderViewportQualityControls(EditorModule& editor, float width) {
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(start,ImVec2(start.x+width,start.y+height),ImGui::GetColorU32(ImGuiCol_FrameBg),
         ImGui::GetStyle().FrameRounding);
-    for (std::size_t i=0; i<forecast.samples.size(); ++i) {
+    for (std::size_t i=0; !fullDetail && i<forecast.samples.size(); ++i) {
         const float x0 = left+(right-left)*float(i)/forecast.samples.size();
         const float x1 = left+(right-left)*float(i+1)/forecast.samples.size();
         draw->AddRectFilled(ImVec2(x0,start.y+padding),ImVec2(x1,start.y+height-padding),QualityColor(forecast.samples[i]));
@@ -54,11 +57,12 @@ void RenderViewportQualityControls(EditorModule& editor, float width) {
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive,ImVec4(0,0,0,0));
     ImGui::PushStyleColor(ImGuiCol_SliderGrab,ImVec4(.9f,.92f,.95f,1));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive,ImVec4(1,1,1,1));
-    const bool changed = ImGui::SliderInt("Target viewport FPS",&target,minimum,maximum,"%d FPS",
+    const bool changed = ImGui::SliderInt("Target viewport FPS",&target,minimum,maximum,fullDetail ? "Automatic" : "%d FPS",
         ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
     const bool finished = ImGui::IsItemDeactivatedAfterEdit();
     const bool hovered = ImGui::IsItemHovered();
     ImGui::PopStyleColor(5);
+    ImGui::EndDisabled();
     if (changed) editor.SetRawViewportTargetFps(target);
     if (finished) editor.FinishRawViewportTargetFpsEdit();
     const auto mouse = ImGui::GetIO().MousePos;
@@ -73,15 +77,23 @@ void RenderViewportQualityControls(EditorModule& editor, float width) {
         DescribeQuality(sample);
         ImGui::EndTooltip();
     }
-    ImGui::TextWrapped("Green: full display detail. Amber: reduced detail. Orange: large reduction or target too fast. Gray: unknown.");
+    if (!fullDetail)
+        ImGui::TextWrapped("Green: full display detail. Amber: reduced detail. Orange: large reduction or target too fast. Gray: unknown.");
     ImGui::TextDisabled("Display limit: %d FPS",editor.GetRawViewportMaximumFps());
-    if (target > editor.GetRawViewportMaximumFps())
+    if (fullDetail)
+        ImGui::TextWrapped("100%% screen detail uses the fastest available updates, up to the display limit.");
+    else if (target > editor.GetRawViewportMaximumFps())
         ImGui::TextDisabled("Requested %d FPS; using %d FPS on this display",target,editor.GetRawViewportTargetFps());
+    if (forecast.estimatedCapacityFps > 0) {
+        ImGui::TextWrapped("Estimated %.0f updates/s at this detail floor%s",
+            forecast.estimatedCapacityFps, forecast.capacityProvisional ? " (provisional)" : "");
+        if (!fullDetail && editor.GetRawViewportTargetFps() > forecast.estimatedCapacityFps * 1.05)
+            ImGui::TextWrapped("The selected target exceeds the current estimate. Lower the detail floor to allow smaller previews.");
+    }
     // This is a forecast for active editing, not the currently displayed frame.
     if (!changed && forecast.current.known) DescribeQuality(forecast.current);
     else ImGui::TextDisabled("Colors estimate the last learned editing workload at this zoom.");
 
-    auto preferences = editor.GetRawViewportPreferences();
     // Preserve the existing storage semantics: disabled TargetFps maps to Auto,
     // even though its saved (inactive) minimum percentage commonly defaults to100.
     int detail = preferences.mode == Raw::ViewportInteractionMode::PreserveDetail ? preferences.minimumDetailPercent : 24;

@@ -12,7 +12,7 @@ WorkspaceMode EditorModule::GetWorkspaceMode() const { return m_Project->workspa
 bool EditorModule::IsViewMode() const { return GetWorkspaceMode() == WorkspaceMode::View; }
 
 bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
-    if(mode!=WorkspaceMode::View)ExitFocusedNodeEditor();
+    if(mode!=WorkspaceMode::View) {m_WhiteBalancePickerArmed=false;ExitFocusedNodeEditor();}
     if (mode != GetWorkspaceMode() && IsBracketingPresentationActive()) return false;
     if (mode == WorkspaceMode::Graph && IsViewMode()) EnsureGraphWorkers();
     if (mode == WorkspaceMode::Graph) {
@@ -39,6 +39,8 @@ bool EditorModule::SetWorkspaceMode(WorkspaceMode mode) {
 }
 
 void EditorModule::WorkspaceLoaded(WorkspaceMode mode) {
+    m_InterpretationWhiteBalance.Cancel();
+    m_WhiteBalanceRequestSource.clear();m_WhiteBalanceStatus.clear();m_WhiteBalancePickerArmed=false;
     // A newly opened document starts fitted, independently of the previous
     // image's camera or the dimensions of its provisional thumbnail.
     m_Viewport.ResetSinglePreviewState();

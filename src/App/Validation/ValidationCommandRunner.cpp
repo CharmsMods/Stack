@@ -1,6 +1,6 @@
 #include "BurstEngine/Protocol.h"
 namespace Stack::Validation { bool ValidateBracketScratch(); int BracketScratchChild(const std::filesystem::path&,HANDLE); }
-namespace Stack::Validation { bool ValidateColorWarpMove(); }
+namespace Stack::Validation { bool ValidateColorWarpMove(); bool ValidateInterpretation(const std::filesystem::path&); }
 #include "App/Validation/Suites/GraphRenderingValidation.h"
 #include "App/Validation/ValidationCommandRunner.h"
 
@@ -145,6 +145,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if(argc==3 && std::strcmp(argv[1],"--validate-shared-curves")==0) {
         exitCode=Stack::Validation::ValidateSharedCurves(std::filesystem::u8path(argv[2]))?0:92;return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-interpretation") == 0) {
+        exitCode=Stack::Validation::ValidateInterpretation(std::filesystem::u8path(argv[2]))?0:91;return true;
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-demosaicing") == 0) {
         exitCode=Stack::Validation::ValidateDemosaicing(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]))?0:91;

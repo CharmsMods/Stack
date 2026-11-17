@@ -37,6 +37,7 @@
 #include "Hdr/PhotoPairs.h"
 #include <vector>
 
+namespace Stack::Renderer { class ViewportSectionStore; }
 struct GLFWwindow;
 class RenderPipeline;
 
@@ -51,6 +52,7 @@ public:
         double workerTotalMs = 0.0;
         double uiAdoptionMs = 0.0;
         double predictedMs = 0.0;
+        std::uint64_t plannedRegionalPixels = 0, plannedCompletePixels = 0;
         double cpuDispatchMs = 0.0;
         double gpuServiceMs = 0.0;
         double completedServiceMs = 0.0;
@@ -569,6 +571,8 @@ public:
         int viewportViewId = 0;
         std::size_t viewportExecutionIdentity = 0;
         std::size_t viewportContentIdentity = 0;
+        std::shared_ptr<Stack::Renderer::ViewportSectionStore> viewportSections;
+        int viewportSection = -1;
         bool prepareViewportOverview = false;
         SharedPixelBuffer sourcePixels;
         int width = 0;
@@ -606,7 +610,11 @@ public:
         int viewportViewId = 0;
         std::size_t viewportExecutionIdentity = 0;
         std::size_t viewportContentIdentity = 0;
+        std::shared_ptr<Stack::Renderer::ViewportSectionStore> viewportSections;
+        int viewportSection = -1;
         SharedTextureResult viewportOverview;
+        SharedTextureResult viewportSectionPreview;
+        bool viewportSectionRestored = false;
         bool viewportCold = false;
         Raw::ViewportStageCosts stageCosts {};
         Raw::ViewportStageCosts cpuStageCosts {}, gpuStageCosts {};
@@ -776,6 +784,8 @@ private:
     void CompleteViewportTiming(const Result& result);
     void FinishViewportTiming(const Result& result);
     void PrepareViewportOverview(const Snapshot& snapshot, Result& result);
+    bool RestoreViewportSection(const Snapshot& snapshot, Result& result);
+    void PreserveViewportSection(Result& result);
     void PollViewportTimings();
     bool WaitForSubmittedGpuWork();
     struct PendingViewportTiming {

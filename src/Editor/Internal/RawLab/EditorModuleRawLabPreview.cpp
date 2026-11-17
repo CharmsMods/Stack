@@ -670,6 +670,10 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         // Defer scopes, capture handles and diagnostic overlays until settled.
         if (m_NodeOpenTransition.Active() || (m_GalleryNavigationMotion &&
             m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace))) return;
+        if(m_WhiteBalancePickerArmed) {
+            RenderWhiteBalancePicker(imageRect.Min,imageRect.Max,previewRecipe.cropRotation);
+            return;
+        }
         DrawMultiFrameRawDiagnosticOverlay(drawList, imageRect.Min, imageRect.Max);
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
             ImGui::IsKeyPressed(ImGuiKey_Escape)) {
@@ -1147,6 +1151,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                 rasterMin, rasterMax, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
         });
         DrawRawViewportDetail(drawList, imageRect.Min, imageRect.Max);
+        DrawViewportNativeSections(drawList,imageRect.Min,imageRect.Max,hdr);
         endPhoto(imageRect, firstPhotoCommand, true);
         drewPreview = true;
     }

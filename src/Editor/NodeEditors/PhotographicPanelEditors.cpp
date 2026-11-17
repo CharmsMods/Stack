@@ -110,6 +110,11 @@ bool DrawCalibrationPanel(EditorModule&,RawWorkspaceEditContext& c) {
     return changed;
 }
 bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) {
+    bool changed=false;
+    if(c.recipe.colorWarp.version<5) {
+        ImGui::TextDisabled("Legacy color processing");
+        if(ImGui::Button("Use improved HSL")) {c.recipe.colorWarp.version=5;changed=true;}
+    }
     auto& state=c.State<PanelControlState>();
     const char* channels[]{"Hue","Saturation","Brightness"};
     static const char* names[]{"   Red","   Orange","   Yellow","   Green","   Aqua","   Blue","   Purple","   Magenta"};
@@ -121,7 +126,6 @@ bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) {
         if(ImGui::Button(channels[channel],{(width-8)/3,0}))state.hslChannel=channel;
         ImGui::PopStyleColor();
     }
-    bool changed=false;
     ImGui::BeginDisabled(!c.recipe.colorWarp.enabled);
     for(int family=0;family<8;++family) {
         const auto found=std::find_if(c.recipe.colorWarp.pins.begin(),c.recipe.colorWarp.pins.end(),
@@ -135,13 +139,14 @@ bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext& c) {
         auto& pin=*found;
         const auto origin=ImGui::GetCursorScreenPos();
         ImGui::BeginDisabled(!pin.enabled || pin.protectColor);
-        float value=state.hslChannel==0?pin.hueShift:state.hslChannel==1?pin.saturation*100:pin.brightness*100;
+        const bool saturationChannel=state.hslChannel==1;
+        float value=state.hslChannel==0?pin.hueShift:saturationChannel?(1.f+pin.saturation)*100.f:pin.brightness*100;
         if(PanelRoller(names[pin.family],"family",value,
-            state.hslChannel==0?-180.f:-100.f,
-            state.hslChannel==0?180.f:state.hslChannel==1?500.f:100.f,
-            .4f,0,"%+.1f",state)) {
+            state.hslChannel==0?-180.f:saturationChannel?0.f:-100.f,
+            state.hslChannel==0?180.f:saturationChannel?600.f:100.f,
+            .4f,saturationChannel?100.f:0.f,saturationChannel?"%.1f%%":"%+.1f",state)) {
             if(state.hslChannel==0)pin.hueShift=value;
-            else if(state.hslChannel==1)pin.saturation=value*.01f;
+            else if(saturationChannel)pin.saturation=value*.01f-1.f;
             else pin.brightness=value*.01f;
             changed=true;
         }

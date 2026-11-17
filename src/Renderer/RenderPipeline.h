@@ -281,6 +281,7 @@ public:
         std::function<bool()> shouldCancel) {
         m_RenderGeneration = generation;
         m_ShouldCancelRender = std::move(shouldCancel);
+        m_Quad.SetCooperativeCancellation(m_GraphViewportRequest.enabled ? m_ShouldCancelRender : std::function<bool()>{});
     }
     // Interactive RAW previews must remain image-only work. Expensive texture
     // readbacks and automatic-analysis evidence are observational and may be
@@ -384,6 +385,7 @@ public:
     const Raw::ViewportRegion& GetRawViewportRegion() const { return m_RawViewportAppliedRegion; }
     void SetGraphViewportRequest(const Stack::Renderer::ViewportPreviewRequest& request) {
         m_GraphViewportRequest = request;
+        m_Quad.SetCooperativeCancellation(request.enabled ? m_ShouldCancelRender : std::function<bool()>{});
         m_GraphViewportGeometry = {};
     }
     const Stack::Renderer::ViewportPreviewGeometry& GetGraphViewportGeometry() const {
@@ -550,6 +552,7 @@ private:
         Raw::ViewportRegion viewportRegion;
         Stack::Renderer::ViewportPreviewGeometry graphGeometry;
         unsigned int texture = 0;
+        unsigned int internalFormat = 0;
         std::size_t fingerprint = 0;
         int width = 0;
         int height = 0;
@@ -590,6 +593,7 @@ private:
         int height = 0;
         bool inUse = false;
         std::uint64_t lastUseSerial = 0;
+        bool retiredCache = false;
     };
 
     struct PointwiseFusionPlan {
@@ -993,7 +997,8 @@ private:
         unsigned int inputTexture,
         bool executionInspectionEnabled);
     void DestroyPointwiseProgramCache();
-    unsigned int CreateGraphRenderTargetTexture() const;
+    unsigned int CreateGraphRenderTargetTexture();
+    bool RetainRetiredGraphTarget(const CachedGraphTexture& entry);
     std::uint64_t EstimateGraphTargetBytes(int width, int height) const;
     void EnsureGraphFloat32Targets();
     void ConfigureGraphTargetPrecision(bool requiredFloat32);

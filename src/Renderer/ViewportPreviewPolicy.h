@@ -56,6 +56,7 @@ struct ViewportPreviewCandidate {
     bool timingCovered = false;
     std::uint64_t workingBytes = 0;
     std::size_t executionIdentity = 0;
+    std::uint64_t regionalPixels = 0, completePixels = 0;
 };
 
 struct ViewportPreviewPolicyInput {

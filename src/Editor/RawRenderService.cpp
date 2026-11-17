@@ -176,6 +176,8 @@ bool RawRenderService::SubmitCommand(
     snapshot.viewportViewId = command.viewportViewId;
     snapshot.viewportExecutionIdentity = command.viewportExecutionIdentity;
     snapshot.viewportContentIdentity = command.viewportContentIdentity;
+    snapshot.viewportSections = std::move(command.viewportSections);
+    snapshot.viewportSection = command.viewportSection;
     snapshot.prepareViewportOverview = command.prepareViewportOverview;
     snapshot.viewportTiling = command.viewportTiling;
     snapshot.previews = std::move(command.previews);

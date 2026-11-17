@@ -140,6 +140,7 @@ set(STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/Internal/DngTiffReader.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGalleryFileActions.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGalleryFilmstripOrganization.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/GalleryDateLabels.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGallerySimilarity.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawGpuMemoryBudget.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/RawWorkspace.cpp"

@@ -39,11 +39,11 @@ struct RawLabImageMapping {
 
     static std::optional<RawLabImageMapping> FromSpatial(
         const NodeMath::SpatialDescriptor& local, const NodeMath::SpatialDescriptor& displayed,
-        const RawRecipe::RawCropRotationRecipe& crop) {
+        const RawRecipe::RawCropRotationRecipe& crop, bool requireExtent = true) {
         const auto sourceToLocal = Inverse(local.sourceTransform);
         if (!sourceToLocal || !Inverse(displayed.sourceTransform)) return std::nullopt;
         const double width = local.fullWindow.width, height = local.fullWindow.height;
-        if (width<=0 || height<=0 || local.pixelAspect<=0) return std::nullopt;
+        if (requireExtent && (width<=0 || height<=0 || local.pixelAspect<=0)) return std::nullopt;
         const Matrix flip{1,0,0,0,-1,1,0,0,1};
         const Matrix window{crop.cropEnabled ? crop.cropWidth : 1,0,crop.cropEnabled ? crop.cropX : 0,
             0,crop.cropEnabled ? crop.cropHeight : 1,crop.cropEnabled ? crop.cropY : 0,0,0,1};
@@ -52,7 +52,8 @@ struct RawLabImageMapping {
         const auto inverse = Inverse(result.canvasToLocal);
         if (!inverse) return std::nullopt;
         result.localToCanvas = *inverse;
-        result.sourceAspect = float(width*local.pixelAspect/height);
+        if (width>0 && height>0 && local.pixelAspect>0)
+            result.sourceAspect = float(width*local.pixelAspect/height);
         return result;
     }
 };

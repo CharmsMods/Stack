@@ -190,7 +190,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
     const bool scalarNoise=noiseLayer && Stack::NodeMath::DescribeImageOperationInput(input->semanticDescriptor).scalar;
     const auto createTarget=[&] {
         if (scalarBlur || scalarCurve || scalarNoise) return GLHelpers::CreateStorageTexture(m_Width,m_Height,GL_R32F);
-        if (canonicalCurve) return GLHelpers::CreateStorageTexture(m_Width,m_Height,GL_RGBA32F);
+        if (canonicalCurve && !m_GraphFloat32Targets) return GLHelpers::CreateStorageTexture(m_Width,m_Height,GL_RGBA32F);
         return CreateGraphRenderTargetTexture();
     };
     Stack::Renderer::ScopedGLTexture processed(createTarget());

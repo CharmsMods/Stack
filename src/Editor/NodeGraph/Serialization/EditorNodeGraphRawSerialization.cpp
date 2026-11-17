@@ -267,6 +267,9 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
 
 Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     Raw::RawDevelopSettings settings;
+    // Missing saved fields retain their historical values, not new-open defaults.
+    settings.highlightMode = Raw::HighlightReconstructionMode::Off;
+    settings.highlightStrength = 0.5f;
     if (!value.is_object()) return settings;
     settings.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
     settings.workingSpace =

@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpHsl.h"
 #include "Editor/Internal/RawLab/RawLabColorSurface.h"
 #include "Editor/Internal/RawLab/RawLabColorProjection.h"
 #include "Editor/NodeEditors/ColorWarpEditorState.h"
@@ -44,7 +45,7 @@ void DrawColorWarpCloud(RawLabColorSurfaceArgs& args,ImVec2 minimum,float size) 
         const auto* selectedPin=selected>=0 && selected<int(args.colorWarp.pins.size())?&args.colorWarp.pins[selected]:nullptr;
         const auto selectedRegion=selectedPin?std::find_if(args.colorWarp.regions.begin(),args.colorWarp.regions.end(),
             [&](const auto& r){return r.id==selectedPin->regionId;}):args.colorWarp.regions.end();
-        const bool selectedSpatial=(selectedPin && selectedPin->smoothSelection>0) || (selectedRegion!=args.colorWarp.regions.end() && selectedRegion->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches);
+        const bool selectedSpatial=(selectedPin && !RawRecipe::UsesColorWarpHsl(args.colorWarp,*selectedPin) && selectedPin->smoothSelection>0) || (selectedRegion!=args.colorWarp.regions.end() && selectedRegion->spatialMode!=RawRecipe::RawColorWarpSpatialMode::AllMatches);
         for(const auto& point:state.points) {
             if(feedback)feedback->SampleMasks(args.colorWarp,point.input,point.u,point.v,masks);
             float caught=0;

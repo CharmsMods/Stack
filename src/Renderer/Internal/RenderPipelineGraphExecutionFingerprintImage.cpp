@@ -629,8 +629,13 @@ void GraphExecutionRuntime::BindImageFingerprint() {
             HashCombine(
                 fingerprint,
                 HashValue(static_cast<int>(node.outputChannelViewMode)));
-            HashCombine(fingerprint, HashValue(pipeline.m_Width));
-            HashCombine(fingerprint, HashValue(pipeline.m_Height));
+            // Image outputs are aliases, including lowered layer boundaries.
+            // Their input already identifies the raster. Scalar visualization
+            // still depends on the execution canvas.
+            if (!input || IsScalarRenderSocket(executionContext,input->fromNodeId,input->fromSocketId)) {
+                HashCombine(fingerprint, HashValue(pipeline.m_Width));
+                HashCombine(fingerprint, HashValue(pipeline.m_Height));
+            }
         } else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
             const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
             const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");

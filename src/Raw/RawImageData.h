@@ -452,8 +452,8 @@ struct RawDevelopSettings {
     float blackLevelOverride = 0.0f;
     bool overrideWhiteLevel = false;
     float whiteLevelOverride = 65535.0f;
-    HighlightReconstructionMode highlightMode = HighlightReconstructionMode::Off;
-    float highlightStrength = 0.5f;
+    HighlightReconstructionMode highlightMode = HighlightReconstructionMode::ColorReconstruction;
+    float highlightStrength = 1.0f;
     float highlightThreshold = 0.98f;
     DemosaicMethod demosaicMethod = DemosaicMethod::Bilinear;
     bool cameraTransformEnabled = true;

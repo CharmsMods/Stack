@@ -56,7 +56,7 @@ void AppShell::TickUiViewportQualityCapture() {
     const bool valid=m_Editor->TryGetViewportPreviewGeometry(geometry);
     const auto presented=Probe::Last(Probe::Visual::Image);
     const double elapsed=std::chrono::duration<double,std::milli>(now-s.qualityStageStarted).count();
-    const bool native=valid && geometry.NativeSamples();
+    const bool native=valid && m_Editor->HasNativeViewportCoverage();
     s.qualityStream<<std::fixed<<std::setprecision(3)<<s.qualityStage<<','<<elapsed<<','<<s.qualityRequiredRevision
         <<','<<(presented.valid?presented.key:0)<<','<<native<<','<<geometry.logicalWidth<<','<<geometry.logicalHeight
         <<','<<geometry.storageWidth<<','<<geometry.storageHeight<<','<<m_Editor->IsEditorRenderBusy()

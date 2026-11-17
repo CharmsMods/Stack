@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpHsl.h"
 #include "Renderer/ColorWarpShader.h"
 #include "Renderer/RenderPipeline.h"
 
@@ -145,7 +146,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         // zero or a selection is disabled. Their fields remain reusable.
         params.push_back({Stack::RawRecipe::ColorWarpHue(pin.sourceA,pin.sourceB),
             pin.enabled?pin.strength:0.f,pin.protectColor?1.f:0.f,
-            Stack::RawRecipe::ColorWarpParticipates(pin)?1.f:0.f});
+            (!Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin) && Stack::RawRecipe::ColorWarpParticipates(pin))?1.f:0.f});
         const auto region=std::find_if(colorWarp.regions.begin(),colorWarp.regions.end(),[&](const auto& r){return r.id==pin.regionId;});
         const bool spatial=region!=colorWarp.regions.end() && region->spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;
         selections.push_back({pin.sourceA,pin.sourceB,pin.sampleRadius,float(pin.population.size())});
@@ -154,10 +155,12 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             populations.push_back({p.a,p.b,p.sceneEv,p.mass});
         }
         fieldFlags.push_back({pin.smoothSelection>0?1.f:0.f,spatial?1.f:0.f,pin.brightnessSoftness,0});
-        const bool needsField=spatial || pin.smoothSelection>0;
-        const auto destination=Stack::RawRecipe::ColorWarpDestination(pin);
+        const bool needsField=!Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin) && (spatial || pin.smoothSelection>0);
+        auto destinationPin=pin;
+        if(colorWarp.version>=5)destinationPin.saturation=0;
+        const auto destination=Stack::RawRecipe::ColorWarpDestination(destinationPin);
         moves.push_back({pin.moveColors?destination[0]-pin.sourceA:pin.tintA,pin.moveColors?destination[1]-pin.sourceB:pin.tintB,0,0});
-        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors?0.f:pin.saturation,pin.brightness,needsField?float(spatialPins.size()+1):0.f});
+        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors && colorWarp.version<5?0.f:pin.saturation,pin.brightness,needsField?float(spatialPins.size()+1):0.f});
         hueRanges.push_back(packedRange(pin.hueRange));
         saturationRanges.push_back(packedRange(pin.saturationRange));
         exposureRanges.push_back(packedRange(pin.exposureRange));
@@ -479,6 +482,9 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             glUniform1i(
                 glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uBlendOverlaps"),
                 colorWarp.combine==Stack::RawRecipe::RawColorWarpCombine::Blend ? 1 : 0);
+            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslModel"),colorWarp.version>=5);
+            const auto hsl=Stack::RawRecipe::PrepareColorWarpHsl(colorWarp);
+            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHsl[0]"),8,hsl.front().data());
             glUniform1f(
                 glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uStrength"),
                 colorWarp.strength);

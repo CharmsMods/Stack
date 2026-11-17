@@ -14,7 +14,10 @@ bool EditorRenderWorker::WaitForSubmittedGpuWork() {
     glFlush();
     bool complete = false;
     for (;;) {
-        const GLenum status = glClientWaitSync(fence, 0, 0);
+        // A bounded driver wait wakes as soon as this small batch completes.
+        // A fixed 2 ms sleep at every cooperative band adds seconds of idle
+        // time to a whole image even when each band takes only microseconds.
+        const GLenum status = glClientWaitSync(fence, 0, 1000000u);
         if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) {
             complete = true;
             break;
@@ -24,11 +27,8 @@ bool EditorRenderWorker::WaitForSubmittedGpuWork() {
             complete = true;
             break;
         }
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        // Pending edits replace the one queued snapshot while this wait lets
-        // the UI run. Shutdown can wake it immediately; do not spin merely
-        // because another snapshot is pending.
-        if (m_Cv.wait_for(lock, std::chrono::milliseconds(2), [this] { return m_StopRequested; })) break;
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_StopRequested) break;
     }
     glDeleteSync(fence);
     return complete;
@@ -47,7 +47,7 @@ bool EditorRenderWorker::TryConsumeViewportTiming(Result& result) {
 }
 
 void EditorRenderWorker::CaptureViewportTiming(const Snapshot& snapshot, Result& result) {
-    if (!m_PersistentPipeline || snapshot.rawRenderPurpose == RawRenderPurpose::ViewportCalibration ||
+    if (result.viewportSectionRestored || !m_PersistentPipeline || snapshot.rawRenderPurpose == RawRenderPurpose::ViewportCalibration ||
         (snapshot.rawWorkspace.sourceKey.empty() && !result.viewportPreview.enabled)) return;
     auto batch=m_PersistentPipeline->m_RawViewportGpuTiming.Capture();
     if (!batch.serviceStart) { Raw::ViewportGpuTiming::Release(batch); return; }
@@ -71,6 +71,8 @@ void EditorRenderWorker::CaptureViewportTiming(const Snapshot& snapshot, Result&
     pending.batch=std::move(batch);
     auto& evidence=pending.evidence;
     evidence.timingOnly=true; evidence.success=true;
+    evidence.denoisePending=result.denoisePending;
+    evidence.error=result.error;
     evidence.ownerId=result.ownerId; evidence.generation=result.generation;
     evidence.graphRequest=result.graphRequest;
     evidence.viewportPreview=result.viewportPreview;
@@ -145,6 +147,9 @@ void EditorRenderWorker::FinishViewportTiming(const Result& result) {
         evidence.telemetry.workerTotalMs = result.telemetry.workerTotalMs;
         evidence.telemetry.queueWaitMs = result.telemetry.queueWaitMs;
         evidence.telemetry.superseded = result.telemetry.superseded;
+        evidence.success = result.success;
+        evidence.error = result.error;
+        evidence.denoisePending = result.denoisePending;
         return;
     }
 }

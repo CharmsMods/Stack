@@ -101,6 +101,9 @@ struct ViewportPreviewRequest {
     // Enabled with empty=true requests no detail. Enabled with an invalid
     // visible rectangle and empty=false explicitly retains full-image demand.
     bool empty = false;
+    // Section completion publishes only edited pixels; its existing base
+    // presentation already owns comparison imagery.
+    bool prepareCompareSource = true;
 };
 
 // Logical dimensions describe the final zero-origin output canvas. Semantic

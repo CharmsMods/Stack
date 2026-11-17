@@ -190,8 +190,8 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
         }
         frame.completePhotoCoverage = frame.completePhotoCoverage || (completeTiles && !tiles.tiles.empty());
     }
-    const auto addRegion = [&](unsigned int texture, const Raw::ViewportRegion& region) {
-        if (!IsViewportTextureSafeForDrawing(texture)) return;
+    const auto addRegion = [&](unsigned int texture, const Raw::ViewportRegion& region, bool ownedSection = false) {
+        if (!texture || (!ownedSection && !IsViewportTextureSafeForDrawing(texture))) return;
         if (!region.Valid()) {
             frame.patches.push_back({texture, imageMin, imageMax});
             frame.completePhotoCoverage = true;
@@ -231,7 +231,45 @@ void EditorModule::PublishRawImageBackdrop(ImVec2 imageMin, ImVec2 imageMax,
             break;
         }
     }
-    MakeBackdropCoverageDisjoint(frame.patches);
+    // The section grid is already disjoint. Partition the backdrop once per
+    // visible cell rather than repeatedly subtracting every tile rectangle.
+    const auto& nativeState=ActiveViewportPreviewState();
+    bool sectionGrid=false;
+    if(UsesGraphViewportPreview() && nativeState.sections && nativeState.sectionRevision &&
+        nativeState.acceptedContentIdentity==nativeState.contentIdentity && fullTexture) {
+        sectionGrid=true;frame.patches.clear();
+        const auto full=nativeState.sections->Bounds(0);
+        constexpr int edge=Stack::Renderer::ViewportSectionStore::Edge;
+        const int columns=(full.fullWidth+edge-1)/edge,rows=(full.fullHeight+edge-1)/edge;
+        const auto cell=[&](float p,float origin,float span,int extent,int limit) {
+            return std::clamp(int((p-origin)/span*extent)/edge,0,limit-1);
+        };
+        // The backdrop is a whole-window consumer, including the photo under
+        // panels. Limiting its cells to the editing pane clears real coverage
+        // at the top/sides whenever the camera crosses a section boundary.
+        const auto* viewport=ImGui::GetMainViewport();
+        const ImVec2 screenMin=viewport->Pos;
+        const ImVec2 screenMax(screenMin.x+viewport->Size.x,screenMin.y+viewport->Size.y);
+        const int x0=cell(screenMin.x,imageMin.x,size.x,full.fullWidth,columns),x1=cell(screenMax.x,imageMin.x,size.x,full.fullWidth,columns);
+        const int y0=cell(screenMin.y,imageMin.y,size.y,full.fullHeight,rows),y1=cell(screenMax.y,imageMin.y,size.y,full.fullHeight,rows);
+        for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x) {
+            const int i=y*columns+x;
+            const auto core=nativeState.sections->Bounds(i),raster=nativeState.sections->Raster(i);
+            const auto& section=nativeState.sectionTextures[i];
+            const auto& texture=section.native.texture ? section.native : section.preview;
+            const auto previousCount=frame.patches.size();
+            // Section adoption already checked readiness and owns the lease.
+            // Avoid a driver existence query for every section on every frame.
+            addRegion(texture.texture ? texture.Display(hdr) : fullTexture,core,
+                texture.texture && texture.lease.Texture()==texture.texture);
+            if(frame.patches.size()==previousCount)continue;
+            auto& patch=frame.patches.back();
+            const auto sample=texture.texture ? raster : Stack::Renderer::WholeImageRegion(core.fullWidth,core.fullHeight);
+            patch.uvMinimum={float(core.x-sample.x)/sample.width,1.f-float(core.y-sample.y)/sample.height};
+            patch.uvMaximum={float(core.x+core.width-sample.x)/sample.width,1.f-float(core.y+core.height-sample.y)/sample.height};
+        }
+    }
+    if(!sectionGrid)MakeBackdropCoverageDisjoint(frame.patches);
 
     // finishImage publishes after the viewport has advanced or cancelled its
     // fade. Use that same blend everywhere, including beneath the controls.

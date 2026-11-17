@@ -29,8 +29,16 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         const auto point=screen(RawRecipe::ColorWarpHue(other.sourceA,other.sourceB),std::hypot(other.sourceA,other.sourceB));
         draw->AddCircle(point,3.f,ImGui::GetColorU32(ImGuiCol_Text,other.enabled?.35f:.15f),16,1.f);
     }
+    const auto destinationForModel=[&] {
+        auto result=RawRecipe::ColorWarpDestination(pin);
+        if(args.colorWarp.version>=5) {
+            result[0]+=pin.tintA*pin.saturation;
+            result[1]+=pin.tintB*pin.saturation;
+        }
+        return result;
+    };
     const auto source=screen(sourceHue,sourceChroma);
-    const auto destination=RawRecipe::ColorWarpDestination(pin);
+    const auto destination=destinationForModel();
     const auto target=screen(RawRecipe::ColorWarpHue(destination[0],destination[1]),std::hypot(destination[0],destination[1]));
     const auto white=ImGui::GetColorU32(ImGuiCol_Text);
     draw->AddLine(source,target,white,1.5f);
@@ -91,7 +99,7 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
         } else if(!pin.protectColor && std::hypot(dx,dy)<size*.5f) {
             state.dragging=0;state.lastHue=pointerHue;state.startChroma=pointerChroma;state.startSaturation=pin.saturation;
             state.movePress={pointerChroma*std::cos(pointerHue*radians),pointerChroma*std::sin(pointerHue*radians)};
-            const auto destination=RawRecipe::ColorWarpDestination(pin);state.moveStart={destination[0],destination[1]};
+            const auto destination=destinationForModel();state.moveStart={destination[0],destination[1]};
         }
     }
     bool changed=false;
@@ -104,7 +112,15 @@ bool DrawColorWarpWheel(RawLabColorSurfaceArgs& args,RawRecipe::RawColorWarpPin&
             if(pin.moveColors || sourceChroma<.02f) {
                 const float a=state.moveStart.x+.15f*(pointerChroma*std::cos(pointerHue*radians)-state.movePress.x);
                 const float b=state.moveStart.y+.15f*(pointerChroma*std::sin(pointerHue*radians)-state.movePress.y);
-                if(sourceChroma<.02f) {
+                if(args.colorWarp.version>=5) {
+                    // Move authors translation independently of saturation. A
+                    // drag from zero saturation starts a fresh visible move.
+                    if(pin.saturation<=-1.f)pin.saturation=0.f;
+                    const float gain=std::max(.000001f,1.f+pin.saturation);
+                    const float angle=(sourceHue+pin.hueShift)*radians;
+                    pin.tintA=std::clamp(a/gain-sourceChroma*std::cos(angle),-1.f,1.f);
+                    pin.tintB=std::clamp(b/gain-sourceChroma*std::sin(angle),-1.f,1.f);
+                } else if(sourceChroma<.02f) {
                     const auto current=RawRecipe::ColorWarpDestination(pin);
                     pin.tintA=std::clamp(a-(current[0]-pin.tintA),-1.f,1.f);
                     pin.tintB=std::clamp(b-(current[1]-pin.tintB),-1.f,1.f);

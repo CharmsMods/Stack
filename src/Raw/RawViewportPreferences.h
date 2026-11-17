@@ -18,6 +18,16 @@ struct ViewportPreferences {
     bool backgroundLearning = true;
 };
 
+inline bool UsesFullDisplayDetail(const ViewportPreferences& preferences) {
+    return preferences.mode == ViewportInteractionMode::PreserveDetail &&
+        preferences.minimumDetailPercent == 100;
+}
+
+inline int EffectiveViewportTargetFps(const ViewportPreferences& preferences, int displayFps) {
+    return ResolveViewportTargetFps(
+        UsesFullDisplayDetail(preferences) ? displayFps : preferences.targetFps, displayFps);
+}
+
 // Shared application preferences. Editors own only an observed revision.
 // An instance without a path is useful for embedded/headless editors too.
 class ViewportPreferencesStore : public std::enable_shared_from_this<ViewportPreferencesStore> {

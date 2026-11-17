@@ -1,3 +1,4 @@
+#include "Raw/ColorWarpHsl.h"
 #include "Raw/Demosaic/DemosaicCatalog.h"
 #include "ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -460,6 +461,9 @@ RawDevelopmentRecipe BuildNeutralComparisonRecipe(
 
     // Keep the current technical and color-domain foundation while resetting
     // authored denoise, tone, and color controls.
+    neutral.technical.highlightMode = currentRecipe.technical.highlightMode;
+    neutral.technical.highlightStrength = currentRecipe.technical.highlightStrength;
+    neutral.technical.highlightThreshold = currentRecipe.technical.highlightThreshold;
     neutral.technical.processingVersion =
         Raw::RawProcessingVersion::TruthfulV2;
     neutral.technical.demosaicMethod =
@@ -495,12 +499,14 @@ RawDevelopmentRecipe BuildNeutralComparisonRecipe(
 const char* WhiteBalanceModeStableString(WhiteBalanceMode mode) {
     switch (mode) {
         case WhiteBalanceMode::AsShot: return "as-shot";
+        case WhiteBalanceMode::Auto: return "auto";
         case WhiteBalanceMode::CustomMultipliers: return "custom-multipliers";
     }
     return "as-shot";
 }
 
 WhiteBalanceMode WhiteBalanceModeFromStableString(const std::string& value) {
+    if (value == "auto") return WhiteBalanceMode::Auto;
     if (value == "custom-multipliers") {
         return WhiteBalanceMode::CustomMultipliers;
     }
@@ -1431,7 +1437,7 @@ bool UsesColorWarpSpatialMasks(const RawColorWarpRecipe& input) {
     if (!HasPreparedColorWarpEffect(colorWarp)) return false;
     return std::any_of(colorWarp.pins.begin(), colorWarp.pins.end(),
         [&](const RawColorWarpPin& pin) {
-            if (!ColorWarpParticipates(pin)) return false;
+            if (UsesColorWarpHsl(colorWarp,pin) || !ColorWarpParticipates(pin)) return false;
             if (pin.smoothSelection>0) return true;
             const auto region = std::find_if(colorWarp.regions.begin(), colorWarp.regions.end(),
                 [&](const RawColorWarpRegion& candidate) { return candidate.id == pin.regionId; });
@@ -1520,14 +1526,16 @@ std::array<float, 3> ApplyPreparedColorWarp(
     float hue=0, saturation=0, brightness=0, totalWeight=0, protection=0, moveA=0, moveB=0;
     for (std::size_t index=0;index<colorWarp.pins.size();++index) {
         const auto& pin=colorWarp.pins[index];
-        if(!ColorWarpParticipates(pin))continue;
+        if(UsesColorWarpHsl(colorWarp,pin) || !ColorWarpParticipates(pin))continue;
         const auto mask=masks && index<masks->size()?(*masks)[index]:RawColorWarpMaskSample{};
         const float weight=EvaluateColorWarpPinWeight(pin,coordinate,mask,
             masks?ColorWarpPinSpatialSupport(colorWarp,pin):0.f);
         if(pin.protectColor) { protection=std::max(protection,std::clamp(weight,0.f,1.f));continue; }
         totalWeight+=weight;brightness+=pin.brightness*weight;
         if(pin.moveColors) {
-            const auto destination=ColorWarpDestination(pin);
+            auto destinationPin=pin;
+            if(colorWarp.version>=5) {destinationPin.saturation=0;saturation+=pin.saturation*weight;}
+            const auto destination=ColorWarpDestination(destinationPin);
             moveA+=(destination[0]-pin.sourceA)*weight;
             moveB+=(destination[1]-pin.sourceB)*weight;
         } else {hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;
@@ -1536,14 +1544,35 @@ std::array<float, 3> ApplyPreparedColorWarp(
     const float denominator=colorWarp.combine==RawColorWarpCombine::Blend?std::max(1.f,totalWeight):1.f;
     const float amount=colorWarp.strength*(1.f-protection)/denominator;
     hue*=amount;saturation*=amount;brightness*=amount;moveA*=amount;moveB*=amount;
-    if(hue==0 && saturation==0 && brightness==0 && moveA==0 && moveB==0)return sceneRgb;
+    float familyGain=1.f;
+    if(colorWarp.version>=5) {
+        const auto normalized=ColorWarpSelectionCoordinate(coordinate);
+        const auto family=EvaluateColorWarpHsl(PrepareColorWarpHsl(colorWarp),std::hypot(normalized[0],normalized[1])>1e-6f?ColorWarpHue(normalized[0],normalized[1]):0.f);
+        const auto smooth=[](float x){x=std::clamp(x,0.f,1.f);return x*x*(3.f-2.f*x);};
+        const float guard=smooth((std::hypot(normalized[0],normalized[1])-.02f)/.08f)*smooth((coordinate.sceneEv+16.f)/4.f);
+        const float influence=colorWarp.strength*(1.f-protection);
+        hue+=family[0]*influence*guard;
+        brightness+=family[2]*influence*guard;
+        familyGain=std::max(0.f,1.f+family[1]*influence*(family[1]>0?guard:1.f));
+    }
+    if(hue==0 && saturation==0 && brightness==0 && moveA==0 && moveB==0 && familyGain==1.f)return sceneRgb;
     auto output=sceneRgb;
-    if(hue!=0 || saturation!=0 || moveA!=0 || moveB!=0) {
+    if(hue!=0 || saturation!=0 || moveA!=0 || moveB!=0 || familyGain!=1.f) {
         const float radians=hue*3.14159265358979323846f/180.f;
         const float c=std::cos(radians),s=std::sin(radians),gain=std::max(0.f,1.f+saturation);
         const float a=coordinate.a,b=coordinate.b;
-        coordinate.a=(c*a-s*b)*gain+moveA*std::max(std::abs(coordinate.lightness),.000001f);coordinate.b=(s*a+c*b)*gain+moveB*std::max(std::abs(coordinate.lightness),.000001f);
+        const float turnGain=colorWarp.version>=5?1.f:gain;
+        coordinate.a=(c*a-s*b)*turnGain+moveA*std::max(std::abs(coordinate.lightness),.000001f);
+        coordinate.b=(s*a+c*b)*turnGain+moveB*std::max(std::abs(coordinate.lightness),.000001f);
+        if(colorWarp.version>=5) {coordinate.a*=gain;coordinate.b*=gain;}
+        coordinate.a*=familyGain;coordinate.b*=familyGain;
         output=ColorWarpCoordinateToWorkingRgb(coordinate,workingSpace);
+        // The legacy sRGB/XYZ matrices use slightly different D65 rounding.
+        // Author an exact neutral endpoint rather than retaining that color cast.
+        if(colorWarp.version>=5 && coordinate.a==0.f && coordinate.b==0.f) {
+            const float neutral=coordinate.lightness*coordinate.lightness*coordinate.lightness;
+            output={neutral,neutral,neutral};
+        }
     }
     // A bounded, monotone lightness adjustment preserves black and eases
     // toward highlights. Apply its gain to original RGB to retain detail.
@@ -2259,12 +2288,15 @@ Raw::RawDevelopSettings ToRawDevelopSettings(const RawDevelopmentRecipe& recipe)
     settings.encodeSrgbOutput = recipe.technical.encodeSrgbOutput;
     settings.mosaicDenoise =
         SanitizeMosaicDenoiseSettings(recipe.technical.mosaicDenoise);
-    settings.highlightMode = Raw::HighlightReconstructionMode::Off;
+    settings.highlightMode = recipe.technical.highlightMode;
+    settings.highlightStrength = std::clamp(recipe.technical.highlightStrength, 0.0f, 1.0f);
+    settings.highlightThreshold = std::clamp(recipe.technical.highlightThreshold, 0.0f, 1.0f);
     settings.falseColorSuppression = 0.0f;
     settings.defringeStrength = 0.0f;
     settings.highlightEdgeCleanup = 0.0f;
     settings.exposureStops = recipe.preToneExposureEv;
     switch (recipe.whiteBalance.mode) {
+        case WhiteBalanceMode::Auto:
         case WhiteBalanceMode::CustomMultipliers:
             settings.whiteBalanceMode = recipe.whiteBalance.hasMultipliers
                 ? Raw::WhiteBalanceMode::Manual
@@ -2335,6 +2367,9 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
         { "rawRecipeVersion", kRawDevelopmentRecipeVersion },
         { "processing", {
             { "version", "truthful-v2" },
+            { "highlightMode", static_cast<int>(recipe.technical.highlightMode) },
+            { "highlightStrength", recipe.technical.highlightStrength },
+            { "highlightThreshold", recipe.technical.highlightThreshold },
             { "demosaic", DemosaicMethodStableString(recipe.technical.demosaicMethod) },
             { "workingSpace", WorkingSpaceStableString(recipe.technical.workingSpace) },
             { "applyBaselineExposure", recipe.technical.applyBaselineExposure },
@@ -2421,6 +2456,9 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
 
 RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     RawDevelopmentRecipe recipe = MakeDefaultRecipe({});
+    recipe.whiteBalance.mode = WhiteBalanceMode::AsShot;
+    recipe.technical.highlightMode = Raw::HighlightReconstructionMode::Off;
+    recipe.technical.highlightStrength = 0.5f;
     if (!value.is_object()) {
         return recipe;
     }
@@ -2435,6 +2473,10 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     recipe.technical.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
     const nlohmann::json processing = value.value("processing", nlohmann::json::object());
     if (processing.is_object()) {
+        recipe.technical.highlightMode = static_cast<Raw::HighlightReconstructionMode>(
+            std::clamp(JsonInteger(processing, "highlightMode", 0), 0, 3));
+        recipe.technical.highlightStrength = std::clamp(JsonFloat(processing, "highlightStrength", 0.5f), 0.0f, 1.0f);
+        recipe.technical.highlightThreshold = std::clamp(JsonFloat(processing, "highlightThreshold", 0.98f), 0.0f, 1.0f);
         recipe.technical.demosaicMethod = DemosaicMethodFromStableString(
             processing.value(
                 "demosaic",
@@ -2519,7 +2561,7 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     const nlohmann::json whiteBalance = value.value("whiteBalance", nlohmann::json::object());
     if (whiteBalance.is_object()) {
         recipe.whiteBalance.mode = WhiteBalanceModeFromStableString(
-            whiteBalance.value("mode", std::string(WhiteBalanceModeStableString(recipe.whiteBalance.mode))));
+            whiteBalance.value("mode", std::string("as-shot")));
         recipe.whiteBalance.hasMultipliers = whiteBalance.value("hasMultipliers", recipe.whiteBalance.hasMultipliers);
         const nlohmann::json multipliers = whiteBalance.value("multipliers", nlohmann::json::array());
         if (multipliers.is_array() && multipliers.size() >= 3) {

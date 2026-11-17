@@ -48,11 +48,6 @@ bool RawDecodeSettingsUseOnlyManagedFields(
         !AlmostEqual(settings.whiteLevelOverride, defaults.whiteLevelOverride)) {
         return fail("RAW Decode black/white level overrides are outside the managed RAW recipe mapping.");
     }
-    if (settings.highlightMode != defaults.highlightMode ||
-        !AlmostEqual(settings.highlightStrength, defaults.highlightStrength) ||
-        !AlmostEqual(settings.highlightThreshold, defaults.highlightThreshold)) {
-        return fail("RAW Decode highlight reconstruction settings are outside the managed RAW recipe mapping.");
-    }
     if (settings.cameraTransformEnabled != defaults.cameraTransformEnabled ||
         settings.cameraTransformSource != defaults.cameraTransformSource ||
         settings.debugBypassCameraTransform != defaults.debugBypassCameraTransform ||
@@ -218,6 +213,9 @@ Stack::RawRecipe::RawDevelopmentRecipe RecipeFromDecodeSettings(
     recipe.technical.applyBaselineExposure = settings.applyBaselineExposure;
     recipe.technical.encodeSrgbOutput = settings.encodeSrgbOutput;
     recipe.technical.mosaicDenoise = settings.mosaicDenoise;
+    recipe.technical.highlightMode = settings.highlightMode;
+    recipe.technical.highlightStrength = settings.highlightStrength;
+    recipe.technical.highlightThreshold = settings.highlightThreshold;
     recipe.preToneExposureEv = settings.exposureStops;
     recipe.cropRotation.rotationDegrees = ((settings.rotationDegrees % 360) + 360) % 360;
     recipe.cropRotation.flipHorizontally = settings.flipHorizontally;
@@ -358,6 +356,9 @@ nlohmann::json SerializeManagedRawSection(const ManagedRawSection& section) {
             { "preToneExposureEv", "rawDecode.settings.exposureStops" },
             { "whiteBalance", "rawDecode.settings.whiteBalance" },
             { "technical.mosaicDenoise", "rawDecode.settings.mosaicDenoise" },
+            { "technical.highlightMode", "rawDecode.settings.highlightMode" },
+            { "technical.highlightStrength", "rawDecode.settings.highlightStrength" },
+            { "technical.highlightThreshold", "rawDecode.settings.highlightThreshold" },
             { "cropRotation.rotationDegrees", "rawDecode.settings.rotationDegrees" },
             { "cropRotation.flipHorizontally", "rawDecode.settings.flipHorizontally" },
             { "cropRotation.flipVertically", "rawDecode.settings.flipVertically" },

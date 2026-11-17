@@ -1,4 +1,5 @@
 #include "App/UiPerformanceProbe.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -100,7 +101,14 @@ void Drawn(Visual visual, std::uint64_t key, Region region) {
 }
 void AcceptedImage(std::uint64_t generation,std::uint64_t revision,const void* owner,bool settledKernels) {
     if (Active()) { auto& s=Get();
-        if (owner==s.editor) s.images[s.nextImage++%s.images.size()]={generation,revision,settledKernels};
+        if (owner==s.editor) {
+            auto found=std::find_if(s.images.begin(),s.images.end(),[&](const auto& image) {
+                return image.generation==generation;
+            });
+            // Native sections can finish the same presented base generation.
+            if(found!=s.images.end()) *found={generation,revision,settledKernels};
+            else s.images[s.nextImage++%s.images.size()]={generation,revision,settledKernels};
+        }
         if(s.imageEvents.size()<512)s.imageEvents.push_back({owner==s.editor?"accepted_primary":"accepted_background",generation,revision}); }
 }
 void ImageDrawn(std::uint64_t generation,Region region) {

@@ -55,6 +55,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
         FinishViewportPreviewRequest(result, false);
         QueueViewportOutputTextureRelease(result.outputTexture);
         QueueViewportOutputTextureRelease(result.viewportOverview);
+        QueueViewportOutputTextureRelease(result.viewportSectionPreview);
         QueueViewportOutputTileSetRelease(result.outputTiles);
         QueueViewportOutputTextureRelease(
             result.rawWorkspace.localRangeOverlayTexture);
@@ -495,6 +496,30 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         bool rawPresentationAdopted = false;
         bool acceptedMainFrame=false;
+        const auto retainNativeWithOverview = [&]() {
+            if (!result.viewportPreview.enabled || !result.success || result.denoisePending ||
+                result.telemetry.interactionActive || !result.outputTexture.texture ||
+                !result.viewportPreviewGeometry.Valid() || result.viewportPreviewGeometry.NativeSamples() ||
+                result.viewportPreviewGeometry.resident.Partial()) return false;
+            const auto& state = ActiveViewportPreviewState();
+            if (state.acceptedInteractive || m_RenderPresentation.denoisePending ||
+                m_RenderPresentation.failed || !state.geometry.NativeSamples() ||
+                !state.geometry.resident.Partial() ||
+                state.acceptedGeneration != m_ViewportOutputRenderGeneration ||
+                result.viewportContentIdentity != state.acceptedContentIdentity ||
+                result.viewportContentIdentity != state.contentIdentity ||
+                result.viewportPreviewGeometry.logicalWidth != state.geometry.logicalWidth ||
+                result.viewportPreviewGeometry.logicalHeight != state.geometry.logicalHeight)
+                return false;
+            // Improve whole-photo coverage without replacing the native patch.
+            // Both results passed normal identity and GPU-readiness checks.
+            // The main resource stays with its existing presentation owner.
+            QueueViewportOutputTextureRelease(result.viewportOverview);
+            result.viewportOverview = std::move(result.outputTexture);
+            result.viewportPreviewGeometry = state.geometry;
+            result.rawWorkspace.viewportRegion = state.geometry.resident;
+            return true;
+        };
         auto markMainOutputAccepted = [&](RawWorkspacePreviewOutputKind outputKind) {
             acceptedMainFrame=true;
             AdoptViewportPreviewState(result);
@@ -889,6 +914,10 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 result.error =
                     "Render output could not be uploaded.";
             }
+        } else if (result.success && result.viewportSections && result.viewportSection >= 0) {
+            AdoptViewportNativeSection(result);
+        } else if (result.success && result.outputTexture.texture != 0 && retainNativeWithOverview()) {
+            markMainOutputAccepted(RawWorkspacePreviewOutputKind::SingleTexture);
         } else if (result.success && result.outputTexture.texture != 0) {
             auto& frameTransition = m_Viewport.FrameTransition();
             bool blendGraphFrame = false;

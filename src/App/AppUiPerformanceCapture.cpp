@@ -226,13 +226,18 @@ void AppShell::TickUiPerformanceCapture() {
         }
     }
     if(s.step==20) {
-        // Start at fit, then remain magnified while reversing the wheel.
-        // Keep the pointer outside the floating tool and stable between events.
+        // Magnify, reverse the wheel, pan, then return to fit and magnify
+        // again. This exercises native section priority and retained reuse.
+        // Keep the pointer outside the floating tool.
         Pointer(900,500);
         if(f==40 || f==120 || f==180 || f==240 || f==300) {
             measure(Visual::ImageCamera,"image_zoom");
-            io.AddMouseWheelEvent(0,f==40?24.f:(f==180 || f==300?3.f:-3.f));
+            io.AddMouseWheelEvent(0,f==40 || f==300?24.f:f==240?-24.f:f==180?3.f:-3.f);
         }
+        if(f==200)io.AddMouseButtonEvent(ImGuiMouseButton_Middle,true);
+        if(f>=201 && f<=221)Pointer(900.f-std::min(f-200,20)*17.f,500.f-std::min(f-200,20)*11.f);
+        if(f==201)measure(Visual::ImageCamera,"image_pan");
+        if(f==221)io.AddMouseButtonEvent(ImGuiMouseButton_Middle,false);
     }
     if(s.step==21) {
         const auto tool=Probe::Last(Visual::Controls).region;
@@ -327,6 +332,24 @@ void AppShell::TickUiPerformanceCapture() {
 void AppShell::FinishUiPerformanceFrame() {
     if(!m_UiPerformanceCapture)return;
     auto& s=*m_UiPerformanceCapture;Probe::Presented();
+    if(s.step==20 && (s.frame==119 || s.frame==222 || s.frame==330)) {
+        if(const auto* photo=m_Editor->GetRawImageBackdrop();photo && !photo->patches.empty()) {
+            const auto* viewport=ImGui::GetMainViewport();
+            const ImVec2 low(std::max(photo->imageMinimum.x,viewport->Pos.x),std::max(photo->imageMinimum.y,viewport->Pos.y));
+            const ImVec2 high(std::min(photo->imageMaximum.x,viewport->Pos.x+viewport->Size.x),
+                std::min(photo->imageMaximum.y,viewport->Pos.y+viewport->Size.y));
+            if(low.x<high.x && low.y<high.y)for(float fy:{.02f,.5f,.98f})for(float fx:{.02f,.5f,.98f}) {
+                const ImVec2 point(low.x+(high.x-low.x)*fx,low.y+(high.y-low.y)*fy);
+                const bool covered=std::any_of(photo->patches.begin(),photo->patches.end(),[&](const auto& patch) {
+                    return patch.texture && point.x>=patch.minimum.x && point.x<=patch.maximum.x &&
+                        point.y>=patch.minimum.y && point.y<=patch.maximum.y;
+                });
+                if(!covered){s.failure="Current photo coverage vanished at a window edge or behind a panel";s.finished=true;m_IsRunning=false;}
+            }
+            if(!s.finished)std::cout<<"Current photo covers window edges and panel areas at frame "<<s.frame<<'\n';
+        }
+    }
+
     if(s.ready && (s.responsiveness.enabled || s.qualityCapture || s.step>=0 && s.step<int(scenarios.size()) && s.frame>30) && s.frames.size()<(s.responsiveness.enabled?60000u:2400u)) {
         if(s.gpuActive)s.queries[s.query].frame=s.frames.size();
         const auto& r=s.responsiveness;

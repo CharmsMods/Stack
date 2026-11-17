@@ -39,7 +39,8 @@ inline constexpr const char* kRestormerDenoiseAdapterVersion =
 
 enum class WhiteBalanceMode {
     AsShot,
-    CustomMultipliers
+    CustomMultipliers,
+    Auto
 };
 
 enum class ToneCurveMode {
@@ -271,6 +272,9 @@ struct RawCropRotationRecipe {
 };
 
 struct RawTechnicalRecipe {
+    Raw::HighlightReconstructionMode highlightMode = Raw::HighlightReconstructionMode::ColorReconstruction;
+    float highlightStrength = 1.0f;
+    float highlightThreshold = 0.98f;
     Raw::RawProcessingVersion processingVersion = Raw::RawProcessingVersion::TruthfulV2;
     Raw::DemosaicMethod demosaicMethod = Raw::DemosaicMethod::MalvarHeCutler;
     Raw::RawWorkingSpace workingSpace = Raw::RawWorkingSpace::LinearRec2020D65;
@@ -388,7 +392,7 @@ struct RawColorWarpPin {
 
 struct RawColorWarpRecipe {
     RawColorWarpRecipe();
-    int version = 4;
+    int version = 5;
     bool enabled = true;
     float strength = 1.0f;
     std::vector<RawColorWarpPin> pins;

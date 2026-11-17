@@ -82,7 +82,7 @@ int NormalizeRawLabRotationDegrees(int rotationDegrees) {
 
 bool EditorModule::BeginRawWorkspaceEditContext(
     const Stack::RawWorkspace::SourceRecord* selectedSource,
-    RawWorkspaceEditContext& context) const {
+    RawWorkspaceEditContext& context, bool bindSelectedNode) const {
     Stack::UiPerformance::Span timing(Stack::UiPerformance::Stage::ViewContext);
     context = RawWorkspaceEditContext{};
     context.source = selectedSource;
@@ -91,7 +91,7 @@ bool EditorModule::BeginRawWorkspaceEditContext(
     context.editabilityTrace.sourceMatches = selectedSource && m_Project->rawSourceKey == selectedSource->relativePathKey;
     context.editabilityTrace.lifecycle = static_cast<int>(m_Project->lifecycle.Phase());
     context.editabilityTrace.loadState = static_cast<int>(m_RawWorkspaceProjectLoadTaskState);
-    if (m_Project->nodeEditor && m_Project->nodeEditor->layerId == Stack::Project::kProjectGraphId &&
+    if (bindSelectedNode && m_Project->nodeEditor && m_Project->nodeEditor->layerId == Stack::Project::kProjectGraphId &&
         !IsBracketingToolActive()) {
         const auto phase=m_Project->lifecycle.Phase();
         context.canEdit=phase!=Stack::Project::ProjectLifecyclePhase::Loading &&
@@ -137,7 +137,7 @@ bool EditorModule::BeginRawWorkspaceEditContext(
                     ? "Save a repaired copy before editing this recovered project."
                     : "The multi-frame project is busy.";
         }
-        BindRawOperationContext(context);
+        if (bindSelectedNode) BindRawOperationContext(context);
         return true;
     }
     if (selectedSource == nullptr) {
@@ -174,8 +174,9 @@ bool EditorModule::BeginRawWorkspaceEditContext(
             ? m_RawWorkspaceProjectLoadStatusText
             : "Double-click this image in Gallery to open its RAW project.";
     } else {
-        if (selectedProjectActive && SelectedRawOperation()) {
-            // Binding an operation retains only source identity, working
+        if (selectedProjectActive && (!bindSelectedNode || SelectedRawOperation())) {
+            // Interpretation edits the source recipe directly. Binding an
+            // operation retains only source identity, working
             // space, processing version and crop from this recipe. Reading
             // every Background operation here would immediately discard it.
             context.recipe = m_Project->rawRecipe;
@@ -232,7 +233,7 @@ bool EditorModule::BeginRawWorkspaceEditContext(
         m_Project->rawInteractionDraft.sourceKey == selectedSource->relativePathKey) {
         context.recipe = m_Project->rawInteractionDraft.recipe;
     }
-    BindRawOperationContext(context);
+    if (bindSelectedNode) BindRawOperationContext(context);
     return resolved;
 }
 
@@ -779,6 +780,7 @@ bool EditorModule::RenderRawWorkspaceLabSecondaryControls(RawWorkspaceEditContex
 }
 
 void EditorModule::RenderRawWorkspaceLabUI() {
+    UpdateInterpretationWhiteBalance();
     UpdateViewImageSurround();
     Stack::UiPerformance::Probe::Drawn(Stack::UiPerformance::Probe::Visual::Workspace,2);
     if (Stack::UiPerformance::Probe::Active())

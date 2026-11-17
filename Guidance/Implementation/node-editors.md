@@ -50,15 +50,32 @@ Tone's direct editor and Local EV's advanced correction curve use `RawLab/CurveC
 
 `RawLab/CurveCanvasMapping` owns continuous presentation scales for Tone's direct editors and Local EV's primary curve. Each node/channel initially fits the first valid input histogram with padding, then retains that view through edits and later histogram publications. Wheel zoom crops the scale without compressing its edges; Bend mode reserves the plain wheel for band width and uses Ctrl+wheel for zoom. The graph-view menu explicitly refits or restores the full range. Domain changes start a fresh fit. Linear-value channel curves use logarithmic brightness spacing; exposure curves already use stops. Tone fits its output view to include the existing curve, while Local EV retains its adjustment scale. Histogram bins, evaluated geometry, point picking, probes and inverse pointer coordinates share the mapping; offscreen anchors remain authored but are not hit targets. View navigation never authors an edit or requests image analysis. Cache labels, histogram rebins and transformed/screen geometry by their actual dependencies.
 
-## View Controls panel
+## View Light panel
 
-Controls is the default photographic editor when opening an image. Its fixed
+Light is the default photographic editor when opening an image. Its fixed
 registration order is Light, Tone, HSL, and Calibration, independent of
 rendering order. Light edits Exposure and five tonal anchors in one Local EV
 node; Tone retains its luminance/RGB curve; Calibration exposes the three primary
 Hue/Saturation pairs; HSL exposes eight fixed families with Hue, Saturation, or
-Brightness (the existing per-pin exposure) selected above them. These are views
+Brightness (the existing per-pin perceptual brightness adjustment) selected above them.
+HSL/Color Warp saturation is displayed as 0-600%, with 100% unchanged; the
+stored signed delta remains unchanged. These are views
 of existing authored parameters, not a second recipe or an automatic graph repair.
+
+Interpretation replaces the View sidebar's Layers tab and edits the prepared
+RAW source independently of the selected adjustment. Demosaicing uses a
+horizontal text carousel with faded edges, click/drag/wheel navigation and a
+short explanation below. White balance has Camera/Auto/Manual and an integrated
+neutral-area picker. Manual RGB gains use direct logarithmic sliders over the
+supported 0.05–16 range. Camera uses recorded metadata; Auto estimates the
+average unclipped camera-space color once on request, and Manual stores explicit
+gains. New recipes default to Camera; legacy recipes without a mode also retain Camera.
+Analysis runs on the existing background/GL service, accepts results only for
+its source and edit revision, and shares source history with manual edits.
+Initial Auto results for temporary previews do not materialize saved projects.
+The picker maps displayed geometry to prepared-source coordinates and rejects
+unavailable mappings. Esc, leaving the panel, or leaving View cancels picking.
+Bracketing retains Source. Hidden controls do not draw or animate.
 
 The catalog uses exact resolved definition identities and stable document/layer/node
 targets across owned graphs. Include RAW-layer graphs only when the renderer lowers them for the current document; ordinary documents may retain unused RAW defaults. Connected image ancestry determines available
@@ -131,6 +148,6 @@ Color Calibration's infinite saturation dial edits the existing three primary sa
 
 Color Warp's version-4 recipe owns eight permanent hue families, up to eight accepted custom selections, perceptual brightness, neutral tint, and Move/Turn adjustments. Custom selections retain up to six joint normalized-OKLab/scene-EV population centers with editable brightness softness; these are a bounded approximation, not independent color and exposure marginals. CPU, shader, masks, and selection feedback use the same membership definition on immutable input colors. Brightness applies a bounded lightness-derived gain with highlight rolloff; defaults suppress unreliable neutral hues and very dark signals. The existing bounded guide smooths influence, not image RGB. HDR values and alpha are retained.
 
-Sampling presents suggested swatches for individual acceptance. New selections start with zero adjustment and Everywhere scope; This region applies the retained spatial restriction. Resample explicitly replaces the sampled profile while retaining adjustments and the spatial restriction. Moving a region does not resample colors. Pending suggestions are rejected after input, node, or source identity changes. Accepted profiles serialize with the node and therefore follow ordinary document history. Version 4 intentionally rejects earlier Color Warp formats; no migration or compatibility renderer is provided.
+Sampling presents suggested swatches for individual acceptance. New selections start with zero adjustment and Everywhere scope; This region applies the retained spatial restriction. Resample explicitly replaces the sampled profile while retaining adjustments and the spatial restriction. Moving a region does not resample colors. Pending suggestions are rejected after input, node, or source identity changes. Accepted profiles serialize with the node and therefore follow ordinary document history. New Color Warp nodes use version 5 processing with the same normalized Oklab coordinates. Standard hue families use a smooth periodic adjustment field without spatial masks; desaturation reaches neutral without shadow/neutral attenuation, while boosts retain protection. Version 4 retains its original renderer until the explicit Use improved HSL action is committed through normal history. Formats older than version 4 remain unsupported.
 
 Move translates normalized chroma from source to destination; Turn rotates hue and scales saturation. Neutral tint is a translation in either mode. Influence previews include strength, protection and overlap; an unadjusted selected pin still previews potential influence. Unchanged selections never dilute active edits. Membership and spatial fields are cached by input and selection definition; brightness, tint, destination, strength and protection edits reuse them. Profile analysis stays on the existing sampling worker; drawing introduces no image scans. The compact panel uses thin tracks with hollow handles; custom swatches and selected adjustments appear directly beneath the default HSL rows. The floating wheel separates vertical brightness from hue/chroma and shows quiet surrounding anchors and the retained brightness profile. Source/result swatches use the shared CPU transform on a representative source color, cached by node/local revision, selected pin and working space. They illustrate color transformation; spatial influence is inspected with the affected-area preview.

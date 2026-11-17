@@ -1,11 +1,14 @@
 #include "App/Validation/Suites/GraphRenderingValidation.h"
 #include "App/Validation/Suites/RawViewportValidationFixture.h"
 #include "Editor/EditorRenderWorker.h"
+#include "Renderer/ViewportSectionStore.h"
 #include "Project/GraphImageContracts.h"
 #include "Raw/RawGraphOperation.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GLStateGuards.h"
+#include "Renderer/GLHelpers.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <cmath>
@@ -56,6 +59,11 @@ void ValidateGraphCacheDemandAndPrecision() {
     graph.nodes.push_back(second);
     graph.links[1] = {2,"imageOut",5,"imageIn"};
     graph.links.push_back({5,"imageOut",3,"imageIn"});
+    // Lowered RAW layers contain image Output aliases between operations.
+    RenderGraphNode bridge;bridge.nodeId=6;bridge.kind=RenderGraphNodeKind::Output;
+    graph.nodes.push_back(bridge);
+    graph.links[1]={2,"imageOut",6,"imageIn"};
+    graph.links.push_back({6,"imageOut",5,"imageIn"});
     Project::BindGraphImageContracts(graph);
     RenderPipeline pipeline;
     pipeline.Initialize();
@@ -112,11 +120,11 @@ void ValidateGraphCacheDemandAndPrecision() {
         "An upstream edit retained stale downstream pixels");
     graph.nodes[1].layerJson["amount"] = 3.f;
 
-    graph.nodes.resize(5);
+    graph.nodes.resize(6);
     graph.nodes[2].kind = RenderGraphNodeKind::DataMath;
     graph.nodes[2].dataMathMode = RenderDataMathMode::Multiply;
     graph.nodes[2].dataMathSettings.constantB = 1.25;
-    graph.links.back().toSocketId = "imageA";
+    for(auto& link:graph.links) if(link.toNodeId==3)link.toSocketId="imageA";
     Project::BindGraphImageContracts(graph);
     const auto mathPlan = RenderTiling::PlanGraphViewport(graph,96,64,0,request);
     RequireViewport(mathPlan.valid && mathPlan.workingBytes == 2 * plan.workingBytes,
@@ -130,6 +138,39 @@ void ValidateGraphCacheDemandAndPrecision() {
     reference.ExecuteGraph(graph);
     RequireViewport(!mathPixels.empty() && mathPixels == reference.GetOutputFloatPixels(width,height),
         "Precision transition changed the mathematical output");
+    // Exercise real large-target retirement and cooperative draws through the
+    // public graph API, using the same fixture pixels and operation graph.
+    constexpr int largeWidth=2051,largeHeight=2049;
+    const auto seed=graph.nodes[0].image.pixels;
+    std::vector<unsigned char> largePixels(std::size_t(largeWidth)*largeHeight*4);
+    for(std::size_t i=0;i<largePixels.size();++i)largePixels[i]=(*seed.bytes)[i%seed.size()];
+    graph.nodes[0].image={MakeSharedPixelBufferOwned(std::move(largePixels)),largeWidth,largeHeight,4};
+    Project::BindGraphImageContracts(graph);
+    pipeline.SetGraphCacheBudget(512ull*1024*1024,0,false);
+    pipeline.Resize(largeWidth,largeHeight);
+    unsigned checkpoints=0;
+    pipeline.SetRenderCancellationContext(1,[&] {++checkpoints;return false;});
+    for(float amount:{2.f,2.5f,3.f}) {
+        graph.nodes[1].layerJson["amount"]=amount;
+        pipeline.ExecuteGraph(graph);
+    }
+    RequireViewport(checkpoints>100 && pipeline.GetLastGraphExecutionStats().transientTargetReuses>0,
+        "Large graph work did not use cooperative draws and retired allocations");
+    const auto largeReused=pipeline.GetOutputFloatPixels(width,height);
+    reference.Resize(largeWidth,largeHeight);
+    reference.ExecuteGraph(graph);
+    RequireViewport(!largeReused.empty() && largeReused==reference.GetOutputFloatPixels(width,height),
+        "Cooperative rendering or retired allocation reuse changed full-image pixels");
+    // Cancellation cannot publish/cache a partially rendered band.
+    graph.nodes[1].layerJson["amount"]=4.f;
+    checkpoints=0;
+    pipeline.SetRenderCancellationContext(2,[&] {return ++checkpoints>80;});
+    pipeline.ExecuteGraph(graph);
+    pipeline.SetRenderCancellationContext(3,{});
+    pipeline.ExecuteGraph(graph);
+    reference.ExecuteGraph(graph);
+    RequireViewport(pipeline.GetOutputFloatPixels(width,height)==reference.GetOutputFloatPixels(width,height),
+        "Canceled bands contaminated a later full-quality result");
     std::cout << "Cache demand: evicted upstream skipped; cold/warm pixels exact; disconnected policy and float32 budget passed.\n";
 }
 
@@ -369,6 +410,22 @@ void RequireViewportPixels(const std::vector<float>& actual, int width, int heig
 } // namespace
 
 bool ValidateGraphViewportWorker(GLFWwindow* sharedWindow) {
+    {
+        // Just above the large-upload threshold, with uneven batch boundaries.
+        // Values outside [0,1] also guard float precision and accidental clipping.
+        constexpr int side=1025;
+        std::vector<float> expected(std::size_t(side)*side*4),actual(expected.size());
+        for(std::size_t i=0;i<expected.size();++i)expected[i]=float(int(i%8191)-4095)/1024.f;
+        const GLState::TextureBinding binding(GL_TEXTURE_2D,GL_TEXTURE_BINDING_2D);
+        const GLState::PixelPackState pack;
+        ScopedGLTexture uploaded(GLHelpers::CreateTextureFromData(expected.data(),side,side,GL_RGBA32F,GL_RGBA,GL_FLOAT,GL_NEAREST));
+        RequireViewport(bool(uploaded),"Batched float viewport upload failed");
+        glBindTexture(GL_TEXTURE_2D,uploaded.Get());pack.ConfigureTightCpuReadback();
+        glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,actual.data());
+        pack.Restore();binding.Restore();
+        RequireViewport(actual==expected,"Batched float upload changed pixels or row boundaries");
+    }
+
     constexpr int width = 96, height = 64;
     auto graph = ViewportGraph();
     const auto source = graph.nodes[0].image.pixels;
@@ -448,6 +505,34 @@ bool ValidateGraphViewportWorker(GLFWwindow* sharedWindow) {
         "Native refinement lost its resident coverage or per-view content identity");
     RequireViewportPixels(ReadViewportTexture(refined.outputTexture), refined.outputTexture.width, refined.outputTexture.height,
         native, width, height, snapshot.viewportPreview.visible);
+    snapshot.generation = snapshot.schedulingSerial = snapshot.graphRequest.revision = 3;
+    snapshot.viewportSections=std::make_shared<ViewportSectionStore>(width,height,0);
+    snapshot.viewportSection=0;snapshot.viewportPreview.visible=snapshot.viewportSections->Raster(0);
+    snapshot.viewportPreview.prepareCompareSource=false;
+    RequireViewport(worker.Submit(snapshot),"Native section request was rejected");
+    auto saved=WaitViewportWorker(worker);
+    RequireViewport(saved.success && snapshot.viewportSections->Complete() && snapshot.viewportSections->DiskBytes()>0 &&
+        saved.viewportSectionPreview.texture,"Native section did not reach its disk-backed completion state");
+    snapshot.generation = snapshot.schedulingSerial = snapshot.graphRequest.revision = 4;
+    RequireViewport(worker.Submit(snapshot),"Cached section reload was rejected");
+    auto restored=WaitViewportWorker(worker);
+    RequireViewport(restored.success && restored.viewportSectionRestored && restored.mainGraphStats.imageCacheMisses==0 &&
+        restored.mainGraphStats.rawStageCacheMisses==0,"Cached native pixels must reload without graph processing");
+    RequireViewportPixels(ReadViewportTexture(restored.outputTexture),width,height,native,width,height,WholeImageRegion(width,height));
+    snapshot.generation = snapshot.schedulingSerial = snapshot.graphRequest.revision = 5;
+    snapshot.rawRenderPurpose = RawRenderPurpose::InteractivePresentation;
+    snapshot.viewportSections.reset(); snapshot.viewportSection=-1;
+    snapshot.prepareViewportOverview=true; snapshot.previewMaxDimension=48;
+    snapshot.viewportPreview.visible=WholeImageRegion(width,height);
+    snapshot.viewportPreview.samplingScale=.5;
+    snapshot.viewportContentIdentity=78;
+    RequireViewport(worker.Submit(snapshot),"Whole-view preview request was rejected");
+    auto whole=WaitViewportWorker(worker);
+    RequireViewport(whole.success && whole.viewportOverview.texture && whole.viewportContentIdentity==78 &&
+        whole.viewportOverview.width==sampleWidth && whole.viewportOverview.height==sampleHeight,
+        "Whole-view edits must retain independent current-content overview coverage");
+    RequireViewportPixels(ReadViewportTexture(whole.viewportOverview),sampleWidth,sampleHeight,
+        proxy,sampleWidth,sampleHeight,WholeImageRegion(sampleWidth,sampleHeight));
     worker.Shutdown();
     RequireViewport(glIsTexture(first.outputTexture.texture) && glIsTexture(first.viewportOverview.texture),
         "Worker shutdown destroyed immutable published detail or overview coverage");

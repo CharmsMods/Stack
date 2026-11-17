@@ -226,6 +226,8 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
             return true;
         }
         m_RawWorkspaceLabUi.activeTool = RawLabTool::Light;
+        SetViewSectionPanelOpen(true);
+        SetViewSectionTab(0);
         RequestOpenRawLabTab(); return true;
     }
     if (nodeId == m_RawLayerMaskWorkspace->projectCanvas->output) {

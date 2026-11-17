@@ -2,7 +2,10 @@
 #include "Editor/EditorRenderWorker.h"
 #include "Editor/ViewportFramePacer.h"
 #include "Renderer/ViewportPreviewPolicy.h"
+#include "Renderer/ViewportWorkloadTiming.h"
 #include "Editor/ViewportQualityPreview.h"
+#include "Editor/ViewportCompletionPolicy.h"
+#include "Renderer/ViewportSectionStore.h"
 #include <string>
 
 namespace Stack::EditorRendering {
@@ -11,7 +14,7 @@ namespace Stack::EditorRendering {
 struct ViewportPreviewState {
     Renderer::ViewportPreviewRequest request;
     Renderer::ViewportPreviewGeometry geometry;
-    Renderer::ViewportPreviewTimingCurve timings;
+    Renderer::ViewportWorkloadTiming timings;
     Renderer::ViewportPreviewSelection selection;
     // Keep diagnostics paired with the final planned raster, after probing,
     // stabilization and native refinement override the initial selection.
@@ -22,6 +25,8 @@ struct ViewportPreviewState {
     mutable double qualityBarUpdatedAt = -1;
     mutable std::uint64_t qualityBarRevision = 0;
     mutable int qualityBarRequestedFps = 0, qualityBarDisplayFps = 0;
+    mutable int qualityBarMinimumEdge = 0;
+    mutable bool qualityBarPreserveDetail = false;
     EditorRenderWorker::SharedTextureResult overview;
     GraphRendering::RequestTag acceptedTag;
     GraphRendering::RequestTag submittedTag;
@@ -39,7 +44,17 @@ struct ViewportPreviewState {
     int backdropPhysicalWidth = 1, backdropPhysicalHeight = 1, backdropDemandFrame = -10;
     double contentChangedAt = -1;
     ViewportFramePacer submissionPacer;
-    bool navigationActive = false, acceptedInteractive = false;
+    ViewportCompletionPolicy completion;
+    struct Section { EditorRenderWorker::SharedTextureResult native,preview; std::uint64_t lastUse=0; };
+    std::shared_ptr<Renderer::ViewportSectionStore> sections;
+    std::vector<Section> sectionTextures;
+    int nextSection = -1;
+    bool sectionNativeDemand = false, sectionsComplete = false, sectionsCoverView = false;
+    std::uint64_t sectionRevision = 0, sectionCheckedRevision = 0, sectionCheckedView = 0;
+    std::uint64_t sectionUseSerial = 0, sectionCheckedBudget = 0;
+    bool sectionCheckedWhole = false;
+    bool navigationActive = false, acceptedInteractive = false, overviewSettled = false;
+    bool overviewCoversDisplay = false;
     double refinementRetryAt = -1;
     int refinementFailures = 0;
     std::string refinementError;

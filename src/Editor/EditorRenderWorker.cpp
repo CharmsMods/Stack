@@ -1833,6 +1833,8 @@ EditorRenderWorker::Result EditorRenderWorker::MakeFailedResult(
     result.viewportViewId = snapshot.viewportViewId;
     result.viewportExecutionIdentity = snapshot.viewportExecutionIdentity;
     result.viewportContentIdentity = snapshot.viewportContentIdentity;
+    result.viewportSections = snapshot.viewportSections;
+    result.viewportSection = snapshot.viewportSection;
     result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
     result.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
     result.rawWorkspace.recipeRevision = snapshot.rawWorkspace.recipeRevision;
@@ -2307,6 +2309,7 @@ void EditorRenderWorker::ThreadMain(Snapshot& snapshot) {
             result.error == "Render superseded by a newer snapshot.";
         CaptureViewportTiming(snapshot,result);
         PrepareViewportOverview(snapshot, result);
+        PreserveViewportSection(result);
         result.telemetry.workerTotalMs = MillisecondsBetween(workerStart, std::chrono::steady_clock::now());
         CompleteViewportTiming(result);
         if (!WaitForSubmittedGpuWork()) result.telemetry.superseded = true;
@@ -2360,6 +2363,8 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         expanded.viewportViewId = snapshot.viewportViewId;
         expanded.viewportExecutionIdentity = snapshot.viewportExecutionIdentity;
         expanded.viewportContentIdentity = snapshot.viewportContentIdentity;
+        expanded.viewportSections = snapshot.viewportSections;
+        expanded.viewportSection = snapshot.viewportSection;
         expanded.prepareViewportOverview = snapshot.prepareViewportOverview;
         expanded.viewportTiling = snapshot.viewportTiling;
         expanded.previews = snapshot.previews;
@@ -2410,6 +2415,8 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
     result.viewportViewId = snapshot.viewportViewId;
     result.viewportExecutionIdentity = snapshot.viewportExecutionIdentity;
     result.viewportContentIdentity = snapshot.viewportContentIdentity;
+    result.viewportSections = snapshot.viewportSections;
+    result.viewportSection = snapshot.viewportSection;
     result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
     result.rawWorkspace.graphScopeOwnerKey=snapshot.rawWorkspace.graphScopeOwnerKey;
     result.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
@@ -2465,13 +2472,14 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         snapshot.rawWorkspace.cachePrewarmFingerprint;
 
     try {
+        if (RestoreViewportSection(snapshot,result)) return result;
         const bool calibration = snapshot.rawRenderPurpose == RawRenderPurpose::ViewportCalibration;
         const bool privateOverview = snapshot.rawRenderPurpose == RawRenderPurpose::ViewportOverview &&
             snapshot.rawWorkspace.viewportDependencyEdge >= 0;
         if (!calibration && !privateOverview) m_CalibrationPipeline.reset();
         auto& owner = calibration || privateOverview ? m_CalibrationPipeline : m_PersistentPipeline;
         const bool calibrationResourcesUnprepared = calibration && !owner;
-        result.viewportCold = !owner;
+        result.viewportCold = !owner || (snapshot.viewportPreview.enabled && snapshot.lastAcceptedGeneration == 0);
         if (!owner) {
             owner = std::make_unique<RenderPipeline>();
             owner->Initialize();
@@ -2612,12 +2620,26 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             SetProgress(progressCompleted, totalProgressSteps, std::move(label));
         };
         bool renderCancelled = false;
+        const auto submissionThread = std::this_thread::get_id();
+        auto lastGpuYield = std::chrono::steady_clock::now();
+        unsigned nativeCheckpoints = 0;
         auto shouldAbortStaleWork = [&]() {
             // Once any stage stops, this snapshot cannot become complete again.
             // The pending job can be withdrawn or replaced while the GPU stage
             // unwinds, so re-reading only the queue can misreport cancellation
             // as a render with no pixels.
             renderCancelled = renderCancelled || ShouldAbortStaleSnapshot(snapshot);
+            // Bound worker GPU backlog at existing stage/tile checkpoints.
+            // CPU helpers may call this callback on another thread: only the
+            // context-owning submission thread can drain graphics commands.
+            if (!renderCancelled && snapshot.viewportPreview.enabled &&
+                std::this_thread::get_id() == submissionThread &&
+                ((snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement && ++nativeCheckpoints >= 2) ||
+                 std::chrono::steady_clock::now()-lastGpuYield >= std::chrono::milliseconds(2))) {
+                renderCancelled = !WaitForSubmittedGpuWork() || ShouldAbortStaleSnapshot(snapshot);
+                lastGpuYield = std::chrono::steady_clock::now();
+                nativeCheckpoints = 0;
+            }
             return renderCancelled;
         };
         auto collectToneCurveAutoRewriteFeedback = [&]() {
@@ -3279,7 +3301,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
             result.viewportCold = result.viewportCold ||
                 result.mainGraphStats.pointwiseProgramCacheMisses > 0 ||
-                result.mainGraphStats.rawSensorUploadBytes > 0;
+                result.mainGraphStats.rawSensorUploadBytes > 0 ||
+                // CPU preprocessing uploads corrected/variance planes instead
+                // of the sensor plane. It is first-use work on that path too.
+                result.mainGraphStats.rawCorrectedUploadBytes > 0 ||
+                result.mainGraphStats.rawVarianceUploadBytes > 0;
             if (shouldAbortStaleWork()) {
                 finishProgressStep("Newer render queued.");
                 result.error = "Render superseded by a newer snapshot.";

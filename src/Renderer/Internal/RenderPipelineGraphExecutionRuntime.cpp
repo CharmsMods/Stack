@@ -92,7 +92,9 @@ GraphExecutionRuntime::GraphExecutionRuntime(
 }
 
 void GraphExecutionRuntime::Execute() {
-    referenceSourceNodeId = pipeline.FindReferenceSourceNode(executionContext, graph.outputNodeId);
+    referenceSourceNodeId = pipeline.m_GraphViewportRequest.enabled &&
+        !pipeline.m_GraphViewportRequest.prepareCompareSource ? -1 :
+        pipeline.FindReferenceSourceNode(executionContext, graph.outputNodeId);
     PreparePhysicalSchedule();
     PruneCachedDependencies();
     for (const ScheduledGraphOutput& scheduled :

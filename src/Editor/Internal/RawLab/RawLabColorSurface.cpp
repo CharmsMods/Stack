@@ -37,6 +37,10 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     auto& state=*args.state;
     auto& recipe=args.colorWarp;
     bool changed=CommitColorWarpSampling(args);
+    if(!args.panel && recipe.version<5) {
+        ImGui::TextDisabled("Legacy color processing");
+        if(ImGui::Button("Use improved HSL")) {recipe.version=5;changed=true;}
+    }
     args.ui.colorWarpInteractionActive=false;
     if(recipe.pins.empty())return changed; // Valid documents always contain eight families.
     args.ui.selectedColorWarpPin=std::clamp(args.ui.selectedColorWarpPin,0,int(recipe.pins.size())-1);
@@ -67,8 +71,8 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
             if(BareTextButton("Preview affected area",args.ui.colorWarpDiagnosticLocked))args.ui.colorWarpDiagnosticLocked=!args.ui.colorWarpDiagnosticLocked;
             ImGui::BeginDisabled(!recipe.enabled || !pin.enabled || pin.protectColor);
             changed|=PanelRoller("Hue","custom-hue",pin.hueShift,-180,180,.4f,0,"%+.1f",*args.panelControls);
-            float saturation=pin.saturation*100,brightness=pin.brightness*100;
-            if(PanelRoller("Saturation","custom-saturation",saturation,-100,500,.4f,0,"%+.1f",*args.panelControls)){pin.saturation=saturation*.01f;changed=true;}
+            float saturation=(1.f+pin.saturation)*100.f,brightness=pin.brightness*100;
+            if(PanelRoller("Saturation","custom-saturation",saturation,0,600,.4f,100,"%.1f%%",*args.panelControls)){pin.saturation=saturation*.01f-1.f;changed=true;}
             if(PanelRoller("Brightness","custom-brightness",brightness,-100,100,.4f,0,"%+.1f",*args.panelControls)){pin.brightness=brightness*.01f;changed=true;}
             ImGui::EndDisabled();
             DrawColorWarpResultSwatches(args,pin);
@@ -180,11 +184,12 @@ bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args) {
     changed|=ImGuiExtras::FloatingSliderFloat("Hue","##hue",&pin.hueShift,-180,180,"%+.1f deg",width);
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
     ImGui::TextUnformatted(pin.moveColors?"Move saturation":"Saturation");
-    float saturation=pin.saturation*100.f;
-    if(ImGuiExtras::FloatingSliderFloat("Saturation","##sat",&saturation,-100,500,"%+.1f%%",width)) {
-        pin.saturation=saturation*.01f;changed=true;
+    float saturation=(1.f+pin.saturation)*100.f;
+    if(ImGuiExtras::FloatingSliderFloat("Saturation","##sat",&saturation,0,600,"%.1f%%",width)) {
+        pin.saturation=saturation*.01f-1.f;changed=true;
     }
     args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();
+    LabTooltip(recipe.version>=5?"100% keeps saturation; 0% removes it at full selection strength, including in Move mode.":pin.moveColors?"100% keeps the group's destination saturation; 0% moves its center to neutral. Color variation remains.":"100% keeps the original saturation; 0% removes it at full selection strength. Feathering and protection reduce the effect.");
     if(pin.family<0) {
         changed|=ImGuiExtras::FloatingSliderFloat("Tint green / red","##tint-a",&pin.tintA,-.2f,.2f,"%+.3f",width);
         args.ui.colorWarpInteractionActive|=ImGui::IsItemActive();

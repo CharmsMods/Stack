@@ -38,7 +38,12 @@ bool EstimateDonor(const ColorObservations& samples,std::size_t g,const std::arr
             // Tolerate noise in a surviving channel, but reject an incompatible hue.
             const double tolerance=std::max(.10*std::abs(p.value),4*std::sqrt(std::max(0.,p.measurementVariance)));
             colorError=std::max(colorError,std::abs(estimate-p.value)/std::max(1e-12,tolerance));
-        } else if(estimate<.97*samples[s][reference].fallback)return false;
+        } else {
+            const double floor=samples[s][reference].fallback;
+            if(!anchors && estimate<.97*floor)return false;
+            // Fade before the saturation-bound veto instead of jumping at 97%.
+            colorError=std::max(colorError,2.*std::max(0.,floor-estimate)/std::max(1e-12,.03*floor));
+        }
     }
     donor={g,scale,exposure,colorError,clippedSites};return true;
 }
@@ -56,42 +61,50 @@ bool DonorColorLess(const ColorObservations& samples,const Donor& a,const Donor&
     }
     return false;
 }
-bool PreferDonor(const ColorObservations& samples,const Donor& a,const Donor& b) {
-    if(a.colorError!=b.colorError)return a.colorError<b.colorError;
-    if(a.exposure!=b.exposure)return a.exposure>b.exposure;
-    return DonorColorLess(samples,a,b);
+double ConfidenceFade(double x) {
+    x=std::clamp(x,0.,1.);
+    return x*x*(3.-2.*x);
 }
 
-const Donor* CoherentDonor(const ColorObservations& samples,const std::array<Pixel,4>& pixels,
-    const std::array<Donor,64>& donors,std::size_t count) {
-    if(!count)return nullptr;
-    std::array<double,4> median{};
-    std::array<double,64> values{};
-    for(unsigned s=0;s<4;++s)if(!pixels[s].valid) {
-        for(std::size_t i=0;i<count;++i)
-            values[i]=donors[i].scale*samples[s][donors[i].group].fallback;
-        auto middle=values.begin()+count/2;
-        std::nth_element(values.begin(),middle,values.begin()+count);
-        median[s]=*middle;
-    }
-    // Use the channel medians only to rank whole donor colors. Selecting each
-    // missing channel's median independently assembles a hue no capture saw.
-    // Relative distances also keep the choice invariant to the radiance gauge.
-    const Donor* best=nullptr;double bestDistance=0;
+// Blend whole donor colors with one weight per exposure. Anchor disagreement
+// fades the estimate into the already prepared neutral/boundary endpoint;
+// crossing a donor acceptance threshold must not replace that endpoint abruptly.
+struct DonorBlend {
+    std::array<double,4> value{};
+    std::array<double,64> weights{};
+    double confidence=0;
+};
+DonorBlend BlendDonors(const ColorObservations& samples,const std::array<Pixel,4>& pixels,
+    const std::array<Donor,64>& donors,std::size_t count,unsigned anchors) {
+    DonorBlend result;
+    double total=0;
     for(std::size_t i=0;i<count;++i) {
-        const auto& donor=donors[i];double distance=0;
-        std::array<double,4> color{};
-        for(unsigned s=0;s<4;++s)if(!pixels[s].valid) {
-            color[s]=donor.scale*samples[s][donor.group].fallback;
-            const double delta=(color[s]-median[s])/std::max(color[s],median[s]);
-            distance+=delta*delta;
-        }
-        const bool betterTie=best&&distance==bestDistance&&PreferDonor(samples,donor,*best);
-        if(!best||distance<bestDistance||betterTie) {
-            best=&donor;bestDistance=distance;
-        }
+        const auto& donor=donors[i];
+        double weight=1.-ConfidenceFade((donor.colorError-.5)/1.5);
+        if(anchors==1)weight*=1.-ConfidenceFade((std::abs(donor.scale-1.)-.05)/.05);
+        // No donor can override a reliable channel, even with high confidence.
+        result.confidence=std::max(result.confidence,weight);
+        total+=weight;
+        result.weights[donor.group]+=weight;
+        for(unsigned site=0;site<4;++site)if(!pixels[site].valid)
+            result.value[site]+=weight*donor.scale*samples[site][donor.group].fallback;
     }
-    return best;
+    if(total>0) {
+        for(auto& v:result.value)v/=total;
+        for(auto& w:result.weights)w/=total;
+        double disagreement=0;
+        for(unsigned site=0;site<4;++site)if(!pixels[site].valid) {
+            double variance=0;
+            for(std::size_t i=0;i<count;++i) {
+                const auto& donor=donors[i];
+                const double delta=donor.scale*samples[site][donor.group].fallback-result.value[site];
+                variance+=result.weights[donor.group]*delta*delta;
+            }
+            disagreement=std::max(disagreement,std::sqrt(variance)/std::max(1e-12,result.value[site]));
+        }
+        result.confidence*=1.-ConfidenceFade((disagreement-.05)/.15);
+    }
+    return result;
 }
 }
 
@@ -153,56 +166,31 @@ bool RecoverClippedBayerFallback(const ColorObservations& samples,const Bracketi
         }
         return true;
     }
-    if(anchors&&n) {
-        auto end=std::partition(donors.begin(),donors.begin()+n,[](const Donor& d){return d.colorError<=1.;});
-        if(end!=donors.begin())n=static_cast<std::size_t>(end-donors.begin());
-        else {
-            // At a noisy or subpixel color edge no donor may match every anchor.
-            // Use independent exposures only if they predict the same missing
-            // channels; this avoids isolated magenta holes at a hard color gate.
-            const Donor* best=nullptr;
-            for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j) {
-                const auto& a=donors[i];const auto& b=donors[j];
-                if(a.colorError>2.||b.colorError>2.||a.exposure==b.exposure)continue;
-                bool agree=true;
-                for(unsigned s=0;s<4;++s)if(!pixels[s].valid) {
-                    const double av=a.scale*samples[s][a.group].fallback,bv=b.scale*samples[s][b.group].fallback;
-                    agree&=std::abs(av-bv)<=.10*std::min(av,bv);
-                }
-                const auto& closer=PreferDonor(samples,a,b)?a:b;
-                if(agree&&(!best||PreferDonor(samples,closer,*best)))best=&closer;
-            }
-            if(best)donors[0]=*best;
-            n=best?1:0;
-        }
-    }
-    const Donor* donor=CoherentDonor(samples,pixels,donors,n);
+    const auto donor=BlendDonors(samples,pixels,donors,n,anchors);
     for(unsigned s=0;s<4;++s) {
         auto& p=pixels[s];
         if(p.valid||samples[s][ref].clippedReference==ClippedReference::None)continue;
-        auto chosen=ref;
-        const double floor=samples[s][ref].fallback;
-        double value=samples[s][chosen].fallback;
+        const auto& reference=samples[s][ref];
+        const double floor=reference.fallback;
+        double value=floor;
         bool estimated=false;
-        if(samples[s][ref].clippedReference==ClippedReference::EstimatedColor) {
-            value=std::max(floor,samples[s][ref].value);
+        double donorWeight=0;
+        if(reference.clippedReference==ClippedReference::EstimatedColor) {
+            value=std::max(floor,reference.value);
             estimated=anchors>0;
-        } else if(donor) {
-            // With only one surviving reference color a displaced donor has no
-            // independent constraint on its chromaticity.
-            if(anchors>1||n>1||std::abs(donor->scale-1.)<=.10) {
-                chosen=donor->group;
-                value=std::max(floor,donor->scale*samples[s][chosen].fallback);estimated=true;
+        } else {
+            if(reference.clippedReference==ClippedReference::NeutralCompletion)
+                value=std::max(floor,reference.value);
+            if(donor.confidence>0) {
+                donorWeight=donor.confidence;
+                value+=donorWeight*(std::max(floor,donor.value[s])-value);
+                estimated=donorWeight>=1.;
             }
         }
-        if(!estimated&&samples[s][ref].clippedReference==ClippedReference::NeutralCompletion) {
-            // Prefer a constrained donor whenever available. Neutral completion
-            // only prevents an unresolved clipped channel becoming false color;
-            // keep it clipped and unsupported, even with surviving anchors.
-            value=std::max(floor,samples[s][ref].value);
-        }
         const bool rejected=p.localRejected;p={};
-        p.value=value;p.actual[chosen]=1;p.fallback=true;p.localRejected=rejected;p.clipped=!estimated;
+        p.value=std::max(floor,value);p.fallback=true;p.localRejected=rejected;p.clipped=!estimated;
+        p.actual[ref]=1.-donorWeight;
+        for(std::size_t g=0;g<recipe.groups.size();++g)p.actual[g]+=donorWeight*donor.weights[g];
         p.fallbackReason=MeasurementFallbackReason::HighlightFallback;
     }
     return true;

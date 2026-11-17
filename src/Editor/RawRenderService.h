@@ -39,6 +39,8 @@ struct RawRenderCommand {
     int viewportViewId = 0;
     std::size_t viewportExecutionIdentity = 0;
     std::size_t viewportContentIdentity = 0;
+    std::shared_ptr<Stack::Renderer::ViewportSectionStore> viewportSections;
+    int viewportSection = -1;
     bool prepareViewportOverview = false;
     ViewportTilingSettings viewportTiling;
     std::vector<EditorRenderWorker::PreviewRequest> previews;

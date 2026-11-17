@@ -8,6 +8,8 @@
 #include <iostream>
 #include <stdexcept>
 
+void TestRawHighlightReconstruction();
+
 namespace {
 
 void Check(bool condition, const char* message) {
@@ -164,6 +166,7 @@ int main() {
         TestTypedUploads();
         TestIncompleteRawInputs();
         TestDemosaicState();
+        TestRawHighlightReconstruction();
         std::cout << "Typed texture uploads, GL state, allocation rejection, RAW input bounds and GPU demosaicing state passed.\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

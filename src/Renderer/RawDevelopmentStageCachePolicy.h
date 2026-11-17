@@ -334,6 +334,9 @@ inline StageFingerprints BuildStageFingerprints(
     HashTypedValue(fingerprint, recipe.source.fileSizeBytes);
     HashTypedValue(fingerprint, recipe.source.modifiedTimeTicks);
     HashTypedValue(fingerprint, recipe.technical.processingVersion);
+    HashTypedValue(fingerprint, recipe.technical.highlightMode);
+    HashTypedValue(fingerprint, recipe.technical.highlightStrength);
+    HashTypedValue(fingerprint, recipe.technical.highlightThreshold);
     HashTypedValue(fingerprint, recipe.technical.demosaicMethod);
     HashTypedValue(fingerprint, recipe.technical.workingSpace);
     HashTypedValue(fingerprint, recipe.technical.applyBaselineExposure);

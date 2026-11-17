@@ -71,6 +71,7 @@ private:
         int highlightMode = -1;
         int highlightStrength = -1;
         int highlightThreshold = -1;
+        int highlightNeutralCamera = -1;
         int demosaicMethod = -1;
         int prepareDemosaic = -1;
         int externalDemosaic = -1;

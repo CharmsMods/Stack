@@ -2,6 +2,7 @@
 #include "Hdr/Presentation.h"
 #include "Editor/EditorRenderWorker.h"
 #include "Editor/RawRenderGraphOverlay.h"
+#include "Renderer/ViewportTextureCopy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +55,25 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
     // Optional coverage must not turn a completed main result into a failure.
     // Its texture owns a separate immutable lease and readiness fence.
     try {
+        // A whole-view result already contains the current edits. Preserve a
+        // small independent lease before later regional results replace it.
+        if (!result.viewportPreviewGeometry.resident.Partial()) {
+            const auto& source = result.outputTexture;
+            const double scale = std::min(1.0,double(kViewportOverviewEdge)/std::max(source.width,source.height));
+            SharedTextureResult overview;
+            overview.width=std::max(1,int(std::lround(source.width*scale)));
+            overview.height=std::max(1,int(std::lround(source.height*scale)));
+            overview.texture=Stack::Renderer::CopyViewportTexture(source.texture,source.width,source.height,overview.width,overview.height);
+            if (source.hdr) {
+                const auto texture=Stack::Renderer::CopyViewportTexture(source.hdr.Texture(),source.width,source.height,overview.width,overview.height);
+                overview.hdr=Raw::RawGpuImageLease::AdoptOwned(texture,overview.width,overview.height,Raw::RawGpuImageFamily::Presentation,16);
+            }
+            if (!overview.EnsureLease() || (source.hdr && !overview.hdr)) return;
+            overview.readyFence=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+            if (!overview.readyFence) return;
+            glFlush(); result.viewportOverview=std::move(overview);
+            return;
+        }
         const Snapshot& templateSnapshot = snapshot.rawSessionCommand && snapshot.rawSessionTemplate
             ? *snapshot.rawSessionTemplate : snapshot;
         if (templateSnapshot.graph.nodes.empty()) return;
@@ -87,6 +107,7 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
         pipeline.SetRawDevelopmentAnalysisEnabled(false);
         pipeline.SetRawDevelopmentViewportValidationEnabled(false);
         auto request = result.viewportPreview;
+        request.prepareCompareSource = false;
         request.visible = {};
         request.empty = false;
         request.samplingScale = std::min(1.0, double(kViewportOverviewEdge) /
@@ -105,6 +126,9 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
             if (!hdrError.empty()) return;
         }
         pipeline.ExecuteGraph(graph);
+        // The overview is a separate graph execution and can still be waiting
+        // for denoise even when the native patch is settled. Its provisional
+        // current-edit pixels are still valid navigation coverage, not native proof.
         if (canceled || ShouldAbortStaleSnapshot(snapshot)) return;
         const auto geometry = pipeline.GetGraphViewportGeometry();
         if (!geometry.Valid() || geometry.resident.Partial() ||

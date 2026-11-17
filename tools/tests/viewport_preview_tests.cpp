@@ -1,5 +1,9 @@
 #include "Renderer/ViewportPreviewTypes.h"
+#include "Renderer/ViewportSectionStore.h"
 #include "Renderer/ViewportPreviewPolicy.h"
+#include "Renderer/ViewportWorkloadTiming.h"
+#include "Editor/ViewportCompletionPolicy.h"
+#include "Raw/RawViewportPreferences.h"
 
 #include <cmath>
 #include <iostream>
@@ -13,7 +17,57 @@ void Require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 
+void TestSectionStore() {
+    for (std::uint64_t allowance : {std::uint64_t(0),std::uint64_t(1024*1024)}) {
+        ViewportSectionStore store(2051,4,allowance);
+        const ImageRegion right{2051,4,2048,0,3,4};
+        Require(store.NextMissing(right,true)==2,"Visible missing sections must precede background completion");
+        Require(!store.Covers(right) && !store.Complete(),"Unwritten native sections cannot claim coverage");
+        for (int index : {2,0,1}) {
+            const auto r=store.Raster(index);
+            std::vector<float> pixels(std::size_t(r.width)*r.height*4),hdr(pixels.size());
+            for(std::size_t i=0;i<pixels.size();++i) {pixels[i]=float(int(i%71)-20)/7.f;hdr[i]=pixels[i]*4.f;}
+            std::string error;
+            Require(store.Store(index,pixels,hdr,error),"Native section could not be stored");
+            std::vector<float> restored,restoredHdr;
+            Require(store.Load(index,restored,restoredHdr,error) && restored==pixels && restoredHdr==hdr,
+                "RAM and disk reload must preserve every float, including negative and HDR values");
+            Require(store.Covers(right),"Completed visible coverage must remain ready during background work");
+        }
+        Require(store.Complete() && store.NextMissing(right,true)<0,"Completed sections must never be scheduled again");
+        Require((store.DiskBytes()>0)==(allowance==0),"Cache must honor its RAM allowance and spill when required");
+        ViewportSectionStore otherRevision(2051,4,allowance);
+        Require(!otherRevision.Has(2),"Different revision stores must not reuse pixels without matching identity");
+    }
+}
+
 void TestGeometry() {
+    Raw::ViewportPreferences preferences;
+    preferences.targetFps = 5;
+    Require(Raw::EffectiveViewportTargetFps(preferences,144) == 5,
+        "Auto detail must honor the saved target even with an inactive 100 percent floor");
+    preferences.mode = Raw::ViewportInteractionMode::PreserveDetail;
+    Require(Raw::EffectiveViewportTargetFps(preferences,144) == 144 && preferences.targetFps == 5,
+        "Full screen detail must use the display ceiling and preserve the inactive target");
+    preferences.minimumDetailPercent = 99;
+    Require(Raw::EffectiveViewportTargetFps(preferences,144) == 5,
+        "Reducing the floor must restore the saved FPS target");
+
+    Stack::EditorRendering::ViewportCompletionPolicy completion;
+    const ImageRegion most{1000,1000,0,0,800,1000};
+    const ImageRegion detail{1000,1000,400,400,100,100};
+    completion.ImageChanged(1.0);
+    Require(!completion.Ready(1.1,false,most) && !completion.wholeImagePending,
+        "Whole image completion must wait through the edit quiet interval");
+    Require(completion.Ready(1.3,false,most) && completion.wholeImagePending,
+        "Eighty percent visibility must arm whole image completion");
+    Require(completion.Ready(1.4,false,detail) && completion.wholeImagePending,
+        "Zooming in must preserve whole image completion intent");
+    completion.ImageChanged(2.0);
+    Require(completion.Ready(2.3,false,detail) && !completion.wholeImagePending,
+        "A new edit at magnification must start with regional completion");
+    Require(!completion.Ready(3.0,true,most) && !completion.Ready(3.1,false,most),
+        "Holding an image control must postpone completion until after release");
     Require(!ImageRegion{}.Valid() && !WholeImageRegion(0, 10).Valid(), "Missing geometry must remain unavailable");
     const ImageRegion native{4033, 3017, 1001, 731, 1821, 1502};
     const auto sampled = ScaleImageRegion(native, 1291, 966);
@@ -44,6 +98,18 @@ void TestGeometry() {
     Require(!patch.Valid(), "A texture independently resized after cropping cannot claim the original sample lattice");
     patch = {4033, 3017, native, native.width, native.height};
     Require(patch.NativeSamples(), "Native crop samples must remain identifiable for authoritative inspection");
+
+    const auto zoomedOut = WholeImageRegion(4033, 3017);
+    const ViewportPreviewGeometry overview{4033, 3017, WholeImageRegion(512, 383), 512, 383};
+    Require(ViewportPreviewCoversDisplay(patch, native, 650, 536) &&
+        !ViewportPreviewCoversDisplay(patch, zoomedOut, 512, 383),
+        "A native patch must satisfy its zoomed-in view and leave wider coverage to the overview");
+    Require(ViewportPreviewCoversDisplay(overview, zoomedOut, 512, 383) &&
+        !ViewportPreviewCoversDisplay(overview, zoomedOut, 513, 383) &&
+        !ViewportPreviewCoversDisplay(overview, zoomedOut, 512, 384),
+        "Overview reuse must require enough samples on both display axes");
+    Require(!ViewportPreviewCoversDisplay(overview, native, 512, 383),
+        "Only the overview samples within the visible crop count toward display coverage");
 
     const int maximum = std::numeric_limits<int>::max();
     const ImageRegion edge{maximum, maximum, maximum - 1, maximum - 1, 1, 1};
@@ -101,6 +167,34 @@ void TestCandidateSelection() {
     plans[1].costKnown = true;
     plans[1].predictedMs = std::numeric_limits<double>::quiet_NaN();
     Require(!SelectViewportPreviewCandidate(input, plans).measured, "Nonfinite cost evidence must remain unknown");
+}
+
+void TestCrossZoomTiming() {
+    ViewportWorkloadTiming timings;
+    const auto now=ViewportWorkloadTiming::Clock::now();
+    // Same graph at fit and two crops: fixed 3 ms + 2 ms/M regional + 4 ms/M complete.
+    timings.Record(1,1000000,2000000,13,false,now);
+    timings.Record(1,2000000,2000000,15,false,now);
+    timings.Record(1,1000000,4000000,21,false,now);
+    timings.Record(1,2000000,4000000,23,false,now);
+    auto estimate=timings.Estimate(1,1500000,3000000,now);
+    Require(estimate.costKnown && !estimate.timingCovered && std::abs(estimate.predictedMs-18)<.001,
+        "cross-zoom fit separates fixed, regional and complete costs");
+    Require(timings.Estimate(1,1000000,2000000,now).timingCovered,"measured workload remains exact");
+    Require(!timings.Estimate(2,1000000,2000000,now).costKnown,"other kernels cannot borrow timing");
+    Require(!timings.Estimate(1,1000000,2000000,now+std::chrono::seconds(31)).costKnown,"cross-zoom evidence expires");
+    timings.Record(2,1000000,0,10,false,now);
+    Require(timings.Estimate(2,250000,0,now).predictedMs==10,"single crop cannot invent fixed cost savings");
+    Require(!timings.Estimate(2,250000,1000000,now).costKnown,"new whole-input dependency remains unknown");
+    timings.Record(4,1000000,4000000,20,false,now);
+    timings.Record(4,2000000,4000000,22,false,now);
+    timings.Record(4,3000000,4000000,24,false,now);
+    Require(std::abs(timings.Estimate(4,1500000,4000000,now).predictedMs-21)<.001,
+        "constant complete dependency allows regional interpolation");
+    Require(timings.Estimate(4,1500000,8000000,now).predictedMs>=40,
+        "constant dependency does not prove the cost of growing it");
+    timings.Record(3,1000000,0,1,true,now);
+    Require(!timings.Estimate(3,1000000,0,now).costKnown,"cold timings excluded");
 }
 
 void TestTimingCurve() {
@@ -164,9 +258,11 @@ void TestTimingCurve() {
 
 int main() {
     try {
+        TestSectionStore();
         TestGeometry();
         TestCandidateSelection();
         TestTimingCurve();
+        TestCrossZoomTiming();
     } catch (const std::exception& error) {
         std::cerr << "Viewport preview checks failed: " << error.what() << '\n';
         return 1;

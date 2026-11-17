@@ -48,13 +48,40 @@ void CheckCompletion(unsigned phase,unsigned reference,double gauge,bool donor,b
         }
     }
 }
+void CheckDonorContinuity() {
+    using namespace Raw::Bracketing;
+    double previous=0;
+    for(int step=0;step<=240;++step) {
+        BracketingRecipe recipe;recipe.groups.resize(2);
+        ColorObservations samples;std::array<Pixel,4> pixels{};
+        for(unsigned site=0;site<4;++site) {
+            samples[site].resize(2);
+            auto& ref=samples[site][0];auto& donor=samples[site][1];
+            ref.finite=true;ref.exposure=1;ref.fallback=site<2?.5:1.;
+            ref.value=site<2?.5:1.25;
+            donor.finite=true;donor.exposure=.25;donor.fallback=site<2?.5:1.5;
+            if(site<2) {pixels[site].valid=true;pixels[site].value=.5;pixels[site].support=1;}
+            else {ref.fallbackClipped=ref.clipped=true;ref.clippedReference=ClippedReference::NeutralCompletion;}
+        }
+        // Cross the old hard donor color gate with two disagreeing anchors.
+        samples[0][1].fallback+=step*.001;
+        Check(RecoverClippedBayerFallback(samples,recipe,pixels),"Donor fade failed");
+        Check(pixels[0].value==.5 && pixels[1].value==.5,"Donor fade changed measured channels");
+        Check(!pixels[2].valid && pixels[2].support==0 && pixels[2].value>=1.,"Donor fade fabricated support or violated a bound");
+        Check(std::abs(pixels[2].actual[0]+pixels[2].actual[1]-1.)<1e-12,"Blended provenance is not normalized");
+        if(step)Check(std::abs(previous-pixels[2].value)<.01,"Donor acceptance produced a hard color edge");
+        previous=pixels[2].value;
+    }
+}
+
 }
 int main() {
     try {
         for(unsigned phase=0;phase<4;++phase)for(unsigned reference=0;reference<2;++reference)
             for(double gauge:{.125,1.,8.})for(bool donor:{false,true})for(bool boundary:{false,true})
                 CheckCompletion(phase,reference,gauge,donor,boundary);
-        std::cout<<"96 highlight cases passed: CFA phase, group order, radiance scale, donor priority, measured-color preservation and clipping evidence.\n";
+        CheckDonorContinuity();
+        std::cout<<"96 highlight cases and donor continuity sweep passed: CFA phase, group order, radiance scale, donor priority, measured-color preservation and clipping evidence.\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

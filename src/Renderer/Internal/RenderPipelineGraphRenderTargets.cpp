@@ -50,7 +50,18 @@ void RenderPipeline::ConfigureGraphTargetPrecision(bool requiredFloat32) {
         });
 }
 
-unsigned int RenderPipeline::CreateGraphRenderTargetTexture() const {
+unsigned int RenderPipeline::CreateGraphRenderTargetTexture() {
+    // Transfer an idle allocation out of the transient owner. The caller owns
+    // the result exactly as it owns a newly allocated target.
+    const auto idle=std::find_if(m_GraphTransientTargets.begin(),m_GraphTransientTargets.end(),[&](const auto& target) {
+        return !target.inUse && target.texture && target.width==m_Width && target.height==m_Height;
+    });
+    if(idle!=m_GraphTransientTargets.end()) {
+        const auto texture=idle->texture;
+        m_GraphTransientTargets.erase(idle);
+        ++m_LastGraphExecutionStats.transientTargetReuses;
+        return texture;
+    }
     return m_GraphFloat32Targets
         ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
         : GLHelpers::CreateEmptyTexture(m_Width, m_Height);
@@ -174,6 +185,21 @@ unsigned int RenderPipeline::AcquireGraphTransientTarget() {
     }
     ++m_LastGraphExecutionStats.transientTargetAllocations;
     return texture.Release();
+}
+
+bool RenderPipeline::RetainRetiredGraphTarget(const CachedGraphTexture& entry) {
+    if(!entry.owned || !entry.texture || entry.texture==m_SourceTexture || entry.texture==m_OutputTexture ||
+        entry.texture==m_GraphSourceTexture || entry.texture==m_ExternalOutputTexture ||
+        entry.bytes<16ull*1024*1024 || entry.bytes!=EstimateGraphTargetBytes(entry.width,entry.height) ||
+        entry.internalFormat!=(m_GraphFloat32Targets ? GL_RGBA32F : GL_RGBA16F))return false;
+    const auto resident=GraphTransientTargetBytes();
+    if(resident>m_GraphTransientTargetBudgetBytes || entry.bytes>m_GraphTransientTargetBudgetBytes-resident)return false;
+    try {
+        // Keep unavailable until the next graph execution. Current evaluation
+        // may still have borrowed aliases; published UI textures are separate.
+        m_GraphTransientTargets.push_back({entry.texture,entry.width,entry.height,true,++m_GraphResourceUseSerial,true});
+        return true;
+    } catch(...) {return false;}
 }
 
 void RenderPipeline::ReleaseGraphTransientTarget(unsigned int texture) {

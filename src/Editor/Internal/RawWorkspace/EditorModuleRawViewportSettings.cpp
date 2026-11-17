@@ -38,7 +38,7 @@ int EditorModule::GetRawViewportMaximumFps() const {
 }
 int EditorModule::GetRawViewportRequestedFps() const { return GetRawViewportPreferences().targetFps; }
 int EditorModule::GetRawViewportTargetFps() const {
-    return Raw::ResolveViewportTargetFps(GetRawViewportRequestedFps(),GetRawViewportMaximumFps());
+    return Raw::EffectiveViewportTargetFps(GetRawViewportPreferences(),GetRawViewportMaximumFps());
 }
 bool EditorModule::GetSmoothRawViewportUpdates() const { return GetRawViewportPreferences().smoothUpdates; }
 void EditorModule::SetSmoothRawViewportUpdates(bool enabled) {

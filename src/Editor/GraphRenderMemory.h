@@ -18,8 +18,8 @@ inline std::uint64_t ImageBytes(int width, int height, std::uint64_t surfaces = 
 }
 
 inline std::uint64_t CacheAllowance(bool budgetKnown, std::uint64_t headroom,
-    std::uint64_t residentCaches, std::uint64_t workingBytes) {
-    constexpr std::uint64_t ceiling = 1280ull * 1024 * 1024;
+    std::uint64_t residentCaches, std::uint64_t workingBytes,
+    std::uint64_t ceiling = 1280ull * 1024 * 1024) {
     if (!budgetKnown) return ceiling;
     const auto reclaimableHeadroom = AddBytes(headroom, residentCaches);
     return std::min(ceiling, reclaimableHeadroom > workingBytes ?

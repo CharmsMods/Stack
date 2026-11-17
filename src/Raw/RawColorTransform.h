@@ -9,4 +9,7 @@ std::array<float, 3> ResolveRawWhiteBalance(
     const RawMetadata&, const RawDevelopSettings&);
 std::array<float, 9> BuildRawCameraToWorkingTransform(
     const RawMetadata&, const RawDevelopSettings&, bool inputAlreadyWhiteBalanced);
+// Camera-domain vector that maps to neutral working RGB after the active matrix.
+std::array<float, 3> ResolveRawHighlightNeutral(
+    const std::array<float, 9>& cameraToWorking, const RawDevelopSettings&);
 }

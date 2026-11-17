@@ -15,6 +15,8 @@ struct ViewportQualityBar {
     static constexpr std::size_t SampleCount = 32;
     std::array<ViewportQualitySample, SampleCount> samples{};
     ViewportQualitySample current;
+    double estimatedCapacityFps = 0;
+    bool capacityProvisional = true;
     int minimumFps = Raw::kMinimumViewportTargetFps, maximumFps = 240;
 };
 struct ViewportQualityModel {

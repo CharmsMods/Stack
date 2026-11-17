@@ -2716,8 +2716,13 @@ void EditorViewport::RenderSingleImageMode(
     const bool imageHovered = ImGui::IsItemHovered() && !ComparisonControlsOwnPointer(contentScreen);
     ImVec2 imageMin = ImGui::GetItemRectMin();
     ImVec2 imageMax = ImGui::GetItemRectMax();
-    editor->UpdateGraphViewportCoverage(cameraImageMin, cameraImageMax, contentScreen,
-        ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y), m_Panning || m_ZoomAnimating);
+    ImVec2 renderClipMin=contentScreen,renderClipMax(contentScreen.x+avail.x,contentScreen.y+avail.y);
+    if(editor->IsViewMode() && ImGui::GetWindowViewport()==ImGui::GetMainViewport()) {
+        const auto* viewport=ImGui::GetMainViewport();
+        renderClipMin=viewport->Pos;
+        renderClipMax={viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y};
+    }
+    editor->UpdateGraphViewportCoverage(cameraImageMin,cameraImageMax,renderClipMin,renderClipMax,m_Panning || m_ZoomAnimating);
     if (editor->IsViewMode()) editor->PresentNodeOpenImage(imageMin, imageMax);
     if (editor->IsViewMode() && hasOutputTexture) editor->PresentGalleryOpeningImage(imageMin,imageMax,outputTex);
     const bool sourceAvailable = sourceTex != 0 && sourceTex != outputTex;
@@ -3223,6 +3228,9 @@ void EditorViewport::RenderSingleImageMode(
                                   ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), outputTint,
                                   regionalOutput ? 0.f : kImageRounding);
     }
+
+    if (!drewPixelInspectionColors)
+        editor->DrawViewportNativeSections(drawList,imageMin,imageMax,hdr,outputTint,kImageRounding);
 
     if (openingSurround && !splitActive) {
         editor->PublishNodeOpenBackdrop(imageMin, imageMax, contentScreen,

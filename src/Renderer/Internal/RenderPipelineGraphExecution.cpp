@@ -196,6 +196,10 @@ void RenderPipeline::SetGraphCacheBudget(
 void RenderPipeline::ExecuteGraphImpl(
     const RenderGraphSnapshot& graph,
     const GraphTopologyIndex& topology) {
+    for(auto& target:m_GraphTransientTargets)if(target.retiredCache) {
+        target.retiredCache=false;target.inUse=false;
+    }
+    TrimGraphTransientTargetsToBudget();
     m_OutputDenoisePending = false;
     m_GraphSourceTexture = 0;
     m_GraphSourceWidth = 0;

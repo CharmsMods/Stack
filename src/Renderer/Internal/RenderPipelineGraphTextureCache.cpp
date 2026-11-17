@@ -70,17 +70,27 @@ unsigned int RenderPipeline::CloneTextureForGraphCache(unsigned int sourceTextur
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copyFbo);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glBlitFramebuffer(
-        0, 0, width, height,
-        0, 0, width, height,
-        GL_COLOR_BUFFER_BIT,
-        GL_NEAREST);
+    // Keep native cache publication from queuing one whole-photo transfer.
+    // Coordinates and filtering remain identical; only submission is split.
+    const bool cooperative = m_GraphViewportRequest.enabled &&
+        std::uint64_t(width)*height > 4ull*1024*1024;
+    const int rows = cooperative ? std::max(1, 262144 / width) : height;
+    bool canceled = false;
+    for (int y=0; y<height; y+=rows) {
+        if (cooperative && m_ShouldCancelRender && m_ShouldCancelRender()) {
+            canceled = true;
+            break;
+        }
+        const int end = std::min(height,y+rows);
+        glBlitFramebuffer(0,y,width,end,0,y,width,end,
+            GL_COLOR_BUFFER_BIT,GL_NEAREST);
+    }
 
     const GLenum copyError = glGetError();
     savedState.Restore(true);
     glDeleteFramebuffers(1, &sourceFbo);
     glDeleteFramebuffers(1, &copyFbo);
-    if (copyError != GL_NO_ERROR) {
+    if (canceled || copyError != GL_NO_ERROR) {
         glDeleteTextures(1, &copyTexture);
         return 0;
     }
@@ -109,6 +119,9 @@ bool RenderPipeline::StoreGraphCacheEntry(
     if(owned && texture) {
         const Stack::Renderer::GLState::TextureBinding binding(GL_TEXTURE_2D,GL_TEXTURE_BINDING_2D);
         glBindTexture(GL_TEXTURE_2D,texture);
+        GLint format=0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D,0,GL_TEXTURE_INTERNAL_FORMAT,&format);
+        replacement.internalFormat=static_cast<unsigned int>(format);
         GLint bits=0;
         for(const auto component:{GL_TEXTURE_RED_SIZE,GL_TEXTURE_GREEN_SIZE,GL_TEXTURE_BLUE_SIZE,GL_TEXTURE_ALPHA_SIZE}) {
             GLint size=0;glGetTexLevelParameteriv(GL_TEXTURE_2D,0,component,&size);bits+=size;
@@ -132,6 +145,7 @@ bool RenderPipeline::StoreGraphCacheEntry(
             cache.emplace(variant,entry);
             entry={};
         }
+        const auto priorEntry = entry;
         const unsigned int priorTexture = entry.texture;
         const bool deletePrior =
             entry.owned &&
@@ -140,7 +154,7 @@ bool RenderPipeline::StoreGraphCacheEntry(
             priorTexture != m_SourceTexture &&
             priorTexture != m_ExternalOutputTexture;
         entry = replacement;
-        if (deletePrior) {
+        if (deletePrior && !RetainRetiredGraphTarget(priorEntry)) {
             glDeleteTextures(1, &priorTexture);
         }
     } catch (const std::bad_alloc&) {
@@ -225,27 +239,32 @@ void RenderPipeline::TrimGraphPersistentCachesToBudget() {
         const std::string* victimKey = nullptr;
         std::uint64_t victimBytes = 0;
         std::uint64_t victimSerial = 0;
+        bool victimRegional = false;
 
         const auto consider = [&](
                                   CacheKind kind,
                                   const std::string& key,
                                   std::uint64_t bytes,
                                   std::uint64_t serial,
-                                  bool protectedResource) {
+                                  bool protectedResource, bool regional) {
             if (protectedResource || bytes == 0) return;
             const bool earlier =
                 victimKey == nullptr ||
-                serial < victimSerial ||
-                (serial == victimSerial &&
-                 (kind < victimKind ||
-                  (kind == victimKind && key < *victimKey)));
+                (regional && !victimRegional) ||
+                (regional == victimRegional && (serial < victimSerial ||
+                 (serial == victimSerial &&
+                  (kind < victimKind || (kind == victimKind && key < *victimKey)))));
             if (!earlier) return;
             victimKind = kind;
             victimKey = &key;
             victimBytes = bytes;
             victimSerial = serial;
+            victimRegional = regional;
         };
 
+        // Complete-input boundaries are reusable by every section. Prefer
+        // retiring old regional intermediates before discarding that work.
+        // Both classes remain evictable within the same memory budget.
         const auto considerTextureCache = [&](
                                               const auto& cache,
                                               CacheKind kind) {
@@ -258,7 +277,9 @@ void RenderPipeline::TrimGraphPersistentCachesToBudget() {
                     entry.texture == m_OutputTexture ||
                         entry.texture == m_GraphSourceTexture ||
                         entry.texture == m_SourceTexture ||
-                        entry.texture == m_ExternalOutputTexture);
+                        entry.texture == m_ExternalOutputTexture,
+                    m_GraphViewportRequest.enabled && m_GraphViewportRequest.visible.Partial() &&
+                        entry.graphGeometry.Valid() && entry.graphGeometry.resident.Partial());
             }
         };
         considerTextureCache(m_GraphImageCache, CacheKind::Image);

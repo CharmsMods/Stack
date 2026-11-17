@@ -1,4 +1,7 @@
 #include "FullscreenQuad.h"
+#include <algorithm>
+#include <cstdint>
+#include <stdexcept>
 
 FullscreenQuad::FullscreenQuad() : m_VAO(0), m_VBO(0) {}
 
@@ -43,6 +46,7 @@ void FullscreenQuad::Initialize() {
 }
 
 void FullscreenQuad::Shutdown() {
+    m_Cancellation={};
     if (m_VBO) {
         glDeleteBuffers(1, &m_VBO);
         m_VBO = 0;
@@ -55,6 +59,30 @@ void FullscreenQuad::Shutdown() {
 
 void FullscreenQuad::Draw() {
     glBindVertexArray(m_VAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    GLint viewport[4]{};
+    if(m_Cancellation)glGetIntegerv(GL_VIEWPORT,viewport);
+    if(!m_Cancellation || std::int64_t(viewport[2])*viewport[3]<=4ll*1024*1024) {
+        glDrawArrays(GL_TRIANGLES,0,6);
+    } else {
+        const bool scissor=glIsEnabled(GL_SCISSOR_TEST)==GL_TRUE;
+        GLint previous[4]{};glGetIntegerv(GL_SCISSOR_BOX,previous);
+        const int left=scissor ? std::max(viewport[0],previous[0]) : viewport[0];
+        const int bottom=scissor ? std::max(viewport[1],previous[1]) : viewport[1];
+        const int right=scissor ? std::min(viewport[0]+viewport[2],previous[0]+previous[2]) : viewport[0]+viewport[2];
+        const int top=scissor ? std::min(viewport[1]+viewport[3],previous[1]+previous[3]) : viewport[1]+viewport[3];
+        glEnable(GL_SCISSOR_TEST);
+        bool canceled=false;
+        for(int y=bottom;y<top && !canceled;y+=128)for(int x=left;x<right;x+=1024) {
+            if(m_Cancellation()){canceled=true;break;}
+            glScissor(x,y,std::min(1024,right-x),std::min(128,top-y));
+            glDrawArrays(GL_TRIANGLES,0,6);
+        }
+        glScissor(previous[0],previous[1],previous[2],previous[3]);
+        if(!scissor)glDisable(GL_SCISSOR_TEST);
+        if(canceled) {
+            glBindVertexArray(0);
+            throw std::runtime_error("Render superseded by a newer snapshot.");
+        }
+    }
     glBindVertexArray(0);
 }

@@ -412,4 +412,18 @@ std::array<float, 9> BuildRawCameraToWorkingTransform(
         inputAlreadyWhiteBalanced);
 }
 
+std::array<float, 3> ResolveRawHighlightNeutral(
+    const std::array<float, 9>& cameraToWorking, const RawDevelopSettings& settings) {
+    constexpr std::array<float,3> neutral{1.f,1.f,1.f};
+    if(!settings.cameraTransformEnabled || settings.debugBypassCameraTransform)return neutral;
+    auto matrix=cameraToWorking;
+    if(settings.debugTransposeCameraMatrix)
+        for(int row=0;row<3;++row)for(int col=row+1;col<3;++col)
+            std::swap(matrix[row*3+col],matrix[col*3+row]);
+    std::array<float,9> inverse{};
+    if(!InvertMatrix3(matrix,inverse))return neutral;
+    const auto result=MultiplyMatrixVector3(inverse,neutral);
+    return std::all_of(result.begin(),result.end(),[](float v){return std::isfinite(v);}) ? result : neutral;
+}
+
 } // namespace Raw

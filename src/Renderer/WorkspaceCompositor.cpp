@@ -6,6 +6,7 @@
 #include "ToolDrawerShaders.h"
 #include "Renderer/GLHelpers.h"
 #include "imgui_impl_opengl3.h"
+#include "Platform/ImGuiRenderer.h"
 #include <algorithm>
 #include <cmath>
 #ifndef GL_VERTEX_ARRAY_BINDING
@@ -128,11 +129,13 @@ struct PresentationTarget {
         glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     }
 };
-void DrawInterface(ImDrawData* data) {
-    // No compositor shader is needed after this boundary. Unbind it so ImGui
-    // does not need to validate/restore a shared program after each UI pass.
-    glUseProgram(0);
-    ImGui_ImplOpenGL3_RenderDrawData(data);
+void DrawInterface(ImDrawData* data, unsigned int compositorVao) {
+    Stack::Platform::RenderOwnedUiDrawData(data);
+    // The following compositor pass starts from explicit state. This avoids
+    // synchronous driver queries while another context renders a large RAW.
+    glUseProgram(0); glBindVertexArray(compositorVao);
+    glBindSampler(0,0); glBindSampler(1,0); glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST);
 }
 void Append(ImDrawData& data, ImDrawList* list) {
     data.CmdLists.push_back(list); ++data.CmdListsCount;
@@ -312,7 +315,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
         glDisable(GL_SCISSOR_TEST);
         glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
         target.Restore();
-        DrawInterface(&overlay);
+        DrawInterface(&overlay,vao);
         return true;
     }
     // Keep the last visible blend as the source when direction changes mid-fade.
@@ -359,7 +362,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     {
         Stack::UiPerformance::Span bodyTiming(Stack::UiPerformance::Stage::CompositorBody);
         RawPhotoInteriorClip photoClip(photoComposited ? rawBackdropFrame : nullptr);
-        DrawInterface(&body);
+        DrawInterface(&body,vao);
     }
     if (captureAllowed) {
         // Remember the unblended body, even during project crossfades.
@@ -418,7 +421,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
             lastPreviewFrame = *projectFrame;
             lastPreviewClear = clear;
         }
-        DrawInterface(&overlay);
+        DrawInterface(&overlay,vao);
         return true;
     } else {
         glBindFramebuffer(GL_READ_FRAMEBUFFER,presentedFramebuffer); glBindFramebuffer(GL_DRAW_FRAMEBUFFER,lowFramebuffer);
@@ -434,7 +437,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     }
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES,0,3);
-    DrawInterface(&overlay);
+    DrawInterface(&overlay,vao);
     return true;
 }
 void WorkspaceCompositor::Shutdown() {

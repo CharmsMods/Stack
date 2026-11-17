@@ -85,9 +85,12 @@ int EditorModule::GetCalibratedRawViewportEdge() const {
 double EditorModule::GetRawViewportVisibleNativeFps() const {
     if (UsesGraphViewportPreview()) {
         const auto& state = ActiveViewportPreviewState();
-        const auto estimate = state.timings.Estimate(state.executionIdentity,
-            std::max(state.geometry.logicalWidth,state.geometry.logicalHeight));
-        return estimate.costKnown && estimate.predictedMs > 0 ? 1000.0 / estimate.predictedMs : 0.0;
+        const int nativeEdge = std::max(state.geometry.logicalWidth,state.geometry.logicalHeight);
+        for (const auto& candidate : state.qualityModel.candidates) if (candidate.edge == nativeEdge) {
+            const auto estimate = state.timings.Estimate(candidate.executionIdentity,candidate.regionalPixels,candidate.completePixels);
+            return estimate.costKnown && estimate.predictedMs > 0 ? 1000.0 / estimate.predictedMs : 0.0;
+        }
+        return 0.0;
     }
     if ((m_RawViewportCalibration.source != GetActiveRawWorkspacePreviewIdentity() || m_RawViewportCalibration.sourceHash != RawViewportSourceHash())) return 0;
     const auto& region = m_RawViewportRequest.visible;

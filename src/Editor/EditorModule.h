@@ -1,3 +1,4 @@
+#include "Editor/WhiteBalanceAnalysis.h"
 #pragma once
 #include "Utils/AtomicExportFile.h"
 #include "Editor/NodeGraph/GraphEditorContext.h"
@@ -1213,6 +1214,11 @@ public:
     // reports whether the active RAW presentation has caught up with them.
     bool HasCurrentRawWorkspacePresentation() const;
     bool TryGetViewportPreviewGeometry(Stack::Renderer::ViewportPreviewGeometry& geometry) const;
+    void DrawViewportNativeSections(ImDrawList* draw, ImVec2 minimum, ImVec2 maximum, bool hdr, ImU32 tint = IM_COL32_WHITE, float rounding = 0) const;
+    bool HasNativeViewportCoverage() const;
+    void ClearViewportNativeSections(Stack::EditorRendering::ViewportPreviewState& state);
+    void AdoptViewportNativeSection(EditorRenderWorker::Result& result);
+    int NextViewportNativeSection(Stack::EditorRendering::ViewportPreviewState& state);
     bool TryGetViewportPreviewOverview(unsigned int& texture, int& width, int& height, bool hdr = false) const;
     void UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
         ImVec2 clipMin, ImVec2 clipMax, bool navigationActive = false);
@@ -3172,7 +3178,7 @@ private:
     RawWorkspaceEditContext* m_NodeEditorDrawingContext = nullptr;
     std::optional<Stack::Project::NodeEditTarget> m_NodePrimaryUiTarget;
     void BindNodeEditorPrimaryState(const Stack::Project::NodeEditTarget& target);
-    int m_ViewSectionTab = 1; // Layers, Controls, Settings, Assets.
+    int m_ViewSectionTab = 1; // Interpretation (Source in Bracketing), Light, Settings, Assets.
     bool m_ViewSectionOpen = true;
     void RenderNodeEditorPanel();
     void RenderNodeEditorPanelMenu();
@@ -3226,7 +3232,16 @@ private:
         const EditorRenderWorker::Result& result);
     bool BeginRawWorkspaceEditContext(
         const Stack::RawWorkspace::SourceRecord* selectedSource,
-        RawWorkspaceEditContext& context) const;
+        RawWorkspaceEditContext& context, bool bindSelectedNode = true) const;
+    void RenderRawInterpretationPanel();
+    void UpdateInterpretationWhiteBalance();
+    void RenderWhiteBalancePicker(const ImVec2&,const ImVec2&,const Stack::RawRecipe::RawCropRotationRecipe&);
+    bool StartInterpretationWhiteBalance(std::optional<std::array<float,2>> sample);
+    Stack::Editor::WhiteBalanceAnalysis m_InterpretationWhiteBalance;
+    bool m_WhiteBalancePickerArmed=false, m_WhiteBalanceAutoRequest=false;
+    std::uint64_t m_WhiteBalanceRequestRevision=0;
+    std::string m_WhiteBalanceRequestSource, m_WhiteBalanceStatus;
+
     void CommitRawWorkspaceEditContext(
         RawWorkspaceEditContext& context,
         bool changed,
