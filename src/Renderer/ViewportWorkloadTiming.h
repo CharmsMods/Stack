@@ -19,6 +19,7 @@ public:
         auto& context = contexts[identity];
         if (now < context.updated) return;
         auto& points = context.points;
+        const auto previousPointCount = points.size();
         points.erase(std::remove_if(points.begin(), points.end(), [&](const auto& p) {
             return now - p.at > ViewportPreviewTimingCurve::MaximumAge;
         }), points.end());
@@ -31,7 +32,13 @@ public:
             same->drift = direction && same->direction == direction ? same->drift + 1 : (direction ? 1 : 0);
             same->direction = direction;
             if (same->drift >= 3) { points.clear(); }
-            else if (direction) return;
+            else if (direction) {
+                // Expiration changes the fit even when this sample is rejected
+                // as a transient outlier. Never keep coefficients derived from
+                // deleted points just because all surviving points are fresh.
+                if (points.size() != previousPointCount) Fit(context, now);
+                return;
+            }
             else { same->ms += .25 * (ms - same->ms); same->at = now; Fit(context, now); return; }
         }
         if (points.size() >= 24) points.erase(std::min_element(points.begin(), points.end(),

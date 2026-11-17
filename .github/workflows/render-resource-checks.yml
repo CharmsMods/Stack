@@ -1,0 +1,32 @@
+name: Render resource checks
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/render-resource-checks.yml'
+      - 'src/Renderer/Viewport*.h'
+      - 'src/Renderer/ViewportSectionStore.cpp'
+      - 'src/Editor/Internal/EditorRenderWorkerViewportSections.cpp'
+      - 'tools/tests/render_resources/**'
+permissions:
+  contents: read
+concurrency:
+  group: render-resources-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  cpu-resource-contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Configure focused CPU checks
+        run: cmake -S tools/tests/render_resources -B _workspace/render-resource-checks -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build _workspace/render-resource-checks --config Release --parallel 2
+      - name: Check resource contracts
+        run: ctest --test-dir _workspace/render-resource-checks -C Release --output-on-failure

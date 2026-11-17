@@ -143,13 +143,15 @@ inline ViewportPreviewSelection SelectViewportPreviewCandidate(
         result.measured = known(selected);
         result.predictedMs = result.measured ? selected.predictedMs : 0.0;
         result.provisional = !allKnown || !selected.timingCovered;
+        // Stabilization can replace the selected plan below. Its explanation
+        // must describe that actual plan, not the previously preferred size.
+        result.limit = !result.measured ? ViewportPreviewLimit::Learning :
+            result.predictedMs > target * 1.05 ?
+                (input.preserveDetail ? ViewportPreviewLimit::DetailFloor : ViewportPreviewLimit::FixedWork) :
+            result.edge < maximum ? ViewportPreviewLimit::FrameBudget : ViewportPreviewLimit::None;
+        if (result.limit == ViewportPreviewLimit::FixedWork && !allKnown) result.limit = ViewportPreviewLimit::Learning;
     };
     describe();
-    result.limit = !result.measured ? ViewportPreviewLimit::Learning :
-        result.predictedMs > target * 1.05 ?
-            (input.preserveDetail ? ViewportPreviewLimit::DetailFloor : ViewportPreviewLimit::FixedWork) :
-        result.edge < maximum ? ViewportPreviewLimit::FrameBudget : ViewportPreviewLimit::None;
-    if (result.limit == ViewportPreviewLimit::FixedWork && !allKnown) result.limit = ViewportPreviewLimit::Learning;
 
     // A caller may report the existing dispatched size during stabilization.
     // Only a supplied, admitted candidate can represent that execution.
@@ -159,8 +161,6 @@ inline ViewportPreviewSelection SelectViewportPreviewCandidate(
                 result.candidateIndex = i;
                 result.edge = candidates[i].edge;
                 describe();
-                if (result.limit == ViewportPreviewLimit::None && result.edge < maximum)
-                    result.limit = ViewportPreviewLimit::FrameBudget;
                 break;
             }
         }

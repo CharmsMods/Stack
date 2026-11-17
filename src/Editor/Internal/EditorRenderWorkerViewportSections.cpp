@@ -25,8 +25,12 @@ bool ReadNative(unsigned texture,int width,int height,std::vector<float>& pixels
 }
 bool EditorRenderWorker::RestoreViewportSection(const Snapshot& snapshot,Result& result) {
     if(!snapshot.viewportSections || snapshot.viewportSection<0 || !snapshot.viewportSections->Has(snapshot.viewportSection))return false;
-    std::vector<float> pixels,hdr;
-    if(!snapshot.viewportSections->Load(snapshot.viewportSection,pixels,hdr,result.error)) {result.success=false;return true;}
+    // Keep immutable native pixels alive through both uploads. RAM hits no
+    // longer allocate/copy a second pair of RGBA32F section buffers.
+    const auto payload=snapshot.viewportSections->LoadShared(snapshot.viewportSection,result.error);
+    if(!payload) {result.success=false;return true;}
+    const auto& pixels=payload->pixels;
+    const auto& hdr=payload->hdr;
     const auto region=snapshot.viewportSections->Raster(snapshot.viewportSection);
     auto& output=result.outputTexture;output.width=region.width;output.height=region.height;
     output.texture=GLHelpers::CreateTextureFromData(pixels.data(),region.width,region.height,GL_RGBA32F,GL_RGBA,GL_FLOAT,GL_LINEAR);
