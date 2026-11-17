@@ -51,9 +51,12 @@ int EditorModule::NextViewportNativeSection(Stack::EditorRendering::ViewportPrev
             if(shown && state.sectionNativeDemand)tile.lastUse=useSerial;
             else evictionCandidates.push_back(i);
         }
-        if(shown && next<0 && (!tile.preview.texture || (state.sectionNativeDemand && !tile.native.texture)))next=i;
-        if(!shown && prefetch<0 && state.sectionNativeDemand && !tile.native.texture && tile.preview.texture &&
-            Intersects(state.sections->Bounds(i),nearby))prefetch=i;
+        // Readiness is metadata-only: prefer a cheap restore before new graph
+        // work, then choose the missing section nearest the camera center.
+        if(shown && (!tile.preview.texture || (state.sectionNativeDemand && !tile.native.texture)) &&
+            state.sections->Prefer(i,next,visible))next=i;
+        if(!shown && state.sectionNativeDemand && !tile.native.texture && tile.preview.texture &&
+            Intersects(state.sections->Bounds(i),nearby) && state.sections->Prefer(i,prefetch,visible))prefetch=i;
     }
     if(residentBytes>budget) {
         std::sort(evictionCandidates.begin(),evictionCandidates.end(),[&](int a,int b) {

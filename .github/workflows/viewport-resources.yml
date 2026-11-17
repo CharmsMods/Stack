@@ -1,0 +1,36 @@
+name: Viewport resources
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/viewport-resources.yml'
+      - 'src/Renderer/ViewportSection*'
+      - 'src/Renderer/ViewportPreviewTypes.h'
+      - 'src/Renderer/Internal/GraphTransientRetentionPolicy.h'
+      - 'src/Renderer/Internal/RenderPipelineGraphRenderTargets.cpp'
+      - 'src/Editor/Internal/EditorModuleViewportSections.cpp'
+      - 'tools/tests/viewport_resources*'
+      - 'tools/tests/viewport_resources/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: viewport-resources-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Configure focused checks
+        run: cmake -S tools/tests/viewport_resources -B _workspace/viewport-resources -DCMAKE_BUILD_TYPE=Release
+      - name: Build focused checks
+        run: cmake --build _workspace/viewport-resources --config Release --parallel 2
+      - name: Run focused checks
+        run: ctest --test-dir _workspace/viewport-resources -C Release --output-on-failure

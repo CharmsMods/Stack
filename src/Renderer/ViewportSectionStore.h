@@ -7,7 +7,7 @@
 
 namespace Stack::Renderer {
 // Native, settled pixels for one immutable document/view revision. CPU-only:
-// reads/writes run on the render worker; coverage queries never touch disk.
+// reads/writes run on workers; metadata queries never wait on the I/O mutex.
 class ViewportSectionStore {
 public:
     static constexpr int Edge = 1024;
@@ -22,6 +22,7 @@ public:
     bool Complete() const;
     bool Covers(const ImageRegion& region) const;
     int NextMissing(const ImageRegion& visible, bool finishWhole) const;
+    bool Prefer(int candidate, int current, const ImageRegion& visible) const;
     bool Load(int index, std::vector<float>& pixels, std::vector<float>& hdr, std::string& error) const;
     bool Store(int index, std::vector<float> pixels, std::vector<float> hdr, std::string& error);
     std::uint64_t DiskBytes() const;

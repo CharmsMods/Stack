@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/Internal/GraphTransientRetentionPolicy.h"
 #include "Renderer/ScopedGLObjects.h"
 #include "Renderer/GraphTargetPrecision.h"
 
@@ -190,10 +191,14 @@ unsigned int RenderPipeline::AcquireGraphTransientTarget() {
 bool RenderPipeline::RetainRetiredGraphTarget(const CachedGraphTexture& entry) {
     if(!entry.owned || !entry.texture || entry.texture==m_SourceTexture || entry.texture==m_OutputTexture ||
         entry.texture==m_GraphSourceTexture || entry.texture==m_ExternalOutputTexture ||
-        entry.bytes<16ull*1024*1024 || entry.bytes!=EstimateGraphTargetBytes(entry.width,entry.height) ||
+        entry.bytes!=EstimateGraphTargetBytes(entry.width,entry.height) ||
         entry.internalFormat!=(m_GraphFloat32Targets ? GL_RGBA32F : GL_RGBA16F))return false;
     const auto resident=GraphTransientTargetBytes();
-    if(resident>m_GraphTransientTargetBudgetBytes || entry.bytes>m_GraphTransientTargetBudgetBytes-resident)return false;
+    // Small interactive previews benefit from reuse too. The byte allowance
+    // and entry cap, not a minimum image size, bound optional retention.
+    if(!Stack::Renderer::GraphExecution::CanRetainGraphTransientTarget(entry.bytes,resident,
+        m_GraphTransientTargetBudgetBytes,m_GraphTransientTargets.size(),
+        Stack::Renderer::GraphExecution::kGraphTransientTargetMaximumEntries))return false;
     try {
         // Keep unavailable until the next graph execution. Current evaluation
         // may still have borrowed aliases; published UI textures are separate.
