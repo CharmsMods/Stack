@@ -1114,7 +1114,11 @@ bool EditorModule::SubmitRenderSnapshot(
     const bool tracePreparation = Stack::UiPerformance::Probe::Active();
     const auto preparationStarted = tracePreparation ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const bool requestedNativeSection = snapshot.viewportSection >= 0;
+    const bool requestedMainOutput = snapshot.outputConnected;
     ConfigureViewportPreview(snapshot);
+    // A rejected refinement plan must retain the accepted image. Auxiliary
+    // packets that intentionally have no main output still use this path.
+    if (requestedMainOutput && !snapshot.outputConnected) return false;
     if (requestedNativeSection && (!ActiveViewportPreviewState().refinement ||
         snapshot.viewportSections != ActiveViewportPreviewState().sections)) return false;
     if (tracePreparation) {

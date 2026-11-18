@@ -268,8 +268,19 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 ? !currentRawGeneration || !currentRawRecipe || obsoleteViewport ||
                     (!m_RawWorkspaceRootTabActive && result.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)
                 : !IsCurrentGraphResult(result)));
+        if (result.viewportPreview.enabled &&
+            result.viewportPreview.refinement == Stack::Renderer::ViewportRefinementStep::NavigationCoverage &&
+            (!result.success || !result.error.empty() || result.denoisePending)) {
+            // Optional coverage starts behind a settled foreground image.
+            // Its failure/provisional denoise cannot downgrade that image or
+            // its completion state. The worker retains denoise continuation
+            // ownership; only this packet and its refinement request retire.
+            releaseDeferredResultResources(result);
+            m_RenderPending = IsAnyRenderBackendBusy();
+            continue;
+        }
         if (result.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
-            result.viewportPreview.enabled && result.viewportSections &&
+            result.viewportPreview.enabled &&
             result.telemetry.skipReason == RawPreviewSkipReason::MemoryBudget) {
             // A deferred native section did not invalidate the accepted image.
             // Keep its retry state separate from execution failures and avoid
@@ -506,27 +517,32 @@ void EditorModule::ConsumeRenderWorkerResults() {
         }
         bool rawPresentationAdopted = false;
         bool acceptedMainFrame=false;
-        const auto retainNativeWithOverview = [&]() {
+        const auto retainDetailWithOverview = [&]() {
             if (!result.viewportPreview.enabled || !result.success || result.denoisePending ||
                 result.telemetry.interactionActive || !result.outputTexture.texture ||
                 !result.viewportPreviewGeometry.Valid() || result.viewportPreviewGeometry.NativeSamples() ||
                 result.viewportPreviewGeometry.resident.Partial()) return false;
             const auto& state = ActiveViewportPreviewState();
             if (state.acceptedInteractive || m_RenderPresentation.denoisePending ||
-                m_RenderPresentation.failed || !state.geometry.NativeSamples() ||
-                !state.geometry.resident.Partial() ||
+                m_RenderPresentation.failed || !state.geometry.Valid() ||
+                (!state.geometry.NativeSamples() &&
+                 result.viewportPreview.refinement != Stack::Renderer::ViewportRefinementStep::NavigationCoverage) ||
+                state.geometry.SampleSpacingX() > result.viewportPreviewGeometry.SampleSpacingX() ||
+                state.geometry.SampleSpacingY() > result.viewportPreviewGeometry.SampleSpacingY() ||
                 state.acceptedGeneration != m_ViewportOutputRenderGeneration ||
                 result.viewportContentIdentity != state.acceptedContentIdentity ||
                 result.viewportContentIdentity != state.contentIdentity ||
                 result.viewportPreviewGeometry.logicalWidth != state.geometry.logicalWidth ||
                 result.viewportPreviewGeometry.logicalHeight != state.geometry.logicalHeight)
                 return false;
-            // Improve whole-photo coverage without replacing the native patch.
+            // Improve whole-photo coverage without replacing a finer current patch.
             // Both results passed normal identity and GPU-readiness checks.
             // The main resource stays with its existing presentation owner.
             QueueViewportOutputTextureRelease(result.viewportOverview);
             result.viewportOverview = std::move(result.outputTexture);
             result.viewportPreviewGeometry = state.geometry;
+            result.previewMaxDimension = state.geometry.NativeSamples() ? 0 :
+                std::max(state.geometry.resident.fullWidth,state.geometry.resident.fullHeight);
             result.rawWorkspace.viewportRegion = state.geometry.resident;
             return true;
         };
@@ -926,7 +942,7 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
         } else if (result.success && result.viewportSections && result.viewportSection >= 0) {
             AdoptViewportNativeSection(result);
-        } else if (result.success && result.outputTexture.texture != 0 && retainNativeWithOverview()) {
+        } else if (result.success && result.outputTexture.texture != 0 && retainDetailWithOverview()) {
             markMainOutputAccepted(RawWorkspacePreviewOutputKind::SingleTexture);
         } else if (result.success && result.outputTexture.texture != 0) {
             auto& frameTransition = m_Viewport.FrameTransition();

@@ -53,7 +53,8 @@ void Texture::Reset() {
 }
 GLuint Texture::Release(){return std::exchange(id,0);}
 Context::Context(GLuint source,int w,int h,CfaPattern cfa,const std::function<bool()>& canceled,
-    std::unordered_map<std::string,Program>& cache):mosaic(source),width(w),height(h),pattern(cfa),cancel(canceled),programs(cache) {
+    std::unordered_map<std::string,Program>& cache,const std::function<bool()>& submitted)
+    :mosaic(source),width(w),height(h),pattern(cfa),cancel(canceled),afterSubmission(submitted),programs(cache) {
     glGenBuffers(1,&statusBuffer);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER,statusBuffer);
     const GLuint zero=0;
@@ -122,6 +123,7 @@ Texture Context::Pass(const char* name,const std::string& body,GLenum format,GLu
     for(int row=0;row<height;row+=256) {
         CheckCancel();glUniform1i(program.rowOffset,row);
         glDispatchCompute((width+15)/16,(std::min(256,height-row)+15)/16,1);
+        if(afterSubmission && afterSubmission()) throw std::runtime_error("Demosaicing canceled.");
     }
     glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_SHADER_STORAGE_BARRIER_BIT);
     if(glGetError()!=GL_NO_ERROR) throw std::runtime_error(std::string("GPU demosaicing pass failed: ")+name);
@@ -166,12 +168,12 @@ GpuDemosaic::GpuDemosaic():m_Impl(std::make_unique<Impl>()){}
 GpuDemosaic::~GpuDemosaic(){for(const auto& item:m_Impl->programs) if(item.second.id) glDeleteProgram(item.second.id);}
 unsigned int GpuDemosaic::Reconstruct(unsigned int mosaic,int width,int height,CfaPattern pattern,
     DemosaicMethod method,const std::function<bool()>& cancel,std::string& error,
-    const std::array<float,9>& cameraToSrgb) {
+    const std::array<float,9>& cameraToSrgb,const std::function<bool()>& afterSubmission) {
     error.clear();
     if(!mosaic || width<2 || height<2 || pattern==CfaPattern::Unknown) {error="GPU demosaicing requires a Bayer texture of at least 2 by 2 pixels.";return 0;}
     ComputeState state;
     try {
-        GpuInternal::Context c(mosaic,width,height,pattern,cancel,m_Impl->programs);
+        GpuInternal::Context c(mosaic,width,height,pattern,cancel,m_Impl->programs,afterSubmission);
         c.cameraToSrgb=cameraToSrgb;
         GpuInternal::Texture rgb;
         switch(method) {

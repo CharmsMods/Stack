@@ -49,6 +49,7 @@ void FullscreenQuad::Initialize() {
 
 void FullscreenQuad::Shutdown() {
     m_Cancellation={};
+    m_Submission={};
     if (m_VBO) {
         glDeleteBuffers(1, &m_VBO);
         m_VBO = 0;
@@ -71,6 +72,10 @@ void FullscreenQuad::Draw() {
             throw std::runtime_error("Render superseded by a newer snapshot.");
         }
         glDrawArrays(GL_TRIANGLES,0,6);
+        if (m_Submission && m_Submission()) {
+            glBindVertexArray(0);
+            throw std::runtime_error("Render superseded by a newer snapshot.");
+        }
     } else {
         const bool scissor=glIsEnabled(GL_SCISSOR_TEST)==GL_TRUE;
         GLint previous[4]{};glGetIntegerv(GL_SCISSOR_BOX,previous);
@@ -80,12 +85,19 @@ void FullscreenQuad::Draw() {
         const int top=scissor ? std::min(viewport[1]+viewport[3],previous[1]+previous[3]) : viewport[1]+viewport[3];
         glEnable(GL_SCISSOR_TEST);
         bool canceled=false;
-        const int tileHeight = Stack::Renderer::CooperativeRasterTileHeight(interacting);
         const int tileWidth = Stack::Renderer::kCooperativeRasterTileWidth;
-        for(int y=bottom;y<top && !canceled;y+=tileHeight)for(int x=left;x<right;x+=tileWidth) {
-            if(m_Cancellation()){canceled=true;break;}
-            glScissor(x,y,std::min(tileWidth,right-x),std::min(tileHeight,top-y));
-            glDrawArrays(GL_TRIANGLES,0,6);
+        for(int y=bottom;y<top && !canceled;) {
+            // Input can begin during an idle pass. Resize subsequent rows
+            // without changing the pixel grid or revisiting submitted pixels.
+            const int tileHeight = std::min(top-y,
+                Stack::Renderer::CooperativeRasterTileHeight(Async::UiInteraction::Active()));
+            for(int x=left;x<right;x+=tileWidth) {
+                if(m_Cancellation()){canceled=true;break;}
+                glScissor(x,y,std::min(tileWidth,right-x),tileHeight);
+                glDrawArrays(GL_TRIANGLES,0,6);
+                if(m_Submission && m_Submission()){canceled=true;break;}
+            }
+            y+=tileHeight;
         }
         glScissor(previous[0],previous[1],previous[2],previous[3]);
         if(!scissor)glDisable(GL_SCISSOR_TEST);

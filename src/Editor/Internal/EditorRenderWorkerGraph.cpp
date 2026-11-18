@@ -6,6 +6,7 @@
 #include "Renderer/LocalToneGuidePlanning.h"
 #include "Renderer/SceneColorGuidePlanning.h"
 #include <algorithm>
+#include <cmath>
 #include <unordered_set>
 #include <stdexcept>
 
@@ -96,26 +97,27 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
                 }
             }
             std::uint64_t publishedMain = 0;
+            std::uint64_t overviewCopy = 0;
             const auto output = mainPlan.stages.find(mainPlan.output);
             if (output != mainPlan.stages.end()) {
                 const auto& stage = output->second;
                 const auto resident = Stack::Renderer::ScaleImageRegion(stage.demand,
                     stage.renderWidth, stage.renderHeight);
                 publishedMain = targetBytes(resident.width, resident.height, 1);
+                if (snapshot.prepareViewportOverview && !resident.Partial()) {
+                    const double scale = std::min(1.0, 512.0 / std::max(resident.width,resident.height));
+                    // PrepareViewportOverview only copies an existing whole
+                    // raster. Regional output never evaluates a hidden graph.
+                    // Reserve both presentation renditions conservatively.
+                    overviewCopy = targetBytes(std::max(1,int(std::lround(resident.width*scale))),
+                        std::max(1,int(std::lround(resident.height*scale))),2);
+                }
             }
             // Complete auxiliary evaluations run after publication and may
             // keep the main immutable texture alive while using full inputs.
             if (!snapshot.previews.empty() || !snapshot.developCandidateRenders.empty())
                 working = std::max(working, AddBytes(completeWorking, publishedMain));
-            if (snapshot.prepareViewportOverview) {
-                auto overview = result.viewportPreview;
-                overview.visible = {};
-                overview.empty = false;
-                const auto overviewPlan = RenderTiling::PlanGraphViewport(snapshot.graph,
-                    snapshot.width, snapshot.height, 512, overview, {}, retainedFloat32);
-                const auto overviewWorking = overviewPlan.valid ? overviewPlan.workingBytes : completeWorking;
-                working = std::max(working, AddBytes(overviewWorking, publishedMain));
-            }
+            working = AddBytes(working,overviewCopy);
         }
     }
     // Published output is immutable and independently leased. Retire the
@@ -129,15 +131,16 @@ void EditorRenderWorker::PrepareGraphResourceBudget(const Snapshot& snapshot,
     const bool budgetKnown = !budget.usedFallback;
     const auto available = budgetKnown ? AddBytes(budget.workingBudgetBytes, resident)
                                       : budget.workingBudgetBytes;
-    if (snapshot.viewportSections && working > available) {
+    if (snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
+        result.viewportPreview.enabled && working > available) {
         // The unmeasured allowance is total admitted work, not free memory;
         // never increase it by adding existing cache residency back.
         result.telemetry.skipReason = RawPreviewSkipReason::MemoryBudget;
         result.telemetry.fullFrameEstimatedWorkingSetBytes = working;
         result.telemetry.fullFrameRefinementBudgetAllowed = false;
         throw std::runtime_error(budgetKnown
-            ? "Native section working set exceeds GPU headroom including reclaimable graph caches."
-            : "Native section needs more than the 512 MiB conservative GPU allowance; device memory headroom is unavailable.");
+            ? "Viewport refinement working set exceeds GPU headroom including reclaimable graph caches."
+            : "Viewport refinement needs more than the 512 MiB conservative GPU allowance; device memory headroom is unavailable.");
     }
     // Device usage already includes accepted/queued presentation textures and
     // other pipelines. Only this pipeline's evictable caches are added back.

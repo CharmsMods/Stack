@@ -278,10 +278,13 @@ public:
     void SetPreviewMaxDimension(int maxDimension) { m_PreviewMaxDimension = std::max(0, maxDimension); }
     void SetRenderCancellationContext(
         std::uint64_t generation,
-        std::function<bool()> shouldCancel) {
+        std::function<bool()> shouldCancel,
+        std::function<bool()> afterSubmission = {}) {
         m_RenderGeneration = generation;
         m_ShouldCancelRender = std::move(shouldCancel);
+        m_AfterGpuSubmission = std::move(afterSubmission);
         m_Quad.SetCooperativeCancellation(m_ShouldCancelRender);
+        m_Quad.SetCooperativeSubmission(m_AfterGpuSubmission);
     }
     // Interactive RAW previews must remain image-only work. Expensive texture
     // readbacks and automatic-analysis evidence are observational and may be
@@ -878,6 +881,7 @@ private:
     GraphExecutionStats m_LastGraphExecutionStats;
     std::uint64_t m_RenderGeneration = 0;
     std::function<bool()> m_ShouldCancelRender;
+    std::function<bool()> m_AfterGpuSubmission;
     bool m_RawRgbDenoiseAsyncEnabled = false;
     bool m_RawRgbDenoiseAsyncStartAllowed = true;
     bool m_HasProvisionalRawRgbDenoiseOutput = false;

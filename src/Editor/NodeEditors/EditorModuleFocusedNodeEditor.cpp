@@ -25,7 +25,16 @@ bool EditorModule::EnterFocusedNodeEditor(const Stack::Project::NodeEditTarget& 
     }
     m_NodeEditorPanel.focusTarget=target;
     m_NodeEditorPanel.focusEnteredFrame=ImGui::GetFrameCount();
+    // Focus needs its input analysis, but entering it does not change the
+    // displayed image. Restore a matching packet before hiding the panel;
+    // otherwise let the auxiliary lane fill the focused editor independently.
+    const bool analysisReady=RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool();
     UpdateNodeEditorPanelVisibility();
+    if (!analysisReady && selected && selected->inputAnalysis!=RawDevelopmentGraphScopeStage::None) {
+        m_RawWorkspaceAnalysisPending=true;
+        m_RawWorkspaceAnalysisScopeRetryCount=0;
+        m_RawWorkspaceAnalysisQuietUntilTime=ImGui::GetTime()+.1;
+    }
     return true;
 }
 

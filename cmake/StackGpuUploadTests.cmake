@@ -3,6 +3,7 @@ add_executable(StackGpuUploadTests
     tools/tests/raw_highlight_gpu_checks.cpp
     src/Renderer/GLLoader.cpp
     src/Renderer/GLHelpers.cpp
+    src/Renderer/CooperativeGpuQueue.cpp
     src/Raw/RawGpuPipeline.cpp
     src/Raw/RawColorTransform.cpp
     src/Raw/Demosaic/DemosaicTexture.cpp

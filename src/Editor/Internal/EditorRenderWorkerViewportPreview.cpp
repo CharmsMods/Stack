@@ -1,7 +1,4 @@
-#include "Hdr/PhotoPreview.h"
-#include "Hdr/Presentation.h"
 #include "Editor/EditorRenderWorker.h"
-#include "Editor/RawRenderGraphOverlay.h"
 #include "Renderer/ViewportTextureCopy.h"
 
 #include <algorithm>
@@ -10,39 +7,6 @@
 namespace {
 
 constexpr int kViewportOverviewEdge = 512;
-
-// The main texture and its query batch have already been published. A second
-// execution may replace pipeline output, but cannot change either result.
-class OverviewPipelineState {
-public:
-    OverviewPipelineState(RenderPipeline& pipeline,
-        const Stack::Renderer::ViewportPreviewRequest& request,
-        bool validationEnabled)
-        : m_Pipeline(pipeline), m_Request(request),
-          m_RawRequest(pipeline.m_RawViewportRequest),
-          m_Edge(pipeline.GetRawViewportCacheEdge()),
-          m_AnalysisEnabled(pipeline.IsRawDevelopmentAnalysisEnabled()),
-          m_ValidationEnabled(validationEnabled) {}
-
-    ~OverviewPipelineState() {
-        m_Pipeline.SetGraphViewportRequest(m_Request);
-        m_Pipeline.SetRawViewportRequest(m_RawRequest);
-        m_Pipeline.SetPreviewMaxDimension(m_Edge);
-        m_Pipeline.SetRawDevelopmentAnalysisEnabled(m_AnalysisEnabled);
-        m_Pipeline.SetRawDevelopmentViewportValidationEnabled(m_ValidationEnabled);
-        // This optional execution owns a separate cancellation registration.
-        // RenderSnapshot has already cleared its callback on leaving scope.
-        m_Pipeline.SetRenderCancellationContext(0, {});
-    }
-
-private:
-    RenderPipeline& m_Pipeline;
-    Stack::Renderer::ViewportPreviewRequest m_Request;
-    Raw::ViewportRequest m_RawRequest;
-    int m_Edge = 0;
-    bool m_AnalysisEnabled = false;
-    bool m_ValidationEnabled = false;
-};
 
 } // namespace
 
@@ -74,77 +38,9 @@ void EditorRenderWorker::PrepareViewportOverview(const Snapshot& snapshot, Resul
             glFlush(); result.viewportOverview=std::move(overview);
             return;
         }
-        const Snapshot& templateSnapshot = snapshot.rawSessionCommand && snapshot.rawSessionTemplate
-            ? *snapshot.rawSessionTemplate : snapshot;
-        if (templateSnapshot.graph.nodes.empty()) return;
-        RenderGraphSnapshot graph = templateSnapshot.graph;
-        if (snapshot.rawSessionCommand) {
-            graph.rawWorkspaceLocalRangeOverlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
-            graph.rawWorkspaceLocalRangeTargetPreview = snapshot.rawWorkspace.localRangeTargetPreview;
-            graph.rawWorkspaceLocalRangeTargetSampleRequested = snapshot.rawWorkspace.localRangeTargetSampleRequested;
-            graph.rawWorkspaceLocalRangeTargetSampleU = snapshot.rawWorkspace.localRangeTargetSampleU;
-            graph.rawWorkspaceLocalRangeTargetSampleV = snapshot.rawWorkspace.localRangeTargetSampleV;
-            if (snapshot.rawWorkspace.hasRecipe) {
-                Stack::EditorRendering::ApplyRawRecipeOverlayToRenderGraph(graph,
-                    snapshot.rawWorkspace.recipe,
-                    snapshot.rawWorkspace.managedRawDecodeNodeId,
-                    snapshot.rawWorkspace.managedToneCurveNodeId,
-                    snapshot.rawWorkspace.managedViewTransformNodeId);
-            }
-        }
-
-        RenderPipeline& pipeline = *m_PersistentPipeline;
-        std::atomic<bool> canceled { false };
-        OverviewPipelineState restore(pipeline, result.viewportPreview,
-            snapshot.rawWorkspace.analysisRequested);
-        pipeline.SetRenderCancellationContext(snapshot.generation, [&]() {
-            if (!canceled.load(std::memory_order_relaxed) && ShouldAbortStaleSnapshot(snapshot))
-                canceled.store(true, std::memory_order_relaxed);
-            return canceled.load(std::memory_order_relaxed);
-        });
-        pipeline.BeginRawViewportTiming(false);
-        pipeline.SetRawViewportRequest({});
-        pipeline.SetPreviewMaxDimension(kViewportOverviewEdge);
-        pipeline.SetRawDevelopmentAnalysisEnabled(false);
-        pipeline.SetRawDevelopmentViewportValidationEnabled(false);
-        auto request = result.viewportPreview;
-        request.prepareCompareSource = false;
-        request.visible = {};
-        request.empty = false;
-        request.samplingScale = std::min(1.0, double(kViewportOverviewEdge) /
-            std::max(result.viewportPreviewGeometry.logicalWidth, result.viewportPreviewGeometry.logicalHeight));
-        // An enabled Full demand retains the bounded, whole-image sample grid
-        // for ordinary graphs as well as RAW. Disabling it loses that contract.
-        pipeline.SetGraphViewportRequest(request);
-        // A separate thumbnail can install another fallback source buffer.
-        // Restore this snapshot's source before rendering matching coverage.
-        pipeline.LoadSourceFromSharedPixels(templateSnapshot.sourcePixels,
-            templateSnapshot.width, templateSnapshot.height, templateSnapshot.channels);
-        SharedTextureResult overview;
-        if (Stack::Hdr::AnyPreviewActive() && !result.rawWorkspace.viewportDiagnostic) {
-            std::string hdrError;
-            overview.hdr = Stack::Hdr::RenderCompanion(pipeline, graph, hdrError);
-            if (!hdrError.empty()) return;
-        }
-        pipeline.ExecuteGraph(graph);
-        // The overview is a separate graph execution and can still be waiting
-        // for denoise even when the native patch is settled. Its provisional
-        // current-edit pixels are still valid navigation coverage, not native proof.
-        if (canceled.load(std::memory_order_relaxed) || ShouldAbortStaleSnapshot(snapshot)) return;
-        const auto geometry = pipeline.GetGraphViewportGeometry();
-        if (!geometry.Valid() || geometry.resident.Partial() ||
-            geometry.logicalWidth != result.viewportPreviewGeometry.logicalWidth ||
-            geometry.logicalHeight != result.viewportPreviewGeometry.logicalHeight ||
-            std::max(geometry.storageWidth, geometry.storageHeight) > kViewportOverviewEdge ||
-            !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty()) return;
-
-        overview.texture = pipeline.PublishSharedOutputTexture(overview.width, overview.height,
-            !snapshot.rawWorkspace.sourceKey.empty());
-        if (!overview.texture || !overview.EnsureLease()) return;
-        overview.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        if (!overview.readyFence) return;
-        glFlush();
-        result.viewportOverview = std::move(overview);
+        // Regional foreground work is published immediately. The editor's
+        // NavigationCoverage step schedules a bounded whole-image render on a
+        // later worker turn; optional coverage cannot hold this frame hostage.
     } catch (...) {
         // The detail result remains adoptable. The caller may request its
         // missing coverage again after a later completed foreground render.

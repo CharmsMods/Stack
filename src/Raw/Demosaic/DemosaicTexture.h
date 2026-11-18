@@ -19,7 +19,8 @@ public:
     unsigned int GetOrRender(std::size_t key,int width,int height,CfaPattern pattern,
         DemosaicMethod method,const std::function<bool()>& renderPreparedMosaic,
         const std::function<bool()>& cancel,std::string& error,
-        const std::array<float,9>& cameraToSrgb = {1,0,0,0,1,0,0,0,1});
+        const std::array<float,9>& cameraToSrgb = {1,0,0,0,1,0,0,0,1},
+        const std::function<bool()>& afterSubmission = {});
 private:
     GpuDemosaic m_Gpu;
     unsigned int m_Texture = 0;

@@ -16,6 +16,7 @@ public:
     unsigned Begin(int w,int h,bool forceSdr);
     bool Present();
     bool Active() const {return target && !failed;}
+    bool Suspended() const {return suspended;}
     unsigned long long SubmittedFrames() const { return presentations; }
     const DisplayInfo& Display() const {return display;}
     const std::string& Status() const {return status;}
@@ -43,7 +44,7 @@ private:
     Ptr<ID3D11Texture2D> back;
     int width=0,height=0;
     unsigned scene=0,target=0,program=0,vao=0;
-    bool failed=false,attached=false,force=false;
+    bool failed=false,attached=false,force=false,suspended=false;
     unsigned long long nextRefresh=0,retryDeviceAt=0,presentations=0;
     bool compatibleOnly=false;
     std::string status="Checking display";

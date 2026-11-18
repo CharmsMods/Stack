@@ -44,11 +44,13 @@ struct Context {
     CfaPattern pattern;
     std::array<float,9> cameraToSrgb{1,0,0,0,1,0,0,0,1};
     const std::function<bool()>& cancel;
+    const std::function<bool()>& afterSubmission;
     std::unordered_map<std::string,Program>& programs;
     TexturePool pool;
     GLuint statusBuffer=0;
     Context(GLuint source,int w,int h,CfaPattern cfa,const std::function<bool()>& canceled,
-        std::unordered_map<std::string,Program>& cache);
+        std::unordered_map<std::string,Program>& cache,
+        const std::function<bool()>& submitted);
     ~Context();
     void CheckCancel() const;
     Texture Pass(const char* name,const std::string& body,GLenum format,

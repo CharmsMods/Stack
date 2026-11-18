@@ -7,13 +7,13 @@ namespace Stack::EditorRendering {
 struct GraphViewportAnalysisDemand {
     bool pending = false, requested = false;
     bool currentPresentation = false, settledPresentation = false;
-    bool nativeReadyOrDeferred = false;
+    bool displayReadyOrDeferred = false;
     bool workOutstanding = false, imageEditActive = false, quietElapsed = false;
 };
 
 inline bool ShouldSubmitGraphViewportAnalysis(const GraphViewportAnalysisDemand& demand) {
     return demand.pending && !demand.requested && demand.currentPresentation &&
-        demand.settledPresentation && demand.nativeReadyOrDeferred &&
+        demand.settledPresentation && demand.displayReadyOrDeferred &&
         !demand.workOutstanding && !demand.imageEditActive && demand.quietElapsed;
 }
 

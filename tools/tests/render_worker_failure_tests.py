@@ -41,6 +41,7 @@ def method(source, signature):
 pre = r'''
 #include "Editor/RawRenderPurpose.h"
 #include "Editor/GraphRenderPolicy.h"
+#include "Editor/ViewportRefinementPolicy.h"
 #include "Hdr/ImageFile.h"
 #include "Renderer/CooperativeGpuScheduling.h"
 #include "Async/UiInteraction.h"
@@ -96,13 +97,20 @@ struct FakeDenoise {
 };
 using RawRgbDenoiseState=FakeDenoise;
 struct RenderPipeline {
-    std::function<bool()> cancellation,quadCancellation;
-    void SetRenderCancellationContext(std::uint64_t,std::function<bool()> callback) {
-        cancellation=std::move(callback);quadCancellation=cancellation;
+    std::function<bool()> cancellation,quadCancellation,quadSubmission;
+    void SetRenderCancellationContext(std::uint64_t,std::function<bool()> callback,std::function<bool()> submitted={}) {
+        cancellation=std::move(callback);quadCancellation=cancellation;quadSubmission=std::move(submitted);
     }
 };
-namespace Stack::Renderer { struct ViewportSectionStore {}; }
-struct ViewportRequest { bool enabled=false,empty=false; std::uint64_t generation=0; };
+namespace Stack::Renderer {
+struct ViewportSectionStore {};
+// GL scheduling boundary stand-in; the callback body below is production code.
+inline std::atomic<int> gpuBatchCheckpoints{0};
+struct CooperativeGpuQueue {
+    bool Checkpoint(const std::function<bool()>& canceled) { ++gpuBatchCheckpoints; return !canceled(); }
+};
+}
+using ViewportRequest=Stack::Renderer::ViewportPreviewRequest;
 struct ViewportTilingSettings {};
 struct PreviewRequest { std::optional<int> assetCapture; bool assetCaptureInput=false; std::string rawLayerId,rawMaskId; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
 struct PreviewResult { bool assetCapture=false,assetCaptureInput=false,assetCaptureSuperseded=false,success=false; std::shared_ptr<int> assetFeedback;std::optional<int> capturedAsset; std::string rawLayerId,rawMaskId,error; int previewNodeId=-1; std::uint64_t dirtyGeneration=0; };
@@ -203,6 +211,7 @@ public:
     static Result MakeFailedResult(const Snapshot&,const std::string&);
     bool Submit(Snapshot);bool TrySubmit(Snapshot&);bool TryConsumeCompleted(Result&);bool TryConsumeViewportTiming(Result&);
     bool IsOwnerSnapshotInvalidLocked(std::uint64_t,std::uint64_t,std::uint64_t,RawRenderPurpose) const;
+    bool ShouldAbortStaleSnapshot(const Snapshot&) const;
     bool HasPendingForOwner(std::uint64_t) const;bool HasSnapshotWorkFor(std::uint64_t) const;
     bool HasPendingSnapshotOrRender() const;bool HasDenoiseWorkLocked() const;
     bool IsWaitingForRawDenoiseCompletion() const;bool IsAvailable() const;
@@ -222,7 +231,7 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
     for(auto& tile:result.outputTiles.tiles) if(tile.texture) glDeleteTextures(1,&tile.texture);
     result.outputTiles.tiles.clear();
 }
-namespace Stack::Renderer { using ViewportPreviewRequest=::ViewportRequest; namespace RawDevelopmentCache { using Stage=int; } }
+namespace Stack::Renderer { namespace RawDevelopmentCache { using Stage=int; } }
 namespace Stack::EditorRendering { std::size_t BuildRawPresentationFingerprint(int recipe,int) { return recipe; } }
 '''
 retirement = (root / 'src/Editor/Internal/EditorRenderResultRetirement.h').read_text()
@@ -241,6 +250,7 @@ for signature in [
     'bool EditorRenderWorker::HasPendingSnapshotOrRender()',
     'bool EditorRenderWorker::IsWaitingForRawDenoiseCompletion()',
     'bool EditorRenderWorker::IsAvailable()',
+    'bool EditorRenderWorker::ShouldAbortStaleSnapshot(',
     'EditorRenderWorker::RenderProgress EditorRenderWorker::GetProgress()']:
     methods += method(worker, signature)
 for signature in [
@@ -360,14 +370,14 @@ void CancellationScopeLifetime() {
     const auto execute=[&](bool fail) {
         bool alive=true;
         RenderCancellationScope cancellation(pipeline);
-        pipeline.SetRenderCancellationContext(5,[&]{return alive;});
-        Require(pipeline.cancellation() && pipeline.quadCancellation(),"request callback reaches pipeline and quad");
+        pipeline.SetRenderCancellationContext(5,[&]{return alive;},[&]{return alive;});
+        Require(pipeline.cancellation() && pipeline.quadCancellation() && pipeline.quadSubmission(),"request callback reaches pipeline and quad");
         if(fail) throw std::runtime_error("end request");
     };
     execute(false);
-    Require(!pipeline.cancellation && !pipeline.quadCancellation,"normal return clears callbacks before locals expire");
+    Require(!pipeline.cancellation && !pipeline.quadCancellation && !pipeline.quadSubmission,"normal return clears callbacks before locals expire");
     try {execute(true);} catch(const std::runtime_error&) {}
-    Require(!pipeline.cancellation && !pipeline.quadCancellation,"exception return clears callbacks before locals expire");
+    Require(!pipeline.cancellation && !pipeline.quadCancellation && !pipeline.quadSubmission,"exception return clears callbacks before locals expire");
 }
 Result ResourcePacket(const Snapshot& request,unsigned base) {
     auto result=EditorRenderWorker::MakeFailedResult(request,"completed");
@@ -515,6 +525,34 @@ void NormalSupersession() {
     Require(service.TryConsumeCompleted(id,result) && result.generation==201 && result.telemetry.superseded && result.error=="Render superseded by a newer snapshot.","real supersession unchanged");
     service.Release(id);
     Service stopping;auto sid=stopping.Acquire(&window);stopping.m_Worker.RequestStopForShutdown();Require(!stopping.Submit(sid,Request(sid,301)),"normal shutdown rejected, not falsely accepted failure");stopping.Release(sid);
+}
+void ScreenPreemptsBackgroundRefinement() {
+    using Step=Stack::Renderer::ViewportRefinementStep;
+    EditorRenderWorker worker;
+    auto active=Request(31,310,RawRenderPurpose::ViewportRefinement);
+    active.graphRequest.enabled=true;active.graphRequest.sourceIdentity=17;
+    active.viewportPreview.enabled=true;active.viewportPreview.refinement=Step::NativeSection;
+    worker.m_Pending=active;worker.m_Pending.generation=311;worker.m_Pending.schedulingSerial=311;
+    worker.m_Pending.viewportPreview.refinement=Step::VisibleScreen;worker.m_HasPending=true;
+    Require(worker.ShouldAbortStaleSnapshot(active),"visible screen preempts same-context native background work");
+    active.viewportPreview.refinement=Step::NavigationCoverage;
+    Require(worker.ShouldAbortStaleSnapshot(active),"visible screen preempts same-context offscreen coverage");
+    active.viewportPreview.refinement=Step::VisibleScreen;
+    Require(!worker.ShouldAbortStaleSnapshot(active),"camera changes coalesce without starving an active screen render");
+    active.viewportPreview.refinement=Step::NativeSection;
+    worker.m_Pending.viewportPreview.refinement=Step::NavigationCoverage;
+    Require(!worker.ShouldAbortStaleSnapshot(active),"ordinary coverage demand does not cancel useful native work");
+    worker.m_Pending.viewportPreview.refinement=Step::VisibleScreen;worker.m_Pending.viewportPreview.empty=true;
+    Require(!worker.ShouldAbortStaleSnapshot(active),"empty viewport demand cannot discard useful background work");
+    worker.m_Pending.viewportPreview.empty=false;worker.m_Pending.schedulingSerial=active.schedulingSerial;
+    Require(!worker.ShouldAbortStaleSnapshot(active),"only newer scheduling attempts can preempt refinement");
+    worker.m_Pending.schedulingSerial=311;active.rawRenderPurpose=RawRenderPurpose::ExplicitExport;
+    Require(!worker.ShouldAbortStaleSnapshot(active),"screen demand preserves terminal exports");
+    active.rawRenderPurpose=RawRenderPurpose::ViewportRefinement;active.viewportPreview.refinement=Step::VisibleScreen;
+    worker.m_Pending.ownerId=32;
+    Require(worker.ShouldAbortStaleSnapshot(active),"a new owner still supersedes the previous owner's active work");
+    worker.m_Pending.ownerId=active.ownerId;worker.m_Pending.graphRequest.sourceIdentity=18;
+    Require(worker.ShouldAbortStaleSnapshot(active),"source-context changes still supersede active screen work");
 }
 void PublicationRetirement() {
     EditorRenderWorker worker;auto request=Request(12,120);auto result=EditorRenderWorker::MakeFailedResult(request,"completed");
@@ -768,18 +806,19 @@ void AdoptionTerminalState() {
 '''
 cancellation_start = worker.index('        std::atomic<bool> renderCancelled { false };')
 cancellation_end = worker.index('        auto collectToneCurveAutoRewriteFeedback', cancellation_start)
-cancellation = worker[cancellation_start:cancellation_end]
+submission_start = worker.index('        const auto submissionThread', cancellation_start)
+cancellation = worker[cancellation_start:submission_start]
+submission = worker[submission_start:cancellation_end]
 cancellation_test = r'''
 void ConcurrentCancellationStaysLatched() {
     Snapshot snapshot;snapshot.viewportPreview.enabled=true;snapshot.rawRenderPurpose=RawRenderPurpose::ViewportRefinement;
-    std::atomic<int> checks{0},gpuWaits{0};
+    std::atomic<int> checks{0};
     std::promise<void> firstEntered,releaseFirst;
     auto entered=firstEntered.get_future(),release=releaseFirst.get_future();
     const auto ShouldAbortStaleSnapshot=[&](const Snapshot&) {
         if(checks.fetch_add(1)==0) {firstEntered.set_value();release.wait();return false;}
         return true;
     };
-    const auto WaitForSubmittedGpuWork=[&] {++gpuWaits;return true;};
 ''' + cancellation + r'''
     bool firstResult=false,secondResult=false;
     std::thread first([&]{firstResult=shouldAbortStaleWork();});
@@ -788,34 +827,35 @@ void ConcurrentCancellationStaysLatched() {
     releaseFirst.set_value();first.join();
     Require(firstResult && secondResult && shouldAbortStaleWork(),
         "a delayed false callback cannot undo another CPU helper's cancellation");
-    Require(checks==2 && gpuWaits==0,
+    Require(checks==2,
         "latched cancellation stops polling and CPU helpers never call the GL worker wait");
 }
 '''+r'''
 void ActiveUiYieldsTerminalGpuWork() {
     Snapshot snapshot;snapshot.rawRenderPurpose=RawRenderPurpose::ExplicitExport;
-    int gpuWaits=0;
+    auto& gpuWaits=Stack::Renderer::gpuBatchCheckpoints;gpuWaits=0;
     const auto ShouldAbortStaleSnapshot=[](const Snapshot&) {return false;};
-    const auto WaitForSubmittedGpuWork=[&] {++gpuWaits;return true;};
-'''+cancellation+r'''
-    for(int i=0;i<8;++i) Require(!shouldAbortStaleWork(),"idle export remains terminal");
+'''+cancellation+submission+r'''
+    for(int i=0;i<8;++i) Require(!afterGpuSubmission(),"idle export remains terminal");
     Require(gpuWaits==0,"idle non-viewport work keeps its existing submission policy");
     Async::UiInteraction::Lease interaction;interaction.Update(true,true,0.0);
     bool helperCanceled=false;
     std::thread helper([&] {
-        for(int i=0;i<8;++i) helperCanceled=shouldAbortStaleWork() || helperCanceled;
+        for(int i=0;i<8;++i) helperCanceled=afterGpuSubmission() || helperCanceled;
     });helper.join();
     Require(!helperCanceled && gpuWaits==0,"CPU helpers cannot drain an export's GL context");
-    Require(!shouldAbortStaleWork() && !shouldAbortStaleWork() && gpuWaits>=1,
+    for(int i=0;i<100;++i) Require(!shouldAbortStaleWork(),"CPU preparation can poll cancellation");
+    Require(gpuWaits==0,"CPU preparation probes never insert or wait on GPU fences");
+    Require(!afterGpuSubmission() && !afterGpuSubmission() && gpuWaits>=1,
         "active input bounds terminal GPU submission without canceling the export");
-    interaction.Clear();const auto before=gpuWaits;
-    for(int i=0;i<8;++i) Require(!shouldAbortStaleWork(),"terminal work continues after the interaction");
+    interaction.Clear();const int before=gpuWaits;
+    for(int i=0;i<8;++i) Require(!afterGpuSubmission(),"terminal work continues after the interaction");
     Require(gpuWaits==before,"ending the UI lease restores idle export throughput");
 }
 '''
 main = r'''
 int main() {
-    try { DenoiseRetirementLockBoundary();CancellationScopeLifetime();ConcurrentCancellationStaysLatched();ActiveUiYieldsTerminalGpuWork();WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
+    try { DenoiseRetirementLockBoundary();CancellationScopeLifetime();ConcurrentCancellationStaysLatched();ActiveUiYieldsTerminalGpuWork();WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();ScreenPreemptsBackgroundRefinement();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''
