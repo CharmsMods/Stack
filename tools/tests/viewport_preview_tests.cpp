@@ -3,6 +3,7 @@
 #include "Renderer/ViewportPreviewPolicy.h"
 #include "Renderer/ViewportWorkloadTiming.h"
 #include "Editor/ViewportCompletionPolicy.h"
+#include "Editor/ViewportRefinementPolicy.h"
 #include "Raw/RawViewportPreferences.h"
 
 #include <cmath>
@@ -17,6 +18,86 @@ using namespace Stack::Renderer;
 
 void Require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
+}
+
+void TestAdaptiveRefinement() {
+    using namespace Stack::EditorRendering;
+    using Step = ViewportRefinementStep;
+    const auto fit = WholeImageRegion(8000,6000);
+    const int fitEdge = ViewportScreenEdge(fit,2000,1500);
+    Require(fitEdge >= 2000 && fitEdge <= 2002,
+        "A 48 MP photo fitted to 2000x1500 must settle at display density before native detail");
+    Require(ViewportScreenEdge({},2000,1500)==0 && ViewportNavigationEdge(fit,0,1500)==0,
+        "Unmeasured/invalid viewport demand must not invent a refinement raster");
+    Require(SelectViewportRefinementStep({false,false,true,false})==Step::VisibleScreen,
+        "Missing visible pixels must retain priority even during camera movement");
+    Require(SelectViewportRefinementStep({true,false,true,false})==Step::None &&
+        SelectViewportRefinementStep({true,false,false,false})==Step::None,
+        "Moving/recently moved cameras must not start speculative coverage or native work");
+    Require(SelectViewportRefinementStep({true,false,false,true})==Step::NavigationCoverage &&
+        SelectViewportRefinementStep({true,true,false,true})==Step::NativeSection,
+        "Quiet refinement must prepare useful navigation coverage before native sections");
+    Require(SelectViewportRefinementStep({false,true,false,true})==Step::VisibleScreen,
+        "Existing offscreen coverage cannot outrank newly missing visible detail");
+
+    const ViewportPreviewGeometry previousZoom{8000,6000,WholeImageRegion(1800,1350),1800,1350};
+    Require(ViewportScreenCovered(previousZoom,fit,2000,1500,true) &&
+        ViewportScreenCovered(previousZoom,fit,2000,1500,true,.9),
+        "A completed nearby zoom may be reused at permitted moving-camera density");
+    Require(!ViewportScreenCovered(previousZoom,fit,2000,1500,false) &&
+        !ViewportScreenCovered(previousZoom,fit,2000,1500,true,.95) &&
+        !ViewportScreenCovered(previousZoom,fit,2000,1500,true,1.0),
+        "Camera hysteresis must preserve the user's floor and settle at full screen density");
+    const ImageRegion crop{8000,6000,3000,2000,2000,2000};
+    const auto sampled = ScaleImageRegion(crop,2000,1500);
+    const ViewportPreviewGeometry patch{8000,6000,sampled,sampled.width,sampled.height};
+    auto panned = crop; panned.x += 100;
+    Require(ViewportScreenCovered(patch,crop,500,500,true) &&
+        !ViewportScreenCovered(patch,panned,500,500,true),
+        "Moving-camera tolerance must never claim missing spatial coverage");
+    Require(!ViewportWholeCoverageReady(patch,500) &&
+        ViewportWholeCoverageReady(previousZoom,1800) && !ViewportWholeCoverageReady(previousZoom,1801),
+        "Whole-image coverage must prove its sampling and complete bounds");
+
+    for (const auto& visible : {fit,ImageRegion{8000,6000,2000,1500,4000,3000},
+            ImageRegion{8000,6000,3000,2250,1000,750}}) {
+        const int screen = ViewportScreenEdge(visible,2000,1500);
+        const int coverage = ViewportNavigationEdge(visible,2000,1500);
+        const double screenScale = double(screen)/8000;
+        const double coverageScale = double(coverage)/8000;
+        const double pixels = 8000.0*6000*coverageScale*coverageScale;
+        const double allowance = std::min(8.0*1024*1024,
+            4.0*visible.width*visible.height*screenScale*screenScale);
+        Require(coverage>0 && coverage<=screen && pixels<=allowance+1.0,
+            "Navigation preparation must stay below screen density and its bounded pixel allowance");
+    }
+    const ImageRegion magnified{8000,6000,3000,2250,1000,750};
+    Require(ViewportScreenEdge(magnified,2000,1500)==8000 &&
+        ViewportNavigationEdge(magnified,2000,1500)==2000,
+        "A magnified view needs native visible pixels without allocating a native whole-image prefetch");
+    const ViewportPreviewGeometry nativePatch{8000,6000,magnified,1000,750};
+    Require(ViewportScreenCovered(nativePatch,magnified,2000,1500,false),
+        "Magnification beyond 1:1 must accept actual native samples without requesting invented detail");
+
+    ViewportPreviewRequest active, pending;
+    active.enabled = pending.enabled = true;
+    active.refinement = Step::NativeSection;
+    pending.refinement = Step::VisibleScreen;
+    Require(SupersedesViewportRefinement(active,pending),
+        "New visible detail must preempt background native refinement");
+    active.refinement = Step::NavigationCoverage;
+    Require(SupersedesViewportRefinement(active,pending),
+        "New visible detail must preempt optional offscreen preparation");
+    active.refinement = Step::VisibleScreen;
+    Require(!SupersedesViewportRefinement(active,pending),
+        "Continuous zoom must coalesce input and let an in-flight screen job finish");
+    active.refinement = Step::NativeSection;
+    pending.empty = true;
+    Require(!SupersedesViewportRefinement(active,pending),
+        "An empty viewport cannot replace useful background work with a detail render");
+    pending.empty = false; pending.refinement = Step::NavigationCoverage;
+    Require(!SupersedesViewportRefinement(active,pending),
+        "Optional offscreen preparation must not repeatedly cancel native progress");
 }
 
 void TestSectionStore() {
@@ -314,6 +395,7 @@ int main() {
     try {
         TestSectionStore();
         TestSectionPublication();
+        TestAdaptiveRefinement();
         TestGeometry();
         TestCandidateSelection();
         TestTimingCurve();
@@ -322,6 +404,6 @@ int main() {
         std::cerr << "Viewport preview checks failed: " << error.what() << '\n';
         return 1;
     }
-    std::cout << "Viewport preview geometry, candidate selection, and timing checks passed.\n";
+    std::cout << "Viewport preview geometry, staged refinement, candidate selection, and timing checks passed.\n";
     return 0;
 }

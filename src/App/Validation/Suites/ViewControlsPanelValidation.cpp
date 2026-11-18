@@ -215,9 +215,15 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         require(returnedToTop,"The Controls body did not settle back at the top.");
         controls=primaries();
         require(controls.size()>1,"The fixed sections did not render.");
+        const Project::NodeEditTarget firstTarget{editor->GetProjectDocumentId(),layers.background.id,firstUuid};
         const Project::NodeEditTarget secondTarget{editor->GetProjectDocumentId(),layers.background.id,second};
         io.AddMousePosEvent(-100,-100);frame();
+        require(editor->EnterFocusedNodeEditor(firstTarget),"Could not focus the first Local EV instance.");
+        editor->ExitFocusedNodeEditor();frame();frame();
+        const auto selectionRenderRevision=editor->GetRenderRevision();
         require(editor->EnterFocusedNodeEditor(secondTarget),"Could not focus the second Local EV instance.");
+        require(editor->GetRenderRevision()==selectionRenderRevision,
+            "Selecting another control invalidated unchanged image pixels.");
         require(editor->IsFocusedNodeEditor(),"Focus mode did not retain its target.");
         frame();require(primaries().empty(),"The Controls panel still submitted hidden primary editors.");
         editor->ExitFocusedNodeEditor();frame();frame();

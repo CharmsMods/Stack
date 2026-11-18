@@ -13,6 +13,7 @@ namespace Stack::EditorRendering {
 // of one editor session. RAW and Graph retain independent cameras.
 struct ViewportPreviewState {
     Renderer::ViewportPreviewRequest request;
+    Renderer::ViewportPreviewRequest submittedRequest;
     Renderer::ViewportPreviewGeometry geometry;
     Renderer::ViewportWorkloadTiming timings;
     Renderer::ViewportPreviewSelection selection;
@@ -43,6 +44,10 @@ struct ViewportPreviewState {
     Renderer::ImageRegion backdropVisible;
     int backdropPhysicalWidth = 1, backdropPhysicalHeight = 1, backdropDemandFrame = -10;
     double contentChangedAt = -1;
+    double navigationChangedAt = -1;
+    double coverageRetryAt = -1;
+    double planningRetryAt = -1;
+    Renderer::ViewportRefinementStep refinementStep = Renderer::ViewportRefinementStep::None;
     ViewportFramePacer submissionPacer;
     ViewportCompletionPolicy completion;
     struct Section { EditorRenderWorker::SharedTextureResult native,preview; std::uint64_t lastUse=0; };

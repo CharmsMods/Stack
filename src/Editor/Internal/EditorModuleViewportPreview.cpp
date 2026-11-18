@@ -5,6 +5,7 @@
 #include "App/UiPerformanceProbe.h"
 #include "Editor/RawRenderGraphOverlay.h"
 #include "Editor/GraphViewportAnalysisPolicy.h"
+#include "Editor/ViewportRefinementPolicy.h"
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Renderer/RenderTiling.h"
 #include "Renderer/GraphViewportPlanner.h"
@@ -18,6 +19,11 @@
 
 namespace {
 using namespace Stack::Renderer;
+bool ViewportWindowIconified() {
+    const auto* viewport = ImGui::GetWindowViewport();
+    auto* window = viewport ? static_cast<GLFWwindow*>(viewport->PlatformHandle) : nullptr;
+    return window && glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+}
 struct ViewportDemand {
     ImageRegion region;
     int physicalWidth = 1, physicalHeight = 1;
@@ -167,7 +173,8 @@ bool EditorModule::TryGetViewportPreviewOverview(unsigned int& texture, int& wid
 }
 void EditorModule::UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     ImVec2 clipMin, ImVec2 clipMax, bool navigationActive) {
-    if (!UsesGraphViewportPreview() || imageMax.x <= imageMin.x || imageMax.y <= imageMin.y) return;
+    if (!UsesGraphViewportPreview() || ViewportWindowIconified() ||
+        imageMax.x <= imageMin.x || imageMax.y <= imageMin.y) return;
     const auto* viewport = ImGui::GetWindowViewport();
     const int refresh = DisplayRefreshRate::ForWindow(viewport ? static_cast<GLFWwindow*>(viewport->PlatformHandle) : nullptr);
     m_RawViewportDisplayRefreshRate = refresh > 0 ? refresh : 60;
@@ -194,6 +201,7 @@ void EditorModule::UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     if (region == state.request.visible && empty == state.request.empty &&
         physicalWidth == state.physicalWidth && physicalHeight == state.physicalHeight) return;
     const auto previousRegion = state.request.visible;
+    state.navigationChangedAt = ImGui::GetTime();
     state.request.visible = region; state.request.enabled = true; state.request.empty = empty;
     ++state.request.generation;
     state.physicalWidth = physicalWidth; state.physicalHeight = physicalHeight;
@@ -221,7 +229,7 @@ void EditorModule::UpdateGraphViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
 
 void EditorModule::UpdateGraphBackdropViewportCoverage(ImVec2 imageMin, ImVec2 imageMax,
     ImVec2 clipMin, ImVec2 clipMax) {
-    if (!UsesGraphViewportPreview()) return;
+    if (!UsesGraphViewportPreview() || ViewportWindowIconified()) return;
     auto& state = ActiveViewportPreviewState();
     ViewportPreviewGeometry presented;
     TryGetViewportPreviewGeometry(presented);
@@ -252,6 +260,21 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
         GetViewportMode() == ViewportMode::CompositeCanvas) return;
     auto& state = ActiveViewportPreviewState();
     const auto content = ContentIdentity(snapshot,CurrentGraphRenderTag().sourceIdentity);
+    const auto rejectRefinementPlan = [&]() {
+        if (state.refinementStep == ViewportRefinementStep::NavigationCoverage) {
+            state.coverageRetryAt = ImGui::GetTime()+2.0;
+        } else {
+            state.refinementBlocked = true;
+            state.refinementMemoryDeferred = false;
+            state.blockedBudget = m_RawWorkspaceVramWorkingBudgetBytes;
+            // Camera updates can reset transient render failures. Keep this
+            // planning backoff independent so impossible geometry cannot cause
+            // another graph plan on every animation/input frame.
+            state.planningRetryAt = ImGui::GetTime()+2.0;
+        }
+        state.refinementError = "Viewport refinement exceeds the executable texture geometry.";
+        snapshot.outputConnected = false;
+    };
     const bool tracePlanning = Stack::UiPerformance::Probe::Active();
     auto planningCheckpoint = tracePlanning ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto checkpoint = [&](const char* phase) {
@@ -301,7 +324,10 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     RenderTiling::GraphViewportPlanner planner(snapshot.graph);
     auto nativePlan = planner.Plan(width,height,0,request);
     checkpoint("native-plan");
-    if (!nativePlan.valid || nativePlan.logicalWidth <= 0 || nativePlan.logicalHeight <= 0) return;
+    if (!nativePlan.valid || nativePlan.logicalWidth <= 0 || nativePlan.logicalHeight <= 0) {
+        if (state.refinement) rejectRefinementPlan();
+        return;
+    }
     const int nativeEdge = std::max(nativePlan.logicalWidth,nativePlan.logicalHeight);
     if (!request.visible.Valid() || request.visible.fullWidth != nativePlan.logicalWidth ||
         request.visible.fullHeight != nativePlan.logicalHeight) {
@@ -319,6 +345,8 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     if (content != state.contentIdentity) {
         state.contentIdentity = content; state.contentChangedAt = ImGui::GetTime();
         state.completion.ImageChanged(state.contentChangedAt);
+        state.coverageRetryAt = -1;
+        state.planningRetryAt = -1;
         ClearViewportNativeSections(state);
         state.qualityModel.valid = false;
         ++state.qualityModel.revision;
@@ -346,8 +374,14 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
         state.sections = std::move(sections);
         state.sectionTextures = std::move(textures);
     }
-    if (state.refinement && state.nextSection >= 0)
+    const auto refinementStep = state.refinement ? state.refinementStep : ViewportRefinementStep::None;
+    const bool nativeSection = refinementStep == ViewportRefinementStep::NativeSection;
+    const bool navigationCoverage = refinementStep == ViewportRefinementStep::NavigationCoverage;
+    if (nativeSection && state.nextSection >= 0)
         request.visible = state.sections->Raster(state.nextSection);
+    else if (navigationCoverage)
+        request.visible = WholeImageRegion(nativePlan.logicalWidth, nativePlan.logicalHeight);
+    request.refinement = refinementStep;
     const auto preferences = GetRawViewportPreferences();
     // Accepted pixels can arrive before this surface has ever drawn a photo.
     // Their geometry does not make the default 1x1 physical demand real. Graph
@@ -360,7 +394,11 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     const double displayScale = measuredDemand ? std::min(1.0,std::max(
         double(state.physicalWidth)/visible.width,double(state.physicalHeight)/visible.height)) :
         std::min(1.0,1024.0/nativeEdge);
-    const int displayEdge = std::clamp(int(std::ceil(nativeEdge*displayScale)),1,nativeEdge);
+    const int displayEdge = measuredDemand ?
+        Stack::EditorRendering::ViewportScreenEdge(visible,state.physicalWidth,state.physicalHeight) :
+        std::clamp(int(std::ceil(nativeEdge*displayScale)),1,nativeEdge);
+    const int refinementEdge = nativeSection ? nativeEdge : navigationCoverage ?
+        Stack::EditorRendering::ViewportNavigationEdge(visible,state.physicalWidth,state.physicalHeight) : displayEdge;
     const int minimum = preferences.mode == Raw::ViewportInteractionMode::PreserveDetail ?
         std::max(1,int(std::ceil(displayEdge*preferences.minimumDetailPercent/100.0))) :
         std::min(displayEdge,ViewportPreviewEdgeForVisiblePixels(visible,nativeEdge,256));
@@ -387,7 +425,7 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     for (int edge = std::max(1,automaticMinimum); edge < displayEdge;) {
         edges.insert(edge); const int next = std::max(edge+1,int(std::ceil(edge*1.25))); edge = next;
     }
-    if (state.refinement) edges = {nativeEdge};
+    if (state.refinement) edges = {refinementEdge};
     if (!state.refinement && state.interactiveEdge >= minimum && state.interactiveEdge <= displayEdge) edges.insert(state.interactiveEdge);
     std::uint64_t retained = std::uint64_t(std::max(0,state.geometry.storageWidth))*
         std::max(0,state.geometry.storageHeight)*16u*2u +
@@ -443,30 +481,16 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     }
     if (state.refinement) {
         checkpoint("candidates");
-        const auto native = std::find_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return candidate.edge==nativeEdge;});
-        // A cached section needs only a bounded upload, not the graph's full
-        // dependency working set. New sections retain ordinary admission.
-        const bool reload = state.nextSection >= 0 && state.sections->Has(state.nextSection);
-        // Native admission is finalized on the worker, which can count and
-        // reclaim its live caches. Free VRAM alone here can reject the next
-        // section because the preceding section retained reusable inputs.
-        if (reload || (native != candidates.end() &&
-            native->workingBytes != std::numeric_limits<std::uint64_t>::max())) {
-            edge = nativeEdge;
-        }
+        const auto planned = std::find_if(candidates.begin(),candidates.end(),
+            [&](const auto& candidate){return candidate.edge==refinementEdge;});
+        // The worker admits the final dependency working set using reclaimable
+        // caches. Planning here checks only executable geometry/texture limits.
+        const bool reload = nativeSection && state.nextSection >= 0 && state.sections->Has(state.nextSection);
+        if (reload || (planned != candidates.end() &&
+            planned->workingBytes != std::numeric_limits<std::uint64_t>::max())) edge = refinementEdge;
         else {
-            // Navigation/refinement must not intentionally replace retained
-            // detail with the editing governor's low-resolution candidate.
-            for (const auto& candidate : candidates)
-                if (candidate.edge >= minimum && candidate.edge <= displayEdge && candidate.workingBytes <= budget)
-                    edge = std::max(edge,candidate.edge);
-            state.refinement = false; state.refinementBlocked = true;
-            state.blockedBudget = m_RawWorkspaceVramWorkingBudgetBytes;
-            state.refinementError = native == candidates.end() ? "No valid native viewport plan" :
-                native->workingBytes == std::numeric_limits<std::uint64_t>::max() ?
-                    "Native viewport exceeds the texture-size limit" :
-                    "Native viewport estimate " + std::to_string(native->workingBytes / (1024u*1024u)) +
-                    " MiB exceeds " + std::to_string(budget / (1024u*1024u)) + " MiB headroom";
+            rejectRefinementPlan();
+            return;
         }
     }
     if (edge <= 0) {
@@ -496,11 +520,12 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
     state.submittedViewGeneration = request.generation;
     snapshot.viewportExecutionIdentity = identity;
     snapshot.viewportContentIdentity = content;
-    if (state.refinement && state.nextSection >= 0) {
+    if (nativeSection && state.nextSection >= 0) {
         snapshot.viewportSections = state.sections;
         snapshot.viewportSection = state.nextSection;
     }
-    snapshot.prepareViewportOverview = !snapshot.viewportSections && needsOverview;
+    snapshot.prepareViewportOverview = !snapshot.viewportSections && !navigationCoverage && needsOverview;
+    state.submittedRequest = request;
     snapshot.viewportTiling.mode = ViewportTilingMode::Off;
     const auto selectedPlan = std::find_if(candidates.begin(),candidates.end(),[edge](const auto& c){return c.edge==edge;});
     if (selectedPlan != candidates.end()) {
@@ -522,75 +547,125 @@ void EditorModule::ConfigureViewportPreview(EditorRenderWorker::Snapshot& snapsh
 
 void EditorModule::UpdateViewportPreviewRefinement(double now) {
     if (!UsesGraphViewportPreview() || GetViewportMode()==ViewportMode::CompositeCanvas) return;
+    using Step = ViewportRefinementStep;
     auto& state = ActiveViewportPreviewState();
-    // Failed submission or a completion discarded before adoption must not
-    // hold the view in a permanently pending refinement state. Deferred GPU
-    // fences still own their requests and are allowed to finish normally.
-    if (state.refinement && !m_RenderDirty && !m_RenderPending && !IsAnyRenderBackendBusy() &&
-        m_DeferredRenderResults.empty()) {
+    const bool workerBusy = m_RenderPending || IsAnyRenderBackendBusy();
+    if (state.refinement && !m_RenderDirty && !workerBusy && m_DeferredRenderResults.empty()) {
         state.refinement = false;
         state.refinementGeneration = 0;
     }
-    // The shell pumps hidden projects too. Refine only for an image consumer
-    // drawn in this frame or the previous one (the pre-UI pump runs first).
-    const int frame=ImGui::GetFrameCount();
-    if (!state.request.enabled ||
-        (state.mainDemandFrame<frame-1 && state.backdropDemandFrame<frame-1)) return;
-    const bool completionReady = state.completion.Ready(
-        now, IsRawWorkspaceImageEditActive(), state.request.visible);
-    if (state.request.empty || !state.geometry.Valid() || state.refinement || m_RenderDirty || m_RenderPending || IsAnyRenderBackendBusy() ||
-        !m_DeferredRenderResults.empty() || !completionReady) return;
-    if (!m_FullQualityRenderRequest.Pending() &&
-        ((m_RenderPresentation.failed && m_RenderPresentation.graphRequest.revision == m_RenderRevision) ||
-         (DidFullQualityRenderFail() && m_FullQualityRenderRequest.graphRequest.revision == m_RenderRevision))) return;
-    if (!state.acceptedInteractive && state.geometry.NativeSamples() &&
-        state.acceptedGeneration == m_ViewportOutputRenderGeneration &&
-        state.acceptedContentIdentity == state.contentIdentity && IsPresentedRenderComplete()) {
-        if (!state.geometry.resident.Partial()) {
-            state.completion.wholeImagePending = false;
-            return;
-        }
-        if (!state.completion.wholeImagePending &&
-            ContainsImageRegion(state.geometry.resident, state.request.visible)) return;
-        // The draw path already composites this matching overview behind the
-        // native patch. Reuse it at fit without displacing the patch.
-        if (!state.completion.wholeImagePending && state.overviewCoversDisplay) return;
-    }
+    const int frame = ImGui::GetFrameCount();
+    if (!state.request.enabled || state.request.empty || !state.request.visible.Valid() ||
+        (state.mainDemandFrame < frame-1 && state.backdropDemandFrame < frame-1) ||
+        !state.geometry.Valid() || m_RenderDirty || !m_DeferredRenderResults.empty()) return;
+    if (!state.completion.Ready(now,IsRawWorkspaceImageEditActive(),state.request.visible)) return;
     if (m_FullQualityRenderRequest.Pending() || m_RawWorkspaceExportRenderRequested ||
         m_RawAssetCapture.pending || m_RawAssetCapture.armed) return;
+    if ((m_RenderPresentation.failed && m_RenderPresentation.graphRequest.revision == m_RenderRevision) ||
+        (DidFullQualityRenderFail() && m_FullQualityRenderRequest.graphRequest.revision == m_RenderRevision)) return;
+
+    const bool current = state.acceptedGeneration == m_ViewportOutputRenderGeneration &&
+        state.acceptedContentIdentity == state.contentIdentity && IsPresentedRenderComplete();
+    const auto preferences = GetRawViewportPreferences();
+    const double minimumDetail = preferences.mode == Raw::ViewportInteractionMode::PreserveDetail ?
+        preferences.minimumDetailPercent / 100.0 : 0.0;
+    // Refresh residency only when stored pixels already cover the view. This
+    // allows navigation to restore a finished tile instead of recomputing it.
+    int restoreSection = -1;
+    if (current && state.sections && state.sections->Covers(state.request.visible)) {
+        const int next = NextViewportNativeSection(state);
+        if (next >= 0 && state.sections->Has(next)) restoreSection = next;
+    }
+    const bool screenReady = current && !state.acceptedInteractive &&
+        (Stack::EditorRendering::ViewportScreenCovered(state.geometry,state.request.visible,
+            state.physicalWidth,state.physicalHeight,state.navigationActive,minimumDetail) ||
+         state.overviewCoversDisplay || HasNativeViewportCoverage());
+    const int navigationEdge = Stack::EditorRendering::ViewportNavigationEdge(
+        state.request.visible,state.physicalWidth,state.physicalHeight);
+    const bool overviewCurrent = state.overviewSettled && state.overviewContentIdentity == state.contentIdentity &&
+        state.overview.texture && state.overview.lease.Texture() == state.overview.texture && !state.overview.readyFence;
+    const bool coverageReady = (current && !state.acceptedInteractive &&
+        (Stack::EditorRendering::ViewportWholeCoverageReady(state.geometry,navigationEdge) ||
+         (!state.geometry.resident.Partial() && ViewportPreviewCoversDisplay(state.geometry,
+             state.request.visible,state.physicalWidth,state.physicalHeight)))) ||
+        (overviewCurrent && std::max(state.overview.width,state.overview.height) >= navigationEdge) ||
+        now < state.coverageRetryAt;
+    const bool cameraQuiet = !state.navigationActive &&
+        (state.navigationChangedAt < 0 || now-state.navigationChangedAt >= .12);
+    auto step = Stack::EditorRendering::SelectViewportRefinementStep(
+        {screenReady,coverageReady,state.navigationActive,cameraQuiet});
+    if (step == Step::None) return;
+    if (workerBusy || state.refinement) {
+        // New visible demand can interrupt background/native work once. Screen
+        // jobs themselves finish; input coalesces while they run, preventing
+        // repeated cancellation during an animated zoom.
+        if (step != Step::VisibleScreen || !state.refinement ||
+            state.submittedRequest.refinement == Step::VisibleScreen ||
+            state.submittedRequest.refinement == Step::None) return;
+    }
+    if (step == Step::VisibleScreen &&
+        (now < state.planningRetryAt || !state.submissionPacer.Ready(now,GetRawViewportTargetFps()))) return;
     if (state.refinementFailures >= 3 || now < state.refinementRetryAt) return;
-    state.nextSection = NextViewportNativeSection(state);
-    if (state.nextSection < 0) return;
-    if (state.refinementBlocked) {
+
+    // A restore is cheaper than another graph execution. Keep its native store
+    // ownership and permit it even while the camera is moving.
+    if (step == Step::VisibleScreen && restoreSection >= 0 && !workerBusy) {
+        step = Step::NativeSection;
+        state.nextSection = restoreSection;
+    } else if (step == Step::NativeSection) {
+        if (current && !state.acceptedInteractive && state.geometry.NativeSamples()) {
+            if (!state.geometry.resident.Partial()) {
+                state.completion.wholeImagePending = false;
+                return;
+            }
+            if (!state.completion.wholeImagePending &&
+                ContainsImageRegion(state.geometry.resident,state.request.visible)) return;
+        }
+        state.nextSection = NextViewportNativeSection(state);
+        if (state.nextSection < 0) return;
+    } else state.nextSection = -1;
+
+    if (state.refinementBlocked && step == Step::NativeSection) {
         RefreshRawWorkspaceGpuMemoryBudget();
-        // Admission refusals are pending work, not failed GPU executions.
-        // Recheck at the normal budget cadence even if other owners released
-        // caches without making this UI-side headroom estimate larger.
         if (!state.refinementMemoryDeferred &&
             m_RawWorkspaceVramWorkingBudgetBytes <= state.blockedBudget + 64u*1024u*1024u) return;
         state.refinementBlocked = false;
         state.refinementMemoryDeferred = false;
     }
-    // One section per dispatch is the preemption boundary. Re-evaluate the
-    // current camera between jobs, without invalidating authored image state.
     const auto generation = Stack::EditorRenderScheduling::NextGlobalGeneration();
+    const auto previousStep = state.refinementStep;
+    const auto previousGeneration = state.refinementGeneration;
+    const auto previousRequest = state.submittedRequest;
+    const auto previousViewGeneration = state.submittedViewGeneration;
+    const auto previousTag = state.submittedTag;
+    const auto previousPurpose = state.submittedPurpose;
+    const auto previousRenderGeneration = m_RenderGeneration;
+    const bool wasRefining = state.refinement;
     state.refinement = true;
+    state.refinementStep = step;
     EditorRenderWorker::Snapshot snapshot;
     bool submitted = false;
     if (TryBuildRenderSnapshot(generation,snapshot) && snapshot.outputConnected) {
-        snapshot.viewportSections = state.sections;
-        snapshot.viewportSection = state.nextSection;
         m_RenderGeneration = generation;
         submitted = SubmitRenderSnapshot(std::move(snapshot));
     }
     if (submitted) {
         m_RenderPending = true;
-        if(Stack::UiPerformance::Probe::Active())
-            std::clog << "Native dispatch index=" << state.nextSection << " camera=" << state.request.generation
-                << " visible=" << state.request.visible.x << ',' << state.request.visible.y << ','
-                << state.request.visible.width << ',' << state.request.visible.height << '\n';
-    } else { state.refinement = false; state.refinementGeneration = 0; }
-
+        if (step == Step::VisibleScreen)
+            state.submissionPacer.Submitted(now,GetRawViewportTargetFps());
+        if (Stack::UiPerformance::Probe::Active())
+            std::clog << "Viewport refinement step=" << int(step) << " section=" << state.nextSection
+                << " camera=" << state.request.generation << " edge=" << state.plannedEdge << '\n';
+    } else {
+        state.refinement = wasRefining;
+        state.refinementStep = previousStep;
+        state.refinementGeneration = previousGeneration;
+        state.submittedRequest = previousRequest;
+        state.submittedViewGeneration = previousViewGeneration;
+        state.submittedTag = previousTag;
+        state.submittedPurpose = previousPurpose;
+        m_RenderGeneration = previousRenderGeneration;
+    }
 }
 bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
     if(m_GalleryNavigationMotion && (m_GalleryNavigationMotion->Waiting(m_GalleryNavigationWorkspace) ||
@@ -614,18 +689,22 @@ bool EditorModule::TrySubmitGraphViewportAnalysis(double now) {
         state.refinement || !m_DeferredRenderResults.empty() || state.analysisGeneration != 0;
     // Pending edits can span many UI frames. Do not rescan graph/source tags
     // for optional work until the foreground request actually becomes idle.
-    if (workOutstanding || m_RawWorkspaceAnalysisRequested || IsRawWorkspaceImageEditActive()) return false;
+    if (workOutstanding || state.navigationActive || m_RawWorkspaceAnalysisRequested ||
+        IsRawWorkspaceImageEditActive()) return false;
     const bool currentPresentation = state.acceptedGeneration &&
         state.acceptedGeneration == m_ViewportOutputRenderGeneration && state.geometry.Valid() &&
         state.acceptedContentIdentity == state.contentIdentity &&
         Stack::EditorRendering::IsCurrentGraphViewportAnalysis(state.acceptedTag, CurrentGraphRenderTag());
     const bool nativeReady = HasNativeViewportCoverage();
+    const bool screenReady = currentPresentation && !state.acceptedInteractive &&
+        (ViewportPreviewCoversDisplay(state.geometry,state.request.visible,
+            state.physicalWidth,state.physicalHeight) || state.overviewCoversDisplay);
     const bool storedNativeCoverage = currentPresentation && state.sectionBudgetLimited &&
         state.sections && state.sections->Covers(state.request.visible);
     const Stack::EditorRendering::GraphViewportAnalysisDemand demand{
         m_RawWorkspaceAnalysisPending, m_RawWorkspaceAnalysisRequested,
         currentPresentation, (!state.acceptedInteractive || storedNativeCoverage) && IsPresentedRenderComplete(),
-        nativeReady || state.refinementBlocked || storedNativeCoverage,
+        screenReady || nativeReady || state.refinementBlocked || storedNativeCoverage,
         workOutstanding, false,
         (m_RawWorkspaceAnalysisQuietUntilTime <= 0 || now >= m_RawWorkspaceAnalysisQuietUntilTime) &&
             state.request.enabled && !state.request.empty &&
@@ -753,6 +832,13 @@ bool EditorModule::IsViewportPreviewResultCurrent(const EditorRenderWorker::Resu
     if (!UsesGraphViewportPreview()) return false;
     const auto& state = ActiveViewportPreviewState();
     if (state.request.empty || (result.success && !result.viewportPreviewGeometry.Valid())) return false;
+    if (result.viewportPreview.refinement == ViewportRefinementStep::NavigationCoverage &&
+        result.viewportContentIdentity == state.contentIdentity) {
+        // Whole-image coverage remains useful after a camera move and is
+        // adopted behind any finer retained foreground patch.
+        return !result.denoisePending &&
+            (!result.success || !result.viewportPreviewGeometry.resident.Partial());
+    }
     if (result.success && result.viewportContentIdentity == state.acceptedContentIdentity &&
         ViewportPreviewCoversDisplay(state.geometry,state.request.visible,state.physicalWidth,state.physicalHeight) &&
         result.viewportPreviewGeometry.SampleSpacingX() > state.geometry.SampleSpacingX() &&
@@ -764,6 +850,14 @@ bool EditorModule::IsViewportPreviewResultCurrent(const EditorRenderWorker::Resu
     if (result.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
         result.viewportContentIdentity != state.contentIdentity) return false;
     if (result.viewportPreview.generation == state.request.generation) return true;
+    if (result.viewportPreview.refinement == ViewportRefinementStep::VisibleScreen &&
+        result.viewportContentIdentity == state.contentIdentity) {
+        const auto preferences = GetRawViewportPreferences();
+        const double minimumDetail = preferences.mode == Raw::ViewportInteractionMode::PreserveDetail ?
+            preferences.minimumDetailPercent / 100.0 : 0.0;
+        return Stack::EditorRendering::ViewportScreenCovered(result.viewportPreviewGeometry,
+            state.request.visible,state.physicalWidth,state.physicalHeight,state.navigationActive,minimumDetail);
+    }
     return result.viewportContentIdentity == state.contentIdentity &&
         ViewportPreviewCoversDisplay(result.viewportPreviewGeometry,state.request.visible,
             state.physicalWidth,state.physicalHeight);
@@ -837,19 +931,36 @@ void EditorModule::FinishViewportPreviewRequest(const EditorRenderWorker::Result
     if (!state.refinementGeneration || result.generation != state.refinementGeneration) return;
     state.refinementGeneration = 0;
     state.refinement = false;
-    if (result.viewportPreview.generation != state.request.generation ||
-        result.viewportContentIdentity != state.contentIdentity) return;
+    if (result.viewportContentIdentity != state.contentIdentity) return;
+    if (result.viewportPreview.refinement == ViewportRefinementStep::NavigationCoverage) {
+        // Optional offscreen coverage must not block visible/native progress
+        // on a low-memory device. Retry later through ordinary admission.
+        state.coverageRetryAt = adopted && result.success && result.error.empty() && !result.denoisePending ?
+            -1 : ImGui::GetTime()+2.0;
+        return;
+    }
+    if (result.viewportPreview.generation != state.request.generation) return;
     if (result.telemetry.skipReason == RawPreviewSkipReason::MemoryBudget) {
         state.refinementBlocked = true;
         state.refinementMemoryDeferred = true;
         state.blockedBudget = m_RawWorkspaceVramWorkingBudgetBytes;
         state.refinementRetryAt = ImGui::GetTime()+2.0;
         state.refinementError = result.error;
+        if (result.viewportPreview.refinement == ViewportRefinementStep::VisibleScreen)
+            state.planningRetryAt = ImGui::GetTime()+2.0;
         return;
     }
     if (result.viewportSections && result.denoisePending) { state.refinementRetryAt = ImGui::GetTime()+.25; return; }
-    if (adopted && result.viewportPreviewGeometry.NativeSamples()) {
+    const bool screenDetail = result.viewportPreview.refinement == ViewportRefinementStep::VisibleScreen;
+    const bool requestedSamples = result.viewportPreviewGeometry.Valid() &&
+        double(result.viewportPreviewGeometry.resident.fullWidth) / result.viewportPreviewGeometry.logicalWidth +
+            1.0 / result.viewportPreviewGeometry.logicalWidth >= result.viewportPreview.samplingScale &&
+        double(result.viewportPreviewGeometry.resident.fullHeight) / result.viewportPreviewGeometry.logicalHeight +
+            1.0 / result.viewportPreviewGeometry.logicalHeight >= result.viewportPreview.samplingScale;
+    if (adopted && (result.viewportPreviewGeometry.NativeSamples() || (screenDetail && requestedSamples))) {
         state.refinementFailures = 0; state.refinementRetryAt = -1; state.refinementError.clear();
+        state.refinementBlocked = state.refinementMemoryDeferred = false;
+        state.planningRetryAt = -1;
     } else if (!result.telemetry.superseded && result.error != "Render superseded by a newer snapshot." &&
         (!result.success || !result.error.empty() || adopted)) {
         // Transient execution/synchronization failures are not memory-budget
@@ -857,7 +968,7 @@ void EditorModule::FinishViewportPreviewRequest(const EditorRenderWorker::Result
         // error until a new edit or camera demand resets this workload.
         ++state.refinementFailures;
         state.refinementRetryAt = ImGui::GetTime() + .25 * state.refinementFailures;
-        state.refinementError = result.error.empty() ? "Native render returned reduced sampling" : result.error;
+        state.refinementError = result.error.empty() ? "Viewport refinement returned reduced sampling" : result.error;
     }
 }
 void EditorModule::ClearViewportPreviewState() {

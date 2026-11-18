@@ -2219,6 +2219,25 @@ void AppShell::Run() {
                 m_IsRunning = false;
             }
         }
+        if (!m_CloseRequested && glfwGetWindowAttrib(m_Window,GLFW_ICONIFIED)==GLFW_TRUE) {
+            bool detachedDrawable=false;
+            for (const auto* viewport : ImGui::GetPlatformIO().Viewports) {
+                auto* window=static_cast<GLFWwindow*>(viewport->PlatformHandle);
+                if (!window || window==m_Window ||
+                    glfwGetWindowAttrib(window,GLFW_VISIBLE)!=GLFW_TRUE ||
+                    glfwGetWindowAttrib(window,GLFW_ICONIFIED)==GLFW_TRUE) continue;
+                int width=0,height=0;
+                glfwGetFramebufferSize(window,&width,&height);
+                if (width>0 && height>0) {detachedDrawable=true;break;}
+            }
+            if (!detachedDrawable) {
+                // No window swap is pacing a suspended surface. Keep normal
+                // project/completion pumps above progressing at a bounded rate;
+                // native input or restore wakes this wait immediately.
+                m_UiInteraction.Clear();
+                glfwWaitEventsTimeout(.05);
+            }
+        }
     }
     Stack::UiPerformance::Flush();
 }

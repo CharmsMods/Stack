@@ -57,6 +57,16 @@ inline void CheckNativeHdrPresentation(GLFWwindow* window) {
                     throw std::runtime_error("An unchanged interactive HDR frame was transferred again.");
             }
         }
+        const auto retainedTarget=target;
+        const auto retainedFrames=presenter.SubmittedFrames();
+        if(presenter.Begin(0,0,false) || !presenter.Active() || !presenter.Suspended())
+            throw std::runtime_error("A minimized drawable discarded its retained HDR surface.");
+        for(int i=0;i<3;++i)
+            if(!presenter.Present() || presenter.SubmittedFrames()!=retainedFrames)
+                throw std::runtime_error("A minimized HDR surface submitted presentation work.");
+        target=presenter.Begin(32,32,false);
+        if(target!=retainedTarget || presenter.Suspended())
+            throw std::runtime_error("Restoring an unchanged drawable recreated its HDR surface.");
         const auto next=presenter.SubmittedFrames()+1;
         target=presenter.Begin(40,24,false);
         if(!target) throw std::runtime_error(presenter.Status());

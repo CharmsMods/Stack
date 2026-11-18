@@ -3,6 +3,8 @@
 #include "Hdr/Presentation.h"
 #include "Renderer/RawCandidateRenderer.h"
 #include "Renderer/CooperativeGpuScheduling.h"
+#include "Editor/ViewportRefinementPolicy.h"
+#include "Renderer/CooperativeGpuQueue.h"
 #include "Async/UiInteraction.h"
 #include "Editor/CompositePixels.h"
 #include "EditorRenderWorker.h"
@@ -2022,7 +2024,8 @@ bool EditorRenderWorker::ShouldAbortStaleSnapshot(
          m_Pending.schedulingSerial > snapshot.schedulingSerial &&
          (m_Pending.ownerId != snapshot.ownerId ||
           (snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement &&
-           m_Pending.rawRenderPurpose == RawRenderPurpose::InteractivePresentation) ||
+           (m_Pending.rawRenderPurpose == RawRenderPurpose::InteractivePresentation ||
+            Stack::EditorRendering::SupersedesViewportRefinement(snapshot.viewportPreview,m_Pending.viewportPreview))) ||
           !Stack::GraphRendering::MayFinishActive(snapshot.graphRequest, m_Pending.graphRequest))) ||
         IsOwnerSnapshotInvalidLocked(snapshot.ownerId, snapshot.generation,
             snapshot.schedulingSerial, snapshot.rawRenderPurpose);
@@ -2540,11 +2543,6 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             }
         }
         result.timingRepresentation = std::to_string(shape);
-        if (!snapshot.graphRequest.enabled && snapshot.rawWorkspace.gpuWorkingBudgetBytes > 0) {
-            pipeline.SetGraphCacheBudget(
-                snapshot.rawWorkspace.gpuCacheBudgetBytes,
-                snapshot.rawWorkspace.minimumRawStageCacheBytes);
-        }
         const bool calibrationProxy = calibration && snapshot.previewMaxDimension > 0 &&
             snapshot.previewMaxDimension < std::max(snapshot.rawWorkspace.fullFrameWidth,
                 snapshot.rawWorkspace.fullFrameHeight);
@@ -2570,6 +2568,15 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         const bool genericViewport = snapshot.viewportPreview.enabled && viewportPurpose && !viewportHasAuxiliary;
         pipeline.SetGraphViewportRequest(genericViewport ? snapshot.viewportPreview : Stack::Renderer::ViewportPreviewRequest{});
         result.viewportPreview.enabled = genericViewport;
+        // Planned viewport work has one worker-side admission/trim below. A
+        // preliminary legacy allowance can evict a reusable native boundary
+        // before that planner restores the appropriate cache budget.
+        if (!snapshot.graphRequest.enabled && !genericViewport &&
+            snapshot.rawWorkspace.gpuWorkingBudgetBytes > 0) {
+            pipeline.SetGraphCacheBudget(
+                snapshot.rawWorkspace.gpuCacheBudgetBytes,
+                snapshot.rawWorkspace.minimumRawStageCacheBytes);
+        }
         PrepareGraphResourceBudget(snapshot, pipeline, result);
         pipeline.SetRawViewportRequest(!genericViewport && !snapshot.rawWorkspace.analysisRequested &&
             (snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation ||
@@ -2644,8 +2651,6 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             SetProgress(progressCompleted, totalProgressSteps, std::move(label));
         };
         std::atomic<bool> renderCancelled { false };
-        const auto submissionThread = std::this_thread::get_id();
-        Stack::Renderer::CooperativeGpuSubmission gpuSubmission(snapshot.telemetry.displayRefreshRate);
         auto shouldAbortStaleWork = [&]() {
             // Once any stage stops, this snapshot cannot become complete again.
             // The pending job can be withdrawn or replaced while the GPU stage
@@ -2656,17 +2661,22 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 renderCancelled.store(true, std::memory_order_relaxed);
                 return true;
             }
-            // Bound worker GPU backlog at existing stage/tile checkpoints.
-            // CPU helpers may call this callback on another thread: only the
-            // context-owning submission thread can drain graphics commands.
+            return renderCancelled.load(std::memory_order_relaxed);
+        };
+        const auto submissionThread = std::this_thread::get_id();
+        Stack::Renderer::CooperativeGpuSubmission gpuSubmission(snapshot.telemetry.displayRefreshRate);
+        Stack::Renderer::CooperativeGpuQueue gpuQueue;
+        auto afterGpuSubmission = [&]() {
+            if (renderCancelled.load(std::memory_order_relaxed)) return true;
+            // Count real GPU submissions, never CPU preparation probes.
+            // The older closed batch may finish while the next one is queued.
             const bool uiInteracting = Async::UiInteraction::Active();
             if ((snapshot.viewportPreview.enabled || uiInteracting) &&
                 std::this_thread::get_id() == submissionThread &&
-                gpuSubmission.Checkpoint(uiInteracting,
-                    snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement)) {
-                if (!WaitForSubmittedGpuWork() || ShouldAbortStaleSnapshot(snapshot))
+                gpuSubmission.Checkpoint(uiInteracting)) {
+                if (!gpuQueue.Checkpoint(shouldAbortStaleWork))
                     renderCancelled.store(true, std::memory_order_relaxed);
-                gpuSubmission.Drained();
+                gpuSubmission.BatchSubmitted();
             }
             return renderCancelled.load(std::memory_order_relaxed);
         };
@@ -2694,7 +2704,8 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         RenderCancellationScope cancellationScope(pipeline);
         pipeline.SetRenderCancellationContext(
             snapshot.generation,
-            shouldAbortStaleWork);
+            shouldAbortStaleWork,
+            afterGpuSubmission);
         auto reportSupersededWork = [&]() {
             reportProgress("Newer render queued; skipping stale feedback...");
         };

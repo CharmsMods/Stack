@@ -2591,7 +2591,11 @@ void EditorViewport::RenderSingleImageMode(
     const float imageV = overImage ? clampedImageV : 0.0f;
     const bool toneCurveProbeActive = editor->HasFocusedToneCurveViewportInteraction() || editor->IsToneCurveTargeting();
 
-    if (toneCurveProbeActive && overImage && isHovered && !m_IsLocked && !editor->IsPickingColor()) {
+    // Final-preview probes can require a synchronous GPU pixel read. Hover
+    // feedback must not hold up camera motion; explicit target clicks below
+    // still sample the point the user chose.
+    if (toneCurveProbeActive && overImage && isHovered && !m_IsLocked && !editor->IsPickingColor() &&
+        !m_Panning && !m_ZoomAnimating) {
         editor->UpdateToneCurveViewportProbe(imageU, imageV);
     } else if (!editor->IsToneCurveTargeting()) {
         editor->ClearToneCurveViewportProbe();

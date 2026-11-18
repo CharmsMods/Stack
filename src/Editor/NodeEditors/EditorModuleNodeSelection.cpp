@@ -62,7 +62,8 @@ std::string EditorModule::RawNodeEditorStateKey() const {
         GetProjectDocumentId()+"/source/"+std::to_string(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
 }
 
-void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::string& uuid) {
+void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::string& uuid,
+    bool refreshImage) {
     const NodeEditTarget target{GetProjectDocumentId(),layerId,uuid};
     const auto* node=ResolveRawNode(m_Project->rawLayers.State(),target,GetProjectDocumentId());
     if(!node || node->role!=Stack::GraphModel::NodeRole::Ordinary) return;
@@ -83,7 +84,13 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
         m_RawWorkspaceLabUi.colorWarpProvisionalSceneEvValid=false;
         m_RawWorkspaceLabUi.gradientDragHandle=-1;
         m_EditingRawLayerMask.reset();m_RawLayerMaskGenerator=-1;m_RawLayerMaskDrag=-1;
-        ClearRawWorkspaceGraphScopeReadbackCaches();
+        if (refreshImage) ClearRawWorkspaceGraphScopeReadbackCaches();
+        else {
+            // Selection changes the active scope owner, not the pixels or the
+            // validity of the other tools' revision-keyed analysis packets.
+            m_RawWorkspaceGraphScopeReadback={};
+            m_RawWorkspaceGraphScopeReadbackRevision=0;
+        }
     }
     if(changed) {
         const auto& state=m_Project->rawLayers.State();
@@ -120,7 +127,7 @@ void EditorModule::SelectRawNodeEditor(const std::string& layerId,const std::str
     if(editor.toneView>=0) m_RawWorkspaceLabUi.sceneToneView=editor.toneView;
     if(node->kind==EditorNodeGraph::NodeKind::RawOperation)
         m_Project->rawOperationSelection[layerId+"/"+Stack::RawRecipe::GraphOperationId(node->rawOperation.kind)]=uuid;
-    if(changed) MarkRenderRefreshDirty();
+    if(changed && refreshImage) MarkRenderRefreshDirty();
 }
 
 void EditorModule::BindRequestedRawNodeEditor() {

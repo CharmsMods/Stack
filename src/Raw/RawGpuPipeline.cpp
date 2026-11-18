@@ -7,6 +7,9 @@
 #include "RawProcessingMath.h"
 #include "RawOrientation.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/CooperativeGpuScheduling.h"
+#include "Renderer/CooperativeGpuQueue.h"
+#include "Async/UiInteraction.h"
 #include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
@@ -37,66 +40,50 @@ void RawGpuPipeline::InvalidateProcessingOutputs() {
 namespace {
 
 constexpr int kMaxRawGpuToneCurvePoints = 12;
-constexpr std::uint64_t kCooperativeCfaRasterPixelThreshold =
-    4ull * 1024ull * 1024ull;
-constexpr int kCooperativeCfaRasterTileWidth = 512;
-constexpr int kCooperativeCfaRasterTileHeight = 128;
 
 bool DrawRawFullscreenPass(
     int width,
     int height,
     bool cooperativeGpuScheduling,
-    const std::function<bool()>& shouldCancel) {
+    const std::function<bool()>& shouldCancel,
+    const std::function<bool()>& afterSubmission) {
+    if (shouldCancel && shouldCancel()) return false;
     if (!cooperativeGpuScheduling || width <= 0 || height <= 0) {
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        return true;
+        return !afterSubmission || !afterSubmission();
     }
+    const int rasterTileWidth = Stack::Renderer::kCooperativeRasterTileWidth;
 
     const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
     GLint previousScissor[4] = { 0, 0, 0, 0 };
     glGetIntegerv(GL_SCISSOR_BOX, previousScissor);
     glEnable(GL_SCISSOR_TEST);
     bool completed = true;
-    for (int y = 0;
-         y < height && completed;
-         y += kCooperativeCfaRasterTileHeight) {
+    for (int y = 0; y < height && completed;) {
+        // Respond to input that begins during this pass at the next row.
+        // Advance by the chosen extent so changing height leaves no gaps.
         const int tileHeight = std::min(
-            kCooperativeCfaRasterTileHeight,
+            Stack::Renderer::CooperativeRasterTileHeight(Async::UiInteraction::Active()),
             height - y);
-        for (int x = 0; x < width; x += kCooperativeCfaRasterTileWidth) {
+        for (int x = 0; x < width; x += rasterTileWidth) {
             if (shouldCancel && shouldCancel()) {
                 completed = false;
                 break;
             }
             const int tileWidth = std::min(
-                kCooperativeCfaRasterTileWidth,
+                rasterTileWidth,
                 width - x);
             glScissor(x, y, tileWidth, tileHeight);
             glDrawArrays(GL_TRIANGLES, 0, 6);
 
-            // Bound each native CFA command so the GPU scheduler can service
-            // the UI/compositor between tiles. Waiting happens only on the
-            // RAW worker and also creates a cancellation boundary before the
-            // next tile is submitted.
-            GLsync tileFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-            if (tileFence != nullptr) {
-                glFlush();
-                GLenum waitResult = GL_TIMEOUT_EXPIRED;
-                while (waitResult == GL_TIMEOUT_EXPIRED) {
-                    waitResult = glClientWaitSync(
-                        tileFence,
-                        GL_SYNC_FLUSH_COMMANDS_BIT,
-                        1000000u);
-                }
-                glDeleteSync(tileFence);
-                if (waitResult == GL_WAIT_FAILED) {
-                    completed = false;
-                    break;
-                }
-            } else {
-                glFlush();
+            // The request's queue overlaps two bounded batches. Do not fully
+            // drain the GPU after every tiny linear/CFA tile.
+            if (afterSubmission && afterSubmission()) {
+                completed = false;
+                break;
             }
         }
+        y += tileHeight;
     }
     glScissor(
         previousScissor[0],
@@ -1776,7 +1763,21 @@ unsigned int RawGpuPipeline::Render(
     const RawImageData& raw,
     const RawDevelopSettings& settings,
     int previewMaxDimension,
-    const std::function<bool()>& shouldCancel) {
+    const std::function<bool()>& shouldCancel,
+    const std::function<bool()>& afterSubmission) {
+    // Ordinary graph rendering shares the request's submission queue. Direct
+    // callers retain a bounded standalone queue on this same GL context.
+    Stack::Renderer::CooperativeGpuSubmission standalonePolicy(60);
+    Stack::Renderer::CooperativeGpuQueue standaloneQueue;
+    std::function<bool()> submitted = afterSubmission;
+    if (!submitted) submitted = [&]() {
+        if (standalonePolicy.Checkpoint(Async::UiInteraction::Active())) {
+            const bool complete = standaloneQueue.Checkpoint(shouldCancel);
+            standalonePolicy.BatchSubmitted();
+            return !complete;
+        }
+        return false;
+    };
     m_LastError.clear();
     m_LastPreprocessTelemetry = {};
     const RawMetadata& metadata = raw.metadata;
@@ -1878,7 +1879,9 @@ unsigned int RawGpuPipeline::Render(
         // Linear DNGs need the same bounded native scheduling as mosaic RAWs.
         // Scissor tiles retain full-image coordinates and exact sampling.
         const bool completed=DrawRawFullscreenPass(outWidth,outHeight,
-            bool(shouldCancel) && std::uint64_t(outWidth)*outHeight>kCooperativeCfaRasterPixelThreshold,shouldCancel);
+            (bool(shouldCancel) || bool(afterSubmission)) && std::int64_t(outWidth)*outHeight >
+                Stack::Renderer::CooperativeRasterPixels(Async::UiInteraction::Active()),
+            shouldCancel,submitted);
         glBindVertexArray(0);
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
@@ -2055,10 +2058,10 @@ unsigned int RawGpuPipeline::Render(
         const unsigned int demosaiced=m_Demosaic->GetOrRender(key,visibleWidth,visibleHeight,
             metadata.cfaPattern,settings.demosaicMethod,[&]() {
                 glUniform1i(m_RawUniforms.prepareDemosaic,1);
-                const bool prepared=DrawRawFullscreenPass(visibleWidth,visibleHeight,true,shouldCancel);
+                const bool prepared=DrawRawFullscreenPass(visibleWidth,visibleHeight,true,shouldCancel,submitted);
                 glUniform1i(m_RawUniforms.prepareDemosaic,0);
                 return prepared;
-            },shouldCancel,m_LastError,analysisTransform);
+            },shouldCancel,m_LastError,analysisTransform,submitted);
         if (!demosaiced) {
             glUniform1i(m_RawUniforms.prepareDemosaic,0);
             glBindVertexArray(0); glUseProgram(0);
@@ -2076,13 +2079,15 @@ unsigned int RawGpuPipeline::Render(
         static_cast<std::uint64_t>(outWidth) *
         static_cast<std::uint64_t>(outHeight);
     const bool cooperativeCfaScheduling =
-        settings.mosaicDenoise.enabled &&
-        outputPixels > kCooperativeCfaRasterPixelThreshold;
+        (settings.mosaicDenoise.enabled || bool(shouldCancel) || bool(afterSubmission)) &&
+        outputPixels > static_cast<std::uint64_t>(
+            Stack::Renderer::CooperativeRasterPixels(Async::UiInteraction::Active()));
     const bool completed = DrawRawFullscreenPass(
         outWidth,
         outHeight,
         cooperativeCfaScheduling,
-        shouldCancel);
+        shouldCancel,
+        submitted);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, 0);

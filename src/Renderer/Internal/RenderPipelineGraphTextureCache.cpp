@@ -84,6 +84,10 @@ unsigned int RenderPipeline::CloneTextureForGraphCache(unsigned int sourceTextur
         const int end = std::min(height,y+rows);
         glBlitFramebuffer(0,y,width,end,0,y,width,end,
             GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        if (m_AfterGpuSubmission && m_AfterGpuSubmission()) {
+            canceled = true;
+            break;
+        }
     }
 
     const GLenum copyError = glGetError();

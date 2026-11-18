@@ -30,10 +30,10 @@ int main() try {
     Require(!ShouldSubmitGraphViewportAnalysis(demand), "A stale or another owner's frame is not current presentation");
     demand = ready; demand.settledPresentation = false;
     Require(!ShouldSubmitGraphViewportAnalysis(demand), "Interactive or denoise-pending pixels must settle first");
-    demand = ready; demand.nativeReadyOrDeferred = false;
-    Require(!ShouldSubmitGraphViewportAnalysis(demand), "Available native detail must finish before analysis");
-    demand.nativeReadyOrDeferred = true;
-    Require(ShouldSubmitGraphViewportAnalysis(demand), "A budget-deferred native request must not starve scopes");
+    demand = ready; demand.displayReadyOrDeferred = false;
+    Require(!ShouldSubmitGraphViewportAnalysis(demand), "Visible screen detail must finish before analysis");
+    demand.displayReadyOrDeferred = true;
+    Require(ShouldSubmitGraphViewportAnalysis(demand), "Settled screen detail or budget deferral must not starve scopes");
     Require(ShouldRequeueGraphViewportAnalysis(true, true, 0, false),
         "A queued but unsubmitted legacy request must drain through the graph scheduler");
     Require(!ShouldRequeueGraphViewportAnalysis(false, true, 0, false),

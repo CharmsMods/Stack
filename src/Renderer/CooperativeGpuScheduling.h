@@ -13,26 +13,26 @@ inline std::int64_t CooperativeRasterPixels(bool interacting) {
     return std::int64_t(kCooperativeRasterTileWidth) * CooperativeRasterTileHeight(interacting);
 }
 
-// Submission-thread policy. A fast CPU must not accumulate an arbitrary number
-// of expensive draws before a time-only checkpoint expires. These are command
-// limits, not a guarantee about driver execution time or hardware preemption.
+// Called after actual GPU submissions, not CPU cancellation probes. A fast
+// CPU must not accumulate an arbitrary number of expensive draws before a
+// time-only checkpoint expires. These are command limits, not GPU deadlines.
 class CooperativeGpuSubmission {
 public:
     using Clock = std::chrono::steady_clock;
     explicit CooperativeGpuSubmission(int displayRefreshRate, Clock::time_point now = Clock::now())
-        : m_LastDrain(now), m_IntervalMs(std::clamp(250.0 / std::max(1,
+        : m_LastBatch(now), m_IntervalMs(std::clamp(250.0 / std::max(1,
               displayRefreshRate > 0 ? displayRefreshRate : 60), .25, 2.0)) {}
 
-    bool Checkpoint(bool interacting, bool nativeRefinement, Clock::time_point now = Clock::now()) {
-        const unsigned maximum = interacting || nativeRefinement ? 2u : 8u;
-        return ++m_Checkpoints >= maximum ||
-            std::chrono::duration<double, std::milli>(now - m_LastDrain).count() >= m_IntervalMs;
+    bool Checkpoint(bool interacting, Clock::time_point now = Clock::now()) {
+        const unsigned maximum = interacting ? 2u : 8u;
+        return ++m_Submissions >= maximum ||
+            std::chrono::duration<double, std::milli>(now - m_LastBatch).count() >= m_IntervalMs;
     }
-    void Drained(Clock::time_point now = Clock::now()) { m_Checkpoints = 0; m_LastDrain = now; }
+    void BatchSubmitted(Clock::time_point now = Clock::now()) { m_Submissions = 0; m_LastBatch = now; }
 
 private:
-    Clock::time_point m_LastDrain;
+    Clock::time_point m_LastBatch;
     double m_IntervalMs;
-    unsigned m_Checkpoints = 0;
+    unsigned m_Submissions = 0;
 };
 }
