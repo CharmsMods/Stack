@@ -65,6 +65,7 @@ public:
         std::size_t fullFrameEstimatedWorkingSetBytes = 0;
         bool workerStarted = false;
         int targetFps = 30;
+        int displayRefreshRate = 60;
         std::uint64_t gestureId = 0;
         bool overloadSkipped = false;
         RawPreviewSkipReason skipReason = RawPreviewSkipReason::None;

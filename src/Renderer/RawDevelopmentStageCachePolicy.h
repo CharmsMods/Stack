@@ -271,6 +271,31 @@ inline void HashColorWarp(
         HashTypedValue(fingerprint,pin.tintA);HashTypedValue(fingerprint,pin.tintB);
         HashTypedValue(fingerprint,pin.saturation);HashTypedValue(fingerprint,pin.brightness);
     }
+    HashTypedValue(fingerprint,value.limitHslToSelections);
+    HashTypedValue(fingerprint,value.hslSelections.size());
+    for(const auto& selection:value.hslSelections) {
+        // Selection order is compositing order. Names and IDs are editing
+        // metadata; every field below can change the resulting image.
+        HashTypedValue(fingerprint,selection.enabled);
+        HashTypedValue(fingerprint,selection.hue);HashTypedValue(fingerprint,selection.hueWidth);
+        HashTypedValue(fingerprint,selection.hueSoftness);HashTypedValue(fingerprint,selection.allColors);
+        HashTypedValue(fingerprint,selection.areaEnabled);HashTypedValue(fingerprint,selection.areaSoftness);
+        HashTypedValue(fingerprint,selection.influence);
+        for(const auto* bands:{&selection.bands,&selection.excludedBands}) {
+            HashTypedValue(fingerprint,bands->size());
+            for(const auto& band:*bands) {
+                HashTypedValue(fingerprint,band.low);HashTypedValue(fingerprint,band.high);
+                HashTypedValue(fingerprint,band.softness);
+            }
+        }
+        HashTypedValue(fingerprint,selection.outline.size());
+        for(const auto& point:selection.outline) {
+            HashTypedValue(fingerprint,point[0]);HashTypedValue(fingerprint,point[1]);
+        }
+        for(bool own:selection.own)HashTypedValue(fingerprint,own);
+        for(const auto& adjustment:selection.values)
+            for(float channel:adjustment)HashTypedValue(fingerprint,channel);
+    }
 }
 
 // Spatial Color Warp pixels also depend on this runtime rendering policy,

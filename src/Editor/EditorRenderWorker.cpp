@@ -2,6 +2,8 @@
 #include "Hdr/GraphView.h"
 #include "Hdr/Presentation.h"
 #include "Renderer/RawCandidateRenderer.h"
+#include "Renderer/CooperativeGpuScheduling.h"
+#include "Async/UiInteraction.h"
 #include "Editor/CompositePixels.h"
 #include "EditorRenderWorker.h"
 #include "Editor/Internal/HdrExportRender.h"
@@ -2643,8 +2645,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         };
         std::atomic<bool> renderCancelled { false };
         const auto submissionThread = std::this_thread::get_id();
-        auto lastGpuYield = std::chrono::steady_clock::now();
-        unsigned nativeCheckpoints = 0;
+        Stack::Renderer::CooperativeGpuSubmission gpuSubmission(snapshot.telemetry.displayRefreshRate);
         auto shouldAbortStaleWork = [&]() {
             // Once any stage stops, this snapshot cannot become complete again.
             // The pending job can be withdrawn or replaced while the GPU stage
@@ -2658,14 +2659,14 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             // Bound worker GPU backlog at existing stage/tile checkpoints.
             // CPU helpers may call this callback on another thread: only the
             // context-owning submission thread can drain graphics commands.
-            if (snapshot.viewportPreview.enabled &&
+            const bool uiInteracting = Async::UiInteraction::Active();
+            if ((snapshot.viewportPreview.enabled || uiInteracting) &&
                 std::this_thread::get_id() == submissionThread &&
-                ((snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement && ++nativeCheckpoints >= 2) ||
-                 std::chrono::steady_clock::now()-lastGpuYield >= std::chrono::milliseconds(2))) {
+                gpuSubmission.Checkpoint(uiInteracting,
+                    snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement)) {
                 if (!WaitForSubmittedGpuWork() || ShouldAbortStaleSnapshot(snapshot))
                     renderCancelled.store(true, std::memory_order_relaxed);
-                lastGpuYield = std::chrono::steady_clock::now();
-                nativeCheckpoints = 0;
+                gpuSubmission.Drained();
             }
             return renderCancelled.load(std::memory_order_relaxed);
         };

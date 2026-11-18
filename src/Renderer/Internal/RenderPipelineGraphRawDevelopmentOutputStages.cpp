@@ -108,12 +108,18 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     if (result.texture == 0) {
         return false;
     }
-    if (m_RawDevelopmentColorWarpProgram == 0) {
-        m_RawDevelopmentColorWarpProgram = GLHelpers::CreateShaderProgram(
+    const bool hslOnly=colorWarp.version>=5 && std::none_of(
+        colorWarp.pins.begin(),colorWarp.pins.end(),[&](const auto& pin) {
+            return !Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin) &&
+                Stack::RawRecipe::ColorWarpParticipates(pin);
+        });
+    unsigned int& program=hslOnly?m_RawDevelopmentHslProgram:m_RawDevelopmentColorWarpProgram;
+    if (program == 0) {
+        program = GLHelpers::CreateShaderProgram(
             kRawOutputStageVert,
-            Stack::Renderer::ColorWarp::Fragment);
+            hslOnly?Stack::Renderer::ColorWarp::HslFragment:Stack::Renderer::ColorWarp::Fragment);
     }
-    if (m_RawDevelopmentColorWarpProgram == 0) {
+    if (program == 0) {
         std::cerr << "[RenderPipeline] RAW Color Warp shader compilation failed; "
                      "passing input texture through.\n";
         if ((m_RawDevelopmentColorWarpRequireSpatialResult && !colorWarp.regions.empty()) ||
@@ -142,35 +148,37 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             std::array<float,4>{-1e20f,-1e20f,1e20f,1e20f};
     };
     for(const auto& pin:colorWarp.pins) {
-        if(params.size()>=colorWarpPinLimit)break;
-        // Keep the selection-field layer order stable when adjustments become
-        // zero or a selection is disabled. Their fields remain reusable.
-        params.push_back({Stack::RawRecipe::ColorWarpHue(pin.sourceA,pin.sourceB),
-            pin.enabled?pin.strength:0.f,pin.protectColor?1.f:0.f,
-            (!Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin) && Stack::RawRecipe::ColorWarpParticipates(pin))?1.f:0.f});
+        const bool familyPin=Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin);
         const auto region=std::find_if(colorWarp.regions.begin(),colorWarp.regions.end(),[&](const auto& r){return r.id==pin.regionId;});
         const bool spatial=region!=colorWarp.regions.end() && region->spatialMode!=Stack::RawRecipe::RawColorWarpSpatialMode::AllMatches;
+        const bool needsField=!familyPin && (spatial || pin.smoothSelection>0);
+        // Keep the selection-field layer order stable when adjustments become
+        // zero or a selection is disabled. The compact active uniforms refer
+        // to that independent layer order; family HSL has no legacy pin work.
+        const float fieldLayer=needsField?float(spatialPins.size()+1):0.f;
+        if(needsField)spatialPins.push_back(&pin);
+        if(familyPin || !Stack::RawRecipe::ColorWarpParticipates(pin))continue;
+        if(params.size()>=colorWarpPinLimit)break;
+        params.push_back({Stack::RawRecipe::ColorWarpHue(pin.sourceA,pin.sourceB),
+            pin.strength,pin.protectColor?1.f:0.f,1.f});
         selections.push_back({pin.sourceA,pin.sourceB,pin.sampleRadius,float(pin.population.size())});
         for(std::size_t j=0;j<Stack::RawRecipe::kMaxRawColorWarpPopulation;++j) {
             const auto p=j<pin.population.size()?pin.population[j]:Stack::RawRecipe::RawColorWarpPopulation{};
             populations.push_back({p.a,p.b,p.sceneEv,p.mass});
         }
         fieldFlags.push_back({pin.smoothSelection>0?1.f:0.f,spatial?1.f:0.f,pin.brightnessSoftness,0});
-        const bool needsField=!Stack::RawRecipe::UsesColorWarpHsl(colorWarp,pin) && (spatial || pin.smoothSelection>0);
         auto destinationPin=pin;
         if(colorWarp.version>=5)destinationPin.saturation=0;
         const auto destination=Stack::RawRecipe::ColorWarpDestination(destinationPin);
         moves.push_back({pin.moveColors?destination[0]-pin.sourceA:pin.tintA,pin.moveColors?destination[1]-pin.sourceB:pin.tintB,0,0});
-        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors && colorWarp.version<5?0.f:pin.saturation,pin.brightness,needsField?float(spatialPins.size()+1):0.f});
+        adjustments.push_back({pin.moveColors?0.f:pin.hueShift,pin.moveColors && colorWarp.version<5?0.f:pin.saturation,pin.brightness,fieldLayer});
         hueRanges.push_back(packedRange(pin.hueRange));
         saturationRanges.push_back(packedRange(pin.saturationRange));
         exposureRanges.push_back(packedRange(pin.exposureRange));
         spatialSupport.push_back(Stack::RawRecipe::ColorWarpPinSpatialSupport(colorWarp,pin));
-        if(needsField)spatialPins.push_back(&pin);
     }
     const int pinCount=static_cast<int>(params.size());
     const int layerCount=static_cast<int>(spatialPins.size());
-    if(pinCount==0)return true;
 
     const bool hasSpatialRegions = std::any_of(
         spatialPins.begin(),
@@ -483,76 +491,73 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
         [&](unsigned int) {
             while (glGetError() != GL_NO_ERROR) {
             }
-            glUseProgram(m_RawDevelopmentColorWarpProgram);
+            glUseProgram(program);
             glActiveTexture(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,selectionTexture?selectionTexture.Get():inputTexture);
-            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslSelections"),5);
-            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslSelectionCount"),static_cast<int>(colorWarp.hslSelections.size()));
-            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslLimit"),colorWarp.limitHslToSelections);
+            glUniform1i(glGetUniformLocation(program,"uHslSelections"),5);
+            glUniform1i(glGetUniformLocation(program,"uHslSelectionCount"),static_cast<int>(colorWarp.hslSelections.size()));
+            glUniform1i(glGetUniformLocation(program,"uHslLimit"),colorWarp.limitHslToSelections);
             const std::array<float,4> region=inputRegion.Valid()?std::array<float,4>{
                 float(inputRegion.x)/inputRegion.fullWidth,float(inputRegion.y)/inputRegion.fullHeight,
                 float(inputRegion.width)/inputRegion.fullWidth,float(inputRegion.height)/inputRegion.fullHeight}:std::array<float,4>{0,0,1,1};
-            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslImageRegion"),1,region.data());
+            glUniform4fv(glGetUniformLocation(program,"uHslImageRegion"),1,region.data());
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, inputTexture);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uInputTex"),
+                glGetUniformLocation(program, "uInputTex"),
                 0);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uInputIsRec2020"),
+                glGetUniformLocation(program, "uInputIsRec2020"),
                 recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 ? 1 : 0);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uBlendOverlaps"),
+                glGetUniformLocation(program, "uBlendOverlaps"),
                 colorWarp.combine==Stack::RawRecipe::RawColorWarpCombine::Blend ? 1 : 0);
-            glUniform1i(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHslModel"),colorWarp.version>=5);
+            glUniform1i(glGetUniformLocation(program,"uHslModel"),colorWarp.version>=5);
             const auto hsl=Stack::RawRecipe::PrepareColorWarpHsl(colorWarp);
-            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uHsl[0]"),8,hsl.front().data());
+            glUniform4fv(glGetUniformLocation(program,"uHsl[0]"),8,hsl.front().data());
             glUniform1f(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uStrength"),
+                glGetUniformLocation(program, "uStrength"),
                 colorWarp.strength);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uPinCount"),
+                glGetUniformLocation(program, "uPinCount"),
                 pinCount);
             glUniform1i(
-                glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uUseSpatialMasks"),
+                glGetUniformLocation(program, "uUseSpatialMasks"),
                 useSpatialMasks ? 1 : 0);
+            // Sampler types must use distinct units even when a uniform
+            // branch does not sample them. Fresh non-spatial programs must
+            // not alias their array samplers with the 2D input on unit zero.
+            glUniform1i(glGetUniformLocation(program,"uGateMask"),1);
+            glUniform1i(glGetUniformLocation(program,"uSupportMask"),2);
+            glUniform1i(glGetUniformLocation(program,"uBoundaryMask"),3);
+            glUniform1i(glGetUniformLocation(program,"uMaskGuide"),4);
             if (useSpatialMasks) {
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(
                     GL_TEXTURE_2D_ARRAY,
                     m_RawDevelopmentColorWarpMaskCache.gateTexture);
-                glUniform1i(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uGateMask"),
-                    1);
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(
                     GL_TEXTURE_2D_ARRAY,
                     m_RawDevelopmentColorWarpMaskCache.supportTexture);
-                glUniform1i(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uSupportMask"),
-                    2);
                 glActiveTexture(GL_TEXTURE3);
                 glBindTexture(
                     GL_TEXTURE_2D_ARRAY,
                     m_RawDevelopmentColorWarpMaskCache.boundaryTexture);
-                glUniform1i(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uBoundaryMask"),
-                    3);
                 glActiveTexture(GL_TEXTURE4);
                 glBindTexture(
                     GL_TEXTURE_2D,
                     m_RawDevelopmentColorWarpMaskCache.guideTexture);
-                glUniform1i(
-                    glGetUniformLocation(m_RawDevelopmentColorWarpProgram, "uMaskGuide"),
-                    4);
                 glActiveTexture(GL_TEXTURE0);
             }
             const auto upload=[&](const char* name,const auto& values) {
-                glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,name),pinCount,values.front().data());
+                glUniform4fv(glGetUniformLocation(program,name),pinCount,values.front().data());
             };
-            glUniform4fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPopulation"),static_cast<GLsizei>(populations.size()),populations.front().data());
-            upload("uPinFieldFlags",fieldFlags);upload("uPinParams",params);upload("uPinAdjust",adjustments);upload("uPinMove",moves);upload("uPinSelection",selections);
-            upload("uHueRange",hueRanges);upload("uSaturationRange",saturationRanges);upload("uExposureRange",exposureRanges);
-            glUniform1fv(glGetUniformLocation(m_RawDevelopmentColorWarpProgram,"uPinSpatialSupport"),pinCount,spatialSupport.data());
+            if(pinCount>0) {
+                glUniform4fv(glGetUniformLocation(program,"uPopulation"),static_cast<GLsizei>(populations.size()),populations.front().data());
+                upload("uPinFieldFlags",fieldFlags);upload("uPinParams",params);upload("uPinAdjust",adjustments);upload("uPinMove",moves);upload("uPinSelection",selections);
+                upload("uHueRange",hueRanges);upload("uSaturationRange",saturationRanges);upload("uExposureRange",exposureRanges);
+                glUniform1fv(glGetUniformLocation(program,"uPinSpatialSupport"),pinCount,spatialSupport.data());
+            }
             glActiveTexture(GL_TEXTURE0);
             m_Quad.Draw();
             glUseProgram(0);

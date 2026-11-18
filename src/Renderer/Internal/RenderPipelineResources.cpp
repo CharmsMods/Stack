@@ -53,6 +53,7 @@ RenderPipeline::RenderPipeline()
       m_RawDevelopmentRgbDenoiseReconstructProgram(0),
       m_RawDevelopmentExposureProgram(0),
       m_RawDevelopmentColorWarpProgram(0),
+      m_RawDevelopmentHslProgram(0),
       m_RawDevelopmentColorWarpProxyProgram(0),
       m_RawDevelopmentCropProgram(0)
 {}
@@ -148,6 +149,7 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_RawDevelopmentExposureProgram);
     deleteProgram(m_RawDevelopmentProtectedExposureProgram);
     deleteProgram(m_RawDevelopmentColorWarpProgram);
+    deleteProgram(m_RawDevelopmentHslProgram);
     deleteProgram(m_RawDevelopmentColorWarpProxyProgram);
     deleteProgram(m_RawDevelopmentCropProgram);
     const auto deleteColorWarpMaskTexture = [](unsigned int& texture) {

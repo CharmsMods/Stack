@@ -1,6 +1,7 @@
 #include "Raw/Tone/SceneTone.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/Curves/CurveAuthoring.h"
+#include "Raw/Curves/PreparedCurve.h"
 #include <algorithm>
 #include <cmath>
 
@@ -203,12 +204,35 @@ float SetSceneToneOutput(SceneTone& t,std::size_t index,float target) {
     }
     return EvaluateSceneToneEv(t,e);
 }
-std::vector<float> BuildSceneToneLut(const SceneTone& input) {
+std::vector<float> BuildSceneToneLut(const SceneTone& input, int sampleCount) {
+    if (sampleCount < 2) return {};
     const auto t=SanitizeSceneTone(input);
-    std::vector<float> lut(kSceneToneLutSize);
-    for(int i=0;i<kSceneToneLutSize;++i) {
-        const float e=kSceneToneLutMinEv+(kSceneToneLutMaxEv-kSceneToneLutMinEv)*i/(kSceneToneLutSize-1);
-        lut[i]=EvaluateSceneToneEv(t,e);
+    const bool direct = t.direct && t.curve.size() >= 2;
+    PreparedRawBezierCurve curve;
+    if (direct) curve = PreparedRawBezierCurve(t.curve);
+    // Tail tangents and slope-mode invariants belong to this curve, not each
+    // sample. Keep the scalar evaluator's arithmetic and the caller's grid.
+    const float lowSlope = direct ? (curve.Evaluate(0.f)-curve.Evaluate(.001f))/(0.f-.001f) : 0.f;
+    const float highSlope = direct ? (curve.Evaluate(1.f)-curve.Evaluate(.999f))/(1.f-.999f) : 0.f;
+    const double baseAtZero = direct ? 0.0 : BaseIntegral(t, 0);
+    const float contrast = direct ? 1.f : EffectiveSceneToneContrast(t);
+    std::vector<float> lut(static_cast<std::size_t>(sampleCount));
+    for(int i=0;i<sampleCount;++i) {
+        const float e=kSceneToneLutMinEv+(kSceneToneLutMaxEv-kSceneToneLutMinEv)*i/(sampleCount-1);
+        if (!t.enabled) { lut[i]=e; continue; }
+        if (direct) {
+            const float x=(e+16)/32;
+            const float y=curve.Evaluate(std::clamp(x,0.f,1.f));
+            float tail=0;
+            if(x<0 || x>1) {
+                const float edge=x<0?0.f:1.f;
+                tail=(x-edge)*(x<0?lowSlope:highSlope);
+            }
+            lut[i]=-16+32*(y+tail);
+        } else {
+            lut[i]=float(t.anchorOffsetEv+BaseIntegral(t,e)-baseAtZero+
+                (contrast-1)*ShapeIntegral(t,e));
+        }
     }
     return lut;
 }

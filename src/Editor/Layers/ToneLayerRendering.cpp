@@ -1,4 +1,5 @@
 #include "Raw/ViewTransform.h"
+#include "Raw/Curves/PreparedCurve.h"
 #include "Hdr/SdrAppearanceTexture.h"
 #include "ToneLayers.h"
 
@@ -746,32 +747,28 @@ void ToneCurveLayer::UpdateLut() {
     std::vector<float> lut(static_cast<std::size_t>(sampleCount) * 4u, 0.0f);
 
     struct PreparedPointCurve {
-        std::vector<Stack::RawRecipe::RawBezierCurvePoint> basePoints;
-        std::vector<Stack::RawRecipe::RawBezierCurvePoint> points;
+        Stack::RawRecipe::PreparedRawBezierCurve basePoints;
+        Stack::RawRecipe::PreparedRawBezierCurve points;
     };
     const auto preparePointCurve = [](const auto& component) {
         PreparedPointCurve prepared;
         if (!component.basePoints.empty()) {
             Stack::RawRecipe::RawPointCurveComponent baseComponent;
             baseComponent.points = component.basePoints;
-            prepared.basePoints =
-                Stack::RawRecipe::RawPointCurveBezierPoints(baseComponent);
+            prepared.basePoints = Stack::RawRecipe::PreparedRawBezierCurve(
+                Stack::RawRecipe::RawPointCurveBezierPoints(baseComponent));
         }
-        prepared.points =
-            Stack::RawRecipe::RawPointCurveBezierPoints(component);
+        prepared.points = Stack::RawRecipe::PreparedRawBezierCurve(
+            Stack::RawRecipe::RawPointCurveBezierPoints(component));
         return prepared;
     };
     const auto evaluatePreparedPointCurve = [](const PreparedPointCurve& prepared,
                                                 float input) {
         float value = std::clamp(input, 0.0f, 1.0f);
-        if (!prepared.basePoints.empty()) {
-            value = Stack::RawRecipe::EvaluateRawBezierCurve(
-                prepared.basePoints,
-                value);
+        if (!prepared.basePoints.Empty()) {
+            value = prepared.basePoints.Evaluate(value);
         }
-        return Stack::RawRecipe::EvaluateRawBezierCurve(
-            prepared.points,
-            value);
+        return prepared.points.Evaluate(value);
     };
     std::array<PreparedPointCurve, 4> preparedCurves;
     if (m_PointCurveSetEnabled) {
@@ -804,9 +801,9 @@ void ToneCurveLayer::UpdateLut() {
         }
     }
     if (Stack::RawRecipe::IsSceneToneActive(m_SceneTone)) {
+        const auto sceneLut = Stack::RawRecipe::BuildSceneToneLut(m_SceneTone, sampleCount);
         for (int i = 0; i < sampleCount; ++i)
-            lut[static_cast<std::size_t>(i) * 4 + 3] = Stack::RawRecipe::EvaluateSceneToneEv(
-                m_SceneTone, -40.0f + 80.0f * i / (sampleCount - 1));
+            lut[static_cast<std::size_t>(i) * 4 + 3] = sceneLut[static_cast<std::size_t>(i)];
     }
     unsigned int replacement = 0;
     {

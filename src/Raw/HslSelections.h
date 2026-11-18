@@ -21,9 +21,12 @@ inline float HslAreaWeight(const HslSelection& s,std::array<float,2> p) {
     auto a=s.outline.back();
     for(const auto& b:s.outline) {
         if((a[1]>p[1])!=(b[1]>p[1]) && p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0])inside=!inside;
-        const float dx=b[0]-a[0],dy=b[1]-a[1];
-        const float t=std::clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/std::max(dx*dx+dy*dy,1e-12f),0.f,1.f);
-        distance=std::min(distance,std::hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy));a=b;
+        if(s.areaSoftness>0) {
+            const float dx=b[0]-a[0],dy=b[1]-a[1];
+            const float t=std::clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/std::max(dx*dx+dy*dy,1e-12f),0.f,1.f);
+            distance=std::min(distance,std::hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy));
+        }
+        a=b;
     }
     return inside?(s.areaSoftness>0?HslSmooth(distance/s.areaSoftness):1.f):0.f;
 }
@@ -35,16 +38,56 @@ inline float HslSelectionWeight(const HslSelection& s,const RawColorWarpCoordina
 }
 inline ColorWarpHslCoefficients HslOwnCoefficients(const HslSelection& s) {
     ColorWarpHslCoefficients c{};
-    const auto& anchors=ColorWarpHslAnchors();
-    for(int i=0;i<8;++i)c[i]={ColorWarpHue(anchors[i].sourceA,anchors[i].sourceB),s.values[i][0],s.values[i][1],s.values[i][2]};
+    const auto& hues=ColorWarpHslAnchorHues();
+    for(int i=0;i<8;++i)c[i]={hues[i],s.values[i][0],s.values[i][1],s.values[i][2]};
     return c;
 }
+struct HslSelectionEvaluation {
+    ColorWarpHslCoefficients coefficients{};
+    std::array<float,4> bounds{1,1,0,0};
+};
+inline HslSelectionEvaluation PrepareHslSelectionEvaluation(const HslSelection& selection) {
+    HslSelectionEvaluation result;
+    if(selection.own[0] || selection.own[1] || selection.own[2])result.coefficients=HslOwnCoefficients(selection);
+    for(const auto& point:selection.outline) {
+        result.bounds[0]=std::min(result.bounds[0],point[0]);
+        result.bounds[1]=std::min(result.bounds[1],point[1]);
+        result.bounds[2]=std::max(result.bounds[2],point[0]);
+        result.bounds[3]=std::max(result.bounds[3],point[1]);
+    }
+    return result;
+}
 inline std::array<float,3> ResolveHslSelections(const RawColorWarpRecipe& recipe,
-    const RawColorWarpCoordinate& input,std::array<float,3> global,std::array<float,2> uv) {
+    const RawColorWarpCoordinate& input,std::array<float,3> global,std::array<float,2> uv,
+    const std::vector<HslSelectionEvaluation>* prepared=nullptr) {
     auto result=recipe.limitHslToSelections?std::array<float,3>{}:global;
-    for(const auto& s:recipe.hslSelections) {
-        const float w=HslSelectionWeight(s,input,uv);if(w<=0)continue;
-        const auto own=s.own[0]||s.own[1]||s.own[2]?EvaluateColorWarpHsl(HslOwnCoefficients(s),ColorWarpHue(input.a,input.b)):std::array<float,3>{};
+    if(input.lightness<=0)return result;
+    // All selection curves use the same immutable anchors. Preserve their raw
+    // a/b hue (including near-neutral values), which differs from the guarded
+    // normalized hue used by the global family curve.
+    const float hue=ColorWarpHue(input.a,input.b);
+    ColorWarpHslSegment segment;
+    bool hasSegment=false;
+    for(std::size_t index=0;index<recipe.hslSelections.size();++index) {
+        const auto& s=recipe.hslSelections[index];if(!s.enabled)continue;
+        const auto* evaluation=prepared && index<prepared->size()?&(*prepared)[index]:nullptr;
+        if(s.areaEnabled && evaluation) {
+            const auto& bounds=evaluation->bounds;
+            if(uv[0]<bounds[0] || uv[1]<bounds[1] || uv[0]>bounds[2] || uv[1]>bounds[3])continue;
+        }
+        const float d=std::abs(ColorWarpHueDelta(hue-s.hue))-s.hueWidth;
+        const float color=s.allColors?1.f:d<=0?1.f:s.hueSoftness>0?1-HslSmooth(d/s.hueSoftness):0.f;
+        if(color<=0)continue;
+        const float brightness=HslBrightnessWeight(s,input.sceneEv);if(brightness<=0)continue;
+        const float w=color*brightness*HslAreaWeight(s,uv);if(w<=0)continue;
+        std::array<float,3> own{};
+        if(s.own[0] || s.own[1] || s.own[2]) {
+            ColorWarpHslCoefficients temporary;
+            const auto* coefficients=evaluation?&evaluation->coefficients:nullptr;
+            if(!coefficients){temporary=HslOwnCoefficients(s);coefficients=&temporary;}
+            if(!hasSegment){segment=FindColorWarpHslSegment(*coefficients,hue);hasSegment=true;}
+            own=EvaluateColorWarpHsl(*coefficients,segment);
+        }
         for(int channel=0;channel<3;++channel) {
             const float target=s.own[channel]?own[channel]:global[channel]*s.influence;
             result[channel]+=w*(target-result[channel]);

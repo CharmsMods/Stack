@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Raw/Curves/LocalEvCurveNormalization.h"
+#include "Renderer/LocalEvCurveUniforms.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/ScopedGLObjects.h"
 #include "Renderer/GLStateGuards.h"
@@ -33,6 +34,20 @@
 #endif
 
 namespace {
+
+void UploadLocalEvCurveUniforms(unsigned int program,
+    const Stack::Renderer::LocalEvCurveUniforms& curve) {
+    glUniform1i(glGetUniformLocation(program, "uLocalCurveActive"), curve.curveActive);
+    glUniform1i(glGetUniformLocation(program, "uLightActive"), curve.lightActive);
+    glUniform1f(glGetUniformLocation(program, "uCurveGlobalOffsetEv"), curve.globalOffsetEv);
+    glUniform1i(glGetUniformLocation(program, "uLocalRangePointCount"), curve.pointCount);
+    if (curve.pointCount > 0)
+        glUniform2fv(glGetUniformLocation(program, "uLocalRangePoints[0]"),
+            curve.pointCount, curve.points.front().data());
+    if (curve.pointCount > 1)
+        glUniform4fv(glGetUniformLocation(program, "uLocalRangeHandles[0]"),
+            curve.pointCount - 1, curve.handles.front().data());
+}
 
 unsigned int CreateRawLocalRangeSelectionTexture(
     int width,
@@ -2006,10 +2021,13 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
+        uniform int uLocalCurveActive;
         uniform float uCurveGlobalOffsetEv;
         uniform float uLightAmounts[5];
+        uniform int uLightActive;
         uniform vec2 uLightRange;
         float lightDelta(float ev) {
+            if (uLightActive == 0) return 0.0;
             float x=clamp(4.0*(ev-uLightRange.x)/max(.1,uLightRange.y-uLightRange.x),0.0,4.0);
             float delta=0.0;
             for(int i=0;i<5;++i) {
@@ -2059,7 +2077,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         }
 
         float evaluateLocalRangeResidual(float sceneEv) {
-            if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
+            if (uLocalCurveActive == 0 || uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
             }
 
@@ -2373,10 +2391,13 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
         uniform vec4 uLocalRangeHandles[11];
+        uniform int uLocalCurveActive;
         uniform float uCurveGlobalOffsetEv;
         uniform float uLightAmounts[5];
+        uniform int uLightActive;
         uniform vec2 uLightRange;
         float lightDelta(float ev) {
+            if (uLightActive == 0) return 0.0;
             float x=clamp(4.0*(ev-uLightRange.x)/max(.1,uLightRange.y-uLightRange.x),0.0,4.0);
             float delta=0.0;
             for(int i=0;i<5;++i) {
@@ -2428,7 +2449,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         }
 
         float evaluateLocalRangeResidual(float sceneEv) {
-            if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
+            if (uLocalCurveActive == 0 || uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
             }
 
@@ -3720,8 +3741,12 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             processingVersion,
             inputStageFingerprint);
 
-    auto& analysis=PrepareLightAnalysis(inputTexture,sanitized,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight);
-    const auto range=sanitized.light.automatic ? analysis.range : Stack::RawRecipe::LightRange{sanitized.light.lowEv,sanitized.light.highEv,true};
+    const auto curveUniforms = Stack::Renderer::PrepareLocalEvCurveUniforms(sanitized);
+    auto* analysis = Stack::Renderer::LocalEvNeedsLightAnalysis(sanitized, curveUniforms)
+        ? &PrepareLightAnalysis(inputTexture,sanitized,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight)
+        : nullptr;
+    const auto range = sanitized.light.automatic && analysis ? analysis->range
+        : Stack::RawRecipe::LightRange{sanitized.light.lowEv,sanitized.light.highEv,true};
     unsigned int outputTexture = m_RawZoneAreasFloatOutput
         ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
         : CreateGraphRenderTargetTexture();
@@ -3734,7 +3759,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
         glUniform1fv(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram,"uLightAmounts"),5,sanitized.light.amounts.data());
         glUniform2f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram,"uLightRange"),range.lowEv,range.highEv);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, sanitized.smoothness>.0001f ? analysis.guide : 0);
+        glBindTexture(GL_TEXTURE_2D, sanitized.smoothness>.0001f && analysis ? analysis->guide : 0);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -3769,36 +3794,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             m_RawDevelopmentLocalRangeProgram,
             sanitized,
             workingSpace);
-        const float curveOffsetEv = Stack::RawRecipe::LocalEvGlobalOffsetEv(sanitized);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uCurveGlobalOffsetEv"), curveOffsetEv);
-        const int count = std::min<int>(static_cast<int>(sanitized.points.size()), 12);
-        glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uLocalRangePointCount"), count);
-        for (int i = 0; i < count; ++i) {
-            char uniformName[64];
-            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangePoints[%d]", i);
-            const Stack::RawRecipe::RawLocalRangePoint& point = sanitized.points[static_cast<std::size_t>(i)];
-            glUniform2f(
-                glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
-                point.ev,
-                point.deltaEv - curveOffsetEv);
-        }
-        const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
-            Stack::RawRecipe::RawLocalRangeBezierPoints(sanitized);
-        const float evSpan = std::max(0.1f, sanitized.maxEv - sanitized.minEv);
-        for (int i = 0; i + 1 < count; ++i) {
-            const Stack::RawRecipe::RawBezierSegment segment =
-                Stack::RawRecipe::BuildRawBezierSegment(
-                    bezierPoints,
-                    static_cast<std::size_t>(i));
-            char uniformName[64];
-            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangeHandles[%d]", i);
-            glUniform4f(
-                glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
-                sanitized.minEv + segment.leftHandleX * evSpan,
-                -4.0f + segment.leftHandleY * 8.0f - curveOffsetEv,
-                sanitized.minEv + segment.rightHandleX * evSpan,
-                -4.0f + segment.rightHandleY * 8.0f - curveOffsetEv);
-        }
+        UploadLocalEvCurveUniforms(m_RawDevelopmentLocalRangeProgram, curveUniforms);
 
         m_Quad.Draw();
         glActiveTexture(GL_TEXTURE1);
@@ -3890,8 +3886,12 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
     if (!m_RawDevelopmentLocalRangeOverlayProgram) {
         return 0;
     }
-    auto& analysis=PrepareLightAnalysis(inputTexture,overlayRange,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight);
-    const auto range=overlayRange.light.automatic ? analysis.range : Stack::RawRecipe::LightRange{overlayRange.light.lowEv,overlayRange.light.highEv,true};
+    const auto curveUniforms = Stack::Renderer::PrepareLocalEvCurveUniforms(overlayRange);
+    auto* analysis = Stack::Renderer::LocalEvNeedsLightAnalysis(overlayRange, curveUniforms)
+        ? &PrepareLightAnalysis(inputTexture,overlayRange,workingSpace,inputStageFingerprint,sourceWidth,sourceHeight)
+        : nullptr;
+    const auto range = overlayRange.light.automatic && analysis ? analysis->range
+        : Stack::RawRecipe::LightRange{overlayRange.light.lowEv,overlayRange.light.highEv,true};
     unsigned int outputTexture = CreateGraphRenderTargetTexture();
     if (!outputTexture) {
         return 0;
@@ -3982,7 +3982,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
         glUniform1fv(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram,"uLightAmounts"),5,overlayRange.light.amounts.data());
         glUniform2f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram,"uLightRange"),range.lowEv,range.highEv);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, overlayRange.smoothness>.0001f ? analysis.guide : 0);
+        glBindTexture(GL_TEXTURE_2D, overlayRange.smoothness>.0001f && analysis ? analysis->guide : 0);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -4037,38 +4037,7 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
             m_RawDevelopmentLocalRangeOverlayProgram,
             overlayRange,
             workingSpace);
-        const float curveOffsetEv = Stack::RawRecipe::LocalEvGlobalOffsetEv(overlayRange);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uCurveGlobalOffsetEv"), curveOffsetEv);
-        const int count = std::min<int>(static_cast<int>(overlayRange.points.size()), 12);
-        glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uLocalRangePointCount"), count);
-        for (int i = 0; i < count; ++i) {
-            char uniformName[64];
-            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangePoints[%d]", i);
-            const Stack::RawRecipe::RawLocalRangePoint& point = overlayRange.points[static_cast<std::size_t>(i)];
-            glUniform2f(
-                glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, uniformName),
-                point.ev,
-                point.deltaEv - curveOffsetEv);
-        }
-        const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
-            Stack::RawRecipe::RawLocalRangeBezierPoints(overlayRange);
-        const float evSpan = std::max(0.1f, overlayRange.maxEv - overlayRange.minEv);
-        for (int i = 0; i + 1 < count; ++i) {
-            const Stack::RawRecipe::RawBezierSegment segment =
-                Stack::RawRecipe::BuildRawBezierSegment(
-                    bezierPoints,
-                    static_cast<std::size_t>(i));
-            char uniformName[64];
-            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangeHandles[%d]", i);
-            glUniform4f(
-                glGetUniformLocation(
-                    m_RawDevelopmentLocalRangeOverlayProgram,
-                    uniformName),
-                overlayRange.minEv + segment.leftHandleX * evSpan,
-                -4.0f + segment.leftHandleY * 8.0f - curveOffsetEv,
-                overlayRange.minEv + segment.rightHandleX * evSpan,
-                -4.0f + segment.rightHandleY * 8.0f - curveOffsetEv);
-        }
+        UploadLocalEvCurveUniforms(m_RawDevelopmentLocalRangeOverlayProgram, curveUniforms);
 
         m_Quad.Draw();
         glActiveTexture(GL_TEXTURE1);

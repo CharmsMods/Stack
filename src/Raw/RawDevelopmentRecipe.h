@@ -486,6 +486,8 @@ RawBezierSegment BuildRawBezierSegment(
     std::size_t segmentIndex);
 std::vector<RawBezierSegment> BuildRawBezierSegments(
     const std::vector<RawBezierCurvePoint>& points);
+// Evaluate one prepared segment after the caller selects its bounded input.
+float EvaluateRawBezierSegment(const RawBezierSegment& segment, float x);
 float EvaluateRawBezierCurve(
     const std::vector<RawBezierCurvePoint>& points,
     float x);

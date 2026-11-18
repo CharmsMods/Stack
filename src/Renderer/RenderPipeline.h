@@ -281,7 +281,7 @@ public:
         std::function<bool()> shouldCancel) {
         m_RenderGeneration = generation;
         m_ShouldCancelRender = std::move(shouldCancel);
-        m_Quad.SetCooperativeCancellation(m_GraphViewportRequest.enabled ? m_ShouldCancelRender : std::function<bool()>{});
+        m_Quad.SetCooperativeCancellation(m_ShouldCancelRender);
     }
     // Interactive RAW previews must remain image-only work. Expensive texture
     // readbacks and automatic-analysis evidence are observational and may be
@@ -385,7 +385,7 @@ public:
     const Raw::ViewportRegion& GetRawViewportRegion() const { return m_RawViewportAppliedRegion; }
     void SetGraphViewportRequest(const Stack::Renderer::ViewportPreviewRequest& request) {
         m_GraphViewportRequest = request;
-        m_Quad.SetCooperativeCancellation(request.enabled ? m_ShouldCancelRender : std::function<bool()>{});
+        m_Quad.SetCooperativeCancellation(m_ShouldCancelRender);
         m_GraphViewportGeometry = {};
     }
     const Stack::Renderer::ViewportPreviewGeometry& GetGraphViewportGeometry() const {
@@ -752,6 +752,7 @@ private:
     unsigned int m_RawDevelopmentExposureProgram;
     unsigned int m_RawDevelopmentProtectedExposureProgram = 0;
     unsigned int m_RawDevelopmentColorWarpProgram;
+    unsigned int m_RawDevelopmentHslProgram;
     unsigned int m_RawDevelopmentColorWarpProxyProgram;
     unsigned int m_RawDevelopmentCropProgram;
     struct RawDevelopmentColorWarpMaskCacheEntry {

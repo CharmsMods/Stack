@@ -52,6 +52,9 @@ bool EditorModule::RenderRawWorkspaceLabColorSurface(
     if(!context.nodeTarget || !context.editorState)return false;
     ImGuiExtras::FloatingSliderScope sliders(context.State<ImGuiExtras::FloatingSliderState>());
     args.state=&context.State<Stack::Editor::ColorWarpEditorState>();
+    args.submitCloudWork=[this](std::function<void()> job) {
+        return ProjectTasks().Submit("Updating color cloud",std::move(job));
+    };
     args.nodeRevision=context.nodeRevision;
     args.panel=context.presentation==Stack::Editor::NodeEditorPresentation::Panel;
     if(args.panel) {

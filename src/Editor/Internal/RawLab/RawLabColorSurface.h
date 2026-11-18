@@ -28,6 +28,7 @@ struct RawLabColorSurfaceArgs {
     PanelControlState* panelControls=nullptr;
     ColorWarpEditorState* state = nullptr;
     std::uint64_t nodeRevision = 0;
+    std::function<bool(std::function<void()>)> submitCloudWork;
 };
 
 bool RenderRawLabColorSurface(RawLabColorSurfaceArgs& args);
