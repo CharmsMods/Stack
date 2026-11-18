@@ -3169,7 +3169,8 @@ private:
     using RawWorkspaceEditContext = Stack::Editor::RawWorkspaceEditContext;
     const EditorNodeGraph::Node* SelectedEditingNode() const;
     const Stack::Editor::NodeEditorDefinition* SelectedNodeEditor() const;
-    void SelectRawNodeEditor(const std::string& layerId, const std::string& uuid);
+    void SelectRawNodeEditor(const std::string& layerId, const std::string& uuid,
+        bool refreshImage = true);
     void ReconcileRawNodeEditorSelection();
     void BindRequestedRawNodeEditor();
     std::string RawNodeEditorStateKey() const;

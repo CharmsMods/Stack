@@ -30,9 +30,9 @@ class GraphViewportAnalysisWiring(unittest.TestCase):
     def test_graph_dispatch_drains_optional_analysis(self):
         source = read("src/Editor/Internal/EditorModuleRenderScheduling.cpp")
         self.assertRegex(source, re.compile(
-            r"if \(UsesGraphViewportPreview\(\)\)\s*\{\s*"
-            r"UpdateViewportPreviewRefinement\(now\);\s*"
-            r"if \(TrySubmitGraphViewportAnalysis\(now\)\) return;", re.S))
+            r"if \(!m_RawWorkspaceExportRenderRequested && UsesGraphViewportPreview\(\)\)\s*\{\s*"
+            r"if \(TrySubmitGraphViewportAnalysis\(now\)\) return;\s*"
+            r"UpdateViewportPreviewRefinement\(now\);", re.S))
 
     def test_layer_selection_queues_instead_of_claiming_in_flight(self):
         source = read("src/Editor/Internal/RawLab/EditorModuleRawLayers.cpp")
@@ -48,7 +48,7 @@ class GraphViewportAnalysisWiring(unittest.TestCase):
         submission = source.split("bool EditorModule::TrySubmitGraphViewportAnalysis(", 1)[1]
         submission = submission.split("void EditorModule::ObserveViewportPreviewTiming(", 1)[0]
         self.assertIn("RawRenderPurpose::AnalysisScopes", submission)
-        self.assertIn("ContentIdentity(snapshot) == state.acceptedContentIdentity", submission)
+        self.assertIn("ContentIdentity(snapshot,CurrentGraphRenderTag().sourceIdentity) == state.acceptedContentIdentity", submission)
         self.assertNotIn("MarkRenderRefreshDirty()", submission)
         adoption = read("src/Editor/Internal/EditorModuleRenderAdoption.cpp")
         self.assertNotRegex(adoption, re.compile(

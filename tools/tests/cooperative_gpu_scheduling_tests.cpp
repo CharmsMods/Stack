@@ -12,22 +12,22 @@ int main() {
     using Clock = CooperativeGpuSubmission::Clock;
     const auto start = Clock::time_point{};
     CooperativeGpuSubmission active(400, start);
-    Check(!active.Checkpoint(true, false, start), "One small submission may proceed");
-    Check(active.Checkpoint(true, false, start), "Fast CPU cannot enqueue unbounded active work");
-    active.Drained(start);
-    Check(active.Checkpoint(true, false, start + std::chrono::microseconds(626)),
+    Check(!active.Checkpoint(true, start), "One small submission may proceed");
+    Check(active.Checkpoint(true, start), "Fast CPU cannot enqueue unbounded active work");
+    active.BatchSubmitted(start);
+    Check(active.Checkpoint(true, start + std::chrono::microseconds(626)),
         "High-refresh time budget expires before one millisecond");
     CooperativeGpuSubmission idle(60, start);
-    for (int i = 0; i < 7; ++i) Check(!idle.Checkpoint(false, false, start), "Idle work keeps useful batching");
-    Check(idle.Checkpoint(false, false, start), "Idle viewport backlog is also count bounded");
-    idle.Drained(start);
-    Check(idle.Checkpoint(false, false, start + std::chrono::milliseconds(2)), "Slow submission has a time bound");
-    idle.Drained(start);
-    Check(!idle.Checkpoint(false, true, start) && idle.Checkpoint(false, true, start),
-        "Native refinement retains its two-checkpoint bound");
+    for (int i = 0; i < 7; ++i) Check(!idle.Checkpoint(false, start), "Idle native and preview work keep useful batching");
+    Check(idle.Checkpoint(false, start), "Idle viewport backlog is also count bounded");
+    idle.BatchSubmitted(start);
+    Check(idle.Checkpoint(false, start + std::chrono::milliseconds(2)), "Slow submission has a time bound");
+    idle.BatchSubmitted(start);
+    Check(!idle.Checkpoint(false, start) && idle.Checkpoint(true, start),
+        "New interaction tightens an existing idle batch immediately");
     CooperativeGpuSubmission unknown(0, start);
-    Check(!unknown.Checkpoint(false, false, start + std::chrono::milliseconds(1)), "Missing refresh uses finite default");
-    Check(unknown.Checkpoint(false, false, start + std::chrono::milliseconds(2)), "Default time budget stays bounded");
+    Check(!unknown.Checkpoint(false, start + std::chrono::milliseconds(1)), "Missing refresh uses finite default");
+    Check(unknown.Checkpoint(false, start + std::chrono::milliseconds(2)), "Default time budget stays bounded");
     Check(CooperativeRasterPixels(true) == 128ll * 1024 && CooperativeRasterPixels(false) == 512ll * 1024,
         "Interaction has smaller indivisible raster submissions");
     Check(2560ll * 1440 > CooperativeRasterPixels(false) && 1920ll * 1080 > CooperativeRasterPixels(true),

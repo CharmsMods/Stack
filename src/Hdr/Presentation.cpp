@@ -29,6 +29,7 @@ void RenderDetached(ImGuiViewport* vp,void* arg) {
     auto* window=static_cast<GLFWwindow*>(vp->PlatformHandle);
     int w=0,h=0; glfwGetFramebufferSize(window,&w,&h);
     auto target=BeginWindow(window,w,h);
+    if(w<1 || h<1 || glfwGetWindowAttrib(window,GLFW_ICONIFIED)) return;
     glBindFramebuffer(GL_FRAMEBUFFER,target);
     {Ui::TargetScope drawTarget(target!=0); renderWindow(vp,arg);}
     glBindFramebuffer(GL_FRAMEBUFFER,0);
@@ -81,8 +82,10 @@ unsigned BeginWindow(GLFWwindow* window,int w,int h,bool main,bool opaqueWindow)
     auto& presenter=windows[window];
     if(!presenter) presenter=std::make_unique<WindowPresenter>(glfwGetWin32Window(window));
     const bool previous=presenter->Active();
-    auto target=presenter->Begin(w,h,forced || !opaqueWindow);
-    if(previous!=presenter->Active()) activeCount.fetch_add(target ? 1 : -1);
+    const bool iconified=glfwGetWindowAttrib(window,GLFW_ICONIFIED)==GLFW_TRUE;
+    auto target=presenter->Begin(iconified ? 0 : w,iconified ? 0 : h,forced || !opaqueWindow);
+    const bool active=presenter->Active();
+    if(previous!=active) activeCount.fetch_add(active ? 1 : -1);
     if(main && mainStatus!=presenter->Status()) mainStatus=presenter->Status();
     return target;
 #else
@@ -92,7 +95,11 @@ unsigned BeginWindow(GLFWwindow* window,int w,int h,bool main,bool opaqueWindow)
 bool PresentWindow(GLFWwindow* window) {
 #ifdef _WIN32
     const auto found=windows.find(window);
-    if(found==windows.end() || !found->second->Active()) return false;
+    if(found==windows.end()) return false;
+    // The absence of a drawable is already handled, including SDR windows.
+    // Neither swap nor DwmFlush should wait for a minimized surface.
+    if(found->second->Suspended()) return true;
+    if(!found->second->Active()) return false;
     const auto previous=found->second->SubmittedFrames();
     const bool presented=found->second->Present();
     // The compatibility path may reuse a frame. Keep the main loop paced

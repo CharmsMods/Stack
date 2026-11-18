@@ -7,6 +7,7 @@
 #include "Project/RawLayerStack.h"
 #include "Project/RawNodeEditing.h"
 #include "Project/GraphImageContracts.h"
+#include "Project/GraphSnapshotBuilder.h"
 #include "Project/GraphSnapshotLookup.h"
 #include "Raw/RawGraphParameters.h"
 
@@ -57,7 +58,12 @@ void EditorModule::BindNodeInputContext(RawWorkspaceEditContext& context) const 
         // authored producer endpoint once on invalidation, through the same
         // aliases used by View and inspection.
         if (incoming) {
-            const auto snapshot=BuildGraphSnapshot();
+            // Visible tools share the retained executable. A descriptor lookup
+            // must not copy every node, parameter and link once per panel row
+            // on each adjustment revision.
+            const auto compiled=EnsureCompiledGraphSnapshot(m_TimelineUi.currentFrame,0);
+            PublishCompiledGraphSemantics(compiled);
+            const auto& snapshot=compiled->snapshot;
             if (const auto producer=ResolveGraphSnapshotOutput(snapshot,*incoming)) {
                 const auto link=std::find_if(snapshot.links.begin(),snapshot.links.end(),[&](const auto& candidate) {
                     return candidate.fromNodeId==producer->nodeId && candidate.fromSocketId==producer->socketId;

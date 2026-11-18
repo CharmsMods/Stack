@@ -11,7 +11,8 @@ unsigned int RenderPipeline::RenderRawPipelineWithTelemetry(
             raw,
             settings,
             previewMaxDimension,
-            m_ShouldCancelRender);
+            m_ShouldCancelRender,
+            m_AfterGpuSubmission);
     const Raw::RawGpuPreprocessTelemetry& telemetry =
         pipeline.GetLastPreprocessTelemetry();
 

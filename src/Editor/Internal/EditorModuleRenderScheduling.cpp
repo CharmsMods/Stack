@@ -113,8 +113,8 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         return;
     }
     if (!m_RawWorkspaceExportRenderRequested && UsesGraphViewportPreview()) {
-        UpdateViewportPreviewRefinement(now);
         if (TrySubmitGraphViewportAnalysis(now)) return;
+        UpdateViewportPreviewRefinement(now);
     }
     else if (!m_RawWorkspaceExportRenderRequested && m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
     if (rawWorkspaceActive &&

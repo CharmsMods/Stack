@@ -93,6 +93,12 @@ inline ImageRegionUv MapImageRegionUv(const ImageRegion& resident, const ImageRe
         std::min(targetHeight / sourceHeight, 1.0 - bottom), true};
 }
 
+// Refinement is presentation demand, separate from the authored graph revision.
+// Carry the step with the request so delayed results retain their own intent.
+enum class ViewportRefinementStep : std::uint8_t {
+    None, VisibleScreen, NavigationCoverage, NativeSection
+};
+
 struct ViewportPreviewRequest {
     ImageRegion visible;
     double samplingScale = 1.0;
@@ -104,6 +110,7 @@ struct ViewportPreviewRequest {
     // Section completion publishes only edited pixels; its existing base
     // presentation already owns comparison imagery.
     bool prepareCompareSource = true;
+    ViewportRefinementStep refinement = ViewportRefinementStep::None;
 };
 
 // Logical dimensions describe the final zero-origin output canvas. Semantic

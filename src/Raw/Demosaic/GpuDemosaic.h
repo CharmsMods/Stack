@@ -20,7 +20,8 @@ public:
     unsigned int Reconstruct(unsigned int mosaic, int width, int height,
         CfaPattern pattern, DemosaicMethod method,
         const std::function<bool()>& cancel, std::string& error,
-        const std::array<float,9>& cameraToSrgb = {1,0,0,0,1,0,0,0,1});
+        const std::array<float,9>& cameraToSrgb = {1,0,0,0,1,0,0,0,1},
+        const std::function<bool()>& afterSubmission = {});
 private:
     struct Impl;
     std::unique_ptr<Impl> m_Impl;

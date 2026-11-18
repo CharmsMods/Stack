@@ -1,5 +1,6 @@
 #ifdef _WIN32
 #include "WindowPresenter.h"
+#include "WindowSurfaceExtent.h"
 #include "ScRgbShader.h"
 #include "Renderer/GLHelpers.h"
 #include <chrono>
@@ -63,6 +64,12 @@ void WindowPresenter::Reset() {
     swap.Reset(); context.Reset(); device.Reset();
 }
 unsigned WindowPresenter::Begin(int w,int h,bool forceSdr) {
+    const auto surface=UpdateWindowSurfaceExtent(w,h,width,height);
+    suspended=surface==WindowSurfaceChange::Suspended;
+    // Minimize/restore is presentation state. Keep HDR identity, the accepted
+    // frame and pending transfer intact; consume display notifications only
+    // when a drawable returns, when real display/device changes still apply.
+    if(suspended) return 0;
     const auto now=GetTickCount64();
     const bool invalidFactory=factory && !factory->IsCurrent();
     const bool retryDevice=retryDeviceAt && now>=retryDeviceAt;
@@ -81,10 +88,9 @@ unsigned WindowPresenter::Begin(int w,int h,bool forceSdr) {
         if(retryDevice) retryDeviceAt=now+2000;
         if(display.adapter && !display.hdr) retryDeviceAt=0;
     }
-    const bool resized=w!=width || h!=height;
-    width=w; height=h;
+    const bool resized=surface==WindowSurfaceChange::Resized;
     if(force!=forceSdr) {force=forceSdr;failed=false;retryDeviceAt=0;}
-    if(!display.hdr || force || width<1 || height<1) {
+    if(!display.hdr || force) {
         if(swap) Reset();
         const char* description=force ? "SDR comparison" : display.reason.c_str();
         if(status!=description) status=description;
@@ -151,6 +157,7 @@ void WindowPresenter::DrawConverted(unsigned destination) {
 }
 bool WindowPresenter::Present() {
     if(!Active()) return false;
+    if(suspended) return true;
     bool ready=false;
     if(sharing) {
         unsigned framebuffer;

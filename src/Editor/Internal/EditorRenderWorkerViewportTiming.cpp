@@ -1,9 +1,9 @@
 #include "Editor/EditorRenderWorker.h"
 
 bool EditorRenderWorker::WaitForSubmittedGpuWork() {
-    // GL dispatch returning only means the commands were queued. Keep one
-    // worker batch in flight, otherwise a CPU-fast shader path can build a GPU
-    // backlog that delays the UI context and every newer image edit.
+    // A request's final publication/retirement boundary covers all remaining
+    // commands. Intermediate raster scheduling keeps two bounded batches in
+    // flight; it must not repeatedly drain this newest completion fence.
     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (!fence) {
         // Preserve the bound even if the driver cannot allocate another sync.

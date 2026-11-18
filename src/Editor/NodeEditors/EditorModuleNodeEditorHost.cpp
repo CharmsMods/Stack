@@ -285,7 +285,14 @@ bool EditorModule::ActivateNodeEditorPanelTarget(const NodeEditTarget& target) {
             const auto& definition=FindNodeEditor(*ResolveNodeEditorTarget(target));
             m_RawWorkspaceLabUi.activeTool=definition.legacyTool.value_or(RawLabTool::GraphNode);
             if (definition.toneView>=0) m_RawWorkspaceLabUi.sceneToneView=definition.toneView;
-        } else SelectRawNodeEditor(target.layerId,target.nodeUuid);
+        } else {
+            // Activating a control must not cancel native refinement or make
+            // the first drag compile/render an unchanged image. Selection can
+            // still affect diagnostic pixels and graph inspection outputs.
+            const bool selectionAffectsImage=!IsViewMode() || m_RawWorkspaceLocalRangeTargetMode ||
+                (!m_RawWorkspaceLocalRangeOverlayMode.empty() && m_RawWorkspaceLocalRangeOverlayMode!="none");
+            SelectRawNodeEditor(target.layerId,target.nodeUuid,selectionAffectsImage);
+        }
         BindNodeEditorPrimaryState(target);
     }
     if(m_NodeEditorPanel.lastTarget!=target) {

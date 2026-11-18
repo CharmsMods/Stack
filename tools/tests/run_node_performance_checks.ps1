@@ -98,24 +98,43 @@ try {
 
     Write-Host 'Checking changed production translation units with the Windows SDK'
     $syntaxSources = @(
+        'src/Editor/EditorModule.cpp',
         'src/Editor/EditorRenderWorker.cpp',
         'src/Editor/Internal/EditorModuleRendering.cpp',
+        'src/Editor/Internal/EditorModuleRenderScheduling.cpp',
+        'src/Editor/Internal/EditorModuleViewportPreview.cpp',
+        'src/Editor/Internal/EditorModuleViewportSections.cpp',
+        'src/Editor/Internal/EditorModuleRenderAdoption.cpp',
+        'src/Editor/Internal/EditorRenderWorkerViewportPreview.cpp',
+        'src/Editor/Internal/EditorRenderWorkerGraph.cpp',
         'src/Editor/Internal/RawLab/EditorModuleRawLabColor.cpp',
         'src/Editor/Internal/RawLab/RawLabColorCloud.cpp',
+        'src/Editor/Internal/RawLab/EditorModuleRawOperationBinding.cpp',
+        'src/Editor/NodeEditors/EditorModuleNodeSelection.cpp',
+        'src/Editor/NodeEditors/EditorModuleNodeEditorHost.cpp',
+        'src/Editor/NodeEditors/EditorModuleFocusedNodeEditor.cpp',
         'src/Editor/Layers/ToneLayerRendering.cpp',
         'src/Renderer/FullscreenQuad.cpp',
+        'src/Renderer/CooperativeGpuQueue.cpp',
         'src/Renderer/GLLoader.cpp',
         'src/Renderer/Internal/RenderPipelineGraphRawDevelopmentOutputStages.cpp',
+        'src/Renderer/Internal/RenderPipelineGraphTextureCache.cpp',
+        'src/Renderer/Internal/RenderPipelineRawPreprocessTelemetry.cpp',
         'src/Renderer/Internal/RenderPipelinePrograms.cpp',
         'src/Renderer/Internal/RenderPipelineResources.cpp',
+        'src/Raw/RawGpuPipeline.cpp',
+        'src/Raw/Demosaic/DemosaicTexture.cpp',
+        'src/Raw/Demosaic/GpuDemosaic.cpp',
         'src/Hdr/WindowTransfer.cpp',
         'src/Hdr/WindowPresenter.cpp',
-        'src/App/Validation/Suites/ColorWarpMoveValidation.cpp'
+        'src/Hdr/Presentation.cpp',
+        'src/App/Validation/Suites/ColorWarpMoveValidation.cpp',
+        'src/App/Validation/Suites/ViewControlsPanelValidation.cpp'
     ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
     Invoke-Checked 'cl.exe' ($compileOptions + @('/Zs') + $syntaxSources +
         @("$CheckDirectory/windows_hdr_validation.cpp"))
-    # AppShell.cpp's mouse-motion lease expression is reviewed with its caller;
-    # its generated embedded assets require the separate full product build.
+    # AppShell.cpp's suspended-window pacing body runs in the extracted lifecycle
+    # check. Its generated embedded assets require the separate product build.
 } finally {
     Pop-Location
 }

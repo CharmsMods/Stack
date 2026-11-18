@@ -24,7 +24,8 @@ public:
         const RawImageData& raw,
         const RawDevelopSettings& settings,
         int previewMaxDimension = 0,
-        const std::function<bool()>& shouldCancel = {});
+        const std::function<bool()>& shouldCancel = {},
+        const std::function<bool()>& afterSubmission = {});
     void Clear();
     void InvalidateProcessingOutputs();
     const std::string& GetLastError() const { return m_LastError; }

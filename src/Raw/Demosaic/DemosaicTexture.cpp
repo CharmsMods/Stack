@@ -25,7 +25,7 @@ void DemosaicTexture::Clear() {
 }
 unsigned int DemosaicTexture::GetOrRender(std::size_t key,int width,int height,CfaPattern pattern,
     DemosaicMethod method,const std::function<bool()>& prepare,const std::function<bool()>& cancel,std::string& error,
-    const std::array<float,9>& cameraToSrgb) {
+    const std::array<float,9>& cameraToSrgb,const std::function<bool()>& afterSubmission) {
     if(cancel && cancel()) { error="Demosaicing canceled."; return 0; }
     if(m_Texture && m_Key==key) return m_Texture;
     try {
@@ -43,7 +43,7 @@ unsigned int DemosaicTexture::GetOrRender(std::size_t key,int width,int height,C
             }
             glViewport(0,0,width,height);
             if(!prepare()) { error="Demosaicing input preparation canceled or failed."; return 0; }
-            replacement=m_Gpu.Reconstruct(target.texture,width,height,pattern,method,cancel,error,cameraToSrgb);
+            replacement=m_Gpu.Reconstruct(target.texture,width,height,pattern,method,cancel,error,cameraToSrgb,afterSubmission);
         }
         if(!replacement) return 0;
         if(cancel && cancel()) { glDeleteTextures(1,&replacement);error="Demosaicing canceled."; return 0; }
