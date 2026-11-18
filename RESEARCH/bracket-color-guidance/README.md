@@ -1,150 +1,212 @@
-# RFC: Bracket guided color evidence (post-first-merge)
+# RFC — Bracket Noise Guidance: palette review, manual chroma and luminance feedback
 
-Status: DESIGN PROPOSAL — not an implemented color solver. Based on Stack main at 52631b910c9c76187aaf0e6b6d272f630206614f (after alignment PR #10 merged on 2026-11-18).
+**Status:** DESIGN / discussion. The guided analyzer, overlay, picker, and solver are **not yet implemented**. This RFC incorporates the user's clarified vision as of November 18, 2026. Base: \`main\` 52631b910c9c76187aaf0e6b6d272f630206614f (after alignment PR #10).
 
-## Intent
+## Product vision
 
-A bracket project already attempts the best possible joint alignment, temporal noise reduction, HDR exposure recovery, and (where justified) native/Bayer or full-RGB super-resolution. Users should be able to inspect the first **completed** result and mark local color evidence they believe is **correct/trustworthy** or **incorrect/suspect**. The same Bracket Engine then uses those hints to selectively improve its reconstruction, rather than handing the problem to an unrelated post-export paint or denoise tool.
+Bracket should perform its best complete **alignment + HDR + temporal denoise + reconstruction** first, with no mandatory interaction. The user can then review a post-merge **Noise Guidance** tool as another handle on the *same* Bracket engine. This is not a Photoshop-style color replacement tool.
 
-The unannotated automatic result must remain the baseline and the default. There is no manual step before initial processing, no new stand-alone "denoise-only" mode, and no generative AI image reconstruction.
+There are **three complementary ways to identify suspected noise**:
 
-### Non-negotiable contracts
+1. **Suggested color palette** — Stack analyzes the first completed merge (and source evidence) and proposes clusters of colors/speckles that **might** be residual chroma noise or false color. Users click through swatches; the rest of the image goes grayscale, and only the selected candidate's **original local colors** remain visible.
+2. **Manually chosen color** — regardless of suggestions, users can sample a color from the image **or** choose any custom color (e.g. green, cyan, magenta, or any RGB/hue). Stack finds pixels/regions matching it within adjustable tolerance; the user can isolate the matches and **submit a judgment** about whether they are noise, already cleaned, or real color/texture. A manual swatch is a **search/selection clue**, not a replacement output color and not proof that all green/cyan/magenta pixels are bad.
+3. **Manually chosen luminance anomalies** — users click/brush pixels or patches that look **too bright** or **too dark**, or review optional suggested local bright/dark outliers. These selections help Stack distinguish *luminance noise* from real highlights, shadows, fine surface texture, stars, edges, etc. This does not require choosing a hue.
 
-- Never rewrite sensor observations, calibrated sample values, clipping/support flags, per-capture noise estimates, or recorded provenance to agree with a hint.
-- Distinguish measured colors, measurement-supported reconstruction, inferred/regularized colors, and a display-only fallback. A user correction is a preference or constraint, **not** newly observed ground truth.
-- A wrong-color mark must not globally ban a hue: a purple artifact in one shadow does not mean purple objects elsewhere are wrong.
-- Never increase confidence just because the user clicked an isolated, extremely noisy pixel; sample a neighborhood and retain measurement uncertainty.
-- Preserve geometric coverage, alpha, HDR range, negative/overrange linear values, motion/depth boundaries, and the intended RAW/scene-linear output contract.
-- Do not require a model download, neural inference, or CPU substitute for Stack's currently GPU-required Bracket pipeline.
-- A project with zero hints must reproduce the existing result without altering colors, identities, or performance in the normal path.
+Color and luminance selections can coexist in one project and may overlap spatially. The user supplies **evidence and feedback**; Stack revisits reliable capture measurements to improve the next result, without hallucinating a supposedly recorded sensor value.
 
-## Existing code that matters
+## User-facing workflow
 
-1. "src/Raw/Bracketing/Processor.cpp" produces BracketingResult plus retained BracketingAnalysis and prepared captures; matching analysis identity lets the engine reuse preparation on later passes. It already offers ReblendPreview for changes to contribution weights.
-2. "src/Raw/Bracketing/HdrColorFusion.cpp" and "Merge.cpp" evaluate aligned exposure-group observations, shared color-cell selection, uncertainty, clipping, headroom, and explicitly categorized fallbacks.
-3. "src/Raw/Bracketing/SceneColorEvidence.h", "SceneColorContract.h", and "src/Raw/SceneColorGuide.h" create a compact **immutable source-derived** camera-color reliability/variance guide. Its maximum dimension is 512; it exists to guide downstream processing and is not a native-resolution user edit mask or reconstructed pixels. Preserve this contract; create separately owned user-hint and refinement data.
-4. "src/Raw/Bracketing/Recipe.h" is currently RecipeVersion 10, with automatic modes, alignment, reconstruction, smoothing, groups, and contribution curves. Do not insert hint arrays into AnalysisIdentity's preparation-defining portion by accident: that would throw away cached alignment for a brush stroke.
-5. "src/Project/BracketingState.h" separates authored recipe/draft, completed result, interactive preview, revisioned jobs, and adoption. "src/BurstEngine/Worker.cpp", "Client.cpp", and result serialization carry the same shared engine to headless and editor use.
-6. "src/Editor/Internal/RawLab/EditorModuleRawSectionPanel.cpp" currently labels the first tab "Source" in bracket mode and routes it to "RenderBracketingSidePanelUI", rather than the single-RAW Interpretation panel. "src/Editor/Bracketing/BracketingWorkspace.cpp" already provides Processing, Captures, and other bracket controls.
-7. The graph already has a canonical source: a managed "MultiFrameHdr" node. "src/Project/RawProjectGraph.cpp" projects one immutable prepared-source node at the start of the layer graph; "src/Editor/Internal/RawLab/EditorModuleRawLayerGraph.cpp" presents the bracket source there, and "EditorModuleRawProjectGraph.cpp" routes its opening into Bracketing. Extend this owner instead of introducing a second upstream source node.
+1. Import bracket/burst, process normally, and accept a **first complete result**. Keep that result immutable for comparison and rollback.
+2. In the first graph source node's **Bracket** tab, open **Noise Guidance**. The review subsection has \`Suggested\`, \`Pick color\`, and \`Pick brightness\` selectors.
+3. **Suggested:** show a compact palette of tentative suspect chroma clusters, based on camera-space variance, disagreement, residual high-frequency chroma, clipping, motion and local spatial support. Rank by *heuristic suspicion*, never claim a validated "probability of noise".
+4. **Pick color:** eyedropper from the completed image, **or a freely editable custom swatch / hue-color picker**. Adjustable tolerance and scope: \`Local area\` (safe default) or \`Find similar across image\` (explicit opt-in). Show the **exact proposed selected-pixel mask** before the user submits. Sampling should use robust local color, not an arbitrary isolated noisy pixel; user-entered color remains allowed.
+5. **Pick brightness:** eyedropper/brush a spot, label it **Too bright** or **Too dark**, optionally choose \`Find similar outliers\` and select a spatial scope + sensitivity. This is *relative to appropriate surrounding structure and corroborating source data*, not a global threshold that brands all shadows as bad or all highlights as hot pixels.
+6. For any selection, inspect a high-zoom crop and, if useful, source-frame evidence. Assign one of these decisions:
+   - **Needs more cleanup** — selection contains residual color and/or brightness noise that should be reduced if evidence permits.
+   - **Already cleaned** — user is inspecting an input-versus-final diagnostic and confirms Stack already removed it adequately; **do not** apply additional cleanup. This label is inappropriate for a residual-only candidate that still exists unless a before/after comparison confirms the claim.
+   - **Real color / texture** — preserve the material's true chroma or luminance detail and avoid oversmoothing.
+   - **Unsure / skip** — no instruction; retain automatic behavior.
+   In brightness mode, retain the \`Too bright\` / \`Too dark\` direction with the decision. A label can target one connected component, a brush region, or an explicitly reviewed color-group selection.
+7. Review all submitted hints in a small queue; edit strength/tolerance/scope, undo, delete, and preview their masks. Applying a label updates the UI **immediately** without rerunning expensive reconstruction per pointer movement.
+8. Press **Refine** to ask the existing Bracket engine for **a second evidence-based pass** over affected tiles. Provide a before/after comparison and explicit messages when no valid source data supports a requested change. Only an accepted complete result replaces the published upstream Bracket output.
+9. Save/reopen all accepted annotations, while preserving the original first merge, automatic behavior when unannotated, and downstream node graph edits.
 
-## Intended user sequence
+### Proposed first-version panel hierarchy
 
-1. Import captures and press Process (or use the existing automatic workflow). Stack completes its initial merge without requesting labels.
-2. Inspect the result at a sufficiently high resolution. In the Bracket panel, show **Color guidance** only after a complete, publishable first result.
-3. Choose **Trust color** or **Question color**, then click or paint a **local** region on the completed image. Use a robust neighborhood estimate instead of a single pixel. Show the sampled color, range/coverage, and available supporting frame evidence.
-4. Optional: choose a source capture/exposure group as the preferred *reference* for the region. This is more informative than claiming a noisy output pixel is true. Selecting a source does not override validity checks.
-5. Review each hint, adjust radius/strength, undo/delete it, and press **Refine color** (a later phase may enable debounced preview). Preview only affected tiles first, then publish an accepted refined result.
-6. Compare **Original merge / Refined** and inspect a **support/confidence** overlay. If no usable alternative evidence exists, say so; keep the baseline or explicitly label an optional inferred-chroma route. Preserve the old completed result while an update runs or fails.
-7. The same Bracket node outputs the accepted result to the normal layer/node graph. Subsequent color grading, exposure, local masks, tone rendering, and export operate on that upstream result.
+\`\`\`text
+Bracket (first graph node / source)
+  Processing                    [existing]
+  Captures                      [existing]
+  Noise Guidance                [new; only after completed first merge]
+    Mode: [Suggested] [Pick color] [Pick brightness]
+    Candidate swatches / manually entered colors / light-dark marks
+    Display: [Isolate selection] [All suspects] [Normal]
+    Scope: [Local region] [Find similar in image]
+    Tolerance / sensitivity / region size
+    Selected pixels, source evidence, zoom
+    Decision: [More cleanup] [Already cleaned] [Real texture] [Unsure]
+    Saved decisions; Refine; Original merge / Refined
+\`\`\`
 
-Suggested first-version UI inside Bracket: Processing; Captures; Color guidance (empty state until result); optional diagnostics. Two obvious tools, "Trust color" and "Question color"; one brush/patch radius; per-hint strength; clear/undo; Refine; Before/After; reliability overlay. No separate global color-palette editor or global hue exclusion. Use labels/patterns as well as colored overlays.
+**Do not** show a nonfunctional \`Noise Guidance\` tool for an unsupported output mode. Normal single-RAW projects retain the **Interpretation** tab.
 
-## Proposed pipeline boundary
+## Isolation and display semantics
 
-Capture preparation / alignment / calibration / group observations
-  -> first neutral/automatic HDR + denoise + native or RGB reconstruction
-  -> completed baseline and retained evidence
-  -> optional authored color hints
-  -> **selective guided re-fusion / reconstruction**, while retaining baseline luminance and evidence contracts
-  -> accepted Bracket output
-  -> downstream RAW development and authored graph operations / display transform
+**Color mode**:
 
-"After the first merge" describes **when the user can author guidance**, not permission to colorize the already tone-mapped display framebuffer. The final computation should consult calibrated scene-referred source data, not bake in current tone curve, white balance appearance, view transform, or exposure sliders. The viewport is a selection surface; its coordinates and picked RGB require a known inverse/source mapping.
+- The photo retains its base *displayed luminance/texture* everywhere.
+- Outside the chosen suspect/manual candidate mask: neutral grayscale (no original hue).
+- Inside the chosen mask: show the pixels' **real local RGB colors** as rendered in the current view. A palette swatch is a representative selector, **not** a flat colored paint overlay.
+- For \`All suspects\`, show the union of enabled candidate masks. Outline or number connected regions; click one to override a group-level judgment. Repeated similar colors in different materials can be different regions.
+- Preserve zoom/pan/viewport coordinates and edge alignment. At zoom, render native-resolution mask boundaries; Stack's existing **512-max-dimension \`SceneColorGuide\` cannot provide pixel-perfect dots alone**.
+- Grayscale isolation is a **non-destructive diagnostic display** and **never** changes source pixels, graph result, exports, RAW evidence, or tone settings.
 
-Implementation must resolve a key difference:
+**Brightness mode**:
 
-- **Standard (Bayer)** can output a native normalized mosaic. There is still a legitimate downstream demosaic operation. For this mode, guided changes must remain valid as re-selection/weighting of real CFA observations. Do **not** silently convert the output to invented full RGB or remove required internal demosaicing. If a requested correction cannot be represented as a valid Bayer reblend, report "insufficient color evidence" for v1.
-- **Super-resolution / reconstructed camera RGB** can incorporate color guidance into the RGB reconstruction stage, with chroma regularization clearly marked as inferred where measurements do not determine it. No synthetic detail may be passed off as captured RAW.
-- **Adaptive** may decide between these outputs. Keep one authored hint format in native reference coordinates, and dispatch through an output-contract-aware backend. Ensure preview and final render use the same decisions.
-- **Panorama** is deliberately out of v1 until its geometry, non-CFA raster result, and overlap color ownership are explicitly supported.
+- Make luminance deviations visible on a neutral grayscale photo without replacing the pixel intensity with a false bright/dark value. Outline selected spots or use an optional overlay (e.g. warm outline for suspected bright spikes and cool outline for dark spikes) rather than pretending their brightness changed.
+- An optional local residual/contrast magnification view may help see one-pixel hot/cold points; label it clearly as diagnostic rather than current output.
+- A bright light, reflection, specular edge or dark painted detail is not automatically noise. The user marks a **suspicious local outlier** and then decides its classification.
 
-## Hint representation and persistence (proposed, not finalized)
+**Already cleaned**:
 
-Define a versioned per-Bracket-source-set ColorGuidance document, or an explicitly versioned BracketingRecipe adjunct, with:
+- To claim a noisy dot was removed, users must be able to inspect **Before input / Removed by merge / Remaining in merge** evidence. The \`Removed\` visualization is a comparison diagnostic, not color overlays painted onto the accepted final result.
+- If the original observation is unavailable, disable or mark this evidence mode as unavailable; never fabricate a "removed noise" map.
 
-- Stable hint UUID, polarity (Trust / Question), strength, enabled flag.
-- Reference-domain coordinates and region (center/path/radius/softness); optional saved mask asset for complex strokes later. No screen coordinates or display-scale dependence.
-- Sample descriptor: robust neighborhood chromaticity, noise/covariance estimate, support category, reference exposure/group/frame if selected, and the **color-space and calibration identity** in which it was measured. The clicked preview's post-view RGB is not itself a camera-space target.
-- Source-set identity, baseline merge identity, orientation/crop mapping identity, and algorithm version. Reprojection on source changes must be verified rather than guessed.
-- A separate diagnostics/provenance object for engine acceptance/rejection, readable in UI but **not** hand-editable raw-measurement status.
+## Candidate representation
 
-Prefer small persisted hint records and recomputed tile evidence over serializing full-resolution masks or gigabytes of per-frame measurements in the project file. Normalize and bounds-check geometry; reject NaN/Inf, impossible frame IDs, stale anchor transforms, unsupported versions, and unreasonable allocations. Disabled or stale hints must not be applied. Saving/reopening must be deterministic and undoable. The shared worker must accept the same document without linking ImGui.
+Keep **engine-suggested candidates** and **user-authored selections** separately identified, but make them share a common local mask and decision UI.
 
-Identity/caching split:
-- **Preparation identity:** input hashes, calibration, exposure grouping, alignment, motion/depth, algorithm revisions. Unaffected by brush edits.
-- **Baseline merge identity:** preparation plus reconstruction/curve choices.
-- **Guidance identity:** baseline + canonical sorted hints + guidance algorithm revision + output contract. Changing one hint invalidates only impacted tile work when geometry and prepared sources remain identical.
-- A change in alignment, origin, orientation or source set may invalidate/reproject hints explicitly. A change to downstream tone/white balance must not silently shift a hint's recorded scene color.
+Suggested candidate metadata:
+- Stable candidate analysis ID tied to **baseline merge identity** + detector algorithm revision.
+- Representative swatch/hue family, per-region source-space chroma, uncertainty / reliability, area, bounding region, connected-component IDs, accepted motion/depth support, calibrated measurement disagreement, clipped/fallback status and category.
+- Sparse per-tile native-resolution membership/provenance for selected regions, with memory-bounded cached masks. Candidate clusters can share a hue yet have different reliability or texture status.
+- Rank/score as **heuristic suspicion**, *not* calibrated probability.
 
-## Candidate solver (v1)
+Manual color metadata:
+- Stable annotation ID; source \`eyedropper\` or \`custom color\`; RGB/color-space identity as entered/displayed; canonical **scene/camera-space or a documented normalized selection representation**, not an implicit 8-bit display RGB baked into processing.
+- Hue/chroma/lightness tolerance and an explicit scope: local brush/ROI (default) or image-wide **candidate matching** (opt-in, independently reviewable).
+- Full-resolution selection mask/connected components determined using a known view-to-source transform. Changing WB/view appearance should either recompute presentation matching explicitly or preserve the authored scene-space anchor, never silently reinterpret the historical swatch.
+- A green/cyan/magenta match must **not** become a global hue-exclusion filter. Identical hue from a real object is separately reviewable and has its own source support.
 
-Use evidence-based, bounded correction — not user-stroke color replacement.
+Manual brightness metadata:
+- Stable annotation ID; direction \`too-bright\` or \`too-dark\`; selected point(s)/ROI; local-baseline scale (spot, texture, blotch); tolerance/sensitivity; source coordinate transform and relevant exposure/scene-linear unit identity.
+- Use a **local luminance residual** measured against robust neighborhoods and source consistency; not "all pixels below X" or "above Y". Save the actual selected region so future reprocessing does not over-expand it on appearance changes.
+- Luminance and chroma hints are independent **channels of guidance**. Opposing labels on overlapping regions must resolve explicitly: \`Real detail\` protection should block destructive smoothing until reviewed, and the UI should flag conflicting labels.
 
-1. From prepared, aligned groups for each touched tile, recover candidate calibrated camera-color observations and their measurement/model variances, support, clipping, fallback state, motion rejection and exposure-group provenance. A low-res SceneColorGuide may prioritize problem areas but is not sufficient to perform full-res reconstruction.
-2. Establish the **baseline** joint color decision and unbiased luminance/detail estimate. Preserve current reliable weights for clearly supported regions. Detect genuinely ambiguous local chroma using noise-corrected differences, cross-exposure disagreement, spatial support and local motion/depth risk.
-3. **Trust** biases a measured, supported candidate or neighborhood color family *locally* where it is plausible. **Question** reduces the preference for that local color hypothesis and looks for an independently supported alternative. It never marks an unmeasured color as clipped, and never makes an invalid source usable.
-4. Use robust chromaticity / opponent-color differences with uncertainty-adaptive tolerances; in near-zero light, color ratios are unstable, so cap influence and use a wider neighborhood plus absolute signal checks. Prefer joint RGB/exposure-group reweighting to independent per-channel cherry-picking.
-5. Optional edge-aware spatial propagation may regularize **chroma**, but should stop at luminance edges, depth/occlusion masks, accepted motion boundaries, and regions with conflicting reliable evidence. Do not blur high-frequency luminance/detail or spread a swatch across the entire frame.
-6. Bound deviation from the baseline by measured variance and total support; cap guided-weight multipliers. If there is no valid alternative (including fully clipped, black/no-signal, or moving subjects without correspondence), do not force a "correct" color. Surface the reason.
-7. Re-run a bounded second pass on affected tiles through shared Bracket processing. GPU memory/headroom and worker admission must be accounted for, cancellation responsive, accepted result atomically adopted, and stale preview results rejected.
+Shared decision data:
+- \`needs_cleanup\`, \`already_cleaned\`, \`real_texture\`, \`unsure\`; emphasis on chroma, luminance, or both; local severity/strength; enabled flag; authoring order/history; optional frame/group reference as supporting evidence.
+- Validate finite parameters, maximum mask/stroke sizes, source-set membership, image transform, stale baseline, legacy reader behavior, duplicate/overlapping identities, and output-mode support.
+- No annotation changes **raw sample values**, motion validity, clipping flags, measured noise model, or evidence confidence as if it were a real observation.
 
-A plausible future objective is a robust data term over actual exposure samples + spatially edge-aware chroma regularity + locally gated user preferences. It is **not** an unconstrained global colorization solve. Measure before committing to a specific optimizer, threshold, chromaticity space, or number of iterations; compare against simple noise-aware group reweighting first.
+## Detection approach (prototype, evidence-driven and testable)
 
-### Important conceptual distinction
+### Suspected chroma noise / false color
 
-Marking a color as **Question** is evidence about the *output appearance*, not about which source is at fault. First identify whether the color came from weak measurements, mismatched exposures, clipping fallback, demosaic/aliasing, or motion mismatch; only then choose the correction mechanism. Questioning purple shadows should not suppress authentic purple lights or paint gray over everything. Likewise, marking a noisy red pixel "Trust" must not promote it above reliable green/blue evidence just because it was clicked.
+1. Compare per-pixel or per-tile reconstructed chroma to an **edge-aware local reference** at appropriate scales; distinguish unexpected high-frequency color changes from actual luminance/colored surface structure.
+2. Use retained **aligned multi-frame observations** with calibrated noise/uncertainty. Agreement between independent valid captures makes true material differences more plausible; large noise-normalized disagreement suggests uncertain chroma. Correlated frames or shared registration errors must not be counted as independent confirmations.
+3. Use clipping/partial source validity, source-group contribution, motion rejection, occlusion/depth boundaries, interpolation/demosaic false color and shot/read-noise characteristics. An isolated saturated speck in a dark area is a *suggestion*, not an absolute fact.
+4. Cluster suspect observations by **chroma similarity + spatial/evidence context**, then offer representative palette swatches. Avoid generating hundreds of swatches or grouping all green pixels together.
+5. After user chooses a color, compute a **bounded** similarity mask, then intersect with the user scope and present connected-component review. It may include legitimate green textures; classification or protected region overrides handle those cases.
 
-## Graph and panel plan
+### Suspected luminance noise
 
-- Keep the canonical managed "MultiFrameHdr" source/project-graph first node; display its photographic identity as **Bracket**, rather than introducing editable upstream graph nodes or moving bracket reconstruction after adjustment nodes.
-- For bracket project/context, rename first side-panel tab **Source -> Bracket**. For ordinary RAW projects retain **Interpretation**.
-- When opening/selecting the first bracket source node, ensure the Bracket tab is visibly selected and its controls reflect the active source set. Do not simply rely on an incidental selected adjustment node.
-- In Bracket mode, do not render the single-RAW demosaic *control section*. Today the panel already dispatches to separate Bracket controls, so this is an invariant to test, not a request to delete working downstream Bayer demosaicing.
-- Bracket-specific colors/brushes attach to the Bracket source-set owner and are evaluated **before** later graph nodes. Editing later nodes must not rewrite hints, change the first source's ownership, or duplicate the Bracket source in the projection.
-- Single-RAW Interpretation, white balance and its existing demosaic controls remain unchanged. If a Bracket output is reconstructed RGB, preserve the no-double-demosaic behavior; if native Bayer, ensure it is developed once.
+1. Build local expected-luminance references at several spatial scales from scene-linear calibrated samples, with careful handling of HDR exposure levels, zero/negative linear values, and unavoidable tone/display transformation for selection.
+2. Compare signed local deviations (bright vs dark spikes/blotches) to the **source noise model**, repeated capture support, and local gradients/edges. Avoid treating all shadows, stars, detailed rough surfaces, sensor clipping, or true specular highlights as denoise targets.
+3. Optionally propose \`bright spots\`, \`dark spots\`, or \`blotches\`, but manual marking works independently even when automatic detection returns no suggestions.
+4. A \`needs_cleanup\` luminance hint requests a bounded luminance-consistent reconstruction (or evidence-weighted temporal selection), not a blanket exposure reduction or global tone curve. \`real_texture\` protects supported luminance detail while refining chroma independently.
 
-## Performance / failure / lifecycle
+### Second-pass fusion/refinement
 
-- Keep original accepted baseline visible during guidance editing and a second-pass worker; do not stall ImGui or start a full reprojection on each mouse move.
-- Interacting with the hint brush should update lightweight overlay state immediately. Debounce processing and cancel superseded previews. Never run disk/IPC/GL-wait work on the UI thread.
-- Cache tile results by source identity, hint subset and output mode, with suitable halo width for edge-aware propagation. Bounded caches obey the same weak-hardware GPU/host-memory policies as the rest of Bracket.
-- Stage outcomes: first merge complete; guidance pending; refining; refined accepted; guidance failed/stale. On failure keep the previous accepted image rather than exporting a partial/inconsistent result.
-- On reopening a project whose prepared inputs are gone, display stored final output and hint metadata safely; recompute only when sources are available. Do not mislabel old guides as valid for new sources.
-- Both the desktop Stack editor and StackBurst/headless path must consume the same versioned recipe/data contract; unattended processing simply has no hints by default.
+- The first completed merge stays authoritative until replacement; labels are *preferences* interpreted against valid observations, **not** new measurements or user-specified output RGB/Y.
+- Prefer reweighing reliable, nonclipped, motion-consistent source groups and **selective frequency-aware chroma/luminance regularization** over generic blur. Separate chroma and luminance penalties; respect group-wise RGB coherence and source uncertainty.
+- Edge-aware smoothing must not cross valid structural boundaries, depth/occlusion edges or moving subjects; a texture-preservation hint must protect local fine details. Both over-denoise and under-denoise are failure modes.
+- Cap correction by measured uncertainty and support. Reject impossible recolor/brightness requests gracefully. If only one source is usable or all exposures lack information, report \`insufficient evidence\`.
+- Work on **source-referred calibrated measurements** or the chosen reconstruction's internal data, not the final tone-mapped 8-bit viewport. Display-only grayscale is excluded from processing.
+- Do not claim precise quantitative improvement until compared with controlled ground-truth captures. First test basic robust group reweighting against more complex spatial optimization.
 
-## Test and measurement plan
+## Output contracts and placement
 
-1. **Zero-hint parity:** exact baseline parity for Standard Bayer, Adaptive, SR 1x/2x, ordinary HDR, and mixed exposure stacks. No surprise identity or GPU allocation changes in the no-hint path.
-2. **Supported correction:** noisy shadow with multiple exposure sources where one has better valid color; trust/question hints improve chroma versus a known controlled reference, without altering measured luminance or crossing edges.
-3. **Impossible correction:** all colors clipped, black/no-signal, no compatible source, synthetic magenta fallback, or only one valid sample. No invented certainty, bad sample activation or non-finite values; explicit warning.
-4. **Mixed evidence:** real saturated colored lights, red/blue sensor saturation asymmetry, mixed illumination/white balance, motion/occlusion, depth/parallax, demosaic artifacts; no color wash, channel seams or color bleeding.
-5. **UX:** preview -> sample -> brush -> undo/redo -> refine -> save/reopen -> source-set switch -> graph-first-node selection; verify no demosaic selector in Bracket and standard RAW Interpretation still works.
-6. **Persistence/transport:** old recipes load as zero-hint; same hints round-trip; deterministic hashes; no stale guidance accepted; worker wire/result artifacts tolerate missing optional guidance; no unsupported schema read.
-7. **Quality/perf:** reference screenshots and per-region quantitative color error plus false-change area, retained luminance texture, fallback count, source provenance, tile latency, max resident CPU/GPU budget, cancellation, repeated edits and stress tests. Test with Stack's documented Windows/GL workflows, not only synthetic CPU helpers.
+\`\`\`text
+Source captures
+  -> alignment / exposure calibration / noise model / HDR & temporal fusion
+  -> Standard Bayer / reconstructed RGB / adaptive output as today
+  -> ACCEPTED IMMUTABLE FIRST MERGE
+  -> optional suspect analysis + user manual selections and labels (review only)
+  -> optional selective guided second pass using retained source evidence
+  -> ACCEPTED BRACKET RESULT (same source node)
+  -> downstream RAW development, demosaic where actually required, graph adjustments, display/export
+\`\`\`
 
-Do not claim this plan's acceptance tests are passing until code for the guided pass is written and validated.
+**Mode-specific guardrails**:
 
-## Incremental implementation proposals
+- **Standard (Bayer):** the image may still require actual downstream demosaic. Hide the single-RAW demosaic *control section* from the Bracket panel, **do not delete the required demosaicing**. Corrections must remain compatible with valid CFA observation reweighting; a post-RGB paint layer cannot be misrepresented as Bayer recovery.
+- **Super-resolution / reconstructed-camera-RGB:** a targeted supported color/luminance refinement can occur in the reconstruction stage. Mark inferred chroma as inferred, not measured.
+- **Adaptive:** preserve its selected output contract and branch on the actual mode; no hidden switch to RGB because a user picked a color.
+- **Panorama:** opt out of unsupported v1 review/refinement until coordinate/overlap semantics have explicit tests.
+- Remain correct for full HDR/signed values, clipping, coverage, provenance, and no-double-demosaic rules.
 
-- **A — UI and contract:** rename first tab; confirm first-node routing; implement hint types, source-set persistence and migrations; add UI editing/picking overlays without affecting the output. Establish reliable coordinate transforms and history.
-- **B — Evidence/prototype:** instrument per-tile candidate chroma/support and preview diagnostics from shared Bracket engine; test a simple local robust reweighting against noisy shadow fixtures before expanding spatial propagation.
-- **C — Guided reconstruction:** implement selective processing and cache identities for RGB output, plus a strictly measurement-supported Standard Bayer path (or postpone unsupported native cases with clear status); preserve no-hint parity.
-- **D — Productization:** native-resolution acceptance/publish, headless parity, stress tests, robustness in saving/reopening, visual QA, UI affordances and Windows GPU performance.
+## Ownership, cache identity and persistence
 
-## Decisions for discussion (recommended defaults)
+Repository integration points confirmed:
+- \`src/Raw/Bracketing/Processor.cpp\`, \`HdrColorFusion.cpp\`, \`Merge.cpp\` — prepared observations, color-aware exposure fusion, reblend and reconstruction.
+- \`src/Raw/Bracketing/SceneColorEvidence.h\`, \`SceneColorContract.h\`, \`src/Raw/SceneColorGuide.h\` — **immutable**, compact, source-derived color reliability (maximum side 512), which can guide ranking but **is not** a native-resolution editable mask.
+- \`src/Raw/Bracketing/Recipe.h\` — currently RecipeVersion 10. Propose a **separate versioned source-set review document**, not a new per-brush preparation dependency.
+- \`src/Project/BracketingState.h\` — draft, completed result, revisioned async preview/adoption. Extend saved review state and independently cancelable candidate/refinement jobs.
+- \`src/Editor/Bracketing/BracketingWorkspace.cpp\`, \`src/Editor/Internal/RawLab/EditorModuleRawSectionPanel.cpp\` — existing Bracket sidebar and proposed Noise Guidance subsection; panel currently dispatches to bracket controls instead of single-RAW Interpretation.
+- \`src/Project/RawProjectGraph.cpp\`, \`src/Editor/Internal/RawLab/EditorModuleRawLayerGraph.cpp\`, \`EditorModuleRawProjectGraph.cpp\` — the first graph source already exists as a managed \`MultiFrameHdr\` node / protected projection. The same source owns the guidance and accepted result; no duplicate upstream node.
+- \`src/BurstEngine/Client.cpp\`, \`Worker.cpp\`, result serialization — shared headless/desktop processing contract. Headless without labels must be identical to today.
 
-1. **What is "correct" sampling?** Default: mark a region from the merged image; optionally pin a trustworthy source exposure when it exists. A chosen source is still tested for clipping/motion/noise. Do not request numerical RGB entry for v1.
-2. **How far may a hint reach?** Default: local brush region with modest edge-aware propagation. No global "all pixels of this hue" option in v1.
-3. **What if no physical source supports the intended hue?** Default: preserve measured baseline and warn. Keep speculative colorization or author-painted chroma as a distinct future, explicitly labeled mode rather than misrepresenting it as recovered RAW.
-4. **When to run?** Default: initial Process remains automatic; after hints, explicit Refine with optional bounded region preview. Defer live full-resolution reruns.
-5. **Output modes?** Default: keep current native Bayer and RGB contracts. Scope the first actual solve to RGB if native CFA-guided weighting proves too constrained; still preserve authored hints and report unsupported cases.
-6. **How should bracket source appear?** Default: one first **Bracket** node opening the Bracket side tab; ordinary Interpretation is untouched.
+Separate identities:
+- **Prepared source identity**: capture hashes, calibration, origin, alignment, exposure groups, motion/depth; never recomputed because of a swatch click.
+- **Baseline merge identity**: prepared source + reconstruction/output modes and authored merge settings.
+- **Candidate analysis identity**: baseline + detector revision + scale/quality; candidates themselves should not mutate when a user changes a decision.
+- **Review identity**: canonical manual swatch/brightness selections, labels, resolved connected-component mask IDs, and baseline transform. UI highlight/selection has no durable result-identity cost.
+- **Refinement identity**: baseline + review identity + solver revision + output contract, with tile/halo-level cache invalidation when possible.
 
-## Literature and adjacent techniques
+Keep masks/provenance memory bounded: save sparse strokes or compact region descriptors and re-derive selection masks deterministically; don't put massive full-resolution RGB/mask arrays into project JSON. Store known source-space representation, allow undo/redo, validate stale transforms, handle old projects with zero hints, and permit reopening without prepared input data (display saved output safely, but disable unsupported re-refinement).
 
-- Wronski et al., *Handheld Multi-Frame Super-Resolution* (ACM TOG 2019): noise-corrected local color differences, CFA-aware reconstruction, and motion/rejection. https://research.google/pubs/handheld-multi-frame-super-resolution/
-- Granados et al., *Optimal HDR Reconstruction with Linear Digital Cameras* (2010): noise-calibrated multi-exposure weighting and uncertainty. https://vcai.mpi-inf.mpg.de/projects/opthdr/granados10_opthdr.pdf
-- Levin, Lischinski and Weiss, *Colorization using Optimization* (ACM TOG 2004): a reference for sparse local hints and edge-aware propagation, **not** a license to hallucinate camera measurements. https://doi.org/10.1145/1015706.1015780
+When a candidate is marked \`already_cleaned\`, this is diagnostic review evidence and should have **no pixel effect**. \`real_texture\` should protect candidate pixels from refinements which would otherwise smooth them. Changes must be atomic, cancelable, project-revision checked, memory-budgeted and never block ImGui. A failed refinement keeps the last accepted result.
 
-These works motivate concepts, not a copied implementation. New tests and source verification must determine whether a given method is appropriate for Stack's exact CFA, radiance, HDR and resource contracts.
+## Test plan
+
+1. **No-label parity** — all existing bracket modes and sources are unchanged bit-for-bit or within the established numerical contract; no unexpected memory or resource changes.
+2. **Candidate suggestion** — noisy magenta/green/cyan speckles against uniform wall; one true saturated LED / painted stripe of same hue; verify separate spatial candidate masks and "suspicion" not certainty.
+3. **Manual color entry** — eyedropper and freely typed/picked arbitrary colors; tolerance changes; local vs explicit image-wide selection; grayscale outside selected mask; pixel-accurate selected dots at high zoom and stable performance.
+4. **Manual luminance** — hot bright flecks and dark dead-pixel-like flecks, low-frequency blotches, shadows, reflections, stars, high-contrast edges, and patterned/rough real textures. Selected direction and reason survive save/reopen.
+5. **Judgments** — \`more_cleanup\` only influences supported selected regions, \`already_cleaned\` no pixel effect, \`real_texture\` prevents over-smoothing, \`unsure\` no effect; conflicts and local overrides behave predictably.
+6. **View separation** — grayscale isolation and bright/dark highlights only change screen diagnostics, never final export or node-graph image; compare views clearly mark which evidence stage they show.
+7. **Hard source cases** — all exposures clipped, very low photon count, no valid alternative, motion/depth edges, different illumination, HDR overrange, Bayer vs reconstructed RGB, adaptive output, stale color space or coordinates.
+8. **Lifecycle** — first-process completion, candidate analysis, input edits, brush edits, undo/redo, background cancellation, stale-result rejection, save/load, worker/headless replay, compare and final acceptance.
+9. **Budget/performance** — bounded tile cache/halo, progressive high-res masks, no UI-thread GPU/IPC stalls, weak vs strong hardware, repeated swatch selection, rapid zoom/pan.
+
+Related existing validation entry points: \`BracketingNodeSurfaceValidation\`, \`BracketingUiValidation\`, \`BracketingSceneColorValidation\`, \`InterpretationValidation\`, \`BracketingValidation\` and Burst-worker tests. **None of the new tests are implemented or run in this draft PR.**
+
+## Implementation slices
+
+**A — Review UX & source ownership.** Keep the source graph node. Label its bracket-only first tab **Bracket** (already changed in this draft PR), ensure selecting it activates that tab, build non-destructive color-isolation and bright/dark diagnostic overlay with **manual picker first** (does not depend on candidate-detector quality), source-space transforms, labeling and undo/redo.
+
+**B — Suggested suspect analyzer.** Add bounded shared-engine chroma candidate analysis/ranking with explicit source/variance evidence and native-resolution masks. Optionally add luminance suspect suggestions after the manual pick path is trustworthy. Separate "removed in original merge" evidence from "still remaining" artifact detections.
+
+**C — Versioned review persistence & worker transport.** Store swatches/brightness marks/masks and decisions per source-set with independent identities and source validity. Save/reopen migration; headless ignores absent labels.
+
+**D — Guided second-pass solver.** Try reliable local source-group reweighting, chroma vs luminance controls and texture-preserve guardrails, then selective spatial regularization with bounded tile halos. Support RGB and CFA output contracts explicitly; surface unsupported operations.
+
+**E — Acceptance, validation and productization.** Exact no-guidance parity, controlled ground truth, interactive performance, end-to-end project stability, UI screenshots, full HDR and high-resolution behavior.
+
+## Open questions and proposed defaults
+
+1. **Manual color matching scope:** local brush/region by default with explicit \`Find similar across image\` toggle; show exact mask before submitting.
+2. **Input method:** offer automatic palette swatches, image eyedropper, and unrestricted custom color picker. All can be classified using the same decisions.
+3. **Luminance controls:** \`Too bright\` and \`Too dark\` selections, optional surrounding pixel search and sensitivity. Avoid global darkness/brightness thresholds.
+4. **Decisions:** \`Needs more cleanup\`, \`Already cleaned\`, \`Real color / texture\`, \`Unsure\`; no pixel change from \`Already cleaned\`, which requires comparison provenance.
+5. **Insufficient source evidence:** preserve baseline and report why; never fabricate recovered sensor data. Optional explicitly labeled creative repair belongs to a distinct future tool.
+6. **Reprocessing:** run once after initial merge, preview masks immediately, refine explicitly via background worker and selectively re-evaluate affected tiles. No per-mouse-move global merge.
+7. **Bayer/RGB behavior:** preserve current output contract; implement mode-specific correction or present a clear unavailable state.
+
+## Research starting points
+
+- Granados et al., *Optimal HDR Reconstruction with Linear Digital Cameras* (2010): calibrated multi-exposure noise/weighting. https://vcai.mpi-inf.mpg.de/projects/opthdr/granados10_opthdr.pdf
+- Wronski et al., *Handheld Multi-Frame Super-Resolution* (ACM TOG 2019): CFA-aware, noise-corrected aligned source evidence. https://research.google/pubs/handheld-multi-frame-super-resolution/
+- Levin, Lischinski and Weiss, *Colorization using Optimization* (ACM TOG 2004): conceptual reference for edge-aware sparse-constraint propagation, **not** a license to invent camera measurements. https://doi.org/10.1145/1015706.1015780
+
+Citations here are architecture background, not evidence that a particular future algorithm will work. Validate candidate detection, false positives and guided denoise against real and controlled reference data before claiming results.
