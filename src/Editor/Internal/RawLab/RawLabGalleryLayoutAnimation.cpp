@@ -95,7 +95,7 @@ void GalleryLayoutAnimation::PrepareSwitch(const std::string& preferredKey) {
     const Pose* anchor = nullptr;
     float nearest = std::numeric_limits<float>::max();
     for (const auto& [key, pose] : layout) {
-        if (!pose.rendered || !pose.image.Overlaps(pose.clip) ||
+        if (!pose.image.Overlaps(pose.clip) ||
             pose.clip.GetWidth() <= 0 || pose.clip.GetHeight() <= 0) continue;
         const ImVec2 center = pose.image.GetCenter();
         const ImVec2 viewportCenter = m_Viewport.GetCenter();

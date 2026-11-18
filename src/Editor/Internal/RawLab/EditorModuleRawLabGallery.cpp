@@ -1723,12 +1723,17 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
             if(!m_LibraryWindowHovered && !io.KeyCtrl && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
                 const float wheel=std::abs(io.MouseWheelH)>.0001f?io.MouseWheelH:io.MouseWheel;
                 if(std::abs(wheel)>.0001f) {
+                    if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && ImGui::GetScrollMaxX()>0)
+                        m_GalleryNavigationMotion->BrowseDuringOpen();
                     motion.glide.Wheel(wheel,motion.uniformStops,motion.uniformStops.size()-1,
                         ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());target=motion.glide.Position();
                 }
             }
-            if(gridBrowse.filmstripSlots.dragging && io.MouseDown[0])
+            if(gridBrowse.filmstripSlots.dragging && io.MouseDown[0]) {
+                if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && std::abs(target-motion.current)>1.f)
+                    m_GalleryNavigationMotion->BrowseDuringOpen();
                 motion.glide.Drag(target,motion.uniformMaximum,ImGui::GetTime());
+            }
             else motion.glide.Step(target,motion.uniformStops,motion.uniformStops.size()-1,
                 ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
             motion.current=motion.lastApplied=motion.glide.Position();
@@ -1960,6 +1965,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 ? io.MouseWheelH
                 : io.MouseWheel;
             if (std::abs(wheel) > 0.0001f) {
+                if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && ImGui::GetScrollMaxX()>0)
+                    m_GalleryNavigationMotion->BrowseDuringOpen();
                 applyWheel(wheel);
             }
         }
@@ -1967,7 +1974,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const float scrollMaximumX = alignedSlots ? slots.maximum : std::max(0.f,ImGui::GetScrollMaxX());
         const bool continuous=(slots.dragging && io.MouseDown[0]) ||
             m_RawWorkspaceLabFilmstripDragState.phase==RawGalleryFilmstripDragPhase::Dragging;
-        if(continuous)scrollMotion.glide.Drag(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaximumX,ImGui::GetTime());
+        if(continuous) {
+            if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion &&
+                std::abs(m_RawWorkspaceLabFilmstripScrollTargetX-currentScrollX)>1.f)
+                m_GalleryNavigationMotion->BrowseDuringOpen();
+            scrollMotion.glide.Drag(m_RawWorkspaceLabFilmstripScrollTargetX,scrollMaximumX,ImGui::GetTime());
+        }
         else scrollMotion.glide.Step(m_RawWorkspaceLabFilmstripScrollTargetX,motionStops,motionLast,
             ImGui::GetTime(),Stack::LibraryUi::ReducedMotion());
         scrollMotion.current=scrollMotion.lastApplied=scrollMotion.glide.Position();

@@ -1305,6 +1305,7 @@ public:
     Stack::Renderer::GalleryTransitionOrigin CaptureGalleryTransitionOrigin(
         const std::filesystem::path& subject,const std::string& key={},const ImRect& bounds={});
     void EnsureGraphWorkers();
+    bool GalleryOpeningPreviewReady();
     bool GalleryLoadFailed() const;
     struct RawGalleryOpenItem {
         std::filesystem::path path;
@@ -1833,6 +1834,8 @@ private:
     Stack::RawWorkspace::WorkspaceState m_RawWorkspace;
     std::optional<Stack::RawWorkspace::SourceRecord> m_PinnedRawWorkspaceSource;
     std::string m_RawWorkspaceSelectedSourceBeforePinnedProject;
+    // UI-thread presentation lifetime for a newly opened Gallery folder.
+    std::uint64_t m_GalleryDiscoveryGeneration = 0;
     std::uint64_t m_RawWorkspaceScanGeneration = 0;
     int m_RawGalleryShortcutFrame = -1;
     bool m_RawGalleryDeletionPending = false;

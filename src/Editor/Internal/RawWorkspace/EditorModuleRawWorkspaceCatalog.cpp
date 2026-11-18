@@ -864,6 +864,7 @@ void EditorModule::FlushRawWorkspacePersistenceForShutdown() {
 void EditorModule::RequestOpenRawWorkspace(const std::filesystem::path& selectedFolder) {
     if(selectedFolder.empty())return;
     if(RequestAutoBracketForeground("open another folder",[this,selectedFolder]{RequestOpenRawWorkspace(selectedFolder);}))return;
+    m_GalleryDiscoveryGeneration = 0;
     const auto generation=++m_RawWorkspaceFolderOpenGeneration;
     auto prepare=[this,selectedFolder,generation,roots=m_RawWorkspace.registeredSourceFolders,
                         gallery=m_PermanentGalleryWorkspace]() mutable {
@@ -997,6 +998,7 @@ void EditorModule::RequestRawWorkspaceScan(bool allowCachedCatalog) {
 }
 
 void EditorModule::RequestRawWorkspaceScanImpl(bool allowCachedCatalog) {
+    m_GalleryDiscoveryGeneration = 0;
     // An explicit reconnect/rescan retries failed tiles without discarding
     // successful resident images. No recurring drive polling is necessary.
     for(auto& item:m_RawWorkspaceThumbnailTextures)
@@ -1036,6 +1038,9 @@ void EditorModule::RequestRawWorkspaceScanImpl(bool allowCachedCatalog) {
             !m_RawWorkspace.sources.empty();
         m_RawWorkspaceScanSnapshot.statusText = "Scanning Workspace...";
     }
+
+    if (m_PermanentGalleryWorkspace && m_RawWorkspace.sources.empty())
+        m_GalleryDiscoveryGeneration = generation;
 
     bool submitted = false;
     try {
@@ -2208,6 +2213,7 @@ void EditorModule::RequestRawWorkspaceThumbnailGenerationImpl() {
 }
 
 void EditorModule::ClearRawWorkspace() {
+    m_GalleryDiscoveryGeneration = 0;
     ++m_RawWorkspaceFolderOpenGeneration;
     RememberRawWorkspaceFolderCards();
     m_RawWorkspace.allSourceFolders = false;

@@ -339,6 +339,8 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
             const int steps = static_cast<int>(std::clamp(accumulated, -100.f, 100.f));
             storage->SetFloat(wheelKey, accumulated - steps);
             if (steps == 0) return;
+            if (m_PermanentGalleryWorkspace && m_GalleryNavigationMotion)
+                m_GalleryNavigationMotion->BrowseDuringOpen();
             // Resolve browsing order only on wheel input, using the same cached
             // filtered stacks as the filmstrip, including their member images.
             struct Target { std::string source; std::filesystem::path project; std::size_t slot; };

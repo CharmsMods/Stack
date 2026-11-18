@@ -81,7 +81,14 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     }
     auto& stacks = m_RawWorkspaceLabVisibleGalleryStacksCache;
     m_RawFilmstripHeight.first = -1;
-    stacks = resolved;
+    if (m_GalleryDiscoveryGeneration) {
+        // Rebind existing slots by identity when the catalog vector is replaced.
+        // The authoritative sort and grouping are adopted together after discovery.
+        if (stacks.empty() || m_RawWorkspaceLabVisibleGalleryWorkspaceKey != m_RawWorkspaceFilmstripStacksCacheWorkspaceKey ||
+            m_RawWorkspaceLabVisibleGalleryFolderFilter != folderFilter) stacks = resolved;
+    } else {
+        stacks = resolved;
+    }
     std::unordered_set<std::string> assigned;
     assigned.reserve(views.size());
     bool anchorChanged = false;
@@ -91,7 +98,7 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
             [&](const auto& key) {
                 return views.find(key) == views.end() || !assigned.insert(key).second;
             }), stack.sourceKeys.end());
-        if (!stack.sourceKeys.empty() && stack.sourceKeys.front() != anchor) {
+        if (!stack.sourceKeys.empty() && (m_GalleryDiscoveryGeneration || stack.sourceKeys.front() != anchor)) {
             const auto index = views.at(stack.sourceKeys.front())->sourceIndex;
             stack.anchorCatalogIndex = index;
             stack.folderKey = m_RawWorkspace.sources[index].parentFolderKey;
@@ -118,7 +125,7 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
         ? defaultOrganization : organization->second;
     // A manual stack can span folders. If filtering removes its anchor, sort
     // the surviving stack by its new first member for both views.
-    if (anchorChanged) stacks = Stack::RawWorkspace::SortRawGalleryFilmstripStacks(
+    if (anchorChanged && !m_GalleryDiscoveryGeneration) stacks = Stack::RawWorkspace::SortRawGalleryFilmstripStacks(
         std::move(stacks), m_RawWorkspaceFilmstripSortSources, ordering);
     updateCompletion(stacks);
     m_RawWorkspaceLabVisibleGalleryWorkspaceKey = m_RawWorkspaceFilmstripStacksCacheWorkspaceKey;
@@ -127,7 +134,8 @@ EditorModule::ResolveRawWorkspaceVisibleGalleryStacks() {
     m_RawWorkspaceLabVisibleGalleryFolderFilter = folderFilter;
     m_RawWorkspaceLabVisibleGalleryOrganizationRevision = m_RawWorkspaceFilmstripOrganizationRevision;
     m_RawWorkspaceLabVisibleGallerySections = Stack::RawWorkspace::BuildRawGalleryStackSections(
-        stacks, ordering.sortMode, m_RawWorkspaceFilmstripSortSources);
+        stacks, m_GalleryDiscoveryGeneration ? Stack::RawWorkspace::RawGalleryFilmstripSortMode::Manual : ordering.sortMode,
+        m_RawWorkspaceFilmstripSortSources);
     m_RawWorkspaceLabFilmstripStackTimelineActive = false;
     m_RawWorkspaceGalleryGridStacks.Reconcile(m_RawWorkspaceLabVisibleGalleryWorkspaceKey, stacks);
     return stacks;

@@ -15,8 +15,13 @@ class GalleryNavigationTransition {
 public:
     using Origin=Renderer::GalleryTransitionOrigin;
     void Tick(double now,int frame,bool reduced);
-    std::uint64_t NewIntent() {return ++navigationIntent;}
+    std::uint64_t NewIntent() {pendingOrigin={}; return ++navigationIntent;}
     std::uint64_t Intent() const {return navigationIntent;}
+    void AwaitPreview(const Origin& origin) {pendingOrigin=origin;pendingSince=time;}
+    void BrowseDuringOpen() {if(pendingOrigin.Valid())NewIntent();}
+    bool AwaitingPreview() const {return pendingOrigin.Valid();}
+    void FinishWaiting() {pendingOrigin={};}
+    static void DrawLoader(ImDrawList&,ImRect,float amount,bool reduced);
     void Folders(bool open,ImRect anchor,ImRect destination={},std::string chosen={});
     bool FoldersVisible() const {return foldersRequested || folderAmount.IsActive() || folderAmount.Value()>.0001f;}
     bool FoldersMoving() const {return folderAmount.IsActive();}
@@ -56,7 +61,8 @@ private:
     unsigned int liveTexture=0; // Borrowed only for the current submitted frame.
     Animation::ScalarChannel folderAmount,sceneAmount{1.f},imageCrop{1.f};
     std::array<Animation::ScalarChannel,4> imageBounds;
-    Origin imageOrigin;
+    Origin imageOrigin,pendingOrigin;
+    double pendingSince=0;
     ImRect browseAnchor{},folderDestination{},imageTarget{},departure{};
     std::string chosenFolder;
     std::vector<Origin> pagesFromFolder;

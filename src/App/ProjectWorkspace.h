@@ -31,6 +31,8 @@ struct ProjectWorkspace {
     int rootTab = 5;
     ProjectLoadTransition loadTransition;
     Stack::Renderer::GalleryTransitionOrigin galleryOrigin;
+    std::uint64_t galleryOpenIntent = 0;
+    bool galleryOpening = false;
     bool galleryBracket = false;
     bool galleryArrivalPending = false;
     double galleryArrivalStarted = -1;

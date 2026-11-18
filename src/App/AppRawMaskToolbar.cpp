@@ -221,6 +221,7 @@ void AppShell::RenderSharedPanelToggle() {
         ToggleWorkspaceSectionPanel();
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
         m_NavigationRail.pinnedOpen = !m_NavigationRail.pinnedOpen;
+        ImGui::MarkIniSettingsDirty();
         if (m_NavigationRail.pinnedOpen && !m_NavigationRail.panelOpen)
             ToggleWorkspaceSectionPanel();
     }

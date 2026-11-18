@@ -204,6 +204,8 @@ void EditorModule::RenderRawWorkspaceLabFilmstripTimeline(
             (ImGui::GetIO().MousePos.x - left - ImGui::GetStateStorage()->GetFloat(dragOffsetId)) /
                 std::max(1.0f, thumbTravel),
             0.0f, 1.0f);
+        if(m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && targetFraction*scrollMaxX!=m_RawWorkspaceLabFilmstripScrollTargetX)
+            m_GalleryNavigationMotion->BrowseDuringOpen();
         m_RawWorkspaceLabFilmstripScrollTargetX =
             targetFraction * scrollMaxX;
         auto& motion=m_RawWorkspaceGalleryGridStacks.filmstripScroll;

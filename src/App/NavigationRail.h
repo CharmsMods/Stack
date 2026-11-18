@@ -13,7 +13,8 @@ struct RailState {
     Stack::Animation::ControlMotion stackMenuMotion, libraryMotion, queueMotion;
     Stack::Animation::ControlMotion panelToggleMotion, activityMotion;
     bool panelOpen = true;
-    bool pinnedOpen = false;
+    bool pinnedOpen = true;
+    bool openGalleryInSidebar = false;
     bool galleryView = true;
     LibraryUi::ViewSwitchMotion libraryViewMotion;
     float panelAmount = 1.0f;

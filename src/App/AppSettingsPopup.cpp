@@ -1,3 +1,4 @@
+#include <imgui_internal.h>
 #include "Hdr/Presentation.h"
 #include "App/settings/PaletteWorkshop.h"
 #include "App/settings/ViewportQualityControls.h"
@@ -940,6 +941,7 @@ void RenderContents(
     EditorModule* editor,
     AppUpdate::UpdateManager* updateManager,
     AppLegal::Manager* legalManager,
+    bool& openGalleryInSidebar,
     State& state) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(appearance);
@@ -1050,6 +1052,9 @@ void RenderContents(
     }
     switch (state.activeCategory) {
     case Category::Appearance:
+        if (ImGui::Checkbox("Open Gallery items in the sidebar", &openGalleryInSidebar))
+            ImGui::MarkIniSettingsDirty();
+        ImGui::Spacing();
         RenderAppearanceSection(appearance, state, detailWidth);
         break;
     case Category::Background:

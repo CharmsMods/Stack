@@ -1332,8 +1332,11 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                         ImGui::SetNextWindowScroll({motion.current, 0.f});
                     }
                     slots.Frame(std::max(0.f, motion.current));
-                    stripMinimum.x += slots.margin;
-                    stripWidth = slots.width;
+                    if (!m_GalleryDiscoveryGeneration ||
+                        m_RawWorkspaceGalleryContentMode != Stack::RawWorkspace::GalleryContentMode::Gallery) {
+                        stripMinimum.x += slots.margin;
+                        stripWidth = slots.width;
+                    }
                     ImGui::SetCursorScreenPos(stripMinimum);
                     ImGui::SetNextWindowContentSize({stripWidth + slots.maximum, 0.f});
                 }

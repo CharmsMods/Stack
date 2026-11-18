@@ -163,10 +163,23 @@ float GalleryNavigationTransition::ImageControls(std::uint64_t workspace) const 
     return reduced ? 1.f : Smooth(float((time-readyAt-.54)/.22));
 }
 bool GalleryNavigationTransition::Active() const {
-    return folderAmount.IsActive() || sceneAmount.IsActive() || imageGeometryActive ||
+    return AwaitingPreview() || folderAmount.IsActive() || sceneAmount.IsActive() || imageGeometryActive ||
         (HasImage() && (!liveReady || (readyAt>=0 && time-readyAt<.76)));
 }
+void GalleryNavigationTransition::DrawLoader(ImDrawList& draw,ImRect bounds,float amount,bool reduced) {
+    const float radius=std::min(12.f,std::min(bounds.GetWidth(),bounds.GetHeight())*.18f);
+    if(radius<=0 || amount<=0)return;
+    draw.AddRectFilled(bounds.Min,bounds.Max,IM_COL32(0,0,0,int(110*amount)),3.f);
+    const float angle=reduced ? 0.f : float(std::fmod(ImGui::GetTime()*5.,6.283185307));
+    draw.PathArcTo(bounds.GetCenter(),radius,angle,angle+4.6f,24);
+    draw.PathStroke(IM_COL32(248,248,248,int(255*amount)),0,std::min(2.4f,radius*.3f));
+}
 void GalleryNavigationTransition::DrawOverlay(ImDrawList& draw) {
+    if(AwaitingPreview()) {
+        DrawLoader(draw,{pendingOrigin.minimum,pendingOrigin.maximum},
+            reduced ? 1.f : Smooth(float((time-pendingSince)/.14)),reduced);
+        return;
+    }
     if(!HasImage() || (reduced && liveReady))return;
     if(!returning && liveReady && readyAt>=0 && time-readyAt>=.54)return;
     float opacity=1.f;
@@ -184,6 +197,8 @@ void GalleryNavigationTransition::DrawOverlay(ImDrawList& draw) {
         const ImVec2 uvHigh(imageOrigin.uvMaximum.x+(1-imageOrigin.uvMaximum.x)*crop,imageOrigin.uvMaximum.y*(1-crop));
         draw.AddImage(static_cast<ImTextureID>(imageOrigin.thumbnail->texture),low,high,uvLow,uvHigh,ink);
     } else if(!liveReady && !returning)draw.AddRectFilled(low,high,ImGui::GetColorU32(ImVec4(.12f,.12f,.12f,opacity)),3);
+    if(!returning && readyBlend<1.f)
+        DrawLoader(draw,{low,high},1.f-readyBlend,reduced);
     if(liveTexture && readyBlend>0) {
         const float crop=std::clamp(imageCrop.Value(),0.f,1.f);
         const ImVec2 uvLow(imageOrigin.uvMinimum.x*(1-crop),imageOrigin.uvMinimum.y+(1-imageOrigin.uvMinimum.y)*crop);

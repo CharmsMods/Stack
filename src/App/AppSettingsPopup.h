@@ -43,6 +43,7 @@ void RenderContents(
     EditorModule* editor,
     AppUpdate::UpdateManager* updateManager,
     AppLegal::Manager* legalManager,
+    bool& openGalleryInSidebar,
     State& state);
 
 } // namespace AppSettingsPopup

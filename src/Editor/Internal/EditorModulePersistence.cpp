@@ -1334,7 +1334,7 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foregr
     if (foreground) RenderRawWorkspaceLifecyclePopups();
     // Adopt background grouping between gestures, never underneath a held
     // source or its drop target. Hidden owners do not wait on another tab's UI.
-    if (m_RawWorkspacePendingSimilarityResult &&
+    if ((m_RawWorkspacePendingSimilarityResult || m_GalleryDiscoveryGeneration) &&
         (!foreground || !m_RawWorkspaceLabUi.galleryWorkspaceOpen || !ImGui::GetCurrentContext() ||
          (!ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
           !ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
@@ -1342,6 +1342,37 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs, bool foregr
           !m_RawWorkspaceGalleryLayoutAnimation.Active() &&
           m_RawWorkspaceLabFilmstripDragState.phase == RawGalleryFilmstripDragPhase::Idle))) {
         ApplyPendingRawWorkspaceSimilarityResult();
+        if (m_GalleryDiscoveryGeneration && !m_RawWorkspaceSimilarityWorkerActive &&
+            !m_RawWorkspaceSimilarityRebuildPending) {
+            bool ready = false;
+            bool retired = false;
+            {
+                std::lock_guard lock(m_RawWorkspaceScanMutex);
+                retired = m_GalleryDiscoveryGeneration != m_RawWorkspaceScanGeneration ||
+                    m_RawWorkspaceScanSnapshot.state == Async::TaskState::Failed;
+                ready = !retired && m_RawWorkspaceScanSnapshot.completedSuccessfully;
+            }
+            const bool browsing = foreground && m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
+                m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Gallery &&
+                m_RawWorkspaceLabUi.galleryNavigationMode == RawGalleryNavigationMode::ProjectRoot;
+            const bool scrolling = ready && browsing && ImGui::GetCurrentContext() &&
+                (ImGui::GetIO().MouseWheel || ImGui::GetIO().MouseWheelH ||
+                 (m_RawWorkspaceLabUi.galleryWorkspaceGrid
+                    ? std::abs(m_RawWorkspaceLabGalleryScrollCurrentY - m_RawWorkspaceLabGalleryScrollTargetY) > .1f
+                    : m_RawWorkspaceGalleryGridStacks.filmstripScroll.glide.Active()));
+            if (retired || (ready && !scrolling)) {
+                m_GalleryDiscoveryGeneration = 0;
+                if (ready && browsing) {
+                    auto& layout = m_RawWorkspaceGalleryLayoutAnimation;
+                    layout.PrepareSwitch(m_RawWorkspace.selectedSourceKey);
+                    if (layout.AnchorPending() && !FindRawWorkspaceSourceByKey(layout.AnchorKey()))
+                        layout.AnchorApplied();
+                }
+                InvalidateRawWorkspaceGalleryPresentation();
+                if (ready) PostNotification(UiNotificationSeverity::Info,
+                    "Folder ready · Layout updated.", "gallery-folder-layout");
+            }
+        }
     }
     TickRawWorkspacePersistence();
     TickRawWorkspacePreviewStaging();

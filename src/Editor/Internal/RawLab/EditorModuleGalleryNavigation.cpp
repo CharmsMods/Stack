@@ -61,8 +61,23 @@ Stack::Renderer::GalleryTransitionOrigin EditorModule::CaptureGalleryTransitionO
     return origin;
 }
 
+bool EditorModule::GalleryOpeningPreviewReady() {
+    if(IsRawWorkspaceProjectLoadBusy() || Async::IsBusy(GetProjectLoadTaskState()))return false;
+    if(m_OpenEditorTabRequested && !GetNodeGraph().IsOutputConnected())
+        return HasDeferredLoadedProjectFirstRenderReady();
+    unsigned texture=0;
+    int width=0,height=0;
+    if(TryGetViewportPreviewOverview(texture,width,height))return true;
+    Stack::Renderer::ViewportPreviewGeometry geometry;
+    if(TryGetViewportPreviewGeometry(geometry) && geometry.resident.Partial())return false;
+    return TryGetActiveRawWorkspacePresentationTexture(texture,width,height) ||
+        (GetViewportOutputRenderGeneration() && GetPipeline().GetOutputTexture() &&
+         (!IsBracketingToolActive() || HasCurrentRawWorkspacePresentation()));
+}
+
 bool EditorModule::GalleryLoadFailed() const {
-    return m_Project->files->load.state==Async::TaskState::Failed ||
+    return m_RenderPresentation.failed || m_GraphRenderBackendFailureReported ||
+        m_Project->files->load.state==Async::TaskState::Failed ||
         m_RawWorkspaceProjectLoadTaskState==Async::TaskState::Failed ||
         m_SourceLoadTaskState==Async::TaskState::Failed ||
         m_DeferredLoadedProjectApply.failed;

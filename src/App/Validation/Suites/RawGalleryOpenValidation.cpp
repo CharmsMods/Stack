@@ -33,7 +33,7 @@ void ValidateRawGraphInsertions(EditorModule& editor);
 static bool ValidateGallery(const std::string& rawPath, const std::string& scratchPath, bool persistenceChecks,
     bool nodeTransitionChecks, bool halationChecks,bool profileOnly,
     const std::string& firstShot = {}, const std::string& secondShot = {}, bool checkAutoIntake = false, bool jumpOnly = false,
-    bool immediateOpen = false) {
+    bool immediateOpen = false, const std::filesystem::path& switchTo = {}, bool grid = false) {
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -93,7 +93,7 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
             Async::TaskSystem::Get().PumpMainThreadTasks(4);
             if (renderGraphics) ImGui_ImplOpenGL3_NewFrame();
             ImGui::NewFrame();
-            editor->PumpNonRenderingWork(2.5);
+            editor->PumpNonRenderingWork(immediateOpen ? .5 : 2.5,!immediateOpen);
             if (checkAutoIntake && !autoRequested) {
                 editor->SetDocumentPersistenceEnabled(true);
                 editor->TickAutoBracketing(false);
@@ -115,7 +115,7 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
                 const auto size = ImGui::GetContentRegionAvail();
                 editor->SetGraphReturnBounds(origin, {origin.x+size.x, origin.y+size.y});
                 editor->RenderUI();
-            } else editor->RenderRawWorkspaceLabUI();
+            } else if (!immediateOpen) editor->RenderRawWorkspaceLabUI();
             ImGui::End();
             if (renderGraphics) {
                 ImGui::Render();
@@ -189,7 +189,51 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
                 << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-requested).count()
                 << " ms after request, verified identity=" << indexed << ", scan busy=" << editor->IsRawWorkspaceScanBusy() << ".\n";
         }
-        if (profileOnly && !jumpOnly) {
+        if (!switchTo.empty()) {
+            auto notices = std::make_shared<Notifications::NotificationStore>();
+            editor->SetNotificationScope(notices->ForOwner(1, "Gallery"));
+            editor->SetRawGalleryGridView(grid);
+            ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+            wait([&] { return !editor->GetRawWorkspaceState().sources.empty(); },
+                "First folder did not publish any originals.");
+            editor->SetRawWorkspaceFolder(switchTo);
+            std::vector<std::string> seen;
+            std::string selected;
+            const auto checkSlots = [&] {
+                const auto& workspace = editor->GetRawWorkspaceState();
+                if (workspace.workspaceRoot != switchTo) return false;
+                const auto& stacks = editor->ResolveRawWorkspaceVisibleGalleryStacks();
+                if (stacks.size() < seen.size()) throw std::runtime_error("Discovery removed a slot.");
+                for (std::size_t i = 0; i < stacks.size(); ++i) {
+                    const auto& key = stacks[i].sourceKeys.at(0);
+                    if (i == seen.size()) seen.push_back(key);
+                    else if (seen[i] != key) throw std::runtime_error("Discovery moved an existing photo.");
+                }
+                if (selected.empty() && !seen.empty()) {
+                    selected = seen.front();
+                    editor->SelectRawWorkspaceSourceForGallery(selected, false, false, false);
+                }
+                return !seen.empty() && !editor->IsRawWorkspaceScanBusy();
+            };
+            wait(checkSlots, "Replacement folder did not complete.");
+            const auto noticeCount = [&] {
+                unsigned int count = 0;
+                for (const auto& notice : notices->Snapshot())
+                    if (notice.content.dedupeKey == "gallery-folder-layout") count += notice.occurrences;
+                return count;
+            };
+            for (int i = 0; i < 8; ++i) { frame(); checkSlots(); }
+            if (noticeCount()) throw std::runtime_error("Layout finalized during a held gesture.");
+            ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            frame();
+            if (noticeCount()) throw std::runtime_error("Layout changed on the release frame.");
+            wait([&] { return noticeCount() != 0; }, "Layout completion notice missing.");
+            frame();
+            if (noticeCount() != 1 || editor->GetRawWorkspaceState().selectedSourceKey != selected)
+                throw std::runtime_error("Completion changed selection or repeated its notice.");
+            std::cout << "PASS " << (grid ? "grid" : "filmstrip") << ": "
+                << seen.size() << " stable slots, selection retained, one completion after release.\n";
+        } else if (profileOnly && !jumpOnly) {
             const auto pairIsVisible = [&] {
                 const auto& stacks = editor->ResolveRawWorkspaceVisibleGalleryStacks();
                 return std::any_of(stacks.begin(), stacks.end(), [&](const auto& stack) {
@@ -316,6 +360,7 @@ static bool ValidateGallery(const std::string& rawPath, const std::string& scrat
             const bool raster = RawWorkspace::IsGalleryRasterPath(input);
             wait([&] {
                 if (editor->GalleryLoadFailed()) throw std::runtime_error("The selected original failed to load.");
+                if (!editor->GalleryOpeningPreviewReady()) return false;
                 return raster ? editor->GetNodeGraph().IsOutputConnected() && editor->GetViewportOutputRenderGeneration() != 0 :
                     editor->HasActiveRawWorkspacePresentationForValidation();
             }, "The clicked original never rendered.");
@@ -744,6 +789,10 @@ bool ValidateRawGalleryOpen(const std::string& rawPath,const std::string& scratc
 }
 bool ValidateClosetGallery(const std::string& root, const std::string& firstShot, const std::string& secondShot, bool checkAutoIntake, bool jumpOnly) {
     return ValidateGallery(root,root,false,false,false,true,firstShot,secondShot,checkAutoIntake,jumpOnly);
+}
+bool ValidateGalleryDiscoveryLayout(const std::string& first, const std::string& second, bool grid) {
+    return ValidateGallery(first, first, false, false, false, true, {}, {}, false, false, false,
+        std::filesystem::absolute(std::filesystem::u8path(second)).lexically_normal(), grid);
 }
 bool ValidateImmediateGalleryOpen(const std::string& original, const std::string& root) {
     return ValidateGallery(original,root,false,false,false,false,{},{},false,false,true);

@@ -39,6 +39,30 @@ void RegisterWidth(const char* type, float& width) {
 void RegisterGalleryNavigatorSettings(RailState& state) {
     // Registered before the context loads its ini. The handler and state have
     // the same AppShell/context lifetime; no callback is registered by drawing.
+    ImGuiSettingsHandler options;
+    options.TypeName = "StackNavigation";
+    options.TypeHash = ImHashStr(options.TypeName);
+    options.UserData = &state;
+    options.ClearAllFn = [](ImGuiContext*, ImGuiSettingsHandler* handler) {
+        auto& rail = *static_cast<RailState*>(handler->UserData);
+        rail.pinnedOpen = true;
+        rail.openGalleryInSidebar = false;
+    };
+    options.ReadOpenFn = [](ImGuiContext*, ImGuiSettingsHandler* handler, const char* name) -> void* {
+        return std::strcmp(name, "Preferences") == 0 ? handler->UserData : nullptr;
+    };
+    options.ReadLineFn = [](ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+        auto& rail = *static_cast<RailState*>(entry);
+        int value;
+        if (std::sscanf(line, "Pinned=%d", &value) == 1) rail.pinnedOpen = value != 0;
+        if (std::sscanf(line, "OpenInSidebar=%d", &value) == 1) rail.openGalleryInSidebar = value != 0;
+    };
+    options.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out) {
+        const auto& rail = *static_cast<RailState*>(handler->UserData);
+        out->appendf("[StackNavigation][Preferences]\nPinned=%d\nOpenInSidebar=%d\n\n",
+            rail.pinnedOpen, rail.openGalleryInSidebar);
+    };
+    ImGui::AddSettingsHandler(&options);
     RegisterWidth("StackGalleryNavigator", state.galleryPanelWidth);
     RegisterWidth("StackQueueNavigator", state.queuePanelWidth);
     RegisterWidth("StackEditorNavigator", state.editorPanelWidth);

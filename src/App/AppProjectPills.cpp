@@ -81,7 +81,9 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
     bool activationQueued = false;
     ImGui::BeginDisabled(!enabled);
     for (const auto& workspace : m_ProjectWorkspaces) {
-        if (workspace->id == m_GalleryWorkspaceId) continue;
+        if (workspace->id == m_GalleryWorkspaceId ||
+            (workspace->galleryOpening && workspace->galleryOpenIntent &&
+             workspace->galleryOpenIntent==m_GalleryNavigationMotion->Intent())) continue;
         const auto id = workspace->id;
         if ((m_WorkspaceTabAction==WorkspaceTabAction::Close && m_WorkspaceTabActionId==id) ||
             m_PendingWorkspaceRetirement==id ||
@@ -149,22 +151,20 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
                     (max.y-min.y-4.f*rail.scale)/origin.thumbnail->height);
                 const ImVec2 extent(origin.thumbnail->width*fit,origin.thumbnail->height*fit);
                 const ImVec2 destination((min.x+max.x-extent.x)*.5f,(min.y+max.y-extent.y)*.5f);
+                const ImRect flying(mix(origin.minimum,destination),mix(origin.maximum,{destination.x+extent.x,destination.y+extent.y}));
                 ImGui::GetForegroundDrawList()->AddImageRounded((ImTextureID)(intptr_t)origin.thumbnail->texture,
-                    mix(origin.minimum,destination),mix(origin.maximum,{destination.x+extent.x,destination.y+extent.y}),
+                    flying.Min,flying.Max,
                     origin.uvMinimum,origin.uvMaximum,IM_COL32_WHITE,3.f*rail.scale);
+                if(workspace->galleryOpening || editor.IsGalleryBracketProcessing())
+                    Stack::Navigation::GalleryNavigationTransition::DrawLoader(*ImGui::GetForegroundDrawList(),flying,1.f,false);
             }
             if(t>=1.f) workspace->galleryArrivalPending=false;
         }
         if (ImGui::IsItemVisible() && !workspace->galleryArrivalPending && !ImGui::IsItemClicked(ImGuiMouseButton_Middle))
             Stack::Navigation::DrawProjectEntry(draw,min,max,rail.scale,texture,width,height,
                 automatic ? "Auto" : name,selected,dirty);
-        if (ImGui::IsItemVisible() && !workspace->galleryArrivalPending && editor.IsGalleryBracketProcessing()) {
-            const ImVec2 center((min.x+max.x)*.5f,(min.y+max.y)*.5f);
-            const float radius=6.f*rail.scale;
-            draw->AddCircleFilled(center,radius+3.f*rail.scale,IM_COL32(0,0,0,180),20);
-            const float angle=float(std::fmod(ImGui::GetTime()*5.,6.283185307));
-            draw->PathArcTo(center,radius,angle,angle+4.5f,20);
-            draw->PathStroke(IM_COL32(245,245,245,255),0,1.7f*rail.scale);
+        if (ImGui::IsItemVisible() && !workspace->galleryArrivalPending && (workspace->galleryOpening || editor.IsGalleryBracketProcessing())) {
+            Stack::Navigation::GalleryNavigationTransition::DrawLoader(*draw,{min,max},1.f,Stack::Notifications::SystemReducedMotion());
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s",name);
         // Resolve command status only while this particular menu is open.

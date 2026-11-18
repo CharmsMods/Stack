@@ -152,6 +152,7 @@ private:
         std::filesystem::path sourceWorkspaceRoot;
         std::vector<std::filesystem::path> bracketSources;
         std::uint64_t workspaceId = 0;
+        bool openInSidebar = false;
         std::uint64_t navigationGeneration=0;
         Stack::Renderer::GalleryTransitionOrigin transitionOrigin;
     };

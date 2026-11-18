@@ -2010,7 +2010,7 @@ void AppShell::Run() {
                     static_cast<std::size_t>(Stack::UiPerformance::Stage::ProjectWorkspaces)];
         }
         if(m_UiPerformanceCapture)m_UiPerformanceCapture->BeginGpu();
-        if(m_GalleryNavigationMotion->HasImage()) {
+        if(m_GalleryNavigationMotion->HasImage() || m_GalleryNavigationMotion->AwaitingPreview()) {
             auto* overlay=ImGui::GetForegroundDrawList();
             m_GalleryNavigationMotion->DrawOverlay(*overlay);
             m_WorkspaceCompositor.KeepFixed(overlay);
@@ -2786,6 +2786,8 @@ void AppShell::RenderUI() {
         else RequestTabSwitch(RootTabRawLab);
     }
     if (m_Editor->ConsumeOpenEditorTabRequest()) {
+        if(m_GalleryNavigationMotion->Waiting(m_ActiveProjectWorkspace) && m_Editor->GetNodeGraph().IsOutputConnected())
+            m_Editor->SetWorkspaceMode(Stack::Project::WorkspaceMode::View);
         RequestTabSwitch(RootTabEditor);
     }
     if (m_Editor->ConsumeOpenMultiFrameTabRequest()) {
@@ -3405,6 +3407,7 @@ void AppShell::RenderHeaderSettingsPopup(bool buttonHovered) {
         m_Editor,
         m_UpdateManager.get(),
         m_LegalManager.get(),
+        m_NavigationRail.openGalleryInSidebar,
         m_SettingsPopupState);
 
     m_SettingsPopupState.hadOpenPopup = ImGui::IsPopupOpen(
@@ -3446,11 +3449,13 @@ void AppShell::RequestRootTabTransition(int newTab) {
     if (ImGui::GetTopMostPopupModal() != nullptr) {
         return;
     }
+    const bool openingEditorView=newTab==RootTabEditor && m_Editor->IsViewMode() &&
+        m_GalleryNavigationMotion->Waiting(m_ActiveProjectWorkspace);
     if(m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace) &&
-        !IsRawWorkspaceRootTab(newTab) && newTab!=m_CurrentTabId)
+        !openingEditorView && !IsRawWorkspaceRootTab(newTab) && newTab!=m_CurrentTabId)
         m_GalleryNavigationMotion->CancelImage();
-    if(m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace) &&
-        IsRawWorkspaceRootTab(newTab)) {
+    if(openingEditorView || (m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace) &&
+        IsRawWorkspaceRootTab(newTab))) {
         if(newTab!=m_CurrentTabId)OnTabChanged(m_CurrentTabId,newTab);
         m_CurrentTabId=newTab;m_RootTabBodyFadeActive=false;
         return;

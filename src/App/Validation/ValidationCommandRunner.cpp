@@ -27,7 +27,7 @@ namespace Stack::Validation { bool ValidateSuperResolution(int,char**); bool Val
 namespace Stack::Validation { bool ValidateHdrGraphExport(const char*,const char*); }
 namespace Stack::Validation { bool ValidateColorCalibration(int, char**); }
 namespace Stack::Validation { bool ValidateFilmGrain(); }
-namespace Stack::Validation { bool ValidateClosetGallery(const std::string&, const std::string&, const std::string&, bool, bool); bool ValidateGalleryTrash(const std::filesystem::path&); bool ValidateProjectGallery(const std::filesystem::path&); }
+namespace Stack::Validation { bool ValidateGalleryDiscoveryLayout(const std::string&, const std::string&, bool); bool ValidateClosetGallery(const std::string&, const std::string&, const std::string&, bool, bool); bool ValidateGalleryTrash(const std::filesystem::path&); bool ValidateProjectGallery(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateImmediateGalleryOpen(const std::string&, const std::string&); }
 namespace Stack::Validation { bool ValidateConcurrentBracketing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidatePanorama(int,char**); }
@@ -205,6 +205,12 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-concurrent-bracketing") == 0) {
         exitCode = Stack::Validation::ValidateConcurrentBracketing(argv[2], argv[3]) ? 0 : 87;
+        return true;
+    }
+    if (argc == 5 && std::strcmp(argv[1], "--validate-gallery-discovery-layout") == 0) {
+        const bool grid = std::strcmp(argv[4], "grid") == 0;
+        exitCode = (grid || std::strcmp(argv[4], "filmstrip") == 0) &&
+            Stack::Validation::ValidateGalleryDiscoveryLayout(argv[2], argv[3], grid) ? 0 : 93;
         return true;
     }
     const bool checkAutoIntake = argc == 5 && std::strcmp(argv[1], "--validate-gallery-auto-intake") == 0;
