@@ -440,6 +440,51 @@ bool ValidateSubpixelEvidenceAndCancellation() {
     return ok;
 }
 
+bool ValidatePointRefinementPrecision() {
+    using namespace Raw::Mfd;
+    auto options = TestOptions();
+    options.registration.pyramidLevels = 1;
+    options.registration.positionalConfidenceScaleRawPixels = .35;
+    const PixelExtent extent {128, 128};
+    const RawCoordinate truth {1.05, .20};
+    // A strong horizontal signal can improve the photometric fit while the
+    // weaker vertical direction remains imprecise. Both noise declarations
+    // exercise the same image and displacement, through the public point API.
+    const auto signal = [](RawCoordinate p, CfaSite) {
+        return .45 + .07 * std::sin(.12 * p.x) + .0009 * std::sin(.17 * p.y);
+    };
+    bool ok = true;
+    for (const double variance : {1e-6, 1e-5}) {
+        CfaPlanePyramid reference, source;
+        ok &= Check(MakePyramid(extent, signal, variance, reference, options) &&
+            MakePyramid(extent, [signal, truth](RawCoordinate p, CfaSite site) {
+                return signal({p.x - truth.x, p.y - truth.y}, site);
+            }, variance, source, options), "point precision fixture could not be built");
+        BidirectionalLocalMotionRequest request;
+        request.reference = &reference; request.alternate = &source;
+        request.referenceToAlternate = IdentityModel(extent); request.options = options;
+        MotionNode result;
+        const bool accepted = RefineBidirectionalMotionPoint(request, {64, 64}, {64, 64}, result);
+        if (variance == 1e-5) {
+            ok &= Check(!accepted && result.state == MotionNodeState::Rejected,
+                "photometric improvement and closure authorized an imprecise point correction");
+            continue;
+        }
+        const double covarianceSigma = std::sqrt(.5 * (result.covarianceRaw.xxRawPixelsSquared +
+            result.covarianceRaw.yyRawPixelsSquared));
+        ok &= Check(accepted && result.state == MotionNodeState::Structured &&
+            std::hypot(result.residualRaw.x - truth.x, result.residualRaw.y - truth.y) < .03 &&
+            result.forwardBackwardEuclideanRaw < .03,
+            "point precision policy discarded an observable correction");
+        ok &= Check(std::isfinite(result.hessianCondition) && result.hessianCondition > 100 &&
+            covarianceSigma > .15 && covarianceSigma < .4 &&
+            std::abs(result.positionalSigmaRaw - covarianceSigma) < 1e-12 &&
+            result.confidence > .2 && result.confidence < .9,
+            "point correction omitted its directional precision from confidence or diagnostics");
+    }
+    return ok;
+}
+
 bool ValidateSubpixelNoisePhases() {
     using namespace Raw::Mfd;
     bool ok = true;
@@ -620,6 +665,109 @@ bool ValidateFlatSafeAndAperturePolicy() {
         request, apertureGrid, &error);
     ok &= Check(!apertureAccepted || apertureGrid.flatSafeCount == 0u,
         "a high-gradient aperture problem was incorrectly classified FlatSafe");
+    return ok;
+}
+
+bool ValidateCommonDomainAmbiguity() {
+    RegistrationFixture fixture;
+    fixture.extent = {128u, 128u};
+    fixture.options.registration.pyramidLevels = 1u;
+    const SignalFunction repeated = [](Raw::Mfd::RawCoordinate p, Raw::Mfd::CfaSite) {
+        const double stripe = p.x >= 4.0 && p.x < 6.0 ? 0.2 : 0.0;
+        return 0.5 + stripe + 1.0e-4 * std::cos(3.14159265358979323846 * p.x / 4.0) +
+            1.0e-4 * std::sin(0.137 * p.y) + 0.00007 * std::cos(0.293 * p.y);
+    };
+    bool ok = Check(MakePyramid(fixture.extent, repeated, 1.0e-8,
+            fixture.reference, fixture.options) &&
+        MakePyramid(fixture.extent, repeated, 1.0e-8, fixture.alternate, fixture.options,
+            [](Raw::Mfd::RawCoordinate p) { return p.x >= 2.0; }),
+        "common-domain ambiguity fixture could not be built");
+    if (!ok) return false;
+    // The distinguishing stripe is usable at the seed but outside its common
+    // refinement support. Heterogeneous source noise keeps the repeat below
+    // the old runner-up in the original scoring domain. Once that stripe is
+    // removed, the +8 RAW-pixel hypothesis is exactly identical to the seed.
+    for (auto& channel : fixture.alternate.planes) {
+        auto& level = channel.front();
+        for (std::uint64_t y = 0; y < level.extent.height; ++y) {
+            for (std::uint64_t x = 0; x < level.extent.width; ++x) {
+                const auto p = fixture.alternate.layout.PlaneToRaw({double(x), double(y), level.site});
+                if (p.x >= 6.0 && p.x < 8.0) level.variance[y * level.extent.width + x] = 0.25;
+            }
+        }
+    }
+    Raw::Mfd::LocalMotionDirectionRequest request;
+    request.reference = &fixture.reference;
+    request.source = &fixture.alternate;
+    request.options = fixture.options;
+    request.globalWarp = IdentityModel(fixture.extent);
+    request.proposal = [](Raw::Mfd::RawCoordinate p, Raw::Mfd::RawCoordinate& source) {
+        source = {p.x + 8.0, p.y};
+        return true;
+    };
+    Raw::Mfd::LocalMotionGrid grid;
+    std::string error;
+    Raw::Mfd::EstimateLocalMotionDirection(request, grid, &error);
+    ok &= Check(grid.nodes.size() == 9u && grid.structuredCount == 0u,
+        "a lower-ranked repeat on common support retained structured confidence");
+    std::size_t checkedBorders = 0u;
+    for (const auto& node : grid.nodes) {
+        if (node.gridX != 0u) continue;
+        ++checkedBorders;
+        ok &= Check(node.discreteResidualRaw.x == 0.0 && node.discreteResidualRaw.y == 0.0 &&
+            node.state == Raw::Mfd::MotionNodeState::Rejected &&
+            node.rejectReason == Raw::Mfd::MotionNodeRejectReason::AmbiguousMatch &&
+            node.uniqueness <= fixture.options.registration.uniquenessTransitionMin,
+            "discarded border evidence hid a competing finest-level hypothesis");
+    }
+    ok &= Check(checkedBorders == 3u, "common-domain ambiguity border nodes were not evaluated");
+
+    // Exercise the public accelerator contract on the same measurements. A
+    // controlled approximate backend first understates a shortlisted rival's
+    // support; native success must restore its eligibility. The second case
+    // keeps the rival outside the numerical shortlist, with exact coverage
+    // 280/400 == 0.70 but an FP32 packed fraction just below that threshold.
+    // Integer counts must retain it for the common-objective check. These
+    // reports test authority/rounding rules, not GPU shader execution.
+    request.options.registration.finestPatchPlanePixels = 10u;
+    for (unsigned mode = 0u; mode < 2u; ++mode) {
+        std::size_t reportedRivals = 0u;
+        request.evaluateDiscreteCandidates = [mode, &reportedRivals](
+            const Raw::Mfd::LocalMotionDirectionRequest&,
+            const std::vector<Raw::Mfd::LocalMotionDiscreteCandidate>& candidates,
+            std::vector<Raw::Mfd::LocalMotionDiscreteScore>& scores, std::string&) {
+            scores.resize(candidates.size());
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                const auto residual = candidates[i].residualRaw;
+                auto& score = scores[i];
+                score.valid = true;
+                score.validCount = std::uint64_t(candidates[i].patchLevelPixels) *
+                    candidates[i].patchLevelPixels * 4u;
+                score.validFraction = 1.0;
+                score.robustCost = residual.x * residual.x + residual.y * residual.y;
+                score.cappedChiSquared = std::min(score.robustCost, 16.0);
+                if (residual.x == 8.0 && residual.y == 0.0) {
+                    ++reportedRivals;
+                    score.validCount = mode == 0u ? 279u : 280u;
+                    score.validFraction = mode == 0u ? 279.0 / 400.0 : double(float(0.70));
+                    score.robustCost = mode == 0u ? 0.125 : 1.0e6;
+                }
+            }
+            return true;
+        };
+        Raw::Mfd::LocalMotionGrid accelerated;
+        Raw::Mfd::EstimateLocalMotionDirection(request, accelerated, &error);
+        ok &= Check(reportedRivals > 0u && accelerated.nodes.size() == 16u &&
+                accelerated.structuredCount == 0u,
+            mode == 0u ? "native verification did not restore ambiguity-rival eligibility" :
+                "packed accelerator coverage discarded an eligible ambiguity rival");
+        for (const auto& node : accelerated.nodes) {
+            if (node.gridX != 0u) continue;
+            ok &= Check(node.rejectReason == Raw::Mfd::MotionNodeRejectReason::AmbiguousMatch &&
+                    node.uniqueness <= request.options.registration.uniquenessTransitionMin,
+                "accelerated candidate eligibility retained false common-domain uniqueness");
+        }
+    }
     return ok;
 }
 
@@ -948,11 +1096,13 @@ bool ValidateMfdPhase5LocalMotion() {
     ok &= ValidatePyramidConstruction();
     ok &= ValidateHierarchicalFlowAndCovariance();
     ok &= ValidateSubpixelEvidenceAndCancellation();
+    ok &= ValidatePointRefinementPrecision();
     ok &= ValidateSubpixelNoisePhases();
     ok &= ValidateProposalEvidence();
     ok &= ValidateBlurredSubpixelFit();
     ok &= ValidateFlatSafeAndAperturePolicy();
     ok &= ValidatePeriodicUniqueness();
+    ok &= ValidateCommonDomainAmbiguity();
     ok &= ValidateDepthBoundaryAndSourceBorder();
     ok &= ValidateFieldDerivativeBoundaries();
     ok &= ValidateReverseClosureAndOcclusion();

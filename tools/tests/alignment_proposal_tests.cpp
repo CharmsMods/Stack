@@ -1,6 +1,8 @@
 #include "Raw/Bracketing/AlignmentProposalGeometry.h"
 #include "Raw/Bracketing/AlignmentProposalInput.h"
+#include "Raw/Bracketing/GroupAlignment.h"
 #include "Raw/Bracketing/ProcessingInternal.h"
+#include "Raw/MultiFrameDenoise/MotionCovariance.h"
 #include "NodeMath/ContractTypes.h"
 #ifdef _WIN32
 #include "App/Validation/Suites/BracketingAnchorEvidenceValidation.h"
@@ -17,6 +19,113 @@ using namespace Raw::Mfd;
 void Check(bool ok,const char* message) {if(!ok)throw std::runtime_error(message);}
 bool Near(RawCoordinate a,RawCoordinate b,double tolerance=1e-6) {
     return std::hypot(a.x-b.x,a.y-b.y)<=tolerance;
+}
+
+SymmetricRawCovariance MatrixTransport(SymmetricRawCovariance covariance,
+    const std::array<double,4>& linear) {
+    const double input[2][2]={{covariance.xxRawPixelsSquared,covariance.xyRawPixelsSquared},
+        {covariance.xyRawPixelsSquared,covariance.yyRawPixelsSquared}};
+    double result[2][2]{};
+    for(unsigned row=0;row<2;++row)for(unsigned column=0;column<2;++column)
+        for(unsigned a=0;a<2;++a)for(unsigned b=0;b<2;++b)
+            result[row][column]+=linear[2*row+a]*input[a][b]*linear[2*column+b];
+    return {result[0][0],result[0][1],result[1][1]};
+}
+
+bool SameCovariance(SymmetricRawCovariance a,SymmetricRawCovariance b,double tolerance=1e-12) {
+    return std::abs(a.xxRawPixelsSquared-b.xxRawPixelsSquared)<=tolerance&&
+        std::abs(a.xyRawPixelsSquared-b.xyRawPixelsSquared)<=tolerance&&
+        std::abs(a.yyRawPixelsSquared-b.yyRawPixelsSquared)<=tolerance;
+}
+
+void CompositionChecks() {
+    // Independent matrix multiplication and PSD principal-minor checks. The
+    // upper envelope must cover every rotated/sheared local model, including
+    // noncommuting covariances for which componentwise maxima are not PSD bounds.
+    const SymmetricRawCovariance input{.4,.12,.2};
+    RawMappingJacobianSet sides;sides.count=4;
+    sides.sides={RawMappingJacobian{{1,0,0,1},true},{{0,-1,1,0},true},
+        {{1,.35,-.15,1.2},true},{{.7,.2,0,1.3},true}};
+    SymmetricRawCovariance envelope;
+    Check(TryTransportMotionCovarianceEnvelope(input,sides,envelope),"Valid local models lost their covariance envelope");
+    for(unsigned i=0;i<sides.count;++i) {
+        const auto c=MatrixTransport(input,sides.sides[i].linear);
+        const double xx=envelope.xxRawPixelsSquared-c.xxRawPixelsSquared;
+        const double xy=envelope.xyRawPixelsSquared-c.xyRawPixelsSquared;
+        const double yy=envelope.yyRawPixelsSquared-c.yyRawPixelsSquared;
+        Check(xx>=-1e-12&&yy>=-1e-12&&xx*yy-xy*xy>=-1e-12,
+            "The covariance envelope understates a supported local model");
+    }
+    sides.sides.fill({{1,0,0,1},true});
+    Check(TryTransportMotionCovarianceEnvelope(input,sides,envelope)&&SameCovariance(envelope,input,0),
+        "Identical translation sides changed native covariance arithmetic");
+    for(unsigned kind=0;kind<4;++kind) {
+        auto invalid=sides;
+        if(kind==0)invalid.count=0;
+        if(kind==1)invalid.count=5;
+        if(kind==2)invalid.sides[1].valid=false;
+        if(kind==3)invalid.sides[1].linear[0]=std::numeric_limits<double>::infinity();
+        envelope={7,0,7};
+        Check(!TryTransportMotionCovarianceEnvelope(input,invalid,envelope)&&SameCovariance(envelope,{7,0,7},0),
+            "Missing/invalid one-sided evidence authorized covariance or changed a failed output");
+    }
+
+    const auto makeGrid=[](double variance) {
+        LocalMotionGrid grid;grid.valid=true;grid.width=grid.height=3;
+        grid.originRawX=grid.originRawY=30;grid.spacingRawX=grid.spacingRawY=2;
+        grid.referenceRawExtent=grid.sourceRawExtent={64,64};grid.structuredCount=9;grid.nodes.resize(9);
+        for(unsigned y=0;y<3;++y)for(unsigned x=0;x<3;++x) {
+            auto& n=grid.nodes[y*3+x];n.gridX=x;n.gridY=y;n.centerRaw={30.+2*x,30.+2*y};
+            n.state=MotionNodeState::Structured;n.confidence=1;n.validFraction=1;
+            n.covarianceRaw={variance,0,variance};
+        }
+        return grid;
+    };
+    PreparedSource anchor,source;anchor.frame.activeExtent=source.frame.activeExtent={64,64};
+    anchor.localMotion=std::make_shared<LocalMotionGrid>(makeGrid(1));
+    ExtendMotionBoundary(*anchor.localMotion);
+    auto pair=makeGrid(.01);pair.globalWarp.centerRaw={32,32};pair.globalWarp.linear={1,.1,0,1};
+    auto composed=ComposeGroupMotion(anchor,source,pair,{});
+    auto node=composed.nodes[2*composed.width+2];
+    Check(node.state==MotionNodeState::Structured&&SameCovariance(node.covarianceRaw,{1.02,.1,1.01}),
+        "Affine cohort transport differs from the analytic covariance");
+
+    pair.globalWarp={};
+    for(auto& n:pair.nodes)n.residualRaw={.5*std::abs(n.centerRaw.x-32),0};
+    LocalMotionFieldSample sample,left,right;RawMappingJacobian unique;
+    RawMappingJacobianSet knot;
+    Check(EvaluateLocalMotionField(pair,{32,32},{},sample,nullptr,false,&unique,&knot)&&
+        !unique.valid&&knot.count==4,"A grid knot concealed its distinct one-sided derivatives");
+    Check(EvaluateLocalMotionField(pair,{31.5,32},{},left)&&EvaluateLocalMotionField(pair,{32.5,32},{},right),
+        "The bounded kink fixture is not evaluable on both sides");
+    Check(std::abs((right.sourceRaw.x-left.sourceRaw.x)-1)<1e-12,
+        "The kink fixture no longer demonstrates the centered-difference cancellation");
+    composed=ComposeGroupMotion(anchor,source,pair,{});node=composed.nodes[2*composed.width+2];
+    Check(node.state==MotionNodeState::Structured&&SameCovariance(node.covarianceRaw,{2.26,0,1.01}),
+        "Cohort transport averaged opposing slopes or rejected an ordinary supported knot");
+
+    // The existing field evaluator caps covariance at its configured ceiling.
+    // A composition exceeding that ceiling must reject the node before it can
+    // be silently reduced and presented as more precise downstream.
+    anchor.localMotion=std::make_shared<LocalMotionGrid>(makeGrid(4));ExtendMotionBoundary(*anchor.localMotion);
+    pair=makeGrid(.01);pair.globalWarp.centerRaw={32,32};pair.globalWarp.linear={2,0,0,2};
+    composed=ComposeGroupMotion(anchor,source,pair,{});node=composed.nodes[2*composed.width+2];
+    Check(node.state==MotionNodeState::Rejected&&node.rejectReason==MotionNodeRejectReason::InvalidCovariance&&
+        composed.valid&&composed.structuredCount==0&&composed.rejectedCount==composed.nodes.size()&&
+        !EvaluateLocalMotionField(composed,{32,32},{},sample),
+        "Over-ceiling composed covariance became apparently precise field evidence");
+    anchor.localMotion=std::make_shared<LocalMotionGrid>(makeGrid(7.95));ExtendMotionBoundary(*anchor.localMotion);
+    pair=makeGrid(7.95);composed=ComposeGroupMotion(anchor,source,pair,{});
+    node=composed.nodes[2*composed.width+2];
+    Check(composed.valid&&composed.structuredCount==9&&composed.flatSafeCount==0&&composed.rejectedCount==16&&
+        node.state==MotionNodeState::Structured&&SameCovariance(node.covarianceRaw,{15.9,0,15.9})&&
+        composed.nodes.front().state==MotionNodeState::Rejected&&
+        composed.nodes.front().rejectReason==MotionNodeRejectReason::InvalidCovariance&&
+        composed.nodes.front().confidence==0,
+        "Boundary padding republished oversized covariance or discarded valid interior evidence");
+    pair.valid=false;knot.count=4;
+    Check(!EvaluateLocalMotionField(pair,{32,32},{},sample,nullptr,false,nullptr,&knot)&&knot.count==0,
+        "Failed field evaluation retained stale linearizations");
 }
 
 void InverseChecks() {
@@ -136,13 +245,13 @@ void AttachmentChecks() {
 
 int main() {
     try {
-        InverseChecks();AttachmentChecks();
+        CompositionChecks();InverseChecks();AttachmentChecks();
 #ifdef _WIN32
         TemporaryDirectory anchors;
         Stack::Validation::ValidateBracketingAnchorEvidence(anchors.path/"anchor-evidence");
         std::cout<<"Native anchor ranking, including AI and external proposals, passed\n";
 #endif
-        std::cout<<"Alignment proposal coordinates, inverse bounds, ownership and identity checks passed\n";return 0;
+        std::cout<<"Alignment proposal coordinates, inverse bounds, ownership, identity and cohort covariance checks passed\n";return 0;
     }
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

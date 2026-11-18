@@ -227,12 +227,24 @@ bool EvaluatePatch(
     PatchStatistics& statistics,
     const PatchReferenceGeometry* geometry,
     PatchEvaluation evaluation,
-    FixedPatchSupport* support) {
+    FixedPatchSupport* support,
+    PatchCostLimit* costLimit) {
     // Reset every statistic to its default without discarding patch scratch.
     auto residuals = std::move(statistics.residuals);
     statistics = {};
     statistics.residuals = std::move(residuals);
     statistics.residuals.clear();
+    if (costLimit) {
+        costLimit->exceeded = false;
+        costLimit->unavailable = false;
+        if (evaluation != PatchEvaluation::FixedObjective || calculateNormal ||
+            calculateFlatPhotometricCost || std::isnan(costLimit->maximumMeanCost) ||
+            costLimit->maximumMeanCost < 0.0 ||
+            !Finite(request.options.registration.registrationHuberDelta) ||
+            request.options.registration.registrationHuberDelta <= 0.0 ||
+            !Finite(request.options.registration.candidateTieTolerance) ||
+            request.options.registration.candidateTieTolerance < 0.0) return false;
+    }
     if (!request.reference || !request.source || patchLevelPixels == 0u ||
         !Finite(centerRaw) || !Finite(residualRaw) ||
         !Finite(request.exposureScale) || request.exposureScale <= 0.0) {
@@ -286,6 +298,7 @@ bool EvaluatePatch(
         const std::int64_t startY = static_cast<std::int64_t>(
             std::floor(centerLevelY - 0.5 * static_cast<double>(patchLevelPixels)));
         for (std::uint32_t patchY = 0u; patchY < patchLevelPixels; ++patchY) {
+            if (costLimit && request.shouldCancel && request.shouldCancel()) return false;
             const std::int64_t referenceY = startY + patchY;
             if (!siteGeometry && (referenceY < 0 ||
                 referenceY >= static_cast<std::int64_t>(referenceLevel->extent.height))) {
@@ -348,6 +361,7 @@ bool EvaluatePatch(
                     : SampleLevelKeys<false>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
                         request.options.registration.keysBicubicParameter,sourceSample);
                 if (!sampled) {
+                    if (costLimit) { costLimit->unavailable = true; continue; }
                     if (fixedSupport) return false;
                     continue;
                 }
@@ -357,6 +371,7 @@ bool EvaluatePatch(
                         sourceSample.variance +
                     request.options.registration.localNumericalVarianceFloor;
                 if (!Finite(variance) || variance <= 0.0) {
+                    if (costLimit) { costLimit->unavailable = true; continue; }
                     if (fixedSupport) return false;
                     continue;
                 }
@@ -367,6 +382,7 @@ bool EvaluatePatch(
                         request.exposureScale * sourceSample.value) /
                     denominator;
                 if (!Finite(residual)) {
+                    if (costLimit) { costLimit->unavailable = true; continue; }
                     if (fixedSupport) return false;
                     continue;
                 }
@@ -380,6 +396,16 @@ bool EvaluatePatch(
                 ++statistics.siteCount[SiteIndex(site)];
                 robustCostSum += HuberLoss(
                     residual, request.options.registration.registrationHuberDelta);
+                // Every remaining or unavailable contribution is nonnegative.
+                // Once this lower bound exceeds the complete-domain limit,
+                // the candidate cannot reduce the inherited uniqueness. The
+                // tolerance makes pruning conservative near a numerical tie.
+                if (costLimit && robustCostSum >
+                    (costLimit->maximumMeanCost + request.options.registration.candidateTieTolerance) *
+                        static_cast<double>(support->validCount)) {
+                    costLimit->exceeded = true;
+                    return true; // statistics.valid remains false.
+                }
                 cappedSquaredSum += std::min(
                     residual * residual,
                     request.options.registration.cappedResidualSquared);
@@ -423,7 +449,8 @@ bool EvaluatePatch(
         : static_cast<double>(statistics.validCount) /
             static_cast<double>(statistics.nominalCount);
     if (evaluation == PatchEvaluation::CaptureSupport) support->validCount = statistics.validCount;
-    if (fixedSupport && statistics.validCount != support->validCount) return false;
+    if ((costLimit && costLimit->unavailable) ||
+        (fixedSupport && statistics.validCount != support->validCount)) return false;
     if (statistics.validCount == 0u) return true;
     statistics.robustCost = robustCostSum /
         static_cast<double>(statistics.validCount);
@@ -473,8 +500,7 @@ bool RefineTileSubpixel(
     RawCoordinate discreteResidualRaw,
     RefinedTile& refined,
     const PatchStatistics* initialStatistics,
-    FixedPatchSupport* initialSupport,
-    const RawCoordinate* alternativeResidualRaw) {
+    FixedPatchSupport* initialSupport) {
     refined = {};
     if (request.shouldCancel && request.shouldCancel()) return false;
     RawCoordinate currentRaw = discreteResidualRaw;
@@ -496,19 +522,6 @@ bool RefineTileSubpixel(
         current.validFraction < request.options.registration.minimumTileValidFraction ||
         current.validCount < request.options.registration.minimumStructuredSamples) {
         return false;
-    }
-    refined.seedCost = current.robustCost;
-    if (alternativeResidualRaw) {
-        PatchStatistics alternative;
-        if (request.shouldCancel && request.shouldCancel()) return false;
-        refined.ambiguityVerified = EvaluatePatch(request, centerRaw, 0u, *alternativeResidualRaw,
-            request.options.registration.finestPatchPlanePixels, false, false, alternative, nullptr,
-            PatchEvaluation::FixedObjective, support) && alternative.valid;
-        if (refined.ambiguityVerified) refined.alternativeCost = alternative.robustCost;
-        // The removed border/mask halo may have contained the only feature
-        // separating two basins. The structured-node gate cannot inherit its
-        // old uniqueness evidence. Still diagnose observability here so the
-        // separate, unchanged FlatSafe parent policy remains available.
     }
     // Two reusable residual buffers, fixed denominators and one optional
     // reference cache are bounded per worker. Allocation failure propagates;

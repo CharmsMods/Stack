@@ -2,6 +2,7 @@
 #include "ProcessingInternal.h"
 #include "CaptureMotion.h"
 #include "BorderSupport.h"
+#include "Raw/MultiFrameDenoise/MotionCovariance.h"
 #include <cmath>
 
 namespace Raw::Bracketing {
@@ -18,8 +19,8 @@ inline bool GroupRelativeWarp(const PreparedSource& anchor,const PreparedSource&
 
 // Compose origin -> exposure anchor -> capture ONCE at motion nodes. The
 // full-resolution samplers retain a single field and their existing cost.
-// Both links must have accepted geometry; uncertainty propagates through the
-// second link's measured Jacobian rather than treating the anchor as exact.
+// Both links must have accepted geometry; uncertainty propagates through all
+// supported one-sided Jacobians of the second link, including grid knots.
 inline Mfd::LocalMotionGrid ComposeGroupMotion(const PreparedSource& anchor,
     const PreparedSource& source,const Mfd::LocalMotionGrid& pair,const Mfd::LocalMotionOptions& options) {
     auto out=*anchor.localMotion;out.globalWarp=source.alignment;
@@ -39,29 +40,37 @@ inline Mfd::LocalMotionGrid ComposeGroupMotion(const PreparedSource& anchor,
     out.sourceRawExtent=source.frame.activeExtent;
     out.structuredCount=out.flatSafeCount=out.rejectedCount=0;
     out.message="Within-exposure motion composed with the exposure anchor.";
+    const double maximumSigma=options.registration.warpCovarianceEigenvalueMaxRawPixels;
+    const double maximumVariance=maximumSigma*maximumSigma;
+    const auto covarianceSupported=[&](const Mfd::SymmetricRawCovariance& covariance) {
+        double low=0,high=0;
+        return std::isfinite(maximumVariance)&&maximumVariance>0&&
+            Mfd::TryMotionCovarianceEigenvalues(covariance,low,high)&&high<=maximumVariance;
+    };
     for(auto& node:out.nodes) {
         const auto point=node.centerRaw;const auto gx=node.gridX,gy=node.gridY;
         node={};node.centerRaw=point;node.gridX=gx;node.gridY=gy;
-        Mfd::LocalMotionFieldSample a,b,x0,x1,y0,y1;
-        const auto sample=[&](Mfd::RawCoordinate p,Mfd::LocalMotionFieldSample& v) {
-            return Mfd::EvaluateLocalMotionField(pair,p,options,v,nullptr,false)&&v.alignmentConfidence>0;
-        };
-        if(!EvaluateCaptureMotion(anchor,point,options,a)||a.alignmentConfidence<=0||!sample(a.sourceRaw,b)) {
+        Mfd::LocalMotionFieldSample a,b;
+        Mfd::RawMappingJacobianSet linearizations;
+        if(!EvaluateCaptureMotion(anchor,point,options,a)||a.alignmentConfidence<=0||
+           !Mfd::EvaluateLocalMotionField(pair,a.sourceRaw,options,b,nullptr,false,nullptr,&linearizations)||
+           b.alignmentConfidence<=0) {
             node.rejectReason=Mfd::MotionNodeRejectReason::MotionFieldAmbiguous;++out.rejectedCount;continue;
         }
-        const double left=std::max(0.,a.sourceRaw.x-.5),right=std::min(double(anchor.frame.activeExtent.width-1),a.sourceRaw.x+.5);
-        const double top=std::max(0.,a.sourceRaw.y-.5),bottom=std::min(double(anchor.frame.activeExtent.height-1),a.sourceRaw.y+.5);
-        if(right<=left||bottom<=top||!sample({left,a.sourceRaw.y},x0)||!sample({right,a.sourceRaw.y},x1)||
-            !sample({a.sourceRaw.x,top},y0)||!sample({a.sourceRaw.x,bottom},y1)) {
-            node.rejectReason=Mfd::MotionNodeRejectReason::MotionFieldAmbiguous;++out.rejectedCount;continue;
+        Mfd::SymmetricRawCovariance transported;
+        if(!Mfd::TryTransportMotionCovarianceEnvelope(a.covarianceRaw,linearizations,transported)) {
+            node.rejectReason=Mfd::MotionNodeRejectReason::InvalidCovariance;++out.rejectedCount;continue;
         }
-        const double j00=(x1.sourceRaw.x-x0.sourceRaw.x)/(right-left),j01=(y1.sourceRaw.x-y0.sourceRaw.x)/(bottom-top);
-        const double j10=(x1.sourceRaw.y-x0.sourceRaw.y)/(right-left),j11=(y1.sourceRaw.y-y0.sourceRaw.y)/(bottom-top);
-        const auto& c=a.covarianceRaw;
         node.covarianceRaw={
-            b.covarianceRaw.xxRawPixelsSquared+j00*j00*c.xxRawPixelsSquared+2*j00*j01*c.xyRawPixelsSquared+j01*j01*c.yyRawPixelsSquared,
-            b.covarianceRaw.xyRawPixelsSquared+j00*j10*c.xxRawPixelsSquared+(j00*j11+j01*j10)*c.xyRawPixelsSquared+j01*j11*c.yyRawPixelsSquared,
-            b.covarianceRaw.yyRawPixelsSquared+j10*j10*c.xxRawPixelsSquared+2*j10*j11*c.xyRawPixelsSquared+j11*j11*c.yyRawPixelsSquared};
+            b.covarianceRaw.xxRawPixelsSquared+transported.xxRawPixelsSquared,
+            b.covarianceRaw.xyRawPixelsSquared+transported.xyRawPixelsSquared,
+            b.covarianceRaw.yyRawPixelsSquared+transported.yyRawPixelsSquared};
+        // A later field sample retains the configured covariance ceiling.
+        // Do not publish composed evidence that it would make more certain
+        // by clipping this known local-model envelope down to that ceiling.
+        if(!covarianceSupported(node.covarianceRaw)) {
+            node.rejectReason=Mfd::MotionNodeRejectReason::InvalidCovariance;++out.rejectedCount;continue;
+        }
         const auto base=source.alignment.Map(point);
         node.residualRaw={b.sourceRaw.x-base.x,b.sourceRaw.y-base.y};node.discreteResidualRaw=node.residualRaw;
         node.confidence=std::min(a.alignmentConfidence,b.alignmentConfidence);
@@ -70,6 +79,23 @@ inline Mfd::LocalMotionGrid ComposeGroupMotion(const PreparedSource& anchor,
         ++out.structuredCount;
     }
     ExtendMotionBoundary(out);
+    // Boundary extension adds uncertainty after interior validation. Reject
+    // oversized copied nodes too; otherwise their extra variance would be
+    // clipped away on evaluation. Generic cell-interpolation policy is unchanged.
+    out.structuredCount=out.flatSafeCount=out.rejectedCount=0;
+    for(auto& node:out.nodes) {
+        if(node.state!=Mfd::MotionNodeState::Rejected&&!covarianceSupported(node.covarianceRaw)) {
+            node.state=Mfd::MotionNodeState::Rejected;
+            node.rejectReason=Mfd::MotionNodeRejectReason::InvalidCovariance;
+            node.confidence=0;
+        }
+        if(node.state==Mfd::MotionNodeState::Structured)++out.structuredCount;
+        else if(node.state==Mfd::MotionNodeState::FlatSafe)++out.flatSafeCount;
+        else ++out.rejectedCount;
+    }
+    // Preserve the validated field descriptor even when every node rejects:
+    // bracket reliability consumes that field as zero local evidence. An
+    // invalid descriptor would instead abort reliability for the whole bracket.
     return out;
 }
 }

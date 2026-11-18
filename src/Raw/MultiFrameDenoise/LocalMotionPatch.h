@@ -62,11 +62,6 @@ struct RefinedTile {
     SymmetricRawCovariance localCovarianceRaw;
     double hessianCondition = std::numeric_limits<double>::infinity();
     double positionSigmaRaw = std::numeric_limits<double>::infinity();
-    // The ordinary grid search supplies its distinct runner-up. Verify that
-    // its ambiguity evidence survives the common support used by this fit.
-    bool ambiguityVerified = false;
-    double seedCost = std::numeric_limits<double>::infinity();
-    double alternativeCost = std::numeric_limits<double>::infinity();
 };
 
 // Nonpositive entries identify samples unavailable somewhere in the allowed
@@ -84,6 +79,16 @@ enum class PatchEvaluation {
     PhysicalOnFixedSupport
 };
 
+// An exceeded limit is only a lower-bound certificate: some measurements may
+// not have been visited or may be unavailable. The denominator is always the
+// complete fixed-support count, and unseen Huber losses have a lower bound of
+// zero. Never expose this partial sum as a complete valid patch score.
+struct PatchCostLimit {
+    double maximumMeanCost = std::numeric_limits<double>::infinity();
+    bool exceeded = false;
+    bool unavailable = false;
+};
+
 bool EvaluatePatch(
     const LocalMotionDirectionRequest& request,
     RawCoordinate centerRaw,
@@ -95,7 +100,8 @@ bool EvaluatePatch(
     PatchStatistics& statistics,
     const PatchReferenceGeometry* geometry = nullptr,
     PatchEvaluation evaluation = PatchEvaluation::Native,
-    FixedPatchSupport* support = nullptr);
+    FixedPatchSupport* support = nullptr,
+    PatchCostLimit* costLimit = nullptr);
 
 bool RefineTileSubpixel(
     const LocalMotionDirectionRequest& request,
@@ -103,7 +109,6 @@ bool RefineTileSubpixel(
     RawCoordinate discreteResidualRaw,
     RefinedTile& refined,
     const PatchStatistics* initialStatistics = nullptr,
-    FixedPatchSupport* initialSupport = nullptr,
-    const RawCoordinate* alternativeResidualRaw = nullptr);
+    FixedPatchSupport* initialSupport = nullptr);
 
 } // namespace Raw::Mfd::Detail

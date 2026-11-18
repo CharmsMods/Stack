@@ -607,6 +607,73 @@ bool SelectBestAndSecond(
     return true;
 }
 
+bool VerifyFinestCandidateAmbiguity(
+    const LocalMotionDirectionRequest& request,
+    RawCoordinate centerRaw,
+    const std::vector<Candidate>& candidates,
+    const std::vector<std::uint8_t>* originalEligibility,
+    const Candidate& best,
+    const Candidate& second,
+    const PatchReferenceGeometry* geometry,
+    double& uniqueness) {
+    uniqueness = 0.0;
+    const auto& parameters = request.options.registration;
+    if (!Finite(second.statistics.robustCost) || !Finite(best.statistics.robustCost)) return true;
+    const double originalGap = std::max(0.0,
+        (second.statistics.robustCost - best.statistics.robustCost) /
+            (best.statistics.robustCost + parameters.localNumericalVarianceFloor));
+    uniqueness = originalGap;
+    // A rejected original gap cannot become stronger by changing the objective.
+    // FlatSafe still has its separate, unchanged parent-evidence policy.
+    if (uniqueness <= parameters.uniquenessTransitionMin) return true;
+    if (request.shouldCancel && request.shouldCancel()) return false;
+
+    Detail::FixedPatchSupport support;
+    PatchStatistics seed;
+    if (!EvaluatePatch(request, centerRaw, 0u, best.residualRaw,
+            parameters.finestPatchPlanePixels, false, false, seed, geometry,
+            Detail::PatchEvaluation::CaptureSupport, &support) || !seed.valid ||
+        seed.validFraction < parameters.minimumTileValidFraction ||
+        seed.validCount < parameters.minimumStructuredSamples) {
+        uniqueness = 0.0;
+        return true;
+    }
+    // Retain only the scalar cap. The candidate list and frozen denominators
+    // remain private, bounded search workspace, never per-image node payloads.
+    // GPU eligibility is captured before numerical-shortlist invalidation, so
+    // lower-ranked hypotheses cannot disappear when the common domain changes.
+    constexpr double minimumSecondDistanceRaw = 2.0;
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        const Candidate& candidate = candidates[index];
+        const bool eligible = originalEligibility
+            ? (*originalEligibility)[index] != 0u : candidate.statistics.valid;
+        if (!eligible || std::sqrt(SquaredNorm(Subtract(candidate.residualRaw,
+                best.residualRaw))) + 1.0e-12 < minimumSecondDistanceRaw) continue;
+        if (request.shouldCancel && request.shouldCancel()) return false;
+        Detail::PatchCostLimit limit;
+        limit.maximumMeanCost = seed.robustCost + uniqueness *
+            (seed.robustCost + parameters.localNumericalVarianceFloor);
+        PatchStatistics rival;
+        const bool evaluated = EvaluatePatch(request, centerRaw, 0u, candidate.residualRaw,
+            parameters.finestPatchPlanePixels, false, false, rival, geometry,
+            Detail::PatchEvaluation::FixedObjective, &support, &limit);
+        if (request.shouldCancel && request.shouldCancel()) return false;
+        // This is a nonnegative-cost lower bound, not a fully verified patch.
+        // Even assigning every unseen/unavailable residual zero cannot make
+        // this candidate reduce the current cap. No full score is published.
+        if (limit.exceeded) continue;
+        if (!evaluated || !rival.valid) {
+            uniqueness = 0.0; // Incomplete evidence could still compete.
+            return true;
+        }
+        const double gap = std::max(0.0, (rival.robustCost - seed.robustCost) /
+            (seed.robustCost + parameters.localNumericalVarianceFloor));
+        uniqueness = std::min(uniqueness, gap);
+        if (uniqueness <= parameters.uniquenessTransitionMin) return true;
+    }
+    return true;
+}
+
 bool VerifyAcceleratedCandidates(
     const LocalMotionDirectionRequest& request,
     RawCoordinate centerRaw,
@@ -614,7 +681,20 @@ bool VerifyAcceleratedCandidates(
     RawCoordinate predictionRaw,
     std::vector<Candidate>& candidates,
     Candidate& best,
-    Candidate& second) {
+    Candidate& second,
+    double& commonUniqueness) {
+    commonUniqueness = 0.0;
+    std::vector<std::uint8_t> originalEligibility;
+    if (level == 0u) {
+        originalEligibility.resize(candidates.size(), 0u);
+        for (std::size_t index = 0u; index < candidates.size(); ++index) {
+            const auto& score = candidates[index].statistics;
+            originalEligibility[index] = score.valid && Finite(score.robustCost) &&
+                score.nominalCount > 0u && score.validCount <= score.nominalCount &&
+                static_cast<double>(score.validCount) / static_cast<double>(score.nominalCount) >=
+                    request.options.registration.minimumTileValidFraction;
+        }
+    }
     std::vector<std::size_t> ranked;
     ranked.reserve(candidates.size());
     for (std::size_t index = 0u; index < candidates.size(); ++index) {
@@ -681,13 +761,17 @@ bool VerifyAcceleratedCandidates(
             authoritative.validFraction <
                 request.options.registration.minimumTileValidFraction) {
             candidates[index].statistics = {};
+            if (level == 0u) originalEligibility[index] = 0u;
             continue;
         }
         candidates[index].statistics = std::move(authoritative);
+        if (level == 0u) originalEligibility[index] = 1u;
     }
-    return SelectBestAndSecond(
+    if (!SelectBestAndSecond(
         candidates, predictionRaw,
-        request.options.registration.candidateTieTolerance, best, second);
+        request.options.registration.candidateTieTolerance, best, second)) return false;
+    return level != 0u || VerifyFinestCandidateAmbiguity(request, centerRaw,
+        candidates, &originalEligibility, best, second, geometry, commonUniqueness);
 }
 
 bool SearchTileAtLevel(
@@ -697,7 +781,9 @@ bool SearchTileAtLevel(
     const std::vector<RawCoordinate>& seedsRaw,
     RawCoordinate predictionRaw,
     Candidate& best,
-    Candidate& second) {
+    Candidate& second,
+    double& commonUniqueness) {
+    commonUniqueness = 0.0;
     const double rawPerLevelPixel = std::ldexp(2.0, level);
     const std::uint32_t radius =
         request.options.registration.searchRadiiFineToCoarse[level];
@@ -779,7 +865,8 @@ bool SearchTileAtLevel(
             second = candidates[index];
         }
     }
-    return true;
+    return level != 0u || VerifyFinestCandidateAmbiguity(request, centerRaw,
+        candidates, nullptr, best, second, geometry, commonUniqueness);
 }
 
 double ResidualConfidence(double cappedChiSquared) {
@@ -812,6 +899,7 @@ struct LevelNodeState {
     RawCoordinate predictionBeforeFineRaw;
     Candidate best;
     Candidate second;
+    double commonUniqueness = 0.0;
 };
 
 bool CompatiblePyramids(
@@ -1100,6 +1188,7 @@ bool EstimateLocalMotionDirection(
                     }
                     Candidate best;
                     Candidate second;
+                    double commonUniqueness = 0.0;
                     if (!VerifyAcceleratedCandidates(
                             request,
                             node.centerRaw,
@@ -1107,7 +1196,8 @@ bool EstimateLocalMotionDirection(
                             node.predictionRaw,
                             node.candidates,
                             best,
-                            second)) {
+                            second,
+                            commonUniqueness)) {
                         return;
                     }
                     LevelNodeState& state = current[node.index];
@@ -1118,6 +1208,7 @@ bool EstimateLocalMotionDirection(
                         : best.residualRaw;
                     state.best = std::move(best);
                     state.second = std::move(second);
+                    state.commonUniqueness = commonUniqueness;
                 };
                 try {
                     if (parallel) {
@@ -1217,6 +1308,7 @@ bool EstimateLocalMotionDirection(
                     }
                     Candidate best;
                     Candidate second;
+                    double commonUniqueness = 0.0;
                     if (!SearchTileAtLevel(
                             request,
                             center,
@@ -1224,7 +1316,8 @@ bool EstimateLocalMotionDirection(
                             seeds,
                             prediction,
                             best,
-                            second)) {
+                            second,
+                            commonUniqueness)) {
                         return;
                     }
                     current[index].valid = true;
@@ -1234,6 +1327,7 @@ bool EstimateLocalMotionDirection(
                         : best.residualRaw;
                     current[index].best = std::move(best);
                     current[index].second = std::move(second);
+                    current[index].commonUniqueness = commonUniqueness;
                 };
                 try {
                     if (parallel) {
@@ -1316,7 +1410,7 @@ bool EstimateLocalMotionDirection(
                     request,
                     node.centerRaw,
                     node.discreteResidualRaw,
-                    refined, nullptr, nullptr, &prior[index].second.residualRaw)) {
+                    refined)) {
                 node.rejectReason = MotionNodeRejectReason::SubpixelFailure;
                 continue;
             }
@@ -1325,11 +1419,10 @@ bool EstimateLocalMotionDirection(
                 continue;
             }
             // Keep secondBestCost in its existing physical-noise diagnostic
-            // domain. The ambiguity cap below uses a separate, directly
-            // comparable pair on this fit's common support and fixed noise.
-            node.uniqueness = refined.ambiguityVerified ? std::min(node.uniqueness, std::max(0.0,
-                (refined.alternativeCost - refined.seedCost) /
-                    (refined.seedCost + request.options.registration.localNumericalVarianceFloor))) : 0.0;
+            // domain. The scalar cap was verified against every eligible
+            // separated hypothesis in this node's finest search domain, on
+            // the same common support and fixed noise used by the fit.
+            node.uniqueness = std::min(node.uniqueness, prior[index].commonUniqueness);
             node.residualRaw = refined.residualRaw;
             node.robustCost = refined.statistics.robustCost;
             node.validFraction = refined.statistics.validFraction;
@@ -1565,15 +1658,10 @@ bool EstimateLocalMotionDirection(
 }
 
 namespace {
-struct MotionFieldDifferentials {
-    std::array<RawMappingJacobian,4> sides;
-    unsigned count=0;
-};
-
 // The same confidence-normalized bilinear map is used by optional guide
 // derivatives and forward/backward uncertainty transport. Keep every supported
 // one-sided derivative at internal knots; physical edges use the inside side.
-MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+RawMappingJacobianSet FieldDifferentials(const LocalMotionGrid& grid,
     double gridX,double gridY,std::uint32_t x0,std::uint32_t y0,
     const LocalMotionOptions& options) {
     const auto derivative=[&](std::uint32_t ix,std::uint32_t iy) {
@@ -1598,7 +1686,7 @@ MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
         j.linear[2]+=(nx.y-n.y/mass*mx)/mass;j.linear[3]+=(ny.y-n.y/mass*my)/mass;
         j.valid=FiniteMappingJacobian(j);return j;
     };
-    MotionFieldDifferentials result;
+    RawMappingJacobianSet result;
     result.sides[result.count++]=derivative(x0,y0);
     result.sides[0].valid=result.sides[0].valid&&gridX>=0&&gridY>=0&&
         gridX<=grid.width-1&&gridY<=grid.height-1;
@@ -1611,7 +1699,7 @@ MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
     return result;
 }
 
-MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+RawMappingJacobianSet FieldDifferentials(const LocalMotionGrid& grid,
     RawCoordinate point,const LocalMotionOptions& options) {
     // Called only after the same grid/coordinate passed field evaluation.
     const double x=(point.x-grid.originRawX)/grid.spacingRawX;
@@ -1630,8 +1718,10 @@ bool EvaluateLocalMotionField(
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
     std::string* error,
-    bool includeDiagnostic, RawMappingJacobian* jacobian) {
+    bool includeDiagnostic, RawMappingJacobian* jacobian,
+    RawMappingJacobianSet* linearizations) {
     if(jacobian)*jacobian={};
+    if(linearizations)*linearizations={};
     result = {};
     result.referenceRaw = referenceRaw;
     if (!grid.valid || grid.width == 0u || grid.height == 0u ||
@@ -1755,12 +1845,15 @@ bool EvaluateLocalMotionField(
         if (includeDiagnostic || error) result.message = "MFD local-motion warp leaves the source active area.";
         return Fail(error, result.message);
     }
-    if(jacobian) {
+    if(jacobian||linearizations) {
         const auto derivatives=FieldDifferentials(grid,gridX,gridY,x0,y0,options);
-        *jacobian=derivatives.sides[0];
-        for(unsigned i=1;i<derivatives.count&&jacobian->valid;++i)
-            jacobian->valid=derivatives.sides[i].valid&&
-                SameMappingJacobian(*jacobian,derivatives.sides[i]);
+        if(linearizations)*linearizations=derivatives;
+        if(jacobian) {
+            *jacobian=derivatives.sides[0];
+            for(unsigned i=1;i<derivatives.count&&jacobian->valid;++i)
+                jacobian->valid=derivatives.sides[i].valid&&
+                    SameMappingJacobian(*jacobian,derivatives.sides[i]);
+        }
     }
     result.valid = true;
     result.rejectReason = MotionNodeRejectReason::None;
@@ -1849,16 +1942,23 @@ bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& reque
         floor,reverseSides,1,mahalanobis))return false;
     if(!Finite(mahalanobis)||mahalanobis>p.forwardBackwardMahalanobisHardLimit||
        std::sqrt(SquaredNorm(closure))>p.forwardBackwardEuclideanHardLimitRawPixels)return false;
+    // Photometric improvement and closure do not supply positional precision
+    // along a weak image direction. Apply the native grid's precision policy
+    // before publishing a correction; the consumer retains base-map covariance.
+    const double confidence=ResidualConfidence(refined.statistics.cappedChiSquared)*
+        CoverageConfidence(refined.statistics.validFraction)*PrecisionConfidence(refined.positionSigmaRaw,p)*
+        std::exp(-.5*std::max(mahalanobis-2.,0.));
+    if(!Finite(confidence)||confidence<=.2)return false;
     result.centerRaw=referenceRaw;result.residualRaw=refined.residualRaw;
     result.discreteResidualRaw=seed;result.covarianceRaw=refined.localCovarianceRaw;
     result.state=MotionNodeState::Structured;result.rejectReason=MotionNodeRejectReason::None;
     result.robustCost=refined.statistics.robustCost;result.secondBestCost=before.robustCost;
     result.validFraction=refined.statistics.validFraction;result.cappedChiSquared=refined.statistics.cappedChiSquared;
-    result.confidence=ResidualConfidence(result.cappedChiSquared)*CoverageConfidence(result.validFraction)*
-        std::exp(-.5*std::max(mahalanobis-2.,0.));
+    result.hessianCondition=refined.hessianCondition;result.positionalSigmaRaw=refined.positionSigmaRaw;
+    result.confidence=confidence;
     result.forwardBackwardErrorRaw=closure;result.forwardBackwardMahalanobis=mahalanobis;
     result.forwardBackwardEuclideanRaw=std::sqrt(SquaredNorm(closure));
-    return result.confidence>.2;
+    return true;
 }
 
 bool EstimateBidirectionalLocalMotion(

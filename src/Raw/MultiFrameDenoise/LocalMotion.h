@@ -17,7 +17,7 @@ inline constexpr const char* kLocalMotionContractId =
 // Processing identity, separate from the unchanged public data contract.
 // All hosts/cache owners using these pyramids or fits must include this value.
 inline constexpr const char* kLocalMotionAlgorithmRevision =
-    "raw-motion-v3-fixed-support-composed-variance";
+    "raw-motion-v4-common-ambiguity-precision-transport";
 
 struct CfaPyramidBasePlane {
     CfaSite site = CfaSite::Red;
@@ -128,8 +128,10 @@ struct LocalMotionOptions {
 // Discrete coarse-to-fine search is the large, embarrassingly parallel part
 // of local registration.  An optional accelerator may score a batch in FP32;
 // the CPU still verifies a conservative shortlist in FP64 before accepting a
-// best/second-best pair, and every later covariance/safety decision remains
-// on the reference path.
+// best/second-best pair. Finest-level ambiguity also checks every eligible
+// enumerated hypothesis on the native common objective, including candidates
+// outside that numerical shortlist. Covariance/safety decisions remain on the
+// reference path; packed FP32 coverage never overrides native count evidence.
 struct LocalMotionDiscreteCandidate {
     RawCoordinate centerRaw;
     RawCoordinate residualRaw;
@@ -234,6 +236,15 @@ struct RawMappingJacobian {
     bool valid=false;
 };
 
+// A continuous interpolated field can have different one-sided derivatives at
+// an internal grid knot. Keep those local models separate for uncertainty
+// transport; averaging their slopes can conceal a motion boundary. This is
+// bounded differential evidence, not a distribution over possible mappings.
+struct RawMappingJacobianSet {
+    std::array<RawMappingJacobian,4> sides;
+    unsigned count=0;
+};
+
 bool EvaluateLocalMotionField(
     const LocalMotionGrid& grid,
     RawCoordinate referenceRaw,
@@ -241,7 +252,8 @@ bool EvaluateLocalMotionField(
     LocalMotionFieldSample& result,
     std::string* error = nullptr,
     bool includeDiagnostic = true,
-    RawMappingJacobian* jacobian = nullptr);
+    RawMappingJacobian* jacobian = nullptr,
+    RawMappingJacobianSet* linearizations = nullptr);
 
 bool InvertAffineModel(
     const AffineModel& model,

@@ -84,6 +84,47 @@ inline bool TryTransportMotionCovariance(SymmetricRawCovariance input,
     output=transformed;return true;
 }
 
+// At a motion-grid knot, each supported side is a possible local linear model.
+// Transport through every side and retain a PSD upper envelope instead of an
+// average Jacobian, which can cancel opposing slopes. For D=C_next-E, adding
+// its positive spectral part gives E_new=E+D_+: both E_new-E and E_new-C_next
+// are PSD. The bounded, deterministic fold preserves identical/affine sides
+// exactly and avoids inflating unaffected axes for commuting covariances.
+//
+// This is a first-order local-model envelope, not a calibrated posterior for
+// uncertainty spanning whole cells or correlations between fitted links. Do
+// not use this envelope to relax a closure gate: closure tests each side.
+inline bool TryTransportMotionCovarianceEnvelope(SymmetricRawCovariance input,
+    const RawMappingJacobianSet& linearizations,SymmetricRawCovariance& output) {
+    if(linearizations.count==0||linearizations.count>linearizations.sides.size())return false;
+    SymmetricRawCovariance envelope;
+    if(!TryTransportMotionCovariance(input,linearizations.sides[0],envelope))return false;
+    for(unsigned i=1;i<linearizations.count;++i) {
+        SymmetricRawCovariance next;
+        if(!TryTransportMotionCovariance(input,linearizations.sides[i],next))return false;
+        const double xx=next.xxRawPixelsSquared-envelope.xxRawPixelsSquared;
+        const double xy=next.xyRawPixelsSquared-envelope.xyRawPixelsSquared;
+        const double yy=next.yyRawPixelsSquared-envelope.yyRawPixelsSquared;
+        const double center=.5*xx+.5*yy;
+        const double radius=std::hypot(.5*xx-.5*yy,xy);
+        const double low=center-radius,high=center+radius;
+        if(!std::isfinite(low)||!std::isfinite(high))return false;
+        if(high<=0)continue;
+        if(low>=0) {envelope=next;continue;}
+        // The positive eigenspace is rank one. D-low*I is its projector
+        // multiplied by high-low; no angle or eigenvector branch is needed.
+        const double factor=.5*(high/radius);
+        envelope.xxRawPixelsSquared+=factor*(xx-low);
+        envelope.xyRawPixelsSquared+=factor*xy;
+        envelope.yyRawPixelsSquared+=factor*(yy-low);
+    }
+    // Keep failure transactional, including nonfinite arithmetic or a
+    // malformed covariance; the caller decides its evidence rejection.
+    SymmetricRawCovariance checked;
+    if(!TryTransportMotionCovariance(envelope,{{1,0,0,1},true},checked))return false;
+    output=checked;return true;
+}
+
 // Closure is measured in the reverse map's output coordinates. At an internal
 // knot every supported one-sided linearization must pass: use the largest
 // Mahalanobis residual, not an averaged/dilated covariance that could create

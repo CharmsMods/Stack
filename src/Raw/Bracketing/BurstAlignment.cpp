@@ -145,9 +145,19 @@ bool AdmitLocalAlignmentMemory(const ProcessingRequest& request,const PreparedDa
     const auto workers=ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount);
     const auto patchSide=parameters.registration.finestPatchPlanePixels;
     const auto fixedSupportBytes=multiply(multiply(patchSide,patchSide),4*sizeof(double));
+    const std::uint64_t motionSpacing=2ull*parameters.registration.finestStridePlanePixels;
+    if(!motionSpacing) {
+        error="Local-alignment memory planning has an invalid motion-grid stride.";return false;
+    }
+    // Each direction retains a common-domain uniqueness cap in both search
+    // state buffers. Charge both directions even when the GPU serializes them;
+    // ceil-rounded dimensions bound the smaller, margin-trimmed motion grid.
+    const auto motionNodes=multiply(data.width/motionSpacing+(data.width%motionSpacing!=0),
+        data.height/motionSpacing+(data.height%motionSpacing!=0));
+    const auto ambiguityStateBytes=multiply(motionNodes,4*sizeof(double));
     const auto searchWorking=add(std::max(multiply(pixels,72),
         add(pairPyramids,add(pixels,multiply(workers,512ull*1024)))),
-        multiply(workers,fixedSupportBytes));
+        add(multiply(workers,fixedSupportBytes),ambiguityStateBytes));
     const auto working=std::max({add(pairPyramids,add(tileBytes,Mfd::kPyramidVarianceScratchBytes)),searchWorking,
         add(pairPyramids,reliabilityWorking),add(pairPyramids/2,multiply(tileBytes,9))});
     // The bounded original overviews, motion fields, metadata, vector/thread

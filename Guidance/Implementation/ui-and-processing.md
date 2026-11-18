@@ -165,12 +165,28 @@ map for the actual pair; a bounded inverse failure omits that hint only.
 
 Native subpixel fitting uses a common measured support across its bounded seed
 neighborhood and fixed seed noise denominators, with residual-dependent Huber
-weights and bounded sufficient-decrease backtracking. Recheck the existing
-runner-up on that same objective before retaining its ambiguity evidence. This
-does not certify every previously searched basin. Re-evaluate physical noise,
-observability and covariance at the accepted coordinate; the fitting objective
-is not a calibrated measurement likelihood. Keep all coverage and rejection
-requirements, and distinguish cancellation/resource failure from weak evidence.
+weights and bounded sufficient-decrease backtracking. Cap ambiguity evidence
+against every eligible separated hypothesis in that node's finest search domain,
+including GPU candidates outside the numerical shortlist. Nonnegative partial
+costs may exclude a rival only when they prove it cannot reduce that cap; missing
+competitive evidence cannot establish uniqueness. This finite search does not
+certify continuous or global uniqueness. Re-evaluate physical noise, observability
+and covariance at the accepted coordinate; the fitting objective is not a
+calibrated measurement likelihood. Point corrections also need the native
+positional-precision confidence factor before publication. Keep coverage and
+rejection requirements, and distinguish cancellation/resource failure from weak
+evidence.
+
+Exposure-cohort composition transports uncertainty through the field's analytic
+one-sided derivatives. At a knot, use a PSD upper envelope over supported local
+models; averaging opposing slopes can conceal uncertainty. Reject emitted nodes,
+including padded boundary nodes, whose covariance would exceed the existing
+sampling ceiling. An all-rejected field still has a valid descriptor for reliability
+evaluation; rejected evidence must not become a malformed-request error. This
+local, first-order envelope does not calibrate a posterior, model correlations
+between fitted links, or change the generic interpolation/scatter ceiling. Keep
+closure's per-side checks separate; larger covariance does not make every
+variance-normalized acceptance test stricter.
 
 Photometrically compatible flat regions are not independent registration evidence.
 Exposure fitting tracks the provenance of the current motion field before synthetic
