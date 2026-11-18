@@ -1,5 +1,6 @@
 #pragma once
 #include "Project/NodeEditTarget.h"
+#include <cstdint>
 #include <functional>
 
 namespace Stack::Editor {

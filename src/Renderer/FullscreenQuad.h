@@ -15,7 +15,8 @@ public:
     void Shutdown();
     void Draw();
     // Request-scoped worker callback; an empty callback leaves ordinary UI
-    // and export draws unchanged. Scissor batches preserve the raster grid.
+    // draws unchanged. Scissor batches preserve the raster grid, including
+    // terminal exports that cooperate with active UI work without being lost.
     void SetCooperativeCancellation(std::function<bool()> callback) { m_Cancellation=std::move(callback); }
 
 private:

@@ -174,6 +174,11 @@ out vec2 vUV;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vUV=p;gl_
     }
     std::cout<<"HSL endpoint/identity/HDR/round-trip cases: "<<hslCases<<"; passed="<<ok<<'\n';
     ok &= ValidateHslSelectionMath(program);
+    // Ordinary HSL uses the smaller variant; exercise its identical selection
+    // math and regional coordinates through the same established cases.
+    const auto hslProgram=GLHelpers::CreateShaderProgram(vertex,Renderer::ColorWarp::HslFragment);
+    ok &= hslProgram!=0;
+    if(hslProgram) {ok &= ValidateHslSelectionMath(hslProgram);glDeleteProgram(hslProgram);}
     glDeleteVertexArrays(1,&vao);glDeleteProgram(program);
     
     ImGui::CreateContext();auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.DisplaySize={720,860};io.DeltaTime=1.f/60;

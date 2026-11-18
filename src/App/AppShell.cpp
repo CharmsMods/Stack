@@ -1883,7 +1883,8 @@ void AppShell::Run() {
         const auto& input=ImGui::GetIO();
         // Focus alone (for example an idle text field) must not indefinitely
         // suppress background work. Track actual presses, text and repeats.
-        const bool relevantInput=input.MouseWheel!=0 || input.MouseWheelH!=0 ||
+        const bool relevantInput=input.MouseDelta.x!=0 || input.MouseDelta.y!=0 ||
+            input.MouseWheel!=0 || input.MouseWheelH!=0 ||
             input.InputQueueCharacters.Size!=0 ||
             ImGui::GetCurrentContext()->LastKeyboardKeyPressTime==ImGui::GetTime() ||
             ImGui::IsAnyMouseDown() || ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||

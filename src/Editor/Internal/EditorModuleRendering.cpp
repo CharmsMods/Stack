@@ -1191,6 +1191,7 @@ void EditorModule::PumpViewportOutputTileTextureDeletes(bool drainAll) {
 EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t generation) {
     EditorRenderWorker::Snapshot snapshot;
     snapshot.telemetry.targetFps = GetRawViewportTargetFps();
+    snapshot.telemetry.displayRefreshRate = m_RawViewportDisplayRefreshRate;
     snapshot.telemetry.timingHistoryEpoch=m_RawViewportTimingHistory.Epoch();
     snapshot.telemetry.gestureId = m_RawViewportGestureId;
     snapshot.rawWorkspace.editStage = m_RawViewportEditStage;

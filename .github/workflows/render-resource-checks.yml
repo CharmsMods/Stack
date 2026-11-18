@@ -3,7 +3,12 @@ name: Render resource checks
 on:
   pull_request:
     paths:
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'src/App/**'
+      - 'src/Async/**'
       - 'src/Editor/**'
+      - 'src/Hdr/**'
       - 'src/Renderer/**'
       - 'src/Raw/**'
       - 'tools/tests/**'
@@ -25,6 +30,25 @@ jobs:
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Fetch pinned ImGui headers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ocornut/imgui
+          ref: 5a76f2adf1b0403b86a45010121fb32a6bff8680
+          path: _workspace/check-deps/imgui
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*.h
+            /backends/*.h
+      - name: Fetch pinned GLFW headers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: glfw/glfw
+          ref: 7b6aead9fb88b3623e3b3725ebb42670cbe4c579
+          path: _workspace/check-deps/glfw
+          persist-credentials: false
+          sparse-checkout: include
       - name: Prepare existing lifecycle checks
         shell: pwsh
         run: |
@@ -58,4 +82,6 @@ jobs:
           cl /nologo /std:c++17 /EHsc /W4 /utf-8 /I"%GITHUB_WORKSPACE%\src" denoise.cpp "%GITHUB_WORKSPACE%\src\Renderer\RawRgbDenoiseState.cpp" /Fe:denoise.exe
           if errorlevel 1 exit /b 1
           denoise.exe
+          if errorlevel 1 exit /b 1
+          pwsh -NoLogo -NoProfile -File "%GITHUB_WORKSPACE%\tools\tests\run_node_performance_checks.ps1" -RepositoryRoot "%GITHUB_WORKSPACE%" -CheckDirectory "%RUNNER_TEMP%\stack-render-checks\nodes" -ImGuiDirectory "%GITHUB_WORKSPACE%\_workspace\check-deps\imgui" -GlfwDirectory "%GITHUB_WORKSPACE%\_workspace\check-deps\glfw"
           if errorlevel 1 exit /b 1

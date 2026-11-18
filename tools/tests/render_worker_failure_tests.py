@@ -42,6 +42,8 @@ pre = r'''
 #include "Editor/RawRenderPurpose.h"
 #include "Editor/GraphRenderPolicy.h"
 #include "Hdr/ImageFile.h"
+#include "Renderer/CooperativeGpuScheduling.h"
+#include "Async/UiInteraction.h"
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -131,6 +133,7 @@ public:
     struct Tiles { GLsync readyFence=nullptr; std::vector<SharedTextureTile> tiles; };
     struct RawRenderTelemetry {
         std::chrono::steady_clock::time_point queuedAt{},snapshotReadyAt{};
+        int displayRefreshRate=60;
         double commandEnqueueMs=0; bool superseded=false,workerStarted=false,overloadSkipped=false;
         std::uint64_t gestureId=0,timingHistoryEpoch=0; RawPreviewSkipReason skipReason=RawPreviewSkipReason::None;
     };
@@ -788,10 +791,31 @@ void ConcurrentCancellationStaysLatched() {
     Require(checks==2 && gpuWaits==0,
         "latched cancellation stops polling and CPU helpers never call the GL worker wait");
 }
+'''+r'''
+void ActiveUiYieldsTerminalGpuWork() {
+    Snapshot snapshot;snapshot.rawRenderPurpose=RawRenderPurpose::ExplicitExport;
+    int gpuWaits=0;
+    const auto ShouldAbortStaleSnapshot=[](const Snapshot&) {return false;};
+    const auto WaitForSubmittedGpuWork=[&] {++gpuWaits;return true;};
+'''+cancellation+r'''
+    for(int i=0;i<8;++i) Require(!shouldAbortStaleWork(),"idle export remains terminal");
+    Require(gpuWaits==0,"idle non-viewport work keeps its existing submission policy");
+    Async::UiInteraction::Lease interaction;interaction.Update(true,true,0.0);
+    bool helperCanceled=false;
+    std::thread helper([&] {
+        for(int i=0;i<8;++i) helperCanceled=shouldAbortStaleWork() || helperCanceled;
+    });helper.join();
+    Require(!helperCanceled && gpuWaits==0,"CPU helpers cannot drain an export's GL context");
+    Require(!shouldAbortStaleWork() && !shouldAbortStaleWork() && gpuWaits>=1,
+        "active input bounds terminal GPU submission without canceling the export");
+    interaction.Clear();const auto before=gpuWaits;
+    for(int i=0;i<8;++i) Require(!shouldAbortStaleWork(),"terminal work continues after the interaction");
+    Require(gpuWaits==before,"ending the UI lease restores idle export throughput");
+}
 '''
 main = r'''
 int main() {
-    try { DenoiseRetirementLockBoundary();CancellationScopeLifetime();ConcurrentCancellationStaysLatched();WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
+    try { DenoiseRetirementLockBoundary();CancellationScopeLifetime();ConcurrentCancellationStaysLatched();ActiveUiYieldsTerminalGpuWork();WorkerRetirementLockBoundary();WorkerRetirementFailureAndStop();ServiceRetirementLockBoundary();WorkerLifecycle();ParkedAndDedupe();CancelFallbackAndShutdown();ServiceRouting();NormalSupersession();PublicationRetirement();GraphAndOverview();AuxiliaryIdentity();ContinuationPurposeOwnership();AdoptionTerminalState();AuxiliaryFailureFeedback();ContinuationFailureDiagnostic();FatalIdleGuard();std::cout<<"render worker failure and retirement lifecycle: PASS\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
 }
 '''

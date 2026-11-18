@@ -1,6 +1,7 @@
 #pragma once
 #include "Hdr/WindowPresenter.h"
 #include "Hdr/Color.h"
+#include "Async/UiInteraction.h"
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -38,6 +39,23 @@ inline void CheckNativeHdrPresentation(GLFWwindow* window) {
             for(int i=0;i<8;++i) {presenter.Present();glFinish();}
             if(presenter.SubmittedFrames()!=1) throw std::runtime_error("An unchanged HDR frame was transferred again.");
             paint(target,2.f);waitForFrame(presenter,2);
+            {
+                Async::UiInteraction::Lease interaction;
+                interaction.Update(true,true,0.0);
+                // Settle the preceding idle comparison, then keep the same
+                // single PBO in the interaction path. glFinish is validation
+                // only; the presenter itself continues to poll without waits.
+                for(int i=0;i<2;++i) {presenter.Present();glFinish();}
+                const auto submitted=presenter.SubmittedFrames();
+                paint(target,2.25f);
+                if(!presenter.Present()) throw std::runtime_error(presenter.Status());
+                glFinish();
+                if(!presenter.Present() || presenter.SubmittedFrames()!=submitted+1)
+                    throw std::runtime_error("Interactive HDR transfer needed a second readback polling turn.");
+                for(int i=0;i<8;++i) {presenter.Present();glFinish();}
+                if(presenter.SubmittedFrames()!=submitted+1)
+                    throw std::runtime_error("An unchanged interactive HDR frame was transferred again.");
+            }
         }
         const auto next=presenter.SubmittedFrames()+1;
         target=presenter.Begin(40,24,false);

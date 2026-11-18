@@ -1,6 +1,7 @@
 #pragma once
 #include "Editor/Internal/RawLab/RawLabColorCloudRenderer.h"
 #include "Editor/Internal/RawLab/RawLabColorWheelRenderer.h"
+#include "Editor/NodeEditors/ColorWarpCloudPreparation.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include <cstdint>
 #include <limits>
@@ -8,11 +9,6 @@
 
 namespace Stack::Editor {
 struct ColorWarpEditorState {
-    struct Point {
-        RawRecipe::RawColorWarpCoordinate input;
-        std::array<float,3> rgb;
-        float u=0,v=0;
-    };
     std::uint64_t swatchRevision=~std::uint64_t(0),swatchLocalRevision=~std::uint64_t(0);
     int swatchSelection=-1;
     Raw::RawWorkingSpace swatchSpace=Raw::RawWorkingSpace::LinearSrgbD65;
@@ -31,12 +27,7 @@ struct ColorWarpEditorState {
     float brightnessInputLow=-8,brightnessInputHigh=8;
 
     std::uint64_t localRevision=0;
-    std::uint64_t cloudRevision=~std::uint64_t(0),cloudLocalRevision=0;
-    std::size_t inputKey=0,cloudFeedbackKey=0;
-    int cloudSelection=-1;
-    bool cloudLive=false,cloudPreview=false,cloudReady=false;
-    Raw::RawWorkingSpace workingSpace=Raw::RawWorkingSpace::LinearSrgbD65;
-    std::vector<Point> points;
+    ColorWarpCloudPreparation cloudPreparation;
     RawLabInternal::ColorWarpCloudRenderState cloud;
     RawLabInternal::RawLabColorWheelRenderer wheel;
     void EndInteraction() { dragging=-1; }

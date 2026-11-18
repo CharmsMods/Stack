@@ -1,6 +1,7 @@
 #pragma once
 #ifdef _WIN32
 #include "DisplayInfo.h"
+#include "CompatibleTransferPolicy.h"
 #include "SharedFrame.h"
 #include "Renderer/GLLoader.h"
 #include <d3d11.h>
@@ -49,7 +50,8 @@ private:
     std::unique_ptr<SharedFrame> sharing;
     unsigned converted[2]{},targets[2]{},flag=0,pbo=0,compare=0;
     GLsync pending=nullptr;
-    enum class Phase { Ready, Comparing, Reading } phase=Phase::Ready;
+    using Phase=CompatibleTransferPhase;
+    Phase phase=Phase::Ready;
     bool hasPrevious=false;
     float previousWhite=0.f,previousPeak=0.f;
     std::vector<unsigned short> transferBytes;

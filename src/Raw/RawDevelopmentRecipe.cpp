@@ -1,5 +1,6 @@
 #include "Raw/ColorWarpHsl.h"
 #include "Raw/HslSelections.h"
+#include "Raw/PreparedColorWarp.h"
 #include "Raw/Demosaic/DemosaicCatalog.h"
 #include "ViewTransform.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -1177,23 +1178,32 @@ float EvaluateRawBezierCurve(
     }
     segmentIndex = std::min(segmentIndex, points.size() - 2u);
     const RawBezierSegment segment = BuildRawBezierSegment(points, segmentIndex);
-    float low = 0.0f;
-    float high = 1.0f;
-    for (int iteration = 0; iteration < 18; ++iteration) {
-        const float middle = (low + high) * 0.5f;
-        const float curveX = BezierCoordinate(
-            segment.left.x,
-            segment.leftHandleX,
-            segment.rightHandleX,
-            segment.right.x,
-            middle);
-        if (curveX < x) low = middle;
-        else high = middle;
-    }
+    return EvaluateRawBezierSegment(segment, x);
+}
+
+float EvaluateRawBezierSegment(const RawBezierSegment& segment, float x) {
     const float span=segment.right.x-segment.left.x;
     const bool linearX=std::abs(segment.leftHandleX-(segment.left.x+span/3))<1e-6f &&
         std::abs(segment.rightHandleX-(segment.right.x-span/3))<1e-6f;
-    const float t = linearX?(x-segment.left.x)/span:(low + high) * 0.5f;
+    float t;
+    if (linearX) {
+        // The existing evaluator used this same analytic t after doing and
+        // discarding all 18 inverse iterations. Ordinary automatic handles
+        // have linear X, including the default point and luminance curves.
+        t = (x-segment.left.x)/span;
+    } else {
+        float low = 0.0f;
+        float high = 1.0f;
+        for (int iteration = 0; iteration < 18; ++iteration) {
+            const float middle = (low + high) * 0.5f;
+            const float curveX = BezierCoordinate(
+                segment.left.x, segment.leftHandleX,
+                segment.rightHandleX, segment.right.x, middle);
+            if (curveX < x) low = middle;
+            else high = middle;
+        }
+        t = (low + high) * 0.5f;
+    }
     return std::clamp(
         BezierCoordinate(
             segment.left.y,
@@ -1511,12 +1521,40 @@ std::array<float, 3> ApplyColorWarp(
     return ApplyPreparedColorWarp(colorWarp, sceneRgb, workingSpace);
 }
 
-std::array<float, 3> ApplyPreparedColorWarp(
+PreparedColorWarpEvaluation PrepareColorWarpEvaluation(const RawColorWarpRecipe& colorWarp) {
+    PreparedColorWarpEvaluation result{colorWarp};
+    result.hasEffect=HasPreparedColorWarpEffect(colorWarp);
+    if(!result.hasEffect)return result;
+    result.globalHsl=PrepareColorWarpHsl(colorWarp);
+    result.selections.reserve(colorWarp.hslSelections.size());
+    for(const auto& selection:colorWarp.hslSelections)
+        result.selections.push_back(PrepareHslSelectionEvaluation(selection));
+    result.pins.reserve(colorWarp.pins.size());
+    for(std::size_t index=0;index<colorWarp.pins.size();++index) {
+        const auto& pin=colorWarp.pins[index];
+        if(UsesColorWarpHsl(colorWarp,pin) || !ColorWarpParticipates(pin))continue;
+        PreparedColorWarpEvaluation::Pin preparedPin;
+        preparedPin.index=index;
+        preparedPin.spatialSupport=ColorWarpPinSpatialSupport(colorWarp,pin);
+        if(pin.moveColors) {
+            auto destinationPin=pin;
+            if(colorWarp.version>=5)destinationPin.saturation=0;
+            const auto destination=ColorWarpDestination(destinationPin);
+            preparedPin.movement={destination[0]-pin.sourceA,destination[1]-pin.sourceB};
+        }
+        result.pins.push_back(preparedPin);
+    }
+    return result;
+}
+
+namespace {
+std::array<float, 3> EvaluateColorWarpSample(
     const RawColorWarpRecipe& colorWarp,
     const std::array<float, 3>& sceneRgb,
     Raw::RawWorkingSpace workingSpace,
-    const std::vector<RawColorWarpMaskSample>* masks, std::array<float,2> imagePosition) {
-    if (!HasPreparedColorWarpEffect(colorWarp)) {
+    const std::vector<RawColorWarpMaskSample>* masks, std::array<float,2> imagePosition,
+    const PreparedColorWarpEvaluation* prepared) {
+    if (!(prepared?prepared->hasEffect:HasPreparedColorWarpEffect(colorWarp))) {
         return sceneRgb;
     }
     RawColorWarpCoordinate coordinate =
@@ -1525,20 +1563,29 @@ std::array<float, 3> ApplyPreparedColorWarp(
             workingSpace);
     if(coordinate.lightness<=0.f || !std::isfinite(coordinate.lightness))return sceneRgb;
     float hue=0, saturation=0, brightness=0, totalWeight=0, protection=0, moveA=0, moveB=0;
-    for (std::size_t index=0;index<colorWarp.pins.size();++index) {
+    const std::size_t count=prepared?prepared->pins.size():colorWarp.pins.size();
+    for (std::size_t entry=0;entry<count;++entry) {
+        const auto* preparedPin=prepared?&prepared->pins[entry]:nullptr;
+        const auto index=preparedPin?preparedPin->index:entry;
         const auto& pin=colorWarp.pins[index];
-        if(UsesColorWarpHsl(colorWarp,pin) || !ColorWarpParticipates(pin))continue;
+        if(!preparedPin && (UsesColorWarpHsl(colorWarp,pin) || !ColorWarpParticipates(pin)))continue;
         const auto mask=masks && index<masks->size()?(*masks)[index]:RawColorWarpMaskSample{};
         const float weight=EvaluateColorWarpPinWeight(pin,coordinate,mask,
-            masks?ColorWarpPinSpatialSupport(colorWarp,pin):0.f);
+            masks?(preparedPin?preparedPin->spatialSupport:ColorWarpPinSpatialSupport(colorWarp,pin)):0.f);
         if(pin.protectColor) { protection=std::max(protection,std::clamp(weight,0.f,1.f));continue; }
         totalWeight+=weight;brightness+=pin.brightness*weight;
         if(pin.moveColors) {
-            auto destinationPin=pin;
-            if(colorWarp.version>=5) {destinationPin.saturation=0;saturation+=pin.saturation*weight;}
-            const auto destination=ColorWarpDestination(destinationPin);
-            moveA+=(destination[0]-pin.sourceA)*weight;
-            moveB+=(destination[1]-pin.sourceB)*weight;
+            if(colorWarp.version>=5)saturation+=pin.saturation*weight;
+            std::array<float,2> movement;
+            if(preparedPin)movement=preparedPin->movement;
+            else {
+                auto destinationPin=pin;
+                if(colorWarp.version>=5)destinationPin.saturation=0;
+                const auto destination=ColorWarpDestination(destinationPin);
+                movement={destination[0]-pin.sourceA,destination[1]-pin.sourceB};
+            }
+            moveA+=movement[0]*weight;
+            moveB+=movement[1]*weight;
         } else {hue+=pin.hueShift*weight;saturation+=pin.saturation*weight;
             moveA+=pin.tintA*weight;moveB+=pin.tintB*weight;}
     }
@@ -1548,10 +1595,15 @@ std::array<float, 3> ApplyPreparedColorWarp(
     float familyGain=1.f;
     if(colorWarp.version>=5) {
         const auto normalized=ColorWarpSelectionCoordinate(coordinate);
-        auto family=EvaluateColorWarpHsl(PrepareColorWarpHsl(colorWarp),std::hypot(normalized[0],normalized[1])>1e-6f?ColorWarpHue(normalized[0],normalized[1]):0.f);
-        family=ResolveHslSelections(colorWarp,coordinate,family,imagePosition);
+        const float chroma=std::hypot(normalized[0],normalized[1]);
+        const float sourceHue=chroma>1e-6f?ColorWarpHue(normalized[0],normalized[1]):0.f;
+        ColorWarpHslCoefficients temporary;
+        const auto* coefficients=prepared?&prepared->globalHsl:nullptr;
+        if(!coefficients){temporary=PrepareColorWarpHsl(colorWarp);coefficients=&temporary;}
+        auto family=EvaluateColorWarpHsl(*coefficients,sourceHue);
+        family=ResolveHslSelections(colorWarp,coordinate,family,imagePosition,prepared?&prepared->selections:nullptr);
         const auto smooth=[](float x){x=std::clamp(x,0.f,1.f);return x*x*(3.f-2.f*x);};
-        const float guard=smooth((std::hypot(normalized[0],normalized[1])-.02f)/.08f)*smooth((coordinate.sceneEv+16.f)/4.f);
+        const float guard=smooth((chroma-.02f)/.08f)*smooth((coordinate.sceneEv+16.f)/4.f);
         const float influence=colorWarp.strength*(1.f-protection);
         hue+=family[0]*influence*guard;
         brightness+=family[2]*influence*guard;
@@ -1583,6 +1635,23 @@ std::array<float, 3> ApplyPreparedColorWarp(
     const float gain=lightness>0.f ? ratio*ratio*ratio : 1.f;
     for(float& channel:output)channel*=gain;
     return output;
+}
+} // namespace
+
+std::array<float, 3> ApplyPreparedColorWarp(
+    const RawColorWarpRecipe& colorWarp,
+    const std::array<float, 3>& sceneRgb,
+    Raw::RawWorkingSpace workingSpace,
+    const std::vector<RawColorWarpMaskSample>* masks, std::array<float,2> imagePosition) {
+    return EvaluateColorWarpSample(colorWarp,sceneRgb,workingSpace,masks,imagePosition,nullptr);
+}
+
+std::array<float, 3> ApplyPreparedColorWarp(
+    const PreparedColorWarpEvaluation& prepared,
+    const std::array<float, 3>& sceneRgb,
+    Raw::RawWorkingSpace workingSpace,
+    const std::vector<RawColorWarpMaskSample>* masks, std::array<float,2> imagePosition) {
+    return EvaluateColorWarpSample(prepared.recipe,sceneRgb,workingSpace,masks,imagePosition,&prepared);
 }
 
 nlohmann::json DefaultViewTransformJson() {

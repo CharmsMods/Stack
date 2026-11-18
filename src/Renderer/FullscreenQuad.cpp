@@ -1,4 +1,6 @@
 #include "FullscreenQuad.h"
+#include "Async/UiInteraction.h"
+#include "Renderer/CooperativeGpuScheduling.h"
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
@@ -61,7 +63,13 @@ void FullscreenQuad::Draw() {
     glBindVertexArray(m_VAO);
     GLint viewport[4]{};
     if(m_Cancellation)glGetIntegerv(GL_VIEWPORT,viewport);
-    if(!m_Cancellation || std::int64_t(viewport[2])*viewport[3]<=4ll*1024*1024) {
+    const bool interacting = Async::UiInteraction::Active();
+    if(!m_Cancellation || std::int64_t(viewport[2])*viewport[3] <=
+            Stack::Renderer::CooperativeRasterPixels(interacting)) {
+        if (m_Cancellation && m_Cancellation()) {
+            glBindVertexArray(0);
+            throw std::runtime_error("Render superseded by a newer snapshot.");
+        }
         glDrawArrays(GL_TRIANGLES,0,6);
     } else {
         const bool scissor=glIsEnabled(GL_SCISSOR_TEST)==GL_TRUE;
@@ -72,9 +80,11 @@ void FullscreenQuad::Draw() {
         const int top=scissor ? std::min(viewport[1]+viewport[3],previous[1]+previous[3]) : viewport[1]+viewport[3];
         glEnable(GL_SCISSOR_TEST);
         bool canceled=false;
-        for(int y=bottom;y<top && !canceled;y+=128)for(int x=left;x<right;x+=1024) {
+        const int tileHeight = Stack::Renderer::CooperativeRasterTileHeight(interacting);
+        const int tileWidth = Stack::Renderer::kCooperativeRasterTileWidth;
+        for(int y=bottom;y<top && !canceled;y+=tileHeight)for(int x=left;x<right;x+=tileWidth) {
             if(m_Cancellation()){canceled=true;break;}
-            glScissor(x,y,std::min(1024,right-x),std::min(128,top-y));
+            glScissor(x,y,std::min(tileWidth,right-x),std::min(tileHeight,top-y));
             glDrawArrays(GL_TRIANGLES,0,6);
         }
         glScissor(previous[0],previous[1],previous[2],previous[3]);

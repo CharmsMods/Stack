@@ -54,6 +54,6 @@ float EvaluateLocalSceneToneEv(const SceneTone& tone, float ev, float baseEv);
 // Curve-view editing changes the same slope points. Returns the achieved EV
 // after enforcing the slope limits. The zero-EV point edits the anchor.
 float SetSceneToneOutput(SceneTone& tone, std::size_t point, float outputEv);
-std::vector<float> BuildSceneToneLut(const SceneTone& tone);
+std::vector<float> BuildSceneToneLut(const SceneTone& tone, int sampleCount = kSceneToneLutSize);
 
 } // namespace Stack::RawRecipe

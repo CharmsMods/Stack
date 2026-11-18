@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include "WindowPresenter.h"
 #include "ScRgbShader.h"
+#include "Async/UiInteraction.h"
 #include "Renderer/GLHelpers.h"
 #include <limits>
 #ifndef GL_DYNAMIC_READ
@@ -20,7 +21,8 @@ namespace Stack::Hdr {
 namespace {
 // The GL compositor can contain custom draw callbacks, changing textures or
 // animations with identical ImGui geometry. Compare final half-float pixels
-// on the GPU. Only a four-byte completion flag crosses on unchanged frames.
+// on the GPU. Only a four-byte completion flag reaches the CPU on unchanged
+// frames, including eager PBO readbacks during UI interaction.
 const std::string Compare=std::string("#version 430 core\n")+ScRgbConversion+R"(
 layout(local_size_x=16,local_size_y=16) in;
 layout(binding=0) uniform sampler2D scene;
@@ -73,20 +75,20 @@ bool WindowPresenter::Transfer() {
         if(result==GL_TIMEOUT_EXPIRED) return false;
         if(result==GL_WAIT_FAILED) {Fail("HDR transfer synchronization failed.");return false;}
         glDeleteSync(pending); pending=nullptr;
-        if(phase==Phase::Comparing) {
-            unsigned changed=0;
+        unsigned changed=0;
+        if(phase==Phase::Comparing || phase==Phase::ComparingAndReading) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER,flag);
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,sizeof(changed),&changed);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);
-            if(changed) {
-                phase=Phase::Reading;
-            } else phase=Phase::Ready;
-        } else if(phase==Phase::Reading) {
+        }
+        const auto completion=CompleteCompatibleTransfer(phase,changed!=0);
+        phase=completion.next;
+        if(completion.copyPixels) {
             glBindBuffer(GL_PIXEL_PACK_BUFFER,pbo);
             glGetBufferSubData(GL_PIXEL_PACK_BUFFER,0,bytes,transferBytes.data());
             glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
             context->UpdateSubresource(back.Get(),0,nullptr,transferBytes.data(),width*8,0);
-            phase=Phase::Ready; ready=true;
+            ready=true;
         }
     }
     if(phase==Phase::Ready) {
@@ -107,9 +109,12 @@ bool WindowPresenter::Transfer() {
         glUseProgram(0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,0);
         glBindTexture(GL_TEXTURE_2D,0);
         hasPrevious=true; previousWhite=display.white; previousPeak=display.peak;
-        phase=Phase::Comparing;
+        // Spend readback bandwidth while input is active so comparison and
+        // transfer can finish together. Idle frames retain the compare-first
+        // path, which avoids reading a whole unchanged window into the PBO.
+        phase=BeginCompatibleTransfer(Async::UiInteraction::Active());
     }
-    if(phase==Phase::Reading) {
+    if(CompatibleTransferNeedsReadback(phase)) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER,targets[1]);
         glReadBuffer(GL_COLOR_ATTACHMENT0); glBindBuffer(GL_PIXEL_PACK_BUFFER,pbo);
         glPixelStorei(GL_PACK_ROW_LENGTH,0); glPixelStorei(GL_PACK_SKIP_PIXELS,0); glPixelStorei(GL_PACK_SKIP_ROWS,0);

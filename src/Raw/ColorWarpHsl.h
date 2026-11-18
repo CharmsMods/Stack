@@ -25,12 +25,19 @@ inline bool UsesColorWarpHsl(const RawColorWarpRecipe& recipe,const RawColorWarp
         a.featherLow==b.featherLow && a.featherHigh==b.featherHigh;
 }
 using ColorWarpHslCoefficients=std::array<std::array<float,4>,8>;
+inline const std::array<float,8>& ColorWarpHslAnchorHues() {
+    static const auto hues=[] {
+        std::array<float,8> result{};
+        const auto& anchors=ColorWarpHslAnchors();
+        for(int i=0;i<8;++i)result[i]=ColorWarpHue(anchors[i].sourceA,anchors[i].sourceB);
+        return result;
+    }();
+    return hues;
+}
 inline ColorWarpHslCoefficients PrepareColorWarpHsl(const RawColorWarpRecipe& recipe) {
     ColorWarpHslCoefficients result{};
-    for(int i=0;i<8;++i) {
-        const auto& a=ColorWarpHslAnchors()[i];
-        result[i][0]=ColorWarpHue(a.sourceA,a.sourceB);
-    }
+    const auto& hues=ColorWarpHslAnchorHues();
+    for(int i=0;i<8;++i)result[i][0]=hues[i];
     for(const auto& pin:recipe.pins)if(UsesColorWarpHsl(recipe,pin) && pin.enabled) {
         auto& c=result[pin.family];
         c[1]=pin.hueShift*pin.strength;
@@ -39,18 +46,34 @@ inline ColorWarpHslCoefficients PrepareColorWarpHsl(const RawColorWarpRecipe& re
     }
     return result;
 }
-inline std::array<float,3> EvaluateColorWarpHsl(const ColorWarpHslCoefficients& coefficients,float hue) {
+struct ColorWarpHslSegment {
+    int first=-1;
+    float amount=0;
+};
+// Reuse the segment only for curves with the same hue anchors. Global and
+// detached HSL selection curves share those anchors but own their values.
+inline ColorWarpHslSegment FindColorWarpHslSegment(const ColorWarpHslCoefficients& coefficients,float hue) {
     for(int i=0;i<8;++i) {
         const auto& a=coefficients[i];const auto& b=coefficients[(i+1)%8];
         const auto positive=[](float h){return h-360.f*std::floor(h/360.f);};
         const float span=positive(b[0]-a[0]),distance=positive(hue-a[0]);
         if(distance<=span) {
             float t=distance/std::max(span,.000001f);t=t*t*(3.f-2.f*t);
-            // Shortest rotation; exact half-turn ties consistently take +180.
-            float delta=ColorWarpHueDelta(b[1]-a[1]);if(delta==-180.f)delta=180.f;
-            return {a[1]+t*delta,a[2]+t*(b[2]-a[2]),a[3]+t*(b[3]-a[3])};
+            return {i,t};
         }
     }
     return {};
+}
+inline std::array<float,3> EvaluateColorWarpHsl(const ColorWarpHslCoefficients& coefficients,
+    const ColorWarpHslSegment& segment) {
+    if(segment.first<0 || segment.first>=8)return {};
+    const auto& a=coefficients[segment.first];const auto& b=coefficients[(segment.first+1)%8];
+    const float t=segment.amount;
+    // Shortest rotation; exact half-turn ties consistently take +180.
+    float delta=ColorWarpHueDelta(b[1]-a[1]);if(delta==-180.f)delta=180.f;
+    return {a[1]+t*delta,a[2]+t*(b[2]-a[2]),a[3]+t*(b[3]-a[3])};
+}
+inline std::array<float,3> EvaluateColorWarpHsl(const ColorWarpHslCoefficients& coefficients,float hue) {
+    return EvaluateColorWarpHsl(coefficients,FindColorWarpHslSegment(coefficients,hue));
 }
 }

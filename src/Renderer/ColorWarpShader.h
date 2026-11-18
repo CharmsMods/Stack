@@ -2,8 +2,7 @@
 #include "Renderer/HslSelectionShader.h"
 // Shared RAW and graph Color Warp pass; mirrors Raw/ColorWarpMath and ApplyPreparedColorWarp.
 namespace Stack::Renderer::ColorWarp {
-inline constexpr const char* Fragment=R"GLSL(
-#version 330 core
+#define STACK_COLOR_WARP_FRAGMENT_BODY R"GLSL(
 in vec2 vUV;
 layout(location=0) out vec4 FragColor;
 uniform sampler2D uInputTex;
@@ -79,41 +78,56 @@ float rangeWeight(vec4 r,float x) {
     return 1.0;
 }
 float hueDelta(float h) { return h-360.0*floor((h+180.0)/360.0); }
-vec3 hslAdjustment(float hue) {
+void hslSegment(float hue,out ivec2 segment,out float t) {
+    segment=ivec2(-1);t=0.0;
     for(int i=0;i<8;++i) {
         vec4 a=uHsl[i],b=uHsl[(i+1)%8];
         float span=mod(b.x-a.x,360.0),distance=mod(hue-a.x,360.0);
         if(distance<=span) {
-            float t=smoothstep(0.0,max(span,0.000001),distance);
-            float delta=hueDelta(b.y-a.y);if(delta==-180.0)delta=180.0;
-            return vec3(a.y+t*delta,mix(a.zw,b.zw,t));
+            segment=ivec2(i,(i+1)%8);
+            t=smoothstep(0.0,max(span,0.000001),distance);
+            return;
         }
     }
-    return vec3(0.0);
+}
+vec3 hslAdjustment(ivec2 segment,float t) {
+    if(segment.x<0)return vec3(0.0);
+    vec4 a=uHsl[segment.x],b=uHsl[segment.y];
+    float delta=hueDelta(b.y-a.y);if(delta==-180.0)delta=180.0;
+    return vec3(a.y+t*delta,mix(a.zw,b.zw,t));
 }
 )GLSL" STACK_HSL_SELECTION_GLSL R"GLSL(
 void main() {
     vec4 inputColor=texture(uInputTex,vUV);
+    if(inputColor.a<=0.0) {FragColor=inputColor;return;}
     vec3 xyz=workingToXyz(inputColor.rgb),lab=xyzToOklab(xyz);
-    if(inputColor.a<=0.0 || lab.x<=0.0) {FragColor=inputColor;return;}
+    if(lab.x<=0.0) {FragColor=inputColor;return;}
     vec2 normalized=lab.yz/max(abs(lab.x),0.000001);
     float chroma=length(normalized);
     float hue=chroma>0.000001 ? degrees(atan(normalized.y,normalized.x)):0.0;
     float neutral=smoothstep(0.02,0.10,chroma);
     float ev=log2(max(xyz.y,0.000001)/0.18);
+    float shadow=smoothstep(-16.0,-12.0,ev);
     vec3 adjustment=vec3(0.0);vec2 movement=vec2(0.0);
     float total=0.0,protection=0.0;
+#if STACK_COLOR_WARP_PINS
+    float guideWeight=1.0;
+    if(uUseSpatialMasks!=0) {
+        vec3 guide=texture(uMaskGuide,vUV).rgb;
+        guideWeight=clamp(exp(-(length(lab.yz-guide.xy)*36.0+abs(ev-guide.z)*0.28)),0.04,1.0);
+    }
     for(int index=0;index<16;++index) {
         if(index>=uPinCount)break;
         vec4 p=uPinParams[index];
         if(p.y<=0.0 || p.w<0.5)continue;
         float h=hueDelta(hue-p.x);
-        float colorWeight=neutral*max(rangeWeight(uHueRange[index],h),
-            max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
+        float hueWeight=max(rangeWeight(uHueRange[index],h),
+            max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)));
+        float saturationWeight=rangeWeight(uSaturationRange[index],chroma);
+        float membership=neutral;
         if(uPinSelection[index].z>0.0) {
             float x=length(normalized-uPinSelection[index].xy)/uPinSelection[index].z;
-            colorWeight=(1.0-smoothstep(0.25,1.0,x))*max(rangeWeight(uHueRange[index],h),
-                max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
+            membership=1.0-smoothstep(0.25,1.0,x);
         }
         if(uPinSelection[index].w>0.0) {
             float joint=0.0;
@@ -124,20 +138,18 @@ void main() {
                 float de=(ev-point.z)/max(.1,uPinFieldFlags[index].z);
                 joint=max(joint,1.0-smoothstep(.25,1.0,length(vec2(dc,de))));
             }
-            colorWeight=joint*max(rangeWeight(uHueRange[index],h),
-                max(rangeWeight(uHueRange[index],h-360.0),rangeWeight(uHueRange[index],h+360.0)))*rangeWeight(uSaturationRange[index],chroma);
+            membership=joint;
         }
-        colorWeight*=smoothstep(-16.0,-12.0,ev);
+        float colorWeight=membership*hueWeight*saturationWeight;
+        colorWeight*=shadow;
         float direct=colorWeight*rangeWeight(uExposureRange[index],ev);
         float gate=1.0,support=0.0,boundary=1.0;
         if(uUseSpatialMasks!=0 && uPinAdjust[index].w>0.5) {
             vec3 maskUv=vec3(vUV,uPinAdjust[index].w-1.0);
-            vec3 guide=texture(uMaskGuide,vUV).rgb;
-            float guided=clamp(exp(-(length(lab.yz-guide.xy)*36.0+abs(ev-guide.z)*0.28)),0.04,1.0);
-            guided=uPinFieldFlags[index].y>0.5?guided:1.0;
+            float guided=uPinFieldFlags[index].y>0.5?guideWeight:1.0;
             gate=texture(uGateMask,maskUv).r*guided;
             support=texture(uSupportMask,maskUv).r*guided;
-            if(uPinFieldFlags[index].x>0.5)direct=smoothstep(-16.0,-12.0,ev);
+            if(uPinFieldFlags[index].x>0.5)direct=shadow;
             boundary=texture(uBoundaryMask,maskUv).r;
         }
         float weight=min(1.0,direct*max(gate,support*uPinSpatialSupport[index]))*boundary*p.y;
@@ -146,10 +158,12 @@ void main() {
     }
     adjustment*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
     movement*=uStrength*(1.0-protection)/(uBlendOverlaps!=0?max(1.0,total):1.0);
+#endif
     float familyGain=1.0;
     if(uHslModel!=0) {
-        vec3 family=resolveHsl(hslAdjustment(hue),hue,ev);
-        float guard=neutral*smoothstep(-16.0,-12.0,ev);
+        ivec2 segment;float t;hslSegment(hue,segment,t);
+        vec3 family=resolveHsl(hslAdjustment(segment,t),hue,ev,segment,t);
+        float guard=neutral*shadow;
         float influence=uStrength*(1.0-protection);
         adjustment.x+=family.x*influence*guard;
         adjustment.z+=family.z*influence*guard;
@@ -171,5 +185,15 @@ void main() {
     float gain=lightness>0.0 ? ratio*ratio*ratio : 1.0;
     FragColor=vec4(rgb*gain,inputColor.a);
 }
-)GLSL";
+)GLSL"
+
+inline constexpr const char* Fragment=R"GLSL(#version 330 core
+#define STACK_COLOR_WARP_PINS 1
+)GLSL" STACK_COLOR_WARP_FRAGMENT_BODY;
+// The ordinary HSL node does not need the legacy pin/field loop or its
+// registers and samplers. Keep both variants on the same color math.
+inline constexpr const char* HslFragment=R"GLSL(#version 330 core
+#define STACK_COLOR_WARP_PINS 0
+)GLSL" STACK_COLOR_WARP_FRAGMENT_BODY;
+#undef STACK_COLOR_WARP_FRAGMENT_BODY
 }
