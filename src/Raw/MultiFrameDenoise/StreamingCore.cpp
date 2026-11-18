@@ -1,4 +1,5 @@
 #include "Raw/MultiFrameDenoise/Streaming.h"
+#include "Raw/MultiFrameDenoise/LocalMotion.h"
 
 #include "Raw/RawTechnicalEvidence.h"
 
@@ -244,6 +245,15 @@ bool BuildMfdCacheKey(
     AppendLengthPrefixed(canonical, kStreamingContractId);
     canonical << '|' << request.contractVersion << '|';
     AppendLengthPrefixed(canonical, MfdCacheStageName(request.stage));
+    // Normalized sensor/noise caches remain reusable. Derived pyramids,
+    // registration, reliability and fusion belong to the current motion math.
+    if (request.stage == MfdCacheStage::CfaPyramid ||
+        request.stage == MfdCacheStage::PairwiseRegistration ||
+        request.stage == MfdCacheStage::LocalMotionReliability ||
+        request.stage == MfdCacheStage::FusedResult) {
+        canonical << '|';
+        AppendLengthPrefixed(canonical, kLocalMotionAlgorithmRevision);
+    }
     canonical << '|' << dependencies.size() << '|';
     for (const MfdCacheDependency& dependency : dependencies) {
         AppendLengthPrefixed(canonical, dependency.name);

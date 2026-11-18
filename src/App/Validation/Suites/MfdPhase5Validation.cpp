@@ -384,6 +384,217 @@ bool ValidateHierarchicalFlowAndCovariance() {
     return ok;
 }
 
+// This is a bounded extension of the existing analytic CFA fixture. It checks
+// a sampling-support invariant and real public refinement cancellation, without
+// exposing the private normal-equation or patch-scratch implementation.
+bool ValidateSubpixelEvidenceAndCancellation() {
+    using namespace Raw::Mfd;
+    bool ok = true;
+    LocalMotionOptions options = TestOptions();
+    options.registration.pyramidLevels = 1u;
+    const PixelExtent extent {128u, 128u};
+    const RawCoordinate truth {-.35, .20};
+    CfaPlanePyramid reference, source;
+    ok &= Check(MakePyramid(extent, SceneSignal, 1e-5, reference, options) &&
+        MakePyramid(extent, [truth](RawCoordinate p, CfaSite site) {
+            return SceneSignal({p.x - truth.x, p.y - truth.y}, site);
+        }, 1e-5, source, options, [](RawCoordinate p) { return p.x >= 38; }),
+        "fixed-support refinement fixture could not be built");
+    LocalMotionDirectionRequest request;
+    request.reference = &reference; request.source = &source;
+    request.globalWarp = IdentityModel(extent); request.options = options;
+    LocalMotionGrid grid; std::string error;
+    ok &= Check(EstimateLocalMotionDirection(request, grid, &error),
+        "fixed-support refinement had no remaining measured support: " + error);
+    std::size_t boundaryNodes = 0;
+    for (const auto& node : grid.nodes) {
+        if (node.state != MotionNodeState::Structured || node.centerRaw.x != 52 || node.centerRaw.y == 20 ||
+            std::abs(node.discreteResidualRaw.x) > 1e-12) continue;
+        ++boundaryNodes;
+        // Two CFA sites retain 13/16 columns and the other two 12/16
+        // throughout the one-plane-pixel trust region. Keep exactly that
+        // common measured domain, while allowing the real negative motion.
+        ok &= Check(std::abs(node.validFraction - .78125) < 1e-12 &&
+            std::hypot(node.residualRaw.x - truth.x, node.residualRaw.y - truth.y) < .15,
+            "subpixel refinement changed its common evidence or immobilized an observable boundary match");
+    }
+    ok &= Check(boundaryNodes > 0, "fixed-support fixture did not exercise its clipped boundary");
+
+    const RawCoordinate smallMotion {.65, -.35};
+    ok &= Check(MakePyramid(extent, [smallMotion](RawCoordinate p, CfaSite site) {
+            return SceneSignal({p.x - smallMotion.x, p.y - smallMotion.y}, site);
+        }, 1e-5, source, options), "subpixel cancellation fixture could not be built");
+    BidirectionalLocalMotionRequest point;
+    point.reference = &reference; point.alternate = &source;
+    point.referenceToAlternate = IdentityModel(extent); point.options = options;
+    MotionNode complete;
+    ok &= Check(RefineBidirectionalMotionPoint(point, {64, 64}, {64, 64}, complete) &&
+        std::hypot(complete.residualRaw.x - smallMotion.x, complete.residualRaw.y - smallMotion.y) < .12,
+        "bounded native point refinement lost a well-observed subpixel translation");
+    unsigned polls = 0;
+    point.shouldCancel = [&polls] { return ++polls >= 3; };
+    MotionNode canceled;
+    ok &= Check(!RefineBidirectionalMotionPoint(point, {64, 64}, {64, 64}, canceled) &&
+        polls == 3 && canceled.state == MotionNodeState::Rejected,
+        "subpixel solve did not stop at the first requested in-fit cancellation");
+    return ok;
+}
+
+bool ValidatePointRefinementPrecision() {
+    using namespace Raw::Mfd;
+    auto options = TestOptions();
+    options.registration.pyramidLevels = 1;
+    options.registration.positionalConfidenceScaleRawPixels = .35;
+    const PixelExtent extent {128, 128};
+    const RawCoordinate truth {1.05, .20};
+    // A strong horizontal signal can improve the photometric fit while the
+    // weaker vertical direction remains imprecise. Both noise declarations
+    // exercise the same image and displacement, through the public point API.
+    const auto signal = [](RawCoordinate p, CfaSite) {
+        return .45 + .07 * std::sin(.12 * p.x) + .0009 * std::sin(.17 * p.y);
+    };
+    bool ok = true;
+    for (const double variance : {1e-6, 1e-5}) {
+        CfaPlanePyramid reference, source;
+        ok &= Check(MakePyramid(extent, signal, variance, reference, options) &&
+            MakePyramid(extent, [signal, truth](RawCoordinate p, CfaSite site) {
+                return signal({p.x - truth.x, p.y - truth.y}, site);
+            }, variance, source, options), "point precision fixture could not be built");
+        BidirectionalLocalMotionRequest request;
+        request.reference = &reference; request.alternate = &source;
+        request.referenceToAlternate = IdentityModel(extent); request.options = options;
+        MotionNode result;
+        const bool accepted = RefineBidirectionalMotionPoint(request, {64, 64}, {64, 64}, result);
+        if (variance == 1e-5) {
+            ok &= Check(!accepted && result.state == MotionNodeState::Rejected,
+                "photometric improvement and closure authorized an imprecise point correction");
+            continue;
+        }
+        const double covarianceSigma = std::sqrt(.5 * (result.covarianceRaw.xxRawPixelsSquared +
+            result.covarianceRaw.yyRawPixelsSquared));
+        ok &= Check(accepted && result.state == MotionNodeState::Structured &&
+            std::hypot(result.residualRaw.x - truth.x, result.residualRaw.y - truth.y) < .03 &&
+            result.forwardBackwardEuclideanRaw < .03,
+            "point precision policy discarded an observable correction");
+        ok &= Check(std::isfinite(result.hessianCondition) && result.hessianCondition > 100 &&
+            covarianceSigma > .15 && covarianceSigma < .4 &&
+            std::abs(result.positionalSigmaRaw - covarianceSigma) < 1e-12 &&
+            result.confidence > .2 && result.confidence < .9,
+            "point correction omitted its directional precision from confidence or diagnostics");
+    }
+    return ok;
+}
+
+bool ValidateSubpixelNoisePhases() {
+    using namespace Raw::Mfd;
+    bool ok = true;
+    LocalMotionOptions options = TestOptions();
+    options.registration.pyramidLevels = 1u;
+    const PixelExtent extent {128, 128};
+    for (const auto truth : {RawCoordinate{.35, -.70}, RawCoordinate{.85, .45},
+                            RawCoordinate{-.65, -.30}, RawCoordinate{-.45, .80}}) {
+        CfaPlanePyramid reference, source;
+        ok &= Check(MakePyramid(extent, SceneSignal, 1e-6, reference, options) &&
+            MakePyramid(extent, [truth](RawCoordinate p, CfaSite site) {
+                return SceneSignal({p.x - truth.x, p.y - truth.y}, site) / 4;
+            }, 1e-6, source, options), "heteroscedastic phase fixture could not be built");
+        // Spatially varying source precision makes its interpolated noise
+        // denominator vary with phase. The immutable RAW signal remains the
+        // same known translated/exposure-scaled scene.
+        for (auto& plane : source.planes) {
+            auto& level = plane.front();
+            for (std::size_t i = 0; i < level.variance.size(); ++i) {
+                level.variance[i] *= (i % 3 == 0) ? 4.0 : .25;
+            }
+        }
+        BidirectionalLocalMotionRequest request;
+        request.reference = &reference; request.alternate = &source;
+        request.referenceToAlternate = IdentityModel(extent);
+        request.options = options; request.exposureScale = 4;
+        MotionNode result;
+        ok &= Check(RefineBidirectionalMotionPoint(request, {64, 64}, {64, 64}, result) &&
+            std::hypot(result.residualRaw.x - truth.x, result.residualRaw.y - truth.y) < .15 &&
+            result.forwardBackwardEuclideanRaw < .15,
+            "fixed-noise objective lost native phase/exposure precision or reverse closure");
+    }
+    return ok;
+}
+
+bool ValidateProposalEvidence() {
+    using namespace Raw::Mfd;
+    LocalMotionOptions options = TestOptions(); options.registration.pyramidLevels = 1;
+    const PixelExtent extent {128, 128}; const RawCoordinate truth {.65, -.35};
+    CfaPlanePyramid reference, source;
+    bool ok = Check(MakePyramid(extent, SceneSignal, 1e-5, reference, options) &&
+        MakePyramid(extent, [truth](RawCoordinate p, CfaSite site) {
+            return SceneSignal({p.x - truth.x, p.y - truth.y}, site);
+        }, 1e-5, source, options), "proposal verification fixture could not be built");
+    LocalMotionDirectionRequest request;
+    request.reference = &reference; request.source = &source;
+    request.globalWarp = IdentityModel(extent); request.options = options;
+    LocalMotionGrid baseline, missing, wrong;
+    ok &= Check(EstimateLocalMotionDirection(request, baseline), "native proposal baseline failed");
+    request.proposal = [](RawCoordinate, RawCoordinate&) { return false; };
+    ok &= Check(EstimateLocalMotionDirection(request, missing), "missing proposal lost native search");
+    ok &= Check(baseline.nodes.size() == missing.nodes.size(), "missing proposal changed grid geometry");
+    for (std::size_t i = 0; i < std::min(baseline.nodes.size(), missing.nodes.size()); ++i) {
+        const auto& a = baseline.nodes[i]; const auto& b = missing.nodes[i];
+        ok &= Check(a.state == b.state && a.residualRaw.x == b.residualRaw.x &&
+            a.residualRaw.y == b.residualRaw.y && a.confidence == b.confidence,
+            "missing proposal changed native alignment evidence");
+    }
+    request.proposal = [](RawCoordinate p, RawCoordinate& mapped) {
+        mapped = {p.x + 20, p.y - 12}; return true;
+    };
+    ok &= Check(EstimateLocalMotionDirection(request, wrong), "wrong proposal displaced all native candidates");
+    std::size_t trusted = 0;
+    for (const auto& node : wrong.nodes) {
+        if (node.state != MotionNodeState::Structured || node.confidence <= .5) continue;
+        ++trusted;
+        ok &= Check(std::hypot(node.residualRaw.x - truth.x, node.residualRaw.y - truth.y) < .2,
+            "unverified motion proposal gained confidence over contradictory RAW measurements");
+    }
+    ok &= Check(trusted > 0, "wrong proposal removed all well-observed native matches");
+    return ok;
+}
+
+bool ValidateBlurredSubpixelFit() {
+    using namespace Raw::Mfd;
+    LocalMotionOptions options = TestOptions();
+    options.registration.pyramidLevels = 1;
+    const PixelExtent extent {128, 128};
+    const RawCoordinate truth {.65, -.55};
+    CfaPlanePyramid reference, source;
+    bool ok = Check(MakePyramid(extent, SceneSignal, 1e-5, reference, options) &&
+        MakePyramid(extent, [truth](RawCoordinate p, CfaSite site) {
+            const double weight[3] = {.25, .5, .25};
+            double signal = 0;
+            for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+                signal += weight[x + 1] * weight[y + 1] *
+                    SceneSignal({p.x - truth.x + 4 * x, p.y - truth.y + 4 * y}, site);
+            }
+            return signal;
+        }, 1e-5, source, options), "blurred subpixel fixture could not be built");
+    LocalMotionDirectionRequest request;
+    request.reference = &reference; request.source = &source;
+    request.globalWarp = IdentityModel(extent); request.options = options;
+    LocalMotionGrid grid;
+    ok &= Check(EstimateLocalMotionDirection(request, grid), "blurred native fit failed");
+    std::vector<double> errors;
+    for (const auto& node : grid.nodes) {
+        if (node.state != MotionNodeState::Structured) continue;
+        errors.push_back(std::hypot(node.residualRaw.x - truth.x, node.residualRaw.y - truth.y));
+    }
+    std::sort(errors.begin(), errors.end());
+    // Blur creates a residual floor. Re-normalizing candidate noise by its
+    // interpolation phase can then veto a geometrically improving step even
+    // though the signal-only normal equations point in the right direction.
+    // This checks alignment only; blur still warrants low fusion confidence.
+    ok &= Check(errors.size() >= 4 && errors[errors.size() / 2] < .30,
+        "native subpixel optimization stalled on interpolation-phase noise normalization");
+    return ok;
+}
+
 bool ValidateFlatSafeAndAperturePolicy() {
     bool ok = true;
     RegistrationFixture flat;
@@ -454,6 +665,109 @@ bool ValidateFlatSafeAndAperturePolicy() {
         request, apertureGrid, &error);
     ok &= Check(!apertureAccepted || apertureGrid.flatSafeCount == 0u,
         "a high-gradient aperture problem was incorrectly classified FlatSafe");
+    return ok;
+}
+
+bool ValidateCommonDomainAmbiguity() {
+    RegistrationFixture fixture;
+    fixture.extent = {128u, 128u};
+    fixture.options.registration.pyramidLevels = 1u;
+    const SignalFunction repeated = [](Raw::Mfd::RawCoordinate p, Raw::Mfd::CfaSite) {
+        const double stripe = p.x >= 4.0 && p.x < 6.0 ? 0.2 : 0.0;
+        return 0.5 + stripe + 1.0e-4 * std::cos(3.14159265358979323846 * p.x / 4.0) +
+            1.0e-4 * std::sin(0.137 * p.y) + 0.00007 * std::cos(0.293 * p.y);
+    };
+    bool ok = Check(MakePyramid(fixture.extent, repeated, 1.0e-8,
+            fixture.reference, fixture.options) &&
+        MakePyramid(fixture.extent, repeated, 1.0e-8, fixture.alternate, fixture.options,
+            [](Raw::Mfd::RawCoordinate p) { return p.x >= 2.0; }),
+        "common-domain ambiguity fixture could not be built");
+    if (!ok) return false;
+    // The distinguishing stripe is usable at the seed but outside its common
+    // refinement support. Heterogeneous source noise keeps the repeat below
+    // the old runner-up in the original scoring domain. Once that stripe is
+    // removed, the +8 RAW-pixel hypothesis is exactly identical to the seed.
+    for (auto& channel : fixture.alternate.planes) {
+        auto& level = channel.front();
+        for (std::uint64_t y = 0; y < level.extent.height; ++y) {
+            for (std::uint64_t x = 0; x < level.extent.width; ++x) {
+                const auto p = fixture.alternate.layout.PlaneToRaw({double(x), double(y), level.site});
+                if (p.x >= 6.0 && p.x < 8.0) level.variance[y * level.extent.width + x] = 0.25;
+            }
+        }
+    }
+    Raw::Mfd::LocalMotionDirectionRequest request;
+    request.reference = &fixture.reference;
+    request.source = &fixture.alternate;
+    request.options = fixture.options;
+    request.globalWarp = IdentityModel(fixture.extent);
+    request.proposal = [](Raw::Mfd::RawCoordinate p, Raw::Mfd::RawCoordinate& source) {
+        source = {p.x + 8.0, p.y};
+        return true;
+    };
+    Raw::Mfd::LocalMotionGrid grid;
+    std::string error;
+    Raw::Mfd::EstimateLocalMotionDirection(request, grid, &error);
+    ok &= Check(grid.nodes.size() == 9u && grid.structuredCount == 0u,
+        "a lower-ranked repeat on common support retained structured confidence");
+    std::size_t checkedBorders = 0u;
+    for (const auto& node : grid.nodes) {
+        if (node.gridX != 0u) continue;
+        ++checkedBorders;
+        ok &= Check(node.discreteResidualRaw.x == 0.0 && node.discreteResidualRaw.y == 0.0 &&
+            node.state == Raw::Mfd::MotionNodeState::Rejected &&
+            node.rejectReason == Raw::Mfd::MotionNodeRejectReason::AmbiguousMatch &&
+            node.uniqueness <= fixture.options.registration.uniquenessTransitionMin,
+            "discarded border evidence hid a competing finest-level hypothesis");
+    }
+    ok &= Check(checkedBorders == 3u, "common-domain ambiguity border nodes were not evaluated");
+
+    // Exercise the public accelerator contract on the same measurements. A
+    // controlled approximate backend first understates a shortlisted rival's
+    // support; native success must restore its eligibility. The second case
+    // keeps the rival outside the numerical shortlist, with exact coverage
+    // 280/400 == 0.70 but an FP32 packed fraction just below that threshold.
+    // Integer counts must retain it for the common-objective check. These
+    // reports test authority/rounding rules, not GPU shader execution.
+    request.options.registration.finestPatchPlanePixels = 10u;
+    for (unsigned mode = 0u; mode < 2u; ++mode) {
+        std::size_t reportedRivals = 0u;
+        request.evaluateDiscreteCandidates = [mode, &reportedRivals](
+            const Raw::Mfd::LocalMotionDirectionRequest&,
+            const std::vector<Raw::Mfd::LocalMotionDiscreteCandidate>& candidates,
+            std::vector<Raw::Mfd::LocalMotionDiscreteScore>& scores, std::string&) {
+            scores.resize(candidates.size());
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                const auto residual = candidates[i].residualRaw;
+                auto& score = scores[i];
+                score.valid = true;
+                score.validCount = std::uint64_t(candidates[i].patchLevelPixels) *
+                    candidates[i].patchLevelPixels * 4u;
+                score.validFraction = 1.0;
+                score.robustCost = residual.x * residual.x + residual.y * residual.y;
+                score.cappedChiSquared = std::min(score.robustCost, 16.0);
+                if (residual.x == 8.0 && residual.y == 0.0) {
+                    ++reportedRivals;
+                    score.validCount = mode == 0u ? 279u : 280u;
+                    score.validFraction = mode == 0u ? 279.0 / 400.0 : double(float(0.70));
+                    score.robustCost = mode == 0u ? 0.125 : 1.0e6;
+                }
+            }
+            return true;
+        };
+        Raw::Mfd::LocalMotionGrid accelerated;
+        Raw::Mfd::EstimateLocalMotionDirection(request, accelerated, &error);
+        ok &= Check(reportedRivals > 0u && accelerated.nodes.size() == 16u &&
+                accelerated.structuredCount == 0u,
+            mode == 0u ? "native verification did not restore ambiguity-rival eligibility" :
+                "packed accelerator coverage discarded an eligible ambiguity rival");
+        for (const auto& node : accelerated.nodes) {
+            if (node.gridX != 0u) continue;
+            ok &= Check(node.rejectReason == Raw::Mfd::MotionNodeRejectReason::AmbiguousMatch &&
+                    node.uniqueness <= request.options.registration.uniquenessTransitionMin,
+                "accelerated candidate eligibility retained false common-domain uniqueness");
+        }
+    }
     return ok;
 }
 
@@ -781,8 +1095,14 @@ bool ValidateMfdPhase5LocalMotion() {
     ok &= ValidateClosureCovarianceTransport();
     ok &= ValidatePyramidConstruction();
     ok &= ValidateHierarchicalFlowAndCovariance();
+    ok &= ValidateSubpixelEvidenceAndCancellation();
+    ok &= ValidatePointRefinementPrecision();
+    ok &= ValidateSubpixelNoisePhases();
+    ok &= ValidateProposalEvidence();
+    ok &= ValidateBlurredSubpixelFit();
     ok &= ValidateFlatSafeAndAperturePolicy();
     ok &= ValidatePeriodicUniqueness();
+    ok &= ValidateCommonDomainAmbiguity();
     ok &= ValidateDepthBoundaryAndSourceBorder();
     ok &= ValidateFieldDerivativeBoundaries();
     ok &= ValidateReverseClosureAndOcclusion();

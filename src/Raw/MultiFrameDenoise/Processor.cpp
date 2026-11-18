@@ -819,6 +819,17 @@ std::uint64_t EstimatePeakBytes(
         workerCount);
     const std::uint64_t transientFrameHeadroom =
         SaturatingMultiply(samples, 17u);
+    const std::uint64_t motionSpacing =
+        2ull * parameters.registration.finestStridePlanePixels;
+    const std::uint64_t motionNodes = motionSpacing
+        ? SaturatingMultiply(extent.width / motionSpacing + (extent.width % motionSpacing != 0u),
+            extent.height / motionSpacing + (extent.height % motionSpacing != 0u))
+        : std::numeric_limits<std::uint64_t>::max();
+    // Both directions may run concurrently, with two search-state buffers
+    // each. Their common-domain ambiguity caps are not image-sized payloads.
+    const std::uint64_t ambiguityStateBytes =
+        alignmentMode == MfdAlignmentMode::Full && alternateCount > 0u
+        ? SaturatingMultiply(motionNodes, 4u * sizeof(double)) : 0u;
     // Registration retains at most the reference and current pyramids plus
     // one full working reliability map. Accepted maps are compacted before
     // the next alternate is prepared. Fusion has no pyramids or full
@@ -831,7 +842,7 @@ std::uint64_t EstimatePeakBytes(
             priorCompactReliability,
             SaturatingAdd(
                 currentRegistrationReliability,
-                transientFrameHeadroom)));
+                SaturatingAdd(transientFrameHeadroom, ambiguityStateBytes))));
     const std::uint64_t fusionPeak = SaturatingAdd(
         SaturatingAdd(
             packed,
@@ -1621,6 +1632,7 @@ std::string BuildResultCacheKey(
             : EncodeOrderedIdentities(alternateIdentities) },
         { "alignment-mode", MfdAlignmentModeId(alignmentMode) },
         { "motion-verification", "source-covariance-to-closure-v2" },
+        { "native-motion", kLocalMotionAlgorithmRevision },
         { "fusion-engine", fusionBackend == MfdFusionBackend::SharedBurstV1
             ? kSharedBurstAlgorithmVersionId
             : kAlgorithmVersionId },

@@ -85,7 +85,7 @@ inline bool RankAlignmentAnchors(const ProcessingRequest& request,const Prepared
     AlignmentExposureCohorts& cohorts,std::vector<std::string>& diagnostics,std::string& error) {
     using namespace AlignmentAnchorEvidence;
     if(request.shouldCancel&&request.shouldCancel()){error="Canceled";return false;}
-    if(request.recipe.aiAlignment||!request.alignmentProposals.empty()||data.origin>=data.sources.size())return true;
+    if(data.origin>=data.sources.size())return true;
     auto pending=cohorts;PreparedTileSampler sampler(data.directory,8);
     std::vector<bool> visited(data.sources.size());
     for(const auto medianAnchor:cohorts.order) {

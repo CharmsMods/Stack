@@ -23,6 +23,8 @@ set(STACK_BURST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/SameCfaSampler.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/GlobalRegistration.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/LocalMotion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/LocalMotionPatch.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/PyramidVariance.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/GpuLocalMotion.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/Reliability.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Raw/MultiFrameDenoise/MemoryPolicy.cpp"

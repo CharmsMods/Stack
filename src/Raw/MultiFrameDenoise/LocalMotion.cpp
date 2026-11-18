@@ -1,7 +1,7 @@
 #include "MotionCovariance.h"
+#include "LocalMotionPatch.h"
+#include "PyramidVariance.h"
 #include "Raw/MultiFrameDenoise/LocalMotion.h"
-
-#include "Raw/MultiFrameDenoise/SameCfaSampler.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +24,13 @@
 
 namespace Raw::Mfd {
 namespace {
+
+using Detail::EvaluatePatch;
+using Detail::PatchReferenceGeometry;
+using Detail::PatchStatistics;
+using Detail::RefinedTile;
+using Detail::RefineTileSubpixel;
+using Detail::ValidateLevel;
 
 constexpr std::array<CfaSite, 4> kSites {
     CfaSite::Red,
@@ -89,28 +96,6 @@ double Clamp01(double value) {
 double Smootherstep5(double value) {
     const double x = Clamp01(value);
     return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
-}
-
-double HuberLoss(double residual, double delta) {
-    const double magnitude = std::abs(residual);
-    if (magnitude <= delta) return 0.5 * residual * residual;
-    return delta * (magnitude - 0.5 * delta);
-}
-
-double HuberWeight(double residual, double delta) {
-    const double magnitude = std::abs(residual);
-    if (magnitude <= delta || magnitude <= 1.0e-30) return 1.0;
-    return delta / magnitude;
-}
-
-double Median(std::vector<double> values) {
-    if (values.empty()) return 0.0;
-    const std::size_t middle = values.size() / 2u;
-    std::nth_element(values.begin(), values.begin() + middle, values.end());
-    const double upper = values[middle];
-    if ((values.size() & 1u) != 0u) return upper;
-    std::nth_element(values.begin(), values.begin() + middle - 1u, values.end());
-    return 0.5 * (values[middle - 1u] + upper);
 }
 
 double SquaredNorm(RawCoordinate value) {
@@ -268,132 +253,6 @@ SymmetricRawCovariance OuterProduct(RawCoordinate value) {
     };
 }
 
-bool CovarianceEigenvalues(
-    SymmetricRawCovariance covariance,
-    double& low,
-    double& high) {
-    if (!Finite(covariance.xxRawPixelsSquared) ||
-        !Finite(covariance.xyRawPixelsSquared) ||
-        !Finite(covariance.yyRawPixelsSquared)) {
-        return false;
-    }
-    const double trace = covariance.xxRawPixelsSquared +
-        covariance.yyRawPixelsSquared;
-    const double difference = covariance.xxRawPixelsSquared -
-        covariance.yyRawPixelsSquared;
-    const double radius = std::sqrt(std::max(
-        0.0,
-        0.25 * difference * difference +
-            covariance.xyRawPixelsSquared * covariance.xyRawPixelsSquared));
-    low = 0.5 * trace - radius;
-    high = 0.5 * trace + radius;
-    return Finite(low) && Finite(high);
-}
-
-bool ClampCovariance(
-    SymmetricRawCovariance input,
-    double minimumSigma,
-    double maximumSigma,
-    SymmetricRawCovariance& result) {
-    double low = 0.0;
-    double high = 0.0;
-    if (!CovarianceEigenvalues(input, low, high)) return false;
-    const double minimum = minimumSigma * minimumSigma;
-    const double maximum = maximumSigma * maximumSigma;
-    if (high < -1.0e-10 || low < -std::max(1.0e-10, 1.0e-8 * std::abs(high))) {
-        return false;
-    }
-    const double angle = 0.5 * std::atan2(
-        2.0 * input.xyRawPixelsSquared,
-        input.xxRawPixelsSquared - input.yyRawPixelsSquared);
-    const double clampedHigh = std::max(minimum, std::min(maximum, high));
-    const double clampedLow = std::max(minimum, std::min(maximum, low));
-    const double cosine = std::cos(angle);
-    const double sine = std::sin(angle);
-    result.xxRawPixelsSquared =
-        clampedHigh * cosine * cosine + clampedLow * sine * sine;
-    result.xyRawPixelsSquared =
-        (clampedHigh - clampedLow) * cosine * sine;
-    result.yyRawPixelsSquared =
-        clampedHigh * sine * sine + clampedLow * cosine * cosine;
-    return Finite(result.xxRawPixelsSquared) &&
-        Finite(result.xyRawPixelsSquared) &&
-        Finite(result.yyRawPixelsSquared);
-}
-
-bool ValidateLevel(const CfaPyramidLevel& level) {
-    std::size_t count = 0u;
-    return CheckedSampleCount(level.extent, count) && count > 0u &&
-        level.signal.size() == count &&
-        level.variance.size() == count &&
-        level.validMask.size() == count &&
-        Finite(level.rawPixelsPerLevelPixel) &&
-        level.rawPixelsPerLevelPixel > 0.0;
-}
-
-struct LevelSample {
-    double value = 0.0;
-    double variance = 0.0;
-    double gradientX = 0.0;
-    double gradientY = 0.0;
-};
-
-template<bool gradients>
-bool SampleLevelKeys(
-    const CfaPyramidLevel& level,
-    double x,
-    double y,
-    double keysParameter,
-    LevelSample& sample) {
-    // EvaluatePatch validates the immutable level once per patch. Candidate
-    // scoring needs values and variance but no interpolation derivatives.
-    if (!Finite(x) || !Finite(y)) return false;
-    const std::int64_t baseX = static_cast<std::int64_t>(std::floor(x));
-    const std::int64_t baseY = static_cast<std::int64_t>(std::floor(y));
-    if (baseX < 1 || baseY < 1 ||
-        baseX + 2 >= static_cast<std::int64_t>(level.extent.width) ||
-        baseY + 2 >= static_cast<std::int64_t>(level.extent.height)) return false;
-    std::array<double,4> weightsX{},derivativesX{};
-    for (std::int64_t offsetX = -1; offsetX <= 2; ++offsetX) {
-        const double distance=x-static_cast<double>(baseX+offsetX);
-        weightsX[offsetX+1]=KeysBicubicKernel(distance,keysParameter);
-        if constexpr(gradients) derivativesX[offsetX+1]=KeysBicubicKernelDerivative(distance,keysParameter);
-    }
-    sample = {};
-    for (std::int64_t offsetY = -1; offsetY <= 2; ++offsetY) {
-        const std::int64_t tapY = baseY + offsetY;
-        const double wy = KeysBicubicKernel(
-            y - static_cast<double>(tapY), keysParameter);
-        double dwy=0;
-        if constexpr(gradients) dwy = KeysBicubicKernelDerivative(
-            y - static_cast<double>(tapY), keysParameter);
-        for (std::int64_t offsetX = -1; offsetX <= 2; ++offsetX) {
-            const std::int64_t tapX = baseX + offsetX;
-            const std::size_t index = PixelIndex(
-                level.extent,
-                static_cast<std::uint64_t>(tapX),
-                static_cast<std::uint64_t>(tapY));
-            if (level.validMask[index] == 0u ||
-                !Finite(level.signal[index]) ||
-                !Finite(level.variance[index]) ||
-                level.variance[index] < 0.0) {
-                return false;
-            }
-            const double wx = weightsX[offsetX+1];
-            const double coefficient = wx * wy;
-            sample.value += coefficient * level.signal[index];
-            sample.variance += coefficient * coefficient * level.variance[index];
-            if constexpr(gradients) {
-                sample.gradientX += derivativesX[offsetX+1] * wy * level.signal[index];
-                sample.gradientY += wx * dwy * level.signal[index];
-            }
-        }
-    }
-    return Finite(sample.value) && Finite(sample.variance) &&
-        sample.variance >= 0.0 && Finite(sample.gradientX) &&
-        Finite(sample.gradientY);
-}
-
 bool GlobalCovarianceAt(
     const LocalMotionDirectionRequest& request,
     RawCoordinate coordinate,
@@ -543,7 +402,6 @@ bool BuildCfaPlanePyramidImpl(
                     const std::int64_t centerX = static_cast<std::int64_t>(2u * x);
                     const std::int64_t centerY = static_cast<std::int64_t>(2u * y);
                     double signal = 0.0;
-                    double variance = 0.0;
                     bool valid = centerX >= 2 && centerY >= 2 &&
                         centerX + 2 < static_cast<std::int64_t>(previous.extent.width) &&
                         centerY + 2 < static_cast<std::int64_t>(previous.extent.height);
@@ -565,19 +423,22 @@ bool BuildCfaPlanePyramidImpl(
                                 static_cast<std::uint64_t>(sampleY));
                             const double coefficient = weightX * weightY;
                             signal += coefficient * previous.signal[sourceIndex];
-                            variance += coefficient * coefficient *
-                                previous.variance[sourceIndex];
                             valid = valid && previous.validMask[sourceIndex] != 0u;
                         }
                     }
                     const std::size_t targetIndex = PixelIndex(next.extent, x, y);
                     next.signal[targetIndex] = signal;
-                    next.variance[targetIndex] = variance;
                     next.validMask[targetIndex] =
-                        valid && Finite(signal) && Finite(variance) && variance >= 0.0
+                        valid && Finite(signal)
                         ? 1u
                         : 0u;
                 }
+            }
+            const auto& native = result.planes[SiteIndex(site)].front();
+            if (!PropagatePyramidLevelVariance(native.variance, native.extent,
+                    levelIndex, parameters.pyramidKernel, next.variance, error)) return false;
+            for (std::size_t index = 0; index < nextCount; ++index) {
+                if (!Finite(next.variance[index]) || next.variance[index] < 0.0) next.validMask[index] = 0u;
             }
             result.planes[SiteIndex(site)].push_back(std::move(next));
         }
@@ -610,301 +471,6 @@ bool BuildCfaPlanePyramid(
 }
 
 namespace {
-
-// One node's immutable reference geometry is shared by its candidate scores
-// and refinement proposals. The 128 KiB limit fits the existing per-worker
-// alignment workspace reserve; larger custom patches use the original path.
-struct PatchReferenceGeometry {
-    struct Sample {
-        RawCoordinate mappedSourceRaw;
-        double signal = 0.0;
-        double variance = -1.0;
-    };
-    struct Site {
-        const CfaPyramidLevel* reference = nullptr;
-        const CfaPyramidLevel* source = nullptr;
-        CfaOffset sourceOffset;
-    };
-    std::array<Site, 4> sites;
-    std::vector<Sample> samples;
-    std::size_t validSampleCount = 0u;
-    const LocalMotionDirectionRequest* request = nullptr;
-    RawCoordinate centerRaw;
-    std::uint32_t level = 0u;
-    std::uint32_t patch = 0u;
-
-    bool Prepare(const LocalMotionDirectionRequest& input, RawCoordinate center,
-        std::uint32_t levelIndex, std::uint32_t patchLevelPixels) {
-        request = nullptr;
-        validSampleCount = 0u;
-        samples.clear();
-        constexpr std::size_t maximumBytes = 128u * 1024u;
-        const std::uint64_t area = std::uint64_t(patchLevelPixels) * patchLevelPixels;
-        if (!input.reference || !input.source || !Finite(center) || area == 0u ||
-            area > maximumBytes / (kSites.size() * sizeof(Sample))) return false;
-        const double levelScale = std::ldexp(1.0, levelIndex);
-        for (CfaSite site : kSites) {
-            auto& geometry = sites[SiteIndex(site)];
-            geometry.reference = FindCfaPyramidLevel(*input.reference, site, levelIndex);
-            geometry.source = FindCfaPyramidLevel(*input.source, site, levelIndex);
-            if (!geometry.reference || !geometry.source ||
-                !ValidateLevel(*geometry.reference) || !ValidateLevel(*geometry.source)) return false;
-            geometry.sourceOffset = input.source->layout.OffsetFor(site);
-        }
-        try {
-            samples.resize(static_cast<std::size_t>(area * kSites.size()));
-        } catch (const std::bad_alloc&) {
-            return false; // Reuse is optional; retain the uncached computation.
-        }
-        for (CfaSite site : kSites) {
-            const auto& reference = *sites[SiteIndex(site)].reference;
-            const auto centerPlane = input.reference->layout.RawToPlane(center, site);
-            const auto startX = static_cast<std::int64_t>(std::floor(
-                centerPlane.x / levelScale - 0.5 * static_cast<double>(patchLevelPixels)));
-            const auto startY = static_cast<std::int64_t>(std::floor(
-                centerPlane.y / levelScale - 0.5 * static_cast<double>(patchLevelPixels)));
-            for (std::uint32_t y = 0u; y < patchLevelPixels; ++y) {
-                const auto referenceY = startY + y;
-                if (referenceY < 0 || referenceY >= static_cast<std::int64_t>(reference.extent.height)) continue;
-                for (std::uint32_t x = 0u; x < patchLevelPixels; ++x) {
-                    const auto referenceX = startX + x;
-                    if (referenceX < 0 || referenceX >= static_cast<std::int64_t>(reference.extent.width)) continue;
-                    const auto index = PixelIndex(reference.extent,
-                        static_cast<std::uint64_t>(referenceX), static_cast<std::uint64_t>(referenceY));
-                    if (reference.validMask[index] == 0u || !Finite(reference.signal[index]) ||
-                        !Finite(reference.variance[index]) || reference.variance[index] < 0.0) continue;
-                    const CfaPlaneCoordinate plane {
-                        static_cast<double>(referenceX) * levelScale,
-                        static_cast<double>(referenceY) * levelScale, site
-                    };
-                    auto& sample = samples[SiteIndex(site) * area + y * patchLevelPixels + x];
-                    sample.mappedSourceRaw = input.globalWarp.Map(input.reference->layout.PlaneToRaw(plane));
-                    sample.signal = reference.signal[index];
-                    sample.variance = reference.variance[index];
-                    ++validSampleCount;
-                }
-            }
-        }
-        request = &input;
-        centerRaw = center;
-        level = levelIndex;
-        patch = patchLevelPixels;
-        return true;
-    }
-
-    bool Matches(const LocalMotionDirectionRequest& input, RawCoordinate center,
-        std::uint32_t levelIndex, std::uint32_t patchLevelPixels) const {
-        return request == &input && centerRaw.x == center.x && centerRaw.y == center.y &&
-            level == levelIndex && patch == patchLevelPixels;
-    }
-};
-
-struct PatchStatistics {
-    bool valid = false;
-    std::uint64_t validCount = 0u;
-    std::uint64_t nominalCount = 0u;
-    double validFraction = 0.0;
-    double robustCost = std::numeric_limits<double>::infinity();
-    double cappedChiSquared = std::numeric_limits<double>::infinity();
-    double flatPhotometricCost = std::numeric_limits<double>::infinity();
-    double hessianXX = 0.0;
-    double hessianXY = 0.0;
-    double hessianYY = 0.0;
-    double gradientX = 0.0;
-    double gradientY = 0.0;
-    std::vector<double> residuals;
-    std::array<double,4> siteSquared {};
-    std::array<std::uint64_t,4> siteCount {};
-};
-
-bool EvaluatePatch(
-    const LocalMotionDirectionRequest& request,
-    RawCoordinate centerRaw,
-    std::uint32_t levelIndex,
-    RawCoordinate residualRaw,
-    std::uint32_t patchLevelPixels,
-    bool calculateNormal,
-    bool calculateFlatPhotometricCost,
-    PatchStatistics& statistics,
-    const PatchReferenceGeometry* geometry = nullptr) {
-    // Reset every statistic to its default without discarding patch scratch.
-    auto residuals = std::move(statistics.residuals);
-    statistics = {};
-    statistics.residuals = std::move(residuals);
-    statistics.residuals.clear();
-    if (!request.reference || !request.source || patchLevelPixels == 0u ||
-        !Finite(centerRaw) || !Finite(residualRaw) ||
-        !Finite(request.exposureScale) || request.exposureScale <= 0.0) {
-        return false;
-    }
-    const double levelScale = std::ldexp(1.0, levelIndex);
-    const double rawPixelsPerLevelPixel = std::ldexp(2.0, levelIndex);
-    if (geometry && !geometry->Matches(request, centerRaw, levelIndex, patchLevelPixels)) geometry = nullptr;
-    statistics.nominalCount = static_cast<std::uint64_t>(patchLevelPixels) *
-        patchLevelPixels * kSites.size();
-    // Matching geometry has already validated both levels and every reference
-    // tap. No candidate displacement can recover an entirely invalid patch.
-    // Keep the same empty statistics as the normal zero-valid-sample exit.
-    if (geometry && geometry->validSampleCount == 0u) return true;
-    statistics.residuals.reserve(
-        calculateNormal ? static_cast<std::size_t>(statistics.nominalCount) : 0u);
-    double robustCostSum = 0.0;
-    double cappedSquaredSum = 0.0;
-    std::vector<double> flatRatios;
-    if (calculateFlatPhotometricCost) {
-        flatRatios.reserve(static_cast<std::size_t>(statistics.nominalCount));
-    }
-
-    for (CfaSite site : kSites) {
-        const auto* siteGeometry = geometry ? &geometry->sites[SiteIndex(site)] : nullptr;
-        const CfaPyramidLevel* referenceLevel = siteGeometry ? siteGeometry->reference : FindCfaPyramidLevel(
-            *request.reference, site, levelIndex);
-        const CfaPyramidLevel* sourceLevel = siteGeometry ? siteGeometry->source : FindCfaPyramidLevel(
-            *request.source, site, levelIndex);
-        if (!siteGeometry && (!referenceLevel || !sourceLevel ||
-            !ValidateLevel(*referenceLevel) || !ValidateLevel(*sourceLevel))) {
-            return false;
-        }
-        const CfaPlaneCoordinate centerPlane = siteGeometry ? CfaPlaneCoordinate{} :
-            request.reference->layout.RawToPlane(centerRaw, site);
-        const double centerLevelX = centerPlane.x / levelScale;
-        const double centerLevelY = centerPlane.y / levelScale;
-        const std::int64_t startX = static_cast<std::int64_t>(
-            std::floor(centerLevelX - 0.5 * static_cast<double>(patchLevelPixels)));
-        const std::int64_t startY = static_cast<std::int64_t>(
-            std::floor(centerLevelY - 0.5 * static_cast<double>(patchLevelPixels)));
-        for (std::uint32_t patchY = 0u; patchY < patchLevelPixels; ++patchY) {
-            const std::int64_t referenceY = startY + patchY;
-            if (!siteGeometry && (referenceY < 0 ||
-                referenceY >= static_cast<std::int64_t>(referenceLevel->extent.height))) {
-                continue;
-            }
-            for (std::uint32_t patchX = 0u; patchX < patchLevelPixels; ++patchX) {
-                double referenceSignal, referenceVariance;
-                RawCoordinate sourceRaw;
-                if (siteGeometry) {
-                    const auto& sample = geometry->samples[
-                        (SiteIndex(site) * std::size_t(patchLevelPixels) + patchY) * patchLevelPixels + patchX];
-                    if (sample.variance < 0.0) continue;
-                    referenceSignal = sample.signal;
-                    referenceVariance = sample.variance;
-                    sourceRaw = sample.mappedSourceRaw;
-                } else {
-                    const std::int64_t referenceX = startX + patchX;
-                    if (referenceX < 0 ||
-                        referenceX >= static_cast<std::int64_t>(referenceLevel->extent.width)) {
-                        continue;
-                    }
-                    const std::size_t referenceIndex = PixelIndex(
-                        referenceLevel->extent,
-                        static_cast<std::uint64_t>(referenceX),
-                        static_cast<std::uint64_t>(referenceY));
-                    if (referenceLevel->validMask[referenceIndex] == 0u ||
-                        !Finite(referenceLevel->signal[referenceIndex]) ||
-                        !Finite(referenceLevel->variance[referenceIndex]) ||
-                        referenceLevel->variance[referenceIndex] < 0.0) {
-                        continue;
-                    }
-                    const CfaPlaneCoordinate referencePlane {
-                        static_cast<double>(referenceX) * levelScale,
-                        static_cast<double>(referenceY) * levelScale,
-                        site
-                    };
-                    const RawCoordinate referenceRaw =
-                        request.reference->layout.PlaneToRaw(referencePlane);
-                    sourceRaw = request.globalWarp.Map(referenceRaw);
-                    referenceSignal = referenceLevel->signal[referenceIndex];
-                    referenceVariance = referenceLevel->variance[referenceIndex];
-                }
-                sourceRaw = Add(sourceRaw, residualRaw);
-                const CfaPlaneCoordinate sourcePlane = siteGeometry ? CfaPlaneCoordinate {
-                    (sourceRaw.x - static_cast<double>(siteGeometry->sourceOffset.x)) * 0.5,
-                    (sourceRaw.y - static_cast<double>(siteGeometry->sourceOffset.y)) * 0.5, site
-                } : request.source->layout.RawToPlane(sourceRaw, site);
-                LevelSample sourceSample;
-                const bool sampled = (calculateNormal || calculateFlatPhotometricCost)
-                    ? SampleLevelKeys<true>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
-                        request.options.registration.keysBicubicParameter,sourceSample)
-                    : SampleLevelKeys<false>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
-                        request.options.registration.keysBicubicParameter,sourceSample);
-                if (!sampled) {
-                    continue;
-                }
-                const double variance =
-                    referenceVariance +
-                    request.exposureScale * request.exposureScale *
-                        sourceSample.variance +
-                    request.options.registration.localNumericalVarianceFloor;
-                if (!Finite(variance) || variance <= 0.0) continue;
-                const double denominator = std::sqrt(variance);
-                const double residual =
-                    (referenceSignal -
-                        request.exposureScale * sourceSample.value) /
-                    denominator;
-                if (!Finite(residual)) continue;
-                ++statistics.validCount;
-                // Color contradictions must remain visible even when both
-                // candidates exceed the robust solver's ordinary cost cap.
-                statistics.siteSquared[SiteIndex(site)] += std::min(residual * residual,1e12);
-                ++statistics.siteCount[SiteIndex(site)];
-                robustCostSum += HuberLoss(
-                    residual, request.options.registration.registrationHuberDelta);
-                cappedSquaredSum += std::min(
-                    residual * residual,
-                    request.options.registration.cappedResidualSquared);
-
-                if (calculateFlatPhotometricCost) {
-                    const double gradientRawX =
-                        request.exposureScale * sourceSample.gradientX /
-                        rawPixelsPerLevelPixel;
-                    const double gradientRawY =
-                        request.exposureScale * sourceSample.gradientY /
-                        rawPixelsPerLevelPixel;
-                    const double flatVariance =
-                        request.options.registration.flatSafeCovarianceRawPixels *
-                        request.options.registration.flatSafeCovarianceRawPixels *
-                        (gradientRawX * gradientRawX +
-                         gradientRawY * gradientRawY);
-                    flatRatios.push_back(flatVariance / variance);
-                }
-
-                if (calculateNormal) {
-                    const double jacobianX =
-                        -request.exposureScale * sourceSample.gradientX /
-                        denominator;
-                    const double jacobianY =
-                        -request.exposureScale * sourceSample.gradientY /
-                        denominator;
-                    const double weight = HuberWeight(
-                        residual, request.options.registration.registrationHuberDelta);
-                    statistics.hessianXX += weight * jacobianX * jacobianX;
-                    statistics.hessianXY += weight * jacobianX * jacobianY;
-                    statistics.hessianYY += weight * jacobianY * jacobianY;
-                    statistics.gradientX += weight * jacobianX * residual;
-                    statistics.gradientY += weight * jacobianY * residual;
-                    statistics.residuals.push_back(residual);
-                }
-            }
-        }
-    }
-    statistics.validFraction = statistics.nominalCount == 0u
-        ? 0.0
-        : static_cast<double>(statistics.validCount) /
-            static_cast<double>(statistics.nominalCount);
-    if (statistics.validCount == 0u) return true;
-    statistics.robustCost = robustCostSum /
-        static_cast<double>(statistics.validCount);
-    statistics.cappedChiSquared = cappedSquaredSum /
-        static_cast<double>(statistics.validCount);
-    statistics.flatPhotometricCost = calculateFlatPhotometricCost
-        ? Median(std::move(flatRatios))
-        : 0.0;
-    statistics.valid = Finite(statistics.robustCost) &&
-        Finite(statistics.cappedChiSquared) &&
-        (!calculateFlatPhotometricCost ||
-         Finite(statistics.flatPhotometricCost));
-    return true;
-}
 
 struct Candidate {
     RawCoordinate residualRaw;
@@ -1041,6 +607,73 @@ bool SelectBestAndSecond(
     return true;
 }
 
+bool VerifyFinestCandidateAmbiguity(
+    const LocalMotionDirectionRequest& request,
+    RawCoordinate centerRaw,
+    const std::vector<Candidate>& candidates,
+    const std::vector<std::uint8_t>* originalEligibility,
+    const Candidate& best,
+    const Candidate& second,
+    const PatchReferenceGeometry* geometry,
+    double& uniqueness) {
+    uniqueness = 0.0;
+    const auto& parameters = request.options.registration;
+    if (!Finite(second.statistics.robustCost) || !Finite(best.statistics.robustCost)) return true;
+    const double originalGap = std::max(0.0,
+        (second.statistics.robustCost - best.statistics.robustCost) /
+            (best.statistics.robustCost + parameters.localNumericalVarianceFloor));
+    uniqueness = originalGap;
+    // A rejected original gap cannot become stronger by changing the objective.
+    // FlatSafe still has its separate, unchanged parent-evidence policy.
+    if (uniqueness <= parameters.uniquenessTransitionMin) return true;
+    if (request.shouldCancel && request.shouldCancel()) return false;
+
+    Detail::FixedPatchSupport support;
+    PatchStatistics seed;
+    if (!EvaluatePatch(request, centerRaw, 0u, best.residualRaw,
+            parameters.finestPatchPlanePixels, false, false, seed, geometry,
+            Detail::PatchEvaluation::CaptureSupport, &support) || !seed.valid ||
+        seed.validFraction < parameters.minimumTileValidFraction ||
+        seed.validCount < parameters.minimumStructuredSamples) {
+        uniqueness = 0.0;
+        return true;
+    }
+    // Retain only the scalar cap. The candidate list and frozen denominators
+    // remain private, bounded search workspace, never per-image node payloads.
+    // GPU eligibility is captured before numerical-shortlist invalidation, so
+    // lower-ranked hypotheses cannot disappear when the common domain changes.
+    constexpr double minimumSecondDistanceRaw = 2.0;
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        const Candidate& candidate = candidates[index];
+        const bool eligible = originalEligibility
+            ? (*originalEligibility)[index] != 0u : candidate.statistics.valid;
+        if (!eligible || std::sqrt(SquaredNorm(Subtract(candidate.residualRaw,
+                best.residualRaw))) + 1.0e-12 < minimumSecondDistanceRaw) continue;
+        if (request.shouldCancel && request.shouldCancel()) return false;
+        Detail::PatchCostLimit limit;
+        limit.maximumMeanCost = seed.robustCost + uniqueness *
+            (seed.robustCost + parameters.localNumericalVarianceFloor);
+        PatchStatistics rival;
+        const bool evaluated = EvaluatePatch(request, centerRaw, 0u, candidate.residualRaw,
+            parameters.finestPatchPlanePixels, false, false, rival, geometry,
+            Detail::PatchEvaluation::FixedObjective, &support, &limit);
+        if (request.shouldCancel && request.shouldCancel()) return false;
+        // This is a nonnegative-cost lower bound, not a fully verified patch.
+        // Even assigning every unseen/unavailable residual zero cannot make
+        // this candidate reduce the current cap. No full score is published.
+        if (limit.exceeded) continue;
+        if (!evaluated || !rival.valid) {
+            uniqueness = 0.0; // Incomplete evidence could still compete.
+            return true;
+        }
+        const double gap = std::max(0.0, (rival.robustCost - seed.robustCost) /
+            (seed.robustCost + parameters.localNumericalVarianceFloor));
+        uniqueness = std::min(uniqueness, gap);
+        if (uniqueness <= parameters.uniquenessTransitionMin) return true;
+    }
+    return true;
+}
+
 bool VerifyAcceleratedCandidates(
     const LocalMotionDirectionRequest& request,
     RawCoordinate centerRaw,
@@ -1048,7 +681,20 @@ bool VerifyAcceleratedCandidates(
     RawCoordinate predictionRaw,
     std::vector<Candidate>& candidates,
     Candidate& best,
-    Candidate& second) {
+    Candidate& second,
+    double& commonUniqueness) {
+    commonUniqueness = 0.0;
+    std::vector<std::uint8_t> originalEligibility;
+    if (level == 0u) {
+        originalEligibility.resize(candidates.size(), 0u);
+        for (std::size_t index = 0u; index < candidates.size(); ++index) {
+            const auto& score = candidates[index].statistics;
+            originalEligibility[index] = score.valid && Finite(score.robustCost) &&
+                score.nominalCount > 0u && score.validCount <= score.nominalCount &&
+                static_cast<double>(score.validCount) / static_cast<double>(score.nominalCount) >=
+                    request.options.registration.minimumTileValidFraction;
+        }
+    }
     std::vector<std::size_t> ranked;
     ranked.reserve(candidates.size());
     for (std::size_t index = 0u; index < candidates.size(); ++index) {
@@ -1115,13 +761,17 @@ bool VerifyAcceleratedCandidates(
             authoritative.validFraction <
                 request.options.registration.minimumTileValidFraction) {
             candidates[index].statistics = {};
+            if (level == 0u) originalEligibility[index] = 0u;
             continue;
         }
         candidates[index].statistics = std::move(authoritative);
+        if (level == 0u) originalEligibility[index] = 1u;
     }
-    return SelectBestAndSecond(
+    if (!SelectBestAndSecond(
         candidates, predictionRaw,
-        request.options.registration.candidateTieTolerance, best, second);
+        request.options.registration.candidateTieTolerance, best, second)) return false;
+    return level != 0u || VerifyFinestCandidateAmbiguity(request, centerRaw,
+        candidates, &originalEligibility, best, second, geometry, commonUniqueness);
 }
 
 bool SearchTileAtLevel(
@@ -1131,7 +781,9 @@ bool SearchTileAtLevel(
     const std::vector<RawCoordinate>& seedsRaw,
     RawCoordinate predictionRaw,
     Candidate& best,
-    Candidate& second) {
+    Candidate& second,
+    double& commonUniqueness) {
+    commonUniqueness = 0.0;
     const double rawPerLevelPixel = std::ldexp(2.0, level);
     const std::uint32_t radius =
         request.options.registration.searchRadiiFineToCoarse[level];
@@ -1213,230 +865,8 @@ bool SearchTileAtLevel(
             second = candidates[index];
         }
     }
-    return true;
-}
-
-struct RefinedTile {
-    bool valid = false;
-    bool observable = false;
-    RawCoordinate residualRaw;
-    PatchStatistics statistics;
-    SymmetricRawCovariance localCovarianceRaw;
-    double hessianCondition = std::numeric_limits<double>::infinity();
-    double positionSigmaRaw = std::numeric_limits<double>::infinity();
-};
-
-bool HessianEigenvalues(const PatchStatistics& statistics, double& low, double& high) {
-    const double trace = statistics.hessianXX + statistics.hessianYY;
-    const double difference = statistics.hessianXX - statistics.hessianYY;
-    const double radius = std::sqrt(std::max(
-        0.0,
-        0.25 * difference * difference +
-            statistics.hessianXY * statistics.hessianXY));
-    low = 0.5 * trace - radius;
-    high = 0.5 * trace + radius;
-    return Finite(low) && Finite(high);
-}
-
-bool SolveNormalStep(
-    const PatchStatistics& statistics,
-    double damping,
-    RawCoordinate& stepPlane) {
-    const double xx = statistics.hessianXX + damping;
-    const double xy = statistics.hessianXY;
-    const double yy = statistics.hessianYY + damping;
-    const double determinant = xx * yy - xy * xy;
-    if (!Finite(determinant) || determinant <= 1.0e-20) return false;
-    stepPlane.x = -(
-        yy * statistics.gradientX - xy * statistics.gradientY) / determinant;
-    stepPlane.y = -(
-        -xy * statistics.gradientX + xx * statistics.gradientY) / determinant;
-    return Finite(stepPlane);
-}
-
-bool RefineTileSubpixel(
-    const LocalMotionDirectionRequest& request,
-    RawCoordinate centerRaw,
-    RawCoordinate discreteResidualRaw,
-    RefinedTile& refined,
-    const PatchStatistics* initialStatistics = nullptr) {
-    refined = {};
-    RawCoordinate currentRaw = discreteResidualRaw;
-    PatchStatistics current;
-    // Burst refinement has already evaluated this exact center and seed for
-    // its cost gate. Reuse those FP64 statistics without another interpolation.
-    if (initialStatistics) current = *initialStatistics;
-    else if (!EvaluatePatch(
-            request,
-            centerRaw,
-            0u,
-            currentRaw,
-            request.options.registration.finestPatchPlanePixels,
-            true,
-            false,
-            current)) {
-        return false;
-    }
-    if (!current.valid ||
-        current.validFraction <
-            request.options.registration.minimumTileValidFraction ||
-        current.validCount < static_cast<std::uint64_t>(
-            request.options.registration.minimumStructuredSamples)) {
-        return false;
-    }
-    // Retain two residual buffers across proposals, then release the spare
-    // and reference geometry before allocating covariance/median scratch.
-    {
-        std::uint32_t costIncreases = 0u;
-        PatchStatistics proposed;
-        PatchReferenceGeometry referenceGeometry;
-        const PatchReferenceGeometry* geometry = nullptr;
-        bool preparedGeometry = false;
-        for (std::uint32_t iteration = 0u;
-             iteration < request.options.registration.subpixelIterations;
-             ++iteration) {
-            const double diagonalScale = std::max(
-                { current.hessianXX, current.hessianYY, 1.0 });
-            RawCoordinate stepPlane;
-            if (!SolveNormalStep(
-                    current,
-                    request.options.registration.localHessianAbsoluteDamping *
-                        diagonalScale,
-                    stepPlane)) {
-                break;
-            }
-            const double stepLength = std::sqrt(SquaredNorm(stepPlane));
-            if (stepLength >
-                request.options.registration.maximumSubpixelStepPlanePixels) {
-                stepPlane = Scale(
-                    stepPlane,
-                    request.options.registration.maximumSubpixelStepPlanePixels /
-                        stepLength);
-            }
-            if (std::sqrt(SquaredNorm(stepPlane)) <
-                request.options.registration.subpixelConvergencePlanePixels) {
-                break;
-            }
-            RawCoordinate proposedRaw = Add(currentRaw, Scale(stepPlane, 2.0));
-            if (std::sqrt(SquaredNorm(Subtract(
-                    proposedRaw, discreteResidualRaw))) >
-                2.0 * request.options.registration.
-                    maximumDistanceFromDiscreteSeedPlanePixels) {
-                break;
-            }
-            // Keep rejected/fully converged nodes allocation-free. Only proposals
-            // that actually need another patch evaluation prepare reusable data.
-            if (!preparedGeometry) {
-                preparedGeometry = true;
-                if (referenceGeometry.Prepare(request, centerRaw, 0u,
-                        request.options.registration.finestPatchPlanePixels)) {
-                    geometry = &referenceGeometry;
-                }
-            }
-            bool proposedValid = EvaluatePatch(
-                    request,
-                    centerRaw,
-                    0u,
-                    proposedRaw,
-                    request.options.registration.finestPatchPlanePixels,
-                    true,
-                    false,
-                    proposed, geometry) &&
-                proposed.valid &&
-                proposed.validFraction >=
-                    request.options.registration.minimumTileValidFraction;
-            if (!proposedValid ||
-                proposed.robustCost > current.robustCost +
-                    request.options.registration.candidateTieTolerance) {
-                proposedRaw = Add(currentRaw, Scale(stepPlane, 1.0));
-                proposedValid = EvaluatePatch(
-                        request,
-                        centerRaw,
-                        0u,
-                        proposedRaw,
-                        request.options.registration.finestPatchPlanePixels,
-                        true,
-                        false,
-                        proposed, geometry) &&
-                    proposed.valid &&
-                    proposed.validFraction >=
-                        request.options.registration.minimumTileValidFraction;
-            }
-            if (!proposedValid ||
-                proposed.robustCost > current.robustCost +
-                    request.options.registration.candidateTieTolerance) {
-                ++costIncreases;
-                if (costIncreases >= request.options.registration.
-                        maximumSubpixelCostIncreases) {
-                    break;
-                }
-                continue;
-            }
-            currentRaw = proposedRaw;
-            std::swap(current, proposed);
-        }
-    }
-
-    if (std::sqrt(SquaredNorm(Subtract(currentRaw, discreteResidualRaw))) >
-        2.0 * request.options.registration.
-            maximumDistanceFromDiscreteSeedPlanePixels + 1.0e-9) {
-        return false;
-    }
-    double low = 0.0;
-    double high = 0.0;
-    if (!HessianEigenvalues(current, low, high)) return false;
-    refined.hessianCondition = low > 1.0e-20
-        ? high / low
-        : std::numeric_limits<double>::infinity();
-
-    std::vector<double> centeredResiduals = current.residuals;
-    const double residualMedian = Median(centeredResiduals);
-    for (double& residual : centeredResiduals) {
-        residual = std::abs(residual - residualMedian);
-    }
-    const double robustScale = 1.4826 * Median(std::move(centeredResiduals));
-    const double scaleSquared = std::max(
-        request.options.registration.covarianceResidualScaleFloor,
-        robustScale * robustScale);
-    const double xx = current.hessianXX +
-        request.options.registration.localCovarianceRegularization;
-    const double xy = current.hessianXY;
-    const double yy = current.hessianYY +
-        request.options.registration.localCovarianceRegularization;
-    const double determinant = xx * yy - xy * xy;
-    if (Finite(determinant) && determinant > 1.0e-20) {
-        SymmetricRawCovariance covariance {
-            4.0 * scaleSquared * yy / determinant,
-            -4.0 * scaleSquared * xy / determinant,
-            4.0 * scaleSquared * xx / determinant
-        };
-        if (!ClampCovariance(
-                covariance,
-                request.options.registration.warpCovarianceEigenvalueMinRawPixels,
-                request.options.registration.warpCovarianceEigenvalueMaxRawPixels,
-                refined.localCovarianceRaw)) {
-            return false;
-        }
-        double covarianceLow = 0.0;
-        double covarianceHigh = 0.0;
-        if (!CovarianceEigenvalues(
-                refined.localCovarianceRaw, covarianceLow, covarianceHigh)) {
-            return false;
-        }
-        refined.positionSigmaRaw = std::sqrt(std::max(
-            0.0,
-            0.5 * (refined.localCovarianceRaw.xxRawPixelsSquared +
-                refined.localCovarianceRaw.yyRawPixelsSquared)));
-    }
-    refined.observable = low > 1.0e-20 &&
-        refined.hessianCondition <=
-            request.options.registration.localHessianConditionLimit &&
-        refined.positionSigmaRaw <=
-            request.options.registration.flatSafeUnobservableSigmaRawPixels;
-    refined.valid = true;
-    refined.residualRaw = currentRaw;
-    refined.statistics = std::move(current);
-    return true;
+    return level != 0u || VerifyFinestCandidateAmbiguity(request, centerRaw,
+        candidates, nullptr, best, second, geometry, commonUniqueness);
 }
 
 double ResidualConfidence(double cappedChiSquared) {
@@ -1469,6 +899,7 @@ struct LevelNodeState {
     RawCoordinate predictionBeforeFineRaw;
     Candidate best;
     Candidate second;
+    double commonUniqueness = 0.0;
 };
 
 bool CompatiblePyramids(
@@ -1757,6 +1188,7 @@ bool EstimateLocalMotionDirection(
                     }
                     Candidate best;
                     Candidate second;
+                    double commonUniqueness = 0.0;
                     if (!VerifyAcceleratedCandidates(
                             request,
                             node.centerRaw,
@@ -1764,7 +1196,8 @@ bool EstimateLocalMotionDirection(
                             node.predictionRaw,
                             node.candidates,
                             best,
-                            second)) {
+                            second,
+                            commonUniqueness)) {
                         return;
                     }
                     LevelNodeState& state = current[node.index];
@@ -1775,6 +1208,7 @@ bool EstimateLocalMotionDirection(
                         : best.residualRaw;
                     state.best = std::move(best);
                     state.second = std::move(second);
+                    state.commonUniqueness = commonUniqueness;
                 };
                 try {
                     if (parallel) {
@@ -1874,6 +1308,7 @@ bool EstimateLocalMotionDirection(
                     }
                     Candidate best;
                     Candidate second;
+                    double commonUniqueness = 0.0;
                     if (!SearchTileAtLevel(
                             request,
                             center,
@@ -1881,7 +1316,8 @@ bool EstimateLocalMotionDirection(
                             seeds,
                             prediction,
                             best,
-                            second)) {
+                            second,
+                            commonUniqueness)) {
                         return;
                     }
                     current[index].valid = true;
@@ -1891,6 +1327,7 @@ bool EstimateLocalMotionDirection(
                         : best.residualRaw;
                     current[index].best = std::move(best);
                     current[index].second = std::move(second);
+                    current[index].commonUniqueness = commonUniqueness;
                 };
                 try {
                     if (parallel) {
@@ -1977,6 +1414,15 @@ bool EstimateLocalMotionDirection(
                 node.rejectReason = MotionNodeRejectReason::SubpixelFailure;
                 continue;
             }
+            if (!refined.valid) {
+                node.rejectReason = MotionNodeRejectReason::SubpixelFailure;
+                continue;
+            }
+            // Keep secondBestCost in its existing physical-noise diagnostic
+            // domain. The scalar cap was verified against every eligible
+            // separated hypothesis in this node's finest search domain, on
+            // the same common support and fixed noise used by the fit.
+            node.uniqueness = std::min(node.uniqueness, prior[index].commonUniqueness);
             node.residualRaw = refined.residualRaw;
             node.robustCost = refined.statistics.robustCost;
             node.validFraction = refined.statistics.validFraction;
@@ -2002,7 +1448,7 @@ bool EstimateLocalMotionDirection(
                     refined.localCovarianceRaw, globalCovariance);
                 total.xxRawPixelsSquared += floorVariance;
                 total.yyRawPixelsSquared += floorVariance;
-                if (!ClampCovariance(
+                if (!TryClampMotionCovariance(
                         total,
                         request.options.registration.
                             warpCovarianceEigenvalueMinRawPixels,
@@ -2064,7 +1510,7 @@ bool EstimateLocalMotionDirection(
             flatCovariance = AddCovariance(flatCovariance, globalCovariance);
             flatCovariance.xxRawPixelsSquared += floorVariance;
             flatCovariance.yyRawPixelsSquared += floorVariance;
-            if (!ClampCovariance(
+            if (!TryClampMotionCovariance(
                     flatCovariance,
                     request.options.registration.warpCovarianceEigenvalueMinRawPixels,
                     request.options.registration.warpCovarianceEigenvalueMaxRawPixels,
@@ -2212,15 +1658,10 @@ bool EstimateLocalMotionDirection(
 }
 
 namespace {
-struct MotionFieldDifferentials {
-    std::array<RawMappingJacobian,4> sides;
-    unsigned count=0;
-};
-
 // The same confidence-normalized bilinear map is used by optional guide
 // derivatives and forward/backward uncertainty transport. Keep every supported
 // one-sided derivative at internal knots; physical edges use the inside side.
-MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+RawMappingJacobianSet FieldDifferentials(const LocalMotionGrid& grid,
     double gridX,double gridY,std::uint32_t x0,std::uint32_t y0,
     const LocalMotionOptions& options) {
     const auto derivative=[&](std::uint32_t ix,std::uint32_t iy) {
@@ -2245,7 +1686,7 @@ MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
         j.linear[2]+=(nx.y-n.y/mass*mx)/mass;j.linear[3]+=(ny.y-n.y/mass*my)/mass;
         j.valid=FiniteMappingJacobian(j);return j;
     };
-    MotionFieldDifferentials result;
+    RawMappingJacobianSet result;
     result.sides[result.count++]=derivative(x0,y0);
     result.sides[0].valid=result.sides[0].valid&&gridX>=0&&gridY>=0&&
         gridX<=grid.width-1&&gridY<=grid.height-1;
@@ -2258,7 +1699,7 @@ MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
     return result;
 }
 
-MotionFieldDifferentials FieldDifferentials(const LocalMotionGrid& grid,
+RawMappingJacobianSet FieldDifferentials(const LocalMotionGrid& grid,
     RawCoordinate point,const LocalMotionOptions& options) {
     // Called only after the same grid/coordinate passed field evaluation.
     const double x=(point.x-grid.originRawX)/grid.spacingRawX;
@@ -2277,8 +1718,10 @@ bool EvaluateLocalMotionField(
     const LocalMotionOptions& options,
     LocalMotionFieldSample& result,
     std::string* error,
-    bool includeDiagnostic, RawMappingJacobian* jacobian) {
+    bool includeDiagnostic, RawMappingJacobian* jacobian,
+    RawMappingJacobianSet* linearizations) {
     if(jacobian)*jacobian={};
+    if(linearizations)*linearizations={};
     result = {};
     result.referenceRaw = referenceRaw;
     if (!grid.valid || grid.width == 0u || grid.height == 0u ||
@@ -2364,7 +1807,7 @@ bool EvaluateLocalMotionField(
     }
     double disagreementLow = 0.0;
     double disagreementHigh = 0.0;
-    if (!CovarianceEigenvalues(
+    if (!TryMotionCovarianceEigenvalues(
             disagreement, disagreementLow, disagreementHigh)) {
         result.rejectReason = MotionNodeRejectReason::InvalidCovariance;
         if (includeDiagnostic || error) result.message = "MFD local-motion disagreement covariance is invalid.";
@@ -2380,7 +1823,7 @@ bool EvaluateLocalMotionField(
         if (includeDiagnostic || error) result.message = "MFD local-motion nodes disagree beyond the hard limit.";
         return Fail(error, result.message);
     }
-    if (!ClampCovariance(
+    if (!TryClampMotionCovariance(
             covariance,
             options.registration.warpCovarianceEigenvalueMinRawPixels,
             options.registration.warpCovarianceEigenvalueMaxRawPixels,
@@ -2402,12 +1845,15 @@ bool EvaluateLocalMotionField(
         if (includeDiagnostic || error) result.message = "MFD local-motion warp leaves the source active area.";
         return Fail(error, result.message);
     }
-    if(jacobian) {
+    if(jacobian||linearizations) {
         const auto derivatives=FieldDifferentials(grid,gridX,gridY,x0,y0,options);
-        *jacobian=derivatives.sides[0];
-        for(unsigned i=1;i<derivatives.count&&jacobian->valid;++i)
-            jacobian->valid=derivatives.sides[i].valid&&
-                SameMappingJacobian(*jacobian,derivatives.sides[i]);
+        if(linearizations)*linearizations=derivatives;
+        if(jacobian) {
+            *jacobian=derivatives.sides[0];
+            for(unsigned i=1;i<derivatives.count&&jacobian->valid;++i)
+                jacobian->valid=derivatives.sides[i].valid&&
+                    SameMappingJacobian(*jacobian,derivatives.sides[i]);
+        }
     }
     result.valid = true;
     result.rejectReason = MotionNodeRejectReason::None;
@@ -2456,12 +1902,17 @@ bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& reque
     forward.shouldCancel=request.shouldCancel;
     const auto seed=Subtract(sourceRaw,forward.globalWarp.Map(referenceRaw));
     PatchStatistics before;
-    if(!EvaluatePatch(forward,referenceRaw,0,seed,forward.options.registration.finestPatchPlanePixels,
-        true,false,before)||!before.valid||before.robustCost<.6)return false;
     RefinedTile refined;
-    if(!RefineTileSubpixel(forward,referenceRaw,seed,refined,&before)||!refined.observable||
-       refined.statistics.robustCost>=before.robustCost*.95||
-       refined.statistics.validCount<before.validCount)return false;
+    {
+        // The reverse fit has its own domain; retire this mandatory scratch
+        // before it starts instead of holding two frozen patches at once.
+        Detail::FixedPatchSupport support;
+        if(!EvaluatePatch(forward,referenceRaw,0,seed,forward.options.registration.finestPatchPlanePixels,
+            true,false,before,nullptr,Detail::PatchEvaluation::CaptureSupport,&support)||!before.valid||before.robustCost<.6)return false;
+        if(!RefineTileSubpixel(forward,referenceRaw,seed,refined,&before,&support)||!refined.observable||
+           refined.statistics.robustCost>=before.robustCost*.95||
+           refined.statistics.validCount<before.validCount)return false;
+    }
     const auto correction=Subtract(refined.residualRaw,seed);
     const double displacement=std::sqrt(SquaredNorm(correction));
     if(displacement<.02||displacement>1.5)return false;
@@ -2491,16 +1942,23 @@ bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& reque
         floor,reverseSides,1,mahalanobis))return false;
     if(!Finite(mahalanobis)||mahalanobis>p.forwardBackwardMahalanobisHardLimit||
        std::sqrt(SquaredNorm(closure))>p.forwardBackwardEuclideanHardLimitRawPixels)return false;
+    // Photometric improvement and closure do not supply positional precision
+    // along a weak image direction. Apply the native grid's precision policy
+    // before publishing a correction; the consumer retains base-map covariance.
+    const double confidence=ResidualConfidence(refined.statistics.cappedChiSquared)*
+        CoverageConfidence(refined.statistics.validFraction)*PrecisionConfidence(refined.positionSigmaRaw,p)*
+        std::exp(-.5*std::max(mahalanobis-2.,0.));
+    if(!Finite(confidence)||confidence<=.2)return false;
     result.centerRaw=referenceRaw;result.residualRaw=refined.residualRaw;
     result.discreteResidualRaw=seed;result.covarianceRaw=refined.localCovarianceRaw;
     result.state=MotionNodeState::Structured;result.rejectReason=MotionNodeRejectReason::None;
     result.robustCost=refined.statistics.robustCost;result.secondBestCost=before.robustCost;
     result.validFraction=refined.statistics.validFraction;result.cappedChiSquared=refined.statistics.cappedChiSquared;
-    result.confidence=ResidualConfidence(result.cappedChiSquared)*CoverageConfidence(result.validFraction)*
-        std::exp(-.5*std::max(mahalanobis-2.,0.));
+    result.hessianCondition=refined.hessianCondition;result.positionalSigmaRaw=refined.positionSigmaRaw;
+    result.confidence=confidence;
     result.forwardBackwardErrorRaw=closure;result.forwardBackwardMahalanobis=mahalanobis;
     result.forwardBackwardEuclideanRaw=std::sqrt(SquaredNorm(closure));
-    return result.confidence>.2;
+    return true;
 }
 
 bool EstimateBidirectionalLocalMotion(

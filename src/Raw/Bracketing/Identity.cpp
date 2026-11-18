@@ -5,6 +5,7 @@
 #include "Panorama/Panorama.h"
 #include "LearnedAlignment.h"
 #include "Raw/RawTechnicalEvidence.h"
+#include "Raw/MultiFrameDenoise/LocalMotion.h"
 
 namespace Raw::Bracketing {
 std::string AnalysisIdentity(const ProcessingRequest& request) {
@@ -24,7 +25,8 @@ std::string AnalysisIdentity(const ProcessingRequest& request) {
     if(guide)j["spatialGuide"]="independent-cfa-contrast-v1";
     // Sampling and clipping decisions feed reliability, the guide and cached
     // group tiles. Keep their revisions together when these decisions change.
-    j["alignmentProfile"]="automatic-local-v40-valid-proxy-active-footprint";
+    j["alignmentProfile"]="automatic-local-v41-additive-cohort-proposals";
+    j["nativeMotionProfile"]=Mfd::kLocalMotionAlgorithmRevision;
     if(recipe.aiAlignment)j["learnedAlignmentProfile"]=LearnedAlignment::Profile;
     if(!request.alignmentProposals.empty()) {
         j["alignmentProposalProfile"]="external-flow-seed-raw-verification-v1";

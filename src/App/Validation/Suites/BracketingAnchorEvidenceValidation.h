@@ -76,8 +76,8 @@ inline void ValidateBracketingAnchorEvidence(const std::filesystem::path& direct
     phase="generic profile fallback";reset();data.sources[1].noise.quality=NoiseModelQuality::GenericLowConfidence;require(rank().anchorForSource[1]==2);
     phase="unaccepted geometry fallback";reset();data.sources[1].alignmentDiagnostic.accepted=false;require(rank().anchorForSource[1]==2);
     phase="existing fields preserved";reset();data.sources[3].localMotion=std::make_shared<LocalMotionGrid>();require(rank().anchorForSource[1]==2);
-    phase="AI path unchanged";reset();request.recipe.aiAlignment=true;require(rank().anchorForSource[1]==2);request.recipe.aiAlignment=false;
-    phase="external proposal path unchanged";reset();request.alignmentProposals.resize(1);require(rank().anchorForSource[1]==2);request.alignmentProposals.clear();
+    phase="AI preserves native anchor ranking";reset();request.recipe.aiAlignment=true;require(rank().anchorForSource[1]==1);request.recipe.aiAlignment=false;
+    phase="external proposals preserve native anchor ranking";reset();request.alignmentProposals.resize(1);require(rank().anchorForSource[1]==1);request.alignmentProposals.clear();
     phase="cancel is failure, plan unchanged";reset();auto before=plan(),after=before;unsigned cancelChecks=0;request.shouldCancel=[&] {return ++cancelChecks==4;};error.clear();
     require(!RankAlignmentAnchors(request,data,after,diagnostics,error)&&error=="Canceled"&&after.order==before.order&&after.anchorForSource==before.anchorForSource);request.shouldCancel={};
     phase="cache read failure is not missing evidence";data.sources[3].frame.cacheKey=std::string(64,'f');data.sources[3].noise.preparedFrameCacheKey=data.sources[3].frame.cacheKey;after=before;error.clear();

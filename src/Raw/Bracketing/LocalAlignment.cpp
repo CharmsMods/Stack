@@ -276,8 +276,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         // Keep shorter exposures independent, and retain existing composed
         // motion on reliability refresh even if refined gains change cohorts.
         const bool useGroup=cohorts.memberCount[index]>1&&anchor!=data.origin&&
-            data.sources[anchor].scale<reference.scale&&!request.recipe.aiAlignment&&
-            request.alignmentProposals.empty();
+            data.sources[anchor].scale<reference.scale;
         if(!data.sources[index].localMotion)data.sources[index].exposureGroupMotion=useGroup;
     }
     std::size_t pyramidReference=data.origin;
@@ -322,7 +321,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
         motionRequest.shouldCancel=request.shouldCancel;
         {
             ProcessingTimer timer(data.stageSeconds,"alignment_proposal_load");
-            if(!source.localMotion&&!AttachAlignmentProposal(request,source.id,motionRequest,error))return false;
+            if(!source.localMotion&&!AttachAlignmentProposal(request,data.sources[pairReference],source,motionRequest,error))return false;
         }
         if(request.reportPresentation&&!groupPair)motionRequest.reportObservation=[&](const Mfd::LocalMotionGrid& grid,bool provisional) {
             ObserveMotion(request,source,grid,provisional);
@@ -359,7 +358,7 @@ bool AlignLocal(const ProcessingRequest& request,PreparedDataset& data,
             source.alignmentDiagnostic.backend="gpu-search/cpu-verified";
         }
         if(motionRequest.forwardProposal&&!reuseMotion)
-            source.alignmentDiagnostic.backend+="/external-proposal-raw-verified";
+            source.alignmentDiagnostic.backend+=groupPair?"/external-proposal-cohort-raw-verified":"/external-proposal-raw-verified";
         if(!reuseMotion) {
             std::array<unsigned,13> rejections{};
             for(const auto& node:motion.forward.nodes)if(node.state==Mfd::MotionNodeState::Rejected)

@@ -4,6 +4,60 @@
 
 namespace Raw::Mfd {
 
+inline bool TryMotionCovarianceEigenvalues(
+    SymmetricRawCovariance covariance,
+    double& low,
+    double& high) {
+    if (!std::isfinite(covariance.xxRawPixelsSquared) ||
+        !std::isfinite(covariance.xyRawPixelsSquared) ||
+        !std::isfinite(covariance.yyRawPixelsSquared)) {
+        return false;
+    }
+    const double trace = covariance.xxRawPixelsSquared +
+        covariance.yyRawPixelsSquared;
+    const double difference = covariance.xxRawPixelsSquared -
+        covariance.yyRawPixelsSquared;
+    const double radius = std::sqrt(std::max(
+        0.0,
+        0.25 * difference * difference +
+            covariance.xyRawPixelsSquared * covariance.xyRawPixelsSquared));
+    low = 0.5 * trace - radius;
+    high = 0.5 * trace + radius;
+    return std::isfinite(low) && std::isfinite(high);
+}
+
+inline bool TryClampMotionCovariance(
+    SymmetricRawCovariance input,
+    double minimumSigma,
+    double maximumSigma,
+    SymmetricRawCovariance& result) {
+    double low = 0.0;
+    double high = 0.0;
+    if (!TryMotionCovarianceEigenvalues(input, low, high)) return false;
+    const double minimum = minimumSigma * minimumSigma;
+    const double maximum = maximumSigma * maximumSigma;
+    if (high < -1.0e-10 || low < -std::max(1.0e-10, 1.0e-8 * std::abs(high))) {
+        return false;
+    }
+    const double angle = 0.5 * std::atan2(
+        2.0 * input.xyRawPixelsSquared,
+        input.xxRawPixelsSquared - input.yyRawPixelsSquared);
+    const double clampedHigh = std::max(minimum, std::min(maximum, high));
+    const double clampedLow = std::max(minimum, std::min(maximum, low));
+    const double cosine = std::cos(angle);
+    const double sine = std::sin(angle);
+    result.xxRawPixelsSquared =
+        clampedHigh * cosine * cosine + clampedLow * sine * sine;
+    result.xyRawPixelsSquared =
+        (clampedHigh - clampedLow) * cosine * sine;
+    result.yyRawPixelsSquared =
+        clampedHigh * sine * sine + clampedLow * cosine * cosine;
+    return std::isfinite(result.xxRawPixelsSquared) &&
+        std::isfinite(result.xyRawPixelsSquared) &&
+        std::isfinite(result.yyRawPixelsSquared);
+}
+
+
 // Covariances describe displacement in the output axes of their motion map.
 // Compose maps by transporting the first displacement through the second map:
 // C_composed = J_second C_first J_second^T + C_second. This does not account
@@ -28,6 +82,47 @@ inline bool TryTransportMotionCovariance(SymmetricRawCovariance input,
         j[2]*j[2]*input.xxRawPixelsSquared+2*j[2]*j[3]*input.xyRawPixelsSquared+j[3]*j[3]*input.yyRawPixelsSquared};
     if(!valid(transformed))return false;
     output=transformed;return true;
+}
+
+// At a motion-grid knot, each supported side is a possible local linear model.
+// Transport through every side and retain a PSD upper envelope instead of an
+// average Jacobian, which can cancel opposing slopes. For D=C_next-E, adding
+// its positive spectral part gives E_new=E+D_+: both E_new-E and E_new-C_next
+// are PSD. The bounded, deterministic fold preserves identical/affine sides
+// exactly and avoids inflating unaffected axes for commuting covariances.
+//
+// This is a first-order local-model envelope, not a calibrated posterior for
+// uncertainty spanning whole cells or correlations between fitted links. Do
+// not use this envelope to relax a closure gate: closure tests each side.
+inline bool TryTransportMotionCovarianceEnvelope(SymmetricRawCovariance input,
+    const RawMappingJacobianSet& linearizations,SymmetricRawCovariance& output) {
+    if(linearizations.count==0||linearizations.count>linearizations.sides.size())return false;
+    SymmetricRawCovariance envelope;
+    if(!TryTransportMotionCovariance(input,linearizations.sides[0],envelope))return false;
+    for(unsigned i=1;i<linearizations.count;++i) {
+        SymmetricRawCovariance next;
+        if(!TryTransportMotionCovariance(input,linearizations.sides[i],next))return false;
+        const double xx=next.xxRawPixelsSquared-envelope.xxRawPixelsSquared;
+        const double xy=next.xyRawPixelsSquared-envelope.xyRawPixelsSquared;
+        const double yy=next.yyRawPixelsSquared-envelope.yyRawPixelsSquared;
+        const double center=.5*xx+.5*yy;
+        const double radius=std::hypot(.5*xx-.5*yy,xy);
+        const double low=center-radius,high=center+radius;
+        if(!std::isfinite(low)||!std::isfinite(high))return false;
+        if(high<=0)continue;
+        if(low>=0) {envelope=next;continue;}
+        // The positive eigenspace is rank one. D-low*I is its projector
+        // multiplied by high-low; no angle or eigenvector branch is needed.
+        const double factor=.5*(high/radius);
+        envelope.xxRawPixelsSquared+=factor*(xx-low);
+        envelope.xyRawPixelsSquared+=factor*xy;
+        envelope.yyRawPixelsSquared+=factor*(yy-low);
+    }
+    // Keep failure transactional, including nonfinite arithmetic or a
+    // malformed covariance; the caller decides its evidence rejection.
+    SymmetricRawCovariance checked;
+    if(!TryTransportMotionCovariance(envelope,{{1,0,0,1},true},checked))return false;
+    output=checked;return true;
 }
 
 // Closure is measured in the reverse map's output coordinates. At an internal

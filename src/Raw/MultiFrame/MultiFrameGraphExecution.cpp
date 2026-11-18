@@ -1,6 +1,7 @@
 #include "Raw/MultiFrame/GraphExecution.h"
 
 #include "Raw/RawTechnicalEvidence.h"
+#include "Raw/MultiFrameDenoise/LocalMotion.h"
 
 #include <algorithm>
 #include <functional>
@@ -94,6 +95,10 @@ std::string StepIdentity(
             << node.nodeId << '\n'
             << GraphExecutionAdapterName(adapter) << '\n'
             << CanonicalSettings(effectiveSettings) << '\n';
+    if (node.kind == MultiFrameGraphNodeKind::BurstDenoise ||
+        node.kind == MultiFrameGraphNodeKind::HdrMerge) {
+        content << "native-motion=" << Mfd::kLocalMotionAlgorithmRevision << '\n';
+    }
     if (node.kind == MultiFrameGraphNodeKind::CaptureSet ||
         node.kind == MultiFrameGraphNodeKind::CaptureSubset) {
         const auto* sourceSet = FindSourceSet(snapshot, node.sourceSetId);

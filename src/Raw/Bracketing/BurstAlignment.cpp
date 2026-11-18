@@ -5,6 +5,7 @@
 #include "CaptureCorrespondence.h"
 #include "PhotometricReliability.h"
 #include "ParallelProcessing.h"
+#include "Raw/MultiFrameDenoise/PyramidVariance.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
 #include <cmath>
@@ -46,7 +47,12 @@ RefinementMemoryPlan PlanRefinementMemory(const ProcessingRequest& request,const
     // pending reliability/inspection payloads are both charged per capture.
     const long double guideWorkerBytes=cacheBytes+256ull*1024+
         static_cast<long double>(data.sources.size())*4096;
-    const long double workspace=std::max(static_cast<long double>(data.width)*data.height*72,guideWorkerBytes);
+    // The point-refinement pass uses a 16-plane-pixel patch on one worker.
+    // Its frozen support and the separate pyramid variance workspace are
+    // explicit additions to the existing full-quality alignment envelope.
+    constexpr std::uint64_t pointSupportBytes=4ull*16*16*sizeof(double);
+    const long double workspace=std::max(static_cast<long double>(data.width)*data.height*72+
+        Mfd::kPyramidVarianceScratchBytes+pointSupportBytes,guideWorkerBytes);
     // Guide points share immutable captures and write disjoint cells. Their
     // private caches fit inside the already-admitted later pyramid workspace;
     // this does not multiply the request's peak memory allowance.
@@ -136,10 +142,23 @@ bool AdmitLocalAlignmentMemory(const ProcessingRequest& request,const PreparedDa
     // ceil-rounded pyramid/staging and per-worker allowances for unusual shapes.
     // This is host admission only: driver/VRAM/unified-memory costs remain
     // subject to the GPU owner's allocation checks, not a combined peak claim.
-    const auto searchWorking=std::max(multiply(pixels,72),
-        add(pairPyramids,add(pixels,multiply(ResolveBracketingWorkerCount(
-            request.memoryBudgetBytes,request.workerCount),512ull*1024))));
-    const auto working=std::max({add(pairPyramids,tileBytes),searchWorking,
+    const auto workers=ResolveBracketingWorkerCount(request.memoryBudgetBytes,request.workerCount);
+    const auto patchSide=parameters.registration.finestPatchPlanePixels;
+    const auto fixedSupportBytes=multiply(multiply(patchSide,patchSide),4*sizeof(double));
+    const std::uint64_t motionSpacing=2ull*parameters.registration.finestStridePlanePixels;
+    if(!motionSpacing) {
+        error="Local-alignment memory planning has an invalid motion-grid stride.";return false;
+    }
+    // Each direction retains a common-domain uniqueness cap in both search
+    // state buffers. Charge both directions even when the GPU serializes them;
+    // ceil-rounded dimensions bound the smaller, margin-trimmed motion grid.
+    const auto motionNodes=multiply(data.width/motionSpacing+(data.width%motionSpacing!=0),
+        data.height/motionSpacing+(data.height%motionSpacing!=0));
+    const auto ambiguityStateBytes=multiply(motionNodes,4*sizeof(double));
+    const auto searchWorking=add(std::max(multiply(pixels,72),
+        add(pairPyramids,add(pixels,multiply(workers,512ull*1024)))),
+        add(multiply(workers,fixedSupportBytes),ambiguityStateBytes));
+    const auto working=std::max({add(pairPyramids,add(tileBytes,Mfd::kPyramidVarianceScratchBytes)),searchWorking,
         add(pairPyramids,reliabilityWorking),add(pairPyramids/2,multiply(tileBytes,9))});
     // The bounded original overviews, motion fields, metadata, vector/thread
     // overhead and small radiometric scratch share the existing 64 MiB margin.
