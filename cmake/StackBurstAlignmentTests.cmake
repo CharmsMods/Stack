@@ -1,5 +1,5 @@
-# Bounded CPU checks of the common production motion implementation. Function
-# sections discard unrelated prepared-tile/decoder entry points, not test stubs.
+# Bounded CPU checks of the common production motion implementation. The
+# Windows prepared-sample dependency closure below uses real production code.
 add_library(StackAlignmentCheckMath OBJECT EXCLUDE_FROM_ALL
     src/Raw/MultiFrameDenoise/Contracts.cpp
     src/Raw/MultiFrameDenoise/GlobalRegistration.cpp
@@ -23,12 +23,20 @@ add_executable(StackPyramidVarianceTests EXCLUDE_FROM_ALL
     tools/tests/pyramid_variance_tests.cpp
     src/Raw/MultiFrameDenoise/PyramidVariance.cpp)
 if(WIN32)
+    # SameCfaSampler also owns prepared-sample entry points. Provide their
+    # complete CPU dependencies rather than relying on /OPT:REF to discard
+    # unresolved references. Preparation uses the Windows scratch-budget API.
+    target_sources(StackAlignmentCheckMath PRIVATE
+        src/Raw/MultiFrameDenoise/Preparation.cpp
+        src/Raw/MultiFrameDenoise/NoiseModel.cpp
+        src/Raw/RawProcessingMath.cpp
+        src/Raw/RawTechnicalEvidence.cpp
+        src/Raw/RawImageData.cpp)
     # The existing image-derived anchor fixture uses the real Windows tile
     # cache and scratch-budget owner; other platforms still check transport.
     target_sources(StackAlignmentProposalTests PRIVATE
         src/Raw/Bracketing/PreparedTileSampler.cpp
-        src/Raw/MultiFrameDenoise/Preparation.cpp
-        src/Raw/MultiFrameDenoise/NoiseModel.cpp)
+        src/Raw/Bracketing/PartialCfaReconstruction.cpp)
 endif()
 
 foreach(target StackAlignmentCheckMath StackBurstAlignmentTests

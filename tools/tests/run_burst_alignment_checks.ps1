@@ -27,7 +27,15 @@ $common = @(
     'src/Raw/MultiFrameDenoise/LocalMotion.cpp',
     'src/Raw/MultiFrameDenoise/LocalMotionPatch.cpp',
     'src/Raw/MultiFrameDenoise/PyramidVariance.cpp',
-    'src/Raw/MultiFrameDenoise/SameCfaSampler.cpp'
+    'src/Raw/MultiFrameDenoise/SameCfaSampler.cpp',
+    # SameCfaSampler owns both the cubic math and prepared-sample entry
+    # points. Supply their real dependencies even when a check only calls
+    # the math; /OPT:REF must not substitute for a complete source closure.
+    'src/Raw/MultiFrameDenoise/Preparation.cpp',
+    'src/Raw/MultiFrameDenoise/NoiseModel.cpp',
+    'src/Raw/RawProcessingMath.cpp',
+    'src/Raw/RawTechnicalEvidence.cpp',
+    'src/Raw/RawImageData.cpp'
 ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
 Push-Location $CheckDirectory
 try {
@@ -42,8 +50,7 @@ try {
             'src/Raw/Bracketing/AlignmentProposalInput.cpp',
             'src/Raw/Bracketing/CaptureMotion.cpp', 'src/NodeMath/ContractTypes.cpp',
             'src/Raw/Bracketing/PreparedTileSampler.cpp',
-            'src/Raw/MultiFrameDenoise/Preparation.cpp',
-            'src/Raw/MultiFrameDenoise/NoiseModel.cpp') },
+            'src/Raw/Bracketing/PartialCfaReconstruction.cpp') },
         @{ Name = 'pyramid_variance'; Sources = @('tools/tests/pyramid_variance_tests.cpp') }
     )
     foreach ($case in $cases) {

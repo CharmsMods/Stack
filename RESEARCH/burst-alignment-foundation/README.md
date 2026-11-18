@@ -143,9 +143,10 @@ The original code also fails the added public-API in-fit cancellation check.
   callback ownership and stale-pair checks on Linux.
 - [x] Existing native-motion suite plus focused support, subpixel and proposal
   regressions; retain its image-correctness thresholds.
-- [ ] Focused Windows linked checks, existing anchor-ranking fixture and compile
-  checks of changed integrated owners.
-- [ ] Final source review and draft PR publication.
+- Windows gate: linked native-motion, proposal/anchor and pyramid checks plus
+  compile checks of changed integrated owners. Current results are recorded in
+  [the draft PR's checks](https://github.com/CharmsMods/Stack/pull/10/checks).
+- [x] Final source review and [draft PR publication](https://github.com/CharmsMods/Stack/pull/10).
 
 Full Windows product/worker linking, physical-GPU execution, actual model inference
 and representative camera bursts remain distinct verification gaps. No measured
