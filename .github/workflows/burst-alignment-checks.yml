@@ -1,0 +1,54 @@
+name: Burst alignment checks
+
+on:
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'cmake/StackBurst*.cmake'
+      - 'src/Raw/Bracketing/**'
+      - 'src/Raw/MultiFrame*/**'
+      - 'src/App/Validation/Suites/MfdPhase5Validation.cpp'
+      - 'src/App/Validation/Suites/BracketingAnchorEvidenceValidation.h'
+      - 'src/Storage/ScratchBudget.h'
+      - 'tools/tests/*alignment*'
+      - 'tools/tests/pyramid_variance_tests.cpp'
+      - '.github/workflows/burst-alignment-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: burst-alignment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-alignment-math:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Fetch pinned ImGui headers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ocornut/imgui
+          ref: 5a76f2adf1b0403b86a45010121fb32a6bff8680
+          path: _workspace/check-deps/imgui
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: '/*.h'
+      - name: Fetch pinned GLFW headers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: glfw/glfw
+          ref: 7b6aead9fb88b3623e3b3725ebb42670cbe4c579
+          path: _workspace/check-deps/glfw
+          persist-credentials: false
+          sparse-checkout: include
+      - name: Build and run native alignment checks
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b 1
+          pwsh -NoLogo -NoProfile -File "%GITHUB_WORKSPACE%\tools\tests\run_burst_alignment_checks.ps1" -RepositoryRoot "%GITHUB_WORKSPACE%" -CheckDirectory "%RUNNER_TEMP%\stack-alignment-checks" -ImGuiDirectory "%GITHUB_WORKSPACE%\_workspace\check-deps\imgui" -GlfwDirectory "%GITHUB_WORKSPACE%\_workspace\check-deps\glfw"
+          if errorlevel 1 exit /b 1

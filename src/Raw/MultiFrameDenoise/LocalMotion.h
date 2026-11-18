@@ -14,6 +14,11 @@ inline constexpr std::uint32_t kLocalMotionContractVersion = 1;
 inline constexpr const char* kLocalMotionContractId =
     "ra-cfa-local-motion-covariance-v1";
 
+// Processing identity, separate from the unchanged public data contract.
+// All hosts/cache owners using these pyramids or fits must include this value.
+inline constexpr const char* kLocalMotionAlgorithmRevision =
+    "raw-motion-v3-fixed-support-composed-variance";
+
 struct CfaPyramidBasePlane {
     CfaSite site = CfaSite::Red;
     PixelExtent extent;

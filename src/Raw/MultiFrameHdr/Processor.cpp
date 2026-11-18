@@ -2,6 +2,7 @@
 #include "Raw/MultiFrameHdr/GpuFusion.h"
 
 #include "NodeMath/ContractTypes.h"
+#include "Raw/MultiFrameDenoise/LocalMotion.h"
 #include "Raw/MultiFrameDenoise/NoiseModel.h"
 #include "Raw/MultiFrameDenoise/Preparation.h"
 #include "Raw/MultiFrameDenoise/SameCfaSampler.h"
@@ -1139,6 +1140,7 @@ std::string BuildCacheKey(
         { "contract", kProcessorContractId },
         { "algorithm", kAlgorithmId },
         { "version", kAlgorithmVersion },
+        { "nativeMotion", Mfd::kLocalMotionAlgorithmRevision },
         { "parameters", SerializeParameters(request.parameters) },
         { "reference", reference },
         { "anchor", anchor },

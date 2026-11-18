@@ -4,6 +4,60 @@
 
 namespace Raw::Mfd {
 
+inline bool TryMotionCovarianceEigenvalues(
+    SymmetricRawCovariance covariance,
+    double& low,
+    double& high) {
+    if (!std::isfinite(covariance.xxRawPixelsSquared) ||
+        !std::isfinite(covariance.xyRawPixelsSquared) ||
+        !std::isfinite(covariance.yyRawPixelsSquared)) {
+        return false;
+    }
+    const double trace = covariance.xxRawPixelsSquared +
+        covariance.yyRawPixelsSquared;
+    const double difference = covariance.xxRawPixelsSquared -
+        covariance.yyRawPixelsSquared;
+    const double radius = std::sqrt(std::max(
+        0.0,
+        0.25 * difference * difference +
+            covariance.xyRawPixelsSquared * covariance.xyRawPixelsSquared));
+    low = 0.5 * trace - radius;
+    high = 0.5 * trace + radius;
+    return std::isfinite(low) && std::isfinite(high);
+}
+
+inline bool TryClampMotionCovariance(
+    SymmetricRawCovariance input,
+    double minimumSigma,
+    double maximumSigma,
+    SymmetricRawCovariance& result) {
+    double low = 0.0;
+    double high = 0.0;
+    if (!TryMotionCovarianceEigenvalues(input, low, high)) return false;
+    const double minimum = minimumSigma * minimumSigma;
+    const double maximum = maximumSigma * maximumSigma;
+    if (high < -1.0e-10 || low < -std::max(1.0e-10, 1.0e-8 * std::abs(high))) {
+        return false;
+    }
+    const double angle = 0.5 * std::atan2(
+        2.0 * input.xyRawPixelsSquared,
+        input.xxRawPixelsSquared - input.yyRawPixelsSquared);
+    const double clampedHigh = std::max(minimum, std::min(maximum, high));
+    const double clampedLow = std::max(minimum, std::min(maximum, low));
+    const double cosine = std::cos(angle);
+    const double sine = std::sin(angle);
+    result.xxRawPixelsSquared =
+        clampedHigh * cosine * cosine + clampedLow * sine * sine;
+    result.xyRawPixelsSquared =
+        (clampedHigh - clampedLow) * cosine * sine;
+    result.yyRawPixelsSquared =
+        clampedHigh * sine * sine + clampedLow * cosine * cosine;
+    return std::isfinite(result.xxRawPixelsSquared) &&
+        std::isfinite(result.xyRawPixelsSquared) &&
+        std::isfinite(result.yyRawPixelsSquared);
+}
+
+
 // Covariances describe displacement in the output axes of their motion map.
 // Compose maps by transporting the first displacement through the second map:
 // C_composed = J_second C_first J_second^T + C_second. This does not account

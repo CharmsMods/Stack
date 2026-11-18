@@ -1621,6 +1621,7 @@ std::string BuildResultCacheKey(
             : EncodeOrderedIdentities(alternateIdentities) },
         { "alignment-mode", MfdAlignmentModeId(alignmentMode) },
         { "motion-verification", "source-covariance-to-closure-v2" },
+        { "native-motion", kLocalMotionAlgorithmRevision },
         { "fusion-engine", fusionBackend == MfdFusionBackend::SharedBurstV1
             ? kSharedBurstAlgorithmVersionId
             : kAlgorithmVersionId },

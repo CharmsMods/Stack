@@ -1,4 +1,6 @@
 #include "AlignmentProposalInput.h"
+#include "AlignmentProposalGeometry.h"
+#include "ProcessingInternal.h"
 #include "NodeMath/ContractTypes.h"
 #include <algorithm>
 #include <cmath>
@@ -87,19 +89,58 @@ bool ValidateAlignmentProposals(const ProcessingRequest& request,std::string& er
     }
     return true;
 }
-bool AttachAlignmentProposal(const ProcessingRequest& request,const std::string& sourceId,
+bool AttachAlignmentProposal(const ProcessingRequest& request,const PreparedSource& pairReference,
+    const PreparedSource& pairSource,
     Mfd::BidirectionalLocalMotionRequest& motion,std::string& error) {
+    // A reused native request must never retain hints from a previous pair,
+    // including when this pair has no proposal or cannot be safely rebased.
+    motion.forwardProposal={};motion.reverseProposal={};
     const auto found=std::find_if(request.alignmentProposals.begin(),request.alignmentProposals.end(),
-        [&](const AlignmentProposal& p){return p.sourceFrameId==sourceId;});
+        [&](const AlignmentProposal& p){return p.sourceFrameId==pairSource.id;});
     if(found==request.alignmentProposals.end())return true;
     const auto& p=*found;
+    if(p.referenceFrameId!=request.recipe.originFrameId||pairReference.id==pairSource.id||
+       pairReference.id.empty()||pairSource.id.empty())return Fail(error,"native pair identities differ.");
     if(!motion.reference||!motion.alternate||p.rawWidth!=motion.reference->rawExtent.width||
        p.rawHeight!=motion.reference->rawExtent.height||p.rawWidth!=motion.alternate->rawExtent.width||
-       p.rawHeight!=motion.alternate->rawExtent.height)return Fail(error,"decoded RAW geometry differs.");
+       p.rawHeight!=motion.alternate->rawExtent.height||
+       p.rawWidth!=pairReference.frame.activeExtent.width||p.rawHeight!=pairReference.frame.activeExtent.height||
+       p.rawWidth!=pairSource.frame.activeExtent.width||p.rawHeight!=pairSource.frame.activeExtent.height)
+        return Fail(error,"decoded RAW geometry differs.");
     std::shared_ptr<const Field> forward,reverse;
     if(!Load(p,false,request,forward,error)||!Load(p,true,request,reverse,error))return false;
-    motion.forwardProposal=[forward](Mfd::RawCoordinate point,Mfd::RawCoordinate& source){return forward->Map(point,source);};
-    motion.reverseProposal=[reverse](Mfd::RawCoordinate point,Mfd::RawCoordinate& source){return reverse->Map(point,source);};
+    if(pairReference.id==p.referenceFrameId) {
+        motion.forwardProposal=[forward](Mfd::RawCoordinate point,Mfd::RawCoordinate& source){return forward->Map(point,source);};
+        motion.reverseProposal=[reverse](Mfd::RawCoordinate point,Mfd::RawCoordinate& source){return reverse->Map(point,source);};
+        return true;
+    }
+    // A shared pointer lease preserves the already accepted anchor field for
+    // the synchronous pair's parallel search callbacks. Copy only the fields
+    // consumed by EvaluateCaptureMotion, never pyramids, RAW buffers or stores.
+    if(!pairReference.localMotionHasRegisteredGeometry||!pairReference.localMotion)return true;
+    Mfd::AffineModel inverse;
+    if(!Mfd::InvertAffineModel(pairReference.alignment,inverse))return true;
+    auto snapshot=std::make_shared<PreparedSource>();
+    snapshot->frame.activeExtent=pairReference.frame.activeExtent;
+    snapshot->localMotion=pairReference.localMotion;snapshot->refinedMotion=pairReference.refinedMotion;
+    const auto options=motion.options;
+    const auto map=[snapshot,options](Mfd::RawCoordinate point,Mfd::RawCoordinate& mapped,Mfd::RawMappingJacobian* jacobian) {
+        Mfd::LocalMotionFieldSample sample;
+        if(!EvaluateCaptureMotion(*snapshot,point,options,sample,nullptr,jacobian)||
+           !std::isfinite(sample.alignmentConfidence)||sample.alignmentConfidence<=0)return false;
+        mapped=sample.sourceRaw;return ProposalGeometry::InDomain(mapped,snapshot->frame.activeExtent);
+    };
+    const Mfd::PixelExtent originExtent{p.rawWidth,p.rawHeight};
+    const auto anchorExtent=pairReference.frame.activeExtent;
+    motion.forwardProposal=[forward,map,inverse,originExtent,anchorExtent](Mfd::RawCoordinate point,Mfd::RawCoordinate& source) {
+        Mfd::RawCoordinate origin;
+        return ProposalGeometry::InvertReference(map,originExtent,anchorExtent,inverse,point,origin)&&
+            forward->Map(origin,source);
+    };
+    motion.reverseProposal=[reverse,map](Mfd::RawCoordinate point,Mfd::RawCoordinate& anchor) {
+        Mfd::RawCoordinate origin;
+        return reverse->Map(point,origin)&&map(origin,anchor,nullptr);
+    };
     return true;
 }
 } // namespace Raw::Bracketing

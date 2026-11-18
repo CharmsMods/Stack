@@ -159,6 +159,18 @@ spatial coverage, tied scores and reused motion retain the median anchor. The
 ranking is a heuristic with added prepared-tile reads, measured separately as
 `alignment_anchor_ranking`; it is not a new confidence or admission test. Native
 sampling phase, noise-model error and dominant moving foreground remain limits.
+Optional learned/external motion proposals preserve these native cohorts and
+measured anchor choices. Rebase a proposal through the accepted origin-to-anchor
+map for the actual pair; a bounded inverse failure omits that hint only.
+
+Native subpixel fitting uses a common measured support across its bounded seed
+neighborhood and fixed seed noise denominators, with residual-dependent Huber
+weights and bounded sufficient-decrease backtracking. Recheck the existing
+runner-up on that same objective before retaining its ambiguity evidence. This
+does not certify every previously searched basin. Re-evaluate physical noise,
+observability and covariance at the accepted coordinate; the fitting objective
+is not a calibrated measurement likelihood. Keep all coverage and rejection
+requirements, and distinguish cancellation/resource failure from weak evidence.
 
 Photometrically compatible flat regions are not independent registration evidence.
 Exposure fitting tracks the provenance of the current motion field before synthetic
@@ -169,8 +181,10 @@ this provenance. Flat pixels remain useful with independently established geomet
 explicit fixed coordinates and manual EV anchors retain their separate meanings.
 Exposure-refresh comparisons use relative gain variance, matching the fusion
 domain rather than an absolute gain-dependent tolerance. Current uncertainty
-propagation retains marginal variances; correlations from shared exposure-graph
-paths and repeated overlapping pyramid filtering are not fully represented.
+propagation retains marginal variances. Pyramid marginals compose the complete
+filter on native samples before squaring coefficients, including reflected
+duplicate taps. Correlations between neighboring coarse samples, later
+interpolation footprints and shared exposure-graph paths are not fully represented.
 Do not present these estimates as a complete covariance-calibrated confidence.
 
 Optional background: [Ward's exposure-resistant registration](https://www.anyhere.com/gward/papers/jgtpap2.pdf)
