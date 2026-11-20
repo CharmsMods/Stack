@@ -73,7 +73,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
                 if (BareToolIslandButton(label,m_ViewSectionTab==tab) && !PickingMaskDestination())
                     SetViewSectionTab(tab==1 && m_ViewSectionTab==1 ? 0 : tab);
             };
-            tabButton(bracketSource ? "Source" : "Interpretation",0);
+            tabButton(bracketSource ? "Bracket" : "Interpretation",0);
             ImGui::SameLine(0,8.f*unit);tabButton("Light",1);
             if (!bracketSource) { ImGui::SameLine(0,8.f*unit);tabButton("Settings",2); }
             ImGui::SameLine(0,8.f*unit);tabButton("Assets",3);
@@ -85,7 +85,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             ImGui::Spacing();
             const bool controls=m_ViewSectionTab==1;
             const bool settings = !bracketSource && m_ViewSectionTab==2;
-            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Interpretation");
+            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Bracket" : settings ? "Settings" : "Interpretation");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
             const bool bodyVisible=controls ? Stack::Editor::BeginControlsPanelBody(visibleWidth < size.x - 0.5f) :
                 ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground);
