@@ -1,4 +1,5 @@
 #pragma once
+namespace Stack::MaskAuthoring { struct Recipe; }
 #include "Hdr/ImageFile.h"
 #include "Raw/RawAssetCapture.h"
 #include "Editor/GraphRenderPolicy.h"
@@ -211,6 +212,9 @@ public:
     };
 
     struct PreviewRequest {
+        bool maskAuthoring=false;
+        int maskNativeWidth=0,maskNativeHeight=0;
+        std::shared_ptr<const Stack::MaskAuthoring::Recipe> maskRecipe;
         std::optional<Stack::RawAssetCapture::Selection> assetCapture;
         bool assetCaptureInput = false;
         std::shared_ptr<std::atomic<bool>> assetCaptureCancellation;
@@ -232,6 +236,7 @@ public:
     };
 
     struct PreviewResult {
+        bool maskAuthoring=false;
         std::optional<Stack::Assets::Record> capturedAsset;
         bool assetCapture = false;
         bool assetCaptureSuperseded = false;

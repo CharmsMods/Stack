@@ -29,6 +29,8 @@ public:
     std::vector<std::string> pendingMembers;
     float scaleTarget = -1.f;
     int columns = 0;
+    GalleryScrollPosition gridPosition;
+    GalleryScrollPosition filmstripPosition;
     GalleryScrollMotion filmstripScroll;
     FilmstripSlots filmstripSlots;
     void Open(const std::vector<std::string>& first, const std::vector<std::string>& second, int frame,

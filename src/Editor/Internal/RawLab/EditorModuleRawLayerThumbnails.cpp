@@ -1,5 +1,6 @@
 #include "Editor/EditorModule.h"
 #include "Renderer/GLHelpers.h"
+#include "Assets/MaskDisplayPreview.h"
 #include "Renderer/GLLoader.h"
 
 #include <algorithm>
@@ -12,6 +13,7 @@ void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorke
     int count = 0;
     for (const auto& entry : m_RawLayerPanel.thumbnails) {
         const auto& thumbnail = entry.second;
+        if (thumbnail.layerId.empty())continue; // Baked authoring thumbnails are ready locally.
         if (ImGui::GetFrameCount() - thumbnail.visibleFrame > 1 || thumbnail.revision == revision) continue;
         EditorRenderWorker::PreviewRequest request;
         request.rawLayerId = thumbnail.layerId;
@@ -27,6 +29,26 @@ void EditorModule::AppendRawLayerThumbnailRequests(std::vector<EditorRenderWorke
 
 unsigned int EditorModule::GetRawMaskTexturePreview(const EditorNodeGraph::Node& node, int& width, int& height) {
     width = height = 0;
+    if(node.kind==EditorNodeGraph::NodeKind::CustomMask && node.customMask.authoring) {
+        auto& thumbnail=m_RawLayerPanel.thumbnails[node.instanceUuid];
+        thumbnail.visibleFrame=ImGui::GetFrameCount();
+        const auto& p=node.customMask;const auto fingerprint=p.rasterLayer.Fingerprint();
+        if(!thumbnail.texture || thumbnail.revision!=fingerprint || thumbnail.width!=p.width || thumbnail.height!=p.height) {
+            auto preview=Stack::Assets::MaskDisplayPreview(p.rasterLayer,p.width,p.height,192);
+            if(!preview)return 0;
+            std::vector<unsigned char> pixels(preview->values.size()*4,255);
+            for(int y=0;y<preview->height;++y)for(int x=0;x<preview->width;++x){
+                const auto at=(size_t(preview->height-1-y)*preview->width+x)*4;
+                const auto gray=static_cast<unsigned char>(std::round(preview->values[size_t(y)*preview->width+x]*255));
+                pixels[at]=pixels[at+1]=pixels[at+2]=gray;
+            }
+            if(thumbnail.texture)glDeleteTextures(1,&thumbnail.texture);
+            thumbnail.texture=GLHelpers::CreateTextureFromPixels(pixels.data(),preview->width,preview->height,4);
+            thumbnail.revision=fingerprint;thumbnail.width=p.width;thumbnail.height=p.height;
+            m_RawLayerPanel.Prune(thumbnail.visibleFrame);
+        }
+        width=p.width;height=p.height;return thumbnail.texture;
+    }
     if (!IsEditingRawLayerMaskGraph()) return 0;
     auto& workspace = *m_RawLayerMaskWorkspace;
     const auto revision = m_Project->rawLayers.Revision();

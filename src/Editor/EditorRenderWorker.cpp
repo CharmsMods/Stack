@@ -1,3 +1,4 @@
+#include "Raw/MaskAuthoring.h"
 #include "Hdr/PhotoPreview.h"
 #include "Hdr/GraphView.h"
 #include "Hdr/Presentation.h"
@@ -1880,6 +1881,7 @@ EditorRenderWorker::Result EditorRenderWorker::MakeFailedResult(
         preview.rawMaskId = request.rawMaskId;
         preview.previewNodeId = request.previewNodeId;
         preview.dirtyGeneration = request.dirtyGeneration;
+        preview.maskAuthoring = request.maskAuthoring;
         preview.assetCapture = request.assetCapture.has_value();
         preview.assetCaptureInput = request.assetCaptureInput;
         preview.error = result.error;
@@ -2786,6 +2788,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 previewResult.rawMaskId = request.rawMaskId;
                 previewResult.previewNodeId = request.previewNodeId;
                 previewResult.dirtyGeneration = request.dirtyGeneration;
+                previewResult.maskAuthoring = request.maskAuthoring;
                 previewResult.assetCapture = request.assetCapture.has_value();
                 previewResult.assetCaptureInput = request.assetCaptureInput;
                 if (request.assetCapture && request.assetCaptureCancellation && request.assetCaptureCancellation->load()) {
@@ -2830,7 +2833,25 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     pipeline.SetRawDevelopmentAnalysisEnabled(false);
                 }
                 loadSourceBuffer(sourceBuffer, sourceWidth, sourceHeight, sourceChannels);
-                if (request.assetCapture) {
+                if (request.maskAuthoring) {
+                    int source=request.assetOperationId;
+                    if(source>0 && request.assetLayerId!="project") {
+                        const auto layer=snapshot.graph.rawLayerMaskNodeIds.find(request.assetLayerId);
+                        if(layer==snapshot.graph.rawLayerMaskNodeIds.end() || !layer->second.count(source))source=-1;
+                        else source=layer->second.at(source);
+                    }
+                    if(source<0) {
+                        previewResult.error="The mask sampling point is unavailable.";
+                        result.previews.push_back(std::move(previewResult));++previewIndex;continue;
+                    }
+                    previewGraph.outputNodeId=source?source:snapshot.graph.outputNodeId;
+                    previewGraph.outputSocketId=source?"imageOut":snapshot.graph.outputSocketId;
+                    if(!source && snapshot.graph.rawLayerViewNodeId>0) {
+                        for(const auto& link:snapshot.graph.links)if(link.toNodeId==snapshot.graph.rawLayerViewNodeId && link.toSocketId=="imageIn") {
+                            previewGraph.outputNodeId=link.fromNodeId;previewGraph.outputSocketId=link.fromSocketId;break;
+                        }
+                    }
+                } else if (request.assetCapture) {
                     const auto layerIds = snapshot.graph.rawLayerMaskNodeIds.find(request.assetLayerId);
                     int operation = 0;
                     if (layerIds != snapshot.graph.rawLayerMaskNodeIds.end()) {
@@ -2877,13 +2898,24 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                             !pipeline.GetLastGraphExecutionStats().lastSpecializedFailure.empty())
                             throw std::runtime_error(RenderFailureReason(pipeline,"Could not render the capture input."));
                         auto rgba = pipeline.GetOutputFloatPixels(previewResult.width,previewResult.height,request.assetCaptureInput ? 1024 : 0);
-                        if (!request.assetCaptureInput && (previewResult.width != request.width || previewResult.height != request.height))
+                        const int expectedWidth=request.maskAuthoring?request.maskNativeWidth:request.width;
+                        const int expectedHeight=request.maskAuthoring?request.maskNativeHeight:request.height;
+                        if (!request.assetCaptureInput && expectedWidth>0 && expectedHeight>0 &&
+                            (previewResult.width!=expectedWidth || previewResult.height!=expectedHeight))
                             throw std::runtime_error("Native capture dimensions do not match the selected input. Capture was not saved.");
                         if (captureCanceled()) throw std::runtime_error("Capture canceled.");
                         if (request.assetCaptureInput)
                             previewResult.assetFeedback = Stack::RawAssetCapture::PreparePreview(rgba,
                                 previewResult.width,previewResult.height,request.assetWorkingSpace,captureCanceled);
-                        else previewResult.capturedAsset = Stack::RawAssetCapture::Capture(rgba,
+                        else if(request.maskRecipe) {
+                            auto field=Stack::RawAssetCapture::PreparePreview(rgba,previewResult.width,previewResult.height,request.assetWorkingSpace,captureCanceled);
+                            rgba.clear();rgba.shrink_to_fit();
+                            auto recipe=*request.maskRecipe;
+                            Stack::MaskAuthoring::CaptureEvidence(*field,recipe,captureCanceled);
+                            previewResult.capturedAsset=Stack::MaskAuthoring::Evaluate(*field,recipe,captureCanceled);
+                            previewResult.capturedAsset->provenance["authoring"]=Stack::MaskAuthoring::Serialize(recipe);
+                            if(!previewResult.capturedAsset->data->Valid(true))throw std::runtime_error("Invalid mask coverage.");
+                        } else previewResult.capturedAsset = Stack::RawAssetCapture::Capture(rgba,
                             previewResult.width,previewResult.height,request.assetWorkingSpace,*request.assetCapture,captureCanceled);
                         if(previewResult.capturedAsset && previewResult.capturedAsset->kind==Stack::Assets::Kind::Mask)
                             (void)previewResult.capturedAsset->data->Fingerprint();

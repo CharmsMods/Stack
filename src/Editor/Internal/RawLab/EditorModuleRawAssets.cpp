@@ -273,8 +273,13 @@ void EditorModule::RenderRawAssetsPanel() {
         }
     }
     if (!capture.status.empty()) ImGui::TextWrapped("%s",capture.status.c_str());
+    if(ImGui::Button("Capture values")) {
+        const auto available=QueryRawAssetCaptureAvailability();
+        if(available.target)BeginRawAssetCapture(*available.target,RawAssetCapture::Shape::Stroke,RawAssetCapture::Channels::Both,capture.status);
+        else capture.status=available.disabledReason;
+    }
     if (m_Project->rawLayers.State().assets.empty()) {
-        ImGui::TextWrapped("Hold C and draw on the image, or use the mask icon in the top bar. Choose what to save or apply when you release."); return;
+        ImGui::TextWrapped("Select an adjustment and capture image values to save an asset."); return;
     }
     ImGui::TextDisabled("Saved captures keep their original values.");
     for (const auto& asset:m_Project->rawLayers.State().assets) {

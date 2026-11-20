@@ -2,7 +2,7 @@
 #include "Graph/LayerOperationParameters.h"
 #include "Graph/GraphDocumentRules.h"
 #include "Project/RawNodeEditing.h"
-#include "Project/RawCapturedMask.h"
+#include "Project/AuthoredMask.h"
 #include "Editor/LayerRegistry.h"
 
 #include <algorithm>
@@ -23,7 +23,7 @@ RawAdjustmentLayer MakeRawLayer(std::string id, std::string name) {
     std::string error;
     const std::vector<RawRecipe::GraphOperationKind> initial = layer.id == kRawBackgroundId
         ? std::vector<RawRecipe::GraphOperationKind>{RawRecipe::GraphOperationKind::LocalEv,
-            RawRecipe::GraphOperationKind::ToneCurve, RawRecipe::GraphOperationKind::Calibration,
+            RawRecipe::GraphOperationKind::ToneCurve,
             RawRecipe::GraphOperationKind::ColorWarp}
         : std::vector<RawRecipe::GraphOperationKind>{};
     int position = 1;
@@ -109,6 +109,46 @@ GraphModel::Endpoint RawLayerEndpoint(const RawAdjustmentLayer& layer,
     return {layer.id, node.instanceUuid, port};
 }
 
+std::string InsertMaskAdjustment(EditorNodeGraph::Graph& graph,const std::string& afterOperationUuid,std::string& error,bool allowBranches) {
+    const auto selected = std::find_if(graph.GetNodes().begin(), graph.GetNodes().end(),
+        [&](const auto& node) {
+            return node.instanceUuid == afterOperationUuid;
+        });
+    if (selected == graph.GetNodes().end() || !RawNodeAcceptsMask(graph,*selected)) {
+        error = "Select an adjustment before drawing a mask."; return {};
+    }
+    std::vector<EditorNodeGraph::Link> outgoing;
+    for (const auto& link : graph.GetLinks())
+        if (link.fromNodeId == selected->id && link.fromSocketId == "imageOut") outgoing.push_back(link);
+    if (!allowBranches && outgoing.size() != 1) {
+        error = "Connect this adjustment to one next step in Graph before drawing a new mask."; return {};
+    }
+    const int sourceId = selected->id;
+    const auto position = selected->position;
+    const auto sourceType = *selected;
+    for (auto& node : graph.EditNodes())
+        if (node.position.x > position.x) node.position.x += 260.f;
+    // Copy only the operation type. Parameters, drivers and masks belong to the
+    // original instance; the new operation starts with its definition's defaults.
+    auto* added = graph.AddDefaultOperationNode(sourceType,{position.x+260,position.y});
+    if (!added) { error="This operation has no available default definition.";return {}; }
+    added->title=sourceType.title;
+    if (added->kind==EditorNodeGraph::NodeKind::Layer) {
+        const auto defaults=LayerRegistry::CreateLayer(added->layerType);
+        if(!defaults) {error="This effect is unavailable.";return {};}
+        GraphModel::ReindexLayerParameterRecords(graph);
+        added->layerParameters=GraphModel::CaptureLayerParameters(*defaults);
+    }
+    const int addedId = added->id;
+    const auto uuid = added->instanceUuid;
+    // This command inserts the processed result. Generic socket matching can
+    // choose the input-image tap instead and silently bypass the new edit.
+    if (!graph.TryConnectSockets(sourceId,"imageOut",addedId,"imageIn",&error)) return {};
+    for(const auto& next:outgoing)
+        if (!graph.TryConnectSockets(addedId,"imageOut",next.toNodeId,next.toSocketId,&error)) return {};
+    return uuid;
+}
+
 namespace {
 std::string AddDefaultAdjustment(RawLayerStackState& state, const std::string& layerId,
     const std::string& afterOperationUuid, std::string& error) {
@@ -116,45 +156,8 @@ std::string AddDefaultAdjustment(RawLayerStackState& state, const std::string& l
     auto candidate = state;
     auto* layer = FindRawAdjustmentLayer(candidate, layerId);
     if (!layer) { error = "The selected layer no longer exists."; return {}; }
-    const auto selected = std::find_if(layer->graph.GetNodes().begin(), layer->graph.GetNodes().end(),
-        [&](const auto& node) {
-            return node.instanceUuid == afterOperationUuid;
-        });
-    if (selected == layer->graph.GetNodes().end() || !RawNodeAcceptsMask(layer->graph,*selected)) {
-        error = "Select an adjustment before drawing a mask."; return {};
-    }
-    std::vector<EditorNodeGraph::Link> outgoing;
-    for (const auto& link : layer->graph.GetLinks())
-        if (link.fromNodeId == selected->id && link.fromSocketId == "imageOut") outgoing.push_back(link);
-    if (outgoing.size() != 1) {
-        error = "Connect this adjustment to one next step in Graph before drawing a new mask."; return {};
-    }
-    const auto position = selected->position;
-    const auto sourceType = *selected;
-    for (auto& node : layer->graph.EditNodes())
-        if (node.position.x > position.x) node.position.x += 260.f;
-    // Copy only the operation type. Parameters, drivers and masks belong to the
-    // original instance; the new operation starts with its definition's defaults.
-    auto* added = layer->graph.AddDefaultOperationNode(sourceType,{position.x+260,position.y});
-    if (!added) { error="This operation has no available default definition.";return {}; }
-    added->title=sourceType.title;
-    if (added->kind==EditorNodeGraph::NodeKind::Layer) {
-        const auto defaults=LayerRegistry::CreateLayer(added->layerType);
-        if(!defaults) {error="This effect is unavailable.";return {};}
-        GraphModel::ReindexLayerParameterRecords(layer->graph);
-        added->layerParameters=GraphModel::CaptureLayerParameters(*defaults);
-    }
-    const int addedId = added->id;
-    const auto uuid = added->instanceUuid;
-    const auto next = outgoing.front();
-    // This command inserts the processed result. Generic socket matching can
-    // choose the input-image tap instead and silently bypass the new edit.
-    auto proposal = GraphModel::ProposeEdit(layer->graph,layer->graph.GetStructureRevision(),[&](auto& graph) {
-        if (!graph.TryConnectSockets(next.fromNodeId,"imageOut",addedId,"imageIn",&error) ||
-            !graph.TryConnectSockets(addedId,"imageOut",next.toNodeId,next.toSocketId,&error))
-            throw std::runtime_error(error);
-    });
-    if (!GraphModel::ApplyEdit(layer->graph,layer->graph.GetStructureRevision(),std::move(proposal),error)) return {};
+    const auto uuid=InsertMaskAdjustment(layer->graph,afterOperationUuid,error);
+    if(uuid.empty())return {};
     if (!ValidateRawLayerStack(candidate,error)) return {};
     state = std::move(candidate);
     return uuid;

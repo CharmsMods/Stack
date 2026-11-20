@@ -1,3 +1,4 @@
+#include "App/WorkspaceInputScope.h"
 #include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/EditorModule.h"
 #include "Editor/RawLayerTools.h"
@@ -340,6 +341,9 @@ void EditorModule::RenderNodeEditorPanel() {
         auto enabled=enabledState(node);
         bool toggle=false;
         const auto headingMinimum=ImGui::GetCursorScreenPos();
+        const bool choosing=PickingMaskDestination();
+        std::unique_ptr<Stack::Workspace::InputScope> blocked;
+        if(choosing)blocked=std::make_unique<Stack::Workspace::InputScope>(true,false);
         const int activated=DrawControlsPanelHeader(group,width,enabled ? &*enabled : nullptr,toggle);
         const auto headingMaximum=ImGui::GetItemRectMax();
         if(ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) &&
@@ -443,6 +447,12 @@ void EditorModule::RenderNodeEditorPanel() {
                 primary->SkipItems=skipItems;
                 ImGui::EndChild();ImGui::PopStyleVar(2);
             } else ImGui::Dummy(ImVec2(width,estimated));
+        }
+        if(choosing) {
+            blocked.reset();
+            ImRect section(headingMinimum,{headingMinimum.x+width,ImGui::GetCursorScreenPos().y});
+            section.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
+            DrawMaskPickerTarget(section,group.label.c_str(),target);
         }
         ImGui::Dummy(ImVec2(0,4.f));
         ImGui::PopID();

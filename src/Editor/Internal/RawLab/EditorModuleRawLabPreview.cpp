@@ -1,3 +1,4 @@
+#include "Editor/MaskToolBindings.h"
 #include "Raw/ColorWarpMath.h"
 #include "Hdr/Presentation.h"
 #include "Editor/UI/ViewportNavigation.h"
@@ -532,11 +533,11 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
 
             if(currentRawPreview && !Stack::Workspace::IsPreview()) {
                 const bool editOwnsPointer=ui.gradientDragHandle>=0 ||
-                    m_RawAssetCapture.armed || m_RawAssetCapture.drawing ||
+                    MaskAuthoringActive() || m_RawAssetCapture.armed || m_RawAssetCapture.drawing ||
                     ui.colorWarpPendingCircleDrawing || (m_EditingRawLayerMask && m_RawLayerMaskDrag>=0);
                 const bool canStart=previewHovered && !RawFloatingSurfaceOwnsPointer() &&
                     !editOwnsPointer && !previewIo.WantTextInput && !ImGui::IsAnyItemActive() &&
-                    !ImGui::IsKeyDown(ImGuiKey_Space) && !ImGui::IsKeyDown(ImGuiKey_C) &&
+                    !ImGui::IsKeyDown(ImGuiKey_Space) && !(ImGui::IsMouseClicked(0) && Stack::Editor::MaskToolChordDown()) &&
                     !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
                 imagePointerScope=std::make_unique<ImGuiExtras::FloatingSurfaceInputScope>(m_RawImageInput,canStart,0,false);
             }
@@ -552,7 +553,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             navigationInput.wheel = (forwardedWheel ? m_RawFloatingSurface.imageWheel : previewIo.MouseWheel) * .5f;
             navigationInput.seconds = previewIo.DeltaTime;
             navigationInput.hovered = previewHovered;
-            navigationInput.wheelAllowed = !ui.colorWarpPendingCircleDrawing && !previewIo.KeyAlt && (!colorLayout ||
+            navigationInput.wheelAllowed = !(MaskAuthoringActive() && (previewIo.KeyCtrl || previewIo.KeyShift)) && !ui.colorWarpPendingCircleDrawing && !previewIo.KeyAlt && (!colorLayout ||
                 (!m_RawWorkspaceLabUi.colorWarpPendingCircleActive &&
                  !(m_RawWorkspaceLabUi.colorWarpInspectionActive &&
                    (previewIo.KeyCtrl || previewIo.KeyShift))));
@@ -671,6 +672,7 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         // Defer scopes, capture handles and diagnostic overlays until settled.
         if (m_NodeOpenTransition.Active() || (m_GalleryNavigationMotion &&
             m_GalleryNavigationMotion->ImageMoving(m_GalleryNavigationWorkspace))) return;
+        if(currentRawPreview && !m_RawAssetCapture.armed && !m_RawAssetCapture.drawing){RenderMaskCanvas(imageRect,previewRecipe.cropRotation);if(MaskAuthoringActive())return;}
         if(m_WhiteBalancePickerArmed) {
             RenderWhiteBalancePicker(imageRect.Min,imageRect.Max,previewRecipe.cropRotation);
             return;
@@ -692,14 +694,6 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
                     *preview.edit.nodeTarget).RetryFailed();
             }
             colorUi.colorWarpInspectedRegionId.clear();
-        }
-        if(currentRawPreview && !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt &&
-           ImGui::IsKeyDown(ImGuiKey_C) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-           imageRect.Contains(ImGui::GetIO().MousePos) && ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() &&
-           !IsRawImageNavigationActive() && !m_RawAssetCapture.armed && !m_RawAssetCapture.pending) {
-            const auto available=QueryRawAssetCaptureAvailability();
-            if(available.target) BeginRawAssetCapture(*available.target,Stack::RawAssetCapture::Shape::Stroke,
-                Stack::RawAssetCapture::Channels::Both,m_RawAssetCapture.status);
         }
         const bool capturingAsset = m_RawAssetCapture.armed || m_RawAssetCapture.drawing;
         if(currentRawPreview && !capturingAsset) UpdateRawCurveProbe(imageRect.Min,imageRect.Max,previewRecipe.cropRotation);

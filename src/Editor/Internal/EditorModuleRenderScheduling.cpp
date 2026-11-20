@@ -81,7 +81,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     // A dead worker cannot satisfy automatic preview/refinement retries.
     // Explicit dirty requests and captures still pass through once so their
     // ordinary failed result releases the caller's expected-completion state.
-    const bool explicitCaptureRequested = m_RawAssetCapture.pending ||
+    const bool explicitCaptureRequested = m_MaskSession.pendingSource || m_RawAssetCapture.pending ||
         (m_RawAssetCapture.armed && m_RawAssetCapture.feedbackNeeded);
     if (rawWorkspaceActive && !m_RenderDirty && !explicitCaptureRequested &&
         Stack::EditorRendering::RawRenderService::Get().HasWorkerFailure(m_RawRenderClientId)) return;
@@ -107,6 +107,59 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         rawWorkspaceActive
             ? m_RawRenderClientId != 0
             : m_RenderWorkerAvailable;
+    const auto submitPreviewOnlyRequests = [&](std::vector<EditorRenderWorker::PreviewRequest>& requests) {
+        if (requests.empty() || !allowBackgroundRenderWorker) {
+            m_RenderPending = false;
+            return false;
+        }
+        m_RenderGeneration =
+            Stack::EditorRenderScheduling::NextGlobalGeneration();
+        const auto snapshotBuildBegin = std::chrono::steady_clock::now();
+        EditorRenderWorker::Snapshot snapshot;
+        if (!TryBuildRenderSnapshot(
+                m_RenderGeneration,
+                snapshot)) {
+            m_RenderPending = false;
+            return false;
+        }
+        m_GraphPerformanceStats.lastSnapshotBuildMs =
+            MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
+        if (Stack::UiPerformance::Probe::Active() && m_GraphPerformanceStats.lastSnapshotBuildMs > 5.0)
+            std::clog << "Viewport snapshot build ms=" << m_GraphPerformanceStats.lastSnapshotBuildMs << '\n';
+        snapshot.outputConnected = false;
+        if(std::none_of(requests.begin(),requests.end(),[](const auto& request){return request.maskAuthoring;}))
+            snapshot.sourcePixels = {};
+        if (!snapshot.rawWorkspace.sourceKey.empty()) {
+            snapshot.rawRenderPurpose = RawRenderPurpose::Thumbnail;
+            snapshot.rawWorkspace.analysisRequested = false;
+        }
+        snapshot.developCandidateRenders.clear();
+        snapshot.previews = std::move(requests);
+        m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(snapshot.previews.size());
+        m_GraphPerformanceStats.lastSubmittedCompositeCount = 0;
+        m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = false;
+        m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
+        m_RenderPending = true;
+        if (!SubmitRenderSnapshot(std::move(snapshot))) {
+            m_RenderPending = false;
+            return false;
+        }
+        return true;
+    };
+    // Mask authoring is a user action. Submit it as soon as its image is
+    // available, before background scope analysis and viewport refinements.
+    if(m_MaskSession.pendingSource && m_MaskSession.sourceReady){
+        if(!MaskOwnerCurrent()){CancelMaskAuthoring();return;}
+        if(m_RenderPending || IsAnyRenderBackendBusy())return;
+        std::vector<EditorRenderWorker::PreviewRequest> requests;
+        AppendMaskAuthoringRequest(requests);
+        if(!submitPreviewOnlyRequests(requests)){
+            m_MaskSession.pendingSource=false;
+            m_MaskSession.phase=Stack::Editor::MaskAuthoringSession::Phase::Drawing;
+            m_MaskSession.status="The mask source could not be submitted for rendering.";
+        }
+        return;
+    }
     const double now = ImGui::GetTime();
     if (m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
         m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive()) {
@@ -117,14 +170,15 @@ void EditorModule::SubmitRenderIfReadyImpl() {
         UpdateViewportPreviewRefinement(now);
     }
     else if (!m_RawWorkspaceExportRenderRequested && m_RawWorkspaceRootTabActive) UpdateRawWorkspaceSettledPreviewRender(now);
+    const bool allowMaintenance = !m_MaskSession.pendingSource && !m_RawAssetCapture.pending && !m_RawAssetCapture.armed;
     if (rawWorkspaceActive &&
         allowBackgroundRenderWorker &&
-        !m_RawAssetCapture.pending && !m_RawAssetCapture.armed && TrySubmitRawWorkspaceCachePrewarm(now)) {
+        allowMaintenance && TrySubmitRawWorkspaceCachePrewarm(now)) {
         return;
     }
-    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && !m_RawAssetCapture.pending && !m_RawAssetCapture.armed &&
+    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && allowMaintenance &&
         TrySubmitRawViewportMaintenance(now)) return;
-    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && !m_RawAssetCapture.pending && !m_RawAssetCapture.armed &&
+    if (rawWorkspaceActive && !UsesGraphViewportPreview() && allowBackgroundRenderWorker && allowMaintenance &&
         TrySubmitRawViewportCalibration(now)) return;
     if (!allowBackgroundRenderWorker && !m_RenderDirty) {
         return;
@@ -187,42 +241,7 @@ void EditorModule::SubmitRenderIfReadyImpl() {
     const bool rawStage = UsesRawWorkspaceStageRender();
     const int activeOutputNodeId = rawStage
         ? ResolveRawWorkspaceStageOutputNodeId() : m_Project->graph.ResolvePreviewOutputNodeId();
-    const auto submitPreviewOnlyRequests = [&](std::vector<EditorRenderWorker::PreviewRequest>& requests) {
-        if (requests.empty() || !allowBackgroundRenderWorker) {
-            m_RenderPending = false;
-            return;
-        }
-        m_RenderGeneration =
-            Stack::EditorRenderScheduling::NextGlobalGeneration();
-        const auto snapshotBuildBegin = std::chrono::steady_clock::now();
-        EditorRenderWorker::Snapshot snapshot;
-        if (!TryBuildRenderSnapshot(
-                m_RenderGeneration,
-                snapshot)) {
-            m_RenderPending = false;
-            return;
-        }
-        m_GraphPerformanceStats.lastSnapshotBuildMs =
-            MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
-        if (Stack::UiPerformance::Probe::Active() && m_GraphPerformanceStats.lastSnapshotBuildMs > 5.0)
-            std::clog << "Viewport snapshot build ms=" << m_GraphPerformanceStats.lastSnapshotBuildMs << '\n';
-        snapshot.outputConnected = false;
-        snapshot.sourcePixels = {};
-        if (!snapshot.rawWorkspace.sourceKey.empty()) {
-            snapshot.rawRenderPurpose = RawRenderPurpose::Thumbnail;
-            snapshot.rawWorkspace.analysisRequested = false;
-        }
-        snapshot.developCandidateRenders.clear();
-        snapshot.previews = std::move(requests);
-        m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(snapshot.previews.size());
-        m_GraphPerformanceStats.lastSubmittedCompositeCount = 0;
-        m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = false;
-        m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
-        m_RenderPending = true;
-        if (!SubmitRenderSnapshot(std::move(snapshot))) {
-            m_RenderPending = false;
-        }
-    };
+
 
     if (compositeMode) {
         FailFullQualityRenderRequest("Full-quality rendering requires a connected single image output.");

@@ -214,7 +214,7 @@ nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload, bool
         objects.push_back(SerializeCustomMaskObject(object));
     }
 
-    return {
+    nlohmann::json result = {
         { "schemaVersion", payload.schemaVersion },
         { "referenceMode", CustomMaskReferenceModeToString(payload.referenceMode) },
         { "referenceNodeId", payload.referenceNodeId },
@@ -242,6 +242,8 @@ nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload, bool
             { "selectedObjectId", payload.selectedObjectId }
         } }
     };
+    if(payload.authoring)result["authoring"]=*payload.authoring;
+    return result;
 }
 
 CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
@@ -252,6 +254,7 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
         return payload;
     }
 
+    if(auto it=value.find("authoring");it!=value.end() && it->is_object())payload.authoring=std::make_shared<const nlohmann::json>(*it);
     payload.schemaVersion = value.value("schemaVersion", payload.schemaVersion);
     payload.referenceMode = CustomMaskReferenceModeFromString(value.value("referenceMode", std::string("CustomSize")));
     payload.referenceNodeId = value.value("referenceNodeId", payload.referenceNodeId);

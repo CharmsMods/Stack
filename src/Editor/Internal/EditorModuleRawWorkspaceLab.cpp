@@ -872,6 +872,8 @@ void EditorModule::RenderRawWorkspaceLabUI() {
         if (m_RawWorkspaceGalleryGridStacks.filmstripSlots.SetContent(layoutKey,
                 m_RawWorkspaceNavigatorRevision, m_RawWorkspaceFilmstripOrganizationRevision,
                 m_RawWorkspaceCategoryQueueRevision)) {
+            m_RawWorkspaceGalleryGridStacks.gridPosition = {};
+            m_RawWorkspaceGalleryGridStacks.filmstripPosition = {};
             m_RawWorkspaceGalleryGridStacks.filmstripScroll = {};
             m_RawWorkspaceLabFilmstripScrollTargetX = 0.0f;
             m_RawWorkspaceLabFilmstripScrollLastAppliedX = 0.0f;
@@ -1304,18 +1306,22 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                 constexpr float kTimelineHeight = kRawLabFilmstripTimelineHeight;
                 ImVec2 stripMinimum = ImGui::GetCursorScreenPos();
                 float stripWidth = ImGui::GetContentRegionAvail().x;
-                auto& slots = m_RawWorkspaceGalleryGridStacks.filmstripSlots;
+                auto& gallery = m_RawWorkspaceGalleryGridStacks;
+                auto& slots = gallery.filmstripSlots;
+                auto& position = gallery.filmstripPosition;
+                const bool restoreScroll = m_PermanentGalleryWorkspace && position.NeedsRestore(currentFrame);
+                float scrollToApply = restoreScroll ? position.offset : -1.f;
                 slots.enabled = m_PermanentGalleryWorkspace &&
                     m_RawWorkspaceLabUi.galleryNavigationMode == RawGalleryNavigationMode::ProjectRoot;
                 if (slots.enabled) {
                     const std::size_t count = m_RawWorkspaceGalleryContentMode == Stack::RawWorkspace::GalleryContentMode::Gallery
                         ? ResolveRawWorkspaceVisibleGalleryStacks().size() : ResolveRawWorkspaceGalleryProjectStacks().size();
-                    auto& motion = m_RawWorkspaceGalleryGridStacks.filmstripScroll;
+                    auto& motion = gallery.filmstripScroll;
                     const float thumbnail=124.f*m_RawWorkspaceLabUi.galleryThumbnailScale;
                     const float unit=std::max(.75f,ImGui::GetFontSize()/16.f);
                     const float imageHeight=kRawLabFilmstripTileHeight*m_RawWorkspaceLabUi.galleryThumbnailScale;
                     if(slots.NeedsUpdate(stripWidth,thumbnail,count,unit,imageHeight)) {
-                        const float previous=std::max(0.f,motion.current);
+                        const float previous = restoreScroll ? position.offset : std::max(0.f, motion.current);
                         const auto end=std::upper_bound(slots.offsets.begin(),slots.offsets.end(),previous);
                         const auto leading=end==slots.offsets.begin()?0:std::size_t(end-slots.offsets.begin()-1);
                         const float oldSpacing=Stack::Animation::FilmstripMotion::Spacing(
@@ -1329,9 +1335,10 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                         motion.current = motion.lastApplied = m_RawWorkspaceLabFilmstripScrollTargetX;
                         motion.glide.Reframe(motion.current,newSpacing/oldSpacing,slots.maximum);
                         motion.overshoot = motion.rebound = 0.f;
-                        ImGui::SetNextWindowScroll({motion.current, 0.f});
+                        scrollToApply = motion.current;
                     }
-                    slots.Frame(std::max(0.f, motion.current));
+                    if (restoreScroll) scrollToApply = std::clamp(scrollToApply, 0.f, slots.maximum);
+                    slots.Frame(scrollToApply >= 0.f ? scrollToApply : std::max(0.f, motion.current));
                     if (!m_GalleryDiscoveryGeneration ||
                         m_RawWorkspaceGalleryContentMode != Stack::RawWorkspace::GalleryContentMode::Gallery) {
                         stripMinimum.x += slots.margin;
@@ -1340,11 +1347,12 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                     ImGui::SetCursorScreenPos(stripMinimum);
                     ImGui::SetNextWindowContentSize({stripWidth + slots.maximum, 0.f});
                 }
+                if (scrollToApply >= 0.f) ImGui::SetNextWindowScroll({scrollToApply, 0.f});
                 const float feather = 48.f * std::max(.75f, ImGui::GetFontSize() / 16.f);
                 const float scrollHeight = std::max(
                     1.0f, ImGui::GetContentRegionAvail().y - kTimelineHeight - ImGui::GetStyle().ItemSpacing.y);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-                ImGui::BeginChild(
+                const bool stripVisible = ImGui::BeginChild(
                     "RawLabFilmstripScroll",
                     ImVec2(stripWidth, scrollHeight),
                     false,
@@ -1367,6 +1375,7 @@ void EditorModule::RenderRawWorkspaceLabUI() {
                 const float scrollMaxX = ImGui::GetScrollMaxX();
                 const float viewportWidth = ImGui::GetWindowSize().x;
                 if (m_PermanentGalleryWorkspace) {
+                    if (stripVisible) position.Remember(currentFrame, scrollX);
                     Stack::Editor::RawLabInternal::DrawFilmstripEdgeFade(
                         ImGui::GetWindowDrawList(), stripMinimum,
                         {stripMinimum.x + stripWidth, stripMinimum.y + scrollHeight},

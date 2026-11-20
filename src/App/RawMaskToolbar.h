@@ -1,30 +1,13 @@
 #pragma once
-
-#include "Editor/RawOperationMaskTarget.h"
-#include "Raw/RawAssetCapture.h"
-#include "imgui.h"
-#include "Animation/ControlMotion.h"
 #include "Animation/FrameTween.h"
+#include <imgui.h>
 
 namespace Stack::Navigation {
-
 struct RawMaskToolbarState {
-    Stack::Animation::ControlMotion maskButtonMotion;
-    bool enabled = false;
-    bool maskButtonEnabled = false; // Preserve styling while the disabled bar exits.
-    float revealAmount = 0.f;
+    bool enabled = false, menuOpen = false;
+    float revealAmount = 0.f, height = 0.f;
     Animation::FrameTween revealMotion;
-    double visibleUntil = 0.0;
-    float visibleHeight = 0.f;
-    ImVec2 position{};
-    ImVec2 maskButtonPosition{};
-    ImVec2 panelTogglePosition{};
-    ImGuiID popupId = 0;
-    bool menuOpen = false;
-    bool menuDrawn = false;
-    std::uint64_t targetWorkspace = 0;
-    std::optional<Stack::Editor::RawOperationMaskTarget> target;
-    std::string commandError;
+    double visibleUntil = 0;
+    ImVec2 position{}, panelTogglePosition{};
 };
-
-} // namespace Stack::Navigation
+}

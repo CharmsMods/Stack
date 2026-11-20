@@ -263,6 +263,8 @@ inline constexpr std::size_t kMaximumCustomMaskObjectCount = 4096;
 inline constexpr std::size_t kMaximumCustomMaskPointsPerObject = 65536;
 
 struct CustomMaskPayload {
+    // Authoring evidence is shared across snapshots and undo. Rendering consumes the raster.
+    std::shared_ptr<const nlohmann::json> authoring;
     int schemaVersion = 1;
     CustomMaskReferenceMode referenceMode = CustomMaskReferenceMode::CustomSize;
     int referenceNodeId = -1;

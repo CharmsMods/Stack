@@ -70,7 +70,7 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
                 if (ImGui::GetCursorPosX()>14.f*unit &&
                     ImGui::GetCursorPosX()+ImGui::CalcTextSize(label).x+16.f*unit>size.x-14.f*unit-(m_ViewSectionTab==1 ? 26.f*unit : 0.f))
                     ImGui::NewLine();
-                if (BareToolIslandButton(label,m_ViewSectionTab==tab))
+                if (BareToolIslandButton(label,m_ViewSectionTab==tab) && !PickingMaskDestination())
                     SetViewSectionTab(tab==1 && m_ViewSectionTab==1 ? 0 : tab);
             };
             tabButton(bracketSource ? "Source" : "Interpretation",0);

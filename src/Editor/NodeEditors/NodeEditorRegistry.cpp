@@ -160,9 +160,6 @@ struct NodeEditorRegistration {
             } else if(editor.legacyTool==Tool::Tone && editor.primary==DrawToneCurve) {
                 editor.panelPrimary=DrawToneCurve;editor.panelLabel="Tone";editor.panelOrder=1;editor.panelHeight=250;
                 editor.panelAnalysis=RawDevelopmentGraphScopeStage::FinishToneInput;
-            } else if(editor.legacyTool==Tool::Calibration) {
-                editor.panelPrimary=DrawCalibrationPanel;editor.panelSettings=DrawCalibrationPanelSettings;
-                editor.panelLabel="Calibration";editor.panelOrder=3;editor.panelHeight=260;
             } else if(editor.legacyTool==Tool::Color) {
                 editor.panelPrimary=editor.primary;
                 editor.scrollFloatingContent=true;

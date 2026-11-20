@@ -139,9 +139,8 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         require(editor->GetRawLayerToolIndex()==selectedBefore,"Drawing multiple tools changed selection.");
         auto controls=primaries();
         const auto& fixed=Editor::PhotographicPanelDefinitions();
-        require(fixed.size()==4 && std::string(fixed[0]->panelLabel)=="Light" &&
-            std::string(fixed[1]->panelLabel)=="Tone" && std::string(fixed[2]->panelLabel)=="HSL" &&
-            std::string(fixed[3]->panelLabel)=="Calibration","Fixed panel inventory/order changed.");
+        require(fixed.size()==3 && std::string(fixed[0]->panelLabel)=="Light" &&
+            std::string(fixed[1]->panelLabel)=="Tone" && std::string(fixed[2]->panelLabel)=="HSL","Fixed panel inventory/order changed.");
         require(!controls.empty(),"The Controls tab did not draw registered primary tools.");
         for (auto* item:controls) {
             require(item->Size.x<=width && item->Pos.x>=20,"A primary surface overflowed the panel.");
@@ -169,6 +168,15 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         };
         for (int i=0;i<12;++i) {frame();stablePositions();}
         capture("controls-360.png");
+        editor->StartMaskTool(MaskAuthoring::Tool::Values);
+        require(editor->PickingMaskDestination(),"Draw Values did not open the destination picker.");
+        io.AddMousePosEvent(controls.front()->Pos.x+65,controls.front()->Pos.y+18);frame();frame();
+        capture("mask-destination.png");
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        require(editor->MaskAuthoringActive() && !editor->PickingMaskDestination(),"Clicking Light did not choose its section.");
+        editor->CancelMaskAuthoring();
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Choosing or canceling a mask changed the graph.");
+        frame();
         io.AddMousePosEvent(40,controls.front()->Pos.y-(ImGui::GetFontSize()+10.f)*.5f-ImGui::GetStyle().ItemSpacing.y);frame();
         io.AddMouseWheelEvent(0,-12);for (int i=0;i<5;++i) frame();
         bool scrolled=false;

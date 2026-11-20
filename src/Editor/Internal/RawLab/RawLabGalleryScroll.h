@@ -4,6 +4,19 @@
 #include "Animation/FilmstripMotion.h"
 
 namespace Stack::Editor::RawLabInternal {
+struct GalleryScrollPosition {
+    int frame = -2;
+    float offset = 0.f;
+
+    bool HasPosition() const { return frame >= 0; }
+    bool NeedsRestore(int currentFrame) const { return frame < currentFrame - 1; }
+
+    void Remember(int currentFrame, float displayedOffset) {
+        frame = currentFrame;
+        offset = displayedOffset;
+    }
+};
+
 struct GalleryScrollMotion {
     Stack::Animation::FilmstripMotion glide;
     std::vector<float> uniformStops;

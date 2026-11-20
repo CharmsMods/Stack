@@ -2333,7 +2333,7 @@ void EditorViewport::RenderSingleImageMode(
     navigationInput.delta = navigationIo.MouseDelta;
     if (splitActive) MapRawComparisonInput(navigationInput.mouse,navigationInput.delta,
         contentScreen,{contentScreen.x+avail.x,contentScreen.y+avail.y},fittedSize);
-    navigationInput.wheel = navigationIo.MouseWheel;
+    navigationInput.wheel = editor->MaskAuthoringActive() && (navigationIo.KeyCtrl || navigationIo.KeyShift) ? 0.f : navigationIo.MouseWheel;
     navigationInput.seconds = navigationIo.DeltaTime;
     navigationInput.hovered = isHovered && !m_IsLocked;
     navigationInput.middleClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
@@ -3265,7 +3265,8 @@ void EditorViewport::RenderSingleImageMode(
 
     if (editor->IsViewMode() && !m_Panning && !ComparisonControlsOwnPointer(contentScreen)) {
         if (splitActive) PushRawComparisonClip(drawList, contentScreen, {contentScreen.x+avail.x,contentScreen.y+avail.y}, true);
-        editor->RenderGraphColorWarpAreaSelector(ImRect(imageMin, imageMax));
+        editor->RenderMaskCanvas(ImRect(imageMin,imageMax),{});
+        if(!editor->MaskAuthoringActive())editor->RenderGraphColorWarpAreaSelector(ImRect(imageMin, imageMax));
         if (splitActive) drawList->PopClipRect();
     }
 

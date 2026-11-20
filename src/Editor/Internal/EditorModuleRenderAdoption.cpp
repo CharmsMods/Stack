@@ -180,7 +180,8 @@ void EditorModule::ConsumeRenderWorkerResults() {
         // Fixed captures validate their own document and processing inputs.
         // A newer viewport request must not discard a completed capture.
         for (auto& preview : result.previews)
-            if (preview.assetCapture) AdoptRawAssetCapture(preview);
+            if (preview.maskAuthoring) AdoptMaskAuthoringResult(preview);
+            else if (preview.assetCapture) AdoptRawAssetCapture(preview);
         if (result.timingOnly) { ObserveRawViewportTiming(result); ObserveViewportPreviewTiming(result); continue; }
         if (result.rawRenderPurpose == RawRenderPurpose::ExplicitExport) {
             // The captured operation's generation, not the current viewport,

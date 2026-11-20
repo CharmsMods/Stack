@@ -746,6 +746,7 @@ void EditorModule::Shutdown() {
     m_DeferredGraphWorkers=false;m_DeferredGraphWorkerWindow=nullptr;
     if(m_GalleryNavigationMotion)m_GalleryNavigationMotion->Retire(m_GalleryNavigationWorkspace);
     m_NodeOpenTransition.Shutdown();
+    CancelMaskAuthoring();
     if (m_RawAssetCapture.cancellation) m_RawAssetCapture.cancellation->store(true);
     CancelMfdExperimentalProcessing({}, true);
     CloseDetachedPreviewFullscreen();
@@ -1100,7 +1101,7 @@ bool EditorModule::SubmitRenderSnapshot(
     EditorRenderWorker::Snapshot snapshot) {
     if (IsEditingRawLayerMaskGraph()) {
         for (auto& preview : snapshot.previews) {
-            if (!preview.rawLayerId.empty()) continue;
+            if (!preview.rawLayerId.empty() || preview.maskAuthoring) continue;
             int source = 0; std::string socket;
             ResolveRawCanvasRenderOutput(snapshot.graph,preview.sourceNodeId,preview.sourceSocketId,source,socket);
             preview.sourceNodeId = source; preview.sourceSocketId = std::move(socket);
@@ -1109,7 +1110,7 @@ bool EditorModule::SubmitRenderSnapshot(
             // Layer thumbnails resolve their output from layer/mask IDs in
             // the worker, not a canvas node. Dropping them here leaves the
             // visible panel requesting the same unfinished thumbnails forever.
-            [](const auto& preview) { return preview.rawLayerId.empty() && preview.sourceNodeId <= 0; }),snapshot.previews.end());
+            [](const auto& preview) { return !preview.maskAuthoring && preview.rawLayerId.empty() && preview.sourceNodeId <= 0; }),snapshot.previews.end());
     }
     const bool tracePreparation = Stack::UiPerformance::Probe::Active();
     const auto preparationStarted = tracePreparation ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

@@ -88,7 +88,6 @@ private:
     void LayoutRawMaskToolbar();
     void RenderRawMaskToolbar();
     void RenderSharedPanelToggle();
-    bool TopBarOwnsPanelToggle() const;
     bool RawMaskToolbarOwnsInput() const;
     void ToggleWorkspaceSectionPanel();
     void RenderStackMenu();

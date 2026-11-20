@@ -26,6 +26,25 @@ namespace Stack::Validation {
 void ValidateSharedCurveInteractions();
 void ValidateRawGraphInsertions(EditorModule& editor);
 namespace {
+// Also exercise saved projects which explicitly contain Calibration.
+void LoadCalibrationFixture(EditorModule& editor) {
+    auto payload=editor.SerializePipeline();
+    Project::RawLayerStackState state;
+    std::string error;
+    if(!Project::DeserializeRawLayerStack(payload.at("rawLayerStack"),state,error))throw std::runtime_error(error);
+    auto& graph=state.background.graph;
+    const auto* tone=Project::FindRawOperation(state.background,RawRecipe::GraphOperationKind::ToneCurve);
+    if(!tone)throw std::runtime_error("Missing Tone Curve in calibration fixture.");
+    const auto wire=*graph.FindOutputLink(tone->id);
+    graph.EditLinks().erase(std::remove_if(graph.EditLinks().begin(),graph.EditLinks().end(),[&](const auto& l){
+        return l.fromNodeId==wire.fromNodeId && l.toNodeId==wire.toNodeId && l.toSocketId==wire.toSocketId;
+    }),graph.EditLinks().end());
+    const int id=graph.AddRawOperationNode(RawRecipe::GraphOperationKind::Calibration,{600,0})->id;
+    if(!graph.TryConnectSockets(wire.fromNodeId,wire.fromSocketId,id,"imageIn") ||
+       !graph.TryConnectSockets(id,"imageOut",wire.toNodeId,wire.toSocketId))throw std::runtime_error("Could not insert Calibration fixture.");
+    payload["rawLayerStack"]=Project::SerializeRawLayerStack(state);
+    editor.DeserializePipeline(payload);
+}
 void ValidateKeyboardInsertion(EditorModule& editor) {
     using namespace EditorNodeGraph;
     using Stack::Editor::NodeNameSearch;
@@ -243,8 +262,9 @@ bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
         const int outputId = sourceGraph.AddOutputNode({300, 0}, true)->id;
         require(sourceGraph.TryConnect(sourceId, outputId), "Could not connect the source document.");
         editor.DeserializePipeline(editor.SerializePipeline());
-        require(editor.GetRawLayerToolLabels() == std::vector<std::string>{"Local EV", "Tone Curve", "Color Calibration", "Color Warp"} && editor.GetRawLayerToolIndex() == 0,
+        require(editor.GetRawLayerToolLabels() == std::vector<std::string>{"Local EV", "Tone Curve", "Color Warp"} && editor.GetRawLayerToolIndex() == 0,
             "A fresh Background did not select an authored tool for Alt navigation.");
+        LoadCalibrationFixture(editor);
         editor.OpenRawLayerMaskGraph({});
         require(editor.IsRawProjectCanvas(), "The project canvas did not open.");
         if (keyboardOnly) {
@@ -340,7 +360,7 @@ bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
         EditorNodeGraphDefinitions::ApplyNodeMetadata(borrowed);
         require(!Stack::Editor::FindNodeEditor(borrowed).primary,
             "An undesigned effect lost the borrowed graph-controls fallback.");
-        require(Stack::Editor::FindNodeEditor(*FindRawOperation(layer,Kind::Calibration)).primary!=nullptr,
+        require(Stack::Editor::FindNodeEditor(*layer.graph.AddRawOperationNode(Kind::Calibration,{0,600})).primary!=nullptr,
             "Calibration lost its custom editor registration.");
         layer.graph.FindNode(effect)->layerParameters["saturation"]=-.7f;
         const auto masked=AddRawLocalAdjustment(maskState,kRawBackgroundId,effectUuid,
@@ -498,7 +518,7 @@ bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
 // Exercise the actual RAW host through public Gallery/editor commands. The
 // caller supplies an existing RAW test capture; document and app-state writes
 // are disabled by the validation runner.
-bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& source, bool captureOnly) {
+bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& source, bool captureOnly, bool authoringOnly) {
     auto& io=ImGui::GetIO();
     const auto require=[](bool ok,const char* message) { if(!ok) throw std::runtime_error(message); };
     const auto bounds=[&] {
@@ -507,6 +527,8 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
         return ImRect(low,high);
     };
     double uiMilliseconds=0, pumpMilliseconds=0, drawMilliseconds=0, taskMilliseconds=0;
+    bool readVisibleLabels=false;
+    std::string labels;
     const auto frame=[&] {
         ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
         const auto pumpStarted=std::chrono::steady_clock::now();
@@ -515,7 +537,9 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
         ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("RAW input validation",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings);
         const auto uiStarted=std::chrono::steady_clock::now();
+        if(readVisibleLabels)ImGui::LogToBuffer();
         editor.RenderRawWorkspaceLabUI();
+        if(readVisibleLabels){labels=ImGui::GetCurrentContext()->LogBuffer.c_str();ImGui::LogFinish();readVisibleLabels=false;}
         uiMilliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-uiStarted).count();
         ImGui::End(); ImGui::Render();
         const auto drawStarted=std::chrono::steady_clock::now();
@@ -525,17 +549,66 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
         Async::TaskSystem::Get().PumpMainThreadTasks(4);
         taskMilliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-taskStarted).count();
     };
+    const char* waitingFor="folder scan";
     const auto await=[&](auto ready) {
-        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(authoringOnly?35:15);
         do { frame(); if(ready()) return; std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
         while(std::chrono::steady_clock::now()<deadline);
-        throw std::runtime_error("RAW input fixture did not become ready: "+editor.GetRawWorkspaceProjectLoadStatusText());
+        throw std::runtime_error(std::string("Waiting for ")+waitingFor+" timed out. "+editor.GetRawWorkspaceProjectLoadStatusText());
     };
     editor.SetRawWorkspaceFolder(source.parent_path());
     editor.EnterRawWorkspaceRootTab();
     await([&] {return !editor.IsRawWorkspaceScanBusy() && !editor.GetRawWorkspaceState().sources.empty();});
-    editor.SelectRawWorkspaceSourceForGallery(source.filename().generic_string(),false,false,true);
+    if(authoringOnly)editor.OpenGalleryOriginalInNewTab(source.parent_path(),source);
+    else editor.SelectRawWorkspaceSourceForGallery(source.filename().generic_string(),false,false,true);
+    waitingFor="photo adoption";
     await([&] {return editor.IsRawWorkspaceProjectActive() && !editor.IsRawWorkspaceProjectLoadBusy();});
+    if(authoringOnly){
+        editor.SetWorkspaceMode(Project::WorkspaceMode::View);
+        waitingFor="rendered photo";
+        await([&]{return editor.HasActiveRawWorkspacePresentationForValidation();});
+        // The surround is optional. A fitted photo can be on screen without a backdrop.
+        const float x=io.DisplaySize.x*.72f,y=io.DisplaySize.y*.62f;
+        editor.StartMaskTool(MaskAuthoring::Tool::Brush);
+        require(editor.PickingMaskDestination(),"Brush failed to open the destination picker.");
+        io.AddMousePosEvent(x,y);frame();frame();
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+        require(!editor.PickingMaskDestination() && editor.MaskAuthoringActive(),"Image did not accept Save to Graph.");
+        // Wait for the palette's actual readiness message, then send one stroke.
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        do {
+            readVisibleLabels=true;frame();
+            if(labels.find("Grayscale")!=std::string::npos && labels.find("Reading image colors")==std::string::npos)break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }while(std::chrono::steady_clock::now()<deadline);
+        if(labels.find("Grayscale")==std::string::npos || labels.find("Retry")!=std::string::npos ||
+            labels.find("Reading image colors")!=std::string::npos)throw std::runtime_error("Mask source unavailable. "+labels);
+        io.AddMousePosEvent(x,y);frame();io.AddMouseButtonEvent(0,true);frame();
+        io.AddMousePosEvent(x+12,y+12);frame();io.AddMouseButtonEvent(0,false);frame();
+        readVisibleLabels=true;frame();
+        if(labels.find("Delete mark")==std::string::npos)throw std::runtime_error("Brush did not receive the stroke. "+labels);
+        io.AddKeyEvent(ImGuiKey_Enter,true);frame();io.AddKeyEvent(ImGuiKey_Enter,false);frame();
+        const auto applyDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        while(editor.MaskAuthoringActive() && std::chrono::steady_clock::now()<applyDeadline){
+            readVisibleLabels=true;frame();
+            if(editor.MaskAuthoringActive() && labels.find("Grayscale")!=std::string::npos)
+                throw std::runtime_error("Apply returned to the drawing tools. "+labels);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        require(!editor.MaskAuthoringActive(),"Brush Apply did not finish in the real View.");
+        editor.OpenRawLayerMaskGraph({});
+        for(const auto& node:editor.GetNodeGraph().GetNodes())if(node.customMask.authoring){
+            require(node.customMask.width>1 && node.customMask.height>1,"View committed an empty raster.");
+            require(!editor.GetNodeGraph().FindOutputLink(node.id),"Save to Graph connected the mask.");
+            std::cout<<"View brush Apply produced a detached "<<node.customMask.width<<" x "<<node.customMask.height<<" mask."<<std::endl;
+            require(editor.OpenRawProjectNodeEditor(node.id) && editor.MaskAuthoringActive() &&
+                !editor.PickingMaskDestination(),"Opening the saved mask did not restore its editing session.");
+            editor.CancelMaskAuthoring();
+            return true;
+        }
+        throw std::runtime_error("View did not commit a mask node.");
+    }
+    LoadCalibrationFixture(editor);
     const std::vector<std::string> defaultTools{"Local EV", "Tone Curve", "Color Calibration", "Color Warp"};
     require(editor.GetRawLayerToolLabels()==defaultTools && editor.GetRawLayerToolIndex()==0,
         "Opening a RAW image did not bind the default tools to the adopted project identity.");
@@ -805,7 +878,9 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
         const float left=std::max(0.f,image->imageMinimum.x),right=std::min(io.DisplaySize.x,image->imageMaximum.x);
         const float top=std::max(0.f,image->imageMinimum.y),bottom=std::min(io.DisplaySize.y,image->imageMaximum.y);
         const float x=left+(right-left)*.75f,y=top+(bottom-top)*.3f;
-        io.AddMousePosEvent(x,y);io.AddKeyEvent(ImGuiKey_C,true);frame();
+        std::string armError;
+        require(editor.BeginRawAssetCapture(*beforeCapture.target,RawAssetCapture::Shape::Stroke,RawAssetCapture::Channels::Both,armError),armError.c_str());
+        io.AddMousePosEvent(x,y);frame();
         io.AddMouseButtonEvent(0,true);frame();
         for(int i=1;i<=6;++i){io.AddMousePosEvent(x+i*4,y+i*3);frame();}
         io.AddMouseButtonEvent(0,false);frame();io.AddKeyEvent(ImGuiKey_C,false);frame();
@@ -889,7 +964,7 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
 } // namespace
 
 static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureOnly, bool includeSharedCurves = true,
-    bool keyboardOnly = false) {
+    bool keyboardOnly = false, bool authoringOnly = false) {
     if (!glfwInit()) return false;
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -911,9 +986,10 @@ static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureO
     Async::TaskSystem::Get().Initialize();
     auto editor = std::make_unique<EditorModule>();
     editor->SetDocumentPersistenceEnabled(false);
+    editor->SetWorkspaceAppStatePersistenceEnabled(false);
     editor->Initialize(window, nullptr, false);
     bool success=false;
-    try {if(input.empty() && includeSharedCurves) ValidateSharedCurveInteractions(); success=input.empty() ? ValidateCanvas(*editor,keyboardOnly) : ValidateFloatingTools(*editor,input,captureOnly);}
+    try {if(input.empty() && includeSharedCurves) ValidateSharedCurveInteractions(); success=input.empty() ? ValidateCanvas(*editor,keyboardOnly) : ValidateFloatingTools(*editor,input,captureOnly,authoringOnly);}
     catch(const std::exception& error) {std::cerr<<error.what()<<'\n';}
     editor->RequestWorkerShutdownForAppClose();
     Async::TaskSystem::Get().Shutdown();
@@ -927,6 +1003,7 @@ static bool RunRawGraphEditing(const std::filesystem::path& input, bool captureO
 bool ValidateRawGraphEditing(const std::filesystem::path& input) {
     return RunRawGraphEditing(input,false);
 }
+bool ValidateMaskAuthoringView(const std::filesystem::path& input){return RunRawGraphEditing(input,false,false,false,true);}
 bool ValidateRawAssetCapture(const std::filesystem::path& input) {
     return !input.empty() && RunRawGraphEditing(input,true);
 }

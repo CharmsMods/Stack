@@ -38,6 +38,7 @@ namespace Stack::Validation { bool ValidateToneDetail(const std::filesystem::pat
 namespace Stack::Validation { bool ValidateRawLayers(const std::filesystem::path&); bool ValidateClosetEditing(const std::filesystem::path&, const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateRawGraphEditing(const std::filesystem::path& input = {}); }
 namespace Stack::Validation { bool ValidateBracketMaskResult(int,char**); }
+namespace Stack::Validation { bool ValidateMaskAuthoringView(const std::filesystem::path& input); }
 namespace Stack::Validation { bool ValidateRawAssetCapture(const std::filesystem::path& input); }
 namespace Stack::Validation { bool ValidateRawGraphCanvas(bool keyboardOnly); bool ValidateViewControlsPanel(const std::filesystem::path&,bool=false); }
 namespace Stack::Validation { bool ValidateGraphNodeNotes(const std::filesystem::path&); }
@@ -46,6 +47,7 @@ namespace Stack::Validation { bool ValidateSettingsDefaults(const std::filesyste
 
 namespace Stack::Validation { bool ValidateDemosaicing(const std::filesystem::path&,const std::filesystem::path&); }
 
+namespace Stack::Validation { bool ValidateMaskAuthoring(const std::filesystem::path&,const std::filesystem::path&,const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSharedCurves(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateTonalSliderInteractions(const std::filesystem::path&); }
 namespace Stack::Validation { bool ValidateSidePanelSliders(const std::filesystem::path&); }
@@ -143,6 +145,9 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
         exitCode = Stack::Validation::ValidateRawGalleryOpen(argv[2], argv[3], false, false, true) ? 0 : 93;
         return true;
     }
+    if(argc==5 && std::strcmp(argv[1],"--validate-mask-authoring")==0){
+        exitCode=Stack::Validation::ValidateMaskAuthoring(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),std::filesystem::u8path(argv[4]))?0:92;return true;
+    }
     if(argc==3 && std::strcmp(argv[1],"--validate-shared-curves")==0) {
         exitCode=Stack::Validation::ValidateSharedCurves(std::filesystem::u8path(argv[2]))?0:92;return true;
     }
@@ -151,6 +156,10 @@ bool TryRunValidationCommand(int argc, char** argv, int& exitCode) {
     }
     if (argc == 4 && std::strcmp(argv[1], "--validate-demosaicing") == 0) {
         exitCode=Stack::Validation::ValidateDemosaicing(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]))?0:91;
+        return true;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--validate-mask-authoring-view") == 0) {
+        exitCode = Stack::Validation::ValidateMaskAuthoringView(std::filesystem::u8path(argv[2])) ? 0 : 89;
         return true;
     }
     if (argc == 3 && std::strcmp(argv[1], "--validate-raw-asset-capture") == 0) {

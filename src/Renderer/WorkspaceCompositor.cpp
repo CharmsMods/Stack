@@ -1,4 +1,5 @@
 #include "WorkspaceCompositor.h"
+#include "MaskPickerBlur.h"
 #include "Hdr/UiColor.h"
 #include "App/UiPerformanceTrace.h"
 #include "App/WorkspaceSwitcher.h"
@@ -441,6 +442,7 @@ bool WorkspaceCompositor::Render(ImDrawData* data, const Workspace::Switcher& sw
     return true;
 }
 void WorkspaceCompositor::Shutdown() {
+    MaskPickerBlur::Shutdown();
     rawBackdrop.Shutdown();
     previews.Clear();
     lastProjectFrame = {};

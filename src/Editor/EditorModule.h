@@ -48,6 +48,7 @@ namespace ImGuiExtras { struct GlassControlState; }
 #include "Editor/RawLayerPanel.h"
 #include "Editor/RawOperationMaskTarget.h"
 #include "Editor/RawAssetCaptureState.h"
+#include "Editor/MaskAuthoringSession.h"
 #include "Editor/RawLayerToolPickerCache.h"
 #include "Editor/Internal/RawLab/RawAssetPreviewCache.h"
 #include "Editor/NodeGraph/GraphOutputSemantics.h"
@@ -260,6 +261,12 @@ public:
         Stack::RawAssetCapture::Shape shape, Stack::RawAssetCapture::Channels channels, std::string& error);
     bool CreateRawOperationMask(const Stack::Editor::RawOperationMaskTarget& target,
         EditorNodeGraph::MaskGeneratorKind kind, std::string& error);
+    bool PickingMaskDestination() const;
+    bool MaskAuthoringActive() const;
+    void StartMaskTool(Stack::MaskAuthoring::Tool tool);
+    void CancelMaskAuthoring();
+    void RenderMaskCanvas(const ImRect& bounds,const Stack::RawRecipe::RawCropRotationRecipe& crop);
+    void RenderMaskToolRail(float scale);
     void RequestRawSettingsPanel();
     void SetViewSectionPanelOpen(bool open);
     bool ViewSectionPanelOpen() const;
@@ -3299,6 +3306,16 @@ private:
     Stack::Editor::RawLayerPanelState m_RawLayerPanel;
     std::unique_ptr<ImGuiExtras::GlassControlState> m_RawToolGlass;
     bool ApplyRawLayerStackEdit(Stack::Project::RawLayerStackState candidate, bool affectsPixels = true, bool completesAction = false);
+    Stack::Editor::MaskAuthoringSession m_MaskSession;
+    void ChooseMaskDestination(const Stack::Project::NodeEditTarget& target);
+    bool ReopenAuthoredMask(const EditorNodeGraph::Node& node,const std::string& layerId);
+    void UpdateMaskPreview();
+    bool MaskOwnerCurrent() const;
+    bool ResolveMaskSource(const Stack::RawRecipe::RawCropRotationRecipe& crop);
+    void AppendMaskAuthoringRequest(std::vector<EditorRenderWorker::PreviewRequest>& requests);
+    void AdoptMaskAuthoringResult(EditorRenderWorker::PreviewResult& result);
+    void DrawMaskPalette();
+    void DrawMaskPickerTarget(const ImRect& bounds,const char* label,const Stack::Project::NodeEditTarget& target);
     Stack::Editor::RawAssetCaptureState m_RawAssetCapture;
     Stack::Editor::RawAssetPreviewCache m_RawAssetPreviews;
     void UpdateRawCurveProbe(const ImVec2& minimum, const ImVec2& maximum,

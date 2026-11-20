@@ -47,6 +47,8 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceLabGalleryScrollTargetY = 0.f;
         m_RawWorkspaceLabGalleryScrollCurrentY = 0.f;
         m_RawWorkspaceLabFilmstripScrollTargetX = 0.f;
+        m_RawWorkspaceGalleryGridStacks.gridPosition = {};
+        m_RawWorkspaceGalleryGridStacks.filmstripPosition = {};
         m_RawWorkspaceGalleryGridStacks.Close();
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }

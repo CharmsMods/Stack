@@ -2886,17 +2886,6 @@ void AppShell::RenderUI() {
             viewport->Pos.y + viewport->Size.y));
     inputRegions.emplace_back(m_NavigationRail.bodyPosition,
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
-    if (m_RawMaskToolbar.enabled) {
-        inputRegions.emplace_back(viewport->Pos,
-            ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + 2.f * m_NavigationRail.scale));
-        if (m_RawMaskToolbar.visibleHeight > .5f) {
-            const float size = 38.f * m_NavigationRail.scale;
-            inputRegions.emplace_back(m_RawMaskToolbar.maskButtonPosition,
-                ImVec2(m_RawMaskToolbar.maskButtonPosition.x + size, m_RawMaskToolbar.maskButtonPosition.y + size));
-            inputRegions.emplace_back(m_RawMaskToolbar.panelTogglePosition,
-                ImVec2(m_RawMaskToolbar.panelTogglePosition.x + size, m_RawMaskToolbar.panelTogglePosition.y + size));
-        }
-    }
     ClearFramelessMainWindowDragZone();
     if (AppWindowTitleBarBridge::IsActive()) {
         if (m_ToolSwitcher.Visible() || m_NotificationPresenter.BlocksInput() || m_SettingsPopupOpen ||

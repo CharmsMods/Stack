@@ -21,18 +21,25 @@ namespace Ui = Stack::LibraryUi;
 void EditorModule::SetRawGalleryGridView(bool grid) {
     if (m_RawWorkspaceLabUi.galleryWorkspaceGrid == grid) return;
     Stack::UiPerformance::Probe::Accepted(Stack::UiPerformance::Probe::Visual::GalleryMode);
-    std::string preferred = m_RawWorkspaceLabFilmstripHoverSourceKey;
-    if (!m_RawWorkspaceLabFilmstripHoverProjectPath.empty()) {
-        for (const auto& project : GetRawWorkspaceGalleryPresentation().projects) {
-            if (project.projectPath.lexically_normal() ==
-                m_RawWorkspaceLabFilmstripHoverProjectPath.lexically_normal()) {
-                preferred = project.projectCoverKey;
-                break;
+    const auto& browse = m_RawWorkspaceGalleryGridStacks;
+    const auto& destination = grid ? browse.gridPosition : browse.filmstripPosition;
+    auto& layout = m_RawWorkspaceGalleryLayoutAnimation;
+    if (destination.HasPosition()) {
+        layout.AnchorApplied();
+    } else {
+        std::string preferred = m_RawWorkspaceLabFilmstripHoverSourceKey;
+        if (!m_RawWorkspaceLabFilmstripHoverProjectPath.empty()) {
+            for (const auto& project : GetRawWorkspaceGalleryPresentation().projects) {
+                if (project.projectPath.lexically_normal() ==
+                    m_RawWorkspaceLabFilmstripHoverProjectPath.lexically_normal()) {
+                    preferred = project.projectCoverKey;
+                    break;
+                }
             }
         }
+        if (preferred.empty()) preferred = m_RawWorkspace.selectedSourceKey;
+        layout.PrepareSwitch(preferred);
     }
-    if (preferred.empty()) preferred = m_RawWorkspace.selectedSourceKey;
-    m_RawWorkspaceGalleryLayoutAnimation.PrepareSwitch(preferred);
     m_RawWorkspaceLabUi.galleryWorkspaceGrid = grid;
     if (grid) m_RawWorkspaceGalleryDisplayMode = Stack::RawWorkspace::GalleryDisplayMode::Grid;
 }

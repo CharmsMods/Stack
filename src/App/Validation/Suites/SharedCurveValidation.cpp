@@ -305,7 +305,7 @@ void Check(const std::filesystem::path& path) {
         std::cout<<"Pending capture edits, source invalidation, completion, undo/redo and late-result rejection passed.\n";
     }
     Require(state.background.maskOutputs.size()==1,"Capture left a disposable shape generator in Graph.");
-    Require(Editor::RawLayerToolNodes(state.background.graph).size()==5,"The captured texture appeared in Alt.");
+    Require(Editor::RawLayerToolNodes(state.background.graph).size()==4,"The captured texture appeared in Alt.");
     graph.nodes[0].rawDevelopment.recipe=recipe;
     graph.nodes.resize(1);graph.outputNodeId=1;graph.outputSocketId="imageOut";
     const bool lowered=LowerRawLayerStack(graph,state,1,1,error);

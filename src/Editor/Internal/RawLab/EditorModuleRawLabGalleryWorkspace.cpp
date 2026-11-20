@@ -94,7 +94,6 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         auto* host = ImGui::GetCurrentWindow();
         auto& scrollState = host->StateStorage;
         const auto timeKey = ImGui::GetID("GridScrollTime");
-        const auto posKey = ImGui::GetID("GridScrollPosition");
         const float now = static_cast<float>(ImGui::GetTime());
         const float age = now-scrollState.GetFloat(timeKey,-100.f);
         const float opacity = std::clamp((2.f-age)/.18f,0.f,1.f);
@@ -102,8 +101,15 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
         for (auto color : {ImGuiCol_ScrollbarGrab,ImGuiCol_ScrollbarGrabHovered,ImGuiCol_ScrollbarGrabActive}) {
             auto ink = ImGui::GetStyleColorVec4(color); ink.w*=opacity; ImGui::PushStyleColor(color,ink);
         }
-        ImGui::BeginChild("Grid", ImVec2(imageWidth, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
+        auto& position = m_RawWorkspaceGalleryGridStacks.gridPosition;
+        const bool restoreScroll = m_PermanentGalleryWorkspace &&
+            position.NeedsRestore(m_RawGalleryPresentationFrame);
+        if (restoreScroll) ImGui::SetNextWindowScroll({-1.f, position.offset});
+        const bool gridVisible = ImGui::BeginChild("Grid", ImVec2(imageWidth, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoScrollWithMouse);
+        if (restoreScroll) {
+            m_RawWorkspaceLabGalleryScrollTargetY = m_RawWorkspaceLabGalleryScrollCurrentY = ImGui::GetScrollY();
+        }
         RenderRawWorkspaceLabGalleryContent(false);
         // Gaps retain the last hover; leaving the grid restores selection.
         if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
@@ -112,9 +118,13 @@ void EditorModule::RenderRawWorkspaceGalleryContentSurface(const ImVec2& size) {
             m_RawWorkspaceLabFilmstripHoverSuppressed = false;
         } else m_RawWorkspaceLabFilmstripHoverFrame = ImGui::GetFrameCount();
         const auto* body = ImGui::GetCurrentWindow();
-        if (scrollState.GetFloat(posKey,body->Scroll.y)!=body->Scroll.y ||
-            (ImGui::GetIO().MouseWheel!=0.f && ImGui::IsWindowHovered())) scrollState.SetFloat(timeKey,now);
-        scrollState.SetFloat(posKey,body->Scroll.y);
+        if (gridVisible) {
+            if ((position.HasPosition() && position.offset != body->Scroll.y) ||
+                (ImGui::GetIO().MouseWheel != 0.f && ImGui::IsWindowHovered())) {
+                scrollState.SetFloat(timeKey, now);
+            }
+            position.Remember(m_RawGalleryPresentationFrame, body->Scroll.y);
+        }
         ImGui::EndChild();
         ImGui::PopStyleColor(4);
         ImGui::PopStyleVar(2);

@@ -164,6 +164,7 @@ Stack::Editor::GraphEditorContext EditorModule::GetRawProjectGraphEditorContext(
 bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
     if (!IsEditingRawLayerMaskGraph()) {
         const auto* node=m_Project->graph.FindNode(nodeId);
+        if(node && ReopenAuthoredMask(*node,kProjectGraphId))return true;
         if (node && node->kind==EditorNodeGraph::NodeKind::MultiFrameHdr &&
             node->multiFrameHdr.bracketingSource && m_Project->snapshot && IsBracketingActive() &&
             node->multiFrameHdr.sourceSetId==m_Project->snapshot->activeSourceSetId) {
@@ -198,6 +199,8 @@ bool EditorModule::OpenRawProjectNodeEditor(int nodeId) {
     const auto owner = node->rawLayerOwnerId;
     const auto uuid = node->instanceUuid;
     if (!CommitRawLayerMaskGraph()) return true;
+    if(const auto* l=FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner))
+        for(const auto& n:l->graph.GetNodes())if(n.instanceUuid==uuid && ReopenAuthoredMask(n,owner))return true;
     const auto* layerOwner=FindRawAdjustmentLayer(m_Project->rawLayers.State(),owner);
     const auto choices=layerOwner ? Stack::Editor::RawLayerToolNodes(layerOwner->graph) : std::vector<const EditorNodeGraph::Node*>{};
     const bool hasNoEditableSurface=layerOwner && role==Stack::GraphModel::NodeRole::Ordinary &&

@@ -223,19 +223,6 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     const auto next = std::find_if(m_ProjectWorkspaces.begin(), m_ProjectWorkspaces.end(),
         [id](const auto& workspace) { return workspace->id == id; });
     if (next == m_ProjectWorkspaces.end() || (FindProjectWorkspace(m_ActiveProjectWorkspace) && !m_Editor->FinishWorkspaceInteraction())) return false;
-    std::filesystem::path gallerySourceRoot;
-    if (id == m_GalleryWorkspaceId) {
-        if (const auto* outgoing = FindProjectWorkspace(m_ActiveProjectWorkspace))
-            gallerySourceRoot = outgoing->sourceWorkspaceRoot;
-        else {
-            // Closing the active pill retires it before selecting its neighbor.
-            for (const auto& outgoing : m_RetiredProjectWorkspaces)
-                if (outgoing->id == m_ActiveProjectWorkspace) {
-                    gallerySourceRoot = outgoing->sourceWorkspaceRoot;
-                    break;
-                }
-        }
-    }
     if(id==m_GalleryWorkspaceId && m_GalleryNavigationMotion->Owns(m_ActiveProjectWorkspace)) {
         auto* gallery=FindProjectWorkspace(m_GalleryWorkspaceId);
         Stack::Renderer::GalleryTransitionOrigin destination;
@@ -272,6 +259,7 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
         m_BackgroundGalleryTabOpens.push_back(std::move(*m_PendingGalleryTabOpen));
         m_PendingGalleryTabOpen.reset();
     }
+    m_Editor->CancelMaskAuthoring();
     m_Editor->ExitFocusedNodeEditor();
     m_Editor->EndWorkspacePreview();
     m_Editor->SetWorkspaceDetachedWindowsVisible(false);
@@ -290,9 +278,8 @@ bool AppShell::ActivateProjectWorkspace(std::uint64_t id, bool preserveNavigatio
     if (id != m_GalleryWorkspaceId && !m_Editor->IsViewMode())
         m_Editor->SetWorkspaceMode(Stack::Project::WorkspaceMode::Graph);
     if (id == m_GalleryWorkspaceId) {
-        // Centralize this for rail, direct, notification and retirement switches.
-        // Only Gallery navigates; the outgoing editor keeps its document and jobs.
-        if (!gallerySourceRoot.empty()) m_Editor->SetRawWorkspaceFolder(gallerySourceRoot);
+        // Re-enter the existing browsing scope through rail, direct,
+        // notification and retirement switches alike.
         (*next)->rawCatalogRefreshPending = true;
         m_CurrentTabId = static_cast<int>(Stack::Workspace::Id::Raw);
         m_Editor->EnterRawWorkspaceRootTab();

@@ -69,7 +69,6 @@ void AppShell::LayoutNavigationRail() {
         const auto* view=ImGui::GetMainViewport();
         rail.visibleWidth=rail.visiblePanelWidth=0;
         rail.bodyPosition=view->Pos;rail.bodySize=view->Size;
-        m_RawMaskToolbar.visibleHeight=0;
         return;
     }
     const bool processing = m_Editor->IsBracketingPresentationActive() || m_Editor->IsAutoBracketWorkspace();
@@ -85,7 +84,6 @@ void AppShell::LayoutNavigationRail() {
     if (m_Editor->IsReturningToGraph()) rail.panelOpen = false;
     auto* viewport = ImGui::GetMainViewport();
     rail.scale = std::max(.75f, ImGui::GetFontSize() / 16.f);
-    const bool toggleWasTop = TopBarOwnsPanelToggle();
     LayoutRawMaskToolbar();
     const float width = Stack::Navigation::BarExtent * rail.scale;
     const auto& io = ImGui::GetIO();
@@ -101,7 +99,7 @@ void AppShell::LayoutNavigationRail() {
         return window && std::strcmp(window->RootWindow->Name, "StackNavigationRail") == 0;
     };
     const auto belongsToToggle = [&](const ImGuiWindow* window) {
-        return !toggleWasTop && window &&
+        return window &&
             std::strcmp(window->RootWindow->Name, "StackPanelToggle") == 0;
     };
     const bool railActive = (context->ActiveId && (belongsToRail(context->ActiveIdWindow) || belongsToToggle(context->ActiveIdWindow))) ||
@@ -146,7 +144,7 @@ void AppShell::LayoutNavigationRail() {
     const float preferredRight = std::min(preferredPanelWidth * rail.scale,
         viewport->Size.x * .6f);
     const float panelWidth = std::min(std::max(240.f * rail.scale, preferredRight - rail.visibleWidth), available * .6f);
-    const float target = !processing && rail.panelOpen ? 1.f : 0.f;
+    const float target = !processing && (rail.panelOpen || m_Editor->PickingMaskDestination()) ? 1.f : 0.f;
     if (rail.galleryResizeActive) rail.panelMotion.Reset(rail.panelAmount);
     else if (rail.panelAmount!=target || rail.panelMotion.Active())
         rail.panelMotion.Update(rail.panelAmount,target,.28f,Stack::Animation::FrameTween::ClockSeconds(),ImGui::GetFrameCount(),
@@ -156,11 +154,10 @@ void AppShell::LayoutNavigationRail() {
     rail.visiblePanelWidth = panelWidth * rail.panelAmount * openingControls;
     // The rail consumes the panel's left edge. Only the minimum-width clamp
     // can move its right edge; its expanded extent survives sidebar retreat.
-    const float toolbarHeight = m_RawMaskToolbar.visibleHeight;
-    rail.panelPosition = ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y + toolbarHeight);
-    rail.panelSize = ImVec2(panelWidth, std::max(1.f, viewport->Size.y - toolbarHeight));
+    rail.panelPosition = ImVec2(viewport->Pos.x + rail.visibleWidth, viewport->Pos.y);
+    rail.panelSize = ImVec2(panelWidth, std::max(1.f, viewport->Size.y));
     const bool graphBody = m_CurrentTabId == Graph && !m_Editor->IsViewMode();
-    const float top = processing ? 0.f : graphBody ? toolbarHeight : std::max(toolbarHeight, Stack::Header::CaptionHeight * rail.scale);
+    const float top = (processing || graphBody) ? 0.f : Stack::Header::CaptionHeight * rail.scale;
     const float reservedPanel = galleryOpening && rail.panelOpen ? panelWidth : rail.visiblePanelWidth;
     rail.bodyPosition = ImVec2(viewport->Pos.x + reservedRailWidth + reservedPanel, viewport->Pos.y + top);
     rail.bodySize = ImVec2(std::max(1.f, available - reservedPanel), std::max(1.f, viewport->Size.y - top));
@@ -172,17 +169,10 @@ void AppShell::LayoutNavigationRail() {
     m_GalleryNavigationMotion->Viewport(m_ActiveProjectWorkspace,
         {rail.bodyPosition,{rail.bodyPosition.x+rail.bodySize.x,rail.bodyPosition.y+rail.bodySize.y}});
     m_Editor->SetGraphReturnBounds(
-        ImVec2(viewport->Pos.x, viewport->Pos.y + toolbarHeight),
+        ImVec2(viewport->Pos.x, viewport->Pos.y),
         ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
-    // Blend the two reveal paths at their shared corner. Switching the input
-    // owner must not teleport the button between horizontal and vertical paths.
-    const float left = rail.revealAmount, topReveal = m_RawMaskToolbar.revealAmount;
-    const float total = left + topReveal;
-    const float hidden = width * (1.f - std::max(left, topReveal));
-    const float leftWeight = total > 0.f ? left / total : 1.f;
-    m_RawMaskToolbar.panelTogglePosition = ImVec2(
-        viewport->Pos.x - (hidden * leftWeight) + Stack::Navigation::BarPadding * rail.scale,
-        viewport->Pos.y - hidden * (1.f - leftWeight) + Stack::Navigation::BarPadding * rail.scale);
+    const float padding = Stack::Navigation::BarPadding * rail.scale;
+    m_RawMaskToolbar.panelTogglePosition = {rail.position.x + padding, viewport->Pos.y + padding};
 }
 
 void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool openActivity) {
@@ -217,7 +207,7 @@ void AppShell::RenderNavigationRail(bool openFileMenu, bool openSettings, bool o
         (rail.revealAmount <= .001f ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None));
     auto* draw = ImGui::GetWindowDrawList();
     // The sidebar is a visible native surface, independent of optional point optics.
-    draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y+m_RawMaskToolbar.visibleHeight),
+    draw->AddRectFilled(ImVec2(rail.position.x,viewport->Pos.y),
         ImVec2(rail.position.x+drawnWidth,viewport->Pos.y+viewport->Size.y),ImGui::GetColorU32(railTint));
     const auto button = [&](const char* label, Stack::Navigation::Glyph glyph, bool selected, Stack::Animation::ControlMotion& motion, bool enabled = true) {
         const bool clicked = Stack::Navigation::IconButton(label, glyph, selected, enabled, s, palette, motion);
