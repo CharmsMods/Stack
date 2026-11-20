@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Stack Light panel concept</title>
+<style>html { color-scheme: light dark; } body { margin: 0; background: light-dark(#eeefef, #141517); } .cursor-interaction { cursor: pointer; }</style>
+</head>
+<body>
+<div id="stack-local-ev-concept" class="viz-dotted-background">
+  <style>
+    #stack-local-ev-concept {
+      --se-panel: light-dark(#f7f7f6, #1c1d20);
+      --se-input: light-dark(#ededeb, #24262a);
+      --se-text: light-dark(#222428, #e5e6e8);
+      --se-muted: light-dark(#60636a, #a4a7af);
+      --se-line: light-dark(#d7d8d9, #35373c);
+      --se-track: light-dark(#c4c6c9, #45484f);
+      --se-active: light-dark(#454b56, #d3d7df);
+      --se-soft: light-dark(#e6e7e9, #2a2c32);
+      --se-reach: light-dark(#626a78, #b2bac8);
+      color: var(--se-text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.4;
+      padding: 18px 12px;
+      box-sizing: border-box;
+    }
+    #stack-local-ev-concept *, #stack-local-ev-concept *::before,
+    #stack-local-ev-concept *::after { box-sizing: border-box; }
+    #stack-local-ev-concept .se-panel {
+      width: 100%; max-width: 390px; margin: 0 auto;
+      background: var(--se-panel); border: 1px solid var(--se-line);
+      border-radius: 12px; padding: 18px 18px 14px;
+    }
+    #stack-local-ev-concept .se-header { min-height: 54px; padding-right: 90px; }
+    #stack-local-ev-concept h2 { margin: 0; font-size: 16px; font-weight: 500; }
+    #stack-local-ev-concept .se-subtitle,
+    #stack-local-ev-concept .se-footnote { color: var(--se-muted); font-size: 12px; }
+    #stack-local-ev-concept .se-subtitle { margin-top: 3px; }
+    #stack-local-ev-concept .se-rows { margin-top: 6px; }
+    #stack-local-ev-concept .se-row { padding: 7px 0 6px; }
+    #stack-local-ev-concept .se-row-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    #stack-local-ev-concept button,
+    #stack-local-ev-concept input { font: inherit; color: inherit; }
+    #stack-local-ev-concept .se-label {
+      padding: 4px 0; border: 0; background: transparent; text-align: left;
+      font-weight: 400; color: var(--se-muted);
+    }
+    #stack-local-ev-concept .se-label[aria-pressed="true"] { color: var(--se-text); font-weight: 500; }
+    #stack-local-ev-concept .se-label[aria-pressed="true"]::before {
+      content: ""; display: inline-block; width: 4px; height: 4px;
+      margin-right: 7px; vertical-align: 3px; border-radius: 50%; background: var(--se-active);
+    }
+    #stack-local-ev-concept .se-value { display: flex; align-items: center; gap: 7px; }
+    #stack-local-ev-concept .se-number {
+      width: 78px; min-width: 0; padding: 4px 7px; text-align: right;
+      border: 1px solid transparent; border-radius: 5px;
+      background: var(--se-input); font-variant-numeric: tabular-nums;
+      appearance: textfield;
+    }
+    #stack-local-ev-concept .se-number::-webkit-inner-spin-button,
+    #stack-local-ev-concept .se-number::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    #stack-local-ev-concept .se-number:focus { border-color: var(--se-track); }
+    #stack-local-ev-concept .se-unit { min-width: 18px; color: var(--se-muted); font-size: 12px; }
+    #stack-local-ev-concept .se-track-wrap { position: relative; height: 27px; }
+    #stack-local-ev-concept .se-zero {
+      position: absolute; left: 50%; top: 8px; height: 11px; width: 1px;
+      background: var(--se-muted); opacity: .6; pointer-events: none;
+    }
+    #stack-local-ev-concept .se-range {
+      display: block; width: 100%; height: 27px; margin: 0; padding: 0;
+      appearance: none; background: transparent; position: relative;
+    }
+    #stack-local-ev-concept .se-range::-webkit-slider-runnable-track { height: 2px; background: var(--se-track); border-radius: 1px; }
+    #stack-local-ev-concept .se-range::-webkit-slider-thumb {
+      appearance: none; width: 12px; height: 12px; margin-top: -5px;
+      border: 2px solid var(--se-active); border-radius: 50%; background: var(--se-panel);
+    }
+    #stack-local-ev-concept .se-range::-moz-range-track { height: 2px; background: var(--se-track); border: 0; border-radius: 1px; }
+    #stack-local-ev-concept .se-range::-moz-range-thumb {
+      width: 9px; height: 9px; border: 2px solid var(--se-active);
+      border-radius: 50%; background: var(--se-panel);
+    }
+    #stack-local-ev-concept .se-reach { border-top: 1px solid var(--se-line); margin-top: 11px; padding-top: 13px; }
+    #stack-local-ev-concept .se-reach-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+    #stack-local-ev-concept .se-small-heading { font-size: 12px; color: var(--se-muted); }
+    #stack-local-ev-concept .se-reset {
+      border: 0; background: transparent; padding: 4px 0 4px 8px;
+      color: var(--se-muted); font-size: 12px;
+    }
+    #stack-local-ev-concept .se-reach-bands { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; margin-top: 7px; }
+    #stack-local-ev-concept .se-band { height: 5px; background: var(--se-reach); opacity: .12; border-radius: 1px; }
+    #stack-local-ev-concept .se-band[data-level="1"] { opacity: .42; }
+    #stack-local-ev-concept .se-band[data-level="2"] { opacity: .88; }
+    #stack-local-ev-concept .se-reach-labels { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; margin-top: 6px; }
+    #stack-local-ev-concept .se-reach-labels span { font-size: 11px; text-align: center; color: var(--se-muted); }
+    #stack-local-ev-concept .se-intent { min-height: 40px; margin: 11px 0 0; font-size: 12px; color: var(--se-text); }
+    #stack-local-ev-concept .se-settings { border-top: 1px solid var(--se-line); margin-top: 11px; }
+    #stack-local-ev-concept summary { padding: 13px 0 8px; font-size: 12px; color: var(--se-muted); }
+    #stack-local-ev-concept .se-setting { margin-top: 12px; }
+    #stack-local-ev-concept .se-setting .se-label { color: var(--se-text); font-size: 12px; }
+    #stack-local-ev-concept .se-setting-note { margin-top: 2px; color: var(--se-muted); font-size: 11px; }
+    #stack-local-ev-concept .se-check { display: flex; align-items: center; gap: 9px; margin: 14px 0 5px; font-size: 12px; }
+    #stack-local-ev-concept .se-check input { accent-color: var(--se-active); width: 15px; height: 15px; margin: 0; flex: 0 0 auto; }
+    #stack-local-ev-concept .se-footnote { margin-top: 10px; font-size: 11px; }
+    #stack-local-ev-concept .se-sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    @media (max-width: 350px) {
+      #stack-local-ev-concept { padding: 12px 8px; }
+      #stack-local-ev-concept .se-panel { padding: 15px 14px 12px; }
+    }
+    @media (pointer: coarse) {
+      #stack-local-ev-concept .se-label, #stack-local-ev-concept .se-reset,
+      #stack-local-ev-concept summary { min-height: 44px; }
+      #stack-local-ev-concept .se-number { min-height: 44px; font-size: 16px; }
+      #stack-local-ev-concept .se-range, #stack-local-ev-concept .se-track-wrap { height: 44px; }
+      #stack-local-ev-concept .se-zero { top: 16px; }
+      #stack-local-ev-concept .se-check { min-height: 44px; }
+    }
+  </style>
+  <section class="se-panel" aria-label="Stack Light panel design concept">
+    <header class="se-header">
+      <h2>Light</h2>
+      <div class="se-subtitle">Local EV · UI concept</div>
+    </header>
+    <div class="se-rows">
+      <div class="se-row" data-control="exposure">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="false" data-select="exposure">Exposure</button>
+          <div class="se-value"><input class="se-number" aria-label="Exposure exact value in EV" type="number" min="-16" max="16" step="0.01" value="0.00" data-number="exposure"><span class="se-unit">EV</span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Exposure in EV" type="range" min="-16" max="16" step="0.01" value="0" data-range="exposure"></div>
+      </div>
+      <div class="se-row" data-control="blacks">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="false" data-select="blacks">Blacks</button>
+          <div class="se-value"><input class="se-number" aria-label="Blacks exact normalized amount" type="number" min="-100" max="100" step="0.1" value="0.0" data-number="blacks"><span class="se-unit" aria-hidden="true"></span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Blacks normalized amount" type="range" min="-100" max="100" step="0.1" value="0" data-range="blacks"></div>
+      </div>
+      <div class="se-row" data-control="shadows">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="true" data-select="shadows">Shadows</button>
+          <div class="se-value"><input class="se-number" aria-label="Shadows exact normalized amount" type="number" min="-100" max="100" step="0.1" value="0.0" data-number="shadows"><span class="se-unit" aria-hidden="true"></span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Shadows normalized amount" type="range" min="-100" max="100" step="0.1" value="0" data-range="shadows"></div>
+      </div>
+      <div class="se-row" data-control="midtones">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="false" data-select="midtones">Midtones</button>
+          <div class="se-value"><input class="se-number" aria-label="Midtones exact normalized amount" type="number" min="-100" max="100" step="0.1" value="0.0" data-number="midtones"><span class="se-unit" aria-hidden="true"></span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Midtones normalized amount" type="range" min="-100" max="100" step="0.1" value="0" data-range="midtones"></div>
+      </div>
+      <div class="se-row" data-control="highlights">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="false" data-select="highlights">Highlights</button>
+          <div class="se-value"><input class="se-number" aria-label="Highlights exact normalized amount" type="number" min="-100" max="100" step="0.1" value="0.0" data-number="highlights"><span class="se-unit" aria-hidden="true"></span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Highlights normalized amount" type="range" min="-100" max="100" step="0.1" value="0" data-range="highlights"></div>
+      </div>
+      <div class="se-row" data-control="whites">
+        <div class="se-row-head">
+          <button type="button" class="se-label cursor-interaction" aria-pressed="false" data-select="whites">Whites</button>
+          <div class="se-value"><input class="se-number" aria-label="Whites exact normalized amount" type="number" min="-100" max="100" step="0.1" value="0.0" data-number="whites"><span class="se-unit" aria-hidden="true"></span></div>
+        </div>
+        <div class="se-track-wrap"><span class="se-zero" aria-hidden="true"></span><input class="se-range" aria-label="Whites normalized amount" type="range" min="-100" max="100" step="0.1" value="0" data-range="whites"></div>
+      </div>
+    </div>
+    <div class="se-reach">
+      <div class="se-reach-head">
+        <span class="se-small-heading">Illustrative tonal reach</span>
+        <button class="se-reset cursor-interaction" type="button" data-reset aria-label="Reset Shadows to zero">Reset</button>
+      </div>
+      <div class="se-reach-bands" role="img" aria-label="Illustrative Shadows targeting: mainly low tones, with softer reach into dark and middle tones. Not measured from an image." data-reach>
+        <span class="se-band" data-level="1"></span><span class="se-band" data-level="2"></span><span class="se-band" data-level="1"></span><span class="se-band" data-level="0"></span><span class="se-band" data-level="0"></span>
+      </div>
+      <div class="se-reach-labels" aria-hidden="true"><span>Dark</span><span>Low</span><span>Mid</span><span>High</span><span>Bright</span></div>
+      <p class="se-intent" aria-live="polite" data-intent>Shadows · Lifts or deepens dark regions while retaining edges and texture.</p>
+    </div>
+    <details class="se-settings">
+      <summary class="cursor-interaction">Settings</summary>
+      <div class="se-setting">
+        <div class="se-row-head"><label class="se-label" for="se-region">Region size</label><div class="se-value"><input class="se-number" id="se-region-number" aria-label="Region size exact percentage" type="number" min="0.5" max="10" step="0.1" value="2.0"><span class="se-unit">%</span></div></div>
+        <input class="se-range" id="se-region" type="range" min="0.5" max="10" step="0.1" value="2" aria-describedby="se-region-note">
+        <div class="se-setting-note" id="se-region-note">Of the full image’s longer side.</div>
+      </div>
+      <div class="se-setting">
+        <div class="se-row-head"><label class="se-label" for="se-detail">Detail retention</label><div class="se-value"><input class="se-number" id="se-detail-number" aria-label="Detail retention exact percentage" type="number" min="0" max="100" step="1" value="100"><span class="se-unit">%</span></div></div>
+        <input class="se-range" id="se-detail" type="range" min="0" max="100" step="1" value="100">
+      </div>
+      <label class="se-check cursor-interaction"><input id="se-hold" type="checkbox">Hold tone targets</label>
+    </details>
+    <div class="se-footnote">UI concept · No image processing</div>
+    <div class="se-sr-only" role="status" aria-live="polite" data-status></div>
+  </section>
+  <script>
+    (() => {
+      const root = document.getElementById('stack-local-ev-concept');
+      const controls = {
+        exposure: { name: 'Exposure', min: -16, max: 16, step: 0.01, digits: 2, bands: [2,2,2,2,2], intent: 'Sets overall brightness, easing positive changes in bright highlights.', reach: 'the full tonal range' },
+        blacks: { name: 'Blacks', min: -100, max: 100, step: 0.1, digits: 1, bands: [2,1,0,0,0], intent: 'Shapes the deep-tone anchor without pulling all shadows down.', reach: 'mainly the darkest tones, with softer reach into low tones' },
+        shadows: { name: 'Shadows', min: -100, max: 100, step: 0.1, digits: 1, bands: [1,2,1,0,0], intent: 'Lifts or deepens dark regions while retaining edges and texture.', reach: 'mainly low tones, with softer reach into dark and middle tones' },
+        midtones: { name: 'Midtones', min: -100, max: 100, step: 0.1, digits: 1, bands: [0,1,2,1,0], intent: 'Adjusts middle brightness while preserving tonal separation.', reach: 'mainly middle tones, with softer reach into low and high tones' },
+        highlights: { name: 'Highlights', min: -100, max: 100, step: 0.1, digits: 1, bands: [0,0,1,2,1], intent: 'Tames or lifts bright regions while keeping detail separated.', reach: 'mainly high tones, with softer reach into middle and bright tones' },
+        whites: { name: 'Whites', min: -100, max: 100, step: 0.1, digits: 1, bands: [0,0,0,1,2], intent: 'Shapes the bright-tone anchor and highlight transition.', reach: 'mainly the brightest tones, with softer reach into high tones' }
+      };
+      const values = Object.fromEntries(Object.keys(controls).map(key => [key, 0]));
+      const reach = root.querySelector('[data-reach]');
+      const bands = Array.from(reach.children);
+      const intent = root.querySelector('[data-intent]');
+      const reset = root.querySelector('[data-reset]');
+      const status = root.querySelector('[data-status]');
+      let selected = 'shadows';
+      function select(key) {
+        if (!controls[key] || key === selected) return;
+        selected = key;
+        const control = controls[key];
+        root.querySelectorAll('[data-select]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.select === key)));
+        bands.forEach((band, index) => { band.dataset.level = String(control.bands[index]); });
+        reach.setAttribute('aria-label', `Illustrative ${control.name} targeting: ${control.reach}. Not measured from an image.`);
+        intent.textContent = `${control.name} · ${control.intent}`;
+        reset.setAttribute('aria-label', `Reset ${control.name} to zero`);
+      }
+      function update(key, candidate) {
+        const control = controls[key];
+        const finite = Number.isFinite(candidate) ? candidate : values[key];
+        const bounded = Math.min(control.max, Math.max(control.min, finite));
+        const value = Math.round(bounded / control.step) * control.step;
+        values[key] = value;
+        root.querySelector(`[data-number="${key}"]`).value = value.toFixed(control.digits);
+        root.querySelector(`[data-range="${key}"]`).value = String(value);
+      }
+      Object.keys(controls).forEach(key => {
+        const label = root.querySelector(`[data-select="${key}"]`);
+        const range = root.querySelector(`[data-range="${key}"]`);
+        const number = root.querySelector(`[data-number="${key}"]`);
+        label.addEventListener('click', () => select(key));
+        label.addEventListener('dblclick', () => { select(key); update(key, 0); status.textContent = `${controls[key].name} reset to zero.`; });
+        range.addEventListener('focus', () => select(key));
+        range.addEventListener('input', () => { select(key); update(key, range.valueAsNumber); });
+        number.addEventListener('focus', () => select(key));
+        number.addEventListener('change', () => update(key, number.valueAsNumber));
+        number.addEventListener('keydown', event => {
+          if (event.key === 'Enter') { update(key, number.valueAsNumber); number.blur(); }
+          if (event.key === 'Escape') { update(key, values[key]); number.blur(); }
+        });
+        number.addEventListener('blur', () => update(key, number.valueAsNumber));
+      });
+      reset.addEventListener('click', () => { update(selected, 0); status.textContent = `${controls[selected].name} reset to zero.`; });
+      function bindSetting(rangeId, numberId, digits, initial) {
+        const range = root.querySelector(`#${rangeId}`);
+        const number = root.querySelector(`#${numberId}`);
+        let committed = initial;
+        function commit(candidate) {
+          const step = Number(range.step);
+          const finite = Number.isFinite(candidate) ? candidate : committed;
+          committed = Math.round(Math.min(Number(range.max), Math.max(Number(range.min), finite)) / step) * step;
+          range.value = String(committed);
+          number.value = committed.toFixed(digits);
+        }
+        range.addEventListener('input', () => commit(range.valueAsNumber));
+        number.addEventListener('change', () => commit(number.valueAsNumber));
+        number.addEventListener('blur', () => commit(number.valueAsNumber));
+        number.addEventListener('keydown', event => {
+          if (event.key === 'Enter') { commit(number.valueAsNumber); number.blur(); }
+          if (event.key === 'Escape') { commit(committed); number.blur(); }
+        });
+      }
+      bindSetting('se-region', 'se-region-number', 1, 2);
+      bindSetting('se-detail', 'se-detail-number', 0, 100);
+      root.querySelector('#se-hold').addEventListener('change', event => {
+        status.textContent = event.target.checked ? 'Hold tone targets enabled in this concept.' : 'Hold tone targets disabled in this concept.';
+      });
+    })();
+  </script>
+</div>
+
+</body>
+</html>

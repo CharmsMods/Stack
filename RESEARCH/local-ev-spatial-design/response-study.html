@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Local EV scalar response study</title>
+<style>
+:root{color-scheme:light dark;--background:light-dark(#ffffff,#191a1d);--foreground:light-dark(#22252a,#e7e9ee);--muted-foreground:light-dark(#60656e,#adb2bd);--border:light-dark(#d7dade,#41464f);--popover:light-dark(#ffffff,#292c32);--popover-foreground:var(--foreground);--primary:light-dark(#343b47,#d8dce4);--viz-series-1:light-dark(#2963bd,#8eb9ff);--viz-series-2:light-dark(#a5530c,#f0b16c);--font-size-base:14px;}
+body{max-width:760px;margin:20px auto;padding:16px;font:400 14px/1.45 system-ui,sans-serif;background:var(--background);color:var(--foreground);box-sizing:border-box;}
+*{box-sizing:border-box;}h3{font-size:18px;font-weight:500;}input,select,button{font:inherit;color:inherit;}.text-small{font-size:12px;}.text-muted{color:var(--muted-foreground);}.tabular-nums{font-variant-numeric:tabular-nums;}.viz-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end;}.viz-controls>.form-label{flex:1 1 220px;}.form-label{display:block;margin:0;}.form-select,.form-control{display:block;width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:5px;background:var(--background);}.form-select{margin-top:5px;}.form-range{display:block;width:100%;height:28px;margin:3px 0;accent-color:var(--primary);}.cursor-interaction{cursor:pointer;}.tooltip{padding:8px 10px;border:1px solid var(--border);border-radius:5px;z-index:2;}.tooltip[hidden]{display:none;}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;}@media(pointer:coarse){.form-range,.form-select,.form-control{min-height:44px;}.form-control,.form-select{font-size:16px;}}
+</style></head><body>
+<section id="local-ev-response-study">
+  <style>
+    #local-ev-response-study { position: relative; width: 100%; color: var(--foreground); }
+    #local-ev-response-study .rs-heading { padding-right: 90px; margin-bottom: 12px; }
+    #local-ev-response-study .rs-heading h3 { margin-bottom: 4px; }
+    #local-ev-response-study .rs-chart { width: 100%; display: block; overflow: visible; }
+    #local-ev-response-study .rs-chart text { fill: var(--foreground); font-size: 12px; }
+    #local-ev-response-study .rs-chart .rs-grid { stroke: var(--border); stroke-width: 1; }
+    #local-ev-response-study .rs-chart .rs-current { stroke: var(--viz-series-1); }
+    #local-ev-response-study .rs-chart .rs-reference { stroke: var(--viz-series-2); }
+    #local-ev-response-study .rs-legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0; align-items: center; }
+    #local-ev-response-study .rs-legend button { border: 0; padding: 4px 0; background: transparent; color: var(--foreground); font: inherit; display: inline-flex; gap: 6px; align-items: center; }
+    #local-ev-response-study .rs-legend button[aria-pressed="false"] { opacity: .5; }
+    #local-ev-response-study .rs-swatch { display: inline-block; width: 18px; height: 2px; background: var(--viz-series-1); }
+    #local-ev-response-study .rs-swatch-reference { background: var(--viz-series-2); }
+    #local-ev-response-study .rs-identity { display: inline-flex; gap: 6px; align-items: center; color: var(--muted-foreground); }
+    #local-ev-response-study .rs-identity-mark { width: 18px; height: 0; border-top: 1px dashed var(--muted-foreground); }
+    #local-ev-response-study .rs-bands { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-top: 16px; }
+    #local-ev-response-study .rs-band-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    #local-ev-response-study .rs-probe { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+    #local-ev-response-study .rs-probe-field { width: 110px; }
+    #local-ev-response-study .rs-slope { margin-top: 8px; }
+    #local-ev-response-study .rs-tooltip { position: absolute; pointer-events: none; max-width: 240px; background: var(--popover); color: var(--popover-foreground); }
+    #local-ev-response-study .rs-tooltip [data-hidden="true"] { display: none; }
+    #local-ev-response-study .rs-limits { margin-top: 14px; }
+    @media (max-width: 440px) { #local-ev-response-study .rs-bands { grid-template-columns: 1fr; gap: 10px; } }
+    @media (pointer: coarse) { #local-ev-response-study .rs-legend button { min-height: 44px; } }
+  </style>
+  <div class="rs-heading"><h3>When tones reverse</h3><div class="text-small text-muted">Bands-only scalar study · No image processing</div></div>
+  <div class="viz-controls">
+    <label class="form-label">Preset<select class="form-select" data-preset><option value="neutral">Neutral</option><option value="shadows" selected>Shadows +100</option><option value="opposing">Shadows +100 / Midtones −100</option><option value="all">All +100</option><option value="custom" hidden disabled>Custom</option></select></label>
+    <label class="form-label">Fitted span<select class="form-select" data-span><option value="4">4 stops · −3 to +1 EV</option><option value="14" selected>14 stops · −8 to +6 EV</option></select></label>
+  </div>
+  <div class="rs-legend text-small">
+    <button type="button" class="cursor-interaction" aria-pressed="true" data-toggle="current"><span class="rs-swatch" aria-hidden="true"></span>Current bands</button>
+    <button type="button" class="cursor-interaction" aria-pressed="true" data-toggle="reference"><span class="rs-swatch rs-swatch-reference" aria-hidden="true"></span>Constrained reference</button>
+    <span class="rs-identity"><span class="rs-identity-mark" aria-hidden="true"></span>Identity</span>
+  </div>
+  <div data-plot><svg class="rs-chart" role="img" aria-label="Input exposure versus output exposure for current bands and a constrained scalar reference. The current curve can reverse tones. The reference has a minimum slope of 0.1." data-chart></svg></div>
+  <div class="rs-slope text-small tabular-nums" aria-live="polite" data-slopes></div>
+  <div class="text-small" aria-live="polite" data-order-status></div>
+  <div class="rs-probe">
+    <label class="form-label" for="rs-input-ev">Inspect input EV</label>
+    <div class="rs-probe-field"><input class="form-control tabular-nums" type="number" id="rs-input-ev" value="-1" step="0.01" aria-describedby="rs-probe-readout"></div>
+    <output class="text-small tabular-nums" id="rs-probe-readout"></output>
+  </div>
+  <div class="rs-bands">
+    <div><div class="rs-band-head"><label class="form-label" for="rs-black">Blacks</label><output class="tabular-nums" data-value="0">0</output></div><input class="form-range" type="range" id="rs-black" min="-100" max="100" step="1" value="0" data-band="0"></div>
+    <div><div class="rs-band-head"><label class="form-label" for="rs-shadow">Shadows</label><output class="tabular-nums" data-value="1">100</output></div><input class="form-range" type="range" id="rs-shadow" min="-100" max="100" step="1" value="100" data-band="1"></div>
+    <div><div class="rs-band-head"><label class="form-label" for="rs-mid">Midtones</label><output class="tabular-nums" data-value="2">0</output></div><input class="form-range" type="range" id="rs-mid" min="-100" max="100" step="1" value="0" data-band="2"></div>
+    <div><div class="rs-band-head"><label class="form-label" for="rs-highlight">Highlights</label><output class="tabular-nums" data-value="3">0</output></div><input class="form-range" type="range" id="rs-highlight" min="-100" max="100" step="1" value="0" data-band="3"></div>
+    <div><div class="rs-band-head"><label class="form-label" for="rs-white">Whites</label><output class="tabular-nums" data-value="4">0</output></div><input class="form-range" type="range" id="rs-white" min="-100" max="100" step="1" value="0" data-band="4"></div>
+  </div>
+  <div class="rs-limits text-small text-muted">Normalized band amounts · Reference slope floor 0.10 · Smoothing half-width 0.25 EV</div>
+  <div class="text-small text-muted">Fixed Strength 1. Excludes Exposure, protection, advanced curve, spatial guide and masks. This reference is not final slider behavior.</div>
+  <div class="tooltip rs-tooltip text-small tabular-nums" role="tooltip" hidden data-tooltip-box><div data-tip-input></div><div data-tip-current></div><div data-tip-reference></div></div>
+  <div class="sr-only" aria-live="polite" data-announcement></div>
+  <script>
+    /* MODEL_START: pure kernel; used by plotting, inspection and bounded checks. */
+    const LocalEvResponseStudyModel = (() => {
+      const DELTA = 0.1, HALF_WIDTH = 0.25, KNOTS = 257;
+      function currentGain(energy, amounts, span) {
+        const lo = -1 - span / 2, hi = -1 + span / 2;
+        if (energy <= lo) return 0.04 * amounts[0];
+        if (energy >= hi) return 0.04 * amounts[4];
+        const position = (energy - lo) * 4 / span;
+        const index = Math.min(3, Math.floor(position));
+        const blend = (1 - Math.cos(Math.PI * (position - index))) / 2;
+        return 0.04 * (amounts[index] * (1 - blend) + amounts[index + 1] * blend);
+      }
+      function pava(values) {
+        const blocks = [];
+        values.forEach((value, index) => {
+          blocks.push({ start: index, end: index, sum: value, weight: 1 });
+          while (blocks.length > 1) {
+            const right = blocks[blocks.length - 1], left = blocks[blocks.length - 2];
+            if (left.sum / left.weight <= right.sum / right.weight) break;
+            blocks.splice(-2, 2, { start: left.start, end: right.end, sum: left.sum + right.sum, weight: left.weight + right.weight });
+          }
+        });
+        const output = new Array(values.length);
+        blocks.forEach(block => { for (let i = block.start; i <= block.end; i++) output[i] = block.sum / block.weight; });
+        return output;
+      }
+      function build(inputAmounts, span) {
+        if (span !== 4 && span !== 14) throw new Error('Fitted span must be 4 or 14 stops.');
+        if (inputAmounts.length !== 5) throw new Error('Five normalized amounts are required.');
+        const amounts = inputAmounts.map(value => Math.min(100, Math.max(-100, Number.isFinite(value) ? value : 0)));
+        const lo = -1 - span / 2, hi = -1 + span / 2, step = span / (KNOTS - 1);
+        const knots = Array.from({ length: KNOTS }, (_, i) => lo + i * step);
+        const requested = knots.map(e => currentGain(e, amounts, span));
+        const projected = pava(knots.map((e, i) => (1 - DELTA) * e + requested[i]));
+        const gains = projected.map((value, i) => value - (1 - DELTA) * knots[i]);
+        const prefix = [0];
+        for (let i = 1; i < KNOTS; i++) prefix.push(prefix[i - 1] + step * (gains[i - 1] + gains[i]) / 2);
+        function interval(e) { return Math.min(KNOTS - 2, Math.max(0, Math.floor((e - lo) / step))); }
+        function projectedGain(e) {
+          if (e <= lo) return gains[0];
+          if (e >= hi) return gains[KNOTS - 1];
+          const i = interval(e), t = (e - knots[i]) / step;
+          return gains[i] * (1 - t) + gains[i + 1] * t;
+        }
+        function integral(e) {
+          if (e <= lo) return gains[0] * (e - lo);
+          if (e >= hi) return prefix[KNOTS - 1] + gains[KNOTS - 1] * (e - hi);
+          const i = interval(e), distance = e - knots[i], slope = (gains[i + 1] - gains[i]) / step;
+          return prefix[i] + gains[i] * distance + slope * distance * distance / 2;
+        }
+        const referenceGain = e => (integral(e + HALF_WIDTH) - integral(e - HALF_WIDTH)) / (2 * HALF_WIDTH);
+        const referenceSlope = e => 1 + (projectedGain(e + HALF_WIDTH) - projectedGain(e - HALF_WIDTH)) / (2 * HALF_WIDTH);
+        let currentMinimumSlope = 1;
+        for (let i = 0; i < 4; i++) currentMinimumSlope = Math.min(currentMinimumSlope, 1 + 0.04 * (amounts[i + 1] - amounts[i]) * Math.PI / (2 * span / 4));
+        const slopeCandidates = knots.flatMap(e => [e - HALF_WIDTH, e + HALF_WIDTH]);
+        const referenceMinimumSlope = Math.min(1, ...slopeCandidates.map(referenceSlope));
+        return { lo, hi, span, amounts, knots, gains, requested, currentMinimumSlope, referenceMinimumSlope, projectedGain, integral, referenceGain, referenceSlope,
+          currentGain: e => currentGain(e, amounts, span), currentOutput: e => e + currentGain(e, amounts, span), referenceOutput: e => e + referenceGain(e) };
+      }
+      return { build, currentGain, pava, DELTA, HALF_WIDTH, KNOTS };
+    })();
+    /* MODEL_END */
+    (() => {
+      const root = document.getElementById('local-ev-response-study');
+      const plot = root.querySelector('[data-plot]'), svg = root.querySelector('[data-chart]');
+      const preset = root.querySelector('[data-preset]'), spanInput = root.querySelector('[data-span]');
+      const probe = root.querySelector('#rs-input-ev'), probeReadout = root.querySelector('#rs-probe-readout');
+      const tooltip = root.querySelector('[data-tooltip-box]');
+      const presets = { neutral: [0,0,0,0,0], shadows: [0,100,0,0,0], opposing: [0,100,-100,0,0], all: [100,100,100,100,100] };
+      let amounts = presets.shadows.slice(), model, chart, pinned = false, inspected = -1;
+      const visible = { current: true, reference: true };
+      const ns = 'http://www.w3.org/2000/svg';
+      const number = value => (Math.abs(value) < 0.0000001 ? 0 : value).toFixed(2);
+      function element(name, attributes = {}, text) {
+        const item = document.createElementNS(ns, name);
+        Object.entries(attributes).forEach(([key, value]) => item.setAttribute(key, String(value)));
+        if (text !== undefined) item.textContent = text;
+        return item;
+      }
+      function ticks(min, max, count) {
+        const raw = (max - min) / (count - 1), power = Math.pow(10, Math.floor(Math.log10(raw)));
+        const step = [1,2,2.5,5,10].find(v => v * power >= raw) * power;
+        const result = [];
+        for (let value = Math.ceil(min / step) * step; value <= max + step * 0.001; value += step) result.push(value);
+        return result;
+      }
+      function tickLabel(value) { return Math.abs(value - Math.round(value)) < 1e-7 ? String(Math.round(value)) : value.toFixed(1); }
+      function inspect(energy, showTooltip, clientY) {
+        if (!chart) return;
+        inspected = Math.max(chart.xmin, Math.min(chart.xmax, energy));
+        const current = model.currentOutput(inspected), reference = model.referenceOutput(inspected), px = chart.x(inspected);
+        chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px); chart.guide.removeAttribute('hidden');
+        chart.currentMarker.setAttribute('cx', px); chart.currentMarker.setAttribute('cy', chart.y(current));
+        chart.referenceMarker.setAttribute('cx', px); chart.referenceMarker.setAttribute('cy', chart.y(reference));
+        chart.currentMarker.style.display = visible.current ? '' : 'none'; chart.referenceMarker.style.display = visible.reference ? '' : 'none';
+        probeReadout.textContent = `Current ${number(current)} · Reference ${number(reference)} EV`;
+        if (document.activeElement !== probe) probe.value = String(Number(inspected.toFixed(6)));
+        root.querySelector('[data-tip-input]').textContent = `Input ${number(inspected)} EV`;
+        root.querySelector('[data-tip-current]').textContent = `Current ${number(current)} EV`;
+        root.querySelector('[data-tip-reference]').textContent = `Reference ${number(reference)} EV`;
+        root.querySelector('[data-tip-current]').dataset.hidden = String(!visible.current);
+        root.querySelector('[data-tip-reference]').dataset.hidden = String(!visible.reference);
+        tooltip.hidden = !showTooltip;
+        if (showTooltip) {
+          const rr = root.getBoundingClientRect(), sr = svg.getBoundingClientRect();
+          const tooltipWidth = tooltip.getBoundingClientRect().width;
+          tooltip.style.left = `${Math.max(0, Math.min(sr.left - rr.left + px + 12, rr.width - tooltipWidth - 4))}px`;
+          tooltip.style.top = `${Math.max(sr.top - rr.top + 6, (clientY === undefined ? sr.top + 40 : clientY) - rr.top - 76)}px`;
+        }
+      }
+      function render() {
+        const width = Math.max(240, plot.getBoundingClientRect().width), height = width < 440 ? 290 : 330;
+        const margin = { left: 64, right: 18, top: 18, bottom: 48 };
+        const from = model.lo - 0.5, to = model.hi + 0.5;
+        const samples = Array.from({ length: 513 }, (_, i) => { const e = from + (to - from) * i / 512; return { e, current: model.currentOutput(e), reference: model.referenceOutput(e) }; });
+        const energies = samples.map(p => p.e), outputs = samples.flatMap(p => [p.e, p.current, p.reference]);
+        const xrange = Math.max(...energies) - Math.min(...energies), yrange = Math.max(...outputs) - Math.min(...outputs);
+        const xmin = Math.min(...energies) - xrange * .025, xmax = Math.max(...energies) + xrange * .025;
+        const ymin = Math.min(...outputs) - yrange * .06, ymax = Math.max(...outputs) + yrange * .06;
+        const left = margin.left, right = width - margin.right, top = margin.top, bottom = height - margin.bottom;
+        const x = e => left + (e - xmin) / (xmax - xmin) * (right - left), y = e => bottom - (e - ymin) / (ymax - ymin) * (bottom - top);
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`); svg.setAttribute('height', String(height)); svg.replaceChildren();
+        svg.appendChild(element('title', {}, 'Bands-only scalar response'));
+        svg.appendChild(element('desc', {}, `Current minimum slope ${number(model.currentMinimumSlope)}. Constrained reference minimum slope ${number(model.referenceMinimumSlope)}. No spatial image processing is simulated.`));
+        const frame = element('rect', { x: left, y: top, width: right-left, height: bottom-top, fill: 'none', stroke: 'var(--border)', 'stroke-width': 1, 'data-chart-frame': '' });
+        svg.appendChild(frame);
+        const tickCount = width <= 360 ? 4 : 5;
+        ticks(xmin,xmax,tickCount).forEach(value => { const px=x(value); svg.appendChild(element('line',{x1:px,y1:top,x2:px,y2:bottom,class:'rs-grid'})); svg.appendChild(element('text',{x:px,y:bottom+22,'text-anchor':'middle'},tickLabel(value))); });
+        ticks(ymin,ymax,tickCount).forEach(value => { const py=y(value); svg.appendChild(element('line',{x1:left,y1:py,x2:right,y2:py,class:'rs-grid'})); svg.appendChild(element('text',{x:left-10,y:py+4,'text-anchor':'end'},tickLabel(value))); });
+        svg.appendChild(element('text',{x:(left+right)/2,y:height-5,'text-anchor':'middle',class:'axis-title','data-axis':'x'},'Input EV'));
+        svg.appendChild(element('text',{x:16,y:(top+bottom)/2,'text-anchor':'middle',transform:`rotate(-90 16 ${(top+bottom)/2})`,class:'axis-title','data-axis':'y'},'Output EV'));
+        const pathFor = key => samples.map((point,i)=>`${i?'L':'M'}${x(point.e).toFixed(3)},${y(key==='identity'?point.e:point[key]).toFixed(3)}`).join(' ');
+        svg.appendChild(element('path',{d:pathFor('identity'),fill:'none',stroke:'var(--muted-foreground)','stroke-width':1,'stroke-dasharray':'4 4'}));
+        const currentPath = element('path',{d:pathFor('current'),fill:'none',class:'rs-current','stroke-width':2,'data-series':'current'});
+        const referencePath = element('path',{d:pathFor('reference'),fill:'none',class:'rs-reference','stroke-width':2,'stroke-dasharray':'7 3','data-series':'reference'});
+        svg.appendChild(currentPath); svg.appendChild(referencePath);
+        currentPath.style.display = visible.current ? '' : 'none'; referencePath.style.display = visible.reference ? '' : 'none';
+        const guide=element('line',{x1:x(inspected),x2:x(inspected),y1:top,y2:bottom,stroke:'var(--muted-foreground)','stroke-width':1,'data-chart-hover-guide':''});
+        const currentMarker=element('circle',{r:4,fill:'var(--viz-series-1)','data-chart-hover-marker':'current'});
+        const referenceMarker=element('circle',{r:4,fill:'var(--viz-series-2)','data-chart-hover-marker':'reference'});
+        svg.appendChild(guide); svg.appendChild(currentMarker); svg.appendChild(referenceMarker);
+        const overlay=element('rect',{x:left,y:top,width:right-left,height:bottom-top,fill:'transparent','data-chart-hit':'','data-chart-hover-overlay':'cross-series'});
+        overlay.style.touchAction='pan-y'; svg.appendChild(overlay);
+        chart={xmin,xmax,x,y,guide,currentMarker,referenceMarker,left,right};
+        function eventEnergy(event) { const bounds=svg.getBoundingClientRect(); const px=(event.clientX-bounds.left)*width/bounds.width; return xmin+(Math.max(left,Math.min(right,px))-left)/(right-left)*(xmax-xmin); }
+        overlay.addEventListener('pointermove',event=>inspect(eventEnergy(event),true,event.clientY));
+        overlay.addEventListener('pointerdown',event=>{pinned=true;inspect(eventEnergy(event),true,event.clientY);});
+        overlay.addEventListener('pointerleave',()=>{if(!pinned)tooltip.hidden=true;});
+        probe.min=String(xmin); probe.max=String(xmax); inspect(inspected,false);
+        // Measure labels after insertion; remove optional tick labels if the host font makes them collide.
+        const labels=Array.from(svg.querySelectorAll('text')).sort((a,b)=>Number(b.classList.contains('axis-title'))-Number(a.classList.contains('axis-title')));
+        const accepted=[];
+        labels.forEach(label=>{ if(typeof label.getBoundingClientRect!=='function')return; const box=label.getBoundingClientRect(); if(!label.classList.contains('axis-title') && accepted.some(b=>box.x<b.x+b.width+4 && box.x+box.width+4>b.x && box.y<b.y+b.height+4 && box.y+box.height+4>b.y))label.remove();else accepted.push(box); });
+      }
+      function update() {
+        model=LocalEvResponseStudyModel.build(amounts,Number(spanInput.value));
+        root.querySelector('[data-slopes]').textContent=`Minimum slope · Current ${model.currentMinimumSlope.toFixed(3)} · Reference ${model.referenceMinimumSlope.toFixed(3)}`;
+        const uniform=amounts.every(value=>value===amounts[0]);
+        root.querySelector('[data-order-status]').textContent=uniform
+          ? (amounts[0]===0 ? 'Both curves coincide with identity; tone order is preserved.' : `Both curves apply the same ${amounts[0]>0?'+':''}${number(0.04*amounts[0])} EV shift; tone order is preserved.`)
+          : (model.currentMinimumSlope<0 ? 'Negative slope reverses tone order in Current; the reference preserves it.' : 'Both curves preserve tone order; the reference keeps a slope of at least 0.10.');
+        amounts.forEach((value,i)=>{root.querySelector(`[data-band="${i}"]`).value=String(value);root.querySelector(`[data-value="${i}"]`).textContent=String(value);});
+        render();
+      }
+      root.querySelectorAll('[data-band]').forEach(input=>input.addEventListener('input',()=>{amounts[Number(input.dataset.band)]=Number(input.value);preset.value='custom';update();}));
+      preset.addEventListener('change',()=>{if(presets[preset.value]){amounts=presets[preset.value].slice();update();}});
+      spanInput.addEventListener('change',update);
+      probe.addEventListener('change',()=>{if(Number.isFinite(probe.valueAsNumber)){pinned=true;inspect(probe.valueAsNumber,false);probe.value=String(inspected);root.querySelector('[data-announcement]').textContent=probeReadout.textContent;}else probe.value=String(inspected);});
+      document.addEventListener('keydown',event=>{if(event.key==='Escape'){pinned=false;tooltip.hidden=true;}});
+      root.querySelectorAll('[data-toggle]').forEach(button=>button.addEventListener('click',()=>{const key=button.dataset.toggle;visible[key]=!visible[key];button.setAttribute('aria-pressed',String(visible[key]));render();}));
+      update();
+      new ResizeObserver(()=>render()).observe(plot);
+    })();
+  </script>
+</section>
+
+</body></html>
