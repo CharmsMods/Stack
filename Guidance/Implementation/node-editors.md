@@ -99,11 +99,11 @@ The panel reset menu operates on the fixed sections and their chosen instances.
 Drawing an unselected section must not change project selection. Scope legacy
 primary interaction state per instance; GPU resources keep their existing owners.
 
-`PanelRoller` is a short stationary ribbed handle with a separate numeric readout.
-Relative horizontal drag changes the draft, Shift reduces sensitivity, clicking
-the readout opens exact entry, double-click resets, and Escape cancels the gesture.
-Keep existing value limits and one undo transaction per gesture. Ribs move only
-during active editing; idle frames do not animate. Disabled placeholders require
+`PanelRoller` draws a thin track, a neutral-position tick, a hollow handle, and a
+separate numeric readout. Relative horizontal drag changes the draft, Shift reduces
+sensitivity, clicking the readout opens exact entry, double-click resets, and
+Escape cancels the gesture. Keep existing value limits and one undo transaction
+per gesture. Idle frames do not animate. Disabled placeholders require
 no authored model or retained gesture state. Calibration pairs columns only when
 the available font-scaled width fits; narrow panels stack them.
 
